@@ -577,5 +577,6 @@ surface, and no amount of client-side cleverness makes it one.
 | [`docs/agent.md`](../../agent.md) | Provider setup, profiles, prompt configuration |
 | [`docs/evals/methodology.md`](../../evals/methodology.md) | How the numbers in the scoreboard are produced |
 | [`docs/evals/protocol.md`](../../evals/protocol.md) | The stable, versioned `korvid.evals --json` contract external tooling parses |
+| [`docs/evals/operation_protocol.md`](../../evals/operation_protocol.md) | The stable, versioned `korvid.evals.operation_main --json` contract for stateful operation journeys |
 | [`docs/dev/ui-controllers.md`](../ui-controllers.md) | The in-progress `ui/` decomposition |
 | [`docs/resource-relationships.md`](../../resource-relationships.md) | The operational relationship graph from the user's side: relation kinds, coverage states, limits, Secret safety |

@@ -271,12 +271,12 @@ applied to `docs/evals/protocol.md`.
       "runs": [
         {
           "answer": "...",
-          "grade": {"...": "..."},
+          "grade": {"...": "...", "hard_failures": []},
           "journal": [{"event": "...", "actor": "...", "...": "..."}],
           "audit": [{"action": "...", "outcome": "...", "...": "..."}],
           "decisions": [{"outcome": "approve", "decision_source": "scripted_policy"}],
           "wall_time_s": 0.01,
-          "hard_failures": []
+          "prompt": {"pack": "...", "overlays": [], "source": "default", "sha256": "..."}
         }
       ]
     }
@@ -287,10 +287,12 @@ applied to `docs/evals/protocol.md`.
 `meta.operation_case_pack` is the operation analogue of `meta.case_pack`;
 `decisions[]` is new, explicit **audit decision provenance** — which
 policy produced each approval decision this run made, discoverable without
-parsing the journal. `hard_failures` names any checkpoint-graded hard
-failure (`off_target_read`, `wrong_target_write`, `uid_conflict`,
+parsing the journal. `grade.hard_failures` names any checkpoint-graded
+hard failure (`off_target_read`, `wrong_target_write`, `uid_conflict`,
 `write_without_uid`, `unsupported_write`, `permission_denied` bypass) so a
-consumer does not have to re-derive them from the raw journal either.
+consumer does not have to re-derive them from the raw journal either — it
+lives inside `grade` (the shipped `OperationGrade` field), not as a
+sibling of `grade` in the run entry.
 
 ### 10. CLI (`src/korvid/evals/operation_main.py`)
 
@@ -322,15 +324,19 @@ data.
 
 ## Fixture coverage
 
-All 11 bundled `src/korvid/evals/operations/*.yaml` fixtures are targeted:
+All 12 bundled `src/korvid/evals/operations/*.yaml` fixtures are targeted:
 straightforward scale/restart fixtures, the two approval-denial/expiry
 fixtures, the RBAC/no-op/unsupported "approval: none" fixtures, the
 neutral-selection fixture (expected to work identically to the target-
 selection fixtures since there is no UI-context bias in a TUI-free run —
 `initial_selection` becomes a no-op for this runner, verified empirically
 by the test suite), and `scale-same-name-replacement.yaml` via the
-intervention hook. `approval_rerequest_turns` remains unsupported and
-undocumented as a non-goal above; no bundled fixture exercises it.
+intervention hook. The `approval_rerequested` journal event itself is
+ported faithfully (one per turn whose index+1 is in a journey's
+`approval_rerequest_turns`), but `_default_script` only ever authors one
+approval outcome per run; no bundled fixture declares
+`approval_rerequest_turns`, so the re-request path is exercised by the
+journaling logic alone, not end to end by any bundled test.
 
 ## Testing
 

@@ -242,85 +242,58 @@ wording; text that reproduces it byte for byte still reports `"default"`.
 Omitting both flags reproduces today's default-prompt behavior exactly —
 every existing JSON field, and every existing CLI exit code, is unchanged.
 
-## External-optimizer machine protocol: not yet available
+## External-optimizer machine protocol
 
-[The scenario protocol](protocol.md) gives external prompt optimizers a
-stable, `korvid.evals`-only, TUI-free JSON contract for the *read-only*
-diagnostic scenarios. That contract does **not** extend to operation
-journeys, and it cannot be extended to them today without either loosening
-an enforced architectural boundary or weakening the approval gate itself.
-This section records why, precisely, so a future change starts from the
-real constraint instead of rediscovering it.
+`python -m korvid.evals.operation_main` is a stable, versioned,
+`korvid.evals`-only, TUI-free entry point for operation journeys — the
+write-lifecycle counterpart to [the scenario protocol](protocol.md). See
+[the operation protocol](operation_protocol.md) for the full JSON contract
+(`meta.operation_case_pack`, per-run `decisions`/`journal`/`audit`/
+`grade`/`prompt`, exit-code semantics) and
+[design decisions](../superpowers/specs/2026-08-28-operation-journey-runner-design.md)
+for how it resolves the approval gate without weakening it.
 
-**The approval gate is Textual by construction, not by convenience.**
-`UIBridge.agent_request_write` (`src/korvid/tools/executor.py`) documents
-the requirement directly: "the implementation must open a confirmation
-dialog that only the *user's* keystroke can approve — the agent can
-neither open-and-confirm nor bypass it." The only production
-implementation of that contract is the real `ConfirmScreen` composed by
-`KorvidApp` (`src/korvid/ui/app.py`, `src/korvid/ui/agent_ui_controller.py`).
-`tests/evals/operation_app.py` says the same thing from the harness side:
-"There is no approval callback shortcut and no eval-only mutation API,"
-and it drives the real dialog with a scripted `Pilot.press` keystroke —
-not a stand-in.
+Earlier revisions of this document recorded, at length, why this runner
+did not exist: the approval gate is Textual by construction
+(`UIBridge.agent_request_write`'s docstring is explicit that only the
+*user's* keystroke may approve a write), and `tach.toml` forbids
+`korvid.evals` from depending on `korvid.core`/`korvid.ui`, the one layer
+allowed to import Textual — so a public, source-tree module could not
+compose the real `KorvidApp` without either loosening that boundary or
+building a fake approval stand-in, which the harness's own design
+forbids as policy-weakening.
 
-**The module boundary that keeps Textual out of `korvid.evals` is
-enforced, not incidental.** `tach.toml` declares `korvid.evals` may depend
-only on `korvid.agent`, `korvid.k8s`, `korvid.providers`, and
-`korvid.tools` — never `korvid.core` or `korvid.ui`, the one layer allowed
-to import Textual. `tests/evals/test_operation_import_boundary.py` proves
-in a subprocess that every *source-tree* operation module
-(`korvid.evals.operation*`) never reaches `textual`, `korvid.ui`, or
-`korvid.core`. `operation_app.py` and `operation_campaign.py` are the
-harness's one deliberate exception, and they live under `tests/` — outside
-`tach`'s `source_roots = ["src"]` — specifically so they can compose the
-real `KorvidApp` without violating that contract. Moving them into
-`src/korvid/evals/` (to make them "public" the way `korvid.evals.__main__`
-is) would fail `tach check` today.
+That blocker is resolved by a fourth option none of the three previously
+listed here: **a typed, composition-root-bound approval capability**
+(`korvid.tools.approval.ApprovalPolicy`) in place of a hard Textual
+dependency. Production's own `AgentUiController` binds the one real
+implementation, `TextualApprovalPolicy`, which decides from the actual
+`ConfirmScreen` dialog exactly as before — nothing about the Textual path
+changed. `korvid.evals.operation_runner.ScriptedOperationBridge` binds a
+different, explicit implementation, `ScriptedApprovalPolicy`
+(deterministic, no sleeps, one pre-authored `ApprovalOutcome` per write,
+derived from each fixture's own authored `approval`/`dialog_intervention`
+— never an ad hoc test double invented per call site). Both flow through
+the identical shared seam: `run_approved_write`, the real fail-closed
+`AuditLog`, and `StatefulFakeWriteOps`'s UID/audit-intent revalidation.
+Nothing is bypassed and nothing is auto-approved — a decision is always a
+typed `ApprovalDecision` (`outcome` + `decision_source`), never a bare
+`bool`/string, and production's own `require_tui_keystroke_source` gate
+still rejects any `approve` decision whose `decision_source` is not
+`"tui_keystroke"`. This is why `korvid.evals.operation_runner` needs no
+`tach.toml` change: it depends only on `korvid.agent`, `korvid.k8s`,
+`korvid.providers`, and `korvid.tools` (via `korvid.tools.approval` and a
+one-line `korvid.tools.audit` re-export of `korvid.core.audit.AuditLog`),
+exactly like the read-only scenario runner.
 
-**What this means for a public runner.** A stable, versioned,
-`python -m korvid.evals`-shaped entry point for operation journeys —
-exact operation ids, prompt-grind inputs, a deterministic JSON result with
-hard failures/checkpoints, and pack identity — is a reasonable extension
-in shape (`operation_campaign.py`'s existing `meta`/per-run record already
-carries most of what it would need: `schema_version`, model tier, prompt
-fingerprint, `safe`/`hard_failures`/`outcome`/`checkpoints`/
-`missing_checkpoints`, per-run journal and audit records — see `_record`
-and `main` in `tests/evals/operation_campaign.py`). But it cannot be
-*production* and *TUI-free* at the same time without one of:
+`korvid-prompt-lab`-style operator campaigns that need real scale/restart
+approval flows should use `python -m korvid.evals.operation_main` going
+forward; `tests.evals.operation_campaign`/`operation_app.py` remain
+korvid's own internal CI regression gate (Textual pilot-driven, `1` on any
+unsafe/incomplete scripted run) and are not deprecated by this runner —
+the two exist for different consumers with different exit-code
+philosophies (see [the operation protocol](operation_protocol.md#exit-codes)).
 
-1. Relaxing the `korvid.evals` → `korvid.ui`/`korvid.core` boundary in
-   `tach.toml` so a public module can compose the real `KorvidApp` —
-   still Textual under the hood (via `App.run_test()`'s headless pilot,
-   as `operation_app.py` already uses), but no longer confined to
-   `tests/` or requiring a caller to import a test module directly. This
-   keeps the approval gate exactly as strict as it is today; it only
-   moves where the composition root lives and lifts the packaging/layer
-   restriction that currently forbids it.
-2. Building a genuinely new, non-Textual production approval mechanism —
-   i.e., a second real implementation of `UIBridge.agent_request_write`
-   that is not a modal at all. This is a security-relevant design in its
-   own right (what stands in for "the user's keystroke" when there is no
-   screen?) and needs its own review; it is not a side effect of a
-   protocol/JSON-shape change.
-3. Pointing a public runner at a fake/stub `UIBridge` that auto-approves.
-   This is explicitly **not** an option: it is exactly the "eval-only
-   mutation API" / "approval callback shortcut" the harness's own design
-   forbids, and it would mean the runner's "approval" no longer exercises
-   the real gate at all — the kind of policy-weakening this project does
-   not do to make external orchestration more convenient.
-
-Option 1 is the only one that adds a public entry point without touching
-approval semantics, but it is still a deliberate architecture change (a
-`tach.toml` boundary edit plus moving/duplicating composition-root code
-out of `tests/`) and is out of scope for this change, which only extends
-the existing read-only scenario protocol. Until one of the above is
-designed, reviewed, and implemented, `korvid-prompt-lab`-style operator
-campaigns that need real scale/restart approval flows must continue to
-run through `tests.evals.operation_campaign`/`operation_app.py` from a
-source checkout — with the operational cost (Textual composition, careful
-harness lifecycle handling) that entails — rather than through a stable
-public protocol.
 ## Metamorphic generation
 
 `korvid.evals.operation_generation.generate_instance(template, seed)`

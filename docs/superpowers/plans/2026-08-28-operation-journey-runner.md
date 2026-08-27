@@ -46,7 +46,7 @@ in `korvid.evals.operation`; CLI in `korvid.evals.operation_main`.
 - Consumes: existing `ApprovalDecision`, `ApprovalOutcome` from the same
   module (unchanged).
 
-- [ ] **Step 1: Read the existing file to confirm exact current exports**
+- [x] **Step 1: Read the existing file to confirm exact current exports**
 
 Run: `sed -n '1,60p' src/korvid/tools/approval.py`
 
@@ -54,7 +54,7 @@ Confirm `ApprovalOutcome`, `ApprovalDecision`, `TUI_KEYSTROKE_SOURCE`,
 `RejectedApprovalSourceError`, `require_tui_keystroke_source` are present
 and note the exact import block at the top of the file.
 
-- [ ] **Step 2: Write the failing test**
+- [x] **Step 2: Write the failing test**
 
 Append to `tests/tools/test_approval.py`:
 
@@ -83,12 +83,12 @@ def test_approval_policy_is_abstract() -> None:
         ApprovalPolicy()  # type: ignore[abstract]
 ```
 
-- [ ] **Step 3: Run test to verify it fails**
+- [x] **Step 3: Run test to verify it fails**
 
 Run: `UV_FROZEN=1 uv run pytest tests/tools/test_approval.py -k "approval_request or approval_policy_is_abstract" -v`
 Expected: FAIL with `ImportError: cannot import name 'ApprovalPolicy'`.
 
-- [ ] **Step 4: Implement**
+- [x] **Step 4: Implement**
 
 Add to `src/korvid/tools/approval.py` (near the top, after existing
 imports — add `from abc import ABC, abstractmethod` and
@@ -125,12 +125,12 @@ class ApprovalPolicy(ABC):
         """Decide one approval request."""
 ```
 
-- [ ] **Step 5: Run test to verify it passes**
+- [x] **Step 5: Run test to verify it passes**
 
 Run: `UV_FROZEN=1 uv run pytest tests/tools/test_approval.py -v`
 Expected: PASS, all tests including pre-existing ones in the file.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/korvid/tools/approval.py tests/tools/test_approval.py
@@ -152,7 +152,7 @@ git commit -m "feat(tools): add ApprovalRequest and ApprovalPolicy capability"
   `ScriptedApprovalPolicy(ApprovalPolicy)` with constructor
   `__init__(self, outcomes: Sequence[ApprovalOutcome], *, interventions: Sequence[Callable[[], None] | None] | None = None)`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to `tests/tools/test_approval.py`:
 
@@ -204,12 +204,12 @@ Add `import pytest` marker if the file is not already async-enabled: check
 or per-test `@pytest.mark.asyncio`; match whatever convention the existing
 file already uses (grep the file first).
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `UV_FROZEN=1 uv run pytest tests/tools/test_approval.py -k scripted_policy -v`
 Expected: FAIL with `ImportError: cannot import name 'ScriptedApprovalPolicy'`.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Add to `src/korvid/tools/approval.py`:
 
@@ -266,12 +266,12 @@ Check the exact constructor signature of `ApprovalDecision` first
 adjust field names above to match exactly if they differ from
 `outcome`/`decision_source`.
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `UV_FROZEN=1 uv run pytest tests/tools/test_approval.py -v`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/korvid/tools/approval.py tests/tools/test_approval.py
@@ -290,7 +290,7 @@ git commit -m "feat(tools): add ScriptedApprovalPolicy"
 - Produces: `korvid.tools.audit.AuditLog` (the same class as
   `korvid.core.audit.AuditLog`).
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 from korvid.core.audit import AuditLog as CoreAuditLog
@@ -301,12 +301,12 @@ def test_tools_audit_reexports_core_audit_log() -> None:
     assert AuditLog is CoreAuditLog
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `UV_FROZEN=1 uv run pytest tests/tools/test_audit_reexport.py -v`
 Expected: FAIL, `ModuleNotFoundError: No module named 'korvid.tools.audit'`.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 ```python
 """Re-export of the production audit log for callers that may depend on
@@ -326,17 +326,17 @@ from korvid.core.audit import AuditLog
 __all__ = ["AuditLog"]
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `UV_FROZEN=1 uv run pytest tests/tools/test_audit_reexport.py -v`
 Expected: PASS.
 
-- [ ] **Step 5: Run tach check**
+- [x] **Step 5: Run tach check**
 
 Run: `UV_FROZEN=1 uv run tach check`
 Expected: no new violations.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/korvid/tools/audit.py tests/tools/test_audit_reexport.py
@@ -358,7 +358,7 @@ git commit -m "feat(tools): re-export AuditLog for evals-safe import"
   `agent_ui_controller.py`; `AgentUiController._approval_policy: ApprovalPolicy`
   attribute, bound in `__init__`.
 
-- [ ] **Step 1: Read `_await_user_approval` in full before touching it**
+- [x] **Step 1: Read `_await_user_approval` in full before touching it**
 
 Run: `grep -n "_await_user_approval\|_collapse_decision\|require_tui_keystroke_source" src/korvid/ui/agent_ui_controller.py`
 
@@ -368,7 +368,7 @@ name and every local variable it uses from `self` (`self._view`,
 `self._app_ref` or similar, deadline/timeout fields) — these must all still
 be reachable from `TextualApprovalPolicy`, which will hold `self._controller`.
 
-- [ ] **Step 2: Write the composition test first (it will fail until Step 4)**
+- [x] **Step 2: Write the composition test first (it will fail until Step 4)**
 
 Create `tests/ui/test_approval_policy_composition.py`:
 
@@ -400,12 +400,12 @@ Before writing this, run:
 to find the exact existing fixture/construction pattern and use it instead
 of inventing a new fixture name.
 
-- [ ] **Step 3: Run test to verify it fails**
+- [x] **Step 3: Run test to verify it fails**
 
 Run: `UV_FROZEN=1 uv run pytest tests/ui/test_approval_policy_composition.py -v`
 Expected: FAIL, `ImportError: cannot import name 'TextualApprovalPolicy'`.
 
-- [ ] **Step 4: Extract `TextualApprovalPolicy`**
+- [x] **Step 4: Extract `TextualApprovalPolicy`**
 
 In `src/korvid/ui/agent_ui_controller.py`, add near the top-level class
 definitions (after imports, before `AgentUiController`):
@@ -469,7 +469,7 @@ approval-related attributes for readability). Add the import:
 (merge with whatever `korvid.tools.approval` import already exists in the
 file from PR #323).
 
-- [ ] **Step 5: Run the composition test and the full existing UI suite**
+- [x] **Step 5: Run the composition test and the full existing UI suite**
 
 Run: `UV_FROZEN=1 uv run pytest tests/ui/test_approval_policy_composition.py -v`
 Expected: PASS.
@@ -481,7 +481,7 @@ extraction moved or altered behavior — diff the extracted method against
 `git show HEAD:src/korvid/ui/agent_ui_controller.py` (pre-task) to find the
 exact discrepancy before proceeding.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/korvid/ui/agent_ui_controller.py tests/ui/test_approval_policy_composition.py
@@ -503,14 +503,14 @@ git commit -m "refactor(ui): extract TextualApprovalPolicy from _await_user_appr
 - Produces: `_observe_audit_intent` now raises `ApiStatusError` when no
   matching record is found (previously always returned/journaled only).
 
-- [ ] **Step 1: Read `_observe_audit_intent` in full**
+- [x] **Step 1: Read `_observe_audit_intent` in full**
 
 View `src/korvid/evals/operation_state.py` lines 300-341 (per prior
 research in this session) to see its exact current body, the shape of
 `AuditRecord`, and how "matching" is currently defined (by action/kind/
 namespace/name, presumably).
 
-- [ ] **Step 2: Write the failing test**
+- [x] **Step 2: Write the failing test**
 
 Add to `tests/evals/test_operation_state.py` (match the file's existing
 import/fixture style — read its first 40 lines first):
@@ -536,13 +536,13 @@ Fill in `<meta>`/`<namespace>`/`<name>`/`<uid>` from whatever a neighboring
 existing `scale_object` test in the same file already uses for its happy
 path (copy its fixture object, then break only the audit-intent probe).
 
-- [ ] **Step 3: Run test to verify it fails**
+- [x] **Step 3: Run test to verify it fails**
 
 Run: `UV_FROZEN=1 uv run pytest tests/evals/test_operation_state.py -k audit_intent -v`
 Expected: FAIL — currently no exception is raised (`_observe_audit_intent`
 is observation-only).
 
-- [ ] **Step 4: Implement fail-closed enforcement**
+- [x] **Step 4: Implement fail-closed enforcement**
 
 In `_observe_audit_intent` (or wherever it is called from within
 `scale_object`/`rollout_restart_with_stamp`/any other write method), after
@@ -568,14 +568,14 @@ used elsewhere in the file (`_safe_summarize`, `_target`, `JournalTarget`)
 — do not invent new helper signatures; reuse what `_resolve`'s UID-conflict
 branch already calls for consistency.
 
-- [ ] **Step 5: Run the new test, then the full existing file's suite**
+- [x] **Step 5: Run the new test, then the full existing file's suite**
 
 Run: `UV_FROZEN=1 uv run pytest tests/evals/test_operation_state.py -v`
 Expected: PASS, including every pre-existing test — the happy path (where
 `AuditLog`/`run_approved_write` genuinely wrote an intent record first)
 must still succeed, since the record now exists before this check runs.
 
-- [ ] **Step 6: Run the full `tests/evals/` suite once to catch downstream users**
+- [x] **Step 6: Run the full `tests/evals/` suite once to catch downstream users**
 
 Run: `UV_FROZEN=1 uv run pytest tests/evals/ -q`
 Expected: PASS. If `tests/evals/operation_app.py`'s existing Textual-driven
@@ -584,7 +584,7 @@ investigate before proceeding; the design intends this to be additive
 enforcement that a correctly-ordered audit (which every real write already
 performs) never trips.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add src/korvid/evals/operation_state.py tests/evals/test_operation_state.py
@@ -608,7 +608,7 @@ git commit -m "fix(evals): StatefulFakeWriteOps rejects mutation without audited
 - Produces: `select_operation_journeys(journeys: Sequence[OperationJourney], ids: Sequence[str]) -> list[OperationJourney]`;
   `operation_case_pack_identity(journeys: Sequence[OperationJourney]) -> dict[str, Any]`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Add to `tests/evals/test_operation.py`:
 
@@ -675,12 +675,12 @@ check whether it is `@dataclass(frozen=True)` first and use
 `dataclasses.replace(mutated[0], goal=mutated[0].goal + " (edited)")` if
 so, which is the safer, correct approach for a frozen dataclass).
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `UV_FROZEN=1 uv run pytest tests/evals/test_operation.py -k "select_operation_journeys or operation_case_pack_identity" -v`
 Expected: FAIL, `ImportError`.
 
-- [ ] **Step 3: Implement, mirroring `scenario.py` exactly**
+- [x] **Step 3: Implement, mirroring `scenario.py` exactly**
 
 In `src/korvid/evals/operation.py`, add near the end of the file:
 
@@ -752,12 +752,12 @@ Add `import hashlib`, `import json`, `from dataclasses import asdict` (or
 equivalent) to the top of `operation.py` if not already imported — check
 first with `grep -n "^import\|^from" src/korvid/evals/operation.py`.
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `UV_FROZEN=1 uv run pytest tests/evals/test_operation.py -v`
 Expected: PASS, including every pre-existing test in the file.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/korvid/evals/operation.py tests/evals/test_operation.py
@@ -784,7 +784,7 @@ git commit -m "feat(evals): add select_operation_journeys and operation_case_pac
 - Produces: `ScriptedOperationBridge(UIBridge)`, `approval_from_result(result: str) -> str`,
   `make_audit_intent_probe(audit_path: Path) -> AuditIntentProbe`.
 
-- [ ] **Step 1: Confirm exact import sources before writing code**
+- [x] **Step 1: Confirm exact import sources before writing code**
 
 Run:
 ```bash
@@ -794,7 +794,7 @@ grep -n "def builtin_aliases" -r src/korvid/evals/
 Use the exact module paths this prints for every symbol ported below —
 do not guess.
 
-- [ ] **Step 2: Write the failing tests**
+- [x] **Step 2: Write the failing tests**
 
 Create `tests/evals/test_operation_runner.py`:
 
@@ -902,12 +902,12 @@ Check whether `tests/evals/` already has `pytest-asyncio` configured
 whether these need `@pytest.mark.asyncio` — grep first:
 `grep -n "asyncio_mode" pyproject.toml`.
 
-- [ ] **Step 3: Run test to verify it fails**
+- [x] **Step 3: Run test to verify it fails**
 
 Run: `UV_FROZEN=1 uv run pytest tests/evals/test_operation_runner.py -v`
 Expected: FAIL, `ModuleNotFoundError: No module named 'korvid.evals.operation_runner'`.
 
-- [ ] **Step 4: Implement `ScriptedOperationBridge` and helpers**
+- [x] **Step 4: Implement `ScriptedOperationBridge` and helpers**
 
 Create `src/korvid/evals/operation_runner.py`. Start with the module
 docstring, imports (using the exact paths confirmed in Step 1), then:
@@ -1166,7 +1166,7 @@ the constructor instead of trying to introspect `AuditLog` for its path —
 simpler: add an explicit `audit_path: Path` constructor parameter to
 `ScriptedOperationBridge` rather than deriving it from `audit`).
 
-- [ ] **Step 5: Fix compile/signature errors iteratively**
+- [x] **Step 5: Fix compile/signature errors iteratively**
 
 Run: `UV_FROZEN=1 uv run pytest tests/evals/test_operation_runner.py -v`
 
@@ -1174,13 +1174,13 @@ Iterate: each failure names an exact missing attribute or wrong
 signature — fix the one specific line, re-run, repeat until all four tests
 in this task pass. Do not move to Task 8 until this file's tests are green.
 
-- [ ] **Step 6: Run mypy/ruff on the new file**
+- [x] **Step 6: Run mypy/ruff on the new file**
 
 Run: `UV_FROZEN=1 uv run ruff check src/korvid/evals/operation_runner.py`
 Run: `UV_FROZEN=1 uv run mypy src/korvid/evals/operation_runner.py`
 Fix any reported issue before committing.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add src/korvid/evals/operation_runner.py tests/evals/test_operation_runner.py
@@ -1203,13 +1203,13 @@ git commit -m "feat(evals): add ScriptedOperationBridge, the TUI-free write seam
 - Produces: `_OperationJournalingExecutor` (wraps a `ToolExecutor`),
   `_AnswerCapturingSession(DefaultAgentSession)`.
 
-- [ ] **Step 1: Port `_AnswerCapturingSession` verbatim**
+- [x] **Step 1: Port `_AnswerCapturingSession` verbatim**
 
 Copy the class body from `tests/evals/operation_app.py` lines 576-631
 (already read earlier in this session) into `operation_runner.py`,
 unchanged except for import paths. It has zero Textual dependency already.
 
-- [ ] **Step 2: Write a focused test for the journaling executor**
+- [x] **Step 2: Write a focused test for the journaling executor**
 
 ```python
 async def test_journaling_executor_records_target_resolved(tmp_path: Path) -> None:
@@ -1246,12 +1246,12 @@ test's exact assertion matters less than confirming the wrapper does not
 crash and produces *some* checkpoint event; Task 9's fixture-parity tests
 are the real correctness gate.
 
-- [ ] **Step 3: Run test to verify it fails**
+- [x] **Step 3: Run test to verify it fails**
 
 Run: `UV_FROZEN=1 uv run pytest tests/evals/test_operation_runner.py -k journaling_executor -v`
 Expected: FAIL, `ImportError`.
 
-- [ ] **Step 4: Port `_JournalingExecutor` and its private helpers**
+- [x] **Step 4: Port `_JournalingExecutor` and its private helpers**
 
 Copy, adapting only import paths and the class name
 (`_JournalingExecutor` → `_OperationJournalingExecutor`), the full body
@@ -1262,17 +1262,17 @@ class itself) into `operation_runner.py`. This is the checkpoint-emission
 core — port it faithfully; do not "simplify" it, since fixture grading
 parity depends on exact event names/ordering.
 
-- [ ] **Step 5: Run test to verify it passes**
+- [x] **Step 5: Run test to verify it passes**
 
 Run: `UV_FROZEN=1 uv run pytest tests/evals/test_operation_runner.py -v`
 Expected: PASS, all tests in the file including Task 7's.
 
-- [ ] **Step 6: Ruff/mypy**
+- [x] **Step 6: Ruff/mypy**
 
 Run: `UV_FROZEN=1 uv run ruff check src/korvid/evals/operation_runner.py`
 Run: `UV_FROZEN=1 uv run mypy src/korvid/evals/operation_runner.py`
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add src/korvid/evals/operation_runner.py tests/evals/test_operation_runner.py
@@ -1282,6 +1282,19 @@ git commit -m "feat(evals): port journaling executor and answer-capturing sessio
 ---
 
 ### Task 9: `run_operation_case` composition + fixture-parity tests
+
+> **Implementation note (post-hoc):** this task's draft below used
+> `journey.goal` as the sole turn text and `EvalUiBridge(journey.interaction)`
+> to build the bridge. Both are wrong: `OperationJourney` has no
+> `interaction`/`objects` field, and the model must receive one
+> `session.run_turn(text)` call per entry in `journey.turns`, with
+> `journey.goal` used only as the `goal_received` journal event's `action`
+> value on the first turn (confirmed against `_run_turns` in
+> `tests/evals/operation_app.py`, lines 1043-1090). The shipped
+> `run_operation_case` drives `journey.turns` and builds the bridge from a
+> new `_operation_interaction(journey)` helper (a static `InteractionContext`
+> from `journey.target`) instead. See `git log` for `feat(evals): compose
+> run_operation_case over the TUI-free write path`.
 
 **Files:**
 - Modify: `src/korvid/evals/operation_runner.py`
@@ -1321,7 +1334,7 @@ async def run_operation_case(
 ) -> OperationRun: ...
 ```
 
-- [ ] **Step 1: Read the default-script derivation rule**
+- [x] **Step 1: Read the default-script derivation rule**
 
 Given `journey.approval` is one of the fixture's authored values
 (`"approved"`/`"expired"`/`"denied"`/`None`/etc. — re-check
@@ -1335,7 +1348,7 @@ callable (`lambda: kube.state.replace_incarnation(...)`) when the fixture
 declares one. Use exactly the field names read earlier in this session
 from `src/korvid/evals/operation.py` lines 206-326.
 
-- [ ] **Step 2: Write one parity test per bundled fixture**
+- [x] **Step 2: Write one parity test per bundled fixture**
 
 ```python
 import pytest
@@ -1379,7 +1392,7 @@ authoring new ones from scratch — this is what makes the parity claim in
 the design doc ("matches what the Textual harness produces for the same
 fixture with an equivalent scripted provider") actually true.
 
-- [ ] **Step 3: Implement `run_operation_case`**
+- [x] **Step 3: Implement `run_operation_case`**
 
 ```python
 async def run_operation_case(
@@ -1475,7 +1488,7 @@ need a small `tool_calls` property added to it, mirroring
 `_JournalingExecutor`'s own — check that class's full body from Task 8 for
 whether it already tracks this).
 
-- [ ] **Step 4: Iterate until every fixture's test passes**
+- [x] **Step 4: Iterate until every fixture's test passes**
 
 Run: `UV_FROZEN=1 uv run pytest tests/evals/test_operation_runner.py -v`
 
@@ -1488,18 +1501,18 @@ expects — cross-reference `src/korvid/evals/operation_grader.py`'s
 `evaluate_assertion`/checkpoint-vocabulary logic directly rather than
 guessing.
 
-- [ ] **Step 5: Run the full `tests/evals/` suite**
+- [x] **Step 5: Run the full `tests/evals/` suite**
 
 Run: `UV_FROZEN=1 uv run pytest tests/evals/ -q`
 Expected: every previously-passing test still passes; only new tests
 added.
 
-- [ ] **Step 6: Ruff/mypy**
+- [x] **Step 6: Ruff/mypy**
 
 Run: `UV_FROZEN=1 uv run ruff check src/korvid/evals/operation_runner.py`
 Run: `UV_FROZEN=1 uv run mypy src/korvid/evals/operation_runner.py`
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add src/korvid/evals/operation_runner.py tests/evals/test_operation_runner.py
@@ -1509,6 +1522,16 @@ git commit -m "feat(evals): compose run_operation_case over the TUI-free write p
 ---
 
 ### Task 10: CLI (`operation_main.py`)
+
+> **Implementation note (post-hoc):** an earlier draft of this task left a
+> `ScriptedProvider([])` placeholder for the CLI's provider path and
+> flagged it as unfinished. The shipped CLI instead uses
+> `provider_factory_from_env(os.environ)` — the exact same live-provider
+> factory `korvid.evals.__main__` uses — as its only provider path;
+> `ScriptedProvider`/`OPERATION_SCRIPTS` are test-only and never imported
+> by `operation_main.py`. This is required for "public CLI/entry point
+> suitable for Prompt Lab one-case calls" to mean a real model can be
+> driven, not just a canned replay.
 
 **Files:**
 - Create: `src/korvid/evals/operation_main.py`
@@ -1524,7 +1547,7 @@ git commit -m "feat(evals): compose run_operation_case over the TUI-free write p
   `meta.operation_case_pack` and top-level `"operations"` key instead of
   `"scenarios"`).
 
-- [ ] **Step 1: Write failing CLI tests**
+- [x] **Step 1: Write failing CLI tests**
 
 Create `tests/evals/test_operation_main.py`, mirroring
 `tests/evals/test___main__.py`'s (confirm exact filename first:
@@ -1554,12 +1577,12 @@ mirror however `tests/evals/test___main__.py` already tests `run_payload`
 without invoking `main()` end-to-end (grep that file for its pattern
 first).
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `UV_FROZEN=1 uv run pytest tests/evals/test_operation_main.py -v`
 Expected: FAIL, `ImportError`.
 
-- [ ] **Step 3: Implement `operation_main.py`**
+- [x] **Step 3: Implement `operation_main.py`**
 
 ```python
 """Public, TUI-free CLI for operation-journey runs (docs/superpowers/specs/
@@ -1684,11 +1707,11 @@ empty script cannot drive any tool calls. Wire this through before this
 task is considered done; do not ship a CLI that cannot actually complete a
 run.
 
-- [ ] **Step 4: Run tests, iterate to green**
+- [x] **Step 4: Run tests, iterate to green**
 
 Run: `UV_FROZEN=1 uv run pytest tests/evals/test_operation_main.py -v`
 
-- [ ] **Step 5: Manual smoke test**
+- [x] **Step 5: Manual smoke test**
 
 Run:
 ```bash
@@ -1704,12 +1727,12 @@ path under the cloned repo instead, e.g.
 Confirm `meta.protocol_version` and `meta.operation_case_pack` are present
 and the run's `grade` reflects a safe, complete outcome.
 
-- [ ] **Step 6: Ruff/mypy**
+- [x] **Step 6: Ruff/mypy**
 
 Run: `UV_FROZEN=1 uv run ruff check src/korvid/evals/operation_main.py`
 Run: `UV_FROZEN=1 uv run mypy src/korvid/evals/operation_main.py`
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add src/korvid/evals/operation_main.py tests/evals/test_operation_main.py
@@ -1726,7 +1749,7 @@ git commit -m "feat(evals): add python -m korvid.evals.operation_main CLI"
 
 **Interfaces:** none (docs only).
 
-- [ ] **Step 1: Rewrite `docs/evals/operations.md`'s "not yet available" section**
+- [x] **Step 1: Rewrite `docs/evals/operations.md`'s "not yet available" section**
 
 Replace the `## External-optimizer machine protocol: not yet available`
 section (added by PR #321, currently describing why no such runner
@@ -1736,7 +1759,7 @@ selection semantics, `meta.operation_case_pack` shape, `decisions[]`
 provenance, exit-code contract, and the explicit non-goals (no
 `approval_rerequest_turns`, no live-provider mode from this entry point).
 
-- [ ] **Step 2: Update `docs/evals/protocol.md`'s closing paragraph**
+- [x] **Step 2: Update `docs/evals/protocol.md`'s closing paragraph**
 
 The paragraph currently reading "That harness has no TUI-free public
 equivalent yet... See operations.md#... for exactly what blocks it" no
@@ -1747,13 +1770,13 @@ operation-journey runner now exists as a separate entry point,
 to describe only the read-only scenario protocol; the two share
 `EVAL_PROTOCOL_VERSION` but are otherwise independent artifacts."
 
-- [ ] **Step 3: Proofread cross-references**
+- [x] **Step 3: Proofread cross-references**
 
 Run: `grep -rn "operations.md#external-optimizer" docs/` to find every
 stale anchor reference and fix each one to point at the new section's
 actual heading anchor.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add docs/evals/operations.md docs/evals/protocol.md

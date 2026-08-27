@@ -170,14 +170,11 @@ korvid's immutable safety contract, never in place of it. See
 [evaluation methodology](methodology.md) for how the numbers this artifact
 carries are meant to be interpreted.
 
-**This protocol covers diagnostic scenarios only.** It does not cover, and
-must not be read as replacing, the stateful *operation* journeys (scale
-and restart flows gated behind the real approval dialog) that
-`tests.evals.operation_campaign`/`operation_app.py` exercise — an external
-optimizer that needs write/approval coverage cannot get it from
-`python -m korvid.evals` today. That harness has no TUI-free public
-equivalent yet, and building one is not a matter of extending this JSON
-shape: it runs into an enforced module boundary and a deliberately
-Textual-only approval gate. See [operation journeys: external-optimizer
-machine protocol status](operations.md#external-optimizer-machine-protocol-not-yet-available)
-for exactly what blocks it and what a future extension would require.
+**This protocol covers diagnostic scenarios only.** It does not cover the
+stateful *operation* journeys (scale and restart flows gated behind a real
+approval decision). Those have their own, separate TUI-free entry point
+and JSON contract: `python -m korvid.evals.operation_main`, documented in
+[the operation protocol](operation_protocol.md). The two contracts share
+`meta.protocol_version` but are otherwise independent CLIs with different
+default tool arming (read-only here; write-armed there) — do not assume
+one's shape or exit-code semantics apply to the other.

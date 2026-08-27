@@ -654,7 +654,12 @@ using Ollama so automatic routing carries the same provider identity as the
 TUI. The JSON artifact's stable, versioned shape — including the
 deterministic case-pack identity a scenario selection publishes — is
 documented for external tooling in the
-[external-optimizer protocol](evals/protocol.md).
+[external-optimizer protocol](evals/protocol.md). The write-lifecycle
+counterpart — stateful scale/restart operation journeys, run TUI-free over
+the same production approval and audit path a Textual session uses — has
+its own entry point, `korvid.evals.operation_main`, and its own JSON
+contract documented in the
+[operation protocol](evals/operation_protocol.md).
 
 ### Conversational journeys
 
