@@ -40,7 +40,10 @@ misrepresent an evidence boundary.
 - Splitting removed material into many new pages merely to retain it.
 - Turning technical references such as provider plugin contracts into visual
   product pages.
-- Changing Korvid application behavior, packaging, or runtime dependencies.
+- Broad application behavior, packaging, or runtime-dependency changes. A
+  tightly coupled correctness fix discovered while proving a documented
+  boundary is allowed only with focused regression coverage and the full
+  production quality gate.
 
 ## Editorial Model
 

@@ -19,9 +19,12 @@ This change covers:
 - the landing copy and provenance statements that describe those captures;
 - focused tests and local browser verification.
 
-It does not redesign the surrounding landing page, introduce remote media, run
-a live model in documentation tests, or change Korvid's production Agent or MCP
-contracts.
+It does not redesign the surrounding landing page, introduce remote media, or
+run a live model in documentation tests. Review hardening may correct an
+existing production boundary when the recording exercises it directly: bridge
+`ERROR:` replies are now typed failures for Agent and MCP consumers. That
+runtime correction requires the full production gate, not documentation-only
+verification.
 
 ## Playback contract
 
