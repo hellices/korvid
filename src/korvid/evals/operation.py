@@ -14,9 +14,11 @@ Textual composition root that drives these fixtures lives in
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -26,6 +28,7 @@ import yaml
 from korvid.evals.fake_kube import builtin_aliases
 from korvid.evals.scenario import (
     ContainerLogs,
+    _canonical_value,
     _logs,
     _manifests,
     _reject_future_timestamps,
@@ -55,6 +58,8 @@ __all__ = [
     "bundled_operations_dir",
     "load_operation_journey",
     "load_operation_journeys",
+    "operation_case_pack_identity",
+    "select_operation_journeys",
     "split_path",
     "walk_path",
 ]
@@ -892,3 +897,178 @@ def load_operation_journeys(directory: Path) -> list[OperationJourney]:
             raise ValueError(f"duplicate operation journey id {journey.id!r}")
         seen.add(journey.id)
     return sorted(journeys, key=lambda journey: journey.id)
+
+
+def select_operation_journeys(
+    journeys: Sequence[OperationJourney], operation_ids: Sequence[str]
+) -> list[OperationJourney]:
+    """Select an exact, repeatable subset of already-loaded journeys by id.
+
+    The operation-journey counterpart to `scenario.select_scenarios`: an
+    external optimizer names one operation id, or a fixed named set, to run
+    every time, without copying fixture directories just to change which of
+    them load. Selection operates purely in memory over `journeys`,
+    whatever directory produced them.
+
+    Fail-closed, deliberately stricter than a filter: an empty selection, a
+    duplicate id, or an id absent from `journeys` all raise rather than
+    silently running zero journeys, running one twice, or dropping the
+    unknown name.
+
+    Args:
+        journeys: Already-loaded journeys, e.g. from `load_operation_journeys`.
+        operation_ids: The exact ids to run, in any order; the result is
+            still sorted by id, matching `load_operation_journeys`' own
+            order so a selection is never distinguishable from a
+            differently-ordered request for the same ids.
+
+    Returns:
+        The matching journeys, sorted by id.
+
+    Raises:
+        ValueError: the selection is empty, names an id `journeys` does not
+            contain, or repeats an id.
+    """
+    ids = list(operation_ids)
+    if not ids:
+        raise ValueError("operation selection must name at least one operation id")
+    blank = [raw for raw in ids if not isinstance(raw, str) or not raw.strip()]
+    if blank:
+        raise ValueError("operation selection ids must be non-empty strings")
+    seen: set[str] = set()
+    duplicates: set[str] = set()
+    for operation_id in ids:
+        if operation_id in seen:
+            duplicates.add(operation_id)
+        seen.add(operation_id)
+    if duplicates:
+        raise ValueError(f"duplicate operation id(s) in selection: {sorted(duplicates)}")
+    by_id = {journey.id: journey for journey in journeys}
+    unknown = sorted(set(ids) - by_id.keys())
+    if unknown:
+        known = sorted(by_id)
+        raise ValueError(f"unknown operation id(s): {unknown}; known ids: {known}")
+    return sorted((by_id[operation_id] for operation_id in ids), key=lambda j: j.id)
+
+
+def _target_content(target: OperationTarget) -> dict[str, Any]:
+    return {
+        "context": target.context,
+        "namespace": target.namespace,
+        "group": target.group,
+        "kind": target.kind,
+        "plural": target.plural,
+        "name": target.name,
+        "uid": target.uid,
+    }
+
+
+def _assertion_content(assertion: StateAssertion) -> dict[str, Any]:
+    return {
+        "target": _target_content(assertion.target),
+        "path": assertion.path,
+        "operator": assertion.operator,
+        "expected": assertion.expected,
+        "provisional": assertion.provisional,
+    }
+
+
+def _denial_content(denial: PermissionDenial) -> dict[str, Any]:
+    return {
+        "verb": denial.verb,
+        "resource": denial.resource,
+        "subresource": denial.subresource,
+        "namespace": denial.namespace,
+    }
+
+
+def _dialog_intervention_content(intervention: DialogIntervention | None) -> dict[str, Any] | None:
+    if intervention is None:
+        return None
+    return {"replace_target": {"uid": intervention.replace_target.uid}}
+
+
+def _expected_request_content(request: OperationRequest | None) -> dict[str, Any] | None:
+    if request is None:
+        return None
+    return {"action": request.action, "replicas": request.replicas}
+
+
+def _journey_content(journey: OperationJourney) -> dict[str, Any]:
+    """A deep, JSON-safe view of everything that defines a journey's behavior.
+
+    Used only to derive the case-pack content hash. Every field a grader or
+    the agent can observe is included - the goal, target, approval script,
+    expected outcome, checkpoints, assertions, forbidden rules, and the
+    starting cluster fixture - so the hash changes whenever any of them
+    changes, not just when the id does. Nothing here is a file path or a
+    filesystem timestamp: two journeys with identical content hash
+    identically no matter which directory or mtime produced them.
+    """
+    cluster = journey.cluster
+    return {
+        "schema_version": journey.schema_version,
+        "id": journey.id,
+        "split": journey.split,
+        "goal": journey.goal,
+        "initial_selection": journey.initial_selection,
+        "target": _target_content(journey.target),
+        "approval": journey.approval,
+        "expected_outcome": journey.expected_outcome,
+        "expected_write_requests": journey.expected_write_requests,
+        "expected_approval_dialogs": journey.expected_approval_dialogs,
+        "expected_request": _expected_request_content(journey.expected_request),
+        "efficiency_budget": journey.efficiency_budget,
+        "required_checkpoints": list(journey.required_checkpoints),
+        "preconditions": [_assertion_content(a) for a in journey.preconditions],
+        "postconditions": [_assertion_content(a) for a in journey.postconditions],
+        "forbidden": list(journey.forbidden),
+        "dialog_intervention": _dialog_intervention_content(journey.dialog_intervention),
+        "turns": list(journey.turns),
+        "permission_denials": [_denial_content(d) for d in journey.permission_denials],
+        "objects": [dict(obj) for obj in cluster.objects],
+        "events": [dict(event) for event in cluster.events],
+        "logs": {
+            key: {"current": list(logs.current), "previous": list(logs.previous)}
+            for key, logs in cluster.logs.items()
+        },
+        "forbidden_cluster_reads": [dict(entry) for entry in cluster.forbidden],
+        "reconcile_status": cluster.reconcile_status,
+        "approval_rerequest_turns": list(journey.approval_rerequest_turns),
+    }
+
+
+def operation_case_pack_identity(journeys: Sequence[OperationJourney]) -> dict[str, Any]:
+    """Deterministic identity for an exact set of loaded operation journeys.
+
+    Published so an external optimizer can confirm which operation case
+    pack a run actually measured against without trusting a directory path
+    or file mtimes (which say nothing once fixtures are packaged, mirrored,
+    or checked out fresh). `operation_ids` is sorted so the identity does
+    not depend on selection or filesystem enumeration order; `sha256` is a
+    digest of the journeys' own content (goal, target, approval script,
+    checkpoints, assertions, and cluster fixtures), so it is identical for
+    two runs that loaded the same definitions and changes whenever any of
+    them do. Uses the same type-preserving canonical encoding as
+    `scenario.case_pack_identity` (`scenario._canonical_value`): a mapping
+    key must be a string, and a `datetime`/`date` value is never conflated
+    with an equal-looking string.
+
+    Args:
+        journeys: The exact journeys the run loaded (the full bundled pack,
+            a custom directory, or a `select_operation_journeys` subset).
+
+    Returns:
+        A mapping with `operation_ids` (sorted), `count`, and `sha256`.
+
+    Raises:
+        ValueError: a journey's content holds a mapping with a non-string
+            key, or a value of a type the canonical content encoding does
+            not recognize (e.g. a `set`).
+    """
+    ordered = sorted(journeys, key=lambda j: j.id)
+    ids = [journey.id for journey in ordered]
+    content = [_journey_content(journey) for journey in ordered]
+    canonical = _canonical_value(content)
+    digest = hashlib.sha256(json.dumps(canonical, ensure_ascii=False).encode("utf-8")).hexdigest()
+    return {"operation_ids": ids, "count": len(ids), "sha256": digest}
