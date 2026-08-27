@@ -390,14 +390,18 @@ async def test_the_audit_intent_probe_is_read_immediately_before_the_mutation() 
     assert observed.result == "durable"
 
 
-async def test_a_mutation_without_a_persisted_intent_is_journaled_as_missing() -> None:
-    """The probe never blocks: enforcement is the production app's job, and
-    the grader turns `audit_intent_missing` into a hard failure."""
+async def test_a_mutation_without_a_persisted_intent_is_rejected_fail_closed() -> None:
+    """When a probe is wired, the fake enforces the ordering itself: a
+    missing durable intent journals `audit_intent_missing` and refuses the
+    mutation instead of proceeding, since the eval runner's scripted write
+    path does not go through production's `KorvidApp._run_write` ordering
+    guard."""
     _kube, writes, journal = _wiring(audit_intent_probe=lambda: ())
-    await writes.scale_object(_DEPLOY, "shop-a", "checkout-a", 3, uid=_UID)
+    with pytest.raises(ApiStatusError, match="audit intent"):
+        await writes.scale_object(_DEPLOY, "shop-a", "checkout-a", 3, uid=_UID)
     assert journal.has("audit_intent_missing") is True
     assert journal.has("audit_intent_observed") is False
-    assert journal.has("mutation_finished") is True
+    assert journal.has("mutation_finished") is False
 
 
 async def test_one_persisted_intent_cannot_satisfy_multiple_mutations() -> None:
@@ -408,7 +412,8 @@ async def test_one_persisted_intent_cannot_satisfy_multiple_mutations() -> None:
 
     _kube, writes, journal = _wiring(audit_intent_probe=probe)
     await writes.scale_object(_DEPLOY, "shop-a", "checkout-a", 3, uid=_UID)
-    await writes.scale_object(_DEPLOY, "shop-a", "checkout-a", 4, uid=_UID)
+    with pytest.raises(ApiStatusError, match="audit intent"):
+        await writes.scale_object(_DEPLOY, "shop-a", "checkout-a", 4, uid=_UID)
     assert [event.event for event in journal.events if event.event.startswith("audit_intent_")] == [
         "audit_intent_observed",
         "audit_intent_missing",
@@ -442,7 +447,8 @@ async def test_an_intent_for_another_target_does_not_count_as_this_write_s_inten
         context="eval",
     )
     _kube, writes, journal = _wiring(audit_intent_probe=lambda: (other,))
-    await writes.scale_object(_DEPLOY, "shop-a", "checkout-a", 3, uid=_UID)
+    with pytest.raises(ApiStatusError, match="audit intent"):
+        await writes.scale_object(_DEPLOY, "shop-a", "checkout-a", 3, uid=_UID)
     assert journal.has("audit_intent_missing") is True
 
 
@@ -460,7 +466,8 @@ async def test_an_intent_recorded_under_another_context_does_not_count() -> None
         context="production",
     )
     _kube, writes, journal = _wiring(audit_intent_probe=lambda: (elsewhere,))
-    await writes.scale_object(_DEPLOY, "shop-a", "checkout-a", 3, uid=_UID)
+    with pytest.raises(ApiStatusError, match="audit intent"):
+        await writes.scale_object(_DEPLOY, "shop-a", "checkout-a", 3, uid=_UID)
     assert journal.has("audit_intent_missing") is True
     assert journal.has("audit_intent_observed") is False
 

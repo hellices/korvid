@@ -300,18 +300,20 @@ class StatefulFakeWriteOps(WriteOps):
     def _observe_audit_intent(
         self, action: str, meta: ResourceMeta, namespace: str | None, name: str, uid: str | None
     ) -> None:
-        """Journal whether this write's audit intent is already durable.
+        """Refuse the mutation unless its audit intent is already durable.
 
         Called immediately before the mutation and never after it, so the
-        journal alone proves the ordering the design requires. Observation
-        only: enforcement stays in production `KorvidApp._run_write`, which
-        blocks the write when the intent cannot be persisted. Refusing here
-        would grade eval-only enforcement instead of the product. With no
-        probe injected (unit tests of the fake itself) nothing is claimed.
+        journal alone proves the ordering the design requires. When a probe
+        is wired, a missing durable intent is fail-closed: the scripted
+        eval write path bypasses production `KorvidApp._run_write`'s own
+        audit-before-mutation guard, so this fake must enforce the ordering
+        itself instead of merely observing it. With no probe injected (unit
+        tests of the fake's mutation mechanics, unrelated to audit
+        ordering) nothing is enforced or claimed.
 
         Matching includes the **context**: the design journals context
         identity at every boundary, and per-run audit paths are what makes
-        a context-blind match safe today — Slice B's shared log would not.
+        a context-blind match safe today - Slice B's shared log would not.
         """
         if self._audit_intent_probe is None:
             return
@@ -339,6 +341,12 @@ class StatefulFakeWriteOps(WriteOps):
             result="durable" if available > 0 else "absent",
             detail=_safe_summarize(action=action, context=self._context, count=available),
         )
+        if available <= 0:
+            raise ApiStatusError(
+                409,
+                f"{_FAKE}: refusing {action} on {meta.plural} {namespace or ''}/{name} "
+                "with no durable audit intent for this context",
+            )
 
     def _unsupported(
         self,
