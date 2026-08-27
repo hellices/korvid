@@ -438,6 +438,98 @@ async def test_a_lone_direct_open_in_a_parallel_capable_policy_is_still_terminal
     assert isinstance(events[-1], TurnComplete)
 
 
+async def test_direct_open_with_duplicate_call_id_does_not_end_early() -> None:
+    """A successful terminal direct-open accompanied by a *discarded* duplicate
+    call id must NOT end the turn early.
+
+    The provider emits two calls with the same call-id; the second is discarded
+    as a duplicate, making ``round_.discarded`` non-empty.  Dropping the
+    ``and not round_.discarded`` guard in ``_honors_terminal`` would treat this
+    as a clean single-call round and short-circuit after the acknowledgement,
+    swallowing the scripted second provider response.  This test proves the
+    guard is load-bearing: the turn must continue and the model must consume the
+    second response.
+    """
+    bridge = RecordingBridge()
+    harness = build_harness(
+        [
+            # Round 1: open_logs kept; its duplicate id is discarded.
+            [
+                tool_call("c1", "open_logs", LOGS_ARGS),
+                tool_call("c1", "open_logs", LOGS_ARGS),  # duplicate id → discarded
+                DONE,
+            ],
+            # Round 2: the model must still reach here and synthesize.
+            text_turn("logs opened, continuing analysis"),
+        ],
+        policy=make_policy(tool_names=("open_logs",)),
+        bridge=bridge,
+    )
+
+    events = await harness.run()
+
+    # The bridge received exactly one action (the kept call).
+    assert bridge.actions == [OpenLogs(pod="api-0", namespace="prod", container=None)]
+    # Two provider calls happened — the discard prevented early termination.
+    assert len(harness.provider.calls) == 2
+    # The turn ended cleanly with the model's own synthesis, not the
+    # fixed acknowledgement.
+    assert isinstance(events[-1], TurnComplete)
+    assert harness.conversation.messages[-1] == {
+        "role": "assistant",
+        "content": "logs opened, continuing analysis",
+    }
+    deltas = [event for event in events if isinstance(event, TextDelta)]
+    assert DIRECT_OPEN_ACKNOWLEDGEMENT not in [delta.text for delta in deltas]
+
+
+async def test_direct_open_with_capped_extra_call_does_not_end_early() -> None:
+    """A successful terminal direct-open accompanied by a *capped* extra call
+    must NOT end the turn early.
+
+    The policy caps at one call per iteration; the provider emits a second call
+    that is dropped as excess, placing it in ``round_.discarded``.  The same
+    ``and not round_.discarded`` guard in ``_honors_terminal`` must prevent the
+    early-exit path here too, forcing the turn to continue and consume the
+    scripted second provider response.
+    """
+    bridge = RecordingBridge()
+    execution = RecordingExecution()
+    harness = build_harness(
+        [
+            # Round 1: open_logs kept; get_logs capped as excess → discarded.
+            [
+                tool_call("c1", "open_logs", LOGS_ARGS),
+                tool_call("c2", "get_logs", GET_LOGS_ARGS),
+                DONE,
+            ],
+            # Round 2: the model must still reach here.
+            text_turn("one call was capped, but I can still respond"),
+        ],
+        policy=make_policy(
+            tool_names=("open_logs", "get_logs"),
+            max_tool_calls=1,
+        ),
+        bridge=bridge,
+        execution=execution,
+    )
+
+    events = await harness.run()
+
+    # Only the kept call ran; the capped one was never executed.
+    assert bridge.actions == [OpenLogs(pod="api-0", namespace="prod", container=None)]
+    assert execution.names == []
+    # Two provider calls happened — the discard prevented early termination.
+    assert len(harness.provider.calls) == 2
+    assert isinstance(events[-1], TurnComplete)
+    assert harness.conversation.messages[-1] == {
+        "role": "assistant",
+        "content": "one call was capped, but I can still respond",
+    }
+    deltas = [event for event in events if isinstance(event, TextDelta)]
+    assert DIRECT_OPEN_ACKNOWLEDGEMENT not in [delta.text for delta in deltas]
+
+
 async def test_every_request_re_sanitizes_the_results_it_carries() -> None:
     """History is re-checked on the way out, not trusted because it is stored."""
     execution = RecordingExecution({"get_logs": SECRET_LOG})
