@@ -12,12 +12,21 @@ from typing import Any
 
 import pytest
 
+from korvid.evals.harness import PromptGrind
 from korvid.evals.operation import bundled_operations_dir, load_operation_journeys
 from korvid.evals.operation_grader import OperationGrade, StateAssertionResult
 
 from . import operation_campaign
 from .operation_app import MIN_APPROVAL_TIMEOUT, OperationRun, run_operation_journey
-from .operation_campaign import _korvid_revision, _record, _seeds, approval_timeout_for, main
+from .operation_campaign import (
+    _korvid_revision,
+    _parse_args,
+    _prompt_grind,
+    _record,
+    _seeds,
+    approval_timeout_for,
+    main,
+)
 
 _JOURNEYS = {journey.id: journey for journey in load_operation_journeys(bundled_operations_dir())}
 
@@ -67,6 +76,7 @@ def test_record_omits_observed_state_from_assertion_artifacts(
         journal=(),
         audit=(),
         wall_time_s=0.1,
+        prompt={"pack": "small", "overlays": [], "source": "default", "sha256": "deadbeef"},
     )
 
     record = _record(
@@ -81,6 +91,7 @@ def test_record_omits_observed_state_from_assertion_artifacts(
     assertion = record[field][0]
     assert "observed" not in assertion
     assert sentinel not in json.dumps(record)
+    assert record["prompt"] == run.prompt
 
 
 def test_a_scripted_campaign_writes_a_provenance_stamped_artifact(tmp_path: Path) -> None:
@@ -773,3 +784,73 @@ def test_the_campaign_runs_the_replacement_journey_it_could_not_run_before(
     assert [entry for entry in journal if entry["event"] == "target_replaced"] != []
     assert [entry for entry in journal if entry["event"] == "uid_conflict"] != []
     assert [entry for entry in journal if entry["event"] == "mutation_started"] == []
+
+
+# --- prompt grinding flags --------------------------------------------------
+
+
+def test_operation_prompt_grind_flags_default_to_unset() -> None:
+    args = _parse_args([])
+    assert args.tier_pack_file is None
+    assert args.prompt_overlay_file is None
+
+
+def test_operation_prompt_grind_flags_accept_paths() -> None:
+    args = _parse_args(["--tier-pack-file", "a.md", "--prompt-overlay-file", "b.md"])
+    assert args.tier_pack_file == Path("a.md")
+    assert args.prompt_overlay_file == Path("b.md")
+
+
+def test_operation_prompt_grind_reads_both_layers(tmp_path: Path) -> None:
+    pack = tmp_path / "pack.md"
+    pack.write_text("Answer in one sentence.", encoding="utf-8")
+    overlay = tmp_path / "overlay.md"
+    overlay.write_text("Always name the namespace.", encoding="utf-8")
+    grind = _prompt_grind(
+        _parse_args(["--tier-pack-file", str(pack), "--prompt-overlay-file", str(overlay)])
+    )
+    assert grind == PromptGrind(
+        tier_pack="Answer in one sentence.", overlay="Always name the namespace."
+    )
+
+
+def test_operation_prompt_grind_file_with_invalid_utf8_exits_cleanly(tmp_path: Path) -> None:
+    """A non-UTF-8 file must produce the CLI's actionable error, not a
+    traceback: `UnicodeDecodeError` is not an `OSError`."""
+    bad = tmp_path / "prompt.md"
+    bad.write_bytes(b"\xff\xfe not utf-8")
+    args = _parse_args(["--tier-pack-file", str(bad)])
+    with pytest.raises(SystemExit, match="--tier-pack-file"):
+        _prompt_grind(args)
+
+
+def test_a_scripted_campaign_grinds_the_prompt_and_publishes_the_override(
+    tmp_path: Path,
+) -> None:
+    """`--tier-pack-file` on the operation campaign travels exactly like it
+    does on the scenario CLI: `meta.prompts.source` flips to "override",
+    and every run record carries the same `prompt` identity."""
+    pack = tmp_path / "pack.md"
+    pack.write_text("Answer in one short sentence.", encoding="utf-8")
+    payload_path = tmp_path / "operations.json"
+    code = main(
+        [
+            "--only",
+            "scale-deployment-up",
+            "--scripted",
+            "--reps",
+            "1",
+            "--json",
+            str(payload_path),
+            "--artifacts",
+            str(tmp_path / "artifacts"),
+            "--tier-pack-file",
+            str(pack),
+        ]
+    )
+    assert code == 0
+    payload = json.loads(payload_path.read_text())
+    meta_prompts = payload["meta"]["prompts"]
+    assert meta_prompts["source"] == "override"
+    run = payload["runs"][0]
+    assert run["prompt"] == meta_prompts
