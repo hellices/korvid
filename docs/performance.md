@@ -147,14 +147,20 @@ differenced within each round.
 Every run kept `dropped updates: 0` and a matching final digest. The two
 changes do **not** compose independently: run round-robin as a 2×2, the render
 and update paths together remove about 2 s more than they do separately, in 9
-rounds out of 9, because the cheaper render pass runs roughly three times as
-often and gives the update-path memo three times as many chances to pay. The
-committed profile understates all of it — its synthetic Pods carry no
-`created`, so the AGE path is skipped entirely — which is why the same change
-is worth 7.4% there and 12.1% once real timestamps are present. Absolute times
-drift between sessions on a shared machine, so only arms measured within one
-session are comparable; the full matrix, the per-round values and the
-allocation accounting live with the run artifacts.
+rounds out of 9. The render-path change roughly triples how often the
+table-update pass runs, giving the update-path memo roughly three times as
+many chances to pay — that explains the *direction* of the interaction but
+only a minority of its size: tripling the update path's own 0.16 s isolated
+saving predicts about 0.48 s, well short of the measured 1.89 s gain, and
+nothing measured here separates the remainder, so it stays unexplained rather
+than narrated. The two arms do not perform equal work either: the
+fully-optimised arm completes roughly 3.5× the table-update passes of the
+unoptimised one, so a percentage of CPU time understates the total work
+completed. The committed profile understates all of it — its synthetic Pods
+carry no `created`, so the AGE path is skipped entirely — which is why the
+same change is worth 7.4% there and 12.1% once real timestamps are present.
+Absolute times drift between sessions on a shared machine, so only arms
+measured within one session are comparable.
 
 ## Known limits
 
@@ -185,6 +191,8 @@ allocation accounting live with the run artifacts.
 Each run emits a summary, a metrics JSON, a `cProfile` dump, a `tracemalloc`
 snapshot, and the seed manifest that reproduces the exact workload. Those stay
 out of the product source history:
-[issue #186](https://github.com/hellices/korvid/issues/186) carries the run
-summaries, the full before/after matrices, and links to the artifacts
-themselves.
+[issue #186](https://github.com/hellices/korvid/issues/186) carries the
+`i186` render-path run's summary and links its artifact commit. It does not
+carry the update-path 2×2 interaction's per-round values or allocation
+accounting — that detail was cut from this page for length, not relocated,
+and no other destination holds it.

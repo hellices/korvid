@@ -504,14 +504,19 @@ _PRUNED_GUIDE_DESTINATIONS = {
 
 @pytest.mark.parametrize("page", sorted(_PRUNED_GUIDE_DESTINATIONS))
 def test_pruned_guides_link_the_home_of_the_detail_they_dropped(page: str) -> None:
-    """A pruned page has to name where its removed detail now lives.
+    """A pruned page has to name where its removed detail genuinely lives.
 
     `performance.md` no longer narrates the optimisation campaign, so the
-    benchmark design, the committed workload profile and the issue holding
-    the run artifacts have to be reachable from it; `threat-model.md` no
-    longer inventories the redactor, so each boundary it summarises keeps
-    its own page's link; and `overview.md` is a map, so every focused
-    guide it summarises stays one click away.
+    benchmark design and the committed workload profile — both real,
+    reachable homes for the reproduction methodology — have to stay linked
+    from it, along with the issue that summarises the `i186` render-path
+    run (not the update-path 2x2 interaction, which has no such home and
+    must not claim one; see
+    `test_performance_page_does_not_invent_a_home_for_deleted_detail` in
+    `test_docs_readability.py`). `threat-model.md` no longer inventories
+    the redactor, so each boundary it summarises keeps its own page's link;
+    and `overview.md` is a map, so every focused guide it summarises stays
+    one click away.
     """
     source = (DOCS / page).read_text(encoding="utf-8")
     for destination in _PRUNED_GUIDE_DESTINATIONS[page]:
@@ -524,8 +529,13 @@ def test_the_raw_artifact_pointer_is_a_link_not_an_issue_number() -> None:
 
     The performance page publishes summaries and keeps the metrics JSON,
     profile dumps and seed manifests out of the product history, so the
-    issue that carries them is the whole raw-artifact trail. Naming it
-    without linking it leaves that trail unreachable from the site.
+    issue that links their artifact commit is the reachable end of that
+    trail. Naming it without linking it leaves that trail unreachable from
+    the site. This checks only that the link survives pruning — it does
+    not assert what the issue contains; that the issue holds no more than
+    the `i186` render-path summary is pinned by
+    `test_performance_page_does_not_invent_a_home_for_deleted_detail` in
+    `test_docs_readability.py`.
     """
     artifacts = (DOCS / "performance.md").read_text(encoding="utf-8").split("## Raw artifacts", 1)
     assert len(artifacts) == 2, "performance.md must keep a Raw artifacts section"

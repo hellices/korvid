@@ -1274,6 +1274,65 @@ def test_performance_live_event_to_render_is_diagnostic_not_a_budget_verdict() -
         assert kept in flat, f"the optimisation discussion must keep {kept!r}"
 
 
+def test_performance_update_path_interaction_does_not_overclaim_causation() -> None:
+    """Review finding: the render-frequency story explains a minority of the size.
+
+    An earlier revision said the 2x2 interaction happened "because the cheaper
+    render pass runs roughly three times as often and gives the update-path
+    memo three times as many chances to pay" — stated as the whole
+    explanation. Tripling the update path's own 0.16 s isolated saving
+    predicts about 0.48 s, not the measured 1.89 s: the render-frequency
+    story explains the *direction* but only a minority of the *size*, the
+    remainder is unmeasured and must stay unexplained rather than narrated,
+    and the two arms do not perform equal work (the optimised arm completes
+    far more table-update passes for less CPU, so a percentage of CPU time
+    understates the work actually completed).
+    """
+    section = _section("performance.md", "Update-path CPU and memory")
+    flat = " ".join(section.split())
+    lowered = flat.lower()
+
+    assert "0.48" in flat, "the predicted size of the render-frequency effect must be named"
+    assert "1.89" in flat, (
+        "the measured interaction size the prediction falls short of must be named"
+    )
+    assert re.search(r"(minority|only part of|not (the|its) (whole|full) size)", lowered), (
+        "the render-frequency explanation must be scoped to less than the full effect"
+    )
+    assert re.search(r"unexplained|not (yet )?explained", lowered), (
+        "the unmeasured remainder must be named as unexplained, not narrated away"
+    )
+    assert re.search(r"(not|n't|do not|does not) .{0,40}equal work", lowered), (
+        "the two arms doing unequal work must be stated, not silently assumed"
+    )
+    assert not re.search(r"because the cheaper render pass.{0,80}chances to pay", lowered), (
+        "the old unqualified causal claim must be replaced, not merely supplemented"
+    )
+
+
+def test_performance_page_does_not_invent_a_home_for_deleted_detail() -> None:
+    """Review finding: issue #186 does not hold the deleted matrices.
+
+    An earlier revision claimed the render/update-path 2x2 matrix, the
+    per-round values and the allocation accounting "live with the run
+    artifacts", and that issue #186 carries "the full before/after
+    matrices". Neither is true: issue #186 summarizes the `i186` render-path
+    run only, and the update-path 2x2 interaction (its per-round values and
+    allocation accounting) was never posted anywhere. Dropping that detail
+    for length is fine; inventing a destination for it is not.
+    """
+    performance = _source("performance.md")
+    lowered = performance.lower()
+
+    assert "full before/after matri" not in lowered, (
+        "issue #186 does not hold a full before/after matrix; do not claim it does"
+    )
+    assert "live with the run artifacts" not in lowered, (
+        "the per-round values and allocation accounting have no artifact home; "
+        "do not claim they were relocated"
+    )
+
+
 def test_mcp_separates_document_redaction_from_credential_pattern_masking() -> None:
     """Round-4 review, finding 2: two different passes, two different tools.
 
