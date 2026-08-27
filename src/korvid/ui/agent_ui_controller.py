@@ -67,6 +67,12 @@ from korvid.k8s.managed import manager_of
 from korvid.k8s.models import PodSummary, manifest_uid
 from korvid.k8s.relations import drill_child, owned_by
 from korvid.k8s.writes import WriteOps, restart_stamp
+from korvid.tools.approval import (
+    TUI_KEYSTROKE_SOURCE,
+    ApprovalDecision,
+    ApprovalOutcome,
+    require_tui_keystroke_source,
+)
 from korvid.tools.executor import UIBridge, incarnation_of
 from korvid.tools.follow import FOLLOWABLE_TOOLS, mirror_read
 from korvid.ui.bridge_dispatch import BridgeDispatch
@@ -444,6 +450,32 @@ class AgentToolUIBridge(UIBridge):
         return await self._dispatch.run(
             self._agent.cancel_write_proposal(proposal_id, session_id=session_id)
         )
+
+
+def _decision_from_confirm_screen(confirmed: bool | None) -> ApprovalDecision:
+    """Every `ConfirmScreen` resolution - approve, decline, or Esc dismiss -
+    is itself gated by `FreshKeysInput`'s post-dialog freshness check (a key
+    buffered before the dialog existed can never resolve it), so all three
+    outcomes are genuinely `tui_keystroke`-sourced."""
+    if confirmed is True:
+        return ApprovalDecision.approved(TUI_KEYSTROKE_SOURCE)
+    if confirmed is False:
+        return ApprovalDecision.declined(TUI_KEYSTROKE_SOURCE)
+    return ApprovalDecision.dismissed(TUI_KEYSTROKE_SOURCE)
+
+
+def _collapse_decision(decision: ApprovalDecision) -> Literal["approved", "declined", "expired"]:
+    """Fail-closed gate (only a `tui_keystroke`-sourced decision may ever
+    carry an `APPROVE` outcome forward - issue TBD), then fold to the
+    legacy three-value contract external callers already depend on: dismiss
+    reads the same as decline, exactly as it did before this decision type
+    existed."""
+    decision = require_tui_keystroke_source(decision)
+    if decision.outcome is ApprovalOutcome.APPROVE:
+        return "approved"
+    if decision.outcome is ApprovalOutcome.EXPIRE:
+        return "expired"
+    return "declined"
 
 
 class AgentUiController:
@@ -2047,12 +2079,12 @@ class AgentUiController:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self._approval_timeout
         if not await self._wait_until_surfaceable(deadline):
-            return "expired"
-        fut: asyncio.Future[bool] = loop.create_future()
+            return _collapse_decision(ApprovalDecision.expired(decision_source="timeout"))
+        fut: asyncio.Future[bool | None] = loop.create_future()
 
         def _done(confirmed: bool | None) -> None:
             if not fut.done():
-                fut.set_result(bool(confirmed))
+                fut.set_result(confirmed)
 
         screen = self._writes.confirm_screen(
             title,
@@ -2072,7 +2104,7 @@ class AgentUiController:
             if remaining <= 0:
                 raise TimeoutError
             confirmed = await asyncio.wait_for(fut, timeout=remaining)
-            return "approved" if confirmed else "declined"
+            return _collapse_decision(_decision_from_confirm_screen(confirmed))
         except asyncio.CancelledError:
             # Turn interrupted (issue #170): never leave an orphaned dialog
             # whose 'y' would resolve a dead future. The write cannot run.
@@ -2090,7 +2122,7 @@ class AgentUiController:
                     "Agent write request expired - dismiss the pending dialog with Esc",
                     severity="warning",
                 )
-            return "expired"
+            return _collapse_decision(ApprovalDecision.expired(decision_source="timeout"))
 
     # ------------------------------------------------------------------
     # External write proposals — delegated, never implemented here

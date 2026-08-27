@@ -63,6 +63,22 @@ from korvid.ui.write_gate import ReservedWrite, WriteGate
 
 logger = logging.getLogger(__name__)
 
+#: `gvr_label`/`write_locus`/`perm_target`/`run_approved_write`/`WRITE_VERBS`
+#: now live in `korvid.tools.write_coordinator` (issue TBD) and are
+#: re-exported here so every existing `from korvid.ui.write_coordinator
+#: import ...` site keeps working unchanged.
+__all__ = [
+    "WRITE_VERBS",
+    "TimelineWrites",
+    "WriteCoordinator",
+    "WriteOrigin",
+    "canonical_meta_kind",
+    "gvr_label",
+    "perm_target",
+    "run_approved_write",
+    "write_locus",
+]
+
 _ResultT = TypeVar("_ResultT")
 
 #: Ceiling for the SubjectAccessReview pre-check: it is advisory, so a
