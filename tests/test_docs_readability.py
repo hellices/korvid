@@ -1305,7 +1305,7 @@ def test_performance_update_path_interaction_does_not_overclaim_causation() -> N
     assert re.search(r"(not|n't|do not|does not) .{0,40}equal work", lowered), (
         "the two arms doing unequal work must be stated, not silently assumed"
     )
-    assert not re.search(r"because the cheaper render pass.{0,80}chances to pay", lowered), (
+    assert not re.search(r"because the cheaper render pass.*?chances to pay", lowered), (
         "the old unqualified causal claim must be replaced, not merely supplemented"
     )
 
