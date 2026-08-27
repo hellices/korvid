@@ -128,8 +128,10 @@ def test_agent_page_is_a_product_guide_not_an_internal_manual() -> None:
     procedures. A reader who opens the site wants the product: what the
     agent sees, what it may do, and where the guarantees stop. Every
     procedure keeps an authoritative home — `evals/methodology.md`,
-    `airgap.md`, `provider-plugins.md` — and the guide links to it instead
-    of restating it.
+    `evals/scenarios.md`, `airgap.md`, `provider-plugins.md` — and the guide
+    links to it instead of restating it. `evals/scenarios.md` has no other
+    inbound link in the site, so dropping this assertion would silently
+    orphan that page again.
     """
     source = _source("agent.md")
     assert len(source.split()) < 2_000
@@ -149,6 +151,7 @@ def test_agent_page_is_a_product_guide_not_an_internal_manual() -> None:
     assert "provider-plugins.md" in source
     assert "airgap.md" in source
     assert "evals/methodology.md" in source
+    assert "evals/scenarios.md" in source
 
 
 def test_task3_review_safety_caveats_are_preserved() -> None:
