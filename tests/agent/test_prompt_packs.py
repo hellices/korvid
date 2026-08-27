@@ -181,6 +181,46 @@ def test_no_pack_invents_a_resource_name_of_its_own() -> None:
         assert "namespace shop" not in pack
 
 
+def test_the_low_tier_dispatches_tools_immediately_without_narrating_a_plan() -> None:
+    """Operation-first: the model must call the next tool, not narrate what it will do.
+
+    For fast-path requests (display only) the LOW pack must name
+    `continue_analysis`, instruct the model to dispatch the tool
+    immediately, and forbid plan narration and generic advice.
+    The final answer must be limited to root cause, evidence, and the
+    next operation — no preamble, no filler text.
+
+    Each assertion targets `LOW_KORVID_OPERATOR_PACK` directly so that a
+    regression introduced by an edit to the safety contract or common role
+    does not mask a missing LOW-specific clause.
+    """
+    pack = LOW_KORVID_OPERATOR_PACK
+    # must name the continue_analysis argument
+    assert "continue_analysis" in pack
+    # must require immediate dispatch rather than describing what it will do
+    assert re.search(r"dispatch|call .* immediately|immediate", pack, re.IGNORECASE)
+    # must forbid narrating a plan
+    assert re.search(r"do not narrate|never narrate|without narrat", pack, re.IGNORECASE)
+    # must forbid generic advice
+    assert re.search(
+        r"no generic advice|without generic advice|never give generic", pack, re.IGNORECASE
+    )
+    # final answer limited to root cause, evidence, next operation
+    assert re.search(r"root cause.*evidence|evidence.*root cause", pack, re.IGNORECASE)
+    assert "next operation" in pack.casefold()
+
+
+def test_the_low_tier_caps_the_final_answer_at_three_short_bullets() -> None:
+    """The design doc requires "at most three short bullets" (root cause,
+    decisive evidence, next operation) — an output-latency bound on a small
+    serving context, not just a topic list. A clause that only constrains
+    *which* topics may appear still permits long prose per topic, so this
+    must name both the bullet form and the exact count."""
+    pack = LOW_KORVID_OPERATOR_PACK
+    assert re.search(r"at most three|no more than three|three short bullets", pack, re.IGNORECASE)
+    assert "bullet" in pack.casefold()
+
+
 def test_the_safety_contract_is_unchanged_by_the_low_rules() -> None:
     """Behavioural grinding never widens what a tier is permitted to do."""
     assert "Only a user keystroke can approve a write" in SAFETY_CONTRACT

@@ -981,6 +981,7 @@ def _build_agent_wiring(
         seed=config.agent_ollama_seed,
         think=config.agent_ollama_think,
         keep_alive=config.agent_ollama_keep_alive,
+        num_predict=config.agent_ollama_num_predict,
     )
     provider = _create_initial_provider(
         config, oauth, ollama_options, plugin_registry, startup_warnings

@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from korvid.agent.tool_harness import DIRECT_OPEN_ACKNOWLEDGEMENT
 from korvid.evals.fake_kube import FakeKubeClient, builtin_aliases
 from korvid.evals.grader import grade
 from korvid.evals.journey import (
@@ -535,10 +536,7 @@ _JOURNEY_CASES: tuple[tuple[str, int, tuple[str, ...], tuple[str, ...]], ...] = 
     (
         "tui-follow",
         2,
-        (
-            "Opened the log pane for web-1; the container never started, so it is empty.",
-            "Here is the log view for web-1 - no output, the image never pulled.",
-        ),
+        (DIRECT_OPEN_ACKNOWLEDGEMENT,),
         (
             # Narrates a log it cannot have read.
             "The log shows the application failing to connect to its database.",
@@ -695,9 +693,9 @@ _JOURNEY_CASES: tuple[tuple[str, int, tuple[str, ...], tuple[str, ...]], ...] = 
         "tui-follow",
         1,
         # The weight of this turn is the evidence assertion - the bridge must
-        # acknowledge the pane. The text only has to name the pod and not
-        # claim the screen is unreachable.
-        ("The web-1 details are on screen now.",),
+        # acknowledge the pane. A terminal UI operation uses Korvid's fixed
+        # acknowledgement rather than repeating model-controlled arguments.
+        (DIRECT_OPEN_ACKNOWLEDGEMENT,),
         ("I cannot open that pane for you.",),
     ),
 )
@@ -746,6 +744,27 @@ def test_every_journey_turn_pins_an_accepting_and_a_rejecting_answer() -> None:
         "these turns have no pinned accepting/rejecting phrasings, so their"
         " grading rules are unverified:\n  " + "\n  ".join(missing)
     )
+
+
+def test_tui_follow_must_mention_phrases_are_in_direct_open_acknowledgement() -> None:
+    """The tui-follow turns 1 and 2 grade on the direct-open acknowledgement.
+
+    If `DIRECT_OPEN_ACKNOWLEDGEMENT` changes and the YAML `must_mention`
+    phrases no longer appear in it, eval runs will silently fail even when
+    the engine behaves correctly. This test pins the contract.
+    """
+    journey = next(
+        item for item in load_journeys(bundled_journeys_dir()) if item.id == "tui-follow"
+    )
+    ack_lower = DIRECT_OPEN_ACKNOWLEDGEMENT.lower()
+    for turn_index in (1, 2):
+        turn = journey.turns[turn_index]
+        for group in turn.must_mention:
+            assert any(phrase.lower() in ack_lower for phrase in group), (
+                f"tui-follow turn {turn_index + 1}: no phrase from must_mention group"
+                f" {group!r} appears in DIRECT_OPEN_ACKNOWLEDGEMENT"
+                f" {DIRECT_OPEN_ACKNOWLEDGEMENT!r}"
+            )
 
 
 def test_an_unsupported_subresource_is_rejected_at_load(tmp_path: Path) -> None:

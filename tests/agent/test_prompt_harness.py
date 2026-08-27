@@ -1,12 +1,11 @@
-"""Tests for the deterministic agent prompt harness (issue #316 task 6).
+"""Tests for the deterministic agent prompt harness (prompt harness design).
 
-The harness binds a `ResolvedAgentPolicy` (task 3) and an
-`InteractionContext`/`ClusterFacts` snapshot (task 1) into one
+The harness binds a `ResolvedAgentPolicy` and an
+`InteractionContext`/`ClusterFacts` snapshot into one
 `ComposedPrompt`, in the exact layer order the design doc pins (§7):
 immutable safety contract, common role, tier pack, provider overlay,
 exact-model overlay, additive user rules, armed capability clauses, then
-bounded dynamic context. Nothing here exercises `AgentSession` (task 11
-consumes this harness) or the old v1 runtime/prompts modules.
+bounded dynamic context. Nothing here exercises `AgentSession` (the session layer consumes this harness) or the old v1 runtime/prompts modules.
 """
 
 from __future__ import annotations
@@ -545,7 +544,7 @@ def test_a_handoff_from_an_unnamed_context_still_names_both_sides() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Eager static validation (task 11 refuses an unusable policy before a swap)
+# Eager static validation (the session layer refuses an unusable policy before a swap)
 # ---------------------------------------------------------------------------
 
 
@@ -721,7 +720,7 @@ def test_the_fully_armed_low_tier_static_prompt_matches_the_migration_note_figur
     `len(prompt.system_message)` is exactly the static prompt's length.
 
     If this number drifts (a pack, the capability clauses, or a low tool
-    description changes), the release note's 4,283 / 6,000 / 1,717
+    description changes), the release note's 4,871 / 6,000 / 1,129
     figures have to move with it.
     """
     resolved = ModelRouter(MODEL_CATALOG).resolve(
@@ -741,8 +740,8 @@ def test_the_fully_armed_low_tier_static_prompt_matches_the_migration_note_figur
 
     assert resolved.max_history_chars == 24_000
     assert budget == 6_000
-    assert static_prompt_chars == 4_283
-    assert budget - static_prompt_chars == 1_717
+    assert static_prompt_chars == 4_871
+    assert budget - static_prompt_chars == 1_129
 
 
 # ---------------------------------------------------------------------------
@@ -815,10 +814,10 @@ def test_newlines_in_context_fields_stay_inside_one_json_string() -> None:
 def test_secret_like_values_in_context_fields_still_pass_through_outbound_masking() -> None:
     """`PromptHarness` bounds and encodes; `OutboundPolicy` is still the sole masking authority.
 
-    The composed strings are plain text (issue #316 task 6 decision), so
+    The composed strings are plain text (prompt harness design decision), so
     nothing here calls `OutboundPolicy` itself - that happens later, when
-    `AgentSession`/`RequestGateway` build the actual provider request
-    (task 11). This proves that later pass still finds and masks a
+    `AgentSession`/`RequestGateway` build the actual provider request.
+    This proves that later pass still finds and masks a
     secret-shaped value the harness merely bounded and JSON-encoded.
     """
     harness = PromptHarness()

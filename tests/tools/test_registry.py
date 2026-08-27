@@ -8,6 +8,7 @@ pre-registry lists exactly.
 
 from __future__ import annotations
 
+import copy
 from typing import Any
 
 import pytest
@@ -152,12 +153,58 @@ def test_low_agent_surface_offers_two_ui_tools() -> None:
 def test_mcp_surface_is_read_plus_ui_drive() -> None:
     from korvid.tools.executor import READ_TOOLS, UI_TOOLS
 
-    assert mcp_tool_schemas() == READ_TOOLS + UI_TOOLS
+    mcp_schemas = mcp_tool_schemas()
+    assert _names(mcp_schemas) == _names(READ_TOOLS) + _names(UI_TOOLS)
+    # For tools that declare `mcp_omit_properties` (e.g. `continue_analysis`
+    # on open_logs/open_describe), project those properties out of a deep copy
+    # of the agent schema and assert the remainder equals the MCP schema.
+    # This prevents silent schema drift on every UI tool, including the two
+    # that previously had to be skipped.
+    for agent_tool, mcp_tool in zip(UI_TOOLS, mcp_schemas[len(READ_TOOLS) :], strict=True):
+        name = agent_tool["function"]["name"]
+        td = next((d for d in TOOL_DEFS if d.name == name), None)
+        omit = td.mcp_omit_properties if td is not None else frozenset()
+        if omit:
+            projected = copy.deepcopy(agent_tool)
+            props = projected["function"]["parameters"]["properties"]
+            for key in omit:
+                props.pop(key, None)
+            required = projected["function"]["parameters"].get("required", [])
+            projected["function"]["parameters"]["required"] = [r for r in required if r not in omit]
+            assert projected == mcp_tool, (
+                f"{name}: agent schema minus {sorted(omit)} should equal MCP schema"
+            )
+        else:
+            assert agent_tool == mcp_tool
 
 
 def test_unknown_surface_rejected() -> None:
     with pytest.raises(ValueError, match="unknown surface"):
         agent_tool_schemas("mcp", readonly=False, resize_supported=False)
+
+
+# --- agent-only schema properties (issue #320: MCP surface projection) --
+
+
+@pytest.mark.parametrize("tool_name", ["open_logs", "open_describe"])
+def test_continue_analysis_is_agent_only_on_the_mcp_surface(tool_name: str) -> None:
+    """`continue_analysis` only affects the native engine's terminal fast
+    path; MCP has no such path, so the MCP schema must not advertise a
+    no-op argument."""
+    schemas = {s["function"]["name"]: s for s in mcp_tool_schemas()}
+    properties = schemas[tool_name]["function"]["parameters"]["properties"]
+    assert "continue_analysis" not in properties
+
+
+@pytest.mark.parametrize("surface", ["high_agent", "low_agent"])
+@pytest.mark.parametrize("tool_name", ["open_logs", "open_describe"])
+def test_continue_analysis_is_preserved_on_agent_surfaces(tool_name: str, surface: str) -> None:
+    schemas = {
+        s["function"]["name"]: s
+        for s in agent_tool_schemas(surface, readonly=True, resize_supported=False)
+    }
+    properties = schemas[tool_name]["function"]["parameters"]["properties"]
+    assert "continue_analysis" in properties
 
 
 # --- validation of malformed definitions --------------------------------

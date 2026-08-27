@@ -1027,6 +1027,84 @@ def test_ollama_negative_seed_falls_back(tmp_path: Path) -> None:
     assert cfg.agent_ollama_seed is None
 
 
+def test_ollama_num_predict_default_is_none(tmp_path: Path) -> None:
+    p = tmp_path / "config.yaml"
+    p.write_text("agent:\n  provider: ollama\n")
+    cfg = load_config(p)
+    assert cfg.agent_ollama_num_predict is None
+
+
+def test_ollama_num_predict_parsed(tmp_path: Path) -> None:
+    p = tmp_path / "config.yaml"
+    p.write_text("agent:\n  provider: ollama\n  ollama:\n    num_predict: 192\n")
+    cfg = load_config(p)
+    assert cfg.agent_ollama_num_predict == 192
+
+
+def test_ollama_num_predict_invalid_falls_back(tmp_path: Path) -> None:
+    p = tmp_path / "config.yaml"
+    p.write_text("agent:\n  provider: ollama\n  ollama:\n    num_predict: -10\n")
+    cfg = load_config(p)
+    assert cfg.agent_ollama_num_predict is None
+    assert any("num_predict" in w for w in cfg.warnings), cfg.warnings
+
+
+def test_ollama_num_predict_zero_falls_back_with_warning(tmp_path: Path) -> None:
+    p = tmp_path / "config.yaml"
+    p.write_text("agent:\n  provider: ollama\n  ollama:\n    num_predict: 0\n")
+    cfg = load_config(p)
+    assert cfg.agent_ollama_num_predict is None
+    assert any("num_predict" in w for w in cfg.warnings), cfg.warnings
+
+
+def test_ollama_num_predict_bool_falls_back_with_warning(tmp_path: Path) -> None:
+    """`true`/`false` are Python `bool`, a stealth `int` subclass — a YAML
+    author who typos a boolean here must not silently get `num_predict=1`."""
+    p = tmp_path / "config.yaml"
+    p.write_text("agent:\n  provider: ollama\n  ollama:\n    num_predict: true\n")
+    cfg = load_config(p)
+    assert cfg.agent_ollama_num_predict is None
+    assert any("num_predict" in w for w in cfg.warnings), cfg.warnings
+
+
+def test_ollama_num_predict_float_falls_back_with_warning(tmp_path: Path) -> None:
+    """Unlike `num_ctx`'s permissive parser, `num_predict` must reject a
+    fractional value outright instead of silently truncating it — even
+    when the fraction is small enough that truncation would look sane."""
+    p = tmp_path / "config.yaml"
+    p.write_text("agent:\n  provider: ollama\n  ollama:\n    num_predict: 1.9\n")
+    cfg = load_config(p)
+    assert cfg.agent_ollama_num_predict is None
+    assert any("num_predict" in w for w in cfg.warnings), cfg.warnings
+
+
+def test_ollama_num_predict_numeric_string_falls_back_with_warning(tmp_path: Path) -> None:
+    """`num_ctx` accepts a numeric string for legacy compatibility;
+    `num_predict` is a new, stricter contract and must not."""
+    p = tmp_path / "config.yaml"
+    p.write_text('agent:\n  provider: ollama\n  ollama:\n    num_predict: "192"\n')
+    cfg = load_config(p)
+    assert cfg.agent_ollama_num_predict is None
+    assert any("num_predict" in w for w in cfg.warnings), cfg.warnings
+
+
+def test_ollama_num_predict_valid_value_has_no_warning(tmp_path: Path) -> None:
+    p = tmp_path / "config.yaml"
+    p.write_text("agent:\n  provider: ollama\n  ollama:\n    num_predict: 192\n")
+    cfg = load_config(p)
+    assert cfg.agent_ollama_num_predict == 192
+    assert not any("num_predict" in w for w in cfg.warnings), cfg.warnings
+
+
+def test_ollama_num_ctx_still_accepts_a_numeric_string(tmp_path: Path) -> None:
+    """`num_ctx` keeps its existing permissive (`_parse_positive_int`)
+    behavior unchanged — only `num_predict` gets the stricter parser."""
+    p = tmp_path / "config.yaml"
+    p.write_text('agent:\n  provider: ollama\n  ollama:\n    num_ctx: "8192"\n')
+    cfg = load_config(p)
+    assert cfg.agent_ollama_num_ctx == 8192
+
+
 # ---------------------------------------------------------------------------
 # namespace scope (issue #108): legacy `namespaces:` is a migration warning;
 # `favorite_namespaces:` is a UI-only shortcut list bound to keys 1-9.

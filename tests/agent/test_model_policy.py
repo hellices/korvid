@@ -1,4 +1,4 @@
-"""Tests for model capability routing and policy resolution (Task 3)."""
+"""Tests for model capability routing and policy resolution."""
 
 from __future__ import annotations
 

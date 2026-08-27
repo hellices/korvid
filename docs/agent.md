@@ -232,6 +232,7 @@ agent:
     seed: 42          # reproducible sampling (omitted when unset)
     think: false      # reasoning tokens off; enable for R1-style models
     keep_alive: 10m   # keep the model warm between turns ("10m" or seconds)
+    num_predict: 192  # cap total generated tokens (thinking/reasoning tokens count too); omit to let Ollama decide
 ```
 
 To keep using the OpenAI-compatibility shim instead, set
@@ -410,6 +411,15 @@ retransmitted on every request of every iteration.
   that points at another object before answering; name exactly one root
   cause and no fault you ruled out; quote the decisive reason string; and
   do not call a resource healthy while its warning events say otherwise.
+  It also carries the **operation-first** rule enforced by the LOW pack:
+  dispatch the next tool immediately without narrating the plan first
+  (call the tool — do not describe what you are about to call); limit the
+  final answer to root cause, evidence, and the next operation — no
+  generic advice, no filler text.  When the model opens a UI pane via
+  `open_logs` or `open_describe` it must pass `continue_analysis: true`
+  only when the user also asked for analysis after the display — omit it
+  (or set it `false`) for display-only requests and stop after the
+  `open_*` call.
   These are additive — no pack, overlay or house rule can widen what the
   safety contract permits.
 - **`LOW_TOOL_DESCRIPTIONS`** (in `korvid/agent/prompt_packs.py`) replaces

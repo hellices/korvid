@@ -180,6 +180,21 @@ async def test_default_options_omit_seed_and_keep_alive() -> None:
     assert payload["options"] == {"num_ctx": 16384, "temperature": 0.0}
 
 
+async def test_num_predict_appears_in_options_when_set() -> None:
+    capture: dict[str, Any] = {}
+    options = OllamaOptions(num_predict=192)
+    provider = _provider(_ndjson(_done()), capture=capture, options=options)
+    await _events(provider)
+    assert capture["json"]["options"]["num_predict"] == 192
+
+
+async def test_num_predict_absent_when_none() -> None:
+    capture: dict[str, Any] = {}
+    provider = _provider(_ndjson(_done()), capture=capture)
+    await _events(provider)
+    assert "num_predict" not in capture["json"]["options"]
+
+
 async def test_posts_to_native_chat_endpoint() -> None:
     capture: dict[str, Any] = {}
     provider = _provider(_ndjson(_done()), capture=capture)

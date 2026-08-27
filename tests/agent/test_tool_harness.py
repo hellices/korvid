@@ -39,7 +39,12 @@ from korvid.agent.model_policy import (
     ResolvedAgentPolicy,
 )
 from korvid.agent.outbound import OutboundPolicyError
-from korvid.agent.tool_harness import ToolExecution, ToolHarness, _ui_action
+from korvid.agent.tool_harness import (
+    DIRECT_OPEN_ACKNOWLEDGEMENT,
+    ToolExecution,
+    ToolHarness,
+    _ui_action,
+)
 from korvid.core.redaction import RedactionRecord
 from korvid.tools.executor import (
     RecordedExecution,
@@ -390,6 +395,209 @@ async def test_drill_down_maps_to_drill_down_action() -> None:
     harness = _harness(_policy(["drill_down"], max_tool_calls=None), bridge=bridge)
     await harness.execute("c1", "drill_down", {"name": "api"})
     assert bridge.actions == [DrillDown(name="api")]
+
+
+# --- terminal direct-open acknowledgement (issue #316, Task 2) --------------
+
+
+async def test_open_logs_without_continue_analysis_returns_the_terminal_message() -> None:
+    """The default (omitted `continue_analysis`) is the fast, terminal path."""
+    harness = _harness(_policy(["open_logs"], max_tool_calls=None))
+
+    result = await harness.execute("c1", "open_logs", {"pod": "api-1", "namespace": "default"})
+
+    assert result.terminal_message == DIRECT_OPEN_ACKNOWLEDGEMENT
+
+
+async def test_open_logs_with_continue_analysis_false_returns_the_terminal_message() -> None:
+    harness = _harness(_policy(["open_logs"], max_tool_calls=None))
+
+    result = await harness.execute(
+        "c1",
+        "open_logs",
+        {"pod": "api-1", "namespace": "default", "continue_analysis": False},
+    )
+
+    assert result.terminal_message == DIRECT_OPEN_ACKNOWLEDGEMENT
+
+
+async def test_open_logs_with_continue_analysis_true_returns_no_terminal_message() -> None:
+    harness = _harness(_policy(["open_logs"], max_tool_calls=None))
+
+    result = await harness.execute(
+        "c1",
+        "open_logs",
+        {"pod": "api-1", "namespace": "default", "continue_analysis": True},
+    )
+
+    assert result.terminal_message is None
+
+
+async def test_a_failed_open_logs_returns_no_terminal_message() -> None:
+    bridge = _RecordingBridge(ok=False, message="could not open the log pane")
+    harness = _harness(_policy(["open_logs"], max_tool_calls=None), bridge=bridge)
+
+    result = await harness.execute("c1", "open_logs", {"pod": "api-1", "namespace": "default"})
+
+    assert result.terminal_message is None
+
+
+async def test_open_describe_without_continue_analysis_returns_the_terminal_message() -> None:
+    harness = _harness(_policy(["open_describe"], max_tool_calls=None))
+
+    result = await harness.execute(
+        "c1", "open_describe", {"kind": "pods", "name": "api-1", "namespace": "default"}
+    )
+
+    assert result.terminal_message == DIRECT_OPEN_ACKNOWLEDGEMENT
+
+
+async def test_open_describe_with_continue_analysis_true_returns_no_terminal_message() -> None:
+    harness = _harness(_policy(["open_describe"], max_tool_calls=None))
+
+    result = await harness.execute(
+        "c1",
+        "open_describe",
+        {"kind": "pods", "name": "api-1", "namespace": "default", "continue_analysis": True},
+    )
+
+    assert result.terminal_message is None
+
+
+async def test_a_failed_open_describe_returns_no_terminal_message() -> None:
+    bridge = _RecordingBridge(ok=False, message="could not open describe")
+    harness = _harness(_policy(["open_describe"], max_tool_calls=None), bridge=bridge)
+
+    result = await harness.execute(
+        "c1", "open_describe", {"kind": "pods", "name": "api-1", "namespace": "default"}
+    )
+
+    assert result.terminal_message is None
+
+
+@pytest.mark.parametrize(
+    "bad_value",
+    ["true", "false", "1", "0", 1, 0],
+    ids=["str-true", "str-false", "str-1", "str-0", "int-1", "int-0"],
+)
+async def test_open_logs_with_non_bool_continue_analysis_is_rejected_before_bridge(
+    bad_value: object,
+) -> None:
+    """A string or integer `continue_analysis` must be rejected (invalid args)
+    before the UI bridge is ever called."""
+    bridge = _RecordingBridge()
+    harness = _harness(_policy(["open_logs"], max_tool_calls=None), bridge=bridge)
+
+    result = await harness.execute(
+        "c1",
+        "open_logs",
+        {"pod": "api-1", "namespace": "default", "continue_analysis": bad_value},
+    )
+
+    assert result.outcome.error is True
+    assert "continue_analysis" in result.outcome.text
+    assert bridge.actions == [], "bridge must not be called when arguments are invalid"
+
+
+async def test_open_logs_with_explicit_null_continue_analysis_is_rejected_before_bridge() -> None:
+    """An explicit JSON `null` is a *provided* value, not an absent key —
+    the schema requires a boolean when the key is present, so `null` must
+    be rejected the same as any other non-boolean, not silently treated
+    as the omitted-key default."""
+    bridge = _RecordingBridge()
+    harness = _harness(_policy(["open_logs"], max_tool_calls=None), bridge=bridge)
+
+    result = await harness.execute(
+        "c1",
+        "open_logs",
+        {"pod": "api-1", "namespace": "default", "continue_analysis": None},
+    )
+
+    assert result.outcome.error is True
+    assert "continue_analysis" in result.outcome.text
+    assert bridge.actions == [], "bridge must not be called when arguments are invalid"
+
+
+@pytest.mark.parametrize(
+    "bad_value",
+    ["true", "false", "1", "0", 1, 0],
+    ids=["str-true", "str-false", "str-1", "str-0", "int-1", "int-0"],
+)
+async def test_open_describe_with_non_bool_continue_analysis_is_rejected_before_bridge(
+    bad_value: object,
+) -> None:
+    """A string or integer `continue_analysis` must be rejected (invalid args)
+    before the UI bridge is ever called."""
+    bridge = _RecordingBridge()
+    harness = _harness(_policy(["open_describe"], max_tool_calls=None), bridge=bridge)
+
+    result = await harness.execute(
+        "c1",
+        "open_describe",
+        {
+            "kind": "pods",
+            "name": "api-1",
+            "namespace": "default",
+            "continue_analysis": bad_value,
+        },
+    )
+
+    assert result.outcome.error is True
+    assert "continue_analysis" in result.outcome.text
+    assert bridge.actions == [], "bridge must not be called when arguments are invalid"
+
+
+async def test_open_describe_with_explicit_null_continue_analysis_is_rejected_before_bridge() -> (
+    None
+):
+    """Mirrors the `open_logs` explicit-`null` case: a present-but-null
+    `continue_analysis` must be rejected, not treated as an absent key."""
+    bridge = _RecordingBridge()
+    harness = _harness(_policy(["open_describe"], max_tool_calls=None), bridge=bridge)
+
+    result = await harness.execute(
+        "c1",
+        "open_describe",
+        {"kind": "pods", "name": "api-1", "namespace": "default", "continue_analysis": None},
+    )
+
+    assert result.outcome.error is True
+    assert "continue_analysis" in result.outcome.text
+    assert bridge.actions == [], "bridge must not be called when arguments are invalid"
+
+
+async def test_the_terminal_message_never_echoes_arguments_or_bridge_text() -> None:
+    """Security boundary: the acknowledgement is a fixed constant. Neither
+    the model's own arguments nor the bridge's (screen-controlled) message
+    text may leak into it — either could carry secrets or injected content
+    across the outbound boundary."""
+    bridge = _RecordingBridge(message="UNTRUSTED-BRIDGE-MARKER-should-never-appear")
+    harness = _harness(_policy(["open_logs"], max_tool_calls=None), bridge=bridge)
+
+    result = await harness.execute(
+        "c1", "open_logs", {"pod": "ARGUMENT-MARKER-should-never-appear", "namespace": "default"}
+    )
+
+    assert result.terminal_message == DIRECT_OPEN_ACKNOWLEDGEMENT
+    assert "ARGUMENT-MARKER" not in result.terminal_message
+    assert "UNTRUSTED-BRIDGE-MARKER" not in result.terminal_message
+
+
+async def test_navigate_never_returns_a_terminal_message() -> None:
+    """Only direct-open tools are terminal; other UI-drive tools are not."""
+    harness = _harness(_policy(["navigate"], max_tool_calls=None))
+
+    result = await harness.execute("c1", "navigate", {"view": "pods"})
+
+    assert result.terminal_message is None
+
+
+async def test_drill_down_never_returns_a_terminal_message() -> None:
+    harness = _harness(_policy(["drill_down"], max_tool_calls=None))
+
+    result = await harness.execute("c1", "drill_down", {"name": "api"})
+
+    assert result.terminal_message is None
 
 
 def _minimal_arguments(schema: dict[str, Any]) -> dict[str, Any]:

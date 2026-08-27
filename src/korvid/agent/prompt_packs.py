@@ -105,7 +105,16 @@ LOW_KORVID_OPERATOR_PACK: Final[str] = (
     "not healthy while warning events show probe failures: call a resource "
     "healthy only when its status, its conditions, and its recent warning "
     "events all agree, and name the checks that passed. Restarts with no "
-    "recent warning are history, not a live fault."
+    "recent warning are history, not a live fault. "
+    "When the next step is clear, dispatch the tool immediately without "
+    "narrating the plan first: do not narrate what you are about to do — "
+    "call the tool and let the result speak. When opening a UI pane, pass "
+    "continue_analysis: true only if the user also asked for analysis after "
+    "the display; omit it or set it false for display-only requests, and stop "
+    "after the open_* call. Limit every final answer to at most three short "
+    "bullets — root cause, decisive evidence, and the next operation the user "
+    "or agent should take — no generic advice, no restating what you already "
+    "showed, no filler text."
 )
 
 #: Layer 3, high tier (design doc §6): broader diagnostic/TUI-navigation

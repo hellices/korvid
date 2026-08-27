@@ -1,4 +1,4 @@
-"""Shipped model capability catalog (Task 3).
+"""Shipped model capability catalog.
 
 Version 1: exact entries only.  No substring or provider heuristics.
 
