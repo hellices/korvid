@@ -1657,19 +1657,28 @@ def test_ground_highlight_keeps_the_read_paths_truthful() -> None:
     """The contract map's one load-bearing claim survives its own deletion.
 
     The map explained, in three lanes and a truth sentence, that the
-    watch-backed table and each driver's bounded fresh reads are taken at
-    different moments. The compact page states that once, in the GROUND
-    highlight, and must never trade it for a "same evidence" shortcut.
+    watch-backed table, korvid's own fresh describe/log reads, and each
+    driver's bounded fresh reads are taken at different moments. Collapsing
+    the TUI's own describe/log reads into either the watch-backed table or
+    the agent/MCP "bounded fresh reads" phrase would silently drop one of the
+    three lanes, so each is pinned as its own fact below. The compact page
+    states all three once, in the GROUND highlight, and must never trade any
+    of them for a "same evidence" shortcut.
     """
     ground = _highlight("GROUND")
     lowered = " ".join(re.sub(r"<[^>]+>", " ", ground).lower().split())
     for fact in (
-        "bounded fresh reads",
         "watch-backed table",
+        "own fresh describe and log reads",
+        "bounded fresh reads",
         "different moments",
         "snapshots can differ",
     ):
         assert fact in lowered, f"the GROUND highlight must keep stating {fact!r}: {lowered!r}"
+    assert lowered.count("fresh") >= 2, (
+        "the TUI's own fresh describe/log reads must stay a distinct lane from the "
+        f"agent/MCP bounded fresh reads, not merged into one mention: {lowered!r}"
+    )
     for overclaim in ("same evidence", "same snapshot", "one snapshot"):
         assert overclaim not in lowered, (
             f"the drivers read at different moments, so {overclaim!r} would be false"

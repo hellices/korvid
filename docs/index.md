@@ -56,7 +56,7 @@ hide:
     </article>
     <article>
       <span>GROUND</span>
-      <p>Bounded fresh reads ground the embedded agent and every MCP client. Those reads and the watch-backed table land at different moments, so snapshots can differ.</p>
+      <p>The watch-backed table, korvid's own fresh describe and log reads, and the bounded fresh reads behind the embedded agent and every MCP client all land at different moments, so snapshots can differ.</p>
       <ul>
         <li><a href="agent/">Embedded agent</a></li>
         <li><a href="mcp/">MCP tools</a></li>

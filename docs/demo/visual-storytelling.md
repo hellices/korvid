@@ -78,8 +78,8 @@ those tools read is the synthetic fixture in `docs/demo/demo.py`
 through: the CrashLoopBackOff pod `shop/payment-worker-6c9f7d-b3xnq`, its
 synthetic Warning events, and its generated log lines. No credential, no
 network, no cluster, and no external provider takes part in the recording.
-Every surface that embeds this media — the landing Agent scene, the landing
-evidence tile, and the `docs/agent.md` storyboard — must therefore call it a
+Every surface that embeds this media — the landing Agent scene, the merged
+landing stage caption, and the `docs/agent.md` storyboard — must therefore call it a
 deterministic synthetic-cluster walkthrough, and must never present it as a
 live-provider or model-quality claim. The production behaviour those pages
 link to is documented in `docs/agent.md`.

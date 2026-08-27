@@ -3152,6 +3152,14 @@ def test_agent_capture_provenance_states_what_the_grounded_turn_proves() -> None
     assert "deterministic synthetic-cluster walkthrough" in lowered, (
         "the provenance page must give the embedding surfaces the label they use"
     )
+    assert "landing evidence tile" not in lowered, (
+        "the compact homepage merged the evidence mosaic away; the provenance "
+        "page must not still send readers looking for a tile that is gone"
+    )
+    assert "merged landing stage caption" in lowered, (
+        "the disclosure-surface list must name the shared stage caption that "
+        "now carries this duty in place of the deleted evidence tile"
+    )
 
 
 def test_landing_video_privacy_rule_bans_provider_and_spend_evidence_not_korvids_own_chrome() -> (
