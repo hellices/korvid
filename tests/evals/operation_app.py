@@ -57,8 +57,15 @@ from korvid.core.audit import AuditLog
 from korvid.core.config import KorvidConfig
 from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
 from korvid.core.watch import WatchManager
+from korvid.evals.__main__ import prompt_fingerprint
 from korvid.evals.fake_kube import builtin_aliases
-from korvid.evals.harness import EVAL_CLUSTER, build_eval_harness, resolve_eval_policy
+from korvid.evals.harness import (
+    EVAL_CLUSTER,
+    NO_GRIND,
+    PromptGrind,
+    build_eval_harness,
+    resolve_eval_policy,
+)
 from korvid.evals.operation import OperationJourney, OperationTarget, StateAssertion
 from korvid.evals.operation_grader import (
     OperationGrade,
@@ -1093,6 +1100,7 @@ class OperationRun:
     journal: tuple[dict[str, Any], ...]
     audit: tuple[dict[str, Any], ...]
     wall_time_s: float
+    prompt: dict[str, Any]
 
 
 def _read_audit(
@@ -1228,6 +1236,7 @@ async def run_operation_journey(
     model_tier: str | None = None,
     approval_timeout_seconds: float = 5.0,
     turn_timeout: float = 20.0,
+    grind: PromptGrind = NO_GRIND,
 ) -> OperationRun:
     """Run one operation journey end to end and grade it.
 
@@ -1249,6 +1258,11 @@ async def run_operation_journey(
             expired result instead of the production 120-second window.
             Must be at least `MIN_APPROVAL_TIMEOUT`.
         turn_timeout: upper bound on one turn reaching a dialog or ending.
+        grind: The eval-only prompt levers (tier pack replacement, eval
+            overlay) — identical to the read-only scenario/journey
+            harness's grind. Composed after the immutable safety contract;
+            never widens the armed-tool surface. Published in the
+            returned `OperationRun.prompt`.
 
     Returns:
         The graded run, its journal, and the audit records it produced.
@@ -1286,6 +1300,7 @@ async def run_operation_journey(
         bridge=agent_ui_proxy,
         policy=policy,
         cluster=EVAL_CLUSTER,
+        grind=grind,
     )
     session = _AnswerCapturingSession(
         engine=harness.engine,
@@ -1365,6 +1380,7 @@ async def run_operation_journey(
         tool_calls=executor.tool_calls,
         iterations=provider.completions,
     )
+    prompt = prompt_fingerprint(harness.policy, grind=grind)
     return OperationRun(
         journey_id=journey.id,
         answer=answer,
@@ -1372,4 +1388,5 @@ async def run_operation_journey(
         journal=tuple(journal.payload()),
         audit=audit,
         wall_time_s=time.monotonic() - started,
+        prompt=prompt,
     )
