@@ -2772,8 +2772,11 @@ def test_retired_landing_components_leave_no_orphan_css() -> None:
     styled them is now unreachable: it cannot be verified against a rendered
     page, it makes the next reader believe those components still ship, and
     it is exactly the kind of dead weight that gets copied into the next
-    component. No other page uses any of these classes — `docs/` is grepped
-    below so the check fails if one is ever reintroduced without its CSS.
+    component. No other page uses any of these classes — every `docs/**/*.md`
+    file and every active `docs/overrides/**/*.html` template is scanned below
+    (as class *tokens*, so a retired class reintroduced anywhere inside a
+    multi-class `class="..."` attribute is caught, not only as the attribute's
+    first token) so the check fails if one is ever reintroduced without its CSS.
     """
     css = _strip_css_comments(_css())
     retired = (
@@ -2792,13 +2795,26 @@ def test_retired_landing_components_leave_no_orphan_css() -> None:
             "rather than leave a component nobody can see"
         )
 
+    authored_paths = [
+        *sorted(DOCS.rglob("*.md")),
+        *sorted(OVERRIDES.rglob("*.html")),
+    ]
     authored = "\n".join(
         path.read_text(encoding="utf-8")
-        for path in sorted(DOCS.rglob("*.md"))
+        for path in authored_paths
         if "superpowers" not in path.parts
     )
+    # A retired class can be reintroduced anywhere inside a multi-class
+    # `class="..."` attribute (e.g. `class="foo evidence-card"`), not only as
+    # the attribute's first token, so every class attribute is tokenised on
+    # whitespace and each retired selector is checked as a whole token rather
+    # than a string prefix.
+    authored_class_tokens = {
+        token for attr in re.findall(r'class="([^"]*)"', authored) for token in attr.split()
+    }
     for selector in retired:
-        assert f'class="{selector.lstrip(".")}' not in authored, (
+        bare = selector.lstrip(".")
+        assert bare not in authored_class_tokens, (
             f"`{selector}` is authored again in docs/ but has no stylesheet; restore "
             "its rules together with the markup"
         )
