@@ -172,7 +172,7 @@ def test_no_current_page_claims_every_surface_describes_tools_identically(
     assert not _IDENTICAL_TOOL_WORDING_OVERCLAIM.search(normalized), _relative(path)
 
 
-@pytest.mark.parametrize("page", ["docs/agent.md", "docs/release-notes/unreleased.md"])
+@pytest.mark.parametrize("page", ["docs/release-notes/unreleased.md"])
 def test_the_tool_description_removal_note_names_which_arm_uses_which_wording(
     page: str,
 ) -> None:
@@ -180,12 +180,42 @@ def test_the_tool_description_removal_note_names_which_arm_uses_which_wording(
     say what actually replaced it: per-deployment overrides are gone, the
     low tier ships its own versioned wording, and the high tier plus the
     MCP server still read the registry's.
+
+    The note is release history, so it lives on the release note. The Agent
+    guide describes the product a reader operates today and links there;
+    `test_the_agent_page_links_the_migration_note_instead_of_restating_it`
+    pins that boundary.
     """
     text = _text(page)
     assert "removed" in text
     assert "low" in text.casefold()
     assert "registry" in text
     assert "MCP" in text
+
+
+def test_the_agent_page_links_the_migration_note_instead_of_restating_it() -> None:
+    """A product guide is not a migration manual.
+
+    The keys the startup error retires (read out of `core/config.py` rather
+    than spelled here, so this test cannot name a key as if it were
+    supported) were replaced a release ago. The table mapping them onto
+    today's settings is release history: `docs/release-notes/unreleased.md`
+    owns it, the startup error itself names the replacement, and the guide
+    describes what an operator configures today.
+    """
+    config = (_REPO_ROOT / "src" / "korvid" / "core" / "config.py").read_text(encoding="utf-8")
+    removed_keys = re.findall(r"\"(agent\.\w+) was removed", config)
+    assert removed_keys, "the startup migration error must still name the retired keys"
+
+    agent = _text("docs/agent.md")
+    assert "Upgrading from the profile-based agent" not in agent
+    assert [key for key in removed_keys if key in agent] == []
+    assert "model_tier" in agent, "the supported key still has to be on the page"
+
+    notes = _text("docs/release-notes/unreleased.md")
+    assert [key for key in removed_keys if key in notes] == removed_keys, (
+        "the release note is where a reader with an old config.yaml is sent"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -282,10 +312,24 @@ def test_the_eval_methodology_states_the_low_pack_constraints() -> None:
     assert "oom-killed" in methodology
 
 
-def test_the_agent_page_states_what_the_low_tier_changes_about_tool_text() -> None:
+def test_the_agent_page_sends_low_tier_wording_questions_to_the_methodology() -> None:
+    """The low tier's shipped wording is an eval contract, not product copy.
+
+    `LOW_TOOL_DESCRIPTIONS`, its 250-character bound and its exact-tool-name
+    application decide whether two campaigns are comparable — a question the
+    eval methodology owns and
+    `test_the_eval_methodology_states_the_low_pack_constraints` pins. The
+    Agent guide tells an operator which tier is routed and what changes with
+    it, then links to that page rather than shipping a second, driftable copy
+    of the constraints.
+    """
     agent = _text("docs/agent.md")
-    assert "LOW_TOOL_DESCRIPTIONS" in agent
-    assert "exact tool name" in agent
+
+    assert "evals/methodology.md" in agent
+    assert "LOW_TOOL_DESCRIPTIONS" not in agent
+    assert "prompt_packs.py" not in agent
+    # The product-visible half of the tier stays: which tier, and the budgets.
+    assert "model_tier" in agent
 
 
 def test_the_low_pack_documentation_publishes_no_score() -> None:

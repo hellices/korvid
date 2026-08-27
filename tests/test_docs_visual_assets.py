@@ -3334,6 +3334,40 @@ def test_agent_page_recording_note_names_the_real_pipeline_and_the_follow_mirror
     assert "scripted" not in lowered, "the replaced panel-only story must be gone"
 
 
+def test_agent_guide_keeps_the_capture_as_the_page_s_evidence() -> None:
+    """One capture, at the top, on a page short enough to still be a guide.
+
+    The storyboard is the Agent page's evidence, not decoration inside a
+    contributor manual: it has to lead the page, stay the only frame on it,
+    and be followed by a product guide rather than four thousand words of
+    eval, migration and prompt-pack procedure that would bury it. The
+    capture's full provenance lives on the visual-evidence page, so the
+    note here links there instead of restating the tape.
+    """
+    page = AGENT_PAGE.read_text(encoding="utf-8")
+
+    assert page.count("agent-poster.png") == 1, "the guide ships exactly one capture"
+    assert page.index('<section class="docs-storyboard"') < page.index("\n## "), (
+        "the capture must lead the guide, not sit inside a later section"
+    )
+
+    body = page.split("</section>", 1)[1]
+    assert len(body.split()) < 1_750, (
+        f"the guide around the capture is {len(body.split())} words; a product "
+        "guide links to the eval, air-gap and plugin procedures instead of "
+        "embedding them"
+    )
+
+    note = page.split("## What the recording demonstrates", 1)[1].split("\n## ", 1)[0]
+    assert "demo/visual-storytelling.md#embedded-agent" in note, (
+        "the note must send a reader to the provenance page that owns the tape"
+    )
+    assert len(note.split()) <= 220, (
+        f"the capture note is a note, not a manual: {len(note.split())}"
+    )
+    assert "vhs " not in note, "the recording commands belong to the provenance page"
+
+
 def test_mcp_guide_capture_note_stays_compact_and_truthful() -> None:
     """`docs/mcp.md` gets a capture note, not a recording manual.
 

@@ -119,6 +119,38 @@ def test_safety_and_evidence_invariants_remain_explicit() -> None:
     assert "mask" in observability
 
 
+def test_agent_page_is_a_product_guide_not_an_internal_manual() -> None:
+    """The Agent page had grown into a contributor manual.
+
+    At 4,418 words and fourteen sections it carried an eval-CLI campaign
+    guide, a profile migration table, a prompt-pack and tool-description
+    inventory, and a second copy of the offline and provider-plugin
+    procedures. A reader who opens the site wants the product: what the
+    agent sees, what it may do, and where the guarantees stop. Every
+    procedure keeps an authoritative home — `evals/methodology.md`,
+    `airgap.md`, `provider-plugins.md` — and the guide links to it instead
+    of restating it.
+    """
+    source = _source("agent.md")
+    assert len(source.split()) < 2_000
+    assert source.count("\n## ") <= 9
+    assert "agent-poster.png" in source
+    assert "DefaultAgentSession" in source
+    assert "NativeAgentEngine" in source
+    assert "fresh user keystroke" in source
+    assert "Agent eval harness" not in source
+    assert "Upgrading from the profile-based agent" not in source
+    assert "uv run python -m korvid.evals" not in source
+
+    # The controls a reader drives from this page stay on it ...
+    assert ":ai payload" in source
+    assert ":ai follow off" in source
+    # ... and the procedures point at the page that owns them.
+    assert "provider-plugins.md" in source
+    assert "airgap.md" in source
+    assert "evals/methodology.md" in source
+
+
 def test_task3_review_safety_caveats_are_preserved() -> None:
     """Focused assertions for Task 3 review findings."""
     rel = " ".join(_source("resource-relationships.md").split()).lower()
