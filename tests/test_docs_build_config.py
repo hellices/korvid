@@ -19,8 +19,6 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-import subprocess
-import sys
 import tomllib
 from collections.abc import Callable
 from pathlib import Path
@@ -533,38 +531,75 @@ def test_quality_gates_are_not_part_of_the_public_site() -> None:
     assert "quality-gates" not in nav_text.lower()
 
 
-def test_search_index_excludes_all_quality_gate_content(tmp_path: Path) -> None:
-    """No built page — not just `dev/quality-gates.md` — may leak the topic.
+def _first_markdown_heading(text: str) -> str:
+    """The page title MkDocs would derive from a source file's first `#` heading.
+
+    Args:
+        text: The raw Markdown source of one page.
+
+    Returns:
+        The heading text with its leading `#` markers stripped, or `""` if
+        the page has no top-level heading.
+    """
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            return stripped.lstrip("#").strip()
+    return ""
+
+
+def test_search_index_excludes_all_quality_gate_content() -> None:
+    """No published page — not just `dev/quality-gates.md` — may leak the topic.
 
     `dev/quality-gates.md` is excluded from the build, but
     `dev/specs/2026-07-24-korvid-engineering-standards.md` documents the same
     internal quality gates under its own heading (`## 4. Quality Gates —
-    Three Layers`) and is *not* excluded, so MkDocs still indexes it. The
-    operator has decided this internal process detail has no place on the
-    official site's search, so no entry's title, text, or location may
-    mention it under either spelling.
+    Three Layers`) and used to build (and search-index) fine on its own, so
+    the operator excluded it too rather than trim just that heading.
+
+    This used to shell out to `mkdocs build --strict` and inspect the built
+    `search_index.json`, but that requires the `docs` dependency group
+    (`mkdocs-material`), which the default CI pytest environment
+    (`uv sync --dev --all-extras`) does not install — the docs group is
+    deliberately kept out of general CI. This is a dependency-free
+    equivalent that scans exactly the same published Markdown source set
+    MkDocs would index — `docs/**/*.md` minus `exclude_docs`'s directories
+    (`overrides/`, `dev/plans/`, `superpowers/`) and its two excluded single
+    files (`dev/quality-gates.md`,
+    `dev/specs/2026-07-24-korvid-engineering-standards.md`) — and asserts
+    that no remaining page's path, first-heading title, or full text
+    mentions the topic under either spelling. No mkdocs import or built
+    site is needed.
     """
-    site_dir = tmp_path / "site"
-    result = subprocess.run(
-        [sys.executable, "-m", "mkdocs", "build", "--strict", "--site-dir", str(site_dir)],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert result.returncode == 0, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    excluded_dirs = ("overrides", "dev/plans", "superpowers")
+    excluded_files = {
+        "dev/quality-gates.md",
+        "dev/specs/2026-07-24-korvid-engineering-standards.md",
+    }
 
-    index_path = site_dir / "search" / "search_index.json"
-    entries = json.loads(index_path.read_text(encoding="utf-8"))["docs"]
-    assert entries, "the search index must not be empty"
+    published: list[Path] = []
+    for path in sorted((ROOT / "docs").rglob("*.md")):
+        relative = path.relative_to(ROOT / "docs").as_posix()
+        if relative in excluded_files:
+            continue
+        if any(relative == d or relative.startswith(f"{d}/") for d in excluded_dirs):
+            continue
+        published.append(path)
 
-    for entry in entries:
-        haystack = " ".join(
-            str(entry.get(field, "")) for field in ("title", "text", "location")
-        ).lower()
+    assert published, "the published Markdown source set must not be empty"
+    # Sanity-check the fixture itself: both known offenders must actually be
+    # gone, or the scan below would be vacuously true.
+    published_relative = {p.relative_to(ROOT / "docs").as_posix() for p in published}
+    assert excluded_files.isdisjoint(published_relative)
+
+    for path in published:
+        relative = path.relative_to(ROOT / "docs").as_posix()
+        text = path.read_text(encoding="utf-8")
+        title = _first_markdown_heading(text)
+        haystack = f"{relative} {title} {text}".lower()
         assert "quality gate" not in haystack, (
-            f"{entry.get('location')!r} leaks 'quality gate' into the public search index"
+            f"{relative!r} leaks 'quality gate' into the published docs source set"
         )
         assert "quality-gates" not in haystack, (
-            f"{entry.get('location')!r} leaks 'quality-gates' into the public search index"
+            f"{relative!r} leaks 'quality-gates' into the published docs source set"
         )
