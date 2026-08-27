@@ -366,7 +366,7 @@ def _stage_caption() -> str:
 
 def _highlight(label: str) -> str:
     """One SEE / GROUND / CONTROL card of the highlights section."""
-    cards = re.findall(r"<article>.*?</article>", _highlights(), re.DOTALL)
+    cards: list[str] = re.findall(r"<article>.*?</article>", _highlights(), re.DOTALL)
     matching = [card for card in cards if f">{label}<" in card]
     assert len(matching) == 1, f"exactly one highlight must carry the {label!r} promise"
     return matching[0]
