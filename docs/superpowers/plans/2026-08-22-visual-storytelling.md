@@ -921,7 +921,7 @@ def test_mkdocs_loads_only_the_reviewed_local_storytelling_script() -> None:
     assert VISUAL_STORYTELLING.is_file()
     script = VISUAL_STORYTELLING.read_bytes()
     assert hashlib.sha256(script).hexdigest() == (
-        "e88e62da5271b0cc33dca4a6cb2dead3641d7050941e5606b7fc074093d378e5"
+        "8ea0da9e192d41f3fb09ed437afd9a6a89a25f71a987df889611c2e43c5a2430"
     )
     assert b"\r" not in script
 
