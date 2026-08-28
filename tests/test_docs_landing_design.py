@@ -1043,6 +1043,33 @@ def test_capped_stage_shrinks_its_media_instead_of_clipping_it() -> None:
         )
 
 
+def test_capped_panel_stays_full_width_when_the_height_cap_binds() -> None:
+    """A capped, ratio-boxed panel must not shrink-wrap its own width.
+
+    Measured on the built page in Chromium at 1440x400, where
+    `min(58vh, 540px)` binds to 232px: the panel had no declared `width`, so
+    the browser resolved its auto width from the *clamped* height and the
+    16:9 ratio (232px * 16 / 9 = 412px) instead of stretching to the
+    593px-wide `.scene-panels` frame. The panel (and, filling it, the video)
+    rendered 412px wide, left-aligned inside the frame with a bare 181px gap
+    on the right — the same shrink-and-left-align happens at 1440x500, where
+    the 290px cap resolved a 516px-wide panel inside the same 593px frame.
+
+    `width: 100%` on the capped panel removes the ratio's influence over the
+    width axis entirely: the panel always fills the frame's inline size, the
+    cap alone bounds the block size, and `object-fit: contain` on the video
+    (asserted separately) does the letterboxing this rule's absence used to
+    push onto layout instead.
+    """
+    css = _css()
+    panel = _rule(css, ".md-typeset .hero-driver-stage .scene-panel {")
+    assert "width: 100%" in panel, (
+        "the capped panel must declare `width: 100%`, or its auto width is "
+        "derived from the clamped height via the 16:9 ratio instead of "
+        f"filling the frame; found {_compact(panel)!r}"
+    )
+
+
 def test_bounded_stage_binds_from_first_paint_without_clipping_a_three_panel_stack() -> None:
     """The cap must be authored, not enhanced — and must survive three panels.
 

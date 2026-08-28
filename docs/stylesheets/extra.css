@@ -440,8 +440,22 @@
    Never declare `display` here: this selector is (0,3,0), exactly ties
    `.md-typeset .scene-panel[hidden]`, and is authored first, so a `display`
    declaration would lose the tie today and un-hide every deselected panel
-   the moment either rule moved. */
+   the moment either rule moved.
+
+   `width: 100%` is declared for its own reason, independent of the cap: a
+   block-level box with both an `aspect-ratio` and an auto width normally
+   resolves that width by stretching to its container first, but once
+   `max-height` actually clamps the block size (measured in Chromium at
+   1440x400, where `min(58vh, 540px)` binds to 232px), the auto width is
+   instead derived from the *clamped* height through the ratio —
+   232px * 16 / 9 = 412px inside the 593px `.scene-panels` frame, left-aligned
+   with a bare 181px gap on the right (516px inside the same 593px frame at
+   1440x500's 290px cap). Declaring the width outright removes the ratio's
+   claim on that axis entirely, so the panel always fills the frame and only
+   the block size answers to the cap; `object-fit: contain` on the video
+   below still letterboxes symmetrically inside whatever box that leaves. */
 .md-typeset .hero-driver-stage .scene-panel {
+  width: 100%;
   aspect-ratio: 16 / 9;
   max-height: min(58vh, 540px);
   grid-template-rows: minmax(0, 1fr);
