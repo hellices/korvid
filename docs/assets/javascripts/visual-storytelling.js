@@ -41,8 +41,11 @@
      reach videos the controller has no business touching. */
   const managedVideos = new Set();
   const handledVideoErrors = new WeakSet();
+  const reportedPlaybackFailures = new WeakMap();
 
   const reportVideoFailure = (video, error) => {
+    if (reportedPlaybackFailures.get(video)) return;
+    reportedPlaybackFailures.set(video, true);
     restoreVideoPoster(video, video.error ?? error);
   };
 
@@ -98,6 +101,7 @@
     if (!motionAllowed()) return;
     promoteVideo(video);
     video.currentTime = 0;
+    reportedPlaybackFailures.set(video, false);
     const playback = video.play();
     if (playback && typeof playback.catch === "function") {
       playback.catch((error) => {

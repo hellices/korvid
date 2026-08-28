@@ -463,6 +463,35 @@ const scenarios = {
     );
   },
 
+  async "a late media error before a rejected play settles reports one failure"() {
+    const built = buildSwitcher("a");
+    const document = buildDocument([built.switcher]);
+    const { errors, observers } = run(document);
+    const rejection = Object.assign(new Error("unsupported codec"), { name: "NotSupportedError" });
+    const lateError = new Error("decode failure");
+    built.videos[1].playError = rejection;
+
+    built.tabs[1].dispatch("click", {});
+    observers[0].callback([{ isIntersecting: true }]);
+    const pausesBeforeFailure = built.videos[1].paused;
+    built.videos[1].error = lateError;
+    built.videos[1].dispatch("error", { type: "error" });
+    await Promise.resolve();
+
+    assert.equal(errors.length, 1, "one failed playback attempt must only be reported once");
+    assert.match(errors[0], /decode failure/, "the first real media failure should be what is logged");
+    assert.equal(
+      built.videos[1].paused,
+      pausesBeforeFailure + 1,
+      "restoring the fallback once proves the rejection and media event shared one failure latch",
+    );
+    assert.equal(
+      built.videos[1].getAttribute("data-poster"),
+      "agent.png",
+      "the CSS fallback must still hide the failed player and reveal its poster image",
+    );
+  },
+
   async "an interrupted pending play is not reported as a media failure"() {
     const built = buildSwitcher("a");
     const document = buildDocument([built.switcher]);
