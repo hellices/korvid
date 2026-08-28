@@ -168,7 +168,7 @@ namespaces if you pressed `0` first), and the numeric caps below.
 | `max_resources` | 10,000 | Resources fed into the graph across every listed source |
 | `max_edges` | 50,000 | Joined edges kept in the graph |
 | `max_depth` / `max_nodes` | 5 / 500 | Hops and resources visited by the `d` expansion |
-| `max_target_lists` | 32 | Concurrent relation-target LISTs per snapshot |
+| `max_target_lists` | 32 | Total relation-target LIST requests per snapshot |
 | `max_concurrency` | 4 | Concurrent LISTs the snapshot loader runs at once |
 
 Every cap is deterministic (ordered, never API-response-order dependent) and

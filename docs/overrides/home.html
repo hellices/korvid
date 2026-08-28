@@ -32,6 +32,14 @@
         border-radius: calc(var(--korvid-radius) - 0.15rem);
       }
 
+      .md-typeset [data-scene-switcher] video[data-poster] {
+        display: block;
+      }
+
+      .md-typeset [data-scene-switcher] video[data-poster] + .scene-panel__fallback {
+        display: none;
+      }
+
       .md-typeset [data-scene-switcher]:not([data-enhanced]) .scene-tabs {
         display: none;
       }

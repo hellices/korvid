@@ -156,7 +156,8 @@ def test_agent_page_is_a_product_guide_not_an_internal_manual() -> None:
 
 def test_task3_review_safety_caveats_are_preserved() -> None:
     """Focused assertions for Task 3 review findings."""
-    rel = " ".join(_source("resource-relationships.md").split()).lower()
+    rel_source = _source("resource-relationships.md").lower()
+    rel = " ".join(rel_source.split())
     # (1a) PDBs do not gate controller scale-down deletes
     assert "pdb" in rel or "poddisruptionbudget" in rel
     # (1b) HPA reconciliation can overwrite replicas
@@ -166,6 +167,8 @@ def test_task3_review_safety_caveats_are_preserved() -> None:
     # (2) max_target_lists default 32 in the compact limits table
     assert "max_target_lists" in rel
     assert "32" in rel
+    target_limit = next(line for line in rel_source.splitlines() if "max_target_lists" in line)
+    assert "concurrent" not in target_limit
 
     helm = " ".join(_source("helm-operators.md").split()).lower()
     # (3) --hide-secret masking guarantee in dry-run

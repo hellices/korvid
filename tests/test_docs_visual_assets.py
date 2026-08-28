@@ -7,6 +7,7 @@ import contextlib
 import copy
 import hashlib
 import importlib.util
+import inspect
 import math
 import os
 import re
@@ -890,6 +891,85 @@ def test_demo_agent_turn_uses_real_tools_and_mints_citations() -> None:
     )
 
 
+def test_demo_agent_session_is_the_shipped_interaction_harness() -> None:
+    """The capture must compose the composition root's graph, not a lookalike.
+
+    `korvid.__main__._build_session` is the only wiring an operator ever
+    runs, so the frame is only evidence of the product if the demo session
+    is built from those same collaborators. Reading the composed object is
+    what proves it: a hand-rolled loop that happened to emit the same
+    events would satisfy every event assertion above and none of these.
+    """
+    from korvid.agent.session import AgentSession, DefaultAgentSession
+
+    harness = _demo_harness()
+    story = harness.load_agent_story()
+    session = harness.build_demo_agent_session(story.RecordedScreenBridge())
+
+    assert isinstance(session, DefaultAgentSession), (
+        f"the scene must run the shipped production session; found {type(session)!r}"
+    )
+    assert isinstance(session, AgentSession)
+    policy = session.policy
+    armed = sorted(str(schema["function"]["name"]) for schema in policy.tools)
+    assert "diagnose_pod" in armed, (
+        f"the recorded turn's first read must be armed by the routed policy: {armed}"
+    )
+    assert "get_logs" in armed, (
+        f"the recorded turn's follow mirror must be armed by the routed policy: {armed}"
+    )
+    assert not [name for name in armed if name.startswith(("scale_", "restart_", "delete_"))], (
+        f"the capture is resolved read-only, so no write tool may be armed: {armed}"
+    )
+    assert story.DEMO_ENVIRONMENT.readonly is True, (
+        "the recording is unattended, so the environment it routes against must "
+        "never put a write schema on the surface"
+    )
+
+
+def test_demo_agent_provider_reports_only_what_it_can_prove() -> None:
+    """The deterministic provider is a real adapter, judged by the real router.
+
+    `LLMProvider` requires a descriptor and capabilities, and the router
+    decides the tier, the prompt pack and the budgets from them. The demo
+    provider may claim tool support — it emits `tool_call` events — but it
+    has no context window, no reasoning and no parallel-call behaviour to
+    report, so those stay unknown and the capture runs on the conservative
+    route any unknown model gets.
+    """
+    from korvid.agent.model_policy import ModelTier
+
+    story = _demo_harness().load_agent_story()
+    provider = story.DemoAgentProvider()
+    policy_doc = inspect.getdoc(story.resolve_demo_policy)
+    assert policy_doc is not None
+    assert "The production router resolves the production catalog" in policy_doc
+
+    assert provider.descriptor == story.DEMO_MODEL
+    assert provider.descriptor.model == DEMO_MODEL_LABEL, (
+        "the model tag the router is given and the label the recorded status row "
+        f"renders are one fact; found {provider.descriptor.model!r}"
+    )
+    capabilities = provider.capabilities
+    assert capabilities.supports_tools is True, (
+        "the provider really does emit tool calls, so tool support is a fact it proves"
+    )
+    for unknown in ("context_window_tokens", "supports_parallel_tools", "supports_reasoning"):
+        assert getattr(capabilities, unknown) is None, (
+            f"the demo provider cannot prove {unknown!r}; an invented fact would "
+            "route the capture on evidence it does not have"
+        )
+
+    policy = story.resolve_demo_policy(provider)
+    assert policy.tier is ModelTier.LOW, (
+        f"unknown capabilities route to the conservative tier; found {policy.tier!r}"
+    )
+    assert policy.allow_parallel_tool_calls is False, (
+        "parallel calls are gated on the provider's own confirmation, which this "
+        "provider never gives"
+    )
+
+
 def test_demo_agent_provider_is_answered_with_real_tool_results() -> None:
     """The capture cannot be satisfied by injecting panel events.
 
@@ -1310,17 +1390,22 @@ def test_compact_landing_keeps_every_approved_recording_and_its_poster() -> None
     three-scene switcher, so the Direct recording appears exactly once. What
     it must not do is lose a driver: all three reviewed recordings, each
     with the reviewed poster frame that stands in for it before selection,
-    stay on the page — the Direct clip eagerly, the Agent and MCP clips
-    behind the `data-` attributes the controller promotes.
+    stay on the page with real sources so they remain playable without
+    JavaScript. Inactive clips still use `preload="none"`.
     """
     landing = LANDING.read_text(encoding="utf-8")
     assert landing.count("<video") == 3, (
         "the page authors one recording per driver: Direct, Agent, MCP"
     )
+    for recording in (
+        "assets/demo.mp4",
+        "assets/scenes/agent-demo.mp4",
+        "assets/scenes/mcp-follow-demo.mp4",
+    ):
+        assert len(re.findall(rf'(?<!data-)src="{re.escape(recording)}"', landing)) == 1, (
+            f"the compact landing page must author a real source for {recording!r} exactly once"
+        )
     for authored, times in (
-        ('src="assets/demo.mp4"', 1),
-        ('data-src="assets/scenes/agent-demo.mp4"', 1),
-        ('data-src="assets/scenes/mcp-follow-demo.mp4"', 1),
         ('poster="assets/scenes/cockpit-poster.png"', 1),
         ('data-poster="assets/scenes/agent-poster.png"', 1),
         ('data-poster="assets/scenes/mcp-poster.png"', 1),

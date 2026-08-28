@@ -1748,39 +1748,35 @@ def test_only_the_visible_scene_ships_an_eagerly_fetched_poster() -> None:
 
 
 def test_deferred_scene_posters_keep_a_local_lazy_fallback_image() -> None:
-    """A visitor without JavaScript must still see each scene's real frame.
+    """Every playback failure must still show the scene's real frame.
 
-    The fallback must be real DOM so it also covers a controller-load failure,
-    not only a browser with JavaScript disabled. Both images sit below the fold
-    and must defer their bytes exactly like the mosaic captures do.
+    The fallback must be real DOM so it also covers a controller-load failure.
+    All three players can fail after the controller starts them, including the
+    initially selected Direct scene, so each panel needs its own stable frame.
     """
     switcher = _scene_switcher()
     fallbacks = re.findall(r'<img class="scene-panel__fallback[^"]*"[^>]+>', switcher)
-    assert len(fallbacks) == 2, "exactly the two deferred scenes need a fallback poster image"
+    assert len(fallbacks) == 3, "every scene needs a playback-failure poster image"
     assets = []
     for fallback in fallbacks:
         match = re.search(r'src="([^"]+)"[^>]*alt="[^"]+"', fallback)
         assert match is not None, f"the fallback must be one described local image: {fallback!r}"
         source = match.group(1)
         assert source.startswith("assets/"), "no-JS fallbacks must stay local, never remote"
-        assert 'loading="lazy"' in fallback, (
-            "a fallback poster renders below the fold, so it must "
-            f"defer its own bytes like every other below-fold capture: {fallback!r}"
-        )
         assets.append(source)
     assert sorted(assets) == [
         "assets/scenes/agent-poster.png",
+        "assets/scenes/cockpit-poster.png",
         "assets/scenes/mcp-poster.png",
     ]
 
 
 def test_deferred_scenes_keep_media_when_the_controller_never_runs() -> None:
-    """Always-parsed fallbacks must cover no-JS and controller-load failure."""
+    """Always-parsed fallbacks must cover a controller-load failure."""
     switcher = _scene_switcher()
     assert "<noscript>" not in switcher
     fallbacks = re.findall(r'<img class="scene-panel__fallback[^"]*"[^>]+>', switcher)
-    assert len(fallbacks) == 2
-    assert all('loading="lazy"' in fallback for fallback in fallbacks)
+    assert len(fallbacks) == 3
 
     css = _css()
     hidden_video = ".md-typeset .scene-panel video[data-poster] {"
@@ -1790,11 +1786,23 @@ def test_deferred_scenes_keep_media_when_the_controller_never_runs() -> None:
 
 
 def test_no_javascript_fallback_replaces_deferred_videos_with_posters() -> None:
-    """No-JS rendering must show one media surface per deferred scene."""
-    selector = ".md-typeset .scene-panel video[data-poster] {"
-    for label, source in (("stylesheet", _css()), ("plan", _plan())):
-        assert selector in source, f"{label} must target deferred unenhanced videos"
-        assert "display: none" in _rule(source, selector)
+    """No-JS rendering must leave every recording playable with native controls."""
+    videos = re.findall(r"<video[^>]*>", _scene_switcher())
+    assert len(videos) == 3
+    for video in videos:
+        assert re.search(r'(?<!data-)src="assets/[^"]+\.mp4"', video), (
+            f"no-JS playback needs a real source in authored markup: {video}"
+        )
+        assert "controls" in video, f"no-JS playback needs native controls: {video}"
+
+    noscript = _noscript_style()
+    video_rule = _rule(noscript, ".md-typeset [data-scene-switcher] video[data-poster]")
+    fallback_rule = _rule(
+        noscript,
+        ".md-typeset [data-scene-switcher] video[data-poster] + .scene-panel__fallback",
+    )
+    assert "display: block" in video_rule
+    assert "display: none" in fallback_rule
 
 
 def test_controller_promotes_a_deferred_poster_only_when_its_scene_is_selected() -> None:
@@ -2278,17 +2286,16 @@ def test_visual_storytelling_plan_mcp_ratio_snippets_match_the_shipped_sources()
     )
 
 
-def test_scene_videos_never_autoplay_and_below_fold_media_preloads_nothing() -> None:
+def test_scene_videos_never_autoplay_and_inactive_media_preloads_nothing() -> None:
     """Bandwidth and motion are the visitor's choice on every landing video.
 
     No `<video>` may declare the native `autoplay` attribute: playback is
     driven entirely by the visibility-aware controller, gated on
     `prefers-reduced-motion`, and never by the browser's own eager-fetch
     behavior. The merged stage is one switcher, so the Direct clip is the
-    page's single eager medium and keeps its real `src`; the Agent and MCP
-    clips defer their bytes behind `data-src` until the controller promotes
-    them on selection, so an unselected driver never downloads video before
-    a visitor picks it.
+    page's single metadata-preloaded medium. Agent and MCP keep real `src`
+    attributes so no-JavaScript visitors can play them, while `preload="none"`
+    prevents their media bytes from loading before a visitor picks them.
     """
     videos = re.findall(r"<video[^>]*>", _index())
     assert len(videos) == 3, "one video per driver, authored once each"
@@ -2296,7 +2303,7 @@ def test_scene_videos_never_autoplay_and_below_fold_media_preloads_nothing() -> 
         assert not re.search(r"(?<!data-)\bautoplay\b", video), (
             f"no landing video may declare the native autoplay attribute: {video}"
         )
-    direct_video, *deferred_scene_videos = videos
+    direct_video, *inactive_scene_videos = videos
     assert 'src="assets/demo.mp4"' in direct_video, (
         "the default scene must keep a real, immediately playable source"
     )
@@ -2306,12 +2313,12 @@ def test_scene_videos_never_autoplay_and_below_fold_media_preloads_nothing() -> 
     assert "data-autoplay-video" not in _index(), (
         "there is no standalone video left: every player belongs to the one switcher"
     )
-    for video in deferred_scene_videos:
-        assert 'data-src="' in video, f"an unselected scene must defer its source: {video}"
-        assert not re.search(r'(?<!data-)src="', video), (
-            f"a deferred scene must not also declare a real, eagerly-fetchable src: {video}"
+    for video in inactive_scene_videos:
+        assert re.search(r'(?<!data-)src="assets/[^"]+\.mp4"', video), (
+            f"an unselected scene must remain playable without JavaScript: {video}"
         )
-        assert 'preload="none"' in video, f"below-fold scene media must fetch nothing: {video}"
+        assert 'data-src="' not in video, f"no-JS playback cannot depend on promotion: {video}"
+        assert 'preload="none"' in video, f"inactive scene media must fetch nothing: {video}"
 
 
 def test_design_asset_rule_states_the_playback_contract_the_controller_ships() -> None:
@@ -2457,7 +2464,7 @@ def test_agent_scene_states_the_grounded_deterministic_walkthrough() -> None:
     lowered = " ".join(stage.lower().split())
     flattened = _flatten(stage)
 
-    description = re.search(r'<video[^>]*data-src="[^"]*agent-demo\.mp4"[^>]*>', scene)
+    description = re.search(r'<video[^>]*src="[^"]*agent-demo\.mp4"[^>]*>', scene)
     assert description is not None, "the Agent panel keeps its video"
     aria = _flatten(description.group(0))
     for token in ("real agentpanel", "real diagnose_pod and get_logs reads", "grounded answer"):
