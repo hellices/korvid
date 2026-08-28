@@ -379,6 +379,59 @@ def _scene_switcher() -> str:
     return _section('<figure class="hero-demo hero-driver-stage"', "</figure>")
 
 
+def _controller_source() -> str:
+    """The one script the site ships."""
+    return STORYTELLING_JS.read_text(encoding="utf-8")
+
+
+def _noscript_style() -> str:
+    """The CSS the site serves only when scripting is disabled.
+
+    `<noscript>` may only carry flow content in `<body>`, so the home
+    template injects it into `extrahead`, where a `<style>` element is
+    valid. Jinja comments are stripped first: the template documents the
+    block in prose that quotes the very tags this looks for, and a contract
+    must never be satisfied by an explanation of itself.
+
+    Returns:
+        The declarations between the `<style>` tags of the template's single
+        `<noscript>` block.
+    """
+    template = (OVERRIDES / "home.html").read_text(encoding="utf-8")
+    source = re.sub(r"\{#.*?#\}", " ", template, flags=re.DOTALL)
+    block = re.search(r"<noscript>(?P<body>.*?)</noscript>", source, re.DOTALL)
+    assert block is not None, (
+        "the home template must ship a <noscript> block, or authored `hidden` "
+        "panels are simply missing for visitors without JavaScript"
+    )
+    style = re.search(r"<style>(?P<css>.*?)</style>", block.group("body"), re.DOTALL)
+    assert style is not None, "the <noscript> block must contain a <style> element"
+    return style.group("css")
+
+
+def _specificity(selector: str) -> tuple[int, int, int]:
+    """The (ids, classes, types) specificity of a single compound selector.
+
+    Attribute selectors and pseudo-classes count with classes; `:not()`
+    contributes only its argument, which is what the shipped selectors rely
+    on. Good enough for the simple selectors this stylesheet uses, and it
+    keeps override contracts from silently depending on rule order.
+
+    Args:
+        selector: One selector (no commas).
+
+    Returns:
+        An (a, b, c) tuple comparable with `>`/`<`.
+    """
+    sel = _compact(selector).replace(":not", "")
+    ids = len(re.findall(r"#[-\w]+", sel))
+    classes = len(re.findall(r"\.[-\w]+", sel))
+    attributes = len(re.findall(r"\[[^\]]+\]", sel))
+    pseudo_classes = len(re.findall(r"(?<!:):[-\w]+", sel))
+    types = len(re.findall(r"(?:^|[\s>+~(])([a-z][-\w]*)", sel))
+    return (ids, classes + attributes + pseudo_classes, types)
+
+
 def _highlights() -> str:
     return _section('<section class="feature-highlights"', "</section>")
 
@@ -836,8 +889,21 @@ def test_hero_becomes_two_columns_only_at_wide_widths() -> None:
     )
 
 
-def test_hero_keeps_heading_then_demo_then_copy_in_source_and_desktop_grid() -> None:
-    """Mobile/tablet flow must surface the product before the supporting copy."""
+def test_hero_keeps_heading_then_copy_then_media_in_source_and_desktop_grid() -> None:
+    """Mobile and tablet must reach the calls to action before the media.
+
+    Below the 960px breakpoint the hero is a single-column grid with no
+    explicit placement, so source order *is* visual order *is* tab order. With
+    the figure authored second, a phone visitor scrolled past a capped 16:9
+    stage plus its provenance caption before reaching "Start flying" or the
+    install command — the two things the page exists to hand over. The copy
+    column therefore comes second in the source and the media third.
+
+    Desktop is unaffected because every hero child is placed explicitly at
+    `min-width: 960px`: heading in column 1 row 1, copy in column 1 row 2, and
+    the media in column 2 spanning both — so the wide layout still reads
+    heading/copy left, product right regardless of document order.
+    """
     hero = _hero()
     heading = hero.find('class="hero-heading"')
     demo = hero.find('class="hero-demo hero-driver-stage"')
@@ -845,9 +911,10 @@ def test_hero_keeps_heading_then_demo_then_copy_in_source_and_desktop_grid() -> 
     assert heading != -1, "the hero must keep a dedicated .hero-heading wrapper"
     assert demo != -1, "the hero must keep the real product demo figure"
     assert copy != -1, "the hero must keep a dedicated .hero-copy-column wrapper"
-    assert heading < demo < copy, (
-        "source order must stay headline → product demo → supporting copy so "
-        "mobile and tablet reading/tab order matches the visual stack"
+    assert heading < copy < demo, (
+        "source order must be headline → copy/actions/install → product media so "
+        "a phone or tablet reaches the calls to action before scrolling a 16:9 "
+        "stage, and so reading order matches tab order"
     )
 
     css = _css()
@@ -857,10 +924,20 @@ def test_hero_keeps_heading_then_demo_then_copy_in_source_and_desktop_grid() -> 
         re.DOTALL,
     )
     assert wide_css is not None
-    demo_rule = _rule(wide_css.group("body"), ".md-typeset .hero-demo {")
+    wide = wide_css.group("body")
+    demo_rule = _rule(wide, ".md-typeset .hero-demo {")
     assert "grid-column: 2" in demo_rule
     assert "grid-row: 1 / span 2" in demo_rule, (
         "desktop layout must keep the demo in column 2 spanning both copy rows"
+    )
+    heading_rule = _rule(wide, ".md-typeset .hero .hero-heading {")
+    copy_rule = _rule(wide, ".md-typeset .hero .hero-copy-column {")
+    assert _declaration(heading_rule, "grid-column") == "1"
+    assert _declaration(heading_rule, "grid-row") == "1"
+    assert _declaration(copy_rule, "grid-column") == "1"
+    assert _declaration(copy_rule, "grid-row") == "2", (
+        "the desktop grid must place both text blocks explicitly, or moving the "
+        "figure in the source would reorder the wide layout too"
     )
 
 
@@ -875,7 +952,7 @@ def test_home_media_stage_is_bounded_without_distorting_clips() -> None:
 
     An unbounded stage let a 16:9 player grow with its column and dominate
     (or, on a short viewport, overflow) the fold. The compact homepage caps
-    the component's width, hands the aspect-ratio box to the *frame*, and
+    the component's width, hands the aspect-ratio box to the *panel*, and
     lets every replaced element fill that box with `object-fit: contain` —
     so the 1280x710 MCP clip letterboxes by a few pixels instead of being
     stretched or cropped to a box that is not its own.
@@ -889,9 +966,9 @@ def test_home_media_stage_is_bounded_without_distorting_clips() -> None:
             f"growing past a readable measure; found {_compact(stage)!r}"
         )
 
-    box = _rule(css, ".hero-driver-stage .scene-panels {")
+    box = _rule(css, ".md-typeset .hero-driver-stage .scene-panel {")
     assert "aspect-ratio: 16 / 9" in box, (
-        f"the frame, not the video, must own the ratio; found {_compact(box)!r}"
+        f"the panel, not the video, must own the ratio; found {_compact(box)!r}"
     )
     assert "max-height: min(58vh, 540px)" in box, (
         f"the stage must stay inside the fold on short viewports; found {_compact(box)!r}"
@@ -925,32 +1002,36 @@ def test_capped_stage_shrinks_its_media_instead_of_clipping_it() -> None:
     the clip stayed 310px tall and `.scene-panels { overflow: hidden }` cut
     100px off the bottom of the video. The panel is a grid, and its implicit
     `auto` row keeps the clip's intrinsic 16:9 contribution rather than
-    shrinking to the frame — so the cap that exists to protect the fold was
+    shrinking to the cap — so the cap that exists to protect the fold was
     cropping the product instead. The row has to be a `minmax(0, 1fr)` track,
     which may shrink below its content, and the panel's 1rem inset has to go:
-    an inset box inside a 16:9 frame is not itself 16:9, so `contain` would
+    an inset box inside a 16:9 box is not itself 16:9, so `contain` would
     pillarbox a 16:9 clip inside its own frame.
 
     `display` must never be declared here. `.md-typeset .scene-panel[hidden]`
-    is (0,3,0) and this selector is (0,5,0), so a `display` declaration would
-    beat the `hidden` rule and reveal every deselected panel.
+    and this selector are both (0,3,0), and this rule is authored first, so a
+    `display` declaration here would lose the tie — and any later reordering
+    would reveal every deselected panel.
     """
     css = _css()
-    anchor = ".md-typeset [data-scene-switcher][data-enhanced] .hero-driver-stage .scene-panel {"
+    anchor = ".md-typeset .hero-driver-stage .scene-panel {"
     panel = _rule(css, anchor)
     for declaration in (
-        "height: 100%",
         "grid-template-rows: minmax(0, 1fr)",
         "padding: 0",
         "gap: 0",
     ):
         assert declaration in panel, (
-            f"the stage's panel must declare `{declaration}` so the frame's height cap "
+            f"the stage's panel must declare `{declaration}` so the height cap "
             f"shrinks the clip rather than cropping it; found {_compact(panel)!r}"
         )
     assert "display" not in panel, (
-        "declaring `display` here out-specifies `.md-typeset .scene-panel[hidden]` and "
+        "declaring `display` here ties `.md-typeset .scene-panel[hidden]` and "
         f"un-hides every deselected panel; found {_compact(panel)!r}"
+    )
+    assert "height: 100%" not in panel, (
+        "the panel must derive its own height from the ratio and the cap; a "
+        "`height: 100%` would chase a frame that now grows with its content"
     )
 
     media = _rule(css, ".hero-driver-stage video,")
@@ -962,39 +1043,62 @@ def test_capped_stage_shrinks_its_media_instead_of_clipping_it() -> None:
         )
 
 
-def test_bounded_stage_never_clips_the_unenhanced_three_panel_fallback() -> None:
-    """The fixed-ratio box is only correct once the controller collapses the stack.
+def test_bounded_stage_binds_from_first_paint_without_clipping_a_three_panel_stack() -> None:
+    """The cap must be authored, not enhanced — and must survive three panels.
 
-    Without JavaScript — and for the moment before the controller runs —
-    every one of the three panels is rendered in document order, and
-    `.scene-panels` clips its overflow to keep the rounded frame tidy.
-    Measured on the built page in Chromium at 1440x900 with JavaScript
-    disabled, an ungated `aspect-ratio: 16 / 9` box holds 332px while that
-    stack is 1,047px tall — 715px clipped, and not one of the three fallback
-    panels fully visible. The cap therefore hangs off the same
-    `data-enhanced` hook that already gates the tab strip, and the shared
-    `.scene-panels` rule keeps no height constraint of its own.
+    Gating the cap on the controller's `data-enhanced` hook meant the first
+    paint had no cap at all: measured on the built page in Chromium at
+    1440x900 with the controller's request held, the hero rendered a 1,049px
+    three-panel stack and then collapsed to a 334px stage the moment the
+    script ran — a 631px hero shift on every cold load. The two unselected
+    panels are now authored `hidden`, so the cap can bind from the first
+    frame, and every stage rule drops the `[data-enhanced]` gate.
+
+    An ungated cap is only safe because it sits on the *panel*. Both the
+    `<noscript>` rendering and the controller's own rollback un-hide all
+    three panels; a fixed-ratio box on the clipping `.scene-panels` frame
+    would then hold 334px of a ~1,000px stack. A per-panel cap lets the
+    frame grow with whatever stack it is given, so nothing is ever cut off.
     """
     css = _css()
 
     for anchor in (
-        ".hero-driver-stage .scene-panels {",
-        ".md-typeset [data-scene-switcher][data-enhanced] .hero-driver-stage .scene-panel {",
-        ".hero-driver-stage video,",
+        ".md-typeset .hero-driver-stage .scene-panel {",
+        ".md-typeset .hero-driver-stage video,",
     ):
         prelude = _selector_list(css, anchor)
-        assert "[data-scene-switcher][data-enhanced]" in prelude, (
-            "the bounded stage must apply only to the enhanced switcher, or the "
-            f"unenhanced three-panel fallback is clipped; prelude was {_compact(prelude)!r}"
+        assert "data-enhanced" not in prelude, (
+            "the stage must be authored, not enhanced: a `[data-enhanced]` gate "
+            "leaves the first paint uncapped and shifts the hero when the "
+            f"controller runs; prelude was {_compact(prelude)!r}"
         )
 
-    shared = _rule(css, ".md-typeset .scene-panels {")
-    assert "overflow: hidden" in shared, "the frame still clips, which is why the gate exists"
+    frame = _rule(css, ".md-typeset .scene-panels {")
+    assert "overflow: hidden" in frame, "the frame still clips, which is why the cap moved"
     for constraint in ("aspect-ratio", "max-height", "height"):
-        assert constraint not in shared, (
-            f"the ungated frame must not constrain its own height (`{constraint}`); "
-            f"found {_compact(shared)!r}"
+        assert constraint not in frame, (
+            f"the frame must not constrain its own height (`{constraint}`), or the "
+            "three-panel no-JavaScript and rollback stacks are clipped; found "
+            f"{_compact(frame)!r}"
         )
+
+    capped = [
+        _compact(prelude)
+        for prelude, body in _declaration_blocks(css)
+        if "max-height: min(58vh, 540px)" in body
+    ]
+    assert capped == [".md-typeset .hero-driver-stage .scene-panel"], (
+        "exactly one rule may cap the stage, and it must be the panel's own — a "
+        f"cap on the clipping frame crops the stack instead; found {capped}"
+    )
+
+    gated = [
+        _compact(prelude) for prelude, _ in _declaration_blocks(css) if "[data-enhanced]" in prelude
+    ]
+    assert gated == [".md-typeset [data-scene-switcher]:not([data-enhanced]) .scene-tabs"], (
+        "the only thing the controller's hook may still switch is the inert tab "
+        f"strip; found {gated}"
+    )
 
 
 def test_visual_storytelling_plan_is_marked_superseded_for_the_landing_structure() -> None:
@@ -1394,14 +1498,124 @@ def test_narrow_tab_strip_keeps_the_wide_strip_untouched() -> None:
     assert not escaped, f"the tab grid must stay inside {NARROW_QUERY}; found {escaped}"
 
 
-def test_scene_switcher_source_is_a_complete_no_javascript_fallback() -> None:
+def test_scene_switcher_source_keeps_every_scene_and_its_source() -> None:
+    """All three panels and all three sources must survive in the authored markup."""
     switcher = _scene_switcher()
     panels = re.findall(r'<article id="scene-[^"]+"[^>]*role="tabpanel"[^>]*>', switcher)
     assert len(panels) == 3
-    assert all(" hidden" not in panel for panel in panels)
     assert 'src="assets/demo.mp4"' in switcher
     assert 'src="assets/scenes/agent-demo.mp4"' in switcher
     assert 'src="assets/scenes/mcp-follow-demo.mp4"' in switcher
+
+
+def test_unselected_scenes_are_authored_hidden_so_the_cold_load_shows_one_stage() -> None:
+    """The first paint must show the same one panel the controller would select.
+
+    Rendering all three panels until the script runs is what produced the
+    measured cold-load shift: a 1,049px stack collapsing to a 334px stage.
+    The two panels whose tabs are `aria-selected="false"` therefore carry the
+    `hidden` attribute in the source, so the browser paints the selected
+    scene — and only that scene — before any JavaScript is fetched.
+
+    The attribute is the exact state the controller already owns
+    (`panel.hidden = !selected`), so enhancement is a no-op on load rather
+    than a re-layout, and the `<noscript>` rule restores all three for
+    visitors with scripting off.
+    """
+    switcher = _scene_switcher()
+    panels = re.findall(r"<article id=\"scene-[^\"]+\"[^>]*role=\"tabpanel\"[^>]*>", switcher)
+    assert len(panels) == 3
+    hidden = [panel for panel in panels if re.search(r"\shidden(?=[\s/>])", panel)]
+    assert len(hidden) == 2, (
+        "exactly the two unselected panels must be authored hidden, or the cold "
+        f"load paints a stack it then collapses; found {len(hidden)}"
+    )
+
+    selected_tab = re.search(
+        r'<button[^>]*aria-selected="true"[^>]*aria-controls="(?P<panel>[^"]+)"', switcher
+    )
+    assert selected_tab is not None, "one tab must be authored selected"
+    visible = [panel for panel in panels if panel not in hidden]
+    assert f'id="{selected_tab.group("panel")}"' in visible[0], (
+        "the panel left visible must be the one the selected tab controls, or the "
+        "cold load contradicts the ARIA state"
+    )
+
+    controller = _controller_source()
+    assert "panel.hidden = !selected" in _strip_js_comments(controller), (
+        "the controller must keep owning the same attribute it now inherits, so "
+        "clicking a tab still swaps scenes"
+    )
+
+
+def test_noscript_restores_every_scene_and_drops_the_stack_cap() -> None:
+    """Authored `hidden` must not cost real no-JavaScript visitors the other scenes.
+
+    `hidden` in the source plus a cap that binds at first paint is only
+    honest if a browser with scripting disabled gets all three panels back,
+    uncapped and unclipped. The site template ships a `<noscript>` stylesheet
+    that un-hides the panels, releases the per-panel ratio/height cap and
+    collapses the inert tab strip — and it wins purely on specificity, so no
+    `!important` and no dependency on rule order.
+    """
+    noscript = _noscript_style()
+    rules = dict(_declaration_blocks(noscript))
+    lookup = {_compact(prelude): body for prelude, body in rules.items()}
+
+    unhide = next(
+        (prelude for prelude in lookup if ".scene-panel[hidden]" in prelude),
+        None,
+    )
+    assert unhide is not None, "the noscript styles must un-hide the authored panels"
+    assert "display: grid" in lookup[unhide], (
+        f"un-hidden panels must return to their grid layout; found {lookup[unhide]!r}"
+    )
+
+    uncap = next(
+        (prelude for prelude in lookup if prelude.endswith(".hero-driver-stage .scene-panel")),
+        None,
+    )
+    assert uncap is not None, "the noscript styles must release the stage cap"
+    assert "aspect-ratio: auto" in lookup[uncap]
+    assert "max-height: none" in lookup[uncap], (
+        "without JavaScript the stack is three panels tall and must not be capped "
+        f"into the clipping frame; found {lookup[uncap]!r}"
+    )
+
+    media = next((prelude for prelude in lookup if "video" in prelude), None)
+    assert media is not None, "the noscript styles must resize the media with the panels"
+    assert "height: auto" in lookup[media], (
+        "with the cap gone the clips must take their intrinsic height instead of "
+        f"stretching to a `height: 100%` of an auto box; found {lookup[media]!r}"
+    )
+    assert ".scene-panel__fallback" in media, (
+        "the poster fallback must be released with the players it stands in for"
+    )
+
+    tabs = next((prelude for prelude in lookup if ".scene-tabs" in prelude), None)
+    assert tabs is not None, "the noscript styles must collapse the reserved tab strip"
+    assert "display: none" in lookup[tabs], (
+        "a strip of buttons that can never be enhanced must take no space at all; "
+        f"found {lookup[tabs]!r}"
+    )
+
+    assert "!important" not in noscript, (
+        "the noscript overrides must win on specificity, not force, so the shipped "
+        "rules stay debuggable"
+    )
+    shipped = _css()
+    for prelude, base in (
+        (unhide, ".md-typeset .scene-panel[hidden]"),
+        (uncap, ".md-typeset .hero-driver-stage .scene-panel"),
+    ):
+        assert _specificity(prelude) > _specificity(base), (
+            f"`{prelude}` must out-specify the shipped `{base}` rule regardless of "
+            "which stylesheet the browser reads first"
+        )
+        assert base in _strip_css_comments(shipped), (
+            f"the noscript override targets `{base}`, which no longer exists in "
+            "extra.css — the two must be changed together"
+        )
 
 
 def test_scene_switcher_uses_the_aria_tab_contract() -> None:
@@ -1905,6 +2119,7 @@ def test_scene_switcher_controller_behaves_correctly_against_a_minimal_dom() -> 
         "two ArrowRight presses walk the roving selection to the last scene",
         "left in the no-JavaScript state",
         "outside its own switcher is rejected",
+        "authored hidden panels are re-asserted, not re-laid-out, on enhancement",
         "without IntersectionObserver gets a working switcher that never autoplays",
     ):
         assert scenario in result.stdout, f"the DOM harness must cover {scenario!r}"
@@ -2788,15 +3003,20 @@ def test_visual_storytelling_design_separates_agent_capability_from_the_capture(
     )
 
 
-def test_scene_tabs_stay_hidden_until_the_controller_enhances_the_switcher() -> None:
-    """Without the controller the tab strip is inert, so it must not render.
+def test_scene_tabs_reserve_their_strip_but_stay_inert_until_enhanced() -> None:
+    """Without the controller the tab strip is inert — but it still occupies space.
 
-    The tabs only switch panels when `visual-storytelling.js` runs. With the
-    script blocked, all three panels are already visible in document order,
-    so a visible tab strip would offer two controls that do nothing, keep a
-    hard-coded `tabindex="-1"`, and advertise `aria-selected="true"` on one
-    of three simultaneously rendered panels. The controller sets
-    `data-enhanced` on the switcher; the stylesheet consumes it.
+    The tabs only switch panels when `visual-storytelling.js` runs, so an
+    unenhanced strip would offer two controls that do nothing, keep a
+    hard-coded `tabindex="-1"`, and advertise `aria-selected="true"` on a
+    panel that is one of several. It must not be operable.
+
+    `display: none` also *removed* it, which measured as a 74.6px jump the
+    moment the script ran — a quarter of the cold-load shift this stage now
+    avoids. `visibility: hidden` keeps the strip unpainted, unfocusable and
+    unannounced while still reserving its exact height, so enhancement
+    changes nothing about the layout. Visitors who can never be enhanced
+    (scripting off) collapse it via the `<noscript>` stylesheet instead.
     """
     css = _strip_css_comments(_css())
     selector = ".md-typeset [data-scene-switcher]:not([data-enhanced]) .scene-tabs"
@@ -2804,8 +3024,37 @@ def test_scene_tabs_stay_hidden_until_the_controller_enhances_the_switcher() -> 
         "the stylesheet must gate the tab strip on the controller's "
         f"`data-enhanced` hook via `{selector}`"
     )
-    assert "display: none" in _rule(_css(), selector)
+    gate = _rule(_css(), selector)
+    assert "visibility: hidden" in gate, (
+        "the inert strip must reserve its height so enhancement does not move the "
+        f"page; found {_compact(gate)!r}"
+    )
+    assert "display: none" not in gate, (
+        "removing the strip from flow is exactly the layout shift this fixes"
+    )
+    noscript = _noscript_style()
+    assert selector in noscript, (
+        "with scripting off the strip can never be enhanced, so the noscript "
+        "stylesheet must target the same reserved strip"
+    )
+    assert "display: none" in _rule(noscript, selector), (
+        "the noscript rule must collapse the space the shipped rule reserves"
+    )
+
     script = STORYTELLING_JS.read_text(encoding="utf-8")
+    assert 'switcher.dataset.enhanced = "true"' in script, (
+        "the controller must set the hook the no-JS gate depends on"
+    )
+    switcher = _hero()
+    assert "data-scene-switcher" in switcher
+    assert "data-enhanced" not in switcher, (
+        "the enhancement hook must be applied by the controller at runtime, "
+        "never hard-coded into the source"
+    )
+    panels = re.findall(r'<article id="scene-([^"]+)"', switcher)
+    assert panels == ["direct", "agent", "mcp"], (
+        "every panel must stay in the source order the no-JS fallback reads"
+    )
     assert 'switcher.dataset.enhanced = "true"' in script, (
         "the controller must set the hook the no-JS gate depends on"
     )
@@ -3069,15 +3318,17 @@ def test_retired_landing_components_leave_no_orphan_css() -> None:
 
     The compact homepage removed the framed hero mock-up, the standalone
     scene-switcher section and its heading block, the contract map, the
-    five-stage write path and the six-card evidence mosaic. Every rule that
-    styled them is now unreachable: it cannot be verified against a rendered
-    page, it makes the next reader believe those components still ship, and
-    it is exactly the kind of dead weight that gets copied into the next
-    component. No other page uses any of these classes — every `docs/**/*.md`
-    file and every active `docs/overrides/**/*.html` template is scanned below
-    (as class *tokens*, so a retired class reintroduced anywhere inside a
-    multi-class `class="..."` attribute is caught, not only as the attribute's
-    first token) so the check fails if one is ever reintroduced without its CSS.
+    five-stage write path and the six-card evidence mosaic. `.korvid-button`
+    never shipped at all — no page has ever authored the class. Every rule
+    that styled them is now unreachable: it cannot be verified against a
+    rendered page, it makes the next reader believe those components still
+    ship, and it is exactly the kind of dead weight that gets copied into the
+    next component. No other page uses any of these classes — every
+    `docs/**/*.md` file and every active `docs/overrides/**/*.html` template
+    is scanned below (as class *tokens*, so a retired class reintroduced
+    anywhere inside a multi-class `class="..."` attribute is caught, not only
+    as the attribute's first token) so the check fails if one is ever
+    reintroduced without its CSS.
     """
     css = _strip_css_comments(_css())
     retired = (
@@ -3089,6 +3340,7 @@ def test_retired_landing_components_leave_no_orphan_css() -> None:
         ".write-path",
         ".evidence-mosaic",
         ".evidence-card",
+        ".korvid-button",
     )
     for selector in retired:
         assert selector not in css, (
@@ -3116,6 +3368,33 @@ def test_retired_landing_components_leave_no_orphan_css() -> None:
             f"`{selector}` is authored again in docs/ but has no stylesheet; restore "
             "its rules together with the markup"
         )
+
+
+def test_stylesheet_declares_no_fully_shadowed_hero_media_rule() -> None:
+    """A rule every one of whose declarations always loses is dead code.
+
+    `.md-typeset .hero-demo video` set the same four properties as the later
+    `.md-typeset .scene-panel video`, at equal (0,3,1) specificity. Every
+    `<video>` on the page is inside a `.scene-panel` inside the `.hero-demo`
+    figure, so both rules always matched together and the later one always
+    won — the earlier rule could never affect a pixel, while reading as if
+    it set the hero's media defaults.
+    """
+    css = _strip_css_comments(_css())
+    assert ".md-typeset .hero-demo video {" not in css, (
+        "`.hero-demo video` is fully shadowed by the later `.scene-panel video` "
+        "rule; delete it rather than leave a rule that cannot render"
+    )
+    survivor = _rule(_css(), ".md-typeset .scene-panel video {")
+    for declaration in ("width: 100%", "display: block"):
+        assert declaration in survivor, (
+            f"the surviving media rule must still carry `{declaration}`, or deleting "
+            f"the shadowed rule changed rendering; found {_compact(survivor)!r}"
+        )
+    focus = _selector_list(_css(), ".md-typeset .hero-demo video:focus-visible")
+    assert "hero-demo" in focus, (
+        "the hero's media focus ring is not shadowed by anything and must survive"
+    )
 
 
 def test_stylesheet_declares_no_inert_content_width_abstraction() -> None:

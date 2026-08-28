@@ -119,21 +119,6 @@
   border-color: var(--korvid-amber-bright);
 }
 
-/* The same amber outline for the in-page calls to action further down the
-   landing page, which would otherwise inherit the docs' default link blue
-   and read as a different product. */
-.md-typeset .korvid-button {
-  color: var(--korvid-amber);
-  border-color: var(--korvid-amber);
-}
-
-.md-typeset .korvid-button:hover,
-.md-typeset .korvid-button:focus {
-  background-color: var(--korvid-amber);
-  border-color: var(--korvid-amber);
-  color: var(--korvid-charcoal);
-}
-
 /* ------------------------------------------------------------------ */
 /* Hero: the install command never breaks mid-token                     */
 /* ------------------------------------------------------------------ */
@@ -212,13 +197,6 @@
   margin: 0;
 }
 
-.md-typeset .hero-demo video {
-  display: block;
-  width: 100%;
-  aspect-ratio: 16 / 9;
-  background: #07090c;
-}
-
 .md-typeset .hero-demo figcaption {
   max-width: 34rem;
   margin: 0.8rem 0 0;
@@ -275,11 +253,18 @@
 
 /* The tabs only do something once `visual-storytelling.js` has wired them,
    and that controller announces itself by setting `data-enhanced` on the
-   switcher. Without it every panel is already rendered in document order,
-   so showing the strip would offer two dead controls and a selected state
-   that contradicts three visible panels. */
+   switcher. Until then the strip must not be operable: it would offer two
+   dead controls and a selected state nothing honours.
+
+   `visibility: hidden` rather than `display: none`, because removing the
+   strip from flow was itself a 74.6px layout shift the moment the script
+   ran. Hidden visibility keeps it unpainted, unfocusable and out of the
+   accessibility tree while reserving the exact space enhancement will use,
+   so the tabs appear without moving anything below them. A visitor who can
+   never be enhanced (scripting off) collapses the reservation instead —
+   see the `<noscript>` block in `docs/overrides/home.html`. */
 .md-typeset [data-scene-switcher]:not([data-enhanced]) .scene-tabs {
-  display: none;
+  visibility: hidden;
 }
 
 .md-typeset .scene-tabs button {
@@ -436,54 +421,59 @@
   margin: 0;
 }
 
-/* The frame owns the aspect ratio; the replaced elements only fit inside
-   it. Gated on the controller's own `data-enhanced` hook — the same one
-   that reveals the tab strip — because only the enhanced switcher shows a
-   single panel. Without JavaScript, and for the moment before the
-   controller runs, all three panels are stacked in document order, and a
-   fixed-ratio box that clips its overflow would hold 332px of a 1,047px
-   stack (measured on the built page in Chromium at 1440x900), leaving none
-   of the three fallback panels fully visible. */
-.md-typeset [data-scene-switcher][data-enhanced] .hero-driver-stage .scene-panels {
-  width: 100%;
+/* The panel owns the aspect ratio; the replaced elements only fit inside
+   it. Authored, not enhanced: gating this box on the controller's
+   `data-enhanced` hook left the first paint with no box at all, and the
+   built page measured a 1,049px three-panel stage collapsing to 334px the
+   moment the script ran — a 631px hero shift on every cold load. The two
+   unselected panels now carry `hidden` in the source instead, so one scene
+   is painted from the first frame and the cap can bind with it.
+
+   The cap sits on the *panel* rather than on the clipping `.scene-panels`
+   frame precisely so it can be ungated. Both the `<noscript>` rendering and
+   the controller's own rollback un-hide all three panels; a fixed-ratio box
+   on the frame would then hold 332px of a 1,047px stack (measured in
+   Chromium at 1440x900) and cut off two of the three scenes. A per-panel
+   cap lets the frame grow with whatever stack it is handed, so nothing is
+   ever clipped, while the one-panel stage stays inside the fold.
+
+   Never declare `display` here: this selector is (0,3,0), exactly ties
+   `.md-typeset .scene-panel[hidden]`, and is authored first, so a `display`
+   declaration would lose the tie today and un-hide every deselected panel
+   the moment either rule moved. */
+.md-typeset .hero-driver-stage .scene-panel {
   aspect-ratio: 16 / 9;
   max-height: min(58vh, 540px);
-}
-
-/* A cap only bounds the stage if the media shrinks with it. The panel is a
-   grid, and its implicit `auto` row keeps the clip's intrinsic 16:9
-   contribution: measured at 1440x400, where `min(58vh, 540px)` binds, a
-   232px frame still held a 310px clip and cut 100px off the bottom. A
-   `minmax(0, 1fr)` track may shrink below its content, so the row follows
-   the frame. The 1rem inset goes with it — an inset box inside a 16:9 frame
-   is not itself 16:9, so `contain` would pillarbox a 16:9 clip inside its
-   own frame. Never declare `display` here: this selector is (0,5,0) and
-   would out-specify `.md-typeset .scene-panel[hidden]`. */
-.md-typeset [data-scene-switcher][data-enhanced] .hero-driver-stage .scene-panel {
-  height: 100%;
   grid-template-rows: minmax(0, 1fr);
   gap: 0;
   padding: 0;
 }
 
-/* The frame already draws the border and the rounded corners it clips to,
-   so a second border on the replaced element sits on top of it and, under
-   the theme's `box-sizing: border-box`, steals 2px from the fitted box. */
-.md-typeset [data-scene-switcher][data-enhanced] .hero-driver-stage video,
-.md-typeset [data-scene-switcher][data-enhanced] .hero-driver-stage .scene-panel__fallback {
-  width: 100%;
-  height: 100%;
-  border: 0;
-  border-radius: 0;
-}
+/* A cap only bounds the stage if the media shrinks with it. The panel is a
+   grid, and its implicit `auto` row keeps the clip's intrinsic 16:9
+   contribution: measured at 1440x400, where `min(58vh, 540px)` binds, a
+   232px box still held a 310px clip and cut 100px off the bottom. The
+   `minmax(0, 1fr)` track above may shrink below its content, so the row
+   follows the cap, and the media fills whatever the row resolves to. The
+   panel's 1rem inset goes with it — an inset box inside a 16:9 box is not
+   itself 16:9, so `contain` would pillarbox a 16:9 clip inside its own
+   frame.
 
-/* `contain` is the UA default for `<video>` but `fill` for `<img>`, so the
+   The frame already draws the border and the rounded corners it clips to,
+   so a second border on the replaced element sits on top of it and, under
+   the theme's `box-sizing: border-box`, steals 2px from the fitted box.
+
+   `contain` is the UA default for `<video>` but `fill` for `<img>`, so the
    no-JavaScript poster would be the one surface that stretches. Stating it
    for both is also what lets the 1280x710 MCP clip letterbox by a few
-   pixels inside the shared 16:9 frame instead of being cropped to it. */
+   pixels inside the shared 16:9 box instead of being cropped to it. */
 .md-typeset .hero-driver-stage video,
 .md-typeset .hero-driver-stage .scene-panel__fallback {
+  width: 100%;
+  height: 100%;
   min-width: 0;
+  border: 0;
+  border-radius: 0;
   object-fit: contain;
 }
 

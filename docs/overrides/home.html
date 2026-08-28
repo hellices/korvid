@@ -1,5 +1,44 @@
 {% extends "main.html" %}
 
+{#- The landing page's two unselected scene panels carry `hidden` in the
+    source so a cold load paints one capped stage instead of a three-panel
+    stack that the controller then collapses. That is only honest if a
+    visitor with scripting disabled — for whom the controller will never
+    run — gets every scene back, uncapped and unclipped.
+
+    `<noscript>` may only carry flow content in `<body>`, so the restore
+    ships here, where a `<style>` element is valid. Every override adds one
+    compound selector to the rule it releases, so it wins on specificity and
+    never on which stylesheet the browser happened to read first — no
+    `!important` anywhere. -#}
+{% block extrahead %}
+  <noscript>
+    <style>
+      .md-typeset [data-scene-switcher] .scene-panel[hidden] {
+        display: grid;
+      }
+
+      .md-typeset [data-scene-switcher] .hero-driver-stage .scene-panel {
+        aspect-ratio: auto;
+        max-height: none;
+        gap: 0.75rem;
+        padding: 1rem;
+      }
+
+      .md-typeset [data-scene-switcher] .hero-driver-stage video,
+      .md-typeset [data-scene-switcher] .hero-driver-stage .scene-panel__fallback {
+        height: auto;
+        border: 1px solid var(--korvid-charcoal-border);
+        border-radius: calc(var(--korvid-radius) - 0.15rem);
+      }
+
+      .md-typeset [data-scene-switcher]:not([data-enhanced]) .scene-tabs {
+        display: none;
+      }
+    </style>
+  </noscript>
+{% endblock %}
+
 {% block tabs %}{% endblock %}
 
 {% block content %}
