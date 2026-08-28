@@ -88,8 +88,7 @@ def test_feature_index_preserves_security_and_development_plan_github_links() ->
     )
 
 
-def test_readme_preserves_demo_source_and_git_install_fallback_github_links() -> None:
-    """Demo source and the git-source install fallback stay on GitHub, whole-README."""
+def test_readme_preserves_git_install_fallback_github_link() -> None:
+    """The git-source install fallback stays on GitHub, whole-README."""
     readme = _readme()
-    assert "https://github.com/hellices/korvid/tree/main/docs/demo" in readme
     assert "uv tool install 'korvid[all] @ git+https://github.com/hellices/korvid'" in readme

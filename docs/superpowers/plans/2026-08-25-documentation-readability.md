@@ -454,7 +454,7 @@ Add:
 ```python
 agent = _source("agent.md")
 assert "deterministic synthetic-cluster walkthrough" in agent
-assert "`AgentRuntime`" in agent
+assert "`DefaultAgentSession`" in agent
 assert "`EvidenceLedger`" in agent
 assert "fresh user keystroke" in agent
 
@@ -482,7 +482,7 @@ Keep the current Agent storyboard and poster. Use:
 - `## What leaves the machine` — provider payload inspection and masking boundary.
 - `## Connect a provider` — one minimal configuration table covering built-in providers, linking Provider Plugins for adapters.
 - `## Stop, correct, or follow` — interrupt/replacement and follow behavior.
-- `## What the recording demonstrates` — a deterministic synthetic-cluster walkthrough whose turn is real: the prompt is submitted through the real `AgentPanel`, the shipped `AgentRuntime` dispatches `diagnose_pod` then `get_logs` through the real `ToolExecutor`, and the real `EvidenceLedger` mints `[E1]`/`[E2]` and validates the answer's markers against them. State the limitation precisely — a deterministic offline provider answers, and every byte read comes from a synthetic fixture, so the clip is not evidence about a live provider, live-model answer quality, or a live cluster.
+- `## What the recording demonstrates` — a deterministic synthetic-cluster walkthrough whose turn is real: the prompt is submitted through the real `AgentPanel`, the shipped `DefaultAgentSession` and `NativeAgentEngine` dispatch `diagnose_pod` then `get_logs` through the real `ToolExecutor`, and the real `EvidenceLedger` mints `[E1]`/`[E2]` and validates the answer's markers against them. State the limitation precisely — a deterministic offline provider answers, and every byte read comes from a synthetic fixture, so the clip is not evidence about a live provider, live-model answer quality, or a live cluster.
 
 Remove the long provider-by-provider shell-command catalog, tuning guide, eval harness procedure, and conversational journey inventory from this introductory page.
 

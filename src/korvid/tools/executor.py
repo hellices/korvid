@@ -998,7 +998,7 @@ class ToolExecutor(RecordedExecution):
             )
         )
 
-    async def _dispatch_proposal(self, tool: ToolDef, args: dict[str, Any]) -> str:
+    async def _dispatch_proposal(self, tool: ToolDef, args: dict[str, Any]) -> ToolOutcome:
         """Route a proposal tool (issue #110): submit/status/cancel only.
 
         Proposal tools never execute a write — the validated dispatch key
@@ -1012,23 +1012,27 @@ class ToolExecutor(RecordedExecution):
         session_id = str(args.get("_session_id", ""))
         if tool.dispatch == "agent_submit_write_proposal":
             action, kind, target, namespace, replicas, resources = _validated_proposal_args(args)
-            return await self._ui.agent_submit_write_proposal(
-                action,
-                kind,
-                target,
-                namespace,
-                replicas,
-                resources,
-                session_id=session_id,
-                client_name=str(args.get("_client_name", "")),
-                client_version=str(args.get("_client_version", "")),
+            return _bridge_outcome(
+                await self._ui.agent_submit_write_proposal(
+                    action,
+                    kind,
+                    target,
+                    namespace,
+                    replicas,
+                    resources,
+                    session_id=session_id,
+                    client_name=str(args.get("_client_name", "")),
+                    client_version=str(args.get("_client_version", "")),
+                )
             )
         proposal_id = args.get("proposal_id")
         if not isinstance(proposal_id, str) or not proposal_id:
             raise ValueError(f"'proposal_id' must be a non-empty string, got {proposal_id!r}")
         if tool.dispatch == "agent_cancel_write_proposal":
-            return await self._ui.agent_cancel_write_proposal(proposal_id, session_id=session_id)
-        return await self._ui.agent_get_write_proposal(proposal_id)
+            return _bridge_outcome(
+                await self._ui.agent_cancel_write_proposal(proposal_id, session_id=session_id)
+            )
+        return _bridge_outcome(await self._ui.agent_get_write_proposal(proposal_id))
 
     def _api_meta(self, kind: str) -> ResourceMeta:
         """Alias lookup for tools that build API paths: synthetic view kinds

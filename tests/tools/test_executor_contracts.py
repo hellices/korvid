@@ -167,6 +167,20 @@ async def test_write_bridge_failure_text_is_reported_as_an_error() -> None:
     assert outcome.text.startswith(ERROR_PREFIX)
 
 
+async def test_proposal_bridge_failure_text_is_reported_as_an_error() -> None:
+    class DenyingProposalBridge(FakeBridge):
+        async def agent_get_write_proposal(self, proposal_id: str) -> str:
+            return f"{ERROR_PREFIX} proposal session is unavailable"
+
+    outcome = await make_ui_executor(DenyingProposalBridge()).execute_recorded(
+        "get_write_proposal",
+        {"proposal_id": "proposal-1"},
+    )
+
+    assert outcome.error is True
+    assert outcome.text.startswith(ERROR_PREFIX)
+
+
 # --- The recorded-execution contract is an ABC (round 6) -------------------
 #
 # The agent loop used to runtime-check a private Protocol it declared

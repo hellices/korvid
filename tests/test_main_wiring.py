@@ -169,11 +169,11 @@ async def test_proxy_not_ready_line_is_composed_from_the_shared_error_prefix() -
     the proxy holds, and the answer it actually returns, both have to move
     with the prefix if the prefix ever changes.
     """
-    from korvid.__main__ import _UIBridgeProxy
+    from korvid.__main__ import _AgentToolUIBridgeProxy
 
-    proxy = _UIBridgeProxy()
+    proxy = _AgentToolUIBridgeProxy()
 
-    assert f"{ERROR_PREFIX} UI not ready" == _UIBridgeProxy._NOT_READY
+    assert f"{ERROR_PREFIX} UI not ready" == _AgentToolUIBridgeProxy._NOT_READY
     assert (await proxy.agent_navigate("pods")).startswith(ERROR_PREFIX)
 
 

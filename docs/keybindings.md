@@ -2,7 +2,7 @@
 
 Korvid shows only the keys that act on the current view. Press `?` for the complete effective set, including remaps; press `~` to expand the top-bar legend.
 
-<img class="docs-keymap" src="../assets/keybindings-context-map.svg" width="460" height="820" alt="Context map of Korvid's keys by context. GLOBAL keys : ? 0 — command bar, effective-key help, namespace scope — work in every view and lead to TABLE keys Enter d g l, where / filters the table. TABLE branches down to LOGS keys / f w p — search, JSON/raw format, wrap, previous — and across to guarded WRITE keys r S Ctrl-D — restart, scale, delete — each of which still requires a fresh approval keystroke.">
+<img class="docs-keymap" src="../assets/keybindings-context-map.svg" width="460" height="1012" alt="Korvid key contexts. GLOBAL keys : ? 0 lead to TABLE. TABLE keys Enter d g / T inspect resources, filter tables, and open the bounded timeline. PODS keys l L Ctrl-T open logs, merged logs, and file transfer; PODS leads to LOGS. LOGS keys / f w p search, toggle JSON/raw format, wrap, and show previous logs. TABLE branches to guarded WRITE. WRITE keys r S Ctrl-D restart, scale, and delete; each requires a fresh approval keystroke.">
 
 ## Move and inspect
 
@@ -17,7 +17,9 @@ Korvid shows only the keys that act on the current view. Press `?` for the compl
 | `1`–`9` | Jump to a configured favorite namespace |
 | `d` | Describe the selected resource |
 | `g` | Open operational relationships |
+| `T` | Open the bounded session timeline |
 | `l` / `L` | Open selected or merged pod logs |
+| `Ctrl-T` | Transfer files to or from the selected pod |
 | `Ctrl-W v/w/q` | Split, focus, or close a workspace pane |
 | `Ctrl-A` / `Ctrl-X` | Toggle the Agent / stop its current turn |
 | `q` | Quit |

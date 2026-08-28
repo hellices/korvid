@@ -17,7 +17,7 @@ executes without a fresh user keystroke in the TUI.
 **MCP tool calls never go through korvid's embedded-provider boundary.** No
 korvid-managed model call is involved, so `OutboundPolicy` — the sanitized
 payload, the request caps, the text credential-pattern masking the embedded
-[agent](agent.md#what-leaves-the-machine) applies — does not run on this
+[agent](agent.md#inspecting-what-the-agent-sends) applies — does not run on this
 surface at all. Disclosure is **tool-specific**, and what an MCP client
 receives is **not necessarily the same snapshot** a Direct keybinding or the
 embedded Agent would show for the same object:
@@ -129,8 +129,7 @@ prod)`), so nothing reads your cluster invisibly.
 
 The landing clip of this flow is recorded from this repository alone: a real
 MCP SDK client making read-only requests over Streamable HTTP to a loopback
-korvid serving a synthetic cluster, with follow mirroring each answer. Full
-provenance: [visual evidence](demo/visual-storytelling.md#mcp-follow).
+korvid serving a synthetic cluster, with follow mirroring each answer.
 
 ## Propose a write
 

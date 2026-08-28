@@ -72,6 +72,10 @@ class HTMLElement {
     return this.attributes.get("id") ?? "";
   }
 
+  get parentElement() {
+    return this.parent;
+  }
+
   getAttribute(name) {
     return this.attributes.has(name) ? this.attributes.get(name) : null;
   }
@@ -199,8 +203,13 @@ function element(tag, attributes, ...children) {
   return new HTMLElement(tag, attributes).append(...children);
 }
 
-/** Build one switcher shaped like the landing page's, with three scenes. */
-function buildSwitcher(prefix, { brokenTab = null, panelOutside = false } = {}) {
+/** Build one switcher shaped like the landing page's, with three scenes.
+ *
+ *  `authoredHidden` mirrors the shipped markup, where the two unselected
+ *  panels carry `hidden` in the source so the cold load paints one scene
+ *  instead of a three-panel stack the controller then collapses. Pass
+ *  `false` to model markup that leaves the whole state to the controller. */
+function buildSwitcher(prefix, { brokenTab = null, panelOutside = false, authoredHidden = true } = {}) {
   const scenes = ["direct", "agent", "mcp"];
   const tabs = scenes.map((scene, index) =>
     element("button", {
@@ -219,13 +228,22 @@ function buildSwitcher(prefix, { brokenTab = null, panelOutside = false } = {}) 
         : { "data-src": `${scene}.mp4`, "data-poster": `${scene}.png` }),
     }),
   );
-  const panels = scenes.map((scene, index) =>
-    element(
+  const panels = scenes.map((scene, index) => {
+    const children = [videos[index]];
+    if (index > 0) {
+      children.push(element("img", { class: "scene-panel__fallback", src: `${scene}.png` }));
+    }
+    return element(
       "article",
-      { id: `${prefix}-${scene}`, class: "scene-panel", role: "tabpanel" },
-      videos[index],
-    ),
-  );
+      {
+        id: `${prefix}-${scene}`,
+        class: "scene-panel",
+        role: "tabpanel",
+        ...(authoredHidden && index > 0 ? { hidden: "" } : {}),
+      },
+      ...children,
+    );
+  });
   const switcher = element(
     "section",
     { class: "scene-switcher", "data-scene-switcher": "" },
@@ -392,15 +410,16 @@ const scenarios = {
     );
   },
 
-  "a rejected play() promise is swallowed without rolling back the switcher"() {
+  async "an autoplay policy rejection is swallowed without rolling back the switcher"() {
     const built = buildSwitcher("a");
     const document = buildDocument([built.switcher]);
     const { errors, observers } = run(document);
-    built.videos[0].playError = new Error("NotAllowedError");
+    built.videos[0].playError = Object.assign(new Error("blocked"), { name: "NotAllowedError" });
 
     assert.doesNotThrow(() => {
       observers[0].callback([{ isIntersecting: true }]);
     });
+    await Promise.resolve();
     assert.deepEqual(errors, [], "a browser-blocked autoplay must not be reported as a failure");
     assert.equal(
       built.switcher.getAttribute("data-enhanced"),
@@ -820,7 +839,54 @@ const scenarios = {
       [false, false],
       "the switcher's own panels stay visible",
     );
-    assert.equal(built.stray.hidden, false, "a panel outside the switcher is never touched");
+    assert.equal(
+      built.stray.hidden,
+      true,
+      "a panel outside the switcher is never touched, so it keeps the authored state",
+    );
+  },
+
+  "authored hidden panels are re-asserted, not re-laid-out, on enhancement"() {
+    /* The shipped markup hides the two unselected panels itself, so the
+       first paint already shows the one scene the controller would select.
+       Enhancement must therefore write the state the page is already in —
+       if it moved a single panel, the cold load would shift exactly the way
+       an unauthored stack did (a measured 1,049px stage collapsing to
+       334px). Markup that does *not* author the state still gets it, so the
+       controller remains the owner rather than the assumer. */
+    const built = buildSwitcher("a");
+    const authored = built.panels.map((panel) => panel.hidden);
+    assert.deepEqual(authored, [false, true, true], "the fixture must mirror the shipped markup");
+
+    const { errors } = run(buildDocument([built.switcher]));
+    assert.deepEqual(errors, []);
+    assert.deepEqual(
+      built.panels.map((panel) => panel.hidden),
+      authored,
+      "enhancement must not move a panel that the source already placed",
+    );
+    assert.equal(built.switcher.getAttribute("data-enhanced"), "true");
+
+    built.tabs[1].dispatch("click", {});
+    assert.deepEqual(
+      built.panels.map((panel) => panel.hidden),
+      [true, false, true],
+      "the controller must still own the attribute it inherited",
+    );
+
+    const legacy = buildSwitcher("b", { authoredHidden: false });
+    assert.deepEqual(
+      legacy.panels.map((panel) => panel.hidden),
+      [false, false, false],
+      "the control case starts with every panel visible",
+    );
+    const legacyRun = run(buildDocument([legacy.switcher]));
+    assert.deepEqual(legacyRun.errors, []);
+    assert.deepEqual(
+      legacy.panels.map((panel) => panel.hidden),
+      [false, true, true],
+      "markup that leaves the state unauthored must still be collapsed by the controller",
+    );
   },
 
   "two ArrowRight presses walk the roving selection to the last scene"() {
@@ -919,7 +985,7 @@ const scenarios = {
 let failed = 0;
 for (const [name, scenario] of Object.entries(scenarios)) {
   try {
-    scenario();
+    await scenario();
     console.log(`ok ${name}`);
   } catch (error) {
     failed += 1;

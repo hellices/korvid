@@ -42,7 +42,6 @@ EXTRA_CSS = DOCS / "stylesheets" / "extra.css"
 OVERRIDES = DOCS / "overrides"
 COPYRIGHT_PARTIAL = OVERRIDES / "partials" / "copyright.html"
 MARK = DOCS / "assets" / "korvid-mark.svg"
-DEMO_README = DOCS / "demo" / "README.md"
 STORYTELLING_JS = DOCS / "assets" / "javascripts" / "visual-storytelling.js"
 SWITCHER_HARNESS = ROOT / "tests" / "js" / "scene_switcher_harness.mjs"
 VISUAL_STORYTELLING_PLAN = DOCS / "superpowers" / "plans" / "2026-08-22-visual-storytelling.md"
@@ -52,11 +51,11 @@ VISUAL_STORYTELLING_DESIGN = (
 
 MATERIAL_ATTRIBUTION = "https://squidfunk.github.io/mkdocs-material/"
 
-#: The Evidence label the Agent scene ships. `build_demo_agent_runtime` in
-#: `docs/demo/agent_story.py` wires korvid's own `AgentRuntime` to the real
-#: `ToolExecutor` over the synthetic `DemoReadOps` fixture, so the capture's
-#: reads are the product's real read tools — the deterministic part is the
-#: cluster they read and the offline provider that chose them.
+#: The Evidence label the Agent scene ships. `build_demo_agent_session` in
+#: `docs/demo/agent_story.py` wires korvid's own `DefaultAgentSession` to the
+#: real `ToolExecutor` over the synthetic `DemoReadOps` fixture, so the
+#: capture's reads are the product's real read tools — the deterministic part
+#: is the cluster they read and the offline provider that chose them.
 AGENT_SCENE_EVIDENCE = "Real read tools over a deterministic synthetic cluster"
 
 
@@ -70,7 +69,7 @@ def test_visual_storytelling_design_names_the_real_agent_security_perimeter() ->
 
 
 #: Claims no surface built on `agent-poster.png`/`agent-demo.mp4` may make.
-#: The recording runs the real runtime, executor and evidence ledger, so the
+#: The recording runs the real session, executor and evidence ledger, so the
 #: read path is no longer the overclaim; the model and the cluster are.
 #: `DemoAgentProvider` opens no socket and always chooses the same two tool
 #: calls, and every byte those tools read is a fixture — so nothing here may
@@ -1226,17 +1225,6 @@ def test_visual_storytelling_plan_hero_css_matches_the_shipped_rules() -> None:
         if ".hero .hero-heading" in block
     )
     assert _compact(plan_wide) == _compact(shipped_wide)
-
-
-def test_demo_regeneration_updates_both_readme_and_site_formats() -> None:
-    """One canonical recording must refresh the README GIF and site MP4 together."""
-    instructions = DEMO_README.read_text(encoding="utf-8")
-    assert "vhs docs/demo/demo.tape" in instructions
-    assert "ffmpeg" in instructions
-    assert "docs/assets/demo.gif" in instructions
-    assert "docs/assets/demo.mp4" in instructions
-    assert "-movflags +faststart" in instructions
-    assert "yuv420p" in instructions
 
 
 # --- the whole page stays original, asset-light, and script-free -------------
@@ -2459,15 +2447,15 @@ def test_no_landing_surface_reduces_the_tui_to_a_watch_backed_snapshot() -> None
 def test_agent_scene_states_the_grounded_deterministic_walkthrough() -> None:
     """The Agent scene ships a real turn over a deterministic synthetic cluster.
 
-    `docs/demo/demo.py` wires the `agent` scene to `build_demo_agent_runtime`,
-    which is korvid's own `AgentRuntime` over the real `ToolExecutor` and the
-    synthetic `DemoReadOps` fixture. The prompt really is submitted through
-    the real `AgentPanel`; `diagnose_pod` and `get_logs` really execute; the
-    real `EvidenceLedger` mints `[E1]`/`[E2]` and validates the answer's
-    markers against them, so the frame carries no unsupported-citation
-    warning. What the capture still cannot speak for is a live model, a live
-    cluster, or answer quality — `DemoAgentProvider` is offline and always
-    chooses the same two calls.
+    `docs/demo/demo.py` wires the `agent` scene to `build_demo_agent_session`,
+    which is korvid's own `DefaultAgentSession` over the real `ToolExecutor`
+    and the synthetic `DemoReadOps` fixture. The prompt really is submitted
+    through the real `AgentPanel`; `diagnose_pod` and `get_logs` really
+    execute; the real `EvidenceLedger` mints `[E1]`/`[E2]` and validates the
+    answer's markers against them, so the frame carries no
+    unsupported-citation warning. What the capture still cannot speak for is a
+    live model, a live cluster, or answer quality — `DemoAgentProvider` is
+    offline and always chooses the same two calls.
 
     So the stage must state both halves, and must never again describe
     injected events, an empty ledger, or a flagged citation. The compact page
@@ -2717,14 +2705,6 @@ def test_agent_capture_never_presents_the_selected_row_as_grounding() -> None:
             assert grounding not in flattened, (
                 f"the capture must not offer {grounding!r} as evidence: {flattened!r}"
             )
-
-    provenance = (DOCS / "demo" / "visual-storytelling.md").read_text(encoding="utf-8")
-    section = provenance.split("## Embedded agent", 1)[1].split("\n## ", 1)[0]
-    lowered = " ".join(section.lower().split())
-    assert "selected row" in lowered, (
-        "the provenance page must state plainly that the capture's selected row "
-        "is not the grounding for the answer"
-    )
 
 
 def test_human_authority_highlight_orders_confirmation_audit_and_execution() -> None:

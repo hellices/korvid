@@ -52,6 +52,11 @@ def test_keybinding_summary_matches_configured_and_view_specific_actions() -> No
 
     assert "| `0` | Toggle all namespaces |" in source
     assert "| `1`\N{EN DASH}`9` | Jump to a configured favorite namespace |" in source
+    assert "| `T` | Open the bounded session timeline |" in source
+    assert "| `Ctrl-T` | Transfer files to or from the selected pod |" in source
+    keymap = _keymap_source()
+    assert ">T</text>" in keymap
+    assert ">Ctrl-T</text>" in keymap
     assert "| Deployments / StatefulSets | `r` restart · `S` scale |" in source
     assert "| DaemonSets | `r` restart |" in source
     assert "| ReplicaSets | `S` scale |" in source
@@ -191,7 +196,7 @@ def test_administration_guides_keep_their_empirical_and_contract_detail() -> Non
 
     provider = _source("provider-plugins.md")
     for heading in (
-        "## API-v1: exact public surface",
+        "## API 2: exact public surface",
         "## Event contract and exact limits",
         "## Options contract, immutability, and secret policy",
         "## Lifecycle and compatibility",
@@ -648,7 +653,7 @@ def test_keybindings_context_map_keeps_its_accessible_name_and_every_label() -> 
     assert root.get("aria-labelledby") == "keymap-title keymap-desc"
     assert root.get("role") == "img"
     texts = {(node.text or "").strip() for node in root.iter() if node.text}
-    for label in ("GLOBAL", "TABLE", "LOGS", "WRITE", "Fresh approval keystroke"):
+    for label in ("GLOBAL", "TABLE", "PODS", "LOGS", "WRITE", "Fresh approval keystroke"):
         assert label in texts, f"keymap lost the {label!r} label"
     for key in (":", "?", "/", "0", "Enter", "d", "g", "l", "f", "w", "p", "r", "S", "Ctrl-D"):
         assert key in texts, f"keymap lost the {key!r} key chip"
@@ -667,7 +672,7 @@ def test_keybindings_context_map_draws_slash_in_the_contexts_that_answer_it() ->
     map exists to remove. It belongs in the two boxes that answer it.
     """
     contexts = _keymap_contexts()
-    assert set(contexts) == {"GLOBAL", "TABLE", "LOGS", "WRITE"}
+    assert set(contexts) == {"GLOBAL", "TABLE", "PODS", "LOGS", "WRITE"}
     keys = {name: [label for _, _, label in chips] for name, chips in contexts.items()}
 
     assert keys["GLOBAL"] == [":", "?", "0"], (
@@ -675,7 +680,8 @@ def test_keybindings_context_map_draws_slash_in_the_contexts_that_answer_it() ->
     )
     assert "/" in keys["TABLE"], "the table's filter is what `/` opens when no pane is up"
     assert "/" in keys["LOGS"], "the log pane's inline search must keep its `/`"
-    assert keys["TABLE"] == ["Enter", "d", "g", "l", "/"]
+    assert keys["TABLE"] == ["Enter", "d", "g", "/", "T"]
+    assert keys["PODS"] == ["l", "L", "Ctrl-T"]
     assert keys["LOGS"] == ["/", "f", "w", "p"]
     assert keys["WRITE"] == ["r", "S", "Ctrl-D"]
 
@@ -764,8 +770,8 @@ def test_keybindings_context_map_alt_carries_the_relationships_it_draws() -> Non
     assert re.search(r"GLOBAL[^.]*lead[s]? to[^.]*TABLE", flat), (
         "the first arrow — global navigation reaching table inspection — must be stated"
     )
-    assert re.search(r"TABLE branches[^.]*LOGS", flat), (
-        f"the table's downward branch — to LOGS — must be stated: {flat!r}"
+    assert re.search(r"PODS leads[^.]*LOGS", flat), (
+        f"the pod-only downward branch — to LOGS — must be stated: {flat!r}"
     )
     assert re.search(r"TABLE branches[^.]*WRITE", flat), (
         f"the table's sideways branch — to guarded WRITE — must be stated: {flat!r}"
@@ -997,21 +1003,26 @@ def test_ops_debug_shell_lifecycles_are_not_conflated() -> None:
 def test_readability_design_agent_limitation_matches_the_shipped_capture() -> None:
     """Video round 2, finding 3 (comment 3859012143).
 
-    `docs/demo/agent_story.py` drives the real `AgentRuntime` over the real
+    `docs/demo/agent_story.py` drives korvid's own agent session over the real
     `ToolExecutor` (`diagnose_pod`, then `get_logs`) with a deterministic
     offline provider, and the real `EvidenceLedger` mints `[E1]`/`[E2]`. The
     design bullet must keep the live-provider/live-cluster/answer-quality
     limitation without claiming the clip lacks grounded tool calls.
+
+    The bullet is a historical record, so it still names the v1 loop by the
+    name it had when it was written; the classes checked here are the ones
+    that outlived the interaction-harness migration. What the capture runs
+    *today* is pinned by the demo contracts in `test_docs_visual_assets.py`.
     """
     spec = _source("superpowers/specs/2026-08-25-documentation-readability-design.md")
     flat = " ".join(spec.split())
     lowered = flat.lower()
 
     assert "not live provider execution or grounded tool calls" not in lowered, (
-        "the capture does run grounded tool calls through the shipped runtime"
+        "the capture does run grounded tool calls through the shipped agent"
     )
     assert "not grounded" not in lowered, "no wording may deny the capture's grounding"
-    for real_path in ("AgentRuntime", "ToolExecutor", "EvidenceLedger", "AgentPanel"):
+    for real_path in ("ToolExecutor", "EvidenceLedger", "AgentPanel"):
         assert real_path in flat, f"the bullet must name {real_path} as a real code path"
     for marker in ("`[E1]`", "`[E2]`"):
         assert marker in flat, f"the ledger mints {marker}; the bullet must name it"
@@ -1829,8 +1840,8 @@ def test_readability_plan_agent_assertions_match_the_shipped_pages() -> None:
     contributor pastes them into `tests/test_docs_readability.py` and edits
     the pages until they pass, so every literal has to be a claim the
     shipped page actually makes. `"not live provider execution or grounded
-    tool calls"` is not: `docs/demo/agent_story.py` drives the real
-    `AgentRuntime` over the real `ToolExecutor` and the real
+    tool calls"` is not: `docs/demo/agent_story.py` drives korvid's own
+    agent session over the real `ToolExecutor` and the real
     `EvidenceLedger` mints `[E1]`/`[E2]`, so replaying that assertion would
     reintroduce a false disclaimer about korvid's own recording.
     """
@@ -1850,7 +1861,7 @@ def test_readability_plan_agent_assertions_match_the_shipped_pages() -> None:
 
     lowered = plan.lower()
     assert "grounded tool calls" not in lowered, (
-        "the capture does run grounded tool calls through the shipped runtime"
+        "the capture does run grounded tool calls through the shipped agent"
     )
     assert "not grounded" not in lowered, "no plan wording may deny the capture's grounding"
 
@@ -1863,6 +1874,11 @@ def test_readability_plan_recording_outline_states_the_real_agent_path() -> None
     limitations that actually apply — no live provider, no live-model
     quality claim, no live cluster — instead of the retired claim that the
     walkthrough had no grounded tool calls.
+
+    The plan is a historical record and still names the v1 loop it was
+    written against; the classes checked here are the ones that outlived the
+    interaction-harness migration. Today's session is pinned by the demo
+    contracts in `test_docs_visual_assets.py`.
     """
     bullet = next(
         line
@@ -1870,7 +1886,7 @@ def test_readability_plan_recording_outline_states_the_real_agent_path() -> None
         if line.startswith("- `## What the recording demonstrates`")
     )
 
-    for real_path in ("AgentPanel", "AgentRuntime", "ToolExecutor", "EvidenceLedger"):
+    for real_path in ("AgentPanel", "ToolExecutor", "EvidenceLedger"):
         assert real_path in bullet, f"the outline must name {real_path} as a real code path"
     for marker in ("[E1]", "[E2]"):
         assert marker in bullet, f"the ledger mints {marker}; the outline must name it"
@@ -1892,7 +1908,7 @@ def test_observability_connector_diagram_claims_provenance_not_citations() -> No
     """Post-merge review: citations are minted by the agent, not by MCP.
 
     This page documents one connector pair for two consumers. Only one of
-    them mints citations: `AgentRuntime` records a read into its
+    them mints citations: the agent session records a read into its
     `EvidenceLedger` and hands the model an `[E1]`-style reference, while
     `KorvidMCPServer` returns the executor's content to the host directly
     and keeps no ledger at all. The single node both paths flow into may

@@ -87,6 +87,15 @@ def test_public_guides_distinguish_validated_evidence_from_navigable_citations()
     assert "compound diagnostics remain validated evidence" in agent
 
 
+def test_agent_install_guide_matches_base_install_availability() -> None:
+    """Without the optional extra, neither Ctrl-A nor :ai is registered."""
+    agent = " ".join(_text("docs/agent.md").split())
+
+    assert "`Ctrl-A` is unavailable" in agent
+    assert "`:ai` is not registered" in agent
+    assert "`Ctrl-A` simply shows a setup hint" not in agent
+
+
 # ---------------------------------------------------------------------------
 # 1. The documented security perimeter is the one that exists
 # ---------------------------------------------------------------------------

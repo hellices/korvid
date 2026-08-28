@@ -32,80 +32,63 @@ flowchart LR
 ```
 
 `audit.jsonl` and any log/describe capture you save are **not** provider
-payloads — they are raw cluster and operator data with no `OutboundPolicy`
-sanitization applied, and stay just as sensitive as the cluster access that
-produced them. Only the sanitized request the agent actually sends is
-redacted and inspectable via `:ai payload` (see
-[`docs/agent.md#what-leaves-the-machine`](agent.md#what-leaves-the-machine)
-and [`docs/threat-model.md`](threat-model.md)).
+payloads — they hold raw cluster and operator data with no `OutboundPolicy`
+sanitization, and stay as sensitive as the cluster access that produced them.
+Only the sanitized request the agent sends is redacted, via `:ai payload` (see
+[`docs/agent.md#inspecting-what-the-agent-sends`](agent.md#inspecting-what-the-agent-sends)).
 
 ## What approval proves
 
-- **SSAR pre-check** — a SelfSubjectAccessReview surfaces "missing RBAC
-  permission" before the dialog opens instead of after a failed mutation.
-  It is advisory: if the check itself fails or times out, korvid warns
-  and proceeds to the (still gated, still audited) dialog rather than
-  locking you out.
-- **Server dry-run preview** — where the API supports it, the write is
-  replayed with `dryRun=All` and the outcome shown in the dialog (see
-  below). If the preview cannot be produced, the dialog opens without
-  one and says so.
-- **Ownership banner** — when the target is managed by a helm release,
-  an OLM operator, or another controller's custom resource (detected
-  from the object's own labels, annotations, and ownerReferences; pods
-  are traced up their controller chain), the dialog shows a
-  `⚠ managed by …` line naming the manager and the right lever — chart
-  values for helm, the CR for an operator, whose reconcile loop would
-  otherwise revert the change within seconds. It warns, never blocks:
-  direct writes stay legitimate (emergencies, debugging), and a failed
-  lookup simply means no banner.
+Confirming the dialog is the one universal gate, but what leads up to it
+differs by write. Approval takes a **fresh user keystroke**: korvid compares
+the plain <kbd>y</kbd> confirmation event's timestamp against the moment the
+dialog was constructed, so a confirming key buffered beforehand — an impatient
+burst typed while a pre-check was still running — is discarded and cannot
+approve a prompt you had not yet seen. High-blast-radius deletes and protected
+contexts replace the y/n shortcut with a typed gate: the exact resource or
+context name. korvid does not filter what fills that field — a paste arrives
+through the input's ordinary handling — so the guarantee is the narrower one it
+can keep: the typed gate resolves only on a submission event delivered after
+the dialog existed.
 
-Writes that do not go through the Kubernetes API skip the SSAR step but
-still require the approval dialog and the fail-closed audit entry: helm
-install/upgrade/rollback shows a `helm --dry-run` rendered-manifest
-preview in its dialog instead of a server `dryRun=All`, and file uploads
-into pods go straight to confirmation with no preview.
+An agent write tool may request approval and open the shared dialog; MCP tools
+can only queue an inert proposal, whose dialog you open later through
+`:proposals`. Neither path has an approval API, and no tool can answer or
+resolve the dialog. Nothing finer is claimed: once the dialog is up korvid does
+not tell a key repeat from a deliberate press, and it cannot see OS-level input
+automation — software already able to type into your terminal is outside this
+gate and inside [`docs/threat-model.md`](threat-model.md).
 
-### What the agent changes about this model: nothing
+Ahead of the dialog korvid may run best-effort previews — an RBAC pre-check, a
+server or `helm --dry-run` preview, an ownership banner — scoped to what that
+write supports; see [Operation-specific evidence](#operation-specific-evidence)
+for which. Writes that skip the Kubernetes API skip the SSAR step but keep the
+dialog and the fail-closed audit entry: helm install/upgrade/rollback shows a
+rendered-manifest preview instead of a server `dryRun=All`, and file uploads go
+straight to confirmation. `korvid --readonly` (or `readonly: true` in
+`~/.config/korvid/config.yaml`) disables every write keybinding and hides write
+tools from the agent entirely, independent of any preview.
 
-The agent's capability tier (`agent.model_tier`) selects a tool surface and
-budgets — how many iterations a turn gets, how much history is retained, how
-big a tool result may be. It has **no** effect on the safety perimeter:
+The agent's capability tier (`agent.model_tier`) picks a tool surface and
+budgets — iterations, retained history, result size — and moves **no** part of
+the perimeter. At every tier a write tool opens this same approval dialog and
+only a keystroke executes it; a direct agent write pins the target's UID before
+approval, so an object recreated under that name is refused rather than
+mutated, and the audit entry stays fail-closed. In read-only mode no write
+schema is offered at all, so there is nothing for a prompt to talk the model
+into asking for.
 
-- every write tool the environment arms opens the same approval dialog at
-  every tier, and only a user keystroke in that dialog executes it; korvid
-  never confirms, replays, or speculatively executes a write on the model's
-  behalf;
-- a direct agent write establishes the target's UID before approval and passes
-  it as an execution precondition, so an object recreated under the same name
-  between lookup and approval is refused rather than mutated;
-- the audit entry is still fail-closed — a write whose audit record cannot
-  be written does not run;
-- read-only mode and protected contexts are enforced in code, above the
-  model: in read-only mode no write schema is offered at all, so there is
-  nothing for a prompt to talk the model into asking for;
-- there is no shell or free-form `kubectl` tool at any tier, so there is
-  no command line to smuggle a flag into: the agent's whole cluster
-  surface is the structured tool registry
-  (`src/korvid/tools/registry.py`). The resolved policy arms only the
-  registry's own exact tool names — never one it invents — and the
-  registry validates every dispatch target against its import-time
-  metadata (which class and method an effect may reach). The
-  `ToolExecutor` rejects any name outside that registry as an unknown tool
-  and performs its own explicit, typed argument validation before a write
-  reaches the cluster — a wrong-typed `kind`, `name`, `namespace`,
-  `replicas`, or `resources` value is refused, not coerced. The tool's
-  declared JSON schema is model-facing wording sent to the provider, not
-  the runtime check;
-- every tool result — cluster read, screen action, or failure — passes
-  the masking pipeline before it reaches the model or the provider, and
-  a result that cannot be safely redacted stops the turn instead of
-  being sent.
-
-House rules (`agent.rules`) are local configuration, no more privileged
-than `agent.provider`. They are composed after korvid's immutable safety
-contract and cannot widen it: a rule saying "delete pods without asking"
-produces a model that tries and is refused.
+There is also **no shell** or free-form `kubectl` tool at any tier. The agent's
+whole cluster surface is the structured tool registry
+(`src/korvid/tools/registry.py`): policy arms only its exact tool names, the
+registry checks every dispatch target against its import-time metadata, and the
+`ToolExecutor` refuses an unknown tool and applies its own
+typed argument validation — a wrong-typed `kind`, `replicas` or `resources`
+value is rejected, not coerced. Every tool result passes the masking pipeline
+before the model or provider sees it, and one that cannot be redacted stops the
+turn. House rules (`agent.rules`) compose *after* this contract and cannot
+widen it — "delete pods without asking" produces a model that tries and is
+refused.
 
 ### Read-only mode
 
@@ -127,12 +110,10 @@ agent:
 ```
 
 While a protected context is active the status bar shows a red
-`⛨ PROTECTED` marker, and every write confirmation — including one
-requested by the agent — requires typing a name instead of a single `y`.
-Dialogs that already demand the resource name (cluster-scoped deletes,
-node drains) keep that stronger gate. Protection is re-evaluated on every
-`:ctx` switch, and `agent.disable_in_protected: true` rejects the agent
-prompt outright.
+`⛨ PROTECTED` marker, and every write confirmation — including one the agent
+requests — requires typing a name instead of a single `y`. Dialogs that
+already demand the resource name (cluster-scoped deletes, node drains) keep
+that stronger gate. Protection is re-evaluated on every `:ctx` switch.
 
 ## What happens when audit fails
 
@@ -144,11 +125,11 @@ without a matching audit record.
 That mutation guarantee is not the whole audit surface. Ordinary cluster
 reads — a describe, a log tail, the watch stream behind every table — write
 no audit entry and are not gated on one. Sensitive non-mutating disclosures
-are different: Secret reveal and copy are fail-closed audited, so an append
-failure keeps the value hidden. Other operational activity, including
-port-forward lifecycle events and file downloads, can also add records under
-its own policy. `audit.jsonl` records safety-relevant operations, not only
-mutations and not every read.
+differ: Secret reveal and copy are fail-closed audited, so an append failure
+keeps the value hidden. Other operational activity, including port-forward
+lifecycle events and file downloads, can add records under its own policy.
+`audit.jsonl` records safety-relevant operations, not only mutations and not
+every read.
 
 ## Representative operations
 
@@ -192,29 +173,25 @@ write.
 ## Operation-specific evidence
 
 SSAR pre-checks, dry-run previews, ownership banners, and the graph-derived
-impact section are **best-effort or operation-specific** — never a
-universal guarantee. A failed or timed-out SSAR check warns and falls
-through to the (still gated, still audited) dialog rather than blocking
-you. Writes outside the Kubernetes API (Helm, file uploads) skip the SSAR
-step by construction. The impact section appears only for delete, rollout
-restart, a known scale-down, and Pod resize — edit, Helm, and operator
-flows have no tested per-relation semantics yet, so korvid shows nothing
-rather than a plausible guess.
+impact section are **best-effort or operation-specific** — never a universal
+guarantee. An **advisory** preview never blocks approval: when the ownership
+banner or the impact section fails, times out, or is unsupported, the dialog
+simply opens without it — still gated, still audited. A failed or timed-out
+SSAR check warns and falls through the same way, and writes outside the
+Kubernetes API (Helm, file uploads) skip the SSAR step by construction. The
+impact section appears only for delete, rollout restart, a known scale-down,
+and Pod resize — edit, Helm, and operator flows have no tested per-relation
+semantics yet, so korvid shows nothing rather than a plausible guess.
 
-An **advisory** preview never blocks approval: when the SSAR check, the
-ownership banner, or the impact section fails, times out, or is
-unsupported, the dialog simply opens without it — still gated, still
-audited. A failed Helm **rollback** or **uninstall** dry-run preview is
-advisory too: `_rollback_preview`/`_uninstall_preview` catch the failure
-and return no preview, so the dialog still opens without a preview —
-still gated, still audited. The **Helm install/upgrade render is the
-exception**, because its verdict is not advisory: when helm's own render
-fails for an install or upgrade, the real command would fail the same
-way, so korvid shows helm's error and stops before the confirmation
-dialog rather than letting you approve a doomed command (see [Helm and
-operators](helm-operators.md)). An *unsupported* preview is still not a
-verdict — old helm rejecting the preview-only `--hide-secret` flag opens
-the (gated, audited) dialog marked **preview unavailable**.
+Helm is the one place a preview carries a verdict, and only for **install and
+upgrade**: when helm's own render fails there, the real command would fail the
+same way, so korvid shows helm's error and stops before the confirmation dialog
+rather than letting you approve a doomed command (see [Helm and
+operators](helm-operators.md)). A failed rollback or uninstall dry-run is
+advisory instead — `_rollback_preview`/`_uninstall_preview` return no preview
+and the dialog still opens. So is an *unsupported* one: old helm rejecting the
+preview-only `--hide-secret` flag opens the (gated, audited) dialog marked
+**preview unavailable**.
 
 ## Sessions that outlive the screen
 
@@ -223,24 +200,19 @@ started them closes:
 
 - **Port-forward** (`Shift-F`) runs as a tracked `kubectl port-forward`
   subprocess bound to `127.0.0.1`; `:pf` lists live status, flips to
-  `broken` if the target pod dies, and every forward is torn down on
-  exit.
+  `broken` if the target pod dies, and every forward is torn down on exit.
 - **Telepresence** (`:tp`, optional) opens a read-only panel over the
-  `telepresence` binary's own state — no forward or intercept runs unless
-  you start it there.
+  `telepresence` binary's own state — nothing runs unless you start it there.
 - **Debug shells** — `s` on a shell-less pod offers an ephemeral
   `kubectl debug` container; `s` on a node opens a privileged
-  `kubectl debug node/` session with the host filesystem at `/host`.
-  Both pass the approval gate explicitly and are audited fail-closed, but
-  they end differently. The pod path injects an ephemeral container into
-  the **existing pod**, and Kubernetes offers no API to remove that spec
-  entry again: it stays on the pod until the pod itself is replaced or
-  deleted (a retry with a different image adds another entry rather than
-  replacing the first). Only the node path creates a **separate
-  `node-debugger-…` pod**, and that pod is deleted by UID when the shell
-  exits — pinned to the uid korvid captured at creation, so a debugger
-  someone else started is never removed.
-- **Crash recovery** — a fatal exception restores the terminal and offers
-  a restart with a fresh event loop, client, and provider; no approval
-  state or pending proposal survives a restart, and the append-only audit
-  log is unaffected.
+  `kubectl debug node/` session with the host filesystem at `/host`. Both pass
+  the approval gate and are audited fail-closed, but they end differently. The
+  pod path injects an ephemeral container into the **existing pod**, and
+  Kubernetes offers no API to remove that spec entry: it stays until the pod is
+  replaced or deleted, and a retry with a different image adds another entry.
+  Only the node path creates a separate **`node-debugger-…` pod**, which is
+  deleted by UID when the shell exits — pinned to the uid korvid captured at
+  creation, so a debugger someone else started is never removed.
+- **Crash recovery** — a fatal exception restores the terminal and offers a
+  restart with a fresh event loop, client, and provider; no approval state or
+  pending proposal survives, and the append-only audit log is unaffected.

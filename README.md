@@ -10,7 +10,7 @@ and proposes writes **you** approve.
 
 ![korvid demo — browsing pods, filtering, describe, live logs, and the help overlay](https://raw.githubusercontent.com/hellices/korvid/main/docs/assets/demo.gif)
 
-*Recorded against canned demo data — see [docs/demo](https://github.com/hellices/korvid/tree/main/docs/demo) to regenerate or run it yourself.*
+*Recorded against synthetic demo data.*
 
 📖 **[Documentation](https://hellices.github.io/korvid/)**
 

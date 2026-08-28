@@ -319,11 +319,7 @@ def test_raw_html_media_resolves_from_every_published_page_url() -> None:
             )
             checked.add((source.relative_to(ROOT).as_posix(), url))
 
-    #: Every storytelling capture the compact site still renders. The homepage
-    #: merge retired the evidence mosaic, so `diagnosis.png` and
-    #: `merged-logs.png` stay checked in and documented in
-    #: `docs/demo/visual-storytelling.md` without being embedded anywhere —
-    #: this walk only covers assets a browser really requests.
+    #: Every storytelling capture the compact site still renders.
     expected_storytelling = {
         "agent-demo.mp4",
         "agent-poster.png",
@@ -341,6 +337,31 @@ def test_raw_html_media_resolves_from_every_published_page_url() -> None:
         "the media walk missed published storytelling assets: "
         f"{expected_storytelling - storytelling}"
     )
+
+
+def test_retired_storytelling_media_is_not_kept_or_referenced() -> None:
+    """Media absent from the public docs must not inflate the repository."""
+    retired = {"diagnosis.png", "merged-logs.png", "relationship-demo.mp4"}
+    sources = [
+        ROOT / "README.md",
+        ROOT / "mkdocs.yml",
+        *(
+            source
+            for source in DOCS.rglob("*.md")
+            if "superpowers" not in source.relative_to(DOCS).parts
+        ),
+    ]
+
+    for name in retired:
+        assert not (DOCS / "assets" / "scenes" / name).exists(), (
+            f"{name} is no longer rendered by the docs and must be removed"
+        )
+        references = [
+            source.relative_to(ROOT).as_posix()
+            for source in sources
+            if name in source.read_text(encoding="utf-8")
+        ]
+        assert references == [], f"{name} still has stale references: {references}"
 
 
 def test_exclude_docs_honours_single_page_entries_not_just_directories() -> None:

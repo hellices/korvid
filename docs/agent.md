@@ -25,7 +25,8 @@ your keystroke.
 ## Installing the agent
 
 The agent is an **optional extra**. A base install has no provider HTTP client
-and no keychain integration; `Ctrl-A` simply shows a setup hint.
+or keychain integration, so `Ctrl-A` is unavailable and `:ai` is not
+registered.
 
 ```sh
 uv tool install "korvid[agent]"      # or: pipx install "korvid[agent]"
@@ -242,5 +243,4 @@ is deterministic and offline — it opens no socket and reads no credential —
 and every byte the tools read comes from a synthetic fixture. So the clip
 says nothing about a live model, a live cluster, or answer quality; the
 read, write, masking, and audit guarantees above hold on every real turn
-regardless. Full provenance lives in
-[the visual-evidence page](demo/visual-storytelling.md#embedded-agent).
+regardless.
