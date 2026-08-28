@@ -258,11 +258,19 @@
 /* Scene switcher — direct / agent / MCP                              */
 /* ------------------------------------------------------------------ */
 
+/* The strip's three one-word tabs ("Direct" / "Agent" / "MCP") fit the
+   593px wide stage around their own 437px row, so the base rule needs no
+   scroll port. `overflow: visible` (not an axis-specific `overflow-x`)
+   matters here: a lone `overflow-x: auto` forces `overflow-y` to compute to
+   `auto` too, which clips a focused tab's 6px outward ring at the strip's
+   top edge, and the strip's former `0` horizontal padding clipped that same
+   ring on both sides. 6px on the top and both sides reserves exactly that
+   ring; the existing 0.75rem stays on the bottom. */
 .md-typeset .scene-tabs {
   display: flex;
   gap: 0.5rem;
-  overflow-x: auto;
-  padding: 0.25rem 0 0.75rem;
+  overflow: visible;
+  padding: 6px 6px 0.75rem;
 }
 
 /* The tabs only do something once `visual-storytelling.js` has wired them,

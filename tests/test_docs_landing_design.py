@@ -1273,6 +1273,44 @@ def test_landing_presents_one_incident_through_three_drivers() -> None:
     )
 
 
+def test_wide_tab_strip_reserves_focus_ring_room_without_scrolling() -> None:
+    """At >=600px the strip already fits its three one-word tabs, so it must not scroll.
+
+    `Direct` / `Agent` / `MCP` are one-word labels sized to fit the 593px
+    wide stage around a 437px row (see
+    `test_narrow_tab_strip_keeps_the_wide_strip_untouched`), so the base rule
+    has no row left to hide with `overflow-x: auto`. A lone `overflow-x:
+    auto` also forces the *vertical* axis to compute to `auto`, which clips a
+    focused tab's 6px outward ring at the strip's top edge — and the base
+    rule's `0` horizontal padding clipped the same ring on both sides. The
+    fix drops the scroll port (`overflow: visible`) and reserves the ring's
+    6px on the top, right and left, the same contract the narrow grid below
+    already keeps.
+    """
+    css = _css()
+    base = _rule(css, ".md-typeset .scene-tabs {")
+    assert _declaration(base, "display") == "flex", (
+        "the wide strip must stay a flex row of intrinsically sized pills"
+    )
+    assert _declaration(base, "overflow") == "visible", (
+        "a strip that already fits its tabs needs no scroll port, and a lone "
+        "`overflow-x: auto` would still coerce `overflow-y` to `auto` and clip "
+        "the focused tab's ring at the top edge"
+    )
+    for prop in ("overflow-x", "overflow-y"):
+        assert prop not in base, (
+            f"`{prop}` must not reappear once `overflow` is shorthand for both axes; "
+            "an axis-specific declaration would silently re-coerce the other axis"
+        )
+
+    top, right, _, left = _padding_sides(base)
+    for side, value in (("top", top), ("right", right), ("left", left)):
+        assert _px(value) >= TAB_FOCUS_RING_PX, (
+            f"the wide strip's {side} padding must reserve the {TAB_FOCUS_RING_PX:.0f}px "
+            f"focus ring so a focused tab's outline is painted inside the strip; got {value!r}"
+        )
+
+
 def test_narrow_tab_strip_is_a_three_column_grid_that_never_scrolls_sideways() -> None:
     """At handset widths the strip lays its three tabs out, it does not scroll them.
 
@@ -1289,10 +1327,6 @@ def test_narrow_tab_strip_is_a_three_column_grid_that_never_scrolls_sideways() -
     which is what clips a focused tab's outward ring at the top edge.
     """
     css = _css()
-    base = _rule(css, ".md-typeset .scene-tabs {")
-    assert "overflow-x: auto" in base, (
-        "this test only makes sense while the wide strip still opts into scrolling"
-    )
 
     blocks = [block for block in _media_blocks(css, NARROW_QUERY) if ".scene-tabs" in block]
     assert len(blocks) == 1, (
