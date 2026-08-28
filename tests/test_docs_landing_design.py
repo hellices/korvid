@@ -2705,31 +2705,54 @@ def test_agent_capture_never_presents_the_selected_row_as_grounding() -> None:
 
 
 def test_control_highlight_orders_confirmation_audit_and_execution() -> None:
-    """The write path's guarantee survives the diagram that carried it.
+    """The write path's guarantee survives the diagram that carried it — scoped honestly.
 
-    The five-stage strip is gone, but its promise is a security invariant:
-    every write previews first, waits for a fresh human keystroke, and is
-    blocked outright when the fail-closed audit append fails. The CONTROL
-    highlight is now the only place the landing page states it, so it must
-    state all three parts, in that order, for every origin the product has.
+    The five-stage strip is gone, but its promise is a security invariant,
+    and `docs/ops.md` is explicit that only part of it is universal: previews
+    (an SSAR pre-check, a dry-run, an ownership banner) are best-effort and
+    operation-specific — file uploads run through the dialog with none at
+    all. What *is* unconditional for every write is the fresh approval
+    keystroke and the fail-closed audit append that blocks the action when it
+    fails. The CONTROL highlight must scope the preview claim instead of
+    promising it for every write, while keeping approval and audit
+    unconditional and in order ahead of execution.
     """
     control = _highlight("CONTROL")
     lowered = " ".join(re.sub(r"<[^>]+>", " ", control).lower().split())
 
-    assert "every write" in lowered, (
-        f"the guarantee must cover every origin, not one of them: {lowered!r}"
+    assert "best-effort" in lowered, (
+        f"the preview claim must be scoped, not stated as a universal guarantee: {lowered!r}"
     )
-    ordered = ["preview", "fresh approval keystroke", "audit"]
+    assert "operation-specific" in lowered, (
+        f"the preview claim must be scoped, not stated as a universal guarantee: {lowered!r}"
+    )
+    preview_pos = lowered.find("preview")
+    assert preview_pos != -1, f"the CONTROL copy must still name previews: {lowered!r}"
+    scope_positions = [lowered.find("best-effort"), lowered.find("operation-specific")]
+    assert all(position != -1 for position in scope_positions), (
+        f"both scoping words must be present: {lowered!r}"
+    )
+    assert max(scope_positions) < preview_pos + len("previews"), (
+        "the scoping words must qualify the preview claim itself, not trail off after it: "
+        f"{lowered!r}"
+    )
+
+    every_write_pos = lowered.find("every write")
+    assert every_write_pos != -1, (
+        f"approval and audit must cover every origin, not one of them: {lowered!r}"
+    )
+    assert every_write_pos > preview_pos, (
+        "'every write' must attach to the unconditional approval/audit guarantee, not the "
+        f"scoped preview claim that precedes it: {lowered!r}"
+    )
+
+    ordered = ["every write", "fresh approval keystroke", "fail-closed", "blocks the action"]
     positions = [lowered.find(stage) for stage in ordered]
     assert all(position != -1 for position in positions), (
-        f"the CONTROL copy must name preview, approval and audit: {lowered!r}"
+        f"the CONTROL copy must name approval and the fail-closed audit block: {lowered!r}"
     )
     assert positions == sorted(positions), (
-        f"approval comes after the preview and before the audit gate: {lowered!r}"
-    )
-    assert "fail-closed" in lowered, "the audit gate must keep its fail-closed name"
-    assert "blocks the action" in lowered, (
-        f"a failed audit append must be shown to block the write: {lowered!r}"
+        f"approval must precede the fail-closed audit gate that blocks execution: {lowered!r}"
     )
     assert "opt-in mcp" not in lowered or "off by default" in lowered
     assert 'href="ops/"' in control, "the highlight links the approval and audit reference"
