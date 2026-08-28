@@ -5,6 +5,11 @@
 differentiation without competitor comparisons  
 **Direction:** One shared workspace, checkable evidence, human authority
 
+This document supersedes only the highlight taxonomy in
+`2026-08-27-compact-homepage-design.md` section 3 and its acceptance item that
+names `SEE / GROUND / CONTROL`. Every other compact-homepage constraint remains
+in force.
+
 ## Problem
 
 The compact homepage's `SEE / GROUND / CONTROL` cards are accurate, but they
