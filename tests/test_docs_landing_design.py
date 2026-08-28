@@ -3231,11 +3231,35 @@ def test_feature_highlights_are_three_linked_promises() -> None:
         assert len(paragraphs) == 1, "one paragraph per promise keeps the page scannable"
         assert len(re.sub(r"<[^>]+>", " ", paragraphs[0]).split()) <= 40
         links = re.findall(r'<a href="([^"]+)"', card)
-        assert len(links) >= 2, f"a promise must hand over real destinations: {card[:80]!r}"
+        assert 2 <= len(links) <= 3, f"a promise must hand over real destinations: {card[:80]!r}"
         for href in links:
             assert re.fullmatch(r"[a-z0-9-]+/(?:#[a-z0-9-]+)?", href), (
                 f"highlight links stay inside the docs site: {href!r}"
             )
+
+
+def test_one_workspace_highlight_keeps_every_driver_visible() -> None:
+    """The one-workspace promise must keep every driver and route visible."""
+    workspace = _highlight("ONE WORKSPACE")
+    lowered = _flatten(workspace)
+
+    for phrase in (
+        "keyboard",
+        "embedded agent",
+        "external mcp",
+        "same visible cockpit",
+        "optional mcp follow",
+        "supported reads",
+        "notification",
+    ):
+        assert phrase in lowered, f"the ONE WORKSPACE copy must keep {phrase!r}: {lowered!r}"
+
+    links = re.findall(r'<a href="([^"]+)"', workspace)
+    assert links == [
+        "tui/",
+        "agent/#direct-control-and-the-conversation",
+        "mcp/#read-once-or-follow-activity",
+    ]
 
 
 def test_evidence_copy_claims_only_what_its_capture_actually_shows() -> None:
