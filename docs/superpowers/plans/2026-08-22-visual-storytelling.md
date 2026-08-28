@@ -1175,9 +1175,23 @@ final newline:
      playing; re-querying the document from the change handler would instead
      reach videos the controller has no business touching. */
   const managedVideos = new Set();
+  const handledVideoErrors = new WeakSet();
+
+  const reportVideoFailure = (video, error) => {
+    restoreVideoPoster(video, video.error ?? error);
+  };
+
+  const manageVideo = (video) => {
+    managedVideos.add(video);
+    if (handledVideoErrors.has(video)) return;
+    handledVideoErrors.add(video);
+    video.addEventListener("error", (event) => {
+      reportVideoFailure(video, event);
+    });
+  };
 
   const manageVideos = (root) => {
-    for (const video of root.querySelectorAll("video")) managedVideos.add(video);
+    for (const video of root.querySelectorAll("video")) manageVideo(video);
   };
 
   const pauseManagedVideos = () => {
@@ -1221,7 +1235,10 @@ final newline:
     video.currentTime = 0;
     const playback = video.play();
     if (playback && typeof playback.catch === "function") {
-      playback.catch(() => {});
+      playback.catch((error) => {
+        if (error && (error.name === "NotAllowedError" || error.name === "AbortError")) return;
+        reportVideoFailure(video, error);
+      });
     }
   };
 

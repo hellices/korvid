@@ -419,6 +419,66 @@ const scenarios = {
     );
   },
 
+  async "a media playback failure is reported and restores the scene poster"() {
+    const built = buildSwitcher("a");
+    const document = buildDocument([built.switcher]);
+    const { errors, observers } = run(document);
+    built.videos[1].playError = Object.assign(new Error("unsupported codec"), {
+      name: "NotSupportedError",
+    });
+
+    built.tabs[1].dispatch("click", {});
+    observers[0].callback([{ isIntersecting: true }]);
+    await Promise.resolve();
+
+    assert.equal(errors.length, 1, "a media failure must be reported");
+    assert.equal(
+      built.videos[1].getAttribute("data-poster"),
+      "agent.png",
+      "the CSS fallback must hide the failed player and reveal its poster image",
+    );
+    assert.ok(built.videos[1].paused > 0, "the failed player must be stopped");
+  },
+
+  async "a late media error after a successful play restores the scene poster"() {
+    const built = buildSwitcher("a");
+    const document = buildDocument([built.switcher]);
+    const { errors, observers } = run(document);
+    const decodeFailure = new Error("decode failure");
+
+    built.tabs[1].dispatch("click", {});
+    observers[0].callback([{ isIntersecting: true }]);
+    await Promise.resolve();
+
+    built.videos[1].error = decodeFailure;
+    built.videos[1].dispatch("error", { type: "error" });
+
+    assert.equal(errors.length, 1, "a late media failure must be reported exactly once");
+    assert.match(errors[0], /decode failure/, "the logged failure should include the media error");
+    assert.ok(built.videos[1].paused > 0, "the failed player must be stopped");
+    assert.equal(
+      built.videos[1].getAttribute("data-poster"),
+      "agent.png",
+      "the CSS fallback must hide the failed player and reveal its poster image",
+    );
+  },
+
+  async "an interrupted pending play is not reported as a media failure"() {
+    const built = buildSwitcher("a");
+    const document = buildDocument([built.switcher]);
+    const { errors, observers } = run(document);
+    built.videos[0].playError = Object.assign(new Error("play interrupted by pause"), {
+      name: "AbortError",
+    });
+
+    observers[0].callback([{ isIntersecting: true }]);
+    observers[0].callback([{ isIntersecting: false }]);
+    await Promise.resolve();
+
+    assert.deepEqual(errors, []);
+    assert.equal(built.videos[0].getAttribute("data-poster"), null);
+  },
+
   "prototype-named keys are ignored as non-navigation input"() {
     const built = buildSwitcher("a");
     const document = buildDocument([built.switcher]);
