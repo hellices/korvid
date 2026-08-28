@@ -77,6 +77,16 @@ def test_the_scan_really_covers_the_operator_facing_pages() -> None:
     assert not any(path.startswith(_HISTORICAL_DOC_PREFIXES) for path in scanned)
 
 
+def test_public_guides_distinguish_validated_evidence_from_navigable_citations() -> None:
+    """Compound diagnoses mint evidence even though no screen can show it all."""
+    overview = " ".join(_text("docs/overview.md").lower().split())
+    agent = " ".join(_text("docs/agent.md").lower().split())
+
+    assert "navigable citation opens its actual view" in overview
+    assert "navigable citations open their source view" in agent
+    assert "compound diagnostics remain validated evidence" in agent
+
+
 # ---------------------------------------------------------------------------
 # 1. The documented security perimeter is the one that exists
 # ---------------------------------------------------------------------------

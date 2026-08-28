@@ -96,12 +96,12 @@ your view, namespace, selection, and filter. It reads through read-only tools �
 manifests, logs, events, compound diagnostics — and **drives the UI itself**:
 "show me the crashing pod's logs" navigates, filters, and opens the log pane
 instead of printing a suggestion. Answers cite the reads behind them and a
-citation opens the actual view; korvid reports an invented reference rather
-than accepting it quietly, but it cannot force a model to cite everything, so
-an uncited sentence stays exactly that. It needs a provider (Copilot, Azure
-OpenAI, Anthropic, OpenAI, Ollama, or any OpenAI-compatible endpoint), and
-`agent.model_tier: low` targets 3B–14B models on your own hardware. See
-[`agent.md`](agent.md).
+navigable citation opens its actual view; korvid reports an invented reference
+rather than accepting it quietly, but it cannot force a model to cite
+everything, so an uncited sentence stays exactly that. It needs a provider
+(Copilot, Azure OpenAI, Anthropic, OpenAI, Ollama, or any OpenAI-compatible
+endpoint), and `agent.model_tier: low` targets 3B–14B models on your own
+hardware. See [`agent.md`](agent.md).
 
 **The MCP server (`korvid[mcp]`).** The same read and UI-driving tools over
 MCP, so VS Code Copilot Chat, Claude Code, Cursor, or Zed gains cluster sight

@@ -1,4 +1,6 @@
 (() => {
+  const failedVideos = new WeakSet();
+
   /* Resolve a tab's panel without ever building a selector from its id: an
      `aria-controls` value is author data, and interpolating it into
      `querySelector("#" + id)` turns a stray space, dot or digit into a
@@ -16,6 +18,7 @@
 
   const promotePoster = (panel) => {
     for (const video of panel.querySelectorAll("video[data-poster]")) {
+      if (failedVideos.has(video)) continue;
       const poster = video.dataset.poster;
       if (!poster) continue;
       video.setAttribute("poster", poster);
@@ -97,8 +100,17 @@
      rejected `play()` promise (autoplay blocked by browser policy) is
      expected, not an application error: the poster and native controls
      remain exactly as they were. */
+  const restoreVideoPoster = (video, error) => {
+    failedVideos.add(video);
+    video.pause();
+    const poster = video.getAttribute("poster");
+    const fallback = video.parentElement?.querySelector(".scene-panel__fallback");
+    if (poster && fallback) video.setAttribute("data-poster", poster);
+    console.error("korvid: video playback failed; restored poster fallback", error);
+  };
+
   const startFromBeginning = (video) => {
-    if (!motionAllowed()) return;
+    if (!motionAllowed() || failedVideos.has(video)) return;
     promoteVideo(video);
     video.currentTime = 0;
     reportedPlaybackFailures.set(video, false);

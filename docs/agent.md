@@ -57,9 +57,10 @@ masked before it ever reaches the model.
 
 Each successful read mints a numbered evidence reference (`[E1]`, `[E2]`, …)
 that the answer cites, validated against what was actually fetched rather than
-merely asserted. Opening a citation navigates to the exact object the read
-looked at, so a claim is checkable in the session that made it. Screen actions
-and writes never mint evidence — only a read of cluster data does.
+merely asserted. Navigable citations open their source view. Compound
+diagnostics remain validated evidence but have no single destination because no
+screen contains the whole report. Screen actions and writes never mint evidence
+— only a read of cluster data does.
 
 The agent can also drive the TUI — navigate, filter, drill down, open the log
 or describe pane — so "show me the crashing pod's logs" lands you in the real

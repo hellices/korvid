@@ -922,7 +922,7 @@ def test_mkdocs_loads_only_the_reviewed_local_storytelling_script() -> None:
     assert VISUAL_STORYTELLING.is_file()
     script = VISUAL_STORYTELLING.read_bytes()
     assert hashlib.sha256(script).hexdigest() == (
-        "b1685fe135ccd32b8b41fe87aa6149e71e6a58c206db57e5b384c42cd05fa318"
+        "ef50182942e61eabd55e6db8a7e54ffc9099b1da8f55dbc6fb27b47b0966a74a"
     )
     assert b"\r" not in script
 
@@ -1136,6 +1136,8 @@ final newline:
 
 ```javascript
 (() => {
+  const failedVideos = new WeakSet();
+
   /* Resolve a tab's panel without ever building a selector from its id: an
      `aria-controls` value is author data, and interpolating it into
      `querySelector("#" + id)` turns a stray space, dot or digit into a
@@ -1153,6 +1155,7 @@ final newline:
 
   const promotePoster = (panel) => {
     for (const video of panel.querySelectorAll("video[data-poster]")) {
+      if (failedVideos.has(video)) continue;
       const poster = video.dataset.poster;
       if (!poster) continue;
       video.setAttribute("poster", poster);
@@ -1234,8 +1237,17 @@ final newline:
      rejected `play()` promise (autoplay blocked by browser policy) is
      expected, not an application error: the poster and native controls
      remain exactly as they were. */
+  const restoreVideoPoster = (video, error) => {
+    failedVideos.add(video);
+    video.pause();
+    const poster = video.getAttribute("poster");
+    const fallback = video.parentElement?.querySelector(".scene-panel__fallback");
+    if (poster && fallback) video.setAttribute("data-poster", poster);
+    console.error("korvid: video playback failed; restored poster fallback", error);
+  };
+
   const startFromBeginning = (video) => {
-    if (!motionAllowed()) return;
+    if (!motionAllowed() || failedVideos.has(video)) return;
     promoteVideo(video);
     video.currentTime = 0;
     reportedPlaybackFailures.set(video, false);

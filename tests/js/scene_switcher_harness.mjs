@@ -440,6 +440,31 @@ const scenarios = {
     assert.ok(built.videos[1].paused > 0, "the failed player must be stopped");
   },
 
+  async "a failed scene keeps its poster fallback when selected again"() {
+    const built = buildSwitcher("a");
+    const document = buildDocument([built.switcher]);
+    const { errors, observers } = run(document);
+    built.videos[1].playError = Object.assign(new Error("unsupported codec"), {
+      name: "NotSupportedError",
+    });
+
+    built.tabs[1].dispatch("click", {});
+    observers[0].callback([{ isIntersecting: true }]);
+    await Promise.resolve();
+    assert.equal(built.videos[1].getAttribute("data-poster"), "agent.png");
+
+    built.tabs[0].dispatch("click", {});
+    built.tabs[1].dispatch("click", {});
+    await Promise.resolve();
+
+    assert.equal(
+      built.videos[1].getAttribute("data-poster"),
+      "agent.png",
+      "reselecting a failed scene must keep the fallback visible",
+    );
+    assert.equal(errors.length, 1, "a permanently failed scene must not enter a retry loop");
+  },
+
   async "a late media error after a successful play restores the scene poster"() {
     const built = buildSwitcher("a");
     const document = buildDocument([built.switcher]);
