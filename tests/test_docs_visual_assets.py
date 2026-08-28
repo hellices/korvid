@@ -1586,6 +1586,26 @@ def test_mcp_client_sections_matches_a_header_exactly_not_by_prefix() -> None:
         "  status: CrashLoopBackOff",
         "CONTAINERS",
         "  app: restarting",
+    ]
+
+
+def test_mcp_client_sections_tolerates_whitespace_around_header_punctuation() -> None:
+    """Cosmetic spacing must not make a valid structured answer unrecordable."""
+    module = _mcp_client_module()
+    answer = "\n".join(
+        [
+            "CONTAINERS : ",
+            "  app: restarting",
+            "RECENT LOGS",
+            "  omitted",
+        ]
+    )
+
+    kept = module._sections(answer, "CONTAINERS")
+
+    assert kept == [
+        "CONTAINERS : ",
+        "  app: restarting",
     ], "a trailing colon still matches; a longer header is a different section"
     assert "CONTAINERS SUMMARY" not in kept
     assert not any("sibling section" in line for line in kept), (
@@ -3169,9 +3189,9 @@ def test_agent_tape_closes_the_focused_panel_before_quitting() -> None:
         for line in AGENT_TAPE.read_text(encoding="utf-8").splitlines()
         if line.strip() and not line.lstrip().startswith("#")
     ]
-    assert commands[-3:] == ["Ctrl+A", "Sleep 1s", 'Type "q"'], (
+    assert commands[-4:] == ["Ctrl+A", "Sleep 1s", 'Type "q"', "Sleep 2s"], (
         "the Agent input still owns printable keys after the turn; close the "
-        "panel and wait for focus handoff before typing q"
+        "panel, wait for focus handoff, then observe the app processing q"
     )
 
 
@@ -6184,6 +6204,23 @@ def test_mcp_follow_tape_is_checked_out_byte_identically_everywhere() -> None:
         "the reviewed bytes are LF-only; a CRLF working tree would hash to something the "
         "shipped pin refuses"
     )
+
+
+def test_agent_tape_is_checked_out_with_lf_line_endings() -> None:
+    """Shell commands in the Agent tape must have stable checkout bytes."""
+    checked = subprocess.run(
+        ["git", "check-attr", "text", "eol", "--", "docs/demo/agent.tape"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+
+    assert checked.returncode == 0, f"git could not report the tape's attributes: {checked.stderr}"
+    assert "docs/demo/agent.tape: text: set" in checked.stdout, checked.stdout
+    assert "docs/demo/agent.tape: eol: lf" in checked.stdout, checked.stdout
+    assert b"\r" not in AGENT_TAPE.read_bytes()
 
 
 def test_mcp_recorder_hashes_portably_and_compares_the_whole_digest() -> None:

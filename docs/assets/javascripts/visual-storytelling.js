@@ -148,6 +148,10 @@
        `tabindex` is written, so a switcher that cannot be driven is never
        partially rewritten. */
     const panels = new Map(tabs.map((tab) => [tab, panelFor(switcher, tab)]));
+    const mediaBox = switcher.querySelector(".scene-panels");
+    if (!(mediaBox instanceof HTMLElement)) {
+      throw new Error("Scene switcher has no media box");
+    }
 
     /* Playback is a visible-only contract, so visibility that has not been
        reported is not visibility: a switcher stays quiet until an
@@ -231,7 +235,7 @@
           if (selectedVideo) startFromBeginning(selectedVideo);
         }
       });
-      observer.observe(switcher);
+      observer.observe(mediaBox);
     }
   };
 

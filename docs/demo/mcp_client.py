@@ -208,7 +208,7 @@ def _section_body(lines: list[str], name: str) -> list[str]:
     keeping = False
     for line in lines:
         if line[:1].strip():
-            keeping = line.rstrip(":") == name
+            keeping = line.strip().rstrip(":").strip() == name
         if keeping and line.strip():
             body.append(line)
     return body

@@ -28,3 +28,4 @@ Hide
 Ctrl+A
 Sleep 1s
 Type "q"
+Sleep 2s

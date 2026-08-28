@@ -1822,11 +1822,12 @@ def test_controller_promotes_a_deferred_poster_only_when_its_scene_is_selected()
 def test_controller_pauses_off_screen_switcher_media_via_intersection_observer() -> None:
     """Scrolling a playing switcher off-screen must not leave it decoding forever.
 
-    A visitor who scrolls the whole switcher out of the viewport must not
-    keep its video decoding indefinitely — nothing else watches the
-    switcher's own visibility. The controller must observe each
-    `[data-scene-switcher]`'s intersection with the viewport, and when it
-    stops intersecting, pause every video inside it (selected or not).
+    A visitor who scrolls the media box out of the viewport must not keep
+    its video decoding indefinitely. On narrow layouts, the switcher's copy
+    can remain visible while `.scene-panels` is still below the fold, so the
+    controller must observe that media box rather than the whole
+    `[data-scene-switcher]`. When it stops intersecting, every video inside
+    the switcher (selected or not) must pause.
     Playback may resume only for the selected scene, and only when the
     switcher is visible again and `prefers-reduced-motion` allows it.
     `IntersectionObserver` support must be feature-detected so its absence
@@ -1838,19 +1839,23 @@ def test_controller_pauses_off_screen_switcher_media_via_intersection_observer()
         "browsers still get a working — if never-autoplaying — switcher"
     )
     start = script.index("new IntersectionObserver(")
-    end = script.index("observer.observe(switcher);", start) + len("observer.observe(switcher);")
+    end = script.index("observer.observe(mediaBox);", start) + len("observer.observe(mediaBox);")
     observer_block = script[start:end]
     assert "isIntersecting" in observer_block, (
-        "the observer callback must branch on the switcher's own intersection state"
+        "the observer callback must branch on the media box's intersection state"
     )
     assert 'switcher.querySelectorAll("video")' in observer_block, (
         "an off-screen switcher must pause every video it contains, not only "
         "the panels that were already inactive"
     )
     assert ".pause()" in observer_block
-    assert "observer.observe(switcher)" in observer_block, (
-        "every switcher instance must register itself with the observer"
+    assert 'switcher.querySelector(".scene-panels")' in script[:start], (
+        "the observed target must be the scene media box, not the hero copy around it"
     )
+    assert "observer.observe(mediaBox)" in observer_block, (
+        "every switcher instance must register its media box with the observer"
+    )
+    assert "observer.observe(switcher)" not in observer_block
 
 
 def _strip_js_comments(source: str) -> str:
@@ -2020,7 +2025,7 @@ def test_controller_withholds_autoplay_where_visibility_is_unknown() -> None:
     starts = [match.start() for match in re.finditer(r"startFromBeginning\(", script)]
     assert starts, "a scene must still start when its switcher is reported visible"
     observer_start = script.index("new IntersectionObserver(")
-    observer_end = script.index("observer.observe(switcher);", observer_start)
+    observer_end = script.index("observer.observe(mediaBox);", observer_start)
     guarded = script.index("if (switcherVisible) startFromBeginning(selectedVideo);")
     definition = script.index("const startFromBeginning")
     for at in starts:

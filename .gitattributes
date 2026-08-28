@@ -2,3 +2,4 @@ docs/assets/javascripts/bundle.d7400e89.min.js -text
 docs/assets/javascripts/vendor/*.js -text
 docs/assets/javascripts/visual-storytelling.js text eol=lf
 docs/demo/mcp-follow.tape text eol=lf
+docs/demo/agent.tape text eol=lf

@@ -211,6 +211,11 @@ def test_the_agent_page_links_the_migration_note_instead_of_restating_it() -> No
     assert "Upgrading from the profile-based agent" not in agent
     assert [key for key in removed_keys if key in agent] == []
     assert "model_tier" in agent, "the supported key still has to be on the page"
+    assert re.search(
+        r"\[[^\]]*(?:migration|upgrade)[^\]]*\]\(release-notes/unreleased\.md\)",
+        agent,
+        re.IGNORECASE,
+    ), "the current guide must send upgrades to the release note that owns migration history"
 
     notes = _text("docs/release-notes/unreleased.md")
     assert [key for key in removed_keys if key in notes] == removed_keys, (
