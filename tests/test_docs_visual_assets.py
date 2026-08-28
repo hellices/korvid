@@ -4236,6 +4236,15 @@ def test_demo_manifest_of_a_synthesised_deployment_agrees_with_its_desired_count
     assert "payment-worker" not in repr(manifest)
 
 
+def test_demo_manifest_uses_the_resolved_row_namespace_when_request_omits_it() -> None:
+    """A name-only lookup must still return the namespaced fixture it resolved."""
+    harness = _demo_harness()
+
+    manifest = asyncio.run(harness.get_manifest("deployments", None, "web-frontend"))
+
+    assert manifest["metadata"]["namespace"] == "shop"
+
+
 def test_demo_manifest_of_a_helm_release_agrees_with_the_releases_table() -> None:
     """A described release must report the revision the browser lists."""
     harness = _demo_harness()
@@ -4283,6 +4292,16 @@ def test_demo_list_and_describe_answer_the_same_pod_facts() -> None:
             # carries no `creationTimestamp`; every synthesised one agrees
             # with the AGE its row renders.
             assert described.created == row.created, f"{row.name} describes a different AGE"
+
+
+def test_demo_list_normalises_the_unscheduled_node_placeholder() -> None:
+    """The external list surface must not expose the TUI's display placeholder."""
+    harness = _demo_harness()
+    rows = asyncio.run(harness.DemoReadOps().list_objects(harness.ALIASES["pods"], None))
+
+    pending = next(row for row in rows if row.name == "search-indexer-59b8c7-tq5mz")
+
+    assert pending.node == ""
 
 
 def test_demo_list_and_describe_answer_the_same_facts_for_every_other_kind() -> None:

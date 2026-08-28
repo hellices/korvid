@@ -386,7 +386,8 @@ The visual architecture must preserve the documented security invariants:
 - agent writes always cross the approval gate;
 - MCP writes are opt-in proposals and never execute automatically;
 - sensitive embedded-agent provider reads pass through masking;
-- `run_kubectl` remains validated;
+- agent cluster access remains confined to the structured tool registry and its
+  exact registered names;
 - approval requires a fresh user keystroke; and
 - audit failure blocks the action.
 

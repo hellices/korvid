@@ -578,6 +578,11 @@ def _pod_resources(pod: PodSummary) -> dict[str, Any]:
     return resources
 
 
+def _pod_node(pod: PodSummary) -> str | None:
+    """The scheduled node, without korvid's table placeholder."""
+    return pod.node if pod.node and pod.node != "-" else None
+
+
 def _pod_spec(pod: PodSummary) -> dict[str, Any]:
     """A `spec` stating only what the pods table already shows."""
     containers = [{"name": name} for name in _container_names(pod)]
@@ -587,10 +592,10 @@ def _pod_spec(pod: PodSummary) -> dict[str, Any]:
         # The table carries the pod's effective aggregate, not a per-container
         # split. Pod-level resources preserve that fact without inventing one.
         spec["resources"] = resources
-    if pod.node and pod.node != "-":
+    if node := _pod_node(pod):
         # "-" is korvid's placeholder for an unscheduled pod, and a real
         # manifest says exactly that by carrying no `nodeName` at all.
-        spec["nodeName"] = pod.node
+        spec["nodeName"] = node
     return spec
 
 
@@ -702,8 +707,8 @@ async def get_manifest(kind: str, namespace: str | None, name: str) -> dict[str,
         else _synthesised_manifest(meta, row)
     )
     manifest["metadata"]["name"] = name
-    if meta.namespaced and namespace:
-        manifest["metadata"]["namespace"] = namespace
+    if meta.namespaced:
+        manifest["metadata"]["namespace"] = row.namespace
     return manifest
 
 
@@ -808,7 +813,7 @@ def _pod_list_row(pod: PodSummary) -> PodListSummary:
         phase=pod.phase,
         ready=pod.ready,
         restarts=pod.restarts,
-        node=pod.node or "",
+        node=_pod_node(pod) or "",
         ready_condition=_pod_is_ready(pod),
     )
 

@@ -59,6 +59,16 @@ MATERIAL_ATTRIBUTION = "https://squidfunk.github.io/mkdocs-material/"
 #: cluster they read and the offline provider that chose them.
 AGENT_SCENE_EVIDENCE = "Real read tools over a deterministic synthetic cluster"
 
+
+def test_visual_storytelling_design_names_the_real_agent_security_perimeter() -> None:
+    """A binding design must not promise validation for an unshipped shell tool."""
+    design = VISUAL_STORYTELLING_DESIGN.read_text(encoding="utf-8")
+    lowered = " ".join(design.lower().split())
+
+    assert "run_kubectl" not in design
+    assert "structured tool registry" in lowered
+
+
 #: Claims no surface built on `agent-poster.png`/`agent-demo.mp4` may make.
 #: The recording runs the real runtime, executor and evidence ledger, so the
 #: read path is no longer the overclaim; the model and the cluster are.
