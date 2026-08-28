@@ -361,11 +361,17 @@ def test_landing_and_plan_cross_page_anchors_resolve_to_real_headings() -> None:
     """Finding 6: raw-HTML landing anchors and the plan's guide link must
     name headings that still exist in tui.md."""
     tui_slugs = _heading_slugs("tui.md")
-    landing = re.findall(r'href="tui/#([^"]+)"', _source("index.md"))
-    assert landing, "index.md must keep its deep links into the TUI guide"
-    for anchor in landing:
-        assert anchor in tui_slugs, f"index.md links tui/#{anchor}, which tui.md has no heading for"
-    assert {"work-with-logs", "follow-one-signal"} <= set(landing)
+    landing = re.findall(r'href="((?:agent|mcp|tui))/#([^"]+)"', _source("index.md"))
+    assert landing, "index.md must keep its deep links into the product guides"
+    for page, anchor in landing:
+        assert anchor in _heading_slugs(f"{page}.md"), (
+            f"index.md links {page}/#{anchor}, which {page}.md has no heading for"
+        )
+    assert {
+        ("agent", "direct-control-and-the-conversation"),
+        ("mcp", "read-once-or-follow-activity"),
+        ("tui", "follow-one-signal"),
+    } <= set(landing)
 
     plan = (DOCS / "dev" / "plans" / "2026-08-15-graph-derived-blast-radius.md").read_text(
         encoding="utf-8"
