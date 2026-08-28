@@ -2462,6 +2462,26 @@ def test_diagnose_pod_reports_the_scheduled_nodes_conditions_not_unavailable() -
     )
 
 
+def test_demo_workload_diagnosis_has_a_stable_deployment_identity() -> None:
+    """The shipped workload tool must run against the capture fixture."""
+    harness = _demo_harness()
+    executor = ToolExecutor(harness.DemoReadOps(), harness.MCP_ALIASES)
+
+    answer = asyncio.run(
+        executor.execute(
+            "diagnose_workload",
+            {
+                "kind": "deployments",
+                "namespace": DEMO_ROOT.namespace,
+                "name": "payment-worker",
+            },
+        )
+    )
+
+    assert not answer.startswith(ERROR_PREFIX), f"the real diagnosis must succeed: {answer!r}"
+    assert "WORKLOAD — Deployment shop/payment-worker" in answer
+
+
 def test_get_manifest_still_refuses_an_unknown_node() -> None:
     """Adding fixture Node rows must not make every node name answerable."""
     harness = _demo_harness()

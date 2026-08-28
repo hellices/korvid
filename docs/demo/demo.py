@@ -167,6 +167,7 @@ POD_MANIFEST: dict[str, Any] = {
     "metadata": {
         "name": "payment-worker-6c9f7d-b3xnq",
         "namespace": "shop",
+        "uid": "pod-payment",
         "labels": {"app": "payment-worker", "tier": "backend"},
     },
     "spec": {
@@ -254,10 +255,22 @@ PODS = [
 ]
 
 
-def _deploy(name: str, ns: str, desired: int, days: int) -> GenericSummary:
+def _deploy(
+    name: str,
+    ns: str,
+    desired: int,
+    days: int,
+    *,
+    uid: str = "",
+) -> GenericSummary:
     created = (datetime.now(UTC) - timedelta(days=days)).isoformat()
     return GenericSummary(
-        name=name, namespace=ns, kind="Deployment", created=created, desired=desired
+        name=name,
+        namespace=ns,
+        kind="Deployment",
+        created=created,
+        desired=desired,
+        uid=uid,
     )
 
 
@@ -349,7 +362,7 @@ EXTRA: dict[str, list[GenericSummary]] = {
     "deployments": [
         _deploy("web-frontend", "shop", 2, 41),
         _deploy("cart-api", "shop", 2, 41),
-        _deploy("payment-worker", "shop", 1, 12),
+        _deploy("payment-worker", "shop", 1, 12, uid="deploy-payment"),
         _deploy("checkout-svc", "shop", 1, 33),
         _deploy("search-indexer", "shop", 1, 5),
         _deploy("grafana", "monitoring", 1, 90),
@@ -410,6 +423,7 @@ DEPLOY_MANIFEST: dict[str, Any] = {
     "metadata": {
         "name": "payment-worker",
         "namespace": "shop",
+        "uid": "deploy-payment",
         "labels": {"app": "payment-worker", "tier": "backend"},
     },
     "spec": {
@@ -440,6 +454,7 @@ SVC_MANIFEST: dict[str, Any] = {
     "metadata": {
         "name": "payment-worker",
         "namespace": "shop",
+        "uid": "svc-payment",
         "labels": {"app": "payment-worker"},
     },
     "spec": {
@@ -454,7 +469,7 @@ SVC_MANIFEST: dict[str, Any] = {
 CONFIGMAP_MANIFEST: dict[str, Any] = {
     "apiVersion": "v1",
     "kind": "ConfigMap",
-    "metadata": {"name": "payment-config", "namespace": "shop"},
+    "metadata": {"name": "payment-config", "namespace": "shop", "uid": "cm-payment"},
     "data": {"gateway": "pay.example.com"},
 }
 
@@ -709,6 +724,8 @@ async def get_manifest(kind: str, namespace: str | None, name: str) -> dict[str,
     manifest["metadata"]["name"] = name
     if meta.namespaced:
         manifest["metadata"]["namespace"] = row.namespace
+    if row.uid:
+        manifest["metadata"]["uid"] = row.uid
     return manifest
 
 
