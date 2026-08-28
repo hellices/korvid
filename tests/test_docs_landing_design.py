@@ -444,7 +444,7 @@ def _stage_caption() -> str:
 
 
 def _highlight(label: str) -> str:
-    """One SEE / GROUND / CONTROL card of the highlights section."""
+    """One workspace / evidence / authority card in the highlights section."""
     cards: list[str] = re.findall(r"<article>.*?</article>", _highlights(), re.DOTALL)
     matching = [card for card in cards if f">{label}<" in card]
     assert len(matching) == 1, f"exactly one highlight must carry the {label!r} promise"
@@ -1352,16 +1352,13 @@ def test_homepage_highlights_the_three_product_promises() -> None:
     """The three highlights carry the product contract the removed prose did.
 
     Compacting the page must not drop the claims it exists to make, so the
-    SEE / GROUND / CONTROL cards keep keyboard-first operation, bounded
-    evidence, the fresh approval keystroke, and the fail-closed audit.
+    ONE WORKSPACE / CHECKABLE EVIDENCE / HUMAN AUTHORITY cards keep the page's
+    three promises visible.
     """
     source = _index()
-    for label in ("SEE", "GROUND", "CONTROL"):
+    for label in ("ONE WORKSPACE", "CHECKABLE EVIDENCE", "HUMAN AUTHORITY"):
         assert f">{label}<" in source, f"the highlights must keep the {label} promise"
-    for claim in ("Keyboard", "Bounded", "Fresh approval", "Fail-closed audit"):
-        assert claim.lower() in source.lower(), (
-            f"the compact page must still make the {claim!r} claim"
-        )
+    assert "One cockpit. Three ways in. You stay in command." in source
 
 
 # --- 4. one incident, three drivers -----------------------------------------
@@ -2362,39 +2359,40 @@ def test_design_asset_rule_states_the_playback_contract_the_controller_ships() -
     )
 
 
-def test_ground_highlight_keeps_the_read_paths_truthful() -> None:
+def test_checkable_evidence_highlight_keeps_the_read_paths_truthful() -> None:
     """The contract map's one load-bearing claim survives its own deletion.
 
-    The map explained, in three lanes and a truth sentence, that the
-    watch-backed table, korvid's own fresh describe/log reads, and each
-    driver's bounded fresh reads are taken at different moments. Collapsing
-    the TUI's own describe/log reads into either the watch-backed table or
-    the agent/MCP "bounded fresh reads" phrase would silently drop one of the
-    three lanes, so each is pinned as its own fact below. The compact page
-    states all three once, in the GROUND highlight, and must never trade any
-    of them for a "same evidence" shortcut.
+    the map explained, in three lanes and a truth sentence, that the
+    watch-backed tables, korvid's own fresh describe/log reads, and each
+    driver's bounded agent/MCP reads land at different moments. Collapsing
+    the TUI's own describe/log reads into either the watch-backed tables or
+    the agent/MCP bounded reads would silently drop one of the three lanes, so
+    each is pinned as its own fact below. The compact page states all three
+    once, in the CHECKABLE EVIDENCE highlight, and must never trade any of
+    them for a "same evidence" shortcut.
     """
-    ground = _highlight("GROUND")
-    lowered = " ".join(re.sub(r"<[^>]+>", " ", ground).lower().split())
+    evidence = _highlight("CHECKABLE EVIDENCE")
+    lowered = " ".join(re.sub(r"<[^>]+>", " ", evidence).lower().split())
     for fact in (
-        "watch-backed table",
-        "own fresh describe and log reads",
-        "bounded fresh reads",
+        "watch-backed tables",
+        "fresh describe and log reads",
+        "bounded agent/mcp reads",
         "different moments",
         "snapshots can differ",
+        "successful agent reads",
+        "checkable citations",
+        "evidence gaps",
     ):
-        assert fact in lowered, f"the GROUND highlight must keep stating {fact!r}: {lowered!r}"
-    assert lowered.count("fresh") >= 2, (
-        "the TUI's own fresh describe/log reads must stay a distinct lane from the "
-        f"agent/MCP bounded fresh reads, not merged into one mention: {lowered!r}"
-    )
-    for overclaim in ("same evidence", "same snapshot", "one snapshot"):
+        assert fact in lowered, (
+            f"the CHECKABLE EVIDENCE highlight must keep stating {fact!r}: {lowered!r}"
+        )
+    for overclaim in ("same evidence", "same snapshot", "one snapshot", "every sentence"):
         assert overclaim not in lowered, (
             f"the drivers read at different moments, so {overclaim!r} would be false"
         )
-    for destination in ('href="agent/"', 'href="mcp/"'):
-        assert destination in ground, (
-            f"the GROUND highlight replaces the removed scene links, so it must keep {destination}"
+    for destination in ('href="agent/"', 'href="mcp/"', 'href="tui/#follow-one-signal"'):
+        assert destination in evidence, (
+            f"the CHECKABLE EVIDENCE highlight keeps the read paths explicit, so it must keep {destination}"
         )
 
 
@@ -2418,9 +2416,9 @@ def test_no_landing_surface_reduces_the_tui_to_a_watch_backed_snapshot() -> None
         "no landing surface may still label the TUI's evidence as watch-backed only"
     )
 
-    ground = " ".join(re.sub(r"<[^>]+>", " ", _highlight("GROUND")).lower().split())
-    assert "snapshots can differ" in ground
-    assert "identical" not in ground
+    evidence = _flatten(_highlight("CHECKABLE EVIDENCE"))
+    assert "snapshots can differ" in evidence
+    assert "identical" not in evidence
 
     agent = _flatten(_section('<article id="scene-agent"', "</article>"))
     assert "real diagnose_pod and get_logs reads" in agent, (
@@ -2503,7 +2501,7 @@ def test_agent_scene_states_the_grounded_deterministic_walkthrough() -> None:
             f"the media stage must not claim {overclaim!r} from a deterministic capture"
         )
 
-    assert 'href="agent/"' in _highlight("GROUND"), (
+    assert 'href="agent/"' in _highlight("CHECKABLE EVIDENCE"), (
         "the highlight that replaced the scene copy keeps the link to the real "
         "embedded-agent documentation"
     )
@@ -2560,16 +2558,16 @@ def test_mcp_scene_states_the_real_read_only_requests_and_follow() -> None:
         "the clip is recorded against the in-memory synthetic fixture the `mcp` "
         "demo scene serves, not a disposable cluster"
     )
-    assert 'href="mcp/"' in _highlight("GROUND"), (
+    assert 'href="mcp/"' in _highlight("CHECKABLE EVIDENCE"), (
         "the highlight that replaced the scene copy keeps the link to the MCP guide"
     )
 
 
 def test_mcp_landing_copy_keeps_the_production_write_and_follow_limits() -> None:
     """Recording a truthful read demo must not soften the production limits."""
-    control = _flatten(_highlight("CONTROL"))
-    assert "proposal" in control, "MCP writes stay opt-in proposals on the landing page"
-    assert "off by default" in control, "and the page must keep saying they are off"
+    authority = _flatten(_highlight("HUMAN AUTHORITY"))
+    assert "proposal" in authority, "MCP writes stay opt-in proposals on the landing page"
+    assert "off by default" in authority, "and the page must keep saying they are off"
 
 
 def test_agent_fallback_frame_claims_only_the_grounded_deterministic_capture() -> None:
@@ -2704,7 +2702,7 @@ def test_agent_capture_never_presents_the_selected_row_as_grounding() -> None:
     )
 
 
-def test_control_highlight_orders_confirmation_audit_and_execution() -> None:
+def test_human_authority_highlight_orders_confirmation_audit_and_execution() -> None:
     """The write path's guarantee survives the diagram that carried it — scoped honestly.
 
     The five-stage strip is gone, but its promise is a security invariant,
@@ -2713,12 +2711,12 @@ def test_control_highlight_orders_confirmation_audit_and_execution() -> None:
     operation-specific — file uploads run through the dialog with none at
     all. What *is* unconditional for every write is the fresh approval
     keystroke and the fail-closed audit append that blocks the action when it
-    fails. The CONTROL highlight must scope the preview claim instead of
+    fails. The HUMAN AUTHORITY highlight must scope the preview claim instead of
     promising it for every write, while keeping approval and audit
     unconditional and in order ahead of execution.
     """
-    control = _highlight("CONTROL")
-    lowered = " ".join(re.sub(r"<[^>]+>", " ", control).lower().split())
+    authority = _highlight("HUMAN AUTHORITY")
+    lowered = " ".join(re.sub(r"<[^>]+>", " ", authority).lower().split())
 
     assert "best-effort" in lowered, (
         f"the preview claim must be scoped, not stated as a universal guarantee: {lowered!r}"
@@ -2727,7 +2725,7 @@ def test_control_highlight_orders_confirmation_audit_and_execution() -> None:
         f"the preview claim must be scoped, not stated as a universal guarantee: {lowered!r}"
     )
     preview_pos = lowered.find("preview")
-    assert preview_pos != -1, f"the CONTROL copy must still name previews: {lowered!r}"
+    assert preview_pos != -1, f"the HUMAN AUTHORITY copy must still name previews: {lowered!r}"
     scope_positions = [lowered.find("best-effort"), lowered.find("operation-specific")]
     assert all(position != -1 for position in scope_positions), (
         f"both scoping words must be present: {lowered!r}"
@@ -2746,16 +2744,16 @@ def test_control_highlight_orders_confirmation_audit_and_execution() -> None:
         f"scoped preview claim that precedes it: {lowered!r}"
     )
 
-    ordered = ["every write", "fresh approval keystroke", "fail-closed", "blocks the action"]
+    ordered = ["every write", "fresh approval keystroke", "fail-closed audit", "blocks"]
     positions = [lowered.find(stage) for stage in ordered]
     assert all(position != -1 for position in positions), (
-        f"the CONTROL copy must name approval and the fail-closed audit block: {lowered!r}"
+        f"the HUMAN AUTHORITY copy must name approval and the fail-closed audit block: {lowered!r}"
     )
     assert positions == sorted(positions), (
         f"approval must precede the fail-closed audit gate that blocks execution: {lowered!r}"
     )
     assert "opt-in mcp" not in lowered or "off by default" in lowered
-    assert 'href="ops/"' in control, "the highlight links the approval and audit reference"
+    assert 'href="ops/"' in authority, "the highlight links the approval and audit reference"
 
 
 def test_storyboard_figures_reserve_the_full_container_width_before_images_load() -> None:
@@ -3126,7 +3124,7 @@ def test_landing_keeps_agent_masking_distinct_from_mcp_disclosure() -> None:
     Provider masking protects what leaves for the embedded agent's model;
     MCP result disclosure is decided per tool. Collapsing them into "secret
     values are masked before model calls" would promise a guarantee neither
-    boundary makes, so the CONTROL highlight names both and links the page
+    boundary makes, so the HUMAN AUTHORITY highlight names both and links the page
     that documents them.
 
     A link label alone is not the claim: a visitor who never follows the
@@ -3137,28 +3135,28 @@ def test_landing_keeps_agent_masking_distinct_from_mcp_disclosure() -> None:
     the embedded provider's payloads are masked, and MCP result disclosure
     is decided per tool.
     """
-    control = _highlight("CONTROL")
-    lowered = " ".join(re.sub(r"<[^>]+>", " ", control).lower().split())
-    assert "provider masking" in lowered, (
+    authority = _highlight("HUMAN AUTHORITY")
+    lowered = " ".join(re.sub(r"<[^>]+>", " ", authority).lower().split())
+    assert "provider payloads are masked" in lowered, (
         f"the control surface must name the embedded provider's masking: {lowered!r}"
     )
-    assert "mcp disclosure" in lowered, (
+    assert "mcp disclosure remains tool-specific" in lowered, (
         f"and must name MCP's tool-specific disclosure separately: {lowered!r}"
     )
     assert "secret values are masked before model calls" not in lowered
-    assert 'href="threat-model/"' in control, (
+    assert 'href="threat-model/"' in authority, (
         "the two boundaries must link to the page that states their limits"
     )
 
-    paragraph = re.search(r"<p>(.*?)</p>", control, re.DOTALL)
-    assert paragraph is not None, "the CONTROL promise must keep its paragraph"
+    paragraph = re.search(r"<p>(.*?)</p>", authority, re.DOTALL)
+    assert paragraph is not None, "the HUMAN AUTHORITY promise must keep its paragraph"
     prose = " ".join(re.sub(r"<[^>]+>", " ", paragraph.group(1)).lower().split())
     assert "provider payloads are masked" in prose, (
         "the paragraph itself must say what the embedded provider masks, rather than "
         f"leaving the boundary to a link label: {prose!r}"
     )
-    assert "mcp result disclosure is tool-specific" in prose, (
-        "and it must say MCP disclosure is decided per tool, which is a weaker "
+    assert "mcp disclosure remains tool-specific" in prose, (
+        "and it must say MCP disclosure stays tool-specific, which is a weaker "
         f"promise than masking and must not be read as one: {prose!r}"
     )
 
@@ -3224,9 +3222,9 @@ def test_feature_highlights_are_three_linked_promises() -> None:
     assert len(cards) == 3, f"exactly three promises; found {len(cards)}"
     labels = [re.search(r"<span>([^<]+)</span>", card) for card in cards]
     assert [label.group(1) for label in labels if label is not None] == [
-        "SEE",
-        "GROUND",
-        "CONTROL",
+        "ONE WORKSPACE",
+        "CHECKABLE EVIDENCE",
+        "HUMAN AUTHORITY",
     ], "the promises stay in the order a visitor meets them"
     for card in cards:
         paragraphs = re.findall(r"<p>(.*?)</p>", card, re.DOTALL)

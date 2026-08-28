@@ -43,32 +43,32 @@ hide:
 </section>
 
 <section class="feature-highlights" aria-labelledby="highlights-title">
-  <h2 id="highlights-title">One product contract, whoever drives.</h2>
+  <h2 id="highlights-title">One cockpit. Three ways in. You stay in command.</h2>
   <div class="feature-highlights__grid">
     <article>
-      <span>SEE</span>
-      <p>Keyboard-first browsing of live resource tables, log streams, and metadata-only relationships.</p>
+      <span>ONE WORKSPACE</span>
+      <p>Keyboard, the embedded Agent, and external MCP clients meet in the same visible cockpit. Agent navigation moves the panes you see; optional MCP follow mirrors supported reads, while follow-off activity still surfaces as a notification.</p>
       <ul>
         <li><a href="tui/">Resource cockpit</a></li>
-        <li><a href="tui/#work-with-logs">Log workflow</a></li>
-        <li><a href="resource-relationships/">Relationships</a></li>
+        <li><a href="agent/#direct-control-and-the-conversation">Shared Agent workspace</a></li>
+        <li><a href="mcp/#read-once-or-follow-activity">MCP follow</a></li>
       </ul>
     </article>
     <article>
-      <span>GROUND</span>
-      <p>The watch-backed table, korvid's own fresh describe and log reads, and the bounded fresh reads behind the embedded agent and every MCP client all land at different moments, so snapshots can differ.</p>
+      <span>CHECKABLE EVIDENCE</span>
+      <p>Watch-backed tables, fresh describe and log reads, and bounded Agent/MCP reads land at different moments, so snapshots can differ. Successful Agent reads mint checkable citations; deterministic diagnoses expose evidence gaps.</p>
       <ul>
-        <li><a href="agent/">Embedded agent</a></li>
-        <li><a href="mcp/">MCP tools</a></li>
+        <li><a href="agent/">Agent evidence</a></li>
+        <li><a href="mcp/">MCP boundary</a></li>
         <li><a href="tui/#follow-one-signal">Diagnosis surfaces</a></li>
       </ul>
     </article>
     <article>
-      <span>CONTROL</span>
-      <p>Best-effort, operation-specific previews run first. Every write still waits for a fresh approval keystroke, and a fail-closed audit append that fails blocks the action. MCP write proposals stay off by default. Provider payloads are masked; MCP result disclosure is tool-specific.</p>
+      <span>HUMAN AUTHORITY</span>
+      <p>Best-effort, operation-specific previews may run first. Every write still waits for a fresh approval keystroke and a fail-closed audit; a failed append blocks the mutation. MCP proposals stay off by default; provider payloads are masked, while MCP disclosure remains tool-specific.</p>
       <ul>
         <li><a href="ops/">Approval and audit</a></li>
-        <li><a href="threat-model/">Provider masking, MCP disclosure</a></li>
+        <li><a href="threat-model/">Provider and MCP boundaries</a></li>
         <li><a href="overview/">Architecture</a></li>
       </ul>
     </article>
