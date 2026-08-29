@@ -12,6 +12,9 @@ from urllib.parse import unquote, urlsplit
 import pytest
 import yaml
 
+from tests.docs_exclusions import is_published as _is_published
+from tests.docs_exclusions import parse_exclude_docs as _parse_exclude_docs
+
 ROOT = Path(__file__).parent.parent
 DOCS = ROOT / "docs"
 MKDOCS = ROOT / "mkdocs.yml"
@@ -61,82 +64,6 @@ def _uses_directory_urls() -> bool:
         f"use_directory_urls must be a boolean, found {value!r} in mkdocs.yml"
     )
     return value
-
-
-def _parse_exclude_docs(block: str) -> tuple[str, ...]:
-    """Docs-relative paths an `exclude_docs` block keeps out of the site.
-
-    MkDocs reads `exclude_docs` with gitignore syntax. This repository only
-    uses plain entries — a directory (`superpowers/`) or a single page
-    (`dev/scratch.md`) — and gitignore matches a slash-less entry as both a
-    file and a directory, so every entry is normalised to one path that
-    excludes itself and everything beneath it. Whether that path is anchored
-    to the docs root or matched at any segment is decided by `_is_published`,
-    which follows gitignore's own slash rule.
-
-    Anything using wildcard, negation, or root-anchoring syntax cannot be
-    resolved to a concrete docs path here. Such a line is rejected rather
-    than widened or dropped: silently misreading it would make this walk
-    disagree with the pages MkDocs builds.
-
-    Args:
-        block: The raw newline-separated `exclude_docs` value.
-
-    Returns:
-        One normalised docs-relative path per meaningful line.
-    """
-    entries: list[str] = []
-    for raw in block.splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        assert not line.startswith("/"), (
-            f"exclude_docs entry {line!r} is root-anchored, which this walk "
-            "does not model; preserve anchoring explicitly before using it"
-        )
-        is_pattern = line.startswith("!") or any(char in line for char in "*?[")
-        assert not is_pattern, (
-            f"exclude_docs entry {line!r} uses gitignore pattern syntax this walk "
-            "cannot resolve to a concrete docs path; teach `_parse_exclude_docs` "
-            "the pattern instead of letting the walk assert on an unpublished page"
-        )
-        entries.append(line.strip("/"))
-    return tuple(entries)
-
-
-def _matches_exclude_entry(relative: str, entry: str) -> bool:
-    """Whether one normalised `exclude_docs` entry unpublishes a page.
-
-    Gitignore anchors a pattern that carries an internal separator to the
-    file the pattern was declared in, and matches a slash-less pattern
-    against every path segment. `dev/plans` therefore only removes the
-    docs-root `dev/plans/**`, while a bare `superpowers` removes
-    `superpowers/**` *and* `guide/superpowers/**` — and a bare `scratch.md`
-    removes that filename at any depth.
-
-    Args:
-        relative: A page path relative to `docs/`, e.g. `dev/README.md`.
-        entry: One normalised entry from `_parse_exclude_docs`.
-
-    Returns:
-        `True` when the entry matches the page itself or one of its parents.
-    """
-    if "/" in entry:
-        return relative == entry or relative.startswith(f"{entry}/")
-    return entry in relative.split("/")
-
-
-def _is_published(relative: str, excluded: tuple[str, ...]) -> bool:
-    """Whether a docs-relative page survives the `exclude_docs` entries.
-
-    Args:
-        relative: A page path relative to `docs/`, e.g. `dev/README.md`.
-        excluded: Normalised entries from `_parse_exclude_docs`.
-
-    Returns:
-        `True` when no entry matches the page itself or one of its parents.
-    """
-    return not any(_matches_exclude_entry(relative, entry) for entry in excluded)
 
 
 def _excluded_prefixes() -> tuple[str, ...]:

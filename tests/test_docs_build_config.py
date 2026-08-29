@@ -26,6 +26,8 @@ from typing import Any, cast
 
 import yaml
 
+from tests.docs_exclusions import is_published, parse_exclude_docs
+
 ROOT = Path(__file__).parent.parent
 MATERIAL_BUNDLE = ROOT / "docs" / "assets" / "javascripts" / "bundle.d7400e89.min.js"
 MERMAID_VENDOR = ROOT / "docs" / "assets" / "javascripts" / "vendor" / "mermaid-11.17.0.min.js"
@@ -408,8 +410,12 @@ def test_mkdocs_loads_only_the_reviewed_local_storytelling_scripts() -> None:
         "assets/javascripts/scene-fallback.js",
         "assets/javascripts/visual-storytelling.js",
     ]
-    assert hashlib.sha256(SCENE_FALLBACK.read_bytes()).hexdigest() == (
+    fallback = SCENE_FALLBACK.read_bytes()
+    assert hashlib.sha256(fallback).hexdigest() == (
         "eda3fc2798316fa155e6e020245e95b548853cd8c2be2fb3237d94c0373d454e"
+    )
+    assert b"\r" not in fallback, (
+        "the reviewed bytes are LF-only; a CRLF checkout would break the pin above"
     )
     assert VISUAL_STORYTELLING.is_file()
     script = VISUAL_STORYTELLING.read_bytes()
@@ -579,23 +585,19 @@ def test_search_index_excludes_all_quality_gate_content() -> None:
     config = _load_mkdocs_config()
     excluded = config.get("exclude_docs")
     assert isinstance(excluded, str)
-    entries = {line.strip() for line in excluded.splitlines() if line.strip()}
-    excluded_dirs = tuple(entry.rstrip("/") for entry in entries if entry.endswith("/"))
-    excluded_files = {entry for entry in entries if not entry.endswith("/")}
+    entries = parse_exclude_docs(excluded)
     required_private_files = {
         "dev/quality-gates.md",
         "dev/specs/2026-07-24-korvid-engineering-standards.md",
     }
-    assert required_private_files <= excluded_files, (
+    assert required_private_files <= set(entries), (
         "both internal quality-gate sources must be excluded by mkdocs.yml itself"
     )
 
     published: list[Path] = []
     for path in sorted((ROOT / "docs").rglob("*.md")):
         relative = path.relative_to(ROOT / "docs").as_posix()
-        if relative in excluded_files:
-            continue
-        if any(relative == d or relative.startswith(f"{d}/") for d in excluded_dirs):
+        if not is_published(relative, entries):
             continue
         published.append(path)
 
