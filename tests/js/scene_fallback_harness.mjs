@@ -8,7 +8,25 @@ const source = readFileSync(
 );
 
 function run({ enhanced = false, readyState = "loading" } = {}) {
-  const panels = [{ hidden: true }, { hidden: true }];
+  const videos = ["agent.png", "mcp.png"].map((poster) => ({
+    dataset: { poster },
+    poster: null,
+    setAttribute(name, value) {
+      assert.equal(name, "poster");
+      this.poster = value;
+    },
+    removeAttribute(name) {
+      assert.equal(name, "data-poster");
+      delete this.dataset.poster;
+    },
+  }));
+  const panels = videos.map((video) => ({
+    hidden: true,
+    querySelectorAll(selector) {
+      assert.equal(selector, "video[data-poster]");
+      return "poster" in video.dataset ? [video] : [];
+    },
+  }));
   const switcher = {
     querySelectorAll(selector) {
       assert.equal(selector, ".scene-panel[hidden]");
@@ -36,6 +54,7 @@ function run({ enhanced = false, readyState = "loading" } = {}) {
   vm.runInNewContext(source, sandbox);
   return {
     panels,
+    videos,
     fireLoad: () => onLoad?.(),
     hasLoadListener: () => onLoad !== null,
   };
@@ -49,6 +68,14 @@ const scenarios = {
       result.panels.map((panel) => panel.hidden),
       [false, false],
     );
+    assert.deepEqual(
+      result.videos.map((video) => [video.poster, video.dataset.poster]),
+      [
+        ["agent.png", undefined],
+        ["mcp.png", undefined],
+      ],
+      "controller failure must expose playable videos with native controls",
+    );
   },
 
   "enhanced scenes keep their controller-owned visibility"() {
@@ -58,6 +85,10 @@ const scenarios = {
       result.panels.map((panel) => panel.hidden),
       [true, true],
     );
+    assert.deepEqual(
+      result.videos.map((video) => video.dataset.poster),
+      ["agent.png", "mcp.png"],
+    );
   },
 
   "a late watchdog reveals scenes synchronously without a load listener"() {
@@ -66,6 +97,10 @@ const scenarios = {
     assert.deepEqual(
       result.panels.map((panel) => panel.hidden),
       [false, false],
+    );
+    assert.deepEqual(
+      result.videos.map((video) => video.poster),
+      ["agent.png", "mcp.png"],
     );
   },
 };

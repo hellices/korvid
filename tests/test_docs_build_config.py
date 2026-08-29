@@ -409,7 +409,7 @@ def test_mkdocs_loads_only_the_reviewed_local_storytelling_scripts() -> None:
         "assets/javascripts/visual-storytelling.js",
     ]
     assert hashlib.sha256(SCENE_FALLBACK.read_bytes()).hexdigest() == (
-        "6fe8c2b787626254524e714a1133f682f0cbaa317d1be6a7ca6b7c28c86b7933"
+        "eda3fc2798316fa155e6e020245e95b548853cd8c2be2fb3237d94c0373d454e"
     )
     assert VISUAL_STORYTELLING.is_file()
     script = VISUAL_STORYTELLING.read_bytes()
