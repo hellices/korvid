@@ -420,7 +420,7 @@ def test_mkdocs_loads_only_the_reviewed_local_storytelling_scripts() -> None:
     assert VISUAL_STORYTELLING.is_file()
     script = VISUAL_STORYTELLING.read_bytes()
     assert hashlib.sha256(script).hexdigest() == (
-        "884562f8f07ae73ae05d60cc84c70f61e447bd05abfadee7c04deef309bb4d17"
+        "edcf34fad0b4b520bd72a0565aaa754ae8eb71f8a043080c6c275a64bd4b6a64"
     )
     assert b"\r" not in script, (
         "the reviewed bytes are LF-only; a CRLF checkout would break the pin above"
@@ -563,7 +563,7 @@ def _first_markdown_heading(text: str) -> str:
     return ""
 
 
-def test_search_index_excludes_all_quality_gate_content() -> None:
+def test_public_markdown_excludes_all_quality_gate_content_and_links() -> None:
     """No published page — not just `dev/quality-gates.md` — may leak the topic.
 
     `dev/quality-gates.md` is excluded from the build, but
@@ -572,15 +572,10 @@ def test_search_index_excludes_all_quality_gate_content() -> None:
     Three Layers`) and used to build (and search-index) fine on its own, so
     the operator excluded it too rather than trim just that heading.
 
-    This used to shell out to `mkdocs build --strict` and inspect the built
-    `search_index.json`, but that requires the `docs` dependency group
-    (`mkdocs-material`), which the default CI pytest environment
-    (`uv sync --dev --all-extras`) does not install — the docs group is
-    deliberately kept out of general CI. This is a dependency-free
-    equivalent that derives the published Markdown source set from
-    `mkdocs.yml`'s actual `exclude_docs` entries and asserts that no remaining
-    page's path, first-heading title, or full text mentions the topic under
-    either spelling. No mkdocs import or built site is needed.
+    This deliberately enforces a stronger boundary than MkDocs search: paths,
+    Markdown link destinations, headings, and prose all remain free of the
+    rejected internal topic. The dependency-free scan derives the published
+    source set from `mkdocs.yml`'s actual `exclude_docs` entries.
     """
     config = _load_mkdocs_config()
     excluded = config.get("exclude_docs")

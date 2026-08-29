@@ -815,6 +815,24 @@ const scenarios = {
     );
   },
 
+  "a rolled-back switcher restores its poster after a media error"() {
+    const broken = buildSwitcher("broken", { brokenTab: "mcp" });
+    const { errors } = run(buildDocument([broken.switcher]));
+    assert.equal(errors.length, 1, "the invalid switcher must report its initialization failure");
+    assert.equal(broken.videos[1].getAttribute("data-poster"), null);
+
+    broken.videos[1].error = new Error("decode failed after rollback");
+    broken.videos[1].dispatch("error", { type: "error" });
+
+    assert.equal(errors.length, 2, "the rolled-back player must still report its media failure");
+    assert.match(errors[1], /decode failed after rollback/);
+    assert.equal(
+      broken.videos[1].getAttribute("data-poster"),
+      "agent.png",
+      "the failed rolled-back player must reveal its static fallback",
+    );
+  },
+
   "a tab pointing at a panel outside its own switcher is rejected"() {
     const built = buildSwitcher("a", { panelOutside: true });
     const document = buildDocument([built.switcher], [built.stray]);

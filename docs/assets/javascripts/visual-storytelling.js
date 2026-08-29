@@ -52,13 +52,17 @@
     restoreVideoPoster(video, video.error ?? error);
   };
 
-  const manageVideo = (video) => {
-    managedVideos.add(video);
+  const watchVideoErrors = (video) => {
     if (handledVideoErrors.has(video)) return;
     handledVideoErrors.add(video);
     video.addEventListener("error", (event) => {
       reportVideoFailure(video, event);
     });
+  };
+
+  const manageVideo = (video) => {
+    managedVideos.add(video);
+    watchVideoErrors(video);
   };
 
   const manageVideos = (root) => {
@@ -232,6 +236,9 @@
   for (const switcher of document.querySelectorAll("[data-scene-switcher]")) {
     const tabs = Array.from(switcher.querySelectorAll('[role="tab"]'));
     const authoredTabState = readAuthoredTabState(tabs);
+    for (const video of switcher.querySelectorAll("video")) {
+      watchVideoErrors(video);
+    }
     try {
       enhance(switcher, tabs);
     } catch (error) {

@@ -2149,6 +2149,7 @@ def test_scene_switcher_controller_behaves_correctly_against_a_minimal_dom() -> 
         "modified arrow and Home/End keys keep their browser behavior",
         "two ArrowRight presses walk the roving selection to the last scene",
         "left in the no-JavaScript state",
+        "rolled-back switcher restores its poster after a media error",
         "outside its own switcher is rejected",
         "authored hidden panels are re-asserted, not re-laid-out, on enhancement",
         "without IntersectionObserver gets a working switcher that never autoplays",

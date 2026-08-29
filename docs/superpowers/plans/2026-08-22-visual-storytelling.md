@@ -922,7 +922,7 @@ def test_mkdocs_loads_only_the_reviewed_local_storytelling_script() -> None:
     assert VISUAL_STORYTELLING.is_file()
     script = VISUAL_STORYTELLING.read_bytes()
     assert hashlib.sha256(script).hexdigest() == (
-        "884562f8f07ae73ae05d60cc84c70f61e447bd05abfadee7c04deef309bb4d17"
+        "edcf34fad0b4b520bd72a0565aaa754ae8eb71f8a043080c6c275a64bd4b6a64"
     )
     assert b"\r" not in script
 
@@ -1189,13 +1189,17 @@ final newline:
     restoreVideoPoster(video, video.error ?? error);
   };
 
-  const manageVideo = (video) => {
-    managedVideos.add(video);
+  const watchVideoErrors = (video) => {
     if (handledVideoErrors.has(video)) return;
     handledVideoErrors.add(video);
     video.addEventListener("error", (event) => {
       reportVideoFailure(video, event);
     });
+  };
+
+  const manageVideo = (video) => {
+    managedVideos.add(video);
+    watchVideoErrors(video);
   };
 
   const manageVideos = (root) => {
@@ -1369,6 +1373,9 @@ final newline:
   for (const switcher of document.querySelectorAll("[data-scene-switcher]")) {
     const tabs = Array.from(switcher.querySelectorAll('[role="tab"]'));
     const authoredTabState = readAuthoredTabState(tabs);
+    for (const video of switcher.querySelectorAll("video")) {
+      watchVideoErrors(video);
+    }
     try {
       enhance(switcher, tabs);
     } catch (error) {
