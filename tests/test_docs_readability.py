@@ -863,13 +863,16 @@ def test_agent_intro_is_not_duplicated_by_the_sections_below_it() -> None:
     assert len(" ".join(intro.split()).split()) <= 90
 
 
-def test_redesign_does_not_add_a_script_bundle() -> None:
+def test_redesign_loads_only_the_two_reviewed_local_scripts() -> None:
     source = (ROOT / "mkdocs.yml").read_text(encoding="utf-8")
     block = source.split("extra_javascript:", 1)[1].split("\nextra_", 1)[0]
     scripts = [
         line.removeprefix("  - ").strip() for line in block.splitlines() if line.startswith("  - ")
     ]
-    assert scripts == ["assets/javascripts/visual-storytelling.js"]
+    assert scripts == [
+        "assets/javascripts/scene-fallback.js",
+        "assets/javascripts/visual-storytelling.js",
+    ]
 
 
 def _ops_section(heading: str) -> str:

@@ -66,3 +66,15 @@ def test_public_scene_media_keeps_reviewed_geometry_and_budget() -> None:
 
 def test_recording_toolchain_is_not_shipped_with_the_docs() -> None:
     assert not (DOCS / "demo").exists()
+
+    gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
+    for stale in (".korvid-mcp-demo", ".candidate.mp4", "docs/demo/"):
+        assert stale not in gitignore, (
+            f"{stale!r} only ignored recording-toolchain output and must be removed "
+            "with its deleted producer"
+        )
+
+    attributes = (ROOT / ".gitattributes").read_text(encoding="utf-8")
+    assert "docs/demo/" not in attributes, (
+        "deleted recording sources must not retain path-specific Git attributes"
+    )

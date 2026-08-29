@@ -43,7 +43,9 @@ OVERRIDES = DOCS / "overrides"
 COPYRIGHT_PARTIAL = OVERRIDES / "partials" / "copyright.html"
 MARK = DOCS / "assets" / "korvid-mark.svg"
 STORYTELLING_JS = DOCS / "assets" / "javascripts" / "visual-storytelling.js"
+SCENE_FALLBACK_JS = DOCS / "assets" / "javascripts" / "scene-fallback.js"
 SWITCHER_HARNESS = ROOT / "tests" / "js" / "scene_switcher_harness.mjs"
+FALLBACK_HARNESS = ROOT / "tests" / "js" / "scene_fallback_harness.mjs"
 VISUAL_STORYTELLING_PLAN = DOCS / "superpowers" / "plans" / "2026-08-22-visual-storytelling.md"
 VISUAL_STORYTELLING_DESIGN = (
     DOCS / "superpowers" / "specs" / "2026-08-22-visual-storytelling-design.md"
@@ -1527,38 +1529,54 @@ def test_scene_switcher_source_keeps_every_scene_and_its_source() -> None:
     assert 'src="assets/scenes/mcp-follow-demo.mp4"' in switcher
 
 
-def test_scenes_are_authored_visible_until_the_controller_enhances_them() -> None:
-    """A failed controller load must leave every scene accessible.
-
-    Source-level `hidden` cannot be recovered when scripting is enabled but
-    the controller fails to download or parse: `<noscript>` does not apply and
-    no controller code runs. Every panel therefore starts visible, and only a
-    successfully initialized controller may hide the unselected pair.
-    """
+def test_cold_load_authors_one_scene_with_an_independent_failure_recovery() -> None:
+    """Stable first paint and controller-load recovery are separate contracts."""
     switcher = _scene_switcher()
     panels = re.findall(r"<article id=\"scene-[^\"]+\"[^>]*role=\"tabpanel\"[^>]*>", switcher)
     assert len(panels) == 3
     hidden = [panel for panel in panels if re.search(r"\shidden(?=[\s/>])", panel)]
-    assert hidden == [], (
-        "controller-load failure has no executable recovery path, so authored "
-        f"`hidden` would make scenes permanently inaccessible: {hidden}"
+    assert len(hidden) == 2, (
+        "the cold load must paint only the selected scene before deferred scripts run"
     )
 
     controller = _controller_source()
     assert "panel.hidden = !selected" in _strip_js_comments(controller), (
-        "only a successfully initialized controller may hide unselected scenes"
+        "the controller must continue owning scene visibility after enhancement"
+    )
+    assert SCENE_FALLBACK_JS.is_file(), (
+        "controller failure recovery must live in a separate script that can still "
+        "run when the controller itself fails to download or parse"
     )
 
 
-def test_noscript_expands_every_scene_and_drops_the_stack_cap() -> None:
-    """No-JavaScript visitors get the authored-visible scenes uncapped."""
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+def test_scene_fallback_runs_independently_of_the_controller() -> None:
+    result = subprocess.run(
+        ["node", str(FALLBACK_HARNESS)],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=ROOT,
+    )
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    assert "not ok" not in result.stdout
+    assert "controller load failure reveals authored-hidden scenes" in result.stdout
+    assert "enhanced scenes keep their controller-owned visibility" in result.stdout
+
+
+def test_noscript_restores_every_scene_and_drops_the_stack_cap() -> None:
+    """No-JavaScript visitors get the source-hidden scenes restored uncapped."""
     noscript = _noscript_style()
     rules = dict(_declaration_blocks(noscript))
     lookup = {_compact(prelude): body for prelude, body in rules.items()}
 
-    assert not any(".scene-panel[hidden]" in prelude for prelude in lookup), (
-        "all panels are authored visible, so a noscript-only unhide rule would "
-        "conceal a regression in the source markup"
+    unhide = next(
+        (prelude for prelude in lookup if ".scene-panel[hidden]" in prelude),
+        None,
+    )
+    assert unhide is not None, "the noscript styles must un-hide the authored panels"
+    assert "display: grid" in lookup[unhide], (
+        f"un-hidden panels must return to their grid layout; found {lookup[unhide]!r}"
     )
 
     uncap = next(
@@ -1594,15 +1612,18 @@ def test_noscript_expands_every_scene_and_drops_the_stack_cap() -> None:
         "rules stay debuggable"
     )
     shipped = _css()
-    base = ".md-typeset .hero-driver-stage .scene-panel"
-    assert _specificity(uncap) > _specificity(base), (
-        f"`{uncap}` must out-specify the shipped `{base}` rule regardless of "
-        "which stylesheet the browser reads first"
-    )
-    assert base in _strip_css_comments(shipped), (
-        f"the noscript override targets `{base}`, which no longer exists in "
-        "extra.css — the two must be changed together"
-    )
+    for prelude, base in (
+        (unhide, ".md-typeset .scene-panel[hidden]"),
+        (uncap, ".md-typeset .hero-driver-stage .scene-panel"),
+    ):
+        assert _specificity(prelude) > _specificity(base), (
+            f"`{prelude}` must out-specify the shipped `{base}` rule regardless of "
+            "which stylesheet the browser reads first"
+        )
+        assert base in _strip_css_comments(shipped), (
+            f"the noscript override targets `{base}`, which no longer exists in "
+            "extra.css — the two must be changed together"
+        )
 
 
 def test_scene_switcher_uses_the_aria_tab_contract() -> None:
@@ -2122,7 +2143,7 @@ def test_scene_switcher_controller_behaves_correctly_against_a_minimal_dom() -> 
         "two ArrowRight presses walk the roving selection to the last scene",
         "left in the no-JavaScript state",
         "outside its own switcher is rejected",
-        "authored visible panels collapse only after enhancement succeeds",
+        "authored hidden panels are re-asserted, not re-laid-out, on enhancement",
         "without IntersectionObserver gets a working switcher that never autoplays",
     ):
         assert scenario in result.stdout, f"the DOM harness must cover {scenario!r}"

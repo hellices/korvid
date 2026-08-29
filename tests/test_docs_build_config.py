@@ -33,6 +33,7 @@ RESIZE_OBSERVER_VENDOR = (
     ROOT / "docs" / "assets" / "javascripts" / "vendor" / "resize-observer-polyfill-1.5.1.js"
 )
 VISUAL_STORYTELLING = ROOT / "docs" / "assets" / "javascripts" / "visual-storytelling.js"
+SCENE_FALLBACK = ROOT / "docs" / "assets" / "javascripts" / "scene-fallback.js"
 
 
 def test_makefile_docs_build_uses_frozen() -> None:
@@ -401,9 +402,15 @@ def test_material_bundle_checkout_preserves_reviewed_bytes() -> None:
     assert "docs/assets/javascripts/vendor/*.js -text" in attributes
 
 
-def test_mkdocs_loads_only_the_reviewed_local_storytelling_script() -> None:
+def test_mkdocs_loads_only_the_reviewed_local_storytelling_scripts() -> None:
     config = _load_mkdocs_config()
-    assert config.get("extra_javascript") == ["assets/javascripts/visual-storytelling.js"]
+    assert config.get("extra_javascript") == [
+        "assets/javascripts/scene-fallback.js",
+        "assets/javascripts/visual-storytelling.js",
+    ]
+    assert hashlib.sha256(SCENE_FALLBACK.read_bytes()).hexdigest() == (
+        "6fe8c2b787626254524e714a1133f682f0cbaa317d1be6a7ca6b7c28c86b7933"
+    )
     assert VISUAL_STORYTELLING.is_file()
     script = VISUAL_STORYTELLING.read_bytes()
     assert hashlib.sha256(script).hexdigest() == (
@@ -426,6 +433,7 @@ def test_visual_storytelling_plan_pins_the_current_controller_bytes() -> None:
 def test_storytelling_script_checkout_preserves_reviewed_bytes() -> None:
     attributes = (ROOT / ".gitattributes").read_text(encoding="utf-8")
     assert "docs/assets/javascripts/visual-storytelling.js text eol=lf" in attributes
+    assert "docs/assets/javascripts/scene-fallback.js text eol=lf" in attributes
 
 
 def test_mkdocs_excludes_override_sources_but_keeps_theme_customization() -> None:

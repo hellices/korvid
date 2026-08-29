@@ -1,8 +1,8 @@
 {% extends "main.html" %}
 
-{#- The landing page authors every scene visible so a controller download or
-    parse failure cannot strand the Agent and MCP panels behind `hidden`.
-    Visitors with scripting disabled also get the expanded, uncapped fallback.
+{#- The landing page's inactive scenes are source-hidden for stable first-paint
+    geometry. This block restores them for visitors without scripting; the
+    independent scene-fallback.js watchdog handles controller load/parse failure.
 
     `<noscript>` may only carry flow content in `<body>`, so the restore
     ships here, where a `<style>` element is valid. Every override adds one
@@ -12,6 +12,10 @@
 {% block extrahead %}
   <noscript>
     <style>
+      .md-typeset [data-scene-switcher] .scene-panel[hidden] {
+        display: grid;
+      }
+
       .md-typeset [data-scene-switcher] .hero-driver-stage .scene-panel {
         aspect-ratio: auto;
         max-height: none;
