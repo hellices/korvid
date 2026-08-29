@@ -226,10 +226,10 @@ function buildSwitcher(prefix, { brokenTab = null, panelOutside = false, authore
     }),
   );
   const panels = scenes.map((scene, index) => {
-    const children = [videos[index]];
-    if (index > 0) {
-      children.push(element("img", { class: "scene-panel__fallback", src: `${scene}.png` }));
-    }
+    const children = [
+      videos[index],
+      element("img", { class: "scene-panel__fallback", src: `${scene}.png` }),
+    ];
     return element(
       "article",
       {
@@ -454,6 +454,21 @@ const scenarios = {
       "the CSS fallback must hide the failed player and reveal its poster image",
     );
     assert.ok(built.videos[1].paused > 0, "the failed player must be stopped");
+  },
+
+  async "the default scene restores its poster after a playback failure"() {
+    const built = buildSwitcher("a");
+    const document = buildDocument([built.switcher]);
+    const { errors, observers } = run(document);
+    built.videos[0].playError = Object.assign(new Error("unsupported codec"), {
+      name: "NotSupportedError",
+    });
+
+    observers[0].callback([{ isIntersecting: true }]);
+    await Promise.resolve();
+
+    assert.equal(errors.length, 1);
+    assert.equal(built.videos[0].getAttribute("data-poster"), "direct.png");
   },
 
   async "a failed scene keeps its poster fallback when selected again"() {

@@ -189,8 +189,8 @@ def test_mcp_follow_demo_asset_fits_readme_budget() -> None:
     """The GIF must be the approved clip's whole story, at a readable rate.
 
     Its geometry and running time are the clip's own — anything else means
-    the README is showing a different recording than the one the landing
-    page and `docs/demo/visual-storytelling.md` document.
+    the README is showing a different recording than `REGENERATION_COMMAND`
+    derives from the reviewed source.
     """
     payload = ASSET.read_bytes()
     delays = _frame_delays(payload)

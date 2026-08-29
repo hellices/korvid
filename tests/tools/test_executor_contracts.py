@@ -181,6 +181,55 @@ async def test_proposal_bridge_failure_text_is_reported_as_an_error() -> None:
     assert outcome.text.startswith(ERROR_PREFIX)
 
 
+@pytest.mark.parametrize(
+    ("tool", "arguments"),
+    [
+        (
+            "propose_write",
+            {
+                "action": "restart",
+                "kind": "deployments",
+                "name": "web",
+                "namespace": "shop",
+            },
+        ),
+        ("cancel_write_proposal", {"proposal_id": "proposal-1"}),
+    ],
+)
+async def test_other_proposal_bridge_failures_are_reported_as_errors(
+    tool: str,
+    arguments: dict[str, Any],
+) -> None:
+    class DenyingProposalBridge(FakeBridge):
+        async def agent_submit_write_proposal(
+            self,
+            action: str,
+            kind: str,
+            name: str,
+            namespace: str | None = None,
+            replicas: int | None = None,
+            resources: dict[str, dict[str, dict[str, str]]] | None = None,
+            *,
+            session_id: str = "",
+            client_name: str = "",
+            client_version: str = "",
+        ) -> str:
+            return f"{ERROR_PREFIX} proposal submission denied"
+
+        async def agent_cancel_write_proposal(
+            self,
+            proposal_id: str,
+            *,
+            session_id: str = "",
+        ) -> str:
+            return f"{ERROR_PREFIX} proposal cancellation denied"
+
+    outcome = await make_ui_executor(DenyingProposalBridge()).execute_recorded(tool, arguments)
+
+    assert outcome.error is True
+    assert outcome.text.startswith(ERROR_PREFIX)
+
+
 # --- The recorded-execution contract is an ABC (round 6) -------------------
 #
 # The agent loop used to runtime-check a private Protocol it declared

@@ -1714,7 +1714,7 @@ def test_visual_storytelling_plan_scene_focus_css_matches_the_shipped_rules() ->
 
 
 def test_only_the_visible_scene_ships_an_eagerly_fetched_poster() -> None:
-    """`preload="none"` suppresses video bytes but never the poster image.
+    """`preload="none"` asks the browser not to preload inactive video bytes.
 
     The preload scanner fetches every `<video poster>` before the
     end-of-body controller can hide the inactive panels, so the two
@@ -2143,6 +2143,7 @@ def test_scene_switcher_controller_behaves_correctly_against_a_minimal_dom() -> 
         "without matchMedia",
         "autoplay policy rejection is swallowed",
         "media playback failure is reported",
+        "default scene restores its poster after a playback failure",
         "a late media error after a successful play restores the scene poster",
         "a late media error before a rejected play settles reports one failure",
         "prototype-named keys are ignored",
@@ -2315,7 +2316,9 @@ def test_scene_videos_never_autoplay_and_inactive_media_preloads_nothing() -> No
             f"an unselected scene must remain playable without JavaScript: {video}"
         )
         assert 'data-src="' not in video, f"no-JS playback cannot depend on promotion: {video}"
-        assert 'preload="none"' in video, f"inactive scene media must fetch nothing: {video}"
+        assert 'preload="none"' in video, (
+            f"inactive scene media must carry the strongest standard preload hint: {video}"
+        )
 
     controller = _strip_js_comments(_controller_source())
     assert "data-src" not in controller
@@ -3347,8 +3350,8 @@ def test_landing_never_labels_a_single_pod_stream_as_a_merged_one() -> None:
     destinations = re.findall(r'<a href="([^"]+)"><strong>([^<]+)</strong>', paths)
     assert destinations == [
         ("getting-started/", "Start operating"),
-        ("agent/", "Explore Agent and MCP"),
-        ("performance/", "Evaluate production use"),
+        ("agent/", "Explore Agent"),
+        ("performance/", "Evaluate performance"),
     ], f"three destinations, install first and production last; found {destinations}"
     for _, label in destinations:
         assert len(label.split()) <= 4, f"a destination label must stay scannable: {label!r}"

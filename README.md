@@ -107,7 +107,8 @@ guidance, retained local state, and the exact `v0.3.0` publish procedure, see th
 | `Ctrl-A` | AI agent panel (`:ai` to set up) |
 | `?` | full help overlay |
 
-Full key reference: [docs/keybindings.md](https://github.com/hellices/korvid/blob/main/docs/keybindings.md).
+Curated key guide: [docs/keybindings.md](https://github.com/hellices/korvid/blob/main/docs/keybindings.md).
+Press `?` in korvid for the complete effective set, including remaps.
 
 ## Features
 
@@ -115,8 +116,8 @@ Full key reference: [docs/keybindings.md](https://github.com/hellices/korvid/blo
   diagrams: a cockpit that works on its own, an agent you can add, and an
   MCP surface that lets your editor's assistant see the cluster. Start here
   if you are deciding whether korvid fits.
-- **[Keybindings](https://hellices.github.io/korvid/keybindings/)** — every key by context, plus
-  remapping via `keybindings:` config.
+- **[Keybindings](https://hellices.github.io/korvid/keybindings/)** — a compact contextual guide
+  and remapping example; press `?` in korvid for every effective key.
 - **[Browsing the cluster](https://hellices.github.io/korvid/tui/)** — custom columns from labels /
   annotations / jsonpath, live pod metrics, ops hints for troubled pods,
   split workspace, the log viewer (multi-pod merge, JSON highlighting,

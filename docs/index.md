@@ -80,7 +80,7 @@ hide:
   <h2 id="flight-paths-title">Go from proof to practice.</h2>
   <div class="flight-paths__grid">
     <a href="getting-started/"><strong>Start operating</strong><span>Install korvid and take the five-minute route.</span></a>
-    <a href="agent/"><strong>Explore Agent and MCP</strong><span>Choose a provider, then expose bounded read-only tools.</span></a>
-    <a href="performance/"><strong>Evaluate production use</strong><span>Check scale, air-gap, and threat assumptions.</span></a>
+    <a href="agent/"><strong>Explore Agent</strong><span>Choose a provider and investigate from the visible cockpit.</span></a>
+    <a href="performance/"><strong>Evaluate performance</strong><span>Check scale targets and measurement methods.</span></a>
   </div>
 </nav>
