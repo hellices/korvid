@@ -1562,6 +1562,7 @@ def test_scene_fallback_runs_independently_of_the_controller() -> None:
     assert "not ok" not in result.stdout
     assert "controller load failure reveals authored-hidden scenes" in result.stdout
     assert "enhanced scenes keep their controller-owned visibility" in result.stdout
+    assert "late watchdog reveals scenes synchronously" in result.stdout
 
 
 def test_noscript_restores_every_scene_and_drops_the_stack_cap() -> None:

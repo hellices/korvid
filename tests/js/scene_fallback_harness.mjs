@@ -34,7 +34,11 @@ function run({ enhanced = false, readyState = "loading" } = {}) {
   };
 
   vm.runInNewContext(source, sandbox);
-  return { panels, fireLoad: () => onLoad?.() };
+  return {
+    panels,
+    fireLoad: () => onLoad?.(),
+    hasLoadListener: () => onLoad !== null,
+  };
 }
 
 const scenarios = {
@@ -53,6 +57,15 @@ const scenarios = {
     assert.deepEqual(
       result.panels.map((panel) => panel.hidden),
       [true, true],
+    );
+  },
+
+  "a late watchdog reveals scenes synchronously without a load listener"() {
+    const result = run({ readyState: "complete" });
+    assert.equal(result.hasLoadListener(), false);
+    assert.deepEqual(
+      result.panels.map((panel) => panel.hidden),
+      [false, false],
     );
   },
 };
