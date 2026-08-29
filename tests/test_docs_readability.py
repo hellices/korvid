@@ -316,6 +316,17 @@ def test_mcp_observability_reads_emit_an_activity_note_instead_of_navigating() -
     assert "Activity note only — never followable navigation" in source
 
 
+def test_mcp_follow_separates_navigation_from_activity_notes() -> None:
+    section = _section("mcp.md", "Read once or follow activity")
+    lowered = " ".join(section.lower().split())
+
+    assert "with follow on" in lowered
+    assert "navigates" in lowered
+    assert "with follow off" in lowered
+    assert "activity note" in lowered
+    assert "cannot land" in lowered
+
+
 def test_tui_scopes_request_relative_wording_to_the_ratio_columns() -> None:
     """Finding 2: only `%CPU/R`/`%MEM/R` are request-relative (`CPU`/`MEM`
     render absolute usage), and the no-limit fallback is the request ratio

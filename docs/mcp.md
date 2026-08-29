@@ -112,14 +112,18 @@ mid-task is worse than invisibility. Enable at startup with
 `mcp: {follow: true}`, or live with `:mcp follow on|off` (bare `:mcp follow`
 toggles; bare `:mcp` reports both server and follow state).
 
-A successful **Kubernetes** read may emit an activity note: `list_resources`
-navigates to that view, `get_resource` / `get_events` open the describe
-pane, `get_logs` opens the log pane, and the `diagnose_*` tools open the
-relevant describe pane too. Prometheus and Loki reads have no korvid screen
-to mirror, so they always surface as an activity note instead of navigating
-anywhere. An activity note does not make the read followable in the same
-sense, though: mirroring is fire-and-forget UI navigation, not a resumable
-feed, and observability reads simply have nothing on screen to navigate to.
+With follow on, a successful **Kubernetes** read navigates the TUI:
+`list_resources` selects that view, `get_resource` / `get_events` open the
+describe pane, `get_logs` opens the log pane, and the `diagnose_*` tools open
+the relevant describe pane too. The mirror is fire-and-forget UI navigation,
+not a resumable feed; if it cannot land, korvid falls back to an activity
+note.
+
+With follow off, Kubernetes reads surface only as activity notes. Prometheus
+and Loki reads always use an activity note instead of navigating anywhere
+because no korvid screen can display them.
+An activity note does not make the read followable; it only makes the external
+read visible.
 
 Mirroring never waits on, or fails with, the MCP response; a failed read is
 never mirrored, and a mirror never opens over an approval dialog — approvals
