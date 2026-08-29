@@ -1610,6 +1610,12 @@ def test_noscript_restores_every_scene_and_drops_the_stack_cap() -> None:
     assert ".scene-panel__fallback" in media, (
         "the poster fallback must be released with the players it stands in for"
     )
+    for prelude, declarations in lookup.items():
+        if "video[data-poster] + .scene-panel__fallback" in prelude:
+            assert "display: none" not in declarations, (
+                "data-poster cannot become a real poster without JavaScript; hiding "
+                "the sibling image would leave an empty preload-none player"
+            )
 
     tabs = next((prelude for prelude in lookup if ".scene-tabs" in prelude), None)
     assert tabs is not None, "the noscript styles must collapse the reserved tab strip"
@@ -1780,8 +1786,8 @@ def test_deferred_scenes_keep_media_when_the_controller_never_runs() -> None:
     assert "display: none" in _rule(css, restored_video)
 
 
-def test_no_javascript_fallback_replaces_deferred_videos_with_posters() -> None:
-    """No-JS rendering must leave every recording playable with native controls."""
+def test_no_javascript_fallback_keeps_players_and_static_frames_visible() -> None:
+    """No-JS rendering keeps playable controls without sacrificing local frames."""
     videos = re.findall(r"<video[^>]*>", _scene_switcher())
     assert len(videos) == 3
     for video in videos:
@@ -1792,12 +1798,8 @@ def test_no_javascript_fallback_replaces_deferred_videos_with_posters() -> None:
 
     noscript = _noscript_style()
     video_rule = _rule(noscript, ".md-typeset [data-scene-switcher] video[data-poster]")
-    fallback_rule = _rule(
-        noscript,
-        ".md-typeset [data-scene-switcher] video[data-poster] + .scene-panel__fallback",
-    )
     assert "display: block" in video_rule
-    assert "display: none" in fallback_rule
+    assert "video[data-poster] + .scene-panel__fallback" not in noscript
 
 
 def test_controller_promotes_a_deferred_poster_only_when_its_scene_is_selected() -> None:
