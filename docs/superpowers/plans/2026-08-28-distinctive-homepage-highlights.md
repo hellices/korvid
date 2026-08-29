@@ -168,7 +168,8 @@ Keep the `threat-model/` destination assertion and the ban on the broader
 Run:
 
 ```bash
-cd /Users/hwang-inhwan/workspace/kube/.worktrees/docs-official-site
+repo_root=$(git rev-parse --show-toplevel)
+cd "$repo_root"
 .venv/bin/python -m pytest -p no:tach tests/test_docs_landing_design.py -q
 ```
 
@@ -219,7 +220,8 @@ Replace only `docs/index.md` lines 45-76 with:
 Run:
 
 ```bash
-cd /Users/hwang-inhwan/workspace/kube/.worktrees/docs-official-site
+repo_root=$(git rev-parse --show-toplevel)
+cd "$repo_root"
 .venv/bin/python -m pytest -p no:tach tests/test_docs_landing_design.py -q
 ```
 
@@ -230,7 +232,8 @@ Expected: all tests in `test_docs_landing_design.py` pass.
 Run:
 
 ```bash
-cd /Users/hwang-inhwan/workspace/kube/.worktrees/docs-official-site
+repo_root=$(git rev-parse --show-toplevel)
+cd "$repo_root"
 .venv/bin/ruff check tests/test_docs_landing_design.py
 .venv/bin/ruff format --check tests/test_docs_landing_design.py
 .venv/bin/mkdocs build --strict

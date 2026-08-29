@@ -395,6 +395,16 @@ def _controller_source() -> str:
     return STORYTELLING_JS.read_text(encoding="utf-8")
 
 
+def test_distinctive_highlights_plan_resolves_the_checkout_dynamically() -> None:
+    plan = (
+        DOCS / "superpowers" / "plans" / "2026-08-28-distinctive-homepage-highlights.md"
+    ).read_text(encoding="utf-8")
+
+    assert "/Users/" not in plan
+    assert plan.count("repo_root=$(git rev-parse --show-toplevel)") == 3
+    assert plan.count('cd "$repo_root"') == 3
+
+
 def _noscript_style() -> str:
     """The CSS the site serves only when scripting is disabled.
 

@@ -537,6 +537,7 @@ def test_quality_gates_are_not_part_of_the_public_site() -> None:
     nav_text = json.dumps(config["nav"])
     assert "dev/quality-gates.md" in excluded
     assert "quality-gates" not in nav_text.lower()
+    assert "quality gates" not in nav_text.lower()
 
 
 def _first_markdown_heading(text: str) -> str:
