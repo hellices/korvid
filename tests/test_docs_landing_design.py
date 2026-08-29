@@ -409,10 +409,7 @@ def _noscript_style() -> str:
     template = (OVERRIDES / "home.html").read_text(encoding="utf-8")
     source = re.sub(r"\{#.*?#\}", " ", template, flags=re.DOTALL)
     block = re.search(r"<noscript>(?P<body>.*?)</noscript>", source, re.DOTALL)
-    assert block is not None, (
-        "the home template must ship a <noscript> block, or authored `hidden` "
-        "panels are simply missing for visitors without JavaScript"
-    )
+    assert block is not None, "the home template must expand the fallback without JavaScript"
     style = re.search(r"<style>(?P<css>.*?)</style>", block.group("body"), re.DOTALL)
     assert style is not None, "the <noscript> block must contain a <style> element"
     return style.group("css")
@@ -1530,67 +1527,38 @@ def test_scene_switcher_source_keeps_every_scene_and_its_source() -> None:
     assert 'src="assets/scenes/mcp-follow-demo.mp4"' in switcher
 
 
-def test_unselected_scenes_are_authored_hidden_so_the_cold_load_shows_one_stage() -> None:
-    """The first paint must show the same one panel the controller would select.
+def test_scenes_are_authored_visible_until_the_controller_enhances_them() -> None:
+    """A failed controller load must leave every scene accessible.
 
-    Rendering all three panels until the script runs is what produced the
-    measured cold-load shift: a 1,049px stack collapsing to a 334px stage.
-    The two panels whose tabs are `aria-selected="false"` therefore carry the
-    `hidden` attribute in the source, so the browser paints the selected
-    scene — and only that scene — before any JavaScript is fetched.
-
-    The attribute is the exact state the controller already owns
-    (`panel.hidden = !selected`), so enhancement is a no-op on load rather
-    than a re-layout, and the `<noscript>` rule restores all three for
-    visitors with scripting off.
+    Source-level `hidden` cannot be recovered when scripting is enabled but
+    the controller fails to download or parse: `<noscript>` does not apply and
+    no controller code runs. Every panel therefore starts visible, and only a
+    successfully initialized controller may hide the unselected pair.
     """
     switcher = _scene_switcher()
     panels = re.findall(r"<article id=\"scene-[^\"]+\"[^>]*role=\"tabpanel\"[^>]*>", switcher)
     assert len(panels) == 3
     hidden = [panel for panel in panels if re.search(r"\shidden(?=[\s/>])", panel)]
-    assert len(hidden) == 2, (
-        "exactly the two unselected panels must be authored hidden, or the cold "
-        f"load paints a stack it then collapses; found {len(hidden)}"
-    )
-
-    selected_tab = re.search(
-        r'<button[^>]*aria-selected="true"[^>]*aria-controls="(?P<panel>[^"]+)"', switcher
-    )
-    assert selected_tab is not None, "one tab must be authored selected"
-    visible = [panel for panel in panels if panel not in hidden]
-    assert f'id="{selected_tab.group("panel")}"' in visible[0], (
-        "the panel left visible must be the one the selected tab controls, or the "
-        "cold load contradicts the ARIA state"
+    assert hidden == [], (
+        "controller-load failure has no executable recovery path, so authored "
+        f"`hidden` would make scenes permanently inaccessible: {hidden}"
     )
 
     controller = _controller_source()
     assert "panel.hidden = !selected" in _strip_js_comments(controller), (
-        "the controller must keep owning the same attribute it now inherits, so "
-        "clicking a tab still swaps scenes"
+        "only a successfully initialized controller may hide unselected scenes"
     )
 
 
-def test_noscript_restores_every_scene_and_drops_the_stack_cap() -> None:
-    """Authored `hidden` must not cost real no-JavaScript visitors the other scenes.
-
-    `hidden` in the source plus a cap that binds at first paint is only
-    honest if a browser with scripting disabled gets all three panels back,
-    uncapped and unclipped. The site template ships a `<noscript>` stylesheet
-    that un-hides the panels, releases the per-panel ratio/height cap and
-    collapses the inert tab strip — and it wins purely on specificity, so no
-    `!important` and no dependency on rule order.
-    """
+def test_noscript_expands_every_scene_and_drops_the_stack_cap() -> None:
+    """No-JavaScript visitors get the authored-visible scenes uncapped."""
     noscript = _noscript_style()
     rules = dict(_declaration_blocks(noscript))
     lookup = {_compact(prelude): body for prelude, body in rules.items()}
 
-    unhide = next(
-        (prelude for prelude in lookup if ".scene-panel[hidden]" in prelude),
-        None,
-    )
-    assert unhide is not None, "the noscript styles must un-hide the authored panels"
-    assert "display: grid" in lookup[unhide], (
-        f"un-hidden panels must return to their grid layout; found {lookup[unhide]!r}"
+    assert not any(".scene-panel[hidden]" in prelude for prelude in lookup), (
+        "all panels are authored visible, so a noscript-only unhide rule would "
+        "conceal a regression in the source markup"
     )
 
     uncap = next(
@@ -1626,18 +1594,15 @@ def test_noscript_restores_every_scene_and_drops_the_stack_cap() -> None:
         "rules stay debuggable"
     )
     shipped = _css()
-    for prelude, base in (
-        (unhide, ".md-typeset .scene-panel[hidden]"),
-        (uncap, ".md-typeset .hero-driver-stage .scene-panel"),
-    ):
-        assert _specificity(prelude) > _specificity(base), (
-            f"`{prelude}` must out-specify the shipped `{base}` rule regardless of "
-            "which stylesheet the browser reads first"
-        )
-        assert base in _strip_css_comments(shipped), (
-            f"the noscript override targets `{base}`, which no longer exists in "
-            "extra.css — the two must be changed together"
-        )
+    base = ".md-typeset .hero-driver-stage .scene-panel"
+    assert _specificity(uncap) > _specificity(base), (
+        f"`{uncap}` must out-specify the shipped `{base}` rule regardless of "
+        "which stylesheet the browser reads first"
+    )
+    assert base in _strip_css_comments(shipped), (
+        f"the noscript override targets `{base}`, which no longer exists in "
+        "extra.css — the two must be changed together"
+    )
 
 
 def test_scene_switcher_uses_the_aria_tab_contract() -> None:
@@ -2157,7 +2122,7 @@ def test_scene_switcher_controller_behaves_correctly_against_a_minimal_dom() -> 
         "two ArrowRight presses walk the roving selection to the last scene",
         "left in the no-JavaScript state",
         "outside its own switcher is rejected",
-        "authored hidden panels are re-asserted, not re-laid-out, on enhancement",
+        "authored visible panels collapse only after enhancement succeeds",
         "without IntersectionObserver gets a working switcher that never autoplays",
     ):
         assert scenario in result.stdout, f"the DOM harness must cover {scenario!r}"

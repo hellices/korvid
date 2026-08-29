@@ -1,10 +1,8 @@
 {% extends "main.html" %}
 
-{#- The landing page's two unselected scene panels carry `hidden` in the
-    source so a cold load paints one capped stage instead of a three-panel
-    stack that the controller then collapses. That is only honest if a
-    visitor with scripting disabled — for whom the controller will never
-    run — gets every scene back, uncapped and unclipped.
+{#- The landing page authors every scene visible so a controller download or
+    parse failure cannot strand the Agent and MCP panels behind `hidden`.
+    Visitors with scripting disabled also get the expanded, uncapped fallback.
 
     `<noscript>` may only carry flow content in `<body>`, so the restore
     ships here, where a `<style>` element is valid. Every override adds one
@@ -14,10 +12,6 @@
 {% block extrahead %}
   <noscript>
     <style>
-      .md-typeset [data-scene-switcher] .scene-panel[hidden] {
-        display: grid;
-      }
-
       .md-typeset [data-scene-switcher] .hero-driver-stage .scene-panel {
         aspect-ratio: auto;
         max-height: none;

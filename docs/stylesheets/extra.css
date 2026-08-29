@@ -259,10 +259,11 @@
    `visibility: hidden` rather than `display: none`, because removing the
    strip from flow was itself a 74.6px layout shift the moment the script
    ran. Hidden visibility keeps it unpainted, unfocusable and out of the
-   accessibility tree while reserving the exact space enhancement will use,
-   so the tabs appear without moving anything below them. A visitor who can
-   never be enhanced (scripting off) collapses the reservation instead —
-   see the `<noscript>` block in `docs/overrides/home.html`. */
+   accessibility tree while reserving the exact space enhancement will use.
+   Before enhancement every scene remains visible, so a controller load
+   failure leaves useful content rather than inaccessible hidden panels. A
+   visitor who can never be enhanced (scripting off) also collapses the tab
+   reservation — see `docs/overrides/home.html`. */
 .md-typeset [data-scene-switcher]:not([data-enhanced]) .scene-tabs {
   visibility: hidden;
 }

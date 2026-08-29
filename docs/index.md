@@ -30,11 +30,11 @@ hide:
         <video src="assets/demo.mp4" poster="assets/scenes/cockpit-poster.png" controls muted loop playsinline preload="metadata" aria-label="korvid browsing, filtering, describing, and following logs for a failing workload">Your browser does not support the korvid demo video.</video>
         <img class="scene-panel__fallback" src="assets/scenes/cockpit-poster.png" width="1280" height="720" alt="Korvid's cockpit showing a filtered workload table and the selected resource detail">
       </article>
-      <article id="scene-agent" class="scene-panel" role="tabpanel" aria-labelledby="scene-tab-agent" tabindex="0" hidden>
+      <article id="scene-agent" class="scene-panel" role="tabpanel" aria-labelledby="scene-tab-agent" tabindex="0">
         <video src="assets/scenes/agent-demo.mp4" data-poster="assets/scenes/agent-poster.png" controls muted loop playsinline preload="none" aria-label="A deterministic synthetic-cluster walkthrough: a prompt submitted in korvid's real AgentPanel, real diagnose_pod and get_logs reads that agent follow mirrors onto the screen, and a grounded answer citing E1 and E2">Your browser does not support this deterministic synthetic-cluster walkthrough.</video>
         <img class="scene-panel__fallback" src="assets/scenes/agent-poster.png" width="1280" height="720" loading="lazy" alt="Korvid's real AgentPanel ending a deterministic synthetic-cluster walkthrough: the submitted prompt, real diagnose_pod and get_logs tool events, a grounded answer citing E1 and E2, and the describe pane agent follow mirrored beside it">
       </article>
-      <article id="scene-mcp" class="scene-panel" role="tabpanel" aria-labelledby="scene-tab-mcp" tabindex="0" hidden>
+      <article id="scene-mcp" class="scene-panel" role="tabpanel" aria-labelledby="scene-tab-mcp" tabindex="0">
         <video src="assets/scenes/mcp-follow-demo.mp4" class="mcp-media" data-poster="assets/scenes/mcp-poster.png" controls muted loop playsinline preload="none" aria-label="A clean local MCP SDK client making real read-only MCP requests over Streamable HTTP while korvid follow mode mirrors each answer onto the screen">Your browser does not support this MCP follow demo.</video>
         <img class="scene-panel__fallback mcp-media" src="assets/scenes/mcp-poster.png" width="1280" height="710" loading="lazy" alt="A clean local MCP SDK client reading a synthetic cluster over Streamable HTTP while korvid follow mode mirrors the same table, describe, and log views">
       </article>

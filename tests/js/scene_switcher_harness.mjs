@@ -203,13 +203,8 @@ function element(tag, attributes, ...children) {
   return new HTMLElement(tag, attributes).append(...children);
 }
 
-/** Build one switcher shaped like the landing page's, with three scenes.
- *
- *  `authoredHidden` mirrors the shipped markup, where the two unselected
- *  panels carry `hidden` in the source so the cold load paints one scene
- *  instead of a three-panel stack the controller then collapses. Pass
- *  `false` to model markup that leaves the whole state to the controller. */
-function buildSwitcher(prefix, { brokenTab = null, panelOutside = false, authoredHidden = true } = {}) {
+/** Build one switcher shaped like the landing page's, with three authored-visible scenes. */
+function buildSwitcher(prefix, { brokenTab = null, panelOutside = false } = {}) {
   const scenes = ["direct", "agent", "mcp"];
   const tabs = scenes.map((scene, index) =>
     element("button", {
@@ -239,7 +234,6 @@ function buildSwitcher(prefix, { brokenTab = null, panelOutside = false, authore
         id: `${prefix}-${scene}`,
         class: "scene-panel",
         role: "tabpanel",
-        ...(authoredHidden && index > 0 ? { hidden: "" } : {}),
       },
       ...children,
     );
@@ -839,31 +833,24 @@ const scenarios = {
       [false, false],
       "the switcher's own panels stay visible",
     );
-    assert.equal(
-      built.stray.hidden,
-      true,
-      "a panel outside the switcher is never touched, so it keeps the authored state",
-    );
+    assert.equal(built.stray.hidden, false, "a panel outside the switcher is never touched");
   },
 
-  "authored hidden panels are re-asserted, not re-laid-out, on enhancement"() {
-    /* The shipped markup hides the two unselected panels itself, so the
-       first paint already shows the one scene the controller would select.
-       Enhancement must therefore write the state the page is already in —
-       if it moved a single panel, the cold load would shift exactly the way
-       an unauthored stack did (a measured 1,049px stage collapsing to
-       334px). Markup that does *not* author the state still gets it, so the
-       controller remains the owner rather than the assumer. */
+  "authored visible panels collapse only after enhancement succeeds"() {
+    /* Source-level hidden panels have no recovery path when JavaScript is
+       enabled but the controller fails to load or parse. The shipped markup
+       therefore leaves every scene visible; successful initialization is the
+       event that earns the right to collapse the unselected pair. */
     const built = buildSwitcher("a");
     const authored = built.panels.map((panel) => panel.hidden);
-    assert.deepEqual(authored, [false, true, true], "the fixture must mirror the shipped markup");
+    assert.deepEqual(authored, [false, false, false], "the fixture must mirror the shipped markup");
 
     const { errors } = run(buildDocument([built.switcher]));
     assert.deepEqual(errors, []);
     assert.deepEqual(
       built.panels.map((panel) => panel.hidden),
-      authored,
-      "enhancement must not move a panel that the source already placed",
+      [false, true, true],
+      "successful enhancement must collapse the unselected panels",
     );
     assert.equal(built.switcher.getAttribute("data-enhanced"), "true");
 
@@ -871,21 +858,7 @@ const scenarios = {
     assert.deepEqual(
       built.panels.map((panel) => panel.hidden),
       [true, false, true],
-      "the controller must still own the attribute it inherited",
-    );
-
-    const legacy = buildSwitcher("b", { authoredHidden: false });
-    assert.deepEqual(
-      legacy.panels.map((panel) => panel.hidden),
-      [false, false, false],
-      "the control case starts with every panel visible",
-    );
-    const legacyRun = run(buildDocument([legacy.switcher]));
-    assert.deepEqual(legacyRun.errors, []);
-    assert.deepEqual(
-      legacy.panels.map((panel) => panel.hidden),
-      [false, true, true],
-      "markup that leaves the state unauthored must still be collapsed by the controller",
+      "the controller must own scene visibility after enhancement",
     );
   },
 
