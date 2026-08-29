@@ -570,20 +570,24 @@ def test_search_index_excludes_all_quality_gate_content() -> None:
     (`mkdocs-material`), which the default CI pytest environment
     (`uv sync --dev --all-extras`) does not install — the docs group is
     deliberately kept out of general CI. This is a dependency-free
-    equivalent that scans exactly the same published Markdown source set
-    MkDocs would index — `docs/**/*.md` minus `exclude_docs`'s directories
-    (`overrides/`, `dev/plans/`, `superpowers/`) and its two excluded single
-    files (`dev/quality-gates.md`,
-    `dev/specs/2026-07-24-korvid-engineering-standards.md`) — and asserts
-    that no remaining page's path, first-heading title, or full text
-    mentions the topic under either spelling. No mkdocs import or built
-    site is needed.
+    equivalent that derives the published Markdown source set from
+    `mkdocs.yml`'s actual `exclude_docs` entries and asserts that no remaining
+    page's path, first-heading title, or full text mentions the topic under
+    either spelling. No mkdocs import or built site is needed.
     """
-    excluded_dirs = ("overrides", "dev/plans", "superpowers")
-    excluded_files = {
+    config = _load_mkdocs_config()
+    excluded = config.get("exclude_docs")
+    assert isinstance(excluded, str)
+    entries = {line.strip() for line in excluded.splitlines() if line.strip()}
+    excluded_dirs = tuple(entry.rstrip("/") for entry in entries if entry.endswith("/"))
+    excluded_files = {entry for entry in entries if not entry.endswith("/")}
+    required_private_files = {
         "dev/quality-gates.md",
         "dev/specs/2026-07-24-korvid-engineering-standards.md",
     }
+    assert required_private_files <= excluded_files, (
+        "both internal quality-gate sources must be excluded by mkdocs.yml itself"
+    )
 
     published: list[Path] = []
     for path in sorted((ROOT / "docs").rglob("*.md")):
@@ -598,7 +602,7 @@ def test_search_index_excludes_all_quality_gate_content() -> None:
     # Sanity-check the fixture itself: both known offenders must actually be
     # gone, or the scan below would be vacuously true.
     published_relative = {p.relative_to(ROOT / "docs").as_posix() for p in published}
-    assert excluded_files.isdisjoint(published_relative)
+    assert required_private_files.isdisjoint(published_relative)
 
     for path in published:
         relative = path.relative_to(ROOT / "docs").as_posix()
