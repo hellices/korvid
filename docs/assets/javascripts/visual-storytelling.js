@@ -81,19 +81,6 @@
     });
   }
 
-  /* Below-fold scene video bytes are deferred behind `data-src` until the
-     scene is actually selected, mirroring `promotePoster` above. Idempotent:
-     a video with no deferred source (already promoted, or never deferred)
-     is left untouched. */
-  const promoteVideo = (video) => {
-    const source = video.dataset.src;
-    if (source) {
-      video.setAttribute("src", source);
-      video.removeAttribute("data-src");
-      video.load?.();
-    }
-  };
-
   /* Restarting from the beginning — rather than resuming — is what makes a
      scene feel like a looping GIF each time it becomes the visible one
      again, whether by tab selection or by scrolling back into view. A
@@ -111,7 +98,6 @@
 
   const startFromBeginning = (video) => {
     if (!motionAllowed() || failedVideos.has(video)) return;
-    promoteVideo(video);
     video.currentTime = 0;
     reportedPlaybackFailures.set(video, false);
     const playback = video.play();
@@ -134,14 +120,7 @@
     switcher.removeAttribute("data-enhanced");
     for (const panel of switcher.querySelectorAll(".scene-panel")) {
       panel.hidden = false;
-      /* Dropping `data-poster` is what reveals the `<video>` and hides the
-         `.scene-panel__fallback` image beside it, so the source has to be
-         promoted in the same pass: a revealed player still holding only
-         `data-src` would replace a real product frame with an empty one. */
       promotePoster(panel);
-      for (const video of panel.querySelectorAll("video")) {
-        promoteVideo(video);
-      }
     }
     for (const [tab, selected, tabIndex] of authoredTabState) {
       if (selected === null) tab.removeAttribute("aria-selected");
@@ -195,7 +174,6 @@
       if (focus) nextTab.focus();
       const selectedVideo = panels.get(nextTab).querySelector("video");
       if (selectedVideo) {
-        promoteVideo(selectedVideo);
         if (switcherVisible) startFromBeginning(selectedVideo);
       }
     };

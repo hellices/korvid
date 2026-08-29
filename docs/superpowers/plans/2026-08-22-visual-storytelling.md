@@ -922,7 +922,7 @@ def test_mkdocs_loads_only_the_reviewed_local_storytelling_script() -> None:
     assert VISUAL_STORYTELLING.is_file()
     script = VISUAL_STORYTELLING.read_bytes()
     assert hashlib.sha256(script).hexdigest() == (
-        "ef50182942e61eabd55e6db8a7e54ffc9099b1da8f55dbc6fb27b47b0966a74a"
+        "884562f8f07ae73ae05d60cc84c70f61e447bd05abfadee7c04deef309bb4d17"
     )
     assert b"\r" not in script
 
@@ -1218,19 +1218,6 @@ final newline:
     });
   }
 
-  /* Below-fold scene video bytes are deferred behind `data-src` until the
-     scene is actually selected, mirroring `promotePoster` above. Idempotent:
-     a video with no deferred source (already promoted, or never deferred)
-     is left untouched. */
-  const promoteVideo = (video) => {
-    const source = video.dataset.src;
-    if (source) {
-      video.setAttribute("src", source);
-      video.removeAttribute("data-src");
-      video.load?.();
-    }
-  };
-
   /* Restarting from the beginning — rather than resuming — is what makes a
      scene feel like a looping GIF each time it becomes the visible one
      again, whether by tab selection or by scrolling back into view. A
@@ -1248,7 +1235,6 @@ final newline:
 
   const startFromBeginning = (video) => {
     if (!motionAllowed() || failedVideos.has(video)) return;
-    promoteVideo(video);
     video.currentTime = 0;
     reportedPlaybackFailures.set(video, false);
     const playback = video.play();
@@ -1271,14 +1257,7 @@ final newline:
     switcher.removeAttribute("data-enhanced");
     for (const panel of switcher.querySelectorAll(".scene-panel")) {
       panel.hidden = false;
-      /* Dropping `data-poster` is what reveals the `<video>` and hides the
-         `.scene-panel__fallback` image beside it, so the source has to be
-         promoted in the same pass: a revealed player still holding only
-         `data-src` would replace a real product frame with an empty one. */
       promotePoster(panel);
-      for (const video of panel.querySelectorAll("video")) {
-        promoteVideo(video);
-      }
     }
     for (const [tab, selected, tabIndex] of authoredTabState) {
       if (selected === null) tab.removeAttribute("aria-selected");
@@ -1332,7 +1311,6 @@ final newline:
       if (focus) nextTab.focus();
       const selectedVideo = panels.get(nextTab).querySelector("video");
       if (selectedVideo) {
-        promoteVideo(selectedVideo);
         if (switcherVisible) startFromBeginning(selectedVideo);
       }
     };

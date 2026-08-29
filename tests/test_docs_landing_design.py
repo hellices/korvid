@@ -1931,11 +1931,7 @@ def test_controller_rolls_one_broken_switcher_back_and_keeps_going() -> None:
     assert 'tab.setAttribute("aria-selected", selected)' in rollback, (
         "the authored tab state must be restored, not left mid-selection"
     )
-    assert "promoteVideo(video)" in rollback, (
-        "promoting `data-poster` is what uncovers the `<video>` and hides the "
-        "`.scene-panel__fallback` image, so the rollback must promote `data-src` "
-        "in the same pass or it replaces a real product frame with a dead player"
-    )
+    assert "promotePoster(panel)" in rollback
     assert "console.error(" in script, "the failure must be reported, never swallowed"
 
     design = (
@@ -2319,6 +2315,10 @@ def test_scene_videos_never_autoplay_and_inactive_media_preloads_nothing() -> No
         )
         assert 'data-src="' not in video, f"no-JS playback cannot depend on promotion: {video}"
         assert 'preload="none"' in video, f"inactive scene media must fetch nothing: {video}"
+
+    controller = _strip_js_comments(_controller_source())
+    assert "data-src" not in controller
+    assert "promoteVideo" not in controller
 
 
 def test_design_asset_rule_states_the_playback_contract_the_controller_ships() -> None:

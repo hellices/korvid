@@ -218,9 +218,11 @@ function buildSwitcher(prefix, { brokenTab = null, panelOutside = false, authore
   const videos = scenes.map((scene, index) =>
     element("video", {
       controls: "",
+      src: `${scene}.mp4`,
+      preload: index === 0 ? "metadata" : "none",
       ...(index === 0
-        ? { src: `${scene}.mp4`, poster: `${scene}.png` }
-        : { "data-src": `${scene}.mp4`, "data-poster": `${scene}.png` }),
+        ? { poster: `${scene}.png` }
+        : { "data-poster": `${scene}.png` }),
     }),
   );
   const panels = scenes.map((scene, index) => {
@@ -374,9 +376,9 @@ const scenarios = {
     assert.equal(
       first.videos[1].getAttribute("src"),
       "agent.mp4",
-      "selecting a scene promotes its deferred video source",
+      "selecting a scene preserves its authored video source",
     );
-    assert.equal(first.videos[1].getAttribute("data-src"), null, "the deferred attribute is dropped");
+    assert.equal(first.videos[1].getAttribute("preload"), "none");
 
     observers[0].callback([{ isIntersecting: false }]);
     assert.ok(
@@ -790,19 +792,10 @@ const scenarios = {
       broken.videos.every((video) => video.getAttribute("data-poster") === null),
       "rollback must finish promoting every deferred poster",
     );
-    /* Dropping `data-poster` is what the stylesheet watches: it reveals the
-       `<video>` and hides the adjacent `.scene-panel__fallback` image. A
-       rollback that promotes only the poster therefore swaps a real product
-       frame for a player with no source at all — worse than the no-JavaScript
-       rendering it claims to restore. */
     assert.deepEqual(
       broken.videos.map((video) => video.getAttribute("src")),
       ["direct.mp4", "agent.mp4", "mcp.mp4"],
-      "rollback must give every revealed video a real source, not a dead player",
-    );
-    assert.ok(
-      broken.videos.every((video) => video.getAttribute("data-src") === null),
-      "rollback must stop deferring every scene source it just revealed",
+      "rollback must preserve every authored video source",
     );
     assert.ok(
       broken.videos.every((video) => video.played === 0),
@@ -883,8 +876,7 @@ const scenarios = {
        contract, verified in a browser; what belongs here is the half the
        controller owns — that a second `ArrowRight` really does land the
        selection, the roving `tabIndex`, and the focus on the MCP tab, with
-       its deferred source and poster promoted so the scene it reveals is a
-       real player rather than an empty box. */
+       its authored source and deferred poster yielding a real player. */
     const built = buildSwitcher("a");
     const document = buildDocument([built.switcher]);
     const { errors, observers } = run(document);
@@ -914,7 +906,7 @@ const scenarios = {
       built.tabs.slice(0, 2).every((tab) => !tab.focused),
       "focus must not be left behind on a deselected tab",
     );
-    assert.equal(built.videos[2].getAttribute("src"), "mcp.mp4", "deferred source promoted");
+    assert.equal(built.videos[2].getAttribute("src"), "mcp.mp4", "authored source preserved");
     assert.equal(built.videos[2].getAttribute("poster"), "mcp.png", "deferred poster promoted");
     assert.ok(
       built.videos.slice(0, 2).every((video) => video.paused > 0),
@@ -954,7 +946,7 @@ const scenarios = {
     assert.equal(
       built.videos[2].getAttribute("src"),
       "mcp.mp4",
-      "selection still promotes the deferred source so the manual play has bytes",
+      "selection preserves the authored source so manual play has bytes",
     );
     assert.equal(
       built.videos[2].getAttribute("poster"),
