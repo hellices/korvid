@@ -12,14 +12,11 @@ system as built (and names the tensions it still has), where the 2026-07-23
 design document states the original intent.
 
 - [`specs/`](https://github.com/hellices/korvid/tree/main/docs/dev/specs) — the product design document and the engineering
-  standards. These are the durable references: layer rules, quality
-  gates, and the security invariants that code must never weaken.
+  standards. These are the durable references: layer rules and the
+  security invariants that code must never weaken.
 - [`plans/`](https://github.com/hellices/korvid/tree/main/docs/dev/plans) — dated implementation plans for individual phases
   and slices. Historical once executed; kept for traceability, not
   updated retroactively.
-- [`quality-gates.md`](quality-gates.md) — which checks run locally, in CI,
-  and at release, and why each is placed where it is. Read this before
-  adding a check anywhere.
 - [`contract-tests.md`](contract-tests.md) — the live-cluster contract
   suite and the Korvid test-only AKS infrastructure it runs against.
 - [`ui-controllers.md`](ui-controllers.md) — how `ui/app.py` is being

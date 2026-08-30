@@ -134,17 +134,12 @@ def _sanitize_client_meta(value: object, *, limit: int = 120) -> str:
 def _failed(name: str, outcome: ToolOutcome) -> bool:
     """Whether one dispatch failed, for the MCP ``isError`` flag.
 
-    Two producers, two rules. A cluster read returns content korvid did
-    not author, so only its `error` bit can say - a pod logging
-    ``ERROR: connection refused`` succeeded. Everything else returns text
-    korvid wrote, where the ``ERROR:`` prefix *is* the failure contract:
-    the UI and proposal bridges answer with plain strings that
-    `ToolExecutor` wraps with the default ``error=False``, so a failed
-    proposal would otherwise reach the host marked successful.
-
-    Judged here rather than in the executor because that bit also drives
-    the agent's evidence ledger and provenance, where a screen action
-    reporting failure would mean something different.
+    A cluster read returns content korvid did not author, so only its
+    ``error`` bit can say - a pod logging ``ERROR: connection refused``
+    succeeded. ``ToolExecutor`` classifies UI and proposal bridge strings at
+    their typed boundary, so those failures normally arrive with
+    ``error=True``. The prefix check remains defensive compatibility for
+    other recorded executors returning korvid-authored non-read verdicts.
     """
     if outcome.error:
         return True

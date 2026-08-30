@@ -1,5 +1,46 @@
 {% extends "main.html" %}
 
+{#- The landing page's inactive scenes are source-hidden for stable first-paint
+    geometry. This block restores them for visitors without scripting; the
+    independent scene-fallback.js watchdog handles controller load/parse failure.
+
+    `<noscript>` may only carry flow content in `<body>`, so the restore
+    ships here, where a `<style>` element is valid. Every override adds one
+    compound selector to the rule it releases, so it wins on specificity and
+    never on which stylesheet the browser happened to read first — no
+    `!important` anywhere. -#}
+{% block extrahead %}
+  <noscript>
+    <style>
+      .md-typeset [data-scene-switcher] .scene-panel[hidden] {
+        display: grid;
+      }
+
+      .md-typeset [data-scene-switcher] .hero-driver-stage .scene-panel {
+        aspect-ratio: auto;
+        max-height: none;
+        gap: 0.75rem;
+        padding: 1rem;
+      }
+
+      .md-typeset [data-scene-switcher] .hero-driver-stage video,
+      .md-typeset [data-scene-switcher] .hero-driver-stage .scene-panel__fallback {
+        height: auto;
+        border: 1px solid var(--korvid-charcoal-border);
+        border-radius: calc(var(--korvid-radius) - 0.15rem);
+      }
+
+      .md-typeset [data-scene-switcher] video[data-poster] {
+        display: block;
+      }
+
+      .md-typeset [data-scene-switcher]:not([data-enhanced]) .scene-tabs {
+        display: none;
+      }
+    </style>
+  </noscript>
+{% endblock %}
+
 {% block tabs %}{% endblock %}
 
 {% block content %}

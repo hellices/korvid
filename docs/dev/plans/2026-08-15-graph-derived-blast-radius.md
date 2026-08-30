@@ -4561,7 +4561,7 @@ Reading it:
     (candidate relationships were dropped, so some edges between resources
     that *are* present were never kept). Both are coarser, earlier limits
     than the 50-dependent traversal cap above (see
-    [Limits](resource-relationships.md#limits) for the exact numbers).
+    [Limits](resource-relationships.md#deliberate-limits) for the exact numbers).
 
 The snapshot is the same bounded, read-only LIST fan-out the relationship
 view (`g`) performs — scoped to the current namespace for a namespaced
@@ -4649,7 +4649,7 @@ including its UID, and never by name: a row whose summary carries no UID
 gets no impact section at all — the preview is omitted and no snapshot is
 loaded — rather than a summary silently attached to whichever object holds
 that name now. The summary is advisory — see [Write impact
-preview](tui.md#write-impact-preview) for how it appears and what it never
+preview](tui.md#preview-impact-before-a-write) for how it appears and what it never
 does.
 
 Only `Ctrl-D` and `r` show this section today. The remaining write types

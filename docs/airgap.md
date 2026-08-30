@@ -1,13 +1,37 @@
 # Air-gapped and restricted-network operation
 
-korvid runs fine without internet access: every runtime dependency can be
-pointed at an internal endpoint. This guide covers what to internalize,
-where korvid's own trust configuration applies, and — just as important —
-where it deliberately does not.
+korvid's own runtime dependencies each point at an internal endpoint, so no
+internet access is required for core operation. The decisions are *which*
+endpoint to internalize, and who owns the trust for it — korvid configures
+TLS only for the connections it makes itself, and there is **no way to
+disable TLS verification** through korvid configuration, by design. Optional
+features that authenticate against an external identity provider (for
+example GitHub Copilot or Entra device login) still need their own external
+connectivity; they are called out below.
 
-## Who owns which trust
+## The artifact and trust path
 
-korvid configures TLS trust **only for connections it owns**:
+```mermaid
+flowchart LR
+    BUILD["Connected build host<br/>checksums + provenance verified"]
+    BUNDLE["Offline bundle<br/>wheels, SHA256SUMS, SBOM"]
+    HOST["korvid host<br/>inside the boundary"]
+    INDEX["Internal package index<br/>or the bundle's wheels/"]
+    CHARTS["Internal chart repository<br/>helm --ca-file"]
+    LLM["Internal model endpoint<br/>network.ca_bundle"]
+    CLUSTER[("Kubernetes API<br/>kubeconfig CA")]
+    REGISTRY["Internal image registry<br/>node/runtime trust"]
+
+    BUILD --> BUNDLE --> HOST
+    HOST --> INDEX
+    HOST --> CHARTS
+    HOST --> LLM
+    HOST --> CLUSTER
+    CLUSTER --> REGISTRY
+```
+
+**Every connection korvid or a feature it depends on can make, who owns the
+trust decision for it, and how to configure that trust:**
 
 | Connection | Owner | Configure with |
 | --- | --- | --- |
@@ -21,14 +45,10 @@ korvid configures TLS trust **only for connections it owns**:
 | Telepresence and other external CLIs | the CLI itself | its own configuration |
 | GitHub Copilot / Entra device login | the provider SDK | requires its usual external connectivity |
 
-There is **no way to disable TLS verification** through korvid
-configuration, by design.
-
 ## Corporate CA for the agent (`network.ca_bundle`)
 
-Internal LLM gateways (Ollama, vLLM, an OpenAI-compatible proxy) are
-usually served over HTTPS signed by a corporate CA. Point korvid at the
-bundle once:
+Internal LLM gateways (Ollama, vLLM, an OpenAI-compatible proxy) are usually
+served over HTTPS signed by a corporate CA. Point korvid at the bundle once:
 
 ```yaml
 # ~/.config/korvid/config.yaml
@@ -50,14 +70,6 @@ agent:
   (`SSL_CERT_FILE`, `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`).
 - The system trust store is never modified.
 
-## Internal Helm chart repositories
-
-The repository dialog (`Ctrl-R` from the chart picker) has an optional CA
-file field. When set, korvid validates the path and runs
-`helm repo add <name> <url> --ca-file <path>` through its fixed-argv
-wrapper (never a shell). Helm remains the owner of persisted repository
-configuration and credentials — korvid stores nothing.
-
 ## Offline installation bundles
 
 Every tagged release attaches versioned offline archives built from the
@@ -69,13 +81,12 @@ committed lockfile with **all extras** (`korvid[all,entra]`):
 | `korvid-X.Y.Z-offline-windows-x86_64-py3.11.zip` … `py3.13` | Windows x86-64 | 3.11–3.13 |
 
 Pick the archive matching the target's OS and Python minor version. Each
-contains `wheels/` (korvid plus every locked dependency, built on a
-native runner of that platform), `install.sh`/`install.ps1`,
-`SHA256SUMS`, `sbom.cdx.json`, and `README.txt`.
-Linux wheel selection and offline verification run inside the pinned
-`manylinux_2_28_x86_64` image, making **glibc 2.28** the explicit
-compatibility floor rather than inheriting whichever newer glibc happens
-to be installed on `ubuntu-latest`.
+contains `wheels/` (korvid plus every locked dependency, built on a native
+runner of that platform), `install.sh`/`install.ps1`, `SHA256SUMS`,
+`sbom.cdx.json`, and `README.txt`. Linux wheel selection and offline
+verification run inside the pinned `manylinux_2_28_x86_64` image, making
+**glibc 2.28** the explicit compatibility floor rather than inheriting
+whichever newer glibc happens to be installed on `ubuntu-latest`.
 
 On the connected side, verify before carrying it across the boundary:
 
@@ -98,30 +109,46 @@ sha256sum -c SHA256SUMS      # bundle-internal integrity
 Upgrading is the same procedure with the newer archive — pip replaces the
 installed version in place (`--no-index` still applies). Every archive is
 verified in CI in a clean environment with package indexes unreachable,
-including a negative check proving the install fails when a dependency
-wheel is missing (i.e. nothing is silently fetched).
+including a negative check proving the install fails when a dependency wheel
+is missing (i.e. nothing is silently fetched).
 
 **Boundary:** the Python bundle contains korvid and its locked Python
 dependencies only. Helm, Telepresence, debug images, model artifacts, and
-Kubernetes credentials are separate operator-supplied dependencies — see
-the sections above.
+Kubernetes credentials are separate operator-supplied dependencies.
 
-## Internalizing the remaining dependencies
+## Internalize the remaining dependencies
 
-- **LLM**: run Ollama/vLLM inside the network; see above.
+- **LLM endpoint**: run Ollama/vLLM inside the network and point
+  `agent.base_url` at it, with `network.ca_bundle` for its CA.
 - **Helm charts**: mirror charts into an internal repository (e.g.
-  ChartMuseum, Harbor) and add it with its CA as above.
+  ChartMuseum, Harbor). The repository dialog (`Ctrl-R` from the chart
+  picker) has an optional CA file field; when set, korvid validates the path
+  and runs `helm repo add <name> <url> --ca-file <path>` through its
+  fixed-argv wrapper (never a shell). Helm remains the owner of persisted
+  repository configuration and credentials — korvid stores nothing.
 - **OLM catalogs**: mirror the catalog and its bundle/operand images with
   `oc-mirror` or `opm`, and configure the cluster's `CatalogSource` and
   registry mirrors (`ImageContentSourcePolicy` / containerd mirror config).
-  Node/container-runtime trust for the mirror registry is cluster
-  configuration, not korvid's.
-- **Debug and node-shell images**: `kubectl debug` pulls whatever image is
-  configured — point `debug.default_image` / `debug.images` in korvid's
-  config at your internal registry (see [ops.md](ops.md)). The registry
-  trust again belongs to the nodes.
+- **Debug images (pods)**: `s` on a shell-less pod offers an *ephemeral
+  debug container* built from `debug.default_image`, or from one of the
+  named `debug.images` offered in the picker — point both at your internal
+  registry (see [ops.md](ops.md)).
+- **Node shell image (nodes)**: `s` on a node is a *separate* config key.
+  It creates a privileged `node-debugger-…` pod from `node_shell.image`,
+  which falls back to korvid's built-in public default when unset, so it
+  must be pointed at the internal registry in its own right. `kubectl debug
+  node/…` pins that pod to the node with `nodeName` and a toleration for
+  every taint, so a cordon or scheduling pressure elsewhere is not what
+  bounds it — the node's kubelet still has to be healthy enough to start a
+  pod and pull the (mirrored) image. It is node-level troubleshooting on a
+  node whose kubelet, network, and container runtime are still working,
+  not a rescue path for one where they aren't: an unreachable kubelet can't
+  start the pod at all, and an unmirrored image fails on the pull.
 - **Workload images**: standard registry mirroring; korvid never pulls
   images itself.
+
+Registry trust for OLM catalogs, debug/node-shell images, and workload
+images belongs to the nodes and the container runtime, not to korvid.
 
 ## Readiness checklist (detect, don't assume)
 
@@ -147,13 +174,14 @@ else
   echo "kubectl failed — cannot verify images"
 fi
 
-# 4. Debug images configured to the internal registry:
-grep -A3 '^debug:' ~/.config/korvid/config.yaml
+# 4. Both image keys configured to the internal registry — the pod debug
+#    images and the node shell image are separate settings:
+grep -A3 -e '^debug:' -e '^node_shell:' ~/.config/korvid/config.yaml
 
 # 5. OLM catalog sources (if OLM is installed) point at the mirror:
 kubectl get catalogsources -A -o jsonpath='{range .items[*]}{.spec.image}{"\n"}{end}'
 ```
 
-A korvid start with `network.ca_bundle` set will itself verify the bundle
-loads; the `:ai` wizard's test call verifies the agent endpoint end to end
-with the exact trust the runtime will use.
+A korvid start with `network.ca_bundle` set verifies that the bundle loads;
+the `:ai` wizard's test call verifies the agent endpoint end to end with the
+exact trust the runtime will use.

@@ -73,6 +73,7 @@ from korvid.tools.executor import (
 )
 from korvid.tools.proposals import ProposalStore
 from korvid.tools.registry import mcp_tool_schemas
+from korvid.tools.structured import ERROR_PREFIX
 from korvid.ui.app import (
     AppUIBridge,
     KorvidApp,
@@ -462,7 +463,11 @@ class _AgentToolUIBridgeProxy(UIBridge):
     the app's UI operations (log pane swaps, describe views) are not safe to
     interleave - only navigation has its own lock inside the app."""
 
-    _NOT_READY = "ERROR: UI not ready"
+    #: Composed from the product's own error prefix rather than spelled out:
+    #: every caller decides "this failed" by testing `ERROR_PREFIX`, so a
+    #: literal here would quietly demote this answer to an ordinary text
+    #: result if that constant ever changed.
+    _NOT_READY = f"{ERROR_PREFIX} UI not ready"
 
     def __init__(self) -> None:
         self.target: UIBridge | None = None

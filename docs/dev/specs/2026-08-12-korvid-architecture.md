@@ -567,7 +567,7 @@ surface, and no amount of client-side cleverness makes it one.
 | Document | What it covers that this one does not |
 |---|---|
 | [`2026-07-23-korvid-tui-design.md`](2026-07-23-korvid-tui-design.md) | Original intent and the product spec |
-| [`2026-07-24-korvid-engineering-standards.md`](2026-07-24-korvid-engineering-standards.md) | Coding standards, review expectations |
+| [`2026-07-24-korvid-engineering-standards.md`](https://github.com/hellices/korvid/blob/main/docs/dev/specs/2026-07-24-korvid-engineering-standards.md) | Coding standards, review expectations |
 | [`docs/overview.md`](../../overview.md) | The product concept: the four valid install compositions and the one safety rule |
 | [`docs/threat-model.md`](../../threat-model.md) | The AI data boundary in depth, incl. residual risk |
 | [`docs/ops.md`](../../ops.md) | Write safety, port-forward and transfer from the user's side |

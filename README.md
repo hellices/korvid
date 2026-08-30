@@ -10,7 +10,7 @@ and proposes writes **you** approve.
 
 ![korvid demo — browsing pods, filtering, describe, live logs, and the help overlay](https://raw.githubusercontent.com/hellices/korvid/main/docs/assets/demo.gif)
 
-*Recorded against canned demo data — see [docs/demo](https://github.com/hellices/korvid/tree/main/docs/demo) to regenerate or run it yourself.*
+*Recorded against synthetic demo data.*
 
 📖 **[Documentation](https://hellices.github.io/korvid/)**
 
@@ -107,7 +107,8 @@ guidance, retained local state, and the exact `v0.3.0` publish procedure, see th
 | `Ctrl-A` | AI agent panel (`:ai` to set up) |
 | `?` | full help overlay |
 
-Full key reference: [docs/keybindings.md](https://github.com/hellices/korvid/blob/main/docs/keybindings.md).
+Curated key guide: [docs/keybindings.md](https://github.com/hellices/korvid/blob/main/docs/keybindings.md).
+Press `?` in korvid for the complete effective set, including remaps.
 
 ## Features
 
@@ -115,8 +116,8 @@ Full key reference: [docs/keybindings.md](https://github.com/hellices/korvid/blo
   diagrams: a cockpit that works on its own, an agent you can add, and an
   MCP surface that lets your editor's assistant see the cluster. Start here
   if you are deciding whether korvid fits.
-- **[Keybindings](https://hellices.github.io/korvid/keybindings/)** — every key by context, plus
-  remapping via `keybindings:` config.
+- **[Keybindings](https://hellices.github.io/korvid/keybindings/)** — a compact contextual guide
+  and remapping example; press `?` in korvid for every effective key.
 - **[Browsing the cluster](https://hellices.github.io/korvid/tui/)** — custom columns from labels /
   annotations / jsonpath, live pod metrics, ops hints for troubled pods,
   split workspace, the log viewer (multi-pod merge, JSON highlighting,
@@ -177,16 +178,19 @@ Full key reference: [docs/keybindings.md](https://github.com/hellices/korvid/blo
 
 ## Watch MCP follow
 
-**One prompt. Korvid follows.** GitHub Copilot CLI uses real read-only MCP calls
-while the TUI moves from the unhealthy pod list to its logs, then finishes in
-the Helm release browser.
+**One client. Korvid follows.** A clean local MCP SDK client makes four real
+read-only calls — `list_resources`, `diagnose_pod`, `get_logs`, and
+`helm_list_releases` — over Streamable HTTP, and korvid's follow bridge
+mirrors each answer: the unhealthy pod list, the failing pod's describe pane,
+its logs, and the Helm release that owns it.
 
 <details open>
-<summary>Show or hide the up-to-15-second MCP follow animation</summary>
+<summary>Show or hide the 14-second MCP follow animation</summary>
 
-![korvid MCP follow — one prompt drives pods, logs, and Helm](https://raw.githubusercontent.com/hellices/korvid/main/docs/assets/mcp-follow-demo.gif)
+![korvid MCP follow — one client drives pods, logs, and Helm](https://raw.githubusercontent.com/hellices/korvid/main/docs/assets/mcp-follow-demo.gif)
 
-*Recorded against a disposable local cluster.*
+*Recorded from this repository against its synthetic in-memory cluster, so
+the frames carry no external client session metadata.*
 
 </details>
 

@@ -6,9 +6,15 @@ repo_name: hellices/korvid
 docs_dir: docs
 site_dir: site
 strict: true
+# Declared explicitly (it is also MkDocs' default) because every concept
+# page's raw-HTML media is written as `../assets/…`, which only resolves
+# while each page is served from its own directory (`/tui/`, not `/tui.html`).
+use_directory_urls: true
 exclude_docs: |
   overrides/
   dev/plans/
+  dev/quality-gates.md
+  dev/specs/2026-07-24-korvid-engineering-standards.md
   superpowers/
 
 theme:
@@ -54,7 +60,6 @@ nav:
   - Project:
       - Architecture: dev/specs/2026-08-12-korvid-architecture.md
       - Contributor docs: dev/README.md
-      - Quality gates: dev/quality-gates.md
       - Release notes:
           - Unreleased: release-notes/unreleased.md
           - v0.3.0: release-notes/v0.3.0.md
@@ -86,3 +91,6 @@ plugins:
 
 extra_css:
   - stylesheets/extra.css
+extra_javascript:
+  - assets/javascripts/scene-fallback.js
+  - assets/javascripts/visual-storytelling.js

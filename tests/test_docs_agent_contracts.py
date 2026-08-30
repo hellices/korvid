@@ -77,6 +77,25 @@ def test_the_scan_really_covers_the_operator_facing_pages() -> None:
     assert not any(path.startswith(_HISTORICAL_DOC_PREFIXES) for path in scanned)
 
 
+def test_public_guides_distinguish_validated_evidence_from_navigable_citations() -> None:
+    """Compound diagnoses mint evidence even though no screen can show it all."""
+    overview = " ".join(_text("docs/overview.md").lower().split())
+    agent = " ".join(_text("docs/agent.md").lower().split())
+
+    assert "navigable citation opens its actual view" in overview
+    assert "navigable citations open their source view" in agent
+    assert "compound diagnostics remain validated evidence" in agent
+
+
+def test_agent_install_guide_matches_base_install_availability() -> None:
+    """Without the optional extra, neither Ctrl-A nor :ai is registered."""
+    agent = " ".join(_text("docs/agent.md").split())
+
+    assert "`Ctrl-A` is unavailable" in agent
+    assert "`:ai` is not registered" in agent
+    assert "`Ctrl-A` simply shows a setup hint" not in agent
+
+
 # ---------------------------------------------------------------------------
 # 1. The documented security perimeter is the one that exists
 # ---------------------------------------------------------------------------
@@ -172,7 +191,7 @@ def test_no_current_page_claims_every_surface_describes_tools_identically(
     assert not _IDENTICAL_TOOL_WORDING_OVERCLAIM.search(normalized), _relative(path)
 
 
-@pytest.mark.parametrize("page", ["docs/agent.md", "docs/release-notes/unreleased.md"])
+@pytest.mark.parametrize("page", ["docs/release-notes/unreleased.md"])
 def test_the_tool_description_removal_note_names_which_arm_uses_which_wording(
     page: str,
 ) -> None:
@@ -180,12 +199,126 @@ def test_the_tool_description_removal_note_names_which_arm_uses_which_wording(
     say what actually replaced it: per-deployment overrides are gone, the
     low tier ships its own versioned wording, and the high tier plus the
     MCP server still read the registry's.
+
+    The note is release history, so it lives on the release note. The Agent
+    guide describes the product a reader operates today and links there;
+    `test_the_agent_page_links_the_migration_note_instead_of_restating_it`
+    pins that boundary.
     """
     text = _text(page)
     assert "removed" in text
     assert "low" in text.casefold()
     assert "registry" in text
     assert "MCP" in text
+
+
+def test_the_agent_page_links_the_migration_note_instead_of_restating_it() -> None:
+    """A product guide is not a migration manual.
+
+    The keys the startup error retires (read out of `core/config.py` rather
+    than spelled here, so this test cannot name a key as if it were
+    supported) were replaced a release ago. The table mapping them onto
+    today's settings is release history: `docs/release-notes/unreleased.md`
+    owns it, the startup error itself names the replacement, and the guide
+    describes what an operator configures today.
+    """
+    config = (_REPO_ROOT / "src" / "korvid" / "core" / "config.py").read_text(encoding="utf-8")
+    removed_keys = re.findall(r"\"(agent\.\w+) was removed", config)
+    assert removed_keys, "the startup migration error must still name the retired keys"
+
+    agent = _text("docs/agent.md")
+    assert "Upgrading from the profile-based agent" not in agent
+    assert [key for key in removed_keys if key in agent] == []
+    assert "model_tier" in agent, "the supported key still has to be on the page"
+    assert re.search(
+        r"\[[^\]]*(?:migration|upgrade)[^\]]*\]\(release-notes/unreleased\.md\)",
+        agent,
+        re.IGNORECASE,
+    ), "the current guide must send upgrades to the release note that owns migration history"
+
+    notes = _text("docs/release-notes/unreleased.md")
+    assert [key for key in removed_keys if key in notes] == removed_keys, (
+        "the release note is where a reader with an old config.yaml is sent"
+    )
+
+
+def test_the_agent_page_states_the_eval_harness_packaging_boundary() -> None:
+    """The methodology link needs its prerequisite next to it, not a click away.
+
+    `pyproject.toml` genuinely excludes `korvid.evals` from wheels and
+    source distributions (`[tool.hatch.build] exclude`). A reader who
+    `pip install`s korvid and then follows the methodology link has no way
+    to know the harness is not there until it fails to import — the guide
+    has to say so, and give the exact recovery command, right beside the
+    link rather than only on the page it points to.
+    """
+    pyproject = _text("pyproject.toml")
+    assert "src/korvid/evals" in pyproject, "packaging must still exclude the harness"
+
+    agent = _text("docs/agent.md")
+    assert "evals/methodology.md" in agent
+    window = agent[agent.index("evals/methodology.md") - 400 :][:800]
+    assert "development-only" in window
+    assert "wheel" in window
+    assert "sdist" in window or "source distribution" in window
+    assert "uv sync --frozen --dev --all-extras" in window
+
+
+def test_the_agent_page_states_cloud_provider_detection_truthfully() -> None:
+    """The cluster-detection fact belongs on the page it was cut from.
+
+    `korvid.k8s.csp.detect_provider` recognizes exactly the AKS/EKS/GKE
+    managed-distribution node labels and falls back to `UNKNOWN_PROVIDER`
+    for everything else, including an RBAC-limited, bare-metal, or local
+    cluster. Task 2 dropped the paragraph describing this without folding
+    it into a surviving section; this pins a concise replacement instead
+    of a restored multi-sentence feature walkthrough.
+    """
+    from korvid.k8s.csp import _MANAGED_LABELS, UNKNOWN_PROVIDER
+
+    distributions = {dist.upper() for dist, _ in _MANAGED_LABELS.values()}
+    assert distributions == {"AKS", "EKS", "GKE"}
+    assert UNKNOWN_PROVIDER == "unknown"
+
+    agent = _text("docs/agent.md")
+    for name in sorted(distributions):
+        assert name in agent
+    assert "node metadata" in agent
+    window = agent[agent.index("node metadata") - 300 :][:600]
+    assert "best-effort" in window
+    assert "RBAC" in window
+    assert "bare-metal" in window
+    assert "unknown" in window.casefold()
+
+
+def test_the_ollama_row_names_the_namespace_its_six_keys_actually_live_under() -> None:
+    """The tuning knobs are read out of `agent.ollama.*`, not the bare names.
+
+    `Config` groups exactly six `agent_ollama_<key>` fields directly under
+    the "Native Ollama tuning (issue #72): `agent.ollama.*` in config.yaml"
+    comment, ending at the unrelated `keybindings` field. The provider
+    table's Ollama row lists the six key names but, before this test, never
+    said which namespace an operator has to nest them under in
+    `config.yaml` — `num_ctx: 32768` at the top level of the agent block is
+    silently ignored. Both the six keys and the `agent.ollama` namespace
+    they require have to be on the page.
+    """
+    config = _text("src/korvid/core/config.py")
+    start = config.index("Native Ollama tuning (issue #72)")
+    end = config.index("keybindings", start)
+    block = config[start:end]
+    keys = re.findall(r"agent_ollama_(\w+):", block)
+    assert keys == ["num_ctx", "temperature", "seed", "think", "keep_alive", "num_predict"], (
+        "the six ollama keys config.py actually defines must drive this test, not a hand-written list"
+    )
+
+    agent = _text("docs/agent.md")
+    row = next(line for line in agent.splitlines() if line.strip().startswith("| Ollama"))
+    for key in keys:
+        assert key in row, f"the Ollama row must still name {key}"
+    assert "agent.ollama" in row, (
+        "the Ollama row must say the six keys nest under the `agent.ollama` namespace"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -282,10 +415,24 @@ def test_the_eval_methodology_states_the_low_pack_constraints() -> None:
     assert "oom-killed" in methodology
 
 
-def test_the_agent_page_states_what_the_low_tier_changes_about_tool_text() -> None:
+def test_the_agent_page_sends_low_tier_wording_questions_to_the_methodology() -> None:
+    """The low tier's shipped wording is an eval contract, not product copy.
+
+    `LOW_TOOL_DESCRIPTIONS`, its 250-character bound and its exact-tool-name
+    application decide whether two campaigns are comparable — a question the
+    eval methodology owns and
+    `test_the_eval_methodology_states_the_low_pack_constraints` pins. The
+    Agent guide tells an operator which tier is routed and what changes with
+    it, then links to that page rather than shipping a second, driftable copy
+    of the constraints.
+    """
     agent = _text("docs/agent.md")
-    assert "LOW_TOOL_DESCRIPTIONS" in agent
-    assert "exact tool name" in agent
+
+    assert "evals/methodology.md" in agent
+    assert "LOW_TOOL_DESCRIPTIONS" not in agent
+    assert "prompt_packs.py" not in agent
+    # The product-visible half of the tier stays: which tier, and the budgets.
+    assert "model_tier" in agent
 
 
 def test_the_low_pack_documentation_publishes_no_score() -> None:

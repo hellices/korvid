@@ -1,13 +1,13 @@
 /*
  * korvid landing page visual polish.
  *
- * Scope: custom properties, the amber-on-charcoal hero and its cockpit
- * panel, the responsive product demo, the feature grid, the site footer,
+ * Scope: custom properties, the amber-on-charcoal hero and its product
+ * media, the scene switcher, the site footer,
  * keyboard-focus visibility, reduced-motion handling, and comfortable
  * reading widths for the new landing content. Everything here is additive
  * to the Material for MkDocs theme already configured in mkdocs.yml
- * (palette: scheme slate, primary black, accent amber) — no custom JavaScript
- * or custom fonts. Generated local/vendor assets are allowed.
+ * (palette: scheme slate, primary black, accent amber) — no custom fonts.
+ * Generated local/vendor assets are allowed.
  * Browser runtime third-party requests are not.
  */
 
@@ -32,6 +32,8 @@
 .md-typeset .hero {
   /* The amber wash is anchored to the top-right corner, where the cockpit
      panel sits, so the panel reads as lit rather than pasted on. */
+  display: grid;
+  gap: 1.5rem;
   background:
     radial-gradient(115% 130% at 100% 0%, rgba(245, 166, 35, 0.09), transparent 58%),
     var(--korvid-charcoal);
@@ -42,6 +44,7 @@
   margin: 0 0 2rem;
 }
 
+.md-typeset .hero .hero-heading,
 .md-typeset .hero .hero-copy-column {
   max-width: var(--korvid-measure);
 }
@@ -60,6 +63,10 @@
   line-height: 1.15;
   margin: 0 0 1rem;
   max-width: var(--korvid-measure);
+}
+
+.md-typeset .hero .hero-heading h1 {
+  margin-bottom: 0;
 }
 
 .md-typeset .hero .hero-copy {
@@ -112,21 +119,6 @@
   border-color: var(--korvid-amber-bright);
 }
 
-/* The same amber outline for the in-page calls to action further down the
-   landing page, which would otherwise inherit the docs' default link blue
-   and read as a different product. */
-.md-typeset .korvid-button {
-  color: var(--korvid-amber);
-  border-color: var(--korvid-amber);
-}
-
-.md-typeset .korvid-button:hover,
-.md-typeset .korvid-button:focus {
-  background-color: var(--korvid-amber);
-  border-color: var(--korvid-amber);
-  color: var(--korvid-charcoal);
-}
-
 /* ------------------------------------------------------------------ */
 /* Hero: the install command never breaks mid-token                     */
 /* ------------------------------------------------------------------ */
@@ -171,118 +163,6 @@
   overflow-wrap: normal;
 }
 
-/* ------------------------------------------------------------------ */
-/* Hero: the cockpit panel that balances the copy                       */
-/* ------------------------------------------------------------------ */
-
-/* Original korvid motif, drawn entirely in CSS: a small terminal frame
-   carrying real keys from keybindings.md. It exists because the hero was
-   840px of prose inside a 1188px panel at desktop widths — the fix is
-   content, not more padding. */
-.md-typeset .hero .hero-panel {
-  margin: 2.5rem 0 0;
-  background: var(--korvid-charcoal-raised);
-  border: 1px solid var(--korvid-charcoal-border);
-  border-radius: var(--korvid-radius);
-  overflow: hidden;
-}
-
-.md-typeset .hero .hero-panel__bar {
-  display: flex;
-  align-items: center;
-  gap: 0.75rem;
-  padding: 0.6rem 1rem;
-  background: var(--korvid-charcoal-sunken);
-  border-bottom: 1px solid var(--korvid-charcoal-border);
-}
-
-/* One lit lamp and two dark ones, drawn with box-shadow so the terminal
-   chrome costs no extra markup. */
-.md-typeset .hero .hero-panel__lights {
-  flex: none;
-  width: 0.45rem;
-  height: 0.45rem;
-  margin-right: 1.35rem;
-  border-radius: 50%;
-  background: var(--korvid-amber);
-  box-shadow:
-    0.7rem 0 0 var(--korvid-charcoal-border),
-    1.4rem 0 0 var(--korvid-charcoal-border);
-}
-
-.md-typeset .hero .hero-panel__title {
-  color: var(--korvid-ink-dim);
-  font-family: var(--md-code-font-family, monospace);
-  font-size: 0.7rem;
-  letter-spacing: 0.02em;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.md-typeset .hero .hero-panel__keys {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  align-items: baseline;
-  gap: 0.6rem 0.9rem;
-  margin: 0;
-  padding: 1.1rem 1rem;
-}
-
-.md-typeset .hero .hero-panel__keys dt,
-.md-typeset .hero .hero-panel__keys dd {
-  margin: 0;
-  font-size: 0.78rem;
-  line-height: 1.45;
-}
-
-.md-typeset .hero .hero-panel__keys dd {
-  color: var(--korvid-ink-dim);
-}
-
-.md-typeset .hero .hero-panel__literal {
-  color: var(--korvid-ink);
-  font-family: var(--md-code-font-family, monospace);
-}
-
-.md-typeset .hero .hero-panel kbd {
-  background: var(--korvid-charcoal-sunken);
-  border: 1px solid var(--korvid-charcoal-border);
-  border-radius: 0.25rem;
-  box-shadow: none;
-  color: var(--korvid-amber-bright);
-  font-size: 0.72rem;
-  padding: 0.1rem 0.4rem;
-  white-space: nowrap;
-}
-
-.md-typeset .hero .hero-panel__note {
-  margin: 0;
-  padding: 0.85rem 1rem;
-  border-top: 1px solid var(--korvid-charcoal-border);
-  color: var(--korvid-ink-dim);
-  font-size: 0.72rem;
-  line-height: 1.5;
-}
-
-/* Two columns only once there is room for both without squeezing either:
-   below this the hero keeps the single-column stack that already works on
-   phones and small tablets. */
-@media (min-width: 1000px) {
-  .md-typeset .hero {
-    display: grid;
-    grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr);
-    column-gap: 3rem;
-    align-items: center;
-    padding: 3.5rem 3rem;
-  }
-
-  .md-typeset .hero .hero-panel {
-    margin-top: 0;
-  }
-}
-
 /* Narrow viewports: reclaim horizontal room so the install command fits
    without scrolling at all, and drop the display headline a step. */
 @media (max-width: 599px) {
@@ -305,109 +185,542 @@
   .md-typeset .hero .install-command code {
     font-size: 0.78rem;
   }
-
-  /* The legend is a supporting note on a phone, not the headline: tighten
-     it so it does not out-weigh the copy it exists to balance. */
-  .md-typeset .hero .hero-panel__bar {
-    padding: 0.55rem 0.8rem;
-  }
-
-  .md-typeset .hero .hero-panel__title {
-    font-size: 0.62rem;
-  }
-
-  .md-typeset .hero .hero-panel__keys {
-    padding: 0.9rem 0.85rem;
-    gap: 0.55rem 0.75rem;
-  }
-
-  .md-typeset .hero .hero-panel__keys dt,
-  .md-typeset .hero .hero-panel__keys dd {
-    font-size: 0.72rem;
-  }
-
-  .md-typeset .hero .hero-panel__note {
-    padding: 0.75rem 0.85rem;
-    font-size: 0.68rem;
-  }
 }
 
 /* ------------------------------------------------------------------ */
-/* Product demo — responsive two-column layout above 960px             */
+/* Hero: the product media that balances the copy                      */
 /* ------------------------------------------------------------------ */
 
-.md-typeset .product-demo {
-  margin: 0 0 2.5rem;
-  padding: 0;
-}
-
-.md-typeset .product-demo video {
+.md-typeset .hero-demo {
   width: 100%;
-  border-radius: var(--korvid-radius);
-  border: 1px solid var(--korvid-charcoal-border);
-  display: block;
+  min-width: 0;
+  margin: 0;
 }
 
-.md-typeset .product-demo figcaption {
+.md-typeset .hero-demo figcaption {
+  max-width: 34rem;
+  margin: 0.8rem 0 0;
   color: var(--korvid-ink-dim);
-  font-size: 0.9rem;
-  margin-top: 0.75rem;
+  font-size: 0.78rem;
 }
 
 @media (min-width: 960px) {
-  .md-typeset .product-demo {
+  .md-typeset .hero {
     display: grid;
-    grid-template-columns: 2fr 1fr;
-    column-gap: var(--korvid-gap);
+    grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
+    column-gap: clamp(2rem, 4vw, 4rem);
+    row-gap: 1rem;
     align-items: center;
+    padding: 3.5rem;
   }
 
-  .md-typeset .product-demo figcaption {
+  .md-typeset .hero .hero-heading {
+    grid-column: 1;
+    grid-row: 1;
+    align-self: end;
+  }
+
+  .md-typeset .hero .hero-copy-column {
+    grid-column: 1;
+    grid-row: 2;
+  }
+
+  .md-typeset .hero-demo {
+    grid-column: 2;
+    grid-row: 1 / span 2;
     margin-top: 0;
-    align-self: center;
-    border-left: 2px solid var(--korvid-amber);
-    padding-left: 1rem;
   }
 }
 
 /* ------------------------------------------------------------------ */
-/* Feature grid — three cards                                          */
+/* Scene switcher — direct / agent / MCP                              */
 /* ------------------------------------------------------------------ */
 
-.md-typeset .feature-grid {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: var(--korvid-gap);
-  margin: 0 0 2rem;
+/* The strip's three one-word tabs ("Direct" / "Agent" / "MCP") fit the
+   593px wide stage around their own 437px row, so the base rule needs no
+   scroll port. `overflow: visible` (not an axis-specific `overflow-x`)
+   matters here: a lone `overflow-x: auto` forces `overflow-y` to compute to
+   `auto` too, which clips a focused tab's 6px outward ring at the strip's
+   top edge, and the strip's former `0` horizontal padding clipped that same
+   ring on both sides. 6px on the top and both sides reserves exactly that
+   ring; the existing 0.75rem stays on the bottom. */
+.md-typeset .scene-tabs {
+  display: flex;
+  gap: 0.5rem;
+  overflow: visible;
+  padding: 6px 6px 0.75rem;
 }
 
-@media (min-width: 720px) {
-  .md-typeset .feature-grid {
-    grid-template-columns: repeat(3, 1fr);
+/* The tabs only do something once `visual-storytelling.js` has wired them,
+   and that controller announces itself by setting `data-enhanced` on the
+   switcher. Until then the strip must not be operable: it would offer two
+   dead controls and a selected state nothing honours.
+
+   `visibility: hidden` rather than `display: none`, because removing the
+   strip from flow was itself a 74.6px layout shift the moment the script
+   ran. Hidden visibility keeps it unpainted, unfocusable and out of the
+   accessibility tree while reserving the exact space enhancement will use,
+   so the tabs appear without moving anything below them. The source-hidden
+   inactive panels are restored either by the no-script stylesheet or by the
+   independent load watchdog if controller enhancement never succeeds. */
+.md-typeset [data-scene-switcher]:not([data-enhanced]) .scene-tabs {
+  visibility: hidden;
+}
+
+.md-typeset .scene-tabs button {
+  flex: none;
+  padding: 0.65rem 1rem;
+  color: var(--korvid-ink-dim);
+  background: transparent;
+  border: 1px solid var(--korvid-charcoal-border);
+  border-radius: 999px;
+  font: inherit;
+  cursor: pointer;
+}
+
+.md-typeset .scene-tabs button[aria-selected="true"] {
+  color: var(--korvid-charcoal);
+  background: var(--korvid-amber);
+  border-color: var(--korvid-amber);
+}
+
+.md-typeset .scene-tabs button:focus-visible {
+  outline: 3px solid var(--korvid-amber-bright);
+  outline-offset: 3px;
+}
+
+/* Handset widths: lay the three tabs out instead of scrolling them.
+
+   The strip is only as wide as the stage it labels — 291px at a 390px
+   viewport — and three pills sized by their own content needed 437px, so
+   `overflow-x: auto` quietly parked the MCP tab 146px past the visible edge.
+   Keyboard navigation then moved the selection onto a control the visitor
+   could not see, because focus does not scroll a scroll port by itself.
+   Three `minmax(0, 1fr)` tracks remove the overflow at its source: the tabs
+   share whatever width the stage has, and the shrinkable minimum keeps a
+   button's own content from pushing the row back open. Fixing it here rather
+   than with a `scrollIntoView` in the controller keeps the shipped script
+   byte-for-byte unchanged.
+
+   `overflow-x` goes back to `visible` in the same breath. A lone
+   `overflow-x: auto` forces the *other* axis to compute to `auto` as well,
+   which clips the 3px focus outline a tab paints 3px outside itself; the
+   6px reserved on the top and both sides is exactly that ring, so a focused
+   tab's outline lands inside the strip. The 6px gap keeps that ring off the
+   neighbouring tab. */
+@media (max-width: 599px) {
+  .md-typeset .scene-tabs {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 6px;
+    overflow-x: visible;
+    padding: 6px 6px 0.75rem;
+  }
+
+  .md-typeset .scene-tabs button {
+    min-width: 0;
+    padding: 0.55rem 0.35rem;
   }
 }
 
-.md-typeset .feature-grid article {
+.md-typeset .scene-panel:focus-visible {
+  outline: 3px solid var(--korvid-amber-bright);
+  outline-offset: -3px;
+}
+
+.md-typeset .scene-panels {
   background: var(--korvid-charcoal-raised);
   border: 1px solid var(--korvid-charcoal-border);
   border-radius: var(--korvid-radius);
-  padding: 1.5rem;
+  overflow: hidden;
 }
 
-.md-typeset .feature-grid article span {
+/* Each panel is a media-only frame now: the Input/Evidence/Result rows and
+   the per-scene paragraph the three-column grid was built for are gone, so
+   one column is the whole layout. `display` is deliberately left alone —
+   `.md-typeset .scene-panel[hidden]` ties this rule's specificity, and a
+   later `display` here would win the tie and un-hide every deselected
+   panel. */
+.md-typeset .scene-panel {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0.75rem;
+  padding: 1rem;
+}
+
+.md-typeset .scene-panel[hidden] {
+  display: none;
+}
+
+.md-typeset .scene-panel video {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  background: #07090c;
+  border: 1px solid var(--korvid-charcoal-border);
+  border-radius: calc(var(--korvid-radius) - 0.15rem);
+}
+
+.md-typeset .scene-panel video[data-poster] {
+  display: none;
+}
+
+.md-typeset .scene-panel video:not([data-poster]) + .scene-panel__fallback {
+  display: none;
+}
+
+/* Always parsed so controller load failures retain a product frame. The
+   image stays lazy, and promotion removes `data-poster` so the real video
+   replaces it after successful enhancement or rollback. Both paths promote
+   `data-src` in the same pass, so the video this rule uncovers always has a
+   source to play. */
+.md-typeset .scene-panel__fallback {
+  display: block;
+  width: 100%;
+  height: auto;
+  border: 1px solid var(--korvid-charcoal-border);
+  border-radius: calc(var(--korvid-radius) - 0.15rem);
+}
+
+/* Every capture on this page is 1280×720 except the MCP pair, which is
+   1280×710 — the reviewed recording's own terminal geometry, declared on the
+   elements as `width="1280" height="710"`. Under the generic 16/9 rule above
+   the reserved box is 4px taller than the media at full width, so the
+   `<video>` would letterbox inside a box that is not its own. This selector
+   qualifies the same element with the class the MCP media carries, so it wins
+   on specificity rather than on source order, and restates the real ratio.
+   Inside the enhanced stage the frame owns the ratio instead and the clip is
+   fitted with `object-fit: contain`; this rule is what reserves the honest
+   box everywhere the height is still the media's own — the unenhanced
+   fallback and any later reuse of a scene panel.
+
+   Reserving the stored pixel box is only truthful because the clip is
+   normalised to square pixels: the source GIF is 1280×711 with a 63:64
+   sample aspect ratio, and making the height even for `yuv420p` would keep
+   that display aspect by rewriting the sample aspect ratio to 2485:2528 —
+   1280×710 stored, 1258×710 laid out, pillarboxed inside this very rule. The
+   capture recipe therefore ends its geometry pass with `setsar=1`, and
+   `tests/test_docs_visual_assets.py` reads the shipped MP4's own boxes and
+   fails if the stored, displayed and declared geometry ever disagree. */
+.md-typeset .scene-panel video.mcp-media {
+  aspect-ratio: 1280 / 710;
+}
+
+/* ------------------------------------------------------------------ */
+/* The bounded driver stage                                            */
+/* ------------------------------------------------------------------ */
+
+/* One media component carries the hero: capped at a readable measure so a
+   16:9 player cannot grow with the column and swallow the fold, and
+   `min-width: 0` so it may shrink inside the hero's grid track instead of
+   forcing it open. */
+.md-typeset .hero-driver-stage {
+  width: 100%;
+  min-width: 0;
+  max-width: 54rem;
+  margin: 0;
+}
+
+/* The panel owns the aspect ratio; the replaced elements only fit inside
+   it. Authored, not enhanced: gating this box on the controller's
+   `data-enhanced` hook left the first paint with no box at all, and the
+   built page measured a 1,049px three-panel stage collapsing to 334px the
+   moment the script ran — a 631px hero shift on every cold load. The two
+   unselected panels now carry `hidden` in the source instead, so one scene
+   is painted from the first frame and the cap can bind with it.
+
+   The cap sits on the *panel* rather than on the clipping `.scene-panels`
+   frame precisely so it can be ungated. Both the `<noscript>` rendering and
+   the controller's own rollback un-hide all three panels; a fixed-ratio box
+   on the frame would then hold 332px of a 1,047px stack (measured in
+   Chromium at 1440x900) and cut off two of the three scenes. A per-panel
+   cap lets the frame grow with whatever stack it is handed, so nothing is
+   ever clipped, while the one-panel stage stays inside the fold.
+
+   Never declare `display` here: this selector is (0,3,0), exactly ties
+   `.md-typeset .scene-panel[hidden]`, and is authored first, so a `display`
+   declaration would lose the tie today and un-hide every deselected panel
+   the moment either rule moved.
+
+   `width: 100%` is declared for its own reason, independent of the cap: a
+   block-level box with both an `aspect-ratio` and an auto width normally
+   resolves that width by stretching to its container first, but once
+   `max-height` actually clamps the block size (measured in Chromium at
+   1440x400, where `min(58vh, 540px)` binds to 232px), the auto width is
+   instead derived from the *clamped* height through the ratio —
+   232px * 16 / 9 = 412px inside the 593px `.scene-panels` frame, left-aligned
+   with a bare 181px gap on the right (516px inside the same 593px frame at
+   1440x500's 290px cap). Declaring the width outright removes the ratio's
+   claim on that axis entirely, so the panel always fills the frame and only
+   the block size answers to the cap; `object-fit: contain` on the video
+   below still letterboxes symmetrically inside whatever box that leaves. */
+.md-typeset .hero-driver-stage .scene-panel {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  max-height: min(58vh, 540px);
+  grid-template-rows: minmax(0, 1fr);
+  gap: 0;
+  padding: 0;
+}
+
+/* A cap only bounds the stage if the media shrinks with it. The panel is a
+   grid, and its implicit `auto` row keeps the clip's intrinsic 16:9
+   contribution: measured at 1440x400, where `min(58vh, 540px)` binds, a
+   232px box still held a 310px clip and cut 100px off the bottom. The
+   `minmax(0, 1fr)` track above may shrink below its content, so the row
+   follows the cap, and the media fills whatever the row resolves to. The
+   panel's 1rem inset goes with it — an inset box inside a 16:9 box is not
+   itself 16:9, so `contain` would pillarbox a 16:9 clip inside its own
+   frame.
+
+   The frame already draws the border and the rounded corners it clips to,
+   so a second border on the replaced element sits on top of it and, under
+   the theme's `box-sizing: border-box`, steals 2px from the fitted box.
+
+   `contain` is the UA default for `<video>` but `fill` for `<img>`, so the
+   no-JavaScript poster would be the one surface that stretches. Stating it
+   for both is also what lets the 1280x710 MCP clip letterbox by a few
+   pixels inside the shared 16:9 box instead of being cropped to it. */
+.md-typeset .hero-driver-stage video,
+.md-typeset .hero-driver-stage .scene-panel__fallback {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  border: 0;
+  border-radius: 0;
+  object-fit: contain;
+}
+
+/* ------------------------------------------------------------------ */
+/* Feature highlights and flight paths                                 */
+/* ------------------------------------------------------------------ */
+
+.md-typeset .feature-highlights,
+.md-typeset .flight-paths {
+  margin: 4rem 0;
+}
+
+/* Authored one column: each promise is a short paragraph plus a list of
+   destinations, and a third of a phone's measure would break both. The
+   three-column layout arrives with the rest of the desktop page, at the
+   `min-width: 960px` block below. */
+.md-typeset .feature-highlights__grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: var(--korvid-gap);
+}
+
+.md-typeset .flight-paths__grid {
+  display: grid;
+  gap: var(--korvid-gap);
+}
+
+.md-typeset .feature-highlights__grid article {
+  min-width: 0;
+  padding: 1.25rem;
+  background: var(--korvid-charcoal-raised);
+  border: 1px solid var(--korvid-charcoal-border);
+  border-radius: var(--korvid-radius);
+}
+
+.md-typeset .feature-highlights__grid span {
+  display: block;
   color: var(--korvid-amber);
+  font-size: 0.72rem;
   font-weight: 700;
-  font-size: 0.85rem;
+  text-transform: uppercase;
   letter-spacing: 0.08em;
 }
 
-.md-typeset .feature-grid article h3 {
-  margin: 0.5rem 0;
+.md-typeset .feature-highlights__grid p {
+  margin: 0.5rem 0 0.9rem;
+  color: var(--korvid-ink-dim);
+  font-size: 0.85rem;
 }
 
-.md-typeset .feature-grid article p {
-  color: var(--korvid-ink-dim);
+/* The destinations are a short index rather than prose: Material's list
+   defaults indent from the theme's own measure and leave a trailing block
+   margin inside the card's padding. The markers stay — dropping them would
+   also drop the list role VoiceOver announces. */
+.md-typeset .feature-highlights__grid ul {
   margin: 0;
+  padding-left: 1.1rem;
+  font-size: 0.85rem;
+}
+
+.md-typeset .feature-highlights__grid li {
+  margin: 0.25rem 0 0;
+}
+
+/* Like the hero's buttons, these would otherwise inherit the docs' default
+   link blue and read as a different product. */
+.md-typeset .feature-highlights__grid a {
+  color: var(--korvid-amber);
+}
+
+.md-typeset .feature-highlights__grid a:hover,
+.md-typeset .feature-highlights__grid a:focus-visible {
+  color: var(--korvid-amber-bright);
+}
+
+.md-typeset .flight-paths__grid a {
+  display: block;
+  padding: 1.25rem;
+  color: var(--korvid-ink);
+  background: var(--korvid-charcoal-raised);
+  border: 1px solid var(--korvid-charcoal-border);
+  border-radius: var(--korvid-radius);
+}
+
+.md-typeset .flight-paths__grid a:hover,
+.md-typeset .flight-paths__grid a:focus-visible {
+  border-color: var(--korvid-amber);
+}
+
+.md-typeset .flight-paths__grid strong,
+.md-typeset .flight-paths__grid span {
+  display: block;
+}
+
+.md-typeset .flight-paths__grid span {
+  margin-top: 0.4rem;
+  color: var(--korvid-ink-dim);
+  font-size: 0.8rem;
+}
+
+@media (min-width: 720px) {
+  .md-typeset .flight-paths__grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (min-width: 960px) {
+  .md-typeset .feature-highlights__grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Core concept visual explanations                                    */
+/* ------------------------------------------------------------------ */
+
+/* `.docs-visual` is itself a `<figure>` and `.docs-storyboard` wraps one, so
+   both meet Material's three figure defaults head on: `width: fit-content`
+   shrink-wraps a lazy figure to its caption until the image decodes,
+   `text-align: center` inherits into legends that are numbered lists, and
+   `figcaption` is a 24rem auto-centred italic column. Each is restated
+   below, because the cascade reads declarations, not intent. */
+.md-typeset .docs-visual,
+.md-typeset .docs-storyboard {
+  display: block;
+  width: 100%;
+  margin: 2rem 0;
+  padding: 1rem;
+  background: var(--korvid-charcoal-raised);
+  border: 1px solid var(--korvid-charcoal-border);
+  border-radius: var(--korvid-radius);
+  text-align: left;
+}
+
+.md-typeset .docs-storyboard figure {
+  display: block;
+  width: 100%;
+  margin: 0;
+  text-align: left;
+}
+
+.md-typeset .docs-visual img,
+.md-typeset .docs-storyboard img {
+  display: block;
+  width: 100%;
+  height: auto;
+  border: 1px solid var(--korvid-charcoal-border);
+  border-radius: calc(var(--korvid-radius) - 0.15rem);
+}
+
+.md-typeset .docs-visual figcaption,
+.md-typeset .docs-storyboard figcaption {
+  max-width: none;
+  margin: 0.8rem 0 0;
+  color: var(--korvid-ink-dim);
+  font-size: 0.8rem;
+  font-style: normal;
+}
+
+.md-typeset .docs-visual__stage {
+  position: relative;
+}
+
+.md-typeset .docs-visual__pin {
+  position: absolute;
+  left: var(--x);
+  top: var(--y);
+  display: grid;
+  width: 1.5rem;
+  height: 1.5rem;
+  place-items: center;
+  color: var(--korvid-charcoal);
+  background: var(--korvid-amber);
+  border: 2px solid var(--korvid-amber-bright);
+  border-radius: 50%;
+  font-weight: 700;
+  transform: translate(-50%, -50%);
+}
+
+.md-typeset .docs-visual figcaption ol,
+.md-typeset .docs-storyboard ol {
+  margin-bottom: 0;
+}
+
+.md-typeset .docs-storyboard {
+  display: grid;
+  gap: 1rem;
+}
+
+.md-typeset .docs-storyboard li span {
+  display: block;
+  color: var(--korvid-ink-dim);
+}
+
+@media (min-width: 960px) {
+  .md-typeset .docs-storyboard {
+    grid-template-columns: minmax(0, 1.5fr) minmax(16rem, 0.5fr);
+    align-items: start;
+  }
+}
+
+/* Contextual keyboard map (keybindings.md) and the compact reference
+   grids (keybindings.md, ops.md) built on top of it. The map's viewBox is
+   narrow and stacked so its labels stay legible in a phone-width column;
+   capping the width keeps it from scaling into a wall on a wide screen. */
+.md-typeset .docs-keymap {
+  display: block;
+  width: 100%;
+  max-width: 400px;
+  height: auto;
+  margin: 1.5rem auto 2rem;
+  border: 1px solid var(--korvid-charcoal-border);
+  border-radius: var(--korvid-radius);
+  background: var(--korvid-charcoal-raised);
+}
+
+.md-typeset .docs-reference-grid {
+  display: grid;
+  gap: 1rem;
+  margin: 1.5rem 0;
+}
+
+.md-typeset .docs-reference-grid > section {
+  min-width: 0;
+  padding: 1rem;
+  border: 1px solid var(--korvid-charcoal-border);
+  border-radius: var(--korvid-radius);
+}
+
+@media (min-width: 720px) {
+  .md-typeset .docs-reference-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -508,11 +821,14 @@
 
 .md-typeset .hero a:focus-visible,
 .md-typeset .hero .install-command:focus-visible,
-.md-typeset .feature-grid article:focus-visible,
-.md-typeset .product-demo video:focus-visible,
 .md-footer .korvid-footer a:focus-visible {
   outline: 3px solid var(--korvid-amber);
   outline-offset: 2px;
+}
+
+.md-typeset .hero-demo video:focus-visible {
+  outline: 3px solid var(--korvid-amber);
+  outline-offset: -3px;
 }
 
 /* ------------------------------------------------------------------ */

@@ -17,6 +17,7 @@ Homebrew guidance without reaching out to PyPI or the tap during tests.
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import tomllib
 from collections.abc import Callable
@@ -25,12 +26,16 @@ from typing import Any, cast
 
 import yaml
 
+from tests.docs_exclusions import is_published, parse_exclude_docs
+
 ROOT = Path(__file__).parent.parent
 MATERIAL_BUNDLE = ROOT / "docs" / "assets" / "javascripts" / "bundle.d7400e89.min.js"
 MERMAID_VENDOR = ROOT / "docs" / "assets" / "javascripts" / "vendor" / "mermaid-11.17.0.min.js"
 RESIZE_OBSERVER_VENDOR = (
     ROOT / "docs" / "assets" / "javascripts" / "vendor" / "resize-observer-polyfill-1.5.1.js"
 )
+VISUAL_STORYTELLING = ROOT / "docs" / "assets" / "javascripts" / "visual-storytelling.js"
+SCENE_FALLBACK = ROOT / "docs" / "assets" / "javascripts" / "scene-fallback.js"
 
 
 def test_makefile_docs_build_uses_frozen() -> None:
@@ -106,6 +111,109 @@ def test_mkdocs_config_does_not_downgrade_link_validation() -> None:
     assert not_found in (None, "warn", "warning", "error"), (
         "mkdocs.yml must not downgrade validation.links.not_found below its "
         f"strict-mode-visible default; found {not_found!r}"
+    )
+
+
+def test_core_concept_pages_each_have_their_selected_visual_evidence() -> None:
+    expected = {
+        "overview.md": ("```mermaid", "KORVID — product boundary"),
+        "tui.md": ('class="docs-visual docs-visual--annotated"', "cockpit-poster.png"),
+        "agent.md": ('class="docs-storyboard"', "agent-poster.png"),
+        "mcp.md": ("```mermaid", "External MCP client"),
+        "ops.md": ("```mermaid", "Audit append"),
+        "resource-relationships.md": (
+            'class="docs-visual"',
+            "relationship-graph.png",
+        ),
+    }
+    for relative, markers in expected.items():
+        source = (ROOT / "docs" / relative).read_text(encoding="utf-8")
+        for marker in markers:
+            assert marker in source, f"{relative} must contain {marker!r}"
+
+
+def test_overview_diagram_keeps_provider_masking_out_of_the_mcp_contract() -> None:
+    """MCP disclosure is tool-specific, not the embedded provider's masking."""
+    source = (ROOT / "docs" / "overview.md").read_text(encoding="utf-8")
+    diagram = source.split("```mermaid", 1)[1].split("```", 1)[0]
+    core = next(line for line in diagram.splitlines() if line.strip().startswith("CORE["))
+    agent = next(line for line in diagram.splitlines() if line.strip().startswith("AGENT["))
+    mcp = next(line for line in diagram.splitlines() if line.strip().startswith("MCP["))
+    assert "mask" not in core.lower()
+    assert "provider payload masking" in agent.lower()
+    assert "tool-specific disclosure" in mcp.lower()
+
+
+def test_mcp_diagram_routes_observability_reads_to_their_own_backends() -> None:
+    """Prometheus/Loki queries must not appear to call the Kubernetes API."""
+    source = (ROOT / "docs" / "mcp.md").read_text(encoding="utf-8")
+    diagram = source.split("```mermaid", 1)[1].split("```", 1)[0]
+    assert 'READ["Bounded Kubernetes read tools"]' in diagram
+    assert 'OBS_READ["Bounded observability tools<br/>activity note only"]' in diagram
+    assert 'OBS[("Prometheus / Loki")]' in diagram
+    assert "CLIENT --> READ --> KUBE" in diagram
+    assert "CLIENT --> OBS_READ --> OBS" in diagram
+    assert "OBS_READ -. successful read .-> FOLLOW" not in diagram
+
+    plan = (
+        ROOT / "docs" / "superpowers" / "plans" / "2026-08-22-visual-storytelling.md"
+    ).read_text(encoding="utf-8")
+    planned = plan.split("- [ ] **Step 6: Add the MCP boundary flow**", 1)[1]
+    planned = planned.split("```mermaid", 1)[1].split("```", 1)[0]
+    assert " ".join(planned.split()) == " ".join(diagram.split())
+
+
+def test_ops_safety_diagram_shows_only_universal_write_gates() -> None:
+    """Optional previews must not appear as a prerequisite for every write."""
+    source = (ROOT / "docs" / "ops.md").read_text(encoding="utf-8")
+    diagram = source.split("```mermaid", 1)[1].split("```", 1)[0]
+    assert "Validate + preview" not in diagram
+    for driver in ("DIRECT", "AGENT", "MCP"):
+        assert re.search(rf'{driver}\["[^"]+"\]\s*-->\s*CONFIRM', diagram)
+    assert 'CONFIRM["Fresh user keystroke"]' in diagram
+    assert 'CONFIRM --> AUDIT["Audit append"]' in diagram
+    assert 'AUDIT -->|success| EXECUTE["Execute mutation"]' in diagram
+    assert 'AUDIT -->|failure| BLOCK["Action blocked"]' in diagram
+
+    plan = (
+        ROOT / "docs" / "superpowers" / "plans" / "2026-08-22-visual-storytelling.md"
+    ).read_text(encoding="utf-8")
+    planned = plan.split("- [ ] **Step 7: Add the full operations safety flow**", 1)[1]
+    planned = planned.split("```mermaid", 1)[1].split("```", 1)[0]
+    assert " ".join(planned.split()) == " ".join(diagram.split())
+
+
+def test_tui_annotation_pins_match_the_poster_layout() -> None:
+    """`tui.md`'s pins must land on what their captions claim.
+
+    Measured against the 1280x720 `cockpit-poster.png` this branch ships
+    (a settled, populated post-navigation frame):
+
+    * the effective key-hint row occupies y 8-25px (~1-3%);
+    * the selected `CrashLoopBackOff` row occupies y 119-137px (~17-19%);
+    * the `ctx:(current)  ns:shop` status row occupies y 695-710px (~97%),
+      with `ns:shop` starting near x 157px (~12%).
+
+    The pins are ordered 1, 2, 3 in the source, matching the ordered list in
+    the figcaption. An earlier revision pointed pin 3 at 8% (the first pod
+    row) and pin 1 at 92% (~40px above the status row) and asserted those
+    offsets as fact, so the test actively defended the mismatch.
+    """
+    source = (ROOT / "docs" / "tui.md").read_text(encoding="utf-8")
+    expected = {
+        1: ("12%", "97%", "the context/namespace status row"),
+        2: ("50%", "18%", "the selected, populated resource row"),
+        3: ("50%", "3%", "the effective key-hint row"),
+    }
+    for number, (x, y, target) in expected.items():
+        pin = (
+            f'<span class="docs-visual__pin" style="--x: {x}; --y: {y};" '
+            f'aria-hidden="true">{number}</span>'
+        )
+        assert pin in source, f"pin {number} must point at {target} (--x: {x}; --y: {y})"
+    positions = [source.index(f'aria-hidden="true">{number}</span>') for number in (1, 2, 3)]
+    assert positions == sorted(positions), (
+        "the pins must stay in the order their figcaption list explains them"
     )
 
 
@@ -296,6 +404,44 @@ def test_material_bundle_checkout_preserves_reviewed_bytes() -> None:
     assert "docs/assets/javascripts/vendor/*.js -text" in attributes
 
 
+def test_mkdocs_loads_only_the_reviewed_local_storytelling_scripts() -> None:
+    config = _load_mkdocs_config()
+    assert config.get("extra_javascript") == [
+        "assets/javascripts/scene-fallback.js",
+        "assets/javascripts/visual-storytelling.js",
+    ]
+    fallback = SCENE_FALLBACK.read_bytes()
+    assert hashlib.sha256(fallback).hexdigest() == (
+        "eda3fc2798316fa155e6e020245e95b548853cd8c2be2fb3237d94c0373d454e"
+    )
+    assert b"\r" not in fallback, (
+        "the reviewed bytes are LF-only; a CRLF checkout would break the pin above"
+    )
+    assert VISUAL_STORYTELLING.is_file()
+    script = VISUAL_STORYTELLING.read_bytes()
+    assert hashlib.sha256(script).hexdigest() == (
+        "edcf34fad0b4b520bd72a0565aaa754ae8eb71f8a043080c6c275a64bd4b6a64"
+    )
+    assert b"\r" not in script, (
+        "the reviewed bytes are LF-only; a CRLF checkout would break the pin above"
+    )
+
+
+def test_visual_storytelling_plan_pins_the_current_controller_bytes() -> None:
+    """Replaying the executable plan must retain the reviewed controller."""
+    plan = (
+        ROOT / "docs" / "superpowers" / "plans" / "2026-08-22-visual-storytelling.md"
+    ).read_text(encoding="utf-8")
+    digest = hashlib.sha256(VISUAL_STORYTELLING.read_bytes()).hexdigest()
+    assert digest in plan
+
+
+def test_storytelling_script_checkout_preserves_reviewed_bytes() -> None:
+    attributes = (ROOT / ".gitattributes").read_text(encoding="utf-8")
+    assert "docs/assets/javascripts/visual-storytelling.js text eol=lf" in attributes
+    assert "docs/assets/javascripts/scene-fallback.js text eol=lf" in attributes
+
+
 def test_mkdocs_excludes_override_sources_but_keeps_theme_customization() -> None:
     """Jinja sources stay out of site/ while remaining available to Material."""
     config = _load_mkdocs_config()
@@ -383,3 +529,87 @@ def test_mkdocs_excludes_repository_only_history_from_site_search() -> None:
     excluded_paths = {line.strip().rstrip("/") for line in excluded.splitlines() if line.strip()}
     assert "dev/plans" in excluded_paths
     assert "superpowers" in excluded_paths
+
+
+def test_quality_gates_are_not_part_of_the_public_site() -> None:
+    """The internal quality-gates reference stays out of the published site.
+
+    `docs/dev/quality-gates.md` documents contributor-only checks (lint,
+    typecheck, coverage gates). It must never be built into `site/` or
+    listed in the public navigation.
+    """
+    config = _load_mkdocs_config()
+    excluded = str(config["exclude_docs"])
+    nav_text = json.dumps(config["nav"])
+    assert "dev/quality-gates.md" in excluded
+    assert "quality-gates" not in nav_text.lower()
+    assert "quality gates" not in nav_text.lower()
+
+
+def _first_markdown_heading(text: str) -> str:
+    """The page title MkDocs would derive from a source file's first `#` heading.
+
+    Args:
+        text: The raw Markdown source of one page.
+
+    Returns:
+        The heading text with its leading `#` markers stripped, or `""` if
+        the page has no top-level heading.
+    """
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            return stripped.lstrip("#").strip()
+    return ""
+
+
+def test_public_markdown_excludes_all_quality_gate_content_and_links() -> None:
+    """No published page — not just `dev/quality-gates.md` — may leak the topic.
+
+    `dev/quality-gates.md` is excluded from the build, but
+    `dev/specs/2026-07-24-korvid-engineering-standards.md` documents the same
+    internal quality gates under its own heading (`## 4. Quality Gates —
+    Three Layers`) and used to build (and search-index) fine on its own, so
+    the operator excluded it too rather than trim just that heading.
+
+    This deliberately enforces a stronger boundary than MkDocs search: paths,
+    Markdown link destinations, headings, and prose all remain free of the
+    rejected internal topic. The dependency-free scan derives the published
+    source set from `mkdocs.yml`'s actual `exclude_docs` entries.
+    """
+    config = _load_mkdocs_config()
+    excluded = config.get("exclude_docs")
+    assert isinstance(excluded, str)
+    entries = parse_exclude_docs(excluded)
+    required_private_files = {
+        "dev/quality-gates.md",
+        "dev/specs/2026-07-24-korvid-engineering-standards.md",
+    }
+    assert required_private_files <= set(entries), (
+        "both internal quality-gate sources must be excluded by mkdocs.yml itself"
+    )
+
+    published: list[Path] = []
+    for path in sorted((ROOT / "docs").rglob("*.md")):
+        relative = path.relative_to(ROOT / "docs").as_posix()
+        if not is_published(relative, entries):
+            continue
+        published.append(path)
+
+    assert published, "the published Markdown source set must not be empty"
+    # Sanity-check the fixture itself: both known offenders must actually be
+    # gone, or the scan below would be vacuously true.
+    published_relative = {p.relative_to(ROOT / "docs").as_posix() for p in published}
+    assert required_private_files.isdisjoint(published_relative)
+
+    for path in published:
+        relative = path.relative_to(ROOT / "docs").as_posix()
+        text = path.read_text(encoding="utf-8")
+        title = _first_markdown_heading(text)
+        haystack = f"{relative} {title} {text}".lower()
+        assert "quality gate" not in haystack, (
+            f"{relative!r} leaks 'quality gate' into the published docs source set"
+        )
+        assert "quality-gates" not in haystack, (
+            f"{relative!r} leaks 'quality-gates' into the published docs source set"
+        )

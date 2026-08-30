@@ -21,6 +21,7 @@ from korvid.agent.model_policy import ModelCapabilities, ModelDescriptor
 from korvid.agent.provider import LLMProvider
 from korvid.agent.setup import AgentSettings
 from korvid.tools.executor import UIBridge
+from korvid.tools.structured import ERROR_PREFIX
 from tests.fixtures.provider_plugin.site_helpers import (
     FIXTURES_DIR,
     build_dist_info,
@@ -156,6 +157,24 @@ async def test_proxy_without_target_returns_error() -> None:
     assert (await proxy.agent_open_describe("pods", "p")).startswith("ERROR:")
     assert (await proxy.agent_drill_down("web")).startswith("ERROR:")
     assert (await proxy.agent_request_write("delete", "pods", "web-1")).startswith("ERROR:")
+
+
+async def test_proxy_not_ready_line_is_composed_from_the_shared_error_prefix() -> None:
+    """The degraded answer must stay an error line by construction.
+
+    Every consumer of a UI tool result — the agent loop and any external
+    MCP host — decides "this failed" by testing
+    `korvid.tools.structured.ERROR_PREFIX`. So the contract is checked
+    against that constant rather than against a spelling of it: the value
+    the proxy holds, and the answer it actually returns, both have to move
+    with the prefix if the prefix ever changes.
+    """
+    from korvid.__main__ import _AgentToolUIBridgeProxy
+
+    proxy = _AgentToolUIBridgeProxy()
+
+    assert f"{ERROR_PREFIX} UI not ready" == _AgentToolUIBridgeProxy._NOT_READY
+    assert (await proxy.agent_navigate("pods")).startswith(ERROR_PREFIX)
 
 
 async def test_proxy_forwards_to_target() -> None:

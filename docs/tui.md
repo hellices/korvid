@@ -1,508 +1,122 @@
 # Browsing the cluster
 
 Everything about reading the cluster: tables, filters, custom columns, live
-metrics, ops hints, the split workspace, the log viewer, namespace scope,
+metrics, the split workspace, the log viewer, namespace scope,
 and context switching. Keys referenced here are listed in
 [keybindings.md](keybindings.md).
 
-## Custom columns
+<figure class="docs-visual docs-visual--annotated">
+  <div class="docs-visual__stage">
+    <img src="../assets/scenes/cockpit-poster.png" width="1280" height="720" loading="lazy" alt="Korvid pod table for a synthetic shop namespace with the crash-looping payment worker selected and its BackOff warning in the ops hint strip">
+    <span class="docs-visual__pin" style="--x: 12%; --y: 97%;" aria-hidden="true">1</span>
+    <span class="docs-visual__pin" style="--x: 50%; --y: 18%;" aria-hidden="true">2</span>
+    <span class="docs-visual__pin" style="--x: 50%; --y: 3%;" aria-hidden="true">3</span>
+  </div>
+  <figcaption>
+    <ol>
+      <li><strong>Context and namespace</strong> stay visible while you navigate.</li>
+      <li><strong>Resource evidence</strong> is watch-backed and filterable in place.</li>
+      <li><strong>Effective keys</strong> follow the current view; <kbd>?</kbd> shows the complete set.</li>
+    </ol>
+  </figcaption>
+</figure>
 
-Teams encode operational facts in labels, annotations, and spec fields —
-owning team, release version, container image. The `views:` section of
-`config.yaml` adds them to any resource table (keyed by the **plural** kind
-name used in `:` navigation):
+## Read the cockpit
+
+The status row along the bottom is always on screen: current kube context
+and the active namespace scope (or `all`). The key legend rides the top of
+the screen and is collapsed by default to the few keys that matter most in
+the current view (`~` expands the full grouped legend). The selected row is
+not a static snapshot: every table is watch-backed, so its fields update
+live as the cluster changes underneath your cursor. It is still a *view of
+what korvid has watched* — a describe, a log stream, or an agent tool
+issues its own fresh read against the API server. Press `?` at any time to
+see the complete effective key set for the current view, including any
+remaps from your config.
+
+## Follow one signal
+
+A typical investigation starts at a troubled row and ends at its cause:
+
+1. `/` filters the table down to the workload you care about (name,
+   `~fuzzy`, `/regex/`, a label selector, or `-s` to hide Completed).
+2. `d` describes the selected resource — its manifest and recent events —
+   for the full picture behind a status like `CrashLoopBackOff`.
+3. `l` opens the log pane for the selected pod (`L` merges the first 8
+   currently filtered pods instead).
+4. `g` opens the operational relationship graph: the resource's direct
+   dependencies and its direct dependents — one hop each way — with a
+   coverage banner stating how complete that view is. `d` toggles a
+   bounded transitive expansion of the dependents side; see
+   [resource-relationships.md](resource-relationships.md) for its depth and
+   node caps.
+
+## Work with logs
+
+`L` streams the first 8 currently visible pods' logs together, each line
+prefixed `[pod/container]`; when more pods match, a notification names the
+cap and how many matched rather than quietly widening the stream. `f`
+toggles between raw text and colour-highlighted JSON for lines that look
+like JSON; `p` reloads the pane from the previous (terminated) container
+instance. `/` opens inline search in the pane, and `n` / `N` jump between
+hits. The pane holds a bounded ring buffer of 5000
+lines — a one-time banner marks the pane once older lines have been
+dropped. Streams reconnect automatically on a transient error or an
+unexpected EOF; after five consecutive failed attempts the header shows an
+error state and a notification is raised.
+
+## Change scope without losing context
+
+korvid always watches exactly one explicit scope. The startup namespace
+resolves from `-n`/`--namespace`, then `namespace:` in
+`~/.config/korvid/config.yaml`, then your kubeconfig context's namespace,
+then `default`. Switch with `:ns <name>`, the `:ns` picker, `0` for
+all-namespaces, or `1`–`9` for your configured `favorite_namespaces`. A
+watch denied by RBAC stops with one concise notice instead of retrying or
+fanning out into other namespaces.
+
+`:ctx` switches kubeconfig context. korvid probes the target first — loads
+its credentials in isolation and runs a self-access review — so an
+unreachable or expired context fails with a toast while you stay connected
+to the current cluster; only a successful probe tears down watches,
+port-forwards, and log streams and retargets everything at the new
+cluster. `Ctrl-W v` splits the workspace into two independent panes (own
+kind, namespace, and filter); `Ctrl-W w` moves focus, `Ctrl-W q` closes the
+focused pane.
+
+## Shape the table
+
+Add columns sourced from labels, annotations, or a bounded JSONPath subset
+under `views:` in `config.yaml`:
 
 ```yaml
 views:
   pods:
     columns:
       - name: TEAM
-        label: team                          # metadata.labels['team']
-      - name: OWNER
-        annotation: owner                    # metadata.annotations['owner']
-      - name: IMAGE
-        jsonpath: .spec.containers[0].image  # dotted path + [index] subset
-  deployments:
-    replace: true          # replace the defaults (NAME/NAMESPACE always stay)
-    columns:
-      - name: VERSION
-        label: app.kubernetes.io/version
+        label: team
 ```
 
-Each column declares exactly one source: `label:`, `annotation:`, or
-`jsonpath:` (a read-only built-in subset — dotted keys and `[n]` indexes;
-no filters or wildcards). By default custom columns are appended after the
-kind's built-in columns; `replace: true` keeps only NAME (and NAMESPACE in
-all-namespaces mode) plus your columns.
-
-Missing values render `<none>`; an expression that fails at runtime renders
-`<err>` — the render loop never crashes. Invalid column definitions
-(including duplicates, names shadowing built-in columns, the synthetic
-helm views, and `secrets` — Secret values only render through the masking
-pipeline) are dropped with a startup warning. `:sort <COLUMN>` sorts by
-any custom column or by the built-in sort keys `name`, `age`, `cpu`, `mem`
-(only while their columns are visible; custom values compare as
-case-insensitive strings). Repeating flips direction, bare `:sort` clears.
-
-## Live metrics
-
-The pods table shows live `CPU` / `MEM` usage and `%CPU/R` / `%MEM/R`
-(usage as a percentage of the declared request) from the `metrics.k8s.io`
-API, polled every 15 seconds while the pods view is on screen.  The number
-is always relative to the request, but the colour keys off enforced
-**limits**: running above the request is normal bursting, while approaching
-an enforced limit means OOMKill (memory) or throttling (CPU) territory.
-Every applicable ceiling is checked — each container against its own limit
-(the kubelet enforces them independently) and, on K8s 1.34+, the pod
-aggregate against the pod-level limit — and the most severe colour wins
-(green &lt; 70 % &le; yellow &lt; 90 % &le; red).  Only when no limit bounds
-the usage does the colour fall back to the request ratio, capped at yellow
-(bursting without a ceiling is expected, never critical).
-On clusters without metrics-server the columns show `-` and korvid keeps
-polling, so a later install is picked up without a restart.
-
-## Ops hints
-
-When the cursor lands on a troubled pod row (CrashLoopBackOff,
-ImagePullBackOff, failing readiness, …) a hint strip appears under the
-table with up to two concise lines built from the pod's container statuses
-and its freshest Warning event — verbatim API data, no synthesized
-diagnoses.  Anything that does not fit folds behind `+N more (i: details)`;
-press `i` to open a read-only overlay with every troubled container (full
-message, exit code, restart count, last-seen age) and the pod's recent
-Warning events.
-
-## Split workspace
-
-`Ctrl-W` `v` splits the workspace into two side-by-side panes, each an
-independent resource view with its own kind, namespace and filter — e.g.
-deployments on the left, their pods on the right.  The focused pane (accent
-border) receives all `:` commands, filters and keybindings; `Ctrl-W` `w`
-moves focus to the other pane and `Ctrl-W` `q` closes the focused one.
-Drill-down, describe and the log pane all act on the focused pane, and the
-AI agent's screen context reports the focused view plus a one-line summary
-of the other.  The layout is session-only — korvid always starts single-pane.
-
-## Log viewer
-
-The log pane supports multi-container merge: press `L` to stream logs from every
-visible pod simultaneously with `[pod/container]` prefixes.  Lines that look like
-JSON are auto-detected and rendered with colour highlighting; press `f` to toggle
-between the formatted and raw views.  Press `p` to reload the pane with logs from
-the previous (terminated) container instance.
-
-Live streams reconnect automatically on transient errors or unexpected EOF.  After
-five consecutive reconnect attempts without a successful line the header shows an
-error state and a notification is raised.  The in-memory ring buffer retains the
-last 5000 lines; when it overflows a one-time banner is written to the pane so you
-know older lines were dropped.
-
-## Namespace scope
-
-korvid always watches exactly one explicit scope — a single namespace or
-all namespaces — and never expands it on your behalf.
-
-The startup namespace resolves in precedence order: the `-n`/`--namespace`
-CLI flag, then `namespace:` in `~/.config/korvid/config.yaml`, then your
-kubeconfig context's namespace, then `default`:
-
-```bash
-korvid -n team-a
-```
-
-Switch scope inside the app with `:ns <name>` (free-text always works, no
-list permission needed), the `:ns` picker, or `0` to toggle the
-all-namespaces view. Keys `1`-`9` jump straight to your favorite
-namespaces — a pure UI shortcut over the same `:ns` path:
-
-```yaml
-namespace: team-a        # startup namespace (optional)
-favorite_namespaces:     # 1-9 jump keys, in order (max 9)
-  - team-a
-  - team-b
-```
-
-On RBAC-limited clusters korvid reports denials instead of guessing around
-them:
-
-- A watch that answers 403 stops with one concise notice — no retry loop,
-  no fan-out into other namespaces. Switch to a namespace your role grants
-  with `:ns <name>` or a favorite key.
-- `0` re-checks cluster-wide access each press, so it starts working the
-  moment your role is granted the permission.
-- When listing namespaces is forbidden, the `:ns` picker explains the
-  denial and points at `:ns <name>` free-text entry.
-- API discovery is unaffected: individual API groups that fail discovery
-  are hidden; they never fail startup.
-
-The legacy `namespaces:` fallback list (and the per-namespace watch
-fan-out it drove) is gone; a leftover key produces a startup warning
-pointing at `favorite_namespaces`.
-
-## Context switching
-
-`:ctx` opens a picker of kubeconfig contexts (current one marked);
-`:ctx <name>` switches directly, with tab completion. Before anything is
-torn down, korvid probes the target context — loads its credentials in
-isolation and issues an authenticated self-access review — so a context
-with expired credentials or an unreachable API server fails with an error
-toast while you stay connected to the current cluster. Only after the
-probe succeeds
-does korvid stop watches, port-forwards, log streams and metrics polling,
-clear cached state, and retarget everything (resource discovery, capability
-probes like pod-resize support, cloud-provider hints, audit log context)
-at the new cluster. An open AI conversation survives the switch: the agent
-is told the context changed, and its tools operate on the new cluster from
-the next turn.
-
-## Session timeline
-
-`T` opens a bounded, read-only log of what has happened in this session:
-watch deltas (ADDED/MODIFIED/DELETED), Warning events, context switches, and
-audit-logged writes, newest first. It performs no cluster I/O of its own —
-it only renders what the running session already recorded — so it opens
-instantly, with or without a row selected, and works the same with the AI
-agent disabled. The table does not refresh itself while open; reopening it,
-or changing a filter, renders a fresh snapshot of the entries currently stored.
-
-By default the timeline shows only the current kube context's epoch, every
-source, every resource. Inside the modal:
-
-- `e` toggles between the current epoch and every epoch the session has
-  seen (a stale entry from before a `:ctx` switch is otherwise never shown
-  by default).
-- `s` cycles the source filter: all → watch → event → context → write →
-  all.
-- `r` toggles between every resource and the one selected in the table
-  behind the modal at the moment `T` was pressed (captured once; it is
-  never re-read while the modal stays open).
-- `Enter` on a row that carries a resource navigates there, reusing the
-  same jump path as every other in-app navigation; rows with no resource
-  (a context-switch entry, say) are inert.
-- `Esc` / `q` closes.
-
-Every cluster-controlled field the timeline renders — timestamps, Warning
-`reason`/`note`, context names, resource identifiers — is shown as literal
-text, never interpreted as Rich markup, even if the cluster or a workload
-supplies text that looks like a markup sequence.
-
-The timeline is bounded in memory and never grows without limit: it holds
-at most `max_entries` entries and `max_bytes` of encoded content, evicting
-the oldest entries first once either cap is hit; the banner above the table
-reports how many entries are currently stored, their encoded size, and how
-many were evicted or refused. Configure the caps in
-`~/.config/korvid/config.yaml`:
-
-```yaml
-timeline:
-  max_entries: 500      # default
-  max_bytes: 262144     # default (256 KiB of encoded content)
-```
-
-## Write impact preview
-
-Writes that have tested impact semantics — delete (`Ctrl-D`), rollout
-restart (`r`), a *known* workload scale-down (`S`, covered below), and Pod
-resize (`R`, covered below) — show advisory impact notes above the server
-dry-run preview in the approval dialog. For delete, rollout restart, and
-known scale-down, the graph-derived section answers one bounded question:
-which resources korvid has already observed depend on this one?
-
-    graph-derived impact (advisory):
-      delete apps/Deployment/prod/web
-      advisory only: known relationships from one bounded snapshot - not a prediction of failure, no replacement for the server dry-run, and never a block on approval.
-      known direct dependents (may be affected): 2 or more
-        - Pod/prod/web-abc-1 via managed_by (declared) at apps/Deployment/prod/web: spec.selector
-        - apps/ReplicaSet/prod/web-abc via owned_by (declared) at apps/ReplicaSet/prod/web-abc: metadata.ownerReferences[0]
-      known transitive dependents (may be affected): none in this snapshot
-      additional known paths: 2 or more (already-listed dependents reached again)
-      scope: prod
-      graph coverage: incomplete - a missing dependent here does not prove none exists
-        - gateway.networking.k8s.io/*: unavailable
-
-The two non-zero counts are `2` because this snapshot reached two direct
-dependents and folded two additional paths. They read `2 or more`, rather
-than exact `2`, because the Gateway API group could not be listed: that one
-incomplete coverage record makes them lower bounds, not totals (see the `N
-or more` bullet below). The transitive line remains `none in this snapshot`;
-with incomplete coverage that means none was observed here, not that none
-exists. With every source `complete` and neither bound hit, the same summary
-renders exact counts.
-
-The section is **advisory**, and says so on its second body line — directly
-under the action, before the first count, because that is where the hedge is
-still on screen with the target rather than below a body that can run to the
-preview's caps. It never predicts failure, never replaces the
-server dry-run, and never blocks approval: the y/typed-name gate, the UID
-precondition, the RBAC pre-check, and the fail-closed audit log are exactly
-what they were. Edit, Helm, and operator flows never show it — they have
-no tested per-relation semantics yet, and korvid would rather show nothing
-than a plausible guess.
-
-### Node maintenance impact
-
-Cordon (`c`), uncordon (`u`), and drain (`shift-D`) show a separate
-advisory section headed exactly:
-
-    Node maintenance impact (advisory):
-
-Neither cordon nor uncordon loads the relationship graph; their advisory
-lines are derived locally from the action:
-
-    Node maintenance impact (advisory):
-      current Pods are not evicted or moved
-      the Node is marked unschedulable for ordinary workload placement
-      future placement and workload availability are not predicted
-
-for a cordon, and
-
-    Node maintenance impact (advisory):
-      current Pods are not moved
-      future scheduling to the Node is permitted
-      scheduler choice and capacity are not predicted
-
-for an uncordon.
-
-Drain keeps `drain impact plan:` as the authoritative section — the
-preview rendered by `DrainPlan.preview_lines()` under that heading. The node
-maintenance advisory appears in the impact section above that plan. When the
-relationship graph load succeeds, the graph section appears first (above the local
-advisory lines);
-when it fails, the local lines remain visible and graph failure never
-removes the plan or blocks approval. Plan failure (an exception from
-`ops.drain_plan`) aborts the whole flow before any dialog opens — no
-graph-only approval dialog is ever shown without a plan.
-
-The graph section for drain can list mirror Pods and DaemonSet Pods that
-the drain plan skips (the plan itself excludes them per its own eviction
-logic). The plan section is always the authoritative source for which Pods
-will be evicted and why others are skipped; the graph section is advisory.
-
-If drain execution begins and is then cancelled, the Node remains cordoned.
-The local advisory line states this explicitly:
-
-    after the Node is successfully cordoned, it remains cordoned if drain execution later fails or is cancelled
-
-Pod resize uses the same graph renderer with an intentionally empty relation
-set, then adds a Pod-local section derived from the captured Pod manifest and
-requested resources:
-
-    graph-derived impact (advisory):
-      pod resize Pod/prod/web-abc-1
-      advisory only: known relationships from one bounded snapshot - not a prediction of failure, no replacement for the server dry-run, and never a block on approval.
-      known direct dependents (may be affected): none in this snapshot
-      known transitive dependents (may be affected): none in this snapshot
-      scope: prod
-      graph coverage: complete
-    Pod-local resize impact (advisory):
-      Pod identity and relationship membership stay unchanged; graph relations are not traversed
-      changed resources do not require a container restart under resizePolicy
-      node feasibility, Deferred/Infeasible status, actuation, and completion are not predicted
-
-The restart and memory-limit-decrease lines are conditional: a
-`RestartContainer` policy adds a CPU- and/or memory-specific restart-required
-line, a proven memory-limit decrease (including adding a finite limit to an
-unbounded container) with `NotRequired` adds the best-effort OOM-avoidance line, and
-malformed or incomplete input produces bounded "could not be determined"
-text instead of optimistic claims. If graph loading fails or is unavailable,
-those safe Pod-local notes remain visible; graph failure never removes them
-or blocks approval.
-
-### Reading it
-
-- **direct** dependents are one hop from the target, **transitive** are two
-  or more; each line names the relation, how the fact was derived, and the
-  resource and manifest field the evidence came from — for a
-  selector-derived `managed_by`/`protected_by` hop that resource is the
-  Deployment/PDB that declared `spec.selector`, not the Pod it matched.
-- Each hop's evidence resource and field are individually bounded, but the
-  whole composed line is still capped at 240 characters, because a path
-  line concatenates up to three rendered hops onto it. Once the composed
-  line reaches that cap, the remaining tail is replaced by a visible `...`,
-  which can fall within the first hop's own field — even though it was
-  never near its own bound — and can omit later hops entirely. This is a
-  deliberate trade-off to keep an approval line readable in a 70-column
-  modal rather than one that silently wraps or scrolls; `[inferred]` has
-  room reserved ahead of that cap, so it always survives it.
-- `additional known paths` counts relationships that reach a dependent
-  already listed above (a second route, a second mount). They are counted
-  rather than repeated, so a count of dependents is never inflated.
-- `relationship cycles` and `additional known paths` count edges the walk
-  folded away rather than expanding them.
-- Every cluster-derived count — both dependent sections, `relationship
-  cycles`, `additional known paths`, and `unresolved references in the
-  affected set` — renders as `N or more` instead of an exact `N` whenever
-  the answer as a whole could not be exhaustive: `traversal capped`,
-  `snapshot truncated`, `graph coverage: incomplete`, or `target not found
-  in this snapshot`. A capped walk stops before it reaches every dependent,
-  a truncated snapshot was already missing resources or relationships
-  before the walk began, and a source that could not be listed was never
-  joined at all — so in each case `N` is a floor and an exact number would
-  read as exhaustive (and would contradict the coverage line right below
-  it). `none in this snapshot` is left as-is: it is already a statement
-  about the snapshot, not a count — which is also why a missing target,
-  whose sections are all empty, hedges nothing. The `... N more dependents
-  not shown (preview capped)`, `... N more unresolved references not shown
-  (preview capped)` and `... N more coverage records not shown (preview
-  capped)` lines also stay exact — they count what the preview cut from
-  rows it holds, not what was never found — and each names the section it
-  cut, since all three overflow at the same indent.
-- `[inferred]` marks a hop derived by a heuristic rather than read from a
-  manifest. It is labelled, never a blocker.
-- `unresolved references in the affected set` lists dangling references
-  held by the target or by something it takes down — a mounted ConfigMap
-  that no longer exists, say. For a delete or a rollout restart that is
-  *whatever relation they use*: the delete removes what they resolved
-  against, and the restart recreates the Pod that has to satisfy them
-  again. A scale-down narrows it to the same closed set its own walk
-  follows (`owned_by`, `managed_by`, `selects`, `routes_to`) — scaling down
-  does not detach a mounted volume or ConfigMap, evict a Pod past its PDB,
-  move a Pod off its node, or unbind a claim, so a dangling reference of
-  one of those relations would say nothing about the scale-down while
-  reading like a warning about it. Each line names
-  its own confidence (`declared`, `observed`, or `inferred`) next to the
-  relation, the same way a dependent path does, so a heuristically-derived
-  dangling reference is identifiable on its own line, not only through the
-  `[inferred]`/aggregate note above.
-- `scope` is the namespace the snapshot covered. `all namespaces` appears
-  for a cluster-scoped target (a Node, a PersistentVolume) or an
-  all-namespaces view; otherwise the coverage below it is only ever
-  complete *within that namespace*.
-- `target not found in this snapshot - dependents unknown` means the exact
-  object (UID included) was not in the snapshot — usually deleted and
-  recreated under the same name. The counts below it then describe the
-  snapshot, not your object.
-- `graph coverage: incomplete` means some source could not be listed
-  (RBAC, an absent API, a cap): a missing dependent is then *unknown*, not
-  *absent*.
-- `traversal capped` and `snapshot truncated` are two different bounds, not
-  one:
-  - `traversal capped` means the *impact* walk itself — the dependent search
-    for this one action — hit its own limit: 3 hops, 50 dependents.
-  - `snapshot truncated` means the underlying relationship snapshot (the
-    same one the graph view `g` builds) hit one of its own, much larger
-    input caps while gathering raw objects and candidate edges before the
-    impact walk ever started: either the resource cap (input objects were
-    dropped, so some resources were never joined) or the edge cap
-    (candidate relationships were dropped, so some edges between resources
-    that *are* present were never kept). Both are coarser, earlier limits
-    than the 50-dependent traversal cap above (see
-    [Limits](resource-relationships.md#limits) for the exact numbers).
-
-### The snapshot, its scope, and UID matching
-
-The snapshot is the same bounded, read-only LIST fan-out the relationship
-view (`g`) performs. For TUI writes, the scope is captured from the pane the
-write was raised from: that pane's namespace for a namespaced target, and
-cluster-wide for a cluster-scoped one so a dependent in another namespace
-cannot be quietly missed. Agent resize requests are not raised from a pane;
-their scope comes from the explicit namespace in the request instead of the
-currently focused view. The snapshot has a 5-second deadline. If it times out
-or fails, the dialog says `impact unavailable; approval remains available`
-and the approval proceeds normally.
-If the context switches, the selection moves, focus lands in the other pane
-of a split workspace, or that pane changes its namespace while the snapshot
-loads, the write is cancelled before any dialog opens — even when the newly
-focused pane happens to sit on the same object.
-
-The summary is matched to the target by **exact identity, UID included**.
-When the selected row carries no UID (a summary type that does not expose
-one), the section is omitted entirely: the dialog opens with the dry-run
-preview only, and no snapshot is loaded at all. korvid does not fall back to
-matching by name — that would silently reconnect the preview to whatever
-object currently holds the name — and it does not show `target not found in
-this snapshot` either, which would read as "the object is gone" when the
-truth is only that korvid has no UID to match on. Approval, the typed-name
-gate, the write, and the audit record are unaffected.
-
-### Scale-down
-
-Scale (`S`) shows the same section, but only when korvid can tell the
-requested count is a *known decrease*: the row's current desired replica
-count was readable and the requested count is lower than it. A scale-up, a
-no-op (requested count equal to current), or a row whose desired count
-korvid cannot read gets the ordinary confirmation with the `old -> new`
-replica line and **no graph section at all** — not the "impact unavailable"
-line, and no relationship snapshot is loaded for it. Only a known decrease
-loads the snapshot and summarizes it.
-
-Whether the request is a decrease is decided from the desired count read
-off the row *before* the permission check, and that number is re-checked at
-every awaited step of the flow — after the permission check, after the
-replica prompt closes, after the dry run, after the snapshot, and once more
-after you approve, before anything is reserved, audited or written. If a
-controller, an autoscaler or another operator moves `spec.replicas`
-meanwhile, the scale is cancelled with `the desired replica count changed
-during …` and no dialog opens: the same request could otherwise be offered
-as a decrease that is now an increase, under an approval line reading
-`replicas <old> -> <new>` for a count the object no longer has. A row that
-had no readable count and gains one mid-flow is the same case. The last
-check is what covers the longest gap of all — the confirmation dialog stays
-open until you answer it — so drift that lands while you are reading the
-dialog cancels the write instead of executing it; that one is reported
-after the dialog closes, since the dialog was already shown.
-
-A scale-down follows a different, still closed relation set than delete and
-rollout restart: `owned_by` and `managed_by` (the same controller/selector
-ownership chain to the shrinking workload's Pods), plus `selects` and
-`routes_to` — a Service selecting those Pods, an EndpointSlice observed
-targeting one of them, and a declared Ingress or Gateway route reaching that
-Service in turn. Delete and rollout restart never follow `selects` (a
-Service whose Pods are deleted one at a time is not itself failing), but a
-scale-down does, conservatively: a Service, EndpointSlice, Ingress, or
-Gateway route is listed as a known dependent that **may be affected**, never
-as one that will lose an endpoint or stop routing. `protected_by`,
-`uses_volume`, `uses_config`, `scheduled_on`, and `bound_to` are excluded —
-none of them is something a scale-down itself changes for a Pod that
-remains. That exclusion covers the `unresolved references in the affected
-set` warning too: a scale-down never warns about a dangling reference of a
-relation it does not follow, which would otherwise reintroduce as a warning
-the claim the closed set deliberately refuses to make.
-
-Every scale-down advisory also states, as machine-defined lines rather than
-anything read from the cluster:
-
-    controller scale-down is not an Eviction API request; PodDisruptionBudgets do not gate it
-    HorizontalPodAutoscaler targeting and reconciliation are not evaluated
-
-and, only when the target itself is an `apps/StatefulSet`:
-
-    StatefulSet PVC retention policy is not evaluated
-
-A controller deletes surplus Pods directly rather than through the Eviction
-API, so a PodDisruptionBudget never sees or gates it; an HPA can independently
-overwrite a manual replica count on its own reconciliation loop; and a
-StatefulSet's `persistentVolumeClaimRetentionPolicy` decides whether scaling
-down also deletes PVCs — none of that is evaluated here. That last line is
-selected by group *and* kind, so a custom resource that merely spells its
-kind `StatefulSet` in a group of its own is never told about a retention
-policy the `apps` API defines and it does not have.
-
-A workload's Pods are one hop from it, not two: a Deployment,
-StatefulSet or ReplicaSet declares `spec.selector`, which is a `managed_by`
-relationship to every Pod it matches, alongside the `owned_by` chain the
-Pods' `metadata.ownerReferences` give. The shortest selector path is used
-for delete, rollout restart, and scale-down because all three actions
-include `managed_by`. So the routing chain from a Deployment is
-`Deployment -> Pod (managed_by) -> Service (selects) ->
-Ingress/Gateway route (routes_to)` — three hops, inside the walk's bound —
-and the dialog names the Ingress. The ReplicaSet in between is itself a
-second direct dependent, and the two ReplicaSet-to-Pod facts — its selector
-and the Pod's ownerReference back to it — are counted under `additional
-known paths` rather than listed twice. Scaling that ReplicaSet down reaches
-the same chain through the `spec.selector` it declares itself, also three
-hops. The
-ordinary 3-hop, 50-dependent bound still applies to everything past that:
-a longer chain is disclosed by `traversal capped` (see [Reading
-it](#reading-it)), which never means "not affected", only "not reached".
-
-Everything else about the section — its advisory framing, the origin-pane
-and UID gates on context/selection/focus/scope drift, the fail-open handling
-of a timeout or a loader failure, and the fact that it never blocks
-approval — is identical to delete and rollout restart's, described above.
-The one difference is what "fail-open" leaves on screen: none of the three
-limitation lines above is read from the cluster, so a scale-down whose
-snapshot timed out or failed still states them under `impact unavailable;
-approval remains available` (the PVC-retention one still only for an
-`apps/StatefulSet`). Delete and rollout restart, which have no such static
-limitation, show that line alone.
+The pods table's `%CPU/R` / `%MEM/R` columns are always relative to the
+declared request (`CPU` and `MEM` show absolute usage), but their colour
+keys off the most severe **limit** the usage approaches across every
+applicable ceiling (container and, on K8s 1.34+, pod-aggregate) — never off
+the request alone. Only when no limit bounds the usage does the colour fall
+back to the request ratio, capped at yellow: bursting above a request is
+expected, never critical. Without `metrics.k8s.io` installed the columns
+show `-` and korvid keeps polling, picking up a later install with no
+restart.
+
+## Preview impact before a write
+
+Delete, rollout restart, a known workload scale-down, and Pod resize show
+an **advisory** graph-derived impact section above the dry-run preview in
+their approval dialog — see [Operations](ops.md) for the full guarded-write
+path all of them share. The section is matched to the selected row by
+**exact identity, UID included**: when a row carries no UID the section is
+omitted entirely rather than guessing by name.
+
+For example, `S` (scale) only loads and summarizes this section when
+korvid can tell the requested count is a *known decrease* — a scale-up, a
+no-op, or a row whose current count can't be read gets the ordinary
+`old -> new` confirmation with no graph section at all.

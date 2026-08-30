@@ -1,16 +1,8 @@
 # Provider plugins
 
 Third-party provider plugins are the escape hatch for LLM backends that do
-**not** fit korvid's built-in providers:
-
-- `github-copilot`
-- `ollama`
-- `openai-compat` and its built-in aliases: `openai`, `azure`, `vllm`,
-  `github`, `anthropic`, `claude`
-
-If your backend already speaks an OpenAI-compatible `/v1` API, prefer the
-built-in `openai-compat` path instead of a plugin. Reach for a plugin only
-when the wire protocol or auth flow truly differs.
+**not** fit korvid's built-in providers. Reach for one only when the wire
+protocol or the auth flow truly differs from anything korvid already speaks.
 
 > **Security warning:** provider plugins are trusted, in-process Python code
 > loaded into the korvid process. Selected-only loading avoids importing
@@ -19,24 +11,25 @@ when the wire protocol or auth flow truly differs.
 > `CredentialSource` — never conversation data. The provider it returns is
 > then called with the same sanitized canonical `messages`/`tools` payload
 > `OutboundPolicy` builds for built-in providers (see
-> [`docs/threat-model.md`](threat-model.md)) — but once your provider's
-> `complete()` receives that payload, it is free to mutate, retain, log,
-> cache, or independently transmit it anywhere; korvid has no further
-> control or visibility past the handoff. See
+> [`docs/threat-model.md`](threat-model.md)) — but once your `complete()`
+> receives that payload it may mutate, retain, log, cache, or transmit it
+> anywhere; korvid has no visibility past the handoff. See
 > [`SECURITY.md`](https://github.com/hellices/korvid/blob/main/SECURITY.md) to report a vulnerability.
 
 ## When you should not write a plugin
 
-Use a built-in config whenever possible:
+A built-in configuration covers most backends:
 
 - **OpenAI, Azure OpenAI, GitHub Models, Anthropic compatibility endpoint,
-  vLLM, local gateways, internal proxies:** use `provider: openai-compat` or
-  a built-in alias.
-- **Native Ollama `/api/chat`:** use `provider: ollama`.
-- **GitHub Copilot device login:** use `provider: github-copilot`.
+  vLLM, local gateways, internal proxies** — `provider: openai-compat`, or one
+  of its built-in aliases `openai`, `azure`, `vllm`, `github`, `anthropic`,
+  `claude`. Any backend that already speaks an OpenAI-compatible `/v1` API
+  belongs here rather than in a plugin.
+- **Native Ollama `/api/chat`** — `provider: ollama`.
+- **GitHub Copilot device login** — `provider: github-copilot`.
 
-A plugin is warranted only when you need a genuinely different protocol or auth
-scheme composition behind korvid's public `CredentialSource` boundary.
+A plugin is warranted only for a genuinely different protocol or auth scheme
+composed behind korvid's public `CredentialSource` boundary.
 
 ## Packaging and entry point
 
@@ -87,25 +80,9 @@ in the config file. Plugin auth methods are limited to `none`, `api_key`, and
 
 ## API 2: exact public surface
 
-Import only from korvid's public agent boundary:
-
-```python
-from korvid.agent.credentials import CredentialSource
-from korvid.agent.model_policy import (
-    CapabilitySource,
-    ModelCapabilities,
-    ModelDescriptor,
-    ModelTier,
-)
-from korvid.agent.provider import LLMProvider
-from korvid.agent.provider_plugin import (
-    PROVIDER_PLUGIN_API_VERSION,
-    ProviderPlugin,
-    ProviderPluginConfig,
-    ProviderPluginMetadata,
-)
-```
-
+Import only from korvid's public agent boundary — `korvid.agent.credentials`,
+`korvid.agent.model_policy`, `korvid.agent.provider`, and
+`korvid.agent.provider_plugin` (the adapter below shows the full import list).
 The published API 2 surface is:
 
 ```python
@@ -180,58 +157,40 @@ class ProviderPlugin(ABC):
 
 ### What changed in API 2 (breaking)
 
-`LLMProvider` no longer has a `name` property. A plugin must implement two
-properties instead, and both are validated the moment korvid wraps it:
+`LLMProvider` no longer has a `name` property. A plugin implements two
+properties instead, both validated the moment korvid wraps it:
 
 | API 1 | API 2 |
 | --- | --- |
 | `name -> str` (the model tag) | `descriptor -> ModelDescriptor` (provider id **and** model tag) |
 | *(nothing)* | `capabilities -> ModelCapabilities` |
 
-The reason is routing. korvid resolves a **model tier** per session — which
-tool surface is armed, how many iterations a turn gets, how much history is
-retained, which prompt pack is composed — and a bare model string cannot
-answer that. `capabilities` is how a plugin participates in that decision
-instead of being routed by the fallback.
+The reason is routing: korvid resolves a **model tier** per session — which
+tool surface is armed, how long a turn runs, which prompt pack is composed —
+and a bare model string cannot answer that. Reporting nothing is a valid, safe
+answer: return `ModelCapabilities.unknown()` and korvid falls back to the
+shipped catalog, then to the `low` tier. Report only what your backend knows —
+`supports_tools=False` is a **hard stop** (korvid refuses to start the agent
+rather than route a model that cannot call tools), `supports_parallel_tools`
+is honored only on the `high` tier, `recommended_tier` loses to an explicit
+`agent.model_tier`, and `provenance` must map a known fact name to a
+`CapabilitySource`.
 
-Reporting nothing is a valid, safe answer: return
-`ModelCapabilities.unknown()` and korvid falls back to the shipped catalog
-and then to the `low` tier. Report only what your backend actually knows:
+Rejection is immediate rather than at first use. `descriptor` must be a real
+`ModelDescriptor` whose `provider` equals your registered plugin name — a
+plugin cannot claim to be another provider — with a non-empty, short `model`;
+`capabilities` must be a real `ModelCapabilities`; `metadata.api_version` must
+equal `PROVIDER_PLUGIN_API_VERSION` (**exactly `2`**); `metadata.name` must
+match the normalized entry-point name; and `auth_methods` must be a tuple of
+unique strings from `{"none", "api_key", "entra"}`. `supports_generic_setup`
+is forward-compatibility metadata: current releases do not auto-discover
+third-party plugins in the `:ai` wizard.
 
-- `supports_tools=False` is a **hard stop** — korvid refuses to start the
-  agent rather than routing a model that cannot call tools.
-- `supports_parallel_tools` is honored only on the `high` tier; the `low`
-  tier is always sequential.
-- `recommended_tier` is a request, not a command: an explicit
-  `agent.model_tier` in `config.yaml` still wins.
-- `provenance` maps a fact name to a `CapabilitySource`; korvid rejects an
-  unknown fact name or a non-`CapabilitySource` value.
-
-Validation is strict, and rejection is immediate rather than at first use:
-
-- `descriptor` must be a real `ModelDescriptor`, its `provider` must equal
-  your registered plugin name (a plugin cannot claim to be another
-  provider), and its `model` must be non-empty and reasonably short.
-- `capabilities` must be a real `ModelCapabilities`.
-
-Notes:
-
-- `PROVIDER_PLUGIN_API_VERSION` is currently **exactly `2`**. A plugin whose
-  `metadata.api_version` differs is rejected at load.
-- `metadata.name` must match the normalized entry-point name.
-- `auth_methods` must be a tuple of unique strings from `{ "none", "api_key",
-  "entra" }`.
-- `supports_generic_setup` is part of API 2 metadata, but current korvid
-  releases do **not** auto-discover third-party plugins in the `:ai` wizard.
-  Treat it as forward-compatibility metadata for now.
-- `LLMProvider.complete()` must be an **async generator** (`async def` with
-  `yield`), not a plain coroutine that returns an iterator.
-- `LLMProvider` also defines `prepare_messages(messages)`, the built-in
-  adapters' hook for dialect conversion ahead of `OutboundPolicy`. korvid
-  does **not** call it on plugin providers — plugins only ever receive the
-  sanitized canonical payload — so overriding it in a plugin has no effect.
-  Adapt the payload inside `complete()` instead, and treat everything you
-  add there as leaving korvid's inspected boundary.
+Two shape traps: `complete()` must be an **async generator** (`async def` with
+`yield`), not a coroutine returning an iterator; and `prepare_messages()`, the
+built-in adapters' dialect hook, is **never** called on plugin providers, so
+overriding it has no effect. Adapt inside `complete()` instead, and treat
+everything you add there as leaving korvid's inspected boundary.
 
 ## Complete minimal adapter
 
@@ -279,15 +238,11 @@ class CompanyProvider(LLMProvider):
 
     @property
     def descriptor(self) -> ModelDescriptor:
-        # `provider` must equal the registered plugin name, or korvid
-        # rejects the provider rather than letting it claim another id.
         return ModelDescriptor("company-llm", self._model)
 
     @property
     def capabilities(self) -> ModelCapabilities:
-        # Report only what this backend actually knows. Everything omitted
-        # stays unknown and routing falls back to korvid's catalog, then to
-        # the `low` tier. `ModelCapabilities.unknown()` is a valid answer.
+        # Omitted facts stay unknown; `ModelCapabilities.unknown()` is valid.
         return ModelCapabilities(
             context_window_tokens=128_000,
             supports_tools=True,
@@ -400,37 +355,23 @@ shapes:
 
 Extra keys are discarded. Unknown event types, non-mapping payloads, missing
 fields, overlong strings, or out-of-range token counts raise
-`ProviderPluginContractError`.
-
-These four are the whole contract. korvid's built-in adapters yield one
-extra internal event to tell the runtime their HTTP request has actually
-reached the transport — the `:ai payload` inspector uses it so a request
-that was never sent is not shown as the session's last handoff. It is not
-part of API 2 and a plugin that yields it is rejected like any other
-unknown type. Your request is recorded when you yield your **first** event
-instead, which is equally proof that it ran; a `complete()` that yields
-nothing records nothing.
-
-`tool_call.arguments` is a **string** payload, typically JSON-encoded
-arguments, not a nested mapping.
-
-`ValidatedPluginProvider.aclose()` forwards to your provider once; duplicate
+`ProviderPluginContractError`. `tool_call.arguments` is a **string** payload,
+typically JSON-encoded arguments, not a nested mapping, and
+`ValidatedPluginProvider.aclose()` forwards to your provider once — duplicate
 closes are swallowed.
+
+These four are the whole contract. korvid's built-in adapters yield one extra
+internal event so the `:ai payload` inspector can tell a request that reached
+the transport from one that never did; it is not part of API 2, and a plugin
+that yields it is rejected like any other unknown type. Your request is
+recorded when you yield your **first** event instead — a `complete()` that
+yields nothing records nothing.
 
 ## Options contract, immutability, and secret policy
 
 `agent.options` is the only plugin-specific config bag. API 2 accepts only
-JSON-like values:
-
-- `null`
-- `bool`
-- `int`
-- finite `float`
-- `str`
-- `list`
-- nested `mapping` with string keys
-
-Exact parser limits:
+JSON-like values — `null`, `bool`, `int`, finite `float`, `str`, `list`, and
+nested mappings with string keys — within exact parser limits:
 
 - max depth: **4**
 - max mapping keys across the whole structure: **64**
@@ -441,31 +382,16 @@ Exact parser limits:
   normalization or secret detection)
 
 Secret-looking keys are rejected before the plugin sees them. The reserved key
-segments are exactly:
+segments are exactly `secret`, `password`, `token`, `api_key` (and the compact
+form `apikey`), `authorization`, and `credential`. CamelCase keys are split at
+word boundaries before matching, so `apiKey`, `clientSecret`, `accessToken`,
+`APIKey`, and `clientAPIKey` are all rejected. Store secrets in environment
+variables and pass only the variable name via `agent.api_key_env`.
 
-- `secret`
-- `password`
-- `token`
-- `api_key` (and compact form `apikey`)
-- `authorization`
-- `credential`
-
-CamelCase keys are split at word boundaries before matching, so `apiKey`,
-`clientSecret`, `accessToken`, `APIKey`, and `clientAPIKey` are all rejected.
-
-Store secrets in environment variables and pass only the variable name via
-`agent.api_key_env`.
-
-Immutability details matter:
-
-- `ProviderPluginConfig.options` is always a read-only top-level mapping.
-- Live wizard/reconnect flows build `AgentSettings`, which deep-freezes nested
-  mappings and converts every `list` to an immutable `tuple`.
-- Startup from `config.yaml` preserves YAML lists as lists before
-  `ProviderPluginConfig` wraps the top-level mapping.
-
-So plugin code should treat `options` as read-only and accept sequence values
-as either `list` or `tuple`.
+Treat `options` as read-only, and accept sequence values as either `list` or
+`tuple`: the top-level mapping is always read-only, live wizard/reconnect flows
+deep-freeze nested mappings and convert every `list` to a `tuple`, while
+startup from `config.yaml` preserves YAML lists as lists.
 
 ## Lifecycle and compatibility
 
@@ -486,20 +412,14 @@ Plugin lifecycle in current korvid builds:
    in `aclose()` (in a `finally` block) alongside any HTTP clients or other
    resources. Failure to close credentials leaks token-refresh HTTP sessions.
 
-Compatibility rules:
-
-- Built-ins are reserved and never hit the plugin registry:
-  `github-copilot`, `ollama`, `openai-compat`, `openai`, `azure`, `vllm`,
-  `github`, `anthropic`, `claude`.
-- Unknown providers without a registry still disable the agent cleanly instead
-  of crashing older code paths.
-- A plugin failure during initial startup becomes a warning and leaves the app
-  running with the agent disabled.
-- A plugin failure during a live rebuild rejects the new provider and keeps the
-  previous provider open.
-- Factory/load/metadata errors are translated into bounded
-  `ProviderPluginError` messages, capped to 200 characters to avoid traceback
-  and secret leakage.
+Failures stay bounded. The built-in names — `github-copilot`, `ollama`,
+`openai-compat`, `openai`, `azure`, `vllm`, `github`, `anthropic`, `claude` —
+are reserved and never hit the plugin registry, and an unknown provider
+disables the agent cleanly instead of crashing. A plugin failure at startup
+becomes a warning with the agent disabled; a failure during a live rebuild
+rejects the new provider and keeps the previous one open. Factory, load, and
+metadata errors become `ProviderPluginError` messages capped at 200 characters
+so tracebacks and secrets do not leak.
 
 ## Operator checklist
 

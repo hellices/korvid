@@ -173,6 +173,11 @@ class ToolOutcome:
     container: str | None = None
 
 
+def _bridge_outcome(text: str) -> ToolOutcome:
+    """Classify the `UIBridge` string verdict at its typed boundary."""
+    return ToolOutcome(text=text, error=text.startswith(ERROR_PREFIX))
+
+
 class RecordedExecution(ABC):
     """The tool-execution contract the agent loop depends on.
 
@@ -929,7 +934,20 @@ class ToolExecutor(RecordedExecution):
         )
         return await handler(arguments)
 
-    async def _dispatch_ui(self, tool: ToolDef, args: dict[str, Any]) -> str:
+    async def _dispatch_ui(self, tool: ToolDef, args: dict[str, Any]) -> ToolOutcome:
+        """Dispatch a `ui_only` tool, classifying the bridge's own verdict.
+
+        `UIBridge` methods never raise on failure; the class contract
+        (see `UIBridge`) has every one return an `ERROR: ...` string
+        instead, e.g. `agent_navigate` when an approval dialog is already
+        open. That string is the *established* boundary for this
+        interface — unlike a cluster manifest, which must never be
+        content-sniffed for `ERROR:` (`ToolOutcome.error` docstring), a
+        `UIBridge` reply carries no document a false match could
+        misclassify. Reporting it as plain text left every consumer of
+        `outcome.error` (provenance, redaction policy) unable to tell a
+        denied navigation from a successful one.
+        """
         if self._ui is None:
             raise ValueError("UI control unavailable in this session")
         adapter = _UI_ARG_ADAPTERS.get(tool.dispatch)
@@ -937,9 +955,10 @@ class ToolExecutor(RecordedExecution):
             raise ValueError(
                 f"tool {tool.name!r}: no argument adapter for UI dispatch {tool.dispatch!r}"
             )
-        return await adapter(self._ui, args)
+        text = await adapter(self._ui, args)
+        return _bridge_outcome(text)
 
-    async def _dispatch_write(self, tool: ToolDef, args: dict[str, Any]) -> str:
+    async def _dispatch_write(self, tool: ToolDef, args: dict[str, Any]) -> ToolOutcome:
         if self._ui is None:
             raise ValueError("write actions require the interactive TUI session")
         action = tool.write_action
@@ -968,16 +987,18 @@ class ToolExecutor(RecordedExecution):
         # The validated dispatch key names the approval-gated bridge
         # entrypoint; the registry rejects writes routed anywhere else.
         request_write: Callable[..., Awaitable[str]] = getattr(self._ui, tool.dispatch)
-        return await request_write(
-            action,
-            kind,
-            target,
-            namespace,
-            replicas,
-            resources,
+        return _bridge_outcome(
+            await request_write(
+                action,
+                kind,
+                target,
+                namespace,
+                replicas,
+                resources,
+            )
         )
 
-    async def _dispatch_proposal(self, tool: ToolDef, args: dict[str, Any]) -> str:
+    async def _dispatch_proposal(self, tool: ToolDef, args: dict[str, Any]) -> ToolOutcome:
         """Route a proposal tool (issue #110): submit/status/cancel only.
 
         Proposal tools never execute a write — the validated dispatch key
@@ -991,23 +1012,27 @@ class ToolExecutor(RecordedExecution):
         session_id = str(args.get("_session_id", ""))
         if tool.dispatch == "agent_submit_write_proposal":
             action, kind, target, namespace, replicas, resources = _validated_proposal_args(args)
-            return await self._ui.agent_submit_write_proposal(
-                action,
-                kind,
-                target,
-                namespace,
-                replicas,
-                resources,
-                session_id=session_id,
-                client_name=str(args.get("_client_name", "")),
-                client_version=str(args.get("_client_version", "")),
+            return _bridge_outcome(
+                await self._ui.agent_submit_write_proposal(
+                    action,
+                    kind,
+                    target,
+                    namespace,
+                    replicas,
+                    resources,
+                    session_id=session_id,
+                    client_name=str(args.get("_client_name", "")),
+                    client_version=str(args.get("_client_version", "")),
+                )
             )
         proposal_id = args.get("proposal_id")
         if not isinstance(proposal_id, str) or not proposal_id:
             raise ValueError(f"'proposal_id' must be a non-empty string, got {proposal_id!r}")
         if tool.dispatch == "agent_cancel_write_proposal":
-            return await self._ui.agent_cancel_write_proposal(proposal_id, session_id=session_id)
-        return await self._ui.agent_get_write_proposal(proposal_id)
+            return _bridge_outcome(
+                await self._ui.agent_cancel_write_proposal(proposal_id, session_id=session_id)
+            )
+        return _bridge_outcome(await self._ui.agent_get_write_proposal(proposal_id))
 
     def _api_meta(self, kind: str) -> ResourceMeta:
         """Alias lookup for tools that build API paths: synthetic view kinds

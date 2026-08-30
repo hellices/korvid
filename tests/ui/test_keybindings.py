@@ -4,9 +4,13 @@ help overlay shows the effective keys."""
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
+from textual.binding import Binding
+
 from korvid.core.config import KorvidConfig
+from korvid.core.keybindings import plan_keybindings
 from korvid.core.session_timeline import SessionTimeline
 from korvid.ui.app import KorvidApp
 from korvid.ui.widgets.help_screen import HelpScreen
@@ -118,12 +122,108 @@ async def test_timeline_binding_can_be_remapped() -> None:
         )
 
 
-def test_keybindings_doc_documents_every_remappable_action() -> None:
-    # docs/keybindings.md's action-name list must not drift from the real
-    # BINDINGS (the list moved out of README.md in the docs restructure).
+def test_keybindings_doc_directs_to_help_overlay_not_static_inventory() -> None:
+    # The approved design contract: docs/keybindings.md must direct users to
+    # the dynamic `?` help overlay for the complete effective set (including
+    # remaps), rather than embedding a static exhaustive action-name inventory.
+    # A hidden collapsible block ("??? note") is still a hidden inventory and
+    # must not exist.
     doc = Path(__file__).parents[2].joinpath("docs", "keybindings.md").read_text()
-    for action in KorvidApp._binding_actions():
-        assert f"`{action}`" in doc, f"docs/keybindings.md missing keybinding action {action!r}"
+
+    # The doc must actively point users to the in-app overlay.
+    assert "Press `?` for the complete effective set" in doc, (
+        "docs/keybindings.md must direct users to the `?` help overlay"
+    )
+
+    # Discovery contract: action names come from the app; an unrecognised name
+    # is skipped at startup with a warning that lists every valid action name.
+    assert "Action names come from the app itself" in doc, (
+        "docs/keybindings.md must explain that action names come from the app"
+    )
+    assert "skipped at startup with a warning that lists every valid action name" in doc, (
+        "docs/keybindings.md must explain that an unrecognised name is skipped with a warning"
+    )
+
+    # The hidden inventory block must be absent — not hidden behind a
+    # collapsible block, not present in any form.
+    assert '??? note "Every remappable action name"' not in doc, (
+        "docs/keybindings.md must not contain a hidden inventory of action names"
+    )
+    assert "Every remappable action name" not in doc, (
+        "docs/keybindings.md must not contain an action-name inventory title"
+    )
+
+
+def _app_bindings() -> list[Binding]:
+    """`KorvidApp.BINDINGS`, normalised to `Binding` objects."""
+    return [raw if isinstance(raw, Binding) else Binding(*raw) for raw in KorvidApp.BINDINGS]
+
+
+def _default_keys(action: str) -> tuple[str, ...]:
+    """Every key the shipped app binds to `action`, spelled as it binds it."""
+    return tuple(binding.key for binding in _app_bindings() if binding.action == action)
+
+
+def test_documented_remap_example_survives_the_real_keybinding_planner() -> None:
+    """The `keybindings:` snippet in docs/keybindings.md must be a remap the
+    shipped app actually accepts. `ctrl+x` (interrupt_agent) and `g`
+    (relationships) are defaults of other actions, so an example using them
+    is silently dropped with a startup warning."""
+    doc = Path(__file__).parents[2].joinpath("docs", "keybindings.md").read_text()
+    block = doc.split("```yaml", 1)[1].split("```", 1)[0]
+    documented = dict(re.findall(r"^\s{2}([a-z_]+):\s*(\S+)", block, flags=re.MULTILINE))
+    assert documented, "docs/keybindings.md must keep a worked remap example"
+
+    bindings = _app_bindings()
+    plan = plan_keybindings(
+        dict(documented),
+        KorvidApp._binding_actions(),
+        {binding.action for binding in bindings if binding.priority},
+        reserved_keys={binding.key: binding.action for binding in bindings if binding.id is None},
+    )
+    assert plan.warnings == ()
+    assert plan.overrides == documented
+
+
+async def test_documented_remap_example_rebinds_the_running_app() -> None:
+    """End-to-end proof for the same snippet: the freed defaults go inert
+    and the documented keys drive the documented actions.
+
+    Round-13 review (comment 3862106877): the freed default used to be the
+    literal `"A"`. If `sort_by_age`'s product default moved, `"A"` would
+    become a key bound to nothing, `assert not _sorted_by_age()` would hold
+    for the wrong reason and the "the default really is inert" half of this
+    contract would quietly stop testing anything. Both halves are derived
+    from the shipped `BINDINGS` now.
+    """
+    doc = Path(__file__).parents[2].joinpath("docs", "keybindings.md").read_text()
+    block = doc.split("```yaml", 1)[1].split("```", 1)[0]
+    documented = dict(re.findall(r"^\s{2}([a-z_]+):\s*(\S+)", block, flags=re.MULTILINE))
+    defaults = _default_keys("sort_by_age")
+    assert defaults, "sort_by_age must still ship a default binding for the remap to free"
+    assert documented["sort_by_age"] not in defaults, (
+        f"the documented remap {documented['sort_by_age']!r} is one of sort_by_age's own "
+        f"defaults {defaults}; freeing it would prove nothing"
+    )
+    pods = [_pod("bb"), _pod("aa")]
+    app = make_app(pods, config=_config(documented))
+    async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 2, label="pods loaded")
+        assert app._keybinding_overrides == documented
+        assert not any("keybindings:" in n.message for n in app._notifications)
+
+        def _sorted_by_age() -> bool:
+            return any(
+                "AGE" in str(c.label) and "▼" in str(c.label) for c in table.columns.values()
+            )
+
+        for freed in defaults:
+            await pilot.press(freed)  # every freed default must be inert now
+            await pilot.pause()
+            assert not _sorted_by_age(), f"the freed default {freed!r} still sorted by age"
+        await pilot.press(documented["sort_by_age"])
+        await until(pilot, _sorted_by_age, label="documented key sorts by age")
 
 
 def test_favorite_namespace_keys_are_not_remappable() -> None:
