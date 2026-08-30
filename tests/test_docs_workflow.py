@@ -31,9 +31,9 @@ PATH_FILTERS = {
 PINNED_ACTIONS = {
     "actions/checkout": "3d3c42e5aac5ba805825da76410c181273ba90b1",
     "astral-sh/setup-uv": "20cfd1bf945f4377ade1205e4dbc17946fc9a30d",
-    "actions/configure-pages": "983d7736d9b0ae728b81ab479565c72886d7745b",
-    "actions/upload-pages-artifact": "7b1f4a764d45c48632c6b24a0339c27f5614fb0b",
-    "actions/deploy-pages": "d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e",
+    "actions/configure-pages": "45bfe0192ca1faeb007ade9deae92b16b8254a0d",
+    "actions/upload-pages-artifact": "fc324d3547104276b827a68afc52ff2a11cc49c9",
+    "actions/deploy-pages": "cd2ce8fcbc39b97be8ca5fce6e763baed58fa128",
 }
 
 
