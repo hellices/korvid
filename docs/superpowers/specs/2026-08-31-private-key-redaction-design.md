@@ -6,18 +6,31 @@
 
 ## Goal
 
-Prevent private-key material in Kubernetes resources and free-form cluster text
-from leaving Korvid through an LLM provider or MCP client. Extend the existing
-shared redaction primitive without adding unrelated credential heuristics.
+Prevent private-key material in Kubernetes resources and provider-bound
+free-form cluster text from leaving Korvid. Extend the existing shared
+redaction primitive without adding unrelated credential heuristics. MCP
+resource reads benefit immediately through `ToolExecutor`; producer-side
+redaction of MCP log/event text remains issue #330.
 
 ## Priority and sequencing
 
 Issue #331 is the first implementation in the local-first MCP safety baseline.
 It closes a direct secret-exfiltration path and strengthens the primitive that
-issue #330 will reuse for log and event output. After #331 and #330, continue
-with #333, #334, #332, #344, #336, and then land #329 with #346. Issues
-labeled `status: backlog` are excluded from this active queue. Issue #335 stays
-conditional on shipping Helm mutations, and #342 remains lower priority.
+issue #330 will reuse for log and event output. The active sequence is:
+
+1. #331 shared redaction foundation
+2. #330 MCP log/event producer redaction
+3. #332, #333, and #334 mandatory local write safety
+4. #335 only if Helm mutations ship
+5. #336 provider stream safety
+6. #344 Kubernetes error boundary
+7. #329 and #346 deployed together as the stdio-default transition
+8. #342 as an optional small crash fix
+
+Issues labeled `status: backlog` are excluded from this active queue. Shipping
+#329 alone would force existing direct HTTP clients to manage the internal
+capability. Shipping it with #346 keeps that credential internal: users
+configure stdio and never see the token.
 
 ## Approaches considered
 
@@ -94,7 +107,13 @@ allowing surrounding credential assignments to retain their existing behavior.
 6. The caller receives redacted data and the existing deterministic
    `RedactionRecord` inventory.
 
-No consumer-specific wiring or new dependency is required.
+`ToolExecutor.get_resource` already applies structural redaction before
+bounding and carries records in `ToolOutcome`. The MCP server returns that
+producer output directly, while `agent.outbound` re-applies structural or text
+redaction as a final provider defense. No consumer-specific wiring or new
+dependency is required for #331. `ToolExecutor.get_logs` and `get_events`
+currently assemble raw text, so MCP protection for those producers is
+explicitly deferred to #330.
 
 ## Error handling
 
@@ -116,6 +135,10 @@ Use TDD in `tests/core/test_redaction.py`.
 - Prove certificates, public-key blocks, incomplete blocks, and mismatched
   headers/footers remain unchanged.
 - Assert deterministic record paths and reasons.
+- Prove `ToolExecutor.get_resource` applies the shared primitive before output
+  reaches its size bound.
+- Prove the provider outbound text boundary masks private-key PEM material.
+- Prove an MCP resource read returns the already-redacted executor result.
 
 Run the targeted redaction tests and Ruff while iterating. Before completion,
 run the relevant full quality gate required by the repository workflow.

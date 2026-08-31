@@ -15,6 +15,9 @@
 - Mask complete `PRIVATE KEY`, `ENCRYPTED PRIVATE KEY`, `RSA PRIVATE KEY`, and `EC PRIVATE KEY` PEM blocks.
 - Preserve certificates, public-key blocks, incomplete blocks, and mismatched header/footer pairs.
 - Record deterministic evidence with existing `RedactionRecord` values.
+- Preserve the existing boundary split: #331 protects structured MCP resource
+  reads and provider-bound text; #330 will add producer-side MCP log/event
+  redaction.
 - Do not add generic entropy detection or unrelated credential heuristics.
 - Keep `core/` free of Textual imports and third-party dependencies.
 
@@ -25,6 +28,8 @@
 **Files:**
 - Modify: `src/korvid/core/redaction.py:34-50`
 - Modify: `tests/core/test_redaction.py`
+- Modify: `tests/tools/test_executor_security.py`
+- Modify: `tests/mcp/test_server.py`
 
 **Interfaces:**
 - Consumes: `denotes_secret(value: str) -> bool`, `_mask_reason(key: str, item: Any, *, secret_sibling: bool) -> str | None`
@@ -76,14 +81,82 @@ def test_private_key_fields_are_masked_with_deterministic_evidence() -> None:
     ]
 ```
 
+Add `RedactionRecord` to the redaction import in
+`tests/tools/test_executor_security.py`, then add:
+
+```python
+async def test_get_resource_masks_private_key_fields_before_bounding() -> None:
+    kube = FakeKube()
+    kube.manifest = {
+        "kind": "ConfigMap",
+        "metadata": {"name": "client-config"},
+        "data": {
+            "privateKey": "private-key-sentinel",
+            "publicKeyId": "public-key-id",
+        },
+    }
+
+    outcome = await make_executor(kube).execute_recorded(
+        "get_resource",
+        {"kind": "pods", "name": "client-config", "namespace": "default"},
+    )
+    loaded = yaml.safe_load(outcome.text)
+
+    assert loaded["data"] == {
+        "privateKey": MASK_PLACEHOLDER,
+        "publicKeyId": "public-key-id",
+    }
+    assert outcome.redactions == (
+        RedactionRecord(path="manifest.data.privateKey", reason="sensitive-key"),
+    )
+```
+
+Add this MCP path regression near
+`test_mcp_results_are_redacted_like_the_agent_path`:
+
+```python
+async def test_mcp_resource_results_mask_private_key_fields() -> None:
+    class ManifestKube:
+        async def get_object(
+            self,
+            meta: Any,
+            namespace: str | None,
+            name: str,
+        ) -> dict[str, Any]:
+            return {
+                "kind": "ConfigMap",
+                "metadata": {"name": name},
+                "data": {
+                    "client-key-data": "mcp-private-key-sentinel",
+                    "publicKeyId": "public-key-id",
+                },
+            }
+
+    executor = ToolExecutor(ManifestKube(), {"pods": PODS_META})  # type: ignore[arg-type]  # read-only test double
+    server = make_server(executor)
+
+    content = await server.call_tool(
+        "get_resource",
+        {"kind": "pods", "name": "client-config", "namespace": "default"},
+    )
+
+    loaded = yaml.safe_load(content[0].text)
+    assert loaded["data"] == {
+        "client-key-data": MASK_PLACEHOLDER,
+        "publicKeyId": "public-key-id",
+    }
+    assert "mcp-private-key-sentinel" not in content[0].text
+```
+
 - [ ] **Step 2: Run the new tests and verify RED**
 
 Run:
 
 ```bash
 PYTHONPATH=src /Users/hwang-inhwan/workspace/kube/.venv/bin/python -m pytest \
-  -p no:tach tests/core/test_redaction.py \
-  -k 'private_key_names or public_and_generic_key_names or private_key_fields' -q
+  -p no:tach tests/core/test_redaction.py tests/tools/test_executor_security.py \
+  tests/mcp/test_server.py \
+  -k 'private_key_names or public_and_generic_key_names or private_key_fields or private_key_fields_before_bounding or mcp_resource_results_mask_private_key_fields' -q
 ```
 
 Expected: the positive private-key cases fail because `denotes_secret` returns `False`; negative cases pass.
@@ -105,12 +178,15 @@ Run:
 
 ```bash
 PYTHONPATH=src /Users/hwang-inhwan/workspace/kube/.venv/bin/python -m pytest \
-  -p no:tach tests/core/test_redaction.py \
-  -k 'private_key_names or public_and_generic_key_names or private_key_fields' -q
+  -p no:tach tests/core/test_redaction.py tests/tools/test_executor_security.py \
+  tests/mcp/test_server.py \
+  -k 'private_key_names or public_and_generic_key_names or private_key_fields or private_key_fields_before_bounding or mcp_resource_results_mask_private_key_fields' -q
 /Users/hwang-inhwan/workspace/kube/.venv/bin/ruff check \
-  src/korvid/core/redaction.py tests/core/test_redaction.py
+  src/korvid/core/redaction.py tests/core/test_redaction.py \
+  tests/tools/test_executor_security.py tests/mcp/test_server.py
 /Users/hwang-inhwan/workspace/kube/.venv/bin/ruff format --check \
-  src/korvid/core/redaction.py tests/core/test_redaction.py
+  src/korvid/core/redaction.py tests/core/test_redaction.py \
+  tests/tools/test_executor_security.py tests/mcp/test_server.py
 ```
 
 Expected: all selected tests pass; Ruff reports no errors and no formatting changes.
@@ -118,7 +194,8 @@ Expected: all selected tests pass; Ruff reports no errors and no formatting chan
 - [ ] **Step 5: Commit the structural redaction**
 
 ```bash
-git add src/korvid/core/redaction.py tests/core/test_redaction.py
+git add src/korvid/core/redaction.py tests/core/test_redaction.py \
+  tests/tools/test_executor_security.py tests/mcp/test_server.py
 git commit -m "fix: redact private-key fields" \
   -m "Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>"
 ```
@@ -129,6 +206,7 @@ git commit -m "fix: redact private-key fields" \
 - Modify: `src/korvid/core/redaction.py:55-99`
 - Modify: `src/korvid/core/redaction.py:237-273`
 - Modify: `tests/core/test_redaction.py`
+- Modify: `tests/agent/test_outbound.py`
 
 **Interfaces:**
 - Consumes: `redact_text(text: str, path: str, records: list[RedactionRecord]) -> str`, `record(records: list[RedactionRecord], path: str, reason: str) -> None`
@@ -194,14 +272,36 @@ def test_non_private_or_incomplete_pem_text_is_preserved(text: str) -> None:
     assert records == []
 ```
 
+Add this provider-boundary regression near the existing untrusted log/event
+tests in `tests/agent/test_outbound.py`:
+
+```python
+def test_provider_text_boundary_masks_private_key_pem() -> None:
+    records: list[RedactionRecord] = []
+    text = (
+        "startup failed\n"
+        "-----BEGIN PRIVATE KEY-----\n"
+        "provider-private-key-sentinel\n"
+        "-----END PRIVATE KEY-----"
+    )
+
+    sanitized = sanitize_tool_result("get_logs", text, records=records)
+
+    assert "provider-private-key-sentinel" not in sanitized
+    assert MASK_PLACEHOLDER in sanitized
+    assert records == [
+        RedactionRecord(path="tool_result", reason="private-key-block"),
+    ]
+```
+
 - [ ] **Step 2: Run the PEM tests and verify RED**
 
 Run:
 
 ```bash
 PYTHONPATH=src /Users/hwang-inhwan/workspace/kube/.venv/bin/python -m pytest \
-  -p no:tach tests/core/test_redaction.py \
-  -k 'pem_blocks or multiple_private_key_pem or non_private_or_incomplete_pem' -q
+  -p no:tach tests/core/test_redaction.py tests/agent/test_outbound.py \
+  -k 'pem_blocks or multiple_private_key_pem or non_private_or_incomplete_pem or provider_text_boundary_masks_private_key_pem' -q
 ```
 
 Expected: complete-block and multiple-block tests fail because the private-key payload remains visible; preservation tests pass.
@@ -250,7 +350,8 @@ Run:
 
 ```bash
 PYTHONPATH=src /Users/hwang-inhwan/workspace/kube/.venv/bin/python -m pytest \
-  -p no:tach tests/core/test_redaction.py -q
+  -p no:tach tests/core/test_redaction.py tests/tools/test_executor_security.py \
+  tests/agent/test_outbound.py tests/mcp/test_server.py -q
 ```
 
 Expected: every test in `tests/core/test_redaction.py` passes.
@@ -261,9 +362,13 @@ Run:
 
 ```bash
 /Users/hwang-inhwan/workspace/kube/.venv/bin/ruff check \
-  src/korvid/core/redaction.py tests/core/test_redaction.py
+  src/korvid/core/redaction.py tests/core/test_redaction.py \
+  tests/tools/test_executor_security.py tests/agent/test_outbound.py \
+  tests/mcp/test_server.py
 /Users/hwang-inhwan/workspace/kube/.venv/bin/ruff format --check \
-  src/korvid/core/redaction.py tests/core/test_redaction.py
+  src/korvid/core/redaction.py tests/core/test_redaction.py \
+  tests/tools/test_executor_security.py tests/agent/test_outbound.py \
+  tests/mcp/test_server.py
 MYPYPATH=src /Users/hwang-inhwan/workspace/kube/.venv/bin/mypy \
   src/korvid/core/redaction.py
 ```
@@ -273,7 +378,9 @@ Expected: Ruff and mypy report success.
 - [ ] **Step 6: Commit PEM redaction**
 
 ```bash
-git add src/korvid/core/redaction.py tests/core/test_redaction.py
+git add src/korvid/core/redaction.py tests/core/test_redaction.py \
+  tests/tools/test_executor_security.py tests/agent/test_outbound.py \
+  tests/mcp/test_server.py
 git commit -m "fix: redact private-key PEM blocks" \
   -m "Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>"
 ```
