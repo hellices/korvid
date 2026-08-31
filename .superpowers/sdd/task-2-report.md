@@ -56,3 +56,33 @@ Result: `10 passed, 238 deselected`
 
 ## Concerns
 - None.
+
+## Fix — PEM delimiter boundary regression
+
+### RED evidence
+- Command:
+  ```bash
+  cd /Users/hwang-inhwan/workspace/kube/.worktrees/fix-331-private-key-redaction && PYTHONPATH=src /Users/hwang-inhwan/workspace/kube/.venv/bin/python -m pytest -p no:tach tests/core/test_redaction.py -k 'incomplete_first_private_key_block_does_not_cross_later_delimiters' -q
+  ```
+- Result: `1 failed, 113 deselected`
+- Failure: the redactor collapsed the malformed first PEM block and the later valid block into one mask.
+
+### GREEN evidence
+- Command:
+  ```bash
+  cd /Users/hwang-inhwan/workspace/kube/.worktrees/fix-331-private-key-redaction && PYTHONPATH=src /Users/hwang-inhwan/workspace/kube/.venv/bin/python -m pytest -p no:tach tests/core/test_redaction.py tests/agent/test_outbound.py -q
+  ```
+- Result: `249 passed in 0.44s`
+
+### Static checks
+- Command:
+  ```bash
+  cd /Users/hwang-inhwan/workspace/kube/.worktrees/fix-331-private-key-redaction && /Users/hwang-inhwan/workspace/kube/.venv/bin/ruff check src/korvid/core/redaction.py tests/core/test_redaction.py tests/agent/test_outbound.py && /Users/hwang-inhwan/workspace/kube/.venv/bin/ruff format --check src/korvid/core/redaction.py tests/core/test_redaction.py tests/agent/test_outbound.py && MYPYPATH=src /Users/hwang-inhwan/workspace/kube/.venv/bin/mypy src/korvid/core/redaction.py
+  ```
+- Result: `All checks passed!`, `3 files already formatted`, `Success: no issues found in 1 source file`
+
+### Commit SHA
+- `37cb7f80`
+
+### Concerns
+- None.
