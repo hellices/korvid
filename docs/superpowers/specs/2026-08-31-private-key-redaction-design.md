@@ -15,7 +15,9 @@ shared redaction primitive without adding unrelated credential heuristics.
 Issue #331 is the first implementation in the local-first MCP safety baseline.
 It closes a direct secret-exfiltration path and strengthens the primitive that
 issue #330 will reuse for log and event output. After #331 and #330, continue
-with #333, #334, #344, #336, and then land #329 with #346.
+with #333, #334, #332, #344, #336, and then land #329 with #346. Issues
+labeled `status: backlog` are excluded from this active queue. Issue #335 stays
+conditional on shipping Helm mutations, and #342 remains lower priority.
 
 ## Approaches considered
 
