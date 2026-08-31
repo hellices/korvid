@@ -98,6 +98,12 @@ _CREDENTIAL_RE = re.compile(
     + r")(?P=credential_key_quote)\s*[:=]\s*)"
     rf"(?P<value>{_DOUBLE_QUOTED_VALUE}|{_SINGLE_QUOTED_VALUE}|[^\s,;}}\]]+)"
 )
+_PRIVATE_KEY_PEM_RE = re.compile(
+    r"-----BEGIN (?P<label>(?:(?:ENCRYPTED|RSA|EC) )?PRIVATE KEY)-----"
+    r".*?"
+    r"-----END (?P=label)-----",
+    re.DOTALL,
+)
 
 
 class RedactionError(ValueError):
@@ -252,9 +258,23 @@ def _replace_match(
     return f"{match.group('prefix')}{replacement}"
 
 
+def _replace_private_key_block(
+    match: re.Match[str],
+    *,
+    path: str,
+    records: list[RedactionRecord],
+) -> str:
+    record(records, path, "private-key-block")
+    return MASK_PLACEHOLDER
+
+
 def redact_text(text: str, path: str, records: list[RedactionRecord]) -> str:
     """Redact credential assignments embedded in free-form text."""
     text = strip_control_characters(text, path, records)
+    text = _PRIVATE_KEY_PEM_RE.sub(
+        lambda match: _replace_private_key_block(match, path=path, records=records),
+        text,
+    )
     text = _AUTHORIZATION_RE.sub(
         lambda match: _replace_match(
             match,

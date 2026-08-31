@@ -173,6 +173,24 @@ def test_untrusted_event_and_log_text_redacts_credentials_but_keeps_evidence() -
     assert sanitized.count(MASK_PLACEHOLDER) == 3
 
 
+def test_provider_text_boundary_masks_private_key_pem() -> None:
+    records: list[RedactionRecord] = []
+    text = (
+        "startup failed\n"
+        "-----BEGIN PRIVATE KEY-----\n"
+        "provider-private-key-sentinel\n"
+        "-----END PRIVATE KEY-----"
+    )
+
+    sanitized = sanitize_tool_result("get_logs", text, records=records)
+
+    assert "provider-private-key-sentinel" not in sanitized
+    assert MASK_PLACEHOLDER in sanitized
+    assert records == [
+        RedactionRecord(path="tool_result", reason="private-key-block"),
+    ]
+
+
 def test_untrusted_json_text_redacts_credentials_and_keeps_diagnostics() -> None:
     text = json.dumps(
         {

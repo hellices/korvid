@@ -126,6 +126,61 @@ def test_free_text_credential_assignments_are_masked() -> None:
     assert records[0].reason == "credential-assignment"
 
 
+@pytest.mark.parametrize(
+    "label",
+    ["PRIVATE KEY", "ENCRYPTED PRIVATE KEY", "RSA PRIVATE KEY", "EC PRIVATE KEY"],
+)
+def test_complete_private_key_pem_blocks_are_masked(label: str) -> None:
+    records: list[RedactionRecord] = []
+    text = (
+        f"before\n-----BEGIN {label}-----\n"
+        "private-key-payload-sentinel\n"
+        f"-----END {label}-----\nafter"
+    )
+
+    redacted = redact_text(text, "event.message", records)
+
+    assert redacted == f"before\n{MASK_PLACEHOLDER}\nafter"
+    assert records == [
+        RedactionRecord(path="event.message", reason="private-key-block"),
+    ]
+
+
+def test_multiple_private_key_pem_blocks_each_record_evidence() -> None:
+    records: list[RedactionRecord] = []
+    text = (
+        "-----BEGIN PRIVATE KEY-----\nfirst-sentinel\n-----END PRIVATE KEY-----\n"
+        "between\n"
+        "-----BEGIN EC PRIVATE KEY-----\nsecond-sentinel\n-----END EC PRIVATE KEY-----"
+    )
+
+    redacted = redact_text(text, "log", records)
+
+    assert "first-sentinel" not in redacted
+    assert "second-sentinel" not in redacted
+    assert redacted.count(MASK_PLACEHOLDER) == 2
+    assert records == [
+        RedactionRecord(path="log", reason="private-key-block"),
+        RedactionRecord(path="log", reason="private-key-block"),
+    ]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "-----BEGIN CERTIFICATE-----\ncertificate\n-----END CERTIFICATE-----",
+        "-----BEGIN PUBLIC KEY-----\npublic\n-----END PUBLIC KEY-----",
+        "-----BEGIN PRIVATE KEY-----\nincomplete",
+        "-----BEGIN RSA PRIVATE KEY-----\nmismatch\n-----END PRIVATE KEY-----",
+    ],
+)
+def test_non_private_or_incomplete_pem_text_is_preserved(text: str) -> None:
+    records: list[RedactionRecord] = []
+
+    assert redact_text(text, "text", records) == text
+    assert records == []
+
+
 def test_unredactable_shapes_fail_closed() -> None:
     with pytest.raises(RedactionError, match="mapping keys must be strings"):
         redact_value({1: "x"}, "doc", [])
