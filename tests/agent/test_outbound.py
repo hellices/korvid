@@ -177,9 +177,9 @@ def test_provider_text_boundary_masks_private_key_pem() -> None:
     records: list[RedactionRecord] = []
     text = (
         "startup failed\n"
-        "-----BEGIN PRIVATE KEY-----\n"
+        "-----BEGIN OPENSSH PRIVATE KEY-----\n"
         "provider-private-key-sentinel\n"
-        "-----END PRIVATE KEY-----"
+        "-----END OPENSSH PRIVATE KEY-----"
     )
 
     sanitized = sanitize_tool_result("get_logs", text, records=records)

@@ -12,7 +12,7 @@
 
 - Recognize `privateKey`, `private_key`, `client-private-key`, and `client-key-data`.
 - Preserve harmless `publicKey`, `publicKeyId`, `secretKeyRef`, and generic `key` fields.
-- Mask complete `PRIVATE KEY`, `ENCRYPTED PRIVATE KEY`, `RSA PRIVATE KEY`, and `EC PRIVATE KEY` PEM blocks.
+- Mask complete `PRIVATE KEY`, `ENCRYPTED PRIVATE KEY`, `RSA PRIVATE KEY`, `EC PRIVATE KEY`, and `OPENSSH PRIVATE KEY` PEM blocks.
 - Preserve certificates, public-key blocks, incomplete blocks, and mismatched header/footer pairs.
 - Record deterministic evidence with existing `RedactionRecord` values.
 - Preserve the existing boundary split: #331 protects structured MCP resource
@@ -219,7 +219,13 @@ Append these tests near the existing free-text tests:
 ```python
 @pytest.mark.parametrize(
     "label",
-    ["PRIVATE KEY", "ENCRYPTED PRIVATE KEY", "RSA PRIVATE KEY", "EC PRIVATE KEY"],
+    [
+        "PRIVATE KEY",
+        "ENCRYPTED PRIVATE KEY",
+        "RSA PRIVATE KEY",
+        "EC PRIVATE KEY",
+        "OPENSSH PRIVATE KEY",
+    ],
 )
 def test_complete_private_key_pem_blocks_are_masked(label: str) -> None:
     records: list[RedactionRecord] = []
@@ -280,9 +286,9 @@ def test_provider_text_boundary_masks_private_key_pem() -> None:
     records: list[RedactionRecord] = []
     text = (
         "startup failed\n"
-        "-----BEGIN PRIVATE KEY-----\n"
+        "-----BEGIN OPENSSH PRIVATE KEY-----\n"
         "provider-private-key-sentinel\n"
-        "-----END PRIVATE KEY-----"
+        "-----END OPENSSH PRIVATE KEY-----"
     )
 
     sanitized = sanitize_tool_result("get_logs", text, records=records)
@@ -312,7 +318,7 @@ Add this compiled pattern beside the existing text-redaction patterns:
 
 ```python
 _PRIVATE_KEY_PEM_RE = re.compile(
-    r"-----BEGIN (?P<label>(?:(?:ENCRYPTED|RSA|EC) )?PRIVATE KEY)-----"
+    r"-----BEGIN (?P<label>(?:(?:ENCRYPTED|RSA|EC|OPENSSH) )?PRIVATE KEY)-----"
     r".*?"
     r"-----END (?P=label)-----",
     re.DOTALL,

@@ -82,6 +82,8 @@ recognized labels:
 - `ENCRYPTED PRIVATE KEY` (encrypted PKCS#8)
 - `RSA PRIVATE KEY` (PKCS#1)
 - `EC PRIVATE KEY`
+- `OPENSSH PRIVATE KEY` (the default `ssh-keygen` private-key format and a
+  concrete Kubernetes `kubernetes.io/ssh-auth` secret payload)
 
 The pattern begins at a matching `BEGIN` line and ends only at the matching
 `END` label. It replaces the complete block with the existing mask placeholder
@@ -129,7 +131,7 @@ Use TDD in `tests/core/test_redaction.py`.
 - Prove normalized structural variants are masked, including nested and
   structured values.
 - Prove `publicKey`, `publicKeyId`, and `secretKeyRef` remain readable.
-- Prove complete plain/encrypted PKCS#8, PKCS#1 RSA, and EC private-key blocks
+- Prove complete plain/encrypted PKCS#8, PKCS#1 RSA, EC, and OpenSSH private-key blocks
   are masked.
 - Prove surrounding text and multiple private-key blocks are handled.
 - Prove certificates, public-key blocks, incomplete blocks, and mismatched

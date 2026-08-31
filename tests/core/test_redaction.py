@@ -128,7 +128,13 @@ def test_free_text_credential_assignments_are_masked() -> None:
 
 @pytest.mark.parametrize(
     "label",
-    ["PRIVATE KEY", "ENCRYPTED PRIVATE KEY", "RSA PRIVATE KEY", "EC PRIVATE KEY"],
+    [
+        "PRIVATE KEY",
+        "ENCRYPTED PRIVATE KEY",
+        "RSA PRIVATE KEY",
+        "EC PRIVATE KEY",
+        "OPENSSH PRIVATE KEY",
+    ],
 )
 def test_complete_private_key_pem_blocks_are_masked(label: str) -> None:
     records: list[RedactionRecord] = []
@@ -160,6 +166,10 @@ def test_complete_private_key_pem_blocks_are_masked(label: str) -> None:
         (
             "-----BEGIN RSA PRIVA\x07TE KEY-----",
             "-----END RSA PRIVATE K\x01EY-----",
+        ),
+        (
+            "-----BEGIN OPENSSH PRIVA\x07TE KEY-----",
+            "-----END OPENSSH PRIVATE K\x01EY-----",
         ),
     ],
 )
