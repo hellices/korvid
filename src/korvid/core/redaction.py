@@ -41,6 +41,8 @@ _SENSITIVE_NAMES = frozenset(
         "accesstoken",
         "refreshtoken",
         "credentials",
+        "privatekey",
+        "clientkeydata",
         # Neither half is a credential name alone: `secret` also spells
         # `secretKeyRef` and `SECRET_NAME` (pointers the model needs to
         # read), and `accesskey` also spells `AWS_ACCESS_KEY_ID` (an

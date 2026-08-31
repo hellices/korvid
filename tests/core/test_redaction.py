@@ -154,9 +154,50 @@ def test_credential_names_are_recognized(name: str) -> None:
     assert denotes_secret(name)
 
 
+@pytest.mark.parametrize(
+    "name",
+    [
+        "privateKey",
+        "private_key",
+        "client-private-key",
+        "client-key-data",
+        "clientKeyData",
+    ],
+)
+def test_private_key_names_are_credentials(name: str) -> None:
+    assert denotes_secret(name)
+
+
 @pytest.mark.parametrize("name", ["TOKENIZER_PATH", "LOG_LEVEL", "passwordless_mode_note"])
 def test_unrelated_names_are_not_credentials(name: str) -> None:
     assert not denotes_secret(name)
+
+
+@pytest.mark.parametrize("name", ["publicKey", "publicKeyId", "secretKeyRef", "key", "keyData"])
+def test_public_and_generic_key_names_are_not_credentials(name: str) -> None:
+    assert not denotes_secret(name)
+
+
+def test_private_key_fields_are_masked_with_deterministic_evidence() -> None:
+    document = {
+        "spec": {
+            "privateKey": {"raw": "private-key-sentinel"},
+            "client-key-data": "client-key-sentinel",
+            "publicKeyId": "public-key-id",
+        }
+    }
+
+    redacted, records = redact_document(document, path="doc")
+
+    assert redacted["spec"] == {
+        "privateKey": MASK_PLACEHOLDER,
+        "client-key-data": MASK_PLACEHOLDER,
+        "publicKeyId": "public-key-id",
+    }
+    assert records == [
+        RedactionRecord(path="doc.spec.privateKey", reason="sensitive-key"),
+        RedactionRecord(path='doc.spec["client-key-data"]', reason="sensitive-key"),
+    ]
 
 
 @pytest.mark.parametrize(
