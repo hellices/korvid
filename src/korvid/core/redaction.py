@@ -77,6 +77,21 @@ def _any_keyword(*words: str) -> str:
     return "|".join(_SEPARATOR.join(_keyword(part) for part in word.split()) for word in words)
 
 
+_PRIVATE_KEY_PEM_LABELS = (
+    "PRIVATE KEY",
+    "ENCRYPTED PRIVATE KEY",
+    "RSA PRIVATE KEY",
+    "EC PRIVATE KEY",
+)
+
+
+def _private_key_pem_block(label: str) -> str:
+    header = _keyword(f"-----BEGIN {label}-----")
+    footer = _keyword(f"-----END {label}-----")
+    boundary = rf"(?:{_keyword('-----BEGIN ')}|{_keyword('-----END ')})"
+    return rf"{header}(?:(?!{boundary}).)*?{footer}"
+
+
 _AUTHORIZATION_RE = re.compile(
     r"(?im)(?P<prefix>(?<![A-Za-z0-9])"
     rf"(?P<auth_key_quote>[\"']?)(?:{_keyword('authorization')})(?P=auth_key_quote)\s*[:=]\s*)"
@@ -99,9 +114,7 @@ _CREDENTIAL_RE = re.compile(
     rf"(?P<value>{_DOUBLE_QUOTED_VALUE}|{_SINGLE_QUOTED_VALUE}|[^\s,;}}\]]+)"
 )
 _PRIVATE_KEY_PEM_RE = re.compile(
-    r"-----BEGIN (?P<label>(?:(?:ENCRYPTED|RSA|EC) )?PRIVATE KEY)-----"
-    r"(?:(?!(?:-----BEGIN |-----END )).)*?"
-    r"-----END (?P=label)-----",
+    "|".join(_private_key_pem_block(label) for label in _PRIVATE_KEY_PEM_LABELS),
     re.DOTALL,
 )
 

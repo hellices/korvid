@@ -146,6 +146,39 @@ def test_complete_private_key_pem_blocks_are_masked(label: str) -> None:
     ]
 
 
+@pytest.mark.parametrize(
+    ("header", "footer"),
+    [
+        (
+            "-----BE\x07GIN PRIVATE KEY-----",
+            "-----END PRIVATE KEY-----",
+        ),
+        (
+            "-----BEGIN ENCRYPTED PRIVATE KEY-----",
+            "-----E\x07ND ENCRYPTED PRIVATE KEY-----",
+        ),
+        (
+            "-----BEGIN RSA PRIVA\x07TE KEY-----",
+            "-----END RSA PRIVATE K\x01EY-----",
+        ),
+    ],
+)
+def test_private_key_pem_blocks_still_match_with_control_debris_in_delimiters(
+    header: str, footer: str
+) -> None:
+    records: list[RedactionRecord] = []
+    text = f"before\n{header}\nprivate-key-payload-sentinel\n{footer}\nafter"
+
+    redacted = redact_text(text, "event.message", records)
+
+    assert redacted == f"before\n{MASK_PLACEHOLDER}\nafter"
+    assert "private-key-payload-sentinel" not in redacted
+    assert records == [
+        RedactionRecord(path="event.message", reason="control-character"),
+        RedactionRecord(path="event.message", reason="private-key-block"),
+    ]
+
+
 def test_multiple_private_key_pem_blocks_each_record_evidence() -> None:
     records: list[RedactionRecord] = []
     text = (
