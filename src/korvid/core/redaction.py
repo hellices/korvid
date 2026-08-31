@@ -100,7 +100,7 @@ _CREDENTIAL_RE = re.compile(
 )
 _PRIVATE_KEY_PEM_RE = re.compile(
     r"-----BEGIN (?P<label>(?:(?:ENCRYPTED|RSA|EC) )?PRIVATE KEY)-----"
-    r".*?"
+    r"(?:(?!(?:-----BEGIN |-----END )).)*?"
     r"-----END (?P=label)-----",
     re.DOTALL,
 )

@@ -165,6 +165,30 @@ def test_multiple_private_key_pem_blocks_each_record_evidence() -> None:
     ]
 
 
+def test_incomplete_first_private_key_block_does_not_cross_later_delimiters() -> None:
+    records: list[RedactionRecord] = []
+    text = (
+        "-----BEGIN PRIVATE KEY-----\n"
+        "first-incomplete\n"
+        "-----END RSA PRIVATE KEY-----\n"
+        "between\n"
+        "-----BEGIN PRIVATE KEY-----\n"
+        "second-complete\n"
+        "-----END PRIVATE KEY-----"
+    )
+
+    redacted = redact_text(text, "log", records)
+
+    assert redacted == (
+        "-----BEGIN PRIVATE KEY-----\n"
+        "first-incomplete\n"
+        "-----END RSA PRIVATE KEY-----\n"
+        "between\n"
+        f"{MASK_PLACEHOLDER}"
+    )
+    assert records == [RedactionRecord(path="log", reason="private-key-block")]
+
+
 @pytest.mark.parametrize(
     "text",
     [
