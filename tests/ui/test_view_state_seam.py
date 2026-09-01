@@ -26,6 +26,7 @@ from korvid.k8s.models import GenericSummary
 from korvid.ui.app import AppUiSurface, AppViewState, KorvidApp
 from korvid.ui.ui_surface import UiSurface
 from korvid.ui.view_state import ViewState
+from korvid.ui.widgets.namespace_picker import NamespacePicker
 
 _ALIASES = {
     "pods": ResourceMeta("", "v1", "pods", "Pod", True),
@@ -238,7 +239,19 @@ def test_app_ui_surface_reports_inline_input_focus() -> None:
     assert surface.inline_input_active() is True
 
 
+def test_app_ui_surface_reports_inline_namespace_picker_focus() -> None:
+    picker = NamespacePicker()
+    surface: Any = AppUiSurface(
+        cast("KorvidApp", SimpleNamespace(focused=picker, _namespace_picker=picker))
+    )
+
+    assert surface.inline_input_active() is True
+
+
 def test_app_ui_surface_ignores_non_input_focus() -> None:
-    surface = AppUiSurface(cast("KorvidApp", SimpleNamespace(focused=object())))
+    picker = NamespacePicker()
+    surface = AppUiSurface(
+        cast("KorvidApp", SimpleNamespace(focused=object(), _namespace_picker=picker))
+    )
 
     assert surface.inline_input_active() is False

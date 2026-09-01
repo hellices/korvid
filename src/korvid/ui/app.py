@@ -2606,7 +2606,8 @@ class AppUiSurface(UiSurface):
         return len(self._app.screen_stack)
 
     def inline_input_active(self) -> bool:
-        return isinstance(self._app.focused, Input)
+        focused = self._app.focused
+        return isinstance(focused, Input) or focused is self._app._namespace_picker
 
 
 class AppContextSurface(ContextSurface):
