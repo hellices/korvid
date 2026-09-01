@@ -137,5 +137,6 @@ review loop defined in `AGENTS.md`.
 - New credential heuristics in `core.redaction`
 - Redacting logs in the Kubernetes client or TUI log display
 - MCP authentication, stdio transport, OAuth, or transport identity
-- Changing log tail limits, event UID scoping, result caps, or error wording
+- Changing log tail limits, event UID scoping, result caps, or unrelated error
+  wording; redaction refusals intentionally use the constant safe message above
 - Refactoring unrelated diagnosis or observability producers

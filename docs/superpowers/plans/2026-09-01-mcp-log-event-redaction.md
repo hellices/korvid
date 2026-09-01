@@ -8,6 +8,9 @@
 
 **Tech Stack:** Python 3.11+, asyncio, pytest, Ruff, mypy strict, Textual-free `tools/` layer
 
+**Status:** Completed. The unchecked steps preserve the original TDD sequence;
+all snippets reflect the final reviewed implementation and regressions.
+
 ## Global Constraints
 
 - Redact full log/event text before any size clamp.
@@ -17,7 +20,9 @@
 - Keep MCP server behavior transport-agnostic; it consumes the safe executor result unchanged.
 - Cover representative password, token, and authorization assignments at the MCP boundary.
 - Do not add credential heuristics, authentication, OAuth, stdio, or transport identity.
-- Do not change log tail limits, event UID scoping, result caps, or error wording.
+- Do not change log tail limits, event UID scoping, result caps, or unrelated
+  error wording. Redaction refusals must use the constant safe message required
+  by the fail-closed contract.
 - Keep `tools/` free of Textual imports and new third-party dependencies.
 
 ---
@@ -130,6 +135,7 @@ Append:
 ```python
 async def test_get_logs_redacts_before_the_final_result_cap() -> None:
     visible_prefix = MAX_RESULT_CHARS - len(executor_module._TRUNCATION_SUFFIX)
+    padding = visible_prefix - len(" to")
 
     class LongCredentialLogs(FakeLogKube):
         async def stream_logs(
@@ -141,7 +147,7 @@ async def test_get_logs_redacts_before_the_final_result_cap() -> None:
             follow: bool = True,
             tail_lines: int = 200,
         ) -> Any:
-            text = "x" * (visible_prefix - 4) + "password=after-cap-sentinel"
+            text = "x" * padding + " token=1234 trailing-diagnostics " + "y" * 100
             yield LogLine(pod=pod, container=container, text=text)
 
     outcome = await make_executor(LongCredentialLogs()).execute_recorded(
@@ -150,7 +156,9 @@ async def test_get_logs_redacts_before_the_final_result_cap() -> None:
     )
 
     assert len(outcome.text) == MAX_RESULT_CHARS
-    assert "after-cap-sentinel" not in outcome.text
+    assert outcome.text.endswith(executor_module._TRUNCATION_SUFFIX)
+    assert "1234" not in outcome.text
+    assert "trailing-diagnostics" not in outcome.text
     assert outcome.redactions == (
         RedactionRecord(path="logs", reason="credential-assignment"),
     )
@@ -164,7 +172,7 @@ async def test_log_redaction_failure_is_fail_closed(
         path: str,
         records: list[RedactionRecord],
     ) -> str:
-        raise RedactionError("unsafe text shape")
+        raise RedactionError(f"unsafe text shape: {text}")
 
     monkeypatch.setattr(executor_module, "redact_text", reject_text)
 
@@ -185,7 +193,7 @@ async def test_event_redaction_failure_is_fail_closed(
         path: str,
         records: list[RedactionRecord],
     ) -> str:
-        raise RedactionError("unsafe text shape")
+        raise RedactionError(f"unsafe text shape: {text}")
 
     monkeypatch.setattr(executor_module, "redact_text", reject_text)
 
