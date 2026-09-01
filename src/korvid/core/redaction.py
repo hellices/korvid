@@ -84,13 +84,21 @@ _PRIVATE_KEY_PEM_LABELS = (
     "EC PRIVATE KEY",
     "OPENSSH PRIVATE KEY",
 )
+_PRIVATE_KEY_PEM_BOUNDARY = (
+    "(?:"
+    + "|".join(
+        _keyword(f"-----{marker} {label}-----")
+        for label in _PRIVATE_KEY_PEM_LABELS
+        for marker in ("BEGIN", "END")
+    )
+    + ")"
+)
 
 
 def _private_key_pem_block(label: str) -> str:
     header = _keyword(f"-----BEGIN {label}-----")
     footer = _keyword(f"-----END {label}-----")
-    boundary = rf"(?:{_keyword('-----BEGIN ')}|{_keyword('-----END ')})"
-    return rf"{header}(?:(?!{boundary}).)*?{footer}"
+    return rf"{header}(?:(?!{_PRIVATE_KEY_PEM_BOUNDARY}).)*?{footer}"
 
 
 _AUTHORIZATION_RE = re.compile(

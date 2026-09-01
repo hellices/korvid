@@ -232,6 +232,26 @@ def test_incomplete_first_private_key_block_does_not_cross_later_delimiters() ->
     assert records == [RedactionRecord(path="log", reason="private-key-block")]
 
 
+def test_private_key_block_with_embedded_certificate_is_masked() -> None:
+    records: list[RedactionRecord] = []
+    text = (
+        "before\n"
+        "-----BEGIN PRIVATE KEY-----\n"
+        "private-key-payload-sentinel\n"
+        "-----BEGIN CERTIFICATE-----\n"
+        "certificate-payload\n"
+        "-----END CERTIFICATE-----\n"
+        "-----END PRIVATE KEY-----\n"
+        "after"
+    )
+
+    redacted = redact_text(text, "log", records)
+
+    assert redacted == f"before\n{MASK_PLACEHOLDER}\nafter"
+    assert "private-key-payload-sentinel" not in redacted
+    assert records == [RedactionRecord(path="log", reason="private-key-block")]
+
+
 @pytest.mark.parametrize(
     "text",
     [
