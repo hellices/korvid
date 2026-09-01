@@ -41,6 +41,8 @@ _SENSITIVE_NAMES = frozenset(
         "accesstoken",
         "refreshtoken",
         "credentials",
+        "privatekey",
+        "clientkeydata",
         # Neither half is a credential name alone: `secret` also spells
         # `secretKeyRef` and `SECRET_NAME` (pointers the model needs to
         # read), and `accesskey` also spells `AWS_ACCESS_KEY_ID` (an
@@ -75,6 +77,30 @@ def _any_keyword(*words: str) -> str:
     return "|".join(_SEPARATOR.join(_keyword(part) for part in word.split()) for word in words)
 
 
+_PRIVATE_KEY_PEM_LABELS = (
+    "PRIVATE KEY",
+    "ENCRYPTED PRIVATE KEY",
+    "RSA PRIVATE KEY",
+    "EC PRIVATE KEY",
+    "OPENSSH PRIVATE KEY",
+)
+_PRIVATE_KEY_PEM_BOUNDARY = (
+    "(?:"
+    + "|".join(
+        _keyword(f"-----{marker} {label}-----")
+        for label in _PRIVATE_KEY_PEM_LABELS
+        for marker in ("BEGIN", "END")
+    )
+    + ")"
+)
+
+
+def _private_key_pem_block(label: str) -> str:
+    header = _keyword(f"-----BEGIN {label}-----")
+    footer = _keyword(f"-----END {label}-----")
+    return rf"{header}(?:(?!{_PRIVATE_KEY_PEM_BOUNDARY}).)*?{footer}"
+
+
 _AUTHORIZATION_RE = re.compile(
     r"(?im)(?P<prefix>(?<![A-Za-z0-9])"
     rf"(?P<auth_key_quote>[\"']?)(?:{_keyword('authorization')})(?P=auth_key_quote)\s*[:=]\s*)"
@@ -95,6 +121,10 @@ _CREDENTIAL_RE = re.compile(
     )
     + r")(?P=credential_key_quote)\s*[:=]\s*)"
     rf"(?P<value>{_DOUBLE_QUOTED_VALUE}|{_SINGLE_QUOTED_VALUE}|[^\s,;}}\]]+)"
+)
+_PRIVATE_KEY_PEM_RE = re.compile(
+    "|".join(_private_key_pem_block(label) for label in _PRIVATE_KEY_PEM_LABELS),
+    re.DOTALL,
 )
 
 
@@ -250,9 +280,23 @@ def _replace_match(
     return f"{match.group('prefix')}{replacement}"
 
 
+def _replace_private_key_block(
+    match: re.Match[str],
+    *,
+    path: str,
+    records: list[RedactionRecord],
+) -> str:
+    record(records, path, "private-key-block")
+    return MASK_PLACEHOLDER
+
+
 def redact_text(text: str, path: str, records: list[RedactionRecord]) -> str:
     """Redact credential assignments embedded in free-form text."""
     text = strip_control_characters(text, path, records)
+    text = _PRIVATE_KEY_PEM_RE.sub(
+        lambda match: _replace_private_key_block(match, path=path, records=records),
+        text,
+    )
     text = _AUTHORIZATION_RE.sub(
         lambda match: _replace_match(
             match,

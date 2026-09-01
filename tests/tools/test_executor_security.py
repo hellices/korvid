@@ -9,6 +9,7 @@ import pytest
 import yaml
 
 import korvid.tools.executor as executor_module
+from korvid.core.redaction import RedactionRecord
 from korvid.core.secrets import MASK_PLACEHOLDER
 from korvid.k8s.discovery import PODS_META
 from korvid.tools.executor import MAX_RESULT_CHARS, ToolExecutor, ToolResultBlocked
@@ -42,6 +43,31 @@ async def test_get_resource_masks_secret_data() -> None:
     assert "aGVsbG8=" not in out
     assert MASK_PLACEHOLDER in out
     assert "managedFields" not in out
+
+
+async def test_get_resource_masks_private_key_fields_before_bounding() -> None:
+    kube = FakeKube()
+    kube.manifest = {
+        "kind": "ConfigMap",
+        "metadata": {"name": "client-config"},
+        "data": {
+            "privateKey": "private-key-sentinel",
+            "publicKeyId": "public-key-id",
+        },
+    }
+
+    outcome = await make_executor(kube).execute_recorded(
+        "get_resource", {"kind": "pods", "name": "client-config", "namespace": "default"}
+    )
+    loaded = yaml.safe_load(outcome.text)
+
+    assert loaded["data"] == {
+        "privateKey": MASK_PLACEHOLDER,
+        "publicKeyId": "public-key-id",
+    }
+    assert outcome.redactions == (
+        RedactionRecord(path="manifest.data.privateKey", reason="sensitive-key"),
+    )
 
 
 async def test_get_resource_masks_secret_string_data() -> None:

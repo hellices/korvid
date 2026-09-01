@@ -183,6 +183,38 @@ async def test_mcp_results_are_redacted_like_the_agent_path() -> None:
     assert yaml.safe_load(content[0].text)["kind"] == "CompositeApp"
 
 
+async def test_mcp_resource_results_mask_private_key_fields() -> None:
+    class ManifestKube:
+        async def get_object(
+            self,
+            meta: Any,
+            namespace: str | None,
+            name: str,
+        ) -> dict[str, Any]:
+            return {
+                "kind": "ConfigMap",
+                "metadata": {"name": name},
+                "data": {
+                    "client-key-data": "mcp-private-key-sentinel",
+                    "publicKeyId": "public-key-id",
+                },
+            }
+
+    executor = ToolExecutor(ManifestKube(), {"pods": PODS_META})  # type: ignore[arg-type]  # read-only test double
+    server = make_server(executor)
+
+    content = await server.call_tool(
+        "get_resource", {"kind": "pods", "name": "client-config", "namespace": "default"}
+    )
+
+    loaded = yaml.safe_load(content[0].text)
+    assert loaded["data"] == {
+        "client-key-data": MASK_PLACEHOLDER,
+        "publicKeyId": "public-key-id",
+    }
+    assert "mcp-private-key-sentinel" not in content[0].text
+
+
 async def test_mcp_reports_a_manifest_too_deep_to_redact_as_a_safe_error() -> None:
     """An MCP host has no turn to stop, so a document the redactor could
     not finish walking comes back as the same safe refusal string every

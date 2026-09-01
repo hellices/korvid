@@ -126,6 +126,148 @@ def test_free_text_credential_assignments_are_masked() -> None:
     assert records[0].reason == "credential-assignment"
 
 
+@pytest.mark.parametrize(
+    "label",
+    [
+        "PRIVATE KEY",
+        "ENCRYPTED PRIVATE KEY",
+        "RSA PRIVATE KEY",
+        "EC PRIVATE KEY",
+        "OPENSSH PRIVATE KEY",
+    ],
+)
+def test_complete_private_key_pem_blocks_are_masked(label: str) -> None:
+    records: list[RedactionRecord] = []
+    text = (
+        f"before\n-----BEGIN {label}-----\n"
+        "private-key-payload-sentinel\n"
+        f"-----END {label}-----\nafter"
+    )
+
+    redacted = redact_text(text, "event.message", records)
+
+    assert redacted == f"before\n{MASK_PLACEHOLDER}\nafter"
+    assert records == [
+        RedactionRecord(path="event.message", reason="private-key-block"),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("header", "footer"),
+    [
+        (
+            "-----BE\x07GIN PRIVATE KEY-----",
+            "-----END PRIVATE KEY-----",
+        ),
+        (
+            "-----BEGIN ENCRYPTED PRIVATE KEY-----",
+            "-----E\x07ND ENCRYPTED PRIVATE KEY-----",
+        ),
+        (
+            "-----BEGIN RSA PRIVA\x07TE KEY-----",
+            "-----END RSA PRIVATE K\x01EY-----",
+        ),
+        (
+            "-----BEGIN OPENSSH PRIVA\x07TE KEY-----",
+            "-----END OPENSSH PRIVATE K\x01EY-----",
+        ),
+    ],
+)
+def test_private_key_pem_blocks_still_match_with_control_debris_in_delimiters(
+    header: str, footer: str
+) -> None:
+    records: list[RedactionRecord] = []
+    text = f"before\n{header}\nprivate-key-payload-sentinel\n{footer}\nafter"
+
+    redacted = redact_text(text, "event.message", records)
+
+    assert redacted == f"before\n{MASK_PLACEHOLDER}\nafter"
+    assert "private-key-payload-sentinel" not in redacted
+    assert records == [
+        RedactionRecord(path="event.message", reason="control-character"),
+        RedactionRecord(path="event.message", reason="private-key-block"),
+    ]
+
+
+def test_multiple_private_key_pem_blocks_each_record_evidence() -> None:
+    records: list[RedactionRecord] = []
+    text = (
+        "-----BEGIN PRIVATE KEY-----\nfirst-sentinel\n-----END PRIVATE KEY-----\n"
+        "between\n"
+        "-----BEGIN EC PRIVATE KEY-----\nsecond-sentinel\n-----END EC PRIVATE KEY-----"
+    )
+
+    redacted = redact_text(text, "log", records)
+
+    assert "first-sentinel" not in redacted
+    assert "second-sentinel" not in redacted
+    assert redacted.count(MASK_PLACEHOLDER) == 2
+    assert records == [
+        RedactionRecord(path="log", reason="private-key-block"),
+        RedactionRecord(path="log", reason="private-key-block"),
+    ]
+
+
+def test_incomplete_first_private_key_block_does_not_cross_later_delimiters() -> None:
+    records: list[RedactionRecord] = []
+    text = (
+        "-----BEGIN PRIVATE KEY-----\n"
+        "first-incomplete\n"
+        "-----END RSA PRIVATE KEY-----\n"
+        "between\n"
+        "-----BEGIN PRIVATE KEY-----\n"
+        "second-complete\n"
+        "-----END PRIVATE KEY-----"
+    )
+
+    redacted = redact_text(text, "log", records)
+
+    assert redacted == (
+        "-----BEGIN PRIVATE KEY-----\n"
+        "first-incomplete\n"
+        "-----END RSA PRIVATE KEY-----\n"
+        "between\n"
+        f"{MASK_PLACEHOLDER}"
+    )
+    assert records == [RedactionRecord(path="log", reason="private-key-block")]
+
+
+def test_private_key_block_with_embedded_certificate_is_masked() -> None:
+    records: list[RedactionRecord] = []
+    text = (
+        "before\n"
+        "-----BEGIN PRIVATE KEY-----\n"
+        "private-key-payload-sentinel\n"
+        "-----BEGIN CERTIFICATE-----\n"
+        "certificate-payload\n"
+        "-----END CERTIFICATE-----\n"
+        "-----END PRIVATE KEY-----\n"
+        "after"
+    )
+
+    redacted = redact_text(text, "log", records)
+
+    assert redacted == f"before\n{MASK_PLACEHOLDER}\nafter"
+    assert "private-key-payload-sentinel" not in redacted
+    assert records == [RedactionRecord(path="log", reason="private-key-block")]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "-----BEGIN CERTIFICATE-----\ncertificate\n-----END CERTIFICATE-----",
+        "-----BEGIN PUBLIC KEY-----\npublic\n-----END PUBLIC KEY-----",
+        "-----BEGIN PRIVATE KEY-----\nincomplete",
+        "-----BEGIN RSA PRIVATE KEY-----\nmismatch\n-----END PRIVATE KEY-----",
+    ],
+)
+def test_non_private_or_incomplete_pem_text_is_preserved(text: str) -> None:
+    records: list[RedactionRecord] = []
+
+    assert redact_text(text, "text", records) == text
+    assert records == []
+
+
 def test_unredactable_shapes_fail_closed() -> None:
     with pytest.raises(RedactionError, match="mapping keys must be strings"):
         redact_value({1: "x"}, "doc", [])
@@ -154,9 +296,50 @@ def test_credential_names_are_recognized(name: str) -> None:
     assert denotes_secret(name)
 
 
+@pytest.mark.parametrize(
+    "name",
+    [
+        "privateKey",
+        "private_key",
+        "client-private-key",
+        "client-key-data",
+        "clientKeyData",
+    ],
+)
+def test_private_key_names_are_credentials(name: str) -> None:
+    assert denotes_secret(name)
+
+
 @pytest.mark.parametrize("name", ["TOKENIZER_PATH", "LOG_LEVEL", "passwordless_mode_note"])
 def test_unrelated_names_are_not_credentials(name: str) -> None:
     assert not denotes_secret(name)
+
+
+@pytest.mark.parametrize("name", ["publicKey", "publicKeyId", "secretKeyRef", "key", "keyData"])
+def test_public_and_generic_key_names_are_not_credentials(name: str) -> None:
+    assert not denotes_secret(name)
+
+
+def test_private_key_fields_are_masked_with_deterministic_evidence() -> None:
+    document = {
+        "spec": {
+            "privateKey": {"raw": "private-key-sentinel"},
+            "client-key-data": "client-key-sentinel",
+            "publicKeyId": "public-key-id",
+        }
+    }
+
+    redacted, records = redact_document(document, path="doc")
+
+    assert redacted["spec"] == {
+        "privateKey": MASK_PLACEHOLDER,
+        "client-key-data": MASK_PLACEHOLDER,
+        "publicKeyId": "public-key-id",
+    }
+    assert records == [
+        RedactionRecord(path="doc.spec.privateKey", reason="sensitive-key"),
+        RedactionRecord(path='doc.spec["client-key-data"]', reason="sensitive-key"),
+    ]
 
 
 @pytest.mark.parametrize(
