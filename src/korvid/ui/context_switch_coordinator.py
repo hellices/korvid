@@ -170,13 +170,30 @@ class SessionConfiguration(ABC):
         """The context in effect, or None for the kubeconfig default."""
 
     @abstractmethod
-    def adopt(self, context: str | None, result: ContextSwitchResult) -> None:
+    def default_namespace(self) -> str:
+        """The session's concrete default namespace currently in effect.
+
+        Captured before the first swap attempt so a failed retarget can
+        restore the exact session scope even when the old context's kubeconfig
+        namespace is unset.
+        """
+
+    @abstractmethod
+    def adopt(
+        self,
+        context: str | None,
+        result: ContextSwitchResult,
+        *,
+        namespace: str | None = None,
+    ) -> None:
         """Adopt the new cluster's identity, default namespace and capabilities.
 
         The target's kubeconfig namespace becomes the session default too:
         the `ns` toggle-back and the helm/operator namespace fallbacks read
         it, and jumping to the *startup* context's namespace after a switch
-        would cross clusters.
+        would cross clusters. Recovery may pass an explicit *namespace* to
+        restore the exact pre-switch concrete session namespace instead of
+        re-deriving one from kubeconfig facts.
         """
 
     @abstractmethod
@@ -499,6 +516,7 @@ class ContextSwitchCoordinator(ContextGuard):
     async def _switch_locked(self, name: str) -> None:
         """The body of `_switch_flow`; runs with the claim held."""
         old = self._session.kube_context()
+        old_namespace = self._session.default_namespace()
         if await self._is_noop(name, old):
             self._ui.notify(f"Already on context {name}")
             return
@@ -568,7 +586,7 @@ class ContextSwitchCoordinator(ContextGuard):
             # point that an exception could keep from ever being reached.
             await self._proposals().expire_all("kube context switched")
             await self._teardown()
-            ok, applied = await self._retarget(name, old)
+            ok, applied = await self._retarget(name, old, old_namespace)
             if not ok:
                 if mcp_restart:
                     self._ui.notify(
@@ -727,7 +745,9 @@ class ContextSwitchCoordinator(ContextGuard):
         self._hints().teardown()
         await self._timeline().stop()
 
-    async def _retarget(self, name: str, old: str | None) -> tuple[bool, str | None]:
+    async def _retarget(
+        self, name: str, old: str | None, old_namespace: str
+    ) -> tuple[bool, str | None]:
         """Swap the connection to *name*; on failure fall back to *old*.
 
         Returns ``(ok, applied)``: ``ok`` is False only when even the
@@ -762,7 +782,7 @@ class ContextSwitchCoordinator(ContextGuard):
             )
         try:
             result = await self._switch_context(old)  # type: ignore[misc]  # guarded by caller
-            self._apply(old, old, result)
+            self._apply(old, old, result, namespace=old_namespace)
             self._ui.notify(f"Restored context {old or '(kubeconfig default)'}")
             return True, old
         except Exception as exc:
@@ -774,14 +794,21 @@ class ContextSwitchCoordinator(ContextGuard):
             )
             return False, None
 
-    def _apply(self, name: str | None, old: str | None, result: ContextSwitchResult) -> None:
+    def _apply(
+        self,
+        name: str | None,
+        old: str | None,
+        result: ContextSwitchResult,
+        *,
+        namespace: str | None = None,
+    ) -> None:
         """Adopt the new cluster's identity and re-probed capabilities.
 
         Synchronous by design: everything below lands in one event-loop
         slice, so no flow can observe a session half on either cluster.
         """
         self._epoch += 1
-        self._session.adopt(name, result)
+        self._session.adopt(name, result, namespace=namespace)
         self._writes().set_protected_context(result.protected_context)
         if result.protected_context is not None:
             self._ui.notify(

@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make a successful context switch to an unset kubeconfig namespace adopt Kubernetes' concrete `default` namespace instead of the old cluster's namespace.
+**Goal:** Make a successful context switch to an unset kubeconfig namespace adopt Kubernetes' concrete `default` namespace, while a failed mid-swap recovery restores the exact pre-switch concrete session namespace.
 
-**Architecture:** Preserve `ContextSwitchResult.context_namespace` as the raw `str | None` kubeconfig fact, and normalize it at `AppSessionConfiguration.adopt()`, the atomic UI session boundary. Existing coordinator ordering then resets workspace, watches, metrics, and namespace fallbacks from the new concrete config value.
+**Architecture:** Preserve `ContextSwitchResult.context_namespace` as the raw `str | None` kubeconfig fact. Successful target adoption continues to normalize it at `AppSessionConfiguration.adopt()`, while the coordinator snapshots the session's concrete default namespace before the first swap and passes that value only to recovery adoption after a failed retarget. Existing ordering still resets workspace, watches, metrics, and namespace fallbacks from the adopted concrete config value.
 
 **Tech Stack:** Python 3.11+, Textual, asyncio, pytest, Ruff, mypy
 
@@ -12,6 +12,7 @@
 
 - An unset target context namespace becomes exactly `"default"`.
 - The previous context's namespace must never be inherited or requested on the new cluster.
+- Failed target-switch recovery must restore the exact pre-switch concrete session namespace.
 - `ContextSwitchResult.context_namespace` remains `str | None`.
 - Probe/switch failure must not modify the old session.
 - Preserve context-switch ordering, proposal expiry, audit retargeting, and recovery.
@@ -20,162 +21,135 @@
 
 ---
 
-### Task 1: Adopt the target context's effective namespace
+### Task 1: Distinguish target adoption from recovery restoration
 
 **Files:**
-- Modify: `src/korvid/ui/app.py:2665-2674`
-- Modify: `tests/ui/test_ctx_switch.py:60-127`
+- Modify: `src/korvid/ui/context_switch_coordinator.py`
+- Modify: `src/korvid/ui/app.py:2662-2682`
+- Modify: `tests/ui/test_context_switch_coordinator.py`
 - Test: `tests/ui/test_ctx_switch.py`
+- Test: `tests/ui/test_context_switch_coordinator.py`
 
 **Interfaces:**
 - Consumes: `ContextSwitchResult.context_namespace: str | None`
-- Produces: `KorvidApp.config.namespace == "default"` when the result is `None`
-- Produces: workspace/watch/metrics state retargeted to the concrete namespace
+- Consumes: `SessionConfiguration.default_namespace() -> str`
+- Produces: `SessionConfiguration.adopt(..., namespace: str | None = None)`
+- Produces: successful adoption resolves `result.context_namespace or "default"`
+- Produces: recovery adoption reuses the snapped pre-switch concrete namespace
 
-- [ ] **Step 1: Extend the app context-switch fixture**
+- [ ] **Step 1: Add the failing coordinator recovery regression**
 
-Add `namespace: str = "default"` to `_CtxEnv.__init__`, initialize a watch-call
-record, append every source invocation, and construct the app with the supplied
-namespace:
-
-```python
-    def __init__(
-        self,
-        *,
-        contexts: tuple[str, ...] = ("ctx-a", "ctx-b"),
-        namespace: str = "default",
-        probe_error: Exception | None = None,
-        switch_error: Exception | None = None,
-        result: ContextSwitchResult | None = None,
-        audit_path: Path | None = None,
-        stream_logs: Any = None,
-        probe_gate: asyncio.Event | None = None,
-        metrics: Any = None,
-        timeline: SessionTimeline | None = None,
-        watch_warning_events: Any = None,
-    ) -> None:
-        self.watch_calls: list[tuple[str, str, str]] = []
-```
-
-At the start of the nested `source`:
+Extend the coordinator harness to accept `session_namespace="team-old"` and add:
 
 ```python
-            self.watch_calls.append((self.cluster, kind, scope))
-```
-
-Replace the hard-coded app config with:
-
-```python
-            config=KorvidConfig(namespace=namespace, kube_context="ctx-a"),
-```
-
-- [ ] **Step 2: Add the failing app-level regression**
-
-Add beside `test_switch_adopts_context_namespace_as_session_default`:
-
-```python
-async def test_switch_without_context_namespace_resets_every_target_to_default() -> None:
-    from korvid.k8s.metrics import MetricsPoller, PodMetrics
-
-    metrics_calls: list[str | None] = []
-
-    async def fetch(namespace: str | None) -> list[PodMetrics]:
-        metrics_calls.append(namespace)
-        return []
-
-    env = _CtxEnv(
-        namespace="team-old",
+async def test_a_failed_swap_restores_the_previous_concrete_session_namespace(
+    tmp_path: Path,
+) -> None:
+    env = Env(
+        tmp_path,
+        session_namespace="team-old",
+        switch_error=RuntimeError("target unreachable"),
         result=ContextSwitchResult(
             pod_resize_supported=True,
-            provider_hint=None,
+            provider_hint="AKS",
             context_namespace=None,
         ),
-        metrics=MetricsPoller(fetch, interval=0.05),
     )
-    app = env.app
-
-    async with app.run_test() as pilot:
-        await _first_pod_visible(env, pilot, "pod-a")
-        assert app.current_scope == "team-old"
-        app.post_message(SwitchContextCommand("ctx-b"))
-        await until(
-            pilot,
-            lambda: app.config.kube_context == "ctx-b",
-            label="context switched",
-        )
-        await until(
-            pilot,
-            lambda: app.current_scope == "default",
-            label="unset namespace became default",
-        )
-        await _first_pod_visible(env, pilot, "pod-b")
-        await until(
-            pilot,
-            lambda: bool(metrics_calls) and metrics_calls[-1] == "default",
-            label="metrics retargeted to default",
-        )
-
-        assert app.config.namespace == "default"
-        assert ("b", "pods", "default") in env.watch_calls
-        assert not any(
-            cluster == "b" and scope == "team-old"
-            for cluster, _kind, scope in env.watch_calls
-        )
-
-        await app.action_toggle_all_namespaces()
-        await until(
-            pilot,
-            lambda: app.current_scope != "default",
-            label="all namespaces enabled",
-        )
-        await app.action_toggle_all_namespaces()
-        await until(
-            pilot,
-            lambda: app.current_scope == "default",
-            label="toggle returned to default",
-        )
+    await env.switch()
+    assert env.session.context == "ctx-a"
+    assert env.session.namespace == "team-old"
+    assert env.view.scope == "team-old"
+    assert env.log.has("watch-start:pods/team-old")
+    assert not env.log.has("watch-start:pods/default")
 ```
 
-- [ ] **Step 3: Run the regression and verify RED**
+- [ ] **Step 2: Run the coordinator regression to verify RED**
+
+```bash
+PYTHONPATH=src /Users/hwang-inhwan/workspace/kube/.venv/bin/python -m pytest -p no:tach \
+  tests/ui/test_context_switch_coordinator.py::test_a_failed_swap_restores_the_previous_concrete_session_namespace -q
+```
+
+Expected: FAIL because recovery normalizes the restore result's `None` to
+`"default"` instead of restoring `team-old`.
+
+- [ ] **Step 3: Implement the explicit recovery namespace contract**
+
+In `src/korvid/ui/context_switch_coordinator.py`, add:
+
+```python
+class SessionConfiguration(ABC):
+    @abstractmethod
+    def default_namespace(self) -> str: ...
+
+    @abstractmethod
+    def adopt(
+        self,
+        context: str | None,
+        result: ContextSwitchResult,
+        *,
+        namespace: str | None = None,
+    ) -> None: ...
+```
+
+Snapshot `old_namespace = self._session.default_namespace()` before the first
+swap attempt, then pass it only on recovery:
+
+```python
+ok, applied = await self._retarget(name, old, old_namespace)
+...
+self._apply(old, old, result, namespace=old_namespace)
+```
+
+and forward the override through `_apply()`:
+
+```python
+def _apply(
+    self,
+    name: str | None,
+    old: str | None,
+    result: ContextSwitchResult,
+    *,
+    namespace: str | None = None,
+) -> None:
+    self._session.adopt(name, result, namespace=namespace)
+```
+
+In `src/korvid/ui/app.py`, expose the concrete session namespace and keep
+successful adoption normalized:
+
+```python
+def default_namespace(self) -> str:
+    return self._app.config.namespace or "default"
+
+adopted_namespace = (
+    namespace if namespace is not None else (result.context_namespace or "default")
+)
+```
+
+- [ ] **Step 4: Update the coordinator fake and recovery expectation**
+
+Teach `tests/ui/test_context_switch_coordinator.py::FakeSession` to expose
+`default_namespace()` and honor the optional `namespace=` override. Update
+`test_a_recovered_session_still_restarts_watches_and_metrics` to assert the
+restored watch restarts in `"default"` for the default-namespace session.
+
+- [ ] **Step 5: Re-run focused GREEN checks**
 
 Run:
 
 ```bash
-UV_FROZEN=1 uv run pytest -p no:tach \
-  tests/ui/test_ctx_switch.py::test_switch_without_context_namespace_resets_every_target_to_default -q
-```
-
-Expected: FAIL because `app.config.namespace` and `current_scope` remain
-`"team-old"`.
-
-- [ ] **Step 4: Fix the session adoption boundary**
-
-In `AppSessionConfiguration.adopt()`, replace:
-
-```python
-            namespace=result.context_namespace or self._app.config.namespace,
-```
-
-with:
-
-```python
-            namespace=result.context_namespace or "default",
-```
-
-Update the nearby comment to say an unset target namespace materializes
-Kubernetes' `default`; it must not mention falling back to prior session state.
-
-- [ ] **Step 5: Run focused GREEN checks**
-
-Run:
-
-```bash
-UV_FROZEN=1 uv run pytest -p no:tach \
+PYTHONPATH=src /Users/hwang-inhwan/workspace/kube/.venv/bin/python -m pytest -p no:tach \
   tests/ui/test_context_switch_coordinator.py tests/ui/test_ctx_switch.py -q
-UV_FROZEN=1 uv run ruff check src/korvid/ui/app.py tests/ui/test_ctx_switch.py
-UV_FROZEN=1 uv run ruff format --check src/korvid/ui/app.py tests/ui/test_ctx_switch.py
-UV_FROZEN=1 uv run mypy src/korvid/ui/app.py
-UV_FROZEN=1 uv run tach check
+/Users/hwang-inhwan/workspace/kube/.venv/bin/ruff check \
+  src/korvid/ui/context_switch_coordinator.py src/korvid/ui/app.py \
+  tests/ui/test_context_switch_coordinator.py tests/ui/test_ctx_switch.py
+/Users/hwang-inhwan/workspace/kube/.venv/bin/ruff format --check \
+  src/korvid/ui/context_switch_coordinator.py src/korvid/ui/app.py \
+  tests/ui/test_context_switch_coordinator.py tests/ui/test_ctx_switch.py
+PYTHONPATH=src /Users/hwang-inhwan/workspace/kube/.venv/bin/python -m mypy \
+  src/korvid/ui/context_switch_coordinator.py src/korvid/ui/app.py
+/Users/hwang-inhwan/workspace/kube/.venv/bin/tach check
 ```
 
 Expected: focused tests and all static checks pass.
@@ -183,8 +157,13 @@ Expected: focused tests and all static checks pass.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/korvid/ui/app.py tests/ui/test_ctx_switch.py
-git commit -m "fix: reset namespace on context switch" \
+git add \
+  src/korvid/ui/context_switch_coordinator.py \
+  src/korvid/ui/app.py \
+  tests/ui/test_context_switch_coordinator.py \
+  docs/superpowers/specs/2026-09-02-context-switch-default-namespace-design.md \
+  docs/superpowers/plans/2026-09-02-context-switch-default-namespace.md
+git commit -m "fix: preserve namespace on context recovery" \
   -m "Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>"
 ```
 
