@@ -64,6 +64,7 @@ class _CtxEnv:
         self,
         *,
         contexts: tuple[str, ...] = ("ctx-a", "ctx-b"),
+        namespace: str = "default",
         probe_error: Exception | None = None,
         switch_error: Exception | None = None,
         result: ContextSwitchResult | None = None,
@@ -76,6 +77,7 @@ class _CtxEnv:
     ) -> None:
         self.probe_calls: list[str] = []
         self.switch_calls: list[str | None] = []
+        self.watch_calls: list[tuple[str, str, str]] = []
         self.probe_error = probe_error
         self.switch_error = switch_error
         self.result = result or ContextSwitchResult(
@@ -88,6 +90,7 @@ class _CtxEnv:
         store = ResourceStore()
 
         async def source(kind: str, scope: str) -> AsyncIterator[tuple[str, Summary]]:
+            self.watch_calls.append((self.cluster, kind, scope))
             if kind == "pods":
                 yield ("ADDED", _pod(f"pod-{self.cluster}", ns=scope))
             while True:
@@ -112,7 +115,7 @@ class _CtxEnv:
 
         self.audit = AuditLog(audit_path, context="ctx-a") if audit_path else None
         self.app = KorvidApp(
-            config=KorvidConfig(namespace="default", kube_context="ctx-a"),
+            config=KorvidConfig(namespace=namespace, kube_context="ctx-a"),
             store=store,
             watch_manager=WatchManager(store, source),
             aliases=dict(_ALIASES),
@@ -345,6 +348,44 @@ async def test_switch_failure_after_probe_restores_old_context() -> None:
             lambda: app.config.kube_context == "ctx-a",
             label="old context restored",
         )
+
+
+@pytest.mark.parametrize("restored_context_namespace", [None, "ns-kubeconfig"])
+async def test_switch_recovery_restores_real_app_namespace_and_watch(
+    restored_context_namespace: str | None,
+) -> None:
+    env = _CtxEnv(
+        namespace="team-old",
+        switch_error=RuntimeError("kubeconfig vanished"),
+        result=ContextSwitchResult(
+            pod_resize_supported=True,
+            provider_hint=None,
+            context_namespace=restored_context_namespace,
+        ),
+    )
+    app = env.app
+    async with app.run_test() as pilot:
+        await _first_pod_visible(env, pilot, "pod-a")
+        old_watch_count = len(env.watch_calls)
+        app.post_message(SwitchContextCommand("ctx-b"))
+        await until(
+            pilot,
+            lambda: any("Restored context" in n.message for n in app._notifications),
+            label="old context restored",
+        )
+        await until(
+            pilot,
+            lambda: len(env.watch_calls) > old_watch_count,
+            label="old namespace watch restarted",
+        )
+
+        assert app.config.kube_context == "ctx-a"
+        assert app.config.namespace == "team-old"
+        assert app.current_scope == "team-old"
+        restarted = env.watch_calls[old_watch_count:]
+        assert ("a", "pods", "team-old") in restarted
+        assert not any(scope == "default" for _cluster, _kind, scope in restarted)
+        assert not any(scope == "ns-kubeconfig" for _cluster, _kind, scope in restarted)
 
 
 async def test_picker_maps_display_labels_to_raw_names() -> None:
@@ -1003,6 +1044,67 @@ async def test_switch_adopts_context_namespace_as_session_default() -> None:
             pilot,
             lambda: app.current_scope == "ns-b",
             label="toggle-off returns to the new context's namespace",
+        )
+
+
+async def test_switch_without_context_namespace_resets_every_target_to_default() -> None:
+    from korvid.k8s.metrics import MetricsPoller, PodMetrics
+
+    metrics_calls: list[str | None] = []
+
+    async def fetch(namespace: str | None) -> list[PodMetrics]:
+        metrics_calls.append(namespace)
+        return []
+
+    env = _CtxEnv(
+        namespace="team-old",
+        result=ContextSwitchResult(
+            pod_resize_supported=True,
+            provider_hint=None,
+            context_namespace=None,
+        ),
+        metrics=MetricsPoller(fetch, interval=0.05),
+    )
+    app = env.app
+
+    async with app.run_test() as pilot:
+        await _first_pod_visible(env, pilot, "pod-a")
+        assert app.current_scope == "team-old"
+        app.post_message(SwitchContextCommand("ctx-b"))
+        await until(
+            pilot,
+            lambda: app.config.kube_context == "ctx-b",
+            label="context switched",
+        )
+        await until(
+            pilot,
+            lambda: app.current_scope == "default",
+            label="unset namespace became default",
+        )
+        await _first_pod_visible(env, pilot, "pod-b")
+        await until(
+            pilot,
+            lambda: bool(metrics_calls) and metrics_calls[-1] == "default",
+            label="metrics retargeted to default",
+        )
+
+        assert app.config.namespace == "default"
+        assert ("b", "pods", "default") in env.watch_calls
+        assert not any(
+            cluster == "b" and scope == "team-old" for cluster, _kind, scope in env.watch_calls
+        )
+
+        await app.action_toggle_all_namespaces()
+        await until(
+            pilot,
+            lambda: app.current_scope != "default",
+            label="all namespaces enabled",
+        )
+        await app.action_toggle_all_namespaces()
+        await until(
+            pilot,
+            lambda: app.current_scope == "default",
+            label="toggle returned to default",
         )
 
 

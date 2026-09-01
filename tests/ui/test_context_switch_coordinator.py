@@ -95,19 +95,36 @@ class FakeSurface(ContextSurface):
 class FakeSession(SessionConfiguration):
     """Session identity, default namespace and per-cluster capabilities."""
 
-    def __init__(self, log: Log, *, context: str | None = "ctx-a") -> None:
+    def __init__(
+        self,
+        log: Log,
+        *,
+        context: str | None = "ctx-a",
+        namespace: str = "default",
+    ) -> None:
         self._log = log
         self.context = context
-        self.namespace = "default"
+        self.namespace = namespace
         self.adopted: list[tuple[str | None, ContextSwitchResult]] = []
         self.tools: list[ContextSwitchResult] = []
 
     def kube_context(self) -> str | None:
         return self.context
 
-    def adopt(self, context: str | None, result: ContextSwitchResult) -> None:
+    def default_namespace(self) -> str:
+        return self.namespace
+
+    def adopt(
+        self,
+        context: str | None,
+        result: ContextSwitchResult,
+        *,
+        namespace: str | None = None,
+    ) -> None:
         self.context = context
-        self.namespace = result.context_namespace or self.namespace
+        self.namespace = (
+            namespace if namespace is not None else (result.context_namespace or "default")
+        )
         self.adopted.append((context, result))
         self._log("adopt-config")
 
@@ -337,6 +354,7 @@ class Env:
         contexts: tuple[str, ...] = ("ctx-a", "ctx-b"),
         active_context: str | None = "ctx-a",
         session_context: str | None = "ctx-a",
+        session_namespace: str = "default",
         probe_error: Exception | None = None,
         switch_error: Exception | None = None,
         restore_error: Exception | None = None,
@@ -347,9 +365,13 @@ class Env:
     ) -> None:
         self.log = Log()
         self.ui = FakeUi()
-        self.view = FakeView(kind="pods", scope="default")
+        self.view = FakeView(kind="pods", scope=session_namespace)
         self.surface = FakeSurface(self.log)
-        self.session = FakeSession(self.log, context=session_context)
+        self.session = FakeSession(
+            self.log,
+            context=session_context,
+            namespace=session_namespace,
+        )
         self.workspace = FakeWorkspace(self.log, self.view, self.session)
         self.watches = FakeWatches(self.log)
         self.store = FakeStore(self.log)
@@ -563,6 +585,30 @@ async def test_a_failed_swap_that_restores_the_old_context_bumps_the_epoch_once(
     assert [phase for _epoch, phase, _note in env.timeline.phases] == ["started", "failed"]
     assert env.session.context == "ctx-a"
     assert any("Restored context ctx-a" in message for message in env.ui.messages())
+
+
+@pytest.mark.parametrize("restored_context_namespace", [None, "ns-kubeconfig"])
+async def test_a_failed_swap_restores_the_previous_concrete_session_namespace(
+    tmp_path: Path,
+    restored_context_namespace: str | None,
+) -> None:
+    env = Env(
+        tmp_path,
+        session_namespace="team-old",
+        switch_error=RuntimeError("target unreachable"),
+        result=ContextSwitchResult(
+            pod_resize_supported=True,
+            provider_hint="AKS",
+            context_namespace=restored_context_namespace,
+        ),
+    )
+    await env.switch()
+    assert env.session.context == "ctx-a"
+    assert env.session.namespace == "team-old"
+    assert env.view.scope == "team-old"
+    assert env.log.has("watch-start:pods/team-old")
+    assert not env.log.has("watch-start:pods/default")
+    assert not env.log.has("watch-start:pods/ns-kubeconfig")
 
 
 async def test_a_flow_that_awaited_through_the_switch_sees_a_crossed_epoch(
@@ -901,7 +947,7 @@ async def test_the_warning_feed_restarts_even_when_the_target_swap_failed(
 async def test_a_recovered_session_still_restarts_watches_and_metrics(tmp_path: Path) -> None:
     env = Env(tmp_path, switch_error=RuntimeError("target unreachable"))
     await env.switch()
-    assert env.log.has("watch-start:pods/ns-b")
+    assert env.log.has("watch-start:pods/default")
     assert env.log.has("metrics-sync")
     assert env.log.has("status-refreshed")
 
