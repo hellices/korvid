@@ -350,6 +350,40 @@ async def test_switch_failure_after_probe_restores_old_context() -> None:
         )
 
 
+async def test_switch_recovery_restores_real_app_namespace_and_watch() -> None:
+    env = _CtxEnv(
+        namespace="team-old",
+        switch_error=RuntimeError("kubeconfig vanished"),
+        result=ContextSwitchResult(
+            pod_resize_supported=True,
+            provider_hint=None,
+            context_namespace=None,
+        ),
+    )
+    app = env.app
+    async with app.run_test() as pilot:
+        await _first_pod_visible(env, pilot, "pod-a")
+        old_watch_count = len(env.watch_calls)
+        app.post_message(SwitchContextCommand("ctx-b"))
+        await until(
+            pilot,
+            lambda: any("Restored context" in n.message for n in app._notifications),
+            label="old context restored",
+        )
+        await until(
+            pilot,
+            lambda: len(env.watch_calls) > old_watch_count,
+            label="old namespace watch restarted",
+        )
+
+        assert app.config.kube_context == "ctx-a"
+        assert app.config.namespace == "team-old"
+        assert app.current_scope == "team-old"
+        restarted = env.watch_calls[old_watch_count:]
+        assert ("a", "pods", "team-old") in restarted
+        assert not any(scope == "default" for _cluster, _kind, scope in restarted)
+
+
 async def test_picker_maps_display_labels_to_raw_names() -> None:
     """A context literally named "ctx-a (current)" must survive selection
     intact: the current-marker is a display label, never an encoding to
