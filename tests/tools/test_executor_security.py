@@ -342,7 +342,8 @@ async def test_get_events_redacts_text_and_preserves_incarnation() -> None:
 
 
 async def test_get_logs_redacts_before_the_final_result_cap() -> None:
-    padding = MAX_RESULT_CHARS - len(" token=1234") - 1
+    visible_prefix = MAX_RESULT_CHARS - len(executor_module._TRUNCATION_SUFFIX)
+    padding = visible_prefix - len(" to")
 
     class LongCredentialLogs(FakeLogKube):
         async def stream_logs(
@@ -354,7 +355,7 @@ async def test_get_logs_redacts_before_the_final_result_cap() -> None:
             follow: bool = True,
             tail_lines: int = 200,
         ) -> Any:
-            text = "x" * padding + " token=1234"
+            text = "x" * padding + " token=1234 trailing-diagnostics " + "y" * 100
             yield LogLine(pod=pod, container=container, text=text)
 
     outcome = await make_executor(LongCredentialLogs()).execute_recorded(
@@ -365,6 +366,7 @@ async def test_get_logs_redacts_before_the_final_result_cap() -> None:
     assert len(outcome.text) == MAX_RESULT_CHARS
     assert outcome.text.endswith(executor_module._TRUNCATION_SUFFIX)
     assert "1234" not in outcome.text
+    assert "trailing-diagnostics" not in outcome.text
     assert outcome.redactions == (RedactionRecord(path="logs", reason="credential-assignment"),)
 
 
