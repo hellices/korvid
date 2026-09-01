@@ -158,3 +158,7 @@ class UiSurface(ABC):
         handing it over lets a controller `pop`, `clear` or reorder screens
         outside the lifecycle that owns them.
         """
+
+    @abstractmethod
+    def inline_input_active(self) -> bool:
+        """Whether an inline text input on the base screen owns the next key."""

@@ -143,6 +143,9 @@ class FakeUi(UiSurface):
     def set_depth(self, depth: int) -> None:
         self._depth = depth
 
+    def inline_input_active(self) -> bool:
+        return False  # pragma: no cover
+
 
 class FakeView(ViewState):
     def __init__(self, state: WorkspaceState, store: ResourceStore) -> None:

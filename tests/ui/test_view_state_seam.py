@@ -11,9 +11,11 @@ from __future__ import annotations
 import asyncio
 import inspect
 from collections.abc import AsyncIterator
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
+from textual.widgets import Input
 from textual.worker import WorkerError
 
 from korvid.core.config import KorvidConfig
@@ -227,3 +229,16 @@ def test_app_ui_surface_delegates_the_terminal_capabilities() -> None:
     surface.call_from_thread(lambda: None)
 
     assert calls == ["refresh", "thread"]
+
+
+def test_app_ui_surface_reports_inline_input_focus() -> None:
+    command_bar = Input()
+    surface = AppUiSurface(cast("KorvidApp", SimpleNamespace(focused=command_bar)))
+
+    assert surface.inline_input_active() is True
+
+
+def test_app_ui_surface_ignores_non_input_focus() -> None:
+    surface = AppUiSurface(cast("KorvidApp", SimpleNamespace(focused=object())))
+
+    assert surface.inline_input_active() is False

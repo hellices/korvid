@@ -35,7 +35,7 @@ from textual.css.query import NoMatches
 from textual.events import DescendantBlur, DescendantFocus, Key
 from textual.screen import Screen
 from textual.widget import AwaitMount
-from textual.widgets import DataTable, Static
+from textual.widgets import DataTable, Input, Static
 from textual.widgets.data_table import CellDoesNotExist, RowDoesNotExist
 from textual.worker import Worker, WorkerError, WorkerState
 
@@ -2604,6 +2604,9 @@ class AppUiSurface(UiSurface):
 
     def screen_depth(self) -> int:
         return len(self._app.screen_stack)
+
+    def inline_input_active(self) -> bool:
+        return isinstance(self._app.focused, Input)
 
 
 class AppContextSurface(ContextSurface):

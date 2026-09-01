@@ -1999,9 +1999,14 @@ class AgentUiController:
 
     def can_surface_approval(self) -> bool:
         """An approval dialog may only appear when the panel is expanded AND
-        no other screen is stacked on top: pushing it over an active dialog
+        no other screen is stacked on top AND no inline text input owns the
+        next key: pushing it over an active dialog or command/input editor
         would let the user's next y/Enter approve an unexpected write."""
-        return self._panel.expanded() and self._ui.screen_depth() == 1
+        return (
+            self._panel.expanded()
+            and self._ui.screen_depth() == 1
+            and not self._ui.inline_input_active()
+        )
 
     async def _wait_until_surfaceable(self, deadline: float) -> bool:
         """Poll until an approval dialog may surface (panel expanded, no other

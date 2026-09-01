@@ -129,6 +129,9 @@ class FakeUiSurface(UiSurface):
     def screen_depth(self) -> int:
         return 1  # pragma: no cover
 
+    def inline_input_active(self) -> bool:
+        return False  # pragma: no cover
+
 
 class FakeViewState(ViewState):
     """Minimal ViewState wrapping an alias map."""

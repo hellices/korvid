@@ -128,6 +128,10 @@ class FakeUi(UiSurface):
         return self.depth
 
     depth: int = 1
+    inline_active: bool = False
+
+    def inline_input_active(self) -> bool:
+        return self.inline_active
 
     # -- helpers -----------------------------------------------------------
 
