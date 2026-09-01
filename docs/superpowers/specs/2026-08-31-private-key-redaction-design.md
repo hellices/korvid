@@ -66,8 +66,10 @@ logic then recognizes exact and compound variants such as `privateKey`,
 generic key-data fields.
 
 Do not classify `publicKey`, `publicKeyId`, `secretKeyRef`, or generic `key`
-fields as private-key material. Boolean fields remain readable under the
-existing one-bit exception.
+fields as private-key material. The existing one-bit exception preserves
+Boolean values only for compound names recognized by the word-window scan;
+exact normalized sensitive names such as `privateKey` and `client-key-data`
+remain masked regardless of value type.
 
 Structural matches use the existing `sensitive-key` reason and replace the
 entire value before descending into it. This preserves deterministic record
