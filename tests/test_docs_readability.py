@@ -533,31 +533,29 @@ def _representative_tool_rows() -> dict[str, str]:
 def test_mcp_tools_table_separates_producer_side_redaction_from_shaping() -> None:
     """Video round 1, finding 2, corrected by round 4: the summary must not overclaim.
 
-    Two Kubernetes reads are redacted where they are produced, by two
-    different passes (`ToolExecutor._get_resource` → `_mask_manifest`, a
-    recursive walk of the parsed document; `_diagnose_workload` →
-    `redacted_and_compacted`, credential-*pattern* text masking of a shaped
-    report). Round 1 gave them one shared row, which promised the
-    structural pass on a report that never gets one. Logs, events, lists,
-    single-pod diagnoses and Helm status get their own shaping and size caps
-    only, and can carry credential-shaped text verbatim — which the prose
-    above the table already discloses. A single "tool-specific redaction"
-    cell covering every Kubernetes read contradicts it, and this table is the
-    part a reader skims.
+    Three Kubernetes read families are redacted where they are produced:
+    manifests get a recursive document walk, while compound workload
+    diagnoses and log/event results get credential-pattern text masking at
+    distinct shaping boundaries. Lists, single-pod diagnoses and Helm status
+    get shaping and size caps only. Combining these families would promise
+    guarantees their producers do not provide, and this table is the part a
+    reader skims.
     """
     rows = _representative_tool_rows()
     assert rows, "mcp.md must keep its representative-tools table"
 
     redacted = [key for key, cell in rows.items() if "redact" in cell.lower()]
-    assert len(redacted) == 2, f"the two producer-side passes need one row each; found {redacted}"
+    assert len(redacted) == 3, (
+        f"the three producer-side read families need one row each; found {redacted}"
+    )
     by_tool = {
         tool: next(key for key in redacted if tool in key)
-        for tool in ("get_resource", "diagnose_workload")
+        for tool in ("get_resource", "diagnose_workload", "get_logs")
     }
-    assert by_tool["get_resource"] != by_tool["diagnose_workload"], (
-        "a structural document pass and a text-pattern pass cannot share a row"
+    assert len(set(by_tool.values())) == 3, (
+        "document, compound-report, and log/event producers need distinct rows"
     )
-    for tool in ("get_logs", "list_resources", "diagnose_pod", "helm_list_releases"):
+    for tool in ("list_resources", "diagnose_pod", "helm_list_releases"):
         for redacted_row in redacted:
             assert tool not in redacted_row, (
                 f"{tool} is not credential-pattern masked; it must not sit in a redacted row"
@@ -570,7 +568,7 @@ def test_mcp_tools_table_separates_producer_side_redaction_from_shaping() -> Non
     ]
     assert len(shaped) == 1, f"the shaped-only Kubernetes reads need their own row; found {shaped}"
     shaped_row, shaped_cell = shaped[0], rows[shaped[0]]
-    for tool in ("list_resources", "get_logs", "diagnose_pod", "helm_list_releases"):
+    for tool in ("list_resources", "diagnose_pod", "helm_list_releases"):
         assert tool in shaped_row, f"the shaping-only row must name {tool}"
     lowered_cell = shaped_cell.lower()
     assert "not" in lowered_cell, (
@@ -1440,7 +1438,12 @@ def test_mcp_separates_document_redaction_from_credential_pattern_masking() -> N
     )
     assert re.search(r"credential-pattern", workload_row, re.I)
 
-    shaped_row = _table_row(source, "`get_logs`")
+    log_event_row = _table_row(source, "`get_logs`")
+    assert "`get_events`" in log_event_row
+    assert re.search(r"credential-pattern", log_event_row, re.I)
+    assert re.search(r"before.{0,40}(cap|bound|cut)", log_event_row, re.I)
+
+    shaped_row = _table_row(source, "`list_resources`")
     assert re.search(r"not\*{0,2} credential-pattern masked", shaped_row, re.I), (
         "shaped-only reads must stay explicitly not credential-pattern masked"
     )
