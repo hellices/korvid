@@ -587,8 +587,10 @@ async def test_a_failed_swap_that_restores_the_old_context_bumps_the_epoch_once(
     assert any("Restored context ctx-a" in message for message in env.ui.messages())
 
 
+@pytest.mark.parametrize("restored_context_namespace", [None, "ns-kubeconfig"])
 async def test_a_failed_swap_restores_the_previous_concrete_session_namespace(
     tmp_path: Path,
+    restored_context_namespace: str | None,
 ) -> None:
     env = Env(
         tmp_path,
@@ -597,7 +599,7 @@ async def test_a_failed_swap_restores_the_previous_concrete_session_namespace(
         result=ContextSwitchResult(
             pod_resize_supported=True,
             provider_hint="AKS",
-            context_namespace=None,
+            context_namespace=restored_context_namespace,
         ),
     )
     await env.switch()
@@ -606,6 +608,7 @@ async def test_a_failed_swap_restores_the_previous_concrete_session_namespace(
     assert env.view.scope == "team-old"
     assert env.log.has("watch-start:pods/team-old")
     assert not env.log.has("watch-start:pods/default")
+    assert not env.log.has("watch-start:pods/ns-kubeconfig")
 
 
 async def test_a_flow_that_awaited_through_the_switch_sees_a_crossed_epoch(

@@ -350,14 +350,17 @@ async def test_switch_failure_after_probe_restores_old_context() -> None:
         )
 
 
-async def test_switch_recovery_restores_real_app_namespace_and_watch() -> None:
+@pytest.mark.parametrize("restored_context_namespace", [None, "ns-kubeconfig"])
+async def test_switch_recovery_restores_real_app_namespace_and_watch(
+    restored_context_namespace: str | None,
+) -> None:
     env = _CtxEnv(
         namespace="team-old",
         switch_error=RuntimeError("kubeconfig vanished"),
         result=ContextSwitchResult(
             pod_resize_supported=True,
             provider_hint=None,
-            context_namespace=None,
+            context_namespace=restored_context_namespace,
         ),
     )
     app = env.app
@@ -382,6 +385,7 @@ async def test_switch_recovery_restores_real_app_namespace_and_watch() -> None:
         restarted = env.watch_calls[old_watch_count:]
         assert ("a", "pods", "team-old") in restarted
         assert not any(scope == "default" for _cluster, _kind, scope in restarted)
+        assert not any(scope == "ns-kubeconfig" for _cluster, _kind, scope in restarted)
 
 
 async def test_picker_maps_display_labels_to_raw_names() -> None:
