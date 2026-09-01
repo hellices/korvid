@@ -185,10 +185,10 @@ These are explicit, current limitations — not aspirational future work.
 - **MCP callers own their own AI boundary.** korvid's MCP server hands cluster
   reads (and, opt-in, write proposals) to external clients without routing them
   through `OutboundPolicy`, and cannot constrain what model or data policy that
-  client applies. Structured manifests are still redacted producer-side, and
-  every section of a compound workload diagnosis is credential-pattern masked
-  before it is clamped or compacted (see [`docs/mcp.md`](mcp.md#mcp-server)),
-  but the remaining text results carry only their tool-specific shaping.
+  client applies. Structured manifests are still redacted producer-side;
+  compound workload diagnoses, logs, and events are credential-pattern masked
+  before their result caps (see [`docs/mcp.md`](mcp.md#mcp-server)). Lists,
+  single-pod diagnoses, and Helm status carry only their tool-specific shaping.
 - **Raw logs and the audit trail are sensitive on their own terms.** Log
   captures, describe exports and `audit.jsonl` are not provider payloads and
   are not sanitized like one; treat them with the same care as kubeconfig

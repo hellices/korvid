@@ -43,10 +43,13 @@ embedded Agent would show for the same object:
   are deterministic structured YAML: EndpointSlice or secondary-read RBAC
   denials become explicit `gaps[]` entries rather than an error, so the
   caller can reason about incomplete evidence instead of a hard failure.
-- **Logs, events, lists, single-pod diagnoses, and helm status** get only
-  their own tool-specific shaping (scoping, formatting, size caps). They are
-  **not** credential-pattern masked — a token printed into a pod's log
-  reaches the client verbatim.
+- **Logs and events** get producer-side **credential-pattern text redaction**
+  after their tool-specific shaping and before the result size cap. A
+  credential printed into a pod log or event message is masked before it
+  reaches the client.
+- **Lists, single-pod diagnoses, and helm status** get only their own
+  tool-specific shaping and size caps. They are **not** credential-pattern
+  masked.
 
 The external client (and whatever model or data policy it applies) owns its
 own AI data boundary past this producer-side redaction; korvid's guarantee
@@ -190,6 +193,7 @@ it is disclosed:
 |---|---|---|---|
 | Recursively redacted manifests | `get_resource` | Kubernetes API | Producer-side recursive **document** redaction (`Secret` data, last-applied annotation, credential-named keys); may emit a follow activity note |
 | Pattern-masked compound diagnoses | `diagnose_workload` | Kubernetes API | Producer-side **credential-pattern text** redaction of each shaped section, applied before compaction — not a recursive document pass; may emit a follow activity note |
-| Shaped Kubernetes reads | `list_resources`, `get_logs`, `get_events`, `diagnose_pod`/`_service`/`_pvc`, `helm_list_releases` | Kubernetes API | Tool-specific shaping and size caps only — **not** credential-pattern masked; may emit a follow activity note |
+| Pattern-masked log and event reads | `get_logs`, `get_events` | Kubernetes API | Producer-side **credential-pattern text** redaction after shaping and before the result cap; may emit a follow activity note |
+| Shaped Kubernetes reads | `list_resources`, `diagnose_pod`/`_service`/`_pvc`, `helm_list_releases` | Kubernetes API | Tool-specific shaping and size caps only — **not** credential-pattern masked; may emit a follow activity note |
 | Observability reads | Prometheus / Loki query tools | Prometheus / Loki | Activity note only — never followable navigation |
 | Write proposals (opt-in) | `propose_write`, `get_write_proposal`, `cancel_write_proposal` | Kubernetes API, gated | Inert until a fresh user keystroke in the TUI |

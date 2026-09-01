@@ -9,9 +9,10 @@ import pytest
 import yaml
 
 import korvid.tools.executor as executor_module
-from korvid.core.redaction import RedactionRecord
+from korvid.core.redaction import RedactionError, RedactionRecord
 from korvid.core.secrets import MASK_PLACEHOLDER
 from korvid.k8s.discovery import PODS_META
+from korvid.k8s.logs import LogLine
 from korvid.tools.executor import MAX_RESULT_CHARS, ToolExecutor, ToolResultBlocked
 from korvid.tools.structured import ERROR_PREFIX, load_structured_document
 from tests.tools.executor_fakes import (
@@ -19,7 +20,9 @@ from tests.tools.executor_fakes import (
     LONG_NAME_ENV_SENTINEL,
     NESTED_SECRET_SENTINEL,
     PARENT_SECRET,
+    FakeEventKube,
     FakeKube,
+    FakeLogKube,
     ParentCredentialKube,
     _ambiguous_key_manifest,
     _credential_log_kube,
@@ -260,6 +263,153 @@ async def test_get_resource_still_returns_a_well_formed_secret() -> None:
     loaded = yaml.safe_load(out)
     assert loaded["metadata"]["annotations"] == {"team": "sre"}
     assert loaded["data"]["password"] == MASK_PLACEHOLDER
+
+
+async def test_get_logs_redacts_full_text_and_preserves_container() -> None:
+    class CredentialLogs(FakeLogKube):
+        async def stream_logs(
+            self,
+            namespace: str,
+            pod: str,
+            container: str,
+            *,
+            follow: bool = True,
+            tail_lines: int = 200,
+        ) -> Any:
+            yield LogLine(
+                pod=pod,
+                container=container,
+                text="password=log-password-sentinel",
+            )
+            yield LogLine(
+                pod=pod,
+                container=container,
+                text="token=log-token-sentinel",
+            )
+            yield LogLine(
+                pod=pod,
+                container=container,
+                text="Authorization: log-auth-sentinel",
+            )
+
+    outcome = await make_executor(CredentialLogs()).execute_recorded(
+        "get_logs",
+        {"pod": "web", "namespace": "default"},
+    )
+
+    assert "log-password-sentinel" not in outcome.text
+    assert "log-token-sentinel" not in outcome.text
+    assert "log-auth-sentinel" not in outcome.text
+    assert outcome.text.count(MASK_PLACEHOLDER) == 3
+    assert outcome.redactions == (
+        RedactionRecord(path="logs", reason="authorization-value"),
+        RedactionRecord(path="logs", reason="credential-assignment"),
+        RedactionRecord(path="logs", reason="credential-assignment"),
+    )
+    assert outcome.container == "app"
+
+
+async def test_get_events_redacts_text_and_preserves_incarnation() -> None:
+    class CredentialEvents(FakeEventKube):
+        async def list_events_for(
+            self,
+            namespace: str,
+            name: str,
+            *,
+            kind: str | None = None,
+            uid: str | None = None,
+        ) -> list[dict[str, Any]]:
+            self.event_calls.append(
+                {"namespace": namespace, "name": name, "kind": kind, "uid": uid}
+            )
+            return [
+                {
+                    "type": "Warning",
+                    "reason": "BackOff",
+                    "count": 3,
+                    "message": "token=event-token-sentinel",
+                }
+            ]
+
+    outcome = await make_executor(CredentialEvents()).execute_recorded(
+        "get_events",
+        {"kind": "pods", "namespace": "default", "name": "web"},
+    )
+
+    assert outcome.text == f"Warning BackOff (3x): token={MASK_PLACEHOLDER}"
+    assert outcome.redactions == (RedactionRecord(path="events", reason="credential-assignment"),)
+    assert outcome.incarnation == "abc-123"
+
+
+async def test_get_logs_redacts_before_the_final_result_cap() -> None:
+    visible_prefix = MAX_RESULT_CHARS - len(executor_module._TRUNCATION_SUFFIX)
+    padding = visible_prefix - len(" to")
+
+    class LongCredentialLogs(FakeLogKube):
+        async def stream_logs(
+            self,
+            namespace: str,
+            pod: str,
+            container: str,
+            *,
+            follow: bool = True,
+            tail_lines: int = 200,
+        ) -> Any:
+            text = "x" * padding + " token=1234 trailing-diagnostics " + "y" * 100
+            yield LogLine(pod=pod, container=container, text=text)
+
+    outcome = await make_executor(LongCredentialLogs()).execute_recorded(
+        "get_logs",
+        {"pod": "web", "namespace": "default"},
+    )
+
+    assert len(outcome.text) == MAX_RESULT_CHARS
+    assert outcome.text.endswith(executor_module._TRUNCATION_SUFFIX)
+    assert "1234" not in outcome.text
+    assert "trailing-diagnostics" not in outcome.text
+    assert outcome.redactions == (RedactionRecord(path="logs", reason="credential-assignment"),)
+
+
+async def test_log_redaction_failure_is_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def reject_text(
+        text: str,
+        path: str,
+        records: list[RedactionRecord],
+    ) -> str:
+        raise RedactionError(f"unsafe text shape: {text}")
+
+    monkeypatch.setattr(executor_module, "redact_text", reject_text)
+
+    with pytest.raises(ToolResultBlocked, match="could not redact the result") as caught:
+        await make_executor(FakeLogKube()).execute_recorded(
+            "get_logs",
+            {"pod": "web", "namespace": "default"},
+        )
+
+    assert "line-1" not in str(caught.value)
+
+
+async def test_event_redaction_failure_is_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def reject_text(
+        text: str,
+        path: str,
+        records: list[RedactionRecord],
+    ) -> str:
+        raise RedactionError(f"unsafe text shape: {text}")
+
+    monkeypatch.setattr(executor_module, "redact_text", reject_text)
+
+    with pytest.raises(ToolResultBlocked, match="could not redact the result") as caught:
+        await make_executor(FakeEventKube()).execute_recorded(
+            "get_events",
+            {"kind": "pods", "namespace": "default", "name": "web"},
+        )
+
+    assert "restarting" not in str(caught.value)
 
 
 # --- A redaction failure is not an ordinary tool error (round 6) ------------
