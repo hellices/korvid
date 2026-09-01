@@ -905,7 +905,7 @@ class ToolExecutor(RecordedExecution):
             # an ordinary error by the catch-all below.
             raise
         except RedactionError as exc:
-            raise ToolResultBlocked(f"could not redact the result: {exc}") from exc
+            raise ToolResultBlocked("could not redact the result") from exc
         except Exception as exc:
             # Errors flow through the same cap below: a client error with a
             # long reason must not bypass the ingest limit. Marked as an

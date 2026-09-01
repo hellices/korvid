@@ -376,7 +376,7 @@ async def test_log_redaction_failure_is_fail_closed(
         path: str,
         records: list[RedactionRecord],
     ) -> str:
-        raise RedactionError("unsafe text shape")
+        raise RedactionError(f"unsafe text shape: {text}")
 
     monkeypatch.setattr(executor_module, "redact_text", reject_text)
 
@@ -397,7 +397,7 @@ async def test_event_redaction_failure_is_fail_closed(
         path: str,
         records: list[RedactionRecord],
     ) -> str:
-        raise RedactionError("unsafe text shape")
+        raise RedactionError(f"unsafe text shape: {text}")
 
     monkeypatch.setattr(executor_module, "redact_text", reject_text)
 
