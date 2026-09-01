@@ -8,6 +8,9 @@
 
 **Tech Stack:** Python 3.11+, standard-library `re`, pytest, Ruff, mypy strict
 
+**Status:** Completed. The checkboxes below preserve the original TDD execution
+sequence; code snippets reflect the final reviewed implementation.
+
 ## Global Constraints
 
 - Recognize `privateKey`, `private_key`, `client-private-key`, and `client-key-data`.
@@ -314,13 +317,36 @@ Expected: complete-block and multiple-block tests fail because the private-key p
 
 - [ ] **Step 3: Add the private-key PEM pattern and replacement**
 
-Add this compiled pattern beside the existing text-redaction patterns:
+Add these fixed-label, debris-tolerant boundary helpers and the compiled pattern
+beside the existing text-redaction patterns:
 
 ```python
+_PRIVATE_KEY_PEM_LABELS = (
+    "PRIVATE KEY",
+    "ENCRYPTED PRIVATE KEY",
+    "RSA PRIVATE KEY",
+    "EC PRIVATE KEY",
+    "OPENSSH PRIVATE KEY",
+)
+_PRIVATE_KEY_PEM_BOUNDARY = (
+    "(?:"
+    + "|".join(
+        _keyword(f"-----{marker} {label}-----")
+        for label in _PRIVATE_KEY_PEM_LABELS
+        for marker in ("BEGIN", "END")
+    )
+    + ")"
+)
+
+
+def _private_key_pem_block(label: str) -> str:
+    header = _keyword(f"-----BEGIN {label}-----")
+    footer = _keyword(f"-----END {label}-----")
+    return rf"{header}(?:(?!{_PRIVATE_KEY_PEM_BOUNDARY}).)*?{footer}"
+
+
 _PRIVATE_KEY_PEM_RE = re.compile(
-    r"-----BEGIN (?P<label>(?:(?:ENCRYPTED|RSA|EC|OPENSSH) )?PRIVATE KEY)-----"
-    r".*?"
-    r"-----END (?P=label)-----",
+    "|".join(_private_key_pem_block(label) for label in _PRIVATE_KEY_PEM_LABELS),
     re.DOTALL,
 )
 ```
