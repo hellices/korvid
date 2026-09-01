@@ -261,17 +261,14 @@ async def test_mcp_compound_diagnoses_are_masked_in_every_section() -> None:
     assert "FailedCreate (3x" in content[0].text
 
 
-async def test_mcp_text_results_carry_only_tool_shaping() -> None:
-    """The other half of the boundary `docs/mcp.md` states.
-
-    Producer-side redaction reaches structured manifests, not free-form
-    text: a credential printed into a pod log crosses to the MCP client
-    verbatim, because nothing on this surface parses log lines. Pinned so
-    the documented limitation cannot drift out of date silently.
-    """
-
+async def test_mcp_log_results_are_redacted_by_the_producer() -> None:
     class LoggingKube:
-        async def get_object(self, meta: Any, namespace: str | None, name: str) -> dict[str, Any]:
+        async def get_object(
+            self,
+            meta: Any,
+            namespace: str | None,
+            name: str,
+        ) -> dict[str, Any]:
             return {"spec": {"containers": [{"name": "main"}]}}
 
         async def stream_logs(
@@ -286,15 +283,65 @@ async def test_mcp_text_results_carry_only_tool_shaping() -> None:
             yield LogLine(
                 pod=pod,
                 container=container,
-                text="starting with password=log-line-sentinel",
+                text="password=mcp-password-sentinel",
+            )
+            yield LogLine(
+                pod=pod,
+                container=container,
+                text="token=mcp-token-sentinel",
             )
 
     executor = ToolExecutor(LoggingKube(), {"pods": PODS_META})  # type: ignore[arg-type]  # read-only test double
     server = make_server(executor)
 
-    content = await server.call_tool("get_logs", {"pod": "api-0", "namespace": "prod"})
+    content = await server.call_tool(
+        "get_logs",
+        {"pod": "api-0", "namespace": "prod"},
+    )
 
-    assert "log-line-sentinel" in content[0].text
+    assert "mcp-password-sentinel" not in content[0].text
+    assert "mcp-token-sentinel" not in content[0].text
+    assert content[0].text.count(MASK_PLACEHOLDER) == 2
+
+
+async def test_mcp_event_results_are_redacted_by_the_producer() -> None:
+    class EventKube:
+        async def get_object(
+            self,
+            meta: Any,
+            namespace: str | None,
+            name: str,
+        ) -> dict[str, Any]:
+            return {"kind": "Pod", "metadata": {"name": name, "uid": "pod-uid"}}
+
+        async def list_events_for(
+            self,
+            namespace: str,
+            name: str,
+            *,
+            kind: str | None = None,
+            uid: str | None = None,
+        ) -> list[dict[str, Any]]:
+            return [
+                {
+                    "type": "Warning",
+                    "reason": "Failed",
+                    "count": 1,
+                    "message": "Authorization: mcp-auth-sentinel",
+                }
+            ]
+
+    executor = ToolExecutor(EventKube(), {"pods": PODS_META})  # type: ignore[arg-type]  # read-only test double
+    server = make_server(executor)
+
+    content = await server.call_tool(
+        "get_events",
+        {"kind": "pods", "name": "api-0", "namespace": "prod"},
+    )
+
+    assert "mcp-auth-sentinel" not in content[0].text
+    assert MASK_PLACEHOLDER in content[0].text
+    assert "Warning Failed (1x)" in content[0].text
 
 
 async def test_call_tool_rejects_names_outside_configured_surface() -> None:

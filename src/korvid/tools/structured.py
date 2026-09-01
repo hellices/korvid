@@ -25,8 +25,8 @@ it refuses the constructs that give a document a second reading.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from typing import Any
+from collections.abc import Callable, Mapping
+from typing import Any, cast
 
 import yaml
 
@@ -142,7 +142,8 @@ def load_structured_document(text: str) -> Any:
     try:
         return loader.get_single_data()
     finally:
-        loader.dispose()
+        dispose = cast(Callable[[], None], loader.dispose)
+        dispose()
 
 
 class _NoAliasDumper(yaml.SafeDumper):

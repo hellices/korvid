@@ -483,8 +483,15 @@ def _projected_within_budget(render: Callable[[int], str], path: str) -> ToolOut
     return outcome
 
 
-def _projected(text: str, path: str, *, error: bool = False) -> ToolOutcome:
-    """An external read's rendered result, masked before it leaves here.
+def _projected(
+    text: str,
+    path: str,
+    *,
+    error: bool = False,
+    incarnation: str | None = None,
+    container: str | None = None,
+) -> ToolOutcome:
+    """A rendered free-text result, masked before it leaves its producer.
 
     The projection has to happen at this boundary rather than on the way
     to a provider: an MCP host receives this `ToolOutcome` directly, and a
@@ -498,7 +505,11 @@ def _projected(text: str, path: str, *, error: bool = False) -> ToolOutcome:
     """
     records: list[RedactionRecord] = []
     return ToolOutcome(
-        text=redact_text(text, path, records), redactions=tuple(records), error=error
+        text=redact_text(text, path, records),
+        redactions=tuple(records),
+        error=error,
+        incarnation=incarnation,
+        container=container,
     )
 
 
@@ -1205,7 +1216,11 @@ class ToolExecutor(RecordedExecution):
         # return the replacement's lines under the old UID - a false
         # identity is worse than none. The resolved container is reported,
         # because that much this read does know (#250 review).
-        return ToolOutcome(text="\n".join(lines), container=container or None)
+        return _projected(
+            "\n".join(lines),
+            "logs",
+            container=container or None,
+        )
 
     async def _query_metrics(self, args: dict[str, Any]) -> ToolOutcome:
         """One catalogue metric signal from the configured metrics backend.
@@ -1271,7 +1286,7 @@ class ToolExecutor(RecordedExecution):
         # here, and a citation cannot re-derive which incarnation was read
         # once the object has been replaced (#250).
         if not events:
-            return ToolOutcome(text="(no events)", incarnation=uid)
+            return _projected("(no events)", "events", incarnation=uid)
         parts: list[str] = []
         for ev in events:
             ev_type = str(ev.get("type") or "")
@@ -1279,7 +1294,7 @@ class ToolExecutor(RecordedExecution):
             count = int(ev.get("count") or 1)
             message = str(ev.get("message") or "")
             parts.append(f"{ev_type} {reason} ({count}x): {message}")
-        return ToolOutcome(text="\n".join(parts), incarnation=uid)
+        return _projected("\n".join(parts), "events", incarnation=uid)
 
     #: Log lines fetched per troubled container before excerpting.
     _DIAGNOSE_LOG_TAIL = 200
