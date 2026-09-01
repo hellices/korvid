@@ -2665,12 +2665,12 @@ class AppSessionConfiguration(SessionConfiguration):
     def adopt(self, context: str | None, result: ContextSwitchResult) -> None:
         # Adopt the target context's kubeconfig namespace as the session
         # default too: `ns` toggle-back and the helm/operator namespace
-        # fallbacks read config.namespace, and jumping to the *startup*
-        # context's namespace after a switch would cross clusters.
+        # fallbacks read config.namespace, and an unset target namespace
+        # materializes Kubernetes' `default` for the new cluster.
         self._app.config = dataclasses.replace(
             self._app.config,
             kube_context=context,
-            namespace=result.context_namespace or self._app.config.namespace,
+            namespace=result.context_namespace or "default",
         )
         self._app._pod_resize_supported = result.pod_resize_supported
         self._app._provider_hint = result.provider_hint
