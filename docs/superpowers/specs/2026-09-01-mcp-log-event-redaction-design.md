@@ -8,7 +8,8 @@
 
 Redact credentials from Kubernetes log lines and event messages at the tool
 producer boundary, before size clamping, so MCP clients and embedded providers
-receive the same safe text and deterministic redaction evidence.
+receive the same safe text while `ToolOutcome` retains deterministic redaction
+evidence for Korvid's internal agent and audit surfaces.
 
 ## Context
 

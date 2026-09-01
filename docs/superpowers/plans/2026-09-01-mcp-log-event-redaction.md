@@ -300,7 +300,7 @@ async def test_mcp_event_results_are_redacted_by_the_producer() -> None:
 Run:
 
 ```bash
-PYTHONPATH=src /Users/hwang-inhwan/workspace/kube/.venv/bin/python -m pytest \
+UV_FROZEN=1 uv run pytest \
   -p no:tach tests/tools/test_executor_security.py tests/mcp/test_server.py \
   -k 'get_logs_redacts_full_text or get_events_redacts_text or get_logs_redacts_before or log_redaction_failure or event_redaction_failure or mcp_log_results_are_redacted or mcp_event_results_are_redacted' -q
 ```
@@ -365,17 +365,16 @@ Replace the final `_get_events` return with:
 Run:
 
 ```bash
-PYTHONPATH=src /Users/hwang-inhwan/workspace/kube/.venv/bin/python -m pytest \
+UV_FROZEN=1 uv run pytest \
   -p no:tach tests/tools/test_executor_core.py tests/tools/test_executor_security.py \
   tests/mcp/test_server.py tests/agent/test_outbound.py -q
-/Users/hwang-inhwan/workspace/kube/.venv/bin/ruff check \
+UV_FROZEN=1 uv run ruff check \
   src/korvid/tools/executor.py tests/tools/test_executor_security.py \
   tests/mcp/test_server.py
-/Users/hwang-inhwan/workspace/kube/.venv/bin/ruff format --check \
+UV_FROZEN=1 uv run ruff format --check \
   src/korvid/tools/executor.py tests/tools/test_executor_security.py \
   tests/mcp/test_server.py
-MYPYPATH=src /Users/hwang-inhwan/workspace/kube/.venv/bin/mypy \
-  src/korvid/tools/executor.py
+UV_FROZEN=1 uv run mypy src/korvid/tools/executor.py
 ```
 
 Expected: affected tests, Ruff, format check, and mypy pass.
@@ -405,7 +404,7 @@ Run:
 
 ```bash
 UV_FROZEN=1 make check
-/Users/hwang-inhwan/workspace/kube/.venv/bin/ruff format --check src tests
+UV_FROZEN=1 uv run ruff format --check src tests
 ```
 
 Expected: Ruff, mypy, pytest, Tach, and format checks pass. If the local
