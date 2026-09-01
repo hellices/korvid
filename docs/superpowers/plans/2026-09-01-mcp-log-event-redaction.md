@@ -74,7 +74,7 @@ async def test_get_logs_redacts_full_text_and_preserves_container() -> None:
             yield LogLine(
                 pod=pod,
                 container=container,
-                text="Authorization: Bearer log-auth-sentinel",
+                text="Authorization: log-auth-sentinel",
             )
 
     outcome = await make_executor(CredentialLogs()).execute_recorded(
@@ -278,7 +278,7 @@ async def test_mcp_event_results_are_redacted_by_the_producer() -> None:
                     "type": "Warning",
                     "reason": "Failed",
                     "count": 1,
-                    "message": "Authorization: Bearer mcp-auth-sentinel",
+                    "message": "Authorization: mcp-auth-sentinel",
                 }
             ]
 
