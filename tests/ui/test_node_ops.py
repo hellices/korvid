@@ -1206,6 +1206,120 @@ async def test_drain_context_switch_during_plan_refuses_confirmation(
         assert not audit_path.exists()
 
 
+async def test_drain_state_is_released_once_the_drain_settles(tmp_path: Path) -> None:
+    """A finished drain must hand the node back.
+
+    While a drain runs, the node it owns is remembered so the drain key can
+    cancel it and so uncordon is refused. If that ownership outlives the
+    drain, the session is wedged: every later node write is answered with
+    "drain of nodes/worker-1 in progress". The write slot is released
+    *after* the ownership is dropped, so `active_writes() == 0` is the point
+    at which the node must already be free.
+    """
+    rec = NodeRecorder()  # empty plan: the drain cordons and finishes
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app(rec, audit_path, extra_nodes=("worker-2",))
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: _resource_row_count(app) > 0, label="initial row rendered")
+        await _to_nodes(pilot)
+        await pilot.press("D")
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="drain dialog")
+        await _confirm_typed(pilot, "worker-1")
+        await until(
+            pilot,
+            lambda: audit_path.exists() and "success" in audit_path.read_text(),
+            label="drain success audited",
+        )
+        await until(pilot, lambda: app._writes.active_writes() == 0, label="write slot released")
+
+        assert app._resource_writes.drain_node_name is None
+
+        # …and the next node is drainable: the user reaches its dialog
+        # instead of the "drain in progress" refusal.
+        await pilot.press("down")
+        await pilot.press("D")
+        await until(
+            pilot,
+            lambda: isinstance(app.screen, ConfirmScreen),
+            label="second drain dialog",
+        )
+        assert not any("in progress" in n.message for n in app._notifications)
+
+
+class _FocusSwitchDuringGraphLister:
+    """list_relationship_objects fake that moves focus to the other pane of a
+    split workspace from within the call — the `ctrl+w w` a user presses
+    while the drain's impact graph is still loading."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str | None]] = []
+        self._app: KorvidApp | None = None
+
+    def attach(self, app: KorvidApp) -> None:
+        self._app = app
+
+    async def __call__(self, meta: ResourceMeta, namespace: str | None) -> list[Summary]:
+        self.calls.append((meta.plural, namespace))
+        if self._app is not None and meta.plural == "nodes":
+            self._app._workspace_ctl.focus_other_pane()
+        if meta.plural == "nodes":
+            return [
+                GenericSummary(
+                    name="worker-1", namespace="", kind="Node", created="", uid="node-uid-1"
+                )
+            ]
+        if meta.plural == "pods":
+            return [
+                PodSummary(
+                    name="web-1",
+                    namespace="default",
+                    phase="Running",
+                    ready="1/1",
+                    restarts=0,
+                    node="worker-1",
+                    uid="pod-uid-1",
+                )
+            ]
+        return []
+
+
+async def test_drain_focus_change_during_graph_load_refuses_confirmation(
+    tmp_path: Path,
+) -> None:
+    """The node write gate carries the pane the drain was raised from.
+
+    Both panes of the split show the same node row, so kind, name and uid
+    all still match after focus moves: only the origin pane can tell that
+    confirming now would execute against a pane the user is no longer
+    acting in. It must cancel before the dialog.
+    """
+    plan = DrainPlan(targets=(_target("web-1"),), skipped_daemonset=(), skipped_mirror=())
+    rec = NodeRecorder(plan=plan)
+    audit_path = tmp_path / "audit.jsonl"
+    lister = _FocusSwitchDuringGraphLister()
+    app = _make_app_with_custom_lister(rec, audit_path, lister)
+    lister.attach(app)
+    async with app.run_test() as pilot:
+        await _to_nodes(pilot)
+        await pilot.press("ctrl+w", "v")
+        await until(
+            pilot,
+            lambda: app.query_one("#pane-1", ResourceTable).row_count > 0,
+            label="second pane showing the same node",
+        )
+        await pilot.press("D")  # raised from the new pane
+        await until(
+            pilot,
+            lambda: any("cancelled" in n.message for n in app._notifications),
+            label="drain cancelled notification",
+        )
+        assert not isinstance(app.screen, ConfirmScreen)
+        assert app._writes.active_writes() == 0
+        assert not any(call[0] == "cordon" for call in rec.calls)
+        assert not any(call[0] == "evict" for call in rec.calls)
+        assert not audit_path.exists()
+
+
 async def test_cancelled_drain_graph_load_dispatches_nothing(tmp_path: Path) -> None:
     """Task cancellation propagates from a blocked graph LIST without side effects."""
     plan = DrainPlan(targets=(_target("web-1"),), skipped_daemonset=(), skipped_mirror=())

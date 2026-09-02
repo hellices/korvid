@@ -24,6 +24,10 @@ from korvid.ui.shell import (
     DEBUG_IMAGE,
     build_debug_argv,
     build_exec_argv,
+    build_node_debug_create_argv,
+    build_pod_attach_argv,
+    build_pod_get_argv,
+    build_pod_wait_argv,
 )
 from korvid.ui.widgets.confirm_screen import ConfirmScreen, ImagePrompt
 from korvid.ui.widgets.pick_screen import PickScreen
@@ -32,6 +36,150 @@ from korvid.ui.widgets.resource_table import ResourceTable
 from .waits import until
 
 SH_FALLBACK = "command -v bash >/dev/null 2>&1 && exec bash || exec sh"
+
+# ---------------------------------------------------------------------------
+# Literal argv contracts for the non-exec kubectl builders.
+#
+# Every pilot below compares the *invoked* command against the builder's own
+# output, so both sides move together under any mutation. These are the only
+# assertions that pin the literal command line korvid runs against a cluster:
+# which context it targets, that the context reaches kubectl rather than the
+# in-container shell (before `--`), and the privileged/detached flags the node
+# debugger's approval dialog promises.
+# ---------------------------------------------------------------------------
+
+
+def test_build_debug_argv_is_pinned_to_the_context_and_shares_the_target_namespace() -> None:
+    assert build_debug_argv("kube-system", "cilium-abc", "cilium-agent", context="staging") == [
+        "kubectl",
+        "debug",
+        "--context",
+        "staging",
+        "-it",
+        "-n",
+        "kube-system",
+        "cilium-abc",
+        f"--image={DEBUG_IMAGE}",
+        "--target=cilium-agent",
+        "--",
+        "sh",
+    ]
+
+
+def test_build_debug_argv_without_a_target_or_context() -> None:
+    """No container to share a process namespace with, and an unpinned
+    session: neither flag may be invented."""
+    assert build_debug_argv("ns", "pod", None, image="lightruncom/koolkits:jvm") == [
+        "kubectl",
+        "debug",
+        "-it",
+        "-n",
+        "ns",
+        "pod",
+        "--image=lightruncom/koolkits:jvm",
+        "--",
+        "sh",
+    ]
+
+
+def test_build_node_debug_create_argv_is_privileged_detached_and_context_pinned() -> None:
+    """The node debugger mounts the host filesystem and the dialog promises a
+    privileged pod on the context korvid connected with. A dropped
+    `--context` orphans that pod on whatever cluster kubeconfig happens to
+    point at; a dropped `--profile=sysadmin` silently downgrades it."""
+    assert build_node_debug_create_argv("worker-1", "debug-ns", context="staging") == [
+        "kubectl",
+        "debug",
+        "--context",
+        "staging",
+        "-it",
+        "--attach=false",
+        "-n",
+        "debug-ns",
+        "node/worker-1",
+        f"--image={DEBUG_IMAGE}",
+        "--profile=sysadmin",
+        "--",
+        "sh",
+        "-c",
+        SH_FALLBACK,
+    ]
+
+
+def test_build_node_debug_create_argv_keeps_kubectl_flags_out_of_the_container() -> None:
+    """`--` separates kubectl's own flags from the command the container runs;
+    a context after it would be handed to `sh` on the node instead."""
+    argv = build_node_debug_create_argv("worker-1", "debug-ns", context="staging")
+    assert argv.index("--context") < argv.index("--")
+    assert argv.index("--profile=sysadmin") < argv.index("--")
+    # `kubectl debug` has no -o/--output: the created pod's name is parsed
+    # from its message instead, so passing one would fail flag parsing.
+    assert "-o" not in argv
+    assert "--output" not in argv
+
+
+def test_build_pod_wait_argv_is_context_pinned() -> None:
+    assert build_pod_wait_argv("debug-ns", "node-debugger-x", context="staging") == [
+        "kubectl",
+        "wait",
+        "--context",
+        "staging",
+        "-n",
+        "debug-ns",
+        "pod/node-debugger-x",
+        "--for=condition=Ready",
+        "--timeout=60s",
+    ]
+
+
+def test_build_pod_attach_argv_is_context_pinned() -> None:
+    assert build_pod_attach_argv("debug-ns", "node-debugger-x", context="staging") == [
+        "kubectl",
+        "attach",
+        "--context",
+        "staging",
+        "-it",
+        "-n",
+        "debug-ns",
+        "node-debugger-x",
+    ]
+
+
+def test_build_pod_get_argv_is_context_pinned() -> None:
+    """The uid precondition cleanup relies on this reading the same cluster
+    the debugger pod was created on."""
+    assert build_pod_get_argv("prod", "api-1", context="staging") == [
+        "kubectl",
+        "get",
+        "pod",
+        "--context",
+        "staging",
+        "-n",
+        "prod",
+        "api-1",
+        "-o",
+        "json",
+    ]
+
+
+def test_argv_builders_omit_the_context_flag_when_the_session_pinned_none() -> None:
+    """No pinned context means kubectl's own current-context: an invented
+    `--context` would send the command somewhere the user never chose."""
+    assert build_debug_argv("ns", "pod") == [
+        "kubectl",
+        "debug",
+        "-it",
+        "-n",
+        "ns",
+        "pod",
+        f"--image={DEBUG_IMAGE}",
+        "--",
+        "sh",
+    ]
+    assert "--context" not in build_node_debug_create_argv("worker-1", "ns")
+    assert "--context" not in build_pod_wait_argv("ns", "pod")
+    assert "--context" not in build_pod_attach_argv("ns", "pod")
+    assert "--context" not in build_pod_get_argv("ns", "pod")
 
 
 async def test_shell_uses_config_context() -> None:
