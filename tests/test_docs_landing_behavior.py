@@ -13,17 +13,49 @@ ROOT = Path(__file__).parent.parent
 JS_TESTS = ROOT / "tests" / "js"
 
 
-class _StartTagCollector(HTMLParser):
+class _SceneMarkupParser(HTMLParser):
     def __init__(self) -> None:
         super().__init__()
-        self.tags: list[tuple[str, dict[str, str | None]]] = []
+        self.switchers = 0
+        self.tabs: dict[str, str] = {}
+        self.panels: dict[str, str] = {}
+        self.video_panels: set[str] = set()
+        self.fallback_panels: set[str] = set()
+        self._inside_switcher = False
+        self._current_panel: str | None = None
 
     def handle_starttag(
         self,
         tag: str,
         attrs: list[tuple[str, str | None]],
     ) -> None:
-        self.tags.append((tag, dict(attrs)))
+        attributes = dict(attrs)
+        if tag == "section" and "data-scene-switcher" in attributes:
+            self.switchers += 1
+            self._inside_switcher = True
+        if not self._inside_switcher:
+            return
+        if attributes.get("role") == "tab":
+            self.tabs[attributes["aria-controls"]] = attributes["id"]
+        if attributes.get("role") == "tabpanel":
+            self._current_panel = attributes["id"]
+            self.panels[attributes["id"]] = attributes["aria-labelledby"]
+        if self._current_panel is None:
+            return
+        if tag == "video" and "controls" in attributes:
+            self.video_panels.add(self._current_panel)
+        if (
+            tag == "img"
+            and "scene-panel__fallback" in (attributes.get("class") or "").split()
+            and (attributes.get("alt") or "").strip()
+        ):
+            self.fallback_panels.add(self._current_panel)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "article":
+            self._current_panel = None
+        if tag == "section" and self._inside_switcher:
+            self._inside_switcher = False
 
 
 def _run_harness(name: str) -> subprocess.CompletedProcess[str]:
@@ -45,26 +77,13 @@ def test_scene_switcher_behavior() -> None:
 
 
 def test_landing_markup_connects_scene_controls_to_fallback_content() -> None:
-    parser = _StartTagCollector()
+    parser = _SceneMarkupParser()
     parser.feed((ROOT / "docs" / "index.md").read_text())
 
-    switchers = [attrs for _, attrs in parser.tags if "data-scene-switcher" in attrs]
-    tabs = [attrs for _, attrs in parser.tags if attrs.get("role") == "tab"]
-    panels = [attrs for _, attrs in parser.tags if attrs.get("role") == "tabpanel"]
-    controlled_panels = {tab["aria-controls"]: tab["id"] for tab in tabs}
-    labelled_panels = {panel["id"]: panel["aria-labelledby"] for panel in panels}
-    videos = [attrs for tag, attrs in parser.tags if tag == "video"]
-    fallbacks = [
-        attrs
-        for tag, attrs in parser.tags
-        if tag == "img" and "scene-panel__fallback" in (attrs.get("class") or "").split()
-    ]
-
-    assert len(switchers) == 1
-    assert controlled_panels == labelled_panels
-    assert len(videos) == len(panels) == len(fallbacks)
-    assert all("controls" in video for video in videos)
-    assert all((fallback.get("alt") or "").strip() for fallback in fallbacks)
+    assert parser.switchers == 1
+    assert parser.tabs
+    assert parser.tabs == parser.panels
+    assert set(parser.panels) == parser.video_panels == parser.fallback_panels
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
