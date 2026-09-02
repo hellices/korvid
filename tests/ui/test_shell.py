@@ -1590,6 +1590,49 @@ async def test_debug_aborts_when_pod_replaced_after_prompt(tmp_path: Path) -> No
     assert not audit_path.exists() or "debug" not in audit_path.read_text()
 
 
+async def test_debug_aborts_when_final_pod_uid_lookup_unavailable(tmp_path: Path) -> None:
+    calls = 0
+
+    async def get_manifest(kind: str, ns: str | None, name: str) -> dict[str, Any]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return {"metadata": {"name": name, "namespace": ns or "", "uid": "uid-original"}}
+        raise TimeoutError
+
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app(
+        [_pod("api-1")],
+        audit=AuditLog(audit_path),
+        get_manifest=get_manifest,
+    )
+    shell_calls: list[list[str]] = []
+    debug_calls: list[list[str]] = []
+
+    with (
+        patch("shutil.which", return_value="/usr/bin/kubectl"),
+        patch("subprocess.call", side_effect=_recording_call(shell_calls)),
+        patch("subprocess.Popen", side_effect=_fake_popen(debug_calls)),
+        patch("subprocess.run", return_value=SimpleNamespace(returncode=1)),
+        patch.object(type(app), "suspend", side_effect=lambda: _noop_cm()),
+    ):
+        async with app.run_test() as pilot:
+            await pilot.pause(0.1)
+            await pilot.press("s")
+            await until(pilot, lambda: isinstance(app.screen, PickScreen))
+            await pilot.press("enter")
+            await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+            await pilot.press("y")
+            await until(
+                pilot,
+                lambda: any("could not be verified" in str(n.message) for n in app._notifications),
+            )
+
+    assert [argv[1] for argv in shell_calls] == ["exec"]
+    assert debug_calls == []
+    assert not audit_path.exists() or "debug" not in audit_path.read_text()
+
+
 async def test_debug_runs_when_pod_uid_unchanged(tmp_path: Path) -> None:
     """Same incarnation at prompt and execution time -> the debug proceeds."""
     app = make_app(

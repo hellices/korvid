@@ -7,7 +7,7 @@ import contextlib
 import io
 import json
 import tarfile
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any
 
@@ -122,6 +122,16 @@ def audit_entries(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
         return []
     return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+
+
+def _raising_manifest(
+    failure_factory: Callable[[], Exception],
+) -> Callable[[str, str | None, str], Any]:
+    async def get_manifest(kind: str, ns: str | None, name: str) -> dict[str, Any]:
+        del kind, ns, name
+        raise failure_factory()
+
+    return get_manifest
 
 
 async def test_ctrl_t_requires_pods_kind() -> None:
@@ -460,6 +470,62 @@ async def test_upload_blocked_when_pod_replaced_after_approval(tmp_path: Path) -
         )
     assert opener.calls == []
     assert audit_entries(audit_path) == []
+
+
+@pytest.mark.parametrize("direction", ["upload", "download"])
+@pytest.mark.parametrize(
+    ("failure_factory", "failure_label"),
+    [
+        (TimeoutError, "timeout"),
+        (lambda: RuntimeError("api unavailable"), "runtime-error"),
+    ],
+    ids=["timeout", "runtime-error"],
+)
+async def test_transfer_blocked_when_final_uid_lookup_unavailable(
+    tmp_path: Path,
+    direction: str,
+    failure_factory: Callable[[], Exception],
+    failure_label: str,
+) -> None:
+    del failure_label
+    opener = FakeExecOpener()
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app(
+        [_pod("api-1", uid="uid-approved")],
+        open_pod_exec=opener,
+        audit=AuditLog(audit_path, context="test"),
+        get_manifest=_raising_manifest(failure_factory),
+    )
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: app.query_one(ResourceTable).row_count == 1, label="rows")
+        await pilot.press("ctrl+t")
+        await until(pilot, lambda: isinstance(app.screen, TransferScreen), label="dialog")
+        if direction == "upload":
+            source = tmp_path / "source"
+            source.write_bytes(b"x")
+            _dialog(app).select_upload()
+            _dialog(app).query_one("#transfer-local", Input).value = str(source)
+            _dialog(app).query_one("#transfer-remote", Input).value = "/tmp/source"
+        else:
+            _dialog(app).query_one("#transfer-remote", Input).value = "/tmp/source"
+            _dialog(app).query_one("#transfer-local", Input).value = str(tmp_path / "source")
+        await pilot.press("enter")
+        if direction == "upload":
+            await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="approval")
+            await pilot.press("y")
+        await until(
+            pilot,
+            lambda: any("could not be verified" in str(n.message) for n in app._notifications),
+            label="retryable verification warning",
+        )
+
+    assert opener.calls == []
+    assert audit_entries(audit_path) == []
+    messages = [str(notification.message) for notification in app._notifications]
+    assert any("Retry" in message for message in messages)
+    assert all(
+        "no longer exists" not in message and "was replaced" not in message for message in messages
+    )
 
 
 async def test_download_blocked_when_pod_replaced(tmp_path: Path) -> None:

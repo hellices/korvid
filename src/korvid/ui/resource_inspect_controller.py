@@ -383,12 +383,7 @@ class ResourceInspectController:
         self, namespace: str, name: str, approved_uid: str, *, action: str
     ) -> bool:
         """Re-verify the approved pod incarnation just before `action`
-        executes; notifies and returns False when the pod is gone or replaced.
-
-        Fails *open* when the lookup cannot answer (uid None): the flows that
-        use this - the debug fallback and the transfer - carry their own
-        preconditions, and blocking on an unreachable metadata read would
-        turn a transient API hiccup into a refused, already-approved action.
+        executes; only the same non-None uid permits the action to proceed.
         """
         try:
             current_uid = await self._target_uid("pods", namespace, name)
@@ -398,7 +393,14 @@ class ResourceInspectController:
                 severity="warning",
             )
             return False
-        if current_uid is not None and current_uid != approved_uid:
+        if current_uid is None:
+            self._ui.notify(
+                f"{action} cancelled - pod {name} could not be verified. "
+                "Retry when the cluster is reachable.",
+                severity="warning",
+            )
+            return False
+        if current_uid != approved_uid:
             self._ui.notify(
                 f"{action} cancelled - pod {name} was replaced since the prompt was shown.",
                 severity="warning",
