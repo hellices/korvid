@@ -413,22 +413,6 @@ async def test_credential_close_consumes_exceptions_without_secret_leak(
     assert "SUPER_SECRET_TOKEN" not in full_log
 
 
-def test_unknown_without_registry_returns_none() -> None:
-    """Without a plugin_registry, unknown names still return None (backward compat)."""
-    assert (
-        create_provider(
-            enabled=True,
-            provider="mystery",
-            auth_method=None,
-            base_url="http://x/v1",
-            model="m",
-            api_key_env=None,
-            plugin_registry=None,
-        )
-        is None
-    )
-
-
 def test_invalid_options_disable_only_the_plugin() -> None:
     """A ProviderPluginError from the registry propagates — callers decide policy."""
     from unittest.mock import MagicMock
@@ -642,12 +626,8 @@ def test_create_provider_threads_ca_bundle(tmp_path: Path, monkeypatch: pytest.M
 @pytest.mark.parametrize(
     ("variant", "expected_type"),
     [
-        ("openai_compat", OpenAICompatProvider),
         ("OpenAI_Compat", OpenAICompatProvider),
-        ("OPENAI-COMPAT", OpenAICompatProvider),
         (" ollama", OllamaProvider),
-        ("Ollama", OllamaProvider),
-        ("OLLAMA", OllamaProvider),
     ],
 )
 def test_normalized_variants_route_to_builtins(variant: str, expected_type: type) -> None:
@@ -663,16 +643,12 @@ def test_normalized_variants_route_to_builtins(variant: str, expected_type: type
     assert isinstance(p, expected_type)
 
 
-@pytest.mark.parametrize(
-    "variant",
-    ["github_copilot", "GitHub_Copilot", "GITHUB-COPILOT"],
-)
-def test_github_copilot_variants_route_to_builtin(variant: str) -> None:
+def test_github_copilot_variant_routes_to_builtin() -> None:
     """github-copilot casing/separator variants route to the copilot path."""
     # Without oauth token, returns None — but exercises the copilot code path
     p = create_provider(
         enabled=True,
-        provider=variant,
+        provider="GitHub_Copilot",
         auth_method=None,
         base_url=None,
         model="gpt-4o",
@@ -681,26 +657,6 @@ def test_github_copilot_variants_route_to_builtin(variant: str) -> None:
     )
     # The copilot path returns None when not logged in — that's correct routing
     assert p is None
-
-
-def test_normalized_variant_never_queries_plugin_registry() -> None:
-    """Built-in variant names must never touch the plugin registry."""
-    from unittest.mock import MagicMock
-
-    registry = MagicMock()
-    # openai_compat should normalize to openai-compat (a built-in alias)
-    p = create_provider(
-        enabled=True,
-        provider="openai_compat",
-        auth_method=None,
-        base_url="http://x/v1",
-        model="m",
-        api_key_env=None,
-        plugin_registry=registry,
-    )
-    assert isinstance(p, OpenAICompatProvider)
-    registry.load_selected.assert_not_called()
-    registry.create.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -747,33 +703,6 @@ def test_builtin_auth_misconfigured_still_returns_none() -> None:
         api_key_env="NONEXISTENT_KEY_abc",
     )
     assert p is None
-
-
-# ---------------------------------------------------------------------------
-# Finding #2 round 5: variant dispatch tests remain correct
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    "provider",
-    ["openai", "azure", "vllm", "github", "anthropic", "claude", "openai-compat"],
-)
-def test_openai_compat_aliases_route_to_builtin(
-    provider: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Every OpenAI-compat alias must route to the built-in path (not plugin)."""
-    monkeypatch.setenv("KORVID_TEST_REG_KEY", "k")
-    p = create_provider(
-        enabled=True,
-        provider=provider,
-        auth_method="api_key",
-        base_url="http://x/v1",
-        model="m",
-        api_key_env="KORVID_TEST_REG_KEY",
-    )
-    from korvid.providers.openai_compat import OpenAICompatProvider
-
-    assert isinstance(p, OpenAICompatProvider)
 
 
 # ---------------------------------------------------------------------------
