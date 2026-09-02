@@ -107,6 +107,32 @@ def test_grade_evidence_matches_raw_substrings_not_normalized_text() -> None:
     assert not result.evidence_fetched
 
 
+def test_grade_evidence_group_is_satisfied_by_any_alternative() -> None:
+    """A group of alternative locations accepts whichever path the model took.
+
+    Sixteen shipped groups list two or more routes to the same fact. If the
+    group were scored as an *all*-of, a model that read `endpoints` but not
+    `endpointslices` would be reported as missing evidence it actually
+    fetched - a false model regression published from a paid campaign.
+    """
+    alternative = Evidence(
+        tool="get_resource",
+        contains="exit=137",
+        args={"kind": "pods", "name": "checkout-1", "namespace": "shop"},
+    )
+    scenario = _scenario(expected_evidence=((_EVIDENCE, alternative),))
+    records = [
+        _record(
+            name="get_resource",
+            result="lastState: exit=137",
+            arguments={"kind": "pods", "name": "checkout-1", "namespace": "shop"},
+        )
+    ]
+    result = grade(scenario, "OOMKilled, exit 137.", records)
+    assert result.evidence_fetched
+    assert result.missing_evidence == ()
+
+
 def test_grade_evidence_requires_the_expected_arguments() -> None:
     """The same substring from a call against the *wrong* object is not
     credited as evidence."""
@@ -324,6 +350,33 @@ def test_grade_credits_diagnose_service_against_name_keyed_evidence() -> None:
     ]
     result = grade(scenario, "OOMKilled, exit 137.", records)
     assert result.evidence_fetched
+
+
+def test_grade_credits_diagnose_service_for_endpoint_evidence() -> None:
+    """`diagnose_service` reports on the Service *and* its endpoints, so a
+    single implied kind is too narrow.
+
+    The bundled Service scenarios express endpoint evidence as
+    `get_resource(kind: endpoints)` / `kind: endpointslices`. Implying only
+    `services` would leave those entries ungraded - the tool would be used
+    correctly and still score no evidence.
+    """
+    for kind in ("endpoints", "endpointslices"):
+        evidence = Evidence(
+            tool="get_resource",
+            contains="subsets: []",
+            args={"kind": kind, "name": "web", "namespace": "front"},
+        )
+        scenario = _scenario(expected_evidence=((evidence,),))
+        records = [
+            _record(
+                name="diagnose_service",
+                result="outcome: findings\nsubsets: []",
+                arguments={"service": "web", "namespace": "front"},
+            )
+        ]
+        result = grade(scenario, "OOMKilled, exit 137.", records)
+        assert result.evidence_fetched, kind
 
 
 def test_grade_still_rejects_a_diagnostic_call_against_a_different_object() -> None:

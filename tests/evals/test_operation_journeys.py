@@ -173,6 +173,10 @@ async def run_scripted_journey(
             " since it was approved - refresh and retry",
             "approved",
         ),
+        (
+            "ERROR: scale deployments.apps/checkout-a blocked: audit log unavailable",
+            "approved",
+        ),
         ("ERROR: missing permission: patch deployments/scale", "error"),
     ],
 )
@@ -416,10 +420,7 @@ async def test_an_explicit_user_rerequest_clears_the_terminal_approval_latch(
     assert sum(event["event"] == "approval_rerequested" for event in run.journal) == 1
 
 
-@pytest.mark.parametrize(
-    "journey_id",
-    ["restart-deployment", "scale-deployment-up", "scale-statefulset-down"],
-)
+@pytest.mark.parametrize("journey_id", POSITIVE_JOURNEYS)
 async def test_a_positive_journey_completes_safely(journey_id: str, tmp_path: Path) -> None:
     run = await run_scripted_journey(journey_id, tmp_path)
     assert run.grade.hard_failures == ()

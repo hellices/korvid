@@ -10,7 +10,9 @@ transitions.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
+
+import pytest
 
 from korvid.agent.interaction import (
     InteractionContext,
@@ -125,6 +127,21 @@ async def test_bridge_records_every_applied_action_in_order() -> None:
     )
 
 
+async def test_bridge_reset_restores_an_authored_starting_interaction() -> None:
+    """Journeys reset between turns when the fixture says the *operator*
+    moved the screen. A reset that stopped clearing `actions` would make
+    every turn's transcript accumulate the previous turn's calls."""
+    start = load_interaction(_minimal(), "fixture.yaml: interaction")
+    bridge = EvalUiBridge(start)
+    await bridge.apply(Navigate(view="nodes"))
+    assert bridge.actions != ()
+
+    bridge.reset(start)
+
+    assert bridge.snapshot() == start
+    assert bridge.actions == ()
+
+
 def test_bridge_never_reaches_a_real_screen() -> None:
     """The eval bridge is the whole workspace: no Textual app is involved."""
     import korvid.evals.interaction as module
@@ -140,3 +157,20 @@ def test_bridge_never_reaches_a_real_screen() -> None:
 # ---------------------------------------------------------------------------
 # The recorder is total over the union it is given
 # ---------------------------------------------------------------------------
+
+
+def test_an_action_outside_the_union_is_refused_not_recorded_as_a_drill() -> None:
+    """A sixth action must not be scored as a drill-down.
+
+    The recorder ended in an unguarded `return "drill_down", ...`, so an
+    action added to `UiAction` without a branch here was silently written
+    into the journey transcript as a drill into `action.name` — a graded
+    artifact describing a call the model never made.
+    """
+    from korvid.evals.interaction import _action_call
+
+    class _UnshippedAction:
+        name = "worker-1"
+
+    with pytest.raises(TypeError, match="unsupported UI action"):
+        _action_call(cast("Any", _UnshippedAction()))

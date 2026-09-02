@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from typing import Any
 
 import pytest
@@ -453,6 +454,47 @@ def test_render_markdown_marks_estimated_token_totals() -> None:
     )
     report = ScenarioReport(scenario_id="oom-killed", root_cause="oom_killed", runs=[run])
     assert "~0.0/5.0" in render_markdown([report])
+
+
+async def test_on_target_tool_calls_credit_any_alternative_in_an_evidence_group() -> None:
+    """`on_target` is an any-of over the group, like the grader's own
+    evidence check but a second, independent implementation.
+
+    Sixteen shipped groups list two or more routes to the same fact. An
+    all-of here would report a correct read as off-target and publish a
+    tool-use regression the model never had.
+    """
+    base = _oom_scenario()
+    scenario = replace(
+        base,
+        expected_evidence=(
+            (
+                # Two different objects, either of which proves the fact —
+                # the shape sixteen shipped groups use (endpoints vs
+                # endpointslices, pod vs owning workload).
+                Evidence(
+                    tool="get_resource",
+                    contains="Ready",
+                    args={"kind": "nodes", "name": "node-a"},
+                ),
+                Evidence(
+                    tool="diagnose_pod",
+                    contains="exit=137",
+                    args={"pod": "checkout-1", "namespace": "shop"},
+                ),
+            ),
+        ),
+    )
+    report = await run_scenario(
+        scenario,
+        provider_factory=lambda: ScriptedProvider(_good_script()),
+        executor_factory=lambda: _executor_factory(scenario),
+        repetitions=1,
+    )
+    run = report.runs[0]
+    assert run.tool_calls == 1
+    assert run.on_target_tool_calls == 1
+    assert run.grade.evidence_fetched
 
 
 async def test_on_target_tool_calls_require_matching_evidence_arguments() -> None:

@@ -11,6 +11,7 @@ from typing import Any
 
 import pytest
 
+from korvid.agent import prompt_harness, prompt_packs
 from korvid.evals.__main__ import (
     exit_code,
     prompt_fingerprint,
@@ -147,3 +148,36 @@ def test_prompt_fingerprint_is_stable_and_changes_with_the_prompt() -> None:
     changed = prompt_fingerprint(policy, grind=PromptGrind(tier_pack="Be terse."))["sha256"]
     assert first == again
     assert first != changed
+
+
+def test_prompt_source_reflects_the_effective_prompt_not_the_flag() -> None:
+    """`source` decides publishability: a campaign run against a ground
+    prompt must not publish provenance claiming the shipped prompts.
+
+    Both polarities are asserted here because either constant — a
+    hard-coded `"default"`, or `"override"` whenever a grind was supplied —
+    makes the published attribution wrong.
+    """
+    reproduces_the_pack = PromptGrind(tier_pack=prompt_packs.LOW_KORVID_OPERATOR_PACK)
+    differs = PromptGrind(tier_pack="You are terse.")
+
+    assert prompt_fingerprint(_policy(), grind=reproduces_the_pack)["source"] == "default"
+    assert prompt_fingerprint(_policy(), grind=differs)["source"] == "override"
+    payload = run_payload([_report()], policy=_policy(), grind=differs)
+    assert payload["meta"]["prompts"]["source"] == "override"
+    assert len(payload["meta"]["prompts"]["sha256"]) == 64
+
+
+def test_prompt_fingerprint_covers_the_composed_prompt_not_just_the_pack(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The digest must identify the actual model input.
+
+    The safety contract and the armed-capability clauses are composed onto
+    every request; a digest over the tier pack alone would call two
+    behaviourally different runs comparable.
+    """
+    policy = _policy()
+    before = prompt_fingerprint(policy)["sha256"]
+    monkeypatch.setattr(prompt_harness, "SAFETY_CONTRACT", "Reworded safety contract.")
+    assert prompt_fingerprint(policy)["sha256"] != before
