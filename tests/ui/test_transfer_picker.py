@@ -137,6 +137,26 @@ class TestRemotePicker:
             prompts = [str(options.get_option_at_index(i).prompt) for i in range(3)]
             assert prompts == ["../", "config/", "app.log"]
 
+    async def test_large_remote_listing_stays_visible_and_escape_returns_focus(self) -> None:
+        opener = FakeExecOpener(_listing(*(f"entry-{i:04d}" for i in range(1_000))))
+        app = make_app([_pod("api-1")], open_pod_exec=opener)
+        async with app.run_test() as pilot:
+            dialog = await _open_dialog(pilot, app)
+            remote = dialog.query_one("#transfer-remote", Input)
+            remote.value = "/srv/"
+            remote.focus()
+            await pilot.press("ctrl+o")
+            await until(
+                pilot, lambda: isinstance(app.screen, RemotePathPickerScreen), label="picker"
+            )
+            options = app.screen.query_one(OptionList)
+            await until(pilot, lambda: options.option_count == 1_001, label="options")
+            options.focus()
+            await pilot.press("escape")
+            await until(pilot, lambda: app.screen is dialog, label="dialog closed")
+            await until(pilot, lambda: remote.has_focus, label="remote focus")
+            assert remote.value == "/srv/"
+
     async def test_selecting_file_fills_remote_input(self) -> None:
         opener = FakeExecOpener(_listing("app.log"))
         app = make_app([_pod("api-1")], open_pod_exec=opener)
