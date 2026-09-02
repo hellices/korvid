@@ -265,7 +265,13 @@ def test_cli_replay_publishes_a_rendered_cell_run_as_event_to_render(
     assert result == 0
     latency = json.loads(json_path.read_text())["latency"]
     assert latency["update_latency_kind"] == "event_to_render"
-    assert latency["event_to_render"]["p95_seconds"] is None
+    assert latency["event_to_render"] == {
+        "count": 0,
+        "p50_seconds": None,
+        "p95_seconds": None,
+        "p99_seconds": None,
+        "maximum_seconds": None,
+    }
     assert latency["watch_to_diff_completion"] is None
     assert "- Event to render p95: `n/a`" in markdown_path.read_text()
 
