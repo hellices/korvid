@@ -1613,7 +1613,36 @@ async def test_agent_write_waits_for_inline_input_focus_to_clear(tmp_path: Path)
     await settle()
     assert env.ui.screens == []
     assert env.ui.messages() == [
-        "Agent write approval pending - leave the active input using Tab/Esc to review"
+        "Agent write approval pending - leave the active input using Tab to review"
+    ]
+
+    env.ui.inline_active = False
+    await env.ui.wait_for_screens()
+    assert isinstance(env.ui.screens[-1][0], ConfirmScreen)
+    env.ui.answer(False)
+    out = await request
+    assert out.startswith("denied")
+    assert ops.calls == []
+
+
+async def test_agent_write_updates_pending_message_when_blocker_changes(tmp_path: Path) -> None:
+    ops = RecordingOps()
+    env = Env(tmp_path=tmp_path, ops=ops)
+
+    request = asyncio.ensure_future(
+        env.controller.agent_request_write("delete", "pods", "web-1", "default")
+    )
+    await settle()
+    assert env.ui.messages() == [
+        "Agent write approval pending - open the agent panel (Ctrl-A) to review"
+    ]
+
+    env.panel.visible = True
+    env.ui.inline_active = True
+    await asyncio.sleep(0.06)
+    assert env.ui.messages() == [
+        "Agent write approval pending - open the agent panel (Ctrl-A) to review",
+        "Agent write approval pending - leave the active input using Tab to review",
     ]
 
     env.ui.inline_active = False

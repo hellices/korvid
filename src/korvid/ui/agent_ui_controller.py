@@ -2010,25 +2010,31 @@ class AgentUiController:
 
     def _pending_approval_message(self) -> str:
         if self._ui.inline_input_active():
-            return "Agent write approval pending - leave the active input using Tab/Esc to review"
+            return "Agent write approval pending - leave the active input using Tab to review"
         return "Agent write approval pending - open the agent panel (Ctrl-A) to review"
 
     async def _wait_until_surfaceable(self, deadline: float) -> bool:
-        """Poll until an approval dialog may surface (panel expanded, no other
-        screen on top); False when the deadline passes first."""
+        """Poll until an approval dialog may surface; False on timeout."""
         loop = asyncio.get_running_loop()
         if self.can_surface_approval():
             return True
-        self._ui.notify(self._pending_approval_message(), severity="warning", timeout=10)
+        message = self._pending_approval_message()
+        self._ui.notify(message, severity="warning", timeout=10)
         last_reminder = loop.time()
         while not self.can_surface_approval():
-            if loop.time() >= deadline:
+            now = loop.time()
+            if now >= deadline:
                 return False
-            if loop.time() - last_reminder >= 30:
+            current_message = self._pending_approval_message()
+            if current_message != message:
+                self._ui.notify(current_message, severity="warning", timeout=10)
+                message = current_message
+                last_reminder = now
+            elif now - last_reminder >= 30:
                 # The first toast fades after 10s: keep reminding so the
                 # request does not silently expire.
-                self._ui.notify(self._pending_approval_message(), severity="warning", timeout=10)
-                last_reminder = loop.time()
+                self._ui.notify(message, severity="warning", timeout=10)
+                last_reminder = now
             await asyncio.sleep(0.05)
         return True
 

@@ -33,10 +33,13 @@ from live Textual focus:
 2. exactly one screen is stacked;
 3. no inline input surface owns focus.
 
-The existing wait loop and deadline remain unchanged. A blocked approval stays
-pending, emits a blocker-specific reminder (`Ctrl-A` when the panel is closed,
-`Tab/Esc` when inline input owns focus), and surfaces after focus leaves the
-inline editor. No focus is stolen and no new timer heuristic is introduced.
+The existing wait-loop deadline and `0.05` second poll remain unchanged. A
+blocked approval stays pending, emits a blocker-specific reminder (`Ctrl-A`
+when the panel is closed, `Tab` when inline input owns focus), and surfaces
+after focus leaves the inline editor. If the blocker changes while the request
+is still pending, the controller emits the new distinct reminder immediately;
+unchanged blockers keep the existing 30-second reminder cadence. No focus is
+stolen and no new timer heuristic is introduced.
 
 Every `UiSurface` fake implements the new query explicitly. Controller unit
 tests default it to false and verify the new condition directly.

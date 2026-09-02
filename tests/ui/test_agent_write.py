@@ -469,7 +469,7 @@ async def test_agent_write_stays_pending_while_agent_input_has_focus(tmp_path: P
         await until(
             pilot,
             lambda: any(
-                "leave the active input using Tab/Esc to review" in str(notification.message)
+                "leave the active input using Tab to review" in str(notification.message)
                 for notification in app._notifications
             ),
             label="agent-input-specific pending notification",

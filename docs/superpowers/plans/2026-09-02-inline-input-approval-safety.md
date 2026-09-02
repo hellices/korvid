@@ -4,14 +4,14 @@
 
 **Goal:** Keep agent write approvals pending while an inline input surface owns focus so typing `y` into command, filter, namespace-selection, or agent chat UI can never approve a cluster mutation.
 
-**Architecture:** Extend the `UiSurface` seam with an inline-focus ownership query, teach `AgentUiController.can_surface_approval()` to consult it without changing the existing timeout/reminder loop, and keep the pending toast blocker-specific (`Ctrl-A` for a collapsed panel, `Tab/Esc` for active inline input). Cover that controller path with unit tests first. Then add Textual Pilot regressions that prove each inline surface keeps the `y` keystroke for itself and that the same pending approval surfaces only after focus returns to a non-inline widget.
+**Architecture:** Extend the `UiSurface` seam with an inline-focus ownership query, teach `AgentUiController.can_surface_approval()` to consult it, and keep the pending toast blocker-specific (`Ctrl-A` for a collapsed panel, `Tab` for active inline input). The wait loop keeps its existing timeout, `0.05` poll, and 30-second cadence for unchanged blockers, but must emit a new reminder immediately if the pending blocker changes. Cover that controller path with unit tests first. Then add Textual Pilot regressions that prove each inline surface keeps the `y` keystroke for itself and that the same pending approval surfaces only after focus returns to a non-inline widget.
 
 **Tech Stack:** Python 3.11+, Textual, Textual Pilot, pytest, ruff, mypy, tach, gh CLI
 
 ## Global Constraints
 
 - Prefix every Python command in this plan with `UV_FROZEN=1 uv run`.
-- Keep the existing approval timeout, the `0.05` second wait-loop sleep, and the existing reminder cadence unchanged. Pending toast text may differ by blocker: collapsed panel uses `Agent write approval pending - open the agent panel (Ctrl-A) to review`; active inline input uses `Agent write approval pending - leave the active input using Tab/Esc to review`.
+- Keep the existing approval timeout and the `0.05` second wait-loop sleep unchanged. Unchanged blockers keep the existing 30-second reminder cadence, but a new blocker-specific reminder must be emitted immediately when the pending blocker changes. Pending toast text may differ by blocker: collapsed panel uses `Agent write approval pending - open the agent panel (Ctrl-A) to review`; active inline input uses `Agent write approval pending - leave the active input using Tab to review`.
 - Preserve the security invariants: approvals still require an explicit user keystroke, active input keeps focus until the user leaves it, `run_kubectl` validation remains unchanged, and fail-closed audit logging must still block writes when the audit sink is unavailable.
 - Only focused `Input` widgets and the inline `NamespacePicker` block approval surfacing; ordinary table focus must not block it.
 - Use `tests/ui/waits.py::until()` for new UI state transitions instead of fixed sleeps.
@@ -369,7 +369,7 @@ async def test_agent_write_stays_pending_while_agent_input_has_focus(tmp_path: P
         await until(
             pilot,
             lambda: any(
-                "leave the active input using Tab/Esc to review" in str(notification.message)
+                "leave the active input using Tab to review" in str(notification.message)
                 for notification in app._notifications
             ),
             label="agent-input-specific pending notification",
