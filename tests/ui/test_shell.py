@@ -1617,7 +1617,11 @@ async def test_debug_aborts_when_final_pod_uid_lookup_unavailable(tmp_path: Path
         patch.object(type(app), "suspend", side_effect=lambda: _noop_cm()),
     ):
         async with app.run_test() as pilot:
-            await pilot.pause(0.1)
+            await until(
+                pilot,
+                lambda: app.query_one(ResourceTable).row_count == 1,
+                label="pod row loaded",
+            )
             await pilot.press("s")
             await until(pilot, lambda: isinstance(app.screen, PickScreen))
             await pilot.press("enter")

@@ -101,7 +101,7 @@ and `raise failure_factory()`.
 Run:
 
 ```bash
-PYTHONPATH=src /Users/hwang-inhwan/workspace/kube/.venv/bin/pytest \
+uv run pytest \
   -p no:tach \
   tests/ui/test_transfer.py::test_transfer_blocked_when_final_uid_lookup_unavailable \
   -q
@@ -148,7 +148,7 @@ async def pod_uid_unchanged(
 Run:
 
 ```bash
-PYTHONPATH=src /Users/hwang-inhwan/workspace/kube/.venv/bin/pytest \
+uv run pytest \
   -p no:tach \
   tests/ui/test_transfer.py::test_transfer_blocked_when_final_uid_lookup_unavailable \
   tests/ui/test_transfer.py::test_upload_blocked_when_pod_replaced_after_approval \
@@ -212,7 +212,7 @@ async def test_debug_aborts_when_final_pod_uid_lookup_unavailable(tmp_path: Path
 Run:
 
 ```bash
-PYTHONPATH=src /Users/hwang-inhwan/workspace/kube/.venv/bin/pytest \
+uv run pytest \
   -p no:tach \
   tests/ui/test_shell.py::test_debug_aborts_when_final_pod_uid_lookup_unavailable \
   tests/ui/test_shell.py::test_debug_aborts_when_pod_replaced_after_prompt \
@@ -227,7 +227,7 @@ Expected: 3 passed.
 Run:
 
 ```bash
-PYTHONPATH=src /Users/hwang-inhwan/workspace/kube/.venv/bin/pytest \
+uv run pytest \
   -p no:tach \
   tests/ui/test_transfer.py \
   tests/ui/test_transfer_controller.py \
@@ -243,15 +243,15 @@ Expected: all tests pass with zero warnings.
 Run:
 
 ```bash
-/Users/hwang-inhwan/workspace/kube/.venv/bin/ruff check \
+uv run ruff check \
   src/korvid/ui/resource_inspect_controller.py \
   tests/ui/test_resource_inspect_controller.py tests/ui/test_transfer.py tests/ui/test_shell.py
-/Users/hwang-inhwan/workspace/kube/.venv/bin/ruff format --check \
+uv run ruff format --check \
   src/korvid/ui/resource_inspect_controller.py \
   tests/ui/test_resource_inspect_controller.py tests/ui/test_transfer.py tests/ui/test_shell.py
-PYTHONPATH=src /Users/hwang-inhwan/workspace/kube/.venv/bin/mypy \
+uv run mypy \
   src/korvid/ui/resource_inspect_controller.py
-PYTHONPATH=src /Users/hwang-inhwan/workspace/kube/.venv/bin/tach check
+uv run tach check
 git diff --check
 ```
 
