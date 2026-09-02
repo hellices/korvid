@@ -61,7 +61,7 @@ class _StandardRowRenderer(Protocol):
         *,
         all_namespaces: bool,
         pattern: str,
-        presorted: bool,
+        presorted: bool = False,
     ) -> None: ...
 
 
@@ -136,7 +136,7 @@ def _render_pod_rows(
     )
 
 
-def _adapt_standard_renderer(method_name: str, name: str) -> _RowRenderer:
+def _adapt_standard_renderer(renderer: _StandardRowRenderer, name: str) -> _RowRenderer:
     def adapted(
         table: ResourceTable,
         rows: list[Summary],
@@ -147,7 +147,8 @@ def _adapt_standard_renderer(method_name: str, name: str) -> _RowRenderer:
         presorted: bool,
     ) -> None:
         del metrics
-        getattr(table, method_name)(
+        renderer(
+            table,
             rows,
             all_namespaces=all_namespaces,
             pattern=pattern,
@@ -156,37 +157,6 @@ def _adapt_standard_renderer(method_name: str, name: str) -> _RowRenderer:
 
     adapted.__name__ = name
     return adapted
-
-
-_render_replicaset_rows = _adapt_standard_renderer(
-    "_add_replicaset_rows", "_render_replicaset_rows"
-)
-_render_helm_release_rows = _adapt_standard_renderer(
-    "_add_helm_release_rows", "_render_helm_release_rows"
-)
-_render_helm_revision_rows = _adapt_standard_renderer(
-    "_add_helm_revision_rows", "_render_helm_revision_rows"
-)
-_render_package_rows = _adapt_standard_renderer("_add_package_rows", "_render_package_rows")
-_render_subscription_rows = _adapt_standard_renderer(
-    "_add_subscription_rows", "_render_subscription_rows"
-)
-_render_csv_rows = _adapt_standard_renderer("_add_csv_rows", "_render_csv_rows")
-_render_generic_rows = _adapt_standard_renderer("_add_generic_rows", "_render_generic_rows")
-
-_ROW_RENDERERS: dict[str, _RowRenderer] = {
-    "pods": _render_pod_rows,
-    "replicasets": _render_replicaset_rows,
-    "helmreleases": _render_helm_release_rows,
-    "helmrevisions": _render_helm_revision_rows,
-    "packagemanifests": _render_package_rows,
-    "subscriptions": _render_subscription_rows,
-    "clusterserviceversions": _render_csv_rows,
-}
-
-
-def _row_renderer(kind: str) -> _RowRenderer:
-    return _ROW_RENDERERS.get(kind, _render_generic_rows)
 
 
 # In-place removals cost O(rows) each (DataTable.remove_row rebuilds its
@@ -1348,3 +1318,40 @@ class ResourceTable(DataTable[str | Text]):
                 continue
             cells: list[str | Text] = [obj.name, age]
             self._emit_row(obj, cells, all_namespaces=all_namespaces, stamp=stamp)
+
+
+_render_replicaset_rows = _adapt_standard_renderer(
+    cast(_StandardRowRenderer, ResourceTable._add_replicaset_rows), "_render_replicaset_rows"
+)
+_render_helm_release_rows = _adapt_standard_renderer(
+    cast(_StandardRowRenderer, ResourceTable._add_helm_release_rows), "_render_helm_release_rows"
+)
+_render_helm_revision_rows = _adapt_standard_renderer(
+    cast(_StandardRowRenderer, ResourceTable._add_helm_revision_rows), "_render_helm_revision_rows"
+)
+_render_package_rows = _adapt_standard_renderer(
+    cast(_StandardRowRenderer, ResourceTable._add_package_rows), "_render_package_rows"
+)
+_render_subscription_rows = _adapt_standard_renderer(
+    cast(_StandardRowRenderer, ResourceTable._add_subscription_rows), "_render_subscription_rows"
+)
+_render_csv_rows = _adapt_standard_renderer(
+    cast(_StandardRowRenderer, ResourceTable._add_csv_rows), "_render_csv_rows"
+)
+_render_generic_rows = _adapt_standard_renderer(
+    cast(_StandardRowRenderer, ResourceTable._add_generic_rows), "_render_generic_rows"
+)
+
+_ROW_RENDERERS: dict[str, _RowRenderer] = {
+    "pods": _render_pod_rows,
+    "replicasets": _render_replicaset_rows,
+    "helmreleases": _render_helm_release_rows,
+    "helmrevisions": _render_helm_revision_rows,
+    "packagemanifests": _render_package_rows,
+    "subscriptions": _render_subscription_rows,
+    "clusterserviceversions": _render_csv_rows,
+}
+
+
+def _row_renderer(kind: str) -> _RowRenderer:
+    return _ROW_RENDERERS.get(kind, _render_generic_rows)
