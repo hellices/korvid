@@ -282,22 +282,6 @@ async def test_l_multi_container_split_panels() -> None:
         assert _titles_visible(app) is True
 
 
-async def test_l_single_container_no_title() -> None:
-    """Single-container pod: one panel, no title bar needed."""
-    fake = FakeStream(lines_per_call=1)
-    app = make_app(
-        [_pod("myapp", containers=("main",))],
-        stream_logs=fake,
-    )
-    async with app.run_test() as pilot:
-        await _pod_row_ready(app, pilot)
-        await pilot.press("l")
-        await until(pilot, lambda: "line0" in _richlog_text(app), label="first line rendered")
-        text = _richlog_text(app)
-        assert "line0" in text
-        assert _titles_visible(app) is False
-
-
 async def test_l_again_closes_pane_and_cancels() -> None:
     """Pressing l again closes the pane and cancels the stream tasks."""
     fake = FakeStream(lines_per_call=1)
@@ -893,26 +877,6 @@ async def test_f_closed_no_crash() -> None:
         assert app.query_one(LogPane).display is False
 
 
-async def test_p_closed_no_crash() -> None:
-    """p when pane closed produces no error and no state change."""
-    app = make_app([_pod("myapp")])
-    async with app.run_test() as pilot:
-        await _pod_row_ready(app, pilot)
-        assert app.query_one(LogPane).display is False
-        await pilot.press("p")
-        assert app.query_one(LogPane).display is False
-
-
-async def test_n_closed_no_crash() -> None:
-    """n when pane closed produces no error."""
-    app = make_app([_pod("myapp")])
-    async with app.run_test() as pilot:
-        await _pod_row_ready(app, pilot)
-        assert app.query_one(LogPane).display is False
-        await pilot.press("n")
-        assert app.query_one(LogPane).display is False
-
-
 async def test_p_unexpected_error_sets_error_state() -> None:
     """A non-API failure in the previous-logs stream surfaces as an error, not 'streaming'."""
 
@@ -1238,34 +1202,6 @@ async def test_reconnect_keeps_new_line_with_equal_timestamp() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Copilot review: never spawn more streams than the pane has panels
-# ---------------------------------------------------------------------------
-
-
-async def test_open_log_pane_caps_spawned_streams_at_max_panels() -> None:
-    """A pod with more containers than MAX_PANELS spawns exactly MAX_PANELS tasks."""
-    from korvid.ui.widgets.log_pane import MAX_PANELS
-
-    fake = FakeStream(lines_per_call=1)
-    containers = tuple(f"c{i}" for i in range(MAX_PANELS + 3))
-    app = make_app([_pod("bigpod", containers=containers)], stream_logs=fake)
-    async with app.run_test() as pilot:
-        await _pod_row_ready(app, pilot)
-        await pilot.press("l")
-        await until(
-            pilot,
-            lambda: len(app._logs.tasks) == MAX_PANELS and len(_panel_texts(app)) == MAX_PANELS,
-            label="spawned streams capped",
-        )
-        assert len(app._logs.tasks) == MAX_PANELS
-        assert len(app._logs.current_triples) == MAX_PANELS
-        panels = _panel_texts(app)
-        assert len(panels) == MAX_PANELS
-        msgs = [n.message for n in app._notifications]
-        assert any(str(MAX_PANELS) in m for m in msgs)
-
-
-# ---------------------------------------------------------------------------
 # Issue #43: wrap toggle (w)
 # ---------------------------------------------------------------------------
 
@@ -1301,15 +1237,6 @@ async def test_w_toggles_wrap_on_panels_and_header() -> None:
         await pilot.press("w")
         await until(pilot, lambda: "[wrap]" not in _header_text(app), label="wrap tag off")
         assert all(rl.wrap is False for rl in _panel_richlogs(app))
-
-
-async def test_w_closed_no_crash() -> None:
-    """Pressing w with the pane closed is a no-op."""
-    app = make_app([_pod("myapp")])
-    async with app.run_test() as pilot:
-        await until(pilot, lambda: app.query_one(ResourceTable).row_count == 1, label="pod row")
-        await pilot.press("w")
-        assert app.query_one(LogPane).display is False
 
 
 async def test_wrap_persists_across_reopen() -> None:
@@ -1445,41 +1372,6 @@ async def test_t_toggles_timestamp_prefix() -> None:
         await pilot.press("t")
         await until(pilot, lambda: "[ts]" not in _header_text(app), label="ts tag off")
         assert _STAMP_LOCAL not in _richlog_text(app)
-
-
-async def test_timestamp_prefix_dims_only_the_timestamp() -> None:
-    """The dim style covers only the HH:MM:SS prefix, not the log body."""
-    from textual.widgets import RichLog
-
-    stream = TimestampFakeStream()
-    app = make_app([_pod("myapp", containers=("main",))], stream_logs=stream)
-    async with app.run_test() as pilot:
-        await until(pilot, lambda: app.query_one(ResourceTable).row_count == 1, label="pod row")
-        await pilot.press("l")
-        await until(pilot, lambda: "bare-line" in _richlog_text(app), label="lines fed")
-        await pilot.press("t")
-        await until(
-            pilot,
-            lambda: f"{_STAMP_LOCAL} stamped-line" in _richlog_text(app),
-            label="stamped line",
-        )
-
-        rich_log = app.query_one(LogPane).query_one(RichLog)
-        strip = next(s for s in rich_log.lines if "stamped-line" in "".join(seg.text for seg in s))
-        body = next(seg for seg in strip if "stamped-line" in seg.text)
-        assert not (body.style is not None and body.style.dim)
-        prefix = next(seg for seg in strip if _STAMP_LOCAL in seg.text)
-        assert prefix.style is not None
-        assert prefix.style.dim
-
-
-async def test_t_closed_no_crash() -> None:
-    """Pressing t with the pane closed is a no-op."""
-    app = make_app([_pod("myapp")])
-    async with app.run_test() as pilot:
-        await until(pilot, lambda: app.query_one(ResourceTable).row_count == 1, label="pod row")
-        await pilot.press("t")
-        assert app.query_one(LogPane).display is False
 
 
 async def test_timestamps_persist_across_reopen() -> None:

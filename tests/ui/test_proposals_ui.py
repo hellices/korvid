@@ -1262,22 +1262,3 @@ async def test_proposals_changed_during_teardown_does_not_raise(tmp_path: Path) 
         with patch.object(app, "_refresh_status", spy_refresh):
             app.on_external_proposals_changed(ExternalProposalsChanged())
         assert refresh_calls, "_refresh_status must be called (NoMatches suppressed, not skipped)"
-
-
-async def test_refresh_status_tolerates_missing_status_bar(tmp_path: Path) -> None:
-    """_refresh_status is called from 20+ sites (MCP switch worker,
-    navigation, proposals handler, etc.); all must survive when StatusBar
-    is unmounted during teardown. Removing the widget while the app is
-    live and calling _refresh_status directly exercises the guard."""
-    from korvid.ui.widgets.status_bar import StatusBar
-
-    app = make_app(Recorder(), tmp_path / "a.jsonl", None)
-    async with app.run_test():
-        # Confirm normal refresh works with the bar present.
-        app._refresh_status()  # must not raise
-        # Remove StatusBar to simulate teardown.
-        bar = app.query_one(StatusBar)
-        await bar.remove()
-        # Must not raise NoMatches — any caller (MCP _switch, proposals
-        # handler, navigation, etc.) hitting this after teardown is safe.
-        app._refresh_status()

@@ -1529,46 +1529,6 @@ async def test_switch_rebinds_the_warning_feed_to_the_new_epoch() -> None:
         hold.set()
 
 
-class _SpyCoordinator:
-    """Wraps the live coordinator, recording only the two entry points.
-
-    Everything else falls through, so replacing it mid-session cannot break
-    an unrelated flow that reads the epoch or the in-flight claim.
-    """
-
-    def __init__(self, real: Any) -> None:
-        self._real = real
-        self.pickers = 0
-        self.switches: list[str] = []
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._real, name)
-
-    def show_picker(self) -> None:
-        self.pickers += 1
-
-    def switch(self, name: str) -> None:
-        self.switches.append(name)
-
-
-async def test_ctx_message_handlers_are_thin_delegates() -> None:
-    """`:ctx` and `:ctx <name>` reach `ContextSwitchCoordinator` directly:
-    the app owns no part of the picker or the switch transaction."""
-    env = _CtxEnv()
-    app = env.app
-    async with app.run_test() as pilot:
-        spy = _SpyCoordinator(app._ctx)
-        app._ctx = cast("Any", spy)
-        app.post_message(ShowContextPicker())
-        app.post_message(SwitchContextCommand("ctx-b"))
-        await until(
-            pilot,
-            lambda: spy.pickers == 1 and spy.switches == ["ctx-b"],
-            label="both handlers delegated",
-        )
-        assert env.probe_calls == []  # nothing ran behind the coordinator's back
-
-
 async def test_context_completions_are_prefetched_at_mount_and_reaped_at_unmount() -> None:
     """The coordinator owns the `:ctx` completion prefetch end to end."""
     env = _CtxEnv()

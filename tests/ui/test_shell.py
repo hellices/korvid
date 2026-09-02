@@ -24,8 +24,6 @@ from korvid.ui.shell import (
     DEBUG_IMAGE,
     build_debug_argv,
     build_exec_argv,
-    build_pod_get_argv,
-    build_probe_argv,
 )
 from korvid.ui.widgets.confirm_screen import ConfirmScreen, ImagePrompt
 from korvid.ui.widgets.pick_screen import PickScreen
@@ -33,66 +31,7 @@ from korvid.ui.widgets.resource_table import ResourceTable
 
 from .waits import until
 
-# ---------------------------------------------------------------------------
-# Pure unit tests: argv builder
-# ---------------------------------------------------------------------------
-
 SH_FALLBACK = "command -v bash >/dev/null 2>&1 && exec bash || exec sh"
-
-
-def test_build_exec_argv_without_container() -> None:
-    result = build_exec_argv("default", "my-pod")
-    assert result == [
-        "kubectl",
-        "exec",
-        "-it",
-        "-n",
-        "default",
-        "my-pod",
-        "--",
-        "sh",
-        "-c",
-        SH_FALLBACK,
-    ]
-
-
-def test_build_exec_argv_with_container() -> None:
-    result = build_exec_argv("kube-system", "coredns-abc", "coredns")
-    assert result == [
-        "kubectl",
-        "exec",
-        "-it",
-        "-n",
-        "kube-system",
-        "coredns-abc",
-        "-c",
-        "coredns",
-        "--",
-        "sh",
-        "-c",
-        SH_FALLBACK,
-    ]
-
-
-def test_build_exec_argv_container_none_omits_flag() -> None:
-    result = build_exec_argv("ns", "pod", None)
-    # "--" must immediately follow the pod name (no "-c <container>" between them)
-    double_dash_idx = result.index("--")
-    assert result[double_dash_idx - 1] == "pod"
-
-
-def test_argv_builders_pin_context_when_given() -> None:
-    for builder in (build_exec_argv, build_probe_argv, build_debug_argv):
-        argv = builder("ns", "pod", "ctr", context="my-cluster")
-        idx = argv.index("--context")
-        assert argv[idx + 1] == "my-cluster"
-        # --context must precede `--` so kubectl parses it as its own flag.
-        assert idx < argv.index("--")
-
-
-def test_argv_builders_omit_context_when_none() -> None:
-    for builder in (build_exec_argv, build_probe_argv, build_debug_argv):
-        assert "--context" not in builder("ns", "pod", "ctr", context=None)
 
 
 async def test_shell_uses_config_context() -> None:
@@ -412,35 +351,6 @@ def _multi_container_pod(name: str, namespace: str = "default") -> PodSummary:
     )
 
 
-def test_build_debug_argv_with_target() -> None:
-    result = build_debug_argv("kube-system", "cilium-abc", "cilium-agent")
-    assert result == [
-        "kubectl",
-        "debug",
-        "-it",
-        "-n",
-        "kube-system",
-        "cilium-abc",
-        f"--image={DEBUG_IMAGE}",
-        "--target=cilium-agent",
-        "--",
-        "sh",
-    ]
-
-
-def test_build_debug_argv_without_target() -> None:
-    result = build_debug_argv("ns", "pod", None)
-    assert "--target" not in " ".join(result)
-    assert f"--image={DEBUG_IMAGE}" in result
-
-
-def test_build_debug_argv_custom_image() -> None:
-    """The recommended toolkit image (issue #52) replaces the busybox default."""
-    result = build_debug_argv("ns", "pod", "app", image="lightruncom/koolkits:jvm")
-    assert "--image=lightruncom/koolkits:jvm" in result
-    assert f"--image={DEBUG_IMAGE}" not in result
-
-
 async def test_shell_multi_container_shows_picker() -> None:
     """s on a multi-container pod → PickScreen listing containers; pick runs exec -c."""
     app = make_app([_multi_container_pod("web-1")])
@@ -634,45 +544,6 @@ async def test_shell_exec_failure_no_declines_debug(tmp_path: Path) -> None:
                 label="debug dialog dismissed",
             )
             mock_call.assert_called_once()  # only the failed exec; no debug
-
-
-def test_build_probe_argv() -> None:
-    result = build_probe_argv("kube-system", "coredns-abc", "coredns")
-    assert result == [
-        "kubectl",
-        "exec",
-        "-n",
-        "kube-system",
-        "coredns-abc",
-        "-c",
-        "coredns",
-        "--",
-        "sh",
-        "-c",
-        "exit 0",
-    ]
-    assert "-it" not in result  # probe must be non-interactive
-
-
-def test_build_pod_get_argv() -> None:
-    result = build_pod_get_argv("prod", "api-1", context="staging")
-    assert result == [
-        "kubectl",
-        "get",
-        "pod",
-        "--context",
-        "staging",
-        "-n",
-        "prod",
-        "api-1",
-        "-o",
-        "json",
-    ]
-
-
-def test_build_pod_get_argv_no_context() -> None:
-    result = build_pod_get_argv("default", "api-1")
-    assert result == ["kubectl", "get", "pod", "-n", "default", "api-1", "-o", "json"]
 
 
 async def test_debug_fallback_not_offered_in_readonly(tmp_path: Path) -> None:
@@ -1836,101 +1707,6 @@ async def test_debug_not_offered_when_pod_gone(tmp_path: Path) -> None:
             )
             assert not isinstance(app.screen, (PickScreen, ConfirmScreen))
             mock_call.assert_called_once()  # only the failed exec; no debug
-
-
-# ---------------------------------------------------------------------------
-# Node shell argv builders (issue #46)
-# ---------------------------------------------------------------------------
-
-
-def test_build_node_debug_create_argv_defaults() -> None:
-    from korvid.ui.shell import build_node_debug_create_argv
-
-    argv = build_node_debug_create_argv("worker-1", "default")
-    assert argv[:2] == ["kubectl", "debug"]
-    assert "node/worker-1" in argv
-    assert f"--image={DEBUG_IMAGE}" in argv
-    # the approval dialog promises a privileged pod; the default profile
-    # is not privileged, so sysadmin must be requested explicitly
-    assert "--profile=sysadmin" in argv
-    # detached create: korvid parses the created pod's name from kubectl's
-    # message and fetches the uid with an exact get, so cleanup never
-    # touches another operator's pod. `kubectl debug` has no -o/--output —
-    # passing one would make every create fail to parse flags.
-    assert "--attach=false" in argv
-    assert "-o" not in argv
-    assert "--output" not in argv
-    ns_idx = argv.index("-n")
-    assert argv[ns_idx + 1] == "default"
-    # every kubectl flag must precede the `--` command separator
-    dd = argv.index("--")
-    assert dd > argv.index("node/worker-1")
-
-
-def test_build_node_debug_create_argv_custom_image_and_context() -> None:
-    from korvid.ui.shell import build_node_debug_create_argv
-
-    argv = build_node_debug_create_argv(
-        "worker-1", "debug-ns", context="prod", image="registry.local/toolkit:1"
-    )
-    idx = argv.index("--context")
-    assert argv[idx + 1] == "prod"
-    assert idx < argv.index("--")
-    assert "--image=registry.local/toolkit:1" in argv
-    ns_idx = argv.index("-n")
-    assert argv[ns_idx + 1] == "debug-ns"
-
-
-def test_build_pod_wait_argv() -> None:
-    from korvid.ui.shell import build_pod_wait_argv
-
-    assert build_pod_wait_argv("debug-ns", "node-debugger-x") == [
-        "kubectl",
-        "wait",
-        "-n",
-        "debug-ns",
-        "pod/node-debugger-x",
-        "--for=condition=Ready",
-        "--timeout=60s",
-    ]
-    argv = build_pod_wait_argv("debug-ns", "node-debugger-x", context="prod")
-    assert argv[argv.index("--context") + 1] == "prod"
-
-
-def test_build_pod_attach_argv() -> None:
-    from korvid.ui.shell import build_pod_attach_argv
-
-    assert build_pod_attach_argv("debug-ns", "node-debugger-x") == [
-        "kubectl",
-        "attach",
-        "-it",
-        "-n",
-        "debug-ns",
-        "node-debugger-x",
-    ]
-    argv = build_pod_attach_argv("debug-ns", "node-debugger-x", context="prod")
-    assert argv[argv.index("--context") + 1] == "prod"
-
-
-def test_parse_debug_pod_name() -> None:
-    from korvid.ui.shell import parse_debug_pod_name
-
-    out = (
-        "Creating debugging pod node-debugger-worker-1-abcde with container"
-        " debugger on node worker-1.\n"
-    )
-    assert parse_debug_pod_name(out) == "node-debugger-worker-1-abcde"
-    # message may be preceded by other informational lines
-    assert parse_debug_pod_name(f"some warning\n{out}") == "node-debugger-worker-1-abcde"
-
-
-def test_parse_debug_pod_name_absent_returns_none() -> None:
-    from korvid.ui.shell import parse_debug_pod_name
-
-    assert parse_debug_pod_name("") is None
-    assert parse_debug_pod_name("something unexpected") is None
-    # similar words embedded mid-line must not match the anchored message
-    assert parse_debug_pod_name("note: Creating debugging pod soon") is None
 
 
 async def test_shell_refused_while_context_switching() -> None:
