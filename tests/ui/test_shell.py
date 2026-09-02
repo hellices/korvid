@@ -141,11 +141,19 @@ def _pod(name: str, namespace: str = "default") -> PodSummary:
         restarts=0,
         node=None,
         qos="-",
+        uid="uid-1",
     )
 
 
 def _deploy(name: str, namespace: str = "default") -> GenericSummary:
     return GenericSummary(name=name, namespace=namespace, kind="Deployment", created="")
+
+
+class _DefaultManifest:
+    pass
+
+
+_DEFAULT_MANIFEST = _DefaultManifest()
 
 
 def make_app(
@@ -156,7 +164,9 @@ def make_app(
     audit: AuditLog | None = None,
     readonly: bool = False,
     permitted: bool | None = None,
-    get_manifest: Callable[[str, str | None, str], Awaitable[dict[str, Any]]] | None = None,
+    get_manifest: (
+        Callable[[str, str | None, str], Awaitable[dict[str, Any]]] | _DefaultManifest | None
+    ) = _DEFAULT_MANIFEST,
     debug_images: dict[str, str] | None = None,
     debug_default_image: str | None = None,
 ) -> KorvidApp:
@@ -177,6 +187,18 @@ def make_app(
         assert permitted is not None
         return permitted
 
+    manifest_source: Callable[[str, str | None, str], Awaitable[dict[str, Any]]] | None
+    if isinstance(get_manifest, _DefaultManifest):
+
+        async def default_manifest(kind: str, ns: str | None, name: str) -> dict[str, Any]:
+            del kind
+            pod = next(pod for pod in pods if pod.namespace == ns and pod.name == name)
+            return {"metadata": {"uid": pod.uid}}
+
+        manifest_source = default_manifest
+    else:
+        manifest_source = get_manifest
+
     return KorvidApp(
         config=KorvidConfig(
             namespace="default",
@@ -189,7 +211,7 @@ def make_app(
         watch_manager=WatchManager(store, source),
         aliases=dict(_TEST_ALIASES),
         audit=audit,
-        get_manifest=get_manifest,
+        get_manifest=manifest_source,
         check_permission=None if permitted is None else check_permission,
     )
 
@@ -832,13 +854,20 @@ async def test_debug_picker_recommends_runtime_image(tmp_path: Path) -> None:
 
 
 async def test_debug_picker_busybox_first_without_manifest(tmp_path: Path) -> None:
-    """No manifest source → no runtime detection → busybox leads the picker."""
-    app = make_app([_pod("api-1")], audit=AuditLog(tmp_path / "audit.jsonl"))
+    """No manifest source offers generic images but blocks the mutation."""
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app(
+        [_pod("api-1")],
+        audit=AuditLog(audit_path),
+        get_manifest=None,
+    )
+    debug_calls: list[list[str]] = []
     with (
         patch("shutil.which", return_value="/usr/bin/kubectl"),
         patch("subprocess.call", return_value=1),
+        patch("subprocess.Popen", side_effect=_fake_popen(debug_calls)),
         patch("subprocess.run", return_value=SimpleNamespace(returncode=1)),
-        patch.object(type(app), "suspend", return_value=_noop_cm()),
+        patch.object(type(app), "suspend", side_effect=lambda: _noop_cm()),
     ):
         async with app.run_test() as pilot:
             await until(
@@ -856,6 +885,21 @@ async def test_debug_picker_busybox_first_without_manifest(tmp_path: Path) -> No
             assert options[0].startswith(DEBUG_IMAGE)
             assert "netshoot" in options[1]
             assert "Custom image…" in options[-1]
+            await pilot.press("enter")
+            await until(
+                pilot,
+                lambda: isinstance(app.screen, ConfirmScreen),
+                label="debug confirmation opened",
+            )
+            await pilot.press("y")
+            await until(
+                pilot,
+                lambda: any("could not be verified" in str(n.message) for n in app._notifications),
+                label="missing identity notification shown",
+            )
+
+    assert debug_calls == []
+    assert not audit_path.exists() or "debug" not in audit_path.read_text()
 
 
 async def test_debug_picker_air_gapped_config_only_configured_images(tmp_path: Path) -> None:
@@ -1588,6 +1632,71 @@ async def test_debug_aborts_when_pod_replaced_after_prompt(tmp_path: Path) -> No
     assert debug_calls == []  # the debug never ran
     # No mutation happened, so no debug intent may have been audited either.
     assert not audit_path.exists() or "debug" not in audit_path.read_text()
+
+
+async def test_debug_aborts_when_final_pod_uid_lookup_unavailable(tmp_path: Path) -> None:
+    calls = 0
+
+    async def get_manifest(kind: str, ns: str | None, name: str) -> dict[str, Any]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return {"metadata": {"name": name, "namespace": ns or "", "uid": "uid-original"}}
+        raise TimeoutError
+
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app(
+        [_pod("api-1")],
+        audit=AuditLog(audit_path),
+        get_manifest=get_manifest,
+    )
+    shell_calls: list[list[str]] = []
+    debug_calls: list[list[str]] = []
+
+    with (
+        patch("shutil.which", return_value="/usr/bin/kubectl"),
+        patch("subprocess.call", side_effect=_recording_call(shell_calls)),
+        patch("subprocess.Popen", side_effect=_fake_popen(debug_calls)),
+        patch("subprocess.run", return_value=SimpleNamespace(returncode=1)),
+        patch.object(type(app), "suspend", side_effect=lambda: _noop_cm()),
+    ):
+        async with app.run_test() as pilot:
+            await until(
+                pilot,
+                lambda: app.query_one(ResourceTable).row_count == 1,
+                label="pod row loaded",
+            )
+            await pilot.press("s")
+            await until(pilot, lambda: isinstance(app.screen, PickScreen))
+            await pilot.press("enter")
+            await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+            await pilot.press("y")
+            await until(
+                pilot,
+                lambda: any("could not be verified" in str(n.message) for n in app._notifications),
+            )
+
+    assert [argv[1] for argv in shell_calls] == ["exec"]
+    assert debug_calls == []
+    assert not audit_path.exists() or "debug" not in audit_path.read_text()
+
+
+async def test_debug_aborts_when_no_pod_uid_was_captured(tmp_path: Path) -> None:
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app([_pod("api-1")], audit=AuditLog(audit_path))
+    debug_calls: list[list[str]] = []
+
+    with (
+        patch("subprocess.Popen", side_effect=_fake_popen(debug_calls)),
+        patch("subprocess.run", return_value=SimpleNamespace(returncode=1)),
+        patch.object(type(app), "suspend", side_effect=lambda: _noop_cm()),
+    ):
+        async with app.run_test():
+            await app._debug.run("default", "api-1", None, None, DEBUG_IMAGE)
+
+    assert debug_calls == []
+    assert not audit_path.exists() or "debug" not in audit_path.read_text()
+    assert any("could not be verified" in str(n.message) for n in app._notifications)
 
 
 async def test_debug_runs_when_pod_uid_unchanged(tmp_path: Path) -> None:

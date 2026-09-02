@@ -249,12 +249,11 @@ class TransferController:
 
     async def _verify_listing_pod(self, namespace: str, name: str, uid: str | None) -> None:
         """Raise TransferError unless pod `uid` is still the incarnation the
-        transfer dialog was opened for. Fails open when no uid was captured
-        (matching the transfer's own uid gate below); with a captured uid an
-        unverifiable lookup fails closed — browsing is optional, so degrading
-        to manual entry beats listing a same-named replacement pod."""
+        transfer dialog was opened for. Missing or unverifiable uids fail
+        closed — browsing is optional, so degrading to manual entry beats
+        listing a same-named replacement pod."""
         if uid is None:
-            return
+            raise TransferError(f"pod {name} could not be verified — enter the path manually")
         try:
             current = await self._target_uid("pods", namespace, name)
         except ApiStatusError as exc:
@@ -277,9 +276,8 @@ class TransferController:
         they are blocked in read-only mode and pass the approval dialog."""
         if self._writes.switching() or epoch != self._writes.epoch():
             # The picker/transfer dialogs stayed open across a context
-            # switch: the pod selection (and its uid, which fails open when
-            # missing) belongs to the old cluster while the shared exec
-            # client now targets the new one.
+            # switch: the pod selection belongs to the old cluster while the
+            # shared exec client now targets the new one.
             self._ui.notify(
                 f"transfer to {namespace}/{name} cancelled - the kube context"
                 " changed while the dialog was open",
@@ -373,9 +371,7 @@ class TransferController:
                 # audit requirement (issue #47), not just the write direction.
                 self._ui.notify("Transfer blocked: no audit log configured", severity="error")
             return
-        if uid is not None and not await self._pod_uid_unchanged(
-            namespace, name, uid, action="Transfer"
-        ):
+        if not await self._pod_uid_unchanged(namespace, name, uid, action="Transfer"):
             return
         action = f"transfer_{spec.direction}"
         detail = f"container={container or '-'} remote={spec.remote_path} local={spec.local_path}"

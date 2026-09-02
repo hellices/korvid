@@ -512,11 +512,22 @@ async def test_pod_uid_unchanged_refuses_a_vanished_pod() -> None:
     assert any("no longer exists" in message for message in h.ui.messages())
 
 
-async def test_pod_uid_unchanged_fails_open_when_the_uid_is_unknown() -> None:
-    """A lookup that cannot answer must not block the flow: the write path
-    that follows has its own precondition."""
+async def test_pod_uid_unchanged_refuses_an_unverifiable_pod() -> None:
     h = Harness(current_uid=None)
-    assert await h.controller.pod_uid_unchanged("default", "api-1", "uid-1", action="Transfer")
+    assert not await h.controller.pod_uid_unchanged("default", "api-1", "uid-1", action="Transfer")
+    messages = h.ui.messages()
+    assert any("could not be verified" in message and "Retry" in message for message in messages)
+    assert all(
+        "no longer exists" not in message and "was replaced" not in message for message in messages
+    )
+
+
+async def test_pod_uid_unchanged_refuses_a_missing_approved_uid() -> None:
+    h = Harness(current_uid="uid-1")
+    assert not await h.controller.pod_uid_unchanged("default", "api-1", None, action="Transfer")
+    assert any(
+        "could not be verified" in message and "Retry" in message for message in h.ui.messages()
+    )
 
 
 async def test_provider_footer_is_none_without_a_detected_provider() -> None:

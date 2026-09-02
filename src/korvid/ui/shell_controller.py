@@ -435,9 +435,9 @@ class ShellController:
         """Pod manifest at debug-offer time (uid binding + runtime detection).
 
         Same semantics as `_target_uid`: raises `ApiStatusError(404)` when the
-        pod is gone; fails open (`None`) when no manifest source is wired or
-        the lookup fails or times out - the debug stays approval-gated and
-        audited, just without a uid precondition or a runtime recommendation.
+        pod is gone and returns `None` when no manifest source is wired or the
+        lookup fails or times out. The later identity guard blocks debug when
+        no uid could be captured, while runtime recommendation remains optional.
         """
         get_manifest = self._get_manifest_fn()
         if get_manifest is None:
@@ -459,8 +459,8 @@ class ShellController:
             )
             return None
         except Exception:
-            # Fail open like _target_uid: an infrastructure error must not
-            # escape the worker and silently swallow the debug offer.
+            # Normalize like _target_uid so the later identity guard can show
+            # the retryable verification warning.
             logger.exception(
                 "manifest lookup for %s/%s failed; offering debug without it", namespace, name
             )
@@ -494,7 +494,7 @@ class ShellController:
         # The gate owns the dialog and the post-approval epoch recheck: the
         # picker/approval may stay open across a context switch, and kubectl
         # debug would then mutate a same-named pod on the new cluster (the
-        # uid re-check fails open without a uid).
+        # uid re-check blocks execution without a captured uid).
         self._ui.run_worker(
             self._gate.confirm_interactive(
                 f"Shell failed in {target} (exit {exit_code})",
