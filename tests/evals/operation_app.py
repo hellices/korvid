@@ -19,9 +19,8 @@ Three deliberate composition rules:
 
 1. Nothing private is imported from production. The late-binding UI proxy
    is this module's own `OperationUIBridgeProxy` — the equivalent proxy in
-   the production composition root is private to that module — pinned
-   against the `UIBridge` interface by
-   `tests/evals/test_operation_bridge_parity.py`.
+   the production composition root is private to that module — and it
+   subclasses the `UIBridge` interface directly.
 2. The audit log is the shipped `AuditLog`, constructed and left alone.
    The fail-closed ordering is proved by `make_audit_intent_probe`, which
    the injected `WriteOps` calls to re-read the real audit file at the
@@ -137,10 +136,9 @@ class OperationUIBridgeProxy(UIBridge):
 
     This is deliberately *not* an import of the production composition
     root's equivalent proxy, which is private to that module: a test may
-    not depend on a private production name.
-    `tests/evals/test_operation_bridge_parity.py` fails if `UIBridge` and
-    this proxy ever drift apart, so a new bridge method can never silently
-    degrade to "UI not ready" in the harness.
+    not depend on a private production name. Subclassing `UIBridge` means
+    a new abstract bridge method fails this proxy at construction rather
+    than silently degrading to "UI not ready" in the harness.
 
     Every delegated call is serialized through one lock, exactly like
     production: the app's UI operations are not safe to interleave.

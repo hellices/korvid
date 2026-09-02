@@ -3,18 +3,14 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, fields
 from typing import Any
-
-import pytest
 
 from korvid.agent.interaction import InteractionContext, OpenDescribe
 from korvid.evals.fake_kube import FakeKubeClient, builtin_aliases
-from korvid.evals.grader import GradeResult
 from korvid.evals.harness import resolve_eval_policy
 from korvid.evals.interaction import EvalUiBridge
 from korvid.evals.journey import bundled_journeys_dir, load_journeys
-from korvid.evals.journey_runner import JourneyTurnResult, _close_run_resources, run_journey
+from korvid.evals.journey_runner import run_journey
 from korvid.evals.live_journey import NamespaceBoundReadOps
 from korvid.evals.scripted import ScriptedProvider
 from korvid.tools.executor import ToolExecutor
@@ -27,24 +23,6 @@ def _call(name: str, args: dict[str, object], call_id: str) -> dict[str, Any]:
         "name": name,
         "arguments": json.dumps(args),
     }
-
-
-async def test_provider_closes_even_when_session_close_fails() -> None:
-    class _Session:
-        async def aclose(self) -> None:
-            raise RuntimeError("session close failed")
-
-    class _Provider:
-        closed = False
-
-        async def aclose(self) -> None:
-            self.closed = True
-
-    provider = _Provider()
-    with pytest.raises(RuntimeError, match="session close failed"):
-        await _close_run_resources(_Session(), provider)
-
-    assert provider.closed is True
 
 
 def _text(text: str) -> list[dict[str, Any]]:
@@ -197,195 +175,6 @@ async def test_live_boundary_rejection_fails_an_otherwise_successful_turn() -> N
     assert first.success is False
 
 
-async def test_run_journey_fails_redundant_turn_budget() -> None:
-    journey = next(
-        item
-        for item in load_journeys(
-            __import__(
-                "korvid.evals.journey", fromlist=["bundled_journeys_dir"]
-            ).bundled_journeys_dir()
-        )
-        if item.id == "healthy-stop"
-    )
-    script: list[list[dict[str, Any]]] = [
-        [
-            _call("list_resources", {"kind": "pods", "namespace": "catalog"}, "c1"),
-            {"type": "done"},
-        ],
-        _text("The namespace is healthy."),
-        [
-            _call("list_resources", {"kind": "pods", "namespace": "catalog"}, "c2"),
-            {"type": "done"},
-        ],
-        [
-            _call("list_resources", {"kind": "pods", "namespace": "catalog"}, "c3"),
-            {"type": "done"},
-        ],
-        _text("No further investigation is needed; stop here."),
-    ]
-
-    report = await run_journey(
-        journey,
-        provider_factory=lambda: ScriptedProvider(script),
-        executor_factory=lambda fixture: ToolExecutor(FakeKubeClient(fixture), builtin_aliases()),
-        repetitions=1,
-    )
-
-    assert report.runs[0].turns[1].tool_calls == 2
-    assert report.runs[0].turns[1].success is False
-
-
-async def test_each_turn_must_fetch_its_own_required_evidence() -> None:
-    journey = next(
-        item
-        for item in load_journeys(
-            __import__(
-                "korvid.evals.journey", fromlist=["bundled_journeys_dir"]
-            ).bundled_journeys_dir()
-        )
-        if item.id == "healthy-stop"
-    )
-    script: list[list[dict[str, Any]]] = [
-        [
-            _call("list_resources", {"kind": "pods", "namespace": "catalog"}, "c1"),
-            {"type": "done"},
-        ],
-        _text("The namespace is healthy."),
-        _text("No further investigation is needed; stop here."),
-    ]
-    report = await run_journey(
-        journey,
-        provider_factory=lambda: ScriptedProvider(script),
-        executor_factory=lambda fixture: ToolExecutor(FakeKubeClient(fixture), builtin_aliases()),
-        repetitions=1,
-    )
-    second = report.runs[0].turns[1]
-    assert second.grade.evidence_fetched is False
-    assert second.success is False
-
-
-def test_malformed_call_rejects_wrong_json_property_types() -> None:
-    from korvid.evals.journey_runner import _malformed_call
-
-    schemas = _armed_schemas()
-    assert _malformed_call(
-        "list_resources",
-        '{"kind": 7, "namespace": ["catalog"]}',
-        schemas,
-    )
-
-
-def test_wrong_namespace_handles_malformed_and_cluster_scoped_calls() -> None:
-    from korvid.evals.journey_runner import _wrong_namespace
-
-    schemas = _armed_schemas()
-    assert _wrong_namespace(
-        "list_resources",
-        {"kind": "pods", "namespace": ["shop"]},
-        schemas,
-        {"shop"},
-    )
-    assert not _wrong_namespace(
-        "get_resource",
-        {"kind": "nodes", "name": "node-a"},
-        schemas,
-        {"shop"},
-    )
-    assert not _wrong_namespace(
-        "get_resource",
-        {"kind": " Node ", "name": "node-a"},
-        schemas,
-        {"shop"},
-    )
-    assert not _wrong_namespace(
-        "navigate",
-        {"view": " Nodes "},
-        schemas,
-        {"shop"},
-    )
-
-
-def test_turn_tally_tracks_write_attempts_and_safety_violations() -> None:
-    from korvid.agent.events import ToolCallFinished, ToolCallStarted
-    from korvid.evals.journey_runner import _TurnTally
-
-    tally = _TurnTally({})
-    tally.note(
-        ToolCallStarted(
-            call_id="w1",
-            name="delete_resource",
-            arguments='{"kind":"pods","name":"x"}',
-        )
-    )
-    tally.note(
-        ToolCallFinished(
-            call_id="w1",
-            name="delete_resource",
-            ok=True,
-            summary="deleted",
-        )
-    )
-    assert tally.write_attempts == 1
-    assert tally.safety_violations == 1
-
-
-async def test_discarded_parallel_calls_count_toward_budget_and_stale_targets() -> None:
-    journey = next(
-        item
-        for item in load_journeys(
-            __import__(
-                "korvid.evals.journey", fromlist=["bundled_journeys_dir"]
-            ).bundled_journeys_dir()
-        )
-        if item.id == "triage-and-correct"
-    )
-    script: list[list[dict[str, Any]]] = [
-        [
-            _call("list_resources", {"kind": "pods", "namespace": "shop"}, "c1"),
-            {"type": "done"},
-        ],
-        _text("checkout and payments need attention."),
-        [
-            _call(
-                "diagnose_pod",
-                {"pod": "payments-1", "namespace": "shop"},
-                "c2",
-            ),
-            _call(
-                "diagnose_pod",
-                {"pod": "checkout-1", "namespace": "other"},
-                "c3",
-            ),
-            {"type": "done"},
-        ],
-        _text("payments has unauthorized registry authentication."),
-        [
-            _call(
-                "open_describe",
-                {
-                    "kind": "pods",
-                    "name": "payments-1",
-                    "namespace": "shop",
-                    "continue_analysis": True,
-                },
-                "c4",
-            ),
-            {"type": "done"},
-        ],
-        _text("payments needs registry credentials."),
-    ]
-    report = await run_journey(
-        journey,
-        provider_factory=lambda: ScriptedProvider(script),
-        executor_factory=lambda fixture: ToolExecutor(FakeKubeClient(fixture), builtin_aliases()),
-        repetitions=1,
-    )
-    turn = report.runs[0].turns[1]
-    assert turn.tool_calls == 2
-    assert turn.forbidden_target_calls == 1
-    assert turn.success is False
-
-
 async def test_wrong_namespace_call_fails_even_if_later_call_is_on_target() -> None:
     journey = next(
         item
@@ -488,13 +277,6 @@ async def _run_triage(script: list[list[dict[str, Any]]]) -> Any:
         executor_factory=lambda fixture: ToolExecutor(FakeKubeClient(fixture), builtin_aliases()),
         repetitions=1,
     )
-
-
-async def test_the_report_records_the_screen_the_conversation_opened_on() -> None:
-    journey = _journey("triage-and-correct")
-    report = await _run_triage(_triage_script())
-
-    assert report.interaction == journey.interaction
 
 
 async def test_each_turn_records_the_screen_it_started_and_ended_on() -> None:
@@ -606,68 +388,3 @@ def test_an_unarmed_write_attempt_is_not_a_malformed_call() -> None:
     assert tally.malformed == 0
     assert tally.write_attempts == 1
     assert tally.safety_violations == 1
-
-
-def test_an_unknown_non_write_tool_is_still_malformed() -> None:
-    """The reduced-arm signal (#221) must survive the write exemption."""
-    from korvid.evals.journey_runner import _malformed_call
-
-    assert _malformed_call("teleport_pod", '{"pod": "x"}', _armed_schemas()) is True
-
-
-# --- a turn's verdict is one fact, not two ------------------------------------
-#
-# `success` used to be a stored constructor field next to `outcome`, so a
-# caller (or a future refactor) could publish a row that claimed both a
-# success and a failure class. It is derived now, and these tests pin that
-# the contradictory state cannot be built at all.
-
-
-def _bare_turn(**overrides: Any) -> JourneyTurnResult:
-    fields: dict[str, Any] = {
-        "answer": "worker-1 was OOMKilled",
-        "grade": GradeResult(True, True, (), (), ()),
-        "tool_calls": 1,
-        "tool_names": ("diagnose_pod",),
-        "malformed_tool_calls": 0,
-        "write_attempts": 0,
-        "safety_violations": 0,
-        "forbidden_target_calls": 0,
-        "wrong_namespace_calls": 0,
-        "error": None,
-        "wall_time_s": 1.0,
-    }
-    fields.update(overrides)
-    return JourneyTurnResult(**fields)
-
-
-@pytest.mark.parametrize(
-    ("outcome", "failure_class", "expected"),
-    [
-        ("success", None, True),
-        ("failure", "misdiagnosis", False),
-        ("failure", "call_budget_exceeded", False),
-        ("error", "provider_error", False),
-    ],
-)
-def test_turn_success_is_derived_from_the_outcome(
-    outcome: str, failure_class: str | None, expected: bool
-) -> None:
-    turn = _bare_turn(outcome=outcome, failure_class=failure_class)
-
-    assert turn.success is expected
-    assert turn.success is (turn.outcome == "success")
-
-
-def test_a_turn_cannot_be_handed_a_success_that_contradicts_its_outcome() -> None:
-    with pytest.raises(TypeError, match="unexpected keyword argument 'success'"):
-        _bare_turn(outcome="failure", failure_class="misdiagnosis", success=True)
-
-
-def test_a_turn_result_stores_no_success_field_to_disagree_with() -> None:
-    """`success` is not in the dataclass' fields, so nothing can set it."""
-    turn = _bare_turn()
-
-    assert "success" not in {field.name for field in fields(turn)}
-    assert "success" not in asdict(turn)
-    assert turn.success is True

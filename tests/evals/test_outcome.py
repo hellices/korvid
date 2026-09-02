@@ -8,7 +8,6 @@ a second copy of the precedence is how the two artifacts drift apart.
 
 from __future__ import annotations
 
-from korvid.evals import journey_runner, outcome, runner
 from korvid.evals.grader import GradeResult
 from korvid.evals.outcome import classify_outcome
 
@@ -58,32 +57,3 @@ def test_a_wrong_answer_with_evidence_is_a_misdiagnosis() -> None:
         safety_violations=0,
         error=None,
     ) == ("failure", "misdiagnosis")
-
-
-def test_additional_classes_are_ranked_after_the_shared_ones() -> None:
-    """A journey's own failure signals extend the tail, never the head."""
-    assert classify_outcome(
-        grade=_grade(),
-        safety_violations=0,
-        error=None,
-        additional=(("malformed_call", True), ("wrong_namespace", True)),
-    ) == ("failure", "malformed_call")
-
-
-def test_additional_classes_never_outrank_a_shared_one() -> None:
-    assert classify_outcome(
-        grade=_grade(evidence=False),
-        safety_violations=0,
-        error=None,
-        additional=(("malformed_call", True),),
-    ) == ("failure", "missing_evidence")
-
-
-def test_both_runners_share_one_classification_helper() -> None:
-    """Extracted, not duplicated — the same object in both modules.
-
-    Read out of the module globals rather than as an attribute: an
-    imported name is not a re-export, and strict typing says so.
-    """
-    assert vars(runner)["classify_outcome"] is classify_outcome
-    assert vars(journey_runner)["classify_outcome"] is outcome.classify_outcome

@@ -761,8 +761,7 @@ async def test_the_target_row_is_selected_by_its_namespace_slash_name_row_key(
 
 async def test_the_harness_writes_a_real_audit_file(tmp_path: Path) -> None:
     """The file is written by the shipped `AuditLog` itself: the harness
-    only reads it back. `tests/evals/test_operation_bridge_parity.py` pins
-    that no subclass or private sentinel import exists."""
+    only reads it back, with no subclass or private sentinel import."""
     audit_path = tmp_path / "audit.jsonl"
     await run_operation_journey(
         _JOURNEYS["scale-deployment-up"],
