@@ -34,7 +34,8 @@ from live Textual focus:
 3. no inline input surface owns focus.
 
 The existing wait loop and deadline remain unchanged. A blocked approval stays
-pending, emits the existing reminder, and surfaces after focus leaves the
+pending, emits a blocker-specific reminder (`Ctrl-A` when the panel is closed,
+`Tab/Esc` when inline input owns focus), and surfaces after focus leaves the
 inline editor. No focus is stolen and no new timer heuristic is introduced.
 
 Every `UiSurface` fake implements the new query explicitly. Controller unit
@@ -56,8 +57,8 @@ move focus away and prove the same pending request surfaces for explicit user
 review.
 
 Use `tests/ui/waits.py::until()` for state transitions. Preserve the existing
-approval timeout, pending notification, explicit-keystroke requirement, and
-write/audit pipeline.
+approval timeout, reminder cadence, explicit-keystroke requirement, focus
+ownership, and write/audit pipeline.
 
 ## Non-goals
 

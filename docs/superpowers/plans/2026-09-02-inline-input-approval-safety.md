@@ -4,15 +4,15 @@
 
 **Goal:** Keep agent write approvals pending while an inline input surface owns focus so typing `y` into command, filter, namespace-selection, or agent chat UI can never approve a cluster mutation.
 
-**Architecture:** Extend the `UiSurface` seam with an inline-focus ownership query, teach `AgentUiController.can_surface_approval()` to consult it without changing the existing timeout/reminder loop, and cover that controller path with unit tests first. Then add Textual Pilot regressions that prove each inline surface keeps the `y` keystroke for itself and that the same pending approval surfaces only after focus returns to a non-inline widget.
+**Architecture:** Extend the `UiSurface` seam with an inline-focus ownership query, teach `AgentUiController.can_surface_approval()` to consult it without changing the existing timeout/reminder loop, and keep the pending toast blocker-specific (`Ctrl-A` for a collapsed panel, `Tab/Esc` for active inline input). Cover that controller path with unit tests first. Then add Textual Pilot regressions that prove each inline surface keeps the `y` keystroke for itself and that the same pending approval surfaces only after focus returns to a non-inline widget.
 
 **Tech Stack:** Python 3.11+, Textual, Textual Pilot, pytest, ruff, mypy, tach, gh CLI
 
 ## Global Constraints
 
 - Prefix every Python command in this plan with `UV_FROZEN=1 uv run`.
-- Keep the existing approval timeout, the `0.05` second wait-loop sleep, and the existing reminder toast text `Agent write approval pending - open the agent panel (Ctrl-A) to review` unchanged.
-- Preserve the security invariants: approvals still require an explicit user keystroke, `run_kubectl` validation remains unchanged, and fail-closed audit logging must still block writes when the audit sink is unavailable.
+- Keep the existing approval timeout, the `0.05` second wait-loop sleep, and the existing reminder cadence unchanged. Pending toast text may differ by blocker: collapsed panel uses `Agent write approval pending - open the agent panel (Ctrl-A) to review`; active inline input uses `Agent write approval pending - leave the active input using Tab/Esc to review`.
+- Preserve the security invariants: approvals still require an explicit user keystroke, active input keeps focus until the user leaves it, `run_kubectl` validation remains unchanged, and fail-closed audit logging must still block writes when the audit sink is unavailable.
 - Only focused `Input` widgets and the inline `NamespacePicker` block approval surfacing; ordinary table focus must not block it.
 - Use `tests/ui/waits.py::until()` for new UI state transitions instead of fixed sleeps.
 - Update every `UiSurface` fake explicitly when the abstract port changes.
@@ -223,7 +223,7 @@ git commit -m $'fix: block agent approvals during inline input focus\n\nCo-autho
 - Consumes: `FilterBar.open(self) -> None`
 - Consumes: `NamespacePicker.open(self, namespaces: list[str]) -> None`
 - Produces: `AppUiSurface.inline_input_active(self) -> bool` that also blocks when the focused widget is the inline `NamespacePicker`
-- Produces: four pilot regressions proving `y` stays with the focused inline surface and the pending approval appears only after focus release
+- Produces: four pilot regressions proving `y` stays with the focused inline surface, the pending toast reflects the blocking surface, and the approval appears only after focus release
 
 - [ ] **Step 1: Write the failing pilot regressions**
 
@@ -355,13 +355,25 @@ async def test_agent_write_stays_pending_while_namespace_picker_has_focus(tmp_pa
 
 async def test_agent_write_stays_pending_while_agent_input_has_focus(tmp_path: Path) -> None:
     rec = Recorder()
-    app = make_app(rec, tmp_path / "audit.jsonl")
+    app = make_app(
+        rec,
+        tmp_path / "audit.jsonl",
+        agent_session=FakeSession(),
+        agent_model_name="test-model",
+    )
     async with app.run_test() as pilot:
-        _expand_panel(app)
         agent_input = app.query_one("#agent-input", Input)
-        agent_input.focus()
+        await pilot.press("ctrl+a")
         await until(pilot, lambda: app.focused is agent_input, label="agent input focused")
         task = _pending_delete(app)
+        await until(
+            pilot,
+            lambda: any(
+                "leave the active input using Tab/Esc to review" in str(notification.message)
+                for notification in app._notifications
+            ),
+            label="agent-input-specific pending notification",
+        )
         await pilot.press("y")
         await until(
             pilot,
@@ -371,12 +383,7 @@ async def test_agent_write_stays_pending_while_agent_input_has_focus(tmp_path: P
             and not isinstance(app.screen, ConfirmScreen),
             label="agent input kept the y key",
         )
-        app.query_one(ResourceTable).focus()
-        await until(
-            pilot,
-            lambda: app.focused is app.query_one(ResourceTable),
-            label="table refocused",
-        )
+        await pilot.press("tab")
         await _decline_after_surface(pilot, app, task)
         assert rec.calls == []
 ```

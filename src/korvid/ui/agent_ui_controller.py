@@ -2008,14 +2008,18 @@ class AgentUiController:
             and not self._ui.inline_input_active()
         )
 
+    def _pending_approval_message(self) -> str:
+        if self._ui.inline_input_active():
+            return "Agent write approval pending - leave the active input using Tab/Esc to review"
+        return "Agent write approval pending - open the agent panel (Ctrl-A) to review"
+
     async def _wait_until_surfaceable(self, deadline: float) -> bool:
         """Poll until an approval dialog may surface (panel expanded, no other
         screen on top); False when the deadline passes first."""
         loop = asyncio.get_running_loop()
         if self.can_surface_approval():
             return True
-        pending_msg = "Agent write approval pending - open the agent panel (Ctrl-A) to review"
-        self._ui.notify(pending_msg, severity="warning", timeout=10)
+        self._ui.notify(self._pending_approval_message(), severity="warning", timeout=10)
         last_reminder = loop.time()
         while not self.can_surface_approval():
             if loop.time() >= deadline:
@@ -2023,7 +2027,7 @@ class AgentUiController:
             if loop.time() - last_reminder >= 30:
                 # The first toast fades after 10s: keep reminding so the
                 # request does not silently expire.
-                self._ui.notify(pending_msg, severity="warning", timeout=10)
+                self._ui.notify(self._pending_approval_message(), severity="warning", timeout=10)
                 last_reminder = loop.time()
             await asyncio.sleep(0.05)
         return True

@@ -18,7 +18,7 @@ from korvid.ui.widgets.confirm_screen import ConfirmScreen
 from korvid.ui.widgets.filter_bar import FilterBar
 from korvid.ui.widgets.namespace_picker import NamespacePicker
 from korvid.ui.widgets.pick_screen import PickScreen
-from korvid.ui.widgets.resource_table import ResourceTable
+from tests.ui.agent_session_fakes import FakeSession
 
 from .agent_write_support import _DEPLOY_META, Recorder, _expand_panel, make_app
 from .waits import until
@@ -455,13 +455,25 @@ async def test_agent_write_stays_pending_while_namespace_picker_has_focus(tmp_pa
 
 async def test_agent_write_stays_pending_while_agent_input_has_focus(tmp_path: Path) -> None:
     rec = Recorder()
-    app = make_app(rec, tmp_path / "audit.jsonl")
+    app = make_app(
+        rec,
+        tmp_path / "audit.jsonl",
+        agent_session=FakeSession(),
+        agent_model_name="test-model",
+    )
     async with app.run_test() as pilot:
-        _expand_panel(app)
         agent_input = app.query_one("#agent-input", Input)
-        agent_input.focus()
+        await pilot.press("ctrl+a")
         await until(pilot, lambda: app.focused is agent_input, label="agent input focused")
         task = _pending_delete(app)
+        await until(
+            pilot,
+            lambda: any(
+                "leave the active input using Tab/Esc to review" in str(notification.message)
+                for notification in app._notifications
+            ),
+            label="agent-input-specific pending notification",
+        )
         await pilot.press("y")
         await until(
             pilot,
@@ -473,7 +485,7 @@ async def test_agent_write_stays_pending_while_agent_input_has_focus(tmp_path: P
             ),
             label="agent input kept the y key",
         )
-        app.query_one(ResourceTable).focus()
+        await pilot.press("tab")
         await _decline_after_surface(pilot, app, task)
         assert rec.calls == []
 
