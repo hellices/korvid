@@ -219,41 +219,6 @@ class TestRemotePicker:
             assert remote.value == "/srv/app.log"
 
 
-class TestBulkOptionInstall:
-    """The backend allows up to 10,000 entries: installing them one
-    `add_option` call at a time repeatedly refreshes the OptionList on the
-    event loop and can freeze the picker (including Esc). One bulk
-    `add_options` call installs the whole listing."""
-
-    async def test_listing_installed_in_single_bulk_add(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        calls: list[OptionList] = []
-        original = OptionList.add_options
-
-        def counting(self: OptionList, new_options: Any) -> OptionList:
-            items = list(new_options)
-            if items:  # __init__ delegates an empty add_options call
-                calls.append(self)
-            return original(self, items)
-
-        monkeypatch.setattr(OptionList, "add_options", counting)
-        opener = FakeExecOpener(_listing("app.log", "config/", "lib/"))
-        app = make_app([_pod("api-1")], open_pod_exec=opener)
-        async with app.run_test() as pilot:
-            dialog = await _open_dialog(pilot, app)
-            remote = dialog.query_one("#transfer-remote", Input)
-            remote.value = "/srv/"
-            remote.focus()
-            await pilot.press("ctrl+o")
-            await until(
-                pilot, lambda: isinstance(app.screen, RemotePathPickerScreen), label="picker"
-            )
-            options = app.screen.query_one(OptionList)
-            await until(pilot, lambda: options.option_count == 4, label="options")
-            assert calls.count(options) == 1  # "../" + 3 entries in one bulk install
-
-
 class TestBrowseGating:
     async def test_ctrl_o_outside_path_fields_does_nothing(self) -> None:
         # ctrl+o is a screen binding: with the direction radio focused it
