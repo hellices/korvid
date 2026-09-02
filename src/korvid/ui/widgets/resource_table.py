@@ -42,8 +42,8 @@ MetricsLookup = Callable[[str, str], PodMetrics | None]
 class _RowRenderer(Protocol):
     def __call__(
         self,
-        table: ResourceTable,
-        rows: list[Summary],
+        __table: ResourceTable,
+        __rows: list[Summary],
         *,
         all_namespaces: bool,
         pattern: str,
@@ -56,8 +56,8 @@ class _RowRenderer(Protocol):
 class _StandardRowRenderer(Protocol):
     def __call__(
         self,
-        table: ResourceTable,
-        rows: list[Summary],
+        __table: ResourceTable,
+        __rows: list[Summary],
         *,
         all_namespaces: bool,
         pattern: str,
@@ -1321,25 +1321,23 @@ class ResourceTable(DataTable[str | Text]):
 
 
 _render_replicaset_rows = _adapt_standard_renderer(
-    cast(_StandardRowRenderer, ResourceTable._add_replicaset_rows), "_render_replicaset_rows"
+    ResourceTable._add_replicaset_rows, "_render_replicaset_rows"
 )
 _render_helm_release_rows = _adapt_standard_renderer(
-    cast(_StandardRowRenderer, ResourceTable._add_helm_release_rows), "_render_helm_release_rows"
+    ResourceTable._add_helm_release_rows, "_render_helm_release_rows"
 )
 _render_helm_revision_rows = _adapt_standard_renderer(
-    cast(_StandardRowRenderer, ResourceTable._add_helm_revision_rows), "_render_helm_revision_rows"
+    ResourceTable._add_helm_revision_rows, "_render_helm_revision_rows"
 )
 _render_package_rows = _adapt_standard_renderer(
-    cast(_StandardRowRenderer, ResourceTable._add_package_rows), "_render_package_rows"
+    ResourceTable._add_package_rows, "_render_package_rows"
 )
 _render_subscription_rows = _adapt_standard_renderer(
-    cast(_StandardRowRenderer, ResourceTable._add_subscription_rows), "_render_subscription_rows"
+    ResourceTable._add_subscription_rows, "_render_subscription_rows"
 )
-_render_csv_rows = _adapt_standard_renderer(
-    cast(_StandardRowRenderer, ResourceTable._add_csv_rows), "_render_csv_rows"
-)
+_render_csv_rows = _adapt_standard_renderer(ResourceTable._add_csv_rows, "_render_csv_rows")
 _render_generic_rows = _adapt_standard_renderer(
-    cast(_StandardRowRenderer, ResourceTable._add_generic_rows), "_render_generic_rows"
+    ResourceTable._add_generic_rows, "_render_generic_rows"
 )
 
 _ROW_RENDERERS: dict[str, _RowRenderer] = {
