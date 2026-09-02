@@ -10,7 +10,11 @@ the individual azure/aws/gce/aks/eks/gke permutations exercised the same
 branch repeatedly with different literals. `test_detect_cloud_provider_lists_nodes`
 below still proves the lookup mechanism end to end through the real
 `KubeClient` boundary; this file's focus is the caching and error-handling
-contract that mechanism doesn't cover.
+contract that mechanism doesn't cover. One `detect_provider` test is kept
+directly: the multi-node loop (skip nodes with no recognizable signal, first
+recognized one decides) is its own algorithmic branch, not a lookup
+permutation, and `test_detect_cloud_provider_lists_nodes` only ever exercises
+a single node.
 """
 
 from typing import Any
@@ -19,6 +23,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from kubernetes_asyncio.client.exceptions import ApiException
 
 from korvid.k8s.client import KubeClient
+from korvid.k8s.csp import detect_provider
 
 
 def _node(provider_id: str | None = None, labels: dict[str, str] | None = None) -> dict[str, Any]:
@@ -26,6 +31,12 @@ def _node(provider_id: str | None = None, labels: dict[str, str] | None = None) 
     if provider_id is not None:
         node["spec"]["providerID"] = provider_id
     return node
+
+
+def test_first_recognized_node_wins() -> None:
+    """Mixed pools: any recognized node decides (skip nodes without providerID)."""
+    info = detect_provider([_node(), _node("aws:///i-2")])
+    assert info.provider == "aws"
 
 
 # ---------------------------------------------------------------------------
