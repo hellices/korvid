@@ -380,11 +380,18 @@ class ResourceInspectController:
         return summary.containers if summary is not None else ()
 
     async def pod_uid_unchanged(
-        self, namespace: str, name: str, approved_uid: str, *, action: str
+        self, namespace: str, name: str, approved_uid: str | None, *, action: str
     ) -> bool:
         """Re-verify the approved pod incarnation just before `action`
         executes; only the same non-None uid permits the action to proceed.
         """
+        if approved_uid is None:
+            self._ui.notify(
+                f"{action} cancelled - pod {name} could not be verified. "
+                "Retry when the cluster is reachable.",
+                severity="warning",
+            )
+            return False
         try:
             current_uid = await self._target_uid("pods", namespace, name)
         except ApiStatusError:

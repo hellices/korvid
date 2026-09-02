@@ -522,6 +522,14 @@ async def test_pod_uid_unchanged_refuses_an_unverifiable_pod() -> None:
     )
 
 
+async def test_pod_uid_unchanged_refuses_a_missing_approved_uid() -> None:
+    h = Harness(current_uid="uid-1")
+    assert not await h.controller.pod_uid_unchanged("default", "api-1", None, action="Transfer")
+    assert any(
+        "could not be verified" in message and "Retry" in message for message in h.ui.messages()
+    )
+
+
 async def test_provider_footer_is_none_without_a_detected_provider() -> None:
     h = Harness()
     assert h.controller.provider_footer(_LB_SERVICE_MANIFEST) is None

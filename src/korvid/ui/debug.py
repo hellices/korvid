@@ -125,9 +125,7 @@ class DebugController:
         if audit is None:
             self._ui.notify("Writes disabled: no audit log configured", severity="warning")
             return
-        if approved_uid is not None and not await self._pod_uid_unchanged(
-            namespace, name, approved_uid, action="kubectl debug"
-        ):
+        if not await self._pod_uid_unchanged(namespace, name, approved_uid, action="kubectl debug"):
             return
         detail = f"ephemeral debug container (kubectl debug, image {image})"
         try:

@@ -141,6 +141,7 @@ def _pod(name: str, namespace: str = "default") -> PodSummary:
         restarts=0,
         node=None,
         qos="-",
+        uid="uid-1",
     )
 
 
@@ -177,6 +178,16 @@ def make_app(
         assert permitted is not None
         return permitted
 
+    manifest_source = get_manifest
+    if manifest_source is None:
+
+        async def default_manifest(kind: str, ns: str | None, name: str) -> dict[str, Any]:
+            del kind
+            pod = next(pod for pod in pods if pod.namespace == ns and pod.name == name)
+            return {"metadata": {"uid": pod.uid}}
+
+        manifest_source = default_manifest
+
     return KorvidApp(
         config=KorvidConfig(
             namespace="default",
@@ -189,7 +200,7 @@ def make_app(
         watch_manager=WatchManager(store, source),
         aliases=dict(_TEST_ALIASES),
         audit=audit,
-        get_manifest=get_manifest,
+        get_manifest=manifest_source,
         check_permission=None if permitted is None else check_permission,
     )
 
@@ -1635,6 +1646,24 @@ async def test_debug_aborts_when_final_pod_uid_lookup_unavailable(tmp_path: Path
     assert [argv[1] for argv in shell_calls] == ["exec"]
     assert debug_calls == []
     assert not audit_path.exists() or "debug" not in audit_path.read_text()
+
+
+async def test_debug_aborts_when_no_pod_uid_was_captured(tmp_path: Path) -> None:
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app([_pod("api-1")], audit=AuditLog(audit_path))
+    debug_calls: list[list[str]] = []
+
+    with (
+        patch("subprocess.Popen", side_effect=_fake_popen(debug_calls)),
+        patch("subprocess.run", return_value=SimpleNamespace(returncode=1)),
+        patch.object(type(app), "suspend", side_effect=lambda: _noop_cm()),
+    ):
+        async with app.run_test():
+            await app._debug.run("default", "api-1", None, None, DEBUG_IMAGE)
+
+    assert debug_calls == []
+    assert not audit_path.exists() or "debug" not in audit_path.read_text()
+    assert any("could not be verified" in str(n.message) for n in app._notifications)
 
 
 async def test_debug_runs_when_pod_uid_unchanged(tmp_path: Path) -> None:

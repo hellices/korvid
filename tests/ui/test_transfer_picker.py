@@ -21,8 +21,7 @@ from korvid.ui.widgets.path_picker import LocalPathPickerScreen, RemotePathPicke
 from korvid.ui.widgets.resource_table import ResourceTable
 from korvid.ui.widgets.transfer_screen import TransferScreen
 from tests.platforms import posix_only
-from tests.ui.test_app import make_app
-from tests.ui.test_transfer import SUCCESS, FakeExecOpener, _dialog, _pod
+from tests.ui.test_transfer import SUCCESS, FakeExecOpener, _dialog, _pod, make_app
 from tests.ui.waits import until
 
 NOT_FOUND = json.dumps(
@@ -403,7 +402,7 @@ class TestContextEpochGuard:
         app = make_app([_pod("api-1")], open_pod_exec=flipping)
         async with app.run_test():
             lister = app._transfer.remote_lister(
-                "default", "api-1", "app", uid=None, epoch=app._ctx.epoch()
+                "default", "api-1", "app", uid="uid-1", epoch=app._ctx.epoch()
             )
             assert lister is not None
             with pytest.raises(TransferError, match="context changed"):
@@ -475,6 +474,18 @@ class TestPodUidGuard:
         async with app.run_test():
             lister = app._transfer.remote_lister(
                 "default", "api-1", "app", uid="uid-approved", epoch=app._ctx.epoch()
+            )
+            assert lister is not None
+            with pytest.raises(TransferError, match="verif"):
+                await lister("/")
+            assert opener.calls == []
+
+    async def test_listing_fails_closed_when_no_uid_was_captured(self) -> None:
+        opener = FakeExecOpener(_listing("etc/"))
+        app = make_app([_pod("api-1")], open_pod_exec=opener)
+        async with app.run_test():
+            lister = app._transfer.remote_lister(
+                "default", "api-1", "app", uid=None, epoch=app._ctx.epoch()
             )
             assert lister is not None
             with pytest.raises(TransferError, match="verif"):

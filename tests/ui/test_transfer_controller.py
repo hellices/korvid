@@ -519,7 +519,7 @@ async def test_remote_lister_is_unavailable_without_an_exec_client(tmp_path: Pat
 async def test_remote_lister_lists_over_the_exec_api(tmp_path: Path) -> None:
     h = FlowHarness(tmp_path)
     lister = h.controller.remote_lister(
-        "default", "api-1", "app", uid=None, epoch=h.env.context.epoch()
+        "default", "api-1", "app", uid="uid-1", epoch=h.env.context.epoch()
     )
     assert lister is not None
     with patch(

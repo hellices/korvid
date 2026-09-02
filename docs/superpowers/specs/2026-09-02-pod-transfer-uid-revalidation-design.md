@@ -9,11 +9,12 @@
 ## Problem
 
 File transfer captures a Pod UID when the dialog opens and re-reads the Pod
-before starting the name-based exec. The manifest lookup helper deliberately
-returns `None` for timeouts and infrastructure errors. The shared
-`pod_uid_unchanged` guard currently treats that result as success, so a Pod
-that was replaced while the dialog was open can receive an upload or serve a
-download when the final lookup is unavailable.
+before starting the name-based exec. Initial summaries can contain no UID, and
+the manifest lookup helper deliberately returns `None` for timeouts and
+infrastructure errors. Missing captured UIDs bypassed the shared
+`pod_uid_unchanged` guard, while missing final UIDs were treated as success, so
+an operation could execute by name without proving it still targeted the
+approved Pod incarnation.
 
 The guard must distinguish three outcomes:
 
@@ -60,15 +61,21 @@ identity boundary for transfer and debug:
   that the Pod no longer exists.
 - A retrieved UID different from the captured UID returns `False` and reports
   that the Pod was replaced.
-- `None` returns `False` and reports that the Pod identity could not be
-  verified and the user should retry.
+- A missing captured UID or a final lookup returning `None` returns `False`
+  and reports that the Pod identity could not be verified and the user should
+  retry.
 - Only an exact non-`None` UID match returns `True`.
 
 The final lookup stays bounded by the existing `_UID_LOOKUP_TIMEOUT`.
 Infrastructure exceptions and timeouts continue to be normalized by
 `_target_manifest`; the identity guard gives that normalized result a stricter
-meaning only when an operation already captured a Pod UID and must bind a
-name-based exec to that incarnation.
+meaning for every name-based transfer or debug operation. The shared guard is
+called unconditionally and requires both sides of the comparison to be
+non-`None`.
+
+Remote directory listing uses the exec API too, so its dialog-time UID guard
+also rejects a missing captured UID rather than listing a potentially different
+same-named Pod.
 
 No changes are made to general write-target lookup behavior. Other writes
 continue using their existing server-side UID preconditions and fail-open
@@ -84,10 +91,11 @@ lookup policy.
 4. start the exec stream;
 5. append the outcome audit entry.
 
-An unavailable, missing, or replaced Pod therefore causes no exec call and no
-intent audit entry because no transfer was attempted. Audit-log absence still
-blocks before identity lookup, and audit append failure still blocks before
-exec. This preserves the existing fail-closed audit guarantees.
+A missing captured UID or an unavailable, missing, or replaced Pod therefore
+causes no exec call and no intent audit entry because no transfer was attempted.
+Audit-log absence still blocks before identity lookup, and audit append failure
+still blocks before exec. This preserves the existing fail-closed audit
+guarantees.
 
 ## User Experience
 
@@ -106,6 +114,8 @@ differentiate target lifecycle changes from transient control-plane failure.
 
 TDD regressions cover both upload and download final revalidation:
 
+- a missing captured UID blocks transfer, debug, and remote listing before
+  exec;
 - a timeout-normalized lookup result blocks before audit and exec;
 - an infrastructure-error-normalized lookup result blocks before audit and
   exec;

@@ -18,16 +18,17 @@ from korvid.core.audit import AuditLog
 from korvid.core.config import KorvidConfig
 from korvid.core.transfer import TransferSpec
 from korvid.k8s.models import PodSummary
+from korvid.ui.app import KorvidApp
 from korvid.ui.widgets.confirm_screen import ConfirmScreen
 from korvid.ui.widgets.resource_table import ResourceTable
 from korvid.ui.widgets.transfer_screen import TransferProgressScreen, TransferScreen
-from tests.ui.test_app import make_app
+from tests.ui.test_app import make_app as _make_app
 from tests.ui.waits import until
 
 SUCCESS = json.dumps({"metadata": {}, "status": "Success"}).encode()
 
 
-def _pod(name: str, containers: tuple[str, ...] = ("app",), uid: str = "") -> PodSummary:
+def _pod(name: str, containers: tuple[str, ...] = ("app",), uid: str = "uid-1") -> PodSummary:
     return PodSummary(
         name=name,
         namespace="default",
@@ -39,6 +40,18 @@ def _pod(name: str, containers: tuple[str, ...] = ("app",), uid: str = "") -> Po
         containers=containers,
         uid=uid,
     )
+
+
+def make_app(pods: list[PodSummary], *args: Any, **kwargs: Any) -> KorvidApp:
+    if "get_manifest" not in kwargs:
+
+        async def get_manifest(kind: str, ns: str | None, name: str) -> dict[str, Any]:
+            del kind
+            pod = next(pod for pod in pods if pod.namespace == ns and pod.name == name)
+            return {"metadata": {"uid": pod.uid}}
+
+        kwargs["get_manifest"] = get_manifest
+    return _make_app(pods, *args, **kwargs)
 
 
 def tar_bytes(name: str, payload: bytes) -> bytes:
@@ -523,6 +536,24 @@ async def test_transfer_blocked_when_final_uid_lookup_unavailable(
     assert all(
         "no longer exists" not in message and "was replaced" not in message for message in messages
     )
+
+
+async def test_transfer_blocked_when_no_pod_uid_was_captured(tmp_path: Path) -> None:
+    opener = FakeExecOpener()
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app(
+        [_pod("api-1")],
+        open_pod_exec=opener,
+        audit=AuditLog(audit_path, context="test"),
+    )
+    spec = TransferSpec("download", "/tmp/source", str(tmp_path / "source"))
+
+    async with app.run_test():
+        await app._transfer.run("default", "api-1", "app", spec, None)
+
+    assert opener.calls == []
+    assert audit_entries(audit_path) == []
+    assert any("could not be verified" in str(n.message) for n in app._notifications)
 
 
 async def test_download_blocked_when_pod_replaced(tmp_path: Path) -> None:

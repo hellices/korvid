@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Refuse name-based Pod transfer unless the final bounded lookup returns the exact UID captured when the transfer dialog opened.
+**Goal:** Refuse name-based Pod transfer and debug unless a non-`None` captured UID exactly matches the final bounded lookup.
 
-**Architecture:** Keep `ResourceInspectController.pod_uid_unchanged` as the shared transfer/debug identity boundary. Change only its interpretation of the injected `str | None` lookup result: `None` becomes a retryable verification failure, while confirmed deletion, replacement, and exact match retain distinct outcomes.
+**Architecture:** Keep `ResourceInspectController.pod_uid_unchanged` as the shared transfer/debug identity boundary. Call it unconditionally with the optional captured UID and reject either a missing captured UID or a `None` lookup result as a retryable verification failure, while confirmed deletion, replacement, and exact match retain distinct outcomes. Apply the same missing-UID policy to remote directory listing because it also executes against the Pod by name.
 
 **Tech Stack:** Python 3.11+, asyncio, Textual Pilot tests, pytest, Ruff, mypy, Tach
 
@@ -23,13 +23,17 @@
 
 **Files:**
 - Modify: `src/korvid/ui/resource_inspect_controller.py`
+- Modify: `src/korvid/ui/transfer.py`
+- Modify: `src/korvid/ui/debug.py`
+- Modify: `src/korvid/ui/shell_controller.py`
 - Modify: `tests/ui/test_resource_inspect_controller.py`
 - Modify: `tests/ui/test_transfer.py:428-524`
+- Modify: `tests/ui/test_transfer_picker.py`
 - Modify: `tests/ui/test_shell.py:1214-1277`
 
 **Interfaces:**
 - Consumes: injected target UID lookup `(kind_alias: str, ns: str | None, name: str) -> Awaitable[str | None]`
-- Produces: `ResourceInspectController.pod_uid_unchanged(namespace: str, name: str, approved_uid: str, *, action: str) -> bool`, where only an exact non-`None` match returns `True`
+- Produces: `ResourceInspectController.pod_uid_unchanged(namespace: str, name: str, approved_uid: str | None, *, action: str) -> bool`, where only an exact non-`None` match returns `True`
 
 - [ ] **Step 1: Add failing transfer regressions for normalized timeout and infrastructure failure**
 
@@ -116,9 +120,16 @@ fail-open behavior:
 
 ```python
 async def pod_uid_unchanged(
-    self, namespace: str, name: str, approved_uid: str, *, action: str
+    self, namespace: str, name: str, approved_uid: str | None, *, action: str
 ) -> bool:
     """Re-verify the approved pod incarnation just before `action` executes."""
+    if approved_uid is None:
+        self.notify(
+            f"{action} cancelled - pod {name} could not be verified. "
+            "Retry when the cluster is reachable.",
+            severity="warning",
+        )
+        return False
     try:
         current_uid = await self._target_uid("pods", namespace, name)
     except ApiStatusError:
