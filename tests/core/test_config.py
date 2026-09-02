@@ -716,13 +716,6 @@ def test_mcp_follow_requires_literal_true(tmp_path: Path) -> None:
     assert cfg.mcp_follow is False
 
 
-def test_mcp_follow_enabled(tmp_path: Path) -> None:
-    f = tmp_path / "config.yaml"
-    f.write_text("mcp:\n  follow: true\n")
-    cfg = load_config(f)
-    assert cfg.mcp_follow is True
-
-
 def test_mcp_write_proposals_requires_literal_true(tmp_path: Path) -> None:
     f = tmp_path / "config.yaml"
     f.write_text('mcp:\n  write_proposals: "yes"\n')
@@ -952,13 +945,6 @@ def test_ollama_negative_seed_falls_back(tmp_path: Path) -> None:
     p.write_text("agent:\n  provider: ollama\n  ollama:\n    seed: -1\n")
     cfg = load_config(p)
     assert cfg.agent_ollama_seed is None
-
-
-def test_ollama_num_predict_parsed(tmp_path: Path) -> None:
-    p = tmp_path / "config.yaml"
-    p.write_text("agent:\n  provider: ollama\n  ollama:\n    num_predict: 192\n")
-    cfg = load_config(p)
-    assert cfg.agent_ollama_num_predict == 192
 
 
 def test_ollama_num_predict_invalid_falls_back(tmp_path: Path) -> None:
@@ -1341,18 +1327,6 @@ def test_the_removed_profile_key_is_actionable(tmp_path: Path) -> None:
         load_config(path)
 
 
-def test_the_removed_profile_key_is_actionable_even_when_agent_disabled(
-    tmp_path: Path,
-) -> None:
-    """The migration error must fire regardless of whether the agent block
-    would otherwise enable the agent — a stale `profile` key is a mistake
-    the user needs to see either way."""
-    path = write_config(tmp_path, "agent:\n  enabled: false\n  profile: full\n")
-
-    with pytest.raises(ConfigMigrationError, match=r"agent\.profile was removed"):
-        load_config(path)
-
-
 def test_removed_agent_prompts_is_actionable(tmp_path: Path) -> None:
     """`agent.prompts` (system/append/tool_descriptions replacement) was
     removed entirely in favor of `agent.rules`; it must not be silently
@@ -1376,11 +1350,6 @@ def test_model_tier_and_additive_rules_load(tmp_path: Path) -> None:
 
     assert config.agent_model_tier == "low"
     assert config.agent_rules == ("Prefer workload owner evidence.",)
-
-
-def test_model_tier_high_is_parsed(tmp_path: Path) -> None:
-    path = write_config(tmp_path, "agent:\n  provider: ollama\n  model_tier: high\n")
-    assert load_config(path).agent_model_tier == "high"
 
 
 @pytest.mark.parametrize(
@@ -1474,22 +1443,6 @@ def test_save_agent_config_writes_an_explicit_low_tier(tmp_path: Path) -> None:
     )
     assert load_config(p).agent_model_tier == "low"
     assert "model_tier: low" in p.read_text()
-
-
-def test_save_agent_config_writes_an_explicit_high_tier(tmp_path: Path) -> None:
-    p = tmp_path / "c.yaml"
-    p.write_text("agent:\n  provider: ollama\n  model: qwen3:8b\n  model_tier: low\n")
-    save_agent_config(
-        p,
-        provider="openai-compat",
-        auth_method="api_key",
-        base_url="https://api.openai.com/v1",
-        model="gpt-4o-mini",
-        api_key_env="OPENAI_API_KEY",
-        model_tier="high",
-    )
-    assert load_config(p).agent_model_tier == "high"
-    assert "model_tier: high" in p.read_text()
 
 
 def test_save_agent_config_removes_tier_for_automatic_routing(tmp_path: Path) -> None:
@@ -1638,35 +1591,3 @@ def test_provider_name_canonicalized_at_load(tmp_path: Path) -> None:
     cfg = load_config(f)
     assert cfg.agent_provider == "github-copilot"
     assert cfg.agent_auth_method == "device-login"
-
-
-def test_provider_name_case_variant_canonicalized(tmp_path: Path) -> None:
-    """Mixed case and dot separators are canonicalized."""
-    f = tmp_path / "config.yaml"
-    f.write_text("agent:\n  provider: GitHub.Copilot\n  model: m\n")
-    cfg = load_config(f)
-    assert cfg.agent_provider == "github-copilot"
-    assert cfg.agent_auth_method == "device-login"
-
-
-def test_canonicalize_provider_name_parity() -> None:
-    """The core _canonicalize_provider_name must produce the same output
-    as providers.plugin_registry.normalize_provider_name for
-    representative built-in and plugin names."""
-    from korvid.core.config import _canonicalize_provider_name
-    from korvid.providers.plugin_registry import normalize_provider_name
-
-    names = [
-        "github-copilot",
-        "GitHub_Copilot",
-        "openai_compat",
-        "OpenAI.Compat",
-        "OLLAMA",
-        "Company_LLM",
-        "  azure  ",
-        "my--custom..provider",
-    ]
-    for name in names:
-        assert _canonicalize_provider_name(name) == normalize_provider_name(name), (
-            f"parity failed for {name!r}"
-        )

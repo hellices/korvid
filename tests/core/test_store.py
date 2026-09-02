@@ -1,12 +1,9 @@
-"""`ResourceStore` — the bulk of its CRUD/subscriber mechanics is exercised
-through the real `WatchManager` integration boundary in
-`tests/core/test_watch.py` (ADDED/DELETED) and through numerous UI-level
-tests exercising a real store for MODIFIED. This file keeps only one
-contract with no equivalent boundary elsewhere: `get()`'s published order for
-`ALL_NAMESPACES` is by the `(namespace, name)` tuple, not by the internal
-`"namespace/name"` key string — `-` sorts before `/`, so a namespace like
-`team-b` would come before `team` under key-string order but must sort after
-it. No retained watch/UI test exercises more than one namespace at once.
+"""`ResourceStore` CRUD is covered through `WatchManager` and UI integration.
+
+This file keeps the one contract with no equivalent boundary elsewhere:
+`get()` orders `ALL_NAMESPACES` by the `(namespace, name)` tuple, not by the
+internal `"namespace/name"` key string. A namespace such as `team-b` would
+sort before `team` by key string but must sort after it.
 """
 
 from __future__ import annotations
