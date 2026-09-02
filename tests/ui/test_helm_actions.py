@@ -5,10 +5,11 @@ helm binary — approval-gated and audited fail-closed like every other write.
 
 import asyncio
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
+import pytest
 from textual.widgets import OptionList, Static
 
 from korvid.core.audit import AuditLog
@@ -16,9 +17,11 @@ from korvid.core.config import KorvidConfig
 from korvid.core.store import ResourceStore, Summary
 from korvid.core.watch import WatchManager
 from korvid.k8s.discovery import ResourceMeta
+from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.helm import (
     HELM_RELEASES_META,
     HELM_REVISIONS_META,
+    HelmReleaseIdentity,
     HelmReleaseSummary,
     HelmRevisionSummary,
     release_uid,
@@ -44,6 +47,8 @@ _ALIASES: dict[str, ResourceMeta] = {
 }
 
 _NGINX = ChartHit("bitnami/nginx", "18.1.0", "1.27.0", "NGINX Open Source")
+HelmIdentityReader = Callable[[str, str], Awaitable[HelmReleaseIdentity | None]]
+_DEFAULT_IDENTITY_READER = cast("HelmIdentityReader", object())
 
 
 class FakeHelm(HelmCLI):
@@ -185,17 +190,29 @@ class FakeHelm(HelmCLI):
         return f'release "{release}" uninstalled'
 
 
-def _release_row(name: str, chart: str = "nginx-18.1.0") -> HelmReleaseSummary:
+def _release_row(
+    name: str,
+    chart: str = "nginx-18.1.0",
+    *,
+    secret_uid: str | None = None,
+    revision: int = 3,
+) -> HelmReleaseSummary:
+    identity = (
+        None
+        if secret_uid == ""
+        else HelmReleaseIdentity(secret_uid or f"secret-uid-{name}-{revision}", revision)
+    )
     return HelmReleaseSummary(
         name=name,
         namespace="default",
         kind="HelmRelease",
         created="2026-07-26T10:00:00Z",
         uid=release_uid("default", name),
-        revision=3,
+        revision=revision,
         status="deployed",
         chart=chart,
         app_version="1.27.0",
+        identity=identity,
     )
 
 
@@ -229,6 +246,7 @@ def make_app(
     helm: HelmCLI | None = None,
     audit_path: Path | None = None,
     readonly: bool = False,
+    get_helm_release_identity: HelmIdentityReader | None = _DEFAULT_IDENTITY_READER,
 ) -> KorvidApp:
     store = ResourceStore()
     rows = data if data is not None else _default_data()
@@ -242,6 +260,21 @@ def make_app(
     async def list_namespaces() -> list[str]:
         return ["default"]
 
+    async def default_identity(namespace: str, name: str) -> HelmReleaseIdentity | None:
+        for obj in rows.get("helmreleases", []):
+            if (
+                isinstance(obj, HelmReleaseSummary)
+                and obj.namespace == namespace
+                and obj.name == name
+            ):
+                return obj.identity
+        return None
+
+    identity_reader = (
+        default_identity
+        if get_helm_release_identity is _DEFAULT_IDENTITY_READER
+        else get_helm_release_identity
+    )
     return KorvidApp(
         config=KorvidConfig(namespace="default", readonly=readonly),
         store=store,
@@ -250,6 +283,7 @@ def make_app(
         aliases=dict(_ALIASES),
         audit=AuditLog(audit_path) if audit_path is not None else None,
         helm=helm,
+        get_helm_release_identity=identity_reader,
     )
 
 
@@ -288,8 +322,71 @@ async def _pick_first_chart(pilot: Any, app: KorvidApp, *, search_first: bool = 
     await pilot.press("enter")
 
 
+async def _approve_upgrade(pilot: Any, app: KorvidApp) -> None:
+    await _navigate(pilot, "helm", "helmreleases")
+    await _rows_listed(pilot, app, 1)
+    await pilot.press("u")
+    await _pick_first_chart(pilot, app, search_first=False)
+    await until(pilot, lambda: isinstance(app.screen, HelmInstallPrompt), label="wizard")
+    await pilot.press("enter")
+    await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="approval")
+    await pilot.press("y")
+
+
+async def _approve_rollback(pilot: Any, app: KorvidApp) -> None:
+    await _navigate(pilot, "helm", "helmreleases")
+    await _rows_listed(pilot, app, 1)
+    await _navigate(pilot, "helmrevisions", "helmrevisions")
+    await _rows_listed(pilot, app, 1)
+    await pilot.press("r")
+    await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="approval")
+    await pilot.press("y")
+
+
+async def _approve_uninstall(pilot: Any, app: KorvidApp) -> None:
+    await _navigate(pilot, "helm", "helmreleases")
+    await _rows_listed(pilot, app, 1)
+    await pilot.press("ctrl+d")
+    await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="approval")
+    for ch in "web":
+        await pilot.press(ch)
+    await pilot.press("enter")
+
+
 def _audit_entries(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
     return [json.loads(line) for line in path.read_text().splitlines()]
+
+
+async def _missing_identity(_namespace: str, _name: str) -> HelmReleaseIdentity | None:
+    return None
+
+
+async def _deleted_release(_namespace: str, _name: str) -> HelmReleaseIdentity | None:
+    raise ApiStatusError(404, "Not Found")
+
+
+async def _timed_out_identity(_namespace: str, _name: str) -> HelmReleaseIdentity | None:
+    raise TimeoutError
+
+
+async def _failed_identity_lookup(_namespace: str, _name: str) -> HelmReleaseIdentity | None:
+    raise ApiStatusError(500, "Internal Server Error")
+
+
+async def _unexpected_identity_error(_namespace: str, _name: str) -> HelmReleaseIdentity | None:
+    raise RuntimeError("identity lookup exploded")
+
+
+_IDENTITY_FAILURES: list[tuple[HelmIdentityReader | None, str]] = [
+    (None, "could not be verified"),
+    (_missing_identity, "could not be verified"),
+    (_deleted_release, "no longer exists"),
+    (_timed_out_identity, "could not be verified"),
+    (_failed_identity_lookup, "could not be verified"),
+    (_unexpected_identity_error, "precondition could not be verified"),
+]
 
 
 async def test_install_key_without_helm_binary_reports_absence(tmp_path: Path) -> None:
@@ -362,6 +459,38 @@ async def test_install_happy_path_executes_and_audits(tmp_path: Path) -> None:
         assert entries[-1]["outcome"] == "success"
         assert entries[-1]["kind"] == "helmreleases"
         assert entries[-1]["name"] == "nginx"
+
+
+async def test_install_does_not_call_helm_identity_reader(tmp_path: Path) -> None:
+    helm = FakeHelm()
+    identity_calls: list[tuple[str, str]] = []
+
+    async def identity_reader(namespace: str, name: str) -> HelmReleaseIdentity | None:
+        identity_calls.append((namespace, name))
+        return HelmReleaseIdentity("must-not-be-read", 1)
+
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app(
+        helm=helm,
+        audit_path=audit_path,
+        get_helm_release_identity=identity_reader,
+    )
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "helm", "helmreleases")
+        await pilot.press("i")
+        await _pick_first_chart(pilot, app)
+        await until(pilot, lambda: isinstance(app.screen, HelmInstallPrompt), label="wizard")
+        await pilot.press("enter")
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="approval")
+        await pilot.press("y")
+        await until(
+            pilot,
+            lambda: audit_path.exists() and "success" in audit_path.read_text(),
+            label="audited success",
+        )
+
+    assert identity_calls == []
+    assert sum(1 for call in helm.calls if call[0] == "install") == 1
 
 
 async def test_install_preview_shows_dry_run_output(tmp_path: Path) -> None:
@@ -822,8 +951,89 @@ async def test_upgrade_key_reuses_wizard_with_fixed_release(tmp_path: Path) -> N
             lambda: audit_path.exists() and "success" in audit_path.read_text(),
             label="audited success",
         )
-        assert ("upgrade", "web", "bitnami/nginx", "default", "18.1.0", True) in helm.calls
-        assert _audit_entries(audit_path)[-1]["action"] == "helm-upgrade"
+        expected = ("upgrade", "web", "bitnami/nginx", "default", "18.1.0", True)
+        assert helm.calls.count(expected) == 1
+        entries = _audit_entries(audit_path)
+        assert entries[0]["action"] == "helm-upgrade"
+        assert entries[0]["outcome"] == "intent"
+        assert entries[-1]["outcome"] == "success"
+
+
+async def test_upgrade_rejects_release_without_captured_identity(tmp_path: Path) -> None:
+    helm = FakeHelm()
+    audit_path = tmp_path / "audit.jsonl"
+    data = _default_data()
+    data["helmreleases"] = [_release_row("web", secret_uid="")]
+    app = make_app(data, helm=helm, audit_path=audit_path)
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "helm", "helmreleases")
+        await _rows_listed(pilot, app, 1)
+        await pilot.press("u")
+        await until(
+            pilot,
+            lambda: any("identity could not be verified" in n.message for n in app._notifications),
+            label="missing captured identity blocked",
+        )
+        assert len(app.screen_stack) == 1
+
+    assert not any(call[0] == "upgrade" for call in helm.calls)
+    assert _audit_entries(audit_path) == []
+
+
+@pytest.mark.parametrize(("reader", "message"), _IDENTITY_FAILURES)
+async def test_upgrade_blocks_when_identity_cannot_be_verified(
+    tmp_path: Path,
+    reader: HelmIdentityReader | None,
+    message: str,
+) -> None:
+    helm = FakeHelm()
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app(
+        helm=helm,
+        audit_path=audit_path,
+        get_helm_release_identity=reader,
+    )
+    async with app.run_test() as pilot:
+        await _approve_upgrade(pilot, app)
+        await until(
+            pilot,
+            lambda: any(message in n.message for n in app._notifications),
+            label="identity failure blocked",
+        )
+
+    assert not any(call[0] == "upgrade" for call in helm.calls)
+    assert _audit_entries(audit_path) == []
+
+
+async def test_upgrade_rejects_reinstalled_release_after_approval(tmp_path: Path) -> None:
+    helm = FakeHelm()
+
+    async def current_identity(_namespace: str, _name: str) -> HelmReleaseIdentity | None:
+        return HelmReleaseIdentity("replacement-secret-uid", 1)
+
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app(
+        helm=helm,
+        audit_path=audit_path,
+        get_helm_release_identity=current_identity,
+    )
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "helm", "helmreleases")
+        await _rows_listed(pilot, app, 1)
+        await pilot.press("u")
+        await _pick_first_chart(pilot, app, search_first=False)
+        await until(pilot, lambda: isinstance(app.screen, HelmInstallPrompt), label="wizard")
+        await pilot.press("enter")
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="approval")
+        await pilot.press("y")
+        await until(
+            pilot,
+            lambda: any("changed since it was approved" in n.message for n in app._notifications),
+            label="replacement blocked",
+        )
+
+    assert not any(call[0] == "upgrade" for call in helm.calls)
+    assert _audit_entries(audit_path) == []
 
 
 async def test_upgrade_preview_prefers_diff_plugin(tmp_path: Path) -> None:
@@ -851,6 +1061,8 @@ async def test_rollback_key_on_revision_confirms_and_executes(tmp_path: Path) ->
     audit_path = tmp_path / "audit.jsonl"
     app = make_app(helm=helm, audit_path=audit_path)
     async with app.run_test() as pilot:
+        await _navigate(pilot, "helm", "helmreleases")
+        await _rows_listed(pilot, app, 1)
         await _navigate(pilot, "helmrevisions", "helmrevisions")
         await _rows_listed(pilot, app, 1)
         await pilot.press("r")
@@ -864,11 +1076,89 @@ async def test_rollback_key_on_revision_confirms_and_executes(tmp_path: Path) ->
             lambda: audit_path.exists() and "success" in audit_path.read_text(),
             label="audited success",
         )
-        assert ("rollback", "web", 2, "default") in helm.calls
+        assert helm.calls.count(("rollback", "web", 2, "default")) == 1
         entries = _audit_entries(audit_path)
         assert entries[0]["action"] == "helm-rollback"
         assert entries[0]["outcome"] == "intent"
         assert entries[-1]["outcome"] == "success"
+
+
+async def test_rollback_rejects_release_without_captured_identity(tmp_path: Path) -> None:
+    helm = FakeHelm()
+    audit_path = tmp_path / "audit.jsonl"
+    data = _default_data()
+    data["helmreleases"] = [_release_row("web", secret_uid="")]
+    app = make_app(data, helm=helm, audit_path=audit_path)
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "helm", "helmreleases")
+        await _rows_listed(pilot, app, 1)
+        await _navigate(pilot, "helmrevisions", "helmrevisions")
+        await _rows_listed(pilot, app, 1)
+        await pilot.press("r")
+        await until(
+            pilot,
+            lambda: any("identity could not be verified" in n.message for n in app._notifications),
+            label="missing captured identity blocked",
+        )
+        assert len(app.screen_stack) == 1
+
+    assert ("rollback", "web", 2, "default") not in helm.calls
+    assert _audit_entries(audit_path) == []
+
+
+@pytest.mark.parametrize(("reader", "message"), _IDENTITY_FAILURES)
+async def test_rollback_blocks_when_identity_cannot_be_verified(
+    tmp_path: Path,
+    reader: HelmIdentityReader | None,
+    message: str,
+) -> None:
+    helm = FakeHelm()
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app(
+        helm=helm,
+        audit_path=audit_path,
+        get_helm_release_identity=reader,
+    )
+    async with app.run_test() as pilot:
+        await _approve_rollback(pilot, app)
+        await until(
+            pilot,
+            lambda: any(message in n.message for n in app._notifications),
+            label="identity failure blocked",
+        )
+
+    assert ("rollback", "web", 2, "default") not in helm.calls
+    assert _audit_entries(audit_path) == []
+
+
+async def test_rollback_rejects_reinstalled_release_after_approval(tmp_path: Path) -> None:
+    helm = FakeHelm()
+
+    async def current_identity(_namespace: str, _name: str) -> HelmReleaseIdentity | None:
+        return HelmReleaseIdentity("replacement-secret-uid", 1)
+
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app(
+        helm=helm,
+        audit_path=audit_path,
+        get_helm_release_identity=current_identity,
+    )
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "helm", "helmreleases")
+        await _rows_listed(pilot, app, 1)
+        await _navigate(pilot, "helmrevisions", "helmrevisions")
+        await _rows_listed(pilot, app, 1)
+        await pilot.press("r")
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="approval")
+        await pilot.press("y")
+        await until(
+            pilot,
+            lambda: any("changed since it was approved" in n.message for n in app._notifications),
+            label="replacement blocked",
+        )
+
+    assert ("rollback", "web", 2, "default") not in helm.calls
+    assert _audit_entries(audit_path) == []
 
 
 async def test_rollback_preview_uses_diff_plugin_when_present(tmp_path: Path) -> None:
@@ -876,6 +1166,8 @@ async def test_rollback_preview_uses_diff_plugin_when_present(tmp_path: Path) ->
     helm.diff_plugin = True
     app = make_app(helm=helm, audit_path=tmp_path / "audit.jsonl")
     async with app.run_test() as pilot:
+        await _navigate(pilot, "helm", "helmreleases")
+        await _rows_listed(pilot, app, 1)
         await _navigate(pilot, "helmrevisions", "helmrevisions")
         await _rows_listed(pilot, app, 1)
         await pilot.press("r")
@@ -929,11 +1221,87 @@ async def test_uninstall_ctrl_d_on_release_confirms_and_executes(tmp_path: Path)
             lambda: audit_path.exists() and "success" in audit_path.read_text(),
             label="audited success",
         )
-        assert ("uninstall", "web", "default", False) in helm.calls
+        assert helm.calls.count(("uninstall", "web", "default", False)) == 1
         entries = _audit_entries(audit_path)
         assert entries[0]["action"] == "helm-uninstall"
         assert entries[0]["outcome"] == "intent"
         assert entries[-1]["outcome"] == "success"
+
+
+async def test_uninstall_rejects_release_without_captured_identity(tmp_path: Path) -> None:
+    helm = FakeHelm()
+    audit_path = tmp_path / "audit.jsonl"
+    data = _default_data()
+    data["helmreleases"] = [_release_row("web", secret_uid="")]
+    app = make_app(data, helm=helm, audit_path=audit_path)
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "helm", "helmreleases")
+        await _rows_listed(pilot, app, 1)
+        await pilot.press("ctrl+d")
+        await until(
+            pilot,
+            lambda: any("identity could not be verified" in n.message for n in app._notifications),
+            label="missing captured identity blocked",
+        )
+        assert len(app.screen_stack) == 1
+
+    assert ("uninstall", "web", "default", False) not in helm.calls
+    assert _audit_entries(audit_path) == []
+
+
+@pytest.mark.parametrize(("reader", "message"), _IDENTITY_FAILURES)
+async def test_uninstall_blocks_when_identity_cannot_be_verified(
+    tmp_path: Path,
+    reader: HelmIdentityReader | None,
+    message: str,
+) -> None:
+    helm = FakeHelm()
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app(
+        helm=helm,
+        audit_path=audit_path,
+        get_helm_release_identity=reader,
+    )
+    async with app.run_test() as pilot:
+        await _approve_uninstall(pilot, app)
+        await until(
+            pilot,
+            lambda: any(message in n.message for n in app._notifications),
+            label="identity failure blocked",
+        )
+
+    assert ("uninstall", "web", "default", False) not in helm.calls
+    assert _audit_entries(audit_path) == []
+
+
+async def test_uninstall_rejects_reinstalled_release_after_approval(tmp_path: Path) -> None:
+    helm = FakeHelm()
+
+    async def current_identity(_namespace: str, _name: str) -> HelmReleaseIdentity | None:
+        return HelmReleaseIdentity("replacement-secret-uid", 1)
+
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app(
+        helm=helm,
+        audit_path=audit_path,
+        get_helm_release_identity=current_identity,
+    )
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "helm", "helmreleases")
+        await _rows_listed(pilot, app, 1)
+        await pilot.press("ctrl+d")
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="approval")
+        for ch in "web":
+            await pilot.press(ch)
+        await pilot.press("enter")
+        await until(
+            pilot,
+            lambda: any("changed since it was approved" in n.message for n in app._notifications),
+            label="replacement blocked",
+        )
+
+    assert ("uninstall", "web", "default", False) not in helm.calls
+    assert _audit_entries(audit_path) == []
 
 
 async def test_uninstall_preview_shows_dry_run_output(tmp_path: Path) -> None:
@@ -1172,6 +1540,8 @@ async def test_rollback_preview_progress_shows_and_clears(tmp_path: Path) -> Non
     helm = GatedRollbackPreviewHelm()
     app = make_app(helm=helm, audit_path=tmp_path / "audit.jsonl")
     async with app.run_test() as pilot:
+        await _navigate(pilot, "helm", "helmreleases")
+        await _rows_listed(pilot, app, 1)
         await _navigate(pilot, "helmrevisions", "helmrevisions")
         await _rows_listed(pilot, app, 1)
         await pilot.press("r")
@@ -1213,16 +1583,26 @@ async def test_rollback_target_is_captured_by_the_action_not_the_worker(tmp_path
     app = make_app(helm=helm, audit_path=tmp_path / "audit.jsonl")
     seen: list[tuple[Any, ...]] = []
 
-    async def spy(helm_arg: Any, row: Any, ns: Any, name: Any, namespace: Any, epoch: Any) -> None:
-        seen.append((row.release, row.revision, namespace))
+    async def spy(
+        helm_arg: Any,
+        row: Any,
+        ns: Any,
+        name: Any,
+        namespace: Any,
+        epoch: Any,
+        identity: Any,
+    ) -> None:
+        seen.append((row.release, row.revision, namespace, identity))
 
     async with app.run_test() as pilot:
+        await _navigate(pilot, "helm", "helmreleases")
+        await _rows_listed(pilot, app, 1)
         await _navigate(pilot, "helmrevisions", "helmrevisions")
         await _rows_listed(pilot, app, 1)
         with mock.patch.object(app._helm_ctl, "rollback", spy):
             await pilot.press("r")
             # captured synchronously: the facts exist before any worker ran
-            assert seen == [("web", 2, "default")]
+            assert seen == [("web", 2, "default", HelmReleaseIdentity("secret-uid-web-3", 3))]
 
 
 async def test_progress_labels_are_owner_scoped(tmp_path: Path) -> None:
@@ -1694,16 +2074,26 @@ async def test_the_controller_captures_the_rollback_target_at_the_keypress(
     app = make_app(helm=FakeHelm(), audit_path=tmp_path / "audit.jsonl")
     seen: list[tuple[Any, ...]] = []
 
-    async def spy(helm_arg: Any, row: Any, ns: Any, name: Any, namespace: Any, epoch: Any) -> None:
-        seen.append((row.release, row.revision, namespace))
+    async def spy(
+        helm_arg: Any,
+        row: Any,
+        ns: Any,
+        name: Any,
+        namespace: Any,
+        epoch: Any,
+        identity: Any,
+    ) -> None:
+        seen.append((row.release, row.revision, namespace, identity))
 
     async with app.run_test() as pilot:
+        await _navigate(pilot, "helm", "helmreleases")
+        await _rows_listed(pilot, app, 1)
         await _navigate(pilot, "helmrevisions", "helmrevisions")
         await _rows_listed(pilot, app, 1)
         with mock.patch.object(app._helm_ctl, "rollback", spy):
             app._helm_ctl.rollback_selected()
             await until(pilot, lambda: bool(seen), label="rollback worker ran")
-            assert seen == [("web", 2, "default")]
+            assert seen == [("web", 2, "default", HelmReleaseIdentity("secret-uid-web-3", 3))]
 
 
 async def test_the_controller_captures_the_uninstall_target_at_the_keypress(
@@ -1714,8 +2104,16 @@ async def test_the_controller_captures_the_uninstall_target_at_the_keypress(
     app = make_app(helm=FakeHelm(), audit_path=tmp_path / "audit.jsonl")
     seen: list[tuple[Any, ...]] = []
 
-    async def spy(helm_arg: Any, row: Any, ns: Any, name: Any, namespace: Any, epoch: Any) -> None:
-        seen.append((row.name, namespace))
+    async def spy(
+        helm_arg: Any,
+        row: Any,
+        ns: Any,
+        name: Any,
+        namespace: Any,
+        epoch: Any,
+        identity: Any,
+    ) -> None:
+        seen.append((row.name, namespace, identity))
 
     async with app.run_test() as pilot:
         await _navigate(pilot, "helm", "helmreleases")
@@ -1723,7 +2121,7 @@ async def test_the_controller_captures_the_uninstall_target_at_the_keypress(
         with mock.patch.object(app._helm_ctl, "uninstall", spy):
             app._helm_ctl.uninstall_selected()
             await until(pilot, lambda: bool(seen), label="uninstall worker ran")
-            assert seen == [("web", "default")]
+            assert seen == [("web", "default", HelmReleaseIdentity("secret-uid-web-3", 3))]
 
 
 async def test_the_controller_owns_the_revision_history_drill(tmp_path: Path) -> None:

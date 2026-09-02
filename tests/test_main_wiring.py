@@ -2856,6 +2856,9 @@ class _FakeKubeForWiring:
 
     def list_namespaces(self) -> Any: ...
     def get_helm_release_components(self, *a: Any, **k: Any) -> Any: ...
+    async def get_helm_release_identity(self, namespace: str, name: str) -> Any:
+        return namespace, name
+
     def stream_logs(self, *a: Any, **k: Any) -> Any: ...
     def can_i(self, *a: Any, **k: Any) -> Any: ...
     def open_pod_exec(self, *a: Any, **k: Any) -> Any: ...
@@ -2898,6 +2901,25 @@ async def test_wire_and_run_wires_relationship_lister_from_kube(
     assert result == []
     assert kube.relationship_list_calls == [("meta", "ns")]
     assert kube.list_calls == []
+
+
+async def test_wire_and_run_wires_helm_release_identity_reader_from_kube(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import korvid.__main__ as main_mod
+    from korvid.core.config import KorvidConfig
+
+    monkeypatch.setattr(main_mod, "KorvidApp", _FakeAppCapturesKwargs)
+    _FakeAppCapturesKwargs.instances.clear()
+
+    kube = _FakeKubeForWiring()
+    state = main_mod._RunState()
+    await main_mod._wire_and_run(KorvidConfig(readonly=True), cast("Any", kube), state)
+    if state.discovery_box:
+        await state.discovery_box[0]
+
+    reader = _FakeAppCapturesKwargs.instances[0].captured["get_helm_release_identity"]
+    assert await reader("default", "web") == ("default", "web")
 
 
 async def test_wire_and_run_passes_session_timeline_and_warning_watch(
