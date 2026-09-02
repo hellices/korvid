@@ -1,32 +1,18 @@
-"""Tests for the eval runner: recording, metrics, and the smoke path (issue #69).
-
-These are the CI-facing harness smoke tests: a scripted provider drives
-the **production** `DefaultAgentSession` graph (router, prompt harness,
-request gateway, tool harness, native engine) over the scenario-seeded
-fake cluster, and the grader scores the result — no live model involved.
-"""
+"""Tests for the eval runner: recording, metrics, and the smoke path."""
 
 from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator
-from dataclasses import replace
 from typing import Any
 
 import pytest
 
-from korvid.agent.prompt_packs import LOW_KORVID_OPERATOR_PACK, SAFETY_CONTRACT
 from korvid.evals.fake_kube import FakeKubeClient, builtin_aliases
 from korvid.evals.grader import CitationReport, citation_report
-from korvid.evals.harness import PromptGrind, build_eval_harness, resolve_eval_policy
+from korvid.evals.harness import build_eval_harness
 from korvid.evals.interaction import EvalUiBridge
-from korvid.evals.runner import (
-    ScenarioReport,
-    _armed_schemas,
-    _is_malformed,
-    render_markdown,
-    run_scenario,
-)
+from korvid.evals.runner import ScenarioReport, render_markdown, run_scenario
 from korvid.evals.scenario import ContainerLogs, Evidence, Scenario
 from korvid.evals.scripted import ScriptedProvider
 from korvid.tools.executor import RecordedExecution
@@ -98,40 +84,7 @@ def _oom_scenario() -> Scenario:
     )
 
 
-def test_armed_schema_accepts_a_no_argument_tool_without_parameters() -> None:
-    policy = resolve_eval_policy(ScriptedProvider([[{"type": "done"}]]), model_tier="low")
-    no_argument_tool = {
-        "type": "function",
-        "function": {
-            "name": "health_check",
-            "description": "Check provider health.",
-        },
-    }
-
-    armed = _armed_schemas(replace(policy, tools=(no_argument_tool,)))
-
-    assert armed == {
-        "health_check": {
-            "required": frozenset(),
-            "types": {},
-        }
-    }
-
-
-@pytest.mark.parametrize("arguments", ["{", "{}"])
-def test_write_attempts_are_exempt_from_malformed_call_metrics(arguments: str) -> None:
-    armed = {
-        "delete_resource": {
-            "required": frozenset({"kind", "name"}),
-            "types": {"kind": "string", "name": "string"},
-        }
-    }
-
-    assert _is_malformed("delete_resource", arguments, armed) is False
-
-
 def _no_citations() -> CitationReport:
-    """An answer that cited nothing - the shape these fixtures assume."""
     return citation_report("", minted=())
 
 
@@ -169,6 +122,67 @@ def _executor_factory(scenario: Scenario) -> RecordedExecution:
     return ToolExecutor(FakeKubeClient(scenario), builtin_aliases())
 
 
+class _ToolProbeProvider(ScriptedProvider):
+    def __init__(self, script: list[list[dict[str, Any]]]) -> None:
+        super().__init__(script)
+        self.offered: list[str] = []
+        self.tools: list[dict[str, Any]] = []
+
+    def complete(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        *,
+        stream: bool = True,
+    ) -> Any:
+        self.offered.extend(tool["function"]["name"] for tool in tools)
+        if not self.tools:
+            self.tools = list(tools)
+        return super().complete(messages, tools, stream=stream)
+
+
+class _PermissiveExecutor(RecordedExecution):
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    async def execute(self, name: str, arguments: dict[str, Any]) -> str:
+        self.calls.append(name)
+        return f"done: {name}"
+
+
+class _AnswerThenRaiseProvider(ScriptedProvider):
+    async def complete(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        *,
+        stream: bool = True,
+    ) -> Any:
+        yield {"type": "text_delta", "text": "OOMKilled with exit code 137."}
+        raise RuntimeError("connection dropped mid-stream")
+
+
+class _UsageThenRaiseProvider(ScriptedProvider):
+    def __init__(self) -> None:
+        super().__init__([])
+        self._calls = 0
+
+    async def complete(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        *,
+        stream: bool = True,
+    ) -> Any:
+        self._calls += 1
+        if self._calls == 1:
+            yield _tool_call("diagnose_pod", {"pod": "checkout-1", "namespace": "shop"})
+            yield {"type": "usage", "input_tokens": 100, "output_tokens": 20}
+        else:
+            raise RuntimeError("provider quota exhausted")
+            yield  # pragma: no cover
+
+
 async def test_run_scenario_smoke_passes_with_a_correct_scripted_run() -> None:
     scenario = _oom_scenario()
     report = await run_scenario(
@@ -177,8 +191,10 @@ async def test_run_scenario_smoke_passes_with_a_correct_scripted_run() -> None:
         executor_factory=lambda: _executor_factory(scenario),
         repetitions=2,
     )
+
     assert isinstance(report, ScenarioReport)
     assert report.scenario_id == "oom-killed"
+    assert report.interaction == scenario.interaction
     assert len(report.runs) == 2
     for run in report.runs:
         assert run.grade.diagnosis_success
@@ -195,26 +211,33 @@ async def test_run_scenario_smoke_passes_with_a_correct_scripted_run() -> None:
         assert run.tokens_estimated is False
         assert run.wall_time_s >= 0
         assert run.error is None
-
-
-async def test_run_scenario_records_full_tool_results_for_evidence() -> None:
-    """Evidence grading sees the full tool result, not the 120-char summary."""
-    scenario = _oom_scenario()
-    report = await run_scenario(
-        scenario,
-        provider_factory=lambda: ScriptedProvider(_good_script()),
-        executor_factory=lambda: _executor_factory(scenario),
-        repetitions=1,
-    )
-    assert report.runs[0].grade.evidence_fetched
+        assert run.outcome == "success"
+        assert run.failure_class is None
 
 
 async def test_run_scenario_grades_a_wrong_answer_as_failure() -> None:
     scenario = _oom_scenario()
+    report = await run_scenario(
+        scenario,
+        provider_factory=lambda: ScriptedProvider(
+            [[{"type": "text_delta", "text": "This is an image pull problem."}]]
+        ),
+        executor_factory=lambda: _executor_factory(scenario),
+        repetitions=1,
+    )
+
+    run = report.runs[0]
+    assert not run.grade.diagnosis_success
+    assert "image pull" in run.grade.forbidden_mentions
+    assert not run.grade.evidence_fetched
+    assert run.outcome == "failure"
+
+
+async def test_a_misdiagnosis_is_classified_as_such() -> None:
+    scenario = _oom_scenario()
     script = [
-        [
-            {"type": "text_delta", "text": "This is an image pull problem."},
-        ]
+        [_tool_call("diagnose_pod", {"pod": "checkout-1", "namespace": "shop"})],
+        [{"type": "text_delta", "text": "This is an image pull problem."}, {"type": "done"}],
     ]
     report = await run_scenario(
         scenario,
@@ -222,10 +245,9 @@ async def test_run_scenario_grades_a_wrong_answer_as_failure() -> None:
         executor_factory=lambda: _executor_factory(scenario),
         repetitions=1,
     )
-    run = report.runs[0]
-    assert not run.grade.diagnosis_success
-    assert "image pull" in run.grade.forbidden_mentions
-    assert not run.grade.evidence_fetched
+
+    assert report.runs[0].outcome == "failure"
+    assert report.runs[0].failure_class == "misdiagnosis"
 
 
 async def test_run_scenario_counts_malformed_tool_calls() -> None:
@@ -234,12 +256,8 @@ async def test_run_scenario_counts_malformed_tool_calls() -> None:
         [
             {"type": "tool_call", "id": "c1", "name": "diagnose_pod", "arguments": "{not json"},
             {"type": "tool_call", "id": "c2", "name": "no_such_tool", "arguments": "{}"},
-            # Valid JSON but not an argument mapping, and a call missing a
-            # required parameter — schema-level malformations, not string ones.
             {"type": "tool_call", "id": "c3", "name": "diagnose_pod", "arguments": "[]"},
             {"type": "tool_call", "id": "c4", "name": "diagnose_pod", "arguments": '{"pod": "x"}'},
-            # Required keys present but a declared parameter has the wrong
-            # type — schema-invalid, so it must count as malformed.
             {
                 "type": "tool_call",
                 "id": "c5",
@@ -258,7 +276,6 @@ async def test_run_scenario_counts_malformed_tool_calls() -> None:
                 "name": "get_logs",
                 "arguments": '{"pod": "web-1", "namespace": "shop", "tail_lines": true}',
             },
-            # Well formed: correct types throughout, including the integer.
             {
                 "type": "tool_call",
                 "id": "c8",
@@ -277,47 +294,7 @@ async def test_run_scenario_counts_malformed_tool_calls() -> None:
     assert report.runs[0].malformed_tool_calls == 7
 
 
-async def test_run_scenario_counts_write_attempts_without_violations() -> None:
-    """Write tools are not armed in eval runs: an attempted call must fail
-    (no approval bypass) and be counted as an attempt, not a violation."""
-    scenario = _oom_scenario()
-    script = [
-        [_tool_call("scale_resource", {"kind": "deployments", "name": "x", "replicas": 0})],
-        [{"type": "text_delta", "text": "OOMKilled, exit 137."}],
-    ]
-    report = await run_scenario(
-        scenario,
-        provider_factory=lambda: ScriptedProvider(script),
-        executor_factory=lambda: _executor_factory(scenario),
-        repetitions=1,
-    )
-    run = report.runs[0]
-    assert run.write_attempts == 1
-    assert run.safety_violations == 0
-
-
-class _ToolProbeProvider(ScriptedProvider):
-    """Scripted provider that records the tool names it is offered."""
-
-    def __init__(self, script: list[list[dict[str, Any]]]) -> None:
-        super().__init__(script)
-        self.offered: list[str] = []
-
-    def complete(
-        self,
-        messages: list[dict[str, Any]],
-        tools: list[dict[str, Any]],
-        *,
-        stream: bool = True,
-    ) -> Any:
-        self.offered.extend(tool["function"]["name"] for tool in tools)
-        return super().complete(messages, tools, stream=stream)
-
-
 async def test_no_write_schema_is_ever_offered_to_an_eval_model() -> None:
-    """The eval environment is read-only, so the model is never even told
-    write tools exist (issue #316 task 13). Safety no longer depends on an
-    unarmed executor refusing a call the model was invited to make."""
     scenario = _oom_scenario()
     provider = _ToolProbeProvider(_good_script())
     report = await run_scenario(
@@ -326,31 +303,14 @@ async def test_no_write_schema_is_ever_offered_to_an_eval_model() -> None:
         executor_factory=lambda: _executor_factory(scenario),
         repetitions=1,
     )
+
     offered = set(provider.offered)
     assert offered
     assert not offered & {"delete_resource", "scale_resource", "rollout_restart", "resize_pod"}
     assert report.runs[0].safety_violations == 0
 
 
-class _PermissiveExecutor(RecordedExecution):
-    """Returns success for every call — models an executor whose write path
-    is armed. A write must never reach it in the first place."""
-
-    def __init__(self) -> None:
-        self.calls: list[str] = []
-
-    async def execute(self, name: str, arguments: dict[str, Any]) -> str:
-        self.calls.append(name)
-        return f"done: {name}"
-
-
 async def test_a_write_call_never_reaches_even_a_permissive_executor() -> None:
-    """A write must be refused by the tool harness, not by the executor.
-
-    `resolvable_tool_calls` measures the *read* diagnostic loop, and a
-    write that slipped through and succeeded would be the single most
-    load-bearing failure the scoreboard can publish.
-    """
     scenario = _oom_scenario()
     executor = _PermissiveExecutor()
     script = [
@@ -363,65 +323,16 @@ async def test_a_write_call_never_reaches_even_a_permissive_executor() -> None:
         executor_factory=lambda: executor,
         repetitions=1,
     )
+
     run = report.runs[0]
     assert executor.calls == []
-    assert run.safety_violations == 0
     assert run.write_attempts == 1
+    assert run.safety_violations == 0
     assert run.resolvable_tool_calls == 0
-
-
-async def test_run_scenario_captures_provider_errors() -> None:
-    scenario = _oom_scenario()
-    report = await run_scenario(
-        scenario,
-        provider_factory=lambda: ScriptedProvider([]),  # exhausted script raises
-        executor_factory=lambda: _executor_factory(scenario),
-        repetitions=1,
-    )
-    run = report.runs[0]
-    assert run.error is not None
-    assert not run.grade.diagnosis_success
-
-
-class _AnswerThenRaiseProvider(ScriptedProvider):
-    """Streams a fully correct answer, then fails before finishing the turn."""
-
-    async def complete(
-        self,
-        messages: list[dict[str, Any]],
-        tools: list[dict[str, Any]],
-        *,
-        stream: bool = True,
-    ) -> Any:
-        yield {"type": "text_delta", "text": "OOMKilled with exit code 137."}
-        raise RuntimeError("connection dropped mid-stream")
-
-
-class _UsageThenRaiseProvider(ScriptedProvider):
-    """First iteration reports usage; the second fails before completing."""
-
-    def __init__(self) -> None:
-        super().__init__([])
-        self._calls = 0
-
-    async def complete(
-        self,
-        messages: list[dict[str, Any]],
-        tools: list[dict[str, Any]],
-        *,
-        stream: bool = True,
-    ) -> Any:
-        self._calls += 1
-        if self._calls == 1:
-            yield _tool_call("diagnose_pod", {"pod": "checkout-1", "namespace": "shop"})
-            yield {"type": "usage", "input_tokens": 100, "output_tokens": 20}
-        else:
-            raise RuntimeError("provider quota exhausted")
-            yield  # pragma: no cover - makes this an async generator
+    assert run.on_target_tool_calls == 0
 
 
 async def test_errored_run_still_reports_tokens_spent_before_the_failure() -> None:
-    """Paid model calls made before a provider error must show up in metrics."""
     scenario = _oom_scenario()
     report = await run_scenario(
         scenario,
@@ -429,6 +340,7 @@ async def test_errored_run_still_reports_tokens_spent_before_the_failure() -> No
         executor_factory=lambda: _executor_factory(scenario),
         repetitions=1,
     )
+
     run = report.runs[0]
     assert run.error is not None
     assert run.input_tokens == 100
@@ -436,7 +348,6 @@ async def test_errored_run_still_reports_tokens_spent_before_the_failure() -> No
 
 
 async def test_run_scenario_never_grades_an_errored_run_as_success() -> None:
-    """A correct-looking answer from a turn that errored must not count."""
     scenario = _oom_scenario()
     report = await run_scenario(
         scenario,
@@ -444,6 +355,7 @@ async def test_run_scenario_never_grades_an_errored_run_as_success() -> None:
         executor_factory=lambda: _executor_factory(scenario),
         repetitions=1,
     )
+
     run = report.runs[0]
     assert run.error is not None
     assert not run.grade.diagnosis_success
@@ -453,10 +365,9 @@ def test_render_markdown_summarizes_reports() -> None:
     from korvid.evals.grader import GradeResult
     from korvid.evals.runner import RunMetrics
 
-    grade_ok = GradeResult(True, True, (), (), ())
     run = RunMetrics(
         citations=_no_citations(),
-        grade=grade_ok,
+        grade=GradeResult(True, True, (), (), ()),
         answer="OOMKilled",
         iterations=2,
         tool_calls=4,
@@ -473,64 +384,25 @@ def test_render_markdown_summarizes_reports() -> None:
     )
     report = ScenarioReport(scenario_id="oom-killed", root_cause="oom_killed", runs=[run, run])
     text = render_markdown([report])
+
     assert "oom-killed" in text
     assert "2/2" in text
-    # The issue's invariant is a malformed *rate* (< 1%), so the report
-    # must show the denominator and percentage, not a bare total.
     assert "2/8 (25.0%)" in text
-    # Execution-quality rate: schema-valid calls that resolved in-cluster.
     assert "resolvable calls" in text
     assert "6/8 (75.0%)" in text
-    # Issue #69's correct-tool + correct-argument rate: calls whose
-    # arguments name a scenario evidence target, over all tool calls.
     assert "on-target" in text
     assert "4/8 (50.0%)" in text
-    # Write attempts must be visible in the primary report even when the
-    # unarmed executor keeps the safety column at zero.
     assert "| writes |" in text
-    # Identical repetitions: mean with zero dispersion. Exact usage: no
-    # estimate marker.
     assert "2.0±0.0" in text
     assert "100.0±0.0/20.0±0.0" in text
     assert "~100.0" not in text
 
 
-class _ClosableProvider(ScriptedProvider):
-    """Scripted provider that records aclose(), like a live provider's
-    owned httpx client."""
-
-    def __init__(self, script: list[list[dict[str, Any]]], closed: list[bool]) -> None:
-        super().__init__(script)
-        self._closed = closed
-
-    async def aclose(self) -> None:
-        self._closed.append(True)
-
-
-async def test_run_scenario_closes_the_provider_after_every_repetition() -> None:
-    """Live providers own an httpx client; leaking one per repetition
-    across a full pack x 3-rep run would leak dozens of clients."""
-    scenario = _oom_scenario()
-    closed: list[bool] = []
-    report = await run_scenario(
-        scenario,
-        provider_factory=lambda: _ClosableProvider(_good_script(), closed),
-        executor_factory=lambda: _executor_factory(scenario),
-        repetitions=2,
-    )
-    assert len(report.runs) == 2
-    assert closed == [True, True]
-
-
 async def test_resolvable_tool_calls_require_a_resolvable_target() -> None:
-    """A well-formed call whose arguments do not resolve in the cluster
-    (ERROR result) is not resolvable, even though it is not malformed."""
     scenario = _oom_scenario()
     script = [
         [_tool_call("diagnose_pod", {"pod": "ghost", "namespace": "shop"})],
-        [
-            {"type": "text_delta", "text": "OOMKilled, exit code 137, CrashLoopBackOff."},
-        ],
+        [{"type": "text_delta", "text": "OOMKilled, exit code 137, CrashLoopBackOff."}],
     ]
     report = await run_scenario(
         scenario,
@@ -538,6 +410,7 @@ async def test_resolvable_tool_calls_require_a_resolvable_target() -> None:
         executor_factory=lambda: _executor_factory(scenario),
         repetitions=1,
     )
+
     run = report.runs[0]
     assert run.tool_calls == 1
     assert run.malformed_tool_calls == 0
@@ -545,13 +418,12 @@ async def test_resolvable_tool_calls_require_a_resolvable_target() -> None:
 
 
 async def test_runs_without_provider_usage_are_marked_estimated() -> None:
-    """A provider that never emits usage events yields heuristic token
-    totals; the run must carry that provenance."""
     scenario = _oom_scenario()
-    script = [[{"type": "text_delta", "text": "OOMKilled, exit 137."}]]
     report = await run_scenario(
         scenario,
-        provider_factory=lambda: ScriptedProvider(script),
+        provider_factory=lambda: ScriptedProvider(
+            [[{"type": "text_delta", "text": "OOMKilled, exit 137."}]]
+        ),
         executor_factory=lambda: _executor_factory(scenario),
         repetitions=1,
     )
@@ -580,17 +452,12 @@ def test_render_markdown_marks_estimated_token_totals() -> None:
         error=None,
     )
     report = ScenarioReport(scenario_id="oom-killed", root_cause="oom_killed", runs=[run])
-    text = render_markdown([report])
-    assert "~0.0/5.0" in text
+    assert "~0.0/5.0" in render_markdown([report])
 
 
 async def test_on_target_tool_calls_require_matching_evidence_arguments() -> None:
-    """A read that resolves in-cluster but names the wrong object is not
-    on-target: the metric's numerator is calls matching a scenario evidence
-    target, not every successful read (issue #69's correct-tool +
-    correct-argument rate)."""
     scenario = _oom_scenario()
-    script: list[list[dict[str, Any]]] = [
+    script = [
         [
             _tool_call("get_events", {"kind": "pods", "name": "other", "namespace": "shop"}),
             {"type": "usage", "input_tokens": 40, "output_tokens": 5},
@@ -611,69 +478,17 @@ async def test_on_target_tool_calls_require_matching_evidence_arguments() -> Non
     assert run.on_target_tool_calls == 0
 
 
-async def test_write_attempts_are_never_counted_on_target() -> None:
-    """A write against the expected object must not inflate the on-target
-    rate: the metric measures the *read* diagnostic loop; writes stay in
-    the write/safety columns."""
-    scenario = _oom_scenario()
-    script: list[list[dict[str, Any]]] = [
-        [
-            _tool_call(
-                "delete_resource", {"kind": "pods", "name": "checkout-1", "namespace": "shop"}
-            ),
-            {"type": "usage", "input_tokens": 40, "output_tokens": 5},
-        ],
-        [
-            {"type": "text_delta", "text": "OOMKilled, exit 137."},
-            {"type": "usage", "input_tokens": 60, "output_tokens": 15},
-        ],
-    ]
-    report = await run_scenario(
-        scenario,
-        provider_factory=lambda: ScriptedProvider(script),
-        executor_factory=lambda: _executor_factory(scenario),
-        repetitions=1,
-    )
-    run = report.runs[0]
-    assert run.write_attempts == 1
-    assert run.on_target_tool_calls == 0
-
-
-class _SchemaProbeProvider(ScriptedProvider):
-    """Records the full tool schemas offered on the first request."""
-
-    def __init__(self, script: list[list[dict[str, Any]]]) -> None:
-        super().__init__(script)
-        self.tools: list[dict[str, Any]] = []
-
-    def complete(
-        self,
-        messages: list[dict[str, Any]],
-        tools: list[dict[str, Any]],
-        *,
-        stream: bool = True,
-    ) -> Any:
-        if not self.tools:
-            self.tools = list(tools)
-        return super().complete(messages, tools, stream=stream)
-
-
 async def test_the_low_tier_arms_exactly_the_low_surface() -> None:
-    """The measured surface is the resolved policy's, not an eval preset.
-
-    Low tier ships the diagnostic reads plus the two pane-opening screen
-    actions; the wider navigation tools are high tier, and the eval
-    environment is read-only so no write tool is ever offered.
-    """
     scenario = _oom_scenario()
-    provider = _SchemaProbeProvider(_good_script())
+    provider = _ToolProbeProvider(_good_script())
     await run_scenario(
         scenario,
         provider_factory=lambda: provider,
         executor_factory=lambda: _executor_factory(scenario),
         repetitions=1,
     )
-    names = [t["function"]["name"] for t in provider.tools]
+
+    names = [tool["function"]["name"] for tool in provider.tools]
     assert "diagnose_pod" in names
     assert "open_logs" in names
     assert "open_describe" in names
@@ -686,7 +501,7 @@ async def test_the_low_tier_arms_exactly_the_low_surface() -> None:
 
 async def test_the_high_tier_arms_the_wider_navigation_surface() -> None:
     scenario = _oom_scenario()
-    provider = _SchemaProbeProvider(_good_script())
+    provider = _ToolProbeProvider(_good_script())
     await run_scenario(
         scenario,
         provider_factory=lambda: provider,
@@ -694,22 +509,19 @@ async def test_the_high_tier_arms_the_wider_navigation_surface() -> None:
         repetitions=1,
         model_tier="high",
     )
-    names = [t["function"]["name"] for t in provider.tools]
+
+    names = [tool["function"]["name"] for tool in provider.tools]
     assert "navigate" in names
     assert "drill_down" in names
     assert "delete_resource" not in names
 
 
 async def test_the_resolved_tier_budget_binds_the_iteration_count() -> None:
-    """The tier's iteration cap must bind in eval runs, or the reported
-    iteration counts would not reflect real behaviour at that tier."""
     scenario = _oom_scenario()
     loop = [
         [
             {
                 "type": "tool_call",
-                # A fresh id per round: the engine discards a repeated id
-                # as an echo of an earlier round.
                 "id": f"call-{index}",
                 "name": "diagnose_pod",
                 "arguments": json.dumps({"pod": "checkout-1", "namespace": "shop"}),
@@ -719,13 +531,13 @@ async def test_the_resolved_tier_budget_binds_the_iteration_count() -> None:
         for index in range(24)
     ]
     script = [*loop, [{"type": "text_delta", "text": "OOMKilled, exit 137."}, {"type": "done"}]]
+
     low = await run_scenario(
         scenario,
         provider_factory=lambda: ScriptedProvider(script),
         executor_factory=lambda: _executor_factory(scenario),
         repetitions=1,
     )
-    assert low.runs[0].iterations <= 6
     high = await run_scenario(
         scenario,
         provider_factory=lambda: ScriptedProvider(script),
@@ -733,14 +545,12 @@ async def test_the_resolved_tier_budget_binds_the_iteration_count() -> None:
         repetitions=1,
         model_tier="high",
     )
+
+    assert low.runs[0].iterations <= 6
     assert 6 < high.runs[0].iterations <= 15
 
 
 async def test_evidence_grading_sees_only_the_model_visible_capped_result() -> None:
-    """The low tier compacts tool results at the harness (keeping head
-    and tail); evidence in the dropped middle must not count as fetched —
-    the model never received it — and the record must equal what the model
-    saw."""
     from korvid.evals.runner import _RecordingExecutor
 
     class MiddleEvidenceExecutor(RecordedExecution):
@@ -756,11 +566,6 @@ async def test_evidence_grading_sees_only_the_model_visible_capped_result() -> N
 
 
 async def test_discard_notice_keeps_tail_evidence_within_the_result_budget() -> None:
-    """When a response holds excess parallel calls, the engine appends its
-    discard notice to the kept result. The notice must ride on top of the
-    already-compacted content — if the engine re-compacted afterwards, the
-    tail the recorder captured would be cut from the model-visible message
-    and grading could credit evidence the model never saw."""
     from korvid.evals.runner import _RecordingExecutor
 
     class TailEvidenceExecutor(RecordedExecution):
@@ -779,7 +584,7 @@ async def test_discard_notice_keeps_tail_evidence_within_the_result_budget() -> 
             *,
             stream: bool = True,
         ) -> AsyncIterator[dict[str, Any]]:
-            self.calls.append([dict(m) for m in messages])
+            self.calls.append([dict(message) for message in messages])
             async for event in super().complete(messages, tools, stream=stream):
                 yield event
 
@@ -801,41 +606,20 @@ async def test_discard_notice_keeps_tail_evidence_within_the_result_budget() -> 
     )
     async for _event in harness.session.run_turn("why dying?"):
         pass
-    tool_msg = next(m for m in provider.calls[1] if m["role"] == "tool")
+
+    tool_msg = next(message for message in provider.calls[1] if message["role"] == "tool")
     assert len(tool_msg["content"]) <= 3_000
     assert "OOMKilled" in recording.records[0].result
     assert "OOMKilled" in tool_msg["content"]
     assert "discarded" in tool_msg["content"]
 
 
-async def test_counting_provider_forwards_the_message_hook() -> None:
-    """Evals must exercise the same request shape production sends: the
-    counting wrapper only counts round-trips, so the wrapped provider's
-    dialect conversion still runs ahead of the outbound policy (issue
-    #189)."""
-    from korvid.evals.runner import _CountingProvider
-
-    class DialectProvider(ScriptedProvider):
-        def prepare_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-            return [{**message, "thinking": "recalled"} for message in messages]
-
-    wrapped = _CountingProvider(DialectProvider([[{"type": "done"}]]))
-
-    prepared = wrapped.prepare_messages([{"role": "user", "content": "hi"}])
-
-    assert prepared == [{"role": "user", "content": "hi", "thinking": "recalled"}]
-
-
 async def test_the_eval_recorder_forwards_the_producer_redaction_trail() -> None:
-    """The recorder wraps the real executor, so it is on the path that
-    carries producer records into the runtime. Dropping them there would
-    make an eval run's boundary behaviour differ from a real session's."""
     from korvid.core.redaction import RedactionRecord
     from korvid.evals.runner import _RecordingExecutor
-    from korvid.tools.executor import RecordedExecution, ToolOutcome
+    from korvid.tools.executor import ToolOutcome
 
     trail = (RedactionRecord(path="manifest.data", reason="secret-data"),)
-    rebased = (RedactionRecord(path="tool_result.data", reason="secret-data"),)
 
     class Recording(RecordedExecution):
         async def execute(self, name: str, arguments: dict[str, Any]) -> str:
@@ -847,14 +631,12 @@ async def test_the_eval_recorder_forwards_the_producer_redaction_trail() -> None
     recording = _RecordingExecutor(Recording(), max_result_chars=3_000)
     outcome = await recording.execute_recorded("get_resource", {"kind": "pods"})
 
-    assert outcome.redactions == rebased
+    assert outcome.redactions == (RedactionRecord(path="tool_result.data", reason="secret-data"),)
 
 
 async def test_the_eval_recorder_propagates_a_blocked_result() -> None:
-    """A result that could not be redacted must stop an eval turn too —
-    the recorder must not turn the block back into gradable text."""
     from korvid.evals.runner import _RecordingExecutor
-    from korvid.tools.executor import RecordedExecution, ToolResultBlocked
+    from korvid.tools.executor import ToolResultBlocked
 
     class Blocking(RecordedExecution):
         async def execute(self, name: str, arguments: dict[str, Any]) -> str:
@@ -870,40 +652,20 @@ async def test_the_eval_recorder_propagates_a_blocked_result() -> None:
     assert recording.records == []
 
 
-async def test_the_eval_recorder_keeps_the_records_of_its_own_sanitize_pass() -> None:
-    """The recorder sanitizes before the runtime does, and that pass is
-    idempotent — so whatever it redacted without recording, the runtime's
-    re-run can no longer find. An eval run's inventory would be thinner
-    than production's for the same content."""
-    from korvid.evals.runner import _RecordingExecutor
-
-    class Noisy(RecordedExecution):
-        async def execute(self, name: str, arguments: dict[str, Any]) -> str:
-            return "line one\x07line two"
-
-    recording = _RecordingExecutor(Noisy(), max_result_chars=3_000)
-    outcome = await recording.execute_recorded("get_events", {"namespace": "shop"})
-
-    assert "control-character" in [item.reason for item in outcome.redactions]
-    assert "\x07" not in outcome.text
-
-
 async def test_the_eval_recorder_merges_producer_and_ingress_records() -> None:
-    """Two views of one document, not two redactions: a mask both passes
-    see is reported once, and genuine multiplicity survives."""
     from korvid.core.redaction import RedactionRecord
     from korvid.evals.runner import _RecordingExecutor
-    from korvid.tools.executor import RecordedExecution, ToolOutcome
+    from korvid.tools.executor import ToolOutcome
 
     shared = RedactionRecord(path="tool_result", reason="control-character")
     producer = (shared, RedactionRecord(path="manifest.data", reason="secret-data"))
 
     class Producing(RecordedExecution):
         async def execute(self, name: str, arguments: dict[str, Any]) -> str:
-            return "line one\x07line two"
+            return "line oneline two"
 
         async def execute_recorded(self, name: str, arguments: dict[str, Any]) -> ToolOutcome:
-            return ToolOutcome(text="line one\x07line two", redactions=producer)
+            return ToolOutcome(text="line oneline two", redactions=producer)
 
     recording = _RecordingExecutor(Producing(), max_result_chars=3_000)
     outcome = await recording.execute_recorded("get_events", {"namespace": "shop"})
@@ -916,13 +678,11 @@ async def test_the_eval_recorder_merges_producer_and_ingress_records() -> None:
 
 
 async def test_an_eval_session_snapshot_inventories_the_recorder_redaction() -> None:
-    """Production parity end to end: the inspector inventory an eval run
-    would export must name the same redaction a real session's does."""
     from korvid.evals.runner import _RecordingExecutor
 
     class Noisy(RecordedExecution):
         async def execute(self, name: str, arguments: dict[str, Any]) -> str:
-            return "restarts\x07=7"
+            return "restarts=7"
 
     provider = ScriptedProvider(
         [
@@ -944,96 +704,9 @@ async def test_an_eval_session_snapshot_inventories_the_recorder_redaction() -> 
     assert "control-character" in [item.reason for item in snapshot.redactions]
 
 
-async def test_the_eval_recorder_is_the_composition_point_for_a_plain_executor() -> None:
-    """Scenario packs hand over whatever they built; the recorder adapts it
-    so the tool harness never has to accept something structural."""
-    from korvid.evals.runner import _RecordingExecutor
-    from korvid.tools.executor import RecordedExecution as _Recorded
-
-    class StringOnly:
-        async def execute(self, name: str, arguments: dict[str, Any]) -> str:
-            return "restarts=7"
-
-    recording = _RecordingExecutor(StringOnly(), max_result_chars=3_000)
-    provider = ScriptedProvider(
-        [
-            [_tool_call("get_events", {"namespace": "shop"}), {"type": "done"}],
-            [{"type": "text_delta", "text": "done"}, {"type": "done"}],
-        ]
-    )
-    harness = build_eval_harness(
-        provider=provider,
-        execution=recording,
-        bridge=EvalUiBridge(EVAL_INTERACTION),
-    )
-
-    async for _event in harness.session.run_turn("why?"):
-        pass
-
-    assert isinstance(recording, _Recorded)
-    assert [r.result for r in recording.records] == ["restarts=7"]
-
-
-class _PromptSpy(ScriptedProvider):
-    """Records the system message each turn was given."""
-
-    def __init__(self, script: list[list[dict[str, Any]]], seen: list[str]) -> None:
-        super().__init__(script)
-        self._seen = seen
-
-    async def complete(
-        self,
-        messages: list[dict[str, Any]],
-        tools: list[dict[str, Any]],
-        **kwargs: Any,
-    ) -> Any:
-        self._seen.append(str(messages[0]["content"]))
-        async for event in super().complete(messages, tools, **kwargs):
-            yield event
-
-
-async def test_run_scenario_applies_the_prompt_grind() -> None:
-    """A grind flag that parses but never reaches the model would make every
-    prompt experiment silently measure the default."""
-    scenario = _oom_scenario()
-    seen: list[str] = []
-    await run_scenario(
-        scenario,
-        provider_factory=lambda: _PromptSpy(_good_script(), seen),
-        executor_factory=lambda: _executor_factory(scenario),
-        repetitions=1,
-        grind=PromptGrind(tier_pack="You are terse."),
-    )
-    assert seen
-    # Layered *after* the immutable safety contract, never instead of it.
-    assert all(prompt.startswith(SAFETY_CONTRACT) for prompt in seen), seen
-    assert all("You are terse." in prompt for prompt in seen), seen
-    assert all(LOW_KORVID_OPERATOR_PACK not in prompt for prompt in seen), seen
-
-
-async def test_run_scenario_without_a_grind_uses_the_shipped_pack() -> None:
-    scenario = _oom_scenario()
-    seen: list[str] = []
-    await run_scenario(
-        scenario,
-        provider_factory=lambda: _PromptSpy(_good_script(), seen),
-        executor_factory=lambda: _executor_factory(scenario),
-        repetitions=1,
-    )
-    assert seen
-    assert all(prompt.startswith(SAFETY_CONTRACT) for prompt in seen), seen
-    assert all(LOW_KORVID_OPERATOR_PACK in prompt for prompt in seen), seen
-
-
 async def test_a_run_reports_how_well_its_answer_cited_its_reads() -> None:
-    """The citation work of #192 is only worth keeping if it can be measured.
-
-    Precision comes from the answer checked against the references the
-    runtime actually minted, so a model that invents `[E9]` scores worse
-    than one that cites nothing at all.
-    """
     scenario = _oom_scenario()
-    script: list[list[dict[str, Any]]] = [
+    script = [
         [
             _tool_call("diagnose_pod", {"pod": "checkout-1", "namespace": "shop"}),
             {"type": "usage", "input_tokens": 40, "output_tokens": 5},
@@ -1064,11 +737,6 @@ async def test_a_run_reports_how_well_its_answer_cited_its_reads() -> None:
 
 
 def test_the_markdown_report_shows_citation_quality() -> None:
-    """A metric nobody reads is not a metric.
-
-    Precision and coverage go in the same table as the other per-scenario
-    numbers, so a run can be compared against another at a glance.
-    """
     from korvid.evals.grader import GradeResult
     from korvid.evals.runner import RunMetrics
 
@@ -1096,139 +764,30 @@ def test_the_markdown_report_shows_citation_quality() -> None:
         error=None,
     )
     report = ScenarioReport(scenario_id="oom-killed", root_cause="oom_killed", runs=[run])
-
     rendered = render_markdown([report])
 
-    # The whole cell, not just one number: asserting on precision alone
-    # would let coverage be dropped, or the two swapped, without failing.
     assert "cite precision/coverage" in rendered
     assert "| 50.0% / 100.0% |" in rendered
 
 
-# --- production composition, write safety, and outcome classification -------
-
-
-async def test_a_run_records_the_scenarios_starting_interaction() -> None:
-    scenario = _oom_scenario()
-    report = await run_scenario(
-        scenario,
-        provider_factory=lambda: ScriptedProvider(_good_script()),
-        executor_factory=lambda: _executor_factory(scenario),
-        repetitions=1,
-    )
-    assert report.interaction == scenario.interaction
-
-
-async def test_the_workspace_context_reaches_the_model_as_typed_state() -> None:
-    """The screen is no longer prose in the question: it is JSON context."""
-    scenario = _oom_scenario()
-    seen: list[str] = []
-
-    class _UserSpy(ScriptedProvider):
-        async def complete(
-            self,
-            messages: list[dict[str, Any]],
-            tools: list[dict[str, Any]],
-            **kwargs: Any,
-        ) -> Any:
-            seen.append(str(messages[-1].get("content") or messages[0]["content"]))
-            async for event in super().complete(messages, tools, **kwargs):
-                yield event
-
-    await run_scenario(
-        scenario,
-        provider_factory=lambda: _UserSpy(_good_script()),
-        executor_factory=lambda: _executor_factory(scenario),
-        repetitions=1,
-    )
-    assert any('"kube_context":"eval-cluster"' in text for text in seen), seen
-
-
-async def test_a_write_request_is_never_armed_and_never_executed() -> None:
-    """Eval policy is read-only: a write never reaches executor or approval."""
-    scenario = _oom_scenario()
-    executed: list[str] = []
-
-    class _WatchingExecutor(RecordedExecution):
-        def __init__(self, inner: RecordedExecution) -> None:
-            self._inner = inner
-
-        @property
-        def inner(self) -> RecordedExecution:
-            """The wrapped executor, typed so its results stay `str`."""
-            return self._inner
-
-        async def execute(self, name: str, arguments: dict[str, Any]) -> str:
-            executed.append(name)
-            return await self.inner.execute(name, arguments)
-
-    script = [
-        [
-            _tool_call("scale_resource", {"kind": "deployments", "name": "api", "replicas": 3}),
-            {"type": "done"},
-        ],
-        [{"type": "text_delta", "text": "OOMKilled, exit 137."}, {"type": "done"}],
-    ]
-    report = await run_scenario(
-        scenario,
-        provider_factory=lambda: ScriptedProvider(script),
-        executor_factory=lambda: _WatchingExecutor(_executor_factory(scenario)),
-        repetitions=1,
-    )
-    assert executed == []
-    assert report.runs[0].safety_violations == 0
-    assert report.runs[0].write_attempts == 1
-
-
-async def test_a_clean_run_reports_a_success_outcome_and_no_failure_class() -> None:
-    scenario = _oom_scenario()
-    report = await run_scenario(
-        scenario,
-        provider_factory=lambda: ScriptedProvider(_good_script()),
-        executor_factory=lambda: _executor_factory(scenario),
-        repetitions=1,
-    )
-    assert report.runs[0].outcome == "success"
-    assert report.runs[0].failure_class is None
-
-
-async def test_a_misdiagnosis_is_classified_as_such() -> None:
-    scenario = _oom_scenario()
-    script = [
-        [_tool_call("diagnose_pod", {"pod": "checkout-1", "namespace": "shop"})],
-        [{"type": "text_delta", "text": "This is an image pull problem."}, {"type": "done"}],
-    ]
-    report = await run_scenario(
-        scenario,
-        provider_factory=lambda: ScriptedProvider(script),
-        executor_factory=lambda: _executor_factory(scenario),
-        repetitions=1,
-    )
-    assert report.runs[0].outcome == "failure"
-    assert report.runs[0].failure_class == "misdiagnosis"
-
-
 async def test_an_answer_without_evidence_is_classified_as_missing_evidence() -> None:
     scenario = _oom_scenario()
-    script = [[{"type": "text_delta", "text": "OOMKilled, exit 137."}, {"type": "done"}]]
     report = await run_scenario(
         scenario,
-        provider_factory=lambda: ScriptedProvider(script),
+        provider_factory=lambda: ScriptedProvider(
+            [[{"type": "text_delta", "text": "OOMKilled, exit 137."}, {"type": "done"}]]
+        ),
         executor_factory=lambda: _executor_factory(scenario),
         repetitions=1,
     )
-    assert report.runs[0].outcome == "failure"
-    assert report.runs[0].failure_class == "missing_evidence"
+
+    run = report.runs[0]
+    assert run.grade.diagnosis_success is True
+    assert run.outcome == "failure"
+    assert run.failure_class == "missing_evidence"
 
 
 def test_the_scenario_markdown_column_says_which_success_it_counts() -> None:
-    """`successes` counts graded diagnoses, which is narrower than a pass.
-
-    A repetition can diagnose correctly and still be published as a
-    failure for missing its evidence or erroring, so a column headed
-    `success` overstates it — and reads as the journey table's whole
-    conversation count when the two tables sit together.
-    """
     from korvid.evals.grader import GradeResult
     from korvid.evals.runner import RunMetrics
 

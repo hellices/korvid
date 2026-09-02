@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import dataclasses
 import json
 from pathlib import Path
 from typing import Any, ClassVar
@@ -13,21 +12,10 @@ from korvid.evals.__main__ import provider_factory_from_env
 from korvid.evals.grader import GradeResult
 from korvid.evals.harness import resolve_eval_policy
 from korvid.evals.interaction import interaction_payload
-from korvid.evals.journey_runner import (
-    JourneyReport,
-    JourneyRun,
-    JourneyTurnResult,
-)
+from korvid.evals.journey_runner import JourneyReport, JourneyRun, JourneyTurnResult
 from korvid.evals.journey_runner import render_markdown as render_journey_markdown
-from korvid.evals.journeys_cli import (
-    _parse_args,
-    _run,
-    exit_code,
-    journey_run_payload,
-)
-from korvid.evals.journeys_cli import (
-    _resolve_policy as _resolve_journey_policy,
-)
+from korvid.evals.journeys_cli import _parse_args, _run, exit_code, journey_run_payload
+from korvid.evals.journeys_cli import _resolve_policy as _resolve_journey_policy
 from korvid.evals.scripted import ScriptedProvider
 from tests.evals.fixtures import EVAL_INTERACTION, eval_interaction
 
@@ -36,14 +24,51 @@ def _policy(**kwargs: Any) -> Any:
     return resolve_eval_policy(ScriptedProvider([[{"type": "done"}]]), **kwargs)
 
 
+def _turn_result(**overrides: Any) -> JourneyTurnResult:
+    fields: dict[str, Any] = {
+        "answer": "payments needs registry credentials",
+        "grade": GradeResult(True, True, (), (), ()),
+        "tool_calls": 1,
+        "tool_names": ("diagnose_pod",),
+        "malformed_tool_calls": 0,
+        "write_attempts": 0,
+        "safety_violations": 0,
+        "forbidden_target_calls": 0,
+        "wrong_namespace_calls": 0,
+        "error": None,
+        "wall_time_s": 1.0,
+        "interaction": EVAL_INTERACTION,
+        "final_interaction": eval_interaction(scope="jobs"),
+        "outcome": "success",
+        "failure_class": None,
+    }
+    fields.update(overrides)
+    return JourneyTurnResult(**fields)
+
+
+def _journey_report(**overrides: Any) -> JourneyReport:
+    fields: dict[str, Any] = {
+        "journey_id": "triage-and-correct",
+        "root_cause": "image_pull_auth",
+        "runs": (
+            JourneyRun(
+                turns=(_turn_result(),),
+                input_tokens=10,
+                output_tokens=5,
+                tokens_estimated=False,
+            ),
+        ),
+        "interaction": EVAL_INTERACTION,
+    }
+    fields.update(overrides)
+    return JourneyReport(**fields)
+
+
 def test_journey_cli_defaults_to_bundled_pack_and_three_reps() -> None:
     args = _parse_args([])
     assert args.reps == 3
     assert args.model_tier is None
     assert args.live is False
-
-
-def test_journey_cli_accepts_an_explicit_model_tier() -> None:
     assert _parse_args(["--model-tier", "high"]).model_tier == "high"
 
 
@@ -62,13 +87,9 @@ def test_journey_automatic_routing_uses_the_ollama_catalog_identity() -> None:
     assert policy.catalog_version is not None
 
 
-@pytest.mark.parametrize("value", ["full", "small"])
-def test_journey_cli_rejects_retired_profile_names(value: str) -> None:
+def test_journey_cli_rejects_retired_or_removed_profile_flags() -> None:
     with pytest.raises(SystemExit, match="2"):
-        _parse_args(["--model-tier", value])
-
-
-def test_the_journey_profile_flag_is_gone() -> None:
+        _parse_args(["--model-tier", "full"])
     with pytest.raises(SystemExit, match="2"):
         _parse_args(["--profile", "small"])
 
@@ -167,31 +188,21 @@ cluster: {objects: [], events: [], logs: {}}
     assert FakeLiveEnvironment.last.closed is True
 
 
-def test_journey_exit_code_prints_turn_errors(
+def test_journey_exit_code_uses_clean_and_error_paths(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    grade = GradeResult(True, True, (), (), ())
-    turn = JourneyTurnResult(
-        answer="",
-        grade=grade,
-        tool_calls=0,
-        tool_names=(),
-        malformed_tool_calls=0,
-        write_attempts=0,
-        safety_violations=0,
-        forbidden_target_calls=0,
-        wrong_namespace_calls=0,
-        error="ReadTimeout",
-        wall_time_s=60.0,
-        outcome="error",
-        failure_class="provider_error",
+    clean = _journey_report()
+    assert exit_code([clean]) == 0
+
+    errored_turn = _turn_result(
+        error="ReadTimeout", outcome="error", failure_class="provider_error"
     )
-    report = JourneyReport(
+    report = _journey_report(
         journey_id="triage",
         root_cause="none",
         runs=(
             JourneyRun(
-                turns=(turn,),
+                turns=(errored_turn,),
                 input_tokens=0,
                 output_tokens=0,
                 tokens_estimated=True,
@@ -202,11 +213,11 @@ def test_journey_exit_code_prints_turn_errors(
     assert "triage run 1 turn 1: ReadTimeout" in capsys.readouterr().err
 
 
-def test_journey_json_records_the_resolved_policy(tmp_path: Path) -> None:
-    """Journey runs become published scoreboard rows too (#176 tier 2), so
-    they must say which model tier, prompt and tool schemas produced them."""
-    payload = journey_run_payload([], policy=_policy())
-    assert payload["meta"]["policy"] == {
+def test_journey_json_records_run_metadata() -> None:
+    low_payload = journey_run_payload([], policy=_policy())
+    high_payload = journey_run_payload([], policy=_policy(model_tier="high"))
+
+    assert low_payload["meta"]["policy"] == {
         "provider": "scripted",
         "model": "scripted",
         "tier": "low",
@@ -214,166 +225,33 @@ def test_journey_json_records_the_resolved_policy(tmp_path: Path) -> None:
         "prompt_pack": "low-korvid-operator",
         "overlays": [],
     }
-    assert payload["meta"]["limits"]["max_tool_calls_per_iteration"] == 1
-    assert payload["meta"]["prompts"]["source"] == "default"
-    assert len(payload["meta"]["prompts"]["sha256"]) == 64
-    assert payload["journeys"] == []
-    json.dumps(payload)
-
-
-def test_journey_json_names_the_exact_armed_tools() -> None:
-    """A journey arms the screen actions the task pack also arms, so a UI
-    schema change must be visible in the artifact."""
-    policy = _policy()
-    payload = journey_run_payload([], policy=policy)
-    armed = payload["meta"]["tools"]["armed"]
+    assert low_payload["meta"]["limits"]["max_tool_calls_per_iteration"] == 1
+    assert low_payload["meta"]["prompts"]["source"] == "default"
+    assert len(low_payload["meta"]["prompts"]["sha256"]) == 64
+    armed = low_payload["meta"]["tools"]["armed"]
     assert "open_describe" in armed
     assert not {"scale_resource", "delete_resource"} & set(armed)
+    assert low_payload["meta"]["prompts"]["sha256"] != high_payload["meta"]["prompts"]["sha256"]
+    assert low_payload["journeys"] == []
+    json.dumps(low_payload)
 
 
-def test_journey_digest_separates_the_two_tiers() -> None:
-    low = journey_run_payload([], policy=_policy())["meta"]["prompts"]["sha256"]
-    high = journey_run_payload([], policy=_policy(model_tier="high"))["meta"]["prompts"]["sha256"]
-    assert low != high
-
-
-def test_journey_payload_records_the_serving_block_when_captured() -> None:
-    """Journeys are published rows too, so they need the same pinning (#235)."""
+def test_journey_payload_records_or_omits_serving() -> None:
     serving = {"model": "m", "engine": {"name": "ollama", "version": "0.5.1"}, "unavailable": []}
-    payload = journey_run_payload([], policy=_policy(), serving=serving)
-    assert payload["meta"]["serving"]["engine"]["version"] == "0.5.1"
+    with_serving = journey_run_payload([], policy=_policy(), serving=serving)
+    without_serving = journey_run_payload([], policy=_policy())
+
+    assert with_serving["meta"]["serving"]["engine"]["version"] == "0.5.1"
+    assert "serving" not in without_serving["meta"]
 
 
-def test_journey_payload_omits_serving_when_it_was_not_captured() -> None:
-    payload = journey_run_payload([], policy=_policy())
-    assert "serving" not in payload["meta"]
-
-
-# --- journey artifact provenance --------------------------------------------
-#
-# A journey row is published next to a scenario row, so it has to carry the
-# same provenance: the screen the conversation opened on, the screen each
-# turn ran against, and one word for what happened.
-
-
-def _turn_result(**overrides: Any) -> JourneyTurnResult:
-    fields: dict[str, Any] = {
-        "answer": "payments needs registry credentials",
-        "grade": GradeResult(True, True, (), (), ()),
-        "tool_calls": 1,
-        "tool_names": ("diagnose_pod",),
-        "malformed_tool_calls": 0,
-        "write_attempts": 0,
-        "safety_violations": 0,
-        "forbidden_target_calls": 0,
-        "wrong_namespace_calls": 0,
-        "error": None,
-        "wall_time_s": 1.0,
-        "interaction": EVAL_INTERACTION,
-        "final_interaction": eval_interaction(scope="jobs"),
-        "outcome": "success",
-        "failure_class": None,
-    }
-    fields.update(overrides)
-    return JourneyTurnResult(**fields)
-
-
-def _journey_report(**overrides: Any) -> JourneyReport:
-    fields: dict[str, Any] = {
-        "journey_id": "triage-and-correct",
-        "root_cause": "image_pull_auth",
-        "runs": (
-            JourneyRun(
-                turns=(_turn_result(),),
-                input_tokens=10,
-                output_tokens=5,
-                tokens_estimated=False,
-            ),
-        ),
-        "interaction": EVAL_INTERACTION,
-    }
-    fields.update(overrides)
-    return JourneyReport(**fields)
-
-
-def test_journey_payload_publishes_the_starting_interaction() -> None:
+def test_journey_payload_publishes_interactions_and_verdicts() -> None:
     payload = journey_run_payload([_journey_report()], policy=_policy())
     row = payload["journeys"][0]
+    turn = row["runs"][0]["turns"][0]
 
     assert row["interaction"] == interaction_payload(EVAL_INTERACTION)
-    json.dumps(payload)
-
-
-def test_journey_payload_counts_successful_journeys_not_ambiguous_successes() -> None:
-    """A journey row and a scenario row are read side by side.
-
-    The scenario artifact's `successes` counts repetitions whose *diagnosis*
-    was graded correct; a journey has no single diagnosis, so the same key
-    here would silently mean something else. The journey artifact names what
-    it counts instead: whole conversations whose every turn outcome was
-    `success`.
-    """
-    payload = journey_run_payload([_journey_report()], policy=_policy())
-    row = payload["journeys"][0]
-
-    assert row["successful_journeys"] == 1
-    assert "successes" not in row
-    json.dumps(payload)
-
-
-def test_a_journey_report_has_no_ambiguous_successes_attribute() -> None:
-    report = _journey_report()
-
-    assert report.successful_journeys == 1
-    assert not hasattr(report, "successes")
-
-
-def test_a_conversation_with_one_failed_turn_is_not_a_successful_journey() -> None:
-    report = _journey_report(
-        runs=(
-            JourneyRun(
-                turns=(
-                    _turn_result(),
-                    _turn_result(outcome="failure", failure_class="misdiagnosis"),
-                ),
-                input_tokens=10,
-                output_tokens=5,
-                tokens_estimated=False,
-            ),
-        )
-    )
-    row = journey_run_payload([report], policy=_policy())["journeys"][0]
-
-    assert row["successful_journeys"] == 0
-    assert [turn["success"] for turn in row["runs"][0]["turns"]] == [True, False]
-
-
-def test_every_published_turn_success_agrees_with_its_outcome() -> None:
-    """The published flag is derived, so a row cannot claim both at once."""
-    report = _journey_report(
-        runs=(
-            JourneyRun(
-                turns=(
-                    _turn_result(),
-                    _turn_result(outcome="failure", failure_class="missing_evidence"),
-                    _turn_result(outcome="error", failure_class="provider_error"),
-                ),
-                input_tokens=10,
-                output_tokens=5,
-                tokens_estimated=False,
-            ),
-        )
-    )
-    turns = journey_run_payload([report], policy=_policy())["journeys"][0]["runs"][0]["turns"]
-
-    for turn in turns:
-        assert turn["success"] is (turn["outcome"] == "success")
-
-
-def test_journey_payload_publishes_every_turn_snapshot_and_verdict() -> None:
-    payload = journey_run_payload([_journey_report()], policy=_policy())
-    turn = payload["journeys"][0]["runs"][0]["turns"][0]
-
+    assert set(row["interaction"]["focused_pane"]) == {"kind", "scope", "filter", "selected"}
     assert turn["interaction"] == interaction_payload(EVAL_INTERACTION)
     assert turn["final_interaction"] == interaction_payload(eval_interaction(scope="jobs"))
     assert turn["outcome"] == "success"
@@ -381,12 +259,31 @@ def test_journey_payload_publishes_every_turn_snapshot_and_verdict() -> None:
     json.dumps(payload)
 
 
-def test_journey_payload_uses_the_shared_interaction_record_shape() -> None:
-    """The same keys a scenario row publishes — `filter`, not `filter_pattern`."""
-    payload = journey_run_payload([_journey_report()], policy=_policy())
-    pane = payload["journeys"][0]["interaction"]["focused_pane"]
+def test_journey_payload_counts_all_turn_success_and_turn_flags() -> None:
+    success_row = journey_run_payload([_journey_report()], policy=_policy())["journeys"][0]
+    mixed_report = _journey_report(
+        runs=(
+            JourneyRun(
+                turns=(
+                    _turn_result(),
+                    _turn_result(outcome="failure", failure_class="missing_evidence"),
+                    _turn_result(
+                        outcome="error", error="ReadTimeout", failure_class="provider_error"
+                    ),
+                ),
+                input_tokens=10,
+                output_tokens=5,
+                tokens_estimated=False,
+            ),
+        )
+    )
+    mixed_row = journey_run_payload([mixed_report], policy=_policy())["journeys"][0]
 
-    assert set(pane) == {"kind", "scope", "filter", "selected"}
+    assert success_row["successful_journeys"] == 1
+    assert mixed_report.successful_journeys == 0
+    assert mixed_row["successful_journeys"] == 0
+    assert "successes" not in mixed_row
+    assert [turn["success"] for turn in mixed_row["runs"][0]["turns"]] == [True, False, False]
 
 
 def test_journey_payload_survives_a_journey_without_a_recorded_screen() -> None:
@@ -399,7 +296,6 @@ def test_journey_payload_survives_a_journey_without_a_recorded_screen() -> None:
 async def test_the_cli_passes_one_resolved_policy_into_every_conversation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Matching the scenario campaign: route once, compose everything against it."""
     monkeypatch.setenv("KORVID_EVAL_BASE_URL", "http://localhost:1/v1")
     monkeypatch.setenv("KORVID_EVAL_MODEL", "model")
     policy = _policy()
@@ -422,7 +318,6 @@ async def test_the_cli_passes_one_resolved_policy_into_every_conversation(
 async def test_the_live_cli_threads_the_run_context_into_retargeting(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A live journey's published screen must name the context it ran on."""
     (tmp_path / "live.yaml").write_text(
         """
 id: live-one
@@ -497,69 +392,13 @@ cluster: {objects: [], events: [], logs: {}}
     assert retargeted[0].interaction.focused_pane.scope == "korvid-agent-eval-run-9"
 
 
-# ---------------------------------------------------------------------------
-# A journey's verdict is derived from its turns, not asserted alongside them
-# ---------------------------------------------------------------------------
-
-
-def test_journey_run_success_is_derived_never_stored() -> None:
-    """A stored flag beside the turns is a second copy of one fact.
-
-    `JourneyTurnResult.success` is already derived from its outcome for
-    exactly this reason; a run that still *takes* `success` lets a caller
-    publish `success=True` above a failed turn, and the scoreboard would
-    repeat the claim without noticing.
-    """
-    names = {field.name for field in dataclasses.fields(JourneyRun)}
-
-    assert "success" not in names
-    assert "turns" in names
-
-
-def test_a_journey_run_cannot_claim_a_success_its_turns_contradict() -> None:
-    run = JourneyRun(
-        turns=(
-            _turn_result(),
-            _turn_result(outcome="failure", failure_class="misdiagnosis"),
-        ),
-        input_tokens=10,
-        output_tokens=5,
-        tokens_estimated=False,
-    )
-
-    assert run.success is False
-
-
-def test_a_journey_run_whose_every_turn_succeeded_is_a_success() -> None:
-    run = JourneyRun(
-        turns=(_turn_result(), _turn_result()),
-        input_tokens=10,
-        output_tokens=5,
-        tokens_estimated=False,
-    )
-
-    assert run.success is True
-
-
 def test_a_journey_run_with_no_turns_is_not_a_success() -> None:
-    """A conversation that never ran proved nothing.
-
-    `all(())` is `True`, so the naive derivation would publish an empty
-    run — a provider that died before the first turn — as a clean pass.
-    """
     run = JourneyRun(turns=(), input_tokens=0, output_tokens=0, tokens_estimated=True)
 
     assert run.success is False
 
 
 def test_the_journey_markdown_column_says_which_success_it_counts() -> None:
-    """`success` next to a scenario table means something else there.
-
-    The two tables are read side by side in the scoreboard: this column
-    counts whole conversations whose every turn succeeded, while the
-    scenario table's counts repetitions whose diagnosis was graded
-    correct. One shared word for two measurements misreads as one.
-    """
     header = render_journey_markdown([_journey_report()]).splitlines()[0]
     cells = [cell.strip() for cell in header.strip("|").split("|")]
 
