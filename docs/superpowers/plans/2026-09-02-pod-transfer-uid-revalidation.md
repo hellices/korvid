@@ -4,7 +4,7 @@
 
 **Goal:** Refuse name-based Pod transfer unless the final bounded lookup returns the exact UID captured when the transfer dialog opened.
 
-**Architecture:** Keep `KorvidApp._pod_uid_unchanged` as the shared transfer/debug identity boundary. Change only its interpretation of the existing `str | None` lookup result: `None` becomes a retryable verification failure, while confirmed deletion, replacement, and exact match retain distinct outcomes.
+**Architecture:** Keep `ResourceInspectController.pod_uid_unchanged` as the shared transfer/debug identity boundary. Change only its interpretation of the injected `str | None` lookup result: `None` becomes a retryable verification failure, while confirmed deletion, replacement, and exact match retain distinct outcomes.
 
 **Tech Stack:** Python 3.11+, asyncio, Textual Pilot tests, pytest, Ruff, mypy, Tach
 
@@ -22,13 +22,14 @@
 ### Task 1: Fail Closed on Unavailable Final Pod UID
 
 **Files:**
-- Modify: `src/korvid/ui/app.py:3799-3818`
+- Modify: `src/korvid/ui/resource_inspect_controller.py`
+- Modify: `tests/ui/test_resource_inspect_controller.py`
 - Modify: `tests/ui/test_transfer.py:428-524`
 - Modify: `tests/ui/test_shell.py:1214-1277`
 
 **Interfaces:**
-- Consumes: `KorvidApp._target_uid(kind_alias: str, ns: str | None, name: str) -> str | None`
-- Produces: `KorvidApp._pod_uid_unchanged(namespace: str, name: str, approved_uid: str, *, action: str) -> bool`, where only an exact non-`None` match returns `True`
+- Consumes: injected target UID lookup `(kind_alias: str, ns: str | None, name: str) -> Awaitable[str | None]`
+- Produces: `ResourceInspectController.pod_uid_unchanged(namespace: str, name: str, approved_uid: str, *, action: str) -> bool`, where only an exact non-`None` match returns `True`
 
 - [ ] **Step 1: Add failing transfer regressions for normalized timeout and infrastructure failure**
 
@@ -110,10 +111,11 @@ Expected: all four parameter cases fail because transfer proceeds and no `could 
 
 - [ ] **Step 3: Implement the minimal fail-closed `None` branch**
 
-Update the shared helper without changing `_target_manifest` or `_target_uid`:
+Update the shared helper without changing the injected lookup or its general
+fail-open behavior:
 
 ```python
-async def _pod_uid_unchanged(
+async def pod_uid_unchanged(
     self, namespace: str, name: str, approved_uid: str, *, action: str
 ) -> bool:
     """Re-verify the approved pod incarnation just before `action` executes."""
@@ -182,10 +184,10 @@ async def test_debug_aborts_when_final_pod_uid_lookup_unavailable(tmp_path: Path
     debug_calls: list[list[str]] = []
 
     with (
-        patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
-        patch("korvid.ui.app.subprocess.call", side_effect=_recording_call(shell_calls)),
-        patch("korvid.ui.app.subprocess.Popen", side_effect=_fake_popen(debug_calls)),
-        patch("korvid.ui.app.subprocess.run", return_value=SimpleNamespace(returncode=1)),
+        patch("shutil.which", return_value="/usr/bin/kubectl"),
+        patch("subprocess.call", side_effect=_recording_call(shell_calls)),
+        patch("subprocess.Popen", side_effect=_fake_popen(debug_calls)),
+        patch("subprocess.run", return_value=SimpleNamespace(returncode=1)),
         patch.object(type(app), "suspend", side_effect=lambda: _noop_cm()),
     ):
         async with app.run_test() as pilot:
@@ -242,11 +244,13 @@ Run:
 
 ```bash
 /Users/hwang-inhwan/workspace/kube/.venv/bin/ruff check \
-  src/korvid/ui/app.py tests/ui/test_transfer.py tests/ui/test_shell.py
+  src/korvid/ui/resource_inspect_controller.py \
+  tests/ui/test_resource_inspect_controller.py tests/ui/test_transfer.py tests/ui/test_shell.py
 /Users/hwang-inhwan/workspace/kube/.venv/bin/ruff format --check \
-  src/korvid/ui/app.py tests/ui/test_transfer.py tests/ui/test_shell.py
+  src/korvid/ui/resource_inspect_controller.py \
+  tests/ui/test_resource_inspect_controller.py tests/ui/test_transfer.py tests/ui/test_shell.py
 PYTHONPATH=src /Users/hwang-inhwan/workspace/kube/.venv/bin/mypy \
-  src/korvid/ui/app.py
+  src/korvid/ui/resource_inspect_controller.py
 PYTHONPATH=src /Users/hwang-inhwan/workspace/kube/.venv/bin/tach check
 git diff --check
 ```
@@ -256,7 +260,8 @@ Expected: every command exits 0.
 - [ ] **Step 9: Commit the behavior and regressions**
 
 ```bash
-git add src/korvid/ui/app.py tests/ui/test_transfer.py tests/ui/test_shell.py
+git add src/korvid/ui/resource_inspect_controller.py \
+  tests/ui/test_resource_inspect_controller.py tests/ui/test_transfer.py tests/ui/test_shell.py
 git commit -m "security: fail closed on unavailable pod UID"
 ```
 
@@ -269,7 +274,7 @@ Include the required `Co-authored-by` trailer in the commit message.
 - Verify: all branch changes against `origin/main`
 
 **Interfaces:**
-- Consumes: the exact-match-only `_pod_uid_unchanged` contract from Task 1
+- Consumes: the exact-match-only `pod_uid_unchanged` contract from Task 1
 - Produces: a review-ready #334 branch with no lockfile drift
 
 - [ ] **Step 1: Run the full project quality gate**

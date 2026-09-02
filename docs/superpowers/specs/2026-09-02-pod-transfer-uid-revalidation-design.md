@@ -11,7 +11,7 @@
 File transfer captures a Pod UID when the dialog opens and re-reads the Pod
 before starting the name-based exec. The manifest lookup helper deliberately
 returns `None` for timeouts and infrastructure errors. The shared
-`_pod_uid_unchanged` guard currently treats that result as success, so a Pod
+`pod_uid_unchanged` guard currently treats that result as success, so a Pod
 that was replaced while the dialog was open can receive an upload or serve a
 download when the final lookup is unavailable.
 
@@ -27,8 +27,9 @@ Only a retrieved UID equal to the captured UID permits execution.
 
 ### 1. Make the shared Pod UID guard fail closed
 
-Treat `None` from `_target_uid` as a retryable verification failure in
-`_pod_uid_unchanged`. Keep the existing messages for deletion and replacement.
+Treat `None` from the injected target UID lookup as a retryable verification
+failure in `ResourceInspectController.pod_uid_unchanged`. Keep the existing
+messages for deletion and replacement.
 
 This is the recommended approach. It is the smallest change, keeps identity
 interpretation at the existing boundary, and also protects `kubectl debug`,
@@ -52,8 +53,8 @@ consumer that needs policy beyond permit or refuse.
 
 ## Design
 
-`KorvidApp._pod_uid_unchanged` remains the single pre-execution identity
-boundary for transfer and debug:
+`ResourceInspectController.pod_uid_unchanged` remains the single pre-execution
+identity boundary for transfer and debug:
 
 - `ApiStatusError` from a confirmed missing Pod returns `False` and reports
   that the Pod no longer exists.
