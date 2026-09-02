@@ -474,20 +474,17 @@ async def test_upload_blocked_when_pod_replaced_after_approval(tmp_path: Path) -
 
 @pytest.mark.parametrize("direction", ["upload", "download"])
 @pytest.mark.parametrize(
-    ("failure_factory", "failure_label"),
+    "failure_factory",
     [
-        (TimeoutError, "timeout"),
-        (lambda: RuntimeError("api unavailable"), "runtime-error"),
+        pytest.param(TimeoutError, id="timeout"),
+        pytest.param(lambda: RuntimeError("api unavailable"), id="runtime-error"),
     ],
-    ids=["timeout", "runtime-error"],
 )
 async def test_transfer_blocked_when_final_uid_lookup_unavailable(
     tmp_path: Path,
     direction: str,
     failure_factory: Callable[[], Exception],
-    failure_label: str,
 ) -> None:
-    del failure_label
     opener = FakeExecOpener()
     audit_path = tmp_path / "audit.jsonl"
     app = make_app(
