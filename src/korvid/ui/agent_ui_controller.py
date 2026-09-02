@@ -1997,21 +1997,26 @@ class AgentUiController:
     # The approval dialog an agent write must pass
     # ------------------------------------------------------------------
 
+    def _approval_surface_blocker(self) -> str | None:
+        """Actionable copy for the condition currently blocking surfacing."""
+        if not self._panel.expanded():
+            return "open the agent panel (Ctrl-A) to review"
+        if self._ui.screen_depth() != 1:
+            return "close the active dialog to review"
+        return self._ui.inline_focus_release_hint()
+
     def can_surface_approval(self) -> bool:
-        """An approval dialog may only appear when the panel is expanded AND
-        no other screen is stacked on top AND no inline text input owns the
-        next key: pushing it over an active dialog or command/input editor
-        would let the user's next y/Enter approve an unexpected write."""
-        return (
-            self._panel.expanded()
-            and self._ui.screen_depth() == 1
-            and not self._ui.inline_input_active()
-        )
+        """An approval dialog may only appear when no surfacing blocker remains:
+        the panel is expanded, no other screen is stacked on top, and no inline
+        focus blocker owns the next key. Otherwise the user's next y/Enter
+        could approve an unexpected write."""
+        return self._approval_surface_blocker() is None
 
     def _pending_approval_message(self) -> str:
-        if self._ui.inline_input_active():
-            return "Agent write approval pending - leave the active input using Tab to review"
-        return "Agent write approval pending - open the agent panel (Ctrl-A) to review"
+        blocker = self._approval_surface_blocker()
+        if blocker is None:  # pragma: no cover - callers use this only while blocked
+            blocker = "open the agent panel (Ctrl-A) to review"
+        return f"Agent write approval pending - {blocker}"
 
     async def _wait_until_surfaceable(self, deadline: float) -> bool:
         """Poll until an approval dialog may surface; False on timeout."""

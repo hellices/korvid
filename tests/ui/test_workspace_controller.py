@@ -143,8 +143,8 @@ class FakeUi(UiSurface):
     def set_depth(self, depth: int) -> None:
         self._depth = depth
 
-    def inline_input_active(self) -> bool:
-        return False  # pragma: no cover
+    def inline_focus_release_hint(self) -> str | None:
+        return None  # pragma: no cover
 
 
 class FakeView(ViewState):

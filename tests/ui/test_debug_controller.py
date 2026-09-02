@@ -102,8 +102,8 @@ class FakeUi(UiSurface):
     def screen_depth(self) -> int:
         return self.depth
 
-    def inline_input_active(self) -> bool:
-        return False
+    def inline_focus_release_hint(self) -> str | None:
+        return None
 
 
 class Harness:

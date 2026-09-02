@@ -2605,9 +2605,17 @@ class AppUiSurface(UiSurface):
     def screen_depth(self) -> int:
         return len(self._app.screen_stack)
 
-    def inline_input_active(self) -> bool:
+    def inline_focus_release_hint(self) -> str | None:
         focused = self._app.focused
-        return isinstance(focused, Input) or focused is self._app._namespace_picker
+        if isinstance(focused, CommandBar):
+            return "close the command bar using Esc to review"
+        if isinstance(focused, FilterBar):
+            return "close the filter bar using Esc to review"
+        if isinstance(focused, NamespacePicker):
+            return "dismiss the namespace picker using Esc to review"
+        if isinstance(focused, Input):
+            return "leave the active input using Tab to review"
+        return None
 
 
 class AppContextSurface(ContextSurface):

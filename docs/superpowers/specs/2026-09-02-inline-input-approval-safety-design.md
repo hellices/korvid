@@ -19,12 +19,13 @@ their focus while the user is typing.
 
 ## Design
 
-Add `inline_input_active() -> bool` to `UiSurface`. `AppUiSurface` implements it
-from live Textual focus:
+Add `inline_focus_release_hint() -> str | None` to `UiSurface`.
+`AppUiSurface` implements it from live Textual focus:
 
-- any focused `Input` owns text entry, including command bar, filter bar,
-  agent input, and log search;
-- the inline `NamespacePicker` owns selection keys while it is focused;
+- focused `CommandBar` and `FilterBar` return actionable `Esc` guidance;
+- the inline `NamespacePicker` returns actionable `Esc` guidance while it is focused;
+- any other focused `Input` owns text entry and returns actionable `Tab` guidance,
+  including agent input and log search;
 - modal pickers remain covered by the existing `screen_depth() == 1` rule.
 
 `AgentUiController.can_surface_approval()` returns true only when:
@@ -35,14 +36,17 @@ from live Textual focus:
 
 The existing wait-loop deadline and `0.05` second poll remain unchanged. A
 blocked approval stays pending, emits a blocker-specific reminder (`Ctrl-A`
-when the panel is closed, `Tab` when inline input owns focus), and surfaces
-after focus leaves the inline editor. If the blocker changes while the request
-is still pending, the controller emits the new distinct reminder immediately;
+when the panel is closed, `Esc` for command/filter/namespace inline surfaces,
+`Tab` for generic inline `Input` focus), and surfaces after focus leaves the
+inline editor. `AgentUiController` derives both "may I surface?" and the
+pending reminder copy from the same blocker query so surfacing and messaging
+cannot drift. If the blocker changes while the request is still pending, the
+controller emits the new distinct reminder immediately;
 unchanged blockers keep the existing 30-second reminder cadence. No focus is
 stolen and no new timer heuristic is introduced.
 
 Every `UiSurface` fake implements the new query explicitly. Controller unit
-tests default it to false and verify the new condition directly.
+tests default it to `None` and verify the new condition directly.
 
 ## Testing
 

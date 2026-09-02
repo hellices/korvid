@@ -4,14 +4,14 @@
 
 **Goal:** Keep agent write approvals pending while an inline input surface owns focus so typing `y` into command, filter, namespace-selection, or agent chat UI can never approve a cluster mutation.
 
-**Architecture:** Extend the `UiSurface` seam with an inline-focus ownership query, teach `AgentUiController.can_surface_approval()` to consult it, and keep the pending toast blocker-specific (`Ctrl-A` for a collapsed panel, `Tab` for active inline input). The wait loop keeps its existing timeout, `0.05` poll, and 30-second cadence for unchanged blockers, but must emit a new reminder immediately if the pending blocker changes. Cover that controller path with unit tests first. Then add Textual Pilot regressions that prove each inline surface keeps the `y` keystroke for itself and that the same pending approval surfaces only after focus returns to a non-inline widget.
+**Architecture:** Extend the `UiSurface` seam with an inline-focus release-hint query, teach `AgentUiController.can_surface_approval()` to consult it, and keep the pending toast blocker-specific (`Ctrl-A` for a collapsed panel, `Esc` for command/filter/namespace inline surfaces, `Tab` for generic inline `Input` focus). The wait loop keeps its existing timeout, `0.05` poll, and 30-second cadence for unchanged blockers, but must emit a new reminder immediately if the pending blocker changes. Cover that controller path with unit tests first. Then add Textual Pilot regressions that prove each inline surface keeps the `y` keystroke for itself and that the same pending approval surfaces only after focus returns to a non-inline widget.
 
 **Tech Stack:** Python 3.11+, Textual, Textual Pilot, pytest, ruff, mypy, tach, gh CLI
 
 ## Global Constraints
 
 - Prefix every Python command in this plan with `UV_FROZEN=1 uv run`.
-- Keep the existing approval timeout and the `0.05` second wait-loop sleep unchanged. Unchanged blockers keep the existing 30-second reminder cadence, but a new blocker-specific reminder must be emitted immediately when the pending blocker changes. Pending toast text may differ by blocker: collapsed panel uses `Agent write approval pending - open the agent panel (Ctrl-A) to review`; active inline input uses `Agent write approval pending - leave the active input using Tab to review`.
+- Keep the existing approval timeout and the `0.05` second wait-loop sleep unchanged. Unchanged blockers keep the existing 30-second reminder cadence, but a new blocker-specific reminder must be emitted immediately when the pending blocker changes. Pending toast text may differ by blocker: collapsed panel uses `Agent write approval pending - open the agent panel (Ctrl-A) to review`; command bar uses `Agent write approval pending - close the command bar using Esc to review`; filter bar uses `Agent write approval pending - close the filter bar using Esc to review`; namespace picker uses `Agent write approval pending - dismiss the namespace picker using Esc to review`; generic inline `Input` focus uses `Agent write approval pending - leave the active input using Tab to review`.
 - Preserve the security invariants: approvals still require an explicit user keystroke, active input keeps focus until the user leaves it, `run_kubectl` validation remains unchanged, and fail-closed audit logging must still block writes when the audit sink is unavailable.
 - Only focused `Input` widgets and the inline `NamespacePicker` block approval surfacing; ordinary table focus must not block it.
 - Use `tests/ui/waits.py::until()` for new UI state transitions instead of fixed sleeps.
@@ -22,11 +22,11 @@
 
 ## File Structure
 
-- `src/korvid/ui/ui_surface.py` — the abstract UI seam; add the inline-focus ownership query here so controllers never reach directly into Textual state.
-- `src/korvid/ui/app.py` — `AppUiSurface` over `KorvidApp`; first detect focused `Input` widgets, then widen the production check to the inline `NamespacePicker` once the pilot regression demonstrates the missing branch.
+- `src/korvid/ui/ui_surface.py` — the abstract UI seam; add the inline-focus release-hint query here so controllers never reach directly into Textual state.
+- `src/korvid/ui/app.py` — `AppUiSurface` over `KorvidApp`; return focus-owner-specific review guidance for command bar, filter bar, namespace picker, and generic `Input` widgets.
 - `src/korvid/ui/agent_ui_controller.py` — the agent approval gate; keep the existing deadline/reminder behaviour while adding the new inline-focus condition.
 - `tests/ui/test_view_state_seam.py` — seam tests that pin the new `AppUiSurface` focus detection behaviour.
-- `tests/ui/test_write_coordinator.py` — shared `FakeUi` used by agent/controller unit tests; add a controllable inline-focus flag here.
+- `tests/ui/test_write_coordinator.py` — shared `FakeUi` used by agent/controller unit tests; add a controllable inline-focus release hint here.
 - `tests/ui/test_workspace_controller.py` — `FakeUi` for workspace controller tests; implement the new seam method explicitly with a false default.
 - `tests/ui/test_session_timeline_controller.py` — `FakeUiSurface` for timeline controller tests; implement the new seam method explicitly with a false default.
 - `tests/ui/test_debug_controller.py` — `FakeUi` for debug controller tests; implement the new seam method explicitly with a false default.
@@ -54,8 +54,8 @@
 - Consumes: `AgentUiController.__init__(*, panel: AgentPanelPort, screens: AgentScreens, ui: UiSurface, view: ViewState, context: ContextGuard, writes: WriteCoordinator, workspace: WorkspaceState, navigation: WorkspaceOps, logs: AgentLogOps, proposals: AgentProposals, dispatch: BridgeDispatch, config: Callable[[], KorvidConfig], get_manifest: Callable[[], ManifestFetcher | None], get_events: Callable[[], Any | None], stream_logs: Callable[[], Any | None], pod_containers: Callable[[str, str], tuple[str, ...]], write_ops: Callable[[], WriteOps | None], audit: Callable[[], AuditLog | None], pod_resize_supported: Callable[[], bool], provider_hint: Callable[[], str | None], approval_timeout_seconds: float | None = None, refresh_status: Callable[[], None] = lambda: None, follow_bridge: Callable[[], UIBridge | None] = lambda: None, tasks: TurnTasks | None = None, session: AgentSession | None = None, model_name: str | None = None, configurator: AgentConfigurator | None = None, rebuild: Callable[[AgentSettings], AgentSession | None] | None = None, disconnect: Callable[[], None] | None = None, available: bool = True) -> None`
 - Consumes: `AgentPanelPort.expanded(self) -> bool`
 - Consumes: `UiSurface.screen_depth(self) -> int`
-- Produces: `UiSurface.inline_input_active(self) -> bool`
-- Produces: `AppUiSurface.inline_input_active(self) -> bool`
+- Produces: `UiSurface.inline_focus_release_hint(self) -> str | None`
+- Produces: `AppUiSurface.inline_focus_release_hint(self) -> str | None`
 - Produces: `AgentUiController.can_surface_approval(self) -> bool`
 
 - [ ] **Step 1: Write the failing seam and controller tests**
@@ -67,18 +67,20 @@ from typing import Any, cast
 
 from textual.widgets import Input
 
+from korvid.ui.widgets.command_bar import CommandBar
 
-def test_app_ui_surface_reports_inline_input_focus() -> None:
-    command_bar = Input()
+
+def test_app_ui_surface_reports_command_bar_escape_hint() -> None:
+    command_bar = CommandBar()
     surface: Any = AppUiSurface(cast("KorvidApp", SimpleNamespace(focused=command_bar)))
 
-    assert surface.inline_input_active() is True
+    assert surface.inline_focus_release_hint() == "close the command bar using Esc to review"
 
 
 def test_app_ui_surface_ignores_non_input_focus() -> None:
     surface: Any = AppUiSurface(cast("KorvidApp", SimpleNamespace(focused=object())))
 
-    assert surface.inline_input_active() is False
+    assert surface.inline_focus_release_hint() is None
 
 
 # tests/ui/test_agent_ui_controller.py
@@ -86,11 +88,11 @@ async def test_can_surface_approval_requires_no_inline_input(tmp_path: Path) -> 
     env = Env(tmp_path=tmp_path, session=ScriptedSession())
     env.panel.mounted = True
     env.panel.visible = True
-    env.ui.inline_active = True
+    env.ui.inline_release_hint = "close the command bar using Esc to review"
 
     assert env.controller.can_surface_approval() is False
 
-    env.ui.inline_active = False
+    env.ui.inline_release_hint = None
     assert env.controller.can_surface_approval() is True
 
 
@@ -99,16 +101,18 @@ async def test_agent_write_waits_for_inline_input_focus_to_clear(tmp_path: Path)
     env = Env(tmp_path=tmp_path, ops=ops)
     env.panel.mounted = True
     env.panel.visible = True
-    env.ui.inline_active = True
+    env.ui.inline_release_hint = "close the command bar using Esc to review"
 
     request = asyncio.ensure_future(
         env.controller.agent_request_write("delete", "pods", "web-1", "default")
     )
     await settle()
     assert env.ui.screens == []
-    assert any("Agent write approval pending" in message for message in env.ui.messages())
+    assert env.ui.messages() == [
+        "Agent write approval pending - close the command bar using Esc to review"
+    ]
 
-    env.ui.inline_active = False
+    env.ui.inline_release_hint = None
     await env.ui.wait_for_screens()
     assert isinstance(env.ui.screens[-1][0], ConfirmScreen)
     env.ui.answer(False)
@@ -123,58 +127,68 @@ Run:
 
 ```bash
 UV_FROZEN=1 uv run pytest -p no:tach \
-  tests/ui/test_view_state_seam.py::test_app_ui_surface_reports_inline_input_focus \
+  tests/ui/test_view_state_seam.py::test_app_ui_surface_reports_command_bar_escape_hint \
   tests/ui/test_view_state_seam.py::test_app_ui_surface_ignores_non_input_focus \
   tests/ui/test_agent_ui_controller.py::test_can_surface_approval_requires_no_inline_input \
   tests/ui/test_agent_ui_controller.py::test_agent_write_waits_for_inline_input_focus_to_clear \
   -q
 ```
 
-Expected: FAIL because `AppUiSurface`/`UiSurface` do not expose `inline_input_active()` yet and `AgentUiController.can_surface_approval()` still ignores inline focus.
+Expected: FAIL because `AppUiSurface`/`UiSurface` do not expose `inline_focus_release_hint()` yet and `AgentUiController.can_surface_approval()` still ignores the release-hint blocker query.
 
 - [ ] **Step 3: Write the minimal seam/controller implementation**
 
 ```python
 # src/korvid/ui/ui_surface.py
     @abstractmethod
-    def inline_input_active(self) -> bool:
-        """Whether an inline editor owns the next keystroke on the base screen."""
+    def inline_focus_release_hint(self) -> str | None:
+        """Actionable copy for the focused inline blocker, if one owns the next key."""
 
 
 # src/korvid/ui/app.py
 from textual.widgets import DataTable, Input, Static
 
 
-    def inline_input_active(self) -> bool:
-        return isinstance(self._app.focused, Input)
+    def inline_focus_release_hint(self) -> str | None:
+        focused = self._app.focused
+        if isinstance(focused, CommandBar):
+            return "close the command bar using Esc to review"
+        if isinstance(focused, FilterBar):
+            return "close the filter bar using Esc to review"
+        if isinstance(focused, NamespacePicker):
+            return "dismiss the namespace picker using Esc to review"
+        if isinstance(focused, Input):
+            return "leave the active input using Tab to review"
+        return None
 
 
 # src/korvid/ui/agent_ui_controller.py
+    def _approval_surface_blocker(self) -> str | None:
+        if not self._panel.expanded():
+            return "open the agent panel (Ctrl-A) to review"
+        if self._ui.screen_depth() != 1:
+            return "close the active dialog to review"
+        return self._ui.inline_focus_release_hint()
+
+
     def can_surface_approval(self) -> bool:
-        """An approval dialog may only appear when the panel is expanded, the
-        base screen is the only stacked screen, and no inline text input owns
-        the next key."""
-        return (
-            self._panel.expanded()
-            and self._ui.screen_depth() == 1
-            and not self._ui.inline_input_active()
-        )
+        return self._approval_surface_blocker() is None
 
 
 # tests/ui/test_write_coordinator.py
     depth: int = 1
-    inline_active: bool = False
+    inline_release_hint: str | None = None
 
-    def inline_input_active(self) -> bool:
-        return self.inline_active
+    def inline_focus_release_hint(self) -> str | None:
+        return self.inline_release_hint
 
 
 # tests/ui/test_workspace_controller.py
 # tests/ui/test_session_timeline_controller.py
 # tests/ui/test_debug_controller.py
 # tests/ui/test_log_controller.py
-    def inline_input_active(self) -> bool:
-        return False  # pragma: no cover
+    def inline_focus_release_hint(self) -> str | None:
+        return None  # pragma: no cover
 ```
 
 - [ ] **Step 4: Run the seam/controller unit suite to verify GREEN**
@@ -215,14 +229,14 @@ git commit -m $'fix: block agent approvals during inline input focus\n\nCo-autho
 - Test: `tests/ui/test_agent_write.py`
 
 **Interfaces:**
-- Consumes: `UiSurface.inline_input_active(self) -> bool`
-- Consumes: `AppUiSurface.inline_input_active(self) -> bool`
+- Consumes: `UiSurface.inline_focus_release_hint(self) -> str | None`
+- Consumes: `AppUiSurface.inline_focus_release_hint(self) -> str | None`
 - Consumes: `AgentUiController.agent_request_write(self, action: str, kind: str, name: str, namespace: str | None = None, replicas: int | None = None, resources: dict[str, dict[str, dict[str, str]]] | None = None) -> str`
 - Consumes: `tests/ui/waits.py::until(pilot: Any, cond: Callable[[], object], timeout: float = 5.0, label: str = "condition") -> None`
 - Consumes: `CommandBar.open(self) -> None`
 - Consumes: `FilterBar.open(self) -> None`
 - Consumes: `NamespacePicker.open(self, namespaces: list[str]) -> None`
-- Produces: `AppUiSurface.inline_input_active(self) -> bool` that also blocks when the focused widget is the inline `NamespacePicker`
+- Produces: `AppUiSurface.inline_focus_release_hint(self) -> str | None` that returns `Esc` guidance for command bar, filter bar, and the inline `NamespacePicker`
 - Produces: four pilot regressions proving `y` stays with the focused inline surface, the pending toast reflects the blocking surface, and the approval appears only after focus release
 
 - [ ] **Step 1: Write the failing pilot regressions**
@@ -263,6 +277,14 @@ async def test_agent_write_stays_pending_while_command_bar_has_focus(tmp_path: P
         bar = app.query_one(CommandBar)
         await until(pilot, lambda: app.focused is bar, label="command bar focused")
         task = _pending_delete(app)
+        await until(
+            pilot,
+            lambda: any(
+                "close the command bar using Esc to review" in str(notification.message)
+                for notification in app._notifications
+            ),
+            label="command-bar-specific pending notification",
+        )
         await pilot.press("y")
         await until(
             pilot,
@@ -401,15 +423,23 @@ UV_FROZEN=1 uv run pytest -p no:tach \
   -q
 ```
 
-Expected: FAIL on the namespace-picker case because `AppUiSurface.inline_input_active()` only recognizes focused `Input` widgets, so the picker can still be covered by a `ConfirmScreen`.
+Expected: FAIL on the namespace-picker case because `AppUiSurface.inline_focus_release_hint()` only recognizes focused `Input` widgets, so the picker still returns no blocker hint and can be covered by a `ConfirmScreen`.
 
 - [ ] **Step 3: Add the final picker branch and its seam test**
 
 ```python
 # src/korvid/ui/app.py
-    def inline_input_active(self) -> bool:
+    def inline_focus_release_hint(self) -> str | None:
         focused = self._app.focused
-        return isinstance(focused, Input) or focused is self._app._namespace_picker
+        if isinstance(focused, CommandBar):
+            return "close the command bar using Esc to review"
+        if isinstance(focused, FilterBar):
+            return "close the filter bar using Esc to review"
+        if isinstance(focused, NamespacePicker):
+            return "dismiss the namespace picker using Esc to review"
+        if isinstance(focused, Input):
+            return "leave the active input using Tab to review"
+        return None
 
 
 # tests/ui/test_view_state_seam.py
@@ -422,7 +452,7 @@ def test_app_ui_surface_reports_inline_namespace_picker_focus() -> None:
         cast("KorvidApp", SimpleNamespace(focused=picker, _namespace_picker=picker))
     )
 
-    assert surface.inline_input_active() is True
+    assert surface.inline_focus_release_hint() == "dismiss the namespace picker using Esc to review"
 ```
 
 - [ ] **Step 4: Run the seam + pilot regressions to verify GREEN**
@@ -464,8 +494,8 @@ git commit -m $'test: cover inline approval focus regressions\n\nCo-authored-by:
 - Verify: `tests/ui/test_agent_write.py`
 
 **Interfaces:**
-- Consumes: `UiSurface.inline_input_active(self) -> bool`
-- Consumes: `AppUiSurface.inline_input_active(self) -> bool`
+- Consumes: `UiSurface.inline_focus_release_hint(self) -> str | None`
+- Consumes: `AppUiSurface.inline_focus_release_hint(self) -> str | None`
 - Consumes: `AgentUiController.can_surface_approval(self) -> bool`
 - Consumes: the four new Textual Pilot regressions in `tests/ui/test_agent_write.py`
 - Produces: a clean, fully verified two-commit tip ready for review

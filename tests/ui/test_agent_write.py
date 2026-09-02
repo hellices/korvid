@@ -357,6 +357,14 @@ async def test_agent_write_stays_pending_while_command_bar_has_focus(tmp_path: P
         bar = app.query_one(CommandBar)
         await until(pilot, lambda: app.focused is bar, label="command bar focused")
         task = _pending_delete(app)
+        await until(
+            pilot,
+            lambda: any(
+                "close the command bar using Esc to review" in str(notification.message)
+                for notification in app._notifications
+            ),
+            label="command-bar-specific pending notification",
+        )
         await pilot.press("y")
         await until(
             pilot,

@@ -160,5 +160,5 @@ class UiSurface(ABC):
         """
 
     @abstractmethod
-    def inline_input_active(self) -> bool:
-        """Whether an inline text input on the base screen owns the next key."""
+    def inline_focus_release_hint(self) -> str | None:
+        """Actionable copy for the focused inline blocker, if one owns the next key."""

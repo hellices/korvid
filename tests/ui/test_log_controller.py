@@ -92,8 +92,8 @@ class FakeUiSurface(UiSurface):
     def screen_depth(self) -> int:
         return 1  # pragma: no cover
 
-    def inline_input_active(self) -> bool:
-        return False  # pragma: no cover
+    def inline_focus_release_hint(self) -> str | None:
+        return None  # pragma: no cover
 
 
 class FakeLogPane:
