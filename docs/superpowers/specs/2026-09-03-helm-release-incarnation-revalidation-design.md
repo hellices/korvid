@@ -117,9 +117,10 @@ release UID.
 
 The composition root injects the authoritative identity reader through
 `KorvidApp` into `HelmController`. The controller depends on a narrow
-`Callable[[str, str], Awaitable[HelmReleaseIdentity]]`, not on `KubeClient`
-itself. Context switching continues to update the shared Kubernetes client;
-the write reservation prevents a switch during post-approval verification.
+`Callable[[str, str], Awaitable[HelmReleaseIdentity | None]]`, not on
+`KubeClient` itself. Context switching continues to update the shared
+Kubernetes client; the write reservation prevents a switch during
+post-approval verification.
 
 Adding the optional `WriteGate.confirm` parameter requires matching signatures
 in its ABC, `WriteCoordinator`, and test fakes. It does not introduce a second
