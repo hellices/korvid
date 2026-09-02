@@ -685,6 +685,8 @@ class WriteCoordinator(WriteGate):
         name: str,
         op_factory: Callable[[], Awaitable[None]],
         detail: str = "",
+        *,
+        precondition: Callable[[], Awaitable[bool]] | None = None,
     ) -> Coroutine[Any, Any, str]:
         """Execute an approved write with fail-closed auditing (AGENTS.md):
         the intent record must persist *before* the mutation - if it cannot,
@@ -698,10 +700,20 @@ class WriteCoordinator(WriteGate):
 
         Takes an operation *factory* so the mutation coroutine is never
         created until intent is audited — a declined or blocked write
-        produces no unawaited coroutine to leak.
+        produces no unawaited coroutine to leak. `precondition` is refusal-
+        only: it runs after approval, still inside the reservation, before any
+        intent audit or mutation is constructed.
         """
         return self.reserved(
-            lambda: self._run_write(action, meta, namespace, name, op_factory, detail)
+            lambda: self._run_write(
+                action,
+                meta,
+                namespace,
+                name,
+                op_factory,
+                detail,
+                precondition=precondition,
+            )
         )
 
     async def _run_write(
@@ -712,13 +724,23 @@ class WriteCoordinator(WriteGate):
         name: str,
         op_factory: Callable[[], Awaitable[None]],
         detail: str,
+        *,
+        precondition: Callable[[], Awaitable[bool]] | None,
     ) -> str:
         """The reserved body: the whole span publishes an in-flight progress
         label (issue #143) — between approval and the outcome toast there was
         previously no visible state at all."""
         kind = meta.plural
         with self._ui.progress(f"{action} {kind}/{name}"):
-            return await self._run_write_inner(action, meta, namespace, name, op_factory, detail)
+            return await self._run_write_inner(
+                action,
+                meta,
+                namespace,
+                name,
+                op_factory,
+                detail,
+                precondition=precondition,
+            )
 
     async def _run_write_inner(
         self,
@@ -728,8 +750,22 @@ class WriteCoordinator(WriteGate):
         name: str,
         op_factory: Callable[[], Awaitable[None]],
         detail: str,
+        *,
+        precondition: Callable[[], Awaitable[bool]] | None,
     ) -> str:
         kind = meta.plural
+        if precondition is not None:
+            try:
+                permitted = await precondition()
+            except Exception as exc:
+                logger.exception("write precondition failed: %s", exc)
+                self._ui.notify(
+                    f"{action} {kind}/{name} blocked: precondition could not be verified",
+                    severity="error",
+                )
+                return "blocked: precondition error"
+            if not permitted:
+                return "blocked: precondition failed"
         try:
             await self.audit_write(action, meta, namespace, name, detail, "intent")
         except Exception as exc:
@@ -953,6 +989,7 @@ class WriteCoordinator(WriteGate):
         managed_note: str | None = None,
         impact_lines: tuple[str, ...] | None = None,
         approval_guard: Callable[[], bool] | None = None,
+        precondition: Callable[[], Awaitable[bool]] | None = None,
     ) -> None:
         """The standard write-approval flow (issue #91 U1): push a confirm
         dialog and, on approval, launch `run` on a supervised worker.
@@ -989,7 +1026,17 @@ class WriteCoordinator(WriteGate):
         """
 
         def _launch() -> None:
-            self._ui.run_worker(self.run(action, meta, namespace, name, op_factory, detail=detail))
+            self._ui.run_worker(
+                self.run(
+                    action,
+                    meta,
+                    namespace,
+                    name,
+                    op_factory,
+                    detail=detail,
+                    precondition=precondition,
+                )
+            )
 
         def _launch_if(guard: Callable[[], bool]) -> None:
             if guard():

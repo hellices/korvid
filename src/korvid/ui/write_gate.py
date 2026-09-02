@@ -4,8 +4,8 @@ Controllers do not perform approved writes themselves; they compose an
 operation and hand it to the app through this gate. Naming that boundary as
 an `abc.ABC` rather than a bag of `Callable[..., ...]` is the point: the
 keywords that carry the security contract - `action`, `meta`, `op_factory`,
-`epoch` - are then checked by mypy at every call site and in every fake,
-instead of being erased by an ellipsis.
+`epoch`, `precondition` - are then checked by mypy at every call site and
+in every fake, instead of being erased by an ellipsis.
 
 The single implementation is `WriteCoordinator` (`ui/write_coordinator.py`),
 which owns the confirm dialog, the audited execution path, and the fail-closed
@@ -44,6 +44,7 @@ class WriteGate(ABC):
         preview: list[str] | None = None,
         preview_title: str = "server dry-run preview:",
         managed_note: str | None = None,
+        precondition: Callable[[], Awaitable[bool]] | None = None,
     ) -> None:
         """Ask the user to approve `operation`, then run it if they agree.
 
@@ -51,6 +52,10 @@ class WriteGate(ABC):
         never construct the mutation, so there is nothing to leak unawaited
         and no side effect before approval. On approval the app awaits the
         factory from its own worker, after the intent audit record persisted.
+
+        `precondition` is refusal-only: it runs only after approval, inside the
+        reserved write, and can block a mutation the user already approved. It
+        must never become a second path around the approval gate.
         """
 
     @abstractmethod
@@ -132,6 +137,8 @@ class WriteGate(ABC):
         name: str,
         op_factory: Callable[[], Awaitable[None]],
         detail: str = "",
+        *,
+        precondition: Callable[[], Awaitable[bool]] | None = None,
     ) -> Coroutine[Any, Any, str]:
         """Build the coroutine for an already-approved, fail-closed write.
 
@@ -145,7 +152,9 @@ class WriteGate(ABC):
         the write is blocked. Only for flows that own their own approval
         step (the operator install dialog re-checks the UID inside its
         callback) - everything else goes through `confirm`, which calls this
-        internally. Returns a short outcome string.
+        internally. `precondition` is refusal-only and runs after approval,
+        still inside the reservation, before any intent audit or mutation is
+        constructed. Returns a short outcome string.
         """
 
     @abstractmethod
