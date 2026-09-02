@@ -17,11 +17,14 @@ import pytest
 from korvid.k8s.helm import (
     HELM_SECRET_TYPE,
     MAX_DISPLAY_CHARS,
+    HelmReleaseIdentity,
     HelmReleaseSummary,
     HelmRevisionSummary,
     ReleaseTracker,
     decode_release,
     release_from_secret,
+    release_identity_from_secret,
+    release_uid,
     revision_from_secret,
 )
 
@@ -159,6 +162,37 @@ class TestReleaseFromSecret:
         assert (
             release_from_secret(_secret("web", 1)).uid == release_from_secret(_secret("web", 2)).uid
         )
+
+    def test_release_identity_uses_concrete_secret_uid_and_revision(self) -> None:
+        secret = _secret("web", 3)
+
+        assert release_identity_from_secret(secret) == HelmReleaseIdentity(
+            secret_uid="secret-uid-web-3",
+            revision=3,
+        )
+        release = release_from_secret(secret)
+        assert release.uid == release_uid("default", "web")
+        assert release.identity == HelmReleaseIdentity("secret-uid-web-3", 3)
+
+    @pytest.mark.parametrize(
+        ("uid", "version"),
+        [
+            ("", "3"),
+            (None, "3"),
+            ("secret-uid", ""),
+            ("secret-uid", "0"),
+            ("secret-uid", "not-an-int"),
+        ],
+    )
+    def test_release_identity_rejects_missing_or_invalid_facts(
+        self, uid: str | None, version: str
+    ) -> None:
+        secret = _secret("web", 3)
+        secret["metadata"]["uid"] = uid
+        secret["metadata"]["labels"]["version"] = version
+
+        assert release_identity_from_secret(secret) is None
+        assert release_from_secret(secret).identity is None
 
     def test_undecodable_payload_falls_back_to_labels(self) -> None:
         secret = _secret("web", 2, data={"release": base64.b64encode(b"junk").decode()})
@@ -399,6 +433,39 @@ class TestWatchHelmRevisions:
 
 
 class TestGetHelmRelease:
+    async def test_get_helm_release_identity_selects_latest_revision(self) -> None:
+        client = KubeClient()
+        response = {"items": [_secret("web", 1), _secret("web", 3), _secret("web", 2)]}
+        with (
+            patch.object(client, "_api", MagicMock()),
+            patch.object(client, "_request_json", AsyncMock(return_value=response)),
+        ):
+            identity = await client.get_helm_release_identity("default", "web")
+
+        assert identity == HelmReleaseIdentity("secret-uid-web-3", 3)
+
+    async def test_get_helm_release_identity_returns_none_for_invalid_latest_secret(self) -> None:
+        latest = _secret("web", 3)
+        latest["metadata"]["uid"] = ""
+        client = KubeClient()
+        response = {"items": [_secret("web", 2), latest]}
+        with (
+            patch.object(client, "_api", MagicMock()),
+            patch.object(client, "_request_json", AsyncMock(return_value=response)),
+        ):
+            identity = await client.get_helm_release_identity("default", "web")
+
+        assert identity is None
+
+    async def test_get_helm_release_identity_preserves_missing_release_404(self) -> None:
+        client = KubeClient()
+        with (
+            patch.object(client, "_api", MagicMock()),
+            patch.object(client, "_request_json", AsyncMock(return_value={"items": []})),
+            pytest.raises(ApiStatusError, match=r"helm release .* not found"),
+        ):
+            await client.get_helm_release_identity("default", "ghost")
+
     async def test_undecodable_payload_describes_from_labels(self) -> None:
         """A release whose latest Secret payload does not decode still lists
         via the label fallback - describe on it must degrade to label-only

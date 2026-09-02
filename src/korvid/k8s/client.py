@@ -28,12 +28,14 @@ from korvid.k8s.dryrun import diff_manifests
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.helm import (
     HELM_SECRET_TYPE,
+    HelmReleaseIdentity,
     HelmReleaseSummary,
     HelmRevisionSummary,
     ReleaseTracker,
     decode_release,
     release_detail,
     release_from_secret,
+    release_identity_from_secret,
     revision_from_secret,
 )
 from korvid.k8s.logs import LogLine
@@ -890,6 +892,13 @@ class KubeClient(ReadOps, WriteOps):
         except ValueError:
             return []
         return manifest_components(payload.get("manifest"))
+
+    async def get_helm_release_identity(
+        self, namespace: str, name: str
+    ) -> HelmReleaseIdentity | None:
+        """Concrete identity of the latest Secret backing a Helm release."""
+        secret = await self._helm_release_secret(namespace, name)
+        return release_identity_from_secret(secret)
 
     async def get_helm_release(
         self, namespace: str, name: str, revision: int | None = None

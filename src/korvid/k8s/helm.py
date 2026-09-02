@@ -121,6 +121,14 @@ def decode_release(secret: dict[str, Any]) -> dict[str, Any]:
 
 
 @dataclass(frozen=True)
+class HelmReleaseIdentity:
+    """Concrete identity of the latest Secret backing a Helm release."""
+
+    secret_uid: str
+    revision: int
+
+
+@dataclass(frozen=True)
 class HelmReleaseSummary(GenericSummary):
     """One installed release at its latest revision."""
 
@@ -128,6 +136,7 @@ class HelmReleaseSummary(GenericSummary):
     status: str = ""
     chart: str = "-"
     app_version: str = "-"
+    identity: HelmReleaseIdentity | None = None
 
 
 @dataclass(frozen=True)
@@ -160,6 +169,20 @@ def _mapping(value: Any) -> dict[str, Any]:
     """The value if it is a JSON object, else {} - nested payload fields can
     be the wrong type in a hand-mangled Secret and must degrade, not raise."""
     return value if isinstance(value, dict) else {}
+
+
+def release_identity_from_secret(secret: dict[str, Any]) -> HelmReleaseIdentity | None:
+    """Validated concrete Secret identity, or None when facts are incomplete."""
+    metadata = _mapping(secret.get("metadata"))
+    labels = _mapping(metadata.get("labels"))
+    secret_uid = metadata.get("uid")
+    try:
+        revision = int(labels.get("version") or 0)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(secret_uid, str) or not secret_uid or revision <= 0:
+        return None
+    return HelmReleaseIdentity(secret_uid=secret_uid, revision=revision)
 
 
 def _chart_facts(secret: dict[str, Any]) -> tuple[str, str, str]:
@@ -217,6 +240,7 @@ def release_from_secret(secret: dict[str, Any]) -> HelmReleaseSummary:
         status=status,
         chart=chart,
         app_version=app_version,
+        identity=release_identity_from_secret(secret),
     )
 
 
