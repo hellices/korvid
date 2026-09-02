@@ -1997,29 +1997,49 @@ class AgentUiController:
     # The approval dialog an agent write must pass
     # ------------------------------------------------------------------
 
+    def _approval_surface_blocker(self) -> str | None:
+        """Actionable copy for the condition currently blocking surfacing."""
+        if not self._panel.expanded():
+            return "open the agent panel (Ctrl-A) to review"
+        if self._ui.screen_depth() != 1:
+            return "close the active dialog to review"
+        return self._ui.inline_focus_release_hint()
+
     def can_surface_approval(self) -> bool:
-        """An approval dialog may only appear when the panel is expanded AND
-        no other screen is stacked on top: pushing it over an active dialog
-        would let the user's next y/Enter approve an unexpected write."""
-        return self._panel.expanded() and self._ui.screen_depth() == 1
+        """An approval dialog may only appear when no surfacing blocker remains:
+        the panel is expanded, no other screen is stacked on top, and no inline
+        focus blocker owns the next key. Otherwise the user's next y/Enter
+        could approve an unexpected write."""
+        return self._approval_surface_blocker() is None
+
+    def _pending_approval_message(self) -> str:
+        blocker = self._approval_surface_blocker()
+        if blocker is None:  # pragma: no cover - callers use this only while blocked
+            blocker = "open the agent panel (Ctrl-A) to review"
+        return f"Agent write approval pending - {blocker}"
 
     async def _wait_until_surfaceable(self, deadline: float) -> bool:
-        """Poll until an approval dialog may surface (panel expanded, no other
-        screen on top); False when the deadline passes first."""
+        """Poll until an approval dialog may surface; False on timeout."""
         loop = asyncio.get_running_loop()
         if self.can_surface_approval():
             return True
-        pending_msg = "Agent write approval pending - open the agent panel (Ctrl-A) to review"
-        self._ui.notify(pending_msg, severity="warning", timeout=10)
+        message = self._pending_approval_message()
+        self._ui.notify(message, severity="warning", timeout=10)
         last_reminder = loop.time()
         while not self.can_surface_approval():
-            if loop.time() >= deadline:
+            now = loop.time()
+            if now >= deadline:
                 return False
-            if loop.time() - last_reminder >= 30:
+            current_message = self._pending_approval_message()
+            if current_message != message:
+                self._ui.notify(current_message, severity="warning", timeout=10)
+                message = current_message
+                last_reminder = now
+            elif now - last_reminder >= 30:
                 # The first toast fades after 10s: keep reminding so the
                 # request does not silently expire.
-                self._ui.notify(pending_msg, severity="warning", timeout=10)
-                last_reminder = loop.time()
+                self._ui.notify(message, severity="warning", timeout=10)
+                last_reminder = now
             await asyncio.sleep(0.05)
         return True
 

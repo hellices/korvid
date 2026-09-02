@@ -35,7 +35,7 @@ from textual.css.query import NoMatches
 from textual.events import DescendantBlur, DescendantFocus, Key
 from textual.screen import Screen
 from textual.widget import AwaitMount
-from textual.widgets import DataTable, Static
+from textual.widgets import DataTable, Input, Static
 from textual.widgets.data_table import CellDoesNotExist, RowDoesNotExist
 from textual.worker import Worker, WorkerError, WorkerState
 
@@ -2604,6 +2604,18 @@ class AppUiSurface(UiSurface):
 
     def screen_depth(self) -> int:
         return len(self._app.screen_stack)
+
+    def inline_focus_release_hint(self) -> str | None:
+        focused = self._app.focused
+        if isinstance(focused, CommandBar):
+            return "close the command bar using Esc to review"
+        if isinstance(focused, FilterBar):
+            return "close the filter bar using Esc to review"
+        if isinstance(focused, NamespacePicker):
+            return "dismiss the namespace picker using Esc to review"
+        if isinstance(focused, Input):
+            return "leave the active input using Tab to review"
+        return None
 
 
 class AppContextSurface(ContextSurface):

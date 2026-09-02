@@ -128,6 +128,10 @@ class FakeUi(UiSurface):
         return self.depth
 
     depth: int = 1
+    inline_release_hint: str | None = None
+
+    def inline_focus_release_hint(self) -> str | None:
+        return self.inline_release_hint
 
     # -- helpers -----------------------------------------------------------
 

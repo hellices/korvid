@@ -5,6 +5,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
+from korvid.agent.session import AgentSession
 from korvid.core.audit import AuditLog
 from korvid.core.config import KorvidConfig
 from korvid.core.store import ResourceStore, Summary
@@ -75,6 +76,8 @@ def make_app(
     permitted: bool | None = None,
     get_manifest: Callable[[str, str | None, str], Awaitable[dict[str, Any]]] | None = None,
     approval_timeout_seconds: float | None = None,
+    agent_session: AgentSession | None = None,
+    agent_model_name: str | None = None,
 ) -> KorvidApp:
     store = ResourceStore()
     deploys = [GenericSummary(name="web", namespace="default", kind="Deployment", created="")]
@@ -109,6 +112,8 @@ def make_app(
         watch_manager=WatchManager(store, source),
         aliases=dict(_ALIASES),
         get_manifest=get_manifest or default_manifest,
+        agent_session=agent_session,
+        agent_model_name=agent_model_name,
         write_ops=recorder,
         audit=AuditLog(audit_path),
         check_permission=None if permitted is None else check_permission,

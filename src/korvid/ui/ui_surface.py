@@ -158,3 +158,7 @@ class UiSurface(ABC):
         handing it over lets a controller `pop`, `clear` or reorder screens
         outside the lifecycle that owns them.
         """
+
+    @abstractmethod
+    def inline_focus_release_hint(self) -> str | None:
+        """Actionable copy for the focused inline blocker, if one owns the next key."""

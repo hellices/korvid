@@ -9,14 +9,36 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from textual.widgets import Input
 
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.errors import ApiStatusError
+from korvid.ui.widgets.command_bar import CommandBar
 from korvid.ui.widgets.confirm_screen import ConfirmScreen
+from korvid.ui.widgets.filter_bar import FilterBar
+from korvid.ui.widgets.namespace_picker import NamespacePicker
 from korvid.ui.widgets.pick_screen import PickScreen
+from tests.ui.agent_session_fakes import FakeSession
 
 from .agent_write_support import _DEPLOY_META, Recorder, _expand_panel, make_app
 from .waits import until
+
+
+def _pending_delete(app: Any) -> asyncio.Task[str]:
+    return asyncio.ensure_future(
+        app._agent_ui.agent_request_write("delete", "deployments", "web", namespace="default")
+    )
+
+
+async def _decline_after_surface(pilot: Any, app: Any, task: asyncio.Task[str]) -> None:
+    await until(
+        pilot,
+        lambda: isinstance(app.screen, ConfirmScreen),
+        label="agent approval dialog opened after focus release",
+    )
+    await pilot.press("n")
+    result = await task
+    assert "denied" in result.lower() or "declined" in result.lower()
 
 
 async def test_agent_delete_approved_by_user_key(tmp_path: Path) -> None:
@@ -324,6 +346,156 @@ async def test_agent_write_waits_for_user_modal_to_close(tmp_path: Path) -> None
         result = await task
         assert "executed" in result.lower()
         assert rec.calls == [("delete", "deployments", "default", "web")]
+
+
+async def test_agent_write_stays_pending_while_command_bar_has_focus(tmp_path: Path) -> None:
+    rec = Recorder()
+    app = make_app(rec, tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        _expand_panel(app)
+        await pilot.press("colon")
+        bar = app.query_one(CommandBar)
+        await until(pilot, lambda: app.focused is bar, label="command bar focused")
+        task = _pending_delete(app)
+        await until(
+            pilot,
+            lambda: any(
+                "close the command bar using Esc to review" in str(notification.message)
+                for notification in app._notifications
+            ),
+            label="command-bar-specific pending notification",
+        )
+        await pilot.press("y")
+        await until(
+            pilot,
+            lambda: (
+                bar.value == "y"
+                and app.focused is bar
+                and not task.done()
+                and not isinstance(app.screen, ConfirmScreen)
+            ),
+            label="command bar kept the y key",
+        )
+        await pilot.press("escape")
+        await until(
+            pilot,
+            lambda: bar.display is False,
+            label="command bar dismissed",
+        )
+        await _decline_after_surface(pilot, app, task)
+        assert rec.calls == []
+
+
+async def test_agent_write_stays_pending_while_filter_bar_has_focus(tmp_path: Path) -> None:
+    rec = Recorder()
+    app = make_app(rec, tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        _expand_panel(app)
+        await pilot.press("slash")
+        bar = app.query_one(FilterBar)
+        await until(pilot, lambda: app.focused is bar, label="filter bar focused")
+        task = _pending_delete(app)
+        await pilot.press("y")
+        await until(
+            pilot,
+            lambda: (
+                bar.value == "y"
+                and app.filter_pattern == "y"
+                and app.focused is bar
+                and not task.done()
+                and not isinstance(app.screen, ConfirmScreen)
+            ),
+            label="filter bar kept the y key",
+        )
+        await pilot.press("escape")
+        await until(
+            pilot,
+            lambda: bar.display is False,
+            label="filter bar dismissed",
+        )
+        await _decline_after_surface(pilot, app, task)
+        assert rec.calls == []
+
+
+async def test_agent_write_stays_pending_while_namespace_picker_has_focus(tmp_path: Path) -> None:
+    rec = Recorder()
+    app = make_app(rec, tmp_path / "audit.jsonl")
+
+    async def list_namespaces() -> list[str]:
+        return ["default", "kube-system", "prod"]
+
+    app._list_namespaces = list_namespaces
+    async with app.run_test() as pilot:
+        _expand_panel(app)
+        await pilot.press("colon")
+        await pilot.press("n")
+        await pilot.press("s")
+        await pilot.press("enter")
+        picker = app.query_one(NamespacePicker)
+        await until(
+            pilot,
+            lambda: picker.display is True and app.focused is picker,
+            label="namespace picker focused",
+        )
+        task = _pending_delete(app)
+        highlighted = picker.highlighted
+        await pilot.press("y")
+        await until(
+            pilot,
+            lambda: (
+                picker.display is True
+                and app.focused is picker
+                and picker.highlighted == highlighted
+                and not task.done()
+                and not isinstance(app.screen, ConfirmScreen)
+            ),
+            label="namespace picker kept focus",
+        )
+        await pilot.press("escape")
+        await until(
+            pilot,
+            lambda: picker.display is False,
+            label="namespace picker dismissed",
+        )
+        await _decline_after_surface(pilot, app, task)
+        assert rec.calls == []
+
+
+async def test_agent_write_stays_pending_while_agent_input_has_focus(tmp_path: Path) -> None:
+    rec = Recorder()
+    app = make_app(
+        rec,
+        tmp_path / "audit.jsonl",
+        agent_session=FakeSession(),
+        agent_model_name="test-model",
+    )
+    async with app.run_test() as pilot:
+        agent_input = app.query_one("#agent-input", Input)
+        await pilot.press("ctrl+a")
+        await until(pilot, lambda: app.focused is agent_input, label="agent input focused")
+        task = _pending_delete(app)
+        await until(
+            pilot,
+            lambda: any(
+                "leave the active input using Tab to review" in str(notification.message)
+                for notification in app._notifications
+            ),
+            label="agent-input-specific pending notification",
+        )
+        await pilot.press("y")
+        await until(
+            pilot,
+            lambda: (
+                agent_input.value == "y"
+                and app.focused is agent_input
+                and not task.done()
+                and not isinstance(app.screen, ConfirmScreen)
+            ),
+            label="agent input kept the y key",
+        )
+        await pilot.press("tab")
+        await _decline_after_surface(pilot, app, task)
+        assert rec.calls == []
 
 
 async def test_agent_write_rejects_empty_name(tmp_path: Path) -> None:

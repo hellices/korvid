@@ -1588,6 +1588,94 @@ async def test_a_declined_agent_write_never_mutates(tmp_path: Path) -> None:
     assert ops.calls == []
 
 
+async def test_can_surface_approval_requires_no_inline_input(tmp_path: Path) -> None:
+    env = Env(tmp_path=tmp_path, session=ScriptedSession())
+    env.panel.mounted = True
+    env.panel.visible = True
+    env.ui.inline_release_hint = "close the command bar using Esc to review"
+
+    assert env.controller.can_surface_approval() is False
+
+    env.ui.inline_release_hint = None
+    assert env.controller.can_surface_approval() is True
+
+
+async def test_agent_write_waits_for_inline_input_focus_to_clear(tmp_path: Path) -> None:
+    ops = RecordingOps()
+    env = Env(tmp_path=tmp_path, ops=ops)
+    env.panel.mounted = True
+    env.panel.visible = True
+    env.ui.inline_release_hint = "close the command bar using Esc to review"
+
+    request = asyncio.ensure_future(
+        env.controller.agent_request_write("delete", "pods", "web-1", "default")
+    )
+    await settle()
+    assert env.ui.screens == []
+    assert env.ui.messages() == [
+        "Agent write approval pending - close the command bar using Esc to review"
+    ]
+
+    env.ui.inline_release_hint = None
+    await env.ui.wait_for_screens()
+    assert isinstance(env.ui.screens[-1][0], ConfirmScreen)
+    env.ui.answer(False)
+    out = await request
+    assert out.startswith("denied")
+    assert ops.calls == []
+
+
+async def test_agent_write_updates_pending_message_when_blocker_changes(tmp_path: Path) -> None:
+    ops = RecordingOps()
+    env = Env(tmp_path=tmp_path, ops=ops)
+
+    request = asyncio.ensure_future(
+        env.controller.agent_request_write("delete", "pods", "web-1", "default")
+    )
+    await settle()
+    assert env.ui.messages() == [
+        "Agent write approval pending - open the agent panel (Ctrl-A) to review"
+    ]
+
+    env.panel.visible = True
+    env.ui.inline_release_hint = "leave the active input using Tab to review"
+    await asyncio.sleep(0.06)
+    assert env.ui.messages() == [
+        "Agent write approval pending - open the agent panel (Ctrl-A) to review",
+        "Agent write approval pending - leave the active input using Tab to review",
+    ]
+
+    env.ui.inline_release_hint = None
+    await env.ui.wait_for_screens()
+    assert isinstance(env.ui.screens[-1][0], ConfirmScreen)
+    env.ui.answer(False)
+    out = await request
+    assert out.startswith("denied")
+    assert ops.calls == []
+
+
+async def test_agent_write_keeps_collapsed_panel_pending_message(tmp_path: Path) -> None:
+    ops = RecordingOps()
+    env = Env(tmp_path=tmp_path, ops=ops)
+
+    request = asyncio.ensure_future(
+        env.controller.agent_request_write("delete", "pods", "web-1", "default")
+    )
+    await settle()
+    assert env.ui.screens == []
+    assert env.ui.messages() == [
+        "Agent write approval pending - open the agent panel (Ctrl-A) to review"
+    ]
+
+    env.panel.visible = True
+    await env.ui.wait_for_screens()
+    assert isinstance(env.ui.screens[-1][0], ConfirmScreen)
+    env.ui.answer(False)
+    out = await request
+    assert out.startswith("denied")
+    assert ops.calls == []
+
+
 async def test_an_agent_write_is_blocked_when_the_audit_sink_is_broken(tmp_path: Path) -> None:
     ops = RecordingOps()
     env = Env(tmp_path=tmp_path, ops=ops, audit="broken")

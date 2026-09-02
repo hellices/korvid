@@ -11,9 +11,11 @@ from __future__ import annotations
 import asyncio
 import inspect
 from collections.abc import AsyncIterator
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
+from textual.widgets import Input
 from textual.worker import WorkerError
 
 from korvid.core.config import KorvidConfig
@@ -24,6 +26,9 @@ from korvid.k8s.models import GenericSummary
 from korvid.ui.app import AppUiSurface, AppViewState, KorvidApp
 from korvid.ui.ui_surface import UiSurface
 from korvid.ui.view_state import ViewState
+from korvid.ui.widgets.command_bar import CommandBar
+from korvid.ui.widgets.filter_bar import FilterBar
+from korvid.ui.widgets.namespace_picker import NamespacePicker
 
 _ALIASES = {
     "pods": ResourceMeta("", "v1", "pods", "Pod", True),
@@ -227,3 +232,42 @@ def test_app_ui_surface_delegates_the_terminal_capabilities() -> None:
     surface.call_from_thread(lambda: None)
 
     assert calls == ["refresh", "thread"]
+
+
+def test_app_ui_surface_reports_command_bar_escape_hint() -> None:
+    command_bar = CommandBar()
+    surface = AppUiSurface(cast("KorvidApp", SimpleNamespace(focused=command_bar)))
+
+    assert surface.inline_focus_release_hint() == "close the command bar using Esc to review"
+
+
+def test_app_ui_surface_reports_filter_bar_escape_hint() -> None:
+    filter_bar = FilterBar()
+    surface = AppUiSurface(cast("KorvidApp", SimpleNamespace(focused=filter_bar)))
+
+    assert surface.inline_focus_release_hint() == "close the filter bar using Esc to review"
+
+
+def test_app_ui_surface_reports_inline_namespace_picker_focus() -> None:
+    picker = NamespacePicker()
+    surface: Any = AppUiSurface(
+        cast("KorvidApp", SimpleNamespace(focused=picker, _namespace_picker=picker))
+    )
+
+    assert surface.inline_focus_release_hint() == "dismiss the namespace picker using Esc to review"
+
+
+def test_app_ui_surface_reports_generic_input_tab_hint() -> None:
+    agent_input = Input()
+    surface = AppUiSurface(cast("KorvidApp", SimpleNamespace(focused=agent_input)))
+
+    assert surface.inline_focus_release_hint() == "leave the active input using Tab to review"
+
+
+def test_app_ui_surface_ignores_non_input_focus() -> None:
+    picker = NamespacePicker()
+    surface = AppUiSurface(
+        cast("KorvidApp", SimpleNamespace(focused=object(), _namespace_picker=picker))
+    )
+
+    assert surface.inline_focus_release_hint() is None
