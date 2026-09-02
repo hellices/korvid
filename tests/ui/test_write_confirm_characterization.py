@@ -203,6 +203,8 @@ async def test_helm_rollback_declined_makes_no_call(tmp_path: Path) -> None:
     audit_path = tmp_path / "audit.jsonl"
     app = make_helm_app(helm=helm, audit_path=audit_path)
     async with app.run_test() as pilot:
+        await _helm_navigate(pilot, "helm", "helmreleases")
+        await _rows_listed(pilot, app, 1)
         await _helm_navigate(pilot, "helmrevisions", "helmrevisions")
         await _rows_listed(pilot, app, 1)
         await pilot.press("r")
