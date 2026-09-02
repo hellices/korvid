@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 from collections.abc import Set as AbstractSet
 from datetime import UTC, datetime
-from typing import Final, NamedTuple, Self, cast
+from typing import Final, NamedTuple, Protocol, Self, cast
 
 from rich.cells import cell_len
 from rich.text import Text
@@ -36,6 +36,34 @@ from korvid.ui.theme import phase_style, ready_style, restarts_style, usage_styl
 
 #: Looks up live metrics for (namespace, name); None disables the join.
 MetricsLookup = Callable[[str, str], PodMetrics | None]
+
+
+#: Dispatcher entry for the row-renderer registry.
+class _RowRenderer(Protocol):
+    def __call__(
+        self,
+        table: ResourceTable,
+        rows: list[Summary],
+        *,
+        all_namespaces: bool,
+        pattern: str,
+        metrics: MetricsLookup | None,
+        presorted: bool,
+    ) -> None: ...
+
+
+#: Dispatcher entry for renderers that do not consume metrics.
+class _StandardRowRenderer(Protocol):
+    def __call__(
+        self,
+        table: ResourceTable,
+        rows: list[Summary],
+        *,
+        all_namespaces: bool,
+        pattern: str,
+        presorted: bool,
+    ) -> None: ...
+
 
 #: `_emit_row(stamp=...)` sentinel: this row opts out of the memo. Distinct
 #: from `None`, which is a legitimate stamp (a row with no volatile inputs).
@@ -88,6 +116,77 @@ def _pod_sort_key(pod: PodSummary) -> tuple[int, str]:
 
 def _phase_cell(phase: str) -> Text:
     return Text(phase, style=phase_style(phase))
+
+
+def _render_pod_rows(
+    table: ResourceTable,
+    rows: list[Summary],
+    *,
+    all_namespaces: bool,
+    pattern: str,
+    metrics: MetricsLookup | None,
+    presorted: bool,
+) -> None:
+    table._add_pod_rows(
+        rows,
+        all_namespaces=all_namespaces,
+        pattern=pattern,
+        metrics=metrics,
+        presorted=presorted,
+    )
+
+
+def _adapt_standard_renderer(method_name: str, name: str) -> _RowRenderer:
+    def adapted(
+        table: ResourceTable,
+        rows: list[Summary],
+        *,
+        all_namespaces: bool,
+        pattern: str,
+        metrics: MetricsLookup | None,
+        presorted: bool,
+    ) -> None:
+        del metrics
+        getattr(table, method_name)(
+            rows,
+            all_namespaces=all_namespaces,
+            pattern=pattern,
+            presorted=presorted,
+        )
+
+    adapted.__name__ = name
+    return adapted
+
+
+_render_replicaset_rows = _adapt_standard_renderer(
+    "_add_replicaset_rows", "_render_replicaset_rows"
+)
+_render_helm_release_rows = _adapt_standard_renderer(
+    "_add_helm_release_rows", "_render_helm_release_rows"
+)
+_render_helm_revision_rows = _adapt_standard_renderer(
+    "_add_helm_revision_rows", "_render_helm_revision_rows"
+)
+_render_package_rows = _adapt_standard_renderer("_add_package_rows", "_render_package_rows")
+_render_subscription_rows = _adapt_standard_renderer(
+    "_add_subscription_rows", "_render_subscription_rows"
+)
+_render_csv_rows = _adapt_standard_renderer("_add_csv_rows", "_render_csv_rows")
+_render_generic_rows = _adapt_standard_renderer("_add_generic_rows", "_render_generic_rows")
+
+_ROW_RENDERERS: dict[str, _RowRenderer] = {
+    "pods": _render_pod_rows,
+    "replicasets": _render_replicaset_rows,
+    "helmreleases": _render_helm_release_rows,
+    "helmrevisions": _render_helm_revision_rows,
+    "packagemanifests": _render_package_rows,
+    "subscriptions": _render_subscription_rows,
+    "clusterserviceversions": _render_csv_rows,
+}
+
+
+def _row_renderer(kind: str) -> _RowRenderer:
+    return _ROW_RENDERERS.get(kind, _render_generic_rows)
 
 
 # In-place removals cost O(rows) each (DataTable.remove_row rebuilds its
@@ -978,43 +1077,15 @@ class ResourceTable(DataTable[str | Text]):
                 else ()
             )
             rows = sort_rows(rows, sort, metrics=metrics, custom_columns=custom_names)
-        presorted = sort is not None
-        if kind == "pods":
-            self._add_pod_rows(
-                rows,
-                all_namespaces=all_namespaces,
-                pattern=pattern,
-                metrics=metrics,
-                presorted=presorted,
-            )
-        elif kind == "replicasets":
-            self._add_replicaset_rows(
-                rows, all_namespaces=all_namespaces, pattern=pattern, presorted=presorted
-            )
-        elif kind == "helmreleases":
-            self._add_helm_release_rows(
-                rows, all_namespaces=all_namespaces, pattern=pattern, presorted=presorted
-            )
-        elif kind == "helmrevisions":
-            self._add_helm_revision_rows(
-                rows, all_namespaces=all_namespaces, pattern=pattern, presorted=presorted
-            )
-        elif kind == "packagemanifests":
-            self._add_package_rows(
-                rows, all_namespaces=all_namespaces, pattern=pattern, presorted=presorted
-            )
-        elif kind == "subscriptions":
-            self._add_subscription_rows(
-                rows, all_namespaces=all_namespaces, pattern=pattern, presorted=presorted
-            )
-        elif kind == "clusterserviceversions":
-            self._add_csv_rows(
-                rows, all_namespaces=all_namespaces, pattern=pattern, presorted=presorted
-            )
-        else:
-            self._add_generic_rows(
-                rows, all_namespaces=all_namespaces, pattern=pattern, presorted=presorted
-            )
+        renderer = _row_renderer(kind)
+        renderer(
+            self,
+            rows,
+            all_namespaces=all_namespaces,
+            pattern=pattern,
+            metrics=metrics,
+            presorted=sort is not None,
+        )
 
     def _add_pod_rows(
         self,
