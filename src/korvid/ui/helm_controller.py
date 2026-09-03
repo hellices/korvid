@@ -758,17 +758,41 @@ class HelmController:
             return
         namespace = ns or row.namespace
         release_row = self.release_row(namespace, row.release)
-        if release_row is None or release_row.identity is None:
-            self._ui.notify(
-                "Helm rollback cancelled - Helm release identity could not be verified",
-                severity="warning",
-            )
-            return
+        if release_row is None:
+            operation = self.rollback_with_current_identity(helm, row, ns, name, namespace, epoch)
+        else:
+            identity = release_row.identity
+            if identity is None:
+                self._ui.notify(
+                    "Helm rollback cancelled - Helm release identity could not be verified",
+                    severity="warning",
+                )
+                return
+            operation = self.rollback(helm, row, ns, name, namespace, epoch, identity)
         self._ui.run_worker(
-            self.rollback(helm, row, ns, name, namespace, epoch, release_row.identity),
+            operation,
             exclusive=True,
             group=HELM_WRITE_GROUP,
         )
+
+    async def rollback_with_current_identity(
+        self,
+        helm: HelmCLI,
+        row: HelmRevisionSummary,
+        ns: str | None,
+        name: str,
+        namespace: str,
+        epoch: int,
+    ) -> None:
+        """Resolve identity when revision history was opened directly."""
+        identity = await self._current_release_identity(
+            namespace,
+            row.release,
+            action="Helm rollback",
+        )
+        if identity is None:
+            return
+        await self.rollback(helm, row, ns, name, namespace, epoch, identity)
 
     def uninstall_selected(self) -> None:
         """Ctrl+D on the helm release browser: uninstall the selected release
@@ -922,13 +946,38 @@ class HelmController:
         *,
         action: str,
     ) -> bool:
+        current = await self._current_release_identity(
+            namespace,
+            release,
+            action=action,
+            propagate_unexpected=True,
+        )
+        if current is None:
+            return False
+        if current != approved:
+            self._ui.notify(
+                f"{action} cancelled - release {release} changed since it was approved; "
+                "refresh and retry",
+                severity="warning",
+            )
+            return False
+        return True
+
+    async def _current_release_identity(
+        self,
+        namespace: str,
+        release: str,
+        *,
+        action: str,
+        propagate_unexpected: bool = False,
+    ) -> HelmReleaseIdentity | None:
         reader = self._get_release_identity()
         if reader is None:
             self._ui.notify(
                 f"{action} cancelled - Helm release identity could not be verified",
                 severity="warning",
             )
-            return False
+            return None
         try:
             current = await asyncio.wait_for(
                 reader(namespace, release),
@@ -940,11 +989,16 @@ class HelmController:
                     f"{action} cancelled - release {release} no longer exists",
                     severity="warning",
                 )
-                return False
+                return None
             logger.warning("Helm release identity lookup failed", exc_info=True)
             current = None
         except TimeoutError:
             logger.warning("Helm release identity lookup timed out", exc_info=True)
+            current = None
+        except Exception:
+            if propagate_unexpected:
+                raise
+            logger.warning("Helm release identity lookup failed unexpectedly", exc_info=True)
             current = None
         if current is None:
             self._ui.notify(
@@ -952,15 +1006,8 @@ class HelmController:
                 "refresh and retry",
                 severity="warning",
             )
-            return False
-        if current != approved:
-            self._ui.notify(
-                f"{action} cancelled - release {release} changed since it was approved; "
-                "refresh and retry",
-                severity="warning",
-            )
-            return False
-        return True
+            return None
+        return current
 
     async def _uninstall_preview(
         self, helm: HelmCLI, release: str, namespace: str

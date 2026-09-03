@@ -457,6 +457,21 @@ class TestGetHelmRelease:
 
         assert identity is None
 
+    async def test_get_helm_release_identity_rejects_malformed_newest_version_label(
+        self,
+    ) -> None:
+        latest = _secret("web", 4)
+        latest["metadata"]["labels"]["version"] = "invalid"
+        client = KubeClient()
+        response = {"items": [_secret("web", 3), latest]}
+        with (
+            patch.object(client, "_api", MagicMock()),
+            patch.object(client, "_request_json", AsyncMock(return_value=response)),
+        ):
+            identity = await client.get_helm_release_identity("default", "web")
+
+        assert identity is None
+
     async def test_get_helm_release_identity_preserves_missing_release_404(self) -> None:
         client = KubeClient()
         with (

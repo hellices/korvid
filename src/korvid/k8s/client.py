@@ -862,6 +862,16 @@ class KubeClient(ReadOps, WriteOps):
         except ValueError:
             return 0
 
+    @staticmethod
+    def _helm_secret_name_revision(secret: dict[str, Any], release: str) -> int:
+        metadata = secret.get("metadata") or {}
+        name = str(metadata.get("name") or "")
+        prefix = f"sh.helm.release.v1.{release}.v"
+        if not name.startswith(prefix):
+            return 0
+        suffix = name.removeprefix(prefix)
+        return int(suffix) if suffix.isdigit() else 0
+
     async def _helm_release_secret(
         self, namespace: str, name: str, revision: int | None = None
     ) -> dict[str, Any]:
@@ -874,10 +884,10 @@ class KubeClient(ReadOps, WriteOps):
         data = await self._request_json(path)
         items = list(data.get("items", []))
         if revision is not None:
-            items = [s for s in items if self._helm_revision(s) == revision]
+            items = [s for s in items if self._helm_secret_name_revision(s, name) == revision]
         if not items:
             raise ApiStatusError(404, f"helm release {name!r} not found in {namespace!r}")
-        return max(items, key=self._helm_revision)
+        return max(items, key=lambda secret: self._helm_secret_name_revision(secret, name))
 
     async def get_helm_release_components(self, namespace: str, name: str) -> list[ComponentRef]:
         """Component refs from the latest revision's rendered manifest.
