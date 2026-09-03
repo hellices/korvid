@@ -202,6 +202,7 @@ def release_identity_from_secret(secret: dict[str, Any]) -> HelmReleaseIdentity 
         or not secret_uid
         or not isinstance(release, str)
         or not release
+        or revision <= 0
         or release_revision_from_secret_name(secret, release) != revision
     ):
         return None

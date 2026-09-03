@@ -1097,6 +1097,9 @@ async def test_rollback_key_on_revision_confirms_and_executes(tmp_path: Path) ->
     [
         (None, "identity could not be verified"),
         (_deleted_release, "no longer exists"),
+        (_timed_out_identity, "identity could not be verified"),
+        (_failed_identity_lookup, "identity could not be verified"),
+        (_unexpected_identity_error, "identity could not be verified"),
     ],
 )
 async def test_direct_rollback_blocks_when_identity_cannot_be_captured(

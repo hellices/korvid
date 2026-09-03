@@ -212,6 +212,14 @@ class TestReleaseFromSecret:
         assert release_identity_from_secret(secret) is None
         assert release_from_secret(secret).identity is None
 
+    def test_release_identity_rejects_zero_revision_with_noncanonical_name(self) -> None:
+        secret = _secret("web", 3)
+        secret["metadata"]["name"] = "noncanonical-secret-name"
+        secret["metadata"]["labels"]["version"] = "0"
+
+        assert release_identity_from_secret(secret) is None
+        assert release_from_secret(secret).identity is None
+
     def test_undecodable_payload_falls_back_to_labels(self) -> None:
         secret = _secret("web", 2, data={"release": base64.b64encode(b"junk").decode()})
         rel = release_from_secret(secret)
