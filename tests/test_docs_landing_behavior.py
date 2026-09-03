@@ -36,10 +36,15 @@ class _SceneMarkupParser(HTMLParser):
         if not self._inside_switcher:
             return
         if attributes.get("role") == "tab":
-            self.tabs[attributes["aria-controls"]] = attributes["id"]
+            panel_id = attributes.get("aria-controls")
+            tab_id = attributes.get("id")
+            if panel_id is not None and tab_id is not None:
+                self.tabs[panel_id] = tab_id
         if attributes.get("role") == "tabpanel":
-            self._current_panel = attributes["id"]
-            self.panels[attributes["id"]] = attributes["aria-labelledby"]
+            self._current_panel = attributes.get("id")
+            tab_id = attributes.get("aria-labelledby")
+            if self._current_panel is not None and tab_id is not None:
+                self.panels[self._current_panel] = tab_id
         if self._current_panel is None:
             return
         if tag == "video" and "controls" in attributes:

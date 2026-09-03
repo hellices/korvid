@@ -499,7 +499,7 @@ async def test_on_target_tool_calls_credit_any_alternative_in_an_evidence_group(
 
 async def test_on_target_tool_calls_require_matching_evidence_arguments() -> None:
     scenario = _oom_scenario()
-    script = [
+    script: list[list[dict[str, Any]]] = [
         [
             _tool_call("get_events", {"kind": "pods", "name": "other", "namespace": "shop"}),
             {"type": "usage", "input_tokens": 40, "output_tokens": 5},
@@ -748,7 +748,7 @@ async def test_an_eval_session_snapshot_inventories_the_recorder_redaction() -> 
 
 async def test_a_run_reports_how_well_its_answer_cited_its_reads() -> None:
     scenario = _oom_scenario()
-    script = [
+    script: list[list[dict[str, Any]]] = [
         [
             _tool_call("diagnose_pod", {"pod": "checkout-1", "namespace": "shop"}),
             {"type": "usage", "input_tokens": 40, "output_tokens": 5},
