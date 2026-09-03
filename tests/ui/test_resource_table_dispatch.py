@@ -98,9 +98,7 @@ def test_render_pod_rows_forwards_exact_metrics_sentinel_and_all_arguments() -> 
     """_render_pod_rows must pass the metrics lookup, presorted, all_namespaces, and
     pattern through to _add_pod_rows unchanged (subclass override as the witness).
     """
-    received: list[
-        tuple[list[Summary], bool, str, resource_table.MetricsLookup | None, bool]
-    ] = []
+    received: list[tuple[list[Summary], bool, str, resource_table.MetricsLookup | None, bool]] = []
 
     def metrics_sentinel(_namespace: str, _name: str) -> PodMetrics | None:
         return None
