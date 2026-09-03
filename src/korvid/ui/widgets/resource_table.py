@@ -54,17 +54,23 @@ class _RowRenderer(Protocol):
     ) -> None: ...
 
 
-#: Dispatcher entry for renderers that do not consume metrics.
-class _StandardRowRenderer(Protocol):
+#: The bound method signature of a standard (non-metrics) row renderer after
+#: it has been resolved from an actual ResourceTable instance.
+class _BoundStandardRowRenderer(Protocol):
     def __call__(
         self,
-        __table: ResourceTable,
         __rows: list[Summary],
         *,
         all_namespaces: bool,
         pattern: str,
         presorted: bool = False,
     ) -> None: ...
+
+
+#: Callable that resolves the correct bound renderer from the actual table
+#: instance at call time, so subclass overrides of `_add_*_rows` are honored.
+class _StandardRendererFactory(Protocol):
+    def __call__(self, __table: ResourceTable) -> _BoundStandardRowRenderer: ...
 
 
 #: `_emit_row(stamp=...)` sentinel: this row opts out of the memo. Distinct
@@ -138,7 +144,7 @@ def _render_pod_rows(
     )
 
 
-def _adapt_standard_renderer(renderer: _StandardRowRenderer, name: str) -> _RowRenderer:
+def _adapt_standard_renderer(factory: _StandardRendererFactory, name: str) -> _RowRenderer:
     def adapted(
         table: ResourceTable,
         rows: list[Summary],
@@ -149,8 +155,7 @@ def _adapt_standard_renderer(renderer: _StandardRowRenderer, name: str) -> _RowR
         presorted: bool,
     ) -> None:
         del metrics
-        renderer(
-            table,
+        factory(table)(
             rows,
             all_namespaces=all_namespaces,
             pattern=pattern,
@@ -1323,23 +1328,23 @@ class ResourceTable(DataTable[str | Text]):
 
 
 _render_replicaset_rows = _adapt_standard_renderer(
-    ResourceTable._add_replicaset_rows, "_render_replicaset_rows"
+    lambda table: table._add_replicaset_rows, "_render_replicaset_rows"
 )
 _render_helm_release_rows = _adapt_standard_renderer(
-    ResourceTable._add_helm_release_rows, "_render_helm_release_rows"
+    lambda table: table._add_helm_release_rows, "_render_helm_release_rows"
 )
 _render_helm_revision_rows = _adapt_standard_renderer(
-    ResourceTable._add_helm_revision_rows, "_render_helm_revision_rows"
+    lambda table: table._add_helm_revision_rows, "_render_helm_revision_rows"
 )
 _render_package_rows = _adapt_standard_renderer(
-    ResourceTable._add_package_rows, "_render_package_rows"
+    lambda table: table._add_package_rows, "_render_package_rows"
 )
 _render_subscription_rows = _adapt_standard_renderer(
-    ResourceTable._add_subscription_rows, "_render_subscription_rows"
+    lambda table: table._add_subscription_rows, "_render_subscription_rows"
 )
-_render_csv_rows = _adapt_standard_renderer(ResourceTable._add_csv_rows, "_render_csv_rows")
+_render_csv_rows = _adapt_standard_renderer(lambda table: table._add_csv_rows, "_render_csv_rows")
 _render_generic_rows = _adapt_standard_renderer(
-    ResourceTable._add_generic_rows, "_render_generic_rows"
+    lambda table: table._add_generic_rows, "_render_generic_rows"
 )
 
 _ROW_RENDERERS: dict[str, _RowRenderer] = {
