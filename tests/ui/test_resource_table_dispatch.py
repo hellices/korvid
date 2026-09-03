@@ -26,15 +26,15 @@ def test_row_renderer_selects_specialized_and_fallback_renderers(
 
 
 def test_adapt_standard_renderer_uses_callable_and_display_name() -> None:
-    calls: list[tuple[object, list[Summary], bool, str, bool]] = []
+    calls: list[tuple[resource_table.ResourceTable, list[Summary], bool, str, bool]] = []
 
     def renderer(
-        table: object,
+        table: resource_table.ResourceTable,
         rows: list[Summary],
         *,
         all_namespaces: bool,
         pattern: str,
-        presorted: bool,
+        presorted: bool = False,
     ) -> None:
         calls.append((table, rows, all_namespaces, pattern, presorted))
 
@@ -42,7 +42,7 @@ def test_adapt_standard_renderer_uses_callable_and_display_name() -> None:
 
     assert adapted.__name__ == "_render_fake_rows"
 
-    marker = object()
+    marker = resource_table.ResourceTable()
     rows: list[Summary] = []
     adapted(
         marker,

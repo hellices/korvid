@@ -40,6 +40,8 @@ MetricsLookup = Callable[[str, str], PodMetrics | None]
 
 #: Dispatcher entry for the row-renderer registry.
 class _RowRenderer(Protocol):
+    __name__: str
+
     def __call__(
         self,
         __table: ResourceTable,
