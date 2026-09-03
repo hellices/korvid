@@ -52,11 +52,13 @@ the same latest Secret that produced the row. This avoids changing store keys,
 hierarchy ownership, or existing release navigation.
 
 `KubeClient.get_helm_release_identity(namespace, name)` performs an
-authoritative LIST using the existing Helm Secret selectors, selects the
-highest revision with the existing latest-release logic, and returns its
-validated concrete identity. A missing release remains an `ApiStatusError(404)`;
-malformed or missing identity is reported as unavailable rather than converted
-into a synthetic value.
+authoritative LIST using the existing Helm Secret selectors, ranks only
+canonical Helm Secret names by their positive decimal revision suffix, and
+then requires the selected Secret's `version` label and UID to form the same
+validated concrete identity. Label-based ranking remains limited to read APIs
+so describe and component lookup stay aligned with visible browser rows. A
+missing release remains an `ApiStatusError(404)`; malformed or missing identity
+is reported as unavailable rather than converted into a synthetic value.
 
 ## Approval and Execution Flow
 

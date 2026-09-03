@@ -36,6 +36,7 @@ from korvid.k8s.helm import (
     release_detail,
     release_from_secret,
     release_identity_from_secret,
+    release_revision_from_secret_name,
     revision_from_secret,
 )
 from korvid.k8s.logs import LogLine
@@ -862,16 +863,6 @@ class KubeClient(ReadOps, WriteOps):
         except ValueError:
             return 0
 
-    @staticmethod
-    def _helm_secret_name_revision(secret: dict[str, Any], release: str) -> int:
-        metadata = secret.get("metadata") or {}
-        name = str(metadata.get("name") or "")
-        prefix = f"sh.helm.release.v1.{release}.v"
-        if not name.startswith(prefix):
-            return 0
-        suffix = name.removeprefix(prefix)
-        return int(suffix) if suffix.isdigit() else 0
-
     async def _helm_release_secrets(
         self,
         namespace: str,
@@ -918,15 +909,11 @@ class KubeClient(ReadOps, WriteOps):
     ) -> HelmReleaseIdentity | None:
         """Concrete identity of the latest Secret backing a Helm release."""
         items = await self._helm_release_secrets(namespace, name)
-        secret = max(items, key=lambda item: self._helm_secret_name_revision(item, name))
-        name_revision = self._helm_secret_name_revision(secret, name)
+        secret = max(items, key=lambda item: release_revision_from_secret_name(item, name))
+        name_revision = release_revision_from_secret_name(secret, name)
         if name_revision < 1:
             return None
         identity = release_identity_from_secret(secret)
-        if identity is None:
-            return None
-        if identity.revision != name_revision:
-            return None
         return identity
 
     async def get_helm_release(

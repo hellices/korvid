@@ -171,16 +171,39 @@ def _mapping(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def release_revision_from_secret_name(secret: dict[str, Any], release: str) -> int:
+    """Positive revision from a canonical Helm Secret name, or zero."""
+    metadata = _mapping(secret.get("metadata"))
+    name = metadata.get("name")
+    prefix = f"sh.helm.release.v1.{release}.v"
+    if not isinstance(name, str) or not name.startswith(prefix):
+        return 0
+    suffix = name.removeprefix(prefix)
+    if not suffix.isascii() or not suffix.isdecimal():
+        return 0
+    revision = int(suffix)
+    if revision <= 0 or suffix != str(revision):
+        return 0
+    return revision
+
+
 def release_identity_from_secret(secret: dict[str, Any]) -> HelmReleaseIdentity | None:
     """Validated concrete Secret identity, or None when facts are incomplete."""
     metadata = _mapping(secret.get("metadata"))
     labels = _mapping(metadata.get("labels"))
     secret_uid = metadata.get("uid")
+    release = labels.get("name")
     try:
         revision = int(labels.get("version") or 0)
     except (TypeError, ValueError):
         return None
-    if not isinstance(secret_uid, str) or not secret_uid or revision <= 0:
+    if (
+        not isinstance(secret_uid, str)
+        or not secret_uid
+        or not isinstance(release, str)
+        or not release
+        or release_revision_from_secret_name(secret, release) != revision
+    ):
         return None
     return HelmReleaseIdentity(secret_uid=secret_uid, revision=revision)
 

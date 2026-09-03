@@ -196,20 +196,24 @@ Expected: failure because `KubeClient.get_helm_release_identity` is absent.
 
 - [ ] **Step 7: Implement the authoritative identity reader**
 
-In `src/korvid/k8s/client.py`, reuse the existing private latest-Secret
-selection:
+In `src/korvid/k8s/client.py`, reuse the existing Secret LIST request, but rank
+the authoritative identity candidates by the canonical revision suffix in
+their Helm Secret names. Validate that the selected Secret's positive
+`version` label agrees with that suffix and that its UID is present:
 
 ```python
 async def get_helm_release_identity(
     self, namespace: str, name: str
 ) -> HelmReleaseIdentity | None:
     """Concrete identity of the latest Secret backing a Helm release."""
-    secret = await self._helm_release_secret(namespace, name)
+    items = await self._helm_release_secrets(namespace, name)
+    secret = max(items, key=lambda item: release_revision_from_secret_name(item, name))
     return release_identity_from_secret(secret)
 ```
 
-Import `HelmReleaseIdentity` and `release_identity_from_secret` from
-`korvid.k8s.helm`. Do not duplicate label parsing in the client.
+Import the shared identity and canonical-name parsing primitives from
+`korvid.k8s.helm`. Do not reuse the label-ranked describe/components selector
+for mutation authorization.
 
 - [ ] **Step 8: Run Task 1 tests and quality checks**
 
@@ -650,8 +654,10 @@ _HELM_IDENTITY_TIMEOUT = 10.0
 
 Accept the narrow reader accessor in the constructor. For upgrade and
 uninstall, reject a selected `HelmReleaseSummary` whose `identity is None`.
-For rollback, resolve the latest release row by `row.release` and reject when
-that row or its identity is absent.
+For rollback, use the latest release row identity when it is cached. When
+revision history was opened directly and no release row is cached, fetch the
+authoritative identity before approval; reject when that lookup fails or
+returns no identity.
 
 Thread the captured `HelmReleaseIdentity` through `_confirm_change`,
 `rollback`, and `uninstall`; install continues to pass no identity.

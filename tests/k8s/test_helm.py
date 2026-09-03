@@ -194,6 +194,24 @@ class TestReleaseFromSecret:
         assert release_identity_from_secret(secret) is None
         assert release_from_secret(secret).identity is None
 
+    @pytest.mark.parametrize(
+        "secret_name",
+        [
+            "sh.helm.release.v1.web.v03",
+            "sh.helm.release.v1.web.v³",
+            "noncanonical-secret-name",
+        ],
+    )
+    def test_release_identity_rejects_noncanonical_secret_name(
+        self,
+        secret_name: str,
+    ) -> None:
+        secret = _secret("web", 3)
+        secret["metadata"]["name"] = secret_name
+
+        assert release_identity_from_secret(secret) is None
+        assert release_from_secret(secret).identity is None
+
     def test_undecodable_payload_falls_back_to_labels(self) -> None:
         secret = _secret("web", 2, data={"release": base64.b64encode(b"junk").decode()})
         rel = release_from_secret(secret)
