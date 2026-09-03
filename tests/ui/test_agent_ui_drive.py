@@ -277,10 +277,13 @@ async def test_agent_open_logs_refused_while_an_approval_dialog_is_open() -> Non
     moment ago must not retroactively license tearing down the streams the
     user was reading beneath it."""
     app = make_app()
+    lookup_calls = 0
 
     async def dialog_answered_mid_lookup(
         kind: str, namespace: str | None, name: str
     ) -> dict[str, Any]:
+        nonlocal lookup_calls
+        lookup_calls += 1
         app.pop_screen()
         return {"kind": "Pod", "spec": {"containers": [{"name": "main"}]}}
 
@@ -298,6 +301,7 @@ async def test_agent_open_logs_refused_while_an_approval_dialog_is_open() -> Non
         await pilot.pause()
 
         assert out.startswith("ERROR:")
+        assert lookup_calls == 0
         assert app._logs.current_triples == before
 
 

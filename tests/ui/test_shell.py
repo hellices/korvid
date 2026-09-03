@@ -28,6 +28,7 @@ from korvid.ui.shell import (
     build_pod_attach_argv,
     build_pod_get_argv,
     build_pod_wait_argv,
+    build_probe_argv,
 )
 from korvid.ui.widgets.confirm_screen import ConfirmScreen, ImagePrompt
 from korvid.ui.widgets.pick_screen import PickScreen
@@ -49,7 +50,7 @@ SH_FALLBACK = "command -v bash >/dev/null 2>&1 && exec bash || exec sh"
 # ---------------------------------------------------------------------------
 
 
-def test_build_debug_argv_is_pinned_to_the_context_and_shares_the_target_namespace() -> None:
+def test_build_debug_argv_is_pinned_to_context_and_shares_the_target_processes() -> None:
     assert build_debug_argv("kube-system", "cilium-abc", "cilium-agent", context="staging") == [
         "kubectl",
         "debug",
@@ -118,6 +119,24 @@ def test_build_node_debug_create_argv_keeps_kubectl_flags_out_of_the_container()
     assert "--output" not in argv
 
 
+def test_build_probe_argv_is_context_pinned_before_the_container_command() -> None:
+    assert build_probe_argv("prod", "api-1", "main", context="staging") == [
+        "kubectl",
+        "exec",
+        "--context",
+        "staging",
+        "-n",
+        "prod",
+        "api-1",
+        "-c",
+        "main",
+        "--",
+        "sh",
+        "-c",
+        "exit 0",
+    ]
+
+
 def test_build_pod_wait_argv_is_context_pinned() -> None:
     assert build_pod_wait_argv("debug-ns", "node-debugger-x", context="staging") == [
         "kubectl",
@@ -176,6 +195,7 @@ def test_argv_builders_omit_the_context_flag_when_the_session_pinned_none() -> N
         "--",
         "sh",
     ]
+    assert "--context" not in build_probe_argv("ns", "pod")
     assert "--context" not in build_node_debug_create_argv("worker-1", "ns")
     assert "--context" not in build_pod_wait_argv("ns", "pod")
     assert "--context" not in build_pod_attach_argv("ns", "pod")
