@@ -1010,10 +1010,16 @@ class TestRoundTenFindings:
 
         assert "secret" not in mask_in("secret", ("secret", "secret"))
 
-    async def test_a_deeply_nested_body_is_a_backend_error(self) -> None:
+    async def test_a_deeply_nested_body_is_a_backend_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """`RecursionError` is not a `ValueError`, so it escaped the contract."""
-        body = b"[" * 200_000 + b"]" * 200_000
-        backend = _backend(lambda request: httpx.Response(200, content=body))
+
+        def nested_too_deep(_body: str) -> Any:
+            raise RecursionError
+
+        monkeypatch.setattr("korvid.obs.http.json.loads", nested_too_deep)
+        backend = _backend(lambda request: httpx.Response(200, json=[]))
         with pytest.raises(ConnectorError) as caught:
             await backend.get_json("/x", {})
         assert caught.value.kind in ("backend", "limit")
