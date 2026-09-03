@@ -500,9 +500,10 @@ class TestGetHelmRelease:
                 "_request_json",
                 AsyncMock(return_value={"items": [secret]}),
             ),
-            pytest.raises(ApiStatusError, match=r"helm release .* not found"),
         ):
-            await client.get_helm_release_identity("default", "web")
+            identity = await client.get_helm_release_identity("default", "web")
+
+        assert identity is None
 
     async def test_get_helm_release_identity_preserves_missing_release_404(self) -> None:
         client = KubeClient()
@@ -529,6 +530,23 @@ class TestGetHelmRelease:
         assert detail["status"] == "deployed"  # from the Secret label
         assert detail["values"] == {}
         assert "could not be decoded" in detail["warning"]
+
+    async def test_label_valid_noncanonical_secret_still_describes(self) -> None:
+        secret = _secret("web", 3)
+        secret["metadata"]["name"] = "noncanonical-secret-name"
+        client = KubeClient()
+        with (
+            patch.object(client, "_api", MagicMock()),
+            patch.object(
+                client,
+                "_request_json",
+                AsyncMock(return_value={"items": [secret]}),
+            ),
+        ):
+            detail = await client.get_helm_release("default", "web")
+
+        assert detail["name"] == "web"
+        assert detail["revision"] == 3
 
     async def test_malformed_nested_payload_describes_with_fallbacks(self) -> None:
         """The row survives a mangled payload via label fallbacks; describe on

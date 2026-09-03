@@ -872,6 +872,19 @@ class KubeClient(ReadOps, WriteOps):
         suffix = name.removeprefix(prefix)
         return int(suffix) if suffix.isdigit() else 0
 
+    async def _helm_release_secrets(
+        self,
+        namespace: str,
+        name: str,
+    ) -> list[dict[str, Any]]:
+        base = self._helm_secrets_base(namespace)
+        path = f"{base}?{urlencode(self._helm_secrets_query(name=name))}"
+        data = await self._request_json(path)
+        items: list[dict[str, Any]] = list(data.get("items", []))
+        if not items:
+            raise ApiStatusError(404, f"helm release {name!r} not found in {namespace!r}")
+        return items
+
     async def _helm_release_secret(
         self, namespace: str, name: str, revision: int | None = None
     ) -> dict[str, Any]:
@@ -879,18 +892,12 @@ class KubeClient(ReadOps, WriteOps):
 
         Raises ApiStatusError(404) when no matching revision Secret exists.
         """
-        base = self._helm_secrets_base(namespace)
-        path = f"{base}?{urlencode(self._helm_secrets_query(name=name))}"
-        data = await self._request_json(path)
-        items: list[dict[str, Any]] = list(data.get("items", []))
+        items = await self._helm_release_secrets(namespace, name)
         if revision is not None:
-            items = [s for s in items if self._helm_secret_name_revision(s, name) == revision]
+            items = [s for s in items if self._helm_revision(s) == revision]
         if not items:
             raise ApiStatusError(404, f"helm release {name!r} not found in {namespace!r}")
-        chosen = max(items, key=lambda secret: self._helm_secret_name_revision(secret, name))
-        if self._helm_secret_name_revision(chosen, name) < 1:
-            raise ApiStatusError(404, f"helm release {name!r} not found in {namespace!r}")
-        return chosen
+        return max(items, key=self._helm_revision)
 
     async def get_helm_release_components(self, namespace: str, name: str) -> list[ComponentRef]:
         """Component refs from the latest revision's rendered manifest.
@@ -910,11 +917,15 @@ class KubeClient(ReadOps, WriteOps):
         self, namespace: str, name: str
     ) -> HelmReleaseIdentity | None:
         """Concrete identity of the latest Secret backing a Helm release."""
-        secret = await self._helm_release_secret(namespace, name)
+        items = await self._helm_release_secrets(namespace, name)
+        secret = max(items, key=lambda item: self._helm_secret_name_revision(item, name))
+        name_revision = self._helm_secret_name_revision(secret, name)
+        if name_revision < 1:
+            return None
         identity = release_identity_from_secret(secret)
         if identity is None:
             return None
-        if identity.revision != self._helm_secret_name_revision(secret, name):
+        if identity.revision != name_revision:
             return None
         return identity
 
