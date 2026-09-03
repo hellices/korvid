@@ -63,13 +63,16 @@ into a synthetic value.
 Each mutation captures the latest release identity before approval:
 
 - Upgrade and uninstall use the selected `HelmReleaseSummary.identity`.
-- Rollback resolves the current `HelmReleaseSummary` for the selected
-  revision's release and uses that latest identity. The selected historical
-  revision UID is not sufficient because the command mutates the current
-  release incarnation.
+- Rollback uses the current `HelmReleaseSummary` for the selected revision's
+  release when that row is already cached. If revision history was opened
+  directly and no release row is cached, it calls
+  `get_helm_release_identity` before approval and uses that authoritative
+  identity. The selected historical revision UID is not sufficient because
+  the command mutates the current release incarnation.
 
-If the pre-approval identity is absent, the flow stops before opening the
-approval dialog and reports that release identity could not be verified.
+If the cached pre-approval identity is absent, or the direct authoritative
+lookup fails or returns no identity, the flow stops before opening the approval
+dialog and reports that release identity could not be verified.
 
 `WriteGate.confirm` gains an optional asynchronous `precondition` callback.
 The single `WriteCoordinator` implementation runs it after user approval and

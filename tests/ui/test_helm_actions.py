@@ -1059,10 +1059,18 @@ async def test_upgrade_preview_prefers_diff_plugin(tmp_path: Path) -> None:
 async def test_rollback_key_on_revision_confirms_and_executes(tmp_path: Path) -> None:
     helm = FakeHelm()
     audit_path = tmp_path / "audit.jsonl"
-    app = make_app(helm=helm, audit_path=audit_path)
+    identity_calls: list[tuple[str, str]] = []
+
+    async def current_identity(namespace: str, name: str) -> HelmReleaseIdentity:
+        identity_calls.append((namespace, name))
+        return HelmReleaseIdentity("secret-uid-web-3", 3)
+
+    app = make_app(
+        helm=helm,
+        audit_path=audit_path,
+        get_helm_release_identity=current_identity,
+    )
     async with app.run_test() as pilot:
-        await _navigate(pilot, "helm", "helmreleases")
-        await _rows_listed(pilot, app, 1)
         await _navigate(pilot, "helmrevisions", "helmrevisions")
         await _rows_listed(pilot, app, 1)
         await pilot.press("r")
@@ -1081,6 +1089,41 @@ async def test_rollback_key_on_revision_confirms_and_executes(tmp_path: Path) ->
         assert entries[0]["action"] == "helm-rollback"
         assert entries[0]["outcome"] == "intent"
         assert entries[-1]["outcome"] == "success"
+        assert identity_calls == [("default", "web"), ("default", "web")]
+
+
+@pytest.mark.parametrize(
+    ("reader", "message"),
+    [
+        (None, "identity could not be verified"),
+        (_deleted_release, "no longer exists"),
+    ],
+)
+async def test_direct_rollback_blocks_when_identity_cannot_be_captured(
+    tmp_path: Path,
+    reader: HelmIdentityReader | None,
+    message: str,
+) -> None:
+    helm = FakeHelm()
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app(
+        helm=helm,
+        audit_path=audit_path,
+        get_helm_release_identity=reader,
+    )
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "helmrevisions", "helmrevisions")
+        await _rows_listed(pilot, app, 1)
+        await pilot.press("r")
+        await until(
+            pilot,
+            lambda: any(message in n.message for n in app._notifications),
+            label="identity capture blocked",
+        )
+        assert len(app.screen_stack) == 1
+
+    assert ("rollback", "web", 2, "default") not in helm.calls
+    assert _audit_entries(audit_path) == []
 
 
 async def test_rollback_rejects_release_without_captured_identity(tmp_path: Path) -> None:
