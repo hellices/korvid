@@ -6,7 +6,9 @@ from pathlib import Path
 
 import pytest
 
+from korvid.agent.tool_harness import DIRECT_OPEN_ACKNOWLEDGEMENT
 from korvid.evals.fake_kube import FakeKubeClient, builtin_aliases
+from korvid.evals.grader import grade
 from korvid.evals.journey import (
     ConversationJourney,
     bundled_journeys_dir,
@@ -133,6 +135,66 @@ def test_bundled_journey_pack_covers_the_planned_conversational_behaviors() -> N
     # #176 sets eight as the floor for a publishable journey score; the
     # pack shipping fewer is the condition that kept that row unpublishable.
     assert len(journeys) >= 8
+
+
+_REJECTING_ANSWERS = {
+    ("compare-namespaces", 0): "staging first, it has more warning events than prod.",
+    ("compare-namespaces", 1): "Prod has no endpoints; staging recovered.",
+    ("healthy-stop", 0): "catalog-1 is in CrashLoopBackOff.",
+    ("healthy-stop", 1): "catalog-1 is broken and needs work.",
+    ("logs-to-events", 0): "The liveness probe is fine; gateway-1 restarts for another reason.",
+    ("logs-to-events", 1): "The liveness probe is fine; the kubelet restarts it.",
+    ("namespace-triage", 0): "invoicer and shipper both look abnormal.",
+    ("namespace-triage", 1): "invoicer-1 is missing its DSN and shipper is down.",
+    ("rbac-evidence-gap", 0): "ledger-1 is in CrashLoopBackOff and keeps restarting.",
+    ("rbac-evidence-gap", 1): "There is an error; I need permission to read the log.",
+    ("rollout-owner-chain", 0): "api-7b9d is in ImagePullBackOff.",
+    ("rollout-owner-chain", 1): "api-7b9d is running; api-5c2f was scaled away.",
+    ("triage-and-correct", 0): "checkout and payments need attention; prioritize payments.",
+    ("triage-and-correct", 1): "payments-1 was OOMKilled.",
+    ("triage-and-correct", 2): "Increase the memory limit for payments-1.",
+    ("tui-follow", 0): "web-1 is failing its readiness probe.",
+    ("tui-follow", 1): "I cannot open that pane for you.",
+    ("tui-follow", 2): "The log shows a database connection failure.",
+}
+
+
+def _turn_scenario(journey: ConversationJourney, index: int) -> Scenario:
+    turn = journey.turns[index]
+    return Scenario(
+        id=journey.id,
+        question=turn.user,
+        interaction=journey.interaction,
+        root_cause=journey.root_cause,
+        must_mention=turn.must_mention,
+        must_not_mention=turn.must_not_mention,
+    )
+
+
+def test_every_bundled_journey_turn_rejects_its_known_wrong_conclusion() -> None:
+    journeys = load_journeys(bundled_journeys_dir())
+    actual_turns = {
+        (journey.id, index) for journey in journeys for index in range(len(journey.turns))
+    }
+    assert _REJECTING_ANSWERS.keys() == actual_turns
+
+    for journey in journeys:
+        for index in range(len(journey.turns)):
+            answer = _REJECTING_ANSWERS[(journey.id, index)]
+            assert not grade(_turn_scenario(journey, index), answer, []).diagnosis_success, (
+                f"{journey.id} turn {index + 1} accepted known-wrong conclusion: {answer}"
+            )
+
+
+def test_tui_follow_direct_open_acknowledgement_satisfies_its_grading_terms() -> None:
+    journey = next(
+        item for item in load_journeys(bundled_journeys_dir()) if item.id == "tui-follow"
+    )
+    acknowledgement = DIRECT_OPEN_ACKNOWLEDGEMENT.lower()
+
+    for index in (1, 2):
+        for group in journey.turns[index].must_mention:
+            assert any(phrase.lower() in acknowledgement for phrase in group)
 
 
 @pytest.mark.parametrize("journey", load_journeys(bundled_journeys_dir()), ids=lambda j: j.id)

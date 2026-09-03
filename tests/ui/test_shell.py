@@ -50,6 +50,40 @@ SH_FALLBACK = "command -v bash >/dev/null 2>&1 && exec bash || exec sh"
 # ---------------------------------------------------------------------------
 
 
+def test_build_exec_argv_pins_context_container_and_shell_boundary() -> None:
+    assert build_exec_argv("prod", "api-1", "sidecar", context="staging") == [
+        "kubectl",
+        "exec",
+        "--context",
+        "staging",
+        "-it",
+        "-n",
+        "prod",
+        "api-1",
+        "-c",
+        "sidecar",
+        "--",
+        "sh",
+        "-c",
+        SH_FALLBACK,
+    ]
+    assert build_exec_argv("prod", "api-1", context="staging") == [
+        "kubectl",
+        "exec",
+        "--context",
+        "staging",
+        "-it",
+        "-n",
+        "prod",
+        "api-1",
+        "--",
+        "sh",
+        "-c",
+        SH_FALLBACK,
+    ]
+    assert "--context" not in build_exec_argv("prod", "api-1")
+
+
 def test_build_debug_argv_is_pinned_to_context_and_shares_the_target_processes() -> None:
     assert build_debug_argv("kube-system", "cilium-abc", "cilium-agent", context="staging") == [
         "kubectl",
