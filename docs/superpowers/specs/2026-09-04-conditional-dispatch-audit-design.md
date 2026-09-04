@@ -36,6 +36,7 @@ audit, redaction, or fail-closed behavior merely because they contain `if`.
 | `k8s/models.py::_display_phase` | 3 | Keep explicit | Ordered kubectl-compatible phase precedence. |
 | `agent/native_engine.py::_consume` | 3 | Keep explicit | Provider protocol parsing, accounting, and interruption checks are interleaved intentionally. |
 | `ui/workspace_controller.py::handle_pane_chord` | 3 | Keep explicit | Keyboard state transition with early exits. |
+| `ui/app.py::KorvidApp.on_worker_state_changed` | 3 | Keep explicit | Guarded worker-error reporting maps three lifecycle groups to distinct operator-facing messages. |
 | `evals/operation_grader.py::_unpaired_within_turn` | 3 | Keep explicit | Small state machine encoding event ordering. |
 | `evals/operation_grader.py::_mutation_without_matching_event` | 3 | Keep explicit | Safety-policy event matching. |
 | `evals/operation_grader.py::_write_before_fresh_read` | 3 | Keep explicit | Fail-closed write ordering rule. |
@@ -44,7 +45,7 @@ audit, redaction, or fail-closed behavior merely because they contain `if`.
 
 The AST output reports `_make_watch_source` twice because the nested `source`
 function is also counted as part of its parent. It represents one code site,
-so the table contains 16 unique functions rather than 17 rows for that output.
+so the table contains 17 unique functions rather than 18 rows for that output.
 
 ## Follow-up Sequence
 
