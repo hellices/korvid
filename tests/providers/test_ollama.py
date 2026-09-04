@@ -366,7 +366,7 @@ async def test_post_terminal_data_is_not_emitted_or_remembered() -> None:
 async def test_reasoning_limit_uses_cumulative_utf8_bytes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(ollama_module, "MAX_REASONING_BYTES", 3, raising=False)
+    monkeypatch.setattr(ollama_module, "MAX_REASONING_BYTES", 3)
     body = _ndjson(
         {
             "message": {
@@ -393,7 +393,7 @@ async def test_reasoning_limit_uses_cumulative_utf8_bytes(
 async def test_serialized_tool_arguments_respect_byte_limit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(ollama_module, "MAX_TOOL_ARGUMENTS_BYTES", 5, raising=False)
+    monkeypatch.setattr(ollama_module, "MAX_TOOL_ARGUMENTS_BYTES", 5)
     body = _ndjson(
         {
             "message": {
@@ -424,7 +424,7 @@ async def test_serialized_tool_arguments_respect_byte_limit(
 async def test_native_tool_calls_respect_cumulative_count_limit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(ollama_module, "MAX_TOOL_CALLS", 1, raising=False)
+    monkeypatch.setattr(ollama_module, "MAX_TOOL_CALLS", 1)
     body = _ndjson(
         {
             "message": {

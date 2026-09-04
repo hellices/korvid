@@ -15,14 +15,26 @@ import httpx
 from korvid.agent.credentials import CredentialSource
 from korvid.agent.model_policy import ModelCapabilities, ModelDescriptor
 from korvid.agent.provider import REQUEST_SENT, LLMProvider
-from korvid.providers.errors import ProviderError
+from korvid.providers.errors import ProviderError as ProviderError
 from korvid.providers.net import make_client
 from korvid.providers.stream_limits import (
     MAX_TOOL_ARGUMENTS_BYTES,
     MAX_TOOL_CALLS,
-    append_bounded,
+    BoundedTextAccumulator,
     require_count,
 )
+
+
+class _ToolCallAccumulator:
+    """Accumulate one streamed tool call without re-encoding prior fragments."""
+
+    def __init__(self) -> None:
+        self.id = ""
+        self.name = ""
+        self.arguments = BoundedTextAccumulator(
+            max_bytes=MAX_TOOL_ARGUMENTS_BYTES,
+            label="tool call arguments",
+        )
 
 
 class OpenAICompatProvider(LLMProvider):
@@ -119,8 +131,7 @@ class OpenAICompatProvider(LLMProvider):
                 await resp.aread()
                 raise ProviderError(f"Upstream returned HTTP {resp.status_code}: {resp.text}")
 
-            # tool_calls[index] = {"id": str, "name": str, "arguments": str}
-            tool_acc: dict[int, dict[str, str]] = {}
+            tool_acc: dict[int, _ToolCallAccumulator] = {}
             last_usage: dict[str, int] | None = None
             terminated = False
 
@@ -140,9 +151,9 @@ class OpenAICompatProvider(LLMProvider):
             acc = tool_acc[idx]
             yield {
                 "type": "tool_call",
-                "id": acc["id"],
-                "name": acc["name"],
-                "arguments": acc["arguments"],
+                "id": acc.id,
+                "name": acc.name,
+                "arguments": acc.arguments.value,
             }
 
         # Emit usage only when both component counts are present — defaulting
@@ -158,7 +169,7 @@ class OpenAICompatProvider(LLMProvider):
         yield {"type": "done"}
 
 
-def _chunk_text(chunk: dict[str, Any], tool_acc: dict[int, dict[str, str]]) -> str | None:
+def _chunk_text(chunk: dict[str, Any], tool_acc: dict[int, _ToolCallAccumulator]) -> str | None:
     """Extract the text delta from one SSE chunk; fold tool-call fragments into tool_acc."""
     choices: list[dict[str, Any]] = chunk.get("choices", [])
     if not choices:
@@ -169,19 +180,14 @@ def _chunk_text(chunk: dict[str, Any], tool_acc: dict[int, dict[str, str]]) -> s
         idx: int = frag["index"]
         if idx not in tool_acc:
             require_count(len(tool_acc), max_count=MAX_TOOL_CALLS, label="tool calls")
-            tool_acc[idx] = {"id": "", "name": "", "arguments": ""}
+            tool_acc[idx] = _ToolCallAccumulator()
         acc = tool_acc[idx]
         if frag.get("id"):
-            acc["id"] = frag["id"]
+            acc.id = frag["id"]
         fn: dict[str, str] = frag.get("function", {})
         if fn.get("name"):
-            acc["name"] = fn["name"]
-        acc["arguments"] = append_bounded(
-            acc["arguments"],
-            fn.get("arguments", ""),
-            max_bytes=MAX_TOOL_ARGUMENTS_BYTES,
-            label="tool call arguments",
-        )
+            acc.name = fn["name"]
+        acc.arguments.append(fn.get("arguments", ""))
 
     content: str | None = delta.get("content")
     return content or None
@@ -189,7 +195,7 @@ def _chunk_text(chunk: dict[str, Any], tool_acc: dict[int, dict[str, str]]) -> s
 
 def _process_sse_line(
     line: str,
-    tool_acc: dict[int, dict[str, str]],
+    tool_acc: dict[int, _ToolCallAccumulator],
     last_usage: dict[str, int] | None,
 ) -> tuple[bool, dict[str, int] | None, str | None]:
     """Parse one SSE line, tracking terminal state and usage."""

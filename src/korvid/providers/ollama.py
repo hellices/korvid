@@ -27,7 +27,7 @@ from korvid.providers.stream_limits import (
     MAX_REASONING_BYTES,
     MAX_TOOL_ARGUMENTS_BYTES,
     MAX_TOOL_CALLS,
-    append_bounded,
+    BoundedTextAccumulator,
     require_count,
 )
 
@@ -192,7 +192,7 @@ class OllamaProvider(LLMProvider):
         client = self._get_client()
         tool_calls: list[dict[str, str]] = []
         usage: dict[str, int] | None = None
-        thinking = ""
+        thinking = BoundedTextAccumulator(max_bytes=MAX_REASONING_BYTES, label="reasoning")
         terminated = False
 
         async with client.stream(
@@ -226,12 +226,7 @@ class OllamaProvider(LLMProvider):
                 # accumulated so the reasoning state can be re-attached to the
                 # assistant history on the next iteration (Ollama's streaming
                 # contract expects thinking to be echoed back with tool calls).
-                thinking = append_bounded(
-                    thinking,
-                    str(message.get("thinking") or ""),
-                    max_bytes=MAX_REASONING_BYTES,
-                    label="reasoning",
-                )
+                thinking.append(str(message.get("thinking") or ""))
                 content: str | None = message.get("content")
                 if content:
                     yield {"type": "text_delta", "text": content}
@@ -240,7 +235,7 @@ class OllamaProvider(LLMProvider):
         if not terminated:
             raise ProviderError("Ollama stream ended without done: true")
 
-        self._remember_thinking(thinking, tool_calls)
+        self._remember_thinking(thinking.value, tool_calls)
         for call in tool_calls:
             yield {"type": "tool_call", **call}
 
@@ -262,16 +257,18 @@ class OllamaProvider(LLMProvider):
             fn: dict[str, Any] = call.get("function") or {}
             arguments = fn.get("arguments")
             native_id = call.get("id")
+            serialized_arguments = BoundedTextAccumulator(
+                max_bytes=MAX_TOOL_ARGUMENTS_BYTES,
+                label="tool call arguments",
+            )
+            serialized_arguments.append(
+                json.dumps(arguments if isinstance(arguments, dict) else {})
+            )
             acc.append(
                 {
                     "id": str(native_id) if native_id else f"call_{next(self._id_counter)}",
                     "name": str(fn.get("name", "")),
-                    "arguments": append_bounded(
-                        "",
-                        json.dumps(arguments if isinstance(arguments, dict) else {}),
-                        max_bytes=MAX_TOOL_ARGUMENTS_BYTES,
-                        label="tool call arguments",
-                    ),
+                    "arguments": serialized_arguments.value,
                 }
             )
 

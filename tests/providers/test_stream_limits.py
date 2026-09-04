@@ -7,6 +7,7 @@ from korvid.providers.stream_limits import (
     MAX_REASONING_BYTES,
     MAX_TOOL_ARGUMENTS_BYTES,
     MAX_TOOL_CALLS,
+    BoundedTextAccumulator,
     append_bounded,
     require_count,
 )
@@ -29,6 +30,27 @@ def test_append_bounded_does_not_echo_accumulated_content() -> None:
         append_bounded("ab", "cd", max_bytes=3, label="probe text")
     assert "ab" not in str(exc_info.value)
     assert "cd" not in str(exc_info.value)
+
+
+def test_bounded_text_accumulator_counts_only_new_fragments(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    encoded: list[str] = []
+
+    def fake_utf8_len(text: str) -> int:
+        encoded.append(text)
+        return len(text.encode("utf-8"))
+
+    monkeypatch.setattr("korvid.providers.stream_limits._utf8_len", fake_utf8_len)
+    acc = BoundedTextAccumulator(max_bytes=8, label="probe text")
+
+    acc.append("ab")
+    acc.append("é")
+    acc.append("")
+    acc.append("cd")
+
+    assert acc.value == "abécd"
+    assert encoded == ["ab", "é", "", "cd"]
 
 
 def test_require_count_rejects_next_item() -> None:

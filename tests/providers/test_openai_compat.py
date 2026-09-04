@@ -125,7 +125,7 @@ async def test_data_after_done_is_ignored() -> None:
 async def test_tool_call_arguments_are_bounded_by_total_bytes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(openai_compat, "MAX_TOOL_ARGUMENTS_BYTES", 8, raising=False)
+    monkeypatch.setattr(openai_compat, "MAX_TOOL_ARGUMENTS_BYTES", 8)
     body = _sse(
         {
             "choices": [
@@ -157,7 +157,7 @@ async def test_tool_call_arguments_are_bounded_by_total_bytes(
 
 
 async def test_tool_call_count_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(openai_compat, "MAX_TOOL_CALLS", 2, raising=False)
+    monkeypatch.setattr(openai_compat, "MAX_TOOL_CALLS", 2)
     chunks = []
     for index in range(3):
         chunks.append(

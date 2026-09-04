@@ -19,7 +19,7 @@ from korvid.providers.github_copilot import (
 from korvid.providers.net import make_client
 from korvid.providers.ollama import normalize_base_url
 from korvid.providers.registry import build_credentials, create_provider
-from korvid.providers.stream_limits import MAX_PROBE_TEXT_BYTES, append_bounded
+from korvid.providers.stream_limits import MAX_PROBE_TEXT_BYTES, BoundedTextAccumulator
 from korvid.providers.token_store import TokenStore
 
 if TYPE_CHECKING:
@@ -191,7 +191,10 @@ class ProviderConfigurator(AgentConfigurator):
         )
         if provider is None:
             raise RuntimeError("configuration incomplete — provider could not be created")
-        text = ""
+        text = BoundedTextAccumulator(
+            max_bytes=MAX_PROBE_TEXT_BYTES,
+            label="provider connection test response",
+        )
         try:
             prepared = self._outbound.prepare(
                 provider.descriptor.model,
@@ -201,17 +204,13 @@ class ProviderConfigurator(AgentConfigurator):
             )
             async for ev in provider.complete(prepared.messages, prepared.tools):
                 if ev.get("type") == "text_delta":
-                    text = append_bounded(
-                        text,
-                        str(ev.get("text", "")),
-                        max_bytes=MAX_PROBE_TEXT_BYTES,
-                        label="provider connection test response",
-                    )
+                    text.append(str(ev.get("text", "")))
         finally:
             await provider.aclose()
-        if not text.strip():
+        response_text = text.value.strip()
+        if not response_text:
             raise RuntimeError("provider returned no text")
-        return text.strip()
+        return response_text
 
     async def save(self, settings: AgentSettings) -> None:
         self._persist(settings)
