@@ -15,11 +15,8 @@ import httpx
 from korvid.agent.credentials import CredentialSource
 from korvid.agent.model_policy import ModelCapabilities, ModelDescriptor
 from korvid.agent.provider import REQUEST_SENT, LLMProvider
+from korvid.providers.errors import ProviderError
 from korvid.providers.net import make_client
-
-
-class ProviderError(Exception):
-    """Raised when the upstream API returns a non-2xx response."""
 
 
 class OpenAICompatProvider(LLMProvider):
