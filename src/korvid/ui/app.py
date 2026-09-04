@@ -62,6 +62,7 @@ from korvid.k8s.discovery import PODS_META, ResourceMeta
 from korvid.k8s.helm import (
     HELM_RELEASES_META,
     HELM_REVISIONS_META,
+    HelmReleaseIdentity,
 )
 from korvid.k8s.helmcli import HelmCLI
 from korvid.k8s.logs import LogLine
@@ -354,6 +355,9 @@ class KorvidApp(App[None]):
         aliases: dict[str, ResourceMeta] | None = None,
         get_manifest: (Callable[[str, str | None, str], Awaitable[dict[str, Any]]] | None) = None,
         get_helm_components: (Callable[[str, str], Awaitable[list[ComponentRef]]] | None) = None,
+        get_helm_release_identity: (
+            Callable[[str, str], Awaitable[HelmReleaseIdentity | None]] | None
+        ) = None,
         get_events: EventsFetcher | None = None,
         stream_logs: Callable[..., AsyncIterator[LogLine]] | None = None,
         agent_session: AgentSession | None = None,
@@ -407,6 +411,7 @@ class KorvidApp(App[None]):
         self._list_namespaces = list_namespaces
         self._get_manifest = get_manifest
         self._get_helm_components = get_helm_components
+        self._get_helm_release_identity = get_helm_release_identity
         self._get_events = get_events
         self._stream_logs = stream_logs
         self._write_ops = write_ops
@@ -619,6 +624,7 @@ class KorvidApp(App[None]):
         #: perimeter keeps a single implementation.
         self._helm_ctl = HelmController(
             helm=lambda: self._helm,
+            get_release_identity=lambda: self._get_helm_release_identity,
             gate=self._writes,
             view=self._view,
             ui=AppUiSurface(self),

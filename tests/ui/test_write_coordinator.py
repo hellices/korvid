@@ -509,6 +509,89 @@ async def test_approved_confirmation_launches_the_audited_write(tmp_path: Path) 
     assert env.audit_outcomes() == ["intent", "success"]
 
 
+async def test_confirm_runs_async_precondition_before_intent_audit(tmp_path: Path) -> None:
+    env = make_env(tmp_path)
+    order: list[str] = []
+
+    async def precondition() -> bool:
+        order.append("precondition")
+        assert env.audit_outcomes() == []
+        return True
+
+    async def operation() -> None:
+        order.append("operation")
+
+    await env.coordinator.confirm(
+        "Upgrade web?",
+        "HELM UPGRADE web",
+        action="helm-upgrade",
+        meta=_HELM_META,
+        namespace="default",
+        name="web",
+        op_factory=operation,
+        precondition=precondition,
+    )
+    env.ui.answer(True)
+    await env.ui.settle()
+
+    assert order == ["precondition", "operation"]
+    assert env.audit_outcomes() == ["intent", "success"]
+
+
+async def test_false_precondition_creates_no_audit_or_mutation(tmp_path: Path) -> None:
+    env = make_env(tmp_path)
+    mutated = False
+
+    async def precondition() -> bool:
+        return False
+
+    async def operation() -> None:
+        nonlocal mutated
+        mutated = True
+
+    await env.coordinator.confirm(
+        "Upgrade web?",
+        "HELM UPGRADE web",
+        action="helm-upgrade",
+        meta=_HELM_META,
+        namespace="default",
+        name="web",
+        op_factory=operation,
+        precondition=precondition,
+    )
+    env.ui.answer(True)
+    await env.ui.settle()
+
+    assert mutated is False
+    assert env.audit_outcomes() == []
+
+
+async def test_raised_precondition_creates_no_audit_or_mutation(tmp_path: Path) -> None:
+    env = make_env(tmp_path)
+
+    async def precondition() -> bool:
+        raise RuntimeError("identity backend failed")
+
+    async def unexpected_operation() -> None:
+        raise AssertionError("operation should not run when precondition raises")
+
+    await env.coordinator.confirm(
+        "Upgrade web?",
+        "HELM UPGRADE web",
+        action="helm-upgrade",
+        meta=_HELM_META,
+        namespace="default",
+        name="web",
+        op_factory=unexpected_operation,
+        precondition=precondition,
+    )
+    env.ui.answer(True)
+    await env.ui.settle()
+
+    assert env.audit_outcomes() == []
+    assert any("precondition" in message for message in env.ui.messages())
+
+
 # ---------------------------------------------------------------------------
 # 2. Revalidation after the awaited dialog gap
 # ---------------------------------------------------------------------------

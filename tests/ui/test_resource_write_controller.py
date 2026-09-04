@@ -329,6 +329,7 @@ class SpyCoordinator(WriteCoordinator):
         managed_note: str | None = None,
         impact_lines: tuple[str, ...] | None = None,
         approval_guard: Callable[[], bool] | None = None,
+        precondition: Callable[[], Awaitable[bool]] | None = None,
     ) -> None:
         self.confirms.append(
             {
@@ -366,6 +367,7 @@ class SpyCoordinator(WriteCoordinator):
             managed_note=managed_note,
             impact_lines=impact_lines,
             approval_guard=approval_guard,
+            precondition=precondition,
         )
 
     def run(
@@ -376,9 +378,19 @@ class SpyCoordinator(WriteCoordinator):
         name: str,
         op_factory: Callable[[], Awaitable[None]],
         detail: str = "",
+        *,
+        precondition: Callable[[], Awaitable[bool]] | None = None,
     ) -> Any:
         self.runs.append(action)
-        return super().run(action, meta, namespace, name, op_factory, detail)
+        return super().run(
+            action,
+            meta,
+            namespace,
+            name,
+            op_factory,
+            detail,
+            precondition=precondition,
+        )
 
 
 class Env:

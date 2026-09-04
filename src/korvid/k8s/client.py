@@ -28,12 +28,15 @@ from korvid.k8s.dryrun import diff_manifests
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.helm import (
     HELM_SECRET_TYPE,
+    HelmReleaseIdentity,
     HelmReleaseSummary,
     HelmRevisionSummary,
     ReleaseTracker,
     decode_release,
     release_detail,
     release_from_secret,
+    release_identity_from_secret,
+    release_revision_from_secret_name,
     revision_from_secret,
 )
 from korvid.k8s.logs import LogLine
@@ -860,6 +863,19 @@ class KubeClient(ReadOps, WriteOps):
         except ValueError:
             return 0
 
+    async def _helm_release_secrets(
+        self,
+        namespace: str,
+        name: str,
+    ) -> list[dict[str, Any]]:
+        base = self._helm_secrets_base(namespace)
+        path = f"{base}?{urlencode(self._helm_secrets_query(name=name))}"
+        data = await self._request_json(path)
+        items: list[dict[str, Any]] = list(data.get("items", []))
+        if not items:
+            raise ApiStatusError(404, f"helm release {name!r} not found in {namespace!r}")
+        return items
+
     async def _helm_release_secret(
         self, namespace: str, name: str, revision: int | None = None
     ) -> dict[str, Any]:
@@ -867,10 +883,7 @@ class KubeClient(ReadOps, WriteOps):
 
         Raises ApiStatusError(404) when no matching revision Secret exists.
         """
-        base = self._helm_secrets_base(namespace)
-        path = f"{base}?{urlencode(self._helm_secrets_query(name=name))}"
-        data = await self._request_json(path)
-        items = list(data.get("items", []))
+        items = await self._helm_release_secrets(namespace, name)
         if revision is not None:
             items = [s for s in items if self._helm_revision(s) == revision]
         if not items:
@@ -890,6 +903,20 @@ class KubeClient(ReadOps, WriteOps):
         except ValueError:
             return []
         return manifest_components(payload.get("manifest"))
+
+    async def get_helm_release_identity(
+        self, namespace: str, name: str
+    ) -> HelmReleaseIdentity | None:
+        """Concrete identity of the latest Secret backing a Helm release."""
+        items = await self._helm_release_secrets(namespace, name)
+        secret = max(items, key=lambda item: release_revision_from_secret_name(item, name))
+        name_revision = release_revision_from_secret_name(secret, name)
+        if name_revision < 1:
+            return None
+        if any(self._helm_revision(item) > name_revision for item in items):
+            return None
+        identity = release_identity_from_secret(secret)
+        return identity
 
     async def get_helm_release(
         self, namespace: str, name: str, revision: int | None = None

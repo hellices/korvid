@@ -38,9 +38,11 @@ from typing import Protocol
 
 from korvid.core.store import ALL_NAMESPACES
 from korvid.k8s.discovery import ResourceMeta
+from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.helm import (
     HELM_RELEASES_META,
     HELM_REVISIONS_META,
+    HelmReleaseIdentity,
     HelmReleaseSummary,
     HelmRevisionSummary,
 )
@@ -59,6 +61,10 @@ logger = logging.getLogger(__name__)
 #: and may pull the chart from a repo, so it gets more budget than an API
 #: server dry-run - still bounded, the approval dialog is never wedged.
 _HELM_PREVIEW_TIMEOUT = 20.0
+
+#: The authoritative Kubernetes lookup must not hold the reserved write
+#: indefinitely after approval.
+_HELM_IDENTITY_TIMEOUT = 10.0
 
 #: A rendered chart can run to thousands of lines; the approval dialog shows
 #: at most this many so the operation summary stays reviewable.
@@ -147,6 +153,9 @@ class HelmController:
         self,
         *,
         helm: Callable[[], HelmCLI | None],
+        get_release_identity: Callable[
+            [], Callable[[str, str], Awaitable[HelmReleaseIdentity | None]] | None
+        ],
         gate: WriteGate,
         view: ViewState,
         ui: UiSurface,
@@ -157,6 +166,7 @@ class HelmController:
         edit_text: Callable[[], Callable[..., Awaitable[str | None]] | None],
     ) -> None:
         self._helm = helm
+        self._get_release_identity = get_release_identity
         self._gate = gate
         self._view = view
         self._ui = ui
@@ -225,6 +235,7 @@ class HelmController:
             namespace=self._view_namespace(),
             epoch=self._gate.epoch(),
             initial="",
+            approved_identity=None,
         )
 
     def upgrade(self) -> None:
@@ -243,14 +254,35 @@ class HelmController:
         if name is None:
             return
         row = self.release_row(ns, name)
-        keyword = _chart_base(row.chart) if row is not None else ""
-        namespace = ns or (row.namespace if row is not None else self._view_namespace())
+        if row is None:
+            self._ui.notify("no helm release selected", severity="warning")
+            return
+        if row.identity is None:
+            self._ui.notify(
+                "Helm upgrade cancelled - Helm release identity could not be verified",
+                severity="warning",
+            )
+            return
+        keyword = _chart_base(row.chart)
+        namespace = ns or row.namespace
         self._open_chart_search(
-            helm, release=name, namespace=namespace, epoch=epoch, initial=keyword
+            helm,
+            release=name,
+            namespace=namespace,
+            epoch=epoch,
+            initial=keyword,
+            approved_identity=row.identity,
         )
 
     def _open_chart_search(
-        self, helm: HelmCLI, *, release: str | None, namespace: str, epoch: int, initial: str
+        self,
+        helm: HelmCLI,
+        *,
+        release: str | None,
+        namespace: str,
+        epoch: int,
+        initial: str,
+        approved_identity: HelmReleaseIdentity | None,
     ) -> None:
         """Keyword-driven chart picker feeding the install/upgrade wizard;
         everything offered comes from `helm search repo`, nothing is
@@ -264,7 +296,13 @@ class HelmController:
                 if choices is None:
                     return
                 self._ui.run_worker(
-                    self._confirm_change(hit, choices, upgrade=release is not None, epoch=epoch),
+                    self._confirm_change(
+                        hit,
+                        choices,
+                        upgrade=release is not None,
+                        epoch=epoch,
+                        approved_identity=approved_identity,
+                    ),
                     exclusive=True,
                     group="helm-write",
                 )
@@ -316,7 +354,13 @@ class HelmController:
         )
 
     async def _confirm_change(
-        self, hit: ChartHit, choices: HelmReleaseChoices, *, upgrade: bool, epoch: int
+        self,
+        hit: ChartHit,
+        choices: HelmReleaseChoices,
+        *,
+        upgrade: bool,
+        epoch: int,
+        approved_identity: HelmReleaseIdentity | None,
     ) -> None:
         """Optional values editing, dry-run/diff preview, then the standard
         approval dialog; the mutation itself runs through `_run_write`, so
@@ -386,6 +430,18 @@ class HelmController:
             detail=detail,
             preview=preview,
             preview_title=preview_title,
+            precondition=(
+                (
+                    lambda: self._release_identity_unchanged(
+                        choices.namespace,
+                        choices.release,
+                        approved_identity,
+                        action="Helm upgrade",
+                    )
+                )
+                if approved_identity is not None
+                else None
+            ),
         )
 
     def _context_after_preview(
@@ -701,11 +757,70 @@ class HelmController:
             self._ui.notify("no helm revision selected", severity="warning")
             return
         namespace = ns or row.namespace
+        history_identity = self.latest_revision_identity(namespace, row.release)
+        if history_identity is None:
+            self._ui.notify(
+                "Helm rollback cancelled - Helm release history identity could not be verified",
+                severity="warning",
+            )
+            return
+        release_row = self.release_row(namespace, row.release)
+        if release_row is None:
+            operation = self.rollback_with_current_identity(
+                helm,
+                row,
+                ns,
+                name,
+                namespace,
+                epoch,
+                history_identity,
+            )
+        else:
+            identity = release_row.identity
+            if identity is None:
+                self._ui.notify(
+                    "Helm rollback cancelled - Helm release identity could not be verified",
+                    severity="warning",
+                )
+                return
+            if identity != history_identity:
+                self._ui.notify(
+                    "Helm rollback cancelled - release history changed; refresh and retry",
+                    severity="warning",
+                )
+                return
+            operation = self.rollback(helm, row, ns, name, namespace, epoch, identity)
         self._ui.run_worker(
-            self.rollback(helm, row, ns, name, namespace, epoch),
+            operation,
             exclusive=True,
             group=HELM_WRITE_GROUP,
         )
+
+    async def rollback_with_current_identity(
+        self,
+        helm: HelmCLI,
+        row: HelmRevisionSummary,
+        ns: str | None,
+        name: str,
+        namespace: str,
+        epoch: int,
+        history_identity: HelmReleaseIdentity,
+    ) -> None:
+        """Resolve identity when revision history was opened directly."""
+        identity = await self._current_release_identity(
+            namespace,
+            row.release,
+            action="Helm rollback",
+        )
+        if identity is None:
+            return
+        if history_identity != identity:
+            self._ui.notify(
+                "Helm rollback cancelled - release history changed; refresh and retry",
+                severity="warning",
+            )
+            return
+        await self.rollback(helm, row, ns, name, namespace, epoch, identity)
 
     def uninstall_selected(self) -> None:
         """Ctrl+D on the helm release browser: uninstall the selected release
@@ -725,9 +840,15 @@ class HelmController:
         if row is None:
             self._ui.notify("no helm release selected", severity="warning")
             return
+        if row.identity is None:
+            self._ui.notify(
+                "Helm uninstall cancelled - Helm release identity could not be verified",
+                severity="warning",
+            )
+            return
         namespace = ns or row.namespace
         self._ui.run_worker(
-            self.uninstall(helm, row, ns, name, namespace, epoch),
+            self.uninstall(helm, row, ns, name, namespace, epoch, row.identity),
             exclusive=True,
             group=HELM_WRITE_GROUP,
         )
@@ -740,6 +861,7 @@ class HelmController:
         name: str,
         namespace: str,
         epoch: int,
+        approved_identity: HelmReleaseIdentity,
     ) -> None:
         """Rollback (the `rollout_restart` key on a revision row of the
         drill-down): approval-gated, audited `helm rollback` to that
@@ -766,6 +888,12 @@ class HelmController:
             detail=f"revision={row.revision}",
             preview=preview,
             preview_title="helm diff rollback preview:",
+            precondition=lambda: self._release_identity_unchanged(
+                namespace,
+                row.release,
+                approved_identity,
+                action="Helm rollback",
+            ),
         )
 
     async def _apply_rollback(
@@ -799,6 +927,7 @@ class HelmController:
         name: str,
         namespace: str,
         epoch: int,
+        approved_identity: HelmReleaseIdentity,
     ) -> None:
         """Uninstall (ctrl+d on a release row): approval-gated, audited
         `helm uninstall`. The release name must be typed to confirm - the
@@ -826,10 +955,87 @@ class HelmController:
             require_name=row.name,
             preview=preview,
             preview_title="helm uninstall --dry-run preview:",
+            precondition=lambda: self._release_identity_unchanged(
+                namespace,
+                row.name,
+                approved_identity,
+                action="Helm uninstall",
+            ),
         )
 
     async def _apply_uninstall(self, helm: HelmCLI, release: str, namespace: str) -> None:
         await helm.uninstall(release, namespace)
+
+    async def _release_identity_unchanged(
+        self,
+        namespace: str,
+        release: str,
+        approved: HelmReleaseIdentity,
+        *,
+        action: str,
+    ) -> bool:
+        current = await self._current_release_identity(
+            namespace,
+            release,
+            action=action,
+            propagate_unexpected=True,
+        )
+        if current is None:
+            return False
+        if current != approved:
+            self._ui.notify(
+                f"{action} cancelled - release {release} changed since it was approved; "
+                "refresh and retry",
+                severity="warning",
+            )
+            return False
+        return True
+
+    async def _current_release_identity(
+        self,
+        namespace: str,
+        release: str,
+        *,
+        action: str,
+        propagate_unexpected: bool = False,
+    ) -> HelmReleaseIdentity | None:
+        reader = self._get_release_identity()
+        if reader is None:
+            self._ui.notify(
+                f"{action} cancelled - Helm release identity could not be verified",
+                severity="warning",
+            )
+            return None
+        try:
+            current = await asyncio.wait_for(
+                reader(namespace, release),
+                timeout=_HELM_IDENTITY_TIMEOUT,
+            )
+        except ApiStatusError as exc:
+            if exc.status == 404:
+                self._ui.notify(
+                    f"{action} cancelled - release {release} no longer exists",
+                    severity="warning",
+                )
+                return None
+            logger.warning("Helm release identity lookup failed", exc_info=True)
+            current = None
+        except TimeoutError:
+            logger.warning("Helm release identity lookup timed out", exc_info=True)
+            current = None
+        except Exception:
+            if propagate_unexpected:
+                raise
+            logger.warning("Helm release identity lookup failed unexpectedly", exc_info=True)
+            current = None
+        if current is None:
+            self._ui.notify(
+                f"{action} cancelled - Helm release identity could not be verified; "
+                "refresh and retry",
+                severity="warning",
+            )
+            return None
+        return current
 
     async def _uninstall_preview(
         self, helm: HelmCLI, release: str, namespace: str
@@ -854,6 +1060,24 @@ class HelmController:
             ):
                 return obj
         return None
+
+    def latest_revision_identity(
+        self,
+        namespace: str,
+        release: str,
+    ) -> HelmReleaseIdentity | None:
+        latest: HelmRevisionSummary | None = None
+        for obj in self._view.resources("helmrevisions", self._view.current_scope()):
+            if (
+                isinstance(obj, HelmRevisionSummary)
+                and obj.namespace == namespace
+                and obj.release == release
+                and (latest is None or obj.revision > latest.revision)
+            ):
+                latest = obj
+        if latest is None or not latest.uid or latest.revision <= 0:
+            return None
+        return HelmReleaseIdentity(latest.uid, latest.revision)
 
     def revision_row(self, ns: str | None, name: str) -> HelmRevisionSummary | None:
         for obj in self._view.resources("helmrevisions", self._view.current_scope()):

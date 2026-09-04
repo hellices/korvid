@@ -1582,6 +1582,7 @@ async def _wire_and_run(config: KorvidConfig, kube: KubeClient, state: _RunState
         aliases=aliases,
         get_manifest=get_manifest,
         get_helm_components=kube.get_helm_release_components,
+        get_helm_release_identity=kube.get_helm_release_identity,
         get_events=get_events,
         stream_logs=kube.stream_logs,
         write_ops=kube,
