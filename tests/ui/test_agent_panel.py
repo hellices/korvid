@@ -7,6 +7,7 @@ from textual.widgets import Input, Static
 
 from korvid.agent.events import (
     AgentError,
+    AgentEvent,
     TextDelta,
     ToolCallFinished,
     ToolCallStarted,
@@ -18,12 +19,13 @@ from korvid.ui.widgets.agent_panel import AgentPanel, ChatEntry
 
 
 class PanelApp(App[None]):
-    def __init__(self) -> None:
+    def __init__(self, panel_type: type[AgentPanel] = AgentPanel) -> None:
         super().__init__()
         self.prompts: list[str] = []
+        self._panel_type = panel_type
 
     def compose(self) -> ComposeResult:
-        yield AgentPanel()
+        yield self._panel_type()
 
     def on_agent_prompt_submitted(self, msg: AgentPromptSubmitted) -> None:
         self.prompts.append(msg.text)
@@ -36,6 +38,30 @@ def _log_text(app: PanelApp) -> str:
 def _status_text(app: PanelApp) -> str:
     panel = app.query_one(AgentPanel)
     return panel.status_text
+
+
+class DispatchProbePanel(AgentPanel):
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls: list[str] = []
+
+    def _apply_text_delta(self, event: TextDelta) -> None:
+        self.calls.append("text")
+
+    def _apply_tool_started(self, event: ToolCallStarted) -> None:
+        self.calls.append("tool-started")
+
+    def _apply_tool_finished(self, event: ToolCallFinished) -> None:
+        self.calls.append("tool-finished")
+
+    def _apply_agent_error(self, event: AgentError) -> None:
+        self.calls.append("error")
+
+    def _apply_turn_complete(self, event: TurnComplete) -> None:
+        self.calls.append("complete")
+
+    def _apply_turn_interrupted(self, event: TurnInterrupted) -> None:
+        self.calls.append("interrupted")
 
 
 # --- prompt input ---
@@ -78,6 +104,23 @@ async def test_partial_delta_streams_immediately() -> None:
         panel.apply_event(TextDelta(text="Looking at your"))
         await pilot.pause()
         assert "Looking at your" in _log_text(app)
+
+
+async def test_apply_event_dispatches_every_event_to_its_typed_handler() -> None:
+    events: list[tuple[AgentEvent, str]] = [
+        (TextDelta(text="x"), "text"),
+        (ToolCallStarted(call_id="1", name="get_logs", arguments="{}"), "tool-started"),
+        (ToolCallFinished(call_id="1", name="get_logs", ok=True, summary=""), "tool-finished"),
+        (AgentError(message="boom"), "error"),
+        (TurnComplete(input_tokens=1, output_tokens=2, estimated=False), "complete"),
+        (TurnInterrupted(input_tokens=1, output_tokens=2, estimated=False), "interrupted"),
+    ]
+    app = PanelApp(DispatchProbePanel)
+    async with app.run_test():
+        panel = app.query_one(DispatchProbePanel)
+        for event, expected in events:
+            panel.apply_event(event)
+            assert panel.calls.pop() == expected
 
 
 async def test_text_deltas_accumulate_in_one_message() -> None:

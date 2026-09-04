@@ -293,73 +293,94 @@ class AgentPanel(Vertical):
         self._set_status("thinking")
 
     def apply_event(self, event: AgentEvent) -> None:
-        if isinstance(event, TextDelta):
-            self._append_text(event.text)
-        elif isinstance(event, ToolCallStarted):
-            self._end_stream()
-            marker = _tool_marker(event.name)
-            label = _tool_label(event.name, event.arguments, done=False)
-            entry = ChatEntry(
-                Text.assemble((f"{marker} ", "yellow"), (f"{label}…", "dim")),
-                raw=f"{marker} {label}…",
-                classes="tool-line",
+        match event:
+            case TextDelta():
+                self._apply_text_delta(event)
+            case ToolCallStarted():
+                self._apply_tool_started(event)
+            case ToolCallFinished():
+                self._apply_tool_finished(event)
+            case AgentError():
+                self._apply_agent_error(event)
+            case TurnComplete():
+                self._apply_turn_complete(event)
+            case TurnInterrupted():
+                self._apply_turn_interrupted(event)
+
+    def _apply_text_delta(self, event: TextDelta) -> None:
+        self._append_text(event.text)
+
+    def _apply_tool_started(self, event: ToolCallStarted) -> None:
+        self._end_stream()
+        marker = _tool_marker(event.name)
+        label = _tool_label(event.name, event.arguments, done=False)
+        entry = ChatEntry(
+            Text.assemble((f"{marker} ", "yellow"), (f"{label}…", "dim")),
+            raw=f"{marker} {label}…",
+            classes="tool-line",
+        )
+        self._tool_widgets[event.call_id] = entry
+        self._tool_args[event.call_id] = event.arguments
+        self._mount_entry(entry)
+        self._set_status(label)
+
+    def _apply_tool_finished(self, event: ToolCallFinished) -> None:
+        self._finish_tool(event)
+        self._set_status("thinking")
+
+    def _apply_agent_error(self, event: AgentError) -> None:
+        self._end_stream()
+        self._stop_flush_timer()
+        self._mount_entry(
+            ChatEntry(
+                Text(f"✗ {event.message}"),
+                raw=f"✗ {event.message}",
+                classes="error-msg",
             )
-            self._tool_widgets[event.call_id] = entry
-            self._tool_args[event.call_id] = event.arguments
-            self._mount_entry(entry)
-            self._set_status(label)
-        elif isinstance(event, ToolCallFinished):
-            self._finish_tool(event)
-            self._set_status("thinking")
-        elif isinstance(event, AgentError):
-            self._end_stream()
-            self._stop_flush_timer()
-            self._mount_entry(
-                ChatEntry(
-                    Text(f"✗ {event.message}"),
-                    raw=f"✗ {event.message}",
-                    classes="error-msg",
-                )
-            )
-            self._clear_status()
-            # AgentError may be terminal (provider failure) — let the user retry.
-            self.query_one("#agent-input", Input).disabled = False
-        elif isinstance(event, TurnComplete):
-            self._end_stream()
-            self._note_citation_problems(event)
-            self._stop_flush_timer()
-            self._clear_status()
-            self.query_one("#agent-input", Input).disabled = False
-            self.set_header(
-                self._model,
-                self._tok_in + event.input_tokens,
-                self._tok_out + event.output_tokens,
-                self._estimated or event.estimated,
-                tier=self._tier,
-            )
-        elif isinstance(event, TurnInterrupted):
-            # A stop is a normal outcome, not an error: the partial answer
-            # stays in the transcript and in-flight tool lines are marked.
-            # Interrupt-and-submit already settled the transcript when the
-            # correction was echoed — never mount a second marker there.
-            self._stop_flush_timer()
-            if not self._interrupt_marked:
-                self._mark_interrupted()
-            self._interrupt_marked = False
-            self._clear_status()
-            # Focus returns to the input even when the stop key was pressed
-            # elsewhere (it is a global binding): the natural next step
-            # after stopping a turn is typing the correction.
-            inp = self.query_one("#agent-input", Input)
-            inp.disabled = False
-            inp.focus()
-            self.set_header(
-                self._model,
-                self._tok_in + event.input_tokens,
-                self._tok_out + event.output_tokens,
-                self._estimated or event.estimated,
-                tier=self._tier,
-            )
+        )
+        self._clear_status()
+        # AgentError may be terminal (provider failure) — let the user retry.
+        self.query_one("#agent-input", Input).disabled = False
+
+    def _finish_turn_header(
+        self,
+        input_tokens: int,
+        output_tokens: int,
+        estimated: bool,
+    ) -> None:
+        self.set_header(
+            self._model,
+            self._tok_in + input_tokens,
+            self._tok_out + output_tokens,
+            self._estimated or estimated,
+            tier=self._tier,
+        )
+
+    def _apply_turn_complete(self, event: TurnComplete) -> None:
+        self._end_stream()
+        self._note_citation_problems(event)
+        self._stop_flush_timer()
+        self._clear_status()
+        self.query_one("#agent-input", Input).disabled = False
+        self._finish_turn_header(event.input_tokens, event.output_tokens, event.estimated)
+
+    def _apply_turn_interrupted(self, event: TurnInterrupted) -> None:
+        # A stop is a normal outcome, not an error: the partial answer
+        # stays in the transcript and in-flight tool lines are marked.
+        # Interrupt-and-submit already settled the transcript when the
+        # correction was echoed — never mount a second marker there.
+        self._stop_flush_timer()
+        if not self._interrupt_marked:
+            self._mark_interrupted()
+        self._interrupt_marked = False
+        self._clear_status()
+        # Focus returns to the input even when the stop key was pressed
+        # elsewhere (it is a global binding): the natural next step
+        # after stopping a turn is typing the correction.
+        inp = self.query_one("#agent-input", Input)
+        inp.disabled = False
+        inp.focus()
+        self._finish_turn_header(event.input_tokens, event.output_tokens, event.estimated)
 
     # --- internals ----------------------------------------------------------
 
