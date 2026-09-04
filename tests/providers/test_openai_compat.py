@@ -157,9 +157,9 @@ async def test_tool_call_arguments_are_bounded_by_total_bytes(
 
 
 async def test_tool_call_count_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(openai_compat, "MAX_TOOL_CALLS", 64, raising=False)
+    monkeypatch.setattr(openai_compat, "MAX_TOOL_CALLS", 2, raising=False)
     chunks = []
-    for index in range(65):
+    for index in range(3):
         chunks.append(
             {
                 "choices": [
@@ -180,7 +180,7 @@ async def test_tool_call_count_is_bounded(monkeypatch: pytest.MonkeyPatch) -> No
     body = _sse(*chunks)
 
     seen: list[dict[str, Any]] = []
-    with pytest.raises(ProviderError, match=r"tool calls exceeds 64"):
+    with pytest.raises(ProviderError, match=r"tool calls exceeds 2"):
         await _drain(_provider(body), seen)
 
     assert not any(event["type"] == "done" for event in seen)
