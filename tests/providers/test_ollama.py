@@ -5,6 +5,7 @@ import httpx
 import pytest
 import yaml
 
+import korvid.providers.ollama as ollama_module
 from korvid.agent.conversation import ConversationState
 from korvid.agent.engine import AgentTurnRequest
 from korvid.agent.evidence import EvidenceLedger
@@ -329,6 +330,132 @@ async def test_mid_stream_error_object_raises() -> None:
     )
     with pytest.raises(ProviderError, match="unexpected EOF"):
         await _events(_provider(body))
+
+
+async def test_stream_requires_done_true_terminal_chunk() -> None:
+    body = _ndjson({"message": {"role": "assistant", "content": "hi"}, "done": False})
+
+    with pytest.raises(ProviderError, match="Ollama stream ended without done: true"):
+        await _events(_provider(body))
+
+
+async def test_post_terminal_data_is_not_emitted_or_remembered() -> None:
+    body = _ndjson(
+        _done(prompt_eval_count=12, eval_count=7),
+        {
+            "message": {
+                "role": "assistant",
+                "content": "ignored",
+                "thinking": "hidden",
+                "tool_calls": [
+                    {"id": "late-call", "function": {"name": "get_logs", "arguments": {}}}
+                ],
+            },
+            "done": False,
+        },
+    )
+    provider = _provider(body, options=OllamaOptions(think=True))
+
+    events = await _events(provider)
+
+    assert {"type": "text_delta", "text": "ignored"} not in events
+    assert not [event for event in events if event.get("type") == "tool_call"]
+    assert provider._thinking_by_call_id == {}
+
+
+async def test_reasoning_limit_uses_cumulative_utf8_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(ollama_module, "MAX_REASONING_BYTES", 3, raising=False)
+    body = _ndjson(
+        {
+            "message": {
+                "role": "assistant",
+                "content": "",
+                "thinking": "é",
+                "tool_calls": [{"id": "call-1", "function": {"name": "get_logs", "arguments": {}}}],
+            },
+            "done": False,
+        },
+        {"message": {"role": "assistant", "content": "", "thinking": "é"}, "done": False},
+        _done(),
+    )
+    provider = _provider(body, options=OllamaOptions(think=True))
+
+    seen: list[dict[str, Any]] = []
+    with pytest.raises(ProviderError, match="reasoning exceeds 3 UTF-8 bytes"):
+        await _drain(provider, seen)
+
+    assert seen == [{"type": REQUEST_SENT}]
+    assert provider._thinking_by_call_id == {}
+
+
+async def test_serialized_tool_arguments_respect_byte_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(ollama_module, "MAX_TOOL_ARGUMENTS_BYTES", 5, raising=False)
+    body = _ndjson(
+        {
+            "message": {
+                "role": "assistant",
+                "content": "",
+                "thinking": "ok",
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "function": {"name": "get_logs", "arguments": {"pod": "web-1"}},
+                    }
+                ],
+            },
+            "done": False,
+        },
+        _done(),
+    )
+    provider = _provider(body, options=OllamaOptions(think=True))
+
+    seen: list[dict[str, Any]] = []
+    with pytest.raises(ProviderError, match="tool call arguments exceeds 5 UTF-8 bytes"):
+        await _drain(provider, seen)
+
+    assert seen == [{"type": REQUEST_SENT}]
+    assert provider._thinking_by_call_id == {}
+
+
+async def test_native_tool_calls_respect_cumulative_count_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(ollama_module, "MAX_TOOL_CALLS", 1, raising=False)
+    body = _ndjson(
+        {
+            "message": {
+                "role": "assistant",
+                "content": "",
+                "thinking": "step 1",
+                "tool_calls": [{"id": "call-1", "function": {"name": "get_logs", "arguments": {}}}],
+            },
+            "done": False,
+        },
+        {
+            "message": {
+                "role": "assistant",
+                "content": "",
+                "thinking": "step 2",
+                "tool_calls": [
+                    {"id": "call-2", "function": {"name": "get_events", "arguments": {}}}
+                ],
+            },
+            "done": False,
+        },
+        _done(),
+    )
+    provider = _provider(body, options=OllamaOptions(think=True))
+
+    seen: list[dict[str, Any]] = []
+    with pytest.raises(ProviderError, match="tool calls exceeds 1"):
+        await _drain(provider, seen)
+
+    assert seen == [{"type": REQUEST_SENT}]
+    assert provider._thinking_by_call_id == {}
 
 
 async def test_tool_result_messages_gain_tool_name() -> None:

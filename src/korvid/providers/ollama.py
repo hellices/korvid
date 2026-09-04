@@ -21,8 +21,15 @@ import httpx
 from korvid.agent.credentials import CredentialSource
 from korvid.agent.model_policy import CapabilitySource, ModelCapabilities, ModelDescriptor
 from korvid.agent.provider import REQUEST_SENT, LLMProvider
+from korvid.providers.errors import ProviderError
 from korvid.providers.net import make_client
-from korvid.providers.openai_compat import ProviderError
+from korvid.providers.stream_limits import (
+    MAX_REASONING_BYTES,
+    MAX_TOOL_ARGUMENTS_BYTES,
+    MAX_TOOL_CALLS,
+    append_bounded,
+    require_count,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -186,6 +193,7 @@ class OllamaProvider(LLMProvider):
         tool_calls: list[dict[str, str]] = []
         usage: dict[str, int] | None = None
         thinking = ""
+        terminated = False
 
         async with client.stream(
             "POST",
@@ -209,18 +217,28 @@ class OllamaProvider(LLMProvider):
                 # it as a hard failure instead of a truncated "success".
                 if chunk.get("error"):
                     raise ProviderError(f"Ollama stream error: {chunk['error']}")
+                if chunk.get("done") is True:
+                    usage = _usage_from_chunk(chunk)
+                    terminated = True
+                    break
                 message: dict[str, Any] = chunk.get("message") or {}
                 # message.thinking is never rendered as answer text, but it is
                 # accumulated so the reasoning state can be re-attached to the
                 # assistant history on the next iteration (Ollama's streaming
                 # contract expects thinking to be echoed back with tool calls).
-                thinking += str(message.get("thinking") or "")
+                thinking = append_bounded(
+                    thinking,
+                    str(message.get("thinking") or ""),
+                    max_bytes=MAX_REASONING_BYTES,
+                    label="reasoning",
+                )
                 content: str | None = message.get("content")
                 if content:
                     yield {"type": "text_delta", "text": content}
                 self._collect_tool_calls(message, tool_calls)
-                if chunk.get("done"):
-                    usage = _usage_from_chunk(chunk)
+
+        if not terminated:
+            raise ProviderError("Ollama stream ended without done: true")
 
         self._remember_thinking(thinking, tool_calls)
         for call in tool_calls:
@@ -240,6 +258,7 @@ class OllamaProvider(LLMProvider):
         working across iterations.
         """
         for call in message.get("tool_calls") or []:
+            require_count(len(acc), max_count=MAX_TOOL_CALLS, label="tool calls")
             fn: dict[str, Any] = call.get("function") or {}
             arguments = fn.get("arguments")
             native_id = call.get("id")
@@ -247,7 +266,12 @@ class OllamaProvider(LLMProvider):
                 {
                     "id": str(native_id) if native_id else f"call_{next(self._id_counter)}",
                     "name": str(fn.get("name", "")),
-                    "arguments": json.dumps(arguments if isinstance(arguments, dict) else {}),
+                    "arguments": append_bounded(
+                        "",
+                        json.dumps(arguments if isinstance(arguments, dict) else {}),
+                        max_bytes=MAX_TOOL_ARGUMENTS_BYTES,
+                        label="tool call arguments",
+                    ),
                 }
             )
 
