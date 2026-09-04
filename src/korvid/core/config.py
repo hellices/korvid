@@ -465,12 +465,8 @@ def load_config(path: Path | None = None) -> KorvidConfig:
     auth_method = _opt_str(auth_raw.get("method"))
     if auth_method is None and provider:
         # Back-compat: configs written before agent.auth existed.
-        if provider == "github-copilot":
-            auth_method = "device-login"
-        else:
-            auth_method = "api_key" if api_key_env else "none"
-    ollama_value = agent_raw.get("ollama")
-    ollama_raw: dict[str, Any] = ollama_value if isinstance(ollama_value, dict) else {}
+        auth_method = _legacy_auth_method(agent_raw, provider)
+    ollama_raw = _legacy_ollama_raw(agent_raw)
     mcp_value = raw.get("mcp")
     mcp_raw: dict[str, Any] = mcp_value if isinstance(mcp_value, dict) else {}
     logs_value = raw.get("logs")
@@ -1264,10 +1260,13 @@ def _parse_agent_profiles(agent_raw: dict[str, Any], warnings: list[str]) -> Age
 #: The in-memory profile name a legacy `agent.provider` config migrates into.
 LEGACY_PROFILE_NAME: str = "default"
 
+#: The separator between a profile's provider name and model identifier.
+MODEL_REFERENCE_SEPARATOR: str = "/"
+
 #: Legacy provider names that meant "an OpenAI-compatible endpoint".
 #: `azure` is deliberately absent: Azure OpenAI authenticates with the raw
 #: `api-key` header (or an Entra token) rather than a bearer token, so it
-#: keeps its own `azure:` adapter instead of collapsing into `openai:`.
+#: keeps its own `azure/` adapter instead of collapsing into `openai/`.
 _LEGACY_OPENAI_COMPAT_NAMES: frozenset[str] = frozenset(
     {"openai-compat", "openai", "vllm", "github", "anthropic", "claude"}
 )
@@ -1317,33 +1316,41 @@ _LEGACY_AUTH_METHODS: Mapping[str, str] = MappingProxyType(
 
 
 def _legacy_model_reference(provider: str, model: str) -> str:
-    """`provider:model` for a legacy provider name.
+    """`provider/model` for a legacy provider name.
 
     Translated at this one parser boundary: nothing downstream branches on
     a legacy provider name again.
     """
     if provider in _LEGACY_OPENAI_COMPAT_NAMES:
-        return f"openai:{model}"
-    return f"{provider}:{model}"
+        return f"openai{MODEL_REFERENCE_SEPARATOR}{model}"
+    return f"{provider}{MODEL_REFERENCE_SEPARATOR}{model}"
 
 
-def _legacy_auth(agent_raw: dict[str, Any], provider: str) -> AgentAuthConfig:
+def _legacy_auth_method(agent_raw: dict[str, Any], provider: str) -> str:
     auth_value = agent_raw.get("auth")
     auth_map: dict[str, Any] = auth_value if isinstance(auth_value, dict) else {}
     legacy_method = _opt_str(auth_map.get("method"))
     api_key_env = _opt_str(agent_raw.get("api_key_env"))
     if legacy_method is None:
         if provider == "github-copilot":
-            legacy_method = "device-login"
-        elif api_key_env:
-            legacy_method = "api_key"
-        else:
-            legacy_method = "none"
+            return "device-login"
+        return "api_key" if api_key_env else "none"
+    return legacy_method
+
+
+def _legacy_auth(agent_raw: dict[str, Any], provider: str) -> AgentAuthConfig:
+    legacy_method = _legacy_auth_method(agent_raw, provider)
     method = _LEGACY_AUTH_METHODS.get(legacy_method, legacy_method)
+    api_key_env = _opt_str(agent_raw.get("api_key_env"))
     settings: dict[str, object] = {}
     if method == "environment" and api_key_env:
         settings["key"] = api_key_env
     return AgentAuthConfig(method=method, settings=settings)
+
+
+def _legacy_ollama_raw(agent_raw: dict[str, Any]) -> dict[str, Any]:
+    ollama_value = agent_raw.get("ollama")
+    return ollama_value if isinstance(ollama_value, dict) else {}
 
 
 def _legacy_options(
@@ -1376,9 +1383,7 @@ def _legacy_options(
     """
     options: dict[str, object] = {}
     if provider == "ollama":
-        ollama_value = agent_raw.get("ollama")
-        ollama_raw: dict[str, Any] = ollama_value if isinstance(ollama_value, dict) else {}
-        options.update(_legacy_ollama_options(ollama_raw, warnings))
+        options.update(_legacy_ollama_options(_legacy_ollama_raw(agent_raw), warnings))
         options["native_api"] = True
     extra = agent_raw.get("options")
     if isinstance(extra, dict):

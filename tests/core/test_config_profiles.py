@@ -12,6 +12,7 @@ from korvid.core.config import (
     AgentAuthConfig,
     AgentProfileConfig,
     AgentProfilesConfig,
+    _legacy_model_reference,
     is_valid_profile_name,
     load_config,
 )
@@ -31,12 +32,12 @@ agent:
   active: production
   profiles:
     production:
-      model: anthropic:claude-sonnet-4-5
+      model: anthropic/claude-sonnet-4-5
       auth:
         method: environment
         key: ANTHROPIC_API_KEY
     local:
-      model: ollama:llama3
+      model: ollama/llama3
       endpoint: http://localhost:11434
       auth:
         method: none
@@ -49,7 +50,7 @@ agent:
     assert list(cfg.agent_profiles.profiles) == ["production", "local"]
     assert cfg.agent_profiles.active == "production"
     local = cfg.agent_profiles.profiles["local"]
-    assert local.model == "ollama:llama3"
+    assert local.model == "ollama/llama3"
     assert local.endpoint == "http://localhost:11434"
     assert local.auth == AgentAuthConfig(method="none", settings={})
     assert local.options["num_ctx"] == 16384
@@ -64,15 +65,15 @@ agent:
   active: prod_east
   profiles:
     prod-east:
-      model: openai:gpt-4o
+      model: openai/gpt-4o
     prod_east:
-      model: openai:gpt-4o-mini
+      model: openai/gpt-4o-mini
 """,
     )
     cfg = load_config(path)
     active = cfg.agent_profiles.active_profile
     assert active is not None
-    assert active.model == "openai:gpt-4o-mini"
+    assert active.model == "openai/gpt-4o-mini"
 
 
 def test_unknown_active_profile_disables_the_agent_with_a_warning(tmp_path: Path) -> None:
@@ -83,7 +84,7 @@ agent:
   active: missing
   profiles:
     local:
-      model: ollama:llama3
+      model: ollama/llama3
 """,
     )
     cfg = load_config(path)
@@ -100,7 +101,7 @@ agent:
   active: local
   profiles:
     local:
-      model: ollama:llama3
+      model: ollama/llama3
       options:
         nested:
           depth: 1
@@ -123,11 +124,11 @@ agent:
   active: zulu
   profiles:
     zulu:
-      model: openai:gpt-4o
+      model: openai/gpt-4o
     alpha:
-      model: openai:gpt-4o-mini
+      model: openai/gpt-4o-mini
     mike:
-      model: ollama:llama3
+      model: ollama/llama3
 """,
     )
     cfg = load_config(path)
@@ -144,7 +145,7 @@ agent:
   active: local
   profiles:
     local:
-      model: ollama:llama3
+      model: ollama/llama3
       options:
         blob: "{blob}"
 """,
@@ -166,7 +167,7 @@ agent:
   active: local
   profiles:
     local:
-      model: openai:gpt-4o
+      model: openai/gpt-4o
       auth:
         method: environment
         api_key: sk-inline-not-a-reference
@@ -190,7 +191,7 @@ agent:
   active: local
   profiles:
     local:
-      model: openai:gpt-4o
+      model: openai/gpt-4o
       auth:
         method: environment
         key: OPENAI_API_KEY
@@ -204,7 +205,7 @@ agent:
 
 def test_revalidating_an_already_frozen_profile_is_idempotent() -> None:
     """Rebuilding a profile from a frozen one must not fail on its tuples."""
-    first = AgentProfileConfig(model="ollama:llama3", options={"stop": ["a", "b"]})
+    first = AgentProfileConfig(model="ollama/llama3", options={"stop": ["a", "b"]})
     assert first.options["stop"] == ("a", "b")
     second = AgentProfileConfig(model=first.model, options=first.options)
     assert second.options == first.options
@@ -215,7 +216,7 @@ def test_revalidating_an_already_frozen_profile_is_idempotent() -> None:
     "instance",
     [
         AgentAuthConfig(method="none"),
-        AgentProfileConfig(model="openai:gpt-4o"),
+        AgentProfileConfig(model="openai/gpt-4o"),
         AgentProfilesConfig(),
     ],
 )
@@ -234,11 +235,11 @@ agent:
   active: local
   profiles:
     local:
-      model: ollama:llama3
+      model: ollama/llama3
     "bad name":
-      model: openai:gpt-4o
+      model: openai/gpt-4o
     {long_name}:
-      model: openai:gpt-4o
+      model: openai/gpt-4o
 """,
     )
     cfg = load_config(path)
@@ -254,7 +255,7 @@ agent:
   active: local
   profiles:
     local:
-      model: ollama:llama3
+      model: ollama/llama3
     broken:
       endpoint: http://example.invalid
 """,
@@ -275,9 +276,9 @@ agent:
   active: local
   profiles:
     local:
-      model: ollama:llama3
+      model: ollama/llama3
     "bad name":
-      model: openai:gpt-4o
+      model: openai/gpt-4o
     broken:
       endpoint: http://example.invalid
 """,
@@ -302,7 +303,7 @@ agent:
   active: local
   profiles:
     local:
-      model: ollama:llama3
+      model: ollama/llama3
       options:
         blob: "{blob}"
 """,
@@ -312,7 +313,7 @@ agent:
     assert profile.options == {}
     assert profile.options_error is not None
     assert cfg.agent_profiles.unparsed["local"] == {
-        "model": "ollama:llama3",
+        "model": "ollama/llama3",
         "options": {"blob": blob},
     }
 
@@ -333,7 +334,33 @@ def test_profiles_config_defaults_are_empty() -> None:
     assert empty.active_profile is None
     assert empty.profiles == {}
     assert empty.unparsed == {}
-    assert AgentProfileConfig(model="ollama:llama3").auth.method == "none"
+    assert AgentProfileConfig(model="ollama/llama3").auth.method == "none"
+
+
+def test_the_legacy_reference_helper_joins_with_a_slash() -> None:
+    assert _legacy_model_reference("ollama", "llama3") == "ollama/llama3"
+    assert _legacy_model_reference("vllm", "qwen") == "openai/qwen"
+
+
+def test_a_model_identifier_containing_a_colon_survives_migration(
+    tmp_path: Path,
+) -> None:
+    """`qwen3:8b` is a real Ollama tag, so the separator must be `/`."""
+    path = _write(
+        tmp_path,
+        """
+agent:
+  provider: ollama
+  model: qwen3:8b
+  base_url: http://localhost:11434
+""",
+    )
+    cfg = load_config(path)
+    profile = cfg.agent_profiles.active_profile
+    assert profile is not None
+    assert profile.model == "ollama/qwen3:8b"
+    prefix, _, tag = profile.model.partition("/")
+    assert (prefix, tag) == ("ollama", "qwen3:8b")
 
 
 # ---------------------------------------------------------------------------
@@ -358,7 +385,7 @@ agent:
     assert cfg.agent_profiles.active == "default"
     profile = cfg.agent_profiles.active_profile
     assert profile is not None
-    assert profile.model == "ollama:llama3"
+    assert profile.model == "ollama/llama3"
     assert profile.endpoint == "http://localhost:11434"
     assert profile.auth.method == "none"
     assert profile.options["num_ctx"] == 8192
@@ -382,7 +409,7 @@ agent:
   active: local
   profiles:
     local:
-      model: ollama:llama3
+      model: ollama/llama3
       endpoint: http://localhost:11434
 """,
     )
@@ -464,13 +491,13 @@ def test_an_uncoercible_legacy_ollama_value_is_dropped_with_a_warning(
 @pytest.mark.parametrize(
     ("provider", "model", "expected"),
     [
-        ("openai-compat", "gpt-4o-mini", "openai:gpt-4o-mini"),
-        ("openai", "gpt-4o", "openai:gpt-4o"),
-        ("vllm", "qwen", "openai:qwen"),
-        ("azure", "gpt-4o", "azure:gpt-4o"),
-        ("ollama", "llama3", "ollama:llama3"),
-        ("github-copilot", "gpt-4o", "github-copilot:gpt-4o"),
-        ("company-llm", "v2", "company-llm:v2"),
+        ("openai-compat", "gpt-4o-mini", "openai/gpt-4o-mini"),
+        ("openai", "gpt-4o", "openai/gpt-4o"),
+        ("vllm", "qwen", "openai/qwen"),
+        ("azure", "gpt-4o", "azure/gpt-4o"),
+        ("ollama", "llama3", "ollama/llama3"),
+        ("github-copilot", "gpt-4o", "github-copilot/gpt-4o"),
+        ("company-llm", "v2", "company-llm/v2"),
     ],
 )
 def test_legacy_provider_names_translate_to_model_references(
@@ -524,17 +551,17 @@ agent:
     profile = cfg.agent_profiles.active_profile
     assert profile is not None
     assert profile.auth.method == "provider-default"
-    assert profile.model == "azure:gpt-4o"
+    assert profile.model == "azure/gpt-4o"
     assert profile.endpoint == "https://example.openai.azure.com"
     assert any("azure" in warning.lower() for warning in cfg.warnings)
 
 
 def test_legacy_azure_api_key_keeps_the_azure_adapter(tmp_path: Path) -> None:
-    """Azure is not an OpenAI-compatible endpoint: it must not become `openai:`.
+    """Azure is not an OpenAI-compatible endpoint: it must not become `openai/`.
 
-    The `openai:` adapter would send `Authorization: ******; Azure
+    The `openai/` adapter would send `Authorization: ******; Azure
     OpenAI authenticates an API key with the raw `api-key` header, so a
-    migration onto `openai:` would silently break every key-based Azure
+    migration onto `openai/` would silently break every key-based Azure
     install.
     """
     path = _write(
@@ -550,7 +577,7 @@ agent:
     cfg = load_config(path)
     profile = cfg.agent_profiles.active_profile
     assert profile is not None
-    assert profile.model == "azure:gpt-4o"
+    assert profile.model == "azure/gpt-4o"
     assert profile.auth == AgentAuthConfig(
         method="environment", settings={"key": "AZURE_OPENAI_API_KEY"}
     )
@@ -678,7 +705,7 @@ agent:
   active: production
   profiles:
     production:
-      model: openai:gpt-4o
+      model: openai/gpt-4o
 """,
     )
     cfg = load_config(path)

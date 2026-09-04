@@ -171,6 +171,30 @@ def test_auth_method_backcompat_none(tmp_path: Path) -> None:
     assert load_config(p).agent_auth_method == "none"
 
 
+def test_legacy_copilot_config_still_infers_device_login(tmp_path: Path) -> None:
+    p = tmp_path / "c.yaml"
+    p.write_text("agent:\n  provider: github-copilot\n  model: gpt-4o\n")
+    cfg = load_config(p)
+    profile = cfg.agent_profiles.active_profile
+    assert profile is not None
+    assert profile.model == "github-copilot/gpt-4o"
+    assert profile.auth.method == "device-login"
+
+
+def test_legacy_ollama_options_survive_the_move_out_of_load_config(
+    tmp_path: Path,
+) -> None:
+    p = tmp_path / "c.yaml"
+    p.write_text("agent:\n  provider: ollama\n  model: qwen3:8b\n  ollama:\n    think: true\n")
+    cfg = load_config(p)
+    profile = cfg.agent_profiles.active_profile
+    assert profile is not None
+    assert cfg.agent_ollama_think is True
+    assert profile.model == "ollama/qwen3:8b"
+    assert profile.options["think"] is True
+    assert profile.options["native_api"] is True
+
+
 def test_save_agent_config_preserves_other_keys(tmp_path: Path) -> None:
     p = tmp_path / "c.yaml"
     p.write_text("namespace: prod\nlog_buffer_lines: 9000\n")
