@@ -1774,3 +1774,55 @@ def test_canonicalize_provider_name_parity() -> None:
         assert _canonicalize_provider_name(name) == normalize_provider_name(name), (
             f"parity failed for {name!r}"
         )
+
+
+def test_bounded_options_accept_a_previously_frozen_tuple_value() -> None:
+    from korvid.core.config import _parse_bounded_options
+
+    parsed, error = _parse_bounded_options({"stop": ("a", "b")}, root="options")
+    assert error is None
+    assert parsed == {"stop": ["a", "b"]}
+
+
+def test_bounded_options_refuse_an_inline_secret_key() -> None:
+    from korvid.core.config import _parse_bounded_options
+
+    parsed, error = _parse_bounded_options({"api_key": "sk-inline"}, root="auth")
+    assert parsed == {}
+    assert error is not None
+    assert "sk-inline" not in error
+
+
+def test_bounded_options_name_the_caller_s_root_in_limit_messages() -> None:
+    from korvid.core.config import _parse_bounded_options
+
+    _parsed, error = _parse_bounded_options(
+        {str(index): index for index in range(65)}, root="agent.profiles[local].options"
+    )
+    assert error is not None
+    assert error.startswith("agent.profiles[local].options")
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param({1: "x"}, id="non-string-key"),
+        pytest.param({str(index): index for index in range(65)}, id="mapping-keys"),
+        pytest.param({"stop": list(range(65))}, id="list-items"),
+    ],
+)
+def test_no_bounded_options_message_hardcodes_the_agent_options_root(
+    value: dict[object, object],
+) -> None:
+    """The three messages that used to spell `agent.options` by hand.
+
+    Each of them is reachable only through a different branch, so one
+    parametrized case per branch is what proves the constant is gone
+    rather than moved.
+    """
+    from korvid.core.config import _parse_bounded_options
+
+    _parsed, error = _parse_bounded_options(value, root="agent.profiles[local].auth")
+    assert error is not None
+    assert error.startswith("agent.profiles[local].auth")
+    assert "agent.options" not in error

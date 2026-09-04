@@ -17,7 +17,8 @@ from os import replace as os_replace
 from pathlib import Path
 from stat import S_IMODE
 from tempfile import mkstemp
-from typing import Any
+from types import MappingProxyType
+from typing import Any, cast
 from urllib.parse import urlsplit
 
 import yaml
@@ -161,6 +162,167 @@ class ConfigMigrationError(ValueError):
     """
 
 
+#: Profile names are operator-defined identifiers, never normalized:
+#: `prod-east` and `prod_east` are distinct keys so a mistyped selector can
+#: never silently activate a different connection.
+AGENT_PROFILE_NAME_MAX_LENGTH: int = 100
+_PROFILE_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def is_valid_profile_name(name: str) -> bool:
+    """Whether *name* is a usable `agent.profiles` key."""
+    return (
+        type(name) is str
+        and 0 < len(name) <= AGENT_PROFILE_NAME_MAX_LENGTH
+        and _PROFILE_NAME_RE.match(name) is not None
+    )
+
+
+def _freeze_config_value(value: object) -> object:
+    """Recursively copy-own a parsed value: mappings become read-only proxies,
+    sequences become tuples, scalars pass through."""
+    if isinstance(value, Mapping):
+        return MappingProxyType(
+            {str(key): _freeze_config_value(item) for key, item in value.items()}
+        )
+    if isinstance(value, list | tuple):
+        return tuple(_freeze_config_value(item) for item in value)
+    return value
+
+
+def _freeze_config_mapping(value: Mapping[str, object]) -> Mapping[str, object]:
+    return cast("Mapping[str, object]", _freeze_config_value(dict(value)))
+
+
+def _validated_config_mapping(
+    value: Mapping[str, object], *, root: str
+) -> tuple[Mapping[str, object], str | None]:
+    """Bound-check *value*, then freeze it.
+
+    Validation runs on the *raw* mapping, before freezing, so the size,
+    depth and secret-key rules see the values a human wrote rather than
+    the proxies and tuples the freeze produces. On rejection the mapping
+    collapses to empty and the reason travels with it — a profile that
+    silently kept half its options would be worse than one that visibly
+    has none.
+
+    *root* is the short path name the message uses (`options` or `auth`);
+    the parser prefixes it with the profile name when it warns.
+
+    Returns:
+        The frozen mapping and `None`, or an empty mapping and the
+        rejection reason. The reason never quotes a value.
+    """
+    sanitized, error = _parse_bounded_options(value, root=root)
+    if error is not None:
+        return MappingProxyType({}), error
+    return _freeze_config_mapping(sanitized), None
+
+
+@dataclass(frozen=True)
+class AgentAuthConfig:
+    """How a profile authenticates, as bounded copy-owned configuration.
+
+    Core does not interpret provider-specific methods: `method` is one of
+    the five common ids (`none`, `environment`, `keyring`,
+    `provider-default`, `device-login`) and `settings` carries the
+    method-specific *references* (never secret values) an adapter
+    descriptor validates.
+    """
+
+    method: str = "none"
+    settings: Mapping[str, object] = field(default_factory=dict)
+    #: Why `settings` was emptied, or None. Not an `__init__` argument and
+    #: not compared: two configs that differ only in *why* a rejected
+    #: mapping is empty are the same configuration.
+    settings_error: str | None = field(default=None, init=False, compare=False)
+
+    # A frozen dataclass would otherwise be hashable, but `settings` is a
+    # `MappingProxyType` over a dict — hashing this would raise from deep
+    # inside `hash(tuple(...))` at some unrelated call site instead of here.
+    __hash__ = None  # type: ignore[assignment]  # frozen but genuinely unhashable
+
+    def __post_init__(self) -> None:
+        settings, error = _validated_config_mapping(self.settings, root="auth")
+        object.__setattr__(self, "settings", settings)
+        object.__setattr__(self, "settings_error", error)
+
+
+@dataclass(frozen=True)
+class AgentProfileConfig:
+    """One named model connection."""
+
+    model: str
+    endpoint: str | None = None
+    auth: AgentAuthConfig = field(default_factory=AgentAuthConfig)
+    options: Mapping[str, object] = field(default_factory=dict)
+    #: Why `options` was emptied, or None. See `AgentAuthConfig.settings_error`.
+    options_error: str | None = field(default=None, init=False, compare=False)
+
+    __hash__ = None  # type: ignore[assignment]  # frozen but genuinely unhashable
+
+    def __post_init__(self) -> None:
+        options, error = _validated_config_mapping(self.options, root="options")
+        object.__setattr__(self, "options", options)
+        object.__setattr__(self, "options_error", error)
+
+    @property
+    def config_error(self) -> str | None:
+        """The first reason this profile cannot be trusted, or None.
+
+        Anything that builds a provider from a profile checks this and
+        refuses rather than connecting with silently discarded settings.
+        """
+        return self.options_error or self.auth.settings_error
+
+
+@dataclass(frozen=True)
+class AgentProfilesConfig:
+    """The configured connection collection and which one is active.
+
+    `profiles` preserves the order the entries appeared in the file. That
+    order is the operator's, and it is what the wizard's profile list and
+    the `:model` picker render.
+
+    `unparsed` is the escape hatch that keeps a save honest: it maps the
+    file key of every entry korvid could **not** fully model — an invalid
+    name, a non-mapping, a missing `model:`, or a profile whose `options`
+    or `auth` block was rejected — to that entry's raw YAML value. Nothing
+    in the runtime reads it: it is not consulted by `active_profile`, by
+    the wizard's list, by `:model`, or by any provider construction. Its
+    only consumer is `save_agent_profiles` (Task 3), which writes those
+    values back verbatim so saving one profile cannot delete another the
+    operator still has to repair. The values are the objects `yaml.safe_load`
+    already built for this same file, held opaquely and never interpreted,
+    so retaining them costs nothing the loader had not already allocated.
+    """
+
+    active: str | None = None
+    profiles: Mapping[str, AgentProfileConfig] = field(default_factory=dict)
+    #: Raw, unmodelled `agent.profiles` entries keyed by file key. Opaque;
+    #: never read by the runtime. Not compared: two configurations that
+    #: differ only in text korvid refused to interpret are the same
+    #: configuration as far as the agent is concerned.
+    unparsed: Mapping[str, object] = field(default_factory=dict, compare=False)
+
+    __hash__ = None  # type: ignore[assignment]  # frozen but genuinely unhashable
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "profiles", MappingProxyType(dict(self.profiles)))
+        object.__setattr__(self, "unparsed", MappingProxyType(dict(self.unparsed)))
+
+    @property
+    def active_profile(self) -> AgentProfileConfig | None:
+        """The active profile, or None when unset or unknown.
+
+        Only `profiles` is consulted — an `unparsed` entry can never
+        become the active connection.
+        """
+        if self.active is None:
+            return None
+        return self.profiles.get(self.active)
+
+
 @dataclass(frozen=True)
 class KorvidConfig:
     kube_context: str | None = None
@@ -168,6 +330,11 @@ class KorvidConfig:
     #: UI-only namespace shortcuts (issue #108): bound to keys `1`-`9` in
     #: order. Purely local navigation state — never an authorization list.
     favorite_namespaces: tuple[str, ...] = ()
+    #: Named model connection profiles (`agent.active` / `agent.profiles`).
+    #: The single source of truth for provider configuration; the legacy
+    #: scalars below are derived from `agent_profiles.active_profile`
+    #: during the compatibility cycle and are removed with it.
+    agent_profiles: AgentProfilesConfig = field(default_factory=AgentProfilesConfig)
     agent_enabled: bool = False
     agent_provider: str | None = None
     agent_base_url: str | None = None
@@ -278,6 +445,12 @@ def load_config(path: Path | None = None) -> KorvidConfig:
     # User-edited configs can hold scalars where mappings are expected;
     # treat anything that is not a mapping as absent instead of crashing.
     agent_raw: dict[str, Any] = agent_value if isinstance(agent_value, dict) else {}
+    warnings: list[str] = []
+    agent_profiles = (
+        _parse_agent_profiles(agent_raw, warnings)
+        if "profiles" in agent_raw
+        else AgentProfilesConfig()
+    )
     provider_raw: str | None = agent_raw.get("provider")
     # Canonicalize early: github_copilot, GitHub.Copilot etc. all become
     # github-copilot so auth-method defaults and the composition root's
@@ -344,7 +517,7 @@ def load_config(path: Path | None = None) -> KorvidConfig:
             "agent.prompts was removed; use agent.rules instead (a list of short house rules)."
         )
     views, view_warnings = _parse_views(raw.get("views"))
-    warnings = list(view_warnings)
+    warnings.extend(view_warnings)
     model_tier = (
         _parse_model_tier(agent_raw.get("model_tier")) if "model_tier" in agent_raw else None
     )
@@ -377,6 +550,7 @@ def load_config(path: Path | None = None) -> KorvidConfig:
         kube_context=raw.get("kube_context"),
         namespace=raw.get("namespace"),
         favorite_namespaces=favorites,
+        agent_profiles=agent_profiles,
         agent_enabled=enabled,
         agent_provider=provider,
         agent_base_url=_opt_str(agent_raw.get("base_url")),
@@ -929,6 +1103,7 @@ def _opt_str(value: Any) -> str | None:
 
 @dataclass
 class _AgentOptionCounters:
+    root: str = "agent.options"
     mapping_keys: int = 0
     list_items: int = 0
 
@@ -980,14 +1155,22 @@ def _parse_agent_rules(value: Any) -> tuple[tuple[str, ...], list[str]]:
     return tuple(rules), warnings
 
 
-def _parse_agent_options(value: Any) -> tuple[dict[str, object], str | None]:
+def _parse_bounded_options(value: Any, *, root: str) -> tuple[dict[str, object], str | None]:
+    """Validate *value* as a bounded, secret-free option mapping.
+
+    *root* is the configuration path the messages name, so the same rules
+    guard `agent.options`, a profile's `options` and a profile's `auth`
+    settings without any of them inventing its own limits.
+
+    Returns:
+        The accepted mapping and `None`, or `{}` and a reason. The reason
+        names the offending *path*, never the offending value.
+    """
     if not isinstance(value, Mapping):
-        return {}, "agent.options must be a mapping with string keys"
-    counters = _AgentOptionCounters()
+        return {}, f"{root} must be a mapping with string keys"
+    counters = _AgentOptionCounters(root=root)
     try:
-        parsed = _parse_agent_option_mapping(
-            value, path="agent.options", depth=1, counters=counters
-        )
+        parsed = _parse_agent_option_mapping(value, path=root, depth=1, counters=counters)
         serialized = json.dumps(
             parsed,
             sort_keys=True,
@@ -997,13 +1180,89 @@ def _parse_agent_options(value: Any) -> tuple[dict[str, object], str | None]:
     except _AgentOptionsError as exc:
         return {}, str(exc)
     except (TypeError, ValueError) as exc:
-        return {}, f"agent.options could not be serialized safely: {type(exc).__name__}"
+        return {}, f"{root} could not be serialized safely: {type(exc).__name__}"
     if len(serialized) > _MAX_AGENT_OPTIONS_SERIALIZED_BYTES:
         return (
             {},
-            f"agent.options exceeds max serialized budget {_MAX_AGENT_OPTIONS_SERIALIZED_BYTES} bytes",
+            f"{root} exceeds max serialized budget {_MAX_AGENT_OPTIONS_SERIALIZED_BYTES} bytes",
         )
     return parsed, None
+
+
+def _parse_agent_options(value: Any) -> tuple[dict[str, object], str | None]:
+    """`agent.options`, validated. Thin wrapper over `_parse_bounded_options`."""
+    return _parse_bounded_options(value, root="agent.options")
+
+
+def _parse_profile_entry(name: str, raw: object, warnings: list[str]) -> AgentProfileConfig | None:
+    """One `agent.profiles.<name>` entry, or None when unusable."""
+    if not isinstance(raw, dict):
+        warnings.append(f"agent.profiles[{name}] is not a mapping; the profile was ignored")
+        return None
+    model = _opt_str(raw.get("model"))
+    if model is None:
+        warnings.append(f"agent.profiles[{name}] has no model reference; the profile was ignored")
+        return None
+    auth_raw = raw.get("auth")
+    auth_map: dict[str, Any] = auth_raw if isinstance(auth_raw, dict) else {}
+    method = _opt_str(auth_map.get("method")) or "none"
+    settings = {key: value for key, value in auth_map.items() if key != "method"}
+    options_raw = raw.get("options")
+    options: Mapping[str, object] = options_raw if isinstance(options_raw, dict) else {}
+    profile = AgentProfileConfig(
+        model=model,
+        endpoint=_opt_str(raw.get("endpoint")),
+        auth=AgentAuthConfig(method=method, settings=settings),
+        options=options,
+    )
+    # The dataclasses validated and (on rejection) emptied these mappings;
+    # the parser is the layer that knows the profile's name, so it is the
+    # layer that turns the reason into an operator-facing warning. The
+    # profile is *kept* — with an empty mapping and a recorded reason — so
+    # `:ai` can show it and let the operator fix it, but anything that
+    # builds a provider refuses while `config_error` is set.
+    if profile.options_error is not None:
+        warnings.append(f"agent.profiles[{name}].options was rejected: {profile.options_error}")
+    if profile.auth.settings_error is not None:
+        warnings.append(f"agent.profiles[{name}].auth was rejected: {profile.auth.settings_error}")
+    return profile
+
+
+def _parse_agent_profiles(agent_raw: dict[str, Any], warnings: list[str]) -> AgentProfilesConfig:
+    """Parse the `agent.active`/`agent.profiles` shape."""
+    raw_profiles = agent_raw.get("profiles")
+    if not isinstance(raw_profiles, dict):
+        warnings.append("agent.profiles is not a mapping; no agent profile was loaded")
+        return AgentProfilesConfig()
+    profiles: dict[str, AgentProfileConfig] = {}
+    unparsed: dict[str, object] = {}
+    reported_invalid_name = False
+    for raw_name, raw_entry in raw_profiles.items():
+        name = raw_name if type(raw_name) is str else ""
+        if not is_valid_profile_name(name):
+            if not reported_invalid_name:
+                warnings.append(
+                    "agent.profiles contains an invalid profile name; the entry was ignored"
+                )
+                reported_invalid_name = True
+            unparsed[str(raw_name)] = raw_entry
+            continue
+        parsed = _parse_profile_entry(name, raw_entry, warnings)
+        if parsed is None:
+            # korvid could not model it; keep the text so a later save
+            # rewrites it untouched instead of deleting the operator's work.
+            unparsed[name] = raw_entry
+            continue
+        if parsed.config_error is not None:
+            # Kept, but with an emptied block. The rejected block is the
+            # one thing the operator has to edit, so it must survive a save.
+            unparsed[name] = raw_entry
+        profiles[name] = parsed
+    active = _opt_str(agent_raw.get("active"))
+    if active is not None and active not in profiles:
+        warnings.append(f"agent.active names an unknown profile {active!r}; the agent is disabled")
+        active = None
+    return AgentProfilesConfig(active=active, profiles=profiles, unparsed=unparsed)
 
 
 def _parse_agent_option_mapping(
@@ -1020,7 +1279,7 @@ def _parse_agent_option_mapping(
     parsed: dict[str, object] = {}
     for key, item in value.items():
         if not isinstance(key, str):
-            raise _AgentOptionsError("agent.options must use string keys")
+            raise _AgentOptionsError(f"{counters.root} must use string keys")
         if len(key.encode("utf-8")) > _MAX_AGENT_OPTIONS_STRING_BYTES:
             raise _AgentOptionsError(
                 f"{_agent_options_path(f'{path}.{key[:60]}...')} key exceeds max length "
@@ -1034,7 +1293,7 @@ def _parse_agent_option_mapping(
         counters.mapping_keys += 1
         if counters.mapping_keys > _MAX_AGENT_OPTIONS_KEYS:
             raise _AgentOptionsError(
-                f"agent.options exceeds max {_MAX_AGENT_OPTIONS_KEYS} mapping keys"
+                f"{counters.root} exceeds max {_MAX_AGENT_OPTIONS_KEYS} mapping keys"
             )
         child_path = f"{path}.{key}"
         parsed[key] = _parse_agent_option_value(
@@ -1055,11 +1314,11 @@ def _parse_agent_option_value(
         return scalar
     if isinstance(value, Mapping):
         return _parse_agent_option_mapping(value, path=path, depth=depth + 1, counters=counters)
-    if isinstance(value, list):
+    if isinstance(value, list | tuple):
         counters.list_items += len(value)
         if counters.list_items > _MAX_AGENT_OPTIONS_LIST_ITEMS:
             raise _AgentOptionsError(
-                f"agent.options exceeds max {_MAX_AGENT_OPTIONS_LIST_ITEMS} list items"
+                f"{counters.root} exceeds max {_MAX_AGENT_OPTIONS_LIST_ITEMS} list items"
             )
         if depth + 1 > _MAX_AGENT_OPTIONS_DEPTH:
             raise _AgentOptionsError(
