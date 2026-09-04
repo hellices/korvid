@@ -12,6 +12,7 @@ from typing import Any
 import pytest
 from textual.app import App
 from textual.widgets import Input, OptionList, Static
+from textual.widgets.option_list import Option
 
 from korvid.agent.setup import AgentConfigurator, AgentSettings, DeviceLoginPrompt
 from korvid.ui.widgets.agent_setup_screen import AgentSetupScreen
@@ -76,6 +77,98 @@ def _select(app: App[None], option_id: str, wanted: str) -> None:
 
 def _kinds(cfg: FakeConfigurator) -> list[str]:
     return [c[0] if isinstance(c, tuple) else c for c in cfg.calls]
+
+
+class _DispatchProbeScreen(AgentSetupScreen):
+    def __init__(self) -> None:
+        super().__init__(FakeConfigurator())
+        self.dispatch_calls: list[str] = []
+
+    def _select_provider(self, event: OptionList.OptionSelected) -> None:
+        self.dispatch_calls.append("provider")
+
+    def _select_auth(self, event: OptionList.OptionSelected) -> None:
+        self.dispatch_calls.append("auth")
+
+    def _select_model_option(self, event: OptionList.OptionSelected) -> None:
+        self.dispatch_calls.append("model-option")
+
+    def _select_tier_option(self, event: OptionList.OptionSelected) -> None:
+        self.dispatch_calls.append("tier-option")
+
+    def _submit_base_url(self, event: Input.Submitted) -> None:
+        self.dispatch_calls.append("base-url")
+
+    def _submit_api_key_env(self, event: Input.Submitted) -> None:
+        self.dispatch_calls.append("api-key-env")
+
+    def _submit_model_filter(self, event: Input.Submitted) -> None:
+        self.dispatch_calls.append("model-filter")
+
+    def _submit_model(self, event: Input.Submitted) -> None:
+        self.dispatch_calls.append("model")
+
+
+def _option_event(widget_id: str) -> OptionList.OptionSelected:
+    option = Option("value", id="value")
+    option_list = OptionList(option, id=widget_id)
+    return OptionList.OptionSelected(option_list, option, 0)
+
+
+def _input_event(widget_id: str) -> Input.Submitted:
+    widget = Input(id=widget_id)
+    return Input.Submitted(widget, "value")
+
+
+@pytest.mark.parametrize(
+    ("widget_id", "expected"),
+    [
+        ("setup-provider", "provider"),
+        ("setup-auth", "auth"),
+        ("setup-model-list", "model-option"),
+        ("setup-tier", "tier-option"),
+    ],
+)
+def test_option_event_dispatches_to_bound_handler(widget_id: str, expected: str) -> None:
+    screen = _DispatchProbeScreen()
+    event = _option_event(widget_id)
+
+    screen.on_option_list_option_selected(event)
+
+    assert event._stop_propagation
+    assert screen.dispatch_calls == [expected]
+
+
+@pytest.mark.parametrize(
+    ("widget_id", "expected"),
+    [
+        ("setup-base-url", "base-url"),
+        ("setup-api-key-env", "api-key-env"),
+        ("setup-model-filter", "model-filter"),
+        ("setup-model", "model"),
+    ],
+)
+def test_input_event_dispatches_to_bound_handler(widget_id: str, expected: str) -> None:
+    screen = _DispatchProbeScreen()
+    event = _input_event(widget_id)
+
+    screen.on_input_submitted(event)
+
+    assert event._stop_propagation
+    assert screen.dispatch_calls == [expected]
+
+
+def test_unknown_widget_events_are_stopped_no_ops() -> None:
+    screen = _DispatchProbeScreen()
+    option_event = _option_event("future-option")
+    input_event = _input_event("future-input")
+
+    screen.on_option_list_option_selected(option_event)
+    screen.on_input_submitted(input_event)
+
+    assert option_event._stop_propagation
+    assert input_event._stop_propagation
+    assert screen.dispatch_calls == []
 
 
 async def _pump(pilot: Any, n: int = 8) -> None:

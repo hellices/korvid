@@ -43,6 +43,9 @@ _PROVIDER_LABELS: dict[str, str] = {
 # pre-highlight and prefill the wizard on reconnect (issue #167).
 _OPENAI_COMPAT_ALIASES = frozenset({"openai", "vllm", "github", "anthropic", "claude"})
 
+_OptionHandler = Callable[[OptionList.OptionSelected], None]
+_InputHandler = Callable[[Input.Submitted], None]
+
 
 def _canonical_provider(name: str | None) -> str | None:
     """The wizard entry a configured provider name maps onto, or None."""
@@ -179,49 +182,75 @@ class AgentSetupScreen(ModalScreen["AgentSettings | None"]):
     # Stage transitions
     # ------------------------------------------------------------------
 
+    def _option_handlers(self) -> dict[str, _OptionHandler]:
+        return {
+            "setup-provider": self._select_provider,
+            "setup-auth": self._select_auth,
+            "setup-model-list": self._select_model_option,
+            "setup-tier": self._select_tier_option,
+        }
+
+    def _input_handlers(self) -> dict[str, _InputHandler]:
+        return {
+            "setup-base-url": self._submit_base_url,
+            "setup-api-key-env": self._submit_api_key_env,
+            "setup-model-filter": self._submit_model_filter,
+            "setup-model": self._submit_model,
+        }
+
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         event.stop()
-        if event.option_list.id == "setup-provider":
-            self._provider = event.option.id or str(event.option.prompt)
-            self.query_one("#setup-provider").display = False
-            self._mark_done(f"Provider: {self._provider}")
-            if self._provider == "azure":
-                self._ask("How should korvid authenticate with Azure?")
-                auth_list = self.query_one("#setup-auth", OptionList)
-                auth_list.display = True
-                auth_list.highlighted = 0
-                current = self._current_settings
-                if (
-                    self._current_canonical == "azure"
-                    and current is not None
-                    and current.auth_method == "entra"
-                ):
-                    # Confirm-through reconnect must not silently switch
-                    # the retained Entra flow to api_key (issue #167).
-                    auth_list.highlighted = 1
-                auth_list.focus()
-                return
-            self._auth_method = _DEFAULTS[self._provider][0]
+        widget_id = event.option_list.id
+        if widget_id is None:
+            return
+        handler = self._option_handlers().get(widget_id)
+        if handler is not None:
+            handler(event)
+
+    def _select_provider(self, event: OptionList.OptionSelected) -> None:
+        self._provider = event.option.id or str(event.option.prompt)
+        self.query_one("#setup-provider").display = False
+        self._mark_done(f"Provider: {self._provider}")
+        if self._provider == "azure":
+            self._ask("How should korvid authenticate with Azure?")
+            auth_list = self.query_one("#setup-auth", OptionList)
+            auth_list.display = True
+            auth_list.highlighted = 0
             current = self._current_settings
             if (
-                current is not None
-                and self._current_canonical == self._provider
-                and current.auth_method
+                self._current_canonical == "azure"
+                and current is not None
+                and current.auth_method == "entra"
             ):
-                # Confirm-through reconnect keeps the retained auth method:
-                # a no-auth endpoint (local vLLM) must not be reset to
-                # api_key and prompted for a nonexistent key env.
-                self._auth_method = current.auth_method
-            self._after_auth_method()
-        elif event.option_list.id == "setup-auth":
-            self._auth_method = str(event.option.prompt)
-            self.query_one("#setup-auth").display = False
-            self._mark_done(f"Auth: {self._auth_method}")
-            self._after_auth_method()
-        elif event.option_list.id == "setup-model-list":
-            self._choose_model(str(event.option.prompt))
-        elif event.option_list.id == "setup-tier":
-            self._choose_tier(event.option.id or "automatic")
+                # Confirm-through reconnect must not silently switch
+                # the retained Entra flow to api_key (issue #167).
+                auth_list.highlighted = 1
+            auth_list.focus()
+            return
+        self._auth_method = _DEFAULTS[self._provider][0]
+        current = self._current_settings
+        if (
+            current is not None
+            and self._current_canonical == self._provider
+            and current.auth_method
+        ):
+            # Confirm-through reconnect keeps the retained auth method:
+            # a no-auth endpoint (local vLLM) must not be reset to
+            # api_key and prompted for a nonexistent key env.
+            self._auth_method = current.auth_method
+        self._after_auth_method()
+
+    def _select_auth(self, event: OptionList.OptionSelected) -> None:
+        self._auth_method = str(event.option.prompt)
+        self.query_one("#setup-auth").display = False
+        self._mark_done(f"Auth: {self._auth_method}")
+        self._after_auth_method()
+
+    def _select_model_option(self, event: OptionList.OptionSelected) -> None:
+        self._choose_model(str(event.option.prompt))
+
+    def _select_tier_option(self, event: OptionList.OptionSelected) -> None:
+        self._choose_tier(event.option.id or "automatic")
 
     def _after_auth_method(self) -> None:
         if self._provider == "github-copilot":
@@ -241,38 +270,48 @@ class AgentSetupScreen(ModalScreen["AgentSettings | None"]):
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         event.stop()
-        if event.input.id == "setup-base-url":
-            self._base_url = event.input.value.strip() or None
-            self._mark_done(f"Endpoint: {self._base_url or 'default'}")
-            if self._auth_method == "api_key":
-                self._ask("Which environment variable holds your API key?")
-                env_input = self.query_one("#setup-api-key-env", Input)
-                current = self._current_settings
-                if (
-                    current is not None
-                    and self._current_canonical == self._provider
-                    and current.api_key_env
-                ):
-                    env_input.value = current.api_key_env
-                env_input.display = True
-                env_input.focus()
-            else:
-                self.run_worker(self._fetch_models(), exclusive=True)
-        elif event.input.id == "setup-api-key-env":
-            self._api_key_env = event.input.value.strip() or None
-            self._mark_done(f"API key env: {self._api_key_env or '(none)'}")
+        widget_id = event.input.id
+        if widget_id is None:
+            return
+        handler = self._input_handlers().get(widget_id)
+        if handler is not None:
+            handler(event)
+
+    def _submit_base_url(self, event: Input.Submitted) -> None:
+        self._base_url = event.input.value.strip() or None
+        self._mark_done(f"Endpoint: {self._base_url or 'default'}")
+        if self._auth_method == "api_key":
+            self._ask("Which environment variable holds your API key?")
+            env_input = self.query_one("#setup-api-key-env", Input)
+            current = self._current_settings
+            if (
+                current is not None
+                and self._current_canonical == self._provider
+                and current.api_key_env
+            ):
+                env_input.value = current.api_key_env
+            env_input.display = True
+            env_input.focus()
+        else:
             self.run_worker(self._fetch_models(), exclusive=True)
-        elif event.input.id == "setup-model-filter":
-            model_list = self.query_one("#setup-model-list", OptionList)
-            if model_list.highlighted is not None and model_list.option_count:
-                option = model_list.get_option_at_index(model_list.highlighted)
-                self._choose_model(str(option.prompt))
-        elif event.input.id == "setup-model":
-            model = event.input.value.strip()
-            if not model:
-                self._status("Model is required")
-                return
-            self._choose_model(model)
+
+    def _submit_api_key_env(self, event: Input.Submitted) -> None:
+        self._api_key_env = event.input.value.strip() or None
+        self._mark_done(f"API key env: {self._api_key_env or '(none)'}")
+        self.run_worker(self._fetch_models(), exclusive=True)
+
+    def _submit_model_filter(self, event: Input.Submitted) -> None:
+        model_list = self.query_one("#setup-model-list", OptionList)
+        if model_list.highlighted is not None and model_list.option_count:
+            option = model_list.get_option_at_index(model_list.highlighted)
+            self._choose_model(str(option.prompt))
+
+    def _submit_model(self, event: Input.Submitted) -> None:
+        model = event.input.value.strip()
+        if not model:
+            self._status("Model is required")
+            return
+        self._choose_model(model)
 
     def on_input_changed(self, event: Input.Changed) -> None:
         if event.input.id != "setup-model-filter":
