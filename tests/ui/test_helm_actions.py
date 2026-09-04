@@ -235,7 +235,7 @@ def _revision_row(release: str, revision: int) -> HelmRevisionSummary:
 
 def _default_data() -> dict[str, list[Summary]]:
     return {
-        "helmreleases": [_release_row("web")],
+        "helmreleases": [_release_row("web", revision=2)],
         "helmrevisions": [_revision_row("web", 2)],
     }
 
@@ -1042,7 +1042,7 @@ async def test_upgrade_rejects_concurrent_revision_bump_after_approval(
     helm = FakeHelm()
 
     async def current_identity(_namespace: str, _name: str) -> HelmReleaseIdentity:
-        return HelmReleaseIdentity("secret-uid-web-3", 4)
+        return HelmReleaseIdentity("secret-uid-web-2", 3)
 
     audit_path = tmp_path / "audit.jsonl"
     app = make_app(
@@ -1178,6 +1178,29 @@ async def test_direct_rollback_rejects_identity_not_in_loaded_history(tmp_path: 
             pilot,
             lambda: any("history changed" in n.message for n in app._notifications),
             label="stale history blocked",
+        )
+        assert len(app.screen_stack) == 1
+
+    assert ("rollback", "web", 2, "default") not in helm.calls
+    assert _audit_entries(audit_path) == []
+
+
+async def test_cached_rollback_rejects_identity_not_in_loaded_history(tmp_path: Path) -> None:
+    helm = FakeHelm()
+    data = _default_data()
+    data["helmreleases"] = [_release_row("web", secret_uid="replacement-secret", revision=3)]
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app(data, helm=helm, audit_path=audit_path)
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "helm", "helmreleases")
+        await _rows_listed(pilot, app, 1)
+        await _navigate(pilot, "helmrevisions", "helmrevisions")
+        await _rows_listed(pilot, app, 1)
+        await pilot.press("r")
+        await until(
+            pilot,
+            lambda: any("history changed" in n.message for n in app._notifications),
+            label="cached stale history blocked",
         )
         assert len(app.screen_stack) == 1
 
@@ -1704,7 +1727,7 @@ async def test_rollback_target_is_captured_by_the_action_not_the_worker(tmp_path
         with mock.patch.object(app._helm_ctl, "rollback", spy):
             await pilot.press("r")
             # captured synchronously: the facts exist before any worker ran
-            assert seen == [("web", 2, "default", HelmReleaseIdentity("secret-uid-web-3", 3))]
+            assert seen == [("web", 2, "default", HelmReleaseIdentity("secret-uid-web-2", 2))]
 
 
 async def test_progress_labels_are_owner_scoped(tmp_path: Path) -> None:
@@ -2195,7 +2218,7 @@ async def test_the_controller_captures_the_rollback_target_at_the_keypress(
         with mock.patch.object(app._helm_ctl, "rollback", spy):
             app._helm_ctl.rollback_selected()
             await until(pilot, lambda: bool(seen), label="rollback worker ran")
-            assert seen == [("web", 2, "default", HelmReleaseIdentity("secret-uid-web-3", 3))]
+            assert seen == [("web", 2, "default", HelmReleaseIdentity("secret-uid-web-2", 2))]
 
 
 async def test_the_controller_captures_the_uninstall_target_at_the_keypress(
@@ -2223,7 +2246,7 @@ async def test_the_controller_captures_the_uninstall_target_at_the_keypress(
         with mock.patch.object(app._helm_ctl, "uninstall", spy):
             app._helm_ctl.uninstall_selected()
             await until(pilot, lambda: bool(seen), label="uninstall worker ran")
-            assert seen == [("web", "default", HelmReleaseIdentity("secret-uid-web-3", 3))]
+            assert seen == [("web", "default", HelmReleaseIdentity("secret-uid-web-2", 2))]
 
 
 async def test_the_controller_owns_the_revision_history_drill(tmp_path: Path) -> None:

@@ -757,14 +757,35 @@ class HelmController:
             self._ui.notify("no helm revision selected", severity="warning")
             return
         namespace = ns or row.namespace
+        history_identity = self.latest_revision_identity(namespace, row.release)
+        if history_identity is None:
+            self._ui.notify(
+                "Helm rollback cancelled - Helm release history identity could not be verified",
+                severity="warning",
+            )
+            return
         release_row = self.release_row(namespace, row.release)
         if release_row is None:
-            operation = self.rollback_with_current_identity(helm, row, ns, name, namespace, epoch)
+            operation = self.rollback_with_current_identity(
+                helm,
+                row,
+                ns,
+                name,
+                namespace,
+                epoch,
+                history_identity,
+            )
         else:
             identity = release_row.identity
             if identity is None:
                 self._ui.notify(
                     "Helm rollback cancelled - Helm release identity could not be verified",
+                    severity="warning",
+                )
+                return
+            if identity != history_identity:
+                self._ui.notify(
+                    "Helm rollback cancelled - release history changed; refresh and retry",
                     severity="warning",
                 )
                 return
@@ -783,6 +804,7 @@ class HelmController:
         name: str,
         namespace: str,
         epoch: int,
+        history_identity: HelmReleaseIdentity,
     ) -> None:
         """Resolve identity when revision history was opened directly."""
         identity = await self._current_release_identity(
@@ -792,8 +814,7 @@ class HelmController:
         )
         if identity is None:
             return
-        history_identity = self.latest_revision_identity(namespace, row.release)
-        if history_identity is None or history_identity != identity:
+        if history_identity != identity:
             self._ui.notify(
                 "Helm rollback cancelled - release history changed; refresh and retry",
                 severity="warning",
