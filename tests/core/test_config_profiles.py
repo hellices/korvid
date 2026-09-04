@@ -494,6 +494,8 @@ def test_an_uncoercible_legacy_ollama_value_is_dropped_with_a_warning(
         ("openai-compat", "gpt-4o-mini", "openai/gpt-4o-mini"),
         ("openai", "gpt-4o", "openai/gpt-4o"),
         ("vllm", "qwen", "openai/qwen"),
+        ("anthropic", "claude-sonnet-4-5", "openai/claude-sonnet-4-5"),
+        ("claude", "claude-sonnet-4-5", "openai/claude-sonnet-4-5"),
         ("azure", "gpt-4o", "azure/gpt-4o"),
         ("ollama", "llama3", "ollama/llama3"),
         ("github-copilot", "gpt-4o", "github-copilot/gpt-4o"),
@@ -743,12 +745,12 @@ def test_the_azure_sdk_builds_the_url_from_the_resource_root(
     already contain a deployment segment.
     """
     openai = pytest.importorskip("openai")
-    httpx2 = pytest.importorskip("httpx2")
+    httpx = pytest.importorskip("httpx")
     seen: list[str] = []
 
     def _capture(request: Any) -> Any:
         seen.append(str(request.url))
-        return httpx2.Response(
+        return httpx.Response(
             200,
             json={
                 "id": "chatcmpl-test",
@@ -769,7 +771,7 @@ def test_the_azure_sdk_builds_the_url_from_the_resource_root(
         azure_endpoint=azure_endpoint,
         api_key="not-a-real-key",
         api_version="2024-10-21",
-        http_client=httpx2.Client(transport=httpx2.MockTransport(_capture)),
+        http_client=httpx.Client(transport=httpx.MockTransport(_capture)),
     )
     client.chat.completions.create(model="gpt-4o", messages=[{"role": "user", "content": "hi"}])
     assert len(seen) == 1
