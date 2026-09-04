@@ -17,6 +17,12 @@ from korvid.agent.model_policy import ModelCapabilities, ModelDescriptor
 from korvid.agent.provider import REQUEST_SENT, LLMProvider
 from korvid.providers.errors import ProviderError
 from korvid.providers.net import make_client
+from korvid.providers.stream_limits import (
+    MAX_TOOL_ARGUMENTS_BYTES,
+    MAX_TOOL_CALLS,
+    append_bounded,
+    require_count,
+)
 
 
 class OpenAICompatProvider(LLMProvider):
@@ -116,26 +122,18 @@ class OpenAICompatProvider(LLMProvider):
             # tool_calls[index] = {"id": str, "name": str, "arguments": str}
             tool_acc: dict[int, dict[str, str]] = {}
             last_usage: dict[str, int] | None = None
+            terminated = False
 
             async for line in resp.aiter_lines():
-                # SSE permits both "data:<value>" and "data: <value>" — strip
-                # at most one optional leading space from the field value.
-                if not line.startswith("data:"):
-                    continue
-                payload_str = line[len("data:") :].removeprefix(" ")
-                if payload_str == "[DONE]":
+                line_terminated, last_usage, text = _process_sse_line(line, tool_acc, last_usage)
+                if line_terminated:
+                    terminated = True
                     break
-
-                chunk: dict[str, Any] = json.loads(payload_str)
-
-                # Capture top-level usage (sent in the final chunk by many providers)
-                raw_usage = chunk.get("usage")
-                if raw_usage:
-                    last_usage = raw_usage
-
-                text = _chunk_text(chunk, tool_acc)
                 if text:
                     yield {"type": "text_delta", "text": text}
+
+        if not terminated:
+            raise ProviderError("OpenAI-compatible stream ended without [DONE]")
 
         # Emit accumulated tool calls in index order
         for idx in sorted(tool_acc):
@@ -169,13 +167,46 @@ def _chunk_text(chunk: dict[str, Any], tool_acc: dict[int, dict[str, str]]) -> s
     delta: dict[str, Any] = choices[0].get("delta", {})
     for frag in delta.get("tool_calls") or []:
         idx: int = frag["index"]
-        acc = tool_acc.setdefault(idx, {"id": "", "name": "", "arguments": ""})
+        if idx not in tool_acc:
+            require_count(len(tool_acc), max_count=MAX_TOOL_CALLS, label="tool calls")
+            tool_acc[idx] = {"id": "", "name": "", "arguments": ""}
+        acc = tool_acc[idx]
         if frag.get("id"):
             acc["id"] = frag["id"]
         fn: dict[str, str] = frag.get("function", {})
         if fn.get("name"):
             acc["name"] = fn["name"]
-        acc["arguments"] += fn.get("arguments", "")
+        acc["arguments"] = append_bounded(
+            acc["arguments"],
+            fn.get("arguments", ""),
+            max_bytes=MAX_TOOL_ARGUMENTS_BYTES,
+            label="tool call arguments",
+        )
 
     content: str | None = delta.get("content")
     return content or None
+
+
+def _process_sse_line(
+    line: str,
+    tool_acc: dict[int, dict[str, str]],
+    last_usage: dict[str, int] | None,
+) -> tuple[bool, dict[str, int] | None, str | None]:
+    """Parse one SSE line, tracking terminal state and usage."""
+    # SSE permits both "data:<value>" and "data: <value>" — strip at most
+    # one optional leading space from the field value.
+    if not line.startswith("data:"):
+        return False, last_usage, None
+
+    payload_str = line[len("data:") :].removeprefix(" ")
+    if payload_str == "[DONE]":
+        return True, last_usage, None
+
+    chunk: dict[str, Any] = json.loads(payload_str)
+
+    # Capture top-level usage (sent in the final chunk by many providers)
+    raw_usage = chunk.get("usage")
+    if raw_usage:
+        last_usage = raw_usage
+
+    return False, last_usage, _chunk_text(chunk, tool_acc)

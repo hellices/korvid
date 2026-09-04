@@ -5,12 +5,14 @@ import httpx
 import pytest
 import yaml
 
+import korvid.providers.openai_compat as openai_compat
 from korvid.agent.credentials import CredentialSource
 from korvid.agent.model_policy import ModelCapabilities, ModelDescriptor
 from korvid.agent.outbound import OutboundPolicy
 from korvid.agent.provider import REQUEST_SENT
 from korvid.core.secrets import MASK_PLACEHOLDER
-from korvid.providers.openai_compat import OpenAICompatProvider, ProviderError
+from korvid.providers.errors import ProviderError
+from korvid.providers.openai_compat import OpenAICompatProvider
 from korvid.providers.static_creds import StaticHeaderSource
 
 
@@ -104,6 +106,84 @@ async def test_reports_usage_when_present() -> None:
     )
     events = [e async for e in _provider(body).complete([], [])]
     assert {"type": "usage", "input_tokens": 12, "output_tokens": 3} in events
+
+
+async def test_missing_done_marker_raises_provider_error() -> None:
+    body = 'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n'
+    with pytest.raises(ProviderError, match=r"OpenAI-compatible stream ended without \[DONE\]"):
+        _ = [event async for event in _provider(body).complete([], [])]
+
+
+async def test_data_after_done_is_ignored() -> None:
+    body = _sse({"choices": [{"delta": {"content": "ok"}}]})
+    body += 'data: {"choices":[{"delta":{"content":"ignored"}}]}\n\n'
+    events = [event async for event in _provider(body).complete([], [])]
+    assert not any(event.get("text") == "ignored" for event in events)
+    assert events[-1] == {"type": "done"}
+
+
+async def test_tool_call_arguments_are_bounded_by_total_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(openai_compat, "MAX_TOOL_ARGUMENTS_BYTES", 8, raising=False)
+    body = _sse(
+        {
+            "choices": [
+                {
+                    "delta": {
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "c1",
+                                "function": {"name": "get_logs", "arguments": '{"po'},
+                            }
+                        ]
+                    }
+                }
+            ]
+        },
+        {
+            "choices": [
+                {"delta": {"tool_calls": [{"index": 0, "function": {"arguments": 'd":"a"}'}}]}}
+            ]
+        },
+    )
+
+    seen: list[dict[str, Any]] = []
+    with pytest.raises(ProviderError, match=r"tool call arguments exceeds 8 UTF-8 bytes"):
+        await _drain(_provider(body), seen)
+
+    assert not any(event["type"] == "done" for event in seen)
+
+
+async def test_tool_call_count_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(openai_compat, "MAX_TOOL_CALLS", 64, raising=False)
+    chunks = []
+    for index in range(65):
+        chunks.append(
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": index,
+                                    "id": f"c{index}",
+                                    "function": {"name": f"fn_{index}", "arguments": "{}"},
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        )
+    body = _sse(*chunks)
+
+    seen: list[dict[str, Any]] = []
+    with pytest.raises(ProviderError, match=r"tool calls exceeds 64"):
+        await _drain(_provider(body), seen)
+
+    assert not any(event["type"] == "done" for event in seen)
 
 
 async def test_sends_auth_header_and_tools() -> None:
