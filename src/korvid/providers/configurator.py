@@ -19,6 +19,7 @@ from korvid.providers.github_copilot import (
 from korvid.providers.net import make_client
 from korvid.providers.ollama import normalize_base_url
 from korvid.providers.registry import build_credentials, create_provider
+from korvid.providers.stream_limits import MAX_PROBE_TEXT_BYTES, append_bounded
 from korvid.providers.token_store import TokenStore
 
 if TYPE_CHECKING:
@@ -200,7 +201,12 @@ class ProviderConfigurator(AgentConfigurator):
             )
             async for ev in provider.complete(prepared.messages, prepared.tools):
                 if ev.get("type") == "text_delta":
-                    text += str(ev.get("text", ""))
+                    text = append_bounded(
+                        text,
+                        str(ev.get("text", "")),
+                        max_bytes=MAX_PROBE_TEXT_BYTES,
+                        label="provider connection test response",
+                    )
         finally:
             await provider.aclose()
         if not text.strip():

@@ -9,6 +9,7 @@ from korvid.agent.model_policy import ModelDescriptor
 from korvid.agent.outbound import OutboundPolicy, OutboundPolicyError
 from korvid.agent.setup import AgentSettings
 from korvid.providers.configurator import _PROBE_MESSAGE, ProviderConfigurator
+from korvid.providers.errors import ProviderError
 from korvid.providers.github_copilot import DeviceCodePrompt, GitHubDeviceFlow
 from korvid.providers.token_store import TokenStore
 
@@ -112,6 +113,22 @@ async def test_probe_receives_a_prepared_copy(
     assert tools == []
     messages[0]["content"] = "provider mutation"
     assert _PROBE_MESSAGE["content"] == "Reply with the single word: ok"
+
+
+async def test_probe_raises_on_cumulative_utf8_overflow(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provider = ScriptedProvider(
+        [{"type": "text_delta", "text": "é"}, {"type": "text_delta", "text": "é"}]
+    )
+    monkeypatch.setattr("korvid.providers.configurator.create_provider", lambda **kw: provider)
+    monkeypatch.setattr("korvid.providers.configurator.MAX_PROBE_TEXT_BYTES", 3)
+    cfg = ProviderConfigurator(_store(tmp_path), persist=lambda s: None)
+
+    with pytest.raises(ProviderError, match="provider connection test response exceeds 3 UTF-8 bytes"):
+        await cfg.test(_SETTINGS)
+
+    assert provider.closed
 
 
 async def test_probe_policy_failure_prevents_delegation_and_closes_provider(
