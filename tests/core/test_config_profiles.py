@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -333,3 +334,417 @@ def test_profiles_config_defaults_are_empty() -> None:
     assert empty.profiles == {}
     assert empty.unparsed == {}
     assert AgentProfileConfig(model="ollama:llama3").auth.method == "none"
+
+
+# ---------------------------------------------------------------------------
+# Task 2: Legacy agent configuration migration
+# ---------------------------------------------------------------------------
+
+
+def test_legacy_ollama_config_becomes_the_default_profile(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        """
+agent:
+  provider: ollama
+  model: llama3
+  base_url: http://localhost:11434
+  ollama:
+    num_ctx: 8192
+    think: true
+""",
+    )
+    cfg = load_config(path)
+    assert cfg.agent_profiles.active == "default"
+    profile = cfg.agent_profiles.active_profile
+    assert profile is not None
+    assert profile.model == "ollama:llama3"
+    assert profile.endpoint == "http://localhost:11434"
+    assert profile.auth.method == "none"
+    assert profile.options["num_ctx"] == 8192
+    assert profile.options["think"] is True
+    # The legacy transport was the native `/api/chat` route, and migration
+    # must not silently switch an existing install to `/v1`.
+    assert profile.options["native_api"] is True
+
+
+def test_a_new_ollama_profile_defaults_to_the_shared_route(tmp_path: Path) -> None:
+    """`native_api` is a migration artefact, not a default for new profiles.
+
+    Only `_legacy_options` sets it. A profile written in the new shape is
+    parsed verbatim, so an operator who never ran the old config gets the
+    common adapter.
+    """
+    path = _write(
+        tmp_path,
+        """
+agent:
+  active: local
+  profiles:
+    local:
+      model: ollama:llama3
+      endpoint: http://localhost:11434
+""",
+    )
+    cfg = load_config(path)
+    profile = cfg.agent_profiles.active_profile
+    assert profile is not None
+    assert "native_api" not in profile.options
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        pytest.param('num_ctx: "8192"', ("num_ctx", 8192), id="numeric-string-int"),
+        pytest.param("num_ctx: 8192.0", ("num_ctx", 8192), id="float-to-int"),
+        pytest.param('temperature: "0.2"', ("temperature", 0.2), id="numeric-string-float"),
+        pytest.param("seed: 0", ("seed", 0), id="zero-seed-is-not-absent"),
+        pytest.param("num_predict: 192", ("num_predict", 192), id="strict-int-kept"),
+        pytest.param("keep_alive: 5m", ("keep_alive", "5m"), id="non-numeric-verbatim"),
+    ],
+)
+def test_legacy_ollama_numbers_keep_the_old_parser_s_coercion(
+    tmp_path: Path, raw: str, expected: tuple[str, object]
+) -> None:
+    """The pre-profile parser coerced these; Task 17 deletes it.
+
+    `OllamaOptions` is a plain dataclass, so a surviving `"8192"` would be
+    sent as a JSON string and would reach `context_window_tokens` as a
+    `str`. Migration is the last place that can still fix it.
+    """
+    path = _write(tmp_path, f"agent:\n  provider: ollama\n  model: llama3\n  ollama:\n    {raw}\n")
+    profile = load_config(path).agent_profiles.active_profile
+    assert profile is not None
+    key, value = expected
+    assert profile.options[key] == value
+    assert type(profile.options[key]) is type(value)
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        pytest.param("num_ctx: nope", id="not-a-number"),
+        pytest.param("num_ctx: true", id="bool-is-not-a-number"),
+        pytest.param("temperature: .inf", id="non-finite"),
+        pytest.param("num_ctx: [1]", id="wrong-shape"),
+        pytest.param('num_predict: "192"', id="strict-int-refuses-a-numeric-string"),
+        pytest.param("num_predict: 1.9", id="strict-int-refuses-a-fraction"),
+        pytest.param("num_predict: 0", id="strict-int-refuses-non-positive"),
+    ],
+)
+def test_an_uncoercible_legacy_ollama_value_is_dropped_with_a_warning(
+    tmp_path: Path, raw: str
+) -> None:
+    """Dropped, not defaulted, and never fatal to the whole profile.
+
+    The old parser substituted its own fallback here. That fallback is now
+    the field default on `OllamaOptions`, which a migrated profile still
+    reaches through `native_api: True`, so dropping the key restores the
+    same effective value *and* names the line to fix. Non-finite floats
+    matter especially: the bounded validator refuses them, so carrying one
+    through would reject the entire migrated profile over one knob.
+
+    `num_predict` is the odd one out: `num_ctx` accepts `"8192"` because
+    its old parser did, while `num_predict`'s old parser refused a numeric
+    string, a fraction, a `bool` and a non-positive value outright
+    instead of coercing them (`tests/core/test_config.py` pins all four).
+    Migration keeps each contract as it was rather than unifying them,
+    because unifying them would change what an existing config means.
+    """
+    key = raw.split(":")[0]
+    path = _write(tmp_path, f"agent:\n  provider: ollama\n  model: llama3\n  ollama:\n    {raw}\n")
+    cfg = load_config(path)
+    profile = cfg.agent_profiles.active_profile
+    assert profile is not None
+    assert profile.config_error is None
+    assert key not in profile.options
+    assert any(f"agent.ollama.{key}" in warning for warning in cfg.warnings)
+
+
+@pytest.mark.parametrize(
+    ("provider", "model", "expected"),
+    [
+        ("openai-compat", "gpt-4o-mini", "openai:gpt-4o-mini"),
+        ("openai", "gpt-4o", "openai:gpt-4o"),
+        ("vllm", "qwen", "openai:qwen"),
+        ("azure", "gpt-4o", "azure:gpt-4o"),
+        ("ollama", "llama3", "ollama:llama3"),
+        ("github-copilot", "gpt-4o", "github-copilot:gpt-4o"),
+        ("company-llm", "v2", "company-llm:v2"),
+    ],
+)
+def test_legacy_provider_names_translate_to_model_references(
+    tmp_path: Path, provider: str, model: str, expected: str
+) -> None:
+    path = _write(
+        tmp_path,
+        f"""
+agent:
+  provider: {provider}
+  model: {model}
+  base_url: https://example.invalid/v1
+""",
+    )
+    cfg = load_config(path)
+    profile = cfg.agent_profiles.active_profile
+    assert profile is not None
+    assert profile.model == expected
+
+
+def test_legacy_api_key_env_becomes_environment_auth(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        """
+agent:
+  provider: openai-compat
+  model: gpt-4o
+  base_url: https://api.openai.com/v1
+  api_key_env: OPENAI_API_KEY
+""",
+    )
+    cfg = load_config(path)
+    profile = cfg.agent_profiles.active_profile
+    assert profile is not None
+    assert profile.auth == AgentAuthConfig(method="environment", settings={"key": "OPENAI_API_KEY"})
+
+
+def test_legacy_entra_auth_becomes_provider_default(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        """
+agent:
+  provider: azure
+  model: gpt-4o
+  base_url: https://example.openai.azure.com
+  auth:
+    method: entra
+""",
+    )
+    cfg = load_config(path)
+    profile = cfg.agent_profiles.active_profile
+    assert profile is not None
+    assert profile.auth.method == "provider-default"
+    assert profile.model == "azure:gpt-4o"
+    assert profile.endpoint == "https://example.openai.azure.com"
+    assert any("azure" in warning.lower() for warning in cfg.warnings)
+
+
+def test_legacy_azure_api_key_keeps_the_azure_adapter(tmp_path: Path) -> None:
+    """Azure is not an OpenAI-compatible endpoint: it must not become `openai:`.
+
+    The `openai:` adapter would send `Authorization: ******; Azure
+    OpenAI authenticates an API key with the raw `api-key` header, so a
+    migration onto `openai:` would silently break every key-based Azure
+    install.
+    """
+    path = _write(
+        tmp_path,
+        """
+agent:
+  provider: azure
+  model: gpt-4o
+  base_url: https://example.openai.azure.com
+  api_key_env: AZURE_OPENAI_API_KEY
+""",
+    )
+    cfg = load_config(path)
+    profile = cfg.agent_profiles.active_profile
+    assert profile is not None
+    assert profile.model == "azure:gpt-4o"
+    assert profile.auth == AgentAuthConfig(
+        method="environment", settings={"key": "AZURE_OPENAI_API_KEY"}
+    )
+
+
+def test_legacy_azure_deployment_url_is_reduced_to_the_resource_url(tmp_path: Path) -> None:
+    """The legacy client posted to `<base_url>/chat/completions`.
+
+    So a working legacy `base_url` was deployment-scoped. `AzureProvider`
+    wants the *resource* URL and appends `/openai/deployments/<model>`
+    itself; handing it the old value produces
+    `.../openai/deployments/my-dep/openai/chat/completions`, a 404. The
+    migration therefore truncates at `/openai` and keeps the deployment
+    name as an option instead of throwing it away.
+    """
+    path = _write(
+        tmp_path,
+        """
+agent:
+  provider: azure
+  model: gpt-4o
+  base_url: https://example.openai.azure.com/openai/deployments/my-dep
+  api_key_env: AZURE_OPENAI_API_KEY
+""",
+    )
+    cfg = load_config(path)
+    profile = cfg.agent_profiles.active_profile
+    assert profile is not None
+    assert profile.endpoint == "https://example.openai.azure.com"
+    assert profile.options["azure_deployment"] == "my-dep"
+    assert any(
+        "https://example.openai.azure.com/openai/deployments/my-dep" in warning
+        and "was rewritten" in warning
+        for warning in cfg.warnings
+    )
+
+
+def test_legacy_azure_v1_url_is_reduced_without_inventing_a_deployment(
+    tmp_path: Path,
+) -> None:
+    """`.../openai/v1` is Azure's v1 surface: no deployment is encoded in it."""
+    path = _write(
+        tmp_path,
+        """
+agent:
+  provider: azure
+  model: gpt-4o
+  base_url: https://example.openai.azure.com/openai/v1
+  api_key_env: AZURE_OPENAI_API_KEY
+""",
+    )
+    cfg = load_config(path)
+    profile = cfg.agent_profiles.active_profile
+    assert profile is not None
+    assert profile.endpoint == "https://example.openai.azure.com"
+    assert "azure_deployment" not in profile.options
+    assert any("openai/v1" in warning for warning in cfg.warnings)
+
+
+def test_a_bare_azure_resource_url_migrates_unchanged_and_silently(
+    tmp_path: Path,
+) -> None:
+    """Nothing to rewrite means nothing to warn about."""
+    path = _write(
+        tmp_path,
+        """
+agent:
+  provider: azure
+  model: gpt-4o
+  base_url: https://example.openai.azure.com/
+  api_key_env: AZURE_OPENAI_API_KEY
+""",
+    )
+    cfg = load_config(path)
+    profile = cfg.agent_profiles.active_profile
+    assert profile is not None
+    assert profile.endpoint == "https://example.openai.azure.com"
+    assert not any("was rewritten" in warning for warning in cfg.warnings)
+
+
+def test_a_non_azure_endpoint_is_never_rewritten(tmp_path: Path) -> None:
+    """Only the `azure` adapter's endpoint changes meaning; leave the rest alone."""
+    path = _write(
+        tmp_path,
+        """
+agent:
+  provider: openai-compat
+  model: gpt-4o
+  base_url: https://gateway.corp.invalid/openai/v1
+  api_key_env: CORP_KEY
+""",
+    )
+    cfg = load_config(path)
+    profile = cfg.agent_profiles.active_profile
+    assert profile is not None
+    assert profile.endpoint == "https://gateway.corp.invalid/openai/v1"
+
+
+def test_legacy_copilot_auth_stays_device_login(tmp_path: Path) -> None:
+    path = _write(tmp_path, "agent:\n  provider: github-copilot\n  model: gpt-4o\n")
+    cfg = load_config(path)
+    profile = cfg.agent_profiles.active_profile
+    assert profile is not None
+    assert profile.auth.method == "device-login"
+
+
+def test_explicitly_disabled_legacy_agent_produces_no_active_profile(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        "agent:\n  enabled: false\n  provider: ollama\n  model: llama3\n  base_url: http://x:11434\n",
+    )
+    cfg = load_config(path)
+    assert cfg.agent_profiles.active is None
+    assert "default" in cfg.agent_profiles.profiles
+
+
+def test_new_shape_wins_over_legacy_with_a_warning(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        """
+agent:
+  provider: ollama
+  model: llama3
+  base_url: http://localhost:11434
+  active: production
+  profiles:
+    production:
+      model: openai:gpt-4o
+""",
+    )
+    cfg = load_config(path)
+    assert set(cfg.agent_profiles.profiles) == {"production"}
+    assert any("legacy" in warning for warning in cfg.warnings)
+
+
+@pytest.mark.parametrize(
+    ("azure_endpoint", "expected_path"),
+    [
+        (
+            "https://x.openai.azure.com",
+            "/openai/deployments/gpt-4o/chat/completions",
+        ),
+        (
+            "https://x.openai.azure.com/openai/deployments/my-dep",
+            "/openai/deployments/my-dep/openai/chat/completions",
+        ),
+        (
+            "https://x.openai.azure.com/openai/v1",
+            "/openai/v1/openai/deployments/gpt-4o/chat/completions",
+        ),
+    ],
+)
+def test_the_azure_sdk_builds_the_url_from_the_resource_root(
+    azure_endpoint: str, expected_path: str
+) -> None:
+    """Why `_migrate_azure_endpoint` strips the deployment segment.
+
+    Only the first row is a working URL. The other two are what an
+    operator's pre-migration `base_url` produces once the request is built
+    by the SDK instead of by korvid's own string concatenation: the SDK
+    treats `azure_endpoint` as the *resource root*, appends `/openai`, and
+    inserts `/deployments/<model>` only when the resulting path does not
+    already contain a deployment segment.
+    """
+    openai = pytest.importorskip("openai")
+    httpx2 = pytest.importorskip("httpx2")
+    seen: list[str] = []
+
+    def _capture(request: Any) -> Any:
+        seen.append(str(request.url))
+        return httpx2.Response(
+            200,
+            json={
+                "id": "chatcmpl-test",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "gpt-4o",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "ok"},
+                        "finish_reason": "stop",
+                    }
+                ],
+            },
+        )
+
+    client = openai.AzureOpenAI(
+        azure_endpoint=azure_endpoint,
+        api_key="not-a-real-key",
+        api_version="2024-10-21",
+        http_client=httpx2.Client(transport=httpx2.MockTransport(_capture)),
+    )
+    client.chat.completions.create(model="gpt-4o", messages=[{"role": "user", "content": "hi"}])
+    assert len(seen) == 1
+    assert seen[0].startswith(f"https://x.openai.azure.com{expected_path}?")
+    assert "api-version=2024-10-21" in seen[0]

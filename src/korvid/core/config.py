@@ -19,7 +19,7 @@ from stat import S_IMODE
 from tempfile import mkstemp
 from types import MappingProxyType
 from typing import Any, cast
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 import yaml
 
@@ -446,11 +446,7 @@ def load_config(path: Path | None = None) -> KorvidConfig:
     # treat anything that is not a mapping as absent instead of crashing.
     agent_raw: dict[str, Any] = agent_value if isinstance(agent_value, dict) else {}
     warnings: list[str] = []
-    agent_profiles = (
-        _parse_agent_profiles(agent_raw, warnings)
-        if "profiles" in agent_raw
-        else AgentProfilesConfig()
-    )
+    agent_profiles = _resolve_agent_profiles(agent_raw, warnings)
     provider_raw: str | None = agent_raw.get("provider")
     # Canonicalize early: github_copilot, GitHub.Copilot etc. all become
     # github-copilot so auth-method defaults and the composition root's
@@ -1263,6 +1259,276 @@ def _parse_agent_profiles(agent_raw: dict[str, Any], warnings: list[str]) -> Age
         warnings.append(f"agent.active names an unknown profile {active!r}; the agent is disabled")
         active = None
     return AgentProfilesConfig(active=active, profiles=profiles, unparsed=unparsed)
+
+
+#: The in-memory profile name a legacy `agent.provider` config migrates into.
+LEGACY_PROFILE_NAME: str = "default"
+
+#: Legacy provider names that meant "an OpenAI-compatible endpoint".
+#: `azure` is deliberately absent: Azure OpenAI authenticates with the raw
+#: `api-key` header (or an Entra token) rather than a bearer token, so it
+#: keeps its own `azure:` adapter instead of collapsing into `openai:`.
+_LEGACY_OPENAI_COMPAT_NAMES: frozenset[str] = frozenset(
+    {"openai-compat", "openai", "vllm", "github", "anthropic", "claude"}
+)
+
+#: Legacy provider names whose credential handling changed with the
+#: migration and therefore warrant a one-line warning on load.
+_LEGACY_REVIEW_NAMES: frozenset[str] = frozenset({"azure"})
+
+#: Legacy `agent.ollama.*` keys carried into the migrated profile's options
+#: so the writer's new shape preserves the operator's tuning.
+_LEGACY_OLLAMA_KEYS: tuple[str, ...] = (
+    "num_ctx",
+    "temperature",
+    "seed",
+    "think",
+    "keep_alive",
+    "num_predict",
+)
+
+#: The legacy `agent.ollama.*` knobs whose pre-profile parser coerced a
+#: numeric *string* to a number, mapped to the type it produced.
+#: `OllamaOptions` is a plain dataclass with no validation, so a `"8192"`
+#: that survived migration would be sent as a JSON string and would land
+#: in `context_window_tokens` as a `str`.
+_LEGACY_OLLAMA_NUMERIC_KEYS: Mapping[str, type[int] | type[float]] = MappingProxyType(
+    {"num_ctx": int, "seed": int, "temperature": float}
+)
+
+#: `num_predict` is deliberately absent from the coercion table above.
+#: Its pre-profile parser was the *strict* one: it refused a numeric
+#: string, a fractional float, a `bool` and a non-positive value outright
+#: instead of coercing them (`tests/core/test_config.py` pins all four).
+#: Migration keeps that contract by dropping the key, which lands on
+#: `OllamaOptions.num_predict = None` — the same effective value the old
+#: fallback produced.
+_LEGACY_OLLAMA_STRICT_INT_KEYS: frozenset[str] = frozenset({"num_predict"})
+
+#: Legacy auth methods → the five common method ids.
+_LEGACY_AUTH_METHODS: Mapping[str, str] = MappingProxyType(
+    {
+        "api_key": "environment",
+        "entra": "provider-default",
+        "device-login": "device-login",
+        "none": "none",
+    }
+)
+
+
+def _legacy_model_reference(provider: str, model: str) -> str:
+    """`provider:model` for a legacy provider name.
+
+    Translated at this one parser boundary: nothing downstream branches on
+    a legacy provider name again.
+    """
+    if provider in _LEGACY_OPENAI_COMPAT_NAMES:
+        return f"openai:{model}"
+    return f"{provider}:{model}"
+
+
+def _legacy_auth(agent_raw: dict[str, Any], provider: str) -> AgentAuthConfig:
+    auth_value = agent_raw.get("auth")
+    auth_map: dict[str, Any] = auth_value if isinstance(auth_value, dict) else {}
+    legacy_method = _opt_str(auth_map.get("method"))
+    api_key_env = _opt_str(agent_raw.get("api_key_env"))
+    if legacy_method is None:
+        if provider == "github-copilot":
+            legacy_method = "device-login"
+        elif api_key_env:
+            legacy_method = "api_key"
+        else:
+            legacy_method = "none"
+    method = _LEGACY_AUTH_METHODS.get(legacy_method, legacy_method)
+    settings: dict[str, object] = {}
+    if method == "environment" and api_key_env:
+        settings["key"] = api_key_env
+    return AgentAuthConfig(method=method, settings=settings)
+
+
+def _legacy_options(
+    agent_raw: dict[str, Any], provider: str, warnings: list[str]
+) -> dict[str, object]:
+    """Options carried into the migrated profile.
+
+    Only `provider: ollama` had a legacy tuning block, so only `ollama`
+    reads `agent.ollama.*`. Copying those keys into, say, an `openai`
+    profile would invent settings the operator never wrote and that the
+    adapter would then have to ignore.
+
+    Migrated `ollama` profiles also get `native_api: True`. The legacy
+    transport was `OllamaProvider`'s `/api/chat` route, which returns
+    per-tool-call reasoning the OpenAI dialect cannot carry (Task 17). A
+    *new* `ollama:` profile defaults to the shared route; an *existing*
+    install keeps the transport it was already running, because a
+    migration that silently changes the wire protocol is not "read
+    without changes".
+
+    Values are copied verbatim with one exception: the numeric knobs are
+    coerced (`num_ctx`, `seed`, `temperature`) or strictly validated
+    (`num_predict`), because the pre-profile parser did that and Task 17
+    deletes it along with the scalars. Anything that will not coerce is
+    **dropped with a warning** rather than replaced by an invented
+    default — the default the old parser substituted is `OllamaOptions`'
+    own field default, which a migrated profile still reaches through
+    `native_api: True`, so dropping restores exactly the old effective
+    value while also telling the operator which line to fix.
+    """
+    options: dict[str, object] = {}
+    if provider == "ollama":
+        ollama_value = agent_raw.get("ollama")
+        ollama_raw: dict[str, Any] = ollama_value if isinstance(ollama_value, dict) else {}
+        options.update(_legacy_ollama_options(ollama_raw, warnings))
+        options["native_api"] = True
+    extra = agent_raw.get("options")
+    if isinstance(extra, dict):
+        options.update(extra)
+    return options
+
+
+def _legacy_ollama_options(ollama_raw: dict[str, Any], warnings: list[str]) -> dict[str, object]:
+    """The `agent.ollama.*` block as profile options. See `_legacy_options`."""
+    options: dict[str, object] = {}
+    for key in _LEGACY_OLLAMA_KEYS:
+        if key not in ollama_raw:
+            continue
+        value = ollama_raw[key]
+        if key in _LEGACY_OLLAMA_STRICT_INT_KEYS:
+            # `bool` is an `int` subclass, so YAML `true` must not pass here.
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                warnings.append(
+                    f"agent.ollama.{key}: must be a positive integer — the value was dropped"
+                )
+                continue
+            options[key] = value
+            continue
+        cast_to = _LEGACY_OLLAMA_NUMERIC_KEYS.get(key)
+        if cast_to is None:
+            options[key] = value
+            continue
+        coerced = _legacy_ollama_number(key, value, cast_to, warnings)
+        if coerced is not None:
+            options[key] = coerced
+    return options
+
+
+def _legacy_ollama_number(
+    key: str, value: object, cast_to: type[int] | type[float], warnings: list[str]
+) -> int | float | None:
+    """One permissive numeric knob, coerced the way the old parser was.
+
+    Returns `None` for "drop it" — the caller tests `is not None` rather
+    than truthiness, because `seed: 0` and `temperature: 0.0` are both
+    valid values that a truthiness test would silently discard.
+    """
+    # `bool` is an `int` subclass, so YAML `true` would coerce to 1.
+    if isinstance(value, bool) or not isinstance(value, int | float | str):
+        warnings.append(f"agent.ollama.{key}: must be a number — the value was dropped")
+        return None
+    try:
+        coerced = cast_to(value)
+    except (TypeError, ValueError, OverflowError):
+        # `.inf` reaches `int()` as OverflowError, `.nan` as ValueError.
+        warnings.append(f"agent.ollama.{key}: must be a number — the value was dropped")
+        return None
+    if isinstance(coerced, float) and not isfinite(coerced):
+        # `.inf`/`.nan` survive `float()`, and the bounded validator
+        # refuses them — which would reject the whole migrated profile
+        # over one tuning knob the old parser quietly replaced.
+        warnings.append(f"agent.ollama.{key}: must be finite — the value was dropped")
+        return None
+    return coerced
+
+
+def _migrate_azure_endpoint(base_url: str) -> tuple[str, str | None, str | None]:
+    """Reduce a legacy Azure `base_url` to the resource URL it was built from.
+
+    The legacy transport posted to `f"{base_url}/chat/completions"`, so a
+    working legacy value was already deployment- or version-scoped —
+    `https://x.openai.azure.com/openai/deployments/<name>` or
+    `https://x.openai.azure.com/openai/v1`. `AzureProvider` takes the
+    *resource* URL and builds the `/openai/...` path itself; given the old
+    value it appends rather than replaces, producing
+    `.../openai/deployments/<name>/openai/chat/completions` or
+    `.../openai/v1/openai/deployments/<model>/chat/completions`. Both 404.
+
+    Everything from the first `/openai` segment onward is therefore
+    dropped, and any deployment name it encoded is returned so the caller
+    can preserve it rather than lose it.
+
+    Returns:
+        The resource URL, the deployment name the old URL encoded (or
+        None), and a warning naming both the old and the new value (or
+        None when nothing was rewritten).
+    """
+    split = urlsplit(base_url)
+    segments = [segment for segment in split.path.split("/") if segment]
+    resource = urlunsplit((split.scheme, split.netloc, "", "", ""))
+    if "openai" not in segments:
+        if not segments and not split.query and not split.fragment:
+            return resource, None, None
+        # A path korvid does not recognise: leave the value alone rather
+        # than guess. The adapter will surface the failure with the real
+        # URL in it, which is more useful than a silent rewrite.
+        return base_url, None, None
+    tail = segments[segments.index("openai") + 1 :]
+    deployment = tail[1] if len(tail) >= 2 and tail[0] == "deployments" else None
+    warning = (
+        f"agent.base_url {base_url!r} was rewritten to {resource!r} for the azure "
+        "adapter, which builds the /openai/deployments path itself"
+    )
+    if deployment is not None:
+        warning += f"; the deployment name {deployment!r} was kept as options.azure_deployment"
+    return resource, deployment, warning
+
+
+def _migrate_legacy_agent(agent_raw: dict[str, Any], warnings: list[str]) -> AgentProfilesConfig:
+    """Normalize a legacy `agent.provider` config into one `default` profile."""
+    provider_raw = agent_raw.get("provider")
+    if not isinstance(provider_raw, str) or not provider_raw.strip():
+        return AgentProfilesConfig()
+    provider = _canonicalize_provider_name(provider_raw)
+    model = _opt_str(agent_raw.get("model"))
+    if model is None:
+        warnings.append("agent.provider is set but agent.model is missing; the agent is disabled")
+        return AgentProfilesConfig()
+    endpoint = _opt_str(agent_raw.get("base_url"))
+    options = _legacy_options(agent_raw, provider, warnings)
+    if provider == "azure" and endpoint is not None:
+        endpoint, deployment, endpoint_warning = _migrate_azure_endpoint(endpoint)
+        if deployment is not None:
+            options.setdefault("azure_deployment", deployment)
+        if endpoint_warning is not None:
+            warnings.append(endpoint_warning)
+    profile = AgentProfileConfig(
+        model=_legacy_model_reference(provider, model),
+        endpoint=endpoint,
+        auth=_legacy_auth(agent_raw, provider),
+        options=options,
+    )
+    if provider in _LEGACY_REVIEW_NAMES:
+        # The credential *reference* survives, but where Entra was implicit
+        # the method is now spelled out. Saying so beats a silent 401.
+        warnings.append(
+            f"agent.provider {provider!r} migrated to an {provider} profile; "
+            "check auth.method (provider-default for Entra ID) in :ai"
+        )
+    enabled = agent_raw.get("enabled", True) is not False
+    return AgentProfilesConfig(
+        active=LEGACY_PROFILE_NAME if enabled else None,
+        profiles={LEGACY_PROFILE_NAME: profile},
+    )
+
+
+def _resolve_agent_profiles(agent_raw: dict[str, Any], warnings: list[str]) -> AgentProfilesConfig:
+    """Route agent config to new-shape parser or legacy migration."""
+    if "profiles" in agent_raw:
+        if "provider" in agent_raw:
+            warnings.append(
+                "agent.profiles is present; the legacy agent.provider fields were ignored"
+            )
+        return _parse_agent_profiles(agent_raw, warnings)
+    return _migrate_legacy_agent(agent_raw, warnings)
 
 
 def _parse_agent_option_mapping(
