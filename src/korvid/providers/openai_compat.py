@@ -208,7 +208,7 @@ def _process_sse_line(
     if payload_str == "[DONE]":
         return True, last_usage, None
 
-    chunk: dict[str, Any] = json.loads(payload_str)
+    chunk = _load_sse_chunk(payload_str)
 
     # Capture top-level usage (sent in the final chunk by many providers)
     raw_usage = chunk.get("usage")
@@ -216,3 +216,12 @@ def _process_sse_line(
         last_usage = raw_usage
 
     return False, last_usage, _chunk_text(chunk, tool_acc)
+
+
+def _load_sse_chunk(payload_str: str) -> dict[str, Any]:
+    """Parse one JSON-bearing SSE payload into a typed provider error."""
+    try:
+        chunk: dict[str, Any] = json.loads(payload_str)
+        return chunk
+    except json.JSONDecodeError as exc:
+        raise ProviderError("OpenAI-compatible stream yielded invalid JSON payload") from exc

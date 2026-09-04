@@ -339,6 +339,16 @@ async def test_stream_requires_done_true_terminal_chunk() -> None:
         await _events(_provider(body))
 
 
+async def test_mid_json_ndjson_chunk_raises_typed_provider_error() -> None:
+    body = '{"message":{"role":"assistant","content":"unterminated'
+
+    seen: list[dict[str, Any]] = []
+    with pytest.raises(ProviderError, match="Ollama stream yielded invalid JSON payload"):
+        await _drain(_provider(body), seen)
+
+    assert seen == [{"type": REQUEST_SENT}]
+
+
 async def test_post_terminal_data_is_not_emitted_or_remembered() -> None:
     body = _ndjson(
         _done(prompt_eval_count=12, eval_count=7),
@@ -360,6 +370,32 @@ async def test_post_terminal_data_is_not_emitted_or_remembered() -> None:
 
     assert {"type": "text_delta", "text": "ignored"} not in events
     assert not [event for event in events if event.get("type") == "tool_call"]
+    assert provider._thinking_by_call_id == {}
+
+
+async def test_terminal_chunk_discards_message_content_and_tool_calls() -> None:
+    body = _ndjson(
+        {
+            "message": {
+                "role": "assistant",
+                "content": "tail",
+                "thinking": "hidden",
+                "tool_calls": [
+                    {"id": "late-call", "function": {"name": "get_logs", "arguments": {}}}
+                ],
+            },
+            "done": True,
+            "prompt_eval_count": 12,
+            "eval_count": 7,
+        }
+    )
+    provider = _provider(body, options=OllamaOptions(think=True))
+
+    events = await _events(provider)
+
+    assert {"type": "text_delta", "text": "tail"} not in events
+    assert not [event for event in events if event.get("type") == "tool_call"]
+    assert {"type": "usage", "input_tokens": 12, "output_tokens": 7} in events
     assert provider._thinking_by_call_id == {}
 
 

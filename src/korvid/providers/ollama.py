@@ -211,7 +211,7 @@ class OllamaProvider(LLMProvider):
             async for line in resp.aiter_lines():
                 if not line.strip():
                     continue
-                chunk: dict[str, Any] = json.loads(line)
+                chunk = _load_ndjson_chunk(line)
                 # Ollama can report a failure mid-stream with HTTP 200: an
                 # {"error": ...} object after generation has started. Treat
                 # it as a hard failure instead of a truncated "success".
@@ -261,6 +261,9 @@ class OllamaProvider(LLMProvider):
                 max_bytes=MAX_TOOL_ARGUMENTS_BYTES,
                 label="tool call arguments",
             )
+            # Ollama hands us one parsed arguments object, so this cap rejects
+            # oversized serialized output after JSON parsing rather than
+            # bounding fragment accumulation like the OpenAI stream does.
             serialized_arguments.append(
                 json.dumps(arguments if isinstance(arguments, dict) else {})
             )
@@ -343,6 +346,15 @@ class OllamaProvider(LLMProvider):
                 new_message["thinking"] = thinking
             converted.append(new_message)
         return converted
+
+
+def _load_ndjson_chunk(line: str) -> dict[str, Any]:
+    """Parse one NDJSON chunk into a typed provider error."""
+    try:
+        chunk: dict[str, Any] = json.loads(line)
+        return chunk
+    except json.JSONDecodeError as exc:
+        raise ProviderError("Ollama stream yielded invalid JSON payload") from exc
 
 
 def _usage_from_chunk(chunk: dict[str, Any]) -> dict[str, int] | None:

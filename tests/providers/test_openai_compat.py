@@ -114,6 +114,18 @@ async def test_missing_done_marker_raises_provider_error() -> None:
         _ = [event async for event in _provider(body).complete([], [])]
 
 
+async def test_mid_json_sse_payload_raises_typed_provider_error() -> None:
+    body = 'data: {"choices":[{"delta":{"content":"unterminated'
+
+    seen: list[dict[str, Any]] = []
+    with pytest.raises(
+        ProviderError, match="OpenAI-compatible stream yielded invalid JSON payload"
+    ):
+        await _drain(_provider(body), seen)
+
+    assert seen == [{"type": REQUEST_SENT}]
+
+
 async def test_data_after_done_is_ignored() -> None:
     body = _sse({"choices": [{"delta": {"content": "ok"}}]})
     body += 'data: {"choices":[{"delta":{"content":"ignored"}}]}\n\n'
