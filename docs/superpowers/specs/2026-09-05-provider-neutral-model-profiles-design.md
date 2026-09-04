@@ -402,20 +402,21 @@ Proposed extras:
 agent = [
   "httpx>=0.27",
   "keyring>=25.7.0",
-  "pydantic-ai-slim>=2.39,<3",
+  "pydantic-ai-slim>=2.35.3,<3",
 ]
-provider-openai = ["pydantic-ai-slim[openai]>=2.39,<3"]
-provider-anthropic = ["pydantic-ai-slim[anthropic]>=2.39,<3"]
-provider-google = ["pydantic-ai-slim[google]>=2.39,<3"]
-provider-bedrock = ["pydantic-ai-slim[bedrock]>=2.39,<3"]
+provider-openai = ["pydantic-ai-slim[openai]>=2.35.3,<3"]
+provider-anthropic = ["pydantic-ai-slim[anthropic]>=2.35.3,<3"]
+provider-google = ["pydantic-ai-slim[google]>=2.35.3,<3"]
+provider-bedrock = ["pydantic-ai-slim[bedrock]>=2.35.3,<3"]
 ```
 
-The floor is the current production/stable Pydantic AI release evaluated by
-this design. The `<3` cap protects the model/stream adapter boundary from an
-unreviewed major-version contract change. Compatibility is verified against
-Python 3.11, 3.12, and 3.13 before the dependency commit is accepted.
+The floor is the newest Pydantic AI release available from the configured
+corporate package proxy and directly inspected by this design. The `<3` cap
+protects the model/stream adapter boundary from an unreviewed major-version
+contract change. Compatibility is verified against Python 3.11, 3.12, and 3.13
+before the dependency commit is accepted.
 
-Pydantic AI 2.39 uses `httpx2` for clients it owns while temporarily accepting
+Pydantic AI 2.35.3 uses `httpx2` for clients it owns while temporarily accepting
 legacy `httpx.AsyncClient`. `httpx2` is a separate import/package and can
 coexist with korvid's existing `httpx` connectors. The new model adapter uses
 provider-owned `httpx2` clients rather than passing korvid's legacy client,
@@ -525,8 +526,12 @@ The existing provider transports remain temporarily behind the catalog.
 
 - Remove old provider scalar compatibility accessors.
 - Remove duplicate built-in registries and aliases.
-- Remove replaced OpenAI-compatible/Ollama transports and configurator request
-  paths.
+- Remove replaced OpenAI-compatible transports and configurator request paths.
+- Keep a provider-layer-only native Ollama extension until the standard
+  Pydantic transport proves parity for every shipped tuning option and
+  `thinking` tool-call round-trip. It must be selected through the common
+  catalog/profile contract and must not leak Ollama identifiers into UI,
+  core, or the composition root.
 - Remove provider-specific core config fields.
 - Remove obsolete extras and tests.
 - Update operator docs and release migration notes.
@@ -575,6 +580,8 @@ merges the single final PR; automation never merges.
 - provider errors do not become successful completion
 - canonical outbound snapshot equivalence
 - no instrumentation/callback leakage
+- native Ollama option and `thinking` parity before its legacy transport is
+  eligible for deletion
 
 ### Import/dependency contracts
 
