@@ -125,7 +125,9 @@ async def test_probe_raises_on_cumulative_utf8_overflow(
     monkeypatch.setattr("korvid.providers.configurator.MAX_PROBE_TEXT_BYTES", 3)
     cfg = ProviderConfigurator(_store(tmp_path), persist=lambda s: None)
 
-    with pytest.raises(ProviderError, match="provider connection test response exceeds 3 UTF-8 bytes"):
+    with pytest.raises(
+        ProviderError, match="provider connection test response exceeds 3 UTF-8 bytes"
+    ):
         await cfg.test(_SETTINGS)
 
     assert provider.closed
