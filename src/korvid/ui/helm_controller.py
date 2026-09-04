@@ -792,6 +792,13 @@ class HelmController:
         )
         if identity is None:
             return
+        history_identity = self.latest_revision_identity(namespace, row.release)
+        if history_identity is None or history_identity != identity:
+            self._ui.notify(
+                "Helm rollback cancelled - release history changed; refresh and retry",
+                severity="warning",
+            )
+            return
         await self.rollback(helm, row, ns, name, namespace, epoch, identity)
 
     def uninstall_selected(self) -> None:
@@ -1032,6 +1039,24 @@ class HelmController:
             ):
                 return obj
         return None
+
+    def latest_revision_identity(
+        self,
+        namespace: str,
+        release: str,
+    ) -> HelmReleaseIdentity | None:
+        latest: HelmRevisionSummary | None = None
+        for obj in self._view.resources("helmrevisions", self._view.current_scope()):
+            if (
+                isinstance(obj, HelmRevisionSummary)
+                and obj.namespace == namespace
+                and obj.release == release
+                and (latest is None or obj.revision > latest.revision)
+            ):
+                latest = obj
+        if latest is None or not latest.uid or latest.revision <= 0:
+            return None
+        return HelmReleaseIdentity(latest.uid, latest.revision)
 
     def revision_row(self, ns: str | None, name: str) -> HelmRevisionSummary | None:
         for obj in self._view.resources("helmrevisions", self._view.current_scope()):

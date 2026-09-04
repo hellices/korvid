@@ -913,6 +913,8 @@ class KubeClient(ReadOps, WriteOps):
         name_revision = release_revision_from_secret_name(secret, name)
         if name_revision < 1:
             return None
+        if any(self._helm_revision(item) > name_revision for item in items):
+            return None
         identity = release_identity_from_secret(secret)
         return identity
 

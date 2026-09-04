@@ -60,6 +60,7 @@ from pathlib import Path
 from textual.css.query import NoMatches
 
 from korvid.k8s.drain import DrainPlan
+from korvid.k8s.helm import HelmReleaseIdentity
 from korvid.ui.widgets.confirm_screen import ConfirmScreen, ReplicasPrompt
 from korvid.ui.widgets.operator_install import OperatorInstallPrompt
 from korvid.ui.widgets.resize_prompt import ResizePrompt
@@ -201,7 +202,15 @@ async def test_resize_declined_at_confirm_makes_no_call(tmp_path: Path) -> None:
 async def test_helm_rollback_declined_makes_no_call(tmp_path: Path) -> None:
     helm = FakeHelm()
     audit_path = tmp_path / "audit.jsonl"
-    app = make_helm_app(helm=helm, audit_path=audit_path)
+
+    async def current_identity(_namespace: str, _name: str) -> HelmReleaseIdentity:
+        return HelmReleaseIdentity("secret-uid-web-2", 2)
+
+    app = make_helm_app(
+        helm=helm,
+        audit_path=audit_path,
+        get_helm_release_identity=current_identity,
+    )
     async with app.run_test() as pilot:
         await _helm_navigate(pilot, "helmrevisions", "helmrevisions")
         await _rows_listed(pilot, app, 1)

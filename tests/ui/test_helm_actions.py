@@ -1036,6 +1036,32 @@ async def test_upgrade_rejects_reinstalled_release_after_approval(tmp_path: Path
     assert _audit_entries(audit_path) == []
 
 
+async def test_upgrade_rejects_concurrent_revision_bump_after_approval(
+    tmp_path: Path,
+) -> None:
+    helm = FakeHelm()
+
+    async def current_identity(_namespace: str, _name: str) -> HelmReleaseIdentity:
+        return HelmReleaseIdentity("secret-uid-web-3", 4)
+
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app(
+        helm=helm,
+        audit_path=audit_path,
+        get_helm_release_identity=current_identity,
+    )
+    async with app.run_test() as pilot:
+        await _approve_upgrade(pilot, app)
+        await until(
+            pilot,
+            lambda: any("changed since it was approved" in n.message for n in app._notifications),
+            label="revision bump blocked",
+        )
+
+    assert not any(call[0] == "upgrade" for call in helm.calls)
+    assert _audit_entries(audit_path) == []
+
+
 async def test_upgrade_preview_prefers_diff_plugin(tmp_path: Path) -> None:
     helm = FakeHelm()
     helm.diff_plugin = True
@@ -1063,7 +1089,7 @@ async def test_rollback_key_on_revision_confirms_and_executes(tmp_path: Path) ->
 
     async def current_identity(namespace: str, name: str) -> HelmReleaseIdentity:
         identity_calls.append((namespace, name))
-        return HelmReleaseIdentity("secret-uid-web-3", 3)
+        return HelmReleaseIdentity("secret-uid-web-2", 2)
 
     app = make_app(
         helm=helm,
@@ -1122,6 +1148,36 @@ async def test_direct_rollback_blocks_when_identity_cannot_be_captured(
             pilot,
             lambda: any(message in n.message for n in app._notifications),
             label="identity capture blocked",
+        )
+        assert len(app.screen_stack) == 1
+
+    assert ("rollback", "web", 2, "default") not in helm.calls
+    assert _audit_entries(audit_path) == []
+
+
+async def test_direct_rollback_rejects_identity_not_in_loaded_history(tmp_path: Path) -> None:
+    helm = FakeHelm()
+
+    async def replacement_identity(
+        _namespace: str,
+        _name: str,
+    ) -> HelmReleaseIdentity:
+        return HelmReleaseIdentity("replacement-secret-uid", 3)
+
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app(
+        helm=helm,
+        audit_path=audit_path,
+        get_helm_release_identity=replacement_identity,
+    )
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "helmrevisions", "helmrevisions")
+        await _rows_listed(pilot, app, 1)
+        await pilot.press("r")
+        await until(
+            pilot,
+            lambda: any("history changed" in n.message for n in app._notifications),
+            label="stale history blocked",
         )
         assert len(app.screen_stack) == 1
 
