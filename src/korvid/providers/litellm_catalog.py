@@ -176,8 +176,9 @@ class LiteLLMModelCatalog(ModelCatalog):
             fully functional.
         enrichment: An optional metadata source (Task 7). `None` means
             "offline only", which is the air-gapped default.
-        discovery: The bounded endpoint prober. Injected so the catalog
-            stays testable without a network. Task 8 fills this in.
+        discovery: The bounded endpoint prober (Task 8). Injected so the
+            catalog stays testable without a network; `None` means this
+            installation cannot list an endpoint's models.
         tester: Probes one profile and returns what to show the operator.
             Injected because the catalog is a data index — it holds no
             client, no credential and no transport of its own. `None`
@@ -478,13 +479,14 @@ class LiteLLMModelCatalog(ModelCatalog):
     async def begin_auth(self, profile: ModelConnectionConfig) -> None:
         """Begin a device-login flow for this profile.
 
-        Stub — Task 8 fills this in.
+        Stub — Task 17 implements the two special flows. Task 8 built the
+        registry they dispatch through, not the flows themselves.
         """
-        return None  # pragma: no cover - Task 8 fills this in
+        return None  # pragma: no cover - Task 17 implements the flows
 
     async def finish_auth(self, profile: ModelConnectionConfig) -> None:
         """Complete a device-login flow for this profile.
 
-        Stub — Task 8 fills this in.
+        Stub — Task 17 implements the two special flows.
         """
-        return None  # pragma: no cover - Task 8 fills this in
+        return None  # pragma: no cover - Task 17 implements the flows

@@ -292,7 +292,9 @@ class ModelConnectionsConfig:
     in the runtime reads it: it is not consulted by `active_profile`, by
     the wizard's list, by `:model`, or by any provider construction. Its
     only consumer is `save_model_connections` (Task 3), which writes those
-    values back verbatim so saving one profile cannot delete another the
+    values back verbatim — and *in preference to* the modelled profile of
+    the same name, because that pairing means the raw text holds the block
+    korvid emptied — so saving one profile cannot delete another the
     operator still has to repair. The values are the objects `yaml.safe_load`
     already built for this same file, held opaquely and never interpreted,
     so retaining them costs nothing the loader had not already allocated.
@@ -968,6 +970,12 @@ def _profile_to_raw(profile: ModelConnectionConfig) -> dict[str, Any]:
     return entry
 
 
+#: "no raw entry for this name". A distinct object rather than `None`,
+#: because `None` is a real raw entry: the file key `broken:` with no
+#: value parses to it, and it must still be written back verbatim.
+_NO_UNPARSED_ENTRY: Final = object()
+
+
 def _tier_to_write(model_tier: ModelTierWrite) -> str | None:
     """Validate a tier bound for disk, in the vocabulary `load_config` reads.
 
@@ -995,6 +1003,14 @@ def save_model_connections(
     `LEGACY_AGENT_KEYS` are removed, and only after the new shape is in
     place.
 
+    A name in `unparsed` is written from `unparsed`, even when a modelled
+    profile of the same name exists — that pairing means the entry parsed
+    only *partly* (a rejected `auth` or `options` block), and the raw text
+    is the sole surviving copy of the block the operator has to repair.
+    The two ways out are both explicit and both handled: dropping the name
+    from *both* halves deletes it, and dropping it from `unparsed` alone
+    lets the repaired profile be serialized over it.
+
     Args:
         path: The config file to rewrite.
         profiles: The profile set to persist.
@@ -1010,9 +1026,19 @@ def save_model_connections(
         raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     agent_value = raw.get("agent")
     agent: dict[str, Any] = dict(agent_value) if isinstance(agent_value, dict) else {}
-    written: dict[str, Any] = {
-        name: _profile_to_raw(profile) for name, profile in profiles.profiles.items()
-    }
+    written: dict[str, Any] = {}
+    for name, profile in profiles.profiles.items():
+        # The raw half outranks the modelled one. A profile whose `auth`
+        # or `options` was rejected lives in *both*: `profiles` holds the
+        # remains with the offending block emptied, `unparsed` holds what
+        # the operator wrote. Serializing the remains over the raw entry
+        # would delete exactly the block that has to be repaired.
+        raw_entry = profiles.unparsed.get(name, _NO_UNPARSED_ENTRY)
+        written[name] = (
+            _profile_to_raw(profile)
+            if raw_entry is _NO_UNPARSED_ENTRY
+            else _thaw_config_value(raw_entry)
+        )
     for name, entry in profiles.unparsed.items():
         if name not in written:
             written[name] = _thaw_config_value(entry)

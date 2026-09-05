@@ -341,6 +341,112 @@ async def test_a_cancelled_manager_changes_nothing(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# The global capability tier, chosen from the manager
+# ---------------------------------------------------------------------------
+
+
+def _hand_back(env: Env, result: ProfileManagerResult) -> None:
+    _screen, callback = env.ui.screens[-1]
+    assert callback is not None
+    callback(result)
+
+
+async def test_the_manager_opens_on_the_persisted_tier(tmp_path: Path) -> None:
+    """The screen renders the controller's tier, not a default of its own."""
+    profiles = _profiles()
+    env = _env(tmp_path, profiles=profiles, config=_config(profiles, agent_model_tier="high"))
+    env.controller.handle_command([])
+    screen, _callback = env.ui.screens[-1]
+    assert isinstance(screen, ProfileManagerScreen)
+
+    assert screen._current_tier == "high"
+
+
+async def test_a_tier_choice_persists_the_tier_with_the_unchanged_profiles(
+    tmp_path: Path,
+) -> None:
+    """One write, and the profiles in it are the set already on disk.
+
+    The tier and the profiles share a writer precisely so they cannot
+    disagree; sending a *different* profile set here would smuggle an
+    unrelated profile edit into a tier decision.
+    """
+    saver = _Saver()
+    profiles = _profiles()
+    env = _env(tmp_path, profiles=profiles, saver=saver)
+    env.controller.handle_command([])
+    _hand_back(env, ProfileManagerResult(tier_changed=True, model_tier="low"))
+
+    assert saver.tiers == ["low"]
+    assert saver.calls[-1] == profiles
+    assert env.controller.configured_model_tier == "low"
+    assert env.controller.active_profile == "default"
+
+
+async def test_choosing_automatic_clears_the_configured_tier(tmp_path: Path) -> None:
+    """`None` here is Automatic, and `tier_changed` is what says so — the
+    write must clear the override rather than leave the old one."""
+    saver = _Saver()
+    profiles = _profiles()
+    env = _env(
+        tmp_path,
+        profiles=profiles,
+        saver=saver,
+        config=_config(profiles, agent_model_tier="high"),
+    )
+    env.controller.handle_command([])
+    _hand_back(env, ProfileManagerResult(tier_changed=True, model_tier=None))
+
+    assert saver.tiers == [None]
+    assert env.controller.configured_model_tier is None
+
+
+async def test_a_manager_result_without_a_tier_change_never_writes_one(
+    tmp_path: Path,
+) -> None:
+    """Every other result must keep `KEEP_MODEL_TIER`: an edit or a switch
+    that wrote a tier would overwrite the operator's override with the
+    controller's copy of it."""
+    saver = _Saver()
+    env = _env(tmp_path, rebuild=_rebuilding(FakeSession()), saver=saver)
+    env.controller.handle_command([])
+    _hand_back(env, ProfileManagerResult(activated="staging"))
+    _hand_back(env, ProfileManagerResult(edited=_profiles(active="default")))
+
+    assert saver.tiers == [KEEP_MODEL_TIER, KEEP_MODEL_TIER]
+
+
+async def test_a_failed_tier_save_leaves_the_configured_tier_alone(tmp_path: Path) -> None:
+    """The tier is adopted from what reached the disk. Adopting it anyway
+    would report a tier the next start does not have."""
+    profiles = _profiles()
+    env = _env(
+        tmp_path,
+        profiles=profiles,
+        saver=_Saver(error=OSError("read-only")),
+        config=_config(profiles, agent_model_tier="high"),
+    )
+    env.controller.handle_command([])
+    _hand_back(env, ProfileManagerResult(tier_changed=True, model_tier="low"))
+
+    assert env.controller.configured_model_tier == "high"
+    assert "revert" in env.ui.notifications[-1][0]
+
+
+async def test_a_tier_choice_does_not_rebuild_the_session(tmp_path: Path) -> None:
+    """A tier is configuration, not a connection: changing it must not
+    tear down a working provider, and must say when it takes effect."""
+    rebuild = _rebuilding(FakeSession())
+    env = _env(tmp_path, rebuild=rebuild, session=FakeSession())
+    env.controller.handle_command([])
+    _hand_back(env, ProfileManagerResult(tier_changed=True, model_tier="high"))
+
+    assert rebuild.built == []
+    message = env.ui.notifications[-1][0]
+    assert "high" in message
+
+
+# ---------------------------------------------------------------------------
 # What profiles do *not* replace
 # ---------------------------------------------------------------------------
 

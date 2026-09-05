@@ -27,15 +27,24 @@ from korvid.core.config import ModelConnectionConfig, ModelConnectionsConfig
 
 @dataclass(frozen=True, slots=True)
 class ProfileManagerResult:
-    """What the manager hands back. Exactly one field is set.
+    """What the manager hands back. Exactly one decision is carried.
 
     `activated` names a profile to switch to. `edited` carries a whole
     replacement profile set to persist. Splitting them keeps "switch"
     from silently rewriting a profile the operator did not touch.
+
+    `tier_changed` carries the third, profile-free decision: the global
+    capability tier. It is a separate flag because `model_tier` alone
+    cannot express it — Automatic *is* `None`, so a reader that treated
+    `None` as "not answered" could never clear an override.
     """
 
     activated: str | None = None
     edited: ModelConnectionsConfig | None = None
+    #: True when the operator chose a tier. `model_tier` is meaningful
+    #: only then; `None` beside it is Automatic, not "unanswered".
+    tier_changed: bool = False
+    model_tier: str | None = None
 
 
 async def _never(
@@ -46,6 +55,21 @@ async def _never(
 
 _ACTIVE_MARKER = " (active)"
 _INVALID_MARKER = " (invalid)"
+
+#: The global capability tier, as the operator picks it. `automatic` is
+#: the id for "no override" — the vocabulary on disk is `low`/`high`/absent.
+_TIER_CHOICES: tuple[tuple[str, str], ...] = (
+    ("automatic", "Automatic"),
+    ("low", "Low"),
+    ("high", "High"),
+)
+
+#: Prefix distinguishing a tier option id from a profile row id.
+_TIER_OPTION_PREFIX = "pm-tier-"
+
+#: What the heading says in each of the screen's two modes.
+_LIST_TITLE = "Model profiles"
+_TIER_TITLE = "Capability tier (applies to every profile)"
 
 
 def _is_unparsed_name(name: str, profiles: ModelConnectionsConfig) -> bool:
@@ -99,6 +123,9 @@ class ProfileManagerScreen(ModalScreen["ProfileManagerResult | None"]):
         open_editor: Pushes the model-search/edit flow for a profile,
             returning the edited profile or None. Injected so this screen
             is testable without the whole wizard.
+        current_tier: The persisted `agent.model_tier` (`None` is
+            Automatic). Injected because it is not a profile field: the
+            screen renders the operator's saved answer, never a guess.
     """
 
     BINDINGS: ClassVar[list[Binding | tuple[str, str] | tuple[str, str, str]]] = [
@@ -107,6 +134,7 @@ class ProfileManagerScreen(ModalScreen["ProfileManagerResult | None"]):
         Binding("a", "add", "Add"),
         Binding("e", "edit", "Edit"),
         Binding("d", "delete", "Delete"),
+        Binding("t", "tier", "Tier"),
     ]
 
     DEFAULT_CSS = """
@@ -129,6 +157,10 @@ class ProfileManagerScreen(ModalScreen["ProfileManagerResult | None"]):
         height: auto;
         max-height: 16;
     }
+    ProfileManagerScreen #tier-list {
+        height: auto;
+        max-height: 16;
+    }
     ProfileManagerScreen #profile-status {
         color: $warning;
         padding-top: 1;
@@ -147,6 +179,7 @@ class ProfileManagerScreen(ModalScreen["ProfileManagerResult | None"]):
             [ModelConnectionConfig | None], Awaitable[ModelConnectionConfig | None]
         ]
         | None = None,
+        current_tier: str | None = None,
     ) -> None:
         super().__init__()
         self._profiles = profiles
@@ -154,6 +187,11 @@ class ProfileManagerScreen(ModalScreen["ProfileManagerResult | None"]):
         self._open_editor: Callable[
             [ModelConnectionConfig | None], Awaitable[ModelConnectionConfig | None]
         ] = open_editor if open_editor is not None else _never
+        self._current_tier = current_tier
+        #: True while the tier chooser has the screen. The profile keys
+        #: are inert then: `d` must not reach a list the operator cannot
+        #: see, and `enter` belongs to the choice in front of them.
+        self._tier_open = False
 
     def _build_options(self) -> list[Option]:
         return [
@@ -161,14 +199,22 @@ class ProfileManagerScreen(ModalScreen["ProfileManagerResult | None"]):
             for name in _ordered_names(self._profiles)
         ]
 
+    def _build_tier_options(self) -> list[Option]:
+        return [
+            Option(label, id=f"{_TIER_OPTION_PREFIX}{tier_id}") for tier_id, label in _TIER_CHOICES
+        ]
+
     def compose(self) -> ComposeResult:
         with Vertical():
-            yield Static("Model profiles", classes="pm-title")
+            yield Static(_LIST_TITLE, classes="pm-title")
             with VerticalScroll():
                 yield OptionList(*self._build_options(), id="profile-list")
+                tier_list = OptionList(*self._build_tier_options(), id="tier-list")
+                tier_list.display = False
+                yield tier_list
             yield Static("", id="profile-status")
             yield Static(
-                "Enter=activate  a=add  e=edit  d=delete  Esc=close",
+                "Enter=activate  a=add  e=edit  d=delete  t=tier  Esc=close",
                 classes="pm-hint",
             )
 
@@ -211,6 +257,10 @@ class ProfileManagerScreen(ModalScreen["ProfileManagerResult | None"]):
         with contextlib.suppress(NoMatches):
             self.query_one("#profile-status", Static).update(msg)
 
+    def _set_title(self, msg: str) -> None:
+        with contextlib.suppress(NoMatches):
+            self.query_one(".pm-title", Static).update(msg)
+
     def _is_invalid_name(self, name: str) -> bool:
         """True when the profile is unparsed or carries a config_error."""
         if name in self._profiles.unparsed and name not in self._profiles.profiles:
@@ -219,9 +269,14 @@ class ProfileManagerScreen(ModalScreen["ProfileManagerResult | None"]):
         return profile is not None and profile.config_error is not None
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
-        """Enter key on OptionList triggers activation."""
+        """Enter on a list: a tier choice, or a profile activation."""
         event.stop()
         opt_id = event.option.id or ""
+        if opt_id.startswith(_TIER_OPTION_PREFIX):
+            self._choose_tier(opt_id[len(_TIER_OPTION_PREFIX) :])
+            return
+        if self._tier_open:
+            return
         name = opt_id[3:] if opt_id.startswith("pm-") else None
         if name is None:
             return
@@ -229,6 +284,8 @@ class ProfileManagerScreen(ModalScreen["ProfileManagerResult | None"]):
 
     def action_activate(self) -> None:
         """Activate the highlighted profile, refusing invalid ones."""
+        if self._tier_open:
+            return
         name = self._selected_name()
         if name is None:
             return
@@ -240,8 +297,54 @@ class ProfileManagerScreen(ModalScreen["ProfileManagerResult | None"]):
             return
         self.dismiss(ProfileManagerResult(activated=name))
 
+    def action_tier(self) -> None:
+        """Open the global capability-tier choice.
+
+        The tier is not a profile field — it is one routing override the
+        agent applies to whichever profile is active — so it is chosen
+        here rather than repeated in every profile's editor. The wizard
+        asks for it once, on a first run; afterwards this is the only
+        screen an operator reaches, and without this it is unreachable.
+        """
+        if self._tier_open:
+            return
+        try:
+            profile_list = self.query_one("#profile-list", OptionList)
+            tier_list = self.query_one("#tier-list", OptionList)
+        except NoMatches:  # pragma: no cover - composed together
+            return
+        self._tier_open = True
+        profile_list.display = False
+        tier_list.display = True
+        ids = [tier_id for tier_id, _ in _TIER_CHOICES]
+        tier_list.highlighted = ids.index(self._current_tier or "automatic")
+        tier_list.focus()
+        self._set_title(_TIER_TITLE)
+        self._set_status("Enter chooses, Esc goes back")
+
+    def _choose_tier(self, tier_id: str) -> None:
+        self.dismiss(
+            ProfileManagerResult(
+                tier_changed=True,
+                model_tier=None if tier_id == "automatic" else tier_id,
+            )
+        )
+
+    def _close_tier(self) -> None:
+        self._tier_open = False
+        with contextlib.suppress(NoMatches):
+            self.query_one("#tier-list", OptionList).display = False
+        with contextlib.suppress(NoMatches):
+            profile_list = self.query_one("#profile-list", OptionList)
+            profile_list.display = True
+            profile_list.focus()
+        self._set_title(_LIST_TITLE)
+        self._set_status("")
+
     def action_delete(self) -> None:
         """Remove the selected profile from both halves, clear active pointer if needed."""
+        if self._tier_open:
+            return
         name = self._selected_name()
         if name is None:
             return
@@ -257,6 +360,8 @@ class ProfileManagerScreen(ModalScreen["ProfileManagerResult | None"]):
 
     def action_edit(self) -> None:
         """Open the editor for the selected profile."""
+        if self._tier_open:
+            return
         name = self._selected_name()
         if name is None:
             return
@@ -281,12 +386,19 @@ class ProfileManagerScreen(ModalScreen["ProfileManagerResult | None"]):
         new_config = ModelConnectionsConfig(
             profiles=new_profiles,
             active=self._profiles.active,
-            unparsed=dict(self._profiles.unparsed),
+            # The raw entry retires with the repair. The writer prefers
+            # `unparsed` for a name that appears in both — that is what
+            # stops an unrelated save from deleting a block korvid could
+            # not model — so leaving it here would make the edit a no-op
+            # on disk and hand the operator back the text they just fixed.
+            unparsed={k: v for k, v in self._profiles.unparsed.items() if k != name},
         )
         self.dismiss(ProfileManagerResult(edited=new_config))
 
     def action_add(self) -> None:
         """Open the editor to create a new profile."""
+        if self._tier_open:
+            return
         self.run_worker(self._run_add(), exclusive=True)
 
     async def _run_add(self) -> None:
@@ -311,4 +423,8 @@ class ProfileManagerScreen(ModalScreen["ProfileManagerResult | None"]):
         self.dismiss(ProfileManagerResult(edited=new_config))
 
     def action_cancel(self) -> None:
+        """Esc backs out of the tier choice first, then the manager."""
+        if self._tier_open:
+            self._close_tier()
+            return
         self.dismiss(None)
