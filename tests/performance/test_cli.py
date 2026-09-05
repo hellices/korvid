@@ -506,6 +506,27 @@ def test_cli_rejects_unusable_scalar_options(
     assert calls == []
 
 
+def test_time_scale_zero_names_the_supported_fast_path(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert (
+        cli.main(
+            [
+                "replay",
+                "--profile",
+                str(profile_path(tmp_path)),
+                "--time-scale",
+                "0",
+            ]
+        )
+        == 1
+    )
+    error = capsys.readouterr().err
+    assert "no longer supported" in error
+    assert "duration_seconds" in error
+
+
 @pytest.mark.parametrize("drop", ["--json", "--out", "--cpu-profile", "--allocation-snapshot"])
 def test_cli_replay_live_requires_all_four_artifacts(
     tmp_path: Path,
