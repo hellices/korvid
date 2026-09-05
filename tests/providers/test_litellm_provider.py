@@ -28,7 +28,7 @@ from korvid.agent.model_policy import (
     ModelCapabilities,
     ModelDescriptor,
 )
-from korvid.agent.provider import REQUEST_SENT
+from korvid.agent.provider import REQUEST_SENT, OperatorSafeProviderError
 from korvid.providers import litellm_provider
 from korvid.providers.litellm_provider import LiteLLMProvider, ProviderRequestError
 from korvid.providers.litellm_request import RequestPlan, build_plan
@@ -203,6 +203,29 @@ async def _collect_into(provider: LiteLLMProvider, sink: list[dict[str, Any]]) -
     """Drain `complete` into `sink`, so a failure leaves what arrived first."""
     async for event in provider.complete(_MESSAGES, []):
         sink.append(event)
+
+
+async def _drain_litellm_logging() -> None:
+    """Run the success callback LiteLLM queued instead of awaiting it.
+
+    A successful *non-streaming* `acompletion` hands its logging callback
+    to LiteLLM's process-global logging worker rather than awaiting it,
+    and that worker binds its queue to the event loop that created it.
+    pytest gives each test its own loop, so the next non-streaming call
+    anywhere in the session finds a changed loop and drops the old queue —
+    queued coroutines and all. The dropped coroutine is then reported as
+    never awaited, as an *unraisable* exception charged to whichever test
+    happened to be running when it was collected: a failure that belongs
+    to no test and moves with the random order.
+
+    Draining it inside the test that queued it keeps that bookkeeping
+    where it belongs. `clear_queue` is LiteLLM's own API for this and is
+    bounded in both iterations and time.
+    """
+    from litellm.litellm_core_utils.logging_worker import GLOBAL_LOGGING_WORKER
+
+    # The ignore below: `clear_queue` carries no return annotation upstream.
+    await GLOBAL_LOGGING_WORKER.clear_queue()  # type: ignore[no-untyped-call]
 
 
 def _returning(value: Any) -> Callable[..., Any]:
@@ -557,6 +580,142 @@ async def test_a_stream_with_no_usage_chunk_reports_none_rather_than_zero() -> N
     assert [e for e in events if e["type"] == "usage"] == []
 
 
+@pytest.mark.filterwarnings("ignore:Accessing the 'model_")
+async def test_litellm_synthesizes_usage_the_provider_never_sent() -> None:
+    """The measurement the provenance rule rests on, pinned.
+
+    Every production plan sends `stream_options.include_usage` (Task 13
+    sets it unconditionally for a streaming call), and LiteLLM 1.98.0
+    answers that flag whether or not the provider did: when no frame
+    carried counts it appends a final chunk holding its *own* tokenizer
+    estimate, built by `stream_chunk_builder` from the text it saw.
+
+    Two facts are pinned here, because the whole usage rule is built on
+    them: the synthesized chunk exists, and it is **not** in the wrapper's
+    own record of what arrived — `chunks` holds the frames the provider
+    really sent, and `usage` is set on one of those only when the provider
+    set it. That recording is the provenance signal `complete` reads. If a
+    future litellm stops populating it, this test fails and the rule gets
+    revisited deliberately instead of silently reporting guesses.
+    """
+    wrapper = await acompletion(
+        model=_MODEL,
+        messages=_MESSAGES,
+        stream=True,
+        stream_options={"include_usage": True},
+        api_key=_SECRET,
+        client=_client(_streaming([_delta(content="hi"), _delta(content=" there")])),
+    )
+    yielded = [chunk async for chunk in wrapper]
+
+    synthesized = getattr(yielded[-1], "usage", None)
+    assert synthesized is not None
+    assert synthesized.prompt_tokens > 0
+    assert [getattr(chunk, "usage", None) for chunk in wrapper.chunks] == [None, None]
+
+
+@pytest.mark.filterwarnings("ignore:Accessing the 'model_")
+async def test_the_wrapper_records_the_usage_frame_the_provider_did_send() -> None:
+    """The other half of the measurement: when the provider *did* send
+    counts, they are on a frame the wrapper recorded in `chunks` — so the
+    signal distinguishes the two cases rather than merely detecting one."""
+    wrapper = await acompletion(
+        model=_MODEL,
+        messages=_MESSAGES,
+        stream=True,
+        stream_options={"include_usage": True},
+        api_key=_SECRET,
+        client=_client(
+            _streaming(
+                [
+                    _delta(content="hi"),
+                    _chunk(
+                        choices=[],
+                        usage={"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18},
+                    ),
+                ]
+            )
+        ),
+    )
+    async for _ in wrapper:
+        pass
+
+    recorded = [getattr(chunk, "usage", None) for chunk in wrapper.chunks]
+    reported = [usage for usage in recorded if usage is not None]
+    assert [(usage.prompt_tokens, usage.completion_tokens) for usage in reported] == [(11, 7)]
+
+
+@pytest.mark.filterwarnings("ignore:Accessing the 'model_")
+async def test_a_tokenizer_estimate_is_never_reported_as_provider_usage() -> None:
+    """A guess must not be committed as a measurement.
+
+    This is the production shape — the plan's own `include_usage`, a
+    provider that answers without a usage frame — and it is the shape the
+    earlier "no usage chunk" case missed by switching the flag off.
+    `conversation.commit_usage` marks the iteration *exactly counted*, so
+    passing LiteLLM's tokenizer estimate through would replace the honest
+    "estimated" flag on the round with numbers korvid invented.
+    """
+    events = await _events(_provider(_streaming([_delta(content="hi"), _delta(content=" there")])))
+    assert [e for e in events if e["type"] == "usage"] == []
+    assert {"type": "text_delta", "text": " there"} in events
+
+
+@pytest.mark.filterwarnings("ignore:Accessing the 'model_")
+async def test_usage_the_provider_sent_beside_its_choices_is_still_the_providers() -> None:
+    """Counts come from the frame the provider sent, not the tail chunk.
+
+    A provider that puts usage on its final *content* chunk (vLLM and
+    Groq-shaped streams do) is still reporting its own numbers, but
+    LiteLLM's synthesized tail chunk does not carry them through — it
+    reports a tokenizer estimate instead. Reading the recorded frame keeps
+    the provider's measurement, which is the half of this rule that must
+    not regress while the guess is being refused.
+    """
+    events = await _events(
+        _provider(
+            _streaming(
+                [
+                    _delta(content="hi"),
+                    _chunk(
+                        choices=[{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                        usage={"prompt_tokens": 33, "completion_tokens": 4, "total_tokens": 37},
+                    ),
+                ]
+            )
+        )
+    )
+    usage = [e for e in events if e["type"] == "usage"]
+    assert usage == [{"type": "usage", "input_tokens": 33, "output_tokens": 4, "total_tokens": 37}]
+
+
+async def test_a_non_streaming_answer_without_counts_reports_no_usage() -> None:
+    """`Usage(0, 0, 0)` is what LiteLLM materializes for a body that
+    carried no usage at all — measured on 1.98.0, indistinguishable from a
+    provider that really said zero. A request that had a prompt cannot
+    have cost zero prompt tokens, so this is an absence, and an absence
+    must not be committed as an exact count."""
+    body = {
+        "id": "chatcmpl-1",
+        "object": "chat.completion",
+        "created": 1,
+        "model": "gpt-4o",
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": "Hello"},
+                "finish_reason": "stop",
+            }
+        ],
+    }
+    events = await _events(
+        _provider(lambda request: httpx.Response(200, json=body, request=request)), stream=False
+    )
+    assert [e for e in events if e["type"] == "usage"] == []
+    assert {"type": "text_delta", "text": "Hello"} in events
+    await _drain_litellm_logging()
+
+
 async def test_reasoning_content_is_surfaced_as_a_distinct_event() -> None:
     """Delta.reasoning_content exists in 1.98.0; folding it into text
     would put chain-of-thought in the transcript as if it were an answer."""
@@ -638,6 +797,7 @@ async def test_a_non_streaming_call_yields_the_same_event_shapes() -> None:
         {"type": "usage", "input_tokens": 11, "output_tokens": 7, "total_tokens": 18},
         {"type": "done"},
     ]
+    await _drain_litellm_logging()
 
 
 # ---------------------------------------------------------------------------
@@ -970,6 +1130,50 @@ async def test_a_transport_failure_message_names_the_connection_not_the_endpoint
             pass
     assert _BASE_URL not in str(excinfo.value)
     assert _SECRET not in str(excinfo.value)
+
+
+# ---------------------------------------------------------------------------
+# The safe-message contract
+# ---------------------------------------------------------------------------
+
+
+async def test_a_translated_failure_declares_its_message_operator_safe() -> None:
+    """Translation only helps if the runtime is allowed to show it.
+
+    `native_engine` withholds `str(exc)` for every provider exception —
+    correctly, since an SDK error quotes the request or the credential it
+    was refused with. `OperatorSafeProviderError` is the one narrow way
+    out: this class declares the exact texts it may carry, and the runtime
+    shows only those. Without the declaration the whole table above is
+    dead code the operator never reads.
+    """
+    with pytest.raises(ProviderRequestError) as excinfo:
+        async for _ in _provider(_answering(401)).complete(_MESSAGES, []):
+            pass
+    error = excinfo.value
+    assert isinstance(error, OperatorSafeProviderError)
+    assert error.operator_message() is not None
+    assert "credential" in str(error.operator_message())
+
+
+def test_every_message_the_transport_can_raise_is_declared_safe() -> None:
+    """The declaration is a list, so it can rot. This is the tripwire: a
+    message added to the table but not to `safe_messages` would be
+    withheld at the panel and read as a translation that silently stopped
+    working."""
+    for message in litellm_provider.WRITTEN_MESSAGES:
+        assert ProviderRequestError(message).operator_message() == message
+
+
+def test_a_message_this_class_never_declared_is_not_safe() -> None:
+    """Subclassing is not a blanket licence to speak.
+
+    The promise is auditable precisely because it is per-text: a later
+    `raise ProviderRequestError(str(sdk_exc))` — the exact refactor this
+    contract exists to survive — carries a message no audit approved, so
+    the runtime falls back to withholding it.
+    """
+    assert ProviderRequestError(f"Incorrect API key provided: {_SECRET}").operator_message() is None
 
 
 async def test_a_stream_iterator_is_returned_not_a_coroutine() -> None:

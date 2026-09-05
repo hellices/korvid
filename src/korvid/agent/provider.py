@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
-from typing import Any, Final
+from typing import Any, ClassVar, Final
 
 from korvid.agent.model_policy import ModelCapabilities, ModelDescriptor
 
@@ -32,6 +32,48 @@ four event types and rejects anything else, so a plugin's request is
 recorded on its first completion event instead, which is equally proof
 that the request ran.
 """
+
+
+class OperatorSafeProviderError(Exception):
+    """A provider failure whose own message an adapter vouches for.
+
+    The runtime's default is to withhold every exception's text: a
+    transport, adapter or protocol error routinely carries the provider's
+    response body — a 401 quotes the credential it refused, a validation
+    error quotes the prompt — and truncating that does not help, because
+    the first characters of a 401 body are exactly the part that
+    identifies the key. A failed request is therefore named by its
+    exception type and nothing else.
+
+    That default makes an adapter's *translation* unreachable. A written
+    sentence like "check the profile's API key" is the only part of a
+    provider failure an operator can act on, and it is evidence-free by
+    construction — it interpolates nothing. This class is the one narrow
+    way to say so, and the promise is per-message rather than per-class:
+    a subclass declares in `safe_messages` the exact texts its instances
+    may carry, and the runtime shows a message only when it is one of
+    them. A later `raise TranslatedError(str(sdk_exc))` therefore still
+    reaches the operator as a withheld failure rather than as a leak, so
+    the audit cannot silently rot into a blanket exemption.
+
+    Subclassing is a claim about the *messages listed*, not about the
+    exception: never list a message built from an exception, a response
+    body, an endpoint, a payload or any option value.
+    """
+
+    #: Every message instances of this class may show an operator. Each
+    #: one must be a constant this repository wrote and audited.
+    safe_messages: ClassVar[frozenset[str]] = frozenset()
+
+    def operator_message(self) -> str | None:
+        """This failure's text, when the class declared that text safe.
+
+        Returns:
+            The message, or `None` when it was never declared — in which
+            case the caller must fall back to withholding it.
+        """
+        text = str(self)
+        return text if text in self.safe_messages else None
 
 
 class LLMProvider(ABC):

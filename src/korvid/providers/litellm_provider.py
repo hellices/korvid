@@ -14,9 +14,9 @@ The normalized events are korvid's own, not LiteLLM's:
 - `{"type": "tool_call", "id": ..., "name": ..., "arguments": ...}` —
   emitted whole, at stream end.
 - `{"type": "usage", "input_tokens": ..., "output_tokens": ...}` — the
-  names `conversation.commit_usage` reads. The provider's own
-  `total_tokens` rides along when it reported one, because a total is not
-  always the sum of the two.
+  names `conversation.commit_usage` reads, and only ever the counts the
+  provider itself reported. The provider's own `total_tokens` rides along
+  when it reported one, because a total is not always the sum of the two.
 - `{"type": "done"}` — the terminal event, as both replaced adapters emit.
 
 Everything LiteLLM-shaped is imported from `litellm_runtime`, so this
@@ -37,20 +37,9 @@ from typing import Any, Final
 import httpx
 
 from korvid.agent.model_policy import ModelCapabilities, ModelDescriptor
-from korvid.agent.provider import REQUEST_SENT, LLMProvider
+from korvid.agent.provider import REQUEST_SENT, LLMProvider, OperatorSafeProviderError
 from korvid.providers.litellm_request import RequestPlan
 from korvid.providers.litellm_runtime import ProviderSDKError, acompletion, exceptions
-
-
-class ProviderRequestError(Exception):
-    """A provider call korvid could not complete, in operator language.
-
-    Replaces `openai_compat.ProviderError`. The message is always one of
-    the written constants below: no exception text, no endpoint and no
-    option value is interpolated into it, because providers echo the
-    offending credential back in their own 401 bodies.
-    """
-
 
 # ---------------------------------------------------------------------------
 # Written messages — evidence-free by construction
@@ -100,6 +89,34 @@ _MESSAGES: Final[tuple[tuple[type[Exception], str], ...]] = (
     (exceptions.ServiceUnavailableError, _UNAVAILABLE),
     (exceptions.InternalServerError, _INTERNAL),
 )
+
+#: Every message this module can put in front of an operator. Derived from
+#: the table so a row added there cannot be forgotten here — the runtime
+#: shows only declared messages (`OperatorSafeProviderError`), so an
+#: undeclared one would read as a translation that silently stopped
+#: working. The three that no row names are listed explicitly.
+WRITTEN_MESSAGES: Final[frozenset[str]] = frozenset(
+    {message for _, message in _MESSAGES} | {_TIMEOUT, _UNREACHABLE, _GENERIC}
+)
+
+
+class ProviderRequestError(OperatorSafeProviderError):
+    """A provider call korvid could not complete, in operator language.
+
+    Replaces `openai_compat.ProviderError`. The message is always one of
+    the written constants above: no exception text, no endpoint and no
+    option value is interpolated into it, because providers echo the
+    offending credential back in their own 401 bodies.
+
+    Those constants are also what this class declares safe, so the runtime
+    may show them instead of naming the exception type — see
+    `agent/provider.py: OperatorSafeProviderError`. The declaration is the
+    exact set: an instance carrying anything else is withheld like any
+    other exception, so a message built from an SDK error at some later
+    date cannot inherit the exemption.
+    """
+
+    safe_messages = WRITTEN_MESSAGES
 
 
 # ---------------------------------------------------------------------------
@@ -201,20 +218,23 @@ def _count(value: object) -> int | None:
 
 
 def _usage_event(chunk: Any) -> dict[str, Any] | None:
-    """The usage event for a chunk that carries provider counts.
+    """The usage event for one frame that carries provider counts.
 
-    LiteLLM passes a provider's own numbers through only from the chunk
-    that carried no choices; anywhere else it substitutes a tokenizer
-    estimate, and with `include_usage` off it reports nothing at all. A
-    stream with no usage chunk therefore yields no usage event: unknown
-    tokens and zero tokens are different facts.
+    Zero on both counts is not a measurement: it is what LiteLLM
+    materializes for a response that reported no usage at all (measured on
+    1.98.0, a non-streaming body without a `usage` object comes back as
+    `Usage(0, 0, 0)`), and a request that had a prompt cannot have cost
+    zero prompt tokens. Reporting it would commit an absence as an exact
+    count — `conversation.commit_usage` treats any usage event as
+    measured — so it is refused here and the round is honestly estimated
+    instead.
     """
     usage = getattr(chunk, "usage", None)
     if usage is None:
         return None
     prompt = _count(getattr(usage, "prompt_tokens", None))
     completion = _count(getattr(usage, "completion_tokens", None))
-    if prompt is None or completion is None:
+    if prompt is None or completion is None or not (prompt or completion):
         return None
     event: dict[str, Any] = {
         "type": "usage",
@@ -224,6 +244,35 @@ def _usage_event(chunk: Any) -> dict[str, Any] | None:
     total = _count(getattr(usage, "total_tokens", None))
     if total is not None:
         event["total_tokens"] = total
+    return event
+
+
+def _provider_usage(response: Any) -> dict[str, Any] | None:
+    """The counts the provider itself sent, from the frames it sent them on.
+
+    A streaming plan always sets `stream_options.include_usage`, and
+    LiteLLM answers that flag whether or not the provider did: measured on
+    1.98.0, a stream whose frames carried no counts still ends with a
+    synthesized chunk holding LiteLLM's *own* tokenizer estimate, in the
+    same shape a real one has. Passing that on would commit a guess as a
+    measurement.
+
+    The wrapper does record the frames it received, in `chunks`, and
+    `usage` is set on one of those only when the provider set it — so that
+    recording is the provenance signal, pinned by a test against the real
+    wrapper. The counts are read from the recorded frame rather than from
+    the synthesized tail chunk, because LiteLLM's builder substitutes its
+    estimate for a provider that reported *beside* its choices instead of
+    on a choices-free frame. The last frame carrying a usable pair wins,
+    mirroring LiteLLM's own rule that the most recent usage frame holds
+    the total so far.
+
+    No recorded frame carrying counts means no usage event at all: unknown
+    tokens and zero tokens are different facts.
+    """
+    event: dict[str, Any] | None = None
+    for chunk in getattr(response, "chunks", None) or ():
+        event = _usage_event(chunk) or event
     return event
 
 
@@ -309,15 +358,18 @@ async def _stream_events(response: Any) -> AsyncGenerator[dict[str, Any], None]:
     sees whole calls. When the stream fails mid-iteration the accumulated
     calls are dropped: a half-received call is not a call, and the harness
     cannot tell arguments the model never finished writing from arguments
-    it meant to send.
+    it meant to send. Usage is likewise taken only from a stream that
+    ended — and only from the frames the provider itself sent.
     """
     calls: dict[int, _PartialToolCall] = {}
     usage: dict[str, Any] | None = None
     try:
         async for chunk in response:
-            usage = _usage_event(chunk) or usage
             for event in _chunk_events(chunk, calls):
                 yield event
+        # Read here, inside the `try`: the provenance record belongs to the
+        # wrapper, which the `finally` below is about to close.
+        usage = _provider_usage(response)
     except asyncio.CancelledError:
         raise
     except ProviderSDKError as exc:

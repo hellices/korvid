@@ -57,6 +57,7 @@ from korvid.agent.events import (
 )
 from korvid.agent.model_policy import ResolvedAgentPolicy
 from korvid.agent.outbound import OutboundPolicyError, OutboundRequestTooLarge
+from korvid.agent.provider import OperatorSafeProviderError
 from korvid.agent.request_gateway import PreparedGatewayRequest, RequestGateway
 from korvid.agent.tool_harness import ToolExecution, ToolHarness
 
@@ -762,7 +763,18 @@ def _failure_message(exc: Exception) -> str:
     key — so nothing derived from `str(exc)` reaches the panel. The class
     name is korvid's or the library's own code, not payload, and is
     bounded anyway in case a dynamically built class carries one.
+
+    The one exception is an exception that *declared* its text safe. An
+    adapter's translation table — "the provider refused the credential,
+    check the profile's API key" — is written by this repository and
+    interpolates nothing, and it is the only part of a provider failure an
+    operator can act on. `OperatorSafeProviderError` carries that
+    declaration per message, not per class, so an instance holding
+    anything the class did not list falls back to the withheld form.
     """
+    safe = exc.operator_message() if isinstance(exc, OperatorSafeProviderError) else None
+    if safe is not None:
+        return _bounded(safe)
     return (
         f"the provider request failed ({_safe_type_name(exc)}) — its own message is "
         "withheld because provider errors can quote the request or a credential"
