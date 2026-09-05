@@ -28,9 +28,9 @@ _VARIANT_EXTRAS = {
 #: Feature packages that must import once the variant's extra is installed.
 _VARIANT_MODULES = {
     "base": frozenset(),
-    "agent": frozenset({"httpx", "keyring"}),
+    "agent": frozenset({"httpx", "keyring", "litellm", "openai"}),
     "mcp": frozenset({"mcp"}),
-    "all": frozenset({"httpx", "keyring", "mcp"}),
+    "all": frozenset({"httpx", "keyring", "litellm", "mcp", "openai"}),
 }
 #: First-party modules that exercise the installed variant rather than only
 #: proving that its third-party dependencies resolved.
@@ -47,9 +47,9 @@ _VARIANT_KORVID_MODULES = {
 #: narrower variant. MCP 2 uses the distinct `httpx2` distribution, so plain
 #: MCP must not leak the `httpx` dependency used by agent/observability.
 _VARIANT_FORBIDDEN_MODULES = {
-    "base": frozenset({"httpx", "keyring", "mcp"}),
+    "base": frozenset({"httpx", "keyring", "litellm", "mcp", "openai"}),
     "agent": frozenset({"mcp"}),
-    "mcp": frozenset({"httpx", "keyring"}),
+    "mcp": frozenset({"httpx", "keyring", "litellm", "openai"}),
     "all": frozenset(),
 }
 #: Development-only modules that must be absent from every installed variant.

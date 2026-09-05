@@ -482,9 +482,15 @@ def test_smoke_install_requirement_for_agent_uses_a_pep_508_direct_reference(
 
 def test_smoke_install_required_modules_follow_the_selected_variant() -> None:
     assert smoke_install.required_modules("base") == set()
-    assert smoke_install.required_modules("agent") == {"httpx", "keyring"}
+    assert smoke_install.required_modules("agent") == {"httpx", "keyring", "litellm", "openai"}
     assert smoke_install.required_modules("mcp") == {"mcp"}
-    assert smoke_install.required_modules("all") == {"httpx", "keyring", "mcp"}
+    assert smoke_install.required_modules("all") == {
+        "httpx",
+        "keyring",
+        "litellm",
+        "mcp",
+        "openai",
+    }
 
 
 def test_smoke_install_required_korvid_modules_follow_the_selected_variant() -> None:
@@ -503,10 +509,18 @@ def test_smoke_install_forbids_optional_feature_packages_outside_their_variant()
         "httpx",
         "keyring",
         "korvid.evals",
+        "litellm",
         "mcp",
+        "openai",
     }
     assert smoke_install.forbidden_modules("agent") == {"korvid.evals", "mcp"}
-    assert smoke_install.forbidden_modules("mcp") == {"httpx", "keyring", "korvid.evals"}
+    assert smoke_install.forbidden_modules("mcp") == {
+        "httpx",
+        "keyring",
+        "korvid.evals",
+        "litellm",
+        "openai",
+    }
     assert smoke_install.forbidden_modules("all") == {"korvid.evals"}
 
 
@@ -845,6 +859,8 @@ def _metadata_text(
         "Provides-Extra: all\n"
         'Requires-Dist: httpx>=0.27; extra == "agent"\n'
         f"{keyring}"
+        'Requires-Dist: litellm==1.98.0; extra == "agent"\n'
+        'Requires-Dist: openai<3.0.0,>=2.20.0; extra == "agent"\n'
         'Requires-Dist: mcp<2,>=1.10; extra == "mcp"\n'
         'Requires-Dist: anyio>=4.5; extra == "mcp"\n'
         'Requires-Dist: starlette>=0.36; extra == "mcp"\n'
@@ -852,6 +868,8 @@ def _metadata_text(
         'Requires-Dist: httpx>=0.27; extra == "observability"\n'
         'Requires-Dist: httpx>=0.27; extra == "all"\n'
         'Requires-Dist: keyring>=25.7.0; extra == "all"\n'
+        'Requires-Dist: litellm==1.98.0; extra == "all"\n'
+        'Requires-Dist: openai<3.0.0,>=2.20.0; extra == "all"\n'
         'Requires-Dist: mcp<2,>=1.10; extra == "all"\n'
         'Requires-Dist: anyio>=4.5; extra == "all"\n'
         'Requires-Dist: starlette>=0.36; extra == "all"\n'
@@ -859,6 +877,19 @@ def _metadata_text(
         "\n"
         f"{body}"
     )
+
+
+def test_metadata_fixture_uses_the_declared_litellm_pin() -> None:
+    project = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))["project"]
+    litellm = next(
+        requirement
+        for requirement in project["optional-dependencies"]["agent"]
+        if requirement.startswith("litellm")
+    )
+    metadata = _metadata_text()
+
+    assert f'Requires-Dist: {litellm}; extra == "agent"' in metadata
+    assert f'Requires-Dist: {litellm}; extra == "all"' in metadata
 
 
 def _fake_dist(

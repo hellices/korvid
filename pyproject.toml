@@ -51,6 +51,10 @@ Security = "https://github.com/hellices/korvid/blob/main/SECURITY.md"
 [project.optional-dependencies]
 # Embedded AI agent: provider HTTP adapters + OS-keychain credential storage.
 agent = [
+    "litellm==1.98.0",
+    # Imported directly by providers/litellm_runtime.py for ProviderSDKError,
+    # so declared directly even though litellm already pulls it in.
+    "openai>=2.20.0,<3.0.0",
     "httpx>=0.27",
     "keyring>=25.7.0",
 ]
@@ -135,6 +139,10 @@ warn_unused_ignores = true
 mypy_path = "src"
 files = ["src", "tests"]
 
+[[tool.mypy.overrides]]
+module = ["litellm.*"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 addopts = "--strict-markers --tb=short"
@@ -170,6 +178,7 @@ known_first_party = ["korvid"]
 
 [tool.deptry.per_rule_ignores]
 # The [all] extra references the project's own extras (korvid[agent,mcp]).
+# `korvid` itself is declared for the console-script entry point.
 DEP002 = ["korvid"]
 
 [tool.deptry.package_module_name_map]

@@ -13,6 +13,7 @@ from types import SimpleNamespace
 from typing import Any, ClassVar, cast
 
 import pytest
+import yaml
 
 import korvid
 import korvid.__main__
@@ -1717,6 +1718,170 @@ def test_load_startup_config_wraps_config_migration_error_as_system_exit(
     assert "agent.model_tier" in message
 
 
+def test_persist_agent_settings_updates_only_default_profile(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import korvid.__main__ as main_mod
+    from korvid.__main__ import _persist_agent_settings
+    from korvid.agent.setup import AgentSettings
+    from korvid.core.config import load_config
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+kube_context: prod
+ui:
+  topbar: expanded
+agent:
+  active: production
+  profiles:
+    default:
+      model: openai/gpt-3.5
+      endpoint: https://old.default.example
+      auth:
+        method: environment
+        key: OLD_KEY
+      options:
+        temperature: 0.1
+    production:
+      model: azure/gpt-4o
+      endpoint: https://prod.example
+      auth:
+        method: provider-default
+      options:
+        azure_deployment: prod
+    rejected:
+      model: openai/gpt-4o
+      options:
+        api_key: inline-secret
+    bad name:
+      model: openai/gpt-4o
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(main_mod, "DEFAULT_CONFIG_PATH", config_path)
+
+    _persist_agent_settings(
+        AgentSettings(
+            provider="openai",
+            auth_method="api_key",
+            base_url="http://localhost:9999/v1",
+            model="m2",
+            api_key_env="KORVID_TEST_KEY",
+        )
+    )
+
+    persisted = load_config(config_path)
+    active = persisted.model_connections.active_profile
+    assert persisted.model_connections.active == "default"
+    assert active is not None
+    assert active.model == "openai/m2"
+    assert active.endpoint == "http://localhost:9999/v1"
+    assert active.auth.method == "environment"
+    assert active.auth.settings["key"] == "KORVID_TEST_KEY"
+    assert persisted.model_connections.profiles["production"].endpoint == "https://prod.example"
+    assert persisted.model_connections.profiles["rejected"].config_error is not None
+    assert "bad name" in persisted.model_connections.unparsed
+    assert "rejected" in persisted.model_connections.unparsed
+
+    raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert raw["kube_context"] == "prod"
+    assert raw["ui"]["topbar"] == "expanded"
+    assert set(raw["agent"]["profiles"]) == {"default", "production", "rejected", "bad name"}
+    # The rejected profile's raw block is the operator's only copy of the
+    # thing they have to fix; an unrelated write must not strip it.
+    assert raw["agent"]["profiles"]["rejected"]["options"] == {"api_key": "inline-secret"}
+
+
+@pytest.mark.parametrize(
+    ("provider", "legacy_method", "expected"),
+    [
+        ("openai", "api_key", "environment"),
+        ("azure", "entra", "provider-default"),
+        ("github-copilot", "device-login", "device-login"),
+        ("openai", "none", "none"),
+    ],
+)
+def test_persist_agent_settings_writes_the_common_auth_vocabulary(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    provider: str,
+    legacy_method: str,
+    expected: str,
+) -> None:
+    """A profile stores the common id, never the transport's own.
+
+    `AgentSettings.auth_method` is the *transport's* alphabet
+    (`api_key`/`entra`/`device-login`/`none`); a profile's is the five
+    common ids. Handing the transport's straight through writes a profile
+    whose auth `project_legacy_transport` then refuses by name — the
+    agent disabled at the next start on a configuration the operator got
+    right. The translation is `common_auth_method`'s and only its: a
+    second table here would be a second thing to keep in step.
+    """
+    import korvid.__main__ as main_mod
+    from korvid.__main__ import _persist_agent_settings
+    from korvid.agent.setup import AgentSettings
+    from korvid.core.config import load_config, project_legacy_transport
+
+    config_path = tmp_path / "config.yaml"
+    monkeypatch.setattr(main_mod, "DEFAULT_CONFIG_PATH", config_path)
+
+    _persist_agent_settings(
+        AgentSettings(
+            provider=provider,
+            auth_method=legacy_method,
+            base_url=None,
+            model="m1",
+            api_key_env="KORVID_TEST_KEY" if legacy_method == "api_key" else None,
+        )
+    )
+
+    active = load_config(config_path).model_connections.active_profile
+    assert active is not None
+    assert active.auth.method == expected
+    # And what was written round-trips back onto the transport it came
+    # from, rather than being refused as an unknown method.
+    projection, refusal = project_legacy_transport(active)
+    assert refusal is None
+    assert projection is not None
+    assert projection.auth_method == legacy_method
+
+
+def test_persist_agent_settings_keeps_the_environment_variable_name(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Translating the method must not drop the key it needs.
+
+    `environment` without `auth.key` is refused by the projection, so a
+    translation that forgot the name would trade one silent breakage for
+    another. The value is never read here — only the name is stored.
+    """
+    import korvid.__main__ as main_mod
+    from korvid.__main__ import _persist_agent_settings
+    from korvid.agent.setup import AgentSettings
+    from korvid.core.config import load_config
+
+    monkeypatch.setenv("KORVID_TEST_KEY", "sk-secret-value")
+    config_path = tmp_path / "config.yaml"
+    monkeypatch.setattr(main_mod, "DEFAULT_CONFIG_PATH", config_path)
+
+    _persist_agent_settings(
+        AgentSettings(
+            provider="openai",
+            auth_method="api_key",
+            base_url=None,
+            model="m1",
+            api_key_env="KORVID_TEST_KEY",
+        )
+    )
+
+    active = load_config(config_path).model_connections.active_profile
+    assert active is not None
+    assert active.auth.settings["key"] == "KORVID_TEST_KEY"
+    assert "sk-secret-value" not in config_path.read_text(encoding="utf-8")
+
+
 def test_load_startup_config_wraps_migration_error_even_when_agent_disabled(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -3321,3 +3486,263 @@ async def test_a_model_that_reports_no_tool_support_warns_instead_of_crashing(
     assert wiring.session_box == [None]
     assert isinstance(wiring.provider_box[0], _ToollessProvider)
     assert any("tool" in warning for warning in warnings)
+
+
+# ---------------------------------------------------------------------------
+# Task 8 — catalog construction performs no I/O
+# ---------------------------------------------------------------------------
+
+
+def test_building_the_catalog_issues_no_http_request() -> None:
+    """_build_model_catalog() must not make any HTTP requests.
+
+    EndpointDiscovery construction must be I/O-free; only list_models
+    triggers network access, and that is only called from discover().
+    """
+    pytest.importorskip("litellm")
+    from korvid.__main__ import _build_model_catalog
+
+    def _fail_if_called() -> None:
+        raise AssertionError("HTTP client was constructed during catalog build")
+
+    # Inject a client_factory that fails if called — EndpointDiscovery only
+    # calls it inside list_models, so construction must not trigger it.
+    import unittest.mock
+
+    with unittest.mock.patch(
+        "korvid.providers.endpoint_discovery._default_client_factory",
+        side_effect=_fail_if_called,
+    ):
+        catalog = _build_model_catalog()
+
+    assert catalog is not None
+
+
+def test_building_the_catalog_opens_no_socket() -> None:
+    """_build_model_catalog() must open no socket — same invariant as the
+    litellm_offline_import test, now verified at the composition-root level.
+
+    A regression in the wrapper's env-var ordering (LITELLM_LOCAL_MODEL_COST_MAP
+    not set before import) would show up here as a real startup stall.
+    """
+    import subprocess
+    import sys
+    import textwrap
+
+    pytest.importorskip("litellm")
+
+    probe = textwrap.dedent(
+        """
+        import socket
+        import sys
+
+        attempts = []
+
+        def _refuse(self, address):  # noqa: ANN001, ANN202
+            attempts.append(address)
+            raise OSError("network disabled for this probe")
+
+        socket.socket.connect = _refuse
+        socket.socket.connect_ex = lambda self, address: (attempts.append(address), 1)[1]
+
+        from korvid.__main__ import _build_model_catalog
+
+        catalog = _build_model_catalog()
+        assert catalog is not None, "catalog was None"
+
+        print(len(attempts))
+        """
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "0", result.stdout
+
+
+# ---------------------------------------------------------------------------
+# Task 11 review — the production catalog can actually probe a profile
+# ---------------------------------------------------------------------------
+
+
+class _RecordingConfigurator:
+    """Stands in for the `:ai` wizard's configurator, recording its probes."""
+
+    def __init__(self, result: str = "ok", error: Exception | None = None) -> None:
+        self.probed: list[AgentSettings] = []
+        self._result = result
+        self._error = error
+
+    async def begin_device_login(self) -> Any:  # pragma: no cover - not probed here
+        raise NotImplementedError
+
+    async def finish_device_login(self) -> None:  # pragma: no cover - not probed here
+        raise NotImplementedError
+
+    async def list_models(self, settings: AgentSettings) -> list[str]:  # pragma: no cover
+        return []
+
+    async def test(self, settings: AgentSettings) -> str:
+        self.probed.append(settings)
+        if self._error is not None:
+            raise self._error
+        return self._result
+
+    async def save(self, settings: AgentSettings) -> None:  # pragma: no cover - not probed here
+        raise NotImplementedError
+
+
+def _azure_profile() -> Any:
+    from korvid.core.config import ConnectionAuthConfig, ModelConnectionConfig
+
+    return ModelConnectionConfig(
+        model="azure/gpt-4o",
+        endpoint="https://x.openai.azure.com",
+        auth=ConnectionAuthConfig(method="environment", settings={"key": "AZURE_OPENAI_API_KEY"}),
+        options={"azure_deployment": "my-dep"},
+    )
+
+
+async def test_the_production_catalog_probes_a_profile_instead_of_raising() -> None:
+    """The wizard's last stage calls `catalog.test()`. A stub that raises
+    `NotImplementedError` there makes every real first run end in failure."""
+    pytest.importorskip("litellm")
+    from korvid.__main__ import _build_model_catalog
+    from korvid.core.config import ModelConnectionConfig
+
+    configurator = _RecordingConfigurator(result="connected")
+    catalog = _build_model_catalog(cast("Any", configurator))
+    assert catalog is not None
+
+    result = await catalog.test(ModelConnectionConfig(model="openai/gpt-4o"))
+
+    assert result == "connected"
+    assert [s.provider for s in configurator.probed] == ["openai"]
+
+
+async def test_the_production_catalog_refuses_a_prefix_the_transport_cannot_serve() -> None:
+    """The interim transport speaks bearer-token HTTP only. Probing an
+    `anthropic` profile through it would send `Authorization: Bearer` to a
+    vendor that expects its own header — a credential leak, not a probe."""
+    pytest.importorskip("litellm")
+    from korvid.__main__ import _build_model_catalog
+    from korvid.core.config import ModelConnectionConfig
+
+    configurator = _RecordingConfigurator()
+    catalog = _build_model_catalog(cast("Any", configurator))
+    assert catalog is not None
+
+    with pytest.raises(Exception, match="Task 15"):
+        await catalog.test(ModelConnectionConfig(model="anthropic/claude-sonnet-4-5"))
+
+    assert configurator.probed == []
+
+
+async def test_the_production_catalog_projects_a_profile_exactly_like_startup(
+    tmp_path: Path,
+) -> None:
+    """The probe must reach the host the runtime would: the Azure
+    deployment path startup rebuilds has to be on the probed base URL too,
+    or a wizard that reports success configures a 404."""
+    pytest.importorskip("litellm")
+    from korvid.__main__ import _build_model_catalog
+    from korvid.core.config import load_config
+
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        "agent:\n"
+        "  active: main\n"
+        "  profiles:\n"
+        "    main:\n"
+        "      model: azure/gpt-4o\n"
+        "      endpoint: https://x.openai.azure.com\n"
+        "      auth:\n"
+        "        method: environment\n"
+        "        key: AZURE_OPENAI_API_KEY\n"
+        "      options:\n"
+        "        azure_deployment: my-dep\n",
+        encoding="utf-8",
+    )
+    startup = load_config(path)
+
+    configurator = _RecordingConfigurator()
+    catalog = _build_model_catalog(cast("Any", configurator))
+    assert catalog is not None
+
+    await catalog.test(_azure_profile())
+
+    probed = configurator.probed[-1]
+    assert probed.base_url == startup.agent_base_url
+    assert probed.base_url == "https://x.openai.azure.com/openai/deployments/my-dep"
+    assert probed.model == startup.agent_model
+    assert probed.api_key_env == startup.agent_api_key_env
+
+
+async def test_a_catalog_built_without_a_configurator_still_reports_a_reason() -> None:
+    pytest.importorskip("litellm")
+    from korvid.__main__ import _build_model_catalog
+    from korvid.core.config import ModelConnectionConfig
+
+    catalog = _build_model_catalog()
+    assert catalog is not None
+
+    with pytest.raises(Exception, match="cannot test"):
+        await catalog.test(ModelConnectionConfig(model="openai/gpt-4o"))
+
+
+def test_the_app_is_wired_with_a_catalog_that_can_probe() -> None:
+    """The composition root hands the catalog the configurator it built —
+    without it every `:ai` run ends at the connection test."""
+    source = Path("src/korvid/__main__.py").read_text(encoding="utf-8")
+    assert "_build_model_catalog(agent.configurator)" in source
+
+
+def _profiles_config(path: Path, *, tier: str | None = None) -> None:
+    tier_line = f"  model_tier: {tier}\n" if tier is not None else ""
+    path.write_text(
+        f"agent:\n{tier_line}  active: main\n  profiles:\n    main:\n      model: openai/gpt-4o\n",
+        encoding="utf-8",
+    )
+
+
+def test_the_profile_writer_keeps_a_tier_it_was_not_given(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The composition root's writer is the seam the UI persists through.
+    A save that never asked about the tier must not drop the override."""
+    from korvid.__main__ import _persist_model_profiles
+    from korvid.core.config import load_config
+
+    path = tmp_path / "config.yaml"
+    _profiles_config(path, tier="high")
+    monkeypatch.setattr(korvid.__main__, "DEFAULT_CONFIG_PATH", path)
+
+    _persist_model_profiles(load_config(path).model_connections)
+
+    assert yaml.safe_load(path.read_text(encoding="utf-8"))["agent"]["model_tier"] == "high"
+
+
+def test_the_profile_writer_persists_a_first_run_tier(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """And the first-run wizard's answer lands in the same write as the
+    profile it was chosen for — including Automatic, which clears it."""
+    from korvid.__main__ import _persist_model_profiles
+    from korvid.core.config import load_config
+
+    path = tmp_path / "config.yaml"
+    _profiles_config(path)
+    monkeypatch.setattr(korvid.__main__, "DEFAULT_CONFIG_PATH", path)
+    profiles = load_config(path).model_connections
+
+    _persist_model_profiles(profiles, model_tier="low")
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert raw["agent"]["model_tier"] == "low"
+    assert raw["agent"]["active"] == "main"
+
+    _persist_model_profiles(profiles, model_tier=None)
+    assert "model_tier" not in yaml.safe_load(path.read_text(encoding="utf-8"))["agent"]

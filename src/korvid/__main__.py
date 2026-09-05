@@ -30,16 +30,28 @@ from korvid.agent.interaction import (
     UiAction,
     UiActionResult,
 )
-from korvid.agent.setup import AgentConfigurator, AgentSettings
+from korvid.agent.setup import (
+    AgentConfigurator,
+    AgentSettings,
+    profile_refusal,
+    settings_from_profile,
+)
 from korvid.core.audit import AuditLog, default_audit_path
 from korvid.core.config import (
     DEFAULT_CONFIG_PATH,
+    KEEP_MODEL_TIER,
+    LEGACY_PROFILE_NAME,
     ConfigMigrationError,
+    ConnectionAuthConfig,
     KorvidConfig,
+    ModelConnectionConfig,
+    ModelConnectionsConfig,
+    ModelTierWrite,
     ObservabilityBackend,
+    common_auth_method,
     context_is_protected,
     load_config,
-    save_agent_config,
+    save_model_connections,
     save_topbar_state,
 )
 from korvid.core.mcp import MCPControllerBase
@@ -86,6 +98,7 @@ if TYPE_CHECKING:
     # Embedded-agent types appear only in annotations here: an MCP-only or
     # base install must never import the agent loop or provider ABC at
     # startup (issue #73 acceptance criterion).
+    from korvid.agent.model_profiles import ModelCatalog
     from korvid.agent.provider import LLMProvider
     from korvid.agent.session import AgentSession
 
@@ -933,6 +946,63 @@ def _close_agent_in_background(
     task.add_done_callback(_reap)
 
 
+def _build_model_catalog(configurator: AgentConfigurator | None = None) -> ModelCatalog | None:
+    """Build the catalog, or None when the agent extra is absent.
+
+    A missing extra degrades to None — the TUI runs without an agent.
+    A *broken* extra is different: it is reported, not swallowed.
+
+    Args:
+        configurator: The `:ai` wizard's configurator, which owns the only
+            transport korvid currently speaks. It is what makes the
+            wizard's connection test a real probe; without it the catalog
+            reports that testing is unavailable rather than pretending.
+    """
+    try:
+        from korvid.providers.endpoint_discovery import EndpointDiscovery
+        from korvid.providers.litellm_catalog import LiteLLMModelCatalog
+        from korvid.providers.litellm_runtime import models_by_provider
+        from korvid.providers.models_dev import ModelsDevSource
+        from korvid.providers.special_flows import SpecialFlowRegistry
+    except ImportError:
+        return None
+    return LiteLLMModelCatalog(
+        flows=SpecialFlowRegistry.from_entry_points(reserved_prefixes=models_by_provider()),
+        enrichment=ModelsDevSource(),
+        discovery=EndpointDiscovery(),
+        tester=None if configurator is None else _make_profile_tester(configurator),
+    )
+
+
+def _make_profile_tester(
+    configurator: AgentConfigurator,
+) -> Callable[[ModelConnectionConfig], Awaitable[str]]:
+    """Probe a profile through the transport the runtime still speaks.
+
+    Interim, and replaced by the profile-native factory in Task 15. The
+    profile is translated by the same projection startup derives its
+    scalars from, so the probe reaches exactly the host the agent would:
+    a provider prefix the transport cannot serve is refused here as well,
+    and an Azure deployment path is on the probed URL too. A probe that
+    projected the profile its own way could report success against a host
+    the agent will never use.
+    """
+
+    async def _test(profile: ModelConnectionConfig) -> str:
+        settings = settings_from_profile(profile, None)
+        if settings is None:
+            raise ProfileNotConnectable(
+                f"cannot test {profile.model!r}: {profile_refusal(profile)}"
+            )
+        return await configurator.test(settings)
+
+    return _test
+
+
+class ProfileNotConnectable(RuntimeError):
+    """The interim transport cannot serve this profile, so it was not probed."""
+
+
 def _build_agent_wiring(
     config: KorvidConfig,
     kube: KubeClient,
@@ -1084,16 +1154,59 @@ def _build_agent_wiring(
 
 
 def _persist_agent_settings(settings: AgentSettings) -> None:
-    """Write what the `:ai` wizard chose back to config.yaml."""
-    save_agent_config(
-        DEFAULT_CONFIG_PATH,
-        provider=settings.provider,
-        auth_method=settings.auth_method,
-        base_url=settings.base_url,
-        model=settings.model,
-        api_key_env=settings.api_key_env,
-        model_tier=settings.model_tier,
+    """Write what the `:ai` wizard chose back to config.yaml.
+
+    `AgentSettings.auth_method` speaks the *interim transport's* alphabet
+    (`api_key`, `entra`, `device-login`, `none`); a profile's `auth.method`
+    speaks the five common ids. The translation is `common_auth_method`'s
+    and only its — writing the transport's id straight into a profile
+    produces one `project_legacy_transport` refuses by name at the next
+    start, disabling an agent the operator configured correctly.
+    """
+    method = common_auth_method(settings.auth_method)
+    auth_settings: dict[str, object] = {}
+    # Only `environment` carries a variable name, and it is a *name*:
+    # nothing here reads the environment, so no secret value can travel
+    # from these settings into the file.
+    if method == "environment" and settings.api_key_env:
+        auth_settings["key"] = settings.api_key_env
+    profile = ModelConnectionConfig(
+        model=f"{settings.provider}/{settings.model}",
+        endpoint=settings.base_url,
+        auth=ConnectionAuthConfig(method=method, settings=auth_settings),
+        options=dict(settings.options),
     )
+    config = load_config(DEFAULT_CONFIG_PATH)
+    profiles_by_name = {
+        name: existing_profile
+        for name, existing_profile in config.model_connections.profiles.items()
+        if existing_profile.config_error is None
+    }
+    profiles_by_name[LEGACY_PROFILE_NAME] = profile
+    profiles = dataclasses.replace(
+        config.model_connections,
+        active=LEGACY_PROFILE_NAME,
+        profiles=profiles_by_name,
+    )
+    try:
+        save_model_connections(DEFAULT_CONFIG_PATH, profiles)
+    except OSError:
+        logger.warning("could not write config: applied now, reverts on restart")
+
+
+def _persist_model_profiles(
+    profiles: ModelConnectionsConfig, *, model_tier: ModelTierWrite = KEEP_MODEL_TIER
+) -> None:
+    """Write the profile set the UI produced back to config.yaml.
+
+    Failures propagate: the caller applied the profile to the live session
+    already and must tell the operator the change reverts on restart.
+
+    `model_tier` defaults to leaving `agent.model_tier` untouched — only
+    the first-run wizard, which actually asks, sends one, and it lands in
+    the same write as the profiles so the two can never disagree.
+    """
+    save_model_connections(DEFAULT_CONFIG_PATH, profiles, model_tier=model_tier)
 
 
 def _make_rebuild_agent(
@@ -1590,7 +1703,10 @@ async def _wire_and_run(config: KorvidConfig, kube: KubeClient, state: _RunState
         check_permission=kube.can_i,
         agent_session=agent.session,
         agent_model_name=config.agent_model,
-        agent_configurator=agent.configurator,
+        # The profile screens' single source of answers, and the one path
+        # that writes `agent.profiles` back (issue #182).
+        agent_catalog=_build_model_catalog(agent.configurator),
+        agent_save_profiles=_persist_model_profiles,
         rebuild_agent=agent.rebuild,
         disconnect_agent=agent.disconnect,
         # The wiring returns no configurator only when the [agent] extra is

@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Final, cast
 
+from korvid.core.config import ModelConnectionConfig, project_legacy_transport
+
 
 def _freeze_option_value(value: object) -> object:
     if isinstance(value, Mapping):
@@ -87,3 +89,45 @@ class AgentConfigurator(ABC):
 
     @abstractmethod
     async def save(self, settings: AgentSettings) -> None: ...
+
+
+def settings_from_profile(profile: ModelConnectionConfig, tier: str | None) -> AgentSettings | None:
+    """Project a profile onto the transport record the runtime still speaks.
+
+    Interim: Task 15 replaces this with the profile-native provider
+    factory. Every caller — the composition root's connection probe, a
+    profile switch, the wizard's apply — goes through the same core
+    projection startup derives its scalars from, so a profile the
+    transport cannot serve is refused in exactly one place and an Azure
+    deployment path is rebuilt in exactly one place.
+
+    Args:
+        profile: The connection to project.
+        tier: The agent's persisted capability-tier override, or None for
+            automatic routing. Not a profile field: it rides along.
+
+    Returns:
+        The settings, or None when the transport cannot serve the profile.
+    """
+    projection, _refusal = project_legacy_transport(profile)
+    if projection is None:
+        return None
+    return AgentSettings(
+        provider=projection.provider,
+        auth_method=projection.auth_method,
+        base_url=projection.base_url,
+        model=projection.model,
+        api_key_env=projection.api_key_env,
+        model_tier=tier,
+        options=projection.options,
+    )
+
+
+def profile_refusal(profile: ModelConnectionConfig) -> str | None:
+    """Why the interim transport cannot serve *profile*, or None if it can.
+
+    The message a refusal is reported with, so the operator is told which
+    of the several reasons applies instead of always being told the model
+    reference is missing a prefix.
+    """
+    return project_legacy_transport(profile)[1]

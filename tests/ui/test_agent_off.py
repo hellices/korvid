@@ -155,30 +155,18 @@ async def test_ctrl_a_after_off_keeps_the_transcript() -> None:
 
 async def test_bare_ai_after_off_prefills_the_wizard() -> None:
     """The wizard opened after :ai off starts from the kept settings —
-    the user reconnects by confirming, not re-entering (review on #180)."""
-    from typing import Any as _Any
+    the user reconnects by confirming, not re-entering (review on #180).
+
+    The prefill is a profile now: the kept scalars are projected onto one
+    so the wizard's stages start from the connection that was live.
+    """
 
     from korvid.agent.setup import AgentSettings
     from korvid.ui.widgets.agent_setup_screen import AgentSetupScreen
-
-    class NoopConfigurator:
-        async def begin_device_login(self) -> _Any:
-            raise NotImplementedError
-
-        async def finish_device_login(self) -> None:
-            raise NotImplementedError
-
-        async def test(self, settings: _Any) -> str:
-            return "ok"
-
-        async def list_models(self, settings: _Any) -> list[str]:
-            return []
-
-        async def save(self, settings: _Any) -> None:
-            pass
+    from tests.ui.test_agent_ui_controller_profiles import _StubCatalog
 
     session = StubSession([TurnComplete(input_tokens=0, output_tokens=0, estimated=False)])
-    app = make_app(session, agent_configurator=NoopConfigurator())
+    app = make_app(session, agent_catalog=_StubCatalog())
     settings = AgentSettings(
         provider="ollama",
         auth_method="none",
@@ -190,17 +178,22 @@ async def test_bare_ai_after_off_prefills_the_wizard() -> None:
         app.on_unknown_command(UnknownCommand("ai off"))
         await pilot.pause()
         app.on_unknown_command(UnknownCommand("ai"))
-        await pilot.pause()
-        assert isinstance(app.screen, AgentSetupScreen)
-        screen = app.screen
-        from textual.widgets import OptionList
-
-        provider_list = screen.query_one("#setup-provider", OptionList)
-        highlighted = provider_list.highlighted
-        assert highlighted is not None
-        assert provider_list.get_option_at_index(highlighted).id == "ollama"
-        # accept the highlighted provider: the endpoint step starts from the
-        # kept base URL, not the provider default
-        await pilot.press("enter")
-        base = screen.query_one("#setup-base-url", Input)
-        assert base.value == "http://my-ollama:11434/v1"
+        await until(
+            pilot,
+            lambda: any(isinstance(screen, AgentSetupScreen) for screen in app.screen_stack),
+            label="setup wizard opened",
+        )
+        wizard = next(screen for screen in app.screen_stack if isinstance(screen, AgentSetupScreen))
+        assert wizard._seed.model == "ollama/qwen3:8b"
+        assert wizard._seed.endpoint == "http://my-ollama:11434/v1"
+        assert wizard._seed.auth.method == "none"
+        # Close the wizard before the app tears down: the stage worker is
+        # parked on a pushed screen, and shutting down under it cancels a
+        # wait nothing is left to answer.
+        await pilot.press("escape")
+        await pilot.press("escape")
+        await until(
+            pilot,
+            lambda: not any(isinstance(screen, AgentSetupScreen) for screen in app.screen_stack),
+            label="setup wizard closed",
+        )

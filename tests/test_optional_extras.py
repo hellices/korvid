@@ -11,6 +11,8 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import tomllib
+from pathlib import Path
 
 import pytest
 
@@ -18,7 +20,7 @@ from tests.fixtures.provider_plugin.site_helpers import FIXTURES_DIR
 
 #: Top-level third-party modules that only the optional extras may pull in.
 _MCP_MODULES = ("mcp", "anyio", "starlette", "uvicorn")
-_AGENT_MODULES = ("httpx", "keyring")
+_AGENT_MODULES = ("httpx", "keyring", "litellm")
 
 _PROBE = """
 import sys
@@ -29,6 +31,26 @@ leaked = [m for m in {watched!r} if m in sys.modules]
 if leaked:
     raise SystemExit(f"optional extras leaked into base import: {{leaked}}")
 """
+
+
+def test_the_agent_extra_declares_litellm_and_no_per_vendor_extras() -> None:
+    data = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+    extras = data["project"]["optional-dependencies"]
+
+    assert any(spec.startswith("litellm") for spec in extras["agent"])
+    vendor_shaped = [
+        name
+        for name in extras
+        if name.startswith("provider-") or name in {"openai", "anthropic", "azure"}
+    ]
+    assert vendor_shaped == []
+
+
+def test_the_deptry_ignore_for_litellm_is_marked_temporary() -> None:
+    data = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+    ignores = data["tool"]["deptry"]["per_rule_ignores"]["DEP002"]
+
+    assert ignores == ["korvid"]
 
 
 def _assert_import_is_extra_free(module: str) -> None:
@@ -116,7 +138,7 @@ def test_agentless_wiring_does_not_scan_provider_plugins() -> None:
         "metadata.distributions = boom\n"
         "real_find_spec = importlib.util.find_spec\n"
         "def fake_find_spec(name, *args, **kwargs):\n"
-        "    if name in {'httpx', 'keyring'}:\n"
+        "    if name in {'httpx', 'keyring', 'litellm'}:\n"
         "        return None\n"
         "    return real_find_spec(name, *args, **kwargs)\n"
         "importlib.util.find_spec = fake_find_spec\n"
@@ -167,10 +189,61 @@ def test_agent_outbound_does_not_load_optional_extras() -> None:
     probe = (
         "import sys\n"
         "import korvid.agent.outbound  # noqa: F401\n"
-        "watched = ('textual', 'httpx', 'keyring', 'mcp', 'anyio', 'starlette', 'uvicorn')\n"
+        "watched = ('textual', 'httpx', 'keyring', 'litellm', 'mcp', 'anyio', 'starlette', 'uvicorn')\n"
         "leaked = [m for m in watched if m in sys.modules]\n"
         "if leaked:\n"
         "    raise SystemExit(f'agent outbound leaked optional extras into base import: {leaked}')\n"
+    )
+    _run_subprocess_probe(probe)
+
+
+def test_the_base_install_does_not_import_litellm() -> None:
+    """The base install must not reach LiteLLM through the app entry points."""
+    probe = (
+        "import sys\n"
+        "import korvid.__main__  # noqa: F401\n"
+        "if 'litellm' in sys.modules:\n"
+        "    raise SystemExit('litellm leaked into the base import graph')\n"
+        "import korvid.ui.app  # noqa: F401\n"
+        "if 'litellm' in sys.modules:\n"
+        "    raise SystemExit('litellm leaked into the base import graph')\n"
+    )
+    _run_subprocess_probe(probe)
+
+
+def test_a_missing_agent_extra_degrades_to_no_agent_rather_than_a_crash() -> None:
+    """Without the agent extra, startup should return the disabled wiring."""
+    probe = (
+        _MISSING_AGENT_EXTRA + "from korvid.__main__ import _build_agent_wiring\n"
+        "from korvid.core.config import KorvidConfig\n"
+        "wiring = _build_agent_wiring(KorvidConfig(), object(), {})\n"
+        "assert wiring.session is None\n"
+        "assert wiring.configurator is None\n"
+        "assert wiring.rebuild is None\n"
+        "assert wiring.provider_box == [None]\n"
+        "assert wiring.session_box == [None]\n"
+    )
+    _run_subprocess_probe(probe)
+
+
+def test_requesting_the_agent_explicitly_without_the_extra_fails_with_a_hint() -> None:
+    """An enabled agent without its extra must fail with install guidance."""
+    probe = (
+        "import korvid.__main__ as main\n"
+        "from korvid.core.config import KorvidConfig\n"
+        "main._missing_extra_packages = lambda roots: ['httpx', 'keyring', 'litellm']\n"
+        "try:\n"
+        "    main._build_agent_wiring(KorvidConfig(agent_enabled=True), object(), {})\n"
+        "except SystemExit as exc:\n"
+        "    message = str(exc)\n"
+        "    if 'korvid[all,entra]' not in message:\n"
+        "        raise SystemExit(message)\n"
+        "    if 'uv tool install --force' not in message:\n"
+        "        raise SystemExit(message)\n"
+        "    if 'pipx install --force' not in message:\n"
+        "        raise SystemExit(message)\n"
+        "else:\n"
+        "    raise SystemExit('expected agent wiring to fail without the extra')\n"
     )
     _run_subprocess_probe(probe)
 
@@ -227,7 +300,7 @@ _MISSING_AGENT_EXTRA = (
     "import sys\n"
     "real_find_spec = importlib.util.find_spec\n"
     "def fake_find_spec(name, *args, **kwargs):\n"
-    "    if name in {'httpx', 'keyring'}:\n"
+    "    if name in {'httpx', 'keyring', 'litellm'}:\n"
     "        return None\n"
     "    return real_find_spec(name, *args, **kwargs)\n"
     "importlib.util.find_spec = fake_find_spec\n"
