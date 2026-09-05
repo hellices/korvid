@@ -1268,6 +1268,7 @@ async def test_same_name_replacement_during_the_impact_load_aborts_the_delete(
 async def test_same_name_replacement_during_the_impact_load_aborts_the_restart(
     tmp_path: Path,
 ) -> None:
+    """Restart has its own post-impact identity check; the delete twin cannot protect it."""
     env = ImpactEnv(tmp_path / "audit.jsonl")
     app = env.app
     env.lister.on_first_call = lambda: _replace_selected_row_with_a_new_incarnation(app)
