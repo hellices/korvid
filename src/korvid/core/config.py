@@ -220,7 +220,7 @@ def _validated_config_mapping(
 
 
 @dataclass(frozen=True)
-class AgentAuthConfig:
+class ConnectionAuthConfig:
     """How a profile authenticates, as bounded copy-owned configuration.
 
     Core does not interpret provider-specific methods: `method` is one of
@@ -249,14 +249,14 @@ class AgentAuthConfig:
 
 
 @dataclass(frozen=True)
-class AgentProfileConfig:
+class ModelConnectionConfig:
     """One named model connection."""
 
     model: str
     endpoint: str | None = None
-    auth: AgentAuthConfig = field(default_factory=AgentAuthConfig)
+    auth: ConnectionAuthConfig = field(default_factory=ConnectionAuthConfig)
     options: Mapping[str, object] = field(default_factory=dict)
-    #: Why `options` was emptied, or None. See `AgentAuthConfig.settings_error`.
+    #: Why `options` was emptied, or None. See `ConnectionAuthConfig.settings_error`.
     options_error: str | None = field(default=None, init=False, compare=False)
 
     __hash__ = None  # type: ignore[assignment]  # frozen but genuinely unhashable
@@ -277,7 +277,7 @@ class AgentProfileConfig:
 
 
 @dataclass(frozen=True)
-class AgentProfilesConfig:
+class ModelConnectionsConfig:
     """The configured connection collection and which one is active.
 
     `profiles` preserves the order the entries appeared in the file. That
@@ -290,7 +290,7 @@ class AgentProfilesConfig:
     or `auth` block was rejected — to that entry's raw YAML value. Nothing
     in the runtime reads it: it is not consulted by `active_profile`, by
     the wizard's list, by `:model`, or by any provider construction. Its
-    only consumer is `save_agent_profiles` (Task 3), which writes those
+    only consumer is `save_model_connections` (Task 3), which writes those
     values back verbatim so saving one profile cannot delete another the
     operator still has to repair. The values are the objects `yaml.safe_load`
     already built for this same file, held opaquely and never interpreted,
@@ -298,7 +298,7 @@ class AgentProfilesConfig:
     """
 
     active: str | None = None
-    profiles: Mapping[str, AgentProfileConfig] = field(default_factory=dict)
+    profiles: Mapping[str, ModelConnectionConfig] = field(default_factory=dict)
     #: Raw, unmodelled `agent.profiles` entries keyed by file key. Opaque;
     #: never read by the runtime. Not compared: two configurations that
     #: differ only in text korvid refused to interpret are the same
@@ -312,7 +312,7 @@ class AgentProfilesConfig:
         object.__setattr__(self, "unparsed", MappingProxyType(dict(self.unparsed)))
 
     @property
-    def active_profile(self) -> AgentProfileConfig | None:
+    def active_profile(self) -> ModelConnectionConfig | None:
         """The active profile, or None when unset or unknown.
 
         Only `profiles` is consulted — an `unparsed` entry can never
@@ -332,9 +332,9 @@ class KorvidConfig:
     favorite_namespaces: tuple[str, ...] = ()
     #: Named model connection profiles (`agent.active` / `agent.profiles`).
     #: The single source of truth for provider configuration; the legacy
-    #: scalars below are derived from `agent_profiles.active_profile`
+    #: scalars below are derived from `model_connections.active_profile`
     #: during the compatibility cycle and are removed with it.
-    agent_profiles: AgentProfilesConfig = field(default_factory=AgentProfilesConfig)
+    model_connections: ModelConnectionsConfig = field(default_factory=ModelConnectionsConfig)
     agent_enabled: bool = False
     agent_provider: str | None = None
     agent_base_url: str | None = None
@@ -446,10 +446,10 @@ def load_config(path: Path | None = None) -> KorvidConfig:
     # treat anything that is not a mapping as absent instead of crashing.
     agent_raw: dict[str, Any] = agent_value if isinstance(agent_value, dict) else {}
     warnings: list[str] = []
-    agent_profiles = _resolve_agent_profiles(agent_raw, warnings)
+    model_connections = _resolve_model_connections(agent_raw, warnings)
     if "profiles" in agent_raw:
         # New profile format: derive scalars from the active profile.
-        scalars = _derive_legacy_scalars(agent_profiles, warnings)
+        scalars = _derive_legacy_scalars(model_connections, warnings)
         agent_enabled = scalars["agent_enabled"]
         agent_provider = scalars["agent_provider"]
         agent_base_url = scalars["agent_base_url"]
@@ -557,7 +557,7 @@ def load_config(path: Path | None = None) -> KorvidConfig:
         kube_context=raw.get("kube_context"),
         namespace=raw.get("namespace"),
         favorite_namespaces=favorites,
-        agent_profiles=agent_profiles,
+        model_connections=model_connections,
         agent_enabled=agent_enabled,
         agent_provider=agent_provider,
         agent_base_url=agent_base_url,
@@ -884,7 +884,7 @@ def _parse_observability_backend(
     )
 
 
-#: Agent-level keys the legacy shape owned. `save_agent_profiles` removes
+#: Agent-level keys the legacy shape owned. `save_model_connections` removes
 #: them once it has written the new shape, so the first successful save
 #: upgrades the file rather than leaving two shapes to disagree.
 #: `enabled` is included: `active: null` is the new off switch.
@@ -915,7 +915,7 @@ def _thaw_config_value(value: object) -> object:
     return value
 
 
-def _profile_to_raw(profile: AgentProfileConfig) -> dict[str, Any]:
+def _profile_to_raw(profile: ModelConnectionConfig) -> dict[str, Any]:
     entry: dict[str, Any] = {"model": profile.model}
     if profile.endpoint is not None:
         entry["endpoint"] = profile.endpoint
@@ -928,7 +928,7 @@ def _profile_to_raw(profile: AgentProfileConfig) -> dict[str, Any]:
     return entry
 
 
-def save_agent_profiles(path: Path, profiles: AgentProfilesConfig) -> None:
+def save_model_connections(path: Path, profiles: ModelConnectionsConfig) -> None:
     """Write `agent.active`/`agent.profiles`, preserving everything else.
 
     Read-modify-write: unrelated top-level keys, unrelated `agent.*` keys
@@ -968,7 +968,7 @@ _PREFIXES_WITHOUT_LEGACY_TRANSPORT: frozenset[str] = frozenset(
 )
 
 
-def _legacy_azure_base_url(profile: AgentProfileConfig) -> str | None:
+def _legacy_azure_base_url(profile: ModelConnectionConfig) -> str | None:
     """Rebuild the deployment-scoped URL the legacy transport needs."""
     if profile.endpoint is None:
         return None
@@ -1002,7 +1002,7 @@ def _empty_legacy_scalars() -> _LegacyScalars:
     )
 
 
-def _derive_legacy_scalars(profiles: AgentProfilesConfig, warnings: list[str]) -> _LegacyScalars:
+def _derive_legacy_scalars(profiles: ModelConnectionsConfig, warnings: list[str]) -> _LegacyScalars:
     """Project the active profile onto the pre-profile scalar fields.
 
     Temporary. It exists only so commit groups 1-3 stay buildable while
@@ -1368,7 +1368,9 @@ def _parse_agent_options(value: Any) -> tuple[dict[str, object], str | None]:
     return _parse_bounded_options(value, root="agent.options")
 
 
-def _parse_profile_entry(name: str, raw: object, warnings: list[str]) -> AgentProfileConfig | None:
+def _parse_profile_entry(
+    name: str, raw: object, warnings: list[str]
+) -> ModelConnectionConfig | None:
     """One `agent.profiles.<name>` entry, or None when unusable."""
     if not isinstance(raw, dict):
         warnings.append(f"agent.profiles[{name}] is not a mapping; the profile was ignored")
@@ -1383,10 +1385,10 @@ def _parse_profile_entry(name: str, raw: object, warnings: list[str]) -> AgentPr
     settings = {key: value for key, value in auth_map.items() if key != "method"}
     options_raw = raw.get("options")
     options: Mapping[str, object] = options_raw if isinstance(options_raw, dict) else {}
-    profile = AgentProfileConfig(
+    profile = ModelConnectionConfig(
         model=model,
         endpoint=_opt_str(raw.get("endpoint")),
-        auth=AgentAuthConfig(method=method, settings=settings),
+        auth=ConnectionAuthConfig(method=method, settings=settings),
         options=options,
     )
     # The dataclasses validated and (on rejection) emptied these mappings;
@@ -1402,13 +1404,15 @@ def _parse_profile_entry(name: str, raw: object, warnings: list[str]) -> AgentPr
     return profile
 
 
-def _parse_agent_profiles(agent_raw: dict[str, Any], warnings: list[str]) -> AgentProfilesConfig:
+def _parse_model_connections(
+    agent_raw: dict[str, Any], warnings: list[str]
+) -> ModelConnectionsConfig:
     """Parse the `agent.active`/`agent.profiles` shape."""
     raw_profiles = agent_raw.get("profiles")
     if not isinstance(raw_profiles, dict):
         warnings.append("agent.profiles is not a mapping; no agent profile was loaded")
-        return AgentProfilesConfig()
-    profiles: dict[str, AgentProfileConfig] = {}
+        return ModelConnectionsConfig()
+    profiles: dict[str, ModelConnectionConfig] = {}
     unparsed: dict[str, object] = {}
     reported_invalid_name = False
     for raw_name, raw_entry in raw_profiles.items():
@@ -1436,7 +1440,7 @@ def _parse_agent_profiles(agent_raw: dict[str, Any], warnings: list[str]) -> Age
     if active is not None and active not in profiles:
         warnings.append(f"agent.active names an unknown profile {active!r}; the agent is disabled")
         active = None
-    return AgentProfilesConfig(active=active, profiles=profiles, unparsed=unparsed)
+    return ModelConnectionsConfig(active=active, profiles=profiles, unparsed=unparsed)
 
 
 #: The in-memory profile name a legacy `agent.provider` config migrates into.
@@ -1520,14 +1524,14 @@ def _legacy_auth_method(agent_raw: dict[str, Any], provider: str) -> str:
     return legacy_method
 
 
-def _legacy_auth(agent_raw: dict[str, Any], provider: str) -> AgentAuthConfig:
+def _legacy_auth(agent_raw: dict[str, Any], provider: str) -> ConnectionAuthConfig:
     legacy_method = _legacy_auth_method(agent_raw, provider)
     method = _LEGACY_AUTH_METHODS.get(legacy_method, legacy_method)
     api_key_env = _opt_str(agent_raw.get("api_key_env"))
     settings: dict[str, object] = {}
     if method == "environment" and api_key_env:
         settings["key"] = api_key_env
-    return AgentAuthConfig(method=method, settings=settings)
+    return ConnectionAuthConfig(method=method, settings=settings)
 
 
 def _legacy_ollama_raw(agent_raw: dict[str, Any]) -> dict[str, Any]:
@@ -1669,16 +1673,16 @@ def _migrate_azure_endpoint(base_url: str) -> tuple[str, str | None, str | None]
     return resource, deployment, warning
 
 
-def _migrate_legacy_agent(agent_raw: dict[str, Any], warnings: list[str]) -> AgentProfilesConfig:
+def _migrate_legacy_agent(agent_raw: dict[str, Any], warnings: list[str]) -> ModelConnectionsConfig:
     """Normalize a legacy `agent.provider` config into one `default` profile."""
     provider_raw = agent_raw.get("provider")
     if not isinstance(provider_raw, str) or not provider_raw.strip():
-        return AgentProfilesConfig()
+        return ModelConnectionsConfig()
     provider = _canonicalize_provider_name(provider_raw)
     model = _opt_str(agent_raw.get("model"))
     if model is None:
         warnings.append("agent.provider is set but agent.model is missing; the agent is disabled")
-        return AgentProfilesConfig()
+        return ModelConnectionsConfig()
     endpoint = _opt_str(agent_raw.get("base_url"))
     options = _legacy_options(agent_raw, provider, warnings)
     if provider == "azure" and endpoint is not None:
@@ -1687,7 +1691,7 @@ def _migrate_legacy_agent(agent_raw: dict[str, Any], warnings: list[str]) -> Age
             options.setdefault("azure_deployment", deployment)
         if endpoint_warning is not None:
             warnings.append(endpoint_warning)
-    profile = AgentProfileConfig(
+    profile = ModelConnectionConfig(
         model=_legacy_model_reference(provider, model),
         endpoint=endpoint,
         auth=_legacy_auth(agent_raw, provider),
@@ -1701,20 +1705,22 @@ def _migrate_legacy_agent(agent_raw: dict[str, Any], warnings: list[str]) -> Age
             "check auth.method (provider-default for Entra ID) in :ai"
         )
     enabled = agent_raw.get("enabled", True) is not False
-    return AgentProfilesConfig(
+    return ModelConnectionsConfig(
         active=LEGACY_PROFILE_NAME if enabled else None,
         profiles={LEGACY_PROFILE_NAME: profile},
     )
 
 
-def _resolve_agent_profiles(agent_raw: dict[str, Any], warnings: list[str]) -> AgentProfilesConfig:
+def _resolve_model_connections(
+    agent_raw: dict[str, Any], warnings: list[str]
+) -> ModelConnectionsConfig:
     """Route agent config to new-shape parser or legacy migration."""
     if "profiles" in agent_raw:
         if "provider" in agent_raw:
             warnings.append(
                 "agent.profiles is present; the legacy agent.provider fields were ignored"
             )
-        return _parse_agent_profiles(agent_raw, warnings)
+        return _parse_model_connections(agent_raw, warnings)
     return _migrate_legacy_agent(agent_raw, warnings)
 
 

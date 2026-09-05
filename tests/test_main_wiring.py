@@ -1772,17 +1772,17 @@ agent:
     )
 
     persisted = load_config(config_path)
-    active = persisted.agent_profiles.active_profile
-    assert persisted.agent_profiles.active == "default"
+    active = persisted.model_connections.active_profile
+    assert persisted.model_connections.active == "default"
     assert active is not None
     assert active.model == "openai/m2"
     assert active.endpoint == "http://localhost:9999/v1"
     assert active.auth.method == "api_key"
     assert active.auth.settings["key"] == "KORVID_TEST_KEY"
-    assert persisted.agent_profiles.profiles["production"].endpoint == "https://prod.example"
-    assert persisted.agent_profiles.profiles["rejected"].config_error is not None
-    assert "bad name" in persisted.agent_profiles.unparsed
-    assert "rejected" in persisted.agent_profiles.unparsed
+    assert persisted.model_connections.profiles["production"].endpoint == "https://prod.example"
+    assert persisted.model_connections.profiles["rejected"].config_error is not None
+    assert "bad name" in persisted.model_connections.unparsed
+    assert "rejected" in persisted.model_connections.unparsed
 
     raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     assert raw["kube_context"] == "prod"

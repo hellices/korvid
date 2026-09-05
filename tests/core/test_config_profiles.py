@@ -11,13 +11,13 @@ import yaml
 
 from korvid.core.config import (
     AGENT_PROFILE_NAME_MAX_LENGTH,
-    AgentAuthConfig,
-    AgentProfileConfig,
-    AgentProfilesConfig,
+    ConnectionAuthConfig,
+    ModelConnectionConfig,
+    ModelConnectionsConfig,
     _legacy_model_reference,
     is_valid_profile_name,
     load_config,
-    save_agent_profiles,
+    save_model_connections,
 )
 
 
@@ -50,12 +50,12 @@ agent:
 """,
     )
     cfg = load_config(path)
-    assert list(cfg.agent_profiles.profiles) == ["production", "local"]
-    assert cfg.agent_profiles.active == "production"
-    local = cfg.agent_profiles.profiles["local"]
+    assert list(cfg.model_connections.profiles) == ["production", "local"]
+    assert cfg.model_connections.active == "production"
+    local = cfg.model_connections.profiles["local"]
     assert local.model == "ollama/llama3"
     assert local.endpoint == "http://localhost:11434"
-    assert local.auth == AgentAuthConfig(method="none", settings={})
+    assert local.auth == ConnectionAuthConfig(method="none", settings={})
     assert local.options["num_ctx"] == 16384
     assert local.config_error is None
 
@@ -74,7 +74,7 @@ agent:
 """,
     )
     cfg = load_config(path)
-    active = cfg.agent_profiles.active_profile
+    active = cfg.model_connections.active_profile
     assert active is not None
     assert active.model == "openai/gpt-4o-mini"
 
@@ -91,8 +91,8 @@ agent:
 """,
     )
     cfg = load_config(path)
-    assert cfg.agent_profiles.active is None
-    assert cfg.agent_profiles.active_profile is None
+    assert cfg.model_connections.active is None
+    assert cfg.model_connections.active_profile is None
     assert any("agent.active" in warning for warning in cfg.warnings)
 
 
@@ -112,7 +112,7 @@ agent:
 """,
     )
     cfg = load_config(path)
-    options = cfg.agent_profiles.profiles["local"].options
+    options = cfg.model_connections.profiles["local"].options
     with pytest.raises(TypeError, match="does not support item assignment"):
         options["nested"]["depth"] = 2  # type: ignore[index]  # proving immutability
     assert options["items"] == (1, 2)
@@ -135,7 +135,7 @@ agent:
 """,
     )
     cfg = load_config(path)
-    assert list(cfg.agent_profiles.profiles) == ["zulu", "alpha", "mike"]
+    assert list(cfg.model_connections.profiles) == ["zulu", "alpha", "mike"]
 
 
 def test_oversized_options_are_rejected_and_recorded_on_the_profile(tmp_path: Path) -> None:
@@ -154,11 +154,11 @@ agent:
 """,
     )
     cfg = load_config(path)
-    profile = cfg.agent_profiles.profiles["local"]
+    profile = cfg.model_connections.profiles["local"]
     assert profile.options == {}
     assert profile.options_error is not None
     assert profile.config_error == profile.options_error
-    assert any("agent.profiles[local].options" in warning for warning in cfg.warnings)
+    assert any("profiles[local].options" in warning for warning in cfg.warnings)
 
 
 def test_an_inline_secret_in_auth_settings_is_refused(tmp_path: Path) -> None:
@@ -177,11 +177,11 @@ agent:
 """,
     )
     cfg = load_config(path)
-    profile = cfg.agent_profiles.profiles["local"]
+    profile = cfg.model_connections.profiles["local"]
     assert profile.auth.settings == {}
     assert profile.auth.settings_error is not None
     assert profile.config_error == profile.auth.settings_error
-    assert any("agent.profiles[local].auth" in warning for warning in cfg.warnings)
+    assert any("profiles[local].auth" in warning for warning in cfg.warnings)
     assert not any("sk-inline-not-a-reference" in warning for warning in cfg.warnings)
 
 
@@ -201,16 +201,16 @@ agent:
 """,
     )
     cfg = load_config(path)
-    profile = cfg.agent_profiles.profiles["local"]
+    profile = cfg.model_connections.profiles["local"]
     assert profile.auth.settings == {"key": "OPENAI_API_KEY"}
     assert profile.config_error is None
 
 
 def test_revalidating_an_already_frozen_profile_is_idempotent() -> None:
     """Rebuilding a profile from a frozen one must not fail on its tuples."""
-    first = AgentProfileConfig(model="ollama/llama3", options={"stop": ["a", "b"]})
+    first = ModelConnectionConfig(model="ollama/llama3", options={"stop": ["a", "b"]})
     assert first.options["stop"] == ("a", "b")
-    second = AgentProfileConfig(model=first.model, options=first.options)
+    second = ModelConnectionConfig(model=first.model, options=first.options)
     assert second.options == first.options
     assert second.options_error is None
 
@@ -218,9 +218,9 @@ def test_revalidating_an_already_frozen_profile_is_idempotent() -> None:
 @pytest.mark.parametrize(
     "instance",
     [
-        AgentAuthConfig(method="none"),
-        AgentProfileConfig(model="openai/gpt-4o"),
-        AgentProfilesConfig(),
+        ConnectionAuthConfig(method="none"),
+        ModelConnectionConfig(model="openai/gpt-4o"),
+        ModelConnectionsConfig(),
     ],
 )
 def test_frozen_profile_dataclasses_are_unhashable(instance: object) -> None:
@@ -246,7 +246,7 @@ agent:
 """,
     )
     cfg = load_config(path)
-    assert set(cfg.agent_profiles.profiles) == {"local"}
+    assert set(cfg.model_connections.profiles) == {"local"}
     assert any("invalid profile name" in warning for warning in cfg.warnings)
 
 
@@ -264,7 +264,7 @@ agent:
 """,
     )
     cfg = load_config(path)
-    assert set(cfg.agent_profiles.profiles) == {"local"}
+    assert set(cfg.model_connections.profiles) == {"local"}
     assert any("broken" in warning and "model" in warning for warning in cfg.warnings)
 
 
@@ -287,7 +287,7 @@ agent:
 """,
     )
     cfg = load_config(path)
-    profiles = cfg.agent_profiles
+    profiles = cfg.model_connections
     assert set(profiles.profiles) == {"local"}
     assert set(profiles.unparsed) == {"bad name", "broken"}
     assert profiles.unparsed["broken"] == {"endpoint": "http://example.invalid"}
@@ -312,10 +312,10 @@ agent:
 """,
     )
     cfg = load_config(path)
-    profile = cfg.agent_profiles.profiles["local"]
+    profile = cfg.model_connections.profiles["local"]
     assert profile.options == {}
     assert profile.options_error is not None
-    assert cfg.agent_profiles.unparsed["local"] == {
+    assert cfg.model_connections.unparsed["local"] == {
         "model": "ollama/llama3",
         "options": {"blob": blob},
     }
@@ -332,12 +332,12 @@ def test_invalid_profile_names(name: str) -> None:
 
 
 def test_profiles_config_defaults_are_empty() -> None:
-    empty = AgentProfilesConfig()
+    empty = ModelConnectionsConfig()
     assert empty.active is None
     assert empty.active_profile is None
     assert empty.profiles == {}
     assert empty.unparsed == {}
-    assert AgentProfileConfig(model="ollama/llama3").auth.method == "none"
+    assert ModelConnectionConfig(model="ollama/llama3").auth.method == "none"
 
 
 def test_the_legacy_reference_helper_joins_with_a_slash() -> None:
@@ -359,7 +359,7 @@ agent:
 """,
     )
     cfg = load_config(path)
-    profile = cfg.agent_profiles.active_profile
+    profile = cfg.model_connections.active_profile
     assert profile is not None
     assert profile.model == "ollama/qwen3:8b"
     prefix, _, tag = profile.model.partition("/")
@@ -385,8 +385,8 @@ agent:
 """,
     )
     cfg = load_config(path)
-    assert cfg.agent_profiles.active == "default"
-    profile = cfg.agent_profiles.active_profile
+    assert cfg.model_connections.active == "default"
+    profile = cfg.model_connections.active_profile
     assert profile is not None
     assert profile.model == "ollama/llama3"
     assert profile.endpoint == "http://localhost:11434"
@@ -417,7 +417,7 @@ agent:
 """,
     )
     cfg = load_config(path)
-    profile = cfg.agent_profiles.active_profile
+    profile = cfg.model_connections.active_profile
     assert profile is not None
     assert "native_api" not in profile.options
 
@@ -443,7 +443,7 @@ def test_legacy_ollama_numbers_keep_the_old_parser_s_coercion(
     `str`. Migration is the last place that can still fix it.
     """
     path = _write(tmp_path, f"agent:\n  provider: ollama\n  model: llama3\n  ollama:\n    {raw}\n")
-    profile = load_config(path).agent_profiles.active_profile
+    profile = load_config(path).model_connections.active_profile
     assert profile is not None
     key, value = expected
     assert profile.options[key] == value
@@ -484,7 +484,7 @@ def test_an_uncoercible_legacy_ollama_value_is_dropped_with_a_warning(
     key = raw.split(":")[0]
     path = _write(tmp_path, f"agent:\n  provider: ollama\n  model: llama3\n  ollama:\n    {raw}\n")
     cfg = load_config(path)
-    profile = cfg.agent_profiles.active_profile
+    profile = cfg.model_connections.active_profile
     assert profile is not None
     assert profile.config_error is None
     assert key not in profile.options
@@ -518,7 +518,7 @@ agent:
 """,
     )
     cfg = load_config(path)
-    profile = cfg.agent_profiles.active_profile
+    profile = cfg.model_connections.active_profile
     assert profile is not None
     assert profile.model == expected
 
@@ -535,9 +535,11 @@ agent:
 """,
     )
     cfg = load_config(path)
-    profile = cfg.agent_profiles.active_profile
+    profile = cfg.model_connections.active_profile
     assert profile is not None
-    assert profile.auth == AgentAuthConfig(method="environment", settings={"key": "OPENAI_API_KEY"})
+    assert profile.auth == ConnectionAuthConfig(
+        method="environment", settings={"key": "OPENAI_API_KEY"}
+    )
 
 
 def test_legacy_entra_auth_becomes_provider_default(tmp_path: Path) -> None:
@@ -553,7 +555,7 @@ agent:
 """,
     )
     cfg = load_config(path)
-    profile = cfg.agent_profiles.active_profile
+    profile = cfg.model_connections.active_profile
     assert profile is not None
     assert profile.auth.method == "provider-default"
     assert profile.model == "azure/gpt-4o"
@@ -580,10 +582,10 @@ agent:
 """,
     )
     cfg = load_config(path)
-    profile = cfg.agent_profiles.active_profile
+    profile = cfg.model_connections.active_profile
     assert profile is not None
     assert profile.model == "azure/gpt-4o"
-    assert profile.auth == AgentAuthConfig(
+    assert profile.auth == ConnectionAuthConfig(
         method="environment", settings={"key": "AZURE_OPENAI_API_KEY"}
     )
 
@@ -609,7 +611,7 @@ agent:
 """,
     )
     cfg = load_config(path)
-    profile = cfg.agent_profiles.active_profile
+    profile = cfg.model_connections.active_profile
     assert profile is not None
     assert profile.endpoint == "https://example.openai.azure.com"
     assert profile.options["azure_deployment"] == "my-dep"
@@ -635,7 +637,7 @@ agent:
 """,
     )
     cfg = load_config(path)
-    profile = cfg.agent_profiles.active_profile
+    profile = cfg.model_connections.active_profile
     assert profile is not None
     assert profile.endpoint == "https://example.openai.azure.com"
     assert "azure_deployment" not in profile.options
@@ -657,7 +659,7 @@ agent:
 """,
     )
     cfg = load_config(path)
-    profile = cfg.agent_profiles.active_profile
+    profile = cfg.model_connections.active_profile
     assert profile is not None
     assert profile.endpoint == "https://example.openai.azure.com"
     assert not any("was rewritten" in warning for warning in cfg.warnings)
@@ -676,7 +678,7 @@ agent:
 """,
     )
     cfg = load_config(path)
-    profile = cfg.agent_profiles.active_profile
+    profile = cfg.model_connections.active_profile
     assert profile is not None
     assert profile.endpoint == "https://gateway.corp.invalid/openai/v1"
 
@@ -684,7 +686,7 @@ agent:
 def test_legacy_copilot_auth_stays_device_login(tmp_path: Path) -> None:
     path = _write(tmp_path, "agent:\n  provider: github-copilot\n  model: gpt-4o\n")
     cfg = load_config(path)
-    profile = cfg.agent_profiles.active_profile
+    profile = cfg.model_connections.active_profile
     assert profile is not None
     assert profile.auth.method == "device-login"
 
@@ -695,8 +697,8 @@ def test_explicitly_disabled_legacy_agent_produces_no_active_profile(tmp_path: P
         "agent:\n  enabled: false\n  provider: ollama\n  model: llama3\n  base_url: http://x:11434\n",
     )
     cfg = load_config(path)
-    assert cfg.agent_profiles.active is None
-    assert "default" in cfg.agent_profiles.profiles
+    assert cfg.model_connections.active is None
+    assert "default" in cfg.model_connections.profiles
 
 
 def test_new_shape_wins_over_legacy_with_a_warning(tmp_path: Path) -> None:
@@ -714,7 +716,7 @@ agent:
 """,
     )
     cfg = load_config(path)
-    assert set(cfg.agent_profiles.profiles) == {"production"}
+    assert set(cfg.model_connections.profiles) == {"production"}
     assert any("legacy" in warning for warning in cfg.warnings)
 
 
@@ -802,7 +804,7 @@ agent:
 """,
     )
     cfg = load_config(path)
-    save_agent_profiles(path, cfg.agent_profiles)
+    save_model_connections(path, cfg.model_connections)
 
     raw = yaml.safe_load(path.read_text(encoding="utf-8"))
     assert raw["kube_context"] == "prod"
@@ -830,9 +832,9 @@ agent:
         items: [1, 2]
 """,
     )
-    before = load_config(path).agent_profiles
-    save_agent_profiles(path, before)
-    after = load_config(path).agent_profiles
+    before = load_config(path).model_connections
+    save_model_connections(path, before)
+    after = load_config(path).model_connections
     assert after.profiles["main"].options["nested"]["depth"] == 1
     assert after.profiles["main"].options["items"] == (1, 2)
     assert after == before
@@ -851,8 +853,8 @@ agent:
 """,
     )
     cfg = load_config(path)
-    assert set(cfg.agent_profiles.profiles) == {"good"}
-    save_agent_profiles(path, cfg.agent_profiles)
+    assert set(cfg.model_connections.profiles) == {"good"}
+    save_model_connections(path, cfg.model_connections)
     raw = yaml.safe_load(path.read_text(encoding="utf-8"))
     assert set(raw["agent"]["profiles"]) == {"good", "broken"}
 
@@ -876,16 +878,16 @@ agent:
 """,
     )
     cfg = load_config(path)
-    assert cfg.agent_profiles.profiles["rejected"].config_error is not None
-    assert "rejected" in cfg.agent_profiles.unparsed
+    assert cfg.model_connections.profiles["rejected"].config_error is not None
+    assert "rejected" in cfg.model_connections.unparsed
 
     pruned = replace(
-        cfg.agent_profiles,
-        profiles={k: v for k, v in cfg.agent_profiles.profiles.items() if k != "rejected"},
-        unparsed={k: v for k, v in cfg.agent_profiles.unparsed.items() if k != "rejected"},
+        cfg.model_connections,
+        profiles={k: v for k, v in cfg.model_connections.profiles.items() if k != "rejected"},
+        unparsed={k: v for k, v in cfg.model_connections.unparsed.items() if k != "rejected"},
     )
-    save_agent_profiles(path, pruned)
-    assert set(load_config(path).agent_profiles.profiles) == {"good"}
+    save_model_connections(path, pruned)
+    assert set(load_config(path).model_connections.profiles) == {"good"}
     raw = yaml.safe_load(path.read_text(encoding="utf-8"))
     assert set(raw["agent"]["profiles"]) == {"good"}
 

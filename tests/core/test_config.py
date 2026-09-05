@@ -175,7 +175,7 @@ def test_legacy_copilot_config_still_infers_device_login(tmp_path: Path) -> None
     p = tmp_path / "c.yaml"
     p.write_text("agent:\n  provider: github-copilot\n  model: gpt-4o\n")
     cfg = load_config(p)
-    profile = cfg.agent_profiles.active_profile
+    profile = cfg.model_connections.active_profile
     assert profile is not None
     assert profile.model == "github-copilot/gpt-4o"
     assert profile.auth.method == "device-login"
@@ -187,7 +187,7 @@ def test_legacy_ollama_options_survive_the_move_out_of_load_config(
     p = tmp_path / "c.yaml"
     p.write_text("agent:\n  provider: ollama\n  model: qwen3:8b\n  ollama:\n    think: true\n")
     cfg = load_config(p)
-    profile = cfg.agent_profiles.active_profile
+    profile = cfg.model_connections.active_profile
     assert profile is not None
     assert cfg.agent_ollama_think is True
     assert profile.model == "ollama/qwen3:8b"

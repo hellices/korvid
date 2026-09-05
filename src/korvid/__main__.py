@@ -35,14 +35,14 @@ from korvid.core.audit import AuditLog, default_audit_path
 from korvid.core.config import (
     DEFAULT_CONFIG_PATH,
     LEGACY_PROFILE_NAME,
-    AgentAuthConfig,
-    AgentProfileConfig,
     ConfigMigrationError,
+    ConnectionAuthConfig,
     KorvidConfig,
+    ModelConnectionConfig,
     ObservabilityBackend,
     context_is_protected,
     load_config,
-    save_agent_profiles,
+    save_model_connections,
     save_topbar_state,
 )
 from korvid.core.mcp import MCPControllerBase
@@ -1091,26 +1091,26 @@ def _persist_agent_settings(settings: AgentSettings) -> None:
     auth_settings: dict[str, object] = {}
     if settings.api_key_env:
         auth_settings["key"] = settings.api_key_env
-    profile = AgentProfileConfig(
+    profile = ModelConnectionConfig(
         model=f"{settings.provider}/{settings.model}",
         endpoint=settings.base_url,
-        auth=AgentAuthConfig(method=settings.auth_method, settings=auth_settings),
+        auth=ConnectionAuthConfig(method=settings.auth_method, settings=auth_settings),
         options=dict(settings.options),
     )
     config = load_config(DEFAULT_CONFIG_PATH)
     profiles_by_name = {
         name: existing_profile
-        for name, existing_profile in config.agent_profiles.profiles.items()
+        for name, existing_profile in config.model_connections.profiles.items()
         if existing_profile.config_error is None
     }
     profiles_by_name[LEGACY_PROFILE_NAME] = profile
     profiles = dataclasses.replace(
-        config.agent_profiles,
+        config.model_connections,
         active=LEGACY_PROFILE_NAME,
         profiles=profiles_by_name,
     )
     try:
-        save_agent_profiles(DEFAULT_CONFIG_PATH, profiles)
+        save_model_connections(DEFAULT_CONFIG_PATH, profiles)
     except OSError:
         logger.warning("could not write config: applied now, reverts on restart")
 
