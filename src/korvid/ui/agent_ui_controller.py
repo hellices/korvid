@@ -58,7 +58,12 @@ from korvid.agent.model_profiles import (
     split_reference,
 )
 from korvid.agent.navigation import EvidenceTarget, target_for
-from korvid.agent.setup import AgentConfigurator, AgentSettings
+from korvid.agent.setup import (
+    AgentConfigurator,
+    AgentSettings,
+    profile_refusal,
+    settings_from_profile,
+)
 from korvid.core.audit import AuditLog
 from korvid.core.config import ConnectionAuthConfig, KorvidConfig, is_valid_profile_name
 from korvid.core.errors import explain_api_error
@@ -126,35 +131,6 @@ Triple = tuple[str, str, str]
 #: key. It is a *name*: nothing here reads the environment, so a secret
 #: value cannot travel from a profile into the session or back to disk.
 _ENV_KEY_SETTING = "key"
-
-
-def settings_from_profile(profile: ModelConnectionConfig, tier: str | None) -> AgentSettings | None:
-    """Project a profile onto the transport record the runtime still speaks.
-
-    Interim: Task 15 replaces this with the profile-native provider
-    factory. It refuses rather than guesses — a reference with no provider
-    prefix yields None, because inventing one would connect the agent to a
-    host the operator never named.
-    """
-    if profile.config_error is not None:
-        return None
-    prefix, tag = split_reference(profile.model)
-    if not prefix or not tag:
-        return None
-    api_key_env: str | None = None
-    if profile.auth.method == "environment":
-        named = profile.auth.settings.get(_ENV_KEY_SETTING)
-        if isinstance(named, str):
-            api_key_env = named
-    return AgentSettings(
-        provider=prefix,
-        auth_method=profile.auth.method,
-        base_url=profile.endpoint,
-        model=tag,
-        api_key_env=api_key_env,
-        model_tier=tier,
-        options=dict(profile.options),
-    )
 
 
 def _profile_from_settings(settings: AgentSettings | None) -> ModelConnectionConfig | None:
@@ -637,6 +613,10 @@ class AgentUiController:
         #: `unparsed` entries: every save round-trips them, so activating
         #: one profile can never delete another the operator must repair.
         self._profiles = settings.model_connections
+        #: The wizard result its own save hook already wrote. The dismiss
+        #: callback is the safety net for wizards that never reached the
+        #: hook, so it skips this one instead of filing a duplicate.
+        self._saved_setup_result: SetupResult | None = None
         # config.yaml naming a provider and a model is enough to seed the
         # settings snapshot, whether or not the composition root managed to
         # build a session from it. A startup that degraded (a provider the
@@ -869,7 +849,10 @@ class AgentUiController:
         # every answer a second time.
         self._ui.push_screen(
             self._setup_screen(
-                _profile_from_settings(self._settings), apply_result=self._apply_result
+                _profile_from_settings(self._settings),
+                ask_tier=True,
+                apply_result=self._apply_result,
+                save_result=self._save_setup_result,
             ),
             callback=self._handle_setup_result,
         )
@@ -878,7 +861,9 @@ class AgentUiController:
         self,
         profile: ModelConnectionConfig | None,
         *,
+        ask_tier: bool = False,
         apply_result: Callable[[SetupResult], bool] | None = None,
+        save_result: Callable[[SetupResult], Awaitable[None]] | None = None,
     ) -> AgentSetupScreen:
         """The wizard. Persistence is the controller's, not the screen's:
         the wizard produces one profile, the controller decides where it
@@ -890,7 +875,9 @@ class AgentUiController:
             catalog,
             profile=profile,
             current_tier=self._configured_tier,
+            ask_tier=ask_tier,
             apply_result=apply_result,
+            save_result=save_result,
         )
 
     async def _edit_profile(
@@ -923,23 +910,62 @@ class AgentUiController:
         settings = self._profile_settings(result.profile, result.model_tier)
         if settings is None:
             self._ui.notify(
-                f"Cannot connect to {result.profile.model!r} — the model reference needs "
-                "a provider prefix (provider/model)",
+                f"Cannot connect to {result.profile.model!r} — {self._refusal(result.profile)}",
                 severity="warning",
                 markup=False,
             )
             return False
         return self.apply_settings(settings)
 
+    @staticmethod
+    def _refusal(profile: ModelConnectionConfig) -> str:
+        """Why a profile could not be built, phrased for the operator.
+
+        The injected factory answers None for several different reasons;
+        reporting only one of them tells the operator to fix something
+        that is not broken.
+        """
+        reason = profile_refusal(profile)
+        return reason if reason else "the model reference needs a provider prefix (provider/model)"
+
     def _handle_setup_result(self, result: SetupResult | None) -> None:
-        """A completed first-run wizard: name the profile and persist it."""
+        """A completed first-run wizard: name the profile and persist it.
+
+        The wizard's own save hook normally wrote it already — this is the
+        safety net for a wizard dismissed by some other path, so it skips
+        the result the hook has just persisted rather than filing a second,
+        duplicate profile beside it.
+        """
         if result is None:
             return
+        if result is self._saved_setup_result:
+            return
+        self._persist_profiles(self._profile_entry(result))
+
+    def _profile_entry(self, result: SetupResult) -> ModelConnectionsConfig:
+        """Place a wizard result in the set as the active profile.
+
+        Built with `replace` so everything else the file round-trips —
+        `unparsed` included — survives.
+        """
         taken = set(self._profiles.profiles) | set(self._profiles.unparsed)
         name = _profile_name(result.profile.model, taken)
         profiles = dict(self._profiles.profiles)
         profiles[name] = result.profile
-        self._persist_profiles(dataclasses.replace(self._profiles, active=name, profiles=profiles))
+        return dataclasses.replace(self._profiles, active=name, profiles=profiles)
+
+    async def _save_setup_result(self, result: SetupResult) -> None:
+        """Persist a wizard result from inside the wizard.
+
+        Raises rather than reports: the screen is still mounted and turns
+        the failure into a visible "will revert on restart" warning that
+        keeps the operator's answers on screen. Swallowing it here would
+        dismiss the wizard on a lie.
+        """
+        entry = self._profile_entry(result)
+        self._write_profiles(entry)
+        self._profiles = entry
+        self._saved_setup_result = result
 
     def _handle_manager_result(self, result: ProfileManagerResult | None) -> None:
         if result is None:
@@ -972,8 +998,7 @@ class AgentUiController:
         settings = self._profile_settings(profile, self._configured_tier)
         if settings is None:
             self._ui.notify(
-                f"Profile {name!r} cannot be built: {profile.model!r} needs a provider "
-                "prefix (provider/model)",
+                f"Profile {name!r} cannot be built: {self._refusal(profile)}",
                 severity="warning",
                 markup=False,
             )
@@ -989,16 +1014,8 @@ class AgentUiController:
         The in-memory set is refreshed from the value handed to the writer
         — `unparsed` included — so the round-trip stays authoritative.
         """
-        save = self._save_profiles
-        if save is None:
-            self._ui.notify(
-                "Agent profiles cannot be saved — no configuration path is wired",
-                severity="warning",
-                markup=False,
-            )
-            return False
         try:
-            save(profiles)
+            self._write_profiles(profiles)
         except Exception as exc:  # applied already; disk is what failed
             self._ui.notify(
                 f"Profile applied, but save failed: {exc} — will revert on restart",
@@ -1008,6 +1025,17 @@ class AgentUiController:
             return False
         self._profiles = profiles
         return True
+
+    def _write_profiles(self, profiles: ModelConnectionsConfig) -> None:
+        """Hand the set to the injected writer, or say there is none.
+
+        Adopting the written value is the caller's: only a caller knows
+        whether a failure should be reported or raised at its own caller.
+        """
+        save = self._save_profiles
+        if save is None:
+            raise RuntimeError("no configuration path is wired")
+        save(profiles)
 
     def handle_model_command(self, args: list[str]) -> None:
         """`:model` shows the current model; `:model <name>` switches and persists it."""

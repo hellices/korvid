@@ -15,7 +15,10 @@ from korvid.agent.model_profiles import (
 
 litellm = pytest.importorskip("litellm")
 
-from korvid.providers.litellm_catalog import LiteLLMModelCatalog  # noqa: E402
+from korvid.providers.litellm_catalog import (  # noqa: E402
+    LiteLLMModelCatalog,
+    ProfileTestUnavailable,
+)
 from korvid.providers.litellm_runtime import (  # noqa: E402
     LOCKDOWN_FLAGS,
     ProviderSDKError,
@@ -575,3 +578,46 @@ def test_a_flow_cannot_offer_keyless_auth_without_an_endpoint() -> None:
     assert "none" in {
         m.id for m in catalog.auth_methods("company-flow/x", endpoint="http://host:8080")
     }
+
+
+# ---------------------------------------------------------------------------
+# Connection probe
+# ---------------------------------------------------------------------------
+
+
+async def test_the_catalog_delegates_the_probe_to_its_injected_tester() -> None:
+    """`test()` is the wizard's last stage. The catalog owns no transport,
+    so it must hand the profile to whoever does — unchanged."""
+    seen: list[ModelConnectionConfig] = []
+
+    async def _probe(profile: ModelConnectionConfig) -> str:
+        seen.append(profile)
+        return "connected to acme"
+
+    catalog = LiteLLMModelCatalog(tester=_probe)
+    profile = ModelConnectionConfig(model="openai/gpt-4o", endpoint="http://host/v1")
+
+    assert await catalog.test(profile) == "connected to acme"
+    assert seen == [profile]
+
+
+async def test_the_catalog_propagates_a_probe_failure_unchanged() -> None:
+    """A refused connection is the answer the wizard renders; swallowing
+    it would report a working profile that cannot connect."""
+
+    async def _probe(profile: ModelConnectionConfig) -> str:
+        raise RuntimeError("connection refused")
+
+    catalog = LiteLLMModelCatalog(tester=_probe)
+
+    with pytest.raises(RuntimeError, match="connection refused"):
+        await catalog.test(ModelConnectionConfig(model="openai/gpt-4o"))
+
+
+async def test_a_catalog_without_a_tester_says_probing_is_unavailable() -> None:
+    """Never `NotImplementedError`: the wizard shows what it caught, and
+    a bare stub name is not something an operator can act on."""
+    catalog = LiteLLMModelCatalog()
+
+    with pytest.raises(ProfileTestUnavailable, match="cannot test"):
+        await catalog.test(ModelConnectionConfig(model="openai/gpt-4o"))

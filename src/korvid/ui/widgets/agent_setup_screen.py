@@ -176,6 +176,12 @@ class AgentSetupScreen(ModalScreen["SetupResult | None"]):
         profile: The profile being edited, or None for a new one. Seeds
             every stage, so editing never silently resets a value.
         current_tier: The persisted tier override (None = Automatic).
+        ask_tier: Whether to ask for the tier at all. The tier is the
+            agent's global routing override, not a field of the profile:
+            the first run asks it once, and the profile editor must not,
+            or adding one profile silently re-answers a setting that
+            applies to all of them. When False `current_tier` travels
+            through the result unchanged.
         apply_result: Swaps the running agent onto the new profile. When
             it returns False the wizard stays open and nothing is saved.
         save_result: Persists the result. Called only after a successful
@@ -186,6 +192,10 @@ class AgentSetupScreen(ModalScreen["SetupResult | None"]):
     BINDINGS: ClassVar[list[Binding | tuple[str, str] | tuple[str, str, str]]] = [
         Binding("escape", "cancel", "Cancel", show=True),
         Binding("ctrl+b", "back", "Back", show=True),
+        # A stage made only of checkboxes and choice lists has no Input to
+        # submit and no single option that ends it, so the way forward has
+        # to be a key the footer advertises.
+        Binding("ctrl+g", "continue", "Continue", show=True),
         Binding("ctrl+r", "retry", "Retry test", show=False),
     ]
 
@@ -223,6 +233,7 @@ class AgentSetupScreen(ModalScreen["SetupResult | None"]):
         *,
         profile: ModelConnectionConfig | None = None,
         current_tier: str | None = None,
+        ask_tier: bool = True,
         apply_result: Callable[[SetupResult], bool] | None = None,
         save_result: Callable[[SetupResult], Awaitable[None]] | None = None,
     ) -> None:
@@ -234,6 +245,7 @@ class AgentSetupScreen(ModalScreen["SetupResult | None"]):
         #: The persisted tier override; the wizard's own answer is a draft
         #: until it dismisses.
         self._model_tier = current_tier
+        self._ask_tier = ask_tier
         self._reference = ""
         self._endpoint: str | None = None
         self._method: AuthMethodDescriptor | None = None
@@ -241,6 +253,10 @@ class AgentSetupScreen(ModalScreen["SetupResult | None"]):
         self._option_fields: tuple[SetupField, ...] = ()
         self._option_values: dict[str, object] = {}
         self._done_steps: dict[str, str] = {}
+        #: True while a multi-field stage is mounted and waiting. Only then
+        #: does Continue mean anything: resolving the probe stage with it
+        #: would run the wizard off the end of its own stage table.
+        self._stage_continuable = False
         #: Resolved by whatever ends the mounted stage — a submitted input,
         #: a chosen option, or one of the navigation bindings.
         self._stage_nav: asyncio.Future[_Nav] | None = None
@@ -428,6 +444,7 @@ class AgentSetupScreen(ModalScreen["SetupResult | None"]):
         seeds = self._auth_seeds(method)
         widgets = [_widget_for(field, seeds.get(field.key)) for field in method.fields]
         await self._mount_stage(method.display_name, self._labelled(method.fields, widgets))
+        self._preselect_choices(method.fields, seeds)
         return await self._collect_stage(method.fields, self._store_auth_values)
 
     def _auth_seeds(self, method: AuthMethodDescriptor) -> dict[str, object]:
@@ -480,7 +497,24 @@ class AgentSetupScreen(ModalScreen["SetupResult | None"]):
         seeds = self._option_seeds(fields)
         widgets = [_widget_for(field, seeds.get(field.key)) for field in fields]
         await self._mount_stage("Model options", self._labelled(fields, widgets))
+        self._preselect_choices(fields, seeds)
         return await self._collect_stage(fields, self._store_option_values)
+
+    def _preselect_choices(self, fields: Sequence[SetupField], seeds: Mapping[str, object]) -> None:
+        """Highlight the option a choice field is already set to.
+
+        Applied after mounting, like the auth-method stage does: a list
+        that opens on its first entry silently rewrites a stored choice to
+        whatever happens to be listed first the moment the stage is read.
+        """
+        for field in fields:
+            seed = seeds.get(field.key)
+            widget = self._stage_widget(field.key)
+            if seed is None or not isinstance(widget, OptionList):
+                continue
+            choices = list(field.choices)
+            if str(seed) in choices:
+                widget.highlighted = choices.index(str(seed))
 
     def _option_seeds(self, fields: Sequence[SetupField]) -> dict[str, object]:
         """Profile first, descriptor default second: editing a profile must
@@ -499,6 +533,11 @@ class AgentSetupScreen(ModalScreen["SetupResult | None"]):
         self._option_values = values
 
     async def _stage_tier(self, direction: _Nav) -> _Nav:
+        if not self._ask_tier:
+            # An editor is placing one profile; the tier applies to the
+            # agent as a whole, so re-asking it here would let adding a
+            # profile quietly re-answer a global setting.
+            return direction
         options = OptionList(
             *(Option(label, id=tier_id) for tier_id, label in _TIER_OPTIONS),
             id="setup-tier",
@@ -577,16 +616,22 @@ class AgentSetupScreen(ModalScreen["SetupResult | None"]):
     async def _collect_stage(
         self, fields: Sequence[SetupField], store: Callable[[dict[str, object]], None]
     ) -> _Nav:
-        while True:
-            outcome = await self._await_nav()
-            if outcome is not _Nav.NEXT:
-                return outcome
-            values, error = _collect_fields(fields, self._stage_widget)
-            if values is None:
-                self._status(error)
-                continue
-            store(values)
-            return _Nav.NEXT
+        self._stage_continuable = True
+        self.refresh_bindings()
+        try:
+            while True:
+                outcome = await self._await_nav()
+                if outcome is not _Nav.NEXT:
+                    return outcome
+                values, error = _collect_fields(fields, self._stage_widget)
+                if values is None:
+                    self._status(error)
+                    continue
+                store(values)
+                return _Nav.NEXT
+        finally:
+            self._stage_continuable = False
+            self.refresh_bindings()
 
     def _draft_profile(self) -> ModelConnectionConfig:
         method = self._method.id if self._method is not None else self._seed.auth.method
@@ -625,6 +670,22 @@ class AgentSetupScreen(ModalScreen["SetupResult | None"]):
 
     def action_back(self) -> None:
         self._resolve_nav(_Nav.BACK)
+
+    def action_continue(self) -> None:
+        """Answer a whole field stage — the stages a keystroke cannot end.
+
+        Only a mounted field stage responds. Resolving the probe or
+        sign-in stages this way would advance past the last entry in the
+        stage table and leave the wizard mounted with nothing running.
+        """
+        if self._stage_continuable:
+            self._resolve_nav(_Nav.NEXT)
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        """Hide Continue on stages where it would do nothing."""
+        if action == "continue":
+            return True if self._stage_continuable else None
+        return True
 
     def action_retry(self) -> None:
         self._resolve_nav(_Nav.REPEAT)

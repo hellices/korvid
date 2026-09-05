@@ -3470,3 +3470,140 @@ def test_building_the_catalog_opens_no_socket() -> None:
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "0", result.stdout
+
+
+# ---------------------------------------------------------------------------
+# Task 11 review — the production catalog can actually probe a profile
+# ---------------------------------------------------------------------------
+
+
+class _RecordingConfigurator:
+    """Stands in for the `:ai` wizard's configurator, recording its probes."""
+
+    def __init__(self, result: str = "ok", error: Exception | None = None) -> None:
+        self.probed: list[AgentSettings] = []
+        self._result = result
+        self._error = error
+
+    async def begin_device_login(self) -> Any:  # pragma: no cover - not probed here
+        raise NotImplementedError
+
+    async def finish_device_login(self) -> None:  # pragma: no cover - not probed here
+        raise NotImplementedError
+
+    async def list_models(self, settings: AgentSettings) -> list[str]:  # pragma: no cover
+        return []
+
+    async def test(self, settings: AgentSettings) -> str:
+        self.probed.append(settings)
+        if self._error is not None:
+            raise self._error
+        return self._result
+
+    async def save(self, settings: AgentSettings) -> None:  # pragma: no cover - not probed here
+        raise NotImplementedError
+
+
+def _azure_profile() -> Any:
+    from korvid.core.config import ConnectionAuthConfig, ModelConnectionConfig
+
+    return ModelConnectionConfig(
+        model="azure/gpt-4o",
+        endpoint="https://x.openai.azure.com",
+        auth=ConnectionAuthConfig(method="environment", settings={"key": "AZURE_OPENAI_API_KEY"}),
+        options={"azure_deployment": "my-dep"},
+    )
+
+
+async def test_the_production_catalog_probes_a_profile_instead_of_raising() -> None:
+    """The wizard's last stage calls `catalog.test()`. A stub that raises
+    `NotImplementedError` there makes every real first run end in failure."""
+    pytest.importorskip("litellm")
+    from korvid.__main__ import _build_model_catalog
+    from korvid.core.config import ModelConnectionConfig
+
+    configurator = _RecordingConfigurator(result="connected")
+    catalog = _build_model_catalog(cast("Any", configurator))
+    assert catalog is not None
+
+    result = await catalog.test(ModelConnectionConfig(model="openai/gpt-4o"))
+
+    assert result == "connected"
+    assert [s.provider for s in configurator.probed] == ["openai"]
+
+
+async def test_the_production_catalog_refuses_a_prefix_the_transport_cannot_serve() -> None:
+    """The interim transport speaks bearer-token HTTP only. Probing an
+    `anthropic` profile through it would send `Authorization: Bearer` to a
+    vendor that expects its own header — a credential leak, not a probe."""
+    pytest.importorskip("litellm")
+    from korvid.__main__ import _build_model_catalog
+    from korvid.core.config import ModelConnectionConfig
+
+    configurator = _RecordingConfigurator()
+    catalog = _build_model_catalog(cast("Any", configurator))
+    assert catalog is not None
+
+    with pytest.raises(Exception, match="Task 15"):
+        await catalog.test(ModelConnectionConfig(model="anthropic/claude-sonnet-4-5"))
+
+    assert configurator.probed == []
+
+
+async def test_the_production_catalog_projects_a_profile_exactly_like_startup(
+    tmp_path: Path,
+) -> None:
+    """The probe must reach the host the runtime would: the Azure
+    deployment path startup rebuilds has to be on the probed base URL too,
+    or a wizard that reports success configures a 404."""
+    pytest.importorskip("litellm")
+    from korvid.__main__ import _build_model_catalog
+    from korvid.core.config import load_config
+
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        "agent:\n"
+        "  active: main\n"
+        "  profiles:\n"
+        "    main:\n"
+        "      model: azure/gpt-4o\n"
+        "      endpoint: https://x.openai.azure.com\n"
+        "      auth:\n"
+        "        method: environment\n"
+        "        key: AZURE_OPENAI_API_KEY\n"
+        "      options:\n"
+        "        azure_deployment: my-dep\n",
+        encoding="utf-8",
+    )
+    startup = load_config(path)
+
+    configurator = _RecordingConfigurator()
+    catalog = _build_model_catalog(cast("Any", configurator))
+    assert catalog is not None
+
+    await catalog.test(_azure_profile())
+
+    probed = configurator.probed[-1]
+    assert probed.base_url == startup.agent_base_url
+    assert probed.base_url == "https://x.openai.azure.com/openai/deployments/my-dep"
+    assert probed.model == startup.agent_model
+    assert probed.api_key_env == startup.agent_api_key_env
+
+
+async def test_a_catalog_built_without_a_configurator_still_reports_a_reason() -> None:
+    pytest.importorskip("litellm")
+    from korvid.__main__ import _build_model_catalog
+    from korvid.core.config import ModelConnectionConfig
+
+    catalog = _build_model_catalog()
+    assert catalog is not None
+
+    with pytest.raises(Exception, match="cannot test"):
+        await catalog.test(ModelConnectionConfig(model="openai/gpt-4o"))
+
+
+def test_the_app_is_wired_with_a_catalog_that_can_probe() -> None:
+    """The composition root hands the catalog the configurator it built —
+    without it every `:ai` run ends at the connection test."""
+    source = Path("src/korvid/__main__.py").read_text(encoding="utf-8")
+    assert "_build_model_catalog(agent.configurator)" in source

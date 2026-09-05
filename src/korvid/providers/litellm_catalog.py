@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import functools
 import re
+from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from typing import Any, Final
 
@@ -153,6 +154,19 @@ def _positive_int(value: object) -> int | None:
 
 _ALNUM_RE: Final = re.compile(r"[a-z0-9]")
 
+#: An async probe of one profile, returning a short human-readable result.
+#: The catalog owns no transport, so whoever does is injected here.
+ProfileTester = Callable[[ModelConnectionConfig], Awaitable[str]]
+
+
+class ProfileTestUnavailable(RuntimeError):
+    """No transport was injected, so this catalog cannot probe a profile.
+
+    Raised rather than returning a cheerful string: a wizard that reports
+    a working connection it never made is worse than one that says it
+    could not check.
+    """
+
 
 class LiteLLMModelCatalog(ModelCatalog):
     """`ModelCatalog` over LiteLLM's shipped tables.
@@ -164,6 +178,11 @@ class LiteLLMModelCatalog(ModelCatalog):
             "offline only", which is the air-gapped default.
         discovery: The bounded endpoint prober. Injected so the catalog
             stays testable without a network. Task 8 fills this in.
+        tester: Probes one profile and returns what to show the operator.
+            Injected because the catalog is a data index — it holds no
+            client, no credential and no transport of its own. `None`
+            means this installation cannot test a connection, and `test`
+            says so instead of pretending.
     """
 
     def __init__(
@@ -172,10 +191,12 @@ class LiteLLMModelCatalog(ModelCatalog):
         flows: SpecialFlowRegistry | None = None,
         enrichment: ModelMetadataSource | None = None,
         discovery: EndpointDiscovery | None = None,
+        tester: ProfileTester | None = None,
     ) -> None:
         self._flows = flows
         self._enrichment = enrichment
         self._discovery = discovery
+        self._tester = tester
 
     # ------------------------------------------------------------------
     # Index construction (lazy, built once per instance)
@@ -440,9 +461,19 @@ class LiteLLMModelCatalog(ModelCatalog):
     async def test(self, profile: ModelConnectionConfig) -> str:
         """Probe the profile and return a short human-readable result.
 
-        Stub — Task 8 fills this in.
+        Delegates to the injected tester. Nothing is normalised on the way
+        through: a refusal is the answer the wizard renders, and swallowing
+        it would report a profile that cannot connect as working.
+
+        Raises:
+            ProfileTestUnavailable: When no tester was injected.
         """
-        raise NotImplementedError("test() is implemented in Task 8")
+        tester = self._tester
+        if tester is None:
+            raise ProfileTestUnavailable(
+                "this installation cannot test a model connection — no transport is wired"
+            )
+        return await tester(profile)
 
     async def begin_auth(self, profile: ModelConnectionConfig) -> None:
         """Begin a device-login flow for this profile.

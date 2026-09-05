@@ -30,7 +30,12 @@ from korvid.agent.interaction import (
     UiAction,
     UiActionResult,
 )
-from korvid.agent.setup import AgentConfigurator, AgentSettings
+from korvid.agent.setup import (
+    AgentConfigurator,
+    AgentSettings,
+    profile_refusal,
+    settings_from_profile,
+)
 from korvid.core.audit import AuditLog, default_audit_path
 from korvid.core.config import (
     DEFAULT_CONFIG_PATH,
@@ -938,11 +943,17 @@ def _close_agent_in_background(
     task.add_done_callback(_reap)
 
 
-def _build_model_catalog() -> ModelCatalog | None:
+def _build_model_catalog(configurator: AgentConfigurator | None = None) -> ModelCatalog | None:
     """Build the catalog, or None when the agent extra is absent.
 
     A missing extra degrades to None — the TUI runs without an agent.
     A *broken* extra is different: it is reported, not swallowed.
+
+    Args:
+        configurator: The `:ai` wizard's configurator, which owns the only
+            transport korvid currently speaks. It is what makes the
+            wizard's connection test a real probe; without it the catalog
+            reports that testing is unavailable rather than pretending.
     """
     try:
         from korvid.providers.endpoint_discovery import EndpointDiscovery
@@ -956,7 +967,37 @@ def _build_model_catalog() -> ModelCatalog | None:
         flows=SpecialFlowRegistry.from_entry_points(reserved_prefixes=models_by_provider()),
         enrichment=ModelsDevSource(),
         discovery=EndpointDiscovery(),
+        tester=None if configurator is None else _make_profile_tester(configurator),
     )
+
+
+def _make_profile_tester(
+    configurator: AgentConfigurator,
+) -> Callable[[ModelConnectionConfig], Awaitable[str]]:
+    """Probe a profile through the transport the runtime still speaks.
+
+    Interim, and replaced by the profile-native factory in Task 15. The
+    profile is translated by the same projection startup derives its
+    scalars from, so the probe reaches exactly the host the agent would:
+    a provider prefix the transport cannot serve is refused here as well,
+    and an Azure deployment path is on the probed URL too. A probe that
+    projected the profile its own way could report success against a host
+    the agent will never use.
+    """
+
+    async def _test(profile: ModelConnectionConfig) -> str:
+        settings = settings_from_profile(profile, None)
+        if settings is None:
+            raise ProfileNotConnectable(
+                f"cannot test {profile.model!r}: {profile_refusal(profile)}"
+            )
+        return await configurator.test(settings)
+
+    return _test
+
+
+class ProfileNotConnectable(RuntimeError):
+    """The interim transport cannot serve this profile, so it was not probed."""
 
 
 def _build_agent_wiring(
@@ -1644,7 +1685,7 @@ async def _wire_and_run(config: KorvidConfig, kube: KubeClient, state: _RunState
         agent_configurator=agent.configurator,
         # The profile screens' single source of answers, and the one path
         # that writes `agent.profiles` back (issue #182).
-        agent_catalog=_build_model_catalog(),
+        agent_catalog=_build_model_catalog(agent.configurator),
         agent_save_profiles=_persist_model_profiles,
         rebuild_agent=agent.rebuild,
         disconnect_agent=agent.disconnect,

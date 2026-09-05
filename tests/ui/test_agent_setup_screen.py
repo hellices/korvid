@@ -13,12 +13,14 @@ recognised an id.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from typing import Any
 
 import pytest
 from textual.app import App
+from textual.binding import Binding
 from textual.widgets import Checkbox, Input, OptionList, Static
 
 from korvid.agent.model_profiles import (
@@ -53,6 +55,10 @@ _ENVIRONMENT = AuthMethodDescriptor(
 )
 
 _NONE_METHOD = AuthMethodDescriptor(id="none", display_name="No authentication")
+
+#: Short local aliases: these tests name field kinds constantly.
+BOOLEAN = SetupFieldKind.BOOLEAN
+CHOICE = SetupFieldKind.CHOICE
 
 
 class _FakeCatalog(ModelCatalog):
@@ -130,6 +136,26 @@ class _FakeCatalog(ModelCatalog):
         return None
 
 
+class _HeldProbeCatalog(_FakeCatalog):
+    """A catalog whose probe blocks until the test releases it.
+
+    Lets an assertion be made while the wizard is still mounted: once the
+    probe returns, the screen dismisses and there is nothing left to query.
+    """
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._released = asyncio.Event()
+
+    def release(self) -> None:
+        self._released.set()
+
+    async def test(self, profile: ModelConnectionConfig) -> str:
+        self.tested.append(profile)
+        await self._released.wait()
+        return "ok"
+
+
 class _Host(App[None]):
     """Pushes the wizard and records what it dismisses with."""
 
@@ -139,6 +165,7 @@ class _Host(App[None]):
         *,
         profile: ModelConnectionConfig | None = None,
         current_tier: str | None = None,
+        ask_tier: bool = True,
         apply_result: Any = None,
         save_result: Any = None,
     ) -> None:
@@ -146,6 +173,7 @@ class _Host(App[None]):
         self._catalog = catalog
         self._profile = profile
         self._current_tier = current_tier
+        self._ask_tier = ask_tier
         self._apply_result = apply_result
         self._save_result = save_result
         self.result: SetupResult | str | None = "unset"
@@ -159,6 +187,7 @@ class _Host(App[None]):
                 self._catalog,
                 profile=self._profile,
                 current_tier=self._current_tier,
+                ask_tier=self._ask_tier,
                 apply_result=self._apply_result,
                 save_result=self._save_result,
             ),
@@ -237,6 +266,18 @@ async def _go_back_and_clear_the_endpoint(pilot: Any) -> None:
     await _wait_for(pilot.app, pilot, "#setup-auth", "auth-method stage recomputed")
 
 
+#: The screen's own "this stage is answered" key, read off the bindings so
+#: the tests cannot drift from the footer the operator actually sees.
+_CONTINUE_KEY = next(
+    b.key for b in AgentSetupScreen.BINDINGS if isinstance(b, Binding) and b.action == "continue"
+)
+
+
+async def _continue_stage(pilot: Any) -> None:
+    """End a field stage through the binding the footer advertises."""
+    await pilot.press(_CONTINUE_KEY)
+
+
 async def _submit_stage(pilot: Any) -> None:
     """Submit whatever field stage is mounted (Enter on its first input)."""
     app = pilot.app
@@ -246,7 +287,7 @@ async def _submit_stage(pilot: Any) -> None:
         inputs.first().focus()
         await pilot.press("enter")
         return
-    await pilot.press("ctrl+j")
+    await _continue_stage(pilot)
 
 
 async def _accept_tier(pilot: Any, tier_id: str = "automatic") -> None:
@@ -886,3 +927,206 @@ def test_the_setup_screen_source_names_no_vendor() -> None:
         "cohere",
     ):
         assert vendor not in source.lower()
+
+
+# ---------------------------------------------------------------------------
+# Continuing a stage that has nothing to submit
+# ---------------------------------------------------------------------------
+
+
+def test_the_continue_binding_is_offered() -> None:
+    """A boolean- or choice-only stage has no Input to submit and no
+    single option that ends it, so the way out has to be on the footer."""
+    keys = {b.action: b for b in AgentSetupScreen.BINDINGS if isinstance(b, Binding)}
+    assert "continue" in keys
+    assert keys["continue"].show is True
+    assert keys["continue"].description
+
+
+async def test_a_boolean_only_stage_completes_without_an_input() -> None:
+    catalog = _FakeCatalog(
+        auth=(_NONE_METHOD,),
+        options=(SetupField(key="native_thinking", label="Native thinking", kind=BOOLEAN),),
+    )
+    app = _Host(catalog)
+    async with app.run_test() as pilot:
+        await _advance_to_auth_method(pilot, endpoint="http://endpoint.example")
+        await _choose_auth_method(pilot, "none")
+        await _wait_for(app, pilot, "#field-native_thinking", "option stage")
+        checkbox = _setup_screen(app).query_one("#field-native_thinking", Checkbox)
+        checkbox.value = True
+        assert list(_setup_screen(app).query(Input)) == []  # nothing to submit
+        await _continue_stage(pilot)
+        await _accept_tier(pilot)
+        await until(pilot, lambda: isinstance(app.result, SetupResult), label="wizard result")
+        assert isinstance(app.result, SetupResult)
+        assert app.result.profile.options["native_thinking"] is True
+
+
+async def test_a_choice_only_stage_completes_without_an_input() -> None:
+    catalog = _FakeCatalog(
+        auth=(_NONE_METHOD,),
+        options=(
+            SetupField(
+                key="region", label="Region", kind=CHOICE, choices=("north", "south", "east")
+            ),
+        ),
+    )
+    app = _Host(catalog)
+    async with app.run_test() as pilot:
+        await _advance_to_auth_method(pilot, endpoint="http://endpoint.example")
+        await _choose_auth_method(pilot, "none")
+        await _wait_for(app, pilot, "#field-region", "option stage")
+        choices = _setup_screen(app).query_one("#field-region", OptionList)
+        choices.highlighted = 2
+        await _continue_stage(pilot)
+        await _accept_tier(pilot)
+        await until(pilot, lambda: isinstance(app.result, SetupResult), label="wizard result")
+        assert isinstance(app.result, SetupResult)
+        assert app.result.profile.options["region"] == "east"
+
+
+async def test_selecting_one_choice_does_not_skip_its_sibling_fields() -> None:
+    """Enter on one OptionList of a multi-field stage submits that option,
+    not the stage: the sibling below it has not been answered yet."""
+    catalog = _FakeCatalog(
+        auth=(_NONE_METHOD,),
+        options=(
+            SetupField(key="region", label="Region", kind=CHOICE, choices=("north", "south")),
+            SetupField(key="lane", label="Lane", kind=CHOICE, choices=("fast", "slow")),
+        ),
+    )
+    app = _Host(catalog)
+    async with app.run_test() as pilot:
+        await _advance_to_auth_method(pilot, endpoint="http://endpoint.example")
+        await _choose_auth_method(pilot, "none")
+        await _wait_for(app, pilot, "#field-region", "option stage")
+        screen = _setup_screen(app)
+        region = screen.query_one("#field-region", OptionList)
+        region.highlighted = 1
+        region.focus()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert _setup_screen(app).query("#field-lane")  # the stage is still here
+        lane = _setup_screen(app).query_one("#field-lane", OptionList)
+        lane.highlighted = 1
+        await _continue_stage(pilot)
+        await _accept_tier(pilot)
+        await until(pilot, lambda: isinstance(app.result, SetupResult), label="wizard result")
+        assert isinstance(app.result, SetupResult)
+        assert dict(app.result.profile.options) == {"region": "south", "lane": "slow"}
+
+
+# ---------------------------------------------------------------------------
+# Choice seeding
+# ---------------------------------------------------------------------------
+
+
+async def test_a_choice_field_preselects_the_stored_value() -> None:
+    """Not the first option: an edit that silently rewrites a stored choice
+    to whatever happens to be listed first is a data change nobody made."""
+    catalog = _FakeCatalog(
+        auth=(_NONE_METHOD,),
+        options=(
+            SetupField(
+                key="region", label="Region", kind=CHOICE, choices=("north", "south", "east")
+            ),
+        ),
+    )
+    profile = ModelConnectionConfig(model=_REFERENCE, options={"region": "east"})
+    app = _Host(catalog, profile=profile)
+    async with app.run_test() as pilot:
+        await _advance_to_auth_method(pilot, endpoint="http://endpoint.example")
+        await _choose_auth_method(pilot, "none")
+        await _wait_for(app, pilot, "#field-region", "option stage")
+        choices = _setup_screen(app).query_one("#field-region", OptionList)
+        assert choices.highlighted == 2
+
+
+async def test_a_stored_choice_survives_an_edit_that_does_not_touch_it() -> None:
+    catalog = _FakeCatalog(
+        auth=(_NONE_METHOD,),
+        options=(
+            SetupField(
+                key="region", label="Region", kind=CHOICE, choices=("north", "south", "east")
+            ),
+        ),
+    )
+    profile = ModelConnectionConfig(model=_REFERENCE, options={"region": "south"})
+    app = _Host(catalog, profile=profile)
+    async with app.run_test() as pilot:
+        await _advance_to_auth_method(pilot, endpoint="http://endpoint.example")
+        await _choose_auth_method(pilot, "none")
+        await _wait_for(app, pilot, "#field-region", "option stage")
+        await _continue_stage(pilot)
+        await _accept_tier(pilot)
+        await until(pilot, lambda: isinstance(app.result, SetupResult), label="wizard result")
+        assert isinstance(app.result, SetupResult)
+        assert app.result.profile.options["region"] == "south"
+
+
+async def test_a_choice_field_falls_back_to_its_descriptor_default() -> None:
+    catalog = _FakeCatalog(
+        auth=(_NONE_METHOD,),
+        options=(
+            SetupField(
+                key="region",
+                label="Region",
+                kind=CHOICE,
+                choices=("north", "south", "east"),
+                default="south",
+            ),
+        ),
+    )
+    app = _Host(catalog)
+    async with app.run_test() as pilot:
+        await _advance_to_auth_method(pilot, endpoint="http://endpoint.example")
+        await _choose_auth_method(pilot, "none")
+        await _wait_for(app, pilot, "#field-region", "option stage")
+        assert _setup_screen(app).query_one("#field-region", OptionList).highlighted == 1
+
+
+# ---------------------------------------------------------------------------
+# The tier stage belongs to the first run, not to the editor
+# ---------------------------------------------------------------------------
+
+
+async def test_an_editor_never_asks_for_the_tier() -> None:
+    """The tier is the agent's global routing override, not a field of the
+    profile being edited: adding or editing one must not re-ask it.
+
+    The probe is held open so the assertion can be made on a live screen —
+    a completed wizard has already dismissed and can no longer be queried.
+    """
+    catalog = _HeldProbeCatalog(auth=(_NONE_METHOD,))
+    app = _Host(catalog, ask_tier=False)
+    async with app.run_test() as pilot:
+        await _advance_to_auth_method(pilot, endpoint="http://endpoint.example")
+        await _choose_auth_method(pilot, "none")
+        await until(pilot, lambda: bool(catalog.tested), label="probe stage reached")
+        assert list(_setup_screen(app).query("#setup-tier")) == []
+        assert "Tier" not in _steps_text(app)
+        catalog.release()
+        await until(pilot, lambda: isinstance(app.result, SetupResult), label="wizard result")
+
+
+async def test_an_editor_hands_back_the_configured_tier_unchanged() -> None:
+    """`current_tier` travels through untouched, so the controller cannot
+    read a draft the operator was never shown."""
+    catalog = _FakeCatalog(auth=(_NONE_METHOD,))
+    app = _Host(catalog, ask_tier=False, current_tier="high")
+    async with app.run_test() as pilot:
+        await _advance_to_auth_method(pilot, endpoint="http://endpoint.example")
+        await _choose_auth_method(pilot, "none")
+        await until(pilot, lambda: isinstance(app.result, SetupResult), label="wizard result")
+        assert isinstance(app.result, SetupResult)
+        assert app.result.model_tier == "high"
+
+
+async def test_the_first_run_wizard_still_asks_for_the_tier() -> None:
+    app = _Host(_FakeCatalog(auth=(_NONE_METHOD,)))
+    async with app.run_test() as pilot:
+        await _advance_to_auth_method(pilot, endpoint="http://endpoint.example")
+        await _choose_auth_method(pilot, "none")
+        await _wait_for(app, pilot, "#setup-tier", "tier stage")
+        assert _setup_screen(app).query("#setup-tier")
