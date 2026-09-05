@@ -479,6 +479,60 @@ def test_cli_replay_live_rejects_duration_that_orphans_a_burst(
     assert calls == []
 
 
+def test_cli_replay_live_duration_overrides_only_duration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[WorkloadProfile] = []
+
+    async def record(
+        profile: WorkloadProfile,
+        _options: ReplayOptions,
+        *,
+        context: str,
+        expected_cluster_id: str,
+        run_id: str,
+    ) -> ReplayReport:
+        del context, expected_cluster_id, run_id
+        calls.append(profile)
+        return _make_report(profile)
+
+    profile_file = Path("tests/performance/profiles/aks-1k.json")
+    original = cli.load_profile(profile_file)
+    monkeypatch.setattr(cli, "run_live_replay", record)
+
+    exit_code = cli.main(
+        [
+            "replay-live",
+            "--profile",
+            str(profile_file),
+            *_LIVE_IDENTITY_ARGS,
+            "--duration",
+            "26",
+            *_live_artifacts(tmp_path),
+        ]
+    )
+
+    assert exit_code == 0
+    replayed = calls[0]
+    assert replayed.duration_seconds == 26
+    assert (
+        replayed.seed,
+        replayed.object_count,
+        replayed.namespace_count,
+        replayed.steady_events_per_second,
+        replayed.bursts,
+        replayed.failures,
+    ) == (
+        original.seed,
+        original.object_count,
+        original.namespace_count,
+        original.steady_events_per_second,
+        original.bursts,
+        original.failures,
+    )
+
+
 @pytest.mark.parametrize(
     ("command", "option", "value", "expected"),
     [

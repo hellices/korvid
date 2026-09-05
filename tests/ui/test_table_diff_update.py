@@ -6,9 +6,14 @@ reorder (e.g. a pod inserted mid-table) falls back to the rebuild path."""
 from __future__ import annotations
 
 import re
+from datetime import UTC, datetime, timedelta
 from typing import Any
+from unittest import mock
 
+from korvid.core.store import Summary
 from korvid.k8s.metrics import PodMetrics
+from korvid.k8s.models import PodSummary
+from korvid.ui.widgets import resource_table
 from korvid.ui.widgets.resource_table import ResourceTable
 
 from .test_app import _pod, make_app
@@ -51,6 +56,14 @@ def _spy_emit(table: ResourceTable) -> list[str]:
 
     table._emit_row = spy  # type: ignore[method-assign]  # documented performance contract
     return built
+
+
+class _FrozenClock:
+    def __init__(self, instant: datetime) -> None:
+        self._instant = instant
+
+    def now(self, tz: Any = None) -> datetime:
+        return self._instant
 
 
 def _plain_refreshes(
@@ -189,6 +202,35 @@ async def test_metrics_refresh_for_an_unchanged_summary() -> None:
         table.show("pods", rows, all_namespaces=False, pattern="", metrics=lookup)
 
         assert str(table.get_row("default/alpha")[4]) != "-"
+
+
+async def test_age_refreshes_for_an_unchanged_summary_as_time_passes() -> None:
+    created = (datetime.now(UTC) - timedelta(minutes=5)).isoformat().replace("+00:00", "Z")
+    pod = PodSummary(
+        name="alpha",
+        namespace="default",
+        phase="Running",
+        ready="1/1",
+        restarts=0,
+        node=None,
+        created=created,
+    )
+    app = make_app([pod])
+    async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 1, label="pod loaded")
+        rows: list[Summary] = [pod]
+        table.show("pods", rows, all_namespaces=False, pattern="")
+        assert str(table.get_row("default/alpha")[-2]) == "5m"
+
+        with mock.patch.object(
+            resource_table,
+            "datetime",
+            _FrozenClock(datetime.now(UTC) + timedelta(minutes=1)),
+        ):
+            table.show("pods", rows, all_namespaces=False, pattern="")
+
+        assert str(table.get_row("default/alpha")[-2]) == "6m"
 
 
 async def test_deleted_pod_removed_without_clear() -> None:
