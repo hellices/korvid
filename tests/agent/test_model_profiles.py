@@ -18,6 +18,7 @@ from korvid.agent.model_profiles import (
     SpecialFlow,
     SpecialFlowRegistry,
     split_reference,
+    suggest_profile_name,
 )
 
 
@@ -38,6 +39,11 @@ def test_a_reference_splits_on_the_first_slash_only(
     reference: str, expected: tuple[str, str]
 ) -> None:
     assert split_reference(reference) == expected
+
+
+def test_profile_name_falls_back_when_model_tag_is_not_a_valid_config_key() -> None:
+    assert suggest_profile_name("ollama/qwen3:8b", ()) == "default"
+    assert suggest_profile_name("ollama/qwen3:8b", ("default",)) == "default-1"
 
 
 def test_catalog_entries_default_every_capability_to_unknown() -> None:

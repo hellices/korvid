@@ -21,8 +21,12 @@ from textual.screen import ModalScreen
 from textual.widgets import OptionList, Static
 from textual.widgets.option_list import Option
 
-from korvid.agent.model_profiles import ModelCatalog
-from korvid.core.config import ModelConnectionConfig, ModelConnectionsConfig
+from korvid.agent.model_profiles import ModelCatalog, suggest_profile_name
+from korvid.core.config import (
+    ModelConnectionConfig,
+    ModelConnectionsConfig,
+    is_valid_profile_name,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -373,16 +377,22 @@ class ProfileManagerScreen(ModalScreen["ProfileManagerResult | None"]):
         if result is None:
             return
         # Replace in-place preserving insertion order
+        remaining_names = (set(self._profiles.profiles) | set(self._profiles.unparsed)) - {name}
+        target_name = (
+            name
+            if existing is not None or is_valid_profile_name(name)
+            else suggest_profile_name(result.model, remaining_names)
+        )
         new_profiles: dict[str, ModelConnectionConfig] = {}
         replaced = False
         for k, v in self._profiles.profiles.items():
             if k == name:
-                new_profiles[k] = result
+                new_profiles[target_name] = result
                 replaced = True
             else:
                 new_profiles[k] = v
         if not replaced:
-            new_profiles[name] = result
+            new_profiles[target_name] = result
         new_config = ModelConnectionsConfig(
             profiles=new_profiles,
             active=self._profiles.active,
@@ -407,12 +417,7 @@ class ProfileManagerScreen(ModalScreen["ProfileManagerResult | None"]):
             return
         # Append with a generated name
         existing_names = set(self._profiles.profiles) | set(self._profiles.unparsed)
-        base = result.model.split("/")[-1] if "/" in result.model else result.model
-        new_name = base
-        counter = 1
-        while new_name in existing_names:
-            new_name = f"{base}-{counter}"
-            counter += 1
+        new_name = suggest_profile_name(result.model, existing_names)
         new_profiles = dict(self._profiles.profiles)
         new_profiles[new_name] = result
         new_config = ModelConnectionsConfig(
