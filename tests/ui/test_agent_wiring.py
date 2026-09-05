@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import replace
-from typing import Any, cast
+from typing import Any
 
 from textual.css.query import NoMatches
 from textual.widgets import Input
@@ -271,26 +271,9 @@ async def test_setup_hint_not_duplicated_on_retoggle() -> None:
 async def test_ai_command_pushes_setup_screen() -> None:
     from korvid.ui.messages import UnknownCommand
 
-    class NoopConfigurator:
-        async def begin_device_login(self) -> Any:
-            raise NotImplementedError
-
-        async def finish_device_login(self) -> None:
-            raise NotImplementedError
-
-        async def test(self, settings: Any) -> str:
-            return "ok"
-
-        async def list_models(self, settings: Any) -> list[str]:
-            return []
-
-        async def save(self, settings: Any) -> None:
-            pass
-
     app = make_app(
         session=None,
         model=None,
-        agent_configurator=NoopConfigurator(),
         agent_catalog=_StubCatalog(),
     )
     async with app.run_test() as pilot:
@@ -423,34 +406,25 @@ async def test_apply_agent_settings_enables_agent() -> None:
 
 
 async def test_model_command_swaps_model_and_saves() -> None:
-    from korvid.agent.setup import AgentConfigurator, AgentSettings
+    """`:model` persists through the *profile* writer — the only path that
+    writes `agent.profiles` — rather than a second, uncoordinated one."""
+    from korvid.agent.setup import AgentSettings
+    from korvid.core.config import ModelConnectionsConfig
     from korvid.ui.messages import UnknownCommand
 
-    saved: list[AgentSettings] = []
-
-    class Cfg(AgentConfigurator):
-        async def begin_device_login(self) -> Any:
-            raise NotImplementedError
-
-        async def finish_device_login(self) -> None:
-            raise NotImplementedError
-
-        async def test(self, settings: Any) -> str:
-            return "ok"
-
-        async def list_models(self, settings: Any) -> list[str]:
-            return []
-
-        async def save(self, settings: AgentSettings) -> None:
-            saved.append(settings)
-
+    saved: list[ModelConnectionsConfig] = []
     rebuilt: list[AgentSettings] = []
 
     def rebuild(settings: AgentSettings) -> Any:
         rebuilt.append(settings)
         return StubSession([], policy=fake_policy(model=settings.model))
 
-    app = make_app(session=None, model=None, agent_configurator=Cfg(), rebuild_agent=rebuild)
+    app = make_app(
+        session=None,
+        model=None,
+        agent_save_profiles=lambda profiles, **_kwargs: saved.append(profiles),
+        rebuild_agent=rebuild,
+    )
     settings = AgentSettings(
         provider="ollama",
         auth_method="none",
@@ -467,8 +441,11 @@ async def test_model_command_swaps_model_and_saves() -> None:
             label="model swap applied",
         )
         assert saved
-        assert saved[-1].model == "gpt-4o"
-        assert dict(saved[-1].options) == {"tenant": "platform", "features": {"region": "apac"}}
+        written = saved[-1]
+        assert written.active is not None
+        profile = written.profiles[written.active]
+        assert profile.model == "ollama/gpt-4o"
+        assert dict(profile.options) == {"tenant": "platform", "features": {"region": "apac"}}
         assert rebuilt[-1].model == "gpt-4o"
         assert dict(rebuilt[-1].options) == {"tenant": "platform", "features": {"region": "apac"}}
 
@@ -492,26 +469,11 @@ async def test_model_command_does_not_persist_when_apply_fails() -> None:
     """If the session swap is refused (rebuild returns None), the new model
     must NOT be written to config.yaml — otherwise the failed change silently
     takes effect after restart."""
-    from korvid.agent.setup import AgentConfigurator, AgentSettings
+    from korvid.agent.setup import AgentSettings
+    from korvid.core.config import ModelConnectionsConfig
     from korvid.ui.messages import UnknownCommand
 
-    saved: list[AgentSettings] = []
-
-    class Cfg(AgentConfigurator):
-        async def begin_device_login(self) -> Any:
-            raise NotImplementedError
-
-        async def finish_device_login(self) -> None:
-            raise NotImplementedError
-
-        async def test(self, settings: Any) -> str:
-            return "ok"
-
-        async def list_models(self, settings: Any) -> list[str]:
-            return []
-
-        async def save(self, settings: AgentSettings) -> None:
-            saved.append(settings)
+    saved: list[ModelConnectionsConfig] = []
 
     session = StubSession([], policy=fake_policy(model="llama3"))
     rebuilds: list[AgentSettings] = []
@@ -521,7 +483,12 @@ async def test_model_command_does_not_persist_when_apply_fails() -> None:
         # First call (initial apply) succeeds; the :model rebuild fails.
         return session if len(rebuilds) == 1 else None
 
-    app = make_app(session=None, model=None, agent_configurator=Cfg(), rebuild_agent=rebuild)
+    app = make_app(
+        session=None,
+        model=None,
+        agent_save_profiles=lambda profiles, **_kwargs: saved.append(profiles),
+        rebuild_agent=rebuild,
+    )
     settings = AgentSettings(
         provider="ollama",
         auth_method="none",
@@ -543,29 +510,17 @@ async def test_model_command_does_not_persist_when_apply_fails() -> None:
 async def test_model_command_save_failure_warns_about_restart_revert() -> None:
     """If the swap succeeded but persisting failed, the user must be told the
     model is live now but will revert on restart."""
-    from korvid.agent.setup import AgentConfigurator, AgentSettings
+    from korvid.agent.setup import AgentSettings
+    from korvid.core.config import ModelConnectionsConfig
     from korvid.ui.messages import UnknownCommand
 
-    class Cfg(AgentConfigurator):
-        async def begin_device_login(self) -> Any:
-            raise NotImplementedError
-
-        async def finish_device_login(self) -> None:
-            raise NotImplementedError
-
-        async def test(self, settings: Any) -> str:
-            return "ok"
-
-        async def list_models(self, settings: Any) -> list[str]:
-            return []
-
-        async def save(self, settings: AgentSettings) -> None:
-            raise RuntimeError("disk full")
+    def explode(profiles: ModelConnectionsConfig, **_kwargs: Any) -> None:
+        raise RuntimeError("disk full")
 
     app = make_app(
         session=None,
         model=None,
-        agent_configurator=Cfg(),
+        agent_save_profiles=explode,
         rebuild_agent=lambda s: StubSession([], policy=fake_policy(model=s.model)),
     )
     settings = AgentSettings(
@@ -583,6 +538,7 @@ async def test_model_command_save_failure_warns_about_restart_revert() -> None:
             label="first model swap",
         )
         assert app._agent_ui._model_name == "gpt-4o"  # swap took effect
+        await pilot.pause()  # let the warning reach the notification rack
         notes = " ".join(str(n.message) for n in app._notifications)
         assert "disk full" in notes
         assert "revert" in notes.lower()
@@ -597,6 +553,7 @@ async def test_model_command_save_failure_warns_about_restart_revert() -> None:
             label="second model swap",
         )
         assert app._agent_ui._model_name == "claude-3"
+        await pilot.pause()
         second = " ".join(
             str(n.message)
             for n in app._notifications
@@ -608,26 +565,10 @@ async def test_model_command_save_failure_warns_about_restart_revert() -> None:
 async def test_model_command_works_after_configured_startup() -> None:
     """A session built from config.yaml at startup must seed _agent_settings
     so :model works without running the :ai wizard first."""
-    from korvid.agent.setup import AgentConfigurator, AgentSettings
+    from korvid.core.config import ModelConnectionsConfig
     from korvid.ui.messages import UnknownCommand
 
-    saved: list[AgentSettings] = []
-
-    class Cfg(AgentConfigurator):
-        async def begin_device_login(self) -> Any:
-            raise NotImplementedError
-
-        async def finish_device_login(self) -> None:
-            raise NotImplementedError
-
-        async def test(self, settings: Any) -> str:
-            return "ok"
-
-        async def list_models(self, settings: Any) -> list[str]:
-            return []
-
-        async def save(self, settings: AgentSettings) -> None:
-            saved.append(settings)
+    saved: list[ModelConnectionsConfig] = []
 
     session = StubSession([], policy=fake_policy(model="llama3"))
     store = ResourceStore()
@@ -651,7 +592,7 @@ async def test_model_command_works_after_configured_startup() -> None:
         watch_manager=WatchManager(store, source),
         agent_session=session,
         agent_model_name="llama3",
-        agent_configurator=Cfg(),
+        agent_save_profiles=lambda profiles, **_kwargs: saved.append(profiles),
         rebuild_agent=lambda s: StubSession([], policy=fake_policy(model=s.model)),
     )
     async with app.run_test() as pilot:
@@ -662,9 +603,12 @@ async def test_model_command_works_after_configured_startup() -> None:
             label="model swap from startup config",
         )
         assert saved
-        assert saved[-1].provider == "ollama"
-        assert saved[-1].model == "gpt-4o"
-        assert dict(saved[-1].options) == {"tenant": "platform", "features": {"region": "apac"}}
+        written = saved[-1]
+        assert written.active is not None
+        profile = written.profiles[written.active]
+        assert profile.model == "ollama/gpt-4o"
+        assert profile.endpoint == "http://localhost:11434/v1"
+        assert dict(profile.options) == {"tenant": "platform", "features": {"region": "apac"}}
 
 
 async def test_model_command_recovers_a_startup_that_built_no_session() -> None:
@@ -677,26 +621,12 @@ async def test_model_command_recovers_a_startup_that_built_no_session() -> None:
     is one `:model <name>` — not a full re-run of the `:ai` wizard, which
     would ask the operator to retype everything korvid already knows.
     """
-    from korvid.agent.setup import AgentConfigurator, AgentSettings
+    from korvid.agent.setup import AgentSettings
+    from korvid.core.config import ModelConnectionsConfig
     from korvid.ui.messages import UnknownCommand
 
-    saved: list[AgentSettings] = []
-
-    class Cfg(AgentConfigurator):
-        async def begin_device_login(self) -> Any:
-            raise NotImplementedError
-
-        async def finish_device_login(self) -> None:
-            raise NotImplementedError
-
-        async def test(self, settings: Any) -> str:
-            return "ok"
-
-        async def list_models(self, settings: Any) -> list[str]:
-            return []
-
-        async def save(self, settings: AgentSettings) -> None:
-            saved.append(settings)
+    saved: list[ModelConnectionsConfig] = []
+    applied: list[AgentSettings] = []
 
     rebuilt = StubSession([], policy=fake_policy(model="llama3"))
     store = ResourceStore()
@@ -705,6 +635,10 @@ async def test_model_command_recovers_a_startup_that_built_no_session() -> None:
         yield ("ADDED", _pod("web-1"))
         while True:
             await asyncio.sleep(0.01)
+
+    def rebuild(settings: AgentSettings) -> Any:
+        applied.append(settings)
+        return rebuilt
 
     app = KorvidApp(
         config=KorvidConfig(
@@ -721,8 +655,8 @@ async def test_model_command_recovers_a_startup_that_built_no_session() -> None:
         # The composition root degraded: a provider it could not route.
         agent_session=None,
         agent_model_name=None,
-        agent_configurator=Cfg(),
-        rebuild_agent=lambda s: rebuilt,
+        agent_save_profiles=lambda profiles, **_kwargs: saved.append(profiles),
+        rebuild_agent=rebuild,
     )
     async with app.run_test() as pilot:
         assert app._agent_ui.session is None
@@ -734,9 +668,12 @@ async def test_model_command_recovers_a_startup_that_built_no_session() -> None:
         )
         assert app._agent_ui._model_name == "llama3"
         assert saved
-        assert saved[-1].provider == "ollama"
-        assert saved[-1].base_url == "http://localhost:11434/v1"
-        assert saved[-1].model_tier == "low"  # the configured override survives
+        written = saved[-1]
+        assert written.active is not None
+        profile = written.profiles[written.active]
+        assert profile.model == "ollama/llama3"
+        assert profile.endpoint == "http://localhost:11434/v1"
+        assert applied[-1].model_tier == "low"  # the configured override survives
         assert not any("not configured" in str(n.message).lower() for n in app._notifications)
 
 
@@ -903,26 +840,11 @@ async def test_apply_agent_settings_notifies_on_install_hint_rebuild_error() -> 
 
 async def test_options_preserved_across_model_change() -> None:
     """Options seeded from config must survive a :model switch."""
-    from korvid.agent.setup import AgentConfigurator, AgentSettings
+    from korvid.agent.setup import AgentSettings
+    from korvid.core.config import ModelConnectionsConfig
     from korvid.ui.messages import UnknownCommand
 
-    saved: list[AgentSettings] = []
-
-    class Cfg(AgentConfigurator):
-        async def begin_device_login(self) -> Any:
-            raise NotImplementedError
-
-        async def finish_device_login(self) -> None:
-            raise NotImplementedError
-
-        async def test(self, settings: Any) -> str:
-            return "ok"
-
-        async def list_models(self, settings: Any) -> list[str]:
-            return []
-
-        async def save(self, settings: AgentSettings) -> None:
-            saved.append(settings)
+    saved: list[ModelConnectionsConfig] = []
 
     rebuilt: list[AgentSettings] = []
     session = StubSession([])
@@ -946,13 +868,14 @@ async def test_options_preserved_across_model_change() -> None:
             agent_base_url="http://x/v1",
             agent_model="m",
             agent_auth_method="api_key",
+            agent_api_key_env="CORP_LLM_KEY",
             agent_options={"tenant": "platform", "features": {"region": "apac"}},
         ),
         store=store,
         watch_manager=WatchManager(store, source),
         agent_session=session,
         agent_model_name="m",
-        agent_configurator=Cfg(),
+        agent_save_profiles=lambda profiles, **_kwargs: saved.append(profiles),
         rebuild_agent=rebuild,
     )
     async with app.run_test() as pilot:
@@ -964,29 +887,18 @@ async def test_options_preserved_across_model_change() -> None:
         )
         assert dict(rebuilt[-1].options) == {"tenant": "platform", "features": {"region": "apac"}}
         assert saved
-        assert dict(saved[-1].options) == {"tenant": "platform", "features": {"region": "apac"}}
+        written = saved[-1]
+        assert written.active is not None
+        profile = written.profiles[written.active]
+        assert dict(profile.options) == {"tenant": "platform", "features": {"region": "apac"}}
+        assert profile.auth.method == "environment"
+        assert profile.auth.settings["key"] == "CORP_LLM_KEY"
 
 
 async def test_rebuild_failure_keeps_previous_runtime_and_settings() -> None:
     from korvid.ui.messages import UnknownCommand
 
     old_session = StubSession([], policy=fake_policy(model="llama3"))
-
-    class Cfg2:
-        async def begin_device_login(self) -> Any:
-            raise NotImplementedError
-
-        async def finish_device_login(self) -> None:
-            raise NotImplementedError
-
-        async def test(self, settings: Any) -> str:
-            return "ok"
-
-        async def list_models(self, settings: Any) -> list[str]:
-            return []
-
-        async def save(self, settings: Any) -> None:
-            pass
 
     store = ResourceStore()
 
@@ -1008,7 +920,6 @@ async def test_rebuild_failure_keeps_previous_runtime_and_settings() -> None:
         watch_manager=WatchManager(store, source),
         agent_session=old_session,
         agent_model_name="llama3",
-        agent_configurator=cast("Any", Cfg2()),
         rebuild_agent=lambda s: None,  # rebuild always fails
     )
     async with app.run_test() as pilot:

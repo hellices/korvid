@@ -9,6 +9,7 @@ setup wizard directly on a first run, activates a profile by rebuilding
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 from pathlib import Path
 from typing import Any
 
@@ -26,7 +27,7 @@ from korvid.agent.model_profiles import (
 )
 from korvid.agent.session import AgentSession
 from korvid.agent.setup import AgentSettings
-from korvid.core.config import KorvidConfig
+from korvid.core.config import KEEP_MODEL_TIER, KorvidConfig, ModelTierWrite
 from korvid.ui.agent_ui_controller import settings_from_profile
 from korvid.ui.widgets.agent_setup_screen import AgentSetupScreen, SetupResult
 from korvid.ui.widgets.profile_manager_screen import ProfileManagerResult, ProfileManagerScreen
@@ -89,12 +90,17 @@ class _Saver:
 
     def __init__(self, error: Exception | None = None) -> None:
         self.calls: list[ModelConnectionsConfig] = []
+        #: What each call asked the writer to do with `agent.model_tier`.
+        self.tiers: list[ModelTierWrite] = []
         self.error = error
 
-    def __call__(self, profiles: ModelConnectionsConfig) -> None:
+    def __call__(
+        self, profiles: ModelConnectionsConfig, *, model_tier: ModelTierWrite = KEEP_MODEL_TIER
+    ) -> None:
         if self.error is not None:
             raise self.error
         self.calls.append(profiles)
+        self.tiers.append(model_tier)
 
 
 def _rebuilding(session: AgentSession | None) -> Any:
@@ -124,7 +130,6 @@ def _env(
         tmp_path=tmp_path,
         session=session,
         config=config if config is not None else _config(resolved),
-        configurator=object(),
         rebuild=rebuild,
         catalog=_StubCatalog() if catalog == "stub" else catalog,
         save_profiles=saver if saver is not None else _Saver(),
@@ -653,3 +658,268 @@ async def test_the_profile_editor_is_not_given_a_save_hook(tmp_path: Path) -> No
     assert callback is not None
     callback(None)
     assert await task is None
+
+
+# ---------------------------------------------------------------------------
+# `:model` writes through the profile set, not around it
+# ---------------------------------------------------------------------------
+
+
+def _model_env(tmp_path: Path, **kwargs: Any) -> Env:
+    return _env(tmp_path, rebuild=_rebuilding(FakeSession()), **kwargs)
+
+
+async def test_model_updates_the_active_profile_in_place_and_saves_once(tmp_path: Path) -> None:
+    """One writer. `:model` used to reach a second, uncoordinated one that
+    reloaded config.yaml and rewrote a `default` profile beside the one the
+    operator was actually on."""
+    saver = _Saver()
+    profiles = _profiles(unparsed={"broken": {"raw": "value"}})
+    env = _model_env(tmp_path, profiles=profiles, saver=saver)
+    env.controller.handle_model_command(["model-z"])
+
+    assert len(saver.calls) == 1
+    written = saver.calls[-1]
+    assert written.active == "default"
+    assert written.profiles["default"].model == "acme/model-z"
+    assert env.controller.profiles.profiles["default"].model == "acme/model-z"
+
+
+async def test_model_leaves_every_other_profile_and_unparsed_entry_alone(tmp_path: Path) -> None:
+    saver = _Saver()
+    profiles = _profiles(unparsed={"broken": {"raw": "value"}})
+    env = _model_env(tmp_path, profiles=profiles, saver=saver)
+    env.controller.handle_model_command(["model-z"])
+
+    written = saver.calls[-1]
+    assert set(written.profiles) == {"default", "staging"}
+    assert written.profiles["staging"] == profiles.profiles["staging"]
+    assert dict(written.unparsed) == {"broken": {"raw": "value"}}
+
+
+async def test_model_keeps_the_provider_prefix_of_the_profile_it_edits(tmp_path: Path) -> None:
+    """`:model gpt-4o` changes the model, not the provider: dropping the
+    prefix would make the reference unserviceable, and guessing a new one
+    would silently point the profile at a different vendor."""
+    saver = _Saver()
+    env = _model_env(tmp_path, saver=saver)
+    env.controller.handle_model_command(["model-z"])
+
+    assert saver.calls[-1].profiles["default"].model == "acme/model-z"
+
+
+async def test_model_takes_a_fully_qualified_reference_verbatim(tmp_path: Path) -> None:
+    saver = _Saver()
+    env = _model_env(tmp_path, saver=saver)
+    env.controller.handle_model_command(["openai/gpt-4o"])
+
+    assert saver.calls[-1].profiles["default"].model == "openai/gpt-4o"
+
+
+async def test_model_preserves_the_endpoint_auth_and_options_of_the_profile(
+    tmp_path: Path,
+) -> None:
+    saver = _Saver()
+    profiles = _profiles(active="staging")
+    env = _model_env(tmp_path, profiles=profiles, saver=saver)
+    env.controller.handle_model_command(["model-z"])
+
+    edited = saver.calls[-1].profiles["staging"]
+    assert edited.model == "acme/model-z"
+    assert edited.endpoint == "http://staging.example"
+    assert edited.auth.method == "environment"
+    assert dict(edited.auth.settings) == {"key": "STAGING_KEY"}
+
+
+async def test_a_refused_model_swap_persists_nothing(tmp_path: Path) -> None:
+    """Apply before persist: a rebuild the app refuses must not become the
+    configuration a restart activates."""
+    saver = _Saver()
+    previous = FakeSession()
+    env = _env(tmp_path, session=previous, rebuild=lambda _s: None, saver=saver)
+    env.controller.handle_model_command(["model-z"])
+
+    assert saver.calls == []
+    assert env.controller.session is previous
+    assert env.controller.profiles.profiles["default"].model == "acme/model-x"
+
+
+async def test_a_failed_model_save_keeps_the_session_and_warns_about_the_revert(
+    tmp_path: Path,
+) -> None:
+    session = FakeSession()
+    saver = _Saver(error=OSError("disk full"))
+    env = _env(tmp_path, rebuild=_rebuilding(session), saver=saver)
+    env.controller.handle_model_command(["model-z"])
+
+    assert env.controller.session is session
+    message = env.ui.notifications[-1][0]
+    assert "disk full" in message
+    assert "revert" in message.lower()
+    # The write failed, so the in-memory set must still be what is on disk.
+    assert env.controller.profiles.profiles["default"].model == "acme/model-x"
+
+
+async def test_model_refuses_a_reference_the_transport_cannot_serve(tmp_path: Path) -> None:
+    saver = _Saver()
+    session = FakeSession()
+    env = _env(tmp_path, session=session, rebuild=_rebuilding(FakeSession()), saver=saver)
+    env.controller.handle_model_command(["anthropic/claude-sonnet-4-5"])
+
+    assert saver.calls == []
+    assert env.controller.session is session
+    assert env.controller.profiles.profiles["default"].model == "acme/model-x"
+
+
+async def test_model_on_a_legacy_startup_creates_the_default_profile(tmp_path: Path) -> None:
+    """A config.yaml still holding the pre-profile scalars has no profile
+    to edit. `:model` has to be the whole recovery, so it files the
+    configuration korvid already has as a profile instead of asking the
+    operator to re-run the wizard."""
+    saver = _Saver()
+    legacy = KorvidConfig(
+        namespace="default",
+        agent_enabled=True,
+        agent_provider="ollama",
+        agent_auth_method="api_key",
+        agent_api_key_env="OLLAMA_KEY",
+        agent_base_url="http://localhost:11434/v1",
+        agent_model="llama3",
+    )
+    env = _env(
+        tmp_path,
+        profiles=ModelConnectionsConfig(),
+        rebuild=_rebuilding(FakeSession()),
+        saver=saver,
+        config=legacy,
+    )
+    env.controller.handle_model_command(["llama3.2"])
+
+    written = saver.calls[-1]
+    assert written.active == "default"
+    created = written.profiles["default"]
+    assert created.model == "ollama/llama3.2"
+    assert created.endpoint == "http://localhost:11434/v1"
+    # The profile vocabulary, not the transport's: a profile written with
+    # `api_key` would be refused by the projection on the next start.
+    assert created.auth.method == "environment"
+    assert dict(created.auth.settings) == {"key": "OLLAMA_KEY"}
+
+
+async def test_model_without_any_configuration_still_asks_for_the_wizard(tmp_path: Path) -> None:
+    saver = _Saver()
+    env = _env(tmp_path, profiles=ModelConnectionsConfig(), saver=saver)
+    env.controller.handle_model_command(["model-z"])
+
+    assert saver.calls == []
+    assert "run :ai first" in env.ui.notifications[-1][0]
+
+
+# ---------------------------------------------------------------------------
+# The first-run tier is persisted with the profiles, in one write
+# ---------------------------------------------------------------------------
+
+
+async def test_the_first_run_save_writes_the_chosen_tier_with_the_profiles(
+    tmp_path: Path,
+) -> None:
+    """The wizard's tier answer reaches disk in the same write as the
+    profile it belongs to — a tier applied to the live session but never
+    written is silently lost at the next start."""
+    saver = _Saver()
+    env = _first_run(tmp_path, saver=saver)
+    env.controller.handle_command([])
+    screen = _pushed_setup(env)
+
+    save = screen._save_result
+    assert save is not None
+    await save(SetupResult(profile=ModelConnectionConfig(model="acme/model-x"), model_tier="high"))
+
+    assert saver.tiers == ["high"]
+    assert len(saver.calls) == 1  # one write, not a profile save plus a tier save
+
+
+async def test_the_first_run_save_clears_a_stale_tier_when_automatic_is_chosen(
+    tmp_path: Path,
+) -> None:
+    """Automatic is `None`, and it has to actually clear the override on
+    disk: leaving `high` behind resets the wizard's own tier step next
+    time to a choice the operator just rejected."""
+    saver = _Saver()
+    env = _first_run(
+        tmp_path, saver=saver, config=_config(ModelConnectionsConfig(), agent_model_tier="high")
+    )
+    env.controller.handle_command([])
+    screen = _pushed_setup(env)
+
+    save = screen._save_result
+    assert save is not None
+    await save(SetupResult(profile=ModelConnectionConfig(model="acme/model-x"), model_tier=None))
+
+    assert saver.tiers == [None]
+    assert len(saver.calls) == 1
+
+
+async def test_a_first_run_result_that_never_reached_the_hook_still_carries_its_tier(
+    tmp_path: Path,
+) -> None:
+    saver = _Saver()
+    env = _first_run(tmp_path, saver=saver)
+    env.controller.handle_command([])
+    _screen, callback = env.ui.screens[-1]
+    assert callback is not None
+
+    callback(SetupResult(profile=ModelConnectionConfig(model="acme/model-x"), model_tier="low"))
+
+    assert saver.tiers == ["low"]
+
+
+async def test_a_profile_edit_save_leaves_the_persisted_tier_alone(tmp_path: Path) -> None:
+    """The manager never asks about the tier, so its save must not be able
+    to overwrite one — it hands the writer the "keep" sentinel."""
+    saver = _Saver()
+    env = _env(tmp_path, saver=saver, config=_config(_profiles(), agent_model_tier="high"))
+    env.controller.handle_command([])
+    _manager, callback = env.ui.screens[-1]
+    assert callback is not None
+    edited = dataclasses.replace(
+        env.controller.profiles,
+        profiles={
+            **env.controller.profiles.profiles,
+            "default": ModelConnectionConfig(model="acme/model-z"),
+        },
+    )
+    callback(ProfileManagerResult(edited=edited))
+
+    assert saver.tiers == [KEEP_MODEL_TIER]
+
+
+async def test_activating_a_profile_leaves_the_persisted_tier_alone(tmp_path: Path) -> None:
+    saver = _Saver()
+    profiles = _profiles()
+    env = _env(
+        tmp_path,
+        profiles=profiles,
+        saver=saver,
+        rebuild=_rebuilding(FakeSession()),
+        config=_config(profiles, agent_model_tier="high"),
+    )
+    env.controller.handle_command([])
+    _activate(env, "staging")
+
+    assert saver.tiers == [KEEP_MODEL_TIER]
+
+
+async def test_the_model_command_leaves_the_persisted_tier_alone(tmp_path: Path) -> None:
+    """`:model` changes a model, not a routing tier."""
+    saver = _Saver()
+    profiles = _profiles()
+    env = _model_env(
+        tmp_path,
+        profiles=profiles,
+        saver=saver,
+        config=_config(profiles, agent_model_tier="low"),
+    )
+    env.controller.handle_model_command(["model-z"])
+
+    assert saver.tiers == [KEEP_MODEL_TIER]

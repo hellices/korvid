@@ -8,6 +8,7 @@ import re
 import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from enum import Enum, auto
 from fnmatch import fnmatchcase
 from math import isfinite
 from os import chmod as os_chmod
@@ -18,7 +19,7 @@ from pathlib import Path
 from stat import S_IMODE
 from tempfile import mkstemp
 from types import MappingProxyType
-from typing import Any, TypedDict, cast
+from typing import Any, Final, Protocol, TypedDict, cast
 from urllib.parse import urlsplit, urlunsplit
 
 import yaml
@@ -899,6 +900,45 @@ LEGACY_AGENT_KEYS: tuple[str, ...] = (
     "enabled",
 )
 
+#: The whole `agent.model_tier` vocabulary. Absent/null means automatic.
+_MODEL_TIERS: frozenset[str] = frozenset({"low", "high"})
+
+
+class KeepModelTier(Enum):
+    """The "don't touch `agent.model_tier`" argument to the profile writer.
+
+    A sentinel rather than `None` because `None` is a real, meaningful tier
+    value — Automatic — and a save that means "clear the override" must be
+    distinguishable from a save that never asked about the tier at all.
+    """
+
+    KEEP = auto()
+
+
+#: The default for `save_model_connections(..., model_tier=...)`.
+KEEP_MODEL_TIER: Final = KeepModelTier.KEEP
+
+#: What a caller may hand the profile writer for the tier: an override, the
+#: Automatic clear (`None`), or "leave it alone".
+ModelTierWrite = str | None | KeepModelTier
+
+
+class ModelConnectionsWriter(Protocol):
+    """The single seam that persists profiles — and the tier with them.
+
+    Injected into the UI by the composition root so the screens never learn
+    a config path, and shaped so a caller that has no opinion about the
+    tier physically cannot overwrite one.
+    """
+
+    def __call__(
+        self,
+        profiles: ModelConnectionsConfig,
+        *,
+        model_tier: ModelTierWrite = KEEP_MODEL_TIER,
+    ) -> None:
+        """Write `profiles`, and `model_tier` when it is not the sentinel."""
+
 
 def _thaw_config_value(value: object) -> object:
     """Undo `_freeze_config_value` recursively for serialization.
@@ -928,14 +968,43 @@ def _profile_to_raw(profile: ModelConnectionConfig) -> dict[str, Any]:
     return entry
 
 
-def save_model_connections(path: Path, profiles: ModelConnectionsConfig) -> None:
+def _tier_to_write(model_tier: ModelTierWrite) -> str | None:
+    """Validate a tier bound for disk, in the vocabulary `load_config` reads.
+
+    Raises before any file is touched: persisting `medium` would produce a
+    config the next start refuses to load.
+    """
+    if isinstance(model_tier, str) and model_tier.strip().lower() not in _MODEL_TIERS:
+        raise ValueError(
+            f"model_tier must be None, 'low', or 'high' (got {model_tier!r}); "
+            "pass KEEP_MODEL_TIER to leave the persisted value alone."
+        )
+    return model_tier.strip().lower() if isinstance(model_tier, str) else None
+
+
+def save_model_connections(
+    path: Path,
+    profiles: ModelConnectionsConfig,
+    *,
+    model_tier: ModelTierWrite = KEEP_MODEL_TIER,
+) -> None:
     """Write `agent.active`/`agent.profiles`, preserving everything else.
 
     Read-modify-write: unrelated top-level keys, unrelated `agent.*` keys
     and every `unparsed` entry survive. Only the keys in
     `LEGACY_AGENT_KEYS` are removed, and only after the new shape is in
     place.
+
+    Args:
+        path: The config file to rewrite.
+        profiles: The profile set to persist.
+        model_tier: `KEEP_MODEL_TIER` (the default) leaves `agent.model_tier`
+            exactly as it is — the only correct choice for a save that never
+            asked about the tier. A `str` writes that override and `None`
+            removes it, both in the *same* write as the profiles, so the two
+            can never disagree on disk.
     """
+    tier = _tier_to_write(model_tier)
     raw: dict[str, Any] = {}
     if path.is_file():
         raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
@@ -949,6 +1018,14 @@ def save_model_connections(path: Path, profiles: ModelConnectionsConfig) -> None
             written[name] = _thaw_config_value(entry)
     agent["active"] = profiles.active
     agent["profiles"] = written
+    if model_tier is not KEEP_MODEL_TIER:
+        # An explicit choice, including Automatic: writing it here — rather
+        # than through a second writer — is what keeps the tier and the
+        # profiles one atomic decision.
+        if tier is not None:
+            agent["model_tier"] = tier
+        else:
+            agent.pop("model_tier", None)
     for key in LEGACY_AGENT_KEYS:
         agent.pop(key, None)
     raw["agent"] = agent
@@ -966,6 +1043,80 @@ def save_model_connections(path: Path, profiles: ModelConnectionsConfig) -> None
 _PREFIXES_WITHOUT_LEGACY_TRANSPORT: frozenset[str] = frozenset(
     {"anthropic", "bedrock", "gemini", "vertex_ai", "cohere", "mistral", "groq", "xai"}
 )
+
+
+#: The auth-settings key naming the environment variable an API key lives
+#: in. A *name*: nothing in this module reads the environment, so a secret
+#: value can never travel from a profile into a projection or back to disk.
+_AUTH_ENV_KEY_SETTING: str = "key"
+
+#: The provider prefix whose SDK credential chain the interim transport
+#: actually implements (`EntraCredentialSource`), and the one whose
+#: device-login token store exists (`CopilotCredentialSource`).
+_ENTRA_PREFIX: str = "azure"
+_DEVICE_LOGIN_PREFIX: str = "github-copilot"
+
+#: Common auth ids the interim transport serves for every provider,
+#: mapped onto the transport's own vocabulary. `environment` is absent:
+#: it carries a variable name and is handled separately.
+_LEGACY_TRANSPORT_AUTH: Mapping[str, str] = MappingProxyType({"none": "none"})
+
+#: Common auth ids the interim transport serves for exactly one provider
+#: prefix, as `method -> (required prefix, transport method)`.
+#: `provider-default` is Azure's Entra chain and nothing else;
+#: `device-login` has a token store only behind GitHub Copilot. Offering
+#: either anywhere else would build a client with no credential at all.
+_PREFIX_BOUND_LEGACY_AUTH: Mapping[str, tuple[str, str]] = MappingProxyType(
+    {
+        "provider-default": (_ENTRA_PREFIX, "entra"),
+        "device-login": (_DEVICE_LOGIN_PREFIX, "device-login"),
+    }
+)
+
+
+def _project_legacy_auth(
+    prefix: str, auth: ConnectionAuthConfig
+) -> tuple[tuple[str, str | None] | None, str | None]:
+    """Translate a profile's common auth id into the transport's own.
+
+    Profiles speak the five common ids (`none`, `environment`, `keyring`,
+    `provider-default`, `device-login`); the *interim* transport speaks
+    `none`, `api_key`, `entra` and `device-login`. They are different
+    alphabets, so a method handed straight through is rejected deep inside
+    the provider factory as "unknown agent auth method" and disables an
+    agent the operator configured correctly.
+
+    Refuses rather than downgrades: a method the transport cannot serve
+    must not fall back to an unauthenticated request or to whatever
+    `api_key_env` happens to be set.
+
+    Args:
+        prefix: The profile's provider prefix.
+        auth: The profile's auth block.
+
+    Returns:
+        `((transport method, api key variable name), None)`, or `None`
+        paired with a human-readable refusal.
+    """
+    method = auth.method
+    if method == "environment":
+        key = auth.settings.get(_AUTH_ENV_KEY_SETTING)
+        if not isinstance(key, str) or not key:
+            return None, (
+                "auth method 'environment' needs the name of the environment variable "
+                f"holding the API key (auth.{_AUTH_ENV_KEY_SETTING})"
+            )
+        return ("api_key", key), None
+    direct = _LEGACY_TRANSPORT_AUTH.get(method)
+    if direct is not None:
+        return (direct, None), None
+    bound = _PREFIX_BOUND_LEGACY_AUTH.get(method)
+    if bound is None:
+        return None, f"auth method {method!r} needs the new transport (Task 15)"
+    required, translated = bound
+    if prefix != required:
+        return None, f"auth method {method!r} is only available for the {required!r} provider"
+    return (translated, None), None
 
 
 def _legacy_azure_base_url(profile: ModelConnectionConfig) -> str | None:
@@ -991,6 +1142,9 @@ class LegacyTransportProjection:
     """
 
     provider: str
+    #: The *transport's* vocabulary (`none`, `api_key`, `entra`,
+    #: `device-login`) — never the profile's common id, which the
+    #: provider factory does not know.
     auth_method: str
     base_url: str | None
     model: str
@@ -1010,6 +1164,10 @@ def project_legacy_transport(
     that expects its own header, which is a credential leak rather than a
     degraded experience.
 
+    The auth method is *translated*, not passed through: profiles speak
+    the five common ids and the transport speaks its own four
+    (`_project_legacy_auth`).
+
     Args:
         profile: The connection to project.
 
@@ -1024,16 +1182,17 @@ def project_legacy_transport(
     prefix, tag = profile.model.split(sep, 1)
     if prefix in _PREFIXES_WITHOUT_LEGACY_TRANSPORT:
         return None, f"the {prefix!r} provider needs the new transport (Task 15)"
-    api_key_env: str | None = None
-    if profile.auth.method == "environment":
-        key_val = profile.auth.settings.get("key")
-        if isinstance(key_val, str):
-            api_key_env = key_val
+    auth, auth_refusal = _project_legacy_auth(prefix, profile.auth)
+    if auth is None:
+        return None, auth_refusal
+    auth_method, api_key_env = auth
     return (
         LegacyTransportProjection(
             provider=prefix,
-            auth_method=profile.auth.method,
-            base_url=_legacy_azure_base_url(profile) if prefix == "azure" else profile.endpoint,
+            auth_method=auth_method,
+            base_url=_legacy_azure_base_url(profile)
+            if prefix == _ENTRA_PREFIX
+            else profile.endpoint,
             model=tag,
             api_key_env=api_key_env,
             options=cast("dict[str, object]", _thaw_config_value(profile.options)),
@@ -1226,7 +1385,7 @@ def _parse_model_tier(value: Any) -> str | None:
         return None
     if isinstance(value, str):
         normalized = value.strip().lower()
-        if normalized in ("low", "high"):
+        if normalized in _MODEL_TIERS:
             return normalized
     raise ConfigMigrationError(
         f"agent.model_tier must be absent, null, 'low', or 'high' (got {value!r})."
@@ -1544,6 +1703,27 @@ _LEGACY_AUTH_METHODS: Mapping[str, str] = MappingProxyType(
 )
 
 
+def common_auth_method(method: str) -> str:
+    """The common auth id a legacy transport method corresponds to.
+
+    The inverse of `_project_legacy_auth`, and the only place the mapping
+    is spelled in that direction. Anything building a *profile* out of the
+    legacy transport scalars (the migration on load, the wizard's prefill
+    on a degraded startup, `:model`) goes through here, or it writes a
+    profile whose auth method the projection would then refuse.
+
+    Args:
+        method: A legacy transport method (`api_key`, `entra`,
+            `device-login`, `none`), or anything else.
+
+    Returns:
+        The common id, or *method* unchanged when it is not a legacy one
+        (it is then already a common id, or an unknown the projection
+        refuses by name).
+    """
+    return _LEGACY_AUTH_METHODS.get(method, method)
+
+
 def _legacy_model_reference(provider: str, model: str) -> str:
     """`provider/model` for a legacy provider name.
 
@@ -1569,11 +1749,11 @@ def _legacy_auth_method(agent_raw: dict[str, Any], provider: str) -> str:
 
 def _legacy_auth(agent_raw: dict[str, Any], provider: str) -> ConnectionAuthConfig:
     legacy_method = _legacy_auth_method(agent_raw, provider)
-    method = _LEGACY_AUTH_METHODS.get(legacy_method, legacy_method)
+    method = common_auth_method(legacy_method)
     api_key_env = _opt_str(agent_raw.get("api_key_env"))
     settings: dict[str, object] = {}
     if method == "environment" and api_key_env:
-        settings["key"] = api_key_env
+        settings[_AUTH_ENV_KEY_SETTING] = api_key_env
     return ConnectionAuthConfig(method=method, settings=settings)
 
 

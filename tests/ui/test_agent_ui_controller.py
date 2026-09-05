@@ -43,7 +43,7 @@ from korvid.agent.model_policy import CapabilitySource, ModelTier
 from korvid.agent.session import AgentSession
 from korvid.agent.setup import AgentSettings
 from korvid.core.audit import AuditLog
-from korvid.core.config import KorvidConfig
+from korvid.core.config import KorvidConfig, ModelConnectionsConfig
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.models import PodSummary
@@ -428,7 +428,6 @@ class Env:
         config: KorvidConfig | None = None,
         ops: RecordingOps | None = None,
         follow_bridge: Any = None,
-        configurator: Any = None,
         rebuild: Any = None,
         disconnect: Any = None,
         with_manifest: bool = True,
@@ -499,7 +498,6 @@ class Env:
             follow_bridge=lambda: follow_bridge,
             session=session,
             model_name="m-1",
-            configurator=configurator,
             rebuild=rebuild,
             disconnect=disconnect,
             available=available,
@@ -690,30 +688,24 @@ async def test_an_unconfigured_agent_seeds_no_settings(env: Env) -> None:
 async def test_model_recovers_a_degraded_startup_without_the_wizard(tmp_path: Path) -> None:
     """`:model <name>` is the whole recovery: the seeded snapshot names the
     provider, so only the model has to change."""
-
-    class _Configurator:
-        def __init__(self) -> None:
-            self.saved: list[AgentSettings] = []
-
-        async def save(self, settings: AgentSettings) -> None:
-            self.saved.append(settings)
+    saved: list[ModelConnectionsConfig] = []
 
     fresh = ScriptedSession(policy=fake_policy(model="llama3.2"))
-    configurator = _Configurator()
     env = Env(
         tmp_path=tmp_path,
         session=None,
         config=_DEGRADED_CONFIG,
-        configurator=configurator,
+        save_profiles=lambda profiles, **_kwargs: saved.append(profiles),
         rebuild=lambda settings: fresh,
     )
     env.controller.handle_model_command(["llama3.2"])
     await asyncio.gather(*env.ui.workers)
     assert env.controller.session is fresh
     assert env.controller.model_name == "llama3.2"
-    assert configurator.saved
-    assert configurator.saved[-1].provider == "ollama"
-    assert configurator.saved[-1].model == "llama3.2"
+    assert saved
+    written = saved[-1]
+    assert written.active is not None
+    assert written.profiles[written.active].model == "ollama/llama3.2"
     await env.close()
 
 

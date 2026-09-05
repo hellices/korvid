@@ -884,3 +884,62 @@ def test_plugin_api_key_only_without_env_defaults_none_and_rejects(
             api_key_env=None,
             plugin_registry=registry,
         )
+
+
+def test_an_environment_profile_builds_the_legacy_openai_compatible_provider(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """End to end over the real seam: config file -> profile -> projection
+    -> `create_provider`.
+
+    The profile vocabulary (`environment`) and the interim transport's
+    vocabulary (`api_key`) are different alphabets. When the projection
+    hands the profile spelling straight through, this call logs "unknown
+    agent auth method" and returns None — an agent the operator configured
+    correctly, disabled by a translation gap. Nothing shorter than the
+    whole chain catches that, so this test uses the production
+    `load_config`, the production projection and the production factory.
+    """
+    import logging
+
+    from korvid.agent.setup import settings_from_profile
+    from korvid.core.config import load_config
+
+    monkeypatch.setenv("PROFILE_API_KEY", "sk-not-in-the-config")
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        "agent:\n"
+        "  active: main\n"
+        "  profiles:\n"
+        "    main:\n"
+        "      model: openai/gpt-4o\n"
+        "      endpoint: https://api.example/v1\n"
+        "      auth:\n"
+        "        method: environment\n"
+        "        key: PROFILE_API_KEY\n",
+        encoding="utf-8",
+    )
+    config = load_config(path)
+    profile = config.model_connections.profiles["main"]
+    settings = settings_from_profile(profile, None)
+    assert settings is not None
+
+    with caplog.at_level(logging.WARNING, logger="korvid.providers.registry"):
+        provider = create_provider(
+            enabled=True,
+            provider=settings.provider,
+            auth_method=settings.auth_method,
+            base_url=settings.base_url,
+            model=settings.model,
+            api_key_env=settings.api_key_env,
+        )
+
+    assert isinstance(provider, OpenAICompatProvider)
+    assert provider.descriptor == ModelDescriptor("openai", "gpt-4o")
+    assert "unknown agent auth method" not in caplog.text
+    assert caplog.text == ""
+    # The key stayed a *name* the whole way: only the factory reads the
+    # environment, and the file never held the value.
+    assert "sk-not-in-the-config" not in path.read_text(encoding="utf-8")

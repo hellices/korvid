@@ -39,12 +39,14 @@ from korvid.agent.setup import (
 from korvid.core.audit import AuditLog, default_audit_path
 from korvid.core.config import (
     DEFAULT_CONFIG_PATH,
+    KEEP_MODEL_TIER,
     LEGACY_PROFILE_NAME,
     ConfigMigrationError,
     ConnectionAuthConfig,
     KorvidConfig,
     ModelConnectionConfig,
     ModelConnectionsConfig,
+    ModelTierWrite,
     ObservabilityBackend,
     context_is_protected,
     load_config,
@@ -1179,13 +1181,19 @@ def _persist_agent_settings(settings: AgentSettings) -> None:
         logger.warning("could not write config: applied now, reverts on restart")
 
 
-def _persist_model_profiles(profiles: ModelConnectionsConfig) -> None:
+def _persist_model_profiles(
+    profiles: ModelConnectionsConfig, *, model_tier: ModelTierWrite = KEEP_MODEL_TIER
+) -> None:
     """Write the profile set the UI produced back to config.yaml.
 
     Failures propagate: the caller applied the profile to the live session
     already and must tell the operator the change reverts on restart.
+
+    `model_tier` defaults to leaving `agent.model_tier` untouched — only
+    the first-run wizard, which actually asks, sends one, and it lands in
+    the same write as the profiles so the two can never disagree.
     """
-    save_model_connections(DEFAULT_CONFIG_PATH, profiles)
+    save_model_connections(DEFAULT_CONFIG_PATH, profiles, model_tier=model_tier)
 
 
 def _make_rebuild_agent(
@@ -1682,7 +1690,6 @@ async def _wire_and_run(config: KorvidConfig, kube: KubeClient, state: _RunState
         check_permission=kube.can_i,
         agent_session=agent.session,
         agent_model_name=config.agent_model,
-        agent_configurator=agent.configurator,
         # The profile screens' single source of answers, and the one path
         # that writes `agent.profiles` back (issue #182).
         agent_catalog=_build_model_catalog(agent.configurator),

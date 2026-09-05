@@ -3607,3 +3607,50 @@ def test_the_app_is_wired_with_a_catalog_that_can_probe() -> None:
     without it every `:ai` run ends at the connection test."""
     source = Path("src/korvid/__main__.py").read_text(encoding="utf-8")
     assert "_build_model_catalog(agent.configurator)" in source
+
+
+def _profiles_config(path: Path, *, tier: str | None = None) -> None:
+    tier_line = f"  model_tier: {tier}\n" if tier is not None else ""
+    path.write_text(
+        f"agent:\n{tier_line}  active: main\n  profiles:\n    main:\n      model: openai/gpt-4o\n",
+        encoding="utf-8",
+    )
+
+
+def test_the_profile_writer_keeps_a_tier_it_was_not_given(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The composition root's writer is the seam the UI persists through.
+    A save that never asked about the tier must not drop the override."""
+    from korvid.__main__ import _persist_model_profiles
+    from korvid.core.config import load_config
+
+    path = tmp_path / "config.yaml"
+    _profiles_config(path, tier="high")
+    monkeypatch.setattr(korvid.__main__, "DEFAULT_CONFIG_PATH", path)
+
+    _persist_model_profiles(load_config(path).model_connections)
+
+    assert yaml.safe_load(path.read_text(encoding="utf-8"))["agent"]["model_tier"] == "high"
+
+
+def test_the_profile_writer_persists_a_first_run_tier(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """And the first-run wizard's answer lands in the same write as the
+    profile it was chosen for — including Automatic, which clears it."""
+    from korvid.__main__ import _persist_model_profiles
+    from korvid.core.config import load_config
+
+    path = tmp_path / "config.yaml"
+    _profiles_config(path)
+    monkeypatch.setattr(korvid.__main__, "DEFAULT_CONFIG_PATH", path)
+    profiles = load_config(path).model_connections
+
+    _persist_model_profiles(profiles, model_tier="low")
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert raw["agent"]["model_tier"] == "low"
+    assert raw["agent"]["active"] == "main"
+
+    _persist_model_profiles(profiles, model_tier=None)
+    assert "model_tier" not in yaml.safe_load(path.read_text(encoding="utf-8"))["agent"]

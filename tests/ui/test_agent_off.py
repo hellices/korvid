@@ -160,30 +160,13 @@ async def test_bare_ai_after_off_prefills_the_wizard() -> None:
     The prefill is a profile now: the kept scalars are projected onto one
     so the wizard's stages start from the connection that was live.
     """
-    from typing import Any as _Any
 
     from korvid.agent.setup import AgentSettings
     from korvid.ui.widgets.agent_setup_screen import AgentSetupScreen
     from tests.ui.test_agent_ui_controller_profiles import _StubCatalog
 
-    class NoopConfigurator:
-        async def begin_device_login(self) -> _Any:
-            raise NotImplementedError
-
-        async def finish_device_login(self) -> None:
-            raise NotImplementedError
-
-        async def test(self, settings: _Any) -> str:
-            return "ok"
-
-        async def list_models(self, settings: _Any) -> list[str]:
-            return []
-
-        async def save(self, settings: _Any) -> None:
-            pass
-
     session = StubSession([TurnComplete(input_tokens=0, output_tokens=0, estimated=False)])
-    app = make_app(session, agent_configurator=NoopConfigurator(), agent_catalog=_StubCatalog())
+    app = make_app(session, agent_catalog=_StubCatalog())
     settings = AgentSettings(
         provider="ollama",
         auth_method="none",
