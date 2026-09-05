@@ -89,6 +89,7 @@ if TYPE_CHECKING:
     # Embedded-agent types appear only in annotations here: an MCP-only or
     # base install must never import the agent loop or provider ABC at
     # startup (issue #73 acceptance criterion).
+    from korvid.agent.model_profiles import ModelCatalog
     from korvid.agent.provider import LLMProvider
     from korvid.agent.session import AgentSession
 
@@ -934,6 +935,26 @@ def _close_agent_in_background(
             logger.debug("old provider close failed")
 
     task.add_done_callback(_reap)
+
+
+def _build_model_catalog() -> ModelCatalog | None:
+    """Build the catalog, or None when the agent extra is absent.
+
+    A missing extra degrades to None — the TUI runs without an agent.
+    A *broken* extra is different: it is reported, not swallowed.
+    """
+    try:
+        from korvid.providers.endpoint_discovery import EndpointDiscovery
+        from korvid.providers.litellm_catalog import LiteLLMModelCatalog
+        from korvid.providers.models_dev import ModelsDevSource
+        from korvid.providers.special_flows import SpecialFlowRegistry
+    except ImportError:
+        return None
+    return LiteLLMModelCatalog(
+        flows=SpecialFlowRegistry.from_entry_points(),
+        enrichment=ModelsDevSource(),
+        discovery=EndpointDiscovery(),
+    )
 
 
 def _build_agent_wiring(

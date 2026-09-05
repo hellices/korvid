@@ -520,3 +520,58 @@ def test_litellm_context_window_wins_over_enrichment() -> None:
 
     assert result.context_window_tokens == 128_000
     assert result.source is ModelEntrySource.LITELLM
+
+
+# ---------------------------------------------------------------------------
+# Task 8 — flow registry integration
+# ---------------------------------------------------------------------------
+
+
+def _make_flow(prefix: str, **kwargs: object) -> object:
+    from korvid.agent.model_profiles import AuthMethodDescriptor, SpecialFlow
+
+    defaults: dict[str, object] = {
+        "auth_methods": (AuthMethodDescriptor(id="none", display_name="None"),),
+    }
+    defaults.update(kwargs)
+    return SpecialFlow(
+        prefix=prefix,
+        display_name=prefix,
+        **defaults,  # type: ignore[arg-type]
+    )
+
+
+def test_a_flow_supplies_the_only_non_optional_endpoint_requirements() -> None:
+    from korvid.providers.special_flows import SpecialFlowRegistry
+
+    registry = SpecialFlowRegistry(
+        [_make_flow("github-copilot", endpoint=EndpointRequirement.UNSUPPORTED)]
+    )
+    catalog = LiteLLMModelCatalog(flows=registry)
+    assert catalog.endpoint_requirement("github-copilot/gpt-4o") is (
+        EndpointRequirement.UNSUPPORTED
+    )
+    assert catalog.endpoint_requirement("openai/gpt-4o") is EndpointRequirement.OPTIONAL
+    assert catalog.endpoint_requirement("azure/gpt-4o") is EndpointRequirement.OPTIONAL
+
+
+def test_a_flow_cannot_offer_keyless_auth_without_an_endpoint() -> None:
+    """The catalog filters a plugin's declarations through korvid's own
+    rule. A flow is third-party code; it does not get to widen a refusal
+    the factory will enforce anyway."""
+    from korvid.agent.model_profiles import AuthMethodDescriptor
+    from korvid.providers.special_flows import SpecialFlowRegistry
+
+    registry = SpecialFlowRegistry(
+        [
+            _make_flow(
+                "company-flow",
+                auth_methods=(AuthMethodDescriptor(id="none", display_name="None"),),
+            )
+        ]
+    )
+    catalog = LiteLLMModelCatalog(flows=registry)
+    assert "none" not in {m.id for m in catalog.auth_methods("company-flow/x")}
+    assert "none" in {
+        m.id for m in catalog.auth_methods("company-flow/x", endpoint="http://host:8080")
+    }

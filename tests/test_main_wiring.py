@@ -3394,3 +3394,79 @@ async def test_a_model_that_reports_no_tool_support_warns_instead_of_crashing(
     assert wiring.session_box == [None]
     assert isinstance(wiring.provider_box[0], _ToollessProvider)
     assert any("tool" in warning for warning in warnings)
+
+
+# ---------------------------------------------------------------------------
+# Task 8 — catalog construction performs no I/O
+# ---------------------------------------------------------------------------
+
+
+def test_building_the_catalog_issues_no_http_request() -> None:
+    """_build_model_catalog() must not make any HTTP requests.
+
+    EndpointDiscovery construction must be I/O-free; only list_models
+    triggers network access, and that is only called from discover().
+    """
+    pytest.importorskip("litellm")
+    from korvid.__main__ import _build_model_catalog
+
+    def _fail_if_called() -> None:
+        raise AssertionError("HTTP client was constructed during catalog build")
+
+    # Inject a client_factory that fails if called — EndpointDiscovery only
+    # calls it inside list_models, so construction must not trigger it.
+    import unittest.mock
+
+    with unittest.mock.patch(
+        "korvid.providers.endpoint_discovery._default_client_factory",
+        side_effect=_fail_if_called,
+    ):
+        catalog = _build_model_catalog()
+
+    assert catalog is not None
+
+
+def test_building_the_catalog_opens_no_socket() -> None:
+    """_build_model_catalog() must open no socket — same invariant as the
+    litellm_offline_import test, now verified at the composition-root level.
+
+    A regression in the wrapper's env-var ordering (LITELLM_LOCAL_MODEL_COST_MAP
+    not set before import) would show up here as a real startup stall.
+    """
+    import subprocess
+    import sys
+    import textwrap
+
+    pytest.importorskip("litellm")
+
+    probe = textwrap.dedent(
+        """
+        import socket
+        import sys
+
+        attempts = []
+
+        def _refuse(self, address):  # noqa: ANN001, ANN202
+            attempts.append(address)
+            raise OSError("network disabled for this probe")
+
+        socket.socket.connect = _refuse
+        socket.socket.connect_ex = lambda self, address: (attempts.append(address), 1)[1]
+
+        from korvid.__main__ import _build_model_catalog
+
+        catalog = _build_model_catalog()
+        assert catalog is not None, "catalog was None"
+
+        print(len(attempts))
+        """
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "0", result.stdout
