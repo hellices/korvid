@@ -21,7 +21,6 @@ from korvid.agent.model_profiles import (
     ModelEntrySource,
     SetupField,
     SetupFieldKind,
-    SpecialFlowRegistry,
     split_reference,
 )
 from korvid.providers.litellm_runtime import (
@@ -29,7 +28,9 @@ from korvid.providers.litellm_runtime import (
     models_by_provider,
     supported_params,
 )
+from korvid.providers.endpoint_discovery import EndpointDiscovery
 from korvid.providers.models_dev import ModelMetadataSource
+from korvid.providers.special_flows import SpecialFlowRegistry
 
 #: LiteLLM's own spelling for the Copilot provider. Its ids ship
 #: already-qualified (`github_copilot/claude-haiku-4.5`), and resolving the
@@ -170,7 +171,7 @@ class LiteLLMModelCatalog(ModelCatalog):
         *,
         flows: SpecialFlowRegistry | None = None,
         enrichment: ModelMetadataSource | None = None,
-        discovery: Any | None = None,
+        discovery: EndpointDiscovery | None = None,
     ) -> None:
         self._flows = flows
         self._enrichment = enrichment
@@ -293,12 +294,25 @@ class LiteLLMModelCatalog(ModelCatalog):
     # ModelCatalog interface
     # ------------------------------------------------------------------
 
-    def search(self, query: str, *, limit: int = 50) -> tuple[ModelEntry, ...]:
-        """Rank catalog entries against a free-text query. Never raises."""
+    def search(
+        self,
+        query: str,
+        *,
+        limit: int = 50,
+        extra: tuple[ModelEntry, ...] = (),
+    ) -> tuple[ModelEntry, ...]:
+        """Rank catalog entries against a free-text query. Never raises.
+
+        `extra` accepts caller-supplied entries (manual references and live
+        endpoint results) that are merged ahead of the ranked catalog hits.
+        Deduplication is by `reference`, with catalog entries winning over
+        extras when both contain the same reference.
+        """
         q = query.strip().lower()
         if not _ALNUM_RE.search(q):
             return ()
         results: list[ModelEntry] = []
+        # Catalog entries ranked first
         for entry in self._index:
             ref = entry.reference.lower()
             if q in ref:
@@ -312,7 +326,13 @@ class LiteLLMModelCatalog(ModelCatalog):
                 e.reference.lower(),
             )
         )
-        return tuple(results[:limit])
+        # Merge extras, deduplicating — catalog wins on conflict
+        catalog_refs = {e.reference for e in results}
+        merged: list[ModelEntry] = list(results)
+        for e in extra:
+            if e.reference not in catalog_refs and q in e.reference.lower():
+                merged.append(e)
+        return tuple(merged[:limit])
 
     def entry(self, reference: str) -> ModelEntry | None:
         """The catalog's record for an exact reference, or None."""
@@ -323,20 +343,31 @@ class LiteLLMModelCatalog(ModelCatalog):
     ) -> tuple[AuthMethodDescriptor, ...]:
         """Auth methods valid for this reference, most specific first.
 
-        `none` (keyless) is offered only when `endpoint` is a non-empty
-        string — the single expression that mirrors the factory's own
-        check exactly (Task 15). No provider dimension is consulted here.
+        When a special flow claims the reference, its declared auth methods
+        replace the generic list. `none` (keyless) is offered only when
+        `endpoint` is a non-empty string — a flow cannot override this rule.
         """
+        flow = self._flows.claim(reference) if self._flows else None
+        if flow is not None and flow.auth_methods:
+            methods = [m for m in flow.auth_methods if m.id != "none" or bool(endpoint)]
+            return tuple(methods)
         methods = list(_GENERIC_AUTH_METHODS)
         if endpoint:
             methods.append(_NONE_AUTH_METHOD)
         return tuple(methods)
 
     def option_fields(self, reference: str) -> tuple[SetupField, ...]:
-        """Declarative option prompts for this reference."""
+        """Declarative option prompts for this reference.
+
+        When a special flow claims the reference, its option_fields are
+        returned ahead of the LiteLLM-derived numeric/versioned params.
+        """
+        flow = self._flows.claim(reference) if self._flows else None
+        flow_fields: tuple[SetupField, ...] = flow.option_fields if flow is not None else ()
+
         provider, model_tag = split_reference(reference)
         params = supported_params(model_tag, provider)
-        fields: list[SetupField] = []
+        fields: list[SetupField] = list(flow_fields)
         for param in _NUMERIC_PARAMS:
             if param in params:
                 field = _PARAM_FIELDS.get(param)
@@ -379,12 +410,32 @@ class LiteLLMModelCatalog(ModelCatalog):
     async def discover(self, profile: ModelConnectionConfig) -> tuple[ModelEntry, ...]:
         """Live-list models from the profile's endpoint.
 
-        Stub — Task 8 fills this in. Returns `()` when no discovery
-        prober is injected or the profile has no endpoint.
+        Returns `()` when no discovery prober is injected, when the profile
+        has a config error, or when the profile has no endpoint.
         """
-        if self._discovery is None or not profile.endpoint:
+        if self._discovery is None:
             return ()
-        return ()  # pragma: no cover - Task 8 fills this in
+        if profile.config_error is not None:
+            return ()
+        if not profile.endpoint:
+            return ()
+
+        # Resolve the key from the profile's explicit auth config, without
+        # falling back to the ambient environment.
+        api_key: str | None = None
+        if profile.auth.method == "environment":
+            key_name = str(profile.auth.settings.get("key", ""))
+            if key_name:
+                import os  # lazy import — os is stdlib, not a dep
+
+                api_key = os.environ.get(key_name)
+
+        prefix = split_reference(profile.model)[0] or "openai"
+        return await self._discovery.list_models(
+            base_url=profile.endpoint,
+            api_key=api_key,
+            prefix=prefix,
+        )
 
     async def test(self, profile: ModelConnectionConfig) -> str:
         """Probe the profile and return a short human-readable result.
