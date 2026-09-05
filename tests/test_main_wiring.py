@@ -2855,7 +2855,7 @@ def test_an_active_profile_is_built_by_the_profile_factory(
     )
 
     config = KorvidConfig(model_connections=_profile_connections("anthropic/claude-sonnet-4-5"))
-    built = _create_initial_provider(config, None, None, object(), [], object())
+    built = cast("Any", _create_initial_provider(config, None, None, object(), [], object()))
 
     assert built == "built-from-profile"
     assert seen[0][0].model == "anthropic/claude-sonnet-4-5"
@@ -2881,7 +2881,8 @@ def test_the_profile_factory_is_given_the_credential_store_and_a_shared_registry
     store = object()
     config = KorvidConfig(model_connections=_profile_connections("openai/gpt-4o"))
 
-    assert _create_initial_provider(config, None, None, object(), [], store) == "built"
+    built = cast("Any", _create_initial_provider(config, None, None, object(), [], store))
+    assert built == "built"
     assert captured["credentials"] is store
     assert captured["flows"] is not None
     assert captured["catalog"] is not None
@@ -2915,7 +2916,6 @@ def test_a_config_with_no_profiles_still_uses_the_legacy_factory(
         agent_model="m",
         agent_base_url="http://x/v1",
     )
-    assert _create_initial_provider(config, None, None, object(), [], object()) == (
-        "built-from-scalars"
-    )
+    built = cast("Any", _create_initial_provider(config, None, None, object(), [], object()))
+    assert built == "built-from-scalars"
     assert seen[0]["model"] == "m"
