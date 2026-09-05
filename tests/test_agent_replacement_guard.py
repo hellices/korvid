@@ -201,6 +201,7 @@ def test_the_agent_package_ships_exactly_the_harness_modules() -> None:
         "interaction.py",
         "model_catalog.py",
         "model_policy.py",
+        "model_profiles.py",
         "native_engine.py",
         "navigation.py",
         "outbound.py",

@@ -11,16 +11,16 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum
 
-from korvid.core.config import AgentAuthConfig, AgentProfileConfig, AgentProfilesConfig
+from korvid.core.config import ConnectionAuthConfig, ModelConnectionConfig, ModelConnectionsConfig
 
 __all__ = [
-    "AgentAuthConfig",
-    "AgentProfileConfig",
-    "AgentProfilesConfig",
     "AuthMethodDescriptor",
+    "ConnectionAuthConfig",
     "DeviceLoginPrompt",
     "EndpointRequirement",
     "ModelCatalog",
+    "ModelConnectionConfig",
+    "ModelConnectionsConfig",
     "ModelEntry",
     "ModelEntrySource",
     "SetupField",
@@ -188,16 +188,16 @@ class ModelCatalog(ABC):
         """
 
     @abstractmethod
-    async def discover(self, profile: AgentProfileConfig) -> tuple[ModelEntry, ...]:
+    async def discover(self, profile: ModelConnectionConfig) -> tuple[ModelEntry, ...]:
         """Live-list models from the profile's endpoint. Best effort: an
         empty tuple means "type it yourself", never an error dialog."""
 
     @abstractmethod
-    async def test(self, profile: AgentProfileConfig) -> str:
+    async def test(self, profile: ModelConnectionConfig) -> str:
         """Probe the profile and return a short human-readable result."""
 
     @abstractmethod
-    async def begin_auth(self, profile: AgentProfileConfig) -> DeviceLoginPrompt | None: ...
+    async def begin_auth(self, profile: ModelConnectionConfig) -> DeviceLoginPrompt | None: ...
 
     @abstractmethod
-    async def finish_auth(self, profile: AgentProfileConfig) -> str | None: ...
+    async def finish_auth(self, profile: ModelConnectionConfig) -> str | None: ...

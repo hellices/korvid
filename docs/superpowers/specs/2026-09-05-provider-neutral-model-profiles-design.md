@@ -350,17 +350,17 @@ Secrets themselves are never stored in YAML — only references.
 
 ```python
 @dataclass(frozen=True)
-class AgentAuthConfig:
+class ConnectionAuthConfig:
     method: str = "none"
     settings: Mapping[str, object] = field(default_factory=dict)
     settings_error: str | None = field(default=None, init=False, compare=False)
 
 
 @dataclass(frozen=True)
-class AgentProfileConfig:
+class ModelConnectionConfig:
     model: str
     endpoint: str | None = None
-    auth: AgentAuthConfig = field(default_factory=AgentAuthConfig)
+    auth: ConnectionAuthConfig = field(default_factory=ConnectionAuthConfig)
     options: Mapping[str, object] = field(default_factory=dict)
     options_error: str | None = field(default=None, init=False, compare=False)
 
@@ -369,13 +369,13 @@ class AgentProfileConfig:
 
 
 @dataclass(frozen=True)
-class AgentProfilesConfig:
+class ModelConnectionsConfig:
     active: str | None = None
-    profiles: Mapping[str, AgentProfileConfig] = field(default_factory=dict)
+    profiles: Mapping[str, ModelConnectionConfig] = field(default_factory=dict)
     unparsed: Mapping[str, object] = field(default_factory=dict, compare=False)
 
     @property
-    def active_profile(self) -> AgentProfileConfig | None: ...
+    def active_profile(self) -> ModelConnectionConfig | None: ...
 ```
 
 Rules the implementation must hold:
@@ -398,7 +398,7 @@ Rules the implementation must hold:
   or the writer re-emits it and the profile becomes undeletable.
 - The dataclasses are `frozen=True` but hold mappings, so `__hash__ = None`.
 
-`KorvidConfig` stores `agent_profiles: AgentProfilesConfig`. Core never imports
+`KorvidConfig` stores `model_connections: ModelConnectionsConfig`. Core never imports
 `litellm`, `korvid.providers`, or any provider identifier outside the isolated
 legacy-migration region.
 
@@ -518,16 +518,16 @@ class ModelCatalog(ABC):
     def endpoint_requirement(self, reference: str) -> EndpointRequirement: ...
 
     @abstractmethod
-    async def discover(self, profile: AgentProfileConfig) -> tuple[ModelEntry, ...]: ...
+    async def discover(self, profile: ModelConnectionConfig) -> tuple[ModelEntry, ...]: ...
 
     @abstractmethod
-    async def test(self, profile: AgentProfileConfig) -> str: ...
+    async def test(self, profile: ModelConnectionConfig) -> str: ...
 
     @abstractmethod
-    async def begin_auth(self, profile: AgentProfileConfig) -> DeviceLoginPrompt | None: ...
+    async def begin_auth(self, profile: ModelConnectionConfig) -> DeviceLoginPrompt | None: ...
 
     @abstractmethod
-    async def finish_auth(self, profile: AgentProfileConfig) -> str | None: ...
+    async def finish_auth(self, profile: ModelConnectionConfig) -> str | None: ...
 ```
 
 Note what is **absent**: there is no `descriptors()` returning a list of
@@ -831,7 +831,7 @@ anything else in korvid imports directly.
   `acompletion(stream=True)`, normalizes text fragments, tool-call fragments
   and usage into the existing provider event dictionaries, emits
   `REQUEST_SENT`, and closes the stream on cancellation.
-- `providers/litellm_factory.py` — turns an `AgentProfileConfig` into the
+- `providers/litellm_factory.py` — turns an `ModelConnectionConfig` into the
   keyword arguments for `acompletion`, resolving the generic auth methods and
   refusing `config_error`.
 
@@ -1171,7 +1171,7 @@ the single final PR; automation never merges.
 - multiple profiles round-trip, insertion order preserved
 - exact active-profile selection
 - immutable/recursively copy-owned nested mappings, and a **thaw** round-trip
-  through `save_agent_profiles` → `load_config`
+  through `save_model_connections` → `load_config`
 - bounded/secret-refusing `options` and `auth.settings`, with `config_error`
 - invalid/missing active profile
 - legacy-to-`default` normalization, including the Azure endpoint rewrite

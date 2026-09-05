@@ -1434,7 +1434,7 @@ git push -u origin HEAD
 
 ```bash
 git rev-parse --abbrev-ref HEAD
-gh workflow run relock.yml -f base="$(git rev-parse --abbrev-ref HEAD)"
+gh workflow run relock.yml -f package=litellm -f base="$(git rev-parse --abbrev-ref HEAD)"
 ```
 
 - [ ] Step 4 — Wait for the run to be *created* before watching it. `gh run watch` on a stale id watches the wrong run:
