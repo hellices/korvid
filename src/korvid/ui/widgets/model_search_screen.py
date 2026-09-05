@@ -144,6 +144,9 @@ class ModelSearchScreen(ModalScreen["str | None"]):
         query = event.value.strip()
         if not query:
             return
+        self._submit_manual_reference(query)
+
+    def _submit_manual_reference(self, query: str) -> None:
         reason = self._validate_manual_reference(query)
         if reason:
             self.query_one("#search-status", Static).update(reason)
@@ -155,7 +158,7 @@ class ModelSearchScreen(ModalScreen["str | None"]):
         idx = event.option_index
         if self._has_manual_option and idx == len(self._shown_entries):
             # Synthetic manual option selected
-            self.dismiss(self.query_one("#model-query", Input).value.strip())
+            self._submit_manual_reference(self.query_one("#model-query", Input).value.strip())
             return
         if 0 <= idx < len(self._shown_entries):
             self.dismiss(self._shown_entries[idx].reference)
