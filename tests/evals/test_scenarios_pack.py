@@ -93,6 +93,13 @@ def test_fixture_owner_references_use_uids() -> None:
                 )
 
 
+def test_bundled_starting_selections_use_uids() -> None:
+    for scenario in BUNDLED:
+        selected = scenario.interaction.focused_pane.selected
+        if selected is not None:
+            assert selected.uid, f"{scenario.id}: starting selection has no uid"
+
+
 @pytest.mark.parametrize("scenario_id", sorted(_GRADING_CASES))
 def test_diagnostic_scenario_keywords_discriminate_realistic_answers(scenario_id: str) -> None:
     scenario = next(item for item in BUNDLED if item.id == scenario_id)

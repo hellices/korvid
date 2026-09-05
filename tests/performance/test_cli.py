@@ -341,7 +341,23 @@ def test_cli_writes_seed_manifests_yaml(tmp_path: Path) -> None:
         "korvid.dev/performance-run": "aks186",
     }
     assert all(document["metadata"]["labels"] == expected_labels for document in documents)
-    assert documents[2]["spec"]["nodeSelector"] == {"korvid.dev/pool": "perftest"}
+    pod_spec = documents[2]["spec"]
+    assert pod_spec["nodeSelector"] == {"korvid.dev/pool": "perftest"}
+    assert pod_spec["tolerations"] == [
+        {
+            "key": "korvid.dev/performance",
+            "operator": "Equal",
+            "value": "true",
+            "effect": "NoSchedule",
+        }
+    ]
+    assert pod_spec["containers"] == [
+        {
+            "name": "bench",
+            "image": "registry.k8s.io/pause:3.10",
+            "resources": {"requests": {"cpu": "5m", "memory": "16Mi"}},
+        }
+    ]
 
 
 def test_cli_replay_live_writes_json_and_markdown(

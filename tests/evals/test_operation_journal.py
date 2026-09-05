@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any, cast
+
 import pytest
 
 from korvid.evals.operation_journal import (
@@ -64,6 +66,17 @@ def test_state_mappings_reject_secret_payload_paths() -> None:
         )
 
 
+def test_state_mappings_reject_non_scalar_values() -> None:
+    journal = ActionJournal()
+    with pytest.raises(ValueError, match="journal state values must be scalars"):
+        journal.append(
+            event="mutation_finished",
+            actor="write_ops",
+            target=_TARGET,
+            post_state={"spec": {"replicas": 3}},
+        )
+
+
 @pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
 def test_state_mappings_reject_non_finite_values(value: float) -> None:
     journal = ActionJournal()
@@ -91,6 +104,18 @@ def test_a_secret_target_may_not_carry_state() -> None:
         journal.append(
             event="mutation_finished", actor="write_ops", target=secret, post_state={"type": "x"}
         )
+
+
+def test_appended_state_is_immutable() -> None:
+    journal = ActionJournal()
+    journal.append(
+        event="mutation_finished",
+        actor="write_ops",
+        target=_TARGET,
+        pre_state={"spec.replicas": 2},
+    )
+    with pytest.raises(TypeError, match="does not support item assignment"):
+        cast(Any, journal.events[0].pre_state)["spec.replicas"] = 3
 
 
 def test_the_payload_is_json_ready_and_carries_every_field() -> None:
