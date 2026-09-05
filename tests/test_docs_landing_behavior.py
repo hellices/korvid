@@ -70,6 +70,7 @@ def _run_harness(name: str) -> subprocess.CompletedProcess[str]:
         text=True,
         check=False,
         cwd=ROOT,
+        timeout=10,
     )
 
 

@@ -84,6 +84,7 @@ def test_fronted_causal_auxiliaries_continue_across_parentheticals(answer: str) 
     "answer",
     [
         "The operation hasn't completed.",
+        "The operation hasn\u2019t completed.",
         "The system can't complete the deployment.",
     ],
 )

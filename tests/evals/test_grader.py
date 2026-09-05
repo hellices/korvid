@@ -61,6 +61,18 @@ def test_grade_matches_keywords_across_punctuation_and_case() -> None:
     assert result.diagnosis_success
 
 
+@pytest.mark.parametrize(
+    ("keyword", "answer"),
+    [
+        ("oom killed", "The container was OOMKilled with exit 137."),
+        ("oomkilled", "The container was oom killed with exit 137."),
+    ],
+)
+def test_grade_matches_compact_and_spaced_keyword_forms(keyword: str, answer: str) -> None:
+    scenario = _scenario(must_mention=((keyword,), ("137",)))
+    assert grade(scenario, answer, [_record()]).diagnosis_success
+
+
 def test_grade_keywords_never_match_inside_larger_words() -> None:
     """'healthy' must not match 'unhealthy' — token boundaries are exact."""
     scenario = _scenario(must_mention=(("healthy",),), expected_evidence=())
@@ -142,6 +154,11 @@ def test_grade_evidence_requires_the_expected_arguments() -> None:
     result = grade(_scenario(), "OOMKilled, exit 137.", records)
     assert not result.evidence_fetched
     assert result.missing_evidence == ((_EVIDENCE,),)
+
+    with_extra = _record(
+        arguments={"pod": "checkout-1", "namespace": "shop", "tail": 50},
+    )
+    assert grade(_scenario(), "OOMKilled, exit 137.", [with_extra]).evidence_fetched
 
 
 def test_grade_evidence_canonicalizes_kind_aliases() -> None:

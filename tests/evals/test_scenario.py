@@ -116,6 +116,18 @@ def test_load_scenario_requires_forbidden_claims_for_negative_controls(tmp_path:
         load_scenario(_write(tmp_path, text))
 
 
+def test_load_scenario_rejects_unknown_grading_key(tmp_path: Path) -> None:
+    text = _MINIMAL.replace("  must_not_mention:", "  must_not_claim:")
+    with pytest.raises(ValueError, match="must_not_claim"):
+        load_scenario(_write(tmp_path, text))
+
+
+def test_load_scenario_rejects_non_string_evidence_tool(tmp_path: Path) -> None:
+    text = _MINIMAL.replace("    - tool: diagnose_pod", "    - tool: [diagnose_pod]")
+    with pytest.raises(ValueError, match="'tool' must be a non-blank string"):
+        load_scenario(_write(tmp_path, text))
+
+
 def test_load_scenarios_rejects_duplicate_ids(tmp_path: Path) -> None:
     _write(tmp_path, _MINIMAL, "a.yaml")
     _write(tmp_path, _MINIMAL, "b.yaml")

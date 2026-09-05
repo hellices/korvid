@@ -30,6 +30,7 @@ _TAGS = {
     ("base_url", "expected"),
     [
         ("http://host:11434/v1", "http://host:11434"),
+        ("http://host:11434/v1/", "http://host:11434"),
         ("http://host:11434", "http://host:11434"),
     ],
 )
