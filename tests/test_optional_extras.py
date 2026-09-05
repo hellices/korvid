@@ -18,7 +18,7 @@ from tests.fixtures.provider_plugin.site_helpers import FIXTURES_DIR
 
 #: Top-level third-party modules that only the optional extras may pull in.
 _MCP_MODULES = ("mcp", "anyio", "starlette", "uvicorn")
-_AGENT_MODULES = ("httpx", "keyring")
+_AGENT_MODULES = ("httpx", "keyring", "litellm")
 
 _PROBE = """
 import sys
@@ -116,7 +116,7 @@ def test_agentless_wiring_does_not_scan_provider_plugins() -> None:
         "metadata.distributions = boom\n"
         "real_find_spec = importlib.util.find_spec\n"
         "def fake_find_spec(name, *args, **kwargs):\n"
-        "    if name in {'httpx', 'keyring'}:\n"
+        "    if name in {'httpx', 'keyring', 'litellm'}:\n"
         "        return None\n"
         "    return real_find_spec(name, *args, **kwargs)\n"
         "importlib.util.find_spec = fake_find_spec\n"
@@ -167,10 +167,61 @@ def test_agent_outbound_does_not_load_optional_extras() -> None:
     probe = (
         "import sys\n"
         "import korvid.agent.outbound  # noqa: F401\n"
-        "watched = ('textual', 'httpx', 'keyring', 'mcp', 'anyio', 'starlette', 'uvicorn')\n"
+        "watched = ('textual', 'httpx', 'keyring', 'litellm', 'mcp', 'anyio', 'starlette', 'uvicorn')\n"
         "leaked = [m for m in watched if m in sys.modules]\n"
         "if leaked:\n"
         "    raise SystemExit(f'agent outbound leaked optional extras into base import: {leaked}')\n"
+    )
+    _run_subprocess_probe(probe)
+
+
+def test_the_base_install_does_not_import_litellm() -> None:
+    """The base install must not reach LiteLLM through the app entry points."""
+    probe = (
+        "import sys\n"
+        "import korvid.__main__  # noqa: F401\n"
+        "if 'litellm' in sys.modules:\n"
+        "    raise SystemExit('litellm leaked into the base import graph')\n"
+        "import korvid.ui.app  # noqa: F401\n"
+        "if 'litellm' in sys.modules:\n"
+        "    raise SystemExit('litellm leaked into the base import graph')\n"
+    )
+    _run_subprocess_probe(probe)
+
+
+def test_a_missing_agent_extra_degrades_to_no_agent_rather_than_a_crash() -> None:
+    """Without the agent extra, startup should return the disabled wiring."""
+    probe = (
+        _MISSING_AGENT_EXTRA + "from korvid.__main__ import _build_agent_wiring\n"
+        "from korvid.core.config import KorvidConfig\n"
+        "wiring = _build_agent_wiring(KorvidConfig(), object(), {})\n"
+        "assert wiring.session is None\n"
+        "assert wiring.configurator is None\n"
+        "assert wiring.rebuild is None\n"
+        "assert wiring.provider_box == [None]\n"
+        "assert wiring.session_box == [None]\n"
+    )
+    _run_subprocess_probe(probe)
+
+
+def test_requesting_the_agent_explicitly_without_the_extra_fails_with_a_hint() -> None:
+    """An enabled agent without its extra must fail with install guidance."""
+    probe = (
+        "import korvid.__main__ as main\n"
+        "from korvid.core.config import KorvidConfig\n"
+        "main._missing_extra_packages = lambda roots: ['httpx', 'keyring', 'litellm']\n"
+        "try:\n"
+        "    main._build_agent_wiring(KorvidConfig(agent_enabled=True), object(), {})\n"
+        "except SystemExit as exc:\n"
+        "    message = str(exc)\n"
+        "    if 'korvid[all,entra]' not in message:\n"
+        "        raise SystemExit(message)\n"
+        "    if 'uv tool install --force' not in message:\n"
+        "        raise SystemExit(message)\n"
+        "    if 'pipx install --force' not in message:\n"
+        "        raise SystemExit(message)\n"
+        "else:\n"
+        "    raise SystemExit('expected agent wiring to fail without the extra')\n"
     )
     _run_subprocess_probe(probe)
 
@@ -227,7 +278,7 @@ _MISSING_AGENT_EXTRA = (
     "import sys\n"
     "real_find_spec = importlib.util.find_spec\n"
     "def fake_find_spec(name, *args, **kwargs):\n"
-    "    if name in {'httpx', 'keyring'}:\n"
+    "    if name in {'httpx', 'keyring', 'litellm'}:\n"
     "        return None\n"
     "    return real_find_spec(name, *args, **kwargs)\n"
     "importlib.util.find_spec = fake_find_spec\n"
