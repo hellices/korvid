@@ -3746,3 +3746,112 @@ def test_the_profile_writer_persists_a_first_run_tier(
 
     _persist_model_profiles(profiles, model_tier=None)
     assert "model_tier" not in yaml.safe_load(path.read_text(encoding="utf-8"))["agent"]
+
+
+def _profile_connections(reference: str, **overrides: Any) -> Any:
+    """One active profile, built the way the config loader builds it."""
+    from korvid.core.config import (
+        ConnectionAuthConfig,
+        ModelConnectionConfig,
+        ModelConnectionsConfig,
+    )
+
+    profile = ModelConnectionConfig(
+        model=reference,
+        auth=overrides.pop("auth", ConnectionAuthConfig(method="provider-default")),
+        **overrides,
+    )
+    return ModelConnectionsConfig(active="main", profiles={"main": profile})
+
+
+def test_an_active_profile_is_built_by_the_profile_factory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Task 15's point: no scalar projection on the way in.
+
+    The legacy factory must not be consulted at all for a profile — a
+    projection there is exactly what this change removes, and it silently
+    drops every connection the legacy transport cannot express.
+    """
+    from korvid.__main__ import _create_initial_provider
+    from korvid.core.config import KorvidConfig
+
+    def _legacy_must_not_run(**kwargs: object) -> None:
+        raise AssertionError("the legacy factory must not see a profile")
+
+    seen: list[Any] = []
+
+    def _from_profile(profile: Any, **kwargs: Any) -> str:
+        seen.append((profile, kwargs))
+        return "built-from-profile"
+
+    monkeypatch.setattr("korvid.providers.registry.create_provider", _legacy_must_not_run)
+    monkeypatch.setattr(
+        "korvid.providers.litellm_factory.create_provider_from_profile", _from_profile
+    )
+
+    config = KorvidConfig(model_connections=_profile_connections("anthropic/claude-sonnet-4-5"))
+    built = _create_initial_provider(config, None, None, object(), [], object())
+
+    assert built == "built-from-profile"
+    assert seen[0][0].model == "anthropic/claude-sonnet-4-5"
+
+
+def test_the_profile_factory_is_given_the_credential_store_and_a_shared_registry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keyring auth is unresolvable without a store, and the catalog and
+    the factory have to agree on which flows exist."""
+    from korvid.__main__ import _create_initial_provider
+    from korvid.core.config import KorvidConfig
+
+    captured: dict[str, Any] = {}
+
+    def _from_profile(profile: Any, **kwargs: Any) -> str:
+        captured.update(kwargs)
+        return "built"
+
+    monkeypatch.setattr(
+        "korvid.providers.litellm_factory.create_provider_from_profile", _from_profile
+    )
+    store = object()
+    config = KorvidConfig(model_connections=_profile_connections("openai/gpt-4o"))
+
+    assert _create_initial_provider(config, None, None, object(), [], store) == "built"
+    assert captured["credentials"] is store
+    assert captured["flows"] is not None
+    assert captured["catalog"] is not None
+
+
+def test_a_config_with_no_profiles_still_uses_the_legacy_factory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both factories are wired during the compatibility cycle, and one is
+    chosen per call. Task 18 deletes the legacy one."""
+    from korvid.__main__ import _create_initial_provider
+    from korvid.core.config import KorvidConfig
+
+    def _profile_must_not_run(profile: Any, **kwargs: Any) -> None:
+        raise AssertionError("no profile exists to build from")
+
+    seen: list[dict[str, Any]] = []
+
+    def _legacy(**kwargs: Any) -> str:
+        seen.append(kwargs)
+        return "built-from-scalars"
+
+    monkeypatch.setattr(
+        "korvid.providers.litellm_factory.create_provider_from_profile", _profile_must_not_run
+    )
+    monkeypatch.setattr("korvid.providers.registry.create_provider", _legacy)
+
+    config = KorvidConfig(
+        agent_enabled=True,
+        agent_provider="openai-compat",
+        agent_model="m",
+        agent_base_url="http://x/v1",
+    )
+    assert _create_initial_provider(config, None, None, object(), [], object()) == (
+        "built-from-scalars"
+    )
+    assert seen[0]["model"] == "m"

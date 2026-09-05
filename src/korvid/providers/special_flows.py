@@ -20,7 +20,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
 from korvid.agent.model_profiles import SpecialFlow, split_reference
-from korvid.providers.litellm_settings import RETIRED_PROVIDER_ALIASES
+from korvid.providers.litellm_settings import DEVICE_LOGIN_PREFIXES, RETIRED_PROVIDER_ALIASES
 
 _ENTRY_POINT_GROUP: str = "korvid.provider"
 
@@ -240,15 +240,22 @@ class SpecialFlowRegistry:
 
     @property
     def claimed_prefixes(self) -> frozenset[str]:
-        """Every normalized prefix a declared flow claims, plus the retired aliases.
+        """Every normalized prefix that is claimed, whatever is installed.
 
-        Available *without* loading anything, so the factory can refuse a
-        claimed reference before it routes.
+        Declared flows, entry-point names, the retired aliases and the
+        device-login prefixes. The last group is why an *empty* registry
+        still claims: those references start an interactive login inside
+        LiteLLM's own routing call, so the factory has to be able to
+        refuse one before it routes, and it must still refuse when the
+        flow that serves it was never installed.
+
+        Available *without* loading anything.
         """
         return (
             frozenset(self._claims.keys())
             | frozenset(self._ep_map.keys())
             | frozenset(normalize_prefix(a) for a in RETIRED_PROVIDER_ALIASES)
+            | frozenset(normalize_prefix(p) for p in DEVICE_LOGIN_PREFIXES)
         )
 
     @property

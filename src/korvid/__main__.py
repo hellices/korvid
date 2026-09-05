@@ -718,16 +718,56 @@ def _agent_unavailable_wiring(
     )
 
 
+def _create_provider_from_active_profile(
+    profile: Any,
+    credentials: Any,
+) -> LLMProvider | None:
+    """Build the provider a named connection profile describes.
+
+    The profile is the source of truth from Task 15 on: no scalar
+    projection happens on the way in, so a connection the legacy
+    transport could not express is built here directly. A profile the
+    factory refuses returns None with the reason logged — a
+    misconfigured connection disables the agent, it never stops korvid
+    from starting.
+    """
+    from korvid.providers.litellm_catalog import LiteLLMModelCatalog
+    from korvid.providers.litellm_factory import create_provider_from_profile
+    from korvid.providers.special_flows import SpecialFlowRegistry
+
+    # One registry, shared: the catalog drops the references no installed
+    # flow can serve, and the factory refuses those same prefixes rather
+    # than handing them to routing.
+    flows = SpecialFlowRegistry()
+    return create_provider_from_profile(
+        profile,
+        catalog=LiteLLMModelCatalog(flows=flows),
+        flows=flows,
+        credentials=credentials,
+    )
+
+
 def _create_initial_provider(
     config: KorvidConfig,
     oauth: str | None,
     ollama_options: Any,
     plugin_registry: Any,
     startup_warnings: list[str] | None,
+    credentials: Any = None,
 ) -> LLMProvider | None:
-    """Build the initial LLM provider, converting plugin errors to warnings."""
+    """Build the initial LLM provider, converting plugin errors to warnings.
+
+    Two factories are wired here on purpose, and one is chosen per call:
+    a config with an active profile is built from that profile, and a
+    config with no profiles at all keeps the legacy scalar path. That
+    path stays live until Task 18 deletes it.
+    """
     from korvid.providers.plugin_registry import ProviderPluginError
     from korvid.providers.registry import create_provider
+
+    profile = config.model_connections.active_profile
+    if profile is not None:
+        return _create_provider_from_active_profile(profile, credentials)
 
     try:
         return create_provider(
@@ -1059,7 +1099,7 @@ def _build_agent_wiring(
         num_predict=config.agent_ollama_num_predict,
     )
     provider = _create_initial_provider(
-        config, oauth, ollama_options, plugin_registry, startup_warnings
+        config, oauth, ollama_options, plugin_registry, startup_warnings, token_store
     )
     # Ownership transfers immediately: if anything below raises (tools,
     # session, configurator), the teardown guard still closes the provider

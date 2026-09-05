@@ -109,3 +109,41 @@ def supported_params(model: str, provider: str) -> tuple[str, ...]:
     except (AttributeError, KeyError, ValueError):
         return ()
     return tuple(params or ())
+
+
+#: LiteLLM's own suffix for an environment variable naming a base URL.
+#: The convention is the SDK's, not a vendor list korvid maintains: every
+#: provider that needs a host publishes it as `<PROVIDER>_API_BASE`.
+_API_BASE_SUFFIX: Final = "_API_BASE"
+
+
+def requires_explicit_api_base(model: str, *, api_key: str | None, api_base: str | None) -> bool:
+    """Does LiteLLM say this reference cannot be reached without a host?
+
+    `validate_environment` reports which environment variables a provider
+    still needs; korvid reads only the ones that name a *base URL*, which
+    is the single fact it can act on — a missing credential is the
+    profile's business, a missing host means the request has nowhere to
+    go. Providers that ship a default host report nothing here, which is
+    exactly the distinction `get_llm_provider`'s `dynamic_api_base` fails
+    to make (measured: `None` for most hosted vendors).
+
+    Args:
+        model: The full model reference, as the operator wrote it.
+        api_key: The resolved credential, or `None`. Passed so a missing
+            key does not show up as a missing *host*.
+        api_base: The endpoint the profile names, or `None`.
+
+    Returns:
+        `True` only when LiteLLM names a base-URL variable it cannot
+        find. Any failure to answer returns `False`: an unanswerable
+        probe must not disable a profile that would have worked.
+    """
+    try:
+        report = _litellm.validate_environment(model=model, api_key=api_key, api_base=api_base)
+    except Exception:  # the probe walks third-party provider tables
+        return False
+    missing = report.get("missing_keys") if isinstance(report, dict) else None
+    if not isinstance(missing, list):
+        return False
+    return any(isinstance(key, str) and key.upper().endswith(_API_BASE_SUFFIX) for key in missing)

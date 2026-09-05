@@ -8,9 +8,10 @@ neither, and the layer rules forbid the first outright.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Collection
+from collections.abc import Callable, Collection
 from dataclasses import dataclass
 from enum import Enum
+from typing import TYPE_CHECKING
 
 from korvid.core.config import (
     ConnectionAuthConfig,
@@ -18,6 +19,14 @@ from korvid.core.config import (
     ModelConnectionsConfig,
     is_valid_profile_name,
 )
+
+if TYPE_CHECKING:
+    from korvid.agent.provider import LLMProvider
+
+    #: Builds the live provider for a reference its flow claimed. Typed
+    #: under `TYPE_CHECKING` only: `ui/` imports this module to render the
+    #: setup wizard, and `agent.provider` drags the whole session graph in.
+    SpecialFlowProviderBuilder = Callable[[ModelConnectionConfig], LLMProvider | None]
 
 __all__ = [
     "AuthMethodDescriptor",
@@ -130,6 +139,12 @@ class SpecialFlow:
     option_fields: tuple[SetupField, ...] = ()
     endpoint: EndpointRequirement = EndpointRequirement.OPTIONAL
     claims_option: str | None = None
+    #: Builds the provider for a reference this flow claimed, or None when
+    #: it cannot. `None` means the flow is a *declaration only*: it still
+    #: keeps the reference away from the standard transport (which is the
+    #: whole point of claiming a prefix), but nothing can be built from it
+    #: yet, so the factory refuses rather than falling through to routing.
+    build_provider: SpecialFlowProviderBuilder | None = None
 
 
 def split_reference(reference: str) -> tuple[str, str]:

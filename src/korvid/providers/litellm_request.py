@@ -58,6 +58,12 @@ class _OmitApiKey:
 #: The "do not pass ``api_key``" marker. Compared with ``is``.
 OMIT_API_KEY: Final = _OmitApiKey()
 
+#: A credential in its three resolved states: the key itself, ``None`` for
+#: a genuinely keyless endpoint, or ``OMIT_API_KEY`` to pass no argument at
+#: all. Named so the factory can carry a resolution result without
+#: importing the private sentinel class.
+ResolvedApiKey = str | _OmitApiKey | None
+
 
 # ---------------------------------------------------------------------------
 # RequestPlan
@@ -77,7 +83,7 @@ class RequestPlan:
     #: credential was resolved" (a keyless endpoint, which still needs the
     #: sentinel on the wire because OpenAI-shaped clients refuse to build
     #: without one); ``OMIT_API_KEY`` means "pass nothing".
-    api_key: str | _OmitApiKey | None
+    api_key: ResolvedApiKey
     base_url: str | None
     api_version: str | None
     extra: Mapping[str, object]
@@ -123,7 +129,7 @@ class RequestPlan:
 def build_plan(
     *,
     model: str,
-    api_key: str | _OmitApiKey | None,
+    api_key: ResolvedApiKey,
     base_url: str | None,
     options: Mapping[str, object],
     supported: Sequence[str],
