@@ -1,9 +1,9 @@
 """`ResourceStore` CRUD is covered through `WatchManager` and UI integration.
 
-This file keeps the one contract with no equivalent boundary elsewhere:
-`get()` orders `ALL_NAMESPACES` by the `(namespace, name)` tuple, not by the
-internal `"namespace/name"` key string. A namespace such as `team-b` would
-sort before `team` by key string but must sort after it.
+This file keeps two contracts with no equivalent boundary elsewhere:
+`get()` orders `ALL_NAMESPACES` by the `(namespace, name)` tuple rather than
+the internal key string, and a failing subscriber cannot block later
+subscribers or kill the watch loop.
 """
 
 from __future__ import annotations

@@ -11,8 +11,8 @@ branch repeatedly with different literals. `test_detect_cloud_provider_lists_nod
 below still proves the lookup mechanism end to end through the real
 `KubeClient` boundary; this file's focus is the caching and error-handling
 contract that mechanism doesn't cover. Direct tests retain the multi-node loop
-(skip nodes with no recognizable signal, first recognized one decides) and one
-managed-label-only case because the real client boundary only supplies a
+(skip nodes with no recognizable signal, first recognized one decides) and the
+three managed-label mappings because the real client boundary only supplies a
 providerID.
 """
 
