@@ -38,6 +38,14 @@ dependencies = [
 [project.scripts]
 korvid = "korvid.cli:main"
 
+# korvid's own special flows, published on the same extension point a
+# third-party flow uses. Each entry point is named for the reference
+# prefix its flow declares — the registry resolves a claim by name
+# without importing anything, so the two must match exactly.
+[project.entry-points."korvid.provider"]
+github-copilot = "korvid.providers.flow_copilot"
+ollama = "korvid.providers.flow_ollama_thinking"
+
 # PyPI builds the project page's sidebar from these. Without them a stranger
 # deciding whether to trust the package has nowhere to click.
 [project.urls]

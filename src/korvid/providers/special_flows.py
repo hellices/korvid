@@ -24,6 +24,10 @@ from korvid.providers.litellm_settings import DEVICE_LOGIN_PREFIXES, RETIRED_PRO
 
 _ENTRY_POINT_GROUP: str = "korvid.provider"
 
+#: korvid's own distribution name, normalized. Entry points shipped by it
+#: are exempt from the reserved-prefix rule (see `_is_korvids_own`).
+_OWN_DISTRIBUTION: str = "korvid"
+
 # Applied to the *declared* (un-normalized) spelling.
 _PREFIX_PATTERN: re.Pattern[str] = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 
@@ -31,6 +35,13 @@ _PREFIX_PATTERN: re.Pattern[str] = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 # be confused by a third party squatting a name they read as korvid's own.
 _FORBIDDEN_PREFIXES: frozenset[str] = frozenset(
     raw.lower().replace("_", "-") for raw in RETIRED_PROVIDER_ALIASES
+)
+
+#: Prefixes no flow may hand back to the standard transport, whatever it
+#: declares. A retired alias must stay unroutable, and a device-login
+#: prefix starts an interactive login inside the SDK's own routing call.
+_ALWAYS_CLAIMED: frozenset[str] = _FORBIDDEN_PREFIXES | frozenset(
+    prefix.lower().replace("_", "-") for prefix in DEVICE_LOGIN_PREFIXES
 )
 
 
@@ -55,6 +66,24 @@ def _iter_entry_points() -> Iterable[importlib.metadata.EntryPoint]:
         return importlib.metadata.entry_points(group=_ENTRY_POINT_GROUP)
     except Exception:  # metadata read can fail for any reason
         return ()
+
+
+def _is_korvids_own(entry_point: importlib.metadata.EntryPoint) -> bool:
+    """Was this entry point declared by korvid's own distribution?
+
+    The reserved-prefix rule protects routing from third parties, not
+    korvid from itself: the references korvid's own flows claim are
+    exactly the ones the SDK would otherwise route into an interactive
+    device login. The exemption is distribution *identity*, never the
+    flow's own say-so, so a plugin cannot buy it by choosing a name.
+    """
+    try:
+        name = getattr(getattr(entry_point, "dist", None), "name", None)
+    except Exception:  # metadata read can fail for any reason
+        return False
+    if not isinstance(name, str):
+        return False
+    return name.strip().lower().replace("_", "-") == _OWN_DISTRIBUTION
 
 
 def _load_declared_flow(
@@ -138,7 +167,7 @@ class SpecialFlowRegistry:
     def from_entry_points(cls, *, reserved_prefixes: Iterable[str] = ()) -> SpecialFlowRegistry:
         """Build from entry-point **names only**; load nothing yet."""
         registry = cls()
-        forbidden = _FORBIDDEN_PREFIXES | {normalize_prefix(prefix) for prefix in reserved_prefixes}
+        reserved = {normalize_prefix(prefix) for prefix in reserved_prefixes}
 
         for ep in _iter_entry_points():
             try:
@@ -146,7 +175,9 @@ class SpecialFlowRegistry:
             except Exception:
                 continue
             normalized = normalize_prefix(name)
-            if normalized in forbidden:
+            if normalized in _FORBIDDEN_PREFIXES or (
+                normalized in reserved and not _is_korvids_own(ep)
+            ):
                 registry._errors.append(
                     f"entry-point prefix {name!r} (normalized: {normalized!r}) is reserved"
                 )
@@ -249,14 +280,32 @@ class SpecialFlowRegistry:
         refuse one before it routes, and it must still refuse when the
         flow that serves it was never installed.
 
+        A flow that claims a named *option* is excluded: it shares its
+        prefix with the standard transport rather than owning it, and a
+        shared prefix in this set would make the option permanently on —
+        the factory refuses a claimed prefix nothing served.
+
         Available *without* loading anything.
         """
+        shared = {
+            prefix
+            for prefix, flow in self._known_flows()
+            if flow.claims_option is not None and prefix not in _ALWAYS_CLAIMED
+        }
         return (
             frozenset(self._claims.keys())
             | frozenset(self._ep_map.keys())
             | frozenset(normalize_prefix(a) for a in RETIRED_PROVIDER_ALIASES)
             | frozenset(normalize_prefix(p) for p in DEVICE_LOGIN_PREFIXES)
-        )
+        ) - shared
+
+    def _known_flows(self) -> Iterable[tuple[str, SpecialFlow]]:
+        """Every flow already registered or loaded, without loading more."""
+        seen: dict[str, SpecialFlow] = dict(self._claims)
+        for prefix, result in self._loaded.items():
+            if isinstance(result, SpecialFlow):
+                seen.setdefault(prefix, result)
+        return tuple(seen.items())
 
     @property
     def errors(self) -> tuple[str, ...]:

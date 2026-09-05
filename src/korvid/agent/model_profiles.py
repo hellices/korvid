@@ -8,7 +8,7 @@ neither, and the layer rules forbid the first outright.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Collection
+from collections.abc import Awaitable, Callable, Collection
 from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING
@@ -27,6 +27,17 @@ if TYPE_CHECKING:
     #: under `TYPE_CHECKING` only: `ui/` imports this module to render the
     #: setup wizard, and `agent.provider` drags the whole session graph in.
     SpecialFlowProviderBuilder = Callable[[ModelConnectionConfig], LLMProvider | None]
+
+    #: Starts an interactive sign-in for a claimed reference and returns
+    #: what the operator has to act on, or `None` when the profile needs
+    #: no sign-in.
+    SpecialFlowAuthStarter = Callable[
+        [ModelConnectionConfig], Awaitable["DeviceLoginPrompt | None"]
+    ]
+
+    #: Completes a sign-in and returns the *credential key* the profile
+    #: will name — never the secret itself.
+    SpecialFlowAuthFinisher = Callable[[ModelConnectionConfig], Awaitable[str | None]]
 
 __all__ = [
     "AuthMethodDescriptor",
@@ -145,6 +156,12 @@ class SpecialFlow:
     #: whole point of claiming a prefix), but nothing can be built from it
     #: yet, so the factory refuses rather than falling through to routing.
     build_provider: SpecialFlowProviderBuilder | None = None
+    #: Starts the flow's own sign-in. `None` means the flow needs none:
+    #: the wizard skips the stage rather than inventing one.
+    begin_auth: SpecialFlowAuthStarter | None = None
+    #: Completes the sign-in and names the stored credential. `None` for
+    #: the same reason as `begin_auth`.
+    finish_auth: SpecialFlowAuthFinisher | None = None
 
 
 def split_reference(reference: str) -> tuple[str, str]:

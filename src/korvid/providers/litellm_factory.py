@@ -33,6 +33,7 @@ from __future__ import annotations
 import logging
 import os
 from collections.abc import Callable, Mapping
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Final, Protocol
 
 from korvid.agent.model_policy import CapabilitySource, ModelCapabilities, ModelDescriptor
@@ -45,7 +46,12 @@ from korvid.agent.model_profiles import (
 )
 from korvid.providers import litellm_runtime, net
 from korvid.providers.litellm_provider import LiteLLMProvider
-from korvid.providers.litellm_request import OMIT_API_KEY, ResolvedApiKey, build_plan
+from korvid.providers.litellm_request import (
+    CA_BUNDLE_OPTION,
+    OMIT_API_KEY,
+    ResolvedApiKey,
+    build_plan,
+)
 from korvid.providers.litellm_settings import DEVICE_LOGIN_PREFIXES
 from korvid.providers.special_flows import SpecialFlowRegistry, normalize_prefix
 
@@ -141,7 +147,7 @@ def create_provider_from_profile(
         _refuse("%s", problem)
         return None
 
-    claimed, provider = _claimed_provider(profile, reference, flows)
+    claimed, provider = _claimed_provider(profile, reference, flows, ca_bundle)
     if claimed:
         return provider
 
@@ -228,6 +234,7 @@ def _claimed_provider(
     profile: ModelConnectionConfig,
     reference: str,
     flows: SpecialFlowRegistry | None,
+    ca_bundle: str | None = None,
 ) -> tuple[bool, LLMProvider | None]:
     """Whether a claim owns this reference, and what it built.
 
@@ -240,7 +247,7 @@ def _claimed_provider(
     registry = flows if flows is not None else SpecialFlowRegistry()
     flow = _claim(registry, reference, profile.options)
     if flow is not None:
-        return True, _build_from_flow(flow, profile, reference)
+        return True, _build_from_flow(flow, profile, reference, ca_bundle)
     if _prefix_is_claimed(registry, reference):
         _refuse(
             "%r names a prefix korvid claims, and no flow is installed to serve it",
@@ -255,6 +262,12 @@ def _claim(
 ) -> SpecialFlow | None:
     """The flow owning this reference by prefix or by named option.
 
+    A flow that declares `claims_option` shares its prefix rather than
+    owning it, so it is honoured only through `claim_by_option`: the
+    lookup by prefix still resolves it — the wizard needs that to render
+    the option — but answering there would make the option permanently
+    on for every reference under the prefix.
+
     Every registry call is guarded: a third-party plugin that raises must
     disable itself, not the profiles it has nothing to do with.
     """
@@ -262,14 +275,17 @@ def _claim(
         lambda: registry.claim(reference),
         lambda: registry.claim_by_option(reference, options),
     )
-    for lookup in lookups:
+    for index, lookup in enumerate(lookups):
         try:
             flow = lookup()
         except Exception:  # third-party plugin code can raise anything
             logger.warning("a special flow raised while claiming %r; ignoring it", reference)
             continue
-        if flow is not None:
-            return flow
+        if flow is None:
+            continue
+        if index == 0 and flow.claims_option is not None:
+            continue
+        return flow
     return None
 
 
@@ -291,15 +307,25 @@ def _prefix_is_claimed(registry: SpecialFlowRegistry, reference: str) -> bool:
 
 
 def _build_from_flow(
-    flow: SpecialFlow, profile: ModelConnectionConfig, reference: str
+    flow: SpecialFlow,
+    profile: ModelConnectionConfig,
+    reference: str,
+    ca_bundle: str | None = None,
 ) -> LLMProvider | None:
-    """Delegate to the flow that claimed the reference."""
+    """Delegate to the flow that claimed the reference.
+
+    A claim is answered before `_apply_trust`, and a flow owns its own
+    transport, so `litellm.ssl_verify` never reaches it. The operator's
+    bundle is therefore handed over as the profile option a flow reads —
+    replacing whatever the profile carried, so there is exactly one trust
+    source and a profile field cannot become a weaker second one.
+    """
     builder = flow.build_provider
     if builder is None:
         _refuse("the flow claiming %r declares no transport", reference)
         return None
     try:
-        provider = builder(profile)
+        provider = builder(_with_trust(profile, ca_bundle))
     except Exception:  # third-party flow code can raise anything
         _refuse("the flow claiming %r failed to build a provider", reference)
         return None
@@ -307,6 +333,16 @@ def _build_from_flow(
         _refuse("the flow claiming %r could not build a provider", reference)
         return None
     return provider
+
+
+def _with_trust(profile: ModelConnectionConfig, ca_bundle: str | None) -> ModelConnectionConfig:
+    """The profile a flow's builder sees, carrying the operator's trust."""
+    options = {key: value for key, value in profile.options.items() if key != CA_BUNDLE_OPTION}
+    if ca_bundle is not None:
+        options[CA_BUNDLE_OPTION] = ca_bundle
+    if options == dict(profile.options):
+        return profile
+    return replace(profile, options=options)
 
 
 # ---------------------------------------------------------------------------

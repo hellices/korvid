@@ -1798,13 +1798,14 @@ def _legacy_options(
     profile would invent settings the operator never wrote and that the
     adapter would then have to ignore.
 
-    Migrated `ollama` profiles also get `native_api: True`. The legacy
-    transport was `OllamaProvider`'s `/api/chat` route, which returns
-    per-tool-call reasoning the OpenAI dialect cannot carry (Task 17). A
-    *new* `ollama:` profile defaults to the shared route; an *existing*
-    install keeps the transport it was already running, because a
-    migration that silently changes the wire protocol is not "read
-    without changes".
+    Migrated `ollama` profiles also get `native_api: True` and
+    `native_thinking: True`. The legacy transport was the `/api/chat`
+    route, which returns per-tool-call reasoning the shared dialect
+    cannot carry, and `native_thinking` is the option the shipped flow
+    claims (Task 17). A *new* `ollama:` profile defaults to the shared
+    route; an *existing* install keeps the transport it was already
+    running, because a migration that silently changes the wire protocol
+    is not "read without changes".
 
     Values are copied verbatim with one exception: the numeric knobs are
     coerced (`num_ctx`, `seed`, `temperature`) or strictly validated
@@ -1820,6 +1821,11 @@ def _legacy_options(
     if provider == "ollama":
         options.update(_legacy_ollama_options(_legacy_ollama_raw(agent_raw), warnings))
         options["native_api"] = True
+        # The key the shipped flow claims. `native_api` stays for the
+        # profiles written before the flow existed; both spellings mean
+        # the same transport, so a migrated install cannot end up naming
+        # one and running the other.
+        options["native_thinking"] = True
     extra = agent_raw.get("options")
     if isinstance(extra, dict):
         options.update(extra)

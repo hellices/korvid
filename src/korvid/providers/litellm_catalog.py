@@ -15,6 +15,7 @@ from typing import Any, Final
 
 from korvid.agent.model_profiles import (
     AuthMethodDescriptor,
+    DeviceLoginPrompt,
     EndpointRequirement,
     ModelCatalog,
     ModelConnectionConfig,
@@ -22,6 +23,7 @@ from korvid.agent.model_profiles import (
     ModelEntrySource,
     SetupField,
     SetupFieldKind,
+    SpecialFlow,
     split_reference,
 )
 from korvid.providers.endpoint_discovery import EndpointDiscovery
@@ -476,17 +478,45 @@ class LiteLLMModelCatalog(ModelCatalog):
             )
         return await tester(profile)
 
-    async def begin_auth(self, profile: ModelConnectionConfig) -> None:
-        """Begin a device-login flow for this profile.
+    async def begin_auth(self, profile: ModelConnectionConfig) -> DeviceLoginPrompt | None:
+        """Start the claiming flow's own sign-in, if it declares one.
 
-        Stub — Task 17 implements the two special flows. Task 8 built the
-        registry they dispatch through, not the flows themselves.
+        The catalog owns no vendor knowledge and no transport: a sign-in
+        belongs to the flow that declared it. `None` means the wizard
+        skips the stage — every ordinary API-key profile lands there, so
+        it must not look like a failure.
+
+        Args:
+            profile: The connection being set up.
+
+        Returns:
+            What the operator has to act on, or None when this profile
+            needs no interactive sign-in.
         """
-        return None  # pragma: no cover - Task 17 implements the flows
+        flow = self._claiming_flow(profile)
+        if flow is None or flow.begin_auth is None:
+            return None
+        return await flow.begin_auth(profile)
 
-    async def finish_auth(self, profile: ModelConnectionConfig) -> None:
-        """Complete a device-login flow for this profile.
+    async def finish_auth(self, profile: ModelConnectionConfig) -> str | None:
+        """Complete the claiming flow's sign-in and name the credential.
 
-        Stub — Task 17 implements the two special flows.
+        Args:
+            profile: The connection being set up.
+
+        Returns:
+            The credential key the profile will reference — never the
+            secret itself — or None when there was no sign-in to finish.
         """
-        return None  # pragma: no cover - Task 17 implements the flows
+        flow = self._claiming_flow(profile)
+        if flow is None or flow.finish_auth is None:
+            return None
+        return await flow.finish_auth(profile)
+
+    def _claiming_flow(self, profile: ModelConnectionConfig) -> SpecialFlow | None:
+        """The flow this profile's reference resolves to, by prefix or option."""
+        if self._flows is None:
+            return None
+        return self._flows.claim(profile.model) or self._flows.claim_by_option(
+            profile.model, profile.options
+        )

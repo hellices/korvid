@@ -621,3 +621,66 @@ async def test_a_catalog_without_a_tester_says_probing_is_unavailable() -> None:
 
     with pytest.raises(ProfileTestUnavailable, match="cannot test"):
         await catalog.test(ModelConnectionConfig(model="openai/gpt-4o"))
+
+
+# ---------------------------------------------------------------------------
+# Task 17 — sign-in delegated to the claiming flow
+# ---------------------------------------------------------------------------
+
+
+async def test_begin_auth_delegates_to_the_claiming_flow() -> None:
+    """The catalog owns no vendor knowledge. A device login belongs to the
+    flow that declared it, and the wizard only ever talks to the catalog."""
+    from korvid.agent.model_profiles import DeviceLoginPrompt
+    from korvid.providers.special_flows import SpecialFlowRegistry
+
+    seen: list[ModelConnectionConfig] = []
+    prompt = DeviceLoginPrompt(
+        user_code="ABCD-1234", verification_uri="https://host/login", expires_in_seconds=900
+    )
+
+    async def _begin(profile: ModelConnectionConfig) -> DeviceLoginPrompt:
+        seen.append(profile)
+        return prompt
+
+    registry = SpecialFlowRegistry([_make_flow("acme", begin_auth=_begin)])
+    catalog = LiteLLMModelCatalog(flows=registry)
+    profile = ModelConnectionConfig(model="acme/model")
+
+    assert await catalog.begin_auth(profile) is prompt
+    assert seen == [profile]
+
+
+async def test_finish_auth_delegates_to_the_claiming_flow() -> None:
+    """What comes back is the credential *key* the profile will name — a
+    token would put a secret on the wizard's screen and in its state."""
+    from korvid.providers.special_flows import SpecialFlowRegistry
+
+    async def _finish(profile: ModelConnectionConfig) -> str:
+        return "github-oauth"
+
+    registry = SpecialFlowRegistry([_make_flow("acme", finish_auth=_finish)])
+    catalog = LiteLLMModelCatalog(flows=registry)
+
+    assert await catalog.finish_auth(ModelConnectionConfig(model="acme/model")) == "github-oauth"
+
+
+async def test_a_reference_no_flow_claims_needs_no_sign_in() -> None:
+    """`None` is the wizard's signal to skip the stage; an exception would
+    make every ordinary API-key profile look broken."""
+    from korvid.providers.special_flows import SpecialFlowRegistry
+
+    catalog = LiteLLMModelCatalog(flows=SpecialFlowRegistry([_make_flow("acme")]))
+    profile = ModelConnectionConfig(model="openai/gpt-4o")
+
+    assert await catalog.begin_auth(profile) is None
+    assert await catalog.finish_auth(profile) is None
+
+
+async def test_a_flow_that_declares_no_sign_in_is_not_invented() -> None:
+    from korvid.providers.special_flows import SpecialFlowRegistry
+
+    catalog = LiteLLMModelCatalog(flows=SpecialFlowRegistry([_make_flow("acme")]))
+
+    assert await catalog.begin_auth(ModelConnectionConfig(model="acme/model")) is None
+    assert await catalog.finish_auth(ModelConnectionConfig(model="acme/model")) is None

@@ -1,0 +1,406 @@
+"""The native thinking flow, declared as data on the extension point.
+
+Migrated from the thinking half of `tests/providers/test_ollama.py`
+(Task 17). The claim is the `native_thinking` *option*, not the `ollama/`
+prefix: with the option off — the default — `ollama/qwen3:8b` goes
+through the shared transport like everything else.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+import httpx
+import pytest
+
+from korvid.agent.model_policy import CapabilitySource, ModelDescriptor
+from korvid.agent.model_profiles import (
+    ConnectionAuthConfig,
+    ModelConnectionConfig,
+    SpecialFlow,
+)
+from korvid.providers.flow_ollama_thinking import (
+    OllamaOptions,
+    OllamaProvider,
+    ProviderError,
+    build_provider,
+    ollama_thinking_flow,
+)
+from korvid.providers.litellm_factory import create_provider_from_profile
+from korvid.providers.special_flows import SpecialFlowRegistry
+
+
+def _ndjson(*chunks: dict[str, Any]) -> str:
+    return "".join(json.dumps(c) + "\n" for c in chunks)
+
+
+def _done(**counts: int) -> dict[str, Any]:
+    return {"done": True, "message": {"role": "assistant", "content": ""}, **counts}
+
+
+def _client(
+    body: str, capture: dict[str, Any] | None = None, status: int = 200
+) -> httpx.AsyncClient:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if capture is not None:
+            capture["url"] = str(request.url)
+            capture["json"] = json.loads(request.content)
+            capture["headers"] = dict(request.headers)
+        return httpx.Response(status, text=body, headers={"content-type": "application/x-ndjson"})
+
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+
+def _profile(
+    reference: str = "ollama/qwen3:8b",
+    *,
+    endpoint: str | None = "http://x:11434",
+    options: dict[str, object] | None = None,
+    method: str = "none",
+    settings: dict[str, object] | None = None,
+) -> ModelConnectionConfig:
+    return ModelConnectionConfig(
+        model=reference,
+        endpoint=endpoint,
+        auth=ConnectionAuthConfig(method=method, settings=settings or {}),
+        options=options if options is not None else {"native_thinking": True},
+    )
+
+
+async def _events(
+    provider: OllamaProvider, messages: list[dict[str, Any]] | None = None
+) -> list[dict[str, Any]]:
+    msgs = messages if messages is not None else [{"role": "user", "content": "hi"}]
+    return [e async for e in provider.complete(msgs, [])]
+
+
+def _built(
+    profile: ModelConnectionConfig, capture: dict[str, Any], body: str = ""
+) -> OllamaProvider:
+    provider = build_provider(profile)
+    assert isinstance(provider, OllamaProvider)
+    provider._client = _client(body or _ndjson(_done()), capture)
+    provider._owns_client = True
+    return provider
+
+
+# ---------------------------------------------------------------------------
+# The declaration
+# ---------------------------------------------------------------------------
+
+
+def test_the_flow_claims_an_option_not_a_prefix() -> None:
+    flow = ollama_thinking_flow()
+    assert isinstance(flow, SpecialFlow)
+    assert flow.claims_option == "native_thinking"
+    assert flow.prefix == "ollama"
+
+
+def test_the_option_defaults_off_so_ollama_routes_through_litellm() -> None:
+    """Parity is opt-in. The default path for ollama/* must be the same
+    path every other model takes."""
+    registry = SpecialFlowRegistry([ollama_thinking_flow()])
+    assert registry.claim_by_option("ollama/qwen3:8b", {}) is None
+    assert registry.claim_by_option("ollama/qwen3:8b", {"native_thinking": False}) is None
+    assert registry.claim_by_option("ollama/qwen3:8b", {"native_thinking": "yes"}) is None
+
+
+def test_the_option_on_reaches_this_flow() -> None:
+    flow = ollama_thinking_flow()
+    registry = SpecialFlowRegistry([flow])
+    assert registry.claim_by_option("ollama/qwen3:8b", {"native_thinking": True}) is flow
+
+
+def test_the_flow_offers_the_option_as_a_setup_field() -> None:
+    """An operator can only opt in to a field the wizard renders."""
+    keys = {field.key for field in ollama_thinking_flow().option_fields}
+    assert "native_thinking" in keys
+
+
+def test_the_shipped_distribution_registers_the_flow_on_the_entry_point() -> None:
+    from korvid.providers.litellm_runtime import models_by_provider
+
+    registry = SpecialFlowRegistry.from_entry_points(reserved_prefixes=models_by_provider())
+    claimed = registry.claim_by_option("ollama/qwen3:8b", {"native_thinking": True})
+    assert claimed is not None
+    assert claimed.claims_option == "native_thinking"
+
+
+def test_the_installed_flow_does_not_take_the_prefix_from_the_shared_transport() -> None:
+    """The entry point is named for the prefix it shares, so the registry
+    can find it without loading every plugin. Sharing a prefix is not
+    claiming it: with the option off the reference must still route."""
+    from korvid.providers.litellm_provider import LiteLLMProvider
+    from korvid.providers.litellm_runtime import models_by_provider
+
+    registry = SpecialFlowRegistry.from_entry_points(reserved_prefixes=models_by_provider())
+    provider = create_provider_from_profile(_profile(options={}), flows=registry)
+    assert isinstance(provider, LiteLLMProvider)
+
+
+def test_the_option_on_takes_the_installed_flows_transport() -> None:
+    from korvid.providers.litellm_runtime import models_by_provider
+
+    registry = SpecialFlowRegistry.from_entry_points(reserved_prefixes=models_by_provider())
+    provider = create_provider_from_profile(_profile(), flows=registry)
+    assert isinstance(provider, OllamaProvider)
+
+
+def test_the_flow_leaves_the_generic_auth_methods_alone() -> None:
+    """A declared auth list *replaces* the catalog's generic one for every
+    reference the prefix resolves to, including the ones this flow does
+    not serve. Sharing a prefix must not narrow them."""
+    assert ollama_thinking_flow().auth_methods == ()
+
+
+# ---------------------------------------------------------------------------
+# Thinking — the reason this flow exists
+# ---------------------------------------------------------------------------
+
+
+async def test_thinking_content_is_surfaced_when_the_option_is_on() -> None:
+    """`message.thinking` exists only on the native endpoint. It is kept
+    for the assistant history and never yielded as answer text."""
+    capture: dict[str, Any] = {}
+    body = _ndjson(
+        {
+            "message": {"role": "assistant", "content": "", "thinking": "step 1; "},
+            "done": False,
+        },
+        {
+            "message": {
+                "role": "assistant",
+                "content": "",
+                "thinking": "step 2",
+                "tool_calls": [{"function": {"name": "get_logs", "arguments": {}}}],
+            },
+            "done": False,
+        },
+        _done(),
+    )
+    provider = _built(_profile(), capture, body)
+    events = await _events(provider)
+    call_id = next(e["id"] for e in events if e["type"] == "tool_call")
+
+    history: list[dict[str, Any]] = [
+        {"role": "user", "content": "hi"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": call_id,
+                    "type": "function",
+                    "function": {"name": "get_logs", "arguments": "{}"},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": call_id, "content": "ok"},
+    ]
+    provider._client = _client(_ndjson(_done()), capture)
+    await _events(provider, provider.prepare_messages(history))
+    assert capture["json"]["messages"][1]["thinking"] == "step 1; step 2"
+
+
+async def test_thinking_field_is_not_yielded_as_text() -> None:
+    body = _ndjson(
+        {"message": {"role": "assistant", "content": "", "thinking": "let me see"}, "done": False},
+        {"message": {"role": "assistant", "content": "answer"}, "done": False},
+        _done(),
+    )
+    capture: dict[str, Any] = {}
+    events = await _events(_built(_profile(), capture, body))
+    texts = [e["text"] for e in events if e["type"] == "text_delta"]
+    assert texts == ["answer"]
+
+
+async def test_the_option_asks_the_model_to_think() -> None:
+    capture: dict[str, Any] = {}
+    await _events(_built(_profile(), capture))
+    assert capture["json"]["think"] is True
+
+
+async def test_num_ctx_still_reaches_the_native_endpoint() -> None:
+    """The compatibility shim silently truncates at the VRAM default; the
+    native endpoint takes the number the operator configured."""
+    capture: dict[str, Any] = {}
+    profile = _profile(options={"native_thinking": True, "num_ctx": 8192})
+    await _events(_built(profile, capture))
+    assert capture["json"]["options"]["num_ctx"] == 8192
+
+
+async def test_num_ctx_falls_back_to_the_adapters_own_default() -> None:
+    capture: dict[str, Any] = {}
+    await _events(_built(_profile(), capture))
+    assert capture["json"]["options"] == {"num_ctx": 16384, "temperature": 0.0}
+
+
+async def test_request_carries_options_think_and_keep_alive() -> None:
+    capture: dict[str, Any] = {}
+    profile = _profile(
+        options={
+            "native_thinking": True,
+            "num_ctx": 8192,
+            "temperature": 0.5,
+            "seed": 42,
+            "keep_alive": "10m",
+            "num_predict": 192,
+        }
+    )
+    await _events(_built(profile, capture))
+    payload = capture["json"]
+    assert payload["stream"] is True
+    assert payload["think"] is True
+    assert payload["keep_alive"] == "10m"
+    assert payload["options"] == {
+        "num_ctx": 8192,
+        "temperature": 0.5,
+        "seed": 42,
+        "num_predict": 192,
+    }
+
+
+async def test_an_unusable_option_value_falls_back_instead_of_shipping_a_string() -> None:
+    """`OllamaOptions` has no validation of its own: a `"8192"` that
+    reached it would be sent as a JSON string and would land in
+    `context_window_tokens` as text."""
+    capture: dict[str, Any] = {}
+    profile = _profile(options={"native_thinking": True, "num_ctx": "lots", "temperature": True})
+    await _events(_built(profile, capture))
+    assert capture["json"]["options"] == {"num_ctx": 16384, "temperature": 0.0}
+
+
+async def test_posts_to_native_chat_endpoint() -> None:
+    capture: dict[str, Any] = {}
+    await _events(_built(_profile(), capture))
+    assert capture["url"] == "http://x:11434/api/chat"
+
+
+async def test_a_shim_era_endpoint_still_reaches_the_native_route() -> None:
+    capture: dict[str, Any] = {}
+    await _events(_built(_profile(endpoint="http://x:11434/v1/"), capture))
+    assert capture["url"] == "http://x:11434/api/chat"
+
+
+async def test_a_colon_tagged_model_reaches_the_native_endpoint_intact() -> None:
+    """`ollama/qwen3:8b` — the tag colon must survive both the reference
+    split and the native request body."""
+    capture: dict[str, Any] = {}
+    await _events(_built(_profile("ollama/qwen3:8b"), capture))
+    assert capture["json"]["model"] == "qwen3:8b"
+
+
+def test_descriptor_is_ollama_and_the_model_tag() -> None:
+    provider = build_provider(_profile("ollama/qwen3:8b"))
+    assert provider is not None
+    assert provider.descriptor == ModelDescriptor("ollama", "qwen3:8b")
+
+
+def test_capabilities_report_context_window_and_multiple_tool_calls() -> None:
+    """The adapter reports only what it directly knows: the configured
+    `num_ctx` and that its native response can carry multiple tool calls
+    (issue #189). It must never infer tier or reasoning from the tag."""
+    provider = build_provider(_profile(options={"native_thinking": True, "num_ctx": 16384}))
+    assert provider is not None
+    capabilities = provider.capabilities
+    assert capabilities.context_window_tokens == 16_384
+    assert capabilities.supports_parallel_tools is True
+    assert capabilities.provenance["context_window_tokens"] is CapabilitySource.PROVIDER
+    assert capabilities.supports_tools is None
+
+
+async def test_non_2xx_raises_provider_error() -> None:
+    provider = build_provider(_profile())
+    assert isinstance(provider, OllamaProvider)
+    provider._client = _client("model not found", status=404)
+    with pytest.raises(ProviderError, match="HTTP 404"):
+        await _events(provider)
+
+
+# ---------------------------------------------------------------------------
+# The builder
+# ---------------------------------------------------------------------------
+
+
+def test_a_reference_with_no_model_is_refused() -> None:
+    assert build_provider(_profile("ollama/")) is None
+
+
+def test_a_profile_with_no_endpoint_uses_the_conventional_local_host() -> None:
+    """The same host the shared transport would have used, so opting into
+    the native route never changes *where* the request goes."""
+    provider = build_provider(_profile(endpoint=None))
+    assert isinstance(provider, OllamaProvider)
+    assert provider._base_url == "http://localhost:11434"
+
+
+async def test_a_named_environment_credential_is_sent_as_a_bearer_header(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OLLAMA_GATEWAY_KEY", "sk-live")
+    capture: dict[str, Any] = {}
+    profile = _profile(method="environment", settings={"key": "OLLAMA_GATEWAY_KEY"})
+    await _events(_built(profile, capture))
+    assert capture["headers"]["authorization"] == "Bearer sk-live"
+
+
+def test_an_environment_credential_that_is_not_set_disables_the_profile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("OLLAMA_GATEWAY_KEY", raising=False)
+    profile = _profile(method="environment", settings={"key": "OLLAMA_GATEWAY_KEY"})
+    assert build_provider(profile) is None
+
+
+@pytest.mark.parametrize("method", ["device-login", "not-a-method"])
+def test_an_auth_method_this_flow_cannot_serve_is_refused(method: str) -> None:
+    assert build_provider(_profile(method=method)) is None
+
+
+def test_the_operators_trust_bundle_reaches_the_transport(tmp_path: Path) -> None:
+    """`network.ca_bundle` is one trust decision for every korvid-owned
+    HTTPS client. A flow that owns its transport owns that too."""
+    bundle = tmp_path / "corporate-root.pem"
+    bundle.write_text("")
+    profile = _profile(options={"native_thinking": True, "ca_bundle": str(bundle)})
+    provider = build_provider(profile)
+    assert isinstance(provider, OllamaProvider)
+    assert provider._ca_bundle == str(bundle)
+
+
+def test_the_legacy_thinking_toggle_still_decides_thinking() -> None:
+    """A migrated install carries `think:` from `agent.ollama.think`. It
+    stays the answer for whether the model reasons out loud."""
+    off = build_provider(_profile(options={"native_thinking": True, "think": False}))
+    assert isinstance(off, OllamaProvider)
+    assert off._options == OllamaOptions(think=False)
+
+
+def test_a_migrated_native_install_keeps_the_native_transport(tmp_path: Path) -> None:
+    """The migration promises an existing install keeps the wire protocol
+    it was already running. That promise is only kept if the option the
+    migration writes is the option this flow claims."""
+    from korvid.core.config import load_config
+
+    path = tmp_path / "korvid.yaml"
+    path.write_text(
+        "agent:\n"
+        "  provider: ollama\n"
+        "  base_url: http://localhost:11434\n"
+        "  model: qwen3:8b\n"
+        "  ollama:\n"
+        "    think: true\n"
+        "    num_ctx: 8192\n"
+    )
+    profile = load_config(path).model_connections.active_profile
+    assert profile is not None
+
+    registry = SpecialFlowRegistry([ollama_thinking_flow()])
+    assert registry.claim_by_option(profile.model, profile.options) is not None
+
+    provider = build_provider(profile)
+    assert isinstance(provider, OllamaProvider)
+    assert provider._options.num_ctx == 8192
+    assert provider._options.think is True

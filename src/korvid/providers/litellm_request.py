@@ -30,8 +30,13 @@ from korvid.providers.litellm_settings import KEYLESS_API_KEY_SENTINEL
 # ---------------------------------------------------------------------------
 # Korvid-owned option keys — transport selectors, not model parameters.
 # ---------------------------------------------------------------------------
+#: The trust bundle, as a profile option. A flow owns its own transport,
+#: so this is how the operator's one trust decision reaches it — never a
+#: model parameter, and never something the wire sees.
+CA_BUNDLE_OPTION: Final[str] = "ca_bundle"
+
 _KORVID_OWNED_OPTIONS: frozenset[str] = frozenset(
-    {"native_thinking", "ca_bundle", "num_ctx_source", "ssl_verify"}
+    {"native_thinking", CA_BUNDLE_OPTION, "num_ctx_source", "ssl_verify"}
 )
 
 #: Options that are named ``acompletion`` parameters rather than model

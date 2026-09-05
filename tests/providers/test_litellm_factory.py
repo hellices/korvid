@@ -928,3 +928,87 @@ def test_route_function_has_no_unreachable_statements_after_return() -> None:
                 dead.extend(s.lineno for s in body[i + 1 :])
 
     assert dead == [], f"Dead statements after return in _route at lines {dead}"
+
+
+# ---------------------------------------------------------------------------
+# Task 17 — a shared prefix, and an operator's trust bundle
+# ---------------------------------------------------------------------------
+
+
+def test_a_flow_that_shares_a_prefix_does_not_claim_the_bare_reference() -> None:
+    """`ollama/qwen3:8b` with the option off is an ordinary routed
+    profile. The registry still resolves the flow for that prefix — the
+    wizard needs it to render the option — so the *factory* is what must
+    read `claims_option` and route instead of building."""
+    flows = SpecialFlowRegistry([_flow("ollama", claims_option="native_thinking")])
+
+    provider = create_provider_from_profile(
+        _profile("ollama/qwen3:8b", base_url="http://localhost:11434"), flows=flows
+    )
+
+    assert isinstance(provider, LiteLLMProvider)
+    assert not isinstance(provider, _FakeFlowProvider)
+
+
+def test_the_operators_trust_bundle_reaches_a_flow_builder(tmp_path: Path) -> None:
+    """A flow owns its own transport, so `litellm.ssl_verify` does not
+    reach it. The claim happens before the shared trust is applied, and a
+    flow that talks to a private host over an internal CA has no other way
+    to learn the bundle the operator configured."""
+    ca_pem, _cert, _key = mint_ca_and_server_cert(tmp_path)
+    seen: list[Any] = []
+
+    def _builder(profile: Any) -> LLMProvider:
+        seen.append(profile.options.get("ca_bundle"))
+        return _FakeFlowProvider()
+
+    flows = SpecialFlowRegistry([_flow("acme", builder=_builder)])
+
+    provider = create_provider_from_profile(
+        _profile("acme/model"), flows=flows, ca_bundle=str(ca_pem)
+    )
+
+    assert isinstance(provider, _FakeFlowProvider)
+    assert seen == [str(ca_pem)]
+
+
+def test_a_flow_gets_no_bundle_when_the_operator_configured_none() -> None:
+    """Absent means absent: a flow must be able to tell "use the system
+    trust store" from "use this file", so korvid does not invent a key."""
+    seen: list[dict[str, Any]] = []
+
+    def _builder(profile: Any) -> LLMProvider:
+        seen.append(dict(profile.options))
+        return _FakeFlowProvider()
+
+    flows = SpecialFlowRegistry([_flow("acme", builder=_builder)])
+
+    assert isinstance(
+        create_provider_from_profile(_profile("acme/model"), flows=flows), _FakeFlowProvider
+    )
+    assert seen == [{}]
+
+
+def test_a_profile_option_cannot_smuggle_a_bundle_past_the_operator(tmp_path: Path) -> None:
+    """`ca_bundle` is korvid-owned everywhere else — a profile field must
+    not become a second, weaker trust source just because a flow reads
+    its options."""
+    ca_pem, _cert, _key = mint_ca_and_server_cert(tmp_path)
+    seen: list[Any] = []
+
+    def _builder(profile: Any) -> LLMProvider:
+        seen.append(profile.options.get("ca_bundle"))
+        return _FakeFlowProvider()
+
+    flows = SpecialFlowRegistry([_flow("acme", builder=_builder)])
+
+    create_provider_from_profile(
+        _profile("acme/model", options={"ca_bundle": "/somewhere/else.pem"}),
+        flows=flows,
+        ca_bundle=str(ca_pem),
+    )
+    create_provider_from_profile(
+        _profile("acme/model", options={"ca_bundle": "/somewhere/else.pem"}), flows=flows
+    )
+
+    assert seen == [str(ca_pem), None]
