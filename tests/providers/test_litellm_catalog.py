@@ -390,7 +390,7 @@ class _FakeMetadataSource:
     def __init__(self, entries: dict[str, object]) -> None:
         self._entries = entries
 
-    def metadata(self, reference: str) -> object | None:  # type: ignore[return]
+    def metadata(self, reference: str) -> object | None:  # type: ignore[return]  # malformed source exercises runtime rejection
         return self._entries.get(reference)
 
     def env_hints(self, provider_id: str) -> tuple[str, ...]:
@@ -421,6 +421,7 @@ def test_provenance_stays_litellm_when_the_overlay_adds_nothing() -> None:
     echoing = _FakeMetadataSource(
         {
             "openai/gpt-4o": ModelMetadata(
+                reference="openai/gpt-4o",
                 display_name="GPT-4o",
                 context_window_tokens=128_000,
                 max_output_tokens=16_384,
@@ -453,7 +454,14 @@ def test_provenance_becomes_models_dev_only_when_a_fact_was_added() -> None:
         credential_env_hints=("OPENAI_API_KEY",),
         source=ModelEntrySource.LITELLM,
     )
-    contributing = _FakeMetadataSource({"openai/gpt-4o": ModelMetadata(display_name="GPT-4o")})
+    contributing = _FakeMetadataSource(
+        {
+            "openai/gpt-4o": ModelMetadata(
+                reference="openai/gpt-4o",
+                display_name="GPT-4o",
+            )
+        }
+    )
     catalog = LiteLLMModelCatalog(enrichment=contributing)
 
     result = catalog._overlay(bare)
@@ -466,7 +474,14 @@ def test_enrichment_cannot_create_a_routable_entry_for_unknown_references() -> N
     """A reference unknown to LiteLLM must not become routable via enrichment."""
     from korvid.providers.models_dev import ModelMetadata
 
-    source = _FakeMetadataSource({"unknown/some-model": ModelMetadata(display_name="Some Model")})
+    source = _FakeMetadataSource(
+        {
+            "unknown/some-model": ModelMetadata(
+                reference="unknown/some-model",
+                display_name="Some Model",
+            )
+        }
+    )
     catalog = LiteLLMModelCatalog(enrichment=source)
     # The catalog builds its index from LiteLLM, not from enrichment.
     entry = catalog.entry("unknown/some-model")
@@ -491,7 +506,14 @@ def test_litellm_context_window_wins_over_enrichment() -> None:
         context_window_tokens=128_000,
         source=ModelEntrySource.LITELLM,
     )
-    lower_claim = _FakeMetadataSource({"openai/gpt-4o": ModelMetadata(context_window_tokens=1)})
+    lower_claim = _FakeMetadataSource(
+        {
+            "openai/gpt-4o": ModelMetadata(
+                reference="openai/gpt-4o",
+                context_window_tokens=1,
+            )
+        }
+    )
     catalog = LiteLLMModelCatalog(enrichment=lower_claim)
 
     result = catalog._overlay(base)

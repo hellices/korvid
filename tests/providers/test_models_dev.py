@@ -37,8 +37,11 @@ _DOCUMENT = {
 }
 
 
-def _source(tmp_path: Path, handler) -> ModelsDevSource:  # type: ignore[type-arg]
-    def factory():  # type: ignore[return]
+def _source(
+    tmp_path: Path,
+    handler,  # type: ignore[type-arg]  # httpx's sync/async transport handler is untyped
+) -> ModelsDevSource:
+    def factory():  # type: ignore[return]  # pytest-loaded httpx cannot expose its generic type
         return httpx.AsyncClient(transport=httpx.MockTransport(handler))
 
     return ModelsDevSource(cache_path=tmp_path / "models-dev.json", client_factory=factory)

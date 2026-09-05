@@ -244,10 +244,11 @@ class LiteLLMModelCatalog(ModelCatalog):
     def _overlay(self, entry: ModelEntry) -> ModelEntry:
         """Overlay models.dev enrichment onto a LiteLLM entry.
 
-        LiteLLM wins every conflict. `source` is re-labelled
-        `MODELS_DEV` only when the overlay actually contributed a new
-        fact — restating known data must not claim credit, because the
-        UI's provenance line would be false.
+        LiteLLM wins routing-relevant capability conflicts. models.dev may
+        replace the bare model-id display label with its human-readable name.
+        `source` is re-labelled `MODELS_DEV` only when the overlay actually
+        contributed a new fact — restating known data must not claim credit,
+        because the UI's provenance line would be false.
         """
         if self._enrichment is None:
             return entry

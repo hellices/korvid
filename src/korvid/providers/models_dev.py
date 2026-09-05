@@ -48,6 +48,7 @@ CACHE_FILENAME: Final[str] = "models-dev.json"
 class ModelMetadata:
     """The subset korvid renders. Everything else is discarded on parse."""
 
+    reference: str
     display_name: str | None = None
     description: str | None = None
     release_date: str | None = None
@@ -169,6 +170,7 @@ def _parse(
             supports_reasoning = _strict_bool(model_val.get("reasoning"))
 
             metadata[reference] = ModelMetadata(
+                reference=reference,
                 display_name=display_name,
                 description=description,
                 release_date=release_date,
