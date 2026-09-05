@@ -99,6 +99,26 @@ async def test_accumulates_tool_call_fragments() -> None:
     ]
 
 
+@pytest.mark.parametrize(
+    "fragment",
+    [
+        {"function": {"arguments": "{}"}},
+        {"index": "0", "function": {"arguments": "{}"}},
+        {"index": True, "function": {"arguments": "{}"}},
+    ],
+)
+async def test_tool_call_fragment_index_must_be_a_real_int(fragment: dict[str, Any]) -> None:
+    body = _sse({"choices": [{"delta": {"tool_calls": [fragment]}}]})
+
+    seen: list[dict[str, Any]] = []
+    with pytest.raises(
+        ProviderError, match="OpenAI-compatible stream yielded invalid tool call index"
+    ):
+        await _drain(_provider(body), seen)
+
+    assert seen == [{"type": REQUEST_SENT}]
+
+
 async def test_reports_usage_when_present() -> None:
     body = _sse(
         {"choices": [{"delta": {"content": "x"}}]},
@@ -143,9 +163,13 @@ async def test_non_object_sse_payload_raises_typed_provider_error(
 
 async def test_data_after_done_is_ignored() -> None:
     body = _sse({"choices": [{"delta": {"content": "ok"}}]})
-    body += 'data: {"choices":[{"delta":{"content":"ignored"}}]}\n\n'
+    body += (
+        'data: {"choices":[{"delta":{"content":"ignored","tool_calls":'
+        '[{"index":0,"function":{"name":"get_logs","arguments":"{}"}}]}}]}\n\n'
+    )
     events = [event async for event in _provider(body).complete([], [])]
     assert not any(event.get("text") == "ignored" for event in events)
+    assert not [event for event in events if event.get("type") == "tool_call"]
     assert events[-1] == {"type": "done"}
 
 

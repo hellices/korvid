@@ -31,6 +31,8 @@ contract and for bounding memory that only the adapter can see.
 - Adding user-configurable provider buffer limits.
 - Bounding rendered answer text in the adapters; the engine already owns that
   visible response policy.
+- Bounding individual transport line size before `aiter_lines()`; a
+  byte-stream line reader is separate follow-up scope.
 - Changing third-party provider plugin limits.
 - Retrying a malformed or truncated stream.
 

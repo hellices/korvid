@@ -177,7 +177,10 @@ def _chunk_text(chunk: dict[str, Any], tool_acc: dict[int, _ToolCallAccumulator]
 
     delta: dict[str, Any] = choices[0].get("delta", {})
     for frag in delta.get("tool_calls") or []:
-        idx: int = frag["index"]
+        raw_index = frag.get("index")
+        if type(raw_index) is not int:
+            raise ProviderError("OpenAI-compatible stream yielded invalid tool call index")
+        idx: int = raw_index
         if idx not in tool_acc:
             require_count(len(tool_acc), max_count=MAX_TOOL_CALLS, label="tool calls")
             tool_acc[idx] = _ToolCallAccumulator()
