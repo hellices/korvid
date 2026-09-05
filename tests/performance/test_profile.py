@@ -1,4 +1,7 @@
+import json
 from pathlib import Path
+
+import pytest
 
 from tests.performance.profile import (
     Burst,
@@ -77,3 +80,27 @@ def test_steady_24eps_1k_profile_pins_the_published_acceptance_workload() -> Non
     assert profile.bursts == ()
     assert profile.failures == ()
     assert planned_event_count(profile) == 720
+
+
+def test_load_profile_rejects_duplicate_failure_event_positions(tmp_path: Path) -> None:
+    path = tmp_path / "duplicate-failures.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "id": "duplicate-failures",
+                "seed": 1,
+                "object_count": 2,
+                "namespace_count": 1,
+                "steady_events_per_second": 10,
+                "duration_seconds": 2,
+                "bursts": [],
+                "failures": [
+                    {"kind": "gone", "at_event": 10},
+                    {"kind": "throttled", "at_event": 10},
+                ],
+            }
+        )
+    )
+    with pytest.raises(ValueError, match="distinct at_event"):
+        load_profile(path)

@@ -355,7 +355,7 @@ def test_grade_target_does_not_depend_on_argument_order(arguments: dict[str, str
     ).evidence_fetched
 
 
-@pytest.mark.parametrize("dash", ["—", " - "])
+@pytest.mark.parametrize("dash", ["—", "\u2013", " - "])
 def test_grade_treats_a_dash_as_a_clause_boundary(dash: str) -> None:
     """Negation before a dash must not suppress the causal claim after it."""
     answer = f"The container was not restarted by the operator{dash}it was OOMKilled with exit 137."
@@ -665,3 +665,26 @@ def test_evidence_that_names_the_screen_action_is_still_credited() -> None:
     result = grade(scenario, "worker-1 was OOMKilled.", [record])
 
     assert result.evidence_fetched is True
+
+
+def test_read_record_cannot_satisfy_ui_action_evidence() -> None:
+    scenario = _scenario(
+        must_mention=(("oomkilled",),),
+        must_not_mention=(),
+        expected_evidence=(
+            (
+                Evidence(
+                    tool="open_describe",
+                    contains="opened describe",
+                    args={"kind": "pods", "name": "worker-1", "namespace": "jobs"},
+                ),
+            ),
+        ),
+    )
+    read = ToolRecord(
+        name="get_resource",
+        arguments={"kind": "pods", "name": "worker-1", "namespace": "jobs"},
+        result="opened describe for worker-1",
+    )
+
+    assert not grade(scenario, "worker-1 was OOMKilled.", [read]).evidence_fetched

@@ -349,7 +349,20 @@ def test_cli_replay_live_writes_json_and_markdown(
 ) -> None:
     json_path = tmp_path / "aks186-live.json"
     markdown_path = tmp_path / "aks186-live.md"
-    monkeypatch.setattr(cli, "run_live_replay", fake_run_live_replay)
+    calls: list[tuple[str, str, str, float]] = []
+
+    async def recording(
+        profile: WorkloadProfile,
+        options: ReplayOptions,
+        *,
+        context: str,
+        expected_cluster_id: str,
+        run_id: str,
+    ) -> ReplayReport:
+        calls.append((context, expected_cluster_id, run_id, options.time_scale))
+        return _make_report(profile)
+
+    monkeypatch.setattr(cli, "run_live_replay", recording)
 
     result = cli.main(
         [
@@ -362,6 +375,7 @@ def test_cli_replay_live_writes_json_and_markdown(
     )
 
     assert result == 0
+    assert calls == [("aks-context", _LIVE_IDENTITY_ARGS[3], "aks186", 1.0)]
     assert json.loads(json_path.read_text())["schema_version"] == 2
     assert "# Large-cluster benchmark" in markdown_path.read_text()
 
