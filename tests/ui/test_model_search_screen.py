@@ -156,7 +156,11 @@ async def test_the_screen_opens_on_search_not_on_a_provider_list() -> None:
         await until(pilot, lambda: app.screen_ref is not None)
         screen = app.screen_ref
         assert screen is not None
-        await pilot.pause(0.05)
+        await until(
+            pilot,
+            lambda: isinstance(screen.focused, Input),
+            label="query input focused",
+        )
 
         assert isinstance(screen.focused, Input)
         assert list(screen.query("#provider-list")) == []
@@ -230,9 +234,13 @@ async def test_a_manual_reference_without_a_slash_is_refused_with_the_reason() -
         q_input.value = "nodomain"
         q_input.focus()
         await pilot.press("enter")
-        await pilot.pause(0.05)
 
         status = screen.query_one("#search-status", Static)
+        await until(
+            pilot,
+            lambda: "provider/model" in str(status.render()),
+            label="manual reference validation",
+        )
         assert "provider/model" in str(status.render())
 
 
@@ -264,7 +272,11 @@ async def test_editing_prefills_the_current_model() -> None:
         await until(pilot, lambda: app.screen_ref is not None)
         screen = app.screen_ref
         assert screen is not None
-        await pilot.pause(0.05)
+        await until(
+            pilot,
+            lambda: screen.query_one("#model-query", Input).value == "ollama/qwen3:8b",
+            label="current model prefilled",
+        )
 
         assert screen.query_one("#model-query", Input).value == "ollama/qwen3:8b"
 
