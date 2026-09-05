@@ -70,7 +70,7 @@ def _turn(
     return engine, gateway, request
 
 
-def _ndjson(*chunks: dict[str, Any]) -> str:
+def _ndjson(*chunks: object) -> str:
     return "".join(json.dumps(c) + "\n" for c in chunks)
 
 
@@ -341,6 +341,19 @@ async def test_stream_requires_done_true_terminal_chunk() -> None:
 
 async def test_mid_json_ndjson_chunk_raises_typed_provider_error() -> None:
     body = '{"message":{"role":"assistant","content":"unterminated'
+
+    seen: list[dict[str, Any]] = []
+    with pytest.raises(ProviderError, match="Ollama stream yielded invalid JSON payload"):
+        await _drain(_provider(body), seen)
+
+    assert seen == [{"type": REQUEST_SENT}]
+
+
+@pytest.mark.parametrize("payload", ["oops", [], 7])
+async def test_non_object_ndjson_payload_raises_typed_provider_error(
+    payload: object,
+) -> None:
+    body = _ndjson(payload)
 
     seen: list[dict[str, Any]] = []
     with pytest.raises(ProviderError, match="Ollama stream yielded invalid JSON payload"):

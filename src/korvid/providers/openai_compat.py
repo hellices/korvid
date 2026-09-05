@@ -221,7 +221,9 @@ def _process_sse_line(
 def _load_sse_chunk(payload_str: str) -> dict[str, Any]:
     """Parse one JSON-bearing SSE payload into a typed provider error."""
     try:
-        chunk: dict[str, Any] = json.loads(payload_str)
-        return chunk
+        chunk: object = json.loads(payload_str)
     except json.JSONDecodeError as exc:
         raise ProviderError("OpenAI-compatible stream yielded invalid JSON payload") from exc
+    if not isinstance(chunk, dict):
+        raise ProviderError("OpenAI-compatible stream yielded invalid JSON payload")
+    return chunk

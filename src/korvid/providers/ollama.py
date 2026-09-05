@@ -351,10 +351,12 @@ class OllamaProvider(LLMProvider):
 def _load_ndjson_chunk(line: str) -> dict[str, Any]:
     """Parse one NDJSON chunk into a typed provider error."""
     try:
-        chunk: dict[str, Any] = json.loads(line)
-        return chunk
+        chunk: object = json.loads(line)
     except json.JSONDecodeError as exc:
         raise ProviderError("Ollama stream yielded invalid JSON payload") from exc
+    if not isinstance(chunk, dict):
+        raise ProviderError("Ollama stream yielded invalid JSON payload")
+    return chunk
 
 
 def _usage_from_chunk(chunk: dict[str, Any]) -> dict[str, int] | None:

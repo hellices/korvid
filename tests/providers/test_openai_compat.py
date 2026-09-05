@@ -126,6 +126,21 @@ async def test_mid_json_sse_payload_raises_typed_provider_error() -> None:
     assert seen == [{"type": REQUEST_SENT}]
 
 
+@pytest.mark.parametrize("payload", ["oops", [], 7])
+async def test_non_object_sse_payload_raises_typed_provider_error(
+    payload: object,
+) -> None:
+    body = f"data: {json.dumps(payload)}\n\n"
+
+    seen: list[dict[str, Any]] = []
+    with pytest.raises(
+        ProviderError, match="OpenAI-compatible stream yielded invalid JSON payload"
+    ):
+        await _drain(_provider(body), seen)
+
+    assert seen == [{"type": REQUEST_SENT}]
+
+
 async def test_data_after_done_is_ignored() -> None:
     body = _sse({"choices": [{"delta": {"content": "ok"}}]})
     body += 'data: {"choices":[{"delta":{"content":"ignored"}}]}\n\n'
