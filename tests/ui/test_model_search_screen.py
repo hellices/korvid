@@ -10,7 +10,12 @@ import pytest
 from textual.app import App, ComposeResult
 from textual.widgets import Input, OptionList, Static
 
-from korvid.agent.model_profiles import ModelCatalog, ModelEntry, ModelEntrySource
+from korvid.agent.model_profiles import (
+    EndpointRequirement,
+    ModelCatalog,
+    ModelEntry,
+    ModelEntrySource,
+)
 from korvid.ui.widgets.model_search_screen import ModelSearchScreen
 
 from .waits import until
@@ -65,9 +70,7 @@ class _FakeCatalog(ModelCatalog):
     def option_fields(self, reference: str) -> tuple[()]:
         return ()
 
-    def endpoint_requirement(self, reference: str) -> object:
-        from korvid.agent.model_profiles import EndpointRequirement
-
+    def endpoint_requirement(self, reference: str) -> EndpointRequirement:
         return EndpointRequirement.OPTIONAL
 
     async def discover(self, profile: object) -> tuple[ModelEntry, ...]:
@@ -184,7 +187,7 @@ async def test_results_group_by_provider_for_reading_but_do_not_filter_by_it() -
             label="results for 'o'",
         )
         # introspect stored entries
-        shown = screen._shown_entries  # type: ignore[attr-defined]
+        shown = screen._shown_entries
         providers = {entry.provider_id for entry in shown}
         assert len(providers) > 1
 
@@ -244,6 +247,35 @@ async def test_a_manual_reference_without_a_slash_is_refused_with_the_reason() -
         assert "provider/model" in str(status.render())
 
 
+async def test_selecting_a_manual_option_still_validates_the_reference() -> None:
+    app = _Host()
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: app.screen_ref is not None)
+        screen = app.screen_ref
+        assert screen is not None
+
+        query = screen.query_one("#model-query", Input)
+        query.value = "company/bad model"
+        await until(
+            pilot,
+            lambda: screen.query_one("#model-results", OptionList).option_count > 0,
+            label="invalid manual option shown",
+        )
+        results = screen.query_one("#model-results", OptionList)
+        results.highlighted = results.option_count - 1
+        results.focus()
+        await pilot.press("enter")
+
+        status = screen.query_one("#search-status", Static)
+        await until(
+            pilot,
+            lambda: "whitespace" in str(status.render()),
+            label="manual option validation",
+        )
+
+    assert app.result == "unset"
+
+
 @pytest.mark.asyncio
 async def test_search_is_bounded_so_a_broad_query_cannot_stall_the_ui() -> None:
     app = _Host()
@@ -261,7 +293,7 @@ async def test_search_is_bounded_so_a_broad_query_cannot_stall_the_ui() -> None:
             lambda: screen.query_one("#model-results", OptionList).option_count > 0,
             label="results for 'model'",
         )
-        shown = screen._shown_entries  # type: ignore[attr-defined]
+        shown = screen._shown_entries
         assert len(shown) <= 50
 
 
