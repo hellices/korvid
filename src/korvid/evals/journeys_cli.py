@@ -83,6 +83,8 @@ def _fake_executor(fixture: Any) -> ToolExecutor:
 async def _run(
     args: argparse.Namespace,
     policy: ResolvedAgentPolicy | None = None,
+    *,
+    provider_factory: Callable[[], Any] | None = None,
 ) -> list[JourneyReport]:
     """Run every journey in the pack against one resolved policy.
 
@@ -94,11 +96,19 @@ async def _run(
             conversation happened to be inspected. `None` (a direct
             caller, or a test) falls back to per-conversation routing
             from `--model-tier`.
+        provider_factory: The campaign's factory, configured once by
+            `main`. Configuring one costs a provider *build*, which an
+            installed special flow may answer with a device login, so a
+            second construction in the same run would ask the operator to
+            authenticate twice. The factory still returns a fresh provider
+            per call, so repetitions share no transport state. `None` (a
+            direct caller, or a test) configures its own.
     """
     journeys = load_journeys(args.journeys)
     if not journeys:
         raise SystemExit(f"no journey YAML files found in {args.journeys}")
-    provider_factory = provider_factory_from_env(os.environ)
+    if provider_factory is None:
+        provider_factory = provider_factory_from_env(os.environ)
     live_environment: Any | None = None
     if args.live:
         from korvid.evals import live_journey as live
@@ -178,30 +188,35 @@ def main(argv: list[str] | None = None) -> int:
         PROBE_TIMEOUT_SECONDS,
         WARMUP_TIMEOUT_SECONDS,
         capture_serving,
+        eval_api_key,
+        eval_model_tag,
         httpx_fetch,
         warn_if_unpinned,
     )
 
     args = _parse_args(argv)
+    # Configured before the probe: a profile korvid refuses is refused
+    # while the operator is still at the prompt, not after minutes of
+    # warm-up. One factory serves the whole campaign — see `_run`.
+    provider_factory = provider_factory_from_env(os.environ)
     serving = asyncio.run(
         capture_serving(
             os.environ.get("KORVID_EVAL_BASE_URL", "").strip(),
-            os.environ.get("KORVID_EVAL_MODEL", "").strip(),
+            eval_model_tag(os.environ),
             fetch=httpx_fetch(
-                api_key=os.environ.get("KORVID_EVAL_API_KEY", "").strip(),
+                api_key=eval_api_key(os.environ),
                 timeout_seconds=PROBE_TIMEOUT_SECONDS,
             ),
             warmup_fetch=httpx_fetch(
-                api_key=os.environ.get("KORVID_EVAL_API_KEY", "").strip(),
+                api_key=eval_api_key(os.environ),
                 timeout_seconds=WARMUP_TIMEOUT_SECONDS,
             ),
             warmup=args.warmup,
         )
     )
     warn_if_unpinned(serving)
-    provider_factory = provider_factory_from_env(os.environ)
     policy = _resolve_policy(provider_factory, args.model_tier)
-    reports = asyncio.run(_run(args, policy))
+    reports = asyncio.run(_run(args, policy, provider_factory=provider_factory))
     markdown = render_markdown(reports)
     print(markdown)
     if args.out:

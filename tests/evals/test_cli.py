@@ -7,6 +7,7 @@ report serialization. The live model round-trip is by definition manual.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -15,6 +16,7 @@ from korvid.agent import prompt_harness, prompt_packs
 from korvid.evals.__main__ import (
     DEFAULT_EVAL_TIMEOUT_SECONDS,
     eval_api_key,
+    eval_model_tag,
     exit_code,
     prompt_fingerprint,
     provider_factory_from_env,
@@ -122,6 +124,140 @@ def test_provider_factory_defaults_the_eval_timeout() -> None:
     )
 
     assert provider._plan.timeout == DEFAULT_EVAL_TIMEOUT_SECONDS
+
+
+# --- the timeout is one rule, however it is spelled -------------------------
+#
+# `KORVID_EVAL_OPTIONS_JSON` carries profile options verbatim, so it can
+# also carry `timeout`. A value that is not a duration used to suppress the
+# eval default here and then be dropped by `build_plan`'s own strictness,
+# leaving the run with *no* bound at all — the opposite of what an operator
+# who wrote a timeout was asking for.
+
+
+@pytest.mark.parametrize(
+    "value",
+    [0, -1, True, float("nan"), float("inf"), "900", None, [900]],
+    ids=["zero", "negative", "bool", "nan", "inf", "string", "null", "list"],
+)
+def test_provider_factory_rejects_an_unusable_timeout_in_the_options_json(
+    value: object,
+) -> None:
+    """Refused where the operator can still fix it, and named so they can."""
+    with pytest.raises(SystemExit, match="KORVID_EVAL_OPTIONS_JSON") as refusal:
+        provider_factory_from_env(
+            {
+                "KORVID_EVAL_BASE_URL": "http://localhost:1234/v1",
+                "KORVID_EVAL_MODEL": "openai/large-local-model",
+                "KORVID_EVAL_OPTIONS_JSON": json.dumps({"timeout": value}),
+            }
+        )
+    message = str(refusal.value)
+    assert "timeout" in message
+    assert "positive" in message
+
+
+def test_a_timeout_in_the_options_json_bounds_the_request() -> None:
+    """A usable JSON timeout reaches the shared plan as a number."""
+    provider = _shipped_provider(
+        {
+            "KORVID_EVAL_BASE_URL": "http://localhost:1234/v1",
+            "KORVID_EVAL_MODEL": "openai/large-local-model",
+            "KORVID_EVAL_OPTIONS_JSON": json.dumps({"timeout": 120}),
+        }
+    )
+
+    assert provider._plan.timeout == 120.0
+
+
+def test_the_timeout_variable_wins_over_the_options_json() -> None:
+    """Documented precedence: the explicit variable, then the JSON, then the default."""
+    provider = _shipped_provider(
+        {
+            "KORVID_EVAL_BASE_URL": "http://localhost:1234/v1",
+            "KORVID_EVAL_MODEL": "openai/large-local-model",
+            "KORVID_EVAL_OPTIONS_JSON": json.dumps({"timeout": 120}),
+            "KORVID_EVAL_TIMEOUT_SECONDS": "900",
+        }
+    )
+
+    assert provider._plan.timeout == 900.0
+
+
+def test_both_timeout_spellings_are_refused_the_same_way() -> None:
+    """One rule, one wording — only the source that carried it differs."""
+    common = {
+        "KORVID_EVAL_BASE_URL": "http://localhost:1234/v1",
+        "KORVID_EVAL_MODEL": "openai/large-local-model",
+    }
+    with pytest.raises(SystemExit) as from_variable:
+        provider_factory_from_env({**common, "KORVID_EVAL_TIMEOUT_SECONDS": "0"})
+    with pytest.raises(SystemExit) as from_json:
+        provider_factory_from_env({**common, "KORVID_EVAL_OPTIONS_JSON": '{"timeout": 0}'})
+
+    variable_message = str(from_variable.value)
+    json_message = str(from_json.value)
+    assert variable_message.startswith("KORVID_EVAL_TIMEOUT_SECONDS")
+    assert json_message.startswith("KORVID_EVAL_OPTIONS_JSON")
+    tail = "must be a positive, finite number of seconds"
+    assert tail in variable_message
+    assert tail in json_message
+
+
+# --- the probe asks the endpoint about the model the endpoint has -----------
+
+
+@pytest.mark.parametrize(
+    ("env", "expected"),
+    [
+        ({"KORVID_EVAL_MODEL": "ollama/qwen3:8b"}, "qwen3:8b"),
+        ({"KORVID_EVAL_PROVIDER": "ollama", "KORVID_EVAL_MODEL": "qwen3:8b"}, "qwen3:8b"),
+        ({"KORVID_EVAL_MODEL": "openai/gpt-4o"}, "gpt-4o"),
+        ({"KORVID_EVAL_MODEL": "qwen3:8b"}, "qwen3:8b"),
+        ({"KORVID_EVAL_MODEL": "openrouter/qwen/qwen3-8b"}, "qwen/qwen3-8b"),
+    ],
+    ids=["prefixed", "legacy-prefix-variable", "other-vendor", "bare", "nested"],
+)
+def test_the_probe_uses_the_tag_the_serving_endpoint_knows(
+    env: dict[str, str], expected: str
+) -> None:
+    """The routing prefix is korvid's, not the server's.
+
+    `/api/show` and `/api/tags` answer about `qwen3:8b`; asking them about
+    `ollama/qwen3:8b` returns nothing, so digest, quantization and context
+    length silently go unpinned. The reference is split by the shared
+    `split_reference`, which takes no vendor branch.
+    """
+    assert eval_model_tag(env) == expected
+
+
+def test_the_campaign_probes_with_the_tag_rather_than_the_reference(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`main` hands the probe the endpoint's own name for the model."""
+    from korvid.evals import __main__ as cli
+
+    probed: list[tuple[str, str]] = []
+
+    async def fake_capture(base_url: str, model: str, **kwargs: Any) -> dict[str, Any]:
+        probed.append((base_url, model))
+        return {"unavailable": []}
+
+    monkeypatch.setenv("KORVID_EVAL_BASE_URL", "http://localhost:11434/v1")
+    monkeypatch.setenv("KORVID_EVAL_MODEL", "ollama/qwen3:8b")
+    monkeypatch.setattr(cli, "capture_serving", fake_capture)
+    monkeypatch.setattr(cli, "provider_factory_from_env", lambda env: lambda: None)
+    monkeypatch.setattr(cli, "load_scenarios", lambda path: ["scenario"])
+    monkeypatch.setattr(cli, "_resolve_policy", lambda factory, args, grind: _policy())
+
+    async def fake_run_all(*args: Any, **kwargs: Any) -> list[Any]:
+        return []
+
+    monkeypatch.setattr(cli, "_run_all", fake_run_all)
+    monkeypatch.setattr(cli, "render_markdown", lambda reports: "")
+
+    assert cli.main(["--scenarios", str(tmp_path)]) == 0
+    assert probed == [("http://localhost:11434/v1", "qwen3:8b")]
 
 
 def test_serving_probe_reads_the_named_credential_variable(

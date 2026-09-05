@@ -180,6 +180,21 @@ an eval-only transport.
 | `KORVID_EVAL_CA_BUNDLE` | The eval's `network.ca_bundle`. A bundle that will not load is refused rather than silently replaced by the default trust store. |
 | `KORVID_EVAL_TIMEOUT_SECONDS` | Request timeout for slow local models (default 60). Carried as the `timeout` profile option and sent as LiteLLM's named `timeout` parameter. |
 
+The timeout can be spelled twice, so its precedence is fixed:
+`KORVID_EVAL_TIMEOUT_SECONDS` wins, then a `timeout` key inside
+`KORVID_EVAL_OPTIONS_JSON`, then the 60-second default. Whichever supplies
+it, the value must be a positive, finite number of seconds — in the JSON, a
+JSON *number*, since that block is typed exactly like a profile's own
+options. Anything else exits with the offending source named, because the
+shared request builder drops a value it cannot use and a dropped timeout
+that had already displaced the default would leave the run unbounded.
+
+The serving probe (`/api/version`, `/api/show`, `/api/tags`, `/api/ps`) is
+asked about the model *tag* — the part after the routing prefix — because
+`ollama/qwen3:8b` is korvid's routing name and the endpoint only knows
+`qwen3:8b`. The split is the same provider-neutral one the factory uses, so
+no vendor is special-cased.
+
 A profile korvid refuses — an unroutable reference, an unset credential
 variable, an unloadable CA bundle — exits non-zero with the reason,
 before the run starts.

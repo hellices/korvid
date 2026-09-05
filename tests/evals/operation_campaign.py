@@ -33,6 +33,7 @@ from korvid.evals.__main__ import (
     PROBE_TIMEOUT_SECONDS,
     capture_serving,
     eval_api_key,
+    eval_model_tag,
     httpx_fetch,
     prompt_fingerprint,
     provider_factory_from_env,
@@ -444,7 +445,7 @@ def _capture_campaign_serving(args: argparse.Namespace) -> dict[str, Any] | None
     serving = asyncio.run(
         capture_serving(
             os.environ.get("KORVID_EVAL_BASE_URL", "").strip(),
-            os.environ.get("KORVID_EVAL_MODEL", "").strip(),
+            eval_model_tag(os.environ),
             fetch=httpx_fetch(
                 api_key=eval_api_key(os.environ),
                 timeout_seconds=PROBE_TIMEOUT_SECONDS,

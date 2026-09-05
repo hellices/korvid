@@ -29,7 +29,9 @@ Configuration comes from the environment:
   own `options` block
 - `KORVID_EVAL_CA_BUNDLE` — the eval's `network.ca_bundle`
 - `KORVID_EVAL_TIMEOUT_SECONDS` — request timeout for slow local models
-  (default 60), carried as the `timeout` profile option
+  (default 60), carried as the `timeout` profile option. It wins over a
+  `timeout` inside `KORVID_EVAL_OPTIONS_JSON`; either way the value must
+  be a positive, finite number of seconds or the run is refused.
 """
 
 from __future__ import annotations
@@ -48,7 +50,11 @@ from pathlib import Path
 from typing import Any, Final
 
 from korvid.agent.model_policy import ResolvedAgentPolicy
-from korvid.agent.model_profiles import ConnectionAuthConfig, ModelConnectionConfig
+from korvid.agent.model_profiles import (
+    ConnectionAuthConfig,
+    ModelConnectionConfig,
+    split_reference,
+)
 from korvid.agent.provider import LLMProvider
 from korvid.evals.fake_kube import FakeKubeClient, builtin_aliases
 from korvid.evals.harness import (
@@ -144,8 +150,13 @@ def _eval_options(env: Mapping[str, str]) -> dict[str, object]:
     The timeout is an option rather than a transport argument on purpose:
     it travels the shared `RequestPlan` boundary as a named `acompletion`
     parameter, so the eval and the TUI bound their requests identically.
-    An explicit `KORVID_EVAL_TIMEOUT_SECONDS` wins over a `timeout` in the
-    JSON; with neither, the eval default applies.
+
+    Precedence, in order: an explicit `KORVID_EVAL_TIMEOUT_SECONDS`, then a
+    `timeout` key inside the JSON, then `DEFAULT_EVAL_TIMEOUT_SECONDS`.
+    Whichever spelling supplies it, the value is validated *here*: a
+    timeout `build_plan` cannot use is dropped there, and a dropped timeout
+    that had already suppressed the default leaves the run unbounded —
+    which is the opposite of what writing a timeout asks for.
     """
     raw = env.get("KORVID_EVAL_OPTIONS_JSON", "").strip()
     options: dict[str, object] = {}
@@ -161,19 +172,62 @@ def _eval_options(env: Mapping[str, str]) -> dict[str, object]:
     raw_timeout = env.get("KORVID_EVAL_TIMEOUT_SECONDS", "").strip()
     if raw_timeout:
         options["timeout"] = _eval_timeout_seconds(raw_timeout)
-    elif "timeout" not in options:
+    elif "timeout" in options:
+        options["timeout"] = _option_timeout_seconds(options["timeout"])
+    else:
         options["timeout"] = DEFAULT_EVAL_TIMEOUT_SECONDS
     return options
 
 
 def _eval_timeout_seconds(raw: str) -> float:
+    """`KORVID_EVAL_TIMEOUT_SECONDS`, whose value is text by definition."""
+    source = "KORVID_EVAL_TIMEOUT_SECONDS"
     try:
         seconds = float(raw)
     except ValueError as exc:
-        raise SystemExit("KORVID_EVAL_TIMEOUT_SECONDS must be a positive number.") from exc
+        raise SystemExit(_timeout_refusal(source, raw)) from exc
+    return _checked_timeout(seconds, source=source, value=raw)
+
+
+def _option_timeout_seconds(value: object) -> float:
+    """The `timeout` key inside `KORVID_EVAL_OPTIONS_JSON`.
+
+    JSON is typed, so a quoted number is a type error rather than
+    something to parse: `build_plan` applies exactly that rule to a
+    profile's own options, and this variable *is* a profile's options
+    block. `bool` is not a duration either, however int-like it is.
+    """
+    source = 'KORVID_EVAL_OPTIONS_JSON option "timeout"'
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise SystemExit(_timeout_refusal(source, value))
+    return _checked_timeout(float(value), source=source, value=value)
+
+
+def _checked_timeout(seconds: float, *, source: str, value: object) -> float:
     if not math.isfinite(seconds) or seconds <= 0:
-        raise SystemExit("KORVID_EVAL_TIMEOUT_SECONDS must be a positive number.")
+        raise SystemExit(_timeout_refusal(source, value))
     return seconds
+
+
+def _timeout_refusal(source: str, value: object) -> str:
+    """One wording for every spelling: only the source that carried it differs."""
+    return (
+        f"{source} must be a positive, finite number of seconds (for example 900); got {value!r}."
+    )
+
+
+def eval_model_tag(env: Mapping[str, str]) -> str:
+    """The model as the *serving endpoint* names it.
+
+    The routing prefix in `provider/model` is korvid's own vocabulary: an
+    endpoint's metadata API knows `qwen3:8b`, not `ollama/qwen3:8b`, and
+    answers nothing for the prefixed form — so digest, quantization and
+    context length go silently unpinned. The reference is split by the
+    shared `split_reference`, which takes no vendor branch: whatever
+    precedes the first separator is dropped for the probe, whoever the
+    provider is.
+    """
+    return split_reference(_eval_reference(env))[1]
 
 
 def eval_api_key(env: Mapping[str, str]) -> str:
@@ -847,7 +901,7 @@ def main(argv: list[str] | None = None) -> int:
     serving = asyncio.run(
         capture_serving(
             os.environ.get("KORVID_EVAL_BASE_URL", "").strip(),
-            os.environ.get("KORVID_EVAL_MODEL", "").strip(),
+            eval_model_tag(os.environ),
             fetch=httpx_fetch(
                 api_key=eval_api_key(os.environ),
                 timeout_seconds=PROBE_TIMEOUT_SECONDS,
