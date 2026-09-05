@@ -17,13 +17,21 @@ real `LiteLLMProvider` — on an `httpx.MockTransport`, which is the only
 double. Assertions are made against the *bytes the transport received*,
 never against what korvid believed it sent.
 
-The write perimeter's own ordering (approval → fail-closed intent audit →
-mutation, `ui/write_coordinator.py`) is stood up here by
-`_ApprovalGatedBridge`, over a **real** `AuditLog`, so "the audit failed"
-is a real filesystem refusal rather than a fake agreeing with itself. The
-gate really opens — `test_an_approved_write_reaches_the_cluster_exactly_once`
-proves it — so every `write_ops.calls == []` below is a gate that held,
-not a stub that could never fire.
+What the write tests pin, precisely: that the *agent's* only route to a
+mutation is `agent_request_write` — the approval entrypoint — and that a
+refusal from the real `AuditLog` on the other side of it blocks the
+mutation. `_ApprovalGatedBridge` is this module's own stand-in for the
+perimeter behind that entrypoint; it is not `ui/write_coordinator.py`, so
+nothing here proves the production coordinator's approval → intent-audit →
+mutation ordering. That ordering is covered where it lives, in
+`tests/ui/test_write_coordinator.py::test_the_perimeter_runs_its_steps_in_the_required_order`.
+What is real here is the audit: the
+sink is broken the way a disk breaks it and `AuditLog.append` raises for
+real, so "the audit failed" is a filesystem refusal rather than a fake
+agreeing with itself. The gate really opens —
+`test_an_approved_write_reaches_the_cluster_exactly_once` proves it — so
+every `write_ops.calls == []` below is a gate that held, not a stub that
+could never fire.
 """
 
 from __future__ import annotations
@@ -75,6 +83,19 @@ DEPLOYMENTS_META = ResourceMeta("Deployment", "deployments", "apps", "v1", True,
 SECRETS_META = ResourceMeta("Secret", "secrets", "", "v1", True)
 
 Handler = Callable[[httpx.Request], httpx.Response]
+
+#: Every client `build` opened during the running test. Closed — with the
+#: `httpx.AsyncClient` underneath it — by `_close_clients` at teardown.
+_OPEN_CLIENTS: list[Any] = []
+
+
+@pytest.fixture(autouse=True)
+async def _close_clients() -> AsyncIterator[None]:
+    """Close the transports a test opened, before the next test runs."""
+    _OPEN_CLIENTS.clear()
+    yield
+    while _OPEN_CLIENTS:
+        await _OPEN_CLIENTS.pop().close()
 
 
 # ---------------------------------------------------------------------------
@@ -132,6 +153,32 @@ def _streaming(*chunks: dict[str, Any]) -> Handler:
 def _answers(text: str) -> Handler:
     """A round that answers with text and asks for nothing."""
     return _streaming(_chunk(content=text))
+
+
+def _usage_frame(prompt_tokens: int, completion_tokens: int) -> dict[str, Any]:
+    """A choices-free frame carrying the provider's own counts.
+
+    The shape `stream_options.include_usage` buys: counts arrive on their
+    own frame at the end of the stream, and they are the *provider's*, not
+    a tokenizer estimate LiteLLM synthesized for a provider that sent none.
+    """
+    return {
+        "id": "chatcmpl-1",
+        "object": "chat.completion.chunk",
+        "created": 1,
+        "model": "gpt-4o",
+        "choices": [],
+        "usage": {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+        },
+    }
+
+
+def _answers_with_usage(text: str, *, prompt_tokens: int, completion_tokens: int) -> Handler:
+    """A round that answers with text and reports what it cost."""
+    return _streaming(_chunk(content=text), _usage_frame(prompt_tokens, completion_tokens))
 
 
 def _asks(call_id: str, name: str, arguments: str) -> Handler:
@@ -305,12 +352,16 @@ class WriteOps:
 
 
 class _ApprovalGatedBridge(FakeBridge):
-    """The write perimeter's ordering, as `ui/write_coordinator.py` states it.
+    """This module's stand-in for the perimeter behind `agent_request_write`.
 
-    1. the user's approval — a keystroke the agent cannot press;
-    2. a fail-closed intent audit — an unpersistable record blocks the
-       mutation, which is never constructed;
-    3. the mutation.
+    It mirrors the shape `ui/write_coordinator.py` implements — approval,
+    then a fail-closed intent audit, then the mutation — but it is *not*
+    that coordinator, and nothing here is evidence about the production
+    ordering; `tests/ui/test_write_coordinator.py` owns that. What this
+    class exists to observe is the half the transport swap could break:
+    that the agent's only route to a mutation is `agent_request_write`, and
+    that a refusal from the **real** `AuditLog` on the other side of it
+    stops the mutation being constructed at all.
 
     `approved` stands for the keystroke and is set by the *test*, never by
     anything the model can reach: the only entrypoint the agent has to this
@@ -375,7 +426,6 @@ class Boundary:
     policy: CountingPolicy
     resolved: ResolvedAgentPolicy
     wire: Wire
-    bridge: Any
     execution: RecordedExecution
     events: list[AgentEvent] = field(default_factory=list)
 
@@ -408,9 +458,13 @@ def build(
     *,
     tool_names: Sequence[str] = ("get_logs",),
     execution: RecordedExecution | None = None,
-    bridge: Any | None = None,
 ) -> Boundary:
-    """Wire the real runtime onto a mock transport."""
+    """Wire the real runtime onto a mock transport.
+
+    Every client built here is registered for close at test teardown by
+    `_close_clients`: a test that leaves one open leaks a connection pool
+    into whatever runs next in the same session.
+    """
     from openai import AsyncOpenAI
 
     wire = Wire(handlers)
@@ -422,6 +476,7 @@ def build(
         # once, and every count in this module would stop meaning anything.
         max_retries=0,
     )
+    _OPEN_CLIENTS.append(client)
     provider = LiteLLMProvider(
         plan=build_plan(
             model="openai/gpt-4o",
@@ -458,7 +513,6 @@ def build(
         policy=policy,
         resolved=resolved,
         wire=wire,
-        bridge=bridge,
         execution=executor,
     )
 
@@ -527,7 +581,14 @@ async def test_the_payload_snapshot_matches_the_bytes_actually_sent() -> None:
 
 async def test_the_snapshot_records_the_model_the_request_was_addressed_to() -> None:
     """`OutboundSnapshot.model` names the model, never the endpoint —
-    a payload export has to say where the data went."""
+    a payload export has to say where the data went.
+
+    Naming *a* model is not enough: it has to be the one the bytes were
+    addressed to. A boundary that snapshotted the resolved model and then
+    let the transport send a fallback would export a payload attributed to
+    a model that never saw it, so the wire's own `model` field is compared
+    against the snapshot rather than only against a literal.
+    """
     boundary = build([_answers("fine")])
 
     await boundary.run()
@@ -536,6 +597,10 @@ async def test_the_snapshot_records_the_model_the_request_was_addressed_to() -> 
     assert latest is not None
     assert latest.model == "gpt-4o"
     assert latest.iteration == 1
+    assert boundary.wire.payload()["model"] == latest.model
+    exported = json.loads(latest.export_json())
+    assert exported["model"] == boundary.wire.payload()["model"]
+    assert exported["payload"]["messages"] == boundary.wire.messages()
 
 
 # ---------------------------------------------------------------------------
@@ -555,7 +620,6 @@ async def test_a_write_tool_still_requires_approval_through_the_transport(
         ],
         tool_names=("delete_resource",),
         execution=cluster_executor(ManifestKube({"kind": "Deployment"}), ui=bridge),
-        bridge=bridge,
     )
 
     await boundary.run("delete the web deployment")
@@ -577,7 +641,6 @@ async def test_a_denied_approval_is_reported_back_to_the_model_as_denied(
         ],
         tool_names=("delete_resource",),
         execution=cluster_executor(ManifestKube({"kind": "Deployment"}), ui=bridge),
-        bridge=bridge,
     )
 
     await boundary.run("delete the web deployment")
@@ -601,7 +664,6 @@ async def test_an_approved_write_reaches_the_cluster_exactly_once(tmp_path: Path
         ],
         tool_names=("delete_resource",),
         execution=cluster_executor(ManifestKube({"kind": "Deployment"}), ui=bridge),
-        bridge=bridge,
     )
 
     await boundary.run("delete the web deployment")
@@ -625,7 +687,6 @@ async def test_an_audit_write_failure_still_blocks_the_action(tmp_path: Path) ->
         ],
         tool_names=("delete_resource",),
         execution=cluster_executor(ManifestKube({"kind": "Deployment"}), ui=bridge),
-        bridge=bridge,
     )
 
     await boundary.run("delete the web deployment")
@@ -690,6 +751,104 @@ async def test_a_truncated_tool_call_leaves_a_history_the_next_turn_can_send() -
     assert not boundary.conversation.has_unmatched_tool_calls
     assert assistant_calls(boundary.wire.messages()) == []
     assert isinstance(second[-1], TurnComplete)
+
+
+async def test_a_complete_but_invalid_tool_call_never_reaches_the_tools() -> None:
+    """A whole call whose arguments are not JSON is refused above the port.
+
+    The truncated case above is the stream failing. This is the *model*
+    failing: the stream completed, the call carries an id and a name, and
+    only the arguments are unusable. The engine's contract for that is
+    explicit — arguments cross the provider verbatim (`litellm_provider`
+    repairs nothing), `_parse_arguments` refuses anything that is not a
+    JSON object, and `ToolHarness.reject` answers it without touching the
+    executor. A provider that "helpfully" parsed loosely, or an engine
+    that fell back to `{}`, would dispatch a call the model never made —
+    and for a write tool that is a mutation nobody asked for.
+
+    So: nothing reaches the tools, the stored call keeps the raw text the
+    model actually emitted, the model is told why on the ordinary result
+    channel, and the turn finishes with a history that pairs.
+    """
+    raw_arguments = "{'pod': 'api-0', 'namespace': 'prod'}"
+    boundary = build(
+        [
+            _asks("c1", "get_logs", raw_arguments),
+            _answers("I will retry with valid arguments"),
+        ],
+        execution=RecordingExecution({"get_logs": "back-off restarting failed container"}),
+    )
+
+    events = await boundary.run()
+
+    assert boundary.execution.calls == []  # type: ignore[attr-defined]  # RecordingExecution
+    messages = boundary.wire.messages()
+    calls = assistant_calls(messages)
+    assert [call["function"]["arguments"] for call in calls] == [raw_arguments]
+    results = tool_messages(messages)
+    assert [result["tool_call_id"] for result in results] == ["c1"]
+    assert str(results[0]["content"]) == "ERROR: tool arguments must be a JSON object"
+    assert not boundary.conversation.has_unmatched_tool_calls
+    assert isinstance(events[-1], TurnComplete)
+
+
+# ---------------------------------------------------------------------------
+# Usage accounting
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.filterwarnings(
+    # litellm 1.98.0 inspects a usage-only delta attribute by attribute to
+    # decide whether it is empty, reading `model_fields` off the instance on
+    # the way past — deprecated in pydantic 2.11. korvid cannot fix that
+    # upstream and must not stop exercising the one chunk shape that carries
+    # a provider's own counts; `tests/providers/test_litellm_provider.py`
+    # ignores it at the same seam for the same reason.
+    "ignore:Accessing the 'model_"
+)
+async def test_measured_usage_is_committed_once_and_never_estimated() -> None:
+    """The counts a turn reports are the provider's own, committed once.
+
+    `ConversationState.commit_usage` *accumulates* and marks the iteration
+    exactly counted, so this one assertion separates three failures a
+    provider-level usage test cannot see: a boundary that handed the same
+    frame over twice (doubled cost), one that dropped it (a heuristic
+    estimate charged as if measured), and one that let LiteLLM's
+    synthesized tokenizer tail through as a measurement.
+
+    The counts are deliberately unroundable — no estimate of this payload
+    lands on 137/29 — so `estimated is False` is corroborated by the
+    numbers rather than trusted on its own.
+    """
+    boundary = build([_answers_with_usage("all quiet", prompt_tokens=137, completion_tokens=29)])
+
+    events = await boundary.run()
+
+    complete = events[-1]
+    assert isinstance(complete, TurnComplete)
+    assert (complete.input_tokens, complete.output_tokens) == (137, 29)
+    assert not complete.estimated
+    # The counts exist because the plan asked for them: LiteLLM only sends
+    # a usage frame when `stream_options.include_usage` rides on the wire.
+    assert boundary.wire.payload()["stream_options"] == {"include_usage": True}
+
+
+async def test_a_provider_that_reports_nothing_is_estimated_rather_than_charged_zero() -> None:
+    """The other half of the rule: unknown tokens are not zero tokens.
+
+    Without this, `..._committed_once_and_never_estimated` could be
+    satisfied by a boundary that never estimates anything, and a round
+    LiteLLM answered with its own tokenizer guess would be indistinguishable
+    from one the provider measured.
+    """
+    boundary = build([_answers("all quiet")])
+
+    events = await boundary.run()
+
+    complete = events[-1]
+    assert isinstance(complete, TurnComplete)
+    assert complete.estimated
+    assert complete.input_tokens > 0
 
 
 # ---------------------------------------------------------------------------
@@ -760,11 +919,17 @@ async def test_a_transport_retry_never_re_enters_the_boundary() -> None:
     prepared: a retry that rebuilt the payload — a fallback model, a
     reshaped body — would put content on the wire that no snapshot
     records and no policy checked.
+
+    The identical-bodies assertion only means something once a retry has
+    actually happened, so the retry itself is asserted first: one prepared
+    request that reached the socket once would satisfy `len(set(...)) == 1`
+    while proving nothing at all.
     """
     boundary = build([_refusing(500, {"error": {"message": "upstream exploded"}})])
 
     await boundary.run()
 
+    assert boundary.wire.requests > 1
     assert boundary.policy.prepare_calls == 1
     assert len(set(boundary.wire.bodies)) == 1
 
