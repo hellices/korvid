@@ -244,7 +244,7 @@ class DescribeScreen(ModalScreen[None]):
         width: 100%;
     }
     DescribeScreen #describe-search {
-        height: 1;
+        height: 3;
     }
     DescribeScreen #describe-footer {
         height: 1;

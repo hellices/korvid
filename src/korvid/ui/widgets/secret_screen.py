@@ -171,7 +171,9 @@ class SecretScreen(ModalScreen[None]):
         table = self.query_one(DataTable)
         # Secret values are arbitrary text — wrap in Text so bracketed
         # content is rendered literally, never interpreted as Rich markup.
-        table.update_cell(f"{section}/{key}", table.ordered_columns[2].key, Text(value))
+        table.update_cell(
+            f"{section}/{key}", table.ordered_columns[2].key, Text(value), update_width=True
+        )
 
     @work
     async def action_toggle_reveal(self) -> None:

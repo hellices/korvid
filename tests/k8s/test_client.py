@@ -1788,15 +1788,25 @@ class TestOpenPodExec:
         with pytest.raises(RuntimeError, match="connect"):
             kube.open_pod_exec("ns", "pod", None, ["tar"], stdin=False)
 
-    async def test_opens_ws_with_exec_params(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    @pytest.mark.parametrize("stdin", [False, True], ids=["download-v4", "upload-v5"])
+    async def test_opens_ws_with_exec_params(
+        self, monkeypatch: pytest.MonkeyPatch, stdin: bool
+    ) -> None:
         sentinel_ws = object()
         sentinel_configuration = object()
         closed: list[bool] = []
         captured: dict[str, object] = {}
 
         class FakeWsApi:
-            def __init__(self, configuration: object) -> None:
+            def __init__(
+                self,
+                configuration: object,
+                header_name: str | None = None,
+                header_value: str | None = None,
+            ) -> None:
                 captured["configuration"] = configuration
+                captured["header_name"] = header_name
+                captured["header_value"] = header_value
 
             async def close(self) -> None:
                 closed.append(True)
@@ -1828,7 +1838,7 @@ class TestOpenPodExec:
         kube._core_v1 = object()  # type: ignore[assignment]  # connected marker
 
         async with kube.open_pod_exec(
-            "prod", "api-0", "app", ["tar", "cf", "-"], stdin=False
+            "prod", "api-0", "app", ["tar", "cf", "-"], stdin=stdin
         ) as ws:
             assert ws is sentinel_ws
         assert captured["configuration"] is sentinel_configuration
@@ -1836,7 +1846,9 @@ class TestOpenPodExec:
         assert captured["namespace"] == "prod"
         assert captured["command"] == ["tar", "cf", "-"]
         assert captured["container"] == "app"
-        assert captured["stdin"] is False
+        assert captured["stdin"] is stdin
+        assert captured["header_name"] == ("sec-websocket-protocol" if stdin else None)
+        assert captured["header_value"] == ("v5.channel.k8s.io" if stdin else None)
         assert captured["stdout"] is True
         assert captured["stderr"] is True
         assert captured["tty"] is False
@@ -1847,7 +1859,7 @@ class TestOpenPodExec:
         captured: dict[str, object] = {}
 
         class FakeWsApi:
-            def __init__(self, configuration: object) -> None:
+            def __init__(self, configuration: object, **kwargs: object) -> None:
                 pass
 
             async def close(self) -> None:
@@ -1881,11 +1893,16 @@ class TestOpenPodExec:
         assert "container" not in captured
         assert captured["stdin"] is True
 
-    async def test_ws_api_closed_on_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    @pytest.mark.parametrize(
+        "error", [OSError("boom"), asyncio.CancelledError("boom")], ids=["error", "cancel"]
+    )
+    async def test_ws_api_closed_on_error(
+        self, monkeypatch: pytest.MonkeyPatch, error: BaseException
+    ) -> None:
         closed: list[bool] = []
 
         class FakeWsApi:
-            def __init__(self, configuration: object) -> None:
+            def __init__(self, configuration: object, **kwargs: object) -> None:
                 pass
 
             async def close(self) -> None:
@@ -1896,7 +1913,7 @@ class TestOpenPodExec:
                 pass
 
             async def connect_get_namespaced_pod_exec(self, *a: object, **k: object) -> object:
-                raise OSError("boom")
+                raise error
 
         monkeypatch.setattr(client_mod, "WsApiClient", FakeWsApi)
         monkeypatch.setattr(k8s_client, "CoreV1Api", FakeCoreWs)
@@ -1904,7 +1921,7 @@ class TestOpenPodExec:
         kube._api = MagicMock()
         kube._core_v1 = object()  # type: ignore[assignment]  # connected marker
 
-        with pytest.raises(OSError, match="boom"):
+        with pytest.raises(type(error), match="boom"):
             async with kube.open_pod_exec("ns", "p", None, ["tar"], stdin=False):
                 pass
         assert closed == [True]

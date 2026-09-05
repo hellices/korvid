@@ -166,6 +166,13 @@ API directly. Needs `helm` on `PATH`.
 No preview of any kind — straight to the approval dialog. Blocked
 outright in read-only mode, and fail-closed audited like every other
 write.
+
+Uploads require exec WebSocket protocol `v5.channel.k8s.io` to close stdin
+without losing the remote outcome stream. If the server or proxy does not
+negotiate it, korvid refuses before sending file data; downloads and remote
+directory browsing still support v4. Success requires an explicit remote
+success status. A timeout or lost connection after sending can leave the
+remote file written even though the outcome remains unconfirmed.
 </section>
 
 </div>

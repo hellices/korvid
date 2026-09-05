@@ -69,6 +69,8 @@ class FakeMsg:
 
 
 class FakeWs:
+    protocol = "v5.channel.k8s.io"
+
     def __init__(self, frames: list[bytes], *, stall: bool = False) -> None:
         self._frames = list(frames)
         self._stall = stall

@@ -699,14 +699,13 @@ class WorkspaceController:
         self._state.filter_pattern = pattern
         self._state.resource_filter = parse_filter(pattern)
         self._surface.render_table(self._state.current_kind, only=self._state.focused)
+        # Filtering can replace the selected pod without moving the cursor.
+        self._hints.refresh_for_focus()
         self._surface.refresh_status()
 
     def clear_filter(self) -> None:
         """Clear the focused pane's filter and re-render it."""
-        self._state.filter_pattern = ""
-        self._state.resource_filter = parse_filter("")
-        self._surface.render_table(self._state.current_kind, only=self._state.focused)
-        self._surface.refresh_status()
+        self.set_filter("")
 
     # ------------------------------------------------------------------
     # Sort (issue #37 / #45 / #138)
