@@ -1777,7 +1777,7 @@ agent:
     assert active is not None
     assert active.model == "openai/m2"
     assert active.endpoint == "http://localhost:9999/v1"
-    assert active.auth.method == "api_key"
+    assert active.auth.method == "environment"
     assert active.auth.settings["key"] == "KORVID_TEST_KEY"
     assert persisted.model_connections.profiles["production"].endpoint == "https://prod.example"
     assert persisted.model_connections.profiles["rejected"].config_error is not None
@@ -1788,6 +1788,98 @@ agent:
     assert raw["kube_context"] == "prod"
     assert raw["ui"]["topbar"] == "expanded"
     assert set(raw["agent"]["profiles"]) == {"default", "production", "rejected", "bad name"}
+    # The rejected profile's raw block is the operator's only copy of the
+    # thing they have to fix; an unrelated write must not strip it.
+    assert raw["agent"]["profiles"]["rejected"]["options"] == {"api_key": "inline-secret"}
+
+
+@pytest.mark.parametrize(
+    ("provider", "legacy_method", "expected"),
+    [
+        ("openai", "api_key", "environment"),
+        ("azure", "entra", "provider-default"),
+        ("github-copilot", "device-login", "device-login"),
+        ("openai", "none", "none"),
+    ],
+)
+def test_persist_agent_settings_writes_the_common_auth_vocabulary(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    provider: str,
+    legacy_method: str,
+    expected: str,
+) -> None:
+    """A profile stores the common id, never the transport's own.
+
+    `AgentSettings.auth_method` is the *transport's* alphabet
+    (`api_key`/`entra`/`device-login`/`none`); a profile's is the five
+    common ids. Handing the transport's straight through writes a profile
+    whose auth `project_legacy_transport` then refuses by name — the
+    agent disabled at the next start on a configuration the operator got
+    right. The translation is `common_auth_method`'s and only its: a
+    second table here would be a second thing to keep in step.
+    """
+    import korvid.__main__ as main_mod
+    from korvid.__main__ import _persist_agent_settings
+    from korvid.agent.setup import AgentSettings
+    from korvid.core.config import load_config, project_legacy_transport
+
+    config_path = tmp_path / "config.yaml"
+    monkeypatch.setattr(main_mod, "DEFAULT_CONFIG_PATH", config_path)
+
+    _persist_agent_settings(
+        AgentSettings(
+            provider=provider,
+            auth_method=legacy_method,
+            base_url=None,
+            model="m1",
+            api_key_env="KORVID_TEST_KEY" if legacy_method == "api_key" else None,
+        )
+    )
+
+    active = load_config(config_path).model_connections.active_profile
+    assert active is not None
+    assert active.auth.method == expected
+    # And what was written round-trips back onto the transport it came
+    # from, rather than being refused as an unknown method.
+    projection, refusal = project_legacy_transport(active)
+    assert refusal is None
+    assert projection is not None
+    assert projection.auth_method == legacy_method
+
+
+def test_persist_agent_settings_keeps_the_environment_variable_name(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Translating the method must not drop the key it needs.
+
+    `environment` without `auth.key` is refused by the projection, so a
+    translation that forgot the name would trade one silent breakage for
+    another. The value is never read here — only the name is stored.
+    """
+    import korvid.__main__ as main_mod
+    from korvid.__main__ import _persist_agent_settings
+    from korvid.agent.setup import AgentSettings
+    from korvid.core.config import load_config
+
+    monkeypatch.setenv("KORVID_TEST_KEY", "sk-secret-value")
+    config_path = tmp_path / "config.yaml"
+    monkeypatch.setattr(main_mod, "DEFAULT_CONFIG_PATH", config_path)
+
+    _persist_agent_settings(
+        AgentSettings(
+            provider="openai",
+            auth_method="api_key",
+            base_url=None,
+            model="m1",
+            api_key_env="KORVID_TEST_KEY",
+        )
+    )
+
+    active = load_config(config_path).model_connections.active_profile
+    assert active is not None
+    assert active.auth.settings["key"] == "KORVID_TEST_KEY"
+    assert "sk-secret-value" not in config_path.read_text(encoding="utf-8")
 
 
 def test_load_startup_config_wraps_migration_error_even_when_agent_disabled(

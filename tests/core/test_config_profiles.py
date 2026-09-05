@@ -893,6 +893,122 @@ agent:
     assert set(raw["agent"]["profiles"]) == {"good"}
 
 
+def test_an_unrelated_save_keeps_a_rejected_block_the_operator_must_repair(
+    tmp_path: Path,
+) -> None:
+    """Activating one profile must not silently strip another's raw text.
+
+    A profile whose `auth` or `options` was rejected is in *both* halves:
+    `profiles` holds the modelled remains with the offending block
+    emptied, `unparsed` holds the operator's original entry. Serializing
+    the modelled remains over the raw entry deletes exactly the block the
+    operator has to edit — a save that "succeeded" while destroying the
+    only copy of the thing it was preserving.
+    """
+    path = _write(
+        tmp_path,
+        """
+agent:
+  active: good
+  profiles:
+    good:
+      model: openai/gpt-4o
+    rejected:
+      model: openai/gpt-4o
+      auth:
+        method: environment
+        key: OPENAI_API_KEY
+        api_key: inline-secret-value
+      options:
+        api_key: inline-secret-value
+        num_ctx: 8192
+""",
+    )
+    cfg = load_config(path)
+    rejected = cfg.model_connections.profiles["rejected"]
+    assert rejected.config_error is not None
+    assert dict(rejected.options) == {}
+    assert dict(rejected.auth.settings) == {}
+
+    # An unrelated activation: only the pointer moves.
+    save_model_connections(path, replace(cfg.model_connections, active="good"))
+
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    entry = raw["agent"]["profiles"]["rejected"]
+    assert entry["options"] == {"api_key": "inline-secret-value", "num_ctx": 8192}
+    assert entry["auth"]["key"] == "OPENAI_API_KEY"
+    assert entry["auth"]["api_key"] == "inline-secret-value"
+    # Reloading still surfaces the same repairable profile.
+    assert load_config(path).model_connections.profiles["rejected"].config_error is not None
+
+
+def test_repairing_a_rejected_profile_replaces_the_raw_entry(tmp_path: Path) -> None:
+    """The raw entry outranks the modelled one only until it is repaired.
+
+    Once the editor hands back a profile korvid *can* model, the manager
+    drops the name from `unparsed`, and that is what lets the repair
+    actually reach the file instead of being overwritten by the text it
+    replaces.
+    """
+    path = _write(
+        tmp_path,
+        """
+agent:
+  active: good
+  profiles:
+    good:
+      model: openai/gpt-4o
+    rejected:
+      model: openai/gpt-4o
+      options:
+        api_key: inline-secret-value
+""",
+    )
+    cfg = load_config(path)
+    repaired = replace(
+        cfg.model_connections,
+        profiles={
+            **cfg.model_connections.profiles,
+            "rejected": ModelConnectionConfig(
+                model="openai/gpt-4o",
+                auth=ConnectionAuthConfig(method="environment", settings={"key": "OPENAI_API_KEY"}),
+                options={"num_ctx": 8192},
+            ),
+        },
+        unparsed={k: v for k, v in cfg.model_connections.unparsed.items() if k != "rejected"},
+    )
+    save_model_connections(path, repaired)
+
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    entry = raw["agent"]["profiles"]["rejected"]
+    assert entry["options"] == {"num_ctx": 8192}
+    assert entry["auth"] == {"method": "environment", "key": "OPENAI_API_KEY"}
+    assert load_config(path).model_connections.profiles["rejected"].config_error is None
+
+
+def test_a_pure_unparsed_name_never_loses_to_a_generated_entry(tmp_path: Path) -> None:
+    """The raw half wins for a name that only exists there, too — the
+    rule is one rule, not a special case for rejected blocks."""
+    path = _write(
+        tmp_path,
+        """
+agent:
+  active: good
+  profiles:
+    good:
+      model: openai/gpt-4o
+    broken:
+      endpoint: http://example.invalid
+""",
+    )
+    cfg = load_config(path)
+    assert set(cfg.model_connections.profiles) == {"good"}
+    save_model_connections(path, cfg.model_connections)
+
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert raw["agent"]["profiles"]["broken"] == {"endpoint": "http://example.invalid"}
+
+
 def test_derived_scalars_refuse_a_prefix_the_legacy_transport_cannot_serve(
     tmp_path: Path,
 ) -> None:

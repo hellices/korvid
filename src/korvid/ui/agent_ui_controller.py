@@ -865,7 +865,12 @@ class AgentUiController:
             return
         if self._profiles.profiles or self._profiles.unparsed:
             self._ui.push_screen(
-                ProfileManagerScreen(self._profiles, catalog, self._edit_profile),
+                ProfileManagerScreen(
+                    self._profiles,
+                    catalog,
+                    self._edit_profile,
+                    current_tier=self._configured_tier,
+                ),
                 callback=self._handle_manager_result,
             )
             return
@@ -998,11 +1003,39 @@ class AgentUiController:
     def _handle_manager_result(self, result: ProfileManagerResult | None) -> None:
         if result is None:
             return
+        if result.tier_changed:
+            self._apply_tier_choice(result.model_tier)
+            return
         if result.activated is not None:
             self._activate_profile(result.activated)
             return
         if result.edited is not None:
             self._persist_profiles(result.edited)
+
+    def _apply_tier_choice(self, model_tier: str | None) -> None:
+        """Persist the global capability tier, alone.
+
+        The profiles handed to the writer are the ones already round-
+        tripped: the tier and the profile set share one write so they
+        cannot disagree, and reusing the current set is what keeps a tier
+        decision from smuggling a profile edit in with it.
+
+        Nothing is rebuilt. The tier is routing configuration rather than
+        a connection, so a change here does not justify tearing down a
+        working provider mid-session; it reaches the agent at the next
+        profile activation or restart, which is what the notification
+        says. `_configured_tier` moves only once the write succeeded —
+        adopting it regardless would report a tier the next start does
+        not have.
+        """
+        if not self._persist_profiles(self._profiles, model_tier=model_tier):
+            return  # _persist_profiles already notified the reason
+        self._configured_tier = model_tier
+        label = model_tier if model_tier is not None else "automatic"
+        self._ui.notify(
+            f"Agent capability tier set to {label} — applies from the next connection",
+            markup=False,
+        )
 
     def _activate_profile(self, name: str) -> None:
         """Build, apply, *then* persist the pointer — never the other way.

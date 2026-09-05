@@ -48,6 +48,7 @@ from korvid.core.config import (
     ModelConnectionsConfig,
     ModelTierWrite,
     ObservabilityBackend,
+    common_auth_method,
     context_is_protected,
     load_config,
     save_model_connections,
@@ -1153,14 +1154,26 @@ def _build_agent_wiring(
 
 
 def _persist_agent_settings(settings: AgentSettings) -> None:
-    """Write what the `:ai` wizard chose back to config.yaml."""
+    """Write what the `:ai` wizard chose back to config.yaml.
+
+    `AgentSettings.auth_method` speaks the *interim transport's* alphabet
+    (`api_key`, `entra`, `device-login`, `none`); a profile's `auth.method`
+    speaks the five common ids. The translation is `common_auth_method`'s
+    and only its — writing the transport's id straight into a profile
+    produces one `project_legacy_transport` refuses by name at the next
+    start, disabling an agent the operator configured correctly.
+    """
+    method = common_auth_method(settings.auth_method)
     auth_settings: dict[str, object] = {}
-    if settings.api_key_env:
+    # Only `environment` carries a variable name, and it is a *name*:
+    # nothing here reads the environment, so no secret value can travel
+    # from these settings into the file.
+    if method == "environment" and settings.api_key_env:
         auth_settings["key"] = settings.api_key_env
     profile = ModelConnectionConfig(
         model=f"{settings.provider}/{settings.model}",
         endpoint=settings.base_url,
-        auth=ConnectionAuthConfig(method=settings.auth_method, settings=auth_settings),
+        auth=ConnectionAuthConfig(method=method, settings=auth_settings),
         options=dict(settings.options),
     )
     config = load_config(DEFAULT_CONFIG_PATH)
