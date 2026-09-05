@@ -895,3 +895,36 @@ def test_capabilities_are_never_inferred_from_the_reference() -> None:
     provider = create_provider_from_profile(_profile("hosted_vllm/gpt-4o-with-tools-2000k"))
     assert provider is not None
     assert provider.capabilities == ModelCapabilities.unknown()
+
+
+# ---------------------------------------------------------------------------
+# Structural: no dead code after return in _route
+# ---------------------------------------------------------------------------
+
+
+def test_route_function_has_no_unreachable_statements_after_return() -> None:
+    """Guard against patch duplicates: every statement after a Return in
+    ``_route``'s function body is unreachable dead code."""
+    src = inspect.getsource(korvid.providers.litellm_factory)
+    tree = ast.parse(src)
+
+    route_func: ast.FunctionDef | None = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "_route":
+            route_func = node
+            break
+
+    assert route_func is not None, "_route not found in litellm_factory"
+
+    dead: list[int] = []
+    for block in ast.walk(route_func):
+        if not isinstance(block, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if block is not route_func:
+            continue
+        body = block.body
+        for i, stmt in enumerate(body[:-1]):
+            if isinstance(stmt, ast.Return):
+                dead.extend(s.lineno for s in body[i + 1 :])
+
+    assert dead == [], f"Dead statements after return in _route at lines {dead}"

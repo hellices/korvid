@@ -125,15 +125,16 @@ def apply_ca_bundle(path: str) -> None:
 
     * Providers built on a vendor SDK client resolve their trust through
       `get_ssl_configuration()` called with **no arguments**, so they see
-      only this module-level `litellm.ssl_verify` — a per-request
-      `ssl_verify` never reaches them.
-    * Providers on LiteLLM's own httpx handler read the per-request
-      value, and fall back to this global.
+      only this module-level `litellm.ssl_verify`.
+    * Providers on LiteLLM's own httpx handler fall back to this global
+      when no per-call value is set.
 
-    So korvid sets both: the global here, and the per-request one on the
-    request plan. Setting only one leaves a whole class of providers on
-    the default trust store while the operator believes their corporate
-    root is in effect.
+    korvid sets only this process-global and passes nothing per request.
+    A per-request `ssl_verify` was measured and rejected: the SDK-shaped
+    providers ignore it for TLS and forward it into the request body,
+    leaking a local filesystem path to the vendor.  The global therefore
+    replaces the default trust store (certifi) for every request made
+    in this process, regardless of which LiteLLM client shape is in use.
 
     The value must be a *path*: `get_ssl_configuration` builds its own
     `SSLContext` and silently discards a pre-built one, so assigning a

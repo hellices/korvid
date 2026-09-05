@@ -511,11 +511,6 @@ def _route(reference: str, endpoint: str | None) -> tuple[str, str] | None:
         _refuse("litellm resolved no provider for the model reference %r", reference)
         return None
     return provider_id, tag or reference
-    provider_id = str(routed[1]) if len(routed) > 1 and routed[1] else prefix
-    if not provider_id:
-        _refuse("litellm resolved no provider for the model reference %r", reference)
-        return None
-    return provider_id, tag or reference
 
 
 # ---------------------------------------------------------------------------
