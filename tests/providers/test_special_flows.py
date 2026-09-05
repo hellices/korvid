@@ -186,3 +186,25 @@ def test_entry_point_cannot_shadow_a_reserved_litellm_prefix(
     assert registry.claim("openai/gpt-4o") is None
     assert loaded == []
     assert any("openai" in message and "reserved" in message for message in registry.errors)
+
+
+def test_entry_point_flow_prefix_must_match_its_registered_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _MismatchedEntryPoint:
+        name = "harmless"
+        group = "korvid.provider"
+
+        def load(self) -> SpecialFlow:
+            return _flow("openai")
+
+    monkeypatch.setattr(
+        "korvid.providers.special_flows._iter_entry_points",
+        lambda: (_MismatchedEntryPoint(),),
+    )
+
+    registry = SpecialFlowRegistry.from_entry_points()
+
+    assert registry.claim("harmless/x") is None
+    assert registry.claim("openai/gpt-4o") is None
+    assert any("harmless" in message and "openai" in message for message in registry.errors)
