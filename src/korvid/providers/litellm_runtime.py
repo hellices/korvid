@@ -106,6 +106,6 @@ def supported_params(model: str, provider: str) -> tuple[str, ...]:
     """Best-effort per-provider parameter allowlist."""
     try:
         params = _litellm.get_supported_openai_params(model=model, custom_llm_provider=provider)
-    except Exception:
+    except (AttributeError, KeyError, ValueError):
         return ()
     return tuple(params or ())

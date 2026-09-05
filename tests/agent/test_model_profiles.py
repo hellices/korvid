@@ -16,6 +16,7 @@ from korvid.agent.model_profiles import (
     SetupField,
     SetupFieldKind,
     SpecialFlow,
+    SpecialFlowRegistry,
     split_reference,
 )
 
@@ -66,6 +67,14 @@ def test_a_special_flow_declares_data_not_behaviour() -> None:
         for name in vars(type(flow))
         if callable(getattr(flow, name, None)) and not name.startswith("__")
     ]
+
+
+def test_special_flow_claim_normalizes_provider_prefix_separators() -> None:
+    flow = SpecialFlow(prefix="github-copilot", display_name="GitHub Copilot", auth_methods=())
+    registry = SpecialFlowRegistry((flow,))
+
+    assert registry.claim("github-copilot/gpt-4o") is flow
+    assert registry.claim("github_copilot/gpt-4o") is flow
 
 
 def test_the_public_boundary_imports_no_provider_or_model_sdk() -> None:
