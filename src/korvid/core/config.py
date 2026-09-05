@@ -978,6 +978,70 @@ def _legacy_azure_base_url(profile: ModelConnectionConfig) -> str | None:
     return f"{profile.endpoint.rstrip('/')}/openai/deployments/{deployment}"
 
 
+@dataclass(frozen=True, slots=True)
+class LegacyTransportProjection:
+    """One profile as the scalars the *interim* legacy transport speaks.
+
+    Temporary, and deleted with the transport in Task 18. It exists as a
+    public value so startup, the `:ai` wizard's connection probe and a
+    profile switch all reach the transport through one projection — a
+    second, parallel one is how an Azure deployment path or an unsupported
+    provider prefix ends up handled one way at boot and another way at
+    runtime.
+    """
+
+    provider: str
+    auth_method: str
+    base_url: str | None
+    model: str
+    api_key_env: str | None
+    options: dict[str, object]
+
+
+def project_legacy_transport(
+    profile: ModelConnectionConfig,
+) -> tuple[LegacyTransportProjection | None, str | None]:
+    """Project *profile* onto the legacy transport, or say why it cannot be.
+
+    Returns `(projection, None)` when the transport can serve the profile
+    and `(None, reason)` when it cannot. It refuses rather than guesses:
+    routing a provider the legacy client cannot speak through a
+    bearer-token HTTP call would send `Authorization: Bearer` to a vendor
+    that expects its own header, which is a credential leak rather than a
+    degraded experience.
+
+    Args:
+        profile: The connection to project.
+
+    Returns:
+        The projection, or `None` paired with a human-readable refusal.
+    """
+    if profile.config_error is not None:
+        return None, f"the profile was rejected: {profile.config_error}"
+    sep = MODEL_REFERENCE_SEPARATOR
+    if sep not in profile.model:
+        return None, f"model {profile.model!r} has no provider prefix"
+    prefix, tag = profile.model.split(sep, 1)
+    if prefix in _PREFIXES_WITHOUT_LEGACY_TRANSPORT:
+        return None, f"the {prefix!r} provider needs the new transport (Task 15)"
+    api_key_env: str | None = None
+    if profile.auth.method == "environment":
+        key_val = profile.auth.settings.get("key")
+        if isinstance(key_val, str):
+            api_key_env = key_val
+    return (
+        LegacyTransportProjection(
+            provider=prefix,
+            auth_method=profile.auth.method,
+            base_url=_legacy_azure_base_url(profile) if prefix == "azure" else profile.endpoint,
+            model=tag,
+            api_key_env=api_key_env,
+            options=cast("dict[str, object]", _thaw_config_value(profile.options)),
+        ),
+        None,
+    )
+
+
 class _LegacyScalars(TypedDict):
     agent_enabled: bool
     agent_provider: str | None
@@ -1006,47 +1070,26 @@ def _derive_legacy_scalars(profiles: ModelConnectionsConfig, warnings: list[str]
     """Project the active profile onto the pre-profile scalar fields.
 
     Temporary. It exists only so commit groups 1-3 stay buildable while
-    the transport is still the legacy one, and Task 18 deletes it. It
-    refuses rather than guesses: a profile whose provider prefix the
-    legacy transport cannot serve yields no scalars and a warning naming
-    the prefix and the task that will enable it.
+    the transport is still the legacy one, and Task 18 deletes it. The
+    projection itself is `project_legacy_transport`, shared with every
+    runtime path that has to reach the same transport; this wrapper adds
+    only the config-file context a startup warning needs.
     """
     profile = profiles.active_profile
     if profile is None:
         return _empty_legacy_scalars()
-    if profile.config_error is not None:
-        warnings.append(
-            f"the active profile was rejected: {profile.config_error} — the agent is disabled"
-        )
+    projection, refusal = project_legacy_transport(profile)
+    if projection is None:
+        warnings.append(f"agent.profiles.{profiles.active}: {refusal} — the agent is disabled")
         return _empty_legacy_scalars()
-    sep = MODEL_REFERENCE_SEPARATOR
-    if sep not in profile.model:
-        warnings.append(
-            f"agent.profiles.{profiles.active}: model {profile.model!r} has no provider"
-            f" prefix — the agent is disabled"
-        )
-        return _empty_legacy_scalars()
-    prefix, tag = profile.model.split(sep, 1)
-    if prefix in _PREFIXES_WITHOUT_LEGACY_TRANSPORT:
-        warnings.append(
-            f"the {prefix!r} provider needs the new transport (Task 15); the agent is disabled"
-        )
-        return _empty_legacy_scalars()
-    base_url = _legacy_azure_base_url(profile) if prefix == "azure" else profile.endpoint
-    api_key_env: str | None = None
-    if profile.auth.method == "environment":
-        key_val = profile.auth.settings.get("key")
-        if isinstance(key_val, str):
-            api_key_env = key_val
-    options = cast("dict[str, object]", _thaw_config_value(profile.options))
     return _LegacyScalars(
         agent_enabled=True,
-        agent_provider=prefix,
-        agent_base_url=base_url,
-        agent_model=tag,
-        agent_api_key_env=api_key_env,
-        agent_auth_method=profile.auth.method,
-        agent_options=options,
+        agent_provider=projection.provider,
+        agent_base_url=projection.base_url,
+        agent_model=projection.model,
+        agent_api_key_env=projection.api_key_env,
+        agent_auth_method=projection.auth_method,
+        agent_options=projection.options,
         agent_options_error=None,
     )
 

@@ -8,6 +8,7 @@ setup wizard directly on a first run, activates a profile by rebuilding
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any
 
@@ -445,3 +446,210 @@ def test_settings_from_profile_never_carries_a_secret_value(
 
 def test_settings_from_profile_refuses_a_reference_without_a_provider() -> None:
     assert settings_from_profile(ModelConnectionConfig(model="bare"), None) is None
+
+
+def test_settings_from_profile_refuses_a_prefix_the_legacy_transport_cannot_serve() -> None:
+    """Startup refuses these with a warning. A profile switch reaching the
+    same prefix through a second, laxer projection would send a bearer
+    token to a vendor that expects its own header."""
+    profile = ModelConnectionConfig(model="anthropic/claude-sonnet-4-5")
+
+    assert settings_from_profile(profile, None) is None
+
+
+def test_settings_from_profile_refuses_a_profile_with_a_config_error() -> None:
+    broken = ModelConnectionConfig(model="acme/model-x", options={"bad": object()})
+    assert broken.config_error is not None  # the fixture is the precondition
+
+    assert settings_from_profile(broken, None) is None
+
+
+def test_settings_from_profile_reattaches_the_azure_deployment_path() -> None:
+    """The projection has to be the one startup uses, deployment path and
+    all: a `:ai` switch that drops it configures a 404."""
+    from korvid.core.config import load_config
+
+    profile = ModelConnectionConfig(
+        model="azure/gpt-4o",
+        endpoint="https://x.openai.azure.com",
+        auth=ConnectionAuthConfig(method="environment", settings={"key": "AZURE_OPENAI_API_KEY"}),
+        options={"azure_deployment": "my-dep"},
+    )
+    settings = settings_from_profile(profile, None)
+
+    assert settings is not None
+    assert settings.base_url == "https://x.openai.azure.com/openai/deployments/my-dep"
+    assert load_config  # the startup path this must agree with
+
+
+def test_settings_from_profile_matches_the_scalars_startup_derives(tmp_path: Path) -> None:
+    from korvid.core.config import load_config
+
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        "agent:\n"
+        "  active: main\n"
+        "  profiles:\n"
+        "    main:\n"
+        "      model: azure/gpt-4o\n"
+        "      endpoint: https://x.openai.azure.com\n"
+        "      auth:\n"
+        "        method: environment\n"
+        "        key: AZURE_OPENAI_API_KEY\n"
+        "      options:\n"
+        "        azure_deployment: my-dep\n",
+        encoding="utf-8",
+    )
+    startup = load_config(path)
+    settings = settings_from_profile(startup.model_connections.profiles["main"], None)
+
+    assert settings is not None
+    assert settings.provider == startup.agent_provider
+    assert settings.base_url == startup.agent_base_url
+    assert settings.model == startup.agent_model
+    assert settings.api_key_env == startup.agent_api_key_env
+    assert settings.auth_method == startup.agent_auth_method
+
+
+# ---------------------------------------------------------------------------
+# The first-run wizard's own persistence hook
+# ---------------------------------------------------------------------------
+
+
+def _first_run(tmp_path: Path, **kwargs: Any) -> Env:
+    return _env(tmp_path, profiles=ModelConnectionsConfig(), **kwargs)
+
+
+def _pushed_setup(env: Env) -> AgentSetupScreen:
+    screen, _callback = env.ui.screens[-1]
+    assert isinstance(screen, AgentSetupScreen)
+    return screen
+
+
+async def test_the_first_run_wizard_is_given_a_save_hook(tmp_path: Path) -> None:
+    """Persistence has to run *inside* the wizard: a save that only
+    happens after dismissal cannot keep the screen open when it fails."""
+    saver = _Saver()
+    env = _first_run(tmp_path, saver=saver)
+    env.controller.handle_command([])
+    screen = _pushed_setup(env)
+
+    save = screen._save_result
+    assert save is not None
+    await save(SetupResult(profile=ModelConnectionConfig(model="acme/model-x")))
+
+    written = saver.calls[-1]
+    assert written.active is not None
+    assert written.profiles[written.active].model == "acme/model-x"
+
+
+async def test_the_first_run_save_hook_adopts_what_it_wrote(tmp_path: Path) -> None:
+    """The in-memory set is refreshed from the value handed to the writer,
+    so the round-trip (`unparsed` included) stays authoritative."""
+    saver = _Saver()
+    env = _first_run(tmp_path, saver=saver)
+    env.controller.handle_command([])
+    screen = _pushed_setup(env)
+
+    save = screen._save_result
+    assert save is not None
+    await save(SetupResult(profile=ModelConnectionConfig(model="acme/model-x")))
+
+    assert env.controller.profiles == saver.calls[-1]
+    assert env.controller.active_profile == saver.calls[-1].active
+
+
+async def test_a_failed_first_run_save_reaches_the_wizard_as_an_error(tmp_path: Path) -> None:
+    """The screen renders "Applied, but save failed … will revert" only if
+    the hook raises. Swallowing the error dismisses on a lie."""
+    saver = _Saver(error=OSError("read-only file system"))
+    env = _first_run(tmp_path, saver=saver)
+    env.controller.handle_command([])
+    screen = _pushed_setup(env)
+
+    save = screen._save_result
+    assert save is not None
+    with pytest.raises(OSError, match="read-only file system"):
+        await save(SetupResult(profile=ModelConnectionConfig(model="acme/model-x")))
+
+    assert env.controller.profiles.profiles == {}
+
+
+async def test_the_first_run_result_is_persisted_once(tmp_path: Path) -> None:
+    """The wizard's hook already wrote it. The dismiss callback must not
+    write a second, duplicate profile beside it."""
+    saver = _Saver()
+    env = _first_run(tmp_path, saver=saver)
+    env.controller.handle_command([])
+    screen, callback = env.ui.screens[-1]
+    assert isinstance(screen, AgentSetupScreen)
+    assert callback is not None
+
+    result = SetupResult(profile=ModelConnectionConfig(model="acme/model-x"))
+    save = screen._save_result
+    assert save is not None
+    await save(result)
+    callback(result)
+
+    assert len(saver.calls) == 1
+    assert set(saver.calls[-1].profiles) == {"model-x"}
+
+
+async def test_a_first_run_result_that_never_reached_the_hook_is_still_persisted(
+    tmp_path: Path,
+) -> None:
+    """The callback stays the safety net: a wizard wired without the hook
+    (or dismissed by another path) must not silently lose the profile."""
+    saver = _Saver()
+    env = _first_run(tmp_path, saver=saver)
+    env.controller.handle_command([])
+    _screen, callback = env.ui.screens[-1]
+    assert callback is not None
+
+    callback(SetupResult(profile=ModelConnectionConfig(model="acme/model-x")))
+
+    assert len(saver.calls) == 1
+
+
+async def test_the_first_run_wizard_applies_before_it_saves(tmp_path: Path) -> None:
+    """Apply-before-persist, on the production path: the screen is given
+    both hooks and nothing is written until the wizard runs them."""
+    saver = _Saver()
+    rebuild = _rebuilding(FakeSession())
+    env = _first_run(tmp_path, rebuild=rebuild, saver=saver)
+    env.controller.handle_command([])
+    screen = _pushed_setup(env)
+
+    apply_result = screen._apply_result
+    save = screen._save_result
+    assert apply_result is not None
+    assert save is not None
+    assert saver.calls == []
+
+    result = SetupResult(profile=ModelConnectionConfig(model="acme/model-x"))
+    assert apply_result(result) is True
+    assert rebuild.built  # applied first
+    assert saver.calls == []  # and nothing persisted yet
+    await save(result)
+    assert len(saver.calls) == 1
+
+
+async def test_the_profile_editor_is_not_given_a_save_hook(tmp_path: Path) -> None:
+    """An edited profile is placed by the manager, not persisted mid-edit."""
+    env = _env(tmp_path)
+    env.controller.handle_command([])
+    manager, _callback = env.ui.screens[-1]
+    assert isinstance(manager, ProfileManagerScreen)
+
+    task = asyncio.ensure_future(
+        env.controller._edit_profile(ModelConnectionConfig(model="acme/model-x"))
+    )
+    await asyncio.sleep(0)
+    editor = _pushed_setup(env)
+    assert editor._save_result is None
+    assert editor._apply_result is None
+
+    _screen, callback = env.ui.screens[-1]
+    assert callback is not None
+    callback(None)
+    assert await task is None

@@ -17,6 +17,7 @@ from korvid.core.config import (
     _legacy_model_reference,
     is_valid_profile_name,
     load_config,
+    project_legacy_transport,
     save_model_connections,
 )
 
@@ -953,3 +954,75 @@ agent:
     cfg = load_config(path)
     assert cfg.agent_enabled is False
     assert any("rejected" in w for w in cfg.warnings)
+
+
+# ---------------------------------------------------------------------------
+# The shared interim projection
+# ---------------------------------------------------------------------------
+
+
+def test_the_shared_projection_is_the_one_startup_derives_its_scalars_from(
+    tmp_path: Path,
+) -> None:
+    """Startup and every later profile switch must reach the same scalars.
+
+    `project_legacy_transport` is that single path: a second, parallel
+    projection is how an Azure deployment URL or an unsupported prefix
+    ends up handled one way at startup and another way at `:ai` time.
+    """
+    path = _write(
+        tmp_path,
+        """
+agent:
+  active: main
+  profiles:
+    main:
+      model: azure/gpt-4o
+      endpoint: https://x.openai.azure.com
+      auth:
+        method: environment
+        key: AZURE_OPENAI_API_KEY
+      options:
+        azure_deployment: my-dep
+""",
+    )
+    cfg = load_config(path)
+    projection, refusal = project_legacy_transport(cfg.model_connections.profiles["main"])
+
+    assert refusal is None
+    assert projection is not None
+    assert projection.provider == cfg.agent_provider
+    assert projection.base_url == cfg.agent_base_url
+    assert projection.model == cfg.agent_model
+    assert projection.api_key_env == cfg.agent_api_key_env
+    assert projection.auth_method == cfg.agent_auth_method
+
+
+def test_the_shared_projection_refuses_a_prefix_the_legacy_transport_cannot_serve() -> None:
+    projection, refusal = project_legacy_transport(
+        ModelConnectionConfig(model="anthropic/claude-sonnet-4-5")
+    )
+
+    assert projection is None
+    assert refusal is not None
+    assert "anthropic" in refusal
+    assert "Task 15" in refusal
+
+
+def test_the_shared_projection_refuses_a_reference_without_a_provider_prefix() -> None:
+    projection, refusal = project_legacy_transport(ModelConnectionConfig(model="bare"))
+
+    assert projection is None
+    assert refusal is not None
+    assert "prefix" in refusal
+
+
+def test_the_shared_projection_refuses_a_profile_with_a_config_error() -> None:
+    broken = ModelConnectionConfig(model="openai/gpt-4o", options={"bad": object()})
+    assert broken.config_error is not None  # the fixture is the precondition
+
+    projection, refusal = project_legacy_transport(broken)
+
+    assert projection is None
+    assert refusal is not None
+    assert "rejected" in refusal
