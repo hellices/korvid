@@ -483,18 +483,18 @@ def test_cli_replay_live_duration_overrides_only_duration(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calls: list[WorkloadProfile] = []
+    calls: list[tuple[WorkloadProfile, ReplayOptions]] = []
 
     async def record(
         profile: WorkloadProfile,
-        _options: ReplayOptions,
+        options: ReplayOptions,
         *,
         context: str,
         expected_cluster_id: str,
         run_id: str,
     ) -> ReplayReport:
         del context, expected_cluster_id, run_id
-        calls.append(profile)
+        calls.append((profile, options))
         return _make_report(profile)
 
     profile_file = Path("tests/performance/profiles/aks-1k.json")
@@ -509,13 +509,18 @@ def test_cli_replay_live_duration_overrides_only_duration(
             *_LIVE_IDENTITY_ARGS,
             "--duration",
             "26",
+            "--input-ack-timeout",
+            "12.5",
+            "--input-sample-pairs",
+            "7",
             *_live_artifacts(tmp_path),
         ]
     )
 
     assert exit_code == 0
-    replayed = calls[0]
+    replayed, options = calls[0]
     assert replayed.duration_seconds == 26
+    assert (options.input_ack_timeout, options.input_sample_pairs) == (12.5, 7)
     assert (
         replayed.seed,
         replayed.object_count,

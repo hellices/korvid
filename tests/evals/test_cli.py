@@ -15,6 +15,7 @@ from korvid.agent import prompt_harness, prompt_packs
 from korvid.evals.__main__ import (
     exit_code,
     prompt_fingerprint,
+    provider_factory_from_env,
     report_payload,
     run_payload,
 )
@@ -66,6 +67,37 @@ def _report(error: str | None = None) -> ScenarioReport:
 
 def _policy(**kwargs: Any) -> Any:
     return resolve_eval_policy(ScriptedProvider([[{"type": "done"}]]), **kwargs)
+
+
+@pytest.mark.parametrize(
+    ("env", "message"),
+    [
+        ({"KORVID_EVAL_MODEL": "m"}, "KORVID_EVAL_BASE_URL"),
+        ({"KORVID_EVAL_BASE_URL": "http://localhost/v1"}, "KORVID_EVAL_MODEL"),
+        (
+            {
+                "KORVID_EVAL_BASE_URL": "http://localhost/v1",
+                "KORVID_EVAL_MODEL": "m",
+                "KORVID_EVAL_PROVIDER": "unknown",
+            },
+            "KORVID_EVAL_PROVIDER",
+        ),
+        (
+            {
+                "KORVID_EVAL_BASE_URL": "http://localhost/v1",
+                "KORVID_EVAL_MODEL": "m",
+                "KORVID_EVAL_TIMEOUT_SECONDS": "nan",
+            },
+            "KORVID_EVAL_TIMEOUT_SECONDS",
+        ),
+    ],
+)
+def test_provider_factory_rejects_invalid_environment(
+    env: dict[str, str],
+    message: str,
+) -> None:
+    with pytest.raises(SystemExit, match=message):
+        provider_factory_from_env(env)
 
 
 def test_report_payload_is_json_serializable_with_summary_counts() -> None:
