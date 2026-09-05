@@ -35,6 +35,7 @@ from korvid.agent.events import (
 )
 from korvid.agent.interaction import Navigate, OpenLogs
 from korvid.agent.native_engine import NativeAgentEngine
+from korvid.agent.provider import OperatorSafeProviderError
 from korvid.agent.request_gateway import PreparedGatewayRequest, RequestGateway
 from korvid.agent.tool_harness import DIRECT_OPEN_ACKNOWLEDGEMENT
 from korvid.core.secrets import MASK_PLACEHOLDER
@@ -46,6 +47,7 @@ from .engine_fakes import (
     Harness,
     RecordingBridge,
     RecordingExecution,
+    ScriptedProvider,
     build_harness,
     make_policy,
     system_message,
@@ -639,6 +641,103 @@ async def test_a_write_that_explodes_is_answered_once_and_never_retried() -> Non
     assert not harness.conversation.has_unmatched_tool_calls
     assert isinstance(events[-1], TurnComplete)
     assert SECRET_TOOL_ERROR not in json.dumps(harness.provider.calls)
+
+
+# -- a provider failure the adapter already translated ------------------------
+
+#: What an adapter's translation table produces: written, actionable, and
+#: carrying nothing derived from the request or the response body.
+TRANSLATED_FAILURE = (
+    "The provider refused the credential. Check the profile's API key, or "
+    "re-run `:ai` to authenticate again."
+)
+#: A provider error shaped like a 401 that echoed the key back — the text
+#: no exception type may show the operator, whatever it subclasses.
+SECRET_PROVIDER_ERROR = '401 {"error":"invalid api key sk-live-DEADBEEF0000"}'
+
+
+class TranslatedProviderError(OperatorSafeProviderError):
+    """An adapter failure whose text was audited, as `providers/` raises.
+
+    Declared here rather than imported from `providers.litellm_provider`
+    so the engine is tested at the contract it actually reads — any
+    adapter making the same promise gets the same treatment — and so this
+    case does not need the `[agent]` extra installed.
+    """
+
+    safe_messages = frozenset({TRANSLATED_FAILURE})
+
+
+async def test_a_message_the_adapter_declared_safe_reaches_the_operator() -> None:
+    """Translation is worthless if the engine throws it away.
+
+    `providers/` maps each SDK failure to a written, evidence-free
+    sentence — "check the profile's API key" — precisely because the
+    operator cannot act on `AuthenticationError`. Withholding every
+    exception's text unconditionally made that whole table dead code.
+    """
+    provider = ScriptedProvider([[TranslatedProviderError(TRANSLATED_FAILURE)]], acknowledge=False)
+    harness = build_harness(provider=provider)
+
+    events = await harness.run()
+
+    error = events[-1]
+    assert isinstance(error, AgentError)
+    assert error.message == TRANSLATED_FAILURE
+
+
+async def test_a_message_that_class_never_declared_is_still_withheld() -> None:
+    """Subclassing is not a licence to say anything.
+
+    The promise is per-text and auditable: only the constants the class
+    declared may be shown. A later `raise TranslatedProviderError(str(exc))`
+    — the refactor this contract exists to survive — reaches the panel as
+    a withheld failure, not as the 401 body it quoted.
+    """
+    provider = ScriptedProvider(
+        [[TranslatedProviderError(SECRET_PROVIDER_ERROR)]], acknowledge=False
+    )
+    harness = build_harness(provider=provider)
+
+    events = await harness.run()
+
+    error = events[-1]
+    assert isinstance(error, AgentError)
+    assert "sk-live-DEADBEEF0000" not in error.message
+    assert "TranslatedProviderError" in error.message
+
+
+async def test_an_untranslated_provider_failure_is_still_named_by_type_only() -> None:
+    """The default did not move: an exception that made no promise is
+    named by its class and nothing else, however ordinary it looks."""
+    provider = ScriptedProvider([[RuntimeError(SECRET_PROVIDER_ERROR)]], acknowledge=False)
+    harness = build_harness(provider=provider)
+
+    events = await harness.run()
+
+    error = events[-1]
+    assert isinstance(error, AgentError)
+    assert "sk-live-DEADBEEF0000" not in error.message
+    assert "RuntimeError" in error.message
+
+
+async def test_even_a_declared_message_is_bounded() -> None:
+    """A declaration vouches for the text's provenance, not its size: the
+    panel's bound holds for every message the engine renders."""
+
+    class _Verbose(OperatorSafeProviderError):
+        safe_messages = frozenset({"the provider said: " + "no " * 1_000})
+
+    message = next(iter(_Verbose.safe_messages))
+    provider = ScriptedProvider([[_Verbose(message)]], acknowledge=False)
+    harness = build_harness(provider=provider)
+
+    events = await harness.run()
+
+    error = events[-1]
+    assert isinstance(error, AgentError)
+    assert error.message.startswith("the provider said: no")
+    assert len(error.message) <= 600
 
 
 # -- cancellation ------------------------------------------------------------
