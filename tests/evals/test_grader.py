@@ -335,6 +335,7 @@ def test_grade_evidence_requires_every_expected_target_argument() -> None:
     ],
 )
 def test_grade_target_does_not_depend_on_argument_order(arguments: dict[str, str]) -> None:
+    """A model's JSON key order cannot change the canonical target name."""
     evidence = Evidence(
         tool="get_resource",
         contains="phase: Pending",
@@ -355,6 +356,7 @@ def test_grade_target_does_not_depend_on_argument_order(arguments: dict[str, str
 
 
 def test_grade_treats_a_dash_as_a_clause_boundary() -> None:
+    """Negation before a dash must not suppress the causal claim after it."""
     answer = "The container was not restarted by the operator—it was OOMKilled with exit code 137."
     result = grade(_scenario(), answer, [_record()])
     assert result.diagnosis_success
@@ -427,6 +429,7 @@ def test_grade_credits_diagnose_service_for_endpoint_evidence() -> None:
 
 
 def test_grade_rejects_a_diagnostic_call_against_a_different_kind() -> None:
+    """Tool-implied kinds must not expand one diagnostic into another resource."""
     evidence = Evidence(
         tool="get_resource",
         contains="endpoints: 0",

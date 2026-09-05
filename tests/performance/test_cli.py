@@ -477,7 +477,9 @@ def test_cli_rejects_unusable_scalar_options(
     argv.extend([option, value])
 
     assert cli.main(argv) == 1
-    assert expected in capsys.readouterr().err
+    error = capsys.readouterr().err
+    assert option in error
+    assert expected in error
     assert calls == []
 
 
