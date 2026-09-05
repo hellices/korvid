@@ -240,6 +240,24 @@ async def test_run_scenario_closes_the_provider_after_every_repetition() -> None
     assert closed == [True, True]
 
 
+async def test_run_scenario_closes_the_provider_when_setup_fails() -> None:
+    scenario = _oom_scenario()
+    closed: list[bool] = []
+
+    def fail_setup() -> RecordedExecution:
+        raise RuntimeError("executor setup failed")
+
+    with pytest.raises(RuntimeError, match="executor setup failed"):
+        await run_scenario(
+            scenario,
+            provider_factory=lambda: _ClosableProvider(_good_script(), closed),
+            executor_factory=fail_setup,
+            repetitions=1,
+        )
+
+    assert closed == [True]
+
+
 async def test_run_scenario_grades_a_wrong_answer_as_failure() -> None:
     scenario = _oom_scenario()
     report = await run_scenario(
@@ -728,6 +746,7 @@ async def test_the_eval_recorder_merges_producer_and_ingress_records() -> None:
 
     class Producing(RecordedExecution):
         async def execute(self, name: str, arguments: dict[str, Any]) -> str:
+            # Keep the escape explicit: a printable "^G" makes the merge test vacuous.
             return "line one\x07line two"
 
         async def execute_recorded(self, name: str, arguments: dict[str, Any]) -> ToolOutcome:
