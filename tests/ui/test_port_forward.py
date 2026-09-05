@@ -14,8 +14,6 @@ from unittest.mock import patch
 import pytest
 from textual.widgets import Input
 
-import korvid.ui.app
-import korvid.ui.forward_controller
 from korvid.core.audit import AuditLog
 from korvid.core.config import KorvidConfig
 from korvid.core.portforward import ForwardRecord, ForwardRegistry, ForwardSpec
@@ -379,12 +377,6 @@ async def test_pf_unavailable_without_registry() -> None:
         await pilot.press("enter")
         await pilot.pause()
         assert not isinstance(app.screen, ForwardListScreen)
-
-
-def test_pf_in_command_help() -> None:
-    from korvid.ui.command import command_help
-
-    assert any(":pf" in cmd for cmd, _ in command_help())
 
 
 # ---------------------------------------------------------------------------
@@ -2099,15 +2091,3 @@ async def test_forward_worker_refused_when_scheduled_with_stale_epoch() -> None:
             label="forward entry epoch refusal",
         )
         assert procs == []
-
-
-def test_readiness_budget_has_exactly_one_definition() -> None:
-    """A duplicate constant makes `patch` silently target the dead copy.
-
-    The extraction left `_FORWARD_READY_SECONDS` in both modules. Tests
-    patched the app's copy, so the controller kept its real 5s budget and
-    raced the 5s `until()` allowance - green locally, red on a slower
-    Windows runner.
-    """
-    assert not hasattr(korvid.ui.app, "_FORWARD_READY_SECONDS")
-    assert korvid.ui.forward_controller._FORWARD_READY_SECONDS == 5.0

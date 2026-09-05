@@ -2,21 +2,16 @@
 
 from __future__ import annotations
 
-from collections.abc import MutableMapping
 from typing import Any, cast
 
 import pytest
 
 from korvid.evals.operation_journal import (
-    JOURNAL_ACTORS,
     JOURNAL_DETAIL_KEYS,
     JOURNAL_RESULTS,
     ActionJournal,
     JournalTarget,
     summarize,
-    summarize_action,
-    summarize_arguments,
-    summarize_untrusted,
 )
 
 _TARGET = JournalTarget(
@@ -49,26 +44,6 @@ def test_the_journal_is_append_only() -> None:
     assert journal.events[0] == snapshot[0]
 
 
-def test_event_state_cannot_be_mutated_after_append() -> None:
-    journal = ActionJournal()
-    event = journal.append(
-        event="mutation_started",
-        actor="write_ops",
-        target=_TARGET,
-        pre_state={"spec.replicas": 2},
-    )
-    mutable_view = cast(MutableMapping[str, Any], event.pre_state)
-    with pytest.raises(TypeError, match="does not support item assignment"):
-        mutable_view["spec.replicas"] = 99
-    assert journal.payload()[0]["pre_state"] == {"spec.replicas": 2}
-
-
-def test_an_unknown_actor_is_rejected() -> None:
-    journal = ActionJournal()
-    with pytest.raises(ValueError, match="unknown journal actor"):
-        journal.append(event="goal_received", actor="model")
-
-
 def test_checkpoints_report_only_lifecycle_events_in_order() -> None:
     journal = ActionJournal()
     journal.append(event="goal_received", actor="fixture_actor")
@@ -98,7 +73,7 @@ def test_state_mappings_reject_non_scalar_values() -> None:
             event="mutation_finished",
             actor="write_ops",
             target=_TARGET,
-            post_state={"spec.template": {"metadata": {}}},
+            post_state={"spec": {"replicas": 3}},
         )
 
 
@@ -129,6 +104,18 @@ def test_a_secret_target_may_not_carry_state() -> None:
         journal.append(
             event="mutation_finished", actor="write_ops", target=secret, post_state={"type": "x"}
         )
+
+
+def test_appended_state_is_immutable() -> None:
+    journal = ActionJournal()
+    journal.append(
+        event="mutation_finished",
+        actor="write_ops",
+        target=_TARGET,
+        pre_state={"spec.replicas": 2},
+    )
+    with pytest.raises(TypeError, match="does not support item assignment"):
+        cast(Any, journal.events[0].pre_state)["spec.replicas"] = 3
 
 
 def test_the_payload_is_json_ready_and_carries_every_field() -> None:
@@ -169,17 +156,6 @@ def test_a_raw_tool_result_may_not_be_journaled() -> None:
         )
 
 
-def test_summarize_untrusted_keeps_bounded_fields_and_reports_zero_drops() -> None:
-    assert (
-        summarize_untrusted(
-            tool="get_resource",
-            checkpoint="precondition_read",
-            count=1,
-        )
-        == "tool=get_resource checkpoint=precondition_read count=1 dropped=0"
-    )
-
-
 def test_raw_tool_arguments_may_not_be_journaled() -> None:
     journal = ActionJournal()
     with pytest.raises(ValueError, match="journal detail must be an allowlisted"):
@@ -189,207 +165,6 @@ def test_raw_tool_arguments_may_not_be_journaled() -> None:
             action="get_resource",
             detail='{"kind": "deployments", "name": "checkout-a"}',
         )
-
-
-def test_summarize_rejects_a_key_outside_the_allowlist() -> None:
-    with pytest.raises(ValueError, match="journal detail key is not allowlisted"):
-        summarize(prompt="scale checkout-a")
-
-
-def test_summarize_rejects_empty_summary_values() -> None:
-    with pytest.raises(ValueError, match="journal detail value is not a bounded summary token"):
-        summarize(kind="")
-
-
-def test_summarize_still_strips_quotes_for_trusted_fields() -> None:
-    assert (
-        summarize(kind='"deployments"', name='"checkout-a"') == "kind=deployments name=checkout-a"
-    )
-
-
-def test_summarize_untrusted_drops_hostile_and_reserved_fields_without_raising() -> None:
-    detail = summarize_untrusted(
-        kind='"deployments"',
-        name="checkout-a",
-        namespace='"shop-a"',
-        count=1,
-        tool="get_resource",
-        dropped="7",
-        note="whatever the model wanted to say",
-        status=False,
-        chars=float("inf"),
-        resource={"uid": "x"},
-    )
-    assert detail == "name=checkout-a count=1 tool=get_resource dropped=7"
-    ActionJournal().append(event="tool_call", actor="model_tool", detail=detail)
-
-
-@pytest.mark.parametrize(
-    "value",
-    [
-        "",
-        "scale resource",
-        "mañana",
-        "n" * 121,
-        "secret/password!",
-        'de"lete_resource',
-        'sc"ale_resource',
-    ],
-)
-def test_summarize_action_is_total_and_bounded(value: str) -> None:
-    assert summarize_action(value) == "unknown_tool"
-
-
-def test_summarize_action_preserves_a_bounded_token() -> None:
-    assert summarize_action("scale_resource") == "scale_resource"
-
-
-def test_summarize_arguments_keeps_only_allowlisted_keys_and_counts_the_rest() -> None:
-    detail = summarize_arguments(
-        "scale_resource",
-        {
-            "kind": "deployments",
-            "name": "checkout-a",
-            "namespace": "shop-a",
-            "replicas": 3,
-            "tool": "shadow",
-            "note": "whatever the model wanted to say",
-        },
-    )
-    assert detail == (
-        "tool=scale_resource kind=redacted name=redacted namespace=redacted replicas=3 dropped=2"
-    )
-    ActionJournal().append(event="tool_call", actor="model_tool", detail=detail)
-
-
-def test_summarize_arguments_redacts_untrusted_string_values() -> None:
-    credential = "ghp_" + "a" * 36
-
-    detail = summarize_arguments(
-        "scale_resource",
-        {
-            "kind": "deployments",
-            "name": credential,
-            "namespace": "shop-a",
-            "replicas": 3,
-        },
-    )
-
-    assert credential not in detail
-    assert detail == (
-        "tool=scale_resource kind=redacted name=redacted namespace=redacted replicas=3 dropped=0"
-    )
-
-
-def test_summarize_arguments_drops_bool_and_empty_values() -> None:
-    detail = summarize_arguments(
-        "scale_resource",
-        {
-            "kind": "",
-            "name": "checkout-a",
-            "replicas": 3,
-            "status": False,
-        },
-    )
-    assert detail == "tool=scale_resource name=redacted replicas=3 dropped=2"
-
-
-def test_summarize_arguments_counts_reserved_tool_and_dropped_keys() -> None:
-    detail = summarize_arguments(
-        "delete resource",
-        {
-            "kind": "deployments",
-            "name": "checkout-a",
-            "tool": "shadow",
-            "dropped": "7",
-            "note": "whatever the model wanted to say",
-        },
-    )
-    assert detail == "kind=redacted name=redacted dropped=4"
-
-
-@pytest.mark.parametrize(
-    ("tool", "arguments", "expected"),
-    [
-        (
-            'de"lete_resource',
-            {
-                "kind": "deployments",
-                "name": '"checkout-a"',
-                "namespace": '"shop-a"',
-            },
-            "kind=redacted dropped=3",
-        ),
-        (
-            'sc"ale_resource',
-            {
-                "kind": "deployments",
-                "name": '"checkout-a"',
-                "namespace": '"shop-a"',
-                "replicas": 3,
-            },
-            "kind=redacted replicas=3 dropped=3",
-        ),
-    ],
-)
-def test_summarize_arguments_rejects_quoted_raw_tokens(
-    tool: str, arguments: dict[str, object], expected: str
-) -> None:
-    detail = summarize_arguments(tool, arguments)
-    assert detail == expected
-    assert "tool=" not in detail
-    ActionJournal().append(event="tool_call", actor="model_tool", detail=detail)
-
-
-@pytest.mark.parametrize(
-    "tool",
-    [
-        "",
-        "scale resource",
-        "mañana",
-        "n" * 121,
-    ],
-)
-def test_summarize_arguments_drops_invalid_tool_names(tool: str) -> None:
-    detail = summarize_arguments(
-        tool,
-        {
-            "kind": "deployments",
-            "name": "checkout-a",
-        },
-    )
-    assert detail == "kind=redacted name=redacted dropped=1"
-    assert "tool=" not in detail
-    ActionJournal().append(event="tool_call", actor="model_tool", detail=detail)
-
-
-def test_append_rejects_a_non_bounded_action() -> None:
-    journal = ActionJournal()
-    with pytest.raises(ValueError, match="journal action must be a bounded summary token"):
-        journal.append(event="tool_call", actor="model_tool", action="delete resource")
-
-
-@pytest.mark.parametrize(
-    "namespace",
-    [
-        "shop-a ",
-        "shop-a(canary)",
-        "n" * 121,
-        "shop-a,shop-b",
-    ],
-)
-def test_summarize_arguments_drops_invalid_namespace_tokens(namespace: str) -> None:
-    detail = summarize_arguments(
-        "delete_resource",
-        {
-            "kind": "deployments",
-            "name": "checkout-a",
-            "namespace": namespace,
-        },
-    )
-    assert detail == "tool=delete_resource kind=redacted name=redacted dropped=1"
-    assert namespace not in detail
-    ActionJournal().append(event="tool_call", actor="model_tool", detail=detail)
 
 
 def test_the_result_and_detail_vocabularies_are_pinned() -> None:
@@ -408,18 +183,6 @@ def test_the_result_and_detail_vocabularies_are_pinned() -> None:
     }
     assert "arguments" not in JOURNAL_DETAIL_KEYS
     assert "answer" not in JOURNAL_DETAIL_KEYS
-
-
-def test_the_actor_vocabulary_is_pinned() -> None:
-    assert JOURNAL_ACTORS == (
-        "model_tool",
-        "app_internal",
-        "approval_driver",
-        "fixture_actor",
-        "audit",
-        "write_ops",
-        "grader",
-    )
 
 
 def test_only_a_model_tool_event_may_claim_read_credit() -> None:

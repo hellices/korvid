@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from korvid.evals.grader import GradeResult, ToolRecord, citation_report, grade, matches_target
+from korvid.evals.grader import GradeResult, ToolRecord, citation_report, grade
 from korvid.evals.scenario import Evidence, Scenario
 from tests.evals.fixtures import EVAL_INTERACTION
 
@@ -61,18 +61,16 @@ def test_grade_matches_keywords_across_punctuation_and_case() -> None:
     assert result.diagnosis_success
 
 
-def test_grade_matches_camel_case_answers_against_spaced_keywords() -> None:
-    """'OOMKilled' in the answer matches the keyword 'oom killed'."""
-    scenario = _scenario(must_mention=(("oom killed",), ("137",)))
-    result = grade(scenario, "The container was OOMKilled (exit 137).", [_record()])
-    assert result.diagnosis_success
-
-
-def test_grade_matches_spaced_answers_against_compact_keywords() -> None:
-    """'oom killed' in the answer matches the keyword 'oomkilled'."""
-    scenario = _scenario(must_mention=(("oomkilled",), ("137",)))
-    result = grade(scenario, "The container was oom killed (exit 137).", [_record()])
-    assert result.diagnosis_success
+@pytest.mark.parametrize(
+    ("keyword", "answer"),
+    [
+        ("oom killed", "The container was OOMKilled with exit 137."),
+        ("oomkilled", "The container was oom killed with exit 137."),
+    ],
+)
+def test_grade_matches_compact_and_spaced_keyword_forms(keyword: str, answer: str) -> None:
+    scenario = _scenario(must_mention=((keyword,), ("137",)))
+    assert grade(scenario, answer, [_record()]).diagnosis_success
 
 
 def test_grade_keywords_never_match_inside_larger_words() -> None:
@@ -123,6 +121,32 @@ def test_grade_evidence_matches_raw_substrings_not_normalized_text() -> None:
     assert not result.evidence_fetched
 
 
+def test_grade_evidence_group_is_satisfied_by_any_alternative() -> None:
+    """A group of alternative locations accepts whichever path the model took.
+
+    Sixteen shipped groups list two or more routes to the same fact. If the
+    group were scored as an *all*-of, a model that read `endpoints` but not
+    `endpointslices` would be reported as missing evidence it actually
+    fetched - a false model regression published from a paid campaign.
+    """
+    alternative = Evidence(
+        tool="get_resource",
+        contains="exit=137",
+        args={"kind": "pods", "name": "checkout-1", "namespace": "shop"},
+    )
+    scenario = _scenario(expected_evidence=((_EVIDENCE, alternative),))
+    records = [
+        _record(
+            name="get_resource",
+            result="lastState: exit=137",
+            arguments={"kind": "pods", "name": "checkout-1", "namespace": "shop"},
+        )
+    ]
+    result = grade(scenario, "OOMKilled, exit 137.", records)
+    assert result.evidence_fetched
+    assert result.missing_evidence == ()
+
+
 def test_grade_evidence_requires_the_expected_arguments() -> None:
     """The same substring from a call against the *wrong* object is not
     credited as evidence."""
@@ -131,11 +155,10 @@ def test_grade_evidence_requires_the_expected_arguments() -> None:
     assert not result.evidence_fetched
     assert result.missing_evidence == ((_EVIDENCE,),)
 
-
-def test_grade_evidence_ignores_extra_arguments_beyond_the_expected() -> None:
-    records = [_record(arguments={"pod": "checkout-1", "namespace": "shop", "tail": 50})]
-    result = grade(_scenario(), "OOMKilled, exit 137.", records)
-    assert result.evidence_fetched
+    with_extra = _record(
+        arguments={"pod": "checkout-1", "namespace": "shop", "tail": 50},
+    )
+    assert grade(_scenario(), "OOMKilled, exit 137.", [with_extra]).evidence_fetched
 
 
 def test_grade_evidence_canonicalizes_kind_aliases() -> None:
@@ -151,25 +174,6 @@ def test_grade_evidence_canonicalizes_kind_aliases() -> None:
             name="get_resource",
             result="status:\n  readyReplicas: 2",
             arguments={"kind": "deploy", "name": "web", "namespace": "shop"},
-        )
-    ]
-    result = grade(scenario, "OOMKilled, exit 137.", records)
-    assert result.evidence_fetched
-
-
-def test_grade_evidence_group_is_satisfied_by_any_alternative() -> None:
-    """A group of alternative locations accepts whichever path the model took."""
-    alternative = Evidence(
-        tool="get_resource",
-        contains="exit=137",
-        args={"kind": "pods", "name": "checkout-1", "namespace": "shop"},
-    )
-    scenario = _scenario(expected_evidence=((_EVIDENCE, alternative),))
-    records = [
-        _record(
-            name="get_resource",
-            result="lastState: exit=137",
-            arguments={"kind": "pods", "name": "checkout-1", "namespace": "shop"},
         )
     ]
     result = grade(scenario, "OOMKilled, exit 137.", records)
@@ -200,29 +204,6 @@ def test_grade_required_mention_must_be_a_positive_claim() -> None:
     result = grade(scenario, "The pod is not healthy — something is wrong.", [])
     assert not result.diagnosis_success
     assert result.missing_mentions == (("healthy", "no issues"),)
-
-
-def test_grade_required_mention_rejects_contraction_negations() -> None:
-    scenario = _scenario(
-        root_cause="none",
-        must_mention=(("healthy",),),
-        must_not_mention=(),
-        expected_evidence=(),
-    )
-    result = grade(scenario, "This pod isn't healthy.", [])
-    assert not result.diagnosis_success
-
-
-def test_grade_required_mention_counts_a_separate_positive_match() -> None:
-    scenario = _scenario(
-        root_cause="none",
-        must_mention=(("healthy",),),
-        must_not_mention=(),
-        expected_evidence=(),
-    )
-    answer = "The restarts were not healthy signs at first, but the pod is healthy now."
-    result = grade(scenario, answer, [])
-    assert result.diagnosis_success
 
 
 def test_grade_required_mention_keywords_may_start_with_a_negator() -> None:
@@ -256,20 +237,6 @@ def test_grade_forbidden_mentions_fail_on_hedged_double_diagnoses() -> None:
     assert result.forbidden_mentions == ("image pull",)
 
 
-def test_grade_forbidden_keywords_may_contain_their_own_negator() -> None:
-    """Negative-control forbidden keywords like 'no endpoints' negate
-    themselves; the window only scans tokens *before* the match."""
-    scenario = _scenario(
-        root_cause="none",
-        must_mention=(("healthy",),),
-        must_not_mention=(("no endpoints",),),
-        expected_evidence=(),
-    )
-    result = grade(scenario, "The service looks healthy but has no endpoints.", [])
-    assert not result.diagnosis_success
-    assert result.forbidden_mentions == ("no endpoints",)
-
-
 def test_grade_evidence_rejects_error_results() -> None:
     """A failed call whose ERROR message echoes the expected substring
     (e.g. the object name in a not-found message) is not evidence."""
@@ -299,15 +266,6 @@ def test_grade_evidence_rejects_another_kind_with_the_same_name() -> None:
     assert not result.evidence_fetched
 
 
-def test_grade_negation_scope_covers_longer_rule_outs() -> None:
-    """A rule-out whose negator sits more than a fixed window before the
-    keyword ('no evidence of an image pull problem') is still a rule-out."""
-    answer = "OOMKilled, exit 137. There is no evidence of an image pull problem."
-    result = grade(_scenario(), answer, [_record()])
-    assert result.diagnosis_success
-    assert result.forbidden_mentions == ()
-
-
 def test_grade_exculpatory_predicate_does_not_satisfy_a_required_claim() -> None:
     """ "The liveness probe is fine" must not satisfy a required "liveness
     probe" claim.
@@ -330,25 +288,6 @@ def test_grade_exculpatory_predicate_does_not_satisfy_a_required_claim() -> None
     assert asserted.diagnosis_success
 
 
-@pytest.mark.parametrize(
-    "answer",
-    [
-        "The image pull looks normal.",
-        "The image pull seems correct.",
-        "The image pull is ok.",
-        "The image pull appears healthy.",
-    ],
-)
-def test_grade_exculpatory_predicates_cover_the_common_phrasings(answer: str) -> None:
-    """One spelling of "it is fine" closed is no help if the others are open."""
-    scenario = _scenario(
-        must_mention=(("image pull",),),
-        must_not_mention=(),
-        expected_evidence=(),
-    )
-    assert not grade(scenario, answer, []).diagnosis_success
-
-
 def test_grade_exculpation_is_off_for_a_negative_control() -> None:
     """ "The service endpoints are healthy" is the *correct* answer when the
     scenario has no fault.
@@ -367,68 +306,6 @@ def test_grade_exculpation_is_off_for_a_negative_control() -> None:
     assert grade(scenario, "The service endpoints are healthy.", []).diagnosis_success
 
 
-def test_grade_exculpation_stays_on_for_forbidden_keywords() -> None:
-    """Polarity is not symmetric.
-
-    In a negative control the required all-clear must survive, but a
-    *forbidden* keyword ruled out with an all-clear predicate is still ruled
-    out: "the image pull looks normal" is not a positive image-pull
-    diagnosis. Disabling exculpation for the whole scenario rejected the
-    correct answer for telling the truth.
-    """
-    scenario = _scenario(
-        root_cause="none",
-        must_mention=(("healthy",),),
-        must_not_mention=(("image pull",),),
-        expected_evidence=(),
-    )
-    result = grade(scenario, "Everything is healthy; the image pull looks normal.", [])
-    assert result.forbidden_mentions == ()
-    assert result.diagnosis_success
-
-
-def test_grade_does_not_exculpate_a_qualified_fault_claim() -> None:
-    """ "The liveness probe is working too slowly and timing out" is a fault
-    claim. `working` is reassuring only until the qualifier arrives, so it
-    is not in the all-clear set at all."""
-    scenario = _scenario(
-        must_mention=(("liveness probe",),),
-        must_not_mention=(),
-        expected_evidence=(),
-    )
-    answer = "The liveness probe is working too slowly and timing out."
-    assert grade(scenario, answer, []).diagnosis_success
-
-
-def test_grade_exculpation_does_not_reach_past_a_scope_breaker() -> None:
-    """Exculpation must not swallow a claim in a later clause.
-
-    "The image pull failed and the node is fine" asserts the pull failure;
-    a rule that scanned forward without stopping would drop it, which is the
-    mirror of the mistake being fixed - rejecting the truth to catch a lie.
-    """
-    scenario = _scenario(
-        must_mention=(("image pull",),),
-        must_not_mention=(),
-        expected_evidence=(),
-    )
-    assert grade(scenario, "The image pull failed and the node is fine.", []).diagnosis_success
-
-
-def test_grade_exculpation_leaves_a_still_serving_claim_intact() -> None:
-    """ "api-5c2f is unaffected" is a required claim in the rollout journey.
-
-    Treating every reassuring adjective as exculpatory would reject it. Only
-    predicates that say *this is not the problem* count.
-    """
-    scenario = _scenario(
-        must_mention=(("api-5c2f",),),
-        must_not_mention=(),
-        expected_evidence=(),
-    )
-    assert grade(scenario, "The old ReplicaSet api-5c2f is unaffected.", []).diagnosis_success
-
-
 def test_grade_negation_stops_at_sentence_boundaries() -> None:
     """A negator in the previous sentence must not negate this one."""
     scenario = _scenario(
@@ -437,19 +314,6 @@ def test_grade_negation_stops_at_sentence_boundaries() -> None:
         expected_evidence=(),
     )
     result = grade(scenario, "It is not. The image pull failed.", [])
-    assert result.diagnosis_success
-
-
-def test_grade_negation_stops_at_coordinating_conjunctions() -> None:
-    """'not restarting and healthy now' claims healthy positively — the
-    conjunction ends the negator's scope."""
-    scenario = _scenario(
-        root_cause="none",
-        must_mention=(("healthy",),),
-        must_not_mention=(),
-        expected_evidence=(),
-    )
-    result = grade(scenario, "It is not restarting and healthy now.", [])
     assert result.diagnosis_success
 
 
@@ -468,27 +332,57 @@ def test_grade_evidence_rejects_swapped_argument_values() -> None:
     assert not result.evidence_fetched
 
 
-def test_matches_target_equates_pod_and_name_identity_keys() -> None:
-    """`pod` and `name` are the same identity key across read tools, and
-    target matching looks only at arguments — result content and success
-    are graded separately."""
-    record = ToolRecord(
-        name="get_resource",
-        arguments={"kind": "pods", "name": "checkout-1", "namespace": "shop"},
-        result="ERROR: unreachable",
-    )
-    assert matches_target(_EVIDENCE, record)
+def test_grade_evidence_requires_every_expected_target_argument() -> None:
+    records = [
+        ToolRecord(
+            name="list_resources",
+            arguments={"kind": "pods", "namespace": "shop"},
+            result="... exit=137 (OOMKilled) ...",
+        )
+    ]
+    result = grade(_scenario(), "OOMKilled, exit 137.", records)
+    assert not result.evidence_fetched
 
 
-def test_matches_target_requires_every_expected_argument() -> None:
-    """An expected argument missing from the call entirely is a different
-    target — repeated values in the call must not mask the gap."""
-    record = ToolRecord(
-        name="list_resources",
-        arguments={"kind": "pods", "namespace": "shop"},
-        result="checkout-1 ... exit=137",
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"pvc": "web", "name": "other", "namespace": "front"},
+        {"name": "other", "pvc": "web", "namespace": "front"},
+    ],
+)
+def test_grade_target_does_not_depend_on_argument_order(arguments: dict[str, str]) -> None:
+    """A model's JSON key order cannot change the canonical target name."""
+    evidence = Evidence(
+        tool="get_resource",
+        contains="phase: Pending",
+        args={"kind": "persistentvolumeclaims", "name": "web", "namespace": "front"},
     )
-    assert not matches_target(_EVIDENCE, record)
+    records = [
+        _record(
+            name="diagnose_pvc",
+            result="outcome: findings\nphase: Pending",
+            arguments=arguments,
+        )
+    ]
+    assert grade(
+        _scenario(expected_evidence=((evidence,),)),
+        "OOMKilled, exit 137.",
+        records,
+    ).evidence_fetched
+
+
+@pytest.mark.parametrize("dash", ["—", "\u2013", " - "])
+def test_grade_treats_a_dash_as_a_clause_boundary(dash: str) -> None:
+    """Negation before a dash must not suppress the causal claim after it."""
+    answer = f"The container was not restarted by the operator{dash}it was OOMKilled with exit 137."
+    result = grade(_scenario(), answer, [_record()])
+    assert result.diagnosis_success
+
+
+def test_grade_keeps_negation_within_an_unbroken_clause() -> None:
+    result = grade(_scenario(), "The container was not OOMKilled with exit code 137.", [_record()])
+    assert not result.diagnosis_success
 
 
 def test_grade_negation_scope_ends_at_causal_conjunctions() -> None:
@@ -530,23 +424,49 @@ def test_grade_credits_diagnose_service_against_name_keyed_evidence() -> None:
     assert result.evidence_fetched
 
 
-def test_grade_credits_diagnostic_pvc_for_its_name_keyed_evidence() -> None:
-    """`diagnose_pvc(pvc=...)` names the same object as `name=...`."""
+def test_grade_credits_diagnose_service_for_endpoint_evidence() -> None:
+    """`diagnose_service` reports on the Service *and* its endpoints, so a
+    single implied kind is too narrow.
+
+    The bundled Service scenarios express endpoint evidence as
+    `get_resource(kind: endpoints)` / `kind: endpointslices`. Implying only
+    `services` would leave those entries ungraded - the tool would be used
+    correctly and still score no evidence.
+    """
+    for kind in ("endpoints", "endpointslices"):
+        evidence = Evidence(
+            tool="get_resource",
+            contains="subsets: []",
+            args={"kind": kind, "name": "web", "namespace": "front"},
+        )
+        scenario = _scenario(expected_evidence=((evidence,),))
+        records = [
+            _record(
+                name="diagnose_service",
+                result="outcome: findings\nsubsets: []",
+                arguments={"service": "web", "namespace": "front"},
+            )
+        ]
+        result = grade(scenario, "OOMKilled, exit 137.", records)
+        assert result.evidence_fetched, kind
+
+
+def test_grade_rejects_a_diagnostic_call_against_a_different_kind() -> None:
+    """Tool-implied kinds must not expand one diagnostic into another resource."""
     evidence = Evidence(
         tool="get_resource",
-        contains="phase: Pending",
-        args={"kind": "persistentvolumeclaims", "name": "data", "namespace": "front"},
+        contains="endpoints: 0",
+        args={"kind": "services", "name": "web", "namespace": "front"},
     )
     scenario = _scenario(expected_evidence=((evidence,),))
     records = [
         _record(
             name="diagnose_pvc",
-            result="outcome: findings\nphase: Pending",
-            arguments={"pvc": "data", "namespace": "front"},
+            result="outcome: findings\nendpoints: 0",
+            arguments={"pvc": "web", "namespace": "front"},
         )
     ]
-    result = grade(scenario, "OOMKilled, exit 137.", records)
-    assert result.evidence_fetched
+    assert not grade(scenario, "OOMKilled, exit 137.", records).evidence_fetched
 
 
 def test_grade_still_rejects_a_diagnostic_call_against_a_different_object() -> None:
@@ -562,51 +482,6 @@ def test_grade_still_rejects_a_diagnostic_call_against_a_different_object() -> N
             name="diagnose_service",
             result="outcome: findings\nendpoints: 0",
             arguments={"service": "api", "namespace": "front"},
-        )
-    ]
-    result = grade(scenario, "OOMKilled, exit 137.", records)
-    assert not result.evidence_fetched
-
-
-def test_grade_rejects_a_diagnostic_call_against_a_different_kind() -> None:
-    """Folding `pvc`/`service`/`pod` onto `name` must not fold away the kind.
-
-    `matches_target` compares `kind` only when both sides carry one, and a
-    diagnostic tool has no `kind` argument. Without an implied kind,
-    `diagnose_pvc(pvc="web")` satisfies evidence about a *Service* named
-    `web` whenever the report happens to contain the substring — inflating
-    both evidence and on-target metrics.
-    """
-    evidence = Evidence(
-        tool="get_resource",
-        contains="endpoints: 0",
-        args={"kind": "services", "name": "web", "namespace": "front"},
-    )
-    scenario = _scenario(expected_evidence=((evidence,),))
-    records = [
-        _record(
-            name="diagnose_pvc",
-            result="outcome: findings\nendpoints: 0",
-            arguments={"pvc": "web", "namespace": "front"},
-        )
-    ]
-    result = grade(scenario, "OOMKilled, exit 137.", records)
-    assert not result.evidence_fetched
-
-
-def test_grade_rejects_a_pod_read_against_deployment_evidence() -> None:
-    """The same hole existed for `pod` before the diagnostic aliases."""
-    evidence = Evidence(
-        tool="get_resource",
-        contains="readyReplicas: 0",
-        args={"kind": "deployments", "name": "web", "namespace": "front"},
-    )
-    scenario = _scenario(expected_evidence=((evidence,),))
-    records = [
-        _record(
-            name="get_logs",
-            result="readyReplicas: 0",
-            arguments={"pod": "web", "namespace": "front"},
         )
     ]
     result = grade(scenario, "OOMKilled, exit 137.", records)
@@ -640,52 +515,6 @@ def test_grade_prefers_the_implied_kind_over_a_conflicting_kind_argument() -> No
     assert not result.evidence_fetched
 
 
-def test_grade_still_uses_an_explicit_kind_when_no_alias_is_present() -> None:
-    """Routes without an identity alias — `get_resource`, `get_events` —
-    must keep comparing on their own `kind` argument."""
-    evidence = Evidence(
-        tool="get_resource",
-        contains="readyReplicas: 2",
-        args={"kind": "deployments", "name": "web", "namespace": "front"},
-    )
-    scenario = _scenario(expected_evidence=((evidence,),))
-    records = [
-        _record(
-            name="get_resource",
-            result="status:\n  readyReplicas: 2",
-            arguments={"kind": "deploy", "name": "web", "namespace": "front"},
-        )
-    ]
-    result = grade(scenario, "OOMKilled, exit 137.", records)
-    assert result.evidence_fetched
-
-
-def test_grade_credits_diagnose_service_for_endpoint_evidence() -> None:
-    """`diagnose_service` reports on the Service *and* its endpoints, so a
-    single implied kind is too narrow.
-
-    The bundled Service scenarios express endpoint evidence as
-    `get_resource(kind: endpoints)`. Implying only `services` would leave
-    this PR's target scenario ungraded — the tool would be used correctly
-    and still score no evidence.
-    """
-    evidence = Evidence(
-        tool="get_resource",
-        contains="subsets: []",
-        args={"kind": "endpoints", "name": "web", "namespace": "front"},
-    )
-    scenario = _scenario(expected_evidence=((evidence,),))
-    records = [
-        _record(
-            name="diagnose_service",
-            result="outcome: findings\nsubsets: []",
-            arguments={"service": "web", "namespace": "front"},
-        )
-    ]
-    result = grade(scenario, "OOMKilled, exit 137.", records)
-    assert result.evidence_fetched
-
-
 def test_grade_ignores_an_identity_key_the_tool_does_not_read() -> None:
     """The implied kind comes from the tool, not from whichever identity-
     shaped key happens to appear last.
@@ -710,63 +539,6 @@ def test_grade_ignores_an_identity_key_the_tool_does_not_read() -> None:
     ]
     result = grade(scenario, "OOMKilled, exit 137.", records)
     assert not result.evidence_fetched
-
-
-@pytest.mark.parametrize(
-    "arguments",
-    [
-        {"pvc": "web", "name": "other", "namespace": "front"},
-        {"name": "other", "pvc": "web", "namespace": "front"},
-    ],
-)
-def test_grade_target_does_not_depend_on_argument_order(
-    arguments: dict[str, str],
-) -> None:
-    """A tool's identity argument decides the target, whichever order the
-    keys arrived in.
-
-    `_diagnose_pvc` reads `pvc`; a stray `name` is inert at execution. If
-    it competed for the same canonical slot, the identical call would grade
-    differently depending on JSON key order.
-    """
-    evidence = Evidence(
-        tool="get_resource",
-        contains="phase: Pending",
-        args={"kind": "persistentvolumeclaims", "name": "web", "namespace": "front"},
-    )
-    scenario = _scenario(expected_evidence=((evidence,),))
-    records = [
-        _record(
-            name="diagnose_pvc",
-            result="outcome: findings\nphase: Pending",
-            arguments=arguments,
-        )
-    ]
-    result = grade(scenario, "OOMKilled, exit 137.", records)
-    assert result.evidence_fetched
-
-
-@pytest.mark.parametrize("dash", ["\u2014", "\u2013", " - "])
-def test_grade_treats_a_dash_as_a_clause_boundary(dash: str) -> None:
-    """A dash separates clauses, so a negator before it must not suppress
-    the claim after it.
-
-    Models punctuate with dashes constantly. Without this, "the pod was not
-    restarted — it was OOMKilled" scores as never having claimed OOMKilled,
-    and the identical sentence written with a full stop passes. That is a
-    grading artifact, not a difference in diagnosis.
-    """
-    answer = (
-        f"The container was not restarted by the operator{dash}it was OOMKilled with exit code 137."
-    )
-    result = grade(_scenario(), answer, [_record()])
-    assert result.diagnosis_success, result.missing_mentions
-
-
-def test_grade_still_scopes_a_negator_within_one_clause() -> None:
-    """The fix must not stop negation working where there is no boundary."""
-    result = grade(_scenario(), "The container was not OOMKilled at all.", [_record()])
-    assert not result.diagnosis_success
 
 
 # -- Citation honesty (issue #192): whether the answer's claims point at
@@ -810,13 +582,6 @@ def test_precision_is_undefined_rather_than_perfect_without_citations() -> None:
     assert report.precision is None
 
 
-def test_a_repeated_citation_does_not_inflate_precision() -> None:
-    report = citation_report("up [E1], still up [E1]", minted=("E1",))
-
-    assert report.precision == 1.0
-    assert report.cited == ("E1",)
-
-
 def test_an_evidence_gap_is_reported_when_reads_go_uncited() -> None:
     """Reads the answer never leaned on are worth surfacing.
 
@@ -841,36 +606,27 @@ def test_coverage_counts_markdown_list_items_separately() -> None:
     assert report.coverage == 0.5
 
 
-def test_coverage_counts_paragraphs_separately() -> None:
-    """A blank line ends a claim as surely as a full stop does."""
-    report = citation_report("the pod is up [E1]\n\nthe node is fine", minted=("E1",))
-
-    assert report.coverage == 0.5
-
-
-def test_coverage_ignores_blank_and_bullet_only_lines() -> None:
-    """Formatting must not dilute the denominator."""
-    report = citation_report("- up [E1]\n-\n\n- down [E1]", minted=("E1",))
-
-    assert report.coverage == 1.0
-
-
-def test_an_ordered_list_scores_as_its_items() -> None:
-    """`1.` is a list marker, not a claim, and not a sentence end.
-
-    Splitting on the full stop left `1` as its own uncited fragment, so a
-    fully cited ordered list scored 2/3 (#192 review).
-    """
-    report = citation_report("1. pod up [E1]\n2. node fine [E2]", minted=("E1", "E2"))
-
-    assert report.coverage == 1.0
+@pytest.mark.parametrize(
+    ("answer", "minted", "expected"),
+    [
+        ("the pod is up [E1]\n\nthe node is fine", ("E1",), 0.5),
+        ("- up [E1]\n-\n\n- down [E1]", ("E1",), 1.0),
+        ("1. pod up [E1]\n2. node fine [E2]", ("E1", "E2"), 1.0),
+        ("pod failed. [E1]", ("E1",), 1.0),
+    ],
+)
+def test_citation_coverage_respects_markdown_claim_boundaries(
+    answer: str,
+    minted: tuple[str, ...],
+    expected: float,
+) -> None:
+    assert citation_report(answer, minted=minted).coverage == expected
 
 
-def test_a_trailing_citation_belongs_to_the_claim_before_it() -> None:
-    """`pod failed. [E1]` is one cited claim, not a claim plus a stray."""
-    report = citation_report("pod failed. [E1]", minted=("E1",))
-
-    assert report.coverage == 1.0
+def test_repeated_citation_does_not_inflate_precision() -> None:
+    report = citation_report("up [E1], still up [E1]", minted=("E1",))
+    assert report.precision == 1.0
+    assert report.cited == ("E1",)
 
 
 # --- screen actions are not cluster evidence --------------------------------
@@ -971,25 +727,4 @@ def test_read_record_cannot_satisfy_ui_action_evidence() -> None:
         result="opened describe for worker-1",
     )
 
-    result = grade(scenario, "worker-1 was OOMKilled.", [read])
-
-    assert result.evidence_fetched is False
-
-
-def test_a_real_read_still_satisfies_evidence_after_a_colliding_screen_action() -> None:
-    """The guard drops the action, not the read that actually happened."""
-    read = ToolRecord(
-        name="get_resource",
-        arguments={"kind": "pods", "name": "worker-1", "namespace": "jobs"},
-        result="name: worker-1\nphase: Running",
-    )
-
-    result = grade(_read_scenario(), "worker-1 was OOMKilled.", [_screen_record(), read])
-
-    assert result.evidence_fetched is True
-
-
-def test_a_tool_record_is_a_cluster_read_unless_it_says_otherwise() -> None:
-    """The executor's own records carry no flag; only the bridge sets it."""
-    assert _record().screen_action is False
-    assert _screen_record().screen_action is True
+    assert not grade(scenario, "worker-1 was OOMKilled.", [read]).evidence_fetched

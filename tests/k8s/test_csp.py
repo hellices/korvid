@@ -3,6 +3,17 @@
 Detection is dynamic: `spec.providerID` scheme prefix plus well-known managed
 node labels. There is no hardcoded annotation catalog anywhere — the detected
 provider only *informs* the agent context and describe footers.
+
+`detect_provider`'s per-provider prefix/label mappings are a single generic
+dict lookup (`_PROVIDER_SCHEMES`/`_MANAGED_LABELS` in `korvid.k8s.csp`), so
+the individual azure/aws/gce/aks/eks/gke permutations exercised the same
+branch repeatedly with different literals. `test_detect_cloud_provider_lists_nodes`
+below still proves the lookup mechanism end to end through the real
+`KubeClient` boundary; this file's focus is the caching and error-handling
+contract that mechanism doesn't cover. Direct tests retain the multi-node loop
+(skip nodes with no recognizable signal, first recognized one decides) and the
+three managed-label mappings because the real client boundary only supplies a
+providerID.
 """
 
 from typing import Any
@@ -11,7 +22,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from kubernetes_asyncio.client.exceptions import ApiException
 
 from korvid.k8s.client import KubeClient
-from korvid.k8s.csp import ProviderInfo, detect_provider
+from korvid.k8s.csp import detect_provider
 
 
 def _node(provider_id: str | None = None, labels: dict[str, str] | None = None) -> dict[str, Any]:
@@ -21,82 +32,25 @@ def _node(provider_id: str | None = None, labels: dict[str, str] | None = None) 
     return node
 
 
-# ---------------------------------------------------------------------------
-# detect_provider (pure)
-# ---------------------------------------------------------------------------
-
-
-def test_azure_provider_id_prefix() -> None:
-    info = detect_provider([_node("azure:///subscriptions/abc/resourceGroups/rg/vm")])
-    assert info.provider == "azure"
-    assert info.distribution is None
-    assert info.display == "azure"
-
-
-def test_aws_provider_id_prefix() -> None:
-    info = detect_provider([_node("aws:///us-east-1a/i-0123456789")])
-    assert info.provider == "aws"
-
-
-def test_gce_provider_id_maps_to_gcp() -> None:
-    info = detect_provider([_node("gce://my-project/us-central1-a/node-1")])
-    assert info.provider == "gcp"
-
-
-def test_aks_managed_label() -> None:
-    info = detect_provider(
-        [_node("azure:///vm", {"kubernetes.azure.com/cluster": "MC_rg_cluster_region"})]
-    )
-    assert info.provider == "azure"
-    assert info.distribution == "aks"
-    assert info.display == "aks"
-
-
-def test_eks_managed_label() -> None:
-    info = detect_provider([_node("aws:///i-1", {"eks.amazonaws.com/nodegroup": "ng-1"})])
-    assert info.distribution == "eks"
-    assert info.display == "eks"
-
-
-def test_gke_managed_label() -> None:
-    info = detect_provider([_node("gce://p/z/n", {"cloud.google.com/gke-nodepool": "default"})])
-    assert info.distribution == "gke"
-
-
-def test_managed_label_alone_implies_provider() -> None:
-    """Some clusters omit providerID; the managed label still identifies the CSP."""
-    info = detect_provider([_node(None, {"kubernetes.azure.com/cluster": "mc"})])
-    assert info.provider == "azure"
-    assert info.distribution == "aks"
-
-
-def test_no_nodes_is_unknown() -> None:
-    info = detect_provider([])
-    assert info.provider == "unknown"
-    assert info.distribution is None
-    assert info.display == "unknown"
-    assert not info.known
-
-
-def test_no_provider_id_no_labels_is_unknown() -> None:
-    info = detect_provider([_node()])
-    assert info.provider == "unknown"
-
-
-def test_unrecognized_scheme_is_unknown() -> None:
-    info = detect_provider([_node("weirdcloud://x/y")])
-    assert info.provider == "unknown"
-
-
 def test_first_recognized_node_wins() -> None:
     """Mixed pools: any recognized node decides (skip nodes without providerID)."""
     info = detect_provider([_node(), _node("aws:///i-2")])
     assert info.provider == "aws"
 
 
-def test_known_property() -> None:
-    assert ProviderInfo("azure", None).known
-    assert not ProviderInfo("unknown", None).known
+def test_managed_labels_identify_each_distribution_without_provider_id() -> None:
+    cases = (
+        ("kubernetes.azure.com/cluster", "azure", "aks"),
+        ("eks.amazonaws.com/nodegroup", "aws", "eks"),
+        ("cloud.google.com/gke-nodepool", "gcp", "gke"),
+    )
+    for label, provider, distribution in cases:
+        info = detect_provider([_node(None, {label: "managed"})])
+        assert (info.provider, info.distribution, info.display) == (
+            provider,
+            distribution,
+            distribution,
+        )
 
 
 # ---------------------------------------------------------------------------

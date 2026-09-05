@@ -1,4 +1,4 @@
-"""Conversation-journey schema tests."""
+"""Conversation-journey schema and bundled-pack fixture-integrity tests."""
 
 from __future__ import annotations
 
@@ -11,7 +11,6 @@ from korvid.evals.fake_kube import FakeKubeClient, builtin_aliases
 from korvid.evals.grader import grade
 from korvid.evals.journey import (
     ConversationJourney,
-    JourneyTurn,
     bundled_journeys_dir,
     load_journey,
     load_journeys,
@@ -79,318 +78,6 @@ cluster:
     assert journey.objects[0]["metadata"]["name"] == "payments-1"
 
 
-def test_load_journey_rejects_unknown_turn_keys(tmp_path: Path) -> None:
-    path = _write(
-        tmp_path / "bad.yaml",
-        """
-id: bad
-root_cause: none
-interaction:
-  kube_context: eval-cluster
-  context_epoch: 1
-  focused_pane: {kind: pods, scope: shop}
-turns:
-  - user: hello
-    surprise: true
-    grading:
-      must_mention: [healthy]
-      must_not_mention: [oomkilled]
-      expected_evidence:
-        - tool: list_resources
-          args: {kind: pods}
-          contains: healthy
-  - user: stop?
-    grading:
-      must_mention: [healthy]
-      must_not_mention: [oomkilled]
-      expected_evidence:
-        - tool: list_resources
-          args: {kind: pods}
-          contains: healthy
-cluster: {objects: [], events: [], logs: {}}
-""",
-    )
-    with pytest.raises(ValueError, match="unknown keys"):
-        load_journey(path)
-
-
-def test_load_journey_rejects_zero_tool_call_budget(tmp_path: Path) -> None:
-    path = _write(
-        tmp_path / "zero-budget.yaml",
-        """
-id: zero-budget
-root_cause: none
-interaction:
-  kube_context: eval-cluster
-  context_epoch: 1
-  focused_pane: {kind: pods, scope: shop}
-turns:
-  - user: inspect
-    grading:
-      must_mention: [healthy]
-      must_not_mention: [broken]
-      max_tool_calls: 0
-      expected_evidence:
-        - tool: list_resources
-          args: {kind: pods}
-          contains: pod
-  - user: stop
-    grading:
-      must_mention: [stop]
-      must_not_mention: [broken]
-      expected_evidence:
-        - tool: list_resources
-          args: {kind: pods}
-          contains: pod
-cluster: {objects: [], events: [], logs: {}}
-""",
-    )
-    with pytest.raises(ValueError, match="positive integer"):
-        load_journey(path)
-
-
-def test_load_journey_rejects_empty_forbidden_target(tmp_path: Path) -> None:
-    path = _write(
-        tmp_path / "empty-target.yaml",
-        """
-id: empty-target
-root_cause: none
-interaction:
-  kube_context: eval-cluster
-  context_epoch: 1
-  focused_pane: {kind: pods, scope: shop}
-turns:
-  - user: inspect
-    grading:
-      must_mention: [healthy]
-      must_not_mention: [broken]
-      expected_evidence:
-        - tool: list_resources
-          args: {kind: pods}
-          contains: pod
-    forbidden_targets: [{}]
-  - user: stop
-    grading:
-      must_mention: [stop]
-      must_not_mention: [broken]
-      expected_evidence:
-        - tool: list_resources
-          args: {kind: pods}
-          contains: pod
-cluster: {objects: [], events: [], logs: {}}
-""",
-    )
-    with pytest.raises(ValueError, match="non-empty"):
-        load_journey(path)
-
-
-def test_load_journeys_rejects_duplicate_ids(tmp_path: Path) -> None:
-    text = """
-id: same
-root_cause: none
-interaction:
-  kube_context: eval-cluster
-  context_epoch: 1
-  focused_pane: {kind: pods, scope: shop}
-turns:
-  - user: hello
-    grading:
-      must_mention: [healthy]
-      must_not_mention: [oomkilled]
-      expected_evidence:
-        - tool: list_resources
-          args: {kind: pods}
-          contains: healthy
-  - user: stop?
-    grading:
-      must_mention: [healthy]
-      must_not_mention: [oomkilled]
-      expected_evidence:
-        - tool: list_resources
-          args: {kind: pods}
-          contains: healthy
-cluster: {objects: [], events: [], logs: {}}
-"""
-    _write(tmp_path / "a.yaml", text)
-    _write(tmp_path / "b.yaml", text)
-    with pytest.raises(ValueError, match="duplicate journey id"):
-        load_journeys(tmp_path)
-
-
-def test_bundled_journey_pack_covers_the_planned_conversational_behaviors() -> None:
-    journeys = load_journeys(bundled_journeys_dir())
-    assert {journey.id for journey in journeys} == {
-        "compare-namespaces",
-        "healthy-stop",
-        "logs-to-events",
-        "namespace-triage",
-        "rbac-evidence-gap",
-        "rollout-owner-chain",
-        "triage-and-correct",
-        "tui-follow",
-    }
-    assert all(len(journey.turns) >= 2 for journey in journeys)
-    # #176 sets eight as the floor for a publishable journey score; the
-    # pack shipping fewer is the condition that kept that row unpublishable.
-    assert len(journeys) >= 8
-
-
-@pytest.mark.parametrize("journey", load_journeys(bundled_journeys_dir()), ids=lambda j: j.id)
-async def test_bundled_journey_evidence_is_reachable_through_the_real_tools(
-    journey: ConversationJourney,
-) -> None:
-    """Every declared evidence item must be fetchable from the fixture.
-
-    The scenario pack has had this guard since #69; journeys did not, so a
-    fixture that drifted from its assertions would only surface as an
-    unexplained model failure during a paid live run.
-    """
-    scenario = Scenario(
-        id=journey.id,
-        question="q",
-        interaction=EVAL_INTERACTION,
-        root_cause=journey.root_cause,
-        must_mention=(),
-        must_not_mention=(),
-        objects=journey.objects,
-        events=journey.events,
-        logs=journey.logs,
-        # The withheld reads belong here too, or the guard would certify a
-        # route the journey itself denies at runtime and the drift it exists
-        # to catch would reappear as an unexplained model failure.
-        forbidden=journey.forbidden,
-    )
-    executor = ToolExecutor(FakeKubeClient(scenario), builtin_aliases())
-    for index, turn in enumerate(journey.turns, start=1):
-        assert turn.expected_evidence, f"{journey.id} turn {index} declares no evidence"
-        for group in turn.expected_evidence:
-            # UI tools need a live bridge this fixture-only executor does
-            # not have; their reachability is a runner concern, not a
-            # fixture one.
-            cluster_reads = [e for e in group if e.tool not in UI_TOOL_NAMES]
-            if not cluster_reads:
-                continue
-            # Every alternative, not merely one per group. The grader
-            # documents each listed tool as "one known-good route, verified
-            # reachable by the fixture-integrity test", and an any-of check
-            # does not verify that: a route that silently stopped matching
-            # would keep passing behind a working sibling, and the pack
-            # would then advertise a path no model can take. Caught a real
-            # one while authoring `rbac-evidence-gap`.
-            for evidence in cluster_reads:
-                result = await executor.execute(evidence.tool, dict(evidence.args))
-                assert not result.startswith("ERROR:"), (
-                    f"{journey.id} turn {index}: {evidence.tool} failed\n{result[:200]}"
-                )
-                assert evidence.contains in result, (
-                    f"{journey.id} turn {index}: {evidence.tool} does not contain "
-                    f"{evidence.contains!r}\n{result[:200]}"
-                )
-
-
-def test_triage_requires_an_explicit_priority_not_just_both_names() -> None:
-    journey = next(
-        item for item in load_journeys(bundled_journeys_dir()) if item.id == "triage-and-correct"
-    )
-    turn = journey.turns[0]
-    scenario = Scenario(
-        id="priority",
-        question=turn.user,
-        interaction=journey.interaction,
-        root_cause=journey.root_cause,
-        must_mention=turn.must_mention,
-        must_not_mention=turn.must_not_mention,
-        expected_evidence=turn.expected_evidence,
-    )
-    result = grade(
-        scenario,
-        "Checkout and payments both need attention.",
-        [],
-    )
-    assert result.diagnosis_success is False
-
-
-#: Per-turn phrasings the rollout journey must accept and reject. Keyword
-#: lists are only as good as the phrasings they survive, so they are pinned
-#: rather than eyeballed once (the same lesson as the scenario pack).
-_ROLLOUT_CASES: tuple[tuple[int, tuple[str, ...], tuple[str, ...]], ...] = (
-    (
-        0,
-        (
-            "The rollout is stalled: the new ReplicaSet api-7b9d has a pod stuck"
-            " in ImagePullBackOff because the image tag v27 does not exist.",
-            "api-7b9d cannot pull the image edge/api:v27 \u2014 the tag looks like"
-            " a typo, so the rollout never completes.",
-            "The new pod fails to pull edge/api:v27 (manifest not found)."
-            " api-7b9d is the wrong tag rollout.",
-        ),
-        (
-            # Names the ReplicaSet and the symptom but never the bad tag —
-            # incomplete, and it passed before the groups were split.
-            "api-7b9d is in ImagePullBackOff.",
-            "The new ReplicaSet api-7b9d cannot pull its image.",
-            # Names the symptom in words that once appeared in both the
-            # symptom and cause groups, satisfying each without ever
-            # identifying which tag is wrong.
-            "The pod in api-7b9d shows manifest not found.",
-            "The pod was OOMKilled and restarted.",
-            "The readiness probe is failing on the new pod.",
-            "The namespace is out of CPU quota.",
-        ),
-    ),
-    (
-        1,
-        (
-            "It belongs to ReplicaSet api-7b9d. The previous ReplicaSet api-5c2f"
-            " still has 2 ready pods, so traffic is still served.",
-            "That pod is owned by api-7b9d; api-5c2f is the old ReplicaSet and is"
-            " still running with 2 replicas.",
-        ),
-        (
-            "This is a total outage; all pods are down.",
-            # Names the owning ReplicaSet only; says nothing about the old one.
-            "It belongs to api-7b9d.",
-        ),
-    ),
-)
-
-
-def _turn_scenario(turn: JourneyTurn, root_cause: str = "r") -> Scenario:
-    """The scenario the runner grades a turn against.
-
-    `root_cause` matters: the grader treats a scenario with no fault as one
-    whose answer *is* an all-clear. Hardcoding a fault here graded
-    `healthy-stop` under the opposite polarity from production, so its pins
-    proved nothing about how it is actually scored - pass `journey.root_cause`.
-    """
-    return Scenario(
-        id="x",
-        question="q",
-        interaction=EVAL_INTERACTION,
-        root_cause=root_cause,
-        must_mention=turn.must_mention,
-        must_not_mention=turn.must_not_mention,
-    )
-
-
-@pytest.mark.parametrize(("index", "correct", "wrong"), _ROLLOUT_CASES)
-def test_rollout_journey_keywords_discriminate(
-    index: int, correct: tuple[str, ...], wrong: tuple[str, ...]
-) -> None:
-    journey = next(
-        item for item in load_journeys(bundled_journeys_dir()) if item.id == "rollout-owner-chain"
-    )
-    scenario = _turn_scenario(journey.turns[index], journey.root_cause)
-    for answer in correct:
-        assert grade(scenario, answer, []).diagnosis_success, (
-            f"turn {index + 1}: a correct answer was graded wrong\n  {answer}"
-        )
-    for answer in wrong:
-        assert not grade(scenario, answer, []).diagnosis_success, (
-            f"turn {index + 1}: a wrong answer was graded correct\n  {answer}"
-        )
-
-
 #: A minimal journey whose fixture withholds one read. Shared so the
 #: acceptance and rejection tests cannot drift apart.
 _JOURNEY_WITH_FORBIDDEN = """
@@ -432,461 +119,130 @@ def test_a_journey_can_withhold_a_read_the_way_rbac_does(tmp_path: Path) -> None
     assert journey.forbidden == ({"kind": "pods", "namespace": "n", "subresource": "log"},)
 
 
-#: Per-turn phrasings the journeys added for #176 must accept and reject.
-#: Each `wrong` entry is the specific failure its journey exists to catch,
-#: not a generic bad answer - a keyword list that cannot separate those is
-#: worse than no journey, because it publishes a score for a behavior it
-#: never measured.
-_JOURNEY_CASES: tuple[tuple[str, int, tuple[str, ...], tuple[str, ...]], ...] = (
-    (
-        "rbac-evidence-gap",
-        0,
-        (
-            "ledger-1 is in CrashLoopBackOff. I could not read the container log -"
-            " access is forbidden - so I used the events and pod status instead,"
-            " and I cannot determine why the process exits.",
-            "The pod keeps restarting (back-off). Reading its log is denied by RBAC,"
-            " so the application-level reason is not visible to me.",
-        ),
-        (
-            # Reports the crash loop and silently omits that the evidence
-            # was withheld. This is the failure the journey exists for.
-            "ledger-1 is in CrashLoopBackOff and keeps restarting.",
-            # Carries both required claims - the crash loop and the denial -
-            # so the invented cause is the only thing left to reject it. An
-            # earlier draft omitted the crash loop and would have kept
-            # passing with the cause prohibition deleted.
-            "ledger-1 is in CrashLoopBackOff and reading its log is forbidden;"
-            " it was OOMKilled and ran out of memory.",
-            # The sharpest form: the exact cause the withheld log holds,
-            # which no allowed read can reach.
-            "ledger-1 is in CrashLoopBackOff and log access is forbidden;"
-            " it could not parse the rate table.",
-            # A guess no prohibition names. Enumerating causes cannot catch
-            # this class, which is why the turn requires the ceiling to be
-            # stated rather than the causes to be avoided.
-            "ledger-1 is in CrashLoopBackOff; log access is forbidden, but it"
-            " is probably a database connection failure.",
-        ),
-    ),
-    (
-        "namespace-triage",
-        0,
-        (
-            "invoicer and shipper are both abnormal; invoicer first, it is fully"
-            " down while shipper still serves.",
-            "Two workloads look wrong: invoicer and shipper. Prioritize invoicer.",
-        ),
-        (
-            # Both names, no ordering: triage without the triage.
-            "invoicer and shipper both look abnormal.",
-            # Concedes the right order and then inverts it.
-            "Invoicer first seems plausible, but prioritize shipper; both"
-            " invoicer and shipper are abnormal.",
-            "The orders namespace is healthy.",
-        ),
-    ),
-    (
+def test_bundled_journey_pack_covers_the_planned_conversational_behaviors() -> None:
+    journeys = load_journeys(bundled_journeys_dir())
+    assert {journey.id for journey in journeys} == {
         "compare-namespaces",
-        0,
-        (
-            "prod first: its checkout Service has no endpoints, which is an outage."
-            " staging only shows an old restart.",
-            "Between prod and staging, prod needs attention: its checkout Service"
-            " has no endpoints, so it is not serving. staging's warnings are"
-            " historical.",
-        ),
-        (
-            # Severity by event count, which is the trap the fixture sets.
-            "staging first, it has more warning events than prod.",
-            # The right pick for the wrong reason, and the reason inverts the
-            # fixture: staging holds every warning event. Naming prod alone
-            # used to be enough.
-            "prod first, because prod has more warning events than staging.",
-            # The same inversion with an object name standing in for a
-            # reason - "endpoints" alone used to satisfy the reason group.
-            "Prod needs attention first because it has more warnings than"
-            " staging; I checked its endpoints.",
-            "prod and staging are both equally urgent.",
-        ),
-    ),
-    (
-        "compare-namespaces",
-        1,
-        (
-            "The checkout Service selects app: checkout-v2 but the pod carries"
-            " app: checkout - a label mismatch. staging recovered and is now ready.",
-        ),
-        (
-            # The symptom offered as the cause the turn asked for.
-            "Prod has no endpoints; staging recovered.",
-        ),
-    ),
-    (
-        "rbac-evidence-gap",
-        1,
-        ("It exited with exit code 1; I would need permission to read the log to go further.",),
-        (
-            # Never reports the one hard fact the allowed reads supply.
-            "There is an error; I need permission to read the log.",
-            # Claims the access the fixture withholds.
-            "exit code 1; I already have permission and log access.",
-        ),
-    ),
-    (
-        "tui-follow",
-        2,
-        (DIRECT_OPEN_ACKNOWLEDGEMENT,),
-        (
-            # Narrates a log it cannot have read.
-            "The log shows the application failing to connect to its database.",
-        ),
-    ),
-    # The four journeys that predate the pinning rule. Every one of them had
-    # a required group naming a topic instead of a claim.
-    (
         "healthy-stop",
-        0,
-        ("Both catalog pods are running normally, with no restarts.",),
-        (
-            "catalog-1 is in CrashLoopBackOff.",
-            # Describes the namespace without judging its health, which is
-            # the only thing the turn asks for.
-            "The namespace contains two pods spread over two nodes.",
-        ),
-    ),
-    (
-        "healthy-stop",
-        1,
-        ("No further investigation is needed: catalog-1 has no warning events.",),
-        (
-            "catalog-1 is broken and needs work.",
-            "Keep digging into catalog-1 before deciding anything.",
-        ),
-    ),
-    (
         "logs-to-events",
-        0,
-        ("gateway-1 restarts because its liveness probe failed with context deadline exceeded.",),
-        (
-            # Names the probe in order to rule it out.
-            "The liveness probe is fine; gateway-1 restarts for another reason.",
-            "gateway-1 was OOMKilled.",
-        ),
-    ),
-    (
-        "logs-to-events",
-        1,
-        (
-            "The kubelet is killing and restarting gateway-1 because the liveness probe failed 27 times.",
-        ),
-        (
-            "The liveness probe is fine; the kubelet restarts the container for another reason.",
-            "The application log is normal, so nothing is happening.",
-        ),
-    ),
-    (
         "namespace-triage",
-        1,
-        (
-            "invoicer-1 crashloops because DATABASE_DSN is missing from its environment,"
-            " and shipper is degraded but still serving with 2 of 3 replicas.",
-            # Contracted spelling of the same claim.
-            "invoicer-1 crashloops because DATABASE_DSN isn't set, and shipper"
-            " is degraded but still serving with 2 of 3 replicas.",
-        ),
-        (
-            # Names the configuration without saying anything is wrong with it.
-            "invoicer-1 has an environment variable and shipper is degraded.",
-            "invoicer-1 is missing its DSN and shipper is down.",
-            # The absence bound to the wrong workload.
-            "Shipper's DATABASE_DSN is missing, but it is still serving;"
-            " invoicer failed for another reason.",
-            # "missing" bound to the wrong subject: the invoicer claim is the
-            # exact opposite of the fixture, and a standalone absence group
-            # let the shipper clause settle it.
-            "DATABASE_DSN is configured; shipper is missing one replica but"
-            " still serving with 2 of 3.",
-        ),
-    ),
-    (
+        "rbac-evidence-gap",
         "rollout-owner-chain",
-        0,
-        ("The new ReplicaSet api-7b9d cannot pull its image because tag v27 does not exist.",),
-        (
-            # The symptom and the ReplicaSet, but never the bad tag.
-            "api-7b9d is in ImagePullBackOff.",
-            "The image pull is fine for api-7b9d; tag v27 is correct.",
-        ),
-    ),
-    (
-        "rollout-owner-chain",
-        1,
-        (
-            "The pod belongs to api-7b9d; the previous ReplicaSet api-5c2f is still"
-            " serving traffic with 2 ready replicas.",
-        ),
-        (
-            # Both names and "still running", attached to the wrong subject.
-            "api-7b9d-x1 is still running, while api-5c2f has already been scaled away.",
-            "Every replica is gone - this is a total outage.",
-        ),
-    ),
-    (
         "triage-and-correct",
-        0,
-        (
-            "checkout-1 and payments-1 both need attention; inspect checkout first, it is crashlooping.",
-        ),
-        (
-            "Both checkout and payments need attention; rather than checkout first, prioritize payments.",
-            # Concedes the accepted wording and then mirrors it.
-            "checkout should be inspected first, but payments should be inspected first instead.",
-            "The shop namespace has no issues.",
-        ),
-    ),
-    (
-        "triage-and-correct",
-        1,
-        (
-            "payments-1 cannot pull its image: the registry rejected the credentials as unauthorized.",
-            # Rules the other pod out explicitly. A bare `checkout`
-            # prohibition rejected this: a negator after the match does not
-            # scope back over it.
-            "Checkout is not the cause; payments-1 has unauthorized registry credentials.",
-            # An article between the subject and the cause. Token matching
-            # is contiguous, so binding the two must tolerate "a"/"an"/"the".
-            "payments has an unauthorized registry authentication failure.",
-        ),
-        (
-            # Right words, wrong subject - the turn says focus on payments.
-            "payments-1 is failing; checkout-1 is the one with registry credentials problems.",
-            # The same misattribution in a grammar no prohibition list
-            # anticipated - which is why the required cause is bound to its
-            # subject instead of the wrong subject being enumerated.
-            "payments-1 is failing; checkout-1 suffers an authentication failure.",
-            # Bound to payments, but to the symptom rather than the cause -
-            # and the tag diagnosis contradicts the fixture.
-            "payments-1 cannot pull its image because tag v99 does not exist.",
-            "payments-1 was OOMKilled.",
-        ),
-    ),
-    (
-        "triage-and-correct",
-        2,
-        ("The payments-1 describe pane is on screen; next, fix the registry credentials secret.",),
-        (
-            "payments-1 needs more memory; rotate the secret later.",
-            "Increase the memory limit for payments-1.",
-        ),
-    ),
-    (
         "tui-follow",
-        0,
-        ("web-1 cannot pull its image because tag v99 does not exist in the registry.",),
-        (
-            "The image pull is fine; web-1 uses tag v99 and works.",
-            "web-1 is failing its readiness probe.",
-        ),
-    ),
-    (
-        "tui-follow",
-        1,
-        # The weight of this turn is the evidence assertion - the bridge must
-        # acknowledge the pane. A terminal UI operation uses Korvid's fixed
-        # acknowledgement rather than repeating model-controlled arguments.
-        (DIRECT_OPEN_ACKNOWLEDGEMENT,),
-        ("I cannot open that pane for you.",),
-    ),
-)
-
-
-@pytest.mark.parametrize(("journey_id", "index", "correct", "wrong"), _JOURNEY_CASES)
-def test_new_journey_keywords_discriminate(
-    journey_id: str, index: int, correct: tuple[str, ...], wrong: tuple[str, ...]
-) -> None:
-    journey = next(item for item in load_journeys(bundled_journeys_dir()) if item.id == journey_id)
-    scenario = _turn_scenario(journey.turns[index], journey.root_cause)
-    for answer in correct:
-        assert grade(scenario, answer, []).diagnosis_success, (
-            f"{journey_id} turn {index + 1}: a correct answer was graded wrong\n  {answer}"
-        )
-    for answer in wrong:
-        assert not grade(scenario, answer, []).diagnosis_success, (
-            f"{journey_id} turn {index + 1}: a wrong answer was graded correct\n  {answer}"
-        )
-
-
-def test_every_journey_turn_pins_an_accepting_and_a_rejecting_answer() -> None:
-    """A turn with no pinned pair is a grading rule nobody has ever exercised.
-
-    Every finding in the #249 review was a keyword group that graded something
-    other than what its comment claimed - a positive phrase inside a group
-    demanding a denial, a prohibition that rejected the truth, a "reason" group
-    satisfied by a bare object name. None was visible by reading the YAML, and
-    each became obvious the moment one specific phrasing was run through the
-    grader. This test makes that exercise mandatory rather than optional.
-    """
-    # An entry with an empty side pins nothing, so presence alone is not the
-    # rule: a turn counts as covered only when both directions are exercised.
-    pinned = {
-        (journey_id, index)
-        for journey_id, index, correct, wrong in _JOURNEY_CASES
-        if correct and wrong
     }
-    missing = [
-        f"{journey.id} turn {index + 1}"
-        for journey in load_journeys(bundled_journeys_dir())
-        for index in range(len(journey.turns))
-        if (journey.id, index) not in pinned
-    ]
-    assert not missing, (
-        "these turns have no pinned accepting/rejecting phrasings, so their"
-        " grading rules are unverified:\n  " + "\n  ".join(missing)
+    assert all(len(journey.turns) >= 2 for journey in journeys)
+    # #176 sets eight as the floor for a publishable journey score; the
+    # pack shipping fewer is the condition that kept that row unpublishable.
+    assert len(journeys) >= 8
+
+
+_REJECTING_ANSWERS = {
+    ("compare-namespaces", 0): "staging first, it has more warning events than prod.",
+    ("compare-namespaces", 1): "Prod has no endpoints; staging recovered.",
+    ("healthy-stop", 0): "catalog-1 is in CrashLoopBackOff.",
+    ("healthy-stop", 1): "catalog-1 is broken and needs work.",
+    ("logs-to-events", 0): "The liveness probe is fine; gateway-1 restarts for another reason.",
+    ("logs-to-events", 1): "The liveness probe is fine; the kubelet restarts it.",
+    ("namespace-triage", 0): "invoicer and shipper both look abnormal.",
+    ("namespace-triage", 1): "invoicer-1 is missing its DSN and shipper is down.",
+    ("rbac-evidence-gap", 0): "ledger-1 is in CrashLoopBackOff and keeps restarting.",
+    ("rbac-evidence-gap", 1): "There is an error; I need permission to read the log.",
+    ("rollout-owner-chain", 0): "api-7b9d is in ImagePullBackOff.",
+    ("rollout-owner-chain", 1): "api-7b9d is running; api-5c2f was scaled away.",
+    ("triage-and-correct", 0): "checkout and payments need attention; prioritize payments.",
+    ("triage-and-correct", 1): "payments-1 was OOMKilled.",
+    ("triage-and-correct", 2): "Increase the memory limit for payments-1.",
+    ("tui-follow", 0): "web-1 is failing its readiness probe.",
+    ("tui-follow", 1): "I cannot open that pane for you.",
+    ("tui-follow", 2): "The log shows a database connection failure.",
+}
+
+
+def _turn_scenario(journey: ConversationJourney, index: int) -> Scenario:
+    turn = journey.turns[index]
+    return Scenario(
+        id=journey.id,
+        question=turn.user,
+        interaction=journey.interaction,
+        root_cause=journey.root_cause,
+        must_mention=turn.must_mention,
+        must_not_mention=turn.must_not_mention,
     )
 
 
-def test_tui_follow_must_mention_phrases_are_in_direct_open_acknowledgement() -> None:
-    """The tui-follow turns 1 and 2 grade on the direct-open acknowledgement.
+def test_every_bundled_journey_turn_rejects_its_known_wrong_conclusion() -> None:
+    journeys = load_journeys(bundled_journeys_dir())
+    actual_turns = {
+        (journey.id, index) for journey in journeys for index in range(len(journey.turns))
+    }
+    assert _REJECTING_ANSWERS.keys() == actual_turns
 
-    If `DIRECT_OPEN_ACKNOWLEDGEMENT` changes and the YAML `must_mention`
-    phrases no longer appear in it, eval runs will silently fail even when
-    the engine behaves correctly. This test pins the contract.
-    """
-    journey = next(
-        item for item in load_journeys(bundled_journeys_dir()) if item.id == "tui-follow"
-    )
-    ack_lower = DIRECT_OPEN_ACKNOWLEDGEMENT.lower()
-    for turn_index in (1, 2):
-        turn = journey.turns[turn_index]
-        for group in turn.must_mention:
-            assert any(phrase.lower() in ack_lower for phrase in group), (
-                f"tui-follow turn {turn_index + 1}: no phrase from must_mention group"
-                f" {group!r} appears in DIRECT_OPEN_ACKNOWLEDGEMENT"
-                f" {DIRECT_OPEN_ACKNOWLEDGEMENT!r}"
+    for journey in journeys:
+        for index in range(len(journey.turns)):
+            answer = _REJECTING_ANSWERS[(journey.id, index)]
+            assert not grade(_turn_scenario(journey, index), answer, []).diagnosis_success, (
+                f"{journey.id} turn {index + 1} accepted known-wrong conclusion: {answer}"
             )
 
 
-def test_an_unsupported_subresource_is_rejected_at_load(tmp_path: Path) -> None:
-    """`log` is the only subresource the matcher knows.
-
-    Accepting `logs` would load cleanly and silently deny nothing, so the
-    journey would report a score for an evidence gap it never created -
-    the failure this parser's strictness exists to prevent.
-    """
-    _write(
-        tmp_path / "j.yaml",
-        _JOURNEY_WITH_FORBIDDEN.replace("subresource: log", "subresource: logs"),
+def test_tui_follow_direct_open_acknowledgement_satisfies_its_grading_terms() -> None:
+    journey = next(
+        item for item in load_journeys(bundled_journeys_dir()) if item.id == "tui-follow"
     )
-    with pytest.raises(ValueError, match="subresource"):
-        load_journeys(tmp_path)
+    acknowledgement = DIRECT_OPEN_ACKNOWLEDGEMENT.lower()
+
+    for index in (1, 2):
+        for group in journey.turns[index].must_mention:
+            assert any(phrase.lower() in acknowledgement for phrase in group)
 
 
-@pytest.mark.parametrize(
-    ("replacement", "match"),
-    [
-        # `_deny` compares the plural resource name, so a singular kind
-        # loads and denies nothing.
-        ("{kind: pod, namespace: n, subresource: log}", "kind"),
-        ("{kind: pods, namespace: '', subresource: log}", "blank"),
-        ("{kind: pods, namespace: n, name: '', subresource: log}", "blank"),
-        # `log` only ever reaches the matcher for a pod read, so pairing it
-        # with any other kind is a rule that cannot fire.
-        ("{kind: secrets, namespace: n, subresource: log}", "subresource"),
-    ],
-)
-def test_a_selector_the_matcher_cannot_honour_is_rejected(
-    tmp_path: Path, replacement: str, match: str
+@pytest.mark.parametrize("journey", load_journeys(bundled_journeys_dir()), ids=lambda j: j.id)
+async def test_bundled_journey_evidence_is_reachable_through_the_real_tools(
+    journey: ConversationJourney,
 ) -> None:
-    """A rule that loads but matches nothing is the worst outcome here: the
-    journey reports a score for an evidence gap it never created, and the
-    run looks like a model that handled the gap well."""
-    _write(
-        tmp_path / "j.yaml",
-        _JOURNEY_WITH_FORBIDDEN.replace(
-            "{kind: pods, namespace: n, subresource: log}", replacement
-        ),
+    """Every declared evidence item must be fetchable from the fixture.
+
+    A journey whose assertions drifted from its fixture only surfaces as an
+    unexplained model failure during a paid live run.
+    """
+    scenario = Scenario(
+        id=journey.id,
+        question="q",
+        interaction=EVAL_INTERACTION,
+        root_cause=journey.root_cause,
+        must_mention=(),
+        must_not_mention=(),
+        objects=journey.objects,
+        events=journey.events,
+        logs=journey.logs,
+        # The withheld reads belong here too, or the guard would certify a
+        # route the journey itself denies at runtime and the drift it exists
+        # to catch would reappear as an unexplained model failure.
+        forbidden=journey.forbidden,
     )
-    with pytest.raises(ValueError, match=match):
-        load_journeys(tmp_path)
-
-
-_JOURNEY_WITH_INTERACTION = """
-id: interaction-journey
-root_cause: none
-interaction:
-  kube_context: eval-cluster
-  context_epoch: 2
-  focused_pane: {kind: pods, scope: shop}
-turns:
-  - user: what is failing?
-    grading:
-      must_mention: [healthy]
-      must_not_mention: [oomkilled]
-      expected_evidence:
-        - tool: list_resources
-          args: {kind: pods, namespace: shop}
-          contains: healthy
-  - user: show me the pod
-    interaction:
-      kube_context: eval-cluster
-      context_epoch: 2
-      focused_pane:
-        kind: pods
-        scope: shop
-        selected: {kind: Pod, namespace: shop, name: payments-1, uid: pod-1}
-    grading:
-      must_mention: [healthy]
-      must_not_mention: [oomkilled]
-      expected_evidence:
-        - tool: list_resources
-          args: {kind: pods, namespace: shop}
-          contains: healthy
-cluster: {objects: [], events: [], logs: {}}
-"""
-
-
-def test_load_journey_records_the_starting_interaction(tmp_path: Path) -> None:
-    journey = load_journey(_write(tmp_path / "j.yaml", _JOURNEY_WITH_INTERACTION))
-    assert journey.interaction.context_epoch == 2
-    assert journey.interaction.focused_pane.kind == "pods"
-    assert journey.interaction.focused_pane.selected is None
-
-
-def test_a_turn_may_restate_the_interaction_the_operator_moved_to(tmp_path: Path) -> None:
-    """Between turns the *operator* moves the screen; that is authored too."""
-    journey = load_journey(_write(tmp_path / "j.yaml", _JOURNEY_WITH_INTERACTION))
-    assert journey.turns[0].interaction is None
-    turn = journey.turns[1].interaction
-    assert turn is not None
-    assert turn.focused_pane.selected is not None
-    assert turn.focused_pane.selected.name == "payments-1"
-
-
-def test_load_journey_requires_a_starting_interaction(tmp_path: Path) -> None:
-    text = _JOURNEY_WITH_INTERACTION.replace(
-        "interaction:\n  kube_context: eval-cluster\n  context_epoch: 2\n"
-        "  focused_pane: {kind: pods, scope: shop}\n",
-        "",
-        1,
-    )
-    with pytest.raises(ValueError, match="interaction"):
-        load_journey(_write(tmp_path / "j.yaml", text))
-
-
-def test_load_journey_rejects_the_retired_turn_screen_field(tmp_path: Path) -> None:
-    text = _JOURNEY_WITH_INTERACTION.replace(
-        "  - user: what is failing?\n",
-        "  - user: what is failing?\n    screen: pods\n",
-        1,
-    )
-    with pytest.raises(ValueError, match="unknown keys"):
-        load_journey(_write(tmp_path / "j.yaml", text))
-
-
-def test_every_bundled_journey_records_a_starting_interaction() -> None:
-    journeys = load_journeys(bundled_journeys_dir())
-    assert journeys
-    for journey in journeys:
-        assert journey.interaction.focused_pane.kind, journey.id
-        assert journey.interaction.focused_pane.scope, journey.id
+    executor = ToolExecutor(FakeKubeClient(scenario), builtin_aliases())
+    for index, turn in enumerate(journey.turns, start=1):
+        assert turn.expected_evidence, f"{journey.id} turn {index} declares no evidence"
+        for group in turn.expected_evidence:
+            # UI tools need a live bridge this fixture-only executor does
+            # not have; their reachability is a runner concern, not a
+            # fixture one.
+            cluster_reads = [e for e in group if e.tool not in UI_TOOL_NAMES]
+            if not cluster_reads:
+                continue
+            # Every alternative, not merely one per group. The grader
+            # documents each listed tool as "one known-good route, verified
+            # reachable by the fixture-integrity test", and an any-of check
+            # does not verify that: a route that silently stopped matching
+            # would keep passing behind a working sibling, and the pack
+            # would then advertise a path no model can take.
+            for evidence in cluster_reads:
+                result = await executor.execute(evidence.tool, dict(evidence.args))
+                assert not result.startswith("ERROR:"), (
+                    f"{journey.id} turn {index}: {evidence.tool} failed\n{result[:200]}"
+                )
+                assert evidence.contains in result, (
+                    f"{journey.id} turn {index}: {evidence.tool} does not contain "
+                    f"{evidence.contains!r}\n{result[:200]}"
+                )

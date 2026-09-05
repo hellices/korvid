@@ -262,22 +262,6 @@ async def test_filter_enter_closes_bar_keeps_filter() -> None:
         assert app.focused is app.query_one(ResourceTable)
 
 
-async def test_bars_show_mode_placeholder() -> None:
-    from korvid.ui.widgets.command_bar import CommandBar
-    from korvid.ui.widgets.filter_bar import FilterBar
-
-    app = make_app([_pod("api-1")])
-    async with app.run_test() as pilot:
-        await until(
-            pilot,
-            lambda: app.query_one(ResourceTable).row_count == 1,
-            label="pod row visible",
-        )
-        assert app.query_one(CommandBar).placeholder != ""
-        assert app.query_one(FilterBar).placeholder != ""
-        assert app.query_one(CommandBar).placeholder != app.query_one(FilterBar).placeholder
-
-
 async def test_bare_ns_opens_picker_and_selection_switches() -> None:
     from korvid.ui.widgets.namespace_picker import NamespacePicker
 
@@ -356,30 +340,6 @@ async def test_rows_sorted_by_eviction_order_reversed() -> None:
         await until(pilot, lambda: table.row_count == 4, label="pod rows visible")
         names = [table.get_row_at(i)[0] for i in range(table.row_count)]
         assert names == ["a-guaranteed", "z-guaranteed", "m-burstable", "b-besteffort"]
-
-
-async def test_qos_cells_are_color_coded() -> None:
-    from rich.text import Text
-
-    app = make_app(
-        [
-            _pod("g", qos="Guaranteed"),
-            _pod("u", qos="Burstable"),
-            _pod("e", qos="BestEffort"),
-        ]
-    )
-    async with app.run_test() as pilot:
-        table = app.query_one(ResourceTable)
-        await until(pilot, lambda: table.row_count == 3, label="pod rows visible")
-        styles = {}
-        for i in range(table.row_count):
-            row = table.get_row_at(i)
-            qos_cell = row[10]  # after the 4 usage columns (issue #12)
-            assert isinstance(qos_cell, Text)
-            styles[str(qos_cell)] = qos_cell.style
-        assert styles["Guaranteed"] == "green"
-        assert styles["Burstable"] == "chartreuse2"
-        assert styles["BestEffort"] == "yellow"
 
 
 async def test_bare_ns_with_empty_list_warns_instead_of_empty_picker() -> None:

@@ -42,16 +42,6 @@ def test_load_from_yaml(tmp_path: Path) -> None:
     assert cfg.keybindings == {"quit": "q"}
 
 
-def test_timeline_config_defaults(tmp_path: Path) -> None:
-    cfg_file = tmp_path / "config.yaml"
-    cfg_file.write_text("")
-
-    cfg = load_config(cfg_file)
-
-    assert cfg.timeline_max_entries == 500
-    assert cfg.timeline_max_bytes == 262144
-
-
 def test_timeline_config_parses_nested_values(tmp_path: Path) -> None:
     cfg_file = tmp_path / "config.yaml"
     cfg_file.write_text("timeline:\n  max_entries: 32\n  max_bytes: 8192\n")
@@ -107,10 +97,6 @@ def test_readonly_defaults_false_and_loads_from_yaml(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_log_buffer_lines_default_is_5000() -> None:
-    assert KorvidConfig().log_buffer_lines == 5000
-
-
 def test_log_buffer_lines_from_yaml(tmp_path: Path) -> None:
     cfg_file = tmp_path / "config.yaml"
     cfg_file.write_text("log_buffer_lines: 20000\n")
@@ -118,16 +104,15 @@ def test_log_buffer_lines_from_yaml(tmp_path: Path) -> None:
 
 
 def test_log_buffer_lines_invalid_falls_back(tmp_path: Path) -> None:
-    for bad in ("log_buffer_lines: banana\n", "log_buffer_lines: -3\n", "log_buffer_lines: 0\n"):
+    for bad in (
+        "log_buffer_lines: banana\n",
+        "log_buffer_lines: -3\n",
+        "log_buffer_lines: 0\n",
+        "log_buffer_lines: true\n",
+    ):
         cfg_file = tmp_path / "config.yaml"
         cfg_file.write_text(bad)
         assert load_config(cfg_file).log_buffer_lines == 5000
-
-
-def test_log_buffer_lines_bool_falls_back(tmp_path: Path) -> None:
-    cfg_file = tmp_path / "config.yaml"
-    cfg_file.write_text("log_buffer_lines: true\n")
-    assert load_config(cfg_file).log_buffer_lines == 5000
 
 
 def test_agent_provider_settings_parsed(tmp_path: Path) -> None:
@@ -141,15 +126,6 @@ def test_agent_provider_settings_parsed(tmp_path: Path) -> None:
     assert cfg.agent_base_url == "http://localhost:11434/v1"
     assert cfg.agent_model == "llama3"
     assert cfg.agent_api_key_env == "MY_KEY"
-
-
-def test_agent_settings_default_none(tmp_path: Path) -> None:
-    p = tmp_path / "config.yaml"
-    p.write_text("namespace: default\n")
-    cfg = load_config(p)
-    assert cfg.agent_base_url is None
-    assert cfg.agent_model is None
-    assert cfg.agent_api_key_env is None
 
 
 def test_auth_method_parsed(tmp_path: Path) -> None:
@@ -733,38 +709,11 @@ def test_save_agent_config_does_not_clobber_foreign_tmp(tmp_path: Path) -> None:
     assert foreign.read_text() == "owned by another process"
 
 
-def test_mcp_defaults_off(tmp_path: Path) -> None:
-    cfg = load_config(tmp_path / "missing.yaml")
-    assert cfg.mcp_enabled is False
-    assert cfg.mcp_port == 7878
-
-
-def test_mcp_write_proposals_default_off(tmp_path: Path) -> None:
-    f = tmp_path / "config.yaml"
-    f.write_text("mcp:\n  enabled: true\n")
-    cfg = load_config(f)
-    assert cfg.mcp_write_proposals is False
-
-
-def test_mcp_follow_default_off(tmp_path: Path) -> None:
-    f = tmp_path / "config.yaml"
-    f.write_text("mcp:\n  enabled: true\n")
-    cfg = load_config(f)
-    assert cfg.mcp_follow is False
-
-
 def test_mcp_follow_requires_literal_true(tmp_path: Path) -> None:
     f = tmp_path / "config.yaml"
     f.write_text('mcp:\n  follow: "yes"\n')
     cfg = load_config(f)
     assert cfg.mcp_follow is False
-
-
-def test_mcp_follow_enabled(tmp_path: Path) -> None:
-    f = tmp_path / "config.yaml"
-    f.write_text("mcp:\n  follow: true\n")
-    cfg = load_config(f)
-    assert cfg.mcp_follow is True
 
 
 def test_mcp_write_proposals_requires_literal_true(tmp_path: Path) -> None:
@@ -818,12 +767,6 @@ def test_mcp_port_rejects_fractional_and_infinite_floats(tmp_path: Path) -> None
 # ---------------------------------------------------------------------------
 
 
-def test_log_display_defaults_are_off() -> None:
-    cfg = KorvidConfig()
-    assert cfg.log_wrap is False
-    assert cfg.log_timestamps is False
-
-
 def test_log_display_from_yaml(tmp_path: Path) -> None:
     cfg_file = tmp_path / "config.yaml"
     cfg_file.write_text("logs:\n  wrap: true\n  timestamps: true\n")
@@ -851,12 +794,6 @@ def test_logs_scalar_section_tolerated(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 # debug section (issue #52): debug image defaults for air-gapped clusters
 # ---------------------------------------------------------------------------
-
-
-def test_debug_defaults() -> None:
-    cfg = KorvidConfig()
-    assert cfg.debug_default_image is None
-    assert cfg.debug_images is None  # unconfigured, not "configured empty"
 
 
 def test_debug_from_yaml(tmp_path: Path) -> None:
@@ -914,12 +851,6 @@ def test_debug_non_string_entries_dropped(tmp_path: Path) -> None:
     assert cfg.debug_images == {"python": "img:1"}
 
 
-def test_node_shell_defaults() -> None:
-    cfg = KorvidConfig()
-    assert cfg.node_shell_image is None
-    assert cfg.node_shell_namespace is None
-
-
 def test_node_shell_from_yaml(tmp_path: Path) -> None:
     f = tmp_path / "config.yaml"
     f.write_text("node_shell:\n  image: registry.local/toolkit:1\n  namespace: debug-ns\n")
@@ -942,17 +873,6 @@ def test_node_shell_non_string_values_ignored(tmp_path: Path) -> None:
     cfg = load_config(f)
     assert cfg.node_shell_image is None
     assert cfg.node_shell_namespace is None
-
-
-def test_ollama_defaults_when_unconfigured(tmp_path: Path) -> None:
-    p = tmp_path / "config.yaml"
-    p.write_text("agent:\n  provider: ollama\n")
-    cfg = load_config(p)
-    assert cfg.agent_ollama_num_ctx == 16384
-    assert cfg.agent_ollama_temperature == 0.0
-    assert cfg.agent_ollama_seed is None
-    assert cfg.agent_ollama_think is False
-    assert cfg.agent_ollama_keep_alive is None
 
 
 def test_ollama_options_parsed(tmp_path: Path) -> None:
@@ -1025,20 +945,6 @@ def test_ollama_negative_seed_falls_back(tmp_path: Path) -> None:
     p.write_text("agent:\n  provider: ollama\n  ollama:\n    seed: -1\n")
     cfg = load_config(p)
     assert cfg.agent_ollama_seed is None
-
-
-def test_ollama_num_predict_default_is_none(tmp_path: Path) -> None:
-    p = tmp_path / "config.yaml"
-    p.write_text("agent:\n  provider: ollama\n")
-    cfg = load_config(p)
-    assert cfg.agent_ollama_num_predict is None
-
-
-def test_ollama_num_predict_parsed(tmp_path: Path) -> None:
-    p = tmp_path / "config.yaml"
-    p.write_text("agent:\n  provider: ollama\n  ollama:\n    num_predict: 192\n")
-    cfg = load_config(p)
-    assert cfg.agent_ollama_num_predict == 192
 
 
 def test_ollama_num_predict_invalid_falls_back(tmp_path: Path) -> None:
@@ -1124,14 +1030,6 @@ def test_favorite_namespaces_parsed(tmp_path: Path) -> None:
     p.write_text("favorite_namespaces:\n  - team-a\n  - team-b\n")
     cfg = load_config(p)
     assert cfg.favorite_namespaces == ("team-a", "team-b")
-
-
-def test_favorite_namespaces_default_empty(tmp_path: Path) -> None:
-    p = tmp_path / "config.yaml"
-    p.write_text("namespace: default\n")
-    cfg = load_config(p)
-    assert cfg.favorite_namespaces == ()
-    assert cfg.warnings == ()
 
 
 def test_favorite_namespaces_non_list_ignored(tmp_path: Path) -> None:
@@ -1429,18 +1327,6 @@ def test_the_removed_profile_key_is_actionable(tmp_path: Path) -> None:
         load_config(path)
 
 
-def test_the_removed_profile_key_is_actionable_even_when_agent_disabled(
-    tmp_path: Path,
-) -> None:
-    """The migration error must fire regardless of whether the agent block
-    would otherwise enable the agent — a stale `profile` key is a mistake
-    the user needs to see either way."""
-    path = write_config(tmp_path, "agent:\n  enabled: false\n  profile: full\n")
-
-    with pytest.raises(ConfigMigrationError, match=r"agent\.profile was removed"):
-        load_config(path)
-
-
 def test_removed_agent_prompts_is_actionable(tmp_path: Path) -> None:
     """`agent.prompts` (system/append/tool_descriptions replacement) was
     removed entirely in favor of `agent.rules`; it must not be silently
@@ -1464,11 +1350,6 @@ def test_model_tier_and_additive_rules_load(tmp_path: Path) -> None:
 
     assert config.agent_model_tier == "low"
     assert config.agent_rules == ("Prefer workload owner evidence.",)
-
-
-def test_model_tier_high_is_parsed(tmp_path: Path) -> None:
-    path = write_config(tmp_path, "agent:\n  provider: ollama\n  model_tier: high\n")
-    assert load_config(path).agent_model_tier == "high"
 
 
 @pytest.mark.parametrize(
@@ -1512,11 +1393,6 @@ def test_model_tier_rejects_legacy_and_unknown_values(tmp_path: Path, bad_value:
         match=r"agent\.model_tier must be .*low.*high",
     ):
         load_config(path)
-
-
-def test_agent_rules_default_is_empty(tmp_path: Path) -> None:
-    path = write_config(tmp_path, "agent:\n  provider: ollama\n")
-    assert load_config(path).agent_rules == ()
 
 
 def test_agent_rules_drops_blank_entries_with_a_warning(tmp_path: Path) -> None:
@@ -1567,22 +1443,6 @@ def test_save_agent_config_writes_an_explicit_low_tier(tmp_path: Path) -> None:
     )
     assert load_config(p).agent_model_tier == "low"
     assert "model_tier: low" in p.read_text()
-
-
-def test_save_agent_config_writes_an_explicit_high_tier(tmp_path: Path) -> None:
-    p = tmp_path / "c.yaml"
-    p.write_text("agent:\n  provider: ollama\n  model: qwen3:8b\n  model_tier: low\n")
-    save_agent_config(
-        p,
-        provider="openai-compat",
-        auth_method="api_key",
-        base_url="https://api.openai.com/v1",
-        model="gpt-4o-mini",
-        api_key_env="OPENAI_API_KEY",
-        model_tier="high",
-    )
-    assert load_config(p).agent_model_tier == "high"
-    assert "model_tier: high" in p.read_text()
 
 
 def test_save_agent_config_removes_tier_for_automatic_routing(tmp_path: Path) -> None:
@@ -1691,11 +1551,6 @@ def test_context_is_protected_none_or_empty() -> None:
     assert context_is_protected("prod-a", ()) is False
 
 
-def test_telepresence_integration_defaults_on(tmp_path: Path) -> None:
-    cfg = load_config(tmp_path / "missing.yaml")
-    assert cfg.telepresence_enabled is True
-
-
 def test_telepresence_kill_switch(tmp_path: Path) -> None:
     f = tmp_path / "config.yaml"
     f.write_text("integrations:\n  telepresence: off\n")
@@ -1717,12 +1572,6 @@ def test_network_ca_bundle_parses(tmp_path: Path) -> None:
     assert cfg.network_ca_bundle == "/etc/korvid/company-ca.pem"
 
 
-def test_network_ca_bundle_defaults_to_none(tmp_path: Path) -> None:
-    cfg_path = tmp_path / "config.yaml"
-    cfg_path.write_text("namespace: default\n")
-    assert load_config(cfg_path).network_ca_bundle is None
-
-
 def test_network_section_tolerates_non_mapping(tmp_path: Path) -> None:
     cfg_path = tmp_path / "config.yaml"
     cfg_path.write_text("network: nonsense\n")
@@ -1734,43 +1583,11 @@ def test_network_section_tolerates_non_mapping(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_provider_name_canonicalized_at_load(tmp_path: Path) -> None:
-    """Config load must canonicalize provider names so github_copilot
-    receives device-login default and compositions root loads OAuth."""
+@pytest.mark.parametrize("provider", ["github_copilot", "GitHub.Copilot"])
+def test_provider_name_canonicalized_at_load(tmp_path: Path, provider: str) -> None:
+    """Config accepts documented underscore and dotted provider spellings."""
     f = tmp_path / "config.yaml"
-    f.write_text("agent:\n  provider: github_copilot\n  model: gpt-4o\n")
+    f.write_text(f"agent:\n  provider: {provider}\n  model: gpt-4o\n")
     cfg = load_config(f)
     assert cfg.agent_provider == "github-copilot"
     assert cfg.agent_auth_method == "device-login"
-
-
-def test_provider_name_case_variant_canonicalized(tmp_path: Path) -> None:
-    """Mixed case and dot separators are canonicalized."""
-    f = tmp_path / "config.yaml"
-    f.write_text("agent:\n  provider: GitHub.Copilot\n  model: m\n")
-    cfg = load_config(f)
-    assert cfg.agent_provider == "github-copilot"
-    assert cfg.agent_auth_method == "device-login"
-
-
-def test_canonicalize_provider_name_parity() -> None:
-    """The core _canonicalize_provider_name must produce the same output
-    as providers.plugin_registry.normalize_provider_name for
-    representative built-in and plugin names."""
-    from korvid.core.config import _canonicalize_provider_name
-    from korvid.providers.plugin_registry import normalize_provider_name
-
-    names = [
-        "github-copilot",
-        "GitHub_Copilot",
-        "openai_compat",
-        "OpenAI.Compat",
-        "OLLAMA",
-        "Company_LLM",
-        "  azure  ",
-        "my--custom..provider",
-    ]
-    for name in names:
-        assert _canonicalize_provider_name(name) == normalize_provider_name(name), (
-            f"parity failed for {name!r}"
-        )

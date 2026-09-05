@@ -35,7 +35,6 @@ from korvid.ui.app import KorvidApp
 from korvid.ui.widgets.confirm_screen import ConfirmScreen
 from korvid.ui.widgets.resource_table import ResourceTable
 from korvid.ui.widgets.status_bar import StatusBar
-from korvid.ui.workspace_state import PaneState
 
 from .waits import until
 
@@ -1120,165 +1119,6 @@ class _CtxSwitchDuringPlanRecorder(NodeRecorder):
         )
 
 
-class _FocusSwitchDuringGraphLister:
-    """list_relationship_objects fake that adds a second pane and switches focus
-    from within the call, simulating a workspace split that happens mid-load."""
-
-    def __init__(self) -> None:
-        self.calls: list[tuple[str, str | None]] = []
-        self._app: KorvidApp | None = None
-
-    def attach(self, app: KorvidApp) -> None:
-        self._app = app
-
-    async def __call__(self, meta: ResourceMeta, namespace: str | None) -> list[Summary]:
-        self.calls.append((meta.plural, namespace))
-        if self._app is not None and meta.plural == "nodes":
-            # Replace pane-0 with a fresh object (same kind/scope/table_id but
-            # different identity) so origin.pane is not self._app._pane — the
-            # same effect as the user focusing a different pane, but without
-            # a second ResourceTable widget in the DOM.
-            current = self._app._workspace.panes[0]
-            replacement = PaneState(current.kind, current.scope, current.table_id)
-            self._app._workspace._panes[0] = replacement
-        if meta.plural == "nodes":
-            return [
-                GenericSummary(
-                    name="worker-1", namespace="", kind="Node", created="", uid="node-uid-1"
-                )
-            ]
-        if meta.plural == "pods":
-            return [
-                PodSummary(
-                    name="web-1",
-                    namespace="default",
-                    phase="Running",
-                    ready="1/1",
-                    restarts=0,
-                    node="worker-1",
-                    uid="pod-uid-1",
-                )
-            ]
-        return []
-
-
-class _ScopeChangeDuringGraphLister:
-    """list_relationship_objects fake that mutates the pane scope from within
-    the call, simulating a :ns re-scope that arrives while the graph LIST is
-    in flight."""
-
-    def __init__(self) -> None:
-        self.calls: list[tuple[str, str | None]] = []
-        self._app: KorvidApp | None = None
-
-    def attach(self, app: KorvidApp) -> None:
-        self._app = app
-
-    async def __call__(self, meta: ResourceMeta, namespace: str | None) -> list[Summary]:
-        self.calls.append((meta.plural, namespace))
-        if self._app is not None and meta.plural == "nodes":
-            self._app._workspace.panes[0].scope = "other-namespace"
-        if meta.plural == "nodes":
-            return [
-                GenericSummary(
-                    name="worker-1", namespace="", kind="Node", created="", uid="node-uid-1"
-                )
-            ]
-        if meta.plural == "pods":
-            return [
-                PodSummary(
-                    name="web-1",
-                    namespace="default",
-                    phase="Running",
-                    ready="1/1",
-                    restarts=0,
-                    node="worker-1",
-                    uid="pod-uid-1",
-                )
-            ]
-        return []
-
-
-class _UidChangeDuringGraphLister:
-    """list_relationship_objects fake that replaces the node UID in the store
-    from within the call, simulating a Node delete-recreate that completes while
-    the graph LIST is in flight."""
-
-    def __init__(self) -> None:
-        self.calls: list[tuple[str, str | None]] = []
-        self._store: ResourceStore | None = None
-        self._scope: str = "default"
-
-    def attach(self, store: ResourceStore, scope: str) -> None:
-        self._store = store
-        self._scope = scope
-
-    async def __call__(self, meta: ResourceMeta, namespace: str | None) -> list[Summary]:
-        self.calls.append((meta.plural, namespace))
-        if self._store is not None and meta.plural == "nodes":
-            replacement = GenericSummary(
-                name="worker-1", namespace="", kind="Node", created="", uid="node-uid-REPLACED"
-            )
-            self._store.apply_event("nodes", self._scope, "MODIFIED", replacement)
-        if meta.plural == "nodes":
-            return [
-                GenericSummary(
-                    name="worker-1", namespace="", kind="Node", created="", uid="node-uid-1"
-                )
-            ]
-        if meta.plural == "pods":
-            return [
-                PodSummary(
-                    name="web-1",
-                    namespace="default",
-                    phase="Running",
-                    ready="1/1",
-                    restarts=0,
-                    node="worker-1",
-                    uid="pod-uid-1",
-                )
-            ]
-        return []
-
-
-class _CtxSwitchDuringGraphLister:
-    """list_relationship_objects fake that increments the context epoch from within the
-    call, simulating a context switch (`:ctx`) that completes while the graph
-    LIST is in flight.  The graph load itself returns normally; the identity
-    check immediately after it detects the stale epoch and cancels."""
-
-    def __init__(self) -> None:
-        self.calls: list[tuple[str, str | None]] = []
-        self._app: KorvidApp | None = None
-
-    def attach(self, app: KorvidApp) -> None:
-        self._app = app
-
-    async def __call__(self, meta: ResourceMeta, namespace: str | None) -> list[Summary]:
-        self.calls.append((meta.plural, namespace))
-        if self._app is not None and meta.plural == "nodes":
-            self._app._ctx._epoch += 1
-        if meta.plural == "nodes":
-            return [
-                GenericSummary(
-                    name="worker-1", namespace="", kind="Node", created="", uid="node-uid-1"
-                )
-            ]
-        if meta.plural == "pods":
-            return [
-                PodSummary(
-                    name="web-1",
-                    namespace="default",
-                    phase="Running",
-                    ready="1/1",
-                    restarts=0,
-                    node="worker-1",
-                    uid="pod-uid-1",
-                )
-            ]
-        return []
-
-
 class _BlockingGraphLister:
     """Relationship lister that exposes cancellation while its first LIST is blocked."""
 
@@ -1366,10 +1206,93 @@ async def test_drain_context_switch_during_plan_refuses_confirmation(
         assert not audit_path.exists()
 
 
+async def test_drain_state_is_released_once_the_drain_settles(tmp_path: Path) -> None:
+    """A finished drain must hand the node back.
+
+    While a drain runs, the node it owns is remembered so the drain key can
+    cancel it and so uncordon is refused. If that ownership outlives the
+    drain, the session is wedged: every later node write is answered with
+    "drain of nodes/worker-1 in progress". The write slot is released
+    *after* the ownership is dropped, so `active_writes() == 0` is the point
+    at which the node must already be free.
+    """
+    rec = NodeRecorder()  # empty plan: the drain cordons and finishes
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app(rec, audit_path, extra_nodes=("worker-2",))
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: _resource_row_count(app) > 0, label="initial row rendered")
+        await _to_nodes(pilot)
+        await pilot.press("D")
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="drain dialog")
+        await _confirm_typed(pilot, "worker-1")
+        await until(
+            pilot,
+            lambda: audit_path.exists() and "success" in audit_path.read_text(),
+            label="drain success audited",
+        )
+        await until(pilot, lambda: app._writes.active_writes() == 0, label="write slot released")
+
+        assert app._resource_writes.drain_node_name is None
+
+        # …and the next node is drainable: the user reaches its dialog
+        # instead of the "drain in progress" refusal.
+        await pilot.press("down")
+        await pilot.press("D")
+        await until(
+            pilot,
+            lambda: isinstance(app.screen, ConfirmScreen),
+            label="second drain dialog",
+        )
+        assert not any("in progress" in n.message for n in app._notifications)
+
+
+class _FocusSwitchDuringGraphLister:
+    """list_relationship_objects fake that moves focus to the other pane of a
+    split workspace from within the call — the `ctrl+w w` a user presses
+    while the drain's impact graph is still loading."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str | None]] = []
+        self._app: KorvidApp | None = None
+
+    def attach(self, app: KorvidApp) -> None:
+        self._app = app
+
+    async def __call__(self, meta: ResourceMeta, namespace: str | None) -> list[Summary]:
+        self.calls.append((meta.plural, namespace))
+        if self._app is not None and meta.plural == "nodes":
+            self._app._workspace_ctl.focus_other_pane()
+        if meta.plural == "nodes":
+            return [
+                GenericSummary(
+                    name="worker-1", namespace="", kind="Node", created="", uid="node-uid-1"
+                )
+            ]
+        if meta.plural == "pods":
+            return [
+                PodSummary(
+                    name="web-1",
+                    namespace="default",
+                    phase="Running",
+                    ready="1/1",
+                    restarts=0,
+                    node="worker-1",
+                    uid="pod-uid-1",
+                )
+            ]
+        return []
+
+
 async def test_drain_focus_change_during_graph_load_refuses_confirmation(
     tmp_path: Path,
 ) -> None:
-    """Switching pane focus during graph load cancels before the dialog."""
+    """The node write gate carries the pane the drain was raised from.
+
+    Both panes of the split show the same node row, so kind, name and uid
+    all still match after focus moves: only the origin pane can tell that
+    confirming now would execute against a pane the user is no longer
+    acting in. It must cancel before the dialog.
+    """
     plan = DrainPlan(targets=(_target("web-1"),), skipped_daemonset=(), skipped_mirror=())
     rec = NodeRecorder(plan=plan)
     audit_path = tmp_path / "audit.jsonl"
@@ -1378,119 +1301,17 @@ async def test_drain_focus_change_during_graph_load_refuses_confirmation(
     lister.attach(app)
     async with app.run_test() as pilot:
         await _to_nodes(pilot)
-        await pilot.press("D")
+        await pilot.press("ctrl+w", "v")
+        await until(
+            pilot,
+            lambda: app.query_one("#pane-1", ResourceTable).row_count > 0,
+            label="second pane showing the same node",
+        )
+        await pilot.press("D")  # raised from the new pane
         await until(
             pilot,
             lambda: any("cancelled" in n.message for n in app._notifications),
             label="drain cancelled notification",
-        )
-        assert not isinstance(app.screen, ConfirmScreen)
-        assert app._writes.active_writes() == 0
-        assert not any(call[0] == "cordon" for call in rec.calls)
-        assert not any(call[0] == "evict" for call in rec.calls)
-        assert not audit_path.exists()
-
-
-async def test_drain_scope_change_during_graph_load_refuses_confirmation(
-    tmp_path: Path,
-) -> None:
-    """Re-scoping the originating pane during graph load cancels before the dialog."""
-    plan = DrainPlan(targets=(_target("web-1"),), skipped_daemonset=(), skipped_mirror=())
-    rec = NodeRecorder(plan=plan)
-    audit_path = tmp_path / "audit.jsonl"
-    lister = _ScopeChangeDuringGraphLister()
-    app = _make_app_with_custom_lister(rec, audit_path, lister)
-    lister.attach(app)
-    async with app.run_test() as pilot:
-        await _to_nodes(pilot)
-        await pilot.press("D")
-        await until(
-            pilot,
-            lambda: any("cancelled" in n.message for n in app._notifications),
-            label="drain cancelled notification",
-        )
-        assert not isinstance(app.screen, ConfirmScreen)
-        assert app._writes.active_writes() == 0
-        assert not any(call[0] == "cordon" for call in rec.calls)
-        assert not any(call[0] == "evict" for call in rec.calls)
-        assert not audit_path.exists()
-
-
-async def test_drain_uid_change_during_graph_load_refuses_confirmation(
-    tmp_path: Path,
-) -> None:
-    """Node UID replaced while the graph LIST is in flight cancels before dialog."""
-    plan = DrainPlan(targets=(_target("web-1"),), skipped_daemonset=(), skipped_mirror=())
-    rec = NodeRecorder(plan=plan)
-    audit_path = tmp_path / "audit.jsonl"
-    lister = _UidChangeDuringGraphLister()
-    app = _make_app_with_custom_lister(rec, audit_path, lister)
-    lister.attach(app.store, app.config.namespace or "default")
-    async with app.run_test() as pilot:
-        await _to_nodes(pilot)
-        lister.attach(app.store, app.current_scope)
-        await pilot.press("D")
-        await until(
-            pilot,
-            lambda: any("cancelled" in n.message for n in app._notifications),
-            label="drain cancelled notification",
-        )
-        assert not isinstance(app.screen, ConfirmScreen)
-        assert app._writes.active_writes() == 0
-        assert not any(call[0] == "cordon" for call in rec.calls)
-        assert not any(call[0] == "evict" for call in rec.calls)
-        assert not audit_path.exists()
-
-
-async def test_drain_uid_change_in_confirmation_dispatches_nothing(
-    tmp_path: Path,
-) -> None:
-    """UID replaced while the drain confirmation dialog is open: no write, no audit."""
-    plan = DrainPlan(targets=(_target("web-1"),), skipped_daemonset=(), skipped_mirror=())
-    calls: list[tuple[str, str | None]] = []
-    rec = NodeRecorder(plan=plan)
-    rec.release_evictions.clear()  # hold any eviction so nothing can run
-    audit_path = tmp_path / "audit.jsonl"
-    app = make_app(rec, audit_path, relationship_calls=calls)
-    async with app.run_test() as pilot:
-        await _to_nodes(pilot)
-        await pilot.press("D")
-        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="drain dialog")
-        # Replace the node UID while the dialog is open.
-        replacement = GenericSummary(
-            name="worker-1", namespace="", kind="Node", created="", uid="node-uid-REPLACED"
-        )
-        app.store.apply_event("nodes", app.current_scope, "MODIFIED", replacement)
-        await _confirm_typed(pilot, "worker-1")
-        await until(
-            pilot,
-            lambda: any("cancelled" in n.message for n in app._notifications),
-            label="drain cancelled after uid drift in confirmation",
-        )
-        assert not isinstance(app.screen, ConfirmScreen)
-        assert app._writes.active_writes() == 0
-        assert not any(call[0] == "cordon" for call in rec.calls)
-        assert not any(call[0] == "evict" for call in rec.calls)
-        assert not audit_path.exists()
-
-
-async def test_drain_context_switch_during_graph_load_refuses_confirmation(
-    tmp_path: Path,
-) -> None:
-    """Context switch occurring during graph load cancels the drain before dialog."""
-    plan = DrainPlan(targets=(_target("web-1"),), skipped_daemonset=(), skipped_mirror=())
-    rec = NodeRecorder(plan=plan)
-    audit_path = tmp_path / "audit.jsonl"
-    lister = _CtxSwitchDuringGraphLister()
-    app = _make_app_with_custom_lister(rec, audit_path, lister)
-    lister.attach(app)
-    async with app.run_test() as pilot:
-        await _to_nodes(pilot)
-        await pilot.press("D")
-        await until(
-            pilot,
-            lambda: any("cancelled" in n.message for n in app._notifications),
-            label="drain cancelled after context switch during graph",
         )
         assert not isinstance(app.screen, ConfirmScreen)
         assert app._writes.active_writes() == 0

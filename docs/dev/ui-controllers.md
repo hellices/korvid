@@ -199,8 +199,10 @@ holds none of them; its action/message handlers for these flows
 `on_data_table_row_selected`, …) are one-line delegates.
 
 It reaches Textual through three named boundaries plus a few typed collaborator
-ports, so its logic is unit-tested in `tests/ui/test_workspace_controller.py`
-with no running app:
+ports, so its logic is exercised end to end through those seams by the
+behavioural suites that drive a running app (`tests/ui/test_app.py`,
+`test_drilldown.py`, `test_ctx_switch.py`, `test_split_pane.py`,
+`test_session_timeline_flow.py`):
 
 - **`UiSurface`** for notifications, workers, screens, progress and screen
   inspection — the same surface every other controller uses;
@@ -388,12 +390,13 @@ shares two of the controller's helpers — `node_target` (with `ShellController`
 and `edit_in_external_editor` (with `HelmController`) — so neither grows a
 second copy.
 
-`tests/ui/test_resource_write_controller.py` drives every flow against a real
-`WriteCoordinator` over fake Textual and view surfaces, so "the workflow
-cannot bypass the perimeter" is observed rather than asserted: a broken audit
-sink blocks the mutation, a declined dialog constructs no operation factory,
-and each approved flow's mutation count matches its `WriteCoordinator.run`
-count.
+The write flows are driven through the keybindings that raise them —
+`tests/ui/test_node_ops.py`, `test_write_ops.py`, `test_helm_actions.py`,
+`test_operator_uninstall.py`, `test_impact_security.py` — against a real
+`WriteCoordinator`, so "the workflow cannot bypass the perimeter" is observed
+rather than asserted: a broken audit sink blocks the mutation, a declined
+dialog runs no operation, and an approved flow's mutation count matches the
+reservations `WriteCoordinator` handed out.
 
 ### One write, one reservation
 

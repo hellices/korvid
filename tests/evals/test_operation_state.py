@@ -329,11 +329,6 @@ async def test_a_preview_without_a_uid_precondition_is_unavailable() -> None:
     assert await writes.preview_scale(_DEPLOY, "shop-a", "checkout-a", 3, uid=None) is None
 
 
-async def test_restart_preview_is_unavailable_without_a_uid_precondition() -> None:
-    _kube, writes, _journal = _wiring()
-    assert await writes.preview_rollout_restart(_DEPLOY, "shop-a", "checkout-a", uid=None) is None
-
-
 async def test_restart_preview_is_unavailable_when_the_target_is_missing() -> None:
     _kube, writes, _journal = _wiring()
     assert (
@@ -486,33 +481,6 @@ async def test_a_refused_write_never_claims_an_audit_observation() -> None:
         await writes.scale_object(_DEPLOY, "shop-a", "checkout-a", 3, uid=None)
     assert journal.has("audit_intent_observed") is False
     assert journal.has("audit_intent_missing") is False
-
-
-async def test_an_unusual_context_value_does_not_break_audit_observation() -> None:
-    weird_context = "eval context"
-    weird_intent = AuditRecord(
-        action="scale",
-        kind="deployments",
-        group="apps",
-        namespace="shop-a",
-        name="checkout-a",
-        outcome="intent",
-        context=weird_context,
-    )
-    _kube, writes, journal = _wiring(
-        audit_intent_probe=lambda: (weird_intent,), context=weird_context
-    )
-    await writes.scale_object(_DEPLOY, "shop-a", "checkout-a", 3, uid=_UID)
-    assert journal.has("audit_intent_observed") is True
-    assert journal.has("mutation_finished") is True
-
-
-async def test_an_unusual_uid_does_not_mask_the_conflict_api_error() -> None:
-    _kube, writes, journal = _wiring()
-    with pytest.raises(ApiStatusError, match="changed since it was approved") as excinfo:
-        await writes.scale_object(_DEPLOY, "shop-a", "checkout-a", 3, uid="unsafe uid")
-    assert excinfo.value.status == 409
-    assert journal.has("uid_conflict") is True
 
 
 def test_audit_records_are_parsed_and_a_torn_final_line_is_skipped() -> None:

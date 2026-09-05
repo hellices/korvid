@@ -14,6 +14,7 @@ from korvid.k8s.logs import LogLine
 from korvid.k8s.models import GenericSummary, PodSummary
 from korvid.tools.executor import UIBridge
 from korvid.ui.app import KorvidApp
+from korvid.ui.widgets.confirm_screen import ConfirmScreen
 from korvid.ui.widgets.describe_screen import DescribeScreen
 from korvid.ui.widgets.log_pane import LogPane
 from tests.ui.agent_session_fakes import FakeSession
@@ -225,6 +226,103 @@ async def test_agent_open_logs_specific_container() -> None:
         await pilot.pause()
         assert app.query_one(LogPane).display is True
         assert not out.startswith("ERROR:")
+
+
+# --- approval dialog on screen: the user owns the decision ---
+
+
+def _pending_delete() -> ConfirmScreen:
+    """The real approval dialog the user is deciding on, as the write
+    perimeter pushes it."""
+    return ConfirmScreen("Delete pod default/web-1", "delete pods/web-1")
+
+
+async def test_agent_navigate_refused_while_an_approval_dialog_is_open() -> None:
+    """The user is deciding on an irreversible write; swapping the table
+    underneath changes the evidence that decision rests on."""
+    app = make_app()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await app.push_screen(_pending_delete())
+        await pilot.pause()
+
+        out = await app._agent_ui.agent_navigate("deployments")
+        await pilot.pause()
+
+        assert out.startswith("ERROR:")
+        assert app.current_kind == "pods"
+        assert isinstance(app.screen, ConfirmScreen)
+
+
+async def test_agent_open_describe_refused_while_an_approval_dialog_is_open() -> None:
+    """A describe pushed over a pending approval steals the keystrokes that
+    dialog is waiting for — approvals are confirmed only by the user."""
+    app = make_app()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await app.push_screen(_pending_delete())
+        await pilot.pause()
+
+        out = await app._agent_ui.agent_open_describe("pods", "web-1", "default")
+        await pilot.pause()
+
+        assert out.startswith("ERROR:")
+        assert isinstance(app.screen, ConfirmScreen)
+        assert not app.query(DescribeScreen)
+
+
+async def test_agent_open_logs_refused_while_an_approval_dialog_is_open() -> None:
+    """The refusal has to land *before* the container lookup: the user may
+    answer the dialog while that lookup is in flight, and a decision made a
+    moment ago must not retroactively license tearing down the streams the
+    user was reading beneath it."""
+    app = make_app()
+    lookup_calls = 0
+
+    async def dialog_answered_mid_lookup(
+        kind: str, namespace: str | None, name: str
+    ) -> dict[str, Any]:
+        nonlocal lookup_calls
+        lookup_calls += 1
+        app.pop_screen()
+        return {"kind": "Pod", "spec": {"containers": [{"name": "main"}]}}
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await app._agent_ui.agent_open_logs("web-1", "default")
+        await pilot.pause()
+        before = list(app._logs.current_triples)
+        assert before
+
+        await app.push_screen(_pending_delete())
+        await pilot.pause()
+        app._get_manifest = dialog_answered_mid_lookup
+        out = await app._agent_ui.agent_open_logs("web-2", "default")
+        await pilot.pause()
+
+        assert out.startswith("ERROR:")
+        assert lookup_calls == 0
+        assert app._logs.current_triples == before
+
+
+async def test_agent_open_logs_refused_by_an_approval_dialog_that_opens_mid_lookup() -> None:
+    """The pre-check goes stale across the awaited container lookup: an
+    approval raised in that window still wins over the pane teardown."""
+    app = make_app()
+
+    async def manifest_then_approval(kind: str, namespace: str | None, name: str) -> dict[str, Any]:
+        await app.push_screen(_pending_delete())
+        return {"kind": "Pod", "spec": {"containers": [{"name": "main"}]}}
+
+    app._get_manifest = manifest_then_approval
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        out = await app._agent_ui.agent_open_logs("web-1", "default")
+        await pilot.pause()
+
+        assert out.startswith("ERROR:")
+        assert app._logs.current_triples == []
+        assert app.query_one(LogPane).display is False
 
 
 # --- bridge never raises ---
