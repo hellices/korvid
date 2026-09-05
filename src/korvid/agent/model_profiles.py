@@ -217,11 +217,8 @@ class SpecialFlowRegistry:
 
     def claim(self, reference: str) -> SpecialFlow | None:
         """Return the first flow whose prefix is a prefix of *reference*, or None."""
+        reference = reference.replace("_", "-")
         return next(
             (f for f in self._flows if reference.startswith(f.prefix)),
             None,
         )
-
-
-#: Alias so callers that only build and pass profiles use a name that
-#: matches their intent without pulling in the full connection vocabulary.
