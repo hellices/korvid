@@ -37,7 +37,7 @@ import dataclasses
 import json
 import logging
 from abc import ABC, abstractmethod
-from collections.abc import Awaitable, Callable, Collection, Coroutine
+from collections.abc import Awaitable, Callable, Coroutine
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from textual.screen import Screen
@@ -56,6 +56,7 @@ from korvid.agent.model_profiles import (
     ModelConnectionConfig,
     ModelConnectionsConfig,
     split_reference,
+    suggest_profile_name,
 )
 from korvid.agent.navigation import EvidenceTarget, target_for
 from korvid.agent.setup import AgentSettings, profile_refusal, settings_from_profile
@@ -69,7 +70,6 @@ from korvid.core.config import (
     ModelConnectionsWriter,
     ModelTierWrite,
     common_auth_method,
-    is_valid_profile_name,
 )
 from korvid.core.errors import explain_api_error
 from korvid.core.impact import ImpactAction
@@ -178,25 +178,6 @@ def _model_reference(argument: str, current: str) -> str:
     if not current_prefix:
         return argument
     return f"{current_prefix}{MODEL_REFERENCE_SEPARATOR}{argument}"
-
-
-def _profile_name(reference: str, taken: Collection[str]) -> str:
-    """A stable, readable, *valid* name for a newly created profile.
-
-    Derived from the model tag rather than asked for: a first run should
-    end with a working agent, not with a naming question. Anything the
-    config file would reject falls back to a fixed name.
-    """
-    _prefix, tag = split_reference(reference)
-    base = tag or reference
-    if not is_valid_profile_name(base):
-        base = "default"
-    name = base
-    counter = 1
-    while name in taken:
-        name = f"{base}-{counter}"
-        counter += 1
-    return name
 
 
 async def _aclose(iterator: object) -> None:
@@ -979,7 +960,7 @@ class AgentUiController:
         `unparsed` included — survives.
         """
         taken = set(self._profiles.profiles) | set(self._profiles.unparsed)
-        name = _profile_name(result.profile.model, taken)
+        name = suggest_profile_name(result.profile.model, taken)
         profiles = dict(self._profiles.profiles)
         profiles[name] = result.profile
         return dataclasses.replace(self._profiles, active=name, profiles=profiles)

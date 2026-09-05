@@ -205,6 +205,53 @@ async def test_add_returns_the_profile_from_the_editor() -> None:
     assert result.edited.profiles == {"gpt-4o": added}
 
 
+async def test_add_uses_a_valid_fallback_name_for_colon_model_tags() -> None:
+    added = ModelConnectionConfig(model="ollama/qwen3:8b")
+
+    async def open_editor(
+        existing: ModelConnectionConfig | None,
+    ) -> ModelConnectionConfig | None:
+        assert existing is None
+        return added
+
+    app = _Host(ModelConnectionsConfig(), open_editor)
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: app.screen_ref is not None and app.screen_ref.is_attached)
+        await pilot.press("a")
+        await until(pilot, lambda: app.result != "unset")
+
+    result = app.result
+    assert isinstance(result, ProfileManagerResult)
+    assert result.edited is not None
+    assert result.edited.profiles == {"default": added}
+
+
+async def test_repairing_an_invalid_name_moves_it_to_a_valid_profile_key() -> None:
+    repaired = ModelConnectionConfig(model="ollama/qwen3:8b")
+
+    async def open_editor(
+        existing: ModelConnectionConfig | None,
+    ) -> ModelConnectionConfig | None:
+        assert existing is None
+        return repaired
+
+    profiles = ModelConnectionsConfig(
+        unparsed={"broken:name": {"model": "ollama/qwen3:8b"}},
+    )
+    app = _Host(profiles, open_editor)
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: app.screen_ref is not None and app.screen_ref.is_attached)
+        _highlight(app, "broken:name")
+        await pilot.press("e")
+        await until(pilot, lambda: app.result != "unset")
+
+    result = app.result
+    assert isinstance(result, ProfileManagerResult)
+    assert result.edited is not None
+    assert result.edited.profiles == {"default": repaired}
+    assert "broken:name" not in result.edited.unparsed
+
+
 async def test_edit_replaces_the_selected_profile_in_place() -> None:
     existing = ModelConnectionConfig(model="openai/gpt-4o-mini")
     edited = ModelConnectionConfig(model="openai/gpt-4o")

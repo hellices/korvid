@@ -8,10 +8,16 @@ neither, and the layer rules forbid the first outright.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Collection
 from dataclasses import dataclass
 from enum import Enum
 
-from korvid.core.config import ConnectionAuthConfig, ModelConnectionConfig, ModelConnectionsConfig
+from korvid.core.config import (
+    ConnectionAuthConfig,
+    ModelConnectionConfig,
+    ModelConnectionsConfig,
+    is_valid_profile_name,
+)
 
 __all__ = [
     "AuthMethodDescriptor",
@@ -28,6 +34,7 @@ __all__ = [
     "SpecialFlow",
     "SpecialFlowRegistry",
     "split_reference",
+    "suggest_profile_name",
 ]
 
 
@@ -136,6 +143,20 @@ def split_reference(reference: str) -> tuple[str, str]:
     if not separator:
         return "", reference
     return prefix, tag
+
+
+def suggest_profile_name(reference: str, taken: Collection[str]) -> str:
+    """Return a readable valid profile name that does not collide."""
+    _provider, tag = split_reference(reference)
+    base = tag or reference
+    if not is_valid_profile_name(base):
+        base = "default"
+    name = base
+    counter = 1
+    while name in taken:
+        name = f"{base}-{counter}"
+        counter += 1
+    return name
 
 
 class ModelCatalog(ABC):
