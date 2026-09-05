@@ -24,3 +24,17 @@ def test_all_namespaces_orders_by_namespace_then_name_not_by_key_string() -> Non
         ("team", "x"),
         ("team-b", "y"),
     ]
+
+
+def test_broken_subscriber_does_not_block_later_subscribers() -> None:
+    store = ResourceStore()
+    seen: list[str] = []
+
+    def broken(_kind: str) -> None:
+        raise RuntimeError("subscriber bug")
+
+    store.subscribe(broken)
+    store.subscribe(seen.append)
+    store.apply_event("pods", "default", "ADDED", _pod("a"))
+
+    assert seen == ["pods"]

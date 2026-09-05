@@ -1584,10 +1584,10 @@ def test_network_section_tolerates_non_mapping(tmp_path: Path) -> None:
 
 
 def test_provider_name_canonicalized_at_load(tmp_path: Path) -> None:
-    """Config load must canonicalize provider names so github_copilot
+    """Config load must canonicalize dotted provider names so GitHub.Copilot
     receives device-login default and compositions root loads OAuth."""
     f = tmp_path / "config.yaml"
-    f.write_text("agent:\n  provider: github_copilot\n  model: gpt-4o\n")
+    f.write_text("agent:\n  provider: GitHub.Copilot\n  model: gpt-4o\n")
     cfg = load_config(f)
     assert cfg.agent_provider == "github-copilot"
     assert cfg.agent_auth_method == "device-login"

@@ -38,9 +38,19 @@ def test_first_recognized_node_wins() -> None:
     assert info.provider == "aws"
 
 
-def test_managed_label_alone_identifies_aks() -> None:
-    info = detect_provider([_node(None, {"kubernetes.azure.com/cluster": "mc"})])
-    assert (info.provider, info.distribution, info.display) == ("azure", "aks", "aks")
+def test_managed_labels_identify_each_distribution_without_provider_id() -> None:
+    cases = (
+        ("kubernetes.azure.com/cluster", "azure", "aks"),
+        ("eks.amazonaws.com/nodegroup", "aws", "eks"),
+        ("cloud.google.com/gke-nodepool", "gcp", "gke"),
+    )
+    for label, provider, distribution in cases:
+        info = detect_provider([_node(None, {label: "managed"})])
+        assert (info.provider, info.distribution, info.display) == (
+            provider,
+            distribution,
+            distribution,
+        )
 
 
 # ---------------------------------------------------------------------------

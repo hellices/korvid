@@ -68,9 +68,17 @@ def test_retarget_journey_namespace_updates_live_identity_and_targets() -> None:
     assert retargeted.turns[0].expected_evidence[0][0].args["namespace"] == namespace
     assert retargeted.turns[1].forbidden_targets[0]["namespace"] == namespace
     assert retargeted.turns[1].interaction is not None
+    assert retargeted.turns[1].interaction.kube_context == "aks-korvid-contract-test"
     assert retargeted.turns[1].interaction.focused_pane.selected is not None
     assert retargeted.turns[1].interaction.focused_pane.selected.uid is None
     assert journey.turns[0].expected_evidence[0][0].args["namespace"] == "shop"
+
+    default_context = retarget_journey_namespace(journey, namespace, context="")
+    assert default_context.interaction.kube_context is None
+    assert all(
+        turn.interaction is None or turn.interaction.kube_context is None
+        for turn in default_context.turns
+    )
 
 
 class _ReadSpy(ReadOps):
