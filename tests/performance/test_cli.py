@@ -453,6 +453,7 @@ def test_cli_replay_live_rejects_duration_that_orphans_a_burst(
     ("command", "option", "value", "expected"),
     [
         ("replay", "--time-scale", "0.5", "must be finite and >= 1.0"),
+        ("replay", "--time-scale", "nan", "must be finite and >= 1.0"),
         ("replay", "--sample-interval", "0", "must be positive"),
         ("replay", "--input-ack-timeout", "inf", "must be finite and positive"),
         ("replay", "--input-sample-pairs", "0", "must be positive"),
