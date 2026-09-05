@@ -373,7 +373,7 @@ async def test_post_terminal_data_is_not_emitted_or_remembered() -> None:
     assert provider._thinking_by_call_id == {}
 
 
-async def test_terminal_chunk_discards_message_content_and_tool_calls() -> None:
+async def test_terminal_chunk_emits_message_content_and_tool_calls_before_done() -> None:
     body = _ndjson(
         {
             "message": {
@@ -393,9 +393,66 @@ async def test_terminal_chunk_discards_message_content_and_tool_calls() -> None:
 
     events = await _events(provider)
 
-    assert {"type": "text_delta", "text": "tail"} not in events
-    assert not [event for event in events if event.get("type") == "tool_call"]
-    assert {"type": "usage", "input_tokens": 12, "output_tokens": 7} in events
+    assert events == [
+        {"type": REQUEST_SENT},
+        {"type": "text_delta", "text": "tail"},
+        {"type": "tool_call", "id": "late-call", "name": "get_logs", "arguments": "{}"},
+        {"type": "usage", "input_tokens": 12, "output_tokens": 7},
+        {"type": "done"},
+    ]
+    assert list(provider._thinking_by_call_id.items()) == [("late-call", "hidden")]
+
+
+async def test_terminal_chunk_reasoning_respects_byte_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(ollama_module, "MAX_REASONING_BYTES", 3)
+    body = _ndjson(
+        {
+            "message": {"role": "assistant", "content": "", "thinking": "éé"},
+            "done": True,
+            "prompt_eval_count": 12,
+            "eval_count": 7,
+        }
+    )
+    provider = _provider(body, options=OllamaOptions(think=True))
+
+    seen: list[dict[str, Any]] = []
+    with pytest.raises(ProviderError, match="reasoning exceeds 3 UTF-8 bytes"):
+        await _drain(provider, seen)
+
+    assert seen == [{"type": REQUEST_SENT}]
+    assert provider._thinking_by_call_id == {}
+
+
+async def test_terminal_chunk_tool_arguments_respect_byte_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(ollama_module, "MAX_TOOL_ARGUMENTS_BYTES", 5)
+    body = _ndjson(
+        {
+            "message": {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "function": {"name": "get_logs", "arguments": {"pod": "web-1"}},
+                    }
+                ],
+            },
+            "done": True,
+            "prompt_eval_count": 12,
+            "eval_count": 7,
+        }
+    )
+    provider = _provider(body, options=OllamaOptions(think=True))
+
+    seen: list[dict[str, Any]] = []
+    with pytest.raises(ProviderError, match="tool call arguments exceeds 5 UTF-8 bytes"):
+        await _drain(provider, seen)
+
+    assert seen == [{"type": REQUEST_SENT}]
     assert provider._thinking_by_call_id == {}
 
 

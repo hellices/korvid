@@ -70,8 +70,9 @@ continues to raise rather than being converted to success.
 
 `OllamaProvider.complete` stops at the first chunk where `done is True`.
 Transport EOF without that exact terminal value raises `ProviderError`.
-Terminal chunks contribute usage but do not allow later content, reasoning, or
-tool calls to be processed.
+The terminal chunk's own `message` payload is processed once before the
+adapter records usage and breaks, so valid final content, reasoning, and tool
+calls are preserved while any later chunks are ignored.
 
 Reasoning is checked cumulatively by UTF-8 bytes. Native tool calls are checked
 before serialization and append: no more than 64 calls, and each serialized

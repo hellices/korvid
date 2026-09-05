@@ -209,10 +209,11 @@ Monkeypatch limits to small values and verify:
 
 - [ ] **Step 4: Implement fail-fast parsing**
 
-Track `terminated = False`. Parse stream errors first. If `chunk.get("done") is
-True`, capture usage, set `terminated`, and break before processing `message`.
-Otherwise append reasoning with `append_bounded`, yield content, and collect
-tools with bounded count and serialized argument bytes.
+Track `terminated = False`. Parse stream errors first. Process every chunk's
+`message` exactly once: append reasoning with `append_bounded`, yield content,
+and collect tools with bounded count and serialized argument bytes. If
+`chunk.get("done") is True`, capture usage after processing that terminal
+payload, set `terminated`, and break before reading any later chunks.
 
 After the response context, reject unless terminated. Only then remember
 reasoning and emit accumulated calls, usage, and `done`.

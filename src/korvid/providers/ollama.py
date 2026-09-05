@@ -217,10 +217,6 @@ class OllamaProvider(LLMProvider):
                 # it as a hard failure instead of a truncated "success".
                 if chunk.get("error"):
                     raise ProviderError(f"Ollama stream error: {chunk['error']}")
-                if chunk.get("done") is True:
-                    usage = _usage_from_chunk(chunk)
-                    terminated = True
-                    break
                 message: dict[str, Any] = chunk.get("message") or {}
                 # message.thinking is never rendered as answer text, but it is
                 # accumulated so the reasoning state can be re-attached to the
@@ -231,6 +227,10 @@ class OllamaProvider(LLMProvider):
                 if content:
                     yield {"type": "text_delta", "text": content}
                 self._collect_tool_calls(message, tool_calls)
+                if chunk.get("done") is True:
+                    usage = _usage_from_chunk(chunk)
+                    terminated = True
+                    break
 
         if not terminated:
             raise ProviderError("Ollama stream ended without done: true")
