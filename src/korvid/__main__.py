@@ -946,12 +946,13 @@ def _build_model_catalog() -> ModelCatalog | None:
     try:
         from korvid.providers.endpoint_discovery import EndpointDiscovery
         from korvid.providers.litellm_catalog import LiteLLMModelCatalog
+        from korvid.providers.litellm_runtime import models_by_provider
         from korvid.providers.models_dev import ModelsDevSource
         from korvid.providers.special_flows import SpecialFlowRegistry
     except ImportError:
         return None
     return LiteLLMModelCatalog(
-        flows=SpecialFlowRegistry.from_entry_points(),
+        flows=SpecialFlowRegistry.from_entry_points(reserved_prefixes=models_by_provider()),
         enrichment=ModelsDevSource(),
         discovery=EndpointDiscovery(),
     )
