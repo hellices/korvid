@@ -846,7 +846,7 @@ def _metadata_text(
         "Provides-Extra: all\n"
         'Requires-Dist: httpx>=0.27; extra == "agent"\n'
         f"{keyring}"
-        'Requires-Dist: litellm>=1.98.0; extra == "agent"\n'
+        'Requires-Dist: litellm==1.98.0; extra == "agent"\n'
         'Requires-Dist: mcp<2,>=1.10; extra == "mcp"\n'
         'Requires-Dist: anyio>=4.5; extra == "mcp"\n'
         'Requires-Dist: starlette>=0.36; extra == "mcp"\n'
@@ -854,7 +854,7 @@ def _metadata_text(
         'Requires-Dist: httpx>=0.27; extra == "observability"\n'
         'Requires-Dist: httpx>=0.27; extra == "all"\n'
         'Requires-Dist: keyring>=25.7.0; extra == "all"\n'
-        'Requires-Dist: litellm>=1.98.0; extra == "all"\n'
+        'Requires-Dist: litellm==1.98.0; extra == "all"\n'
         'Requires-Dist: mcp<2,>=1.10; extra == "all"\n'
         'Requires-Dist: anyio>=4.5; extra == "all"\n'
         'Requires-Dist: starlette>=0.36; extra == "all"\n'
@@ -862,6 +862,19 @@ def _metadata_text(
         "\n"
         f"{body}"
     )
+
+
+def test_metadata_fixture_uses_the_declared_litellm_pin() -> None:
+    project = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))["project"]
+    litellm = next(
+        requirement
+        for requirement in project["optional-dependencies"]["agent"]
+        if requirement.startswith("litellm")
+    )
+    metadata = _metadata_text()
+
+    assert f'Requires-Dist: {litellm}; extra == "agent"' in metadata
+    assert f'Requires-Dist: {litellm}; extra == "all"' in metadata
 
 
 def _fake_dist(
