@@ -15,12 +15,15 @@ shaped so it cannot grow back into a provider list:
 from __future__ import annotations
 
 import importlib.metadata
+import logging
 import re
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
 from korvid.agent.model_profiles import SpecialFlow, split_reference
 from korvid.providers.litellm_settings import DEVICE_LOGIN_PREFIXES, RETIRED_PROVIDER_ALIASES
+
+logger = logging.getLogger(__name__)
 
 _ENTRY_POINT_GROUP: str = "korvid.provider"
 
@@ -127,6 +130,9 @@ class SpecialFlowRegistry:
         self._ep_map: dict[str, importlib.metadata.EntryPoint] = {}
         # {normalized_name: SpecialFlow | Exception} — memoized load results
         self._loaded: dict[str, SpecialFlow | Exception] = {}
+        # Prefixes the standard transport publishes and routes on its own;
+        # filled in by `from_entry_points`. See `_falls_back_to_the_transport`.
+        self._routable_prefixes: frozenset[str] = frozenset()
 
         for item in flows:
             self._register(item)
@@ -165,9 +171,16 @@ class SpecialFlowRegistry:
 
     @classmethod
     def from_entry_points(cls, *, reserved_prefixes: Iterable[str] = ()) -> SpecialFlowRegistry:
-        """Build from entry-point **names only**; load nothing yet."""
+        """Build from entry-point **names only**; load nothing yet.
+
+        *reserved_prefixes* is the standard transport's own provider
+        table. It does two jobs: a third party may not shadow a name in
+        it, and a name in it is one korvid can hand back to routing if
+        the flow sharing it turns out not to be loadable.
+        """
         registry = cls()
         reserved = {normalize_prefix(prefix) for prefix in reserved_prefixes}
+        registry._routable_prefixes = frozenset(reserved)
 
         for ep in _iter_entry_points():
             try:
@@ -187,6 +200,43 @@ class SpecialFlowRegistry:
 
         return registry
 
+    def _falls_back_to_the_transport(self, normalized: str) -> bool:
+        """Would this prefix still be served if its flow were missing?
+
+        Only if the standard transport publishes it — a flow can *share*
+        a prefix, never invent one for the transport — and only if it is
+        not on the list that must never reach routing at all.
+        """
+        return normalized in self._routable_prefixes and normalized not in _ALWAYS_CLAIMED
+
+    def _fail_load(
+        self, normalized: str, name: str, result: Exception, reason: str
+    ) -> SpecialFlow | None:
+        """Memoize a failed load, report it, and name what it costs.
+
+        A flow that could not be loaded claims only what it must: a
+        prefix it *shared* with the standard transport goes back to being
+        routed, because refusing it would disable every ordinary
+        reference under that prefix over an optional module that raised.
+        A prefix nothing else can serve — a retired alias, a device-login
+        trap, a name the transport does not publish — stays claimed and
+        is refused.
+
+        Reported either way: the result is memoized, so a repeated claim
+        neither reloads nor re-reports.
+        """
+        self._loaded[normalized] = result
+        self._errors.append(f"entry point {name!r} {reason}")
+        logger.warning(
+            "special flow %r %s; references under that prefix %s",
+            name,
+            reason,
+            "fall back to the standard transport"
+            if self._falls_back_to_the_transport(normalized)
+            else "are refused",
+        )
+        return None
+
     def _load_ep(self, normalized: str) -> SpecialFlow | None:
         """Load the entry point for *normalized* if not yet loaded.
 
@@ -202,21 +252,25 @@ class SpecialFlowRegistry:
 
         loaded = _load_declared_flow(ep)
         if isinstance(loaded, Exception):
-            self._loaded[normalized] = loaded
-            self._errors.append(f"entry point {ep.name!r} raised on load: {type(loaded).__name__}")
-            return None
+            return self._fail_load(
+                normalized, ep.name, loaded, f"raised on load: {type(loaded).__name__}"
+            )
 
         flow = loaded
         if normalize_prefix(flow.prefix) != normalized:
-            self._loaded[normalized] = ValueError("entry-point prefix mismatch")
-            self._errors.append(f"entry point {ep.name!r} returned flow prefix {flow.prefix!r}")
-            return None
+            return self._fail_load(
+                normalized,
+                ep.name,
+                ValueError("entry-point prefix mismatch"),
+                f"returned flow prefix {flow.prefix!r}",
+            )
         self._loaded[normalized] = flow
         # Register it properly (validates prefix etc.)
         before = len(self._errors)
         self._register(flow)
         if len(self._errors) > before:
-            # Validation rejected it — do not expose
+            # Validation rejected it — do not expose. `_register` already
+            # said why, so this only records that nothing was loaded.
             self._loaded[normalized] = ValueError("rejected after load")
             return None
         return self._claims.get(normalize_prefix(flow.prefix))
@@ -280,10 +334,21 @@ class SpecialFlowRegistry:
         refuse one before it routes, and it must still refuse when the
         flow that serves it was never installed.
 
-        A flow that claims a named *option* is excluded: it shares its
-        prefix with the standard transport rather than owning it, and a
-        shared prefix in this set would make the option permanently on —
-        the factory refuses a claimed prefix nothing served.
+        Two kinds of prefix are subtracted, and both are prefixes the
+        standard transport already serves:
+
+        - one whose only claim is a named *option*: the flow shares the
+          prefix rather than owning it, and a shared prefix in this set
+          would make the option permanently on — the factory refuses a
+          claimed prefix nothing served;
+        - one whose entry point was loaded and *failed*: nothing is left
+          to serve the option, so the ordinary references under it go
+          back to being routed instead of being disabled by an optional
+          module that raised.
+
+        Neither subtraction can touch `_ALWAYS_CLAIMED`, so a retired
+        alias and a device-login trap stay refused however badly a flow
+        misbehaves.
 
         Available *without* loading anything.
         """
@@ -293,11 +358,23 @@ class SpecialFlowRegistry:
             if flow.claims_option is not None and prefix not in _ALWAYS_CLAIMED
         }
         return (
-            frozenset(self._claims.keys())
-            | frozenset(self._ep_map.keys())
-            | frozenset(normalize_prefix(a) for a in RETIRED_PROVIDER_ALIASES)
-            | frozenset(normalize_prefix(p) for p in DEVICE_LOGIN_PREFIXES)
-        ) - shared
+            (
+                frozenset(self._claims.keys())
+                | frozenset(self._ep_map.keys())
+                | frozenset(normalize_prefix(a) for a in RETIRED_PROVIDER_ALIASES)
+                | frozenset(normalize_prefix(p) for p in DEVICE_LOGIN_PREFIXES)
+            )
+            - shared
+            - self._unloadable_prefixes()
+        )
+
+    def _unloadable_prefixes(self) -> frozenset[str]:
+        """Prefixes whose flow was loaded, failed, and has a fallback."""
+        return frozenset(
+            prefix
+            for prefix, result in self._loaded.items()
+            if isinstance(result, Exception) and self._falls_back_to_the_transport(prefix)
+        )
 
     def _known_flows(self) -> Iterable[tuple[str, SpecialFlow]]:
         """Every flow already registered or loaded, without loading more."""

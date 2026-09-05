@@ -18,6 +18,7 @@ from typing import Any
 import httpx
 import pytest
 
+from korvid.agent.credentials import CredentialSource
 from korvid.agent.model_policy import ModelDescriptor
 from korvid.agent.model_profiles import (
     ConnectionAuthConfig,
@@ -26,9 +27,11 @@ from korvid.agent.model_profiles import (
     ModelConnectionConfig,
     SpecialFlow,
 )
+from korvid.agent.provider import REQUEST_SENT
 from korvid.providers.flow_copilot import (
     COPILOT_CHAT_BASE_URL,
     CREDENTIAL_KEY,
+    CopilotChatProvider,
     CopilotCredentialSource,
     CopilotDeviceLogin,
     DeviceCodePrompt,
@@ -38,6 +41,7 @@ from korvid.providers.flow_copilot import (
     copilot_flow,
 )
 from korvid.providers.special_flows import SpecialFlowRegistry
+from korvid.providers.static_creds import StaticHeaderSource
 from korvid.providers.token_store import TokenStore
 
 
@@ -609,3 +613,394 @@ def _chat_client(seen: dict[str, Any]) -> httpx.AsyncClient:
         return httpx.Response(200, text=body, headers={"content-type": "text/event-stream"})
 
     return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+
+# ---------------------------------------------------------------------------
+# The SSE dialect the flow parses for itself
+#
+# The flow carries its own reader rather than importing the shared one —
+# the vendor guard forbids naming the shared dialect inside this module —
+# so the reader needs its own tests. Without them, deleting the shared
+# adapter's tests (Task 18) would delete the only coverage fragmented
+# tool calls, usage reporting and the acknowledgement contract ever had.
+# ---------------------------------------------------------------------------
+
+
+def _sse(*chunks: dict[str, Any]) -> str:
+    return "".join(f"data: {json.dumps(chunk)}\n\n" for chunk in chunks) + "data: [DONE]\n\n"
+
+
+def _sse_provider(
+    body: str,
+    *,
+    status: int = 200,
+    capture: dict[str, Any] | None = None,
+) -> CopilotChatProvider:
+    """The chat transport on a mock wire, with no device flow in the way."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if capture is not None:
+            capture["url"] = str(request.url)
+            capture["json"] = json.loads(request.content)
+            capture["headers"] = dict(request.headers)
+        return httpx.Response(status, text=body, headers={"content-type": "text/event-stream"})
+
+    return CopilotChatProvider(
+        base_url=COPILOT_CHAT_BASE_URL,
+        model="gpt-4o",
+        credentials=StaticHeaderSource("cop-1"),
+        client=_client(handler),
+    )
+
+
+async def _stream(
+    provider: CopilotChatProvider, tools: list[dict[str, Any]] | None = None
+) -> list[dict[str, Any]]:
+    return [e async for e in provider.complete([{"role": "user", "content": "hi"}], tools or [])]
+
+
+async def _drain(provider: CopilotChatProvider, seen: list[dict[str, Any]]) -> None:
+    """Consume a stream into `seen` so `pytest.raises` wraps one call."""
+    async for event in provider.complete([{"role": "user", "content": "hi"}], []):
+        seen.append(event)
+
+
+async def test_text_deltas_stream_in_order_and_end_with_done() -> None:
+    events = await _stream(
+        _sse_provider(
+            _sse(
+                {"choices": [{"delta": {"content": "Wor"}}]},
+                {"choices": [{"delta": {"content": "ld"}}]},
+            )
+        )
+    )
+    assert [e["text"] for e in events if e["type"] == "text_delta"] == ["Wor", "ld"]
+    assert events[-1] == {"type": "done"}
+
+
+async def test_the_first_event_acknowledges_the_transport() -> None:
+    """The runtime treats an acknowledged request as sent, whatever
+    happens next: a retry that assumed otherwise would double-charge the
+    operator's subscription."""
+    events = await _stream(_sse_provider(_sse({"choices": [{"delta": {"content": "hi"}}]})))
+    assert events[0] == {"type": REQUEST_SENT}
+
+
+async def test_an_http_error_acknowledges_before_it_raises() -> None:
+    seen: list[dict[str, Any]] = []
+    provider = _sse_provider("nope", status=401)
+    with pytest.raises(ProviderError, match="HTTP 401"):
+        await _drain(provider, seen)
+    assert seen == [{"type": REQUEST_SENT}]
+
+
+async def test_a_credential_source_that_refuses_sends_nothing() -> None:
+    """No headers, no request: nothing was handed to anyone, so the
+    acknowledgement must not be emitted either."""
+
+    class _Refusing(CredentialSource):
+        async def headers(self) -> dict[str, str]:
+            raise RuntimeError("keyring locked")
+
+    provider = CopilotChatProvider(
+        base_url=COPILOT_CHAT_BASE_URL,
+        model="gpt-4o",
+        credentials=_Refusing(),
+        client=_client(lambda request: httpx.Response(200)),
+    )
+
+    seen: list[dict[str, Any]] = []
+    with pytest.raises(RuntimeError, match="keyring locked"):
+        await _drain(provider, seen)
+    assert seen == []
+
+
+async def test_a_tool_call_split_across_chunks_is_reassembled() -> None:
+    """The host streams a tool call as fragments: the id and name arrive
+    once, the arguments arrive a few characters at a time. Emitting a
+    fragment would hand the executor half a JSON document."""
+    events = await _stream(
+        _sse_provider(
+            _sse(
+                {
+                    "choices": [
+                        {
+                            "delta": {
+                                "tool_calls": [
+                                    {
+                                        "index": 0,
+                                        "id": "c1",
+                                        "function": {"name": "get_logs", "arguments": '{"po'},
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                },
+                {"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {}}]}}]},
+                {
+                    "choices": [
+                        {
+                            "delta": {
+                                "tool_calls": [{"index": 0, "function": {"arguments": 'd": "a'}}]
+                            }
+                        }
+                    ]
+                },
+                {
+                    "choices": [
+                        {"delta": {"tool_calls": [{"index": 0, "function": {"arguments": '"}'}}]}}
+                    ]
+                },
+            )
+        ),
+        tools=[{"type": "function", "function": {"name": "get_logs"}}],
+    )
+    assert [e for e in events if e["type"] == "tool_call"] == [
+        {"type": "tool_call", "id": "c1", "name": "get_logs", "arguments": '{"pod": "a"}'}
+    ]
+
+
+async def test_two_interleaved_tool_calls_stay_separate_and_ordered() -> None:
+    """Parallel tool calls arrive interleaved and out of order, keyed only
+    by `index`. Folding them by arrival order would splice one call's
+    arguments into another's."""
+    events = await _stream(
+        _sse_provider(
+            _sse(
+                {
+                    "choices": [
+                        {
+                            "delta": {
+                                "tool_calls": [
+                                    {
+                                        "index": 1,
+                                        "id": "second",
+                                        "function": {"name": "describe", "arguments": '{"b'},
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                },
+                {
+                    "choices": [
+                        {
+                            "delta": {
+                                "tool_calls": [
+                                    {
+                                        "index": 0,
+                                        "id": "first",
+                                        "function": {"name": "get_logs", "arguments": '{"a'},
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                },
+                {
+                    "choices": [
+                        {
+                            "delta": {
+                                "tool_calls": [{"index": 1, "function": {"arguments": '": 2}'}}]
+                            }
+                        }
+                    ]
+                },
+                {
+                    "choices": [
+                        {
+                            "delta": {
+                                "tool_calls": [{"index": 0, "function": {"arguments": '": 1}'}}]
+                            }
+                        }
+                    ]
+                },
+            )
+        ),
+        tools=[{"type": "function", "function": {"name": "get_logs"}}],
+    )
+    assert [e for e in events if e["type"] == "tool_call"] == [
+        {"type": "tool_call", "id": "first", "name": "get_logs", "arguments": '{"a": 1}'},
+        {"type": "tool_call", "id": "second", "name": "describe", "arguments": '{"b": 2}'},
+    ]
+
+
+async def test_text_and_tool_calls_in_one_answer_both_survive() -> None:
+    """A tool call is emitted after the stream ends, so text that arrived
+    around it must not be swallowed by the fold."""
+    events = await _stream(
+        _sse_provider(
+            _sse(
+                {"choices": [{"delta": {"content": "thinking"}}]},
+                {
+                    "choices": [
+                        {
+                            "delta": {
+                                "content": " out loud",
+                                "tool_calls": [
+                                    {
+                                        "index": 0,
+                                        "id": "c1",
+                                        "function": {"name": "get_logs", "arguments": "{}"},
+                                    }
+                                ],
+                            }
+                        }
+                    ]
+                },
+            )
+        )
+    )
+    assert [e["text"] for e in events if e["type"] == "text_delta"] == ["thinking", " out loud"]
+    assert [e["name"] for e in events if e["type"] == "tool_call"] == ["get_logs"]
+
+
+async def test_tool_call_arguments_reach_the_executor_exactly_as_sent() -> None:
+    """The transport does not parse arguments. A model that emits invalid
+    JSON must produce a tool-call event the executor can refuse with the
+    model's own text, not a transport-shaped guess at what it meant."""
+    events = await _stream(
+        _sse_provider(
+            _sse(
+                {
+                    "choices": [
+                        {
+                            "delta": {
+                                "tool_calls": [
+                                    {
+                                        "index": 0,
+                                        "id": "c1",
+                                        "function": {
+                                            "name": "get_logs",
+                                            "arguments": '{"pod": "a"',
+                                        },
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                }
+            )
+        )
+    )
+    call = next(e for e in events if e["type"] == "tool_call")
+    assert call["arguments"] == '{"pod": "a"'
+
+
+async def test_a_tool_call_that_never_names_a_function_still_reaches_the_executor() -> None:
+    """A fragment with no name and no id is malformed, and the refusal
+    belongs to the executor: dropping it here would end the turn with a
+    silent nothing instead of a reported failure."""
+    events = await _stream(
+        _sse_provider(
+            _sse({"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {}}]}}]})
+        )
+    )
+    assert [e for e in events if e["type"] == "tool_call"] == [
+        {"type": "tool_call", "id": "", "name": "", "arguments": ""}
+    ]
+
+
+async def test_usage_is_reported_from_the_final_chunk() -> None:
+    events = await _stream(
+        _sse_provider(
+            _sse(
+                {"choices": [{"delta": {"content": "x"}}]},
+                {"choices": [], "usage": {"prompt_tokens": 12, "completion_tokens": 3}},
+            )
+        )
+    )
+    assert {"type": "usage", "input_tokens": 12, "output_tokens": 3} in events
+
+
+async def test_a_later_usage_report_replaces_an_earlier_one() -> None:
+    """`stream_options.include_usage` sends running counts; the last one
+    is the total, and reporting the first would under-report the turn."""
+    events = await _stream(
+        _sse_provider(
+            _sse(
+                {"choices": [], "usage": {"prompt_tokens": 12, "completion_tokens": 1}},
+                {"choices": [], "usage": {"prompt_tokens": 12, "completion_tokens": 9}},
+            )
+        )
+    )
+    assert [e for e in events if e["type"] == "usage"] == [
+        {"type": "usage", "input_tokens": 12, "output_tokens": 9}
+    ]
+
+
+async def test_partial_usage_is_not_reported_as_if_it_were_exact() -> None:
+    """The runtime treats any usage event as authoritative, so a missing
+    count defaulted to 0 would make an incomplete report look exact."""
+    events = await _stream(
+        _sse_provider(
+            _sse(
+                {"choices": [{"delta": {"content": "x"}}]},
+                {"choices": [], "usage": {"total_tokens": 9}},
+            )
+        )
+    )
+    assert not [e for e in events if e["type"] == "usage"]
+
+
+async def test_a_stream_that_reports_no_usage_reports_none() -> None:
+    events = await _stream(_sse_provider(_sse({"choices": [{"delta": {"content": "x"}}]})))
+    assert not [e for e in events if e["type"] == "usage"]
+
+
+async def test_sse_without_a_space_after_the_colon_is_still_read() -> None:
+    """SSE permits `data:<value>`. Skipping those lines would drop the
+    whole answer against a host that writes them."""
+    chunk = json.dumps({"choices": [{"delta": {"content": "hi"}}]})
+    body = f"data:{chunk}\n\ndata:[DONE]\n\n"
+    events = await _stream(_sse_provider(body))
+    assert {"type": "text_delta", "text": "hi"} in events
+    assert events[-1] == {"type": "done"}
+
+
+async def test_keepalive_and_comment_lines_are_ignored() -> None:
+    """Hosts send `:` comments and blank lines to hold the connection
+    open; parsing one as a chunk would raise mid-answer."""
+    chunk = json.dumps({"choices": [{"delta": {"content": "hi"}}]})
+    body = f": ping\n\ndata: {chunk}\n\n\ndata: [DONE]\n\n"
+    events = await _stream(_sse_provider(body))
+    assert [e["text"] for e in events if e["type"] == "text_delta"] == ["hi"]
+
+
+async def test_anything_after_done_is_not_read() -> None:
+    """`[DONE]` ends the answer. A host that keeps writing must not be
+    able to append to a turn the runtime already considers finished."""
+    body = (
+        'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'
+        "data: [DONE]\n\n"
+        'data: {"choices":[{"delta":{"content":" and more"}}]}\n\n'
+    )
+    events = await _stream(_sse_provider(body))
+    assert [e["text"] for e in events if e["type"] == "text_delta"] == ["hi"]
+
+
+async def test_a_chunk_with_no_choices_is_skipped_rather_than_raising() -> None:
+    events = await _stream(
+        _sse_provider(_sse({"choices": []}, {"id": "chatcmpl-1"}, {"choices": [{"delta": {}}]}))
+    )
+    assert [e["type"] for e in events] == [REQUEST_SENT, "done"]
+
+
+async def test_the_request_asks_for_a_stream_that_carries_usage() -> None:
+    capture: dict[str, Any] = {}
+    tools = [{"type": "function", "function": {"name": "get_logs"}}]
+    provider = _sse_provider(_sse({"choices": [{"delta": {"content": "x"}}]}), capture=capture)
+    await _stream(provider, tools=tools)
+    assert capture["json"]["model"] == "gpt-4o"
+    assert capture["json"]["stream"] is True
+    assert capture["json"]["stream_options"] == {"include_usage": True}
+    assert capture["json"]["tools"] == tools
+
+
+async def test_a_turn_without_tools_does_not_offer_an_empty_tool_list() -> None:
+    """An empty `tools: []` is not the same request as no `tools` key —
+    some hosts refuse it."""
+    capture: dict[str, Any] = {}
+    await _stream(_sse_provider(_sse({"choices": [{"delta": {"content": "x"}}]}), capture=capture))
+    assert "tools" not in capture["json"]

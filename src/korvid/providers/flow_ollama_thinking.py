@@ -395,6 +395,25 @@ def _int(value: object, default: int) -> int:
     return value
 
 
+def _bool(key: str, value: object, default: bool) -> bool:
+    """A boolean option, or the adapter's default.
+
+    Only a real `bool` decides. A hand-written `think: "false"` is a
+    *string*, and a truthiness test would read it as on — the opposite of
+    what the line says — so anything that is not a boolean falls back to
+    *default* and names the key it came from.
+
+    `bool` is not widened to `int` on purpose: `1` and `0` are not this
+    toggle's vocabulary, and accepting them would make `think: 2` mean
+    something.
+    """
+    if isinstance(value, bool):
+        return value
+    if value is not None:
+        logger.warning("ignoring unusable %r option value %r; using %r", key, value, default)
+    return default
+
+
 def _optional_int(value: object) -> int | None:
     if value is None:
         return None
@@ -428,13 +447,18 @@ def _options_from(profile_options: Mapping[str, object]) -> OllamaOptions:
     being shipped: a `"8192"` sent verbatim would land in
     `context_window_tokens` as text and make the model's own limit
     unknowable.
+
+    `think` defaults to `False`, the same default the pre-profile parser
+    substituted (`agent.ollama.think` was read as `raw.get("think") is
+    True`). Turning the *transport* on is not consent to reasoning
+    output, which can dwarf the answer on R1-style models, so only an
+    explicit boolean `true` asks for it.
     """
-    think = profile_options.get("think")
     return OllamaOptions(
         num_ctx=_int(profile_options.get("num_ctx"), 16384),
         temperature=_float(profile_options.get("temperature"), 0.0),
         seed=_optional_int(profile_options.get("seed")),
-        think=bool(think) if isinstance(think, bool) else True,
+        think=_bool("think", profile_options.get("think"), False),
         keep_alive=_keep_alive(profile_options.get("keep_alive")),
         num_predict=_optional_int(profile_options.get("num_predict")),
     )

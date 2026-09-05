@@ -216,10 +216,53 @@ async def test_thinking_field_is_not_yielded_as_text() -> None:
     assert texts == ["answer"]
 
 
-async def test_the_option_asks_the_model_to_think() -> None:
+async def test_turning_the_transport_on_does_not_turn_thinking_on() -> None:
+    """`native_thinking` chooses the *transport*; `think` chooses whether
+    the model emits reasoning. The legacy adapter defaulted `think` to
+    `False` — reasoning output can dwarf the answer on R1-style models —
+    and opting in to the native route must not flip that for an operator
+    who never asked for it."""
     capture: dict[str, Any] = {}
     await _events(_built(_profile(), capture))
+    assert capture["json"]["think"] is False
+
+
+async def test_an_explicit_true_asks_the_model_to_think() -> None:
+    capture: dict[str, Any] = {}
+    await _events(_built(_profile(options={"native_thinking": True, "think": True}), capture))
     assert capture["json"]["think"] is True
+
+
+async def test_an_explicit_false_keeps_the_model_quiet() -> None:
+    capture: dict[str, Any] = {}
+    await _events(_built(_profile(options={"native_thinking": True, "think": False}), capture))
+    assert capture["json"]["think"] is False
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param("false", id="the-string-false"),
+        pytest.param("true", id="the-string-true"),
+        pytest.param("yes please", id="prose"),
+        pytest.param(1, id="one"),
+        pytest.param(0, id="zero"),
+        pytest.param([], id="wrong-shape"),
+    ],
+)
+async def test_a_non_boolean_think_never_silently_turns_thinking_on(
+    value: object, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A hand-edited `think: "false"` must not mean the opposite of what
+    it reads. Only a real boolean decides; anything else falls back to the
+    legacy default and names itself in the log, exactly as the other
+    unusable option values in this module do."""
+    capture: dict[str, Any] = {}
+    profile = _profile(options={"native_thinking": True, "think": value})
+    with caplog.at_level("WARNING", logger="korvid.providers.flow_ollama_thinking"):
+        await _events(_built(profile, capture))
+    assert capture["json"]["think"] is False
+    assert any("think" in record.getMessage() for record in caplog.records)
 
 
 async def test_num_ctx_still_reaches_the_native_endpoint() -> None:
@@ -245,6 +288,7 @@ async def test_request_carries_options_think_and_keep_alive() -> None:
             "num_ctx": 8192,
             "temperature": 0.5,
             "seed": 42,
+            "think": True,
             "keep_alive": "10m",
             "num_predict": 192,
         }
@@ -404,3 +448,42 @@ def test_a_migrated_native_install_keeps_the_native_transport(tmp_path: Path) ->
     assert isinstance(provider, OllamaProvider)
     assert provider._options.num_ctx == 8192
     assert provider._options.think is True
+
+
+@pytest.mark.parametrize(
+    ("block", "expected"),
+    [
+        pytest.param("    think: true\n", True, id="on-stays-on"),
+        pytest.param("    think: false\n", False, id="off-stays-off"),
+        pytest.param("", False, id="unset-stays-off"),
+        pytest.param('    think: "false"\n', False, id="unusable-lands-on-the-old-default"),
+    ],
+)
+async def test_a_migrated_install_puts_the_old_think_value_on_the_wire(
+    tmp_path: Path, block: str, expected: bool
+) -> None:
+    """End to end from the legacy file to the request body.
+
+    `agent.ollama.think` was read as `raw.get("think") is True`, so an
+    install that never wrote the key — or wrote something that is not a
+    boolean — was running with thinking *off*. Migration plus this flow
+    has to reproduce that value, not a new one, because the operator did
+    not ask for anything to change.
+    """
+    from korvid.core.config import load_config
+
+    path = tmp_path / "korvid.yaml"
+    path.write_text(
+        "agent:\n"
+        "  provider: ollama\n"
+        "  base_url: http://localhost:11434\n"
+        "  model: qwen3:8b\n"
+        "  ollama:\n"
+        "    num_ctx: 8192\n" + block
+    )
+    profile = load_config(path).model_connections.active_profile
+    assert profile is not None
+
+    capture: dict[str, Any] = {}
+    await _events(_built(profile, capture))
+    assert capture["json"]["think"] is expected

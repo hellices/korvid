@@ -1012,3 +1012,97 @@ def test_a_profile_option_cannot_smuggle_a_bundle_past_the_operator(tmp_path: Pa
     )
 
     assert seen == [str(ca_pem), None]
+
+
+# ---------------------------------------------------------------------------
+# Task 17 review — a flow that fails to load claims only what must never route
+# ---------------------------------------------------------------------------
+
+
+class _ExplodingEntryPoint:
+    """A `korvid.provider` entry point whose module cannot be imported."""
+
+    def __init__(self, name: str, distribution: str = "korvid") -> None:
+        self.name = name
+        self.group = "korvid.provider"
+        self.dist = type("_Dist", (), {"name": distribution})()
+
+    def load(self) -> SpecialFlow:
+        raise ImportError(f"No module named 'korvid.providers.flow_{self.name}'")
+
+
+def _registry_with_broken(
+    monkeypatch: pytest.MonkeyPatch, name: str, distribution: str = "korvid"
+) -> SpecialFlowRegistry:
+    monkeypatch.setattr(
+        "korvid.providers.special_flows._iter_entry_points",
+        lambda: (_ExplodingEntryPoint(name, distribution),),
+    )
+    return SpecialFlowRegistry.from_entry_points(
+        reserved_prefixes={"ollama", "openai", "github_copilot"}
+    )
+
+
+def test_a_broken_option_flow_leaves_ordinary_references_routable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The thinking flow is optional; `ollama/*` is not.
+
+    Its entry point shares a prefix the standard transport publishes, so
+    an import error there must cost the operator the *option*, not the
+    provider. Refusing the prefix would disable every ollama profile on
+    the machine because one optional module raised.
+    """
+    flows = _registry_with_broken(monkeypatch, "ollama")
+
+    provider = create_provider_from_profile(
+        _profile("ollama/qwen3:8b", base_url="http://localhost:11434"), flows=flows
+    )
+
+    assert isinstance(provider, LiteLLMProvider)
+
+
+def test_a_broken_device_login_flow_still_refuses_the_reference(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The opposite case. `get_llm_provider("github_copilot/...")` starts
+    an interactive device login inside the routing call, so a flow that
+    failed to load must leave the reference refused rather than routed."""
+
+    def _explode(*args: object, **kwargs: object) -> None:
+        raise AssertionError("get_llm_provider must not be reached")
+
+    monkeypatch.setattr("korvid.providers.litellm_runtime.get_llm_provider", _explode)
+    flows = _registry_with_broken(monkeypatch, "github-copilot")
+
+    assert create_provider_from_profile(_profile("github_copilot/gpt-4o"), flows=flows) is None
+
+
+def test_a_broken_third_party_flow_still_refuses_its_own_prefix(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """`acme/` is not a name the standard transport publishes, so there is
+    nothing to fall back *to*: the claim stands and the refusal names the
+    reference."""
+    flows = _registry_with_broken(monkeypatch, "acme", distribution="acme-korvid-plugin")
+
+    with caplog.at_level(logging.WARNING, logger=FACTORY_LOGGER):
+        provider = create_provider_from_profile(_profile("acme/model"), flows=flows)
+
+    assert provider is None
+    assert "acme/model" in caplog.text
+
+
+def test_a_broken_flow_is_still_reported_when_its_prefix_falls_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Falling back is not the same as saying nothing: the operator who
+    turned the option on has to be able to find out why it stopped
+    happening."""
+    flows = _registry_with_broken(monkeypatch, "ollama")
+
+    create_provider_from_profile(
+        _profile("ollama/qwen3:8b", base_url="http://localhost:11434"), flows=flows
+    )
+
+    assert any("ollama" in message for message in flows.errors)

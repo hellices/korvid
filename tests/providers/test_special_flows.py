@@ -316,3 +316,129 @@ def test_an_option_flow_is_still_the_setup_answer_for_its_shared_prefix() -> Non
     registry = SpecialFlowRegistry([flow])
 
     assert registry.claim("ollama/qwen3:8b") is flow
+
+
+class _ExplodingEntryPoint:
+    """An entry point whose module cannot be imported."""
+
+    def __init__(self, name: str, distribution: str | None = "korvid") -> None:
+        self.name = name
+        self.group = "korvid.provider"
+        self.dist = None if distribution is None else _Distribution(distribution)
+
+    def load(self) -> SpecialFlow:
+        raise ImportError(f"No module named 'korvid.providers.flow_{self.name}'")
+
+
+def test_a_flow_that_cannot_load_does_not_take_a_prefix_the_transport_already_serves(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A broken plugin may disable itself; it may not disable `ollama/*`.
+
+    The prefix the thinking flow *shares* is one LiteLLM publishes and
+    routes on its own. Keeping it claimed after the load failed means the
+    factory refuses a claimed prefix nothing served — so every ordinary
+    `ollama/*` profile, including ones that never asked for the native
+    route, stops working because an unrelated optional module raised on
+    import.
+    """
+    monkeypatch.setattr(
+        "korvid.providers.special_flows._iter_entry_points",
+        lambda: (_ExplodingEntryPoint("ollama"),),
+    )
+
+    registry = SpecialFlowRegistry.from_entry_points(reserved_prefixes={"ollama", "openai"})
+
+    assert registry.claim("ollama/qwen3:8b") is None
+    assert "ollama" not in registry.claimed_prefixes
+
+
+def test_a_flow_that_cannot_load_still_denies_a_device_login_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The opposite case, and the reason the rule is not "unclaim on
+    failure". Routing `github_copilot/...` starts an interactive device
+    login inside `get_llm_provider`. If the flow that exists to prevent
+    that cannot be loaded, the reference must be refused, not handed to
+    the SDK.
+    """
+    monkeypatch.setattr(
+        "korvid.providers.special_flows._iter_entry_points",
+        lambda: (_ExplodingEntryPoint("github-copilot"),),
+    )
+
+    registry = SpecialFlowRegistry.from_entry_points(reserved_prefixes={"github_copilot", "ollama"})
+
+    assert registry.claim("github-copilot/gpt-4o") is None
+    assert "github-copilot" in registry.claimed_prefixes
+
+
+def test_a_flow_that_cannot_load_keeps_a_prefix_nothing_else_can_route(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An exclusive claim on a name the standard transport does not
+    publish has no fallback: handing `acme/model` to routing produces the
+    SDK's own confusion instead of korvid's reason, so the claim stands
+    and the factory refuses it.
+    """
+    monkeypatch.setattr(
+        "korvid.providers.special_flows._iter_entry_points",
+        lambda: (_ExplodingEntryPoint("acme", distribution="acme-korvid-plugin"),),
+    )
+
+    registry = SpecialFlowRegistry.from_entry_points(reserved_prefixes={"ollama", "openai"})
+
+    assert registry.claim("acme/model") is None
+    assert "acme" in registry.claimed_prefixes
+
+
+def test_a_flow_that_cannot_load_says_so(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Handing the prefix back to the standard transport is a fallback,
+    not a silence: an operator who opted in to a flow has to be able to
+    find out that it was never loaded."""
+    monkeypatch.setattr(
+        "korvid.providers.special_flows._iter_entry_points",
+        lambda: (_ExplodingEntryPoint("ollama"),),
+    )
+
+    registry = SpecialFlowRegistry.from_entry_points(reserved_prefixes={"ollama"})
+    assert registry.claim("ollama/qwen3:8b") is None
+
+    assert any("ollama" in message and "ImportError" in message for message in registry.errors)
+
+
+def test_a_failed_load_is_reported_once_however_often_it_is_asked_for(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`claimed_prefixes` is read on every profile build. A failure that
+    re-appended would grow the banner without bound."""
+    monkeypatch.setattr(
+        "korvid.providers.special_flows._iter_entry_points",
+        lambda: (_ExplodingEntryPoint("ollama"),),
+    )
+
+    registry = SpecialFlowRegistry.from_entry_points(reserved_prefixes={"ollama"})
+    for _ in range(3):
+        assert registry.claim("ollama/qwen3:8b") is None
+        assert "ollama" not in registry.claimed_prefixes
+
+    assert len([message for message in registry.errors if "ollama" in message]) == 1
+
+
+def test_an_unasked_for_prefix_is_still_claimed_before_anything_is_loaded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The fallback is only for a load that was *attempted and failed*.
+
+    A declared entry point that has not been loaded yet is still a claim,
+    because the factory has to be able to refuse before it routes and it
+    must not have to import plugin code to find that out.
+    """
+    monkeypatch.setattr(
+        "korvid.providers.special_flows._iter_entry_points",
+        lambda: (_ExplodingEntryPoint("ollama"),),
+    )
+
+    registry = SpecialFlowRegistry.from_entry_points(reserved_prefixes={"ollama"})
+
+    assert "ollama" in registry.claimed_prefixes

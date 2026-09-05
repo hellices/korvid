@@ -1718,6 +1718,14 @@ _LEGACY_OLLAMA_NUMERIC_KEYS: Mapping[str, type[int] | type[float]] = MappingProx
 #: fallback produced.
 _LEGACY_OLLAMA_STRICT_INT_KEYS: frozenset[str] = frozenset({"num_predict"})
 
+#: `think` was read as `raw.get("think") is True`, so only a real boolean
+#: ever turned it on and `think: yes please` meant *off*. Carrying a
+#: non-boolean through would hand the adapter a value it has to guess at,
+#: and a guess that read `"false"` as on would invert the line the
+#: operator wrote. Dropping it lands on `OllamaOptions.think = False` —
+#: exactly what the old parser produced.
+_LEGACY_OLLAMA_STRICT_BOOL_KEYS: frozenset[str] = frozenset({"think"})
+
 #: Legacy auth methods → the five common method ids.
 _LEGACY_AUTH_METHODS: Mapping[str, str] = MappingProxyType(
     {
@@ -1809,13 +1817,13 @@ def _legacy_options(
 
     Values are copied verbatim with one exception: the numeric knobs are
     coerced (`num_ctx`, `seed`, `temperature`) or strictly validated
-    (`num_predict`), because the pre-profile parser did that and Task 17
-    deletes it along with the scalars. Anything that will not coerce is
-    **dropped with a warning** rather than replaced by an invented
-    default — the default the old parser substituted is `OllamaOptions`'
-    own field default, which a migrated profile still reaches through
-    `native_api: True`, so dropping restores exactly the old effective
-    value while also telling the operator which line to fix.
+    (`num_predict`, `think`), because the pre-profile parser did that and
+    Task 17 deletes it. Anything that will not coerce is **dropped with a
+    warning** rather than replaced by an invented default — the default
+    the old parser substituted is `OllamaOptions`' own field default,
+    which a migrated profile still reaches through `native_api: True`, so
+    dropping restores exactly the old effective value while also telling
+    the operator which line to fix.
     """
     options: dict[str, object] = {}
     if provider == "ollama":
@@ -1838,24 +1846,37 @@ def _legacy_ollama_options(ollama_raw: dict[str, Any], warnings: list[str]) -> d
     for key in _LEGACY_OLLAMA_KEYS:
         if key not in ollama_raw:
             continue
-        value = ollama_raw[key]
-        if key in _LEGACY_OLLAMA_STRICT_INT_KEYS:
-            # `bool` is an `int` subclass, so YAML `true` must not pass here.
-            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-                warnings.append(
-                    f"agent.ollama.{key}: must be a positive integer — the value was dropped"
-                )
-                continue
+        keep, value = _legacy_ollama_value(key, ollama_raw[key], warnings)
+        if keep:
             options[key] = value
-            continue
-        cast_to = _LEGACY_OLLAMA_NUMERIC_KEYS.get(key)
-        if cast_to is None:
-            options[key] = value
-            continue
-        coerced = _legacy_ollama_number(key, value, cast_to, warnings)
-        if coerced is not None:
-            options[key] = coerced
     return options
+
+
+def _legacy_ollama_value(key: str, value: object, warnings: list[str]) -> tuple[bool, object]:
+    """One legacy knob, validated the way its own pre-profile parser was.
+
+    Returns `(keep, value)` rather than an optional value, because `False`
+    and `0` are both legitimate answers here and a sentinel would have to
+    be told apart from them anyway.
+    """
+    if key in _LEGACY_OLLAMA_STRICT_BOOL_KEYS:
+        if not isinstance(value, bool):
+            warnings.append(f"agent.ollama.{key}: must be true or false — the value was dropped")
+            return False, None
+        return True, value
+    if key in _LEGACY_OLLAMA_STRICT_INT_KEYS:
+        # `bool` is an `int` subclass, so YAML `true` must not pass here.
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            warnings.append(
+                f"agent.ollama.{key}: must be a positive integer — the value was dropped"
+            )
+            return False, None
+        return True, value
+    cast_to = _LEGACY_OLLAMA_NUMERIC_KEYS.get(key)
+    if cast_to is None:
+        return True, value
+    coerced = _legacy_ollama_number(key, value, cast_to, warnings)
+    return coerced is not None, coerced
 
 
 def _legacy_ollama_number(

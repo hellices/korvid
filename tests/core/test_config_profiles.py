@@ -493,6 +493,53 @@ def test_an_uncoercible_legacy_ollama_value_is_dropped_with_a_warning(
 
 
 @pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        pytest.param("think: true", True, id="explicit-true-survives"),
+        pytest.param("think: false", False, id="explicit-false-survives"),
+    ],
+)
+def test_a_boolean_legacy_think_is_carried_verbatim(
+    tmp_path: Path, raw: str, expected: bool
+) -> None:
+    """`think` is the only legacy knob whose value is the answer itself.
+
+    `False` must survive the migration as `False`: a drop test written on
+    truthiness would discard it and the profile would then fall back to a
+    default that happens to agree today — an accident, not a contract.
+    """
+    path = _write(tmp_path, f"agent:\n  provider: ollama\n  model: llama3\n  ollama:\n    {raw}\n")
+    profile = load_config(path).model_connections.active_profile
+    assert profile is not None
+    assert profile.options["think"] is expected
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        pytest.param('think: "true"', id="the-string-true"),
+        pytest.param('think: "false"', id="the-string-false"),
+        pytest.param("think: yes please", id="prose"),
+        pytest.param("think: 1", id="one-is-not-a-boolean"),
+        pytest.param("think: [1]", id="wrong-shape"),
+    ],
+)
+def test_a_non_boolean_legacy_think_is_dropped_with_a_warning(tmp_path: Path, raw: str) -> None:
+    """The pre-profile parser read this key as `raw.get("think") is True`,
+    so `think: yes please` meant *off*. Carrying the string through would
+    hand the adapter a value it has to guess at, and a guess that read
+    `"false"` as on would be the opposite of what the line says.
+    """
+    path = _write(tmp_path, f"agent:\n  provider: ollama\n  model: llama3\n  ollama:\n    {raw}\n")
+    cfg = load_config(path)
+    profile = cfg.model_connections.active_profile
+    assert profile is not None
+    assert profile.config_error is None
+    assert "think" not in profile.options
+    assert any("agent.ollama.think" in warning for warning in cfg.warnings)
+
+
+@pytest.mark.parametrize(
     ("provider", "model", "expected"),
     [
         ("openai-compat", "gpt-4o-mini", "openai/gpt-4o-mini"),
