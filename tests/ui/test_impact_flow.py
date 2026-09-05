@@ -1265,6 +1265,27 @@ async def test_same_name_replacement_during_the_impact_load_aborts_the_delete(
         )
 
 
+async def test_same_name_replacement_during_the_impact_load_aborts_the_restart(
+    tmp_path: Path,
+) -> None:
+    env = ImpactEnv(tmp_path / "audit.jsonl")
+    app = env.app
+    env.lister.on_first_call = lambda: _replace_selected_row_with_a_new_incarnation(app)
+    async with app.run_test() as pilot:
+        await to_view(pilot, "deploy", expect="web")
+        await app.action_rollout_restart()
+        assert len(app.screen_stack) == 1
+        assert env.ops.calls == []
+        await until(
+            pilot,
+            lambda: any(
+                "the selection changed during the impact summary" in n.message
+                for n in app._notifications
+            ),
+            label="restart impact-summary uid refusal",
+        )
+
+
 async def test_a_row_that_loses_its_uid_during_the_impact_load_aborts_the_delete(
     tmp_path: Path,
 ) -> None:

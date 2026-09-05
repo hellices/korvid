@@ -331,7 +331,7 @@ def test_getting_started_current_release_banner_and_pins_follow_project_version(
     current_release = markdown_section(getting_started, "Current release")
     banner = next(line for line in current_release.splitlines() if line.strip())
     assert re.match(rf"^\*\*`{re.escape(version)}`\*\*", banner)
-    pinned_versions = set(re.findall(r"korvid(?:\[[^\]]+\])?==(\d+\.\d+\.\d+)", getting_started))
+    pinned_versions = set(re.findall(r"korvid(?:\[[^\]]+\])?==([^\s'\"`]+)", getting_started))
     assert pinned_versions == {version}
 
 

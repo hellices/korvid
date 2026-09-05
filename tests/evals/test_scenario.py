@@ -128,6 +128,12 @@ def test_load_scenario_rejects_non_string_evidence_tool(tmp_path: Path) -> None:
         load_scenario(_write(tmp_path, text))
 
 
+def test_load_scenario_rejects_non_string_mention_keywords(tmp_path: Path) -> None:
+    text = _MINIMAL.replace('- "137"', "- 137")
+    with pytest.raises(ValueError, match="non-blank strings"):
+        load_scenario(_write(tmp_path, text))
+
+
 def test_load_scenarios_rejects_duplicate_ids(tmp_path: Path) -> None:
     _write(tmp_path, _MINIMAL, "a.yaml")
     _write(tmp_path, _MINIMAL, "b.yaml")

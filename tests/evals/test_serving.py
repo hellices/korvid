@@ -70,3 +70,13 @@ def test_a_failed_probe_is_recorded_as_a_gap_rather_than_raising() -> None:
     assert meta["context_length"] is None
     assert meta["unavailable"] == ["engine", "digest", "quantization", "context_length"]
     assert meta["error"] == "connect timeout"
+
+
+def test_an_unloaded_model_leaves_the_runtime_context_unpinned() -> None:
+    meta = serving_metadata(
+        model="qwen3:8b",
+        probe=ProbeResult(version=_VERSION, show=_SHOW, tags=_TAGS, ps={"models": []}),
+    )
+    assert meta["context_length"] is None
+    assert meta["max_context_length"] == 40960
+    assert "context_length" in meta["unavailable"]
