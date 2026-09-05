@@ -10,11 +10,10 @@ the individual azure/aws/gce/aks/eks/gke permutations exercised the same
 branch repeatedly with different literals. `test_detect_cloud_provider_lists_nodes`
 below still proves the lookup mechanism end to end through the real
 `KubeClient` boundary; this file's focus is the caching and error-handling
-contract that mechanism doesn't cover. One `detect_provider` test is kept
-directly: the multi-node loop (skip nodes with no recognizable signal, first
-recognized one decides) is its own algorithmic branch, not a lookup
-permutation, and `test_detect_cloud_provider_lists_nodes` only ever exercises
-a single node.
+contract that mechanism doesn't cover. Direct tests retain the multi-node loop
+(skip nodes with no recognizable signal, first recognized one decides) and one
+managed-label-only case because the real client boundary only supplies a
+providerID.
 """
 
 from typing import Any
