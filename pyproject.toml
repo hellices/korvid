@@ -52,6 +52,9 @@ Security = "https://github.com/hellices/korvid/blob/main/SECURITY.md"
 # Embedded AI agent: provider HTTP adapters + OS-keychain credential storage.
 agent = [
     "litellm==1.98.0",
+    # Imported directly by providers/litellm_runtime.py for ProviderSDKError,
+    # so declared directly even though litellm already pulls it in.
+    "openai>=1.0",
     "httpx>=0.27",
     "keyring>=25.7.0",
 ]
@@ -176,10 +179,7 @@ known_first_party = ["korvid"]
 [tool.deptry.per_rule_ignores]
 # The [all] extra references the project's own extras (korvid[agent,mcp]).
 # `korvid` itself is declared for the console-script entry point.
-# `litellm` is declared here one commit before the first module that imports
-# it, so the catalog tasks keep a real RED/GREEN and Task 6 removes this
-# ignore in the same commit that adds the importing module.
-DEP002 = ["korvid", "litellm"]
+DEP002 = ["korvid"]
 
 [tool.deptry.package_module_name_map]
 pyyaml = "yaml"

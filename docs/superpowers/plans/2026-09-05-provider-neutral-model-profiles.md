@@ -4,7 +4,7 @@
 
 **Goal:** Replace korvid's single hard-coded provider configuration and CSP-oriented `:ai` wizard with named model connection profiles whose provider and model selection is **data-driven** — read from LiteLLM's shipped catalog tables and optionally enriched from models.dev — and whose routing is **delegated** to `litellm.get_llm_provider`/`litellm.acompletion`. korvid's `NativeAgentEngine`, `RequestGateway`, `OutboundPolicy`, `ToolHarness`, approval gate, audit log, conversation repair and evidence contracts are untouched.
 
-**Architecture:** `core/config.py` owns immutable, provider-neutral profile dataclasses (`AgentAuthConfig`, `AgentProfileConfig`, `AgentProfilesConfig`) as the single source of truth. `agent/model_profiles.py` publishes the catalog vocabulary the UI consumes without importing `providers/` or `litellm`. `providers/litellm_catalog.py` builds that catalog from LiteLLM's offline tables; `providers/models_dev.py` optionally enriches it from a bounded, cached public JSON document; `providers/special_flows.py` registers the two flows LiteLLM cannot own. `providers/_litellm_import.py` is the **only** module in korvid that executes `import litellm` — it makes that import offline and silent — and `providers/litellm_runtime.py` is the only module that imports it, applying the telemetry/callback lockdown. `providers/litellm_provider.py` implements korvid's existing `LLMProvider` over `acompletion(stream=True)`.
+**Architecture:** `core/config.py` owns immutable, provider-neutral profile dataclasses (`ConnectionAuthConfig`, `ModelConnectionConfig`, `ModelConnectionsConfig`) as the single source of truth. `agent/model_profiles.py` publishes the catalog vocabulary the UI consumes without importing `providers/` or `litellm`. `providers/litellm_catalog.py` builds that catalog from LiteLLM's offline tables; `providers/models_dev.py` optionally enriches it from a bounded, cached public JSON document; `providers/special_flows.py` registers the two flows LiteLLM cannot own. `providers/_litellm_import.py` is the **only** module in korvid that executes `import litellm` — it makes that import offline and silent — and `providers/litellm_runtime.py` is the only module that imports it, applying the telemetry/callback lockdown. `providers/litellm_provider.py` implements korvid's existing `LLMProvider` over `acompletion(stream=True)`.
 
 **Tech Stack:** Python 3.11+, Textual, `litellm==1.98.0` (inside the `[agent]` extra only), `httpx>=0.27` (LiteLLM's own floor is `httpx>=0.28,<1.0` — the same family korvid already uses, so no second client flavour appears), pytest / pytest-asyncio, Ruff, mypy --strict, tach, deptry, uv.
 
@@ -57,13 +57,13 @@ Neither reproduction lives in the repository, so none of them substitutes for th
 - **The review loop runs to AGENTS.md's termination rule, not to one round.** Task 21 iterates: read every comment including the suppressed low-confidence findings inside the review body's `<details>` block, fix credible findings with TDD, reply per comment, resolve each thread, re-request review, poll, repeat. It terminates after two consecutive rounds that contain only suppressed low-confidence findings and no unresolved blocking findings; any new credible blocking finding resets that counter.
 - **Never `git commit --no-verify`**, never edit a gate file to make a failure pass.
 - Profile names: non-empty, at most 100 characters, only ASCII letters, digits, `.`, `_`, `-`. Names are **not** normalized (`prod-east` != `prod_east`). `agent.active` must exactly name an entry in `agent.profiles`.
-- **Profile insertion order is the file's order.** `AgentProfilesConfig.profiles` preserves the order the profiles appear in `config.yaml`; nothing sorts them. The wizard's list, the `:model` picker and every test assert that same order.
+- **Profile insertion order is the file's order.** `ModelConnectionsConfig.profiles` preserves the order the profiles appear in `config.yaml`; nothing sorts them. The wizard's list, the `:model` picker and every test assert that same order.
 - **Model references use the standard slash form `provider/model`.** That is what LiteLLM accepts, what models.dev publishes, and what every tool in the ecosystem prints. A colon form is not used: colons already occur *inside* model ids (`qwen3:8b`, `anthropic.claude-3-5-sonnet-20240620-v1:0`), so a colon separator is ambiguous. Tasks 1 and 2 landed with a colon form; **Task 2B is a correction commit that fixes it before anything consumes a reference.**
 - **korvid owns no provider class table and no per-vendor construction branch.** Routing is `litellm.get_llm_provider` for validation and `litellm.acompletion` for execution. There is no `BUILTIN_ADAPTERS`, no `provider-*` extra, and no `_build_<vendor>_model` function anywhere in this plan. A test asserts that the transport package contains no vendor-name dispatch.
 - Common auth methods, exactly these five ids: `none`, `environment` (with `key`), `keyring` (with `key`), `provider-default`, `device-login`. They map onto LiteLLM's *common* call arguments; `provider-default` deliberately passes **no** `api_key` so the provider SDK's own environment/default credential chain applies.
 - Secrets are never stored in YAML — only references. Both `profile.options` and `auth.settings` are parsed through the *same* bounded, secret-refusing validator before they are frozen.
-- **Freezing is recursive, so thawing must be too.** `_freeze_config_value` produces `MappingProxyType`/`tuple`; `yaml.safe_dump` has no representer for `mappingproxy` and raises `RepresenterError`. `save_agent_profiles` thaws recursively (`Mapping → dict`, `tuple → list`) before dumping, and a nested-option round-trip test pins it.
-- **A save never deletes what the parser could not model.** A profile korvid dropped (invalid name, no `model:`) and an `options`/`auth` block korvid rejected are carried on `AgentProfilesConfig.unparsed` as raw mappings and written back verbatim. `unparsed` is *never* read by anything that builds, activates or lists a connection: it is write-back state only, and a test pins that. The one exception is an *explicit* delete, and it must clear **both** halves — a profile that parsed into a `config_error` is a member of `profiles` *and* of `unparsed`, so removing it from one alone lets the writer re-emit it and the deleted profile comes back on the next load.
+- **Freezing is recursive, so thawing must be too.** `_freeze_config_value` produces `MappingProxyType`/`tuple`; `yaml.safe_dump` has no representer for `mappingproxy` and raises `RepresenterError`. `save_model_connections` thaws recursively (`Mapping → dict`, `tuple → list`) before dumping, and a nested-option round-trip test pins it.
+- **A save never deletes what the parser could not model.** A profile korvid dropped (invalid name, no `model:`) and an `options`/`auth` block korvid rejected are carried on `ModelConnectionsConfig.unparsed` as raw mappings and written back verbatim. `unparsed` is *never* read by anything that builds, activates or lists a connection: it is write-back state only, and a test pins that. The one exception is an *explicit* delete, and it must clear **both** halves — a profile that parsed into a `config_error` is a member of `profiles` *and* of `unparsed`, so removing it from one alone lets the writer re-emit it and the deleted profile comes back on the next load.
 - **`config_error` refuses construction, everywhere and permanently.** `create_provider_from_profile` returns `None` with a warning whenever `profile.config_error is not None`, and a test that survives the legacy deletion pins it.
 - **A misconfiguration disables the agent; it never crashes startup.** Every documented failure mode of the factory (unroutable reference, unsupported auth method, missing credential, unreadable CA bundle, keyless public host) returns `None` and appends to `startup_warnings`. `__main__`'s provider construction catches `(ProviderPluginError, ValueError)`, and a test asserts an unroutable profile yields `None` plus a warning rather than raising.
 - Core never imports `litellm`, `korvid.providers`, or any provider identifier outside the isolated legacy-migration region. UI never imports `korvid.providers` and never branches on `azure`, `aws`, `gcp`, `ollama`, or `github-copilot`.
@@ -87,14 +87,14 @@ Neither reproduction lives in the repository, so none of them substitutes for th
 - **Every constant shared by two layers lives in a leaf module.** `providers/litellm_settings.py` is stdlib-only and imports nothing from `korvid`; the catalog, the factory, `registry.py` and `plugin_registry.py` take shared constants from there. No shared table is defined in a module that also imports one of its consumers.
 - **This network cannot resolve public PyPI directly, but its proxy does.** `uv.lock` is produced only by the `Relock` workflow (Task 5B). Never run `uv lock` locally; never commit a lock resolved through a mirror. Verifying a library's API locally is a *separate* activity and has already been done: `uv venv /tmp/korvid-litellm-probe && uv pip install --python /tmp/korvid-litellm-probe/bin/python 'litellm==1.98.0'` succeeded through the global proxy and is the source of the API baseline table. That venv never touches `pyproject.toml`, `uv.lock` or `.venv`, which is why it is permitted where `uv lock` is not: it leaves no mirror-scoped URL behind.
 - **The dependency lands before the first module that reads it.** Task 5B takes `litellm` into `[agent]` and relocks *between* Task 5 (the vocabulary) and Task 6 (the first LiteLLM catalog module), so Tasks 6–8 have a genuine RED and a genuine GREEN instead of three commits whose suites silently `importorskip`. The price is one commit where `deptry` reports DEP002 for a declared-but-unimported `litellm`; Task 5B adds a scoped, commented ignore and **Task 6 deletes it again** in the commit that adds the first importing module — the deletion is itself the proof that the wrapper imports what it claims to.
-- **Every new import edge is already legal under `tach.toml`, checked against the rule file rather than the AGENTS.md summary.** `korvid.providers` declares `depends_on = ["korvid.agent"]` and nothing else — notably **not** `korvid.core`. That is why `agent/model_profiles.py` re-exports `AgentAuthConfig`/`AgentProfileConfig`/`AgentProfilesConfig` from `korvid.core.config` and every `providers/` module imports them from *there*: no `providers/` module imports `korvid.core` today, and none may start. The new intra-package edges (`litellm_runtime.py` → `_litellm_import.py`, `plugin_registry.py` → `litellm_settings.py`, `litellm_factory.py` → `special_flows.py`) are all inside `korvid.providers`, which tach does not govern. Still run `uv run tach check` whenever imports cross packages. Every test contains at least one `assert` or `pytest.raises(..., match=...)`. No bare `except:`; no bare `# type: ignore`.
+- **Every new import edge is already legal under `tach.toml`, checked against the rule file rather than the AGENTS.md summary.** `korvid.providers` declares `depends_on = ["korvid.agent"]` and nothing else — notably **not** `korvid.core`. That is why `agent/model_profiles.py` re-exports `ConnectionAuthConfig`/`ModelConnectionConfig`/`ModelConnectionsConfig` from `korvid.core.config` and every `providers/` module imports them from *there*: no `providers/` module imports `korvid.core` today, and none may start. The new intra-package edges (`litellm_runtime.py` → `_litellm_import.py`, `plugin_registry.py` → `litellm_settings.py`, `litellm_factory.py` → `special_flows.py`) are all inside `korvid.providers`, which tach does not govern. Still run `uv run tach check` whenever imports cross packages. Every test contains at least one `assert` or `pytest.raises(..., match=...)`. No bare `except:`; no bare `# type: ignore`.
 - Every commit message ends with the trailer `Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>`.
 
 ## File Structure
 
 | Path | Responsibility | Task |
 | --- | --- | --- |
-| `src/korvid/core/config.py` | Immutable `AgentAuthConfig`/`AgentProfileConfig`/`AgentProfilesConfig`, new-shape parser, legacy migration, slash references, `save_agent_profiles` writer, derived legacy scalars (deleted in Task 18) | 1, 2, 2B, 3, 18 |
+| `src/korvid/core/config.py` | Immutable `ConnectionAuthConfig`/`ModelConnectionConfig`/`ModelConnectionsConfig`, new-shape parser, legacy migration, slash references, `save_model_connections` writer, derived legacy scalars (deleted in Task 18) | 1, 2, 2B, 3, 18 |
 | `src/korvid/agent/model_profiles.py` (new) | Public, provider-free catalog vocabulary: `SetupFieldKind`, `SetupField`, `EndpointRequirement`, `AuthMethodDescriptor`, `ModelEntry`, `ModelEntrySource`, `ModelCatalog`, `DeviceLoginPrompt`, `SpecialFlow`, `split_reference()`, re-export of the three config dataclasses | 5 |
 | `src/korvid/providers/litellm_settings.py` (new) | Stdlib-only leaf: `AGENT_EXTRA`, `KEYLESS_API_KEY_SENTINEL`, `RETIRED_PROVIDER_ALIASES`. Imports nothing from `korvid`; the install hint stays in the existing `agent/install_hint.py` | 5, 6, 8, 13, 15 |
 | `src/korvid/providers/_litellm_import.py` (new) | The **only** module executing `import litellm`. Stdlib-only above the import: sets `LITELLM_LOCAL_MODEL_COST_MAP` before it, imports inside the install-hint `try:`, then detaches LiteLLM's `StreamHandler`s. No policy of its own | 6 |
@@ -217,7 +217,7 @@ that runs `make check`.
 
 **Status:** already implemented and committed. Do not redo it; verify it and move on.
 
-`src/korvid/core/config.py` now holds `_freeze_config_value`, `_freeze_config_mapping`, `_validated_config_mapping`, `AgentAuthConfig`, `AgentProfileConfig`, `AgentProfilesConfig`, `is_valid_profile_name`, `AGENT_PROFILE_NAME_MAX_LENGTH`, `_parse_profile_entry` and `_parse_agent_profiles`. `KorvidConfig` carries `agent_profiles: AgentProfilesConfig`. `tests/core/test_config_profiles.py` covers ordering, immutability, bounded/secret-refusing `options` and `auth.settings`, `config_error`, `unparsed` retention, unhashability, and the name rules.
+`src/korvid/core/config.py` now holds `_freeze_config_value`, `_freeze_config_mapping`, `_validated_config_mapping`, `ConnectionAuthConfig`, `ModelConnectionConfig`, `ModelConnectionsConfig`, `is_valid_profile_name`, `AGENT_PROFILE_NAME_MAX_LENGTH`, `_parse_profile_entry` and `_parse_model_connections`. `KorvidConfig` carries `model_connections: ModelConnectionsConfig`. `tests/core/test_config_profiles.py` covers ordering, immutability, bounded/secret-refusing `options` and `auth.settings`, `config_error`, `unparsed` retention, unhashability, and the name rules.
 
 **Steps**
 
@@ -235,12 +235,12 @@ Expected: `a71ee6cf feat: parse named agent model profiles` is in the log and th
 
 ```bash
 uv run python - <<'PY'
-from korvid.core.config import AgentAuthConfig, AgentProfileConfig, AgentProfilesConfig
-p = AgentProfileConfig(model="x/y", options={"nested": {"a": 1}, "items": [1, 2]})
+from korvid.core.config import ConnectionAuthConfig, ModelConnectionConfig, ModelConnectionsConfig
+p = ModelConnectionConfig(model="x/y", options={"nested": {"a": 1}, "items": [1, 2]})
 assert type(p.options["nested"]).__name__ == "mappingproxy", "freeze must recurse into mappings"
 assert p.options["items"] == (1, 2), "freeze must turn sequences into tuples"
-assert AgentProfileConfig.__hash__ is None and AgentAuthConfig.__hash__ is None
-c = AgentProfilesConfig(active="b", profiles={"b": p, "a": p})
+assert ModelConnectionConfig.__hash__ is None and ConnectionAuthConfig.__hash__ is None
+c = ModelConnectionsConfig(active="b", profiles={"b": p, "a": p})
 assert list(c.profiles) == ["b", "a"], "insertion order is the file's order"
 assert c.active_profile is p
 print("ok")
@@ -255,7 +255,7 @@ PY
 
 **Status:** already implemented and committed. It has one defect, corrected by Task 2B; do not fix it here and do not amend `d7b69101`.
 
-`core/config.py` now holds `LEGACY_PROFILE_NAME`, `_LEGACY_OPENAI_COMPAT_NAMES`, `_LEGACY_REVIEW_NAMES`, `_LEGACY_OLLAMA_KEYS`, `_LEGACY_OLLAMA_NUMERIC_KEYS`, `_LEGACY_OLLAMA_STRICT_INT_KEYS`, `_LEGACY_AUTH_METHODS`, `_legacy_model_reference`, `_legacy_auth`, `_legacy_options`, `_legacy_ollama_options`, `_legacy_ollama_number`, `_migrate_azure_endpoint`, `_migrate_legacy_agent` and `_resolve_agent_profiles`.
+`core/config.py` now holds `LEGACY_PROFILE_NAME`, `_LEGACY_OPENAI_COMPAT_NAMES`, `_LEGACY_REVIEW_NAMES`, `_LEGACY_OLLAMA_KEYS`, `_LEGACY_OLLAMA_NUMERIC_KEYS`, `_LEGACY_OLLAMA_STRICT_INT_KEYS`, `_LEGACY_AUTH_METHODS`, `_legacy_model_reference`, `_legacy_auth`, `_legacy_options`, `_legacy_ollama_options`, `_legacy_ollama_number`, `_migrate_azure_endpoint`, `_migrate_legacy_agent` and `_resolve_model_connections`.
 
 **Steps**
 
@@ -350,7 +350,7 @@ agent:
 """,
     )
     cfg = load_config(path)
-    profile = cfg.agent_profiles.active_profile
+    profile = cfg.model_connections.active_profile
     assert profile is not None
     assert profile.model == expected
 ```
@@ -381,7 +381,7 @@ agent:
 """,
     )
     cfg = load_config(path)
-    profile = cfg.agent_profiles.active_profile
+    profile = cfg.model_connections.active_profile
     assert profile is not None
     assert profile.model == "ollama/qwen3:8b"
     prefix, _, tag = profile.model.partition("/")
@@ -447,7 +447,7 @@ provider = "github-copilot"
 model = "gpt-4o"
 """,
     )
-    profile = load_config(path).agent_profiles.active_profile
+    profile = load_config(path).model_connections.active_profile
     assert profile is not None
     assert profile.auth.method == "device-login"
     assert profile.model == "github-copilot/gpt-4o"
@@ -468,7 +468,7 @@ model = "qwen3:8b"
 native_thinking = true
 """,
     )
-    profile = load_config(path).agent_profiles.active_profile
+    profile = load_config(path).model_connections.active_profile
     assert profile is not None
     assert profile.model == "ollama/qwen3:8b"
     assert profile.options["native_thinking"] is True
@@ -561,14 +561,14 @@ Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>"
 
 **Files**
 
-- `src/korvid/core/config.py` — `_thaw_config_value`, `_profile_to_raw`, `save_agent_profiles`, `LEGACY_AGENT_KEYS`, `_derive_legacy_scalars`, `_PREFIXES_WITHOUT_LEGACY_TRANSPORT`, `_legacy_azure_base_url`
+- `src/korvid/core/config.py` — `_thaw_config_value`, `_profile_to_raw`, `save_model_connections`, `LEGACY_AGENT_KEYS`, `_derive_legacy_scalars`, `_PREFIXES_WITHOUT_LEGACY_TRANSPORT`, `_legacy_azure_base_url`
 - `tests/core/test_config_profiles.py` — writer and derivation tests
-- `src/korvid/__main__.py` — persist through `save_agent_profiles`
+- `src/korvid/__main__.py` — persist through `save_model_connections`
 
 **Interfaces**
 
 ```python
-#: Agent-level keys the legacy shape owned. `save_agent_profiles` removes
+#: Agent-level keys the legacy shape owned. `save_model_connections` removes
 #: them once it has written the new shape, so the first successful save
 #: upgrades the file rather than leaving two shapes to disagree.
 #: `enabled` is included: `active: null` is the new off switch.
@@ -594,7 +594,7 @@ def _thaw_config_value(value: object) -> object:
     """
 
 
-def save_agent_profiles(path: Path, profiles: AgentProfilesConfig) -> None:
+def save_model_connections(path: Path, profiles: ModelConnectionsConfig) -> None:
     """Write `agent.active`/`agent.profiles`, preserving everything else.
 
     Read-modify-write: unrelated top-level keys, unrelated `agent.*` keys
@@ -605,7 +605,7 @@ def save_agent_profiles(path: Path, profiles: AgentProfilesConfig) -> None:
 
 
 def _derive_legacy_scalars(
-    profiles: AgentProfilesConfig, warnings: list[str]
+    profiles: ModelConnectionsConfig, warnings: list[str]
 ) -> _LegacyScalars:
     """Project the active profile onto the pre-profile scalar fields.
 
@@ -637,7 +637,7 @@ agent:
 """,
     )
     cfg = load_config(path)
-    save_agent_profiles(path, cfg.agent_profiles)
+    save_model_connections(path, cfg.model_connections)
 
     raw = yaml.safe_load(path.read_text(encoding="utf-8"))
     assert raw["kube_context"] == "prod"
@@ -665,9 +665,9 @@ agent:
         items: [1, 2]
 """,
     )
-    before = load_config(path).agent_profiles
-    save_agent_profiles(path, before)
-    after = load_config(path).agent_profiles
+    before = load_config(path).model_connections
+    save_model_connections(path, before)
+    after = load_config(path).model_connections
     assert after.profiles["main"].options["nested"]["depth"] == 1
     assert after.profiles["main"].options["items"] == (1, 2)
     assert after == before
@@ -686,8 +686,8 @@ agent:
 """,
     )
     cfg = load_config(path)
-    assert set(cfg.agent_profiles.profiles) == {"good"}
-    save_agent_profiles(path, cfg.agent_profiles)
+    assert set(cfg.model_connections.profiles) == {"good"}
+    save_model_connections(path, cfg.model_connections)
     raw = yaml.safe_load(path.read_text(encoding="utf-8"))
     assert set(raw["agent"]["profiles"]) == {"good", "broken"}
 
@@ -711,16 +711,16 @@ agent:
 """,
     )
     cfg = load_config(path)
-    assert cfg.agent_profiles.profiles["rejected"].config_error is not None
-    assert "rejected" in cfg.agent_profiles.unparsed
+    assert cfg.model_connections.profiles["rejected"].config_error is not None
+    assert "rejected" in cfg.model_connections.unparsed
 
     pruned = replace(
-        cfg.agent_profiles,
-        profiles={k: v for k, v in cfg.agent_profiles.profiles.items() if k != "rejected"},
-        unparsed={k: v for k, v in cfg.agent_profiles.unparsed.items() if k != "rejected"},
+        cfg.model_connections,
+        profiles={k: v for k, v in cfg.model_connections.profiles.items() if k != "rejected"},
+        unparsed={k: v for k, v in cfg.model_connections.unparsed.items() if k != "rejected"},
     )
-    save_agent_profiles(path, pruned)
-    assert set(load_config(path).agent_profiles.profiles) == {"good"}
+    save_model_connections(path, pruned)
+    assert set(load_config(path).model_connections.profiles) == {"good"}
     raw = yaml.safe_load(path.read_text(encoding="utf-8"))
     assert set(raw["agent"]["profiles"]) == {"good"}
 
@@ -788,7 +788,7 @@ agent:
     assert any("rejected" in w for w in cfg.warnings)
 ```
 
-Add `from dataclasses import replace` and `import yaml` to the test module's imports, and `save_agent_profiles` to the `korvid.core.config` import list.
+Add `from dataclasses import replace` and `import yaml` to the test module's imports, and `save_model_connections` to the `korvid.core.config` import list.
 
 - [ ] Step 2 — Run the RED:
 
@@ -796,7 +796,7 @@ Add `from dataclasses import replace` and `import yaml` to the test module's imp
 uv run pytest -p no:tach tests/core/test_config_profiles.py -q -k "saving or nested_option or unparsed or removed or derived or config_error"
 ```
 
-Expected: `ImportError: cannot import name 'save_agent_profiles'` collects as an error for the whole module — that is the RED. Do not proceed until you have seen it.
+Expected: `ImportError: cannot import name 'save_model_connections'` collects as an error for the whole module — that is the RED. Do not proceed until you have seen it.
 
 - [ ] Step 3 — GREEN, part 1: the writer.
 
@@ -809,7 +809,7 @@ def _thaw_config_value(value: object) -> object:
     return value
 
 
-def _profile_to_raw(profile: AgentProfileConfig) -> dict[str, Any]:
+def _profile_to_raw(profile: ModelConnectionConfig) -> dict[str, Any]:
     entry: dict[str, Any] = {"model": profile.model}
     if profile.endpoint is not None:
         entry["endpoint"] = profile.endpoint
@@ -822,7 +822,7 @@ def _profile_to_raw(profile: AgentProfileConfig) -> dict[str, Any]:
     return entry
 
 
-def save_agent_profiles(path: Path, profiles: AgentProfilesConfig) -> None:
+def save_model_connections(path: Path, profiles: ModelConnectionsConfig) -> None:
     raw = _read_config_document(path)
     agent_value = raw.get("agent")
     agent: dict[str, Any] = agent_value if isinstance(agent_value, dict) else {}
@@ -859,7 +859,7 @@ _PREFIXES_WITHOUT_LEGACY_TRANSPORT: frozenset[str] = frozenset(
 )
 
 
-def _legacy_azure_base_url(profile: AgentProfileConfig) -> str | None:
+def _legacy_azure_base_url(profile: ModelConnectionConfig) -> str | None:
     """Rebuild the deployment-scoped URL the legacy transport needs."""
     if profile.endpoint is None:
         return None
@@ -887,7 +887,7 @@ def _legacy_azure_base_url(profile: AgentProfileConfig) -> str | None:
 
 Wire it into `load_config` so `KorvidConfig`'s legacy scalars come from the projection, and make sure `agent_options_error` is assigned **before** the `KorvidConfig(...)` call that reads it.
 
-- [ ] Step 5 — Persist through the writer. In `src/korvid/__main__.py`, replace the existing agent-config save call with `save_agent_profiles(config_path, profiles)`. Keep the existing "applied now, reverts on restart" warning on `OSError`.
+- [ ] Step 5 — Persist through the writer. In `src/korvid/__main__.py`, replace the existing agent-config save call with `save_model_connections(config_path, profiles)`. Keep the existing "applied now, reverts on restart" warning on `OSError`.
 
 - [ ] Step 6 — Verify:
 
@@ -905,7 +905,7 @@ uv run tach check
 git add -A
 git commit -m "feat: write agent model profiles and derive legacy scalars
 
-save_agent_profiles emits only the new agent.active/agent.profiles shape,
+save_model_connections emits only the new agent.active/agent.profiles shape,
 thaws frozen mappings so yaml.safe_dump can represent them, carries
 unmodelled entries back verbatim, and removes the legacy agent keys once
 the new shape is in place.
@@ -1002,12 +1002,12 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
 
-from korvid.core.config import AgentAuthConfig, AgentProfileConfig, AgentProfilesConfig
+from korvid.core.config import ConnectionAuthConfig, ModelConnectionConfig, ModelConnectionsConfig
 
 __all__ = [
-    "AgentAuthConfig",
-    "AgentProfileConfig",
-    "AgentProfilesConfig",
+    "ConnectionAuthConfig",
+    "ModelConnectionConfig",
+    "ModelConnectionsConfig",
     "AuthMethodDescriptor",
     "DeviceLoginPrompt",
     "EndpointRequirement",
@@ -1179,19 +1179,19 @@ class ModelCatalog(ABC):
         """
 
     @abstractmethod
-    async def discover(self, profile: AgentProfileConfig) -> tuple[ModelEntry, ...]:
+    async def discover(self, profile: ModelConnectionConfig) -> tuple[ModelEntry, ...]:
         """Live-list models from the profile's endpoint. Best effort: an
         empty tuple means "type it yourself", never an error dialog."""
 
     @abstractmethod
-    async def test(self, profile: AgentProfileConfig) -> str:
+    async def test(self, profile: ModelConnectionConfig) -> str:
         """Probe the profile and return a short human-readable result."""
 
     @abstractmethod
-    async def begin_auth(self, profile: AgentProfileConfig) -> DeviceLoginPrompt | None: ...
+    async def begin_auth(self, profile: ModelConnectionConfig) -> DeviceLoginPrompt | None: ...
 
     @abstractmethod
-    async def finish_auth(self, profile: AgentProfileConfig) -> str | None: ...
+    async def finish_auth(self, profile: ModelConnectionConfig) -> str | None: ...
 ```
 
 And the stdlib-only leaf, which exists so the catalog, the factory, `registry.py` and `plugin_registry.py` can share constants without importing one another:
@@ -1811,7 +1811,7 @@ from pathlib import Path
 import pytest
 
 from korvid.agent.model_profiles import (
-    AgentProfileConfig,
+    ModelConnectionConfig,
     EndpointRequirement,
     ModelEntrySource,
 )
@@ -2182,7 +2182,7 @@ def test_a_flow_declaration_is_the_only_source_of_a_non_optional_requirement() -
 
 async def test_discovery_without_an_endpoint_returns_nothing_rather_than_raising() -> None:
     catalog = LiteLLMModelCatalog()
-    profile = AgentProfileConfig(model="openai/gpt-4o")
+    profile = ModelConnectionConfig(model="openai/gpt-4o")
     assert await catalog.discover(profile) == ()
 ```
 
@@ -3412,7 +3412,7 @@ class ProfileManagerResult:
     """
 
     activated: str | None = None
-    edited: AgentProfilesConfig | None = None
+    edited: ModelConnectionsConfig | None = None
 
 
 class ProfileManagerScreen(ModalScreen["ProfileManagerResult | None"]):
@@ -3453,8 +3453,8 @@ async def test_enter_activates_without_rewriting_the_profile_set() -> None:
 async def test_a_profile_that_failed_to_parse_is_listed_and_deletable() -> None:
     """A rejected profile must stay visible and removable. Hiding it
     leaves an operator with a config file they cannot fix from the UI."""
-    profiles = AgentProfilesConfig(
-        profiles={"good": AgentProfileConfig(model="openai/gpt-4o")},
+    profiles = ModelConnectionsConfig(
+        profiles={"good": ModelConnectionConfig(model="openai/gpt-4o")},
         unparsed={"broken": {"model": ["not", "a", "string"]}},
     )
     ...
@@ -3511,7 +3511,7 @@ Row rendering: `f"{name}{marker} — {label}"` where `marker` is `" (active)"` f
 
 `action_activate` refuses when the selected profile is unparsed or carries a `config_error`, writing the reason into `#profile-status` and **not** dismissing. Otherwise it dismisses with `ProfileManagerResult(activated=name)`.
 
-`action_delete` builds a new `AgentProfilesConfig` with the name removed from **both** `profiles` and `unparsed`, clears `active` when it pointed at the deleted name, and dismisses with `ProfileManagerResult(edited=...)`.
+`action_delete` builds a new `ModelConnectionsConfig` with the name removed from **both** `profiles` and `unparsed`, clears `active` when it pointed at the deleted name, and dismisses with `ProfileManagerResult(edited=...)`.
 
 `action_add` / `action_edit` await `self._open_editor(existing)` and, on a non-`None` result, merge it into the set preserving insertion order (an edit replaces in place; an add appends) and dismiss with `edited`.
 
@@ -3717,7 +3717,7 @@ async def test_a_secret_ref_field_stores_the_name_and_never_the_value() -> None:
 async def test_option_fields_are_seeded_from_the_edited_profile() -> None:
     """Editing must start from the profile's current options, not from
     descriptor defaults - otherwise editing silently resets them."""
-    profile = AgentProfileConfig(
+    profile = ModelConnectionConfig(
         model="x/y", options={"num_ctx": 8192, "native_thinking": True}
     )
     ...
@@ -3876,7 +3876,7 @@ Extract the stage table and the field-to-value conversion into module-level help
 
 `_activate_profile` builds the provider **first** via the factory (Task 15), applies it through the existing `apply_settings` path, and only persists `agent.profiles.active` when the swap succeeded. On failure it notifies with the factory's message and leaves both the session and the pointer untouched.
 
-`_persist_profiles` calls `save_agent_profiles` (Task 3) and refreshes the in-memory set from what was written, so the `unparsed` round-trip stays authoritative.
+`_persist_profiles` calls `save_model_connections` (Task 3) and refreshes the in-memory set from what was written, so the `unparsed` round-trip stays authoritative.
 
 Keep `settings: KorvidConfig` on the constructor. `agent_model_tier` and `agent_follow` are **not** profile fields and still come from there. Continue using `self._configured_tier` for the persisted tier; the wizard's `_model_tier` is a draft and must not be read here.
 
@@ -4609,7 +4609,7 @@ Where a profile becomes a live provider, and where every "this must not be built
 
 ```python
 def create_provider_from_profile(
-    profile: AgentProfileConfig,
+    profile: ModelConnectionConfig,
     *,
     catalog: ModelCatalog | None = None,
     flows: SpecialFlowRegistry | None = None,
@@ -4637,7 +4637,7 @@ from pathlib import Path
 import pytest
 
 from korvid.agent.model_profiles import AuthMethodDescriptor, EndpointRequirement
-from korvid.core.config import AgentAuthConfig, AgentProfileConfig
+from korvid.core.config import ConnectionAuthConfig, ModelConnectionConfig
 from korvid.providers.litellm_factory import OMIT_API_KEY, create_provider_from_profile
 from korvid.providers.special_flows import SpecialFlowRegistry
 ```
@@ -4649,7 +4649,7 @@ def test_a_profile_with_a_config_error_is_refused() -> None:
     """The parser already decided this profile is unusable. Building
     from it anyway would send a request shaped by values korvid could not
     validate."""
-    profile = AgentProfileConfig(model="openai/gpt-4o", config_error="bad options")
+    profile = ModelConnectionConfig(model="openai/gpt-4o", config_error="bad options")
     assert create_provider_from_profile(profile) is None
 
 
@@ -4736,7 +4736,7 @@ def test_korvid_never_routes_to_litellms_own_copilot_provider(
 
 def test_an_environment_auth_method_reads_the_named_variable(monkeypatch) -> None:
     monkeypatch.setenv("MY_KEY", "sk-live")
-    plan = _plan_for(_profile("openai/gpt-4o", auth=AgentAuthConfig(method="environment", key="MY_KEY")))
+    plan = _plan_for(_profile("openai/gpt-4o", auth=ConnectionAuthConfig(method="environment", key="MY_KEY")))
     assert plan.api_key == "sk-live"
 
 
@@ -4764,7 +4764,7 @@ def test_provider_default_passes_no_key_so_the_sdk_chain_applies(monkeypatch) ->
     delegate - the SDK sees an explicit argument and stops consulting its
     own chain. That is the bug the assertion has to be able to fail on.
     """
-    plan = _plan_for(_profile("bedrock-x/model", auth=AgentAuthConfig(method="provider-default")))
+    plan = _plan_for(_profile("bedrock-x/model", auth=ConnectionAuthConfig(method="provider-default")))
     assert "api_key" not in plan.call_kwargs([], [], stream=True)
     assert plan.api_key is OMIT_API_KEY
 
@@ -4908,7 +4908,7 @@ def test_a_broken_flow_registry_does_not_prevent_normal_profiles() -> None: ...
 5. **Apply the `none`-auth rule, before anything is resolved or routed:** refuse when `auth.method == "none"` **and** `profile.base_url` is falsy (absent, empty, or whitespace-only). Allow otherwise. It reads one field of the profile, so it needs nothing from the steps below and belongs above them — a refusal should cost nothing:
 
 ```python
-def _refuse_keyless_without_endpoint(profile: AgentProfileConfig) -> str | None:
+def _refuse_keyless_without_endpoint(profile: ModelConnectionConfig) -> str | None:
     """`none` auth is only meaningful against an endpoint the operator named.
 
     With no endpoint the request goes to whatever default host the SDK
@@ -5295,12 +5295,12 @@ def provider_factory_from_env() -> LLMProvider | None:
         return None
     base_url = os.environ.get("KORVID_EVAL_BASE_URL", "").strip() or None
     key_var = os.environ.get("KORVID_EVAL_API_KEY_ENV", "").strip()
-    profile = AgentProfileConfig(
+    profile = ModelConnectionConfig(
         model=f"{provider_id}{MODEL_REFERENCE_SEPARATOR}{model}",
         base_url=base_url,
-        auth=AgentAuthConfig(method="environment", key=key_var)
+        auth=ConnectionAuthConfig(method="environment", key=key_var)
         if key_var
-        else AgentAuthConfig(method="none"),
+        else ConnectionAuthConfig(method="none"),
     )
     return create_provider_from_profile(profile)
 ```
