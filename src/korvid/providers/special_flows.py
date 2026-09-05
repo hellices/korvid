@@ -57,6 +57,24 @@ def _iter_entry_points() -> Iterable[importlib.metadata.EntryPoint]:
         return ()
 
 
+def _load_declared_flow(
+    entry_point: importlib.metadata.EntryPoint,
+) -> SpecialFlow | Exception:
+    """Load one selected entry point and extract its first declared flow."""
+    try:
+        obj = entry_point.load()
+        if isinstance(obj, SpecialFlow):
+            return obj
+        factory = getattr(obj, "korvid_special_flows", None)
+        if callable(factory):
+            for candidate in factory():
+                if isinstance(candidate, SpecialFlow):
+                    return candidate
+    except Exception as exc:
+        return exc
+    return ValueError("no SpecialFlow found in loaded object")
+
+
 class SpecialFlowRegistry:
     """Loads `SpecialFlow` declarations from the `korvid.provider` entry-point group.
 
@@ -117,13 +135,10 @@ class SpecialFlowRegistry:
         self._claims[normalized] = item
 
     @classmethod
-    def from_entry_points(cls) -> SpecialFlowRegistry:
+    def from_entry_points(cls, *, reserved_prefixes: Iterable[str] = ()) -> SpecialFlowRegistry:
         """Build from entry-point **names only**; load nothing yet."""
-        registry = cls.__new__(cls)
-        registry._claims = {}
-        registry._errors = []
-        registry._loaded = {}
-        registry._ep_map = {}
+        registry = cls()
+        forbidden = _FORBIDDEN_PREFIXES | {normalize_prefix(prefix) for prefix in reserved_prefixes}
 
         for ep in _iter_entry_points():
             try:
@@ -131,6 +146,11 @@ class SpecialFlowRegistry:
             except Exception:
                 continue
             normalized = normalize_prefix(name)
+            if normalized in forbidden:
+                registry._errors.append(
+                    f"entry-point prefix {name!r} (normalized: {normalized!r}) is reserved"
+                )
+                continue
             if normalized not in registry._ep_map:
                 registry._ep_map[normalized] = ep
 
@@ -149,36 +169,26 @@ class SpecialFlowRegistry:
         if ep is None:
             return None
 
-        try:
-            obj = ep.load()  # third-party code can raise anything
-        except Exception as exc:
-            self._loaded[normalized] = exc
-            self._errors.append(f"entry point {ep.name!r} raised on load: {type(exc).__name__}")
+        loaded = _load_declared_flow(ep)
+        if isinstance(loaded, Exception):
+            self._loaded[normalized] = loaded
+            self._errors.append(f"entry point {ep.name!r} raised on load: {type(loaded).__name__}")
             return None
 
-        # An entry point can expose a SpecialFlow directly or via korvid_special_flows().
-        flow: SpecialFlow | None = None
-        if isinstance(obj, SpecialFlow):
-            flow = obj
-        elif callable(getattr(obj, "korvid_special_flows", None)):
-            for candidate in obj.korvid_special_flows():
-                if isinstance(candidate, SpecialFlow):
-                    flow = candidate
-                    break
-
-        if flow is not None:
-            self._loaded[normalized] = flow
-            # Register it properly (validates prefix etc.)
-            before = len(self._errors)
-            self._register(flow)
-            if len(self._errors) > before:
-                # Validation rejected it — do not expose
-                self._loaded[normalized] = ValueError("rejected after load")
-                return None
-            return self._claims.get(normalize_prefix(flow.prefix))
-
-        self._loaded[normalized] = ValueError("no SpecialFlow found in loaded object")
-        return None
+        flow = loaded
+        if normalize_prefix(flow.prefix) != normalized:
+            self._loaded[normalized] = ValueError("entry-point prefix mismatch")
+            self._errors.append(f"entry point {ep.name!r} returned flow prefix {flow.prefix!r}")
+            return None
+        self._loaded[normalized] = flow
+        # Register it properly (validates prefix etc.)
+        before = len(self._errors)
+        self._register(flow)
+        if len(self._errors) > before:
+            # Validation rejected it — do not expose
+            self._loaded[normalized] = ValueError("rejected after load")
+            return None
+        return self._claims.get(normalize_prefix(flow.prefix))
 
     def claim(self, reference: str) -> SpecialFlow | None:
         """The flow owning this reference's prefix, or None.

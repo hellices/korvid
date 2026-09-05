@@ -87,7 +87,13 @@ def test_the_registry_is_not_a_provider_list() -> None:
     """No enumeration API: nothing may iterate flows to render a vendor
     picker, which is the shape this design removes."""
     public = {name for name in vars(SpecialFlowRegistry) if not name.startswith("_")}
-    assert not {"all", "flows", "descriptors", "names", "providers"} & public
+    assert public == {
+        "claim",
+        "claim_by_option",
+        "claimed_prefixes",
+        "errors",
+        "from_entry_points",
+    }
 
 
 @pytest.mark.parametrize(
@@ -155,3 +161,28 @@ def test_only_the_resolved_entry_point_is_ever_loaded(
     assert loaded == ["wanted"]
     assert registry.claim("unrelated/x") is None
     assert loaded == ["wanted"]
+
+
+def test_entry_point_cannot_shadow_a_reserved_litellm_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loaded: list[str] = []
+
+    class _FakeEntryPoint:
+        name = "openai"
+        group = "korvid.provider"
+
+        def load(self) -> SpecialFlow:
+            loaded.append(self.name)
+            return _flow(self.name)
+
+    monkeypatch.setattr(
+        "korvid.providers.special_flows._iter_entry_points",
+        lambda: (_FakeEntryPoint(),),
+    )
+
+    registry = SpecialFlowRegistry.from_entry_points(reserved_prefixes={"openai"})
+
+    assert registry.claim("openai/gpt-4o") is None
+    assert loaded == []
+    assert any("openai" in message and "reserved" in message for message in registry.errors)
