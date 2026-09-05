@@ -20,7 +20,7 @@ from tests.performance.metrics import (
     ScenarioResult,
     UpdateLatencyKind,
 )
-from tests.performance.profile import WorkloadProfile
+from tests.performance.profile import WorkloadProfile, load_profile
 from tests.performance.replay import ReplayOptions, ReplayReport
 
 
@@ -498,7 +498,7 @@ def test_cli_replay_live_duration_overrides_only_duration(
         return _make_report(profile)
 
     profile_file = Path("tests/performance/profiles/aks-1k.json")
-    original = cli.load_profile(profile_file)
+    original = load_profile(profile_file)
     monkeypatch.setattr(cli, "run_live_replay", record)
 
     exit_code = cli.main(
