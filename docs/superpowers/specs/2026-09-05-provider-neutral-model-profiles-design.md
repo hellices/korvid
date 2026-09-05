@@ -987,7 +987,7 @@ The base installation is unchanged and imports no `litellm` module.
 agent = [
   "httpx>=0.27",
   "keyring>=25.7.0",
-  "litellm>=1.98.0,<2",
+  "litellm==1.98.0",
 ]
 ```
 
