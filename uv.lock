@@ -1307,6 +1307,7 @@ agent = [
     { name = "httpx" },
     { name = "keyring" },
     { name = "litellm" },
+    { name = "openai" },
 ]
 all = [
     { name = "anyio" },
@@ -1314,6 +1315,7 @@ all = [
     { name = "keyring" },
     { name = "litellm" },
     { name = "mcp" },
+    { name = "openai" },
     { name = "starlette" },
     { name = "uvicorn" },
 ]
@@ -1362,6 +1364,7 @@ requires-dist = [
     { name = "kubernetes-asyncio", specifier = ">=32.0" },
     { name = "litellm", marker = "extra == 'agent'", specifier = "==1.98.0" },
     { name = "mcp", marker = "extra == 'mcp'", specifier = ">=2.0.0,<3" },
+    { name = "openai", marker = "extra == 'agent'", specifier = ">=2.20.0,<3.0.0" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "regex", specifier = ">=2026.7.19" },
     { name = "rich", specifier = ">=13.0" },
