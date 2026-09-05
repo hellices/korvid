@@ -18,7 +18,7 @@ from pathlib import Path
 from stat import S_IMODE
 from tempfile import mkstemp
 from types import MappingProxyType
-from typing import Any, cast
+from typing import Any, TypedDict, cast
 from urllib.parse import urlsplit, urlunsplit
 
 import yaml
@@ -447,25 +447,42 @@ def load_config(path: Path | None = None) -> KorvidConfig:
     agent_raw: dict[str, Any] = agent_value if isinstance(agent_value, dict) else {}
     warnings: list[str] = []
     agent_profiles = _resolve_agent_profiles(agent_raw, warnings)
-    provider_raw: str | None = agent_raw.get("provider")
-    # Canonicalize early: github_copilot, GitHub.Copilot etc. all become
-    # github-copilot so auth-method defaults and the composition root's
-    # OAuth token lookup match without case/separator awareness.
-    provider: str | None = (
-        _canonicalize_provider_name(provider_raw) if isinstance(provider_raw, str) else None
-    )
-    # Auto-activation: provider present -> on, unless explicitly disabled (§6.3).
-    enabled = bool(provider) and agent_raw.get("enabled", True) is not False
-    api_key_env = _opt_str(agent_raw.get("api_key_env"))
-    auth_value = agent_raw.get("auth")
-    auth_raw: dict[str, Any] = auth_value if isinstance(auth_value, dict) else {}
-    agent_options, agent_options_error = (
-        _parse_agent_options(agent_raw["options"]) if "options" in agent_raw else ({}, None)
-    )
-    auth_method = _opt_str(auth_raw.get("method"))
-    if auth_method is None and provider:
-        # Back-compat: configs written before agent.auth existed.
-        auth_method = _legacy_auth_method(agent_raw, provider)
+    if "profiles" in agent_raw:
+        # New profile format: derive scalars from the active profile.
+        scalars = _derive_legacy_scalars(agent_profiles, warnings)
+        agent_enabled = scalars["agent_enabled"]
+        agent_provider = scalars["agent_provider"]
+        agent_base_url = scalars["agent_base_url"]
+        agent_model = scalars["agent_model"]
+        agent_api_key_env = scalars["agent_api_key_env"]
+        agent_auth_method = scalars["agent_auth_method"]
+        agent_options = scalars["agent_options"]
+        agent_options_error = scalars["agent_options_error"]
+    else:
+        # Legacy format: read scalars directly from agent_raw.
+        provider_raw: str | None = agent_raw.get("provider")
+        # Canonicalize early: github_copilot, GitHub.Copilot etc. all become
+        # github-copilot so auth-method defaults and the composition root's
+        # OAuth token lookup match without case/separator awareness.
+        agent_provider = (
+            _canonicalize_provider_name(provider_raw) if isinstance(provider_raw, str) else None
+        )
+        # Auto-activation: provider present -> on, unless explicitly disabled (§6.3).
+        agent_enabled = bool(agent_provider) and agent_raw.get("enabled", True) is not False
+        agent_api_key_env = _opt_str(agent_raw.get("api_key_env"))
+        auth_value = agent_raw.get("auth")
+        auth_raw: dict[str, Any] = auth_value if isinstance(auth_value, dict) else {}
+        agent_options, agent_options_error = (
+            _parse_agent_options(agent_raw["options"]) if "options" in agent_raw else ({}, None)
+        )
+        agent_auth_method = _opt_str(auth_raw.get("method"))
+        if agent_auth_method is None and agent_provider:
+            # Back-compat: configs written before agent.auth existed.
+            agent_auth_method = _legacy_auth_method(agent_raw, agent_provider)
+        agent_base_url = _opt_str(agent_raw.get("base_url"))
+        agent_model = _opt_str(agent_raw.get("model"))
+        if agent_options_error is not None:
+            warnings.append(agent_options_error)
     ollama_raw = _legacy_ollama_raw(agent_raw)
     mcp_value = raw.get("mcp")
     mcp_raw: dict[str, Any] = mcp_value if isinstance(mcp_value, dict) else {}
@@ -515,8 +532,6 @@ def load_config(path: Path | None = None) -> KorvidConfig:
     )
     agent_rules, rules_warnings = _parse_agent_rules(agent_raw.get("rules"))
     warnings.extend(rules_warnings)
-    if agent_options_error is not None:
-        warnings.append(agent_options_error)
     if "namespaces" in raw:
         warnings.append(
             "namespaces: no longer controls the namespace picker or watches"
@@ -543,12 +558,12 @@ def load_config(path: Path | None = None) -> KorvidConfig:
         namespace=raw.get("namespace"),
         favorite_namespaces=favorites,
         agent_profiles=agent_profiles,
-        agent_enabled=enabled,
-        agent_provider=provider,
-        agent_base_url=_opt_str(agent_raw.get("base_url")),
-        agent_model=_opt_str(agent_raw.get("model")),
-        agent_api_key_env=api_key_env,
-        agent_auth_method=auth_method,
+        agent_enabled=agent_enabled,
+        agent_provider=agent_provider,
+        agent_base_url=agent_base_url,
+        agent_model=agent_model,
+        agent_api_key_env=agent_api_key_env,
+        agent_auth_method=agent_auth_method,
         agent_options=agent_options,
         agent_options_error=agent_options_error,
         agent_model_tier=model_tier,
@@ -866,6 +881,173 @@ def _parse_observability_backend(
             mask_labels=_observability_mask_labels(value.get("mask_labels"), label, warnings),
         ),
         warnings,
+    )
+
+
+#: Agent-level keys the legacy shape owned. `save_agent_profiles` removes
+#: them once it has written the new shape, so the first successful save
+#: upgrades the file rather than leaving two shapes to disagree.
+#: `enabled` is included: `active: null` is the new off switch.
+LEGACY_AGENT_KEYS: tuple[str, ...] = (
+    "provider",
+    "model",
+    "base_url",
+    "api_key_env",
+    "auth",
+    "ollama",
+    "options",
+    "enabled",
+)
+
+
+def _thaw_config_value(value: object) -> object:
+    """Undo `_freeze_config_value` recursively for serialization.
+
+    `yaml.safe_dump` has no representer for `mappingproxy` and raises
+    `RepresenterError`; tuples happen to serialize (SafeRepresenter maps
+    `tuple` to `represent_list`) but round-trip back as lists anyway, so
+    both are converted here rather than relying on that.
+    """
+    if isinstance(value, Mapping):
+        return {str(key): _thaw_config_value(item) for key, item in value.items()}
+    if isinstance(value, tuple | list):
+        return [_thaw_config_value(item) for item in value]
+    return value
+
+
+def _profile_to_raw(profile: AgentProfileConfig) -> dict[str, Any]:
+    entry: dict[str, Any] = {"model": profile.model}
+    if profile.endpoint is not None:
+        entry["endpoint"] = profile.endpoint
+    auth: dict[str, Any] = {"method": profile.auth.method}
+    auth.update(cast("dict[str, Any]", _thaw_config_value(profile.auth.settings)))
+    entry["auth"] = auth
+    options = cast("dict[str, Any]", _thaw_config_value(profile.options))
+    if options:
+        entry["options"] = options
+    return entry
+
+
+def save_agent_profiles(path: Path, profiles: AgentProfilesConfig) -> None:
+    """Write `agent.active`/`agent.profiles`, preserving everything else.
+
+    Read-modify-write: unrelated top-level keys, unrelated `agent.*` keys
+    and every `unparsed` entry survive. Only the keys in
+    `LEGACY_AGENT_KEYS` are removed, and only after the new shape is in
+    place.
+    """
+    raw: dict[str, Any] = {}
+    if path.is_file():
+        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    agent_value = raw.get("agent")
+    agent: dict[str, Any] = dict(agent_value) if isinstance(agent_value, dict) else {}
+    written: dict[str, Any] = {
+        name: _profile_to_raw(profile) for name, profile in profiles.profiles.items()
+    }
+    for name, entry in profiles.unparsed.items():
+        if name not in written:
+            written[name] = _thaw_config_value(entry)
+    agent["active"] = profiles.active
+    agent["profiles"] = written
+    for key in LEGACY_AGENT_KEYS:
+        agent.pop(key, None)
+    raw["agent"] = agent
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_write_text(path, yaml.safe_dump(raw, sort_keys=False))
+
+
+#: Provider prefixes the *interim* legacy transport cannot serve. Between
+#: this task and Task 15 the running transport is still the legacy one,
+#: which speaks only bearer-token OpenAI-compatible HTTP, Azure and
+#: Ollama. Anything else must disable the agent visibly rather than be
+#: silently routed through a bearer-token client — sending an
+#: `Authorization: Bearer` to a vendor that expects its own header is a
+#: credential leak, not a degraded experience. Deleted in Task 18.
+_PREFIXES_WITHOUT_LEGACY_TRANSPORT: frozenset[str] = frozenset(
+    {"anthropic", "bedrock", "gemini", "vertex_ai", "cohere", "mistral", "groq", "xai"}
+)
+
+
+def _legacy_azure_base_url(profile: AgentProfileConfig) -> str | None:
+    """Rebuild the deployment-scoped URL the legacy transport needs."""
+    if profile.endpoint is None:
+        return None
+    deployment = profile.options.get("azure_deployment")
+    if not isinstance(deployment, str) or not deployment:
+        return profile.endpoint
+    return f"{profile.endpoint.rstrip('/')}/openai/deployments/{deployment}"
+
+
+class _LegacyScalars(TypedDict):
+    agent_enabled: bool
+    agent_provider: str | None
+    agent_base_url: str | None
+    agent_model: str | None
+    agent_api_key_env: str | None
+    agent_auth_method: str | None
+    agent_options: dict[str, object]
+    agent_options_error: str | None
+
+
+def _empty_legacy_scalars() -> _LegacyScalars:
+    return _LegacyScalars(
+        agent_enabled=False,
+        agent_provider=None,
+        agent_base_url=None,
+        agent_model=None,
+        agent_api_key_env=None,
+        agent_auth_method=None,
+        agent_options={},
+        agent_options_error=None,
+    )
+
+
+def _derive_legacy_scalars(profiles: AgentProfilesConfig, warnings: list[str]) -> _LegacyScalars:
+    """Project the active profile onto the pre-profile scalar fields.
+
+    Temporary. It exists only so commit groups 1-3 stay buildable while
+    the transport is still the legacy one, and Task 18 deletes it. It
+    refuses rather than guesses: a profile whose provider prefix the
+    legacy transport cannot serve yields no scalars and a warning naming
+    the prefix and the task that will enable it.
+    """
+    profile = profiles.active_profile
+    if profile is None:
+        return _empty_legacy_scalars()
+    if profile.config_error is not None:
+        warnings.append(
+            f"the active profile was rejected: {profile.config_error} — the agent is disabled"
+        )
+        return _empty_legacy_scalars()
+    sep = MODEL_REFERENCE_SEPARATOR
+    if sep not in profile.model:
+        warnings.append(
+            f"agent.profiles.{profiles.active}: model {profile.model!r} has no provider"
+            f" prefix — the agent is disabled"
+        )
+        return _empty_legacy_scalars()
+    prefix, tag = profile.model.split(sep, 1)
+    if prefix in _PREFIXES_WITHOUT_LEGACY_TRANSPORT:
+        warnings.append(
+            f"the {prefix!r} provider needs the new transport (Task 15); the agent is disabled"
+        )
+        return _empty_legacy_scalars()
+    base_url = _legacy_azure_base_url(profile) if prefix == "azure" else profile.endpoint
+    api_key_env: str | None = None
+    if profile.auth.method == "environment":
+        key_val = profile.auth.settings.get("key")
+        if isinstance(key_val, str):
+            api_key_env = key_val
+    options = cast("dict[str, object]", _thaw_config_value(profile.options))
+    return _LegacyScalars(
+        agent_enabled=True,
+        agent_provider=prefix,
+        agent_base_url=base_url,
+        agent_model=tag,
+        agent_api_key_env=api_key_env,
+        agent_auth_method=profile.auth.method,
+        agent_options=options,
+        agent_options_error=None,
     )
 
 
