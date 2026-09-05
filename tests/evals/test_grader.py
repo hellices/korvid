@@ -606,6 +606,29 @@ def test_coverage_counts_markdown_list_items_separately() -> None:
     assert report.coverage == 0.5
 
 
+@pytest.mark.parametrize(
+    ("answer", "minted", "expected"),
+    [
+        ("the pod is up [E1]\n\nthe node is fine", ("E1",), 0.5),
+        ("- up [E1]\n-\n\n- down [E1]", ("E1",), 1.0),
+        ("1. pod up [E1]\n2. node fine [E2]", ("E1", "E2"), 1.0),
+        ("pod failed. [E1]", ("E1",), 1.0),
+    ],
+)
+def test_citation_coverage_respects_markdown_claim_boundaries(
+    answer: str,
+    minted: tuple[str, ...],
+    expected: float,
+) -> None:
+    assert citation_report(answer, minted=minted).coverage == expected
+
+
+def test_repeated_citation_does_not_inflate_precision() -> None:
+    report = citation_report("up [E1], still up [E1]", minted=("E1",))
+    assert report.precision == 1.0
+    assert report.cited == ("E1",)
+
+
 # --- screen actions are not cluster evidence --------------------------------
 #
 # The eval bridge files each applied screen action into the same ordered

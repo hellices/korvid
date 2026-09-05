@@ -141,12 +141,19 @@ def test_load_scenarios_rejects_duplicate_ids(tmp_path: Path) -> None:
         load_scenarios(tmp_path)
 
 
-def test_load_scenario_rejects_timestamps_after_the_anchor(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "timestamp",
+    ['"2026-07-28T00:00:00Z"', "2026-07-28T00:00:00Z"],
+)
+def test_load_scenario_rejects_timestamps_after_the_anchor(
+    tmp_path: Path,
+    timestamp: str,
+) -> None:
     """Fixture timestamps are authored against SCENARIO_NOW; a later instant
     would rebase into the run's future and distort ages and event order."""
     text = _MINIMAL.replace(
         "      metadata: {name: checkout-1, namespace: shop}",
-        '      metadata: {name: checkout-1, namespace: shop, creationTimestamp: "2026-07-28T00:00:00Z"}',
+        f"      metadata: {{name: checkout-1, namespace: shop, creationTimestamp: {timestamp}}}",
     )
     with pytest.raises(ValueError, match="after the scenario anchor"):
         load_scenario(_write(tmp_path, text))
