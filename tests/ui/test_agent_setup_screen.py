@@ -1130,3 +1130,96 @@ async def test_the_first_run_wizard_still_asks_for_the_tier() -> None:
         await _choose_auth_method(pilot, "none")
         await _wait_for(app, pilot, "#setup-tier", "tier stage")
         assert _setup_screen(app).query("#setup-tier")
+
+
+# ---------------------------------------------------------------------------
+# An unsupported endpoint is an answer, not a missing answer
+# ---------------------------------------------------------------------------
+
+
+async def _run_to_completion_without_an_endpoint_stage(
+    pilot: Any, *, key: str = "ACME_KEY", tier_id: str = "automatic"
+) -> None:
+    """Drive a wizard whose model does not take an endpoint at all."""
+    await _pick_model(pilot)
+    await _wait_for(pilot.app, pilot, "#setup-auth", "auth-method stage")
+    await _choose_auth_method(pilot, "environment")
+    await _wait_for(pilot.app, pilot, "#field-key", "auth field stage")
+    field = _setup_screen(pilot.app).query_one("#field-key", Input)
+    field.value = key
+    field.focus()
+    await pilot.press("enter")
+    await _accept_tier(pilot, tier_id)
+
+
+async def test_a_model_that_takes_no_endpoint_clears_the_one_it_was_seeded_with() -> None:
+    """Editing an endpoint-bearing profile onto a model whose descriptor says
+    UNSUPPORTED must drop the endpoint.
+
+    Carrying the old URL forward would hand the provider a base_url its
+    model does not accept — and persist it, so every later run repeats the
+    mistake. The stage *answered* the question with "no endpoint"; the seed
+    is only a default for questions still unanswered.
+    """
+    from korvid.agent.model_profiles import ConnectionAuthConfig
+
+    profile = ModelConnectionConfig(
+        model="acme/old-model",
+        endpoint="https://stale.example/v1",
+        auth=ConnectionAuthConfig(method="environment", settings={"key": "ACME_KEY"}),
+    )
+    catalog = _FakeCatalog(endpoint=EndpointRequirement.UNSUPPORTED)
+    app = _Host(catalog, profile=profile)
+    async with app.run_test() as pilot:
+        await _run_to_completion_without_an_endpoint_stage(pilot)
+        await until(pilot, lambda: isinstance(app.result, SetupResult), label="wizard result")
+        assert isinstance(app.result, SetupResult)
+        assert app.result.profile.endpoint is None
+        # And the probe ran against that same connection, not the stale URL.
+        assert catalog.tested[-1].endpoint is None
+
+
+async def test_discovery_still_uses_the_seeded_endpoint_before_the_stage_runs() -> None:
+    """The endpoint stage has not been reached when the model search lists
+    models, so discovery must still use the connection the profile came
+    with — clearing it early would break listing for every edit."""
+    from korvid.agent.model_profiles import ConnectionAuthConfig
+
+    profile = ModelConnectionConfig(
+        model=_REFERENCE,
+        endpoint="http://kept.example",
+        auth=ConnectionAuthConfig(method="environment", settings={"key": "KEPT_KEY"}),
+    )
+    catalog = _FakeCatalog(endpoint=EndpointRequirement.UNSUPPORTED)
+    app = _Host(catalog, profile=profile)
+    async with app.run_test() as pilot:
+        await until(
+            pilot,
+            lambda: bool(catalog.discovered_for),
+            label="discovery attempted",
+        )
+        assert catalog.discovered_for[0].endpoint == "http://kept.example"
+
+
+async def test_an_answered_endpoint_survives_a_walk_back_to_the_model_stage() -> None:
+    """Going back and re-picking a model that *does* take an endpoint must
+    keep the endpoint already typed, not silently reset it to the seed."""
+    from korvid.agent.model_profiles import ConnectionAuthConfig
+
+    profile = ModelConnectionConfig(
+        model=_REFERENCE,
+        endpoint="http://seeded.example",
+        auth=ConnectionAuthConfig(method="environment", settings={"key": "KEPT_KEY"}),
+    )
+    app = _Host(_FakeCatalog(), profile=profile)
+    async with app.run_test() as pilot:
+        await _advance_to_auth_method(pilot, endpoint="http://typed.example")
+        await _choose_auth_method(pilot, "environment")
+        await _wait_for(app, pilot, "#field-key", "auth field stage")
+        await _go_back(pilot)
+        await _wait_for(app, pilot, "#setup-auth", "auth-method stage again")
+        await _go_back(pilot)
+        await _wait_for(app, pilot, "#setup-endpoint", "endpoint stage again")
+        assert (
+            _setup_screen(app).query_one("#setup-endpoint", Input).value == "http://typed.example"
+        )

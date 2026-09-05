@@ -1026,3 +1026,329 @@ def test_the_shared_projection_refuses_a_profile_with_a_config_error() -> None:
     assert projection is None
     assert refusal is not None
     assert "rejected" in refusal
+
+
+# ---------------------------------------------------------------------------
+# Auth methods: the common ids the transport actually speaks
+# ---------------------------------------------------------------------------
+
+
+def test_the_projection_translates_environment_auth_into_the_transports_api_key() -> None:
+    """`environment` is the profile vocabulary; the interim transport only
+    knows `api_key`. Handing it the profile spelling verbatim makes
+    `build_credentials` reject it as an unknown method and disables an
+    agent the operator configured correctly."""
+    profile = ModelConnectionConfig(
+        model="openai/gpt-4o",
+        endpoint="https://api.example/v1",
+        auth=ConnectionAuthConfig(method="environment", settings={"key": "OPENAI_API_KEY"}),
+    )
+    projection, refusal = project_legacy_transport(profile)
+
+    assert refusal is None
+    assert projection is not None
+    assert projection.auth_method == "api_key"
+    assert projection.api_key_env == "OPENAI_API_KEY"
+
+
+def test_the_projection_refuses_environment_auth_without_a_variable_name() -> None:
+    """`api_key` with no variable name is not a connection: the transport
+    would raise "api_key_env is not set" from inside the provider factory
+    instead of the profile being refused where the reason is known."""
+    profile = ModelConnectionConfig(
+        model="openai/gpt-4o",
+        auth=ConnectionAuthConfig(method="environment", settings={}),
+    )
+    projection, refusal = project_legacy_transport(profile)
+
+    assert projection is None
+    assert refusal is not None
+    assert "environment" in refusal
+
+
+def test_the_projection_maps_azure_provider_default_onto_entra() -> None:
+    """Azure's SDK credential chain *is* Entra ID, which the interim
+    transport speaks."""
+    profile = ModelConnectionConfig(
+        model="azure/gpt-4o",
+        endpoint="https://x.openai.azure.com",
+        auth=ConnectionAuthConfig(method="provider-default"),
+    )
+    projection, refusal = project_legacy_transport(profile)
+
+    assert refusal is None
+    assert projection is not None
+    assert projection.auth_method == "entra"
+    assert projection.api_key_env is None
+
+
+def test_the_projection_refuses_provider_default_for_a_non_azure_provider() -> None:
+    """There is no SDK credential chain behind the bearer-token client:
+    silently downgrading to an unauthenticated request would connect as
+    nobody, or leak whatever `api_key_env` happened to be lying around."""
+    profile = ModelConnectionConfig(
+        model="openai/gpt-4o",
+        endpoint="https://api.example/v1",
+        auth=ConnectionAuthConfig(method="provider-default"),
+    )
+    projection, refusal = project_legacy_transport(profile)
+
+    assert projection is None
+    assert refusal is not None
+    assert "provider-default" in refusal
+
+
+def test_the_projection_keeps_none_auth_as_none() -> None:
+    profile = ModelConnectionConfig(
+        model="ollama/llama3", endpoint="http://localhost:11434", auth=ConnectionAuthConfig()
+    )
+    projection, refusal = project_legacy_transport(profile)
+
+    assert refusal is None
+    assert projection is not None
+    assert projection.auth_method == "none"
+
+
+def test_the_projection_allows_device_login_only_for_github_copilot() -> None:
+    profile = ModelConnectionConfig(
+        model="github-copilot/gpt-4o",
+        auth=ConnectionAuthConfig(method="device-login"),
+    )
+    projection, refusal = project_legacy_transport(profile)
+
+    assert refusal is None
+    assert projection is not None
+    assert projection.auth_method == "device-login"
+
+
+def test_the_projection_refuses_device_login_for_any_other_provider() -> None:
+    """Only the Copilot adapter has a device-login token store; any other
+    provider would be built with no credential at all."""
+    profile = ModelConnectionConfig(
+        model="openai/gpt-4o",
+        endpoint="https://api.example/v1",
+        auth=ConnectionAuthConfig(method="device-login"),
+    )
+    projection, refusal = project_legacy_transport(profile)
+
+    assert projection is None
+    assert refusal is not None
+    assert "device-login" in refusal
+
+
+def test_the_projection_refuses_keyring_auth_with_a_reason() -> None:
+    """The interim transport has no keyring reader. Refusing names the
+    reason; passing `keyring` through names none."""
+    profile = ModelConnectionConfig(
+        model="openai/gpt-4o",
+        endpoint="https://api.example/v1",
+        auth=ConnectionAuthConfig(method="keyring"),
+    )
+    projection, refusal = project_legacy_transport(profile)
+
+    assert projection is None
+    assert refusal is not None
+    assert "keyring" in refusal
+
+
+def test_the_projection_refuses_an_auth_method_it_does_not_know() -> None:
+    profile = ModelConnectionConfig(
+        model="openai/gpt-4o",
+        endpoint="https://api.example/v1",
+        auth=ConnectionAuthConfig(method="mtls"),
+    )
+    projection, refusal = project_legacy_transport(profile)
+
+    assert projection is None
+    assert refusal is not None
+    assert "mtls" in refusal
+
+
+def test_an_environment_profile_disables_nothing_at_startup(tmp_path: Path) -> None:
+    """The whole point of the mapping: a profile written by the wizard has
+    to come up enabled, with the scalars the transport speaks."""
+    path = _write(
+        tmp_path,
+        """
+agent:
+  active: main
+  profiles:
+    main:
+      model: openai/gpt-4o
+      endpoint: https://api.example/v1
+      auth:
+        method: environment
+        key: OPENAI_API_KEY
+""",
+    )
+    cfg = load_config(path)
+
+    assert cfg.agent_enabled is True
+    assert cfg.agent_auth_method == "api_key"
+    assert cfg.agent_api_key_env == "OPENAI_API_KEY"
+    assert cfg.warnings == ()
+
+
+def test_a_keyring_profile_disables_the_agent_with_the_keyring_reason(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        """
+agent:
+  active: main
+  profiles:
+    main:
+      model: openai/gpt-4o
+      endpoint: https://api.example/v1
+      auth:
+        method: keyring
+""",
+    )
+    cfg = load_config(path)
+
+    assert cfg.agent_enabled is False
+    assert any("keyring" in warning for warning in cfg.warnings)
+
+
+def test_a_profile_never_carries_the_secret_itself(tmp_path: Path) -> None:
+    """`auth.key` is a variable *name*. Nothing in the config layer reads
+    the environment, so a projection cannot move a secret value into the
+    file or into a rendered profile."""
+    path = _write(
+        tmp_path,
+        """
+agent:
+  active: main
+  profiles:
+    main:
+      model: openai/gpt-4o
+      endpoint: https://api.example/v1
+      auth:
+        method: environment
+        key: OPENAI_API_KEY
+""",
+    )
+    cfg = load_config(path)
+    projection, _refusal = project_legacy_transport(cfg.model_connections.profiles["main"])
+
+    assert projection is not None
+    assert projection.api_key_env == "OPENAI_API_KEY"
+    assert "sk-" not in repr(projection)
+    save_model_connections(path, cfg.model_connections)
+    assert "sk-" not in path.read_text(encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# The model tier travels with the profiles it was chosen for
+# ---------------------------------------------------------------------------
+
+
+def test_the_writer_leaves_a_tier_it_was_not_asked_about_alone(tmp_path: Path) -> None:
+    """Editing profiles is not a tier decision.
+
+    The profile manager and `:model` never ask about the tier, so their
+    saves must not be able to drop an override the operator chose in the
+    wizard — the bug a separate tier writer produces every time the two
+    writes disagree.
+    """
+    path = _write(
+        tmp_path,
+        """
+agent:
+  model_tier: high
+  active: main
+  profiles:
+    main:
+      model: openai/gpt-4o
+""",
+    )
+    cfg = load_config(path)
+    assert cfg.agent_model_tier == "high"
+    save_model_connections(path, cfg.model_connections)
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert raw["agent"]["model_tier"] == "high"
+    assert load_config(path).agent_model_tier == "high"
+
+
+def test_the_writer_persists_a_tier_in_the_same_write_as_the_profiles(tmp_path: Path) -> None:
+    """One file write carries both, so a crash can never leave a profile
+    set persisted with a tier that was never written (or vice versa)."""
+    path = _write(
+        tmp_path,
+        """
+agent:
+  active: main
+  profiles:
+    main:
+      model: openai/gpt-4o
+""",
+    )
+    cfg = load_config(path)
+    save_model_connections(path, cfg.model_connections, model_tier="high")
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert raw["agent"]["model_tier"] == "high"
+    assert raw["agent"]["active"] == "main"
+    reloaded = load_config(path)
+    assert reloaded.agent_model_tier == "high"
+    assert reloaded.model_connections == cfg.model_connections
+
+
+def test_choosing_automatic_clears_a_stale_tier(tmp_path: Path) -> None:
+    """Automatic is `None`, and it must actually remove the old override —
+    otherwise reopening the wizard resets it to a tier nobody chose."""
+    path = _write(
+        tmp_path,
+        """
+agent:
+  model_tier: low
+  active: main
+  profiles:
+    main:
+      model: openai/gpt-4o
+""",
+    )
+    cfg = load_config(path)
+    save_model_connections(path, cfg.model_connections, model_tier=None)
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert "model_tier" not in raw["agent"]
+    assert load_config(path).agent_model_tier is None
+
+
+def test_writing_a_tier_keeps_unrelated_agent_and_top_level_keys(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        """
+kube_context: prod
+agent:
+  rules: keep-me
+  active: main
+  profiles:
+    main:
+      model: openai/gpt-4o
+""",
+    )
+    cfg = load_config(path)
+    save_model_connections(path, cfg.model_connections, model_tier="low")
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert raw["kube_context"] == "prod"
+    assert raw["agent"]["rules"] == "keep-me"
+    assert raw["agent"]["model_tier"] == "low"
+
+
+def test_an_invalid_tier_is_refused_before_anything_is_written(tmp_path: Path) -> None:
+    """The tier vocabulary is `low`/`high`/absent. A writer that accepted
+    anything else would persist a file `load_config` then rejects."""
+    path = _write(
+        tmp_path,
+        """
+agent:
+  active: main
+  profiles:
+    main:
+      model: openai/gpt-4o
+""",
+    )
+    before = path.read_text(encoding="utf-8")
+    cfg = load_config(path)
+    with pytest.raises(ValueError, match="model_tier"):
+        save_model_connections(path, cfg.model_connections, model_tier="medium")
+    assert path.read_text(encoding="utf-8") == before

@@ -248,6 +248,15 @@ class AgentSetupScreen(ModalScreen["SetupResult | None"]):
         self._ask_tier = ask_tier
         self._reference = ""
         self._endpoint: str | None = None
+        #: Whether the endpoint stage has been answered. Until it has, the
+        #: seed profile's endpoint is the draft's answer; afterwards the
+        #: stage's answer is — including the deliberate "no endpoint".
+        self._endpoint_answered = False
+        #: Whether the selected model takes an endpoint at all. A model whose
+        #: descriptor says UNSUPPORTED has *answered* the question with "no
+        #: endpoint": carrying the seed's URL forward would connect (and
+        #: persist) a base URL the model does not accept.
+        self._endpoint_supported = True
         self._method: AuthMethodDescriptor | None = None
         self._auth_values: dict[str, object] = {}
         self._option_fields: tuple[SetupField, ...] = ()
@@ -382,10 +391,11 @@ class AgentSetupScreen(ModalScreen["SetupResult | None"]):
     async def _stage_endpoint(self, direction: _Nav) -> _Nav:
         requirement = self._catalog.endpoint_requirement(self._reference)
         if requirement is EndpointRequirement.UNSUPPORTED:
-            self._endpoint = None
+            self._endpoint_supported = False
             self._done_steps.pop("endpoint", None)
             return direction
-        seed = self._endpoint if self._endpoint is not None else self._seed.endpoint
+        self._endpoint_supported = True
+        seed = self._endpoint if self._endpoint_answered else self._seed.endpoint
         widget = Input(
             value=seed or "",
             placeholder="endpoint URL",
@@ -407,12 +417,26 @@ class AgentSetupScreen(ModalScreen["SetupResult | None"]):
                 self._status("An endpoint is required for this model.")
                 continue
             self._endpoint = value or None
+            self._endpoint_answered = True
             self._mark_done("endpoint", f"Endpoint: {self._endpoint or 'provider default'}")
             return _Nav.NEXT
 
+    def _drafted_endpoint(self) -> str | None:
+        """The endpoint every draft, probe and save must use.
+
+        Three states, in order: a model that takes no endpoint has none; an
+        answered stage owns its answer (blank included); an unanswered stage
+        falls back to the profile being edited.
+        """
+        if not self._endpoint_supported:
+            return None
+        if self._endpoint_answered:
+            return self._endpoint
+        return self._seed.endpoint
+
     async def _stage_auth_method(self, direction: _Nav) -> _Nav:
         """Recomputed on every visit: a stale method list is a trap."""
-        methods = self._catalog.auth_methods(self._reference, endpoint=self._endpoint)
+        methods = self._catalog.auth_methods(self._reference, endpoint=self._drafted_endpoint())
         if not methods:
             self._method = None
             self._done_steps.pop("auth", None)
@@ -639,7 +663,7 @@ class AgentSetupScreen(ModalScreen["SetupResult | None"]):
         previous_auth = self._seed.auth.settings if self._seed.auth.method == method else {}
         return ModelConnectionConfig(
             model=self._reference or self._seed.model,
-            endpoint=self._endpoint if self._endpoint is not None else self._seed.endpoint,
+            endpoint=self._drafted_endpoint(),
             auth=ConnectionAuthConfig(
                 method=method,
                 settings=_merged(previous_auth, auth_fields, self._auth_values),
