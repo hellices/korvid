@@ -4,8 +4,8 @@ Building the call once means the outbound snapshot and the wire payload are
 the same object rather than two constructions that can drift.
 
 Parameter names are taken from ``acompletion``'s real signature in 1.98.0:
-``base_url`` and ``api_version`` are named parameters; ``api_base`` is only
-reachable through ``**kwargs``, so korvid uses the named ones.
+``base_url``, ``api_version`` and ``timeout`` are named parameters; ``api_base``
+is only reachable through ``**kwargs``, so korvid uses the named ones.
 
 ``api_key`` is tri-state:
 
@@ -20,6 +20,7 @@ reachable through ``**kwargs``, so korvid uses the named ones.
 from __future__ import annotations
 
 import copy
+import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Final
@@ -32,6 +33,29 @@ from korvid.providers.litellm_settings import KEYLESS_API_KEY_SENTINEL
 _KORVID_OWNED_OPTIONS: frozenset[str] = frozenset(
     {"native_thinking", "ca_bundle", "num_ctx_source", "ssl_verify"}
 )
+
+#: Options that are named ``acompletion`` parameters rather than model
+#: parameters. They are lifted onto the plan and must never be left in the
+#: extras, where the per-provider allowlist would decide their fate.
+_LIFTED: frozenset[str] = frozenset({"api_version", "timeout"})
+
+
+def _positive_seconds(value: object) -> float | None:
+    """A duration in seconds, or None when the value cannot be one.
+
+    Deliberately strict. ``bool`` is excluded because ``True`` is an ``int``
+    and a one-second timeout is never what an operator meant by it, and a
+    numeric *string* is rejected rather than coerced: profile options are
+    typed YAML, and quietly parsing text here would make ``"nan"`` a
+    plausible input. Anything unusable falls back to the SDK default, which
+    is the honest answer for a value korvid cannot act on.
+    """
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    seconds = float(value)
+    if not math.isfinite(seconds) or seconds <= 0:
+        return None
+    return seconds
 
 
 # ---------------------------------------------------------------------------
@@ -87,6 +111,10 @@ class RequestPlan:
     base_url: str | None
     api_version: str | None
     extra: Mapping[str, object]
+    #: Seconds the SDK waits for the whole request, or ``None`` for its own
+    #: default. Named rather than an extra because ``get_supported_openai_params``
+    #: lists it for no provider, so the allowlist filter would drop it.
+    timeout: float | None = None
 
     def call_kwargs(
         self,
@@ -115,6 +143,8 @@ class RequestPlan:
             kwargs["base_url"] = self.base_url
         if self.api_version:
             kwargs["api_version"] = self.api_version
+        if self.timeout is not None:
+            kwargs["timeout"] = self.timeout
         if stream:
             kwargs["stream_options"] = {"include_usage": True}
         kwargs.update(copy.deepcopy(dict(self.extra)))
@@ -140,7 +170,9 @@ def build_plan(
         model: LiteLLM model string (e.g. ``"openai/gpt-4o"``).
         api_key: Resolved credential, ``None`` (keyless), or ``OMIT_API_KEY``.
         base_url: Override base URL, or ``None`` to use the provider default.
-        options: Raw operator options from the profile.
+        options: Raw operator options from the profile. ``api_version`` and
+            ``timeout`` are lifted onto the plan's named parameters; the rest
+            are filtered against *supported*.
         supported: Parameter names the provider accepts. An *empty* sequence
             means the capability lookup failed; in that case all non-owned keys
             are forwarded rather than silently dropped.
@@ -148,15 +180,20 @@ def build_plan(
     Returns:
         A frozen ``RequestPlan`` ready for snapshotting and wiring.
     """
-    # 1. Lift api_version before filtering (it is a named acompletion param).
+    # 1. Lift api_version and timeout before filtering: both are named
+    #    acompletion parameters rather than model parameters. `timeout` is
+    #    the sharper case — `get_supported_openai_params` lists it for no
+    #    provider (measured on 1.98.0), so leaving it among the extras would
+    #    hand it to the allowlist filter, which drops it.
     api_version: str | None = None
     raw_api_version = options.get("api_version")
     if isinstance(raw_api_version, str):
         api_version = raw_api_version
+    timeout = _positive_seconds(options.get("timeout"))
 
     # 2. Strip korvid-owned transport selectors — they must never reach the wire.
     filtered = {
-        k: v for k, v in options.items() if k not in _KORVID_OWNED_OPTIONS and k != "api_version"
+        k: v for k, v in options.items() if k not in _KORVID_OWNED_OPTIONS and k not in _LIFTED
     }
 
     # 3. Keep only what the provider accepts.  An empty `supported` means the
@@ -177,4 +214,5 @@ def build_plan(
         base_url=base_url,
         api_version=api_version,
         extra=extra,
+        timeout=timeout,
     )

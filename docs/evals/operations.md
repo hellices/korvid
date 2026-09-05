@@ -189,10 +189,13 @@ uv run pytest tests/evals/test_operation_journeys.py
 uv run python -m tests.evals.operation_campaign --scripted --reps 1
 ```
 
-Live provider (grinding mode; never a merge gate):
+Live provider (grinding mode; never a merge gate). The campaign builds its
+provider through the same profile factory the TUI uses — see
+[`methodology.md`](methodology.md#reproduction) for every `KORVID_EVAL_*`
+variable:
 
 ```bash
-KORVID_EVAL_PROVIDER=ollama KORVID_EVAL_BASE_URL=... KORVID_EVAL_MODEL=... \
+KORVID_EVAL_BASE_URL=... KORVID_EVAL_MODEL=ollama/qwen3:8b \
   uv run python -m tests.evals.operation_campaign --reps 3 --seeds 101,102
 ```
 

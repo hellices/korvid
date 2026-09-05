@@ -13,6 +13,8 @@ import pytest
 
 from korvid.agent import prompt_harness, prompt_packs
 from korvid.evals.__main__ import (
+    DEFAULT_EVAL_TIMEOUT_SECONDS,
+    eval_api_key,
     exit_code,
     prompt_fingerprint,
     provider_factory_from_env,
@@ -80,7 +82,9 @@ def _policy(**kwargs: Any) -> Any:
                 "KORVID_EVAL_MODEL": "m",
                 "KORVID_EVAL_PROVIDER": "unknown",
             },
-            "KORVID_EVAL_PROVIDER",
+            # The prefix is refused by routing the reference it composes,
+            # not by a vendor list korvid keeps.
+            "unknown/m",
         ),
         (
             {
@@ -98,6 +102,35 @@ def test_provider_factory_rejects_invalid_environment(
 ) -> None:
     with pytest.raises(SystemExit, match=message):
         provider_factory_from_env(env)
+
+
+def test_provider_factory_defaults_the_eval_timeout() -> None:
+    """An unset timeout is still bound — a local model must not hang forever."""
+    provider = provider_factory_from_env(
+        {
+            "KORVID_EVAL_BASE_URL": "http://localhost:1234/v1",
+            "KORVID_EVAL_MODEL": "openai/large-local-model",
+        }
+    )()
+
+    assert provider._plan.timeout == DEFAULT_EVAL_TIMEOUT_SECONDS
+
+
+def test_serving_probe_reads_the_named_credential_variable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The probe follows the profile's convention rather than its own."""
+    monkeypatch.setenv("EVAL_TOKEN", "sk-probe")
+
+    assert eval_api_key({"KORVID_EVAL_API_KEY_ENV": "EVAL_TOKEN"}) == "sk-probe"
+
+
+def test_serving_probe_falls_back_to_the_deprecated_variable() -> None:
+    assert eval_api_key({"KORVID_EVAL_API_KEY": "sk-legacy"}) == "sk-legacy"
+
+
+def test_serving_probe_has_no_credential_when_none_is_configured() -> None:
+    assert eval_api_key({}) == ""
 
 
 def test_report_payload_is_json_serializable_with_summary_counts() -> None:

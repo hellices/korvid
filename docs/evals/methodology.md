@@ -162,12 +162,33 @@ evidence on screen.
 
 ## Reproduction
 
+The eval builds its provider with the same
+`create_provider_from_profile` the TUI's composition root calls, from a
+`ModelConnectionConfig` assembled out of the variables below. Routing,
+credential resolution, capability lookup, option filtering and TLS trust
+are the product's, so a score is evidence about korvid rather than about
+an eval-only transport.
+
+| Variable | Meaning |
+|---|---|
+| `KORVID_EVAL_BASE_URL` | Endpoint base URL. Required. |
+| `KORVID_EVAL_MODEL` | Model reference, `provider/model`. Required. |
+| `KORVID_EVAL_PROVIDER` | Compatibility only: the prefix put in front of `KORVID_EVAL_MODEL` when that value contains no `/`. It is joined into a reference, never compared against a vendor list. |
+| `KORVID_EVAL_API_KEY_ENV` | The **name** of the variable holding the key. Preferred: the profile then stores a name, never a secret. |
+| `KORVID_EVAL_API_KEY` | **Deprecated.** The key itself. Still honoured — and still read by name, so the profile holds `KORVID_EVAL_API_KEY` rather than its value — but it puts a credential in the eval's own variable namespace. Prefer `KORVID_EVAL_API_KEY_ENV`. |
+| `KORVID_EVAL_OPTIONS_JSON` | A JSON object of profile options (`temperature`, `num_ctx`, …), exactly as a configured connection's own `options` block. Options the provider does not accept are dropped by the shared factory, not by the eval. |
+| `KORVID_EVAL_CA_BUNDLE` | The eval's `network.ca_bundle`. A bundle that will not load is refused rather than silently replaced by the default trust store. |
+| `KORVID_EVAL_TIMEOUT_SECONDS` | Request timeout for slow local models (default 60). Carried as the `timeout` profile option and sent as LiteLLM's named `timeout` parameter. |
+
+A profile korvid refuses — an unroutable reference, an unset credential
+variable, an unloadable CA bundle — exits non-zero with the reason,
+before the run starts.
+
 Task pack:
 
 ```sh
-export KORVID_EVAL_PROVIDER=ollama
+export KORVID_EVAL_MODEL=ollama/qwen3:8b
 export KORVID_EVAL_BASE_URL=http://127.0.0.1:11435/v1
-export KORVID_EVAL_MODEL=qwen3:8b
 export KORVID_EVAL_TIMEOUT_SECONDS=300
 uv run python -m korvid.evals --model-tier low --reps 3 \
   --out report.md --json report.json

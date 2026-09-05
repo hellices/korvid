@@ -182,6 +182,41 @@ def test_api_version_lifted_from_options_into_named_parameter() -> None:
     assert kwargs["api_version"] == "2024-02-01"
 
 
+def test_timeout_lifted_from_options_into_named_parameter() -> None:
+    """`timeout` is a named acompletion param, and never an OpenAI param.
+
+    Measured on litellm 1.98.0: `get_supported_openai_params` lists it for
+    no provider, so leaving it among the extras means the allowlist filter
+    drops it and a slow local model silently runs at the SDK default.
+    """
+    plan = build_plan(
+        model="openai/gpt-4o",
+        api_key="k",
+        base_url="http://localhost:1234/v1",
+        options={"timeout": 900},
+        supported=["temperature"],
+    )
+    assert plan.timeout == 900.0
+    assert "timeout" not in plan.extra
+    kwargs = plan.call_kwargs([], [], stream=True)
+    assert kwargs["timeout"] == 900.0
+
+
+@pytest.mark.parametrize("value", [0, -1, "900", True, float("nan"), float("inf")])
+def test_a_timeout_that_is_not_a_positive_number_is_dropped(value: object) -> None:
+    """An unusable timeout is not sent — the SDK default is the honest answer."""
+    plan = build_plan(
+        model="openai/gpt-4o",
+        api_key="k",
+        base_url="http://localhost:1234/v1",
+        options={"timeout": value},
+        supported=[],
+    )
+    assert plan.timeout is None
+    assert "timeout" not in plan.extra
+    assert "timeout" not in plan.call_kwargs([], [], stream=True)
+
+
 def test_empty_supported_keeps_all_options() -> None:
     """Empty `supported` means lookup failed — keep everything rather than
     silently drop operator settings."""

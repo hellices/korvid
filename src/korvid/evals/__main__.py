@@ -1,16 +1,35 @@
 """Live eval CLI: `python -m korvid.evals` (issue #69).
 
-Runs the bundled (or a custom) scenario pack against a live
-OpenAI-compatible endpoint and prints a markdown report. This is a
-manual, on-demand tool — it talks to a real model and is never part of
-CI (CI covers the harness itself with scripted-provider smoke tests).
+Runs the bundled (or a custom) scenario pack against a live model
+endpoint and prints a markdown report. This is a manual, on-demand tool —
+it talks to a real model and is never part of CI (CI covers the harness
+itself with scripted-provider smoke tests).
+
+The provider is built by exactly the factory the TUI uses
+(`create_provider_from_profile`), from a `ModelConnectionConfig` assembled
+out of the variables below. That is the whole point: a score is only
+evidence about korvid if the run went through korvid's own construction
+path, with the same routing, credential resolution, capability lookup,
+option filtering and TLS trust.
 
 Configuration comes from the environment:
 
-- `KORVID_EVAL_BASE_URL` — OpenAI-compatible endpoint base URL (required)
-- `KORVID_EVAL_MODEL` — model name (required)
-- `KORVID_EVAL_API_KEY` — bearer token, if the endpoint needs one
-- `KORVID_EVAL_TIMEOUT_SECONDS` — read timeout for slow local models (default 60)
+- `KORVID_EVAL_BASE_URL` — endpoint base URL (required)
+- `KORVID_EVAL_MODEL` — model reference, `provider/model` (required)
+- `KORVID_EVAL_PROVIDER` — compatibility only: the prefix to put in front
+  of `KORVID_EVAL_MODEL` when that value has no `/`. Never a transport
+  choice; korvid takes no branch on its value.
+- `KORVID_EVAL_API_KEY_ENV` — the *name* of the variable holding the key
+- `KORVID_EVAL_API_KEY` — **deprecated**: the key itself. Still honoured,
+  and still read by name (the profile stores `KORVID_EVAL_API_KEY`, never
+  its value), but it puts a credential in the eval's own environment
+  namespace. Prefer `KORVID_EVAL_API_KEY_ENV`.
+- `KORVID_EVAL_OPTIONS_JSON` — a JSON object of profile options
+  (`temperature`, `num_ctx`, …), exactly as a connection profile's
+  own `options` block
+- `KORVID_EVAL_CA_BUNDLE` — the eval's `network.ca_bundle`
+- `KORVID_EVAL_TIMEOUT_SECONDS` — request timeout for slow local models
+  (default 60), carried as the `timeout` profile option
 """
 
 from __future__ import annotations
@@ -20,14 +39,17 @@ import asyncio
 import dataclasses
 import hashlib
 import json
+import logging
 import math
 import os
 import sys
 from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 from korvid.agent.model_policy import ResolvedAgentPolicy
+from korvid.agent.model_profiles import ConnectionAuthConfig, ModelConnectionConfig
+from korvid.agent.provider import LLMProvider
 from korvid.evals.fake_kube import FakeKubeClient, builtin_aliases
 from korvid.evals.harness import (
     NO_GRIND,
@@ -49,48 +71,244 @@ from korvid.evals.runner import (
 )
 from korvid.evals.scenario import Scenario, bundled_scenarios_dir, load_scenarios
 from korvid.evals.serving import ProbeResult, ollama_root, serving_metadata
-from korvid.providers.ollama import OllamaProvider
-from korvid.providers.openai_compat import OpenAICompatProvider
-from korvid.providers.static_creds import StaticHeaderSource
+from korvid.providers.litellm_catalog import LiteLLMModelCatalog
+from korvid.providers.litellm_factory import create_provider_from_profile
+from korvid.providers.litellm_runtime import models_by_provider
+from korvid.providers.special_flows import SpecialFlowRegistry
 from korvid.tools.executor import ToolExecutor
 
+#: The reference separator, spelled once. `provider/model` is the shape
+#: every korvid profile uses; the eval's legacy two-variable form is
+#: joined into it rather than interpreted.
+_REFERENCE_SEPARATOR: Final = "/"
 
-def provider_factory_from_env(env: Mapping[str, str]) -> Callable[[], Any]:
-    """Build a live-provider factory from `KORVID_EVAL_*` variables."""
-    provider_id = env.get("KORVID_EVAL_PROVIDER", "openai-compat").strip()
-    if provider_id not in {"ollama", "openai-compat"}:
-        raise SystemExit("KORVID_EVAL_PROVIDER must be 'ollama' or 'openai-compat'.")
-    base_url = env.get("KORVID_EVAL_BASE_URL", "").strip()
+#: Seconds a live eval waits for a model that has not answered yet. Local
+#: 30B-class models on cold weights routinely exceed any SDK default.
+DEFAULT_EVAL_TIMEOUT_SECONDS: Final = 60.0
+
+#: The deprecated variable that holds the credential *value*. Kept working,
+#: but the profile only ever stores this name — the value is read by the
+#: production `environment` auth method, from the process environment,
+#: exactly as it would be for a TUI profile.
+_LEGACY_API_KEY_VAR: Final = "KORVID_EVAL_API_KEY"
+
+#: What `litellm_factory._refuse` appends to every refusal. Trimmed off the
+#: text the CLI prints because "the agent is disabled" describes the TUI,
+#: not an eval run. Trimming a suffix that is no longer there is a no-op,
+#: so a reworded refusal still reaches the operator in full.
+_FACTORY_REFUSAL_SUFFIX: Final = " — the agent is disabled"
+
+_FACTORY_LOGGER: Final = "korvid.providers.litellm_factory"
+
+
+def _eval_reference(env: Mapping[str, str]) -> str:
+    """The model reference, canonical if given, joined if not.
+
+    `KORVID_EVAL_PROVIDER` predates canonical references. It survives as a
+    *prefix*, never as a choice: whatever the operator wrote is joined to
+    the model with a separator and handed to the same routing the TUI
+    uses, so no vendor name is ever compared here.
+    """
     model = env.get("KORVID_EVAL_MODEL", "").strip()
-    if not base_url or not model:
+    if _REFERENCE_SEPARATOR in model:
+        return model
+    prefix = env.get("KORVID_EVAL_PROVIDER", "").strip()
+    if not prefix or not model:
+        return model
+    return f"{prefix}{_REFERENCE_SEPARATOR}{model}"
+
+
+def _eval_auth(env: Mapping[str, str]) -> ConnectionAuthConfig:
+    """The auth the eval profile declares — a variable *name*, or nothing.
+
+    Both supported forms resolve to the `environment` method, so the
+    profile carries no secret and the credential is read by the same code
+    path a TUI profile uses.
+    """
+    named = env.get("KORVID_EVAL_API_KEY_ENV", "").strip()
+    if not named and env.get(_LEGACY_API_KEY_VAR, "").strip():
+        print(
+            f"warning: {_LEGACY_API_KEY_VAR} is deprecated; set KORVID_EVAL_API_KEY_ENV"
+            " to the name of the variable holding the key instead.",
+            file=sys.stderr,
+        )
+        named = _LEGACY_API_KEY_VAR
+    if not named:
+        return ConnectionAuthConfig(method="none")
+    return ConnectionAuthConfig(method="environment", settings={"key": named})
+
+
+def _eval_options(env: Mapping[str, str]) -> dict[str, object]:
+    """Profile options from `KORVID_EVAL_OPTIONS_JSON`, plus the timeout.
+
+    The timeout is an option rather than a transport argument on purpose:
+    it travels the shared `RequestPlan` boundary as a named `acompletion`
+    parameter, so the eval and the TUI bound their requests identically.
+    An explicit `KORVID_EVAL_TIMEOUT_SECONDS` wins over a `timeout` in the
+    JSON; with neither, the eval default applies.
+    """
+    raw = env.get("KORVID_EVAL_OPTIONS_JSON", "").strip()
+    options: dict[str, object] = {}
+    if raw:
+        try:
+            parsed = json.loads(raw)
+        except ValueError as exc:
+            raise SystemExit(f"KORVID_EVAL_OPTIONS_JSON is not valid JSON: {exc}") from exc
+        if not isinstance(parsed, dict):
+            raise SystemExit("KORVID_EVAL_OPTIONS_JSON must be a JSON object of profile options.")
+        options.update(parsed)
+
+    raw_timeout = env.get("KORVID_EVAL_TIMEOUT_SECONDS", "").strip()
+    if raw_timeout:
+        options["timeout"] = _eval_timeout_seconds(raw_timeout)
+    elif "timeout" not in options:
+        options["timeout"] = DEFAULT_EVAL_TIMEOUT_SECONDS
+    return options
+
+
+def _eval_timeout_seconds(raw: str) -> float:
+    try:
+        seconds = float(raw)
+    except ValueError as exc:
+        raise SystemExit("KORVID_EVAL_TIMEOUT_SECONDS must be a positive number.") from exc
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise SystemExit("KORVID_EVAL_TIMEOUT_SECONDS must be a positive number.")
+    return seconds
+
+
+def eval_api_key(env: Mapping[str, str]) -> str:
+    """The credential the *serving probe* presents, resolved like the profile's.
+
+    The probe is metadata collection, not the eval itself, so it reads the
+    same two variables rather than growing its own convention.
+    """
+    named = env.get("KORVID_EVAL_API_KEY_ENV", "").strip()
+    if named:
+        return os.environ.get(named, "").strip()
+    return env.get(_LEGACY_API_KEY_VAR, "").strip()
+
+
+class _RefusalCollector(logging.Handler):
+    """Keeps the factory's refusals so the CLI can exit *saying* one.
+
+    `create_provider_from_profile` logs its reason and returns None,
+    because a misconfigured profile must not stop the TUI from starting.
+    A CLI has the opposite obligation: there is nothing to degrade to, so
+    the reason has to reach the operator's terminal.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.WARNING)
+        self.reasons: list[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.reasons.append(record.getMessage().removesuffix(_FACTORY_REFUSAL_SUFFIX))
+
+
+def eval_profile_from_env(env: Mapping[str, str]) -> ModelConnectionConfig:
+    """The connection profile the `KORVID_EVAL_*` variables describe.
+
+    A plain `ModelConnectionConfig` — the same shape a configured
+    connection parses into — so the eval has no configuration vocabulary
+    of its own. It never holds a credential: `auth` names the variable,
+    and the production `environment` method reads it.
+
+    Raises:
+        SystemExit: The endpoint or the model reference is missing, or an
+            option value cannot be understood.
+    """
+    base_url = env.get("KORVID_EVAL_BASE_URL", "").strip()
+    reference = _eval_reference(env)
+    if not base_url or not reference:
         raise SystemExit(
             "korvid.evals needs a live model endpoint: set KORVID_EVAL_BASE_URL"
-            " and KORVID_EVAL_MODEL (and KORVID_EVAL_API_KEY if required)."
+            " and KORVID_EVAL_MODEL (and KORVID_EVAL_API_KEY_ENV if required)."
         )
-    api_key = env.get("KORVID_EVAL_API_KEY", "").strip()
-    raw_timeout = env.get("KORVID_EVAL_TIMEOUT_SECONDS", "60").strip()
-    try:
-        timeout_seconds = float(raw_timeout)
-    except ValueError:
-        timeout_seconds = 0
-    if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
-        raise SystemExit("KORVID_EVAL_TIMEOUT_SECONDS must be a positive number.")
+    return ModelConnectionConfig(
+        model=reference,
+        endpoint=base_url,
+        auth=_eval_auth(env),
+        options=_eval_options(env),
+    )
 
-    def factory() -> OllamaProvider | OpenAICompatProvider:
-        credentials = StaticHeaderSource(api_key) if api_key else None
-        if provider_id == "ollama":
-            return OllamaProvider(
-                base_url,
-                model,
-                credentials=credentials,
-                timeout_seconds=timeout_seconds,
+
+def provider_factory_from_env(env: Mapping[str, str]) -> Callable[[], LLMProvider]:
+    """Build a live-provider factory from `KORVID_EVAL_*` variables.
+
+    The variables become one `ModelConnectionConfig`, and every call to
+    the returned factory hands that profile to the same
+    `create_provider_from_profile` the TUI's composition root calls, with
+    the same entry-point `SpecialFlowRegistry` and the same
+    `LiteLLMModelCatalog` built over it. Reference validation, special-flow
+    claims, credential resolution, endpoint rules, capability lookup,
+    option filtering and CA-bundle trust are therefore not reimplemented
+    here — they are the product's, unmodified.
+
+    Args:
+        env: The variables to read. `main` passes `os.environ`; the
+            credential itself is always read from the process environment
+            by the profile's `environment` auth method, so a caller that
+            passes a literal mapping still gets production credential
+            semantics.
+
+    Returns:
+        A factory returning a fresh provider per call — a repetition must
+        never inherit another repetition's transport state.
+
+    Raises:
+        SystemExit: The variables are incomplete or contradictory, or the
+            profile they describe is one korvid refuses to build. The
+            refusal happens here rather than at the first repetition: a
+            campaign that cannot build its provider must fail before it
+            creates an artifact directory, not hours into a GPU run.
+    """
+    profile = eval_profile_from_env(env)
+    ca_bundle = env.get("KORVID_EVAL_CA_BUNDLE", "").strip() or None
+
+    # Discovered once per campaign rather than once per repetition: entry
+    # points cannot change mid-run, and `models_by_provider()` sorts every
+    # shipped model id on each call. The provider is still rebuilt every
+    # time, which is the part that has to be fresh.
+    flows = SpecialFlowRegistry.from_entry_points(reserved_prefixes=models_by_provider())
+    catalog = LiteLLMModelCatalog(flows=flows)
+
+    def build() -> LLMProvider:
+        collector = _RefusalCollector()
+        logger = logging.getLogger(_FACTORY_LOGGER)
+        restore_level = logger.level
+        if not logger.isEnabledFor(logging.WARNING):
+            logger.setLevel(logging.WARNING)
+        logger.addHandler(collector)
+        try:
+            provider = create_provider_from_profile(
+                profile,
+                catalog=catalog,
+                flows=flows,
+                ca_bundle=ca_bundle,
             )
-        return OpenAICompatProvider(
-            base_url,
-            model,
-            credentials=credentials,
-            timeout_seconds=timeout_seconds,
-        )
+        finally:
+            logger.removeHandler(collector)
+            logger.setLevel(restore_level)
+        if provider is None:
+            reason = "; ".join(collector.reasons) or "the profile was refused"
+            raise SystemExit(
+                f"korvid.evals cannot build a provider for {profile.model!r}: {reason}"
+            )
+        return provider
+
+    # Built now, handed out on the first call. Validating by building and
+    # discarding would run an installed flow's `build_provider` an extra
+    # time, and a flow is allowed to do real work there (a device login,
+    # for one). This provider has never been used, so the first repetition
+    # still gets a clean one.
+    validated: LLMProvider | None = build()
+
+    def factory() -> LLMProvider:
+        nonlocal validated
+        if validated is not None:
+            provider, validated = validated, None
+            return provider
+        return build()
 
     return factory
 
@@ -631,11 +849,11 @@ def main(argv: list[str] | None = None) -> int:
             os.environ.get("KORVID_EVAL_BASE_URL", "").strip(),
             os.environ.get("KORVID_EVAL_MODEL", "").strip(),
             fetch=httpx_fetch(
-                api_key=os.environ.get("KORVID_EVAL_API_KEY", "").strip(),
+                api_key=eval_api_key(os.environ),
                 timeout_seconds=PROBE_TIMEOUT_SECONDS,
             ),
             warmup_fetch=httpx_fetch(
-                api_key=os.environ.get("KORVID_EVAL_API_KEY", "").strip(),
+                api_key=eval_api_key(os.environ),
                 timeout_seconds=WARMUP_TIMEOUT_SECONDS,
             ),
             warmup=args.warmup,
