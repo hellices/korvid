@@ -89,7 +89,7 @@ class ModelEntry:
 
     reference: str
     provider_id: str
-    display_name: str
+    display_name: str | None = None
     context_window_tokens: int | None = None
     max_output_tokens: int | None = None
     supports_tools: bool | None = None
