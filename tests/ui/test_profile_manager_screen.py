@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
@@ -57,15 +58,22 @@ def _make_profiles(**kwargs: str) -> ModelConnectionsConfig:
     )
 
 
+async def _no_edit(_profile: ModelConnectionConfig | None) -> ModelConnectionConfig | None:
+    return None
+
+
 class _Host(App["ProfileManagerResult | None"]):
     def __init__(
         self,
         profiles: ModelConnectionsConfig,
-        open_editor: Any | None = None,
+        open_editor: Callable[
+            [ModelConnectionConfig | None], Awaitable[ModelConnectionConfig | None]
+        ]
+        | None = None,
     ) -> None:
         super().__init__()
         self._profiles = profiles
-        self._open_editor = open_editor or (lambda p: None)
+        self._open_editor = open_editor or _no_edit
         self.result: ProfileManagerResult | str | None = "unset"
         self.screen_ref: ProfileManagerScreen | None = None
 
@@ -160,13 +168,61 @@ async def test_a_profile_that_failed_to_parse_cannot_be_activated() -> None:
         await until(pilot, lambda: app.screen_ref is not None and app.screen_ref.is_attached)
         _highlight(app, "broken")
         await pilot.press("enter")
-        await pilot.pause(0.15)
         screen = app.screen_ref
         assert screen is not None
+        await until(
+            pilot,
+            lambda: bool(str(screen.query_one("#profile-status", Static).render())),
+            label="invalid profile status",
+        )
         status_text = str(screen.query_one("#profile-status", Static).render())
 
     assert app.result == "unset"  # did not dismiss
     assert "cannot be activated" in status_text
+
+
+async def test_add_returns_the_profile_from_the_editor() -> None:
+    added = ModelConnectionConfig(model="openai/gpt-4o")
+
+    async def open_editor(
+        existing: ModelConnectionConfig | None,
+    ) -> ModelConnectionConfig | None:
+        assert existing is None
+        return added
+
+    app = _Host(ModelConnectionsConfig(), open_editor)
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: app.screen_ref is not None and app.screen_ref.is_attached)
+        await pilot.press("a")
+        await until(pilot, lambda: app.result != "unset")
+
+    result = app.result
+    assert isinstance(result, ProfileManagerResult)
+    assert result.edited is not None
+    assert result.edited.profiles == {"gpt-4o": added}
+
+
+async def test_edit_replaces_the_selected_profile_in_place() -> None:
+    existing = ModelConnectionConfig(model="openai/gpt-4o-mini")
+    edited = ModelConnectionConfig(model="openai/gpt-4o")
+
+    async def open_editor(
+        selected: ModelConnectionConfig | None,
+    ) -> ModelConnectionConfig | None:
+        assert selected is existing
+        return edited
+
+    app = _Host(ModelConnectionsConfig(profiles={"production": existing}), open_editor)
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: app.screen_ref is not None and app.screen_ref.is_attached)
+        _highlight(app, "production")
+        await pilot.press("e")
+        await until(pilot, lambda: app.result != "unset")
+
+    result = app.result
+    assert isinstance(result, ProfileManagerResult)
+    assert result.edited is not None
+    assert result.edited.profiles == {"production": edited}
 
 
 @pytest.mark.asyncio

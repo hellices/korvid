@@ -11,7 +11,7 @@ from __future__ import annotations
 import contextlib
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, ClassVar
+from typing import ClassVar
 
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -23,9 +23,6 @@ from textual.widgets.option_list import Option
 
 from korvid.agent.model_profiles import ModelCatalog
 from korvid.core.config import ModelConnectionConfig, ModelConnectionsConfig
-
-if TYPE_CHECKING:
-    pass
 
 
 @dataclass(frozen=True, slots=True)
