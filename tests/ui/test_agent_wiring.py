@@ -8,7 +8,7 @@ from dataclasses import replace
 from typing import Any, cast
 
 from textual.css.query import NoMatches
-from textual.widgets import Input, OptionList
+from textual.widgets import Input
 
 from korvid import __version__
 from korvid.agent.events import AgentEvent, TextDelta, TurnComplete
@@ -23,6 +23,7 @@ from korvid.ui.app import KorvidApp
 from korvid.ui.messages import AgentPromptSubmitted
 from korvid.ui.widgets.agent_panel import AgentPanel
 from tests.ui.agent_session_fakes import FakeSession, fake_policy
+from tests.ui.test_agent_ui_controller_profiles import _StubCatalog
 from tests.ui.waits import until
 
 
@@ -97,20 +98,24 @@ def _notification_text(app: KorvidApp) -> str:
 
 
 def _agent_setup_screen_initialized(app: KorvidApp) -> bool:
-    from korvid.ui.widgets.agent_setup_screen import AgentSetupScreen
+    """The wizard is open and has reached its first question.
 
-    if not isinstance(app.screen, AgentSetupScreen):
+    That question is Task 10's model search, pushed over the wizard: the
+    stage machine starts by asking *what model*, so the search screen on
+    top of a setup screen is the initialized state.
+    """
+    from korvid.ui.widgets.agent_setup_screen import AgentSetupScreen
+    from korvid.ui.widgets.model_search_screen import ModelSearchScreen
+
+    if not any(isinstance(screen, AgentSetupScreen) for screen in app.screen_stack):
+        return False
+    if not isinstance(app.screen, ModelSearchScreen):
         return False
     try:
-        provider_list = app.screen.query_one("#setup-provider", OptionList)
-        auth_list = app.screen.query_one("#setup-auth", OptionList)
+        query = app.screen.query_one("#model-query", Input)
     except NoMatches:
         return False
-    return (
-        provider_list.highlighted == 0
-        and auth_list.display is False
-        and app.focused is provider_list
-    )
+    return app.focused is query
 
 
 async def test_ctrl_a_toggles_panel_display() -> None:
@@ -282,7 +287,12 @@ async def test_ai_command_pushes_setup_screen() -> None:
         async def save(self, settings: Any) -> None:
             pass
 
-    app = make_app(session=None, model=None, agent_configurator=NoopConfigurator())
+    app = make_app(
+        session=None,
+        model=None,
+        agent_configurator=NoopConfigurator(),
+        agent_catalog=_StubCatalog(),
+    )
     async with app.run_test() as pilot:
         app.on_unknown_command(UnknownCommand("ai"))
         await until(

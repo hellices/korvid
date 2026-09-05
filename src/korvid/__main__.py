@@ -39,6 +39,7 @@ from korvid.core.config import (
     ConnectionAuthConfig,
     KorvidConfig,
     ModelConnectionConfig,
+    ModelConnectionsConfig,
     ObservabilityBackend,
     context_is_protected,
     load_config,
@@ -1137,6 +1138,15 @@ def _persist_agent_settings(settings: AgentSettings) -> None:
         logger.warning("could not write config: applied now, reverts on restart")
 
 
+def _persist_model_profiles(profiles: ModelConnectionsConfig) -> None:
+    """Write the profile set the UI produced back to config.yaml.
+
+    Failures propagate: the caller applied the profile to the live session
+    already and must tell the operator the change reverts on restart.
+    """
+    save_model_connections(DEFAULT_CONFIG_PATH, profiles)
+
+
 def _make_rebuild_agent(
     build_provider: Callable[[AgentSettings], LLMProvider | None],
     compose: Callable[[LLMProvider, str | None], tuple[AgentSession, Any]],
@@ -1632,6 +1642,10 @@ async def _wire_and_run(config: KorvidConfig, kube: KubeClient, state: _RunState
         agent_session=agent.session,
         agent_model_name=config.agent_model,
         agent_configurator=agent.configurator,
+        # The profile screens' single source of answers, and the one path
+        # that writes `agent.profiles` back (issue #182).
+        agent_catalog=_build_model_catalog(),
+        agent_save_profiles=_persist_model_profiles,
         rebuild_agent=agent.rebuild,
         disconnect_agent=agent.disconnect,
         # The wiring returns no configurator only when the [agent] extra is

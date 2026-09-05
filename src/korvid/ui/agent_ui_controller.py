@@ -37,7 +37,7 @@ import dataclasses
 import json
 import logging
 from abc import ABC, abstractmethod
-from collections.abc import Awaitable, Callable, Coroutine
+from collections.abc import Awaitable, Callable, Collection, Coroutine
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from textual.screen import Screen
@@ -51,10 +51,16 @@ from korvid.agent.events import (
 )
 from korvid.agent.install_hint import isolated_install_hint
 from korvid.agent.interaction import PaneContext, ResourceIdentity
+from korvid.agent.model_profiles import (
+    ModelCatalog,
+    ModelConnectionConfig,
+    ModelConnectionsConfig,
+    split_reference,
+)
 from korvid.agent.navigation import EvidenceTarget, target_for
 from korvid.agent.setup import AgentConfigurator, AgentSettings
 from korvid.core.audit import AuditLog
-from korvid.core.config import KorvidConfig
+from korvid.core.config import ConnectionAuthConfig, KorvidConfig, is_valid_profile_name
 from korvid.core.errors import explain_api_error
 from korvid.core.impact import ImpactAction
 from korvid.core.portforward import OWNER_CHAIN_PLURALS, controller_owner
@@ -74,10 +80,11 @@ from korvid.ui.resize_impact_preview import compose_resize_impact_lines
 from korvid.ui.resource_write_controller import RESTARTABLE, SCALABLE, resize_summary
 from korvid.ui.ui_surface import UiSurface
 from korvid.ui.view_state import ViewState
-from korvid.ui.widgets.agent_setup_screen import AgentSetupScreen
+from korvid.ui.widgets.agent_setup_screen import AgentSetupScreen, SetupResult
 from korvid.ui.widgets.describe_screen import DescribeScreen, provider_footer_note
 from korvid.ui.widgets.log_pane import MAX_PANELS
 from korvid.ui.widgets.payload_inspector import PayloadInspectorScreen
+from korvid.ui.widgets.profile_manager_screen import ProfileManagerResult, ProfileManagerScreen
 from korvid.ui.workspace_controller import ContextGuard
 from korvid.ui.workspace_state import WorkspaceState, filtered_rows
 from korvid.ui.write_coordinator import WriteCoordinator, gvr_label, write_locus
@@ -114,6 +121,79 @@ WriteOpBuild = tuple[ResourceMeta, str | None, Callable[[str | None], Awaitable[
 
 #: A (namespace, pod, container) log target.
 Triple = tuple[str, str, str]
+
+#: The auth-settings key that names the environment variable holding an API
+#: key. It is a *name*: nothing here reads the environment, so a secret
+#: value cannot travel from a profile into the session or back to disk.
+_ENV_KEY_SETTING = "key"
+
+
+def settings_from_profile(profile: ModelConnectionConfig, tier: str | None) -> AgentSettings | None:
+    """Project a profile onto the transport record the runtime still speaks.
+
+    Interim: Task 15 replaces this with the profile-native provider
+    factory. It refuses rather than guesses — a reference with no provider
+    prefix yields None, because inventing one would connect the agent to a
+    host the operator never named.
+    """
+    if profile.config_error is not None:
+        return None
+    prefix, tag = split_reference(profile.model)
+    if not prefix or not tag:
+        return None
+    api_key_env: str | None = None
+    if profile.auth.method == "environment":
+        named = profile.auth.settings.get(_ENV_KEY_SETTING)
+        if isinstance(named, str):
+            api_key_env = named
+    return AgentSettings(
+        provider=prefix,
+        auth_method=profile.auth.method,
+        base_url=profile.endpoint,
+        model=tag,
+        api_key_env=api_key_env,
+        model_tier=tier,
+        options=dict(profile.options),
+    )
+
+
+def _profile_from_settings(settings: AgentSettings | None) -> ModelConnectionConfig | None:
+    """The profile a pre-profile configuration describes, if any.
+
+    Only used to seed a first-run wizard on a machine whose config.yaml
+    still holds the legacy scalars: it is a prefill, never something the
+    controller persists behind the operator's back.
+    """
+    if settings is None or not settings.provider or not settings.model:
+        return None
+    auth_settings: dict[str, object] = {}
+    if settings.api_key_env:
+        auth_settings[_ENV_KEY_SETTING] = settings.api_key_env
+    return ModelConnectionConfig(
+        model=f"{settings.provider}/{settings.model}",
+        endpoint=settings.base_url,
+        auth=ConnectionAuthConfig(method=settings.auth_method, settings=auth_settings),
+        options=dict(settings.options),
+    )
+
+
+def _profile_name(reference: str, taken: Collection[str]) -> str:
+    """A stable, readable, *valid* name for a newly created profile.
+
+    Derived from the model tag rather than asked for: a first run should
+    end with a working agent, not with a naming question. Anything the
+    config file would reject falls back to a fixed name.
+    """
+    _prefix, tag = split_reference(reference)
+    base = tag or reference
+    if not is_valid_profile_name(base):
+        base = "default"
+    name = base
+    counter = 1
+    while name in taken:
+        name = f"{base}-{counter}"
+        counter += 1
+    return name
 
 
 async def _aclose(iterator: object) -> None:
@@ -490,6 +570,17 @@ class AgentUiController:
         rebuild: Callable[[AgentSettings], AgentSession | None] | None = None,
         disconnect: Callable[[], None] | None = None,
         available: bool = True,
+        #: Answers every question the profile screens ask. None when the
+        #: [agent] extra is absent (issue #73): `:ai` then reports the
+        #: install hint instead of opening a wizard it cannot drive.
+        catalog: ModelCatalog | None = None,
+        #: Writes `agent.active`/`agent.profiles`. Injected by the
+        #: composition root, which owns every path korvid writes to.
+        save_profiles: Callable[[ModelConnectionsConfig], None] | None = None,
+        #: Profile -> the record the runtime is built from. Replaced by the
+        #: profile-native provider factory in Task 15.
+        profile_settings: Callable[[ModelConnectionConfig, str | None], AgentSettings | None]
+        | None = None,
     ) -> None:
         self._panel = panel
         self._screens = screens
@@ -525,6 +616,11 @@ class AgentUiController:
         self._model_name = session.policy.model.model if session is not None else model_name
         self._configurator = configurator
         self._rebuild = rebuild
+        self._catalog = catalog
+        self._save_profiles = save_profiles
+        self._profile_settings = (
+            profile_settings if profile_settings is not None else settings_from_profile
+        )
         #: Releases the live provider on `:ai off` (issue #167) — session
         #: state only; persisted configuration is untouched.
         self._disconnect = disconnect
@@ -537,6 +633,10 @@ class AgentUiController:
         #: the `:ai` wizard's tier step and `:model` rebuilds so an
         #: explicit low/high override survives across them.
         self._configured_tier = settings.agent_model_tier
+        #: The profile set as korvid last read or wrote it, including the
+        #: `unparsed` entries: every save round-trips them, so activating
+        #: one profile can never delete another the operator must repair.
+        self._profiles = settings.model_connections
         # config.yaml naming a provider and a model is enough to seed the
         # settings snapshot, whether or not the composition root managed to
         # build a session from it. A startup that degraded (a provider the
@@ -604,6 +704,16 @@ class AgentUiController:
     def settings(self) -> AgentSettings | None:
         """The settings snapshot `:model` edits, or None when unconfigured."""
         return self._settings
+
+    @property
+    def profiles(self) -> ModelConnectionsConfig:
+        """The profile set as korvid last read or wrote it."""
+        return self._profiles
+
+    @property
+    def active_profile(self) -> str | None:
+        """Name of the profile the agent is connected through, if any."""
+        return self._profiles.active
 
     @property
     def follow_enabled(self) -> bool:
@@ -735,23 +845,169 @@ class AgentUiController:
         self._ui.notify("Agent disconnected — run :ai to reconnect")
 
     def _open_setup(self) -> None:
-        if self._configurator is None:
+        """`:ai` — the profile manager when profiles exist, setup otherwise.
+
+        A first run has nothing to list, so it opens the wizard directly
+        rather than showing an empty list with nothing to pick.
+        """
+        catalog = self._catalog
+        if catalog is None:
             self._ui.notify(
                 f"Agent setup unavailable — {isolated_install_hint(feature='agent')}",
                 severity="warning",
                 markup=False,
             )
             return
-        # The wizard applies the settings itself (via apply_settings) before
-        # persisting, so a refused swap keeps the wizard open and unsaved.
-        self._ui.push_screen(
-            AgentSetupScreen(
-                self._configurator,
-                apply_settings=self.apply_settings,
-                current_tier=self._configured_tier,
-                current_settings=self._settings,
+        if self._profiles.profiles or self._profiles.unparsed:
+            self._ui.push_screen(
+                ProfileManagerScreen(self._profiles, catalog, self._edit_profile),
+                callback=self._handle_manager_result,
             )
+            return
+        # No profile on disk, but a degraded startup can still have left
+        # legacy scalars in memory: prefill from them rather than ask for
+        # every answer a second time.
+        self._ui.push_screen(
+            self._setup_screen(
+                _profile_from_settings(self._settings), apply_result=self._apply_result
+            ),
+            callback=self._handle_setup_result,
         )
+
+    def _setup_screen(
+        self,
+        profile: ModelConnectionConfig | None,
+        *,
+        apply_result: Callable[[SetupResult], bool] | None = None,
+    ) -> AgentSetupScreen:
+        """The wizard. Persistence is the controller's, not the screen's:
+        the wizard produces one profile, the controller decides where it
+        lands in the set it round-trips."""
+        catalog = self._catalog
+        if catalog is None:  # pragma: no cover - every caller checks first
+            raise RuntimeError("the model catalog is not wired")
+        return AgentSetupScreen(
+            catalog,
+            profile=profile,
+            current_tier=self._configured_tier,
+            apply_result=apply_result,
+        )
+
+    async def _edit_profile(
+        self, profile: ModelConnectionConfig | None
+    ) -> ModelConnectionConfig | None:
+        """The editor the profile manager opens for add/edit.
+
+        No apply: an edited profile is not the active one until the
+        operator activates it, and the tier it collected stays a draft —
+        `self._configured_tier` is the persisted choice.
+        """
+        if self._catalog is None:
+            return None
+        result = await self._push_setup(profile)
+        return None if result is None else result.profile
+
+    async def _push_setup(self, profile: ModelConnectionConfig | None) -> SetupResult | None:
+        loop = asyncio.get_running_loop()
+        done: asyncio.Future[SetupResult | None] = loop.create_future()
+
+        def _finished(result: SetupResult | None) -> None:
+            if not done.done():
+                done.set_result(result)
+
+        self._ui.push_screen(self._setup_screen(profile), callback=_finished)
+        return await done
+
+    def _apply_result(self, result: SetupResult) -> bool:
+        """Swap the runtime onto a wizard result, or refuse and say why."""
+        settings = self._profile_settings(result.profile, result.model_tier)
+        if settings is None:
+            self._ui.notify(
+                f"Cannot connect to {result.profile.model!r} — the model reference needs "
+                "a provider prefix (provider/model)",
+                severity="warning",
+                markup=False,
+            )
+            return False
+        return self.apply_settings(settings)
+
+    def _handle_setup_result(self, result: SetupResult | None) -> None:
+        """A completed first-run wizard: name the profile and persist it."""
+        if result is None:
+            return
+        taken = set(self._profiles.profiles) | set(self._profiles.unparsed)
+        name = _profile_name(result.profile.model, taken)
+        profiles = dict(self._profiles.profiles)
+        profiles[name] = result.profile
+        self._persist_profiles(dataclasses.replace(self._profiles, active=name, profiles=profiles))
+
+    def _handle_manager_result(self, result: ProfileManagerResult | None) -> None:
+        if result is None:
+            return
+        if result.activated is not None:
+            self._activate_profile(result.activated)
+            return
+        if result.edited is not None:
+            self._persist_profiles(result.edited)
+
+    def _activate_profile(self, name: str) -> None:
+        """Build, apply, *then* persist the pointer — never the other way.
+
+        A profile that cannot build a provider must leave both the live
+        session and the persisted `agent.active` exactly as they were.
+        """
+        profile = self._profiles.profiles.get(name)
+        if profile is None:
+            self._ui.notify(f"No profile named {name!r}", severity="warning", markup=False)
+            return
+        if profile.config_error is not None:
+            # Never handed to the factory: connecting with silently
+            # discarded settings is worse than refusing to connect.
+            self._ui.notify(
+                f"Profile {name!r} is invalid: {profile.config_error}",
+                severity="warning",
+                markup=False,
+            )
+            return
+        settings = self._profile_settings(profile, self._configured_tier)
+        if settings is None:
+            self._ui.notify(
+                f"Profile {name!r} cannot be built: {profile.model!r} needs a provider "
+                "prefix (provider/model)",
+                severity="warning",
+                markup=False,
+            )
+            return
+        if not self.apply_settings(settings):
+            return  # apply_settings already notified the reason
+        if self._persist_profiles(dataclasses.replace(self._profiles, active=name)):
+            self._ui.notify(f"Agent profile {name!r} activated", markup=False)
+
+    def _persist_profiles(self, profiles: ModelConnectionsConfig) -> bool:
+        """Write the profile set and adopt what was written.
+
+        The in-memory set is refreshed from the value handed to the writer
+        — `unparsed` included — so the round-trip stays authoritative.
+        """
+        save = self._save_profiles
+        if save is None:
+            self._ui.notify(
+                "Agent profiles cannot be saved — no configuration path is wired",
+                severity="warning",
+                markup=False,
+            )
+            return False
+        try:
+            save(profiles)
+        except Exception as exc:  # applied already; disk is what failed
+            self._ui.notify(
+                f"Profile applied, but save failed: {exc} — will revert on restart",
+                severity="warning",
+                markup=False,
+            )
+            return False
+        self._profiles = profiles
+        return True
 
     def handle_model_command(self, args: list[str]) -> None:
         """`:model` shows the current model; `:model <name>` switches and persists it."""

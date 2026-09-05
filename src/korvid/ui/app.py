@@ -41,9 +41,10 @@ from textual.worker import Worker, WorkerError, WorkerState
 
 from korvid.agent.events import AgentEvent
 from korvid.agent.interaction import PaneContext, ResourceIdentity
+from korvid.agent.model_profiles import ModelCatalog
 from korvid.agent.setup import AgentConfigurator, AgentSettings
 from korvid.core.audit import AuditLog
-from korvid.core.config import KorvidConfig
+from korvid.core.config import KorvidConfig, ModelConnectionsConfig
 from korvid.core.filters import ResourceFilter
 from korvid.core.keybindings import plan_keybindings, shift_alias_keys
 from korvid.core.mcp import MCPControllerBase
@@ -363,6 +364,11 @@ class KorvidApp(App[None]):
         agent_session: AgentSession | None = None,
         agent_model_name: str | None = None,
         agent_configurator: AgentConfigurator | None = None,
+        #: Answers every question the profile screens ask; None without the
+        #: [agent] extra, which degrades `:ai` to an install hint.
+        agent_catalog: ModelCatalog | None = None,
+        #: Writes `agent.active`/`agent.profiles` back to config.yaml.
+        agent_save_profiles: Callable[[ModelConnectionsConfig], None] | None = None,
         rebuild_agent: Callable[[AgentSettings], AgentSession | None] | None = None,
         disconnect_agent: Callable[[], None] | None = None,
         agent_available: bool = True,
@@ -862,6 +868,8 @@ class KorvidApp(App[None]):
             session=agent_session,
             model_name=agent_model_name,
             configurator=agent_configurator,
+            catalog=agent_catalog,
+            save_profiles=agent_save_profiles,
             rebuild=rebuild_agent,
             disconnect=disconnect_agent,
             available=agent_available,
