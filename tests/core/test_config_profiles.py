@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 
 from korvid.core.config import (
     AGENT_PROFILE_NAME_MAX_LENGTH,
@@ -15,6 +17,7 @@ from korvid.core.config import (
     _legacy_model_reference,
     is_valid_profile_name,
     load_config,
+    save_agent_profiles,
 )
 
 
@@ -777,3 +780,174 @@ def test_the_azure_sdk_builds_the_url_from_the_resource_root(
     assert len(seen) == 1
     assert seen[0].startswith(f"https://x.openai.azure.com{expected_path}?")
     assert "api-version=2024-10-21" in seen[0]
+
+
+# ---------------------------------------------------------------------------
+# Task 3 tests: profile writer and derived legacy scalars
+# ---------------------------------------------------------------------------
+
+
+def test_saving_writes_only_the_new_shape_and_drops_the_legacy_keys(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        """
+kube_context: prod
+agent:
+  provider: ollama
+  model: llama3
+  base_url: http://localhost:11434
+  enabled: true
+  ollama:
+    num_ctx: 8192
+""",
+    )
+    cfg = load_config(path)
+    save_agent_profiles(path, cfg.agent_profiles)
+
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert raw["kube_context"] == "prod"
+    assert set(raw["agent"]) == {"active", "profiles"}
+    assert raw["agent"]["active"] == "default"
+    assert raw["agent"]["profiles"]["default"]["model"] == "ollama/llama3"
+    assert raw["agent"]["profiles"]["default"]["options"]["num_ctx"] == 8192
+
+
+def test_a_nested_option_round_trips_through_the_writer(tmp_path: Path) -> None:
+    """`_freeze_config_value` produces `mappingproxy`/`tuple`; `yaml.safe_dump`
+    raises `RepresenterError` on the first and normalises the second. The
+    writer must thaw recursively, and the result must reload equal."""
+    path = _write(
+        tmp_path,
+        """
+agent:
+  active: main
+  profiles:
+    main:
+      model: openai/gpt-4o
+      options:
+        nested:
+          depth: 1
+        items: [1, 2]
+""",
+    )
+    before = load_config(path).agent_profiles
+    save_agent_profiles(path, before)
+    after = load_config(path).agent_profiles
+    assert after.profiles["main"].options["nested"]["depth"] == 1
+    assert after.profiles["main"].options["items"] == (1, 2)
+    assert after == before
+
+
+def test_saving_carries_unparsed_entries_back_verbatim(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        """
+agent:
+  active: good
+  profiles:
+    good:
+      model: openai/gpt-4o
+    broken: {}
+""",
+    )
+    cfg = load_config(path)
+    assert set(cfg.agent_profiles.profiles) == {"good"}
+    save_agent_profiles(path, cfg.agent_profiles)
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert set(raw["agent"]["profiles"]) == {"good", "broken"}
+
+
+def test_an_explicitly_removed_profile_does_not_come_back(tmp_path: Path) -> None:
+    """A profile with a rejected `options` block is in *both* `profiles`
+    and `unparsed`. Dropping it from one alone lets the writer re-emit it
+    from the other, and the operator can never delete it."""
+    path = _write(
+        tmp_path,
+        """
+agent:
+  active: good
+  profiles:
+    good:
+      model: openai/gpt-4o
+    rejected:
+      model: openai/gpt-4o
+      options:
+        api_key: inline-secret-value
+""",
+    )
+    cfg = load_config(path)
+    assert cfg.agent_profiles.profiles["rejected"].config_error is not None
+    assert "rejected" in cfg.agent_profiles.unparsed
+
+    pruned = replace(
+        cfg.agent_profiles,
+        profiles={k: v for k, v in cfg.agent_profiles.profiles.items() if k != "rejected"},
+        unparsed={k: v for k, v in cfg.agent_profiles.unparsed.items() if k != "rejected"},
+    )
+    save_agent_profiles(path, pruned)
+    assert set(load_config(path).agent_profiles.profiles) == {"good"}
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert set(raw["agent"]["profiles"]) == {"good"}
+
+
+def test_derived_scalars_refuse_a_prefix_the_legacy_transport_cannot_serve(
+    tmp_path: Path,
+) -> None:
+    path = _write(
+        tmp_path,
+        """
+agent:
+  active: main
+  profiles:
+    main:
+      model: anthropic/claude-sonnet-4-5
+""",
+    )
+    cfg = load_config(path)
+    assert cfg.agent_enabled is False
+    assert cfg.agent_provider is None
+    assert any("anthropic" in w and "Task 15" in w for w in cfg.warnings)
+
+
+def test_derived_scalars_reattach_the_azure_deployment_path(tmp_path: Path) -> None:
+    """Group 1's transport is still the legacy string-concatenating one,
+    which posts to `<base_url>/chat/completions`. The profile holds the
+    resource root, so the projection has to rebuild what Task 2 stripped
+    or every interim Azure request 404s."""
+    path = _write(
+        tmp_path,
+        """
+agent:
+  active: main
+  profiles:
+    main:
+      model: azure/gpt-4o
+      endpoint: https://x.openai.azure.com
+      auth:
+        method: environment
+        key: AZURE_OPENAI_API_KEY
+      options:
+        azure_deployment: my-dep
+""",
+    )
+    cfg = load_config(path)
+    assert cfg.agent_provider == "azure"
+    assert cfg.agent_base_url == "https://x.openai.azure.com/openai/deployments/my-dep"
+
+
+def test_a_profile_with_a_config_error_yields_no_legacy_scalars(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        """
+agent:
+  active: main
+  profiles:
+    main:
+      model: openai/gpt-4o
+      options:
+        api_key: inline-secret-value
+""",
+    )
+    cfg = load_config(path)
+    assert cfg.agent_enabled is False
+    assert any("rejected" in w for w in cfg.warnings)

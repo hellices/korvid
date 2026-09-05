@@ -34,12 +34,16 @@ from korvid.agent.setup import AgentConfigurator, AgentSettings
 from korvid.core.audit import AuditLog, default_audit_path
 from korvid.core.config import (
     DEFAULT_CONFIG_PATH,
+    LEGACY_PROFILE_NAME,
+    AgentAuthConfig,
+    AgentProfileConfig,
+    AgentProfilesConfig,
     ConfigMigrationError,
     KorvidConfig,
     ObservabilityBackend,
     context_is_protected,
     load_config,
-    save_agent_config,
+    save_agent_profiles,
     save_topbar_state,
 )
 from korvid.core.mcp import MCPControllerBase
@@ -1085,15 +1089,23 @@ def _build_agent_wiring(
 
 def _persist_agent_settings(settings: AgentSettings) -> None:
     """Write what the `:ai` wizard chose back to config.yaml."""
-    save_agent_config(
-        DEFAULT_CONFIG_PATH,
-        provider=settings.provider,
-        auth_method=settings.auth_method,
-        base_url=settings.base_url,
-        model=settings.model,
-        api_key_env=settings.api_key_env,
-        model_tier=settings.model_tier,
+    auth_settings: dict[str, object] = {}
+    if settings.api_key_env:
+        auth_settings["key"] = settings.api_key_env
+    profile = AgentProfileConfig(
+        model=f"{settings.provider}/{settings.model}",
+        endpoint=settings.base_url,
+        auth=AgentAuthConfig(method=settings.auth_method, settings=auth_settings),
+        options=dict(settings.options),
     )
+    profiles = AgentProfilesConfig(
+        active=LEGACY_PROFILE_NAME,
+        profiles={LEGACY_PROFILE_NAME: profile},
+    )
+    try:
+        save_agent_profiles(DEFAULT_CONFIG_PATH, profiles)
+    except OSError:
+        logger.warning("could not write config: applied now, reverts on restart")
 
 
 def _make_rebuild_agent(
