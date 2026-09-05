@@ -13,6 +13,7 @@ from types import SimpleNamespace
 from typing import Any, ClassVar, cast
 
 import pytest
+import yaml
 
 import korvid
 import korvid.__main__
@@ -1715,6 +1716,78 @@ def test_load_startup_config_wraps_config_migration_error_as_system_exit(
     assert "\n" not in message  # one-line, actionable
     assert "agent.profile" in message
     assert "agent.model_tier" in message
+
+
+def test_persist_agent_settings_updates_only_default_profile(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import korvid.__main__ as main_mod
+    from korvid.__main__ import _persist_agent_settings
+    from korvid.agent.setup import AgentSettings
+    from korvid.core.config import load_config
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+kube_context: prod
+ui:
+  topbar: expanded
+agent:
+  active: production
+  profiles:
+    default:
+      model: openai/gpt-3.5
+      endpoint: https://old.default.example
+      auth:
+        method: environment
+        key: OLD_KEY
+      options:
+        temperature: 0.1
+    production:
+      model: azure/gpt-4o
+      endpoint: https://prod.example
+      auth:
+        method: provider-default
+      options:
+        azure_deployment: prod
+    rejected:
+      model: openai/gpt-4o
+      options:
+        api_key: inline-secret
+    bad name:
+      model: openai/gpt-4o
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(main_mod, "DEFAULT_CONFIG_PATH", config_path)
+
+    _persist_agent_settings(
+        AgentSettings(
+            provider="openai",
+            auth_method="api_key",
+            base_url="http://localhost:9999/v1",
+            model="m2",
+            api_key_env="KORVID_TEST_KEY",
+        )
+    )
+
+    persisted = load_config(config_path)
+    active = persisted.agent_profiles.active_profile
+    assert persisted.agent_profiles.active == "default"
+    assert active is not None
+    assert active.model == "openai/m2"
+    assert active.endpoint == "http://localhost:9999/v1"
+    assert active.auth.method == "api_key"
+    assert active.auth.settings["key"] == "KORVID_TEST_KEY"
+    assert persisted.agent_profiles.profiles["production"].endpoint == "https://prod.example"
+    assert persisted.agent_profiles.profiles["rejected"].config_error is not None
+    assert "bad name" in persisted.agent_profiles.unparsed
+    assert "rejected" in persisted.agent_profiles.unparsed
+
+    raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert raw["kube_context"] == "prod"
+    assert raw["ui"]["topbar"] == "expanded"
+    assert set(raw["agent"]["profiles"]) == {"default", "production", "rejected", "bad name"}
 
 
 def test_load_startup_config_wraps_migration_error_even_when_agent_disabled(

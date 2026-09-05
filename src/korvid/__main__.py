@@ -37,7 +37,6 @@ from korvid.core.config import (
     LEGACY_PROFILE_NAME,
     AgentAuthConfig,
     AgentProfileConfig,
-    AgentProfilesConfig,
     ConfigMigrationError,
     KorvidConfig,
     ObservabilityBackend,
@@ -1098,9 +1097,17 @@ def _persist_agent_settings(settings: AgentSettings) -> None:
         auth=AgentAuthConfig(method=settings.auth_method, settings=auth_settings),
         options=dict(settings.options),
     )
-    profiles = AgentProfilesConfig(
+    config = load_config(DEFAULT_CONFIG_PATH)
+    profiles_by_name = {
+        name: existing_profile
+        for name, existing_profile in config.agent_profiles.profiles.items()
+        if existing_profile.config_error is None
+    }
+    profiles_by_name[LEGACY_PROFILE_NAME] = profile
+    profiles = dataclasses.replace(
+        config.agent_profiles,
         active=LEGACY_PROFILE_NAME,
-        profiles={LEGACY_PROFILE_NAME: profile},
+        profiles=profiles_by_name,
     )
     try:
         save_agent_profiles(DEFAULT_CONFIG_PATH, profiles)
