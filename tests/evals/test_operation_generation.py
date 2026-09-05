@@ -9,6 +9,8 @@ denies the namespace the target moved to.
 
 from __future__ import annotations
 
+import re
+
 from korvid.evals.operation import (
     OPERATION_SCHEMA_VERSION,
     bundled_operations_dir,
@@ -26,6 +28,15 @@ def test_the_same_seed_reproduces_the_same_instance() -> None:
     second, second_record = generate_instance(_TEMPLATES["scale-deployment-up"], 7)
     assert first == second
     assert first_record == second_record
+
+
+def test_a_different_seed_moves_the_target_identity() -> None:
+    first, _ = generate_instance(_TEMPLATES["scale-deployment-up"], 7)
+    second, _ = generate_instance(_TEMPLATES["scale-deployment-up"], 8)
+    assert (first.target.namespace, first.target.name) != (
+        second.target.namespace,
+        second.target.name,
+    )
 
 
 def test_the_instance_stays_internally_consistent() -> None:
@@ -70,3 +81,19 @@ def test_every_shipped_template_generates_a_schema_valid_instance() -> None:
         assert instance.id == f"{template_id}-s13"
         assert record.seed == 13
         assert record.template_id == template_id
+        assert len(instance.target.name) <= 253
+        assert all(
+            re.fullmatch(r"[a-z0-9](?:[-a-z0-9]*[a-z0-9])?", label) and len(label) <= 63
+            for label in instance.target.name.split(".")
+        )
+        identities = [
+            (
+                manifest.get("kind"),
+                manifest["metadata"].get("namespace"),
+                manifest["metadata"].get("name"),
+            )
+            for manifest in instance.cluster.objects
+        ]
+        uids = [manifest["metadata"].get("uid") for manifest in instance.cluster.objects]
+        assert len(set(identities)) == len(identities)
+        assert len(set(uids)) == len(uids)

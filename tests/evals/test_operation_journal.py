@@ -64,6 +64,18 @@ def test_state_mappings_reject_secret_payload_paths() -> None:
         )
 
 
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_state_mappings_reject_non_finite_values(value: float) -> None:
+    journal = ActionJournal()
+    with pytest.raises(ValueError, match="journal state values must be finite"):
+        journal.append(
+            event="mutation_finished",
+            actor="write_ops",
+            target=_TARGET,
+            post_state={"spec.replicas": value},
+        )
+
+
 def test_a_secret_target_may_not_carry_state() -> None:
     journal = ActionJournal()
     secret = JournalTarget(

@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from korvid.evals.scenario import load_scenario
+from korvid.evals.scenario import load_scenario, load_scenarios
 
 _MINIMAL = """\
 id: oom-killed
@@ -114,6 +114,13 @@ def test_load_scenario_requires_forbidden_claims_for_negative_controls(tmp_path:
     )
     with pytest.raises(ValueError, match="must_not_mention"):
         load_scenario(_write(tmp_path, text))
+
+
+def test_load_scenarios_rejects_duplicate_ids(tmp_path: Path) -> None:
+    _write(tmp_path, _MINIMAL, "a.yaml")
+    _write(tmp_path, _MINIMAL, "b.yaml")
+    with pytest.raises(ValueError, match="duplicate"):
+        load_scenarios(tmp_path)
 
 
 def test_load_scenario_rejects_timestamps_after_the_anchor(tmp_path: Path) -> None:
