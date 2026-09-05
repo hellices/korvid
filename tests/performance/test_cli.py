@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from types import MappingProxyType
 
@@ -292,10 +293,17 @@ def test_cli_replay_publishes_a_rendered_cell_run_as_event_to_render(
 def test_cli_returns_nonzero_for_digest_or_drop_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    failed_replay: object,
+    failed_replay: Callable[[WorkloadProfile, ReplayOptions], Awaitable[ReplayReport]],
 ) -> None:
-    monkeypatch.setattr(cli, "run_replay", failed_replay)
+    calls: list[WorkloadProfile] = []
+
+    async def recording(profile: WorkloadProfile, options: ReplayOptions) -> ReplayReport:
+        calls.append(profile)
+        return await failed_replay(profile, options)
+
+    monkeypatch.setattr(cli, "run_replay", recording)
     assert cli.main(["replay", "--profile", str(profile_path(tmp_path))]) == 1
+    assert len(calls) == 1
 
 
 def test_cli_writes_seed_manifests_yaml(tmp_path: Path) -> None:

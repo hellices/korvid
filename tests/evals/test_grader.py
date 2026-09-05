@@ -355,11 +355,17 @@ def test_grade_target_does_not_depend_on_argument_order(arguments: dict[str, str
     ).evidence_fetched
 
 
-def test_grade_treats_a_dash_as_a_clause_boundary() -> None:
+@pytest.mark.parametrize("dash", ["—", " - "])
+def test_grade_treats_a_dash_as_a_clause_boundary(dash: str) -> None:
     """Negation before a dash must not suppress the causal claim after it."""
-    answer = "The container was not restarted by the operator—it was OOMKilled with exit code 137."
+    answer = f"The container was not restarted by the operator{dash}it was OOMKilled with exit 137."
     result = grade(_scenario(), answer, [_record()])
     assert result.diagnosis_success
+
+
+def test_grade_keeps_negation_within_an_unbroken_clause() -> None:
+    result = grade(_scenario(), "The container was not OOMKilled with exit code 137.", [_record()])
+    assert not result.diagnosis_success
 
 
 def test_grade_negation_scope_ends_at_causal_conjunctions() -> None:
