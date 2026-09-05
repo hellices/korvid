@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from korvid.evals.grader import GradeResult, ToolRecord, citation_report, grade
 from korvid.evals.scenario import Evidence, Scenario
 from tests.evals.fixtures import EVAL_INTERACTION
@@ -325,6 +327,39 @@ def test_grade_evidence_requires_every_expected_target_argument() -> None:
     assert not result.evidence_fetched
 
 
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"pvc": "web", "name": "other", "namespace": "front"},
+        {"name": "other", "pvc": "web", "namespace": "front"},
+    ],
+)
+def test_grade_target_does_not_depend_on_argument_order(arguments: dict[str, str]) -> None:
+    evidence = Evidence(
+        tool="get_resource",
+        contains="phase: Pending",
+        args={"kind": "persistentvolumeclaims", "name": "web", "namespace": "front"},
+    )
+    records = [
+        _record(
+            name="diagnose_pvc",
+            result="outcome: findings\nphase: Pending",
+            arguments=arguments,
+        )
+    ]
+    assert grade(
+        _scenario(expected_evidence=((evidence,),)),
+        "OOMKilled, exit 137.",
+        records,
+    ).evidence_fetched
+
+
+def test_grade_treats_a_dash_as_a_clause_boundary() -> None:
+    answer = "The container was not restarted by the operator—it was OOMKilled with exit code 137."
+    result = grade(_scenario(), answer, [_record()])
+    assert result.diagnosis_success
+
+
 def test_grade_negation_scope_ends_at_causal_conjunctions() -> None:
     """'the pod is not healthy because the readiness probe is failing' —
     the negator scopes over 'healthy' only; the cause after 'because' is a
@@ -389,6 +424,23 @@ def test_grade_credits_diagnose_service_for_endpoint_evidence() -> None:
         ]
         result = grade(scenario, "OOMKilled, exit 137.", records)
         assert result.evidence_fetched, kind
+
+
+def test_grade_rejects_a_diagnostic_call_against_a_different_kind() -> None:
+    evidence = Evidence(
+        tool="get_resource",
+        contains="endpoints: 0",
+        args={"kind": "services", "name": "web", "namespace": "front"},
+    )
+    scenario = _scenario(expected_evidence=((evidence,),))
+    records = [
+        _record(
+            name="diagnose_pvc",
+            result="outcome: findings\nendpoints: 0",
+            arguments={"pvc": "web", "namespace": "front"},
+        )
+    ]
+    assert not grade(scenario, "OOMKilled, exit 137.", records).evidence_fetched
 
 
 def test_grade_still_rejects_a_diagnostic_call_against_a_different_object() -> None:

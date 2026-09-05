@@ -143,6 +143,18 @@ async def fake_run_live_replay(
     return _make_report(profile)
 
 
+async def unexpected_live_replay(
+    profile: WorkloadProfile,
+    _options: ReplayOptions,
+    *,
+    context: str,
+    expected_cluster_id: str,
+    run_id: str,
+) -> ReplayReport:
+    del profile, context, expected_cluster_id, run_id
+    raise AssertionError("live replay must not start before validation completes")
+
+
 async def fake_failed_live_replay(
     profile: WorkloadProfile,
     _options: ReplayOptions,
@@ -430,14 +442,14 @@ def test_cli_replay_live_rejects_duration_that_orphans_a_burst(
 
 
 @pytest.mark.parametrize(
-    ("command", "option", "value"),
+    ("command", "option", "value", "expected"),
     [
-        ("replay", "--time-scale", "0.5"),
-        ("replay", "--sample-interval", "0"),
-        ("replay", "--input-ack-timeout", "inf"),
-        ("replay", "--input-sample-pairs", "0"),
-        ("replay-live", "--duration", "0"),
-        ("replay-live", "--sample-interval", "0"),
+        ("replay", "--time-scale", "0.5", "must be finite and >= 1.0"),
+        ("replay", "--sample-interval", "0", "must be positive"),
+        ("replay", "--input-ack-timeout", "inf", "must be finite and positive"),
+        ("replay", "--input-sample-pairs", "0", "must be positive"),
+        ("replay-live", "--duration", "0", "must be positive"),
+        ("replay-live", "--sample-interval", "0", "must be positive"),
     ],
 )
 def test_cli_rejects_unusable_scalar_options(
@@ -447,6 +459,7 @@ def test_cli_rejects_unusable_scalar_options(
     command: str,
     option: str,
     value: str,
+    expected: str,
 ) -> None:
     calls: list[str] = []
 
@@ -464,7 +477,7 @@ def test_cli_rejects_unusable_scalar_options(
     argv.extend([option, value])
 
     assert cli.main(argv) == 1
-    assert option in capsys.readouterr().err
+    assert expected in capsys.readouterr().err
     assert calls == []
 
 
@@ -479,10 +492,7 @@ def test_cli_replay_live_requires_all_four_artifacts(
     index = artifacts.index(drop)
     del artifacts[index : index + 2]
 
-    async def unexpected(*args: object, **kwargs: object) -> ReplayReport:
-        raise AssertionError("live replay must not start without every artifact")
-
-    monkeypatch.setattr(cli, "run_live_replay", unexpected)
+    monkeypatch.setattr(cli, "run_live_replay", unexpected_live_replay)
     exit_code = cli.main(
         ["replay-live", "--profile", str(profile_path(tmp_path)), *_LIVE_IDENTITY_ARGS, *artifacts]
     )
@@ -498,7 +508,7 @@ def test_cli_replay_live_rejects_artifact_not_named_for_the_run(
 ) -> None:
     artifacts = _live_artifacts(tmp_path)
     artifacts[1] = str(tmp_path / "result.json")
-    monkeypatch.setattr(cli, "run_live_replay", fake_run_live_replay)
+    monkeypatch.setattr(cli, "run_live_replay", unexpected_live_replay)
 
     exit_code = cli.main(
         ["replay-live", "--profile", str(profile_path(tmp_path)), *_LIVE_IDENTITY_ARGS, *artifacts]
@@ -516,7 +526,7 @@ def test_cli_replay_live_rejects_artifact_paths_that_alias_one_file(
     (tmp_path / "sub").mkdir()
     artifacts = _live_artifacts(tmp_path)
     artifacts[3] = str(tmp_path / "sub" / ".." / "aks186-live.json")
-    monkeypatch.setattr(cli, "run_live_replay", fake_run_live_replay)
+    monkeypatch.setattr(cli, "run_live_replay", unexpected_live_replay)
 
     exit_code = cli.main(
         ["replay-live", "--profile", str(profile_path(tmp_path)), *_LIVE_IDENTITY_ARGS, *artifacts]
