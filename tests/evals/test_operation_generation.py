@@ -9,8 +9,12 @@ denies the namespace the target moved to.
 
 from __future__ import annotations
 
+import random
 import re
+from copy import deepcopy
+from dataclasses import replace
 
+import korvid.evals.operation_generation as operation_generation
 from korvid.evals.operation import (
     OPERATION_SCHEMA_VERSION,
     bundled_operations_dir,
@@ -31,12 +35,11 @@ def test_the_same_seed_reproduces_the_same_instance() -> None:
 
 
 def test_a_different_seed_moves_the_target_identity() -> None:
-    first, _ = generate_instance(_TEMPLATES["scale-deployment-up"], 7)
-    second, _ = generate_instance(_TEMPLATES["scale-deployment-up"], 8)
-    assert (first.target.namespace, first.target.name) != (
-        second.target.namespace,
-        second.target.name,
-    )
+    identities: set[tuple[str, str]] = set()
+    for seed in range(8):
+        instance, _ = generate_instance(_TEMPLATES["scale-deployment-up"], seed)
+        identities.add((instance.target.namespace, instance.target.name))
+    assert len(identities) > 1
 
 
 def test_the_instance_stays_internally_consistent() -> None:
@@ -88,6 +91,7 @@ def test_every_shipped_template_generates_a_schema_valid_instance() -> None:
         )
         identities = [
             (
+                str(manifest.get("apiVersion") or "").rpartition("/")[0],
                 manifest.get("kind"),
                 manifest["metadata"].get("namespace"),
                 manifest["metadata"].get("name"),
@@ -95,5 +99,49 @@ def test_every_shipped_template_generates_a_schema_valid_instance() -> None:
             for manifest in instance.cluster.objects
         ]
         uids = [manifest["metadata"].get("uid") for manifest in instance.cluster.objects]
+        assert record.distractors
         assert len(set(identities)) == len(identities)
+        assert all(uids)
         assert len(set(uids)) == len(uids)
+
+
+def test_generated_target_name_remains_a_dns_subdomain_after_truncation() -> None:
+    target = replace(
+        _TEMPLATES["scale-deployment-up"].target,
+        name=f"{'a' * 64}.checkout",
+    )
+
+    generated = operation_generation._generated_name(random.Random(7), target, set())
+
+    assert len(generated) <= 253
+    assert all(
+        re.fullmatch(r"[a-z0-9](?:[-a-z0-9]*[a-z0-9])?", label) and len(label) <= 63
+        for label in generated.split(".")
+    )
+
+
+def test_generated_distractor_does_not_collide_with_an_existing_peer() -> None:
+    template = _TEMPLATES["scale-statefulset-down"]
+    peer = deepcopy(template.cluster.objects[0])
+    peer["metadata"] = {
+        **peer["metadata"],
+        "name": "idle-1",
+        "uid": "statefulset-existing-idle-1",
+    }
+    custom = replace(
+        template,
+        cluster=replace(template.cluster, objects=(*template.cluster.objects, peer)),
+    )
+
+    instance, record = generate_instance(custom, 0)
+    identities = [
+        (
+            manifest.get("apiVersion"),
+            manifest.get("kind"),
+            manifest["metadata"].get("namespace"),
+            manifest["metadata"].get("name"),
+        )
+        for manifest in instance.cluster.objects
+    ]
+    assert record.distractors
+    assert len(set(identities)) == len(identities)
