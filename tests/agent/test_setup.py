@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import dataclasses
 from collections.abc import ItemsView, Iterator, Mapping
+from types import MappingProxyType
 
 import pytest
 
@@ -144,3 +145,52 @@ def test_options_are_still_frozen_for_an_accepted_tier() -> None:
 
     with pytest.raises(TypeError, match="does not support item assignment"):
         settings.options["nested"] = 2  # type: ignore[index]  # read-only is the test
+
+
+# ---------------------------------------------------------------------------
+# Copy safety of `options` (moved here from the setup screen's tests, which
+# no longer build `AgentSettings`: these pin the dataclass, not the wizard).
+# ---------------------------------------------------------------------------
+
+
+def test_agent_settings_options_are_copy_safe_and_immutable() -> None:
+    nested = {"region": "apac"}
+    models = ["m-1"]
+    source: dict[str, object] = {
+        "tenant": "platform",
+        "nested": nested,
+        "models": models,
+    }
+    settings = _settings(options=source)
+
+    source["tenant"] = "mutated"
+    nested["region"] = "emea"
+    models.append("m-2")
+
+    assert dict(settings.options) == {
+        "tenant": "platform",
+        "nested": {"region": "apac"},
+        "models": ("m-1",),
+    }
+    assert isinstance(settings.options, MappingProxyType)
+    assert isinstance(settings.options["nested"], MappingProxyType)
+    with pytest.raises(TypeError, match="mappingproxy"):
+        settings.options["new"] = "value"  # type: ignore[index]  # immutability is the test
+    with pytest.raises(TypeError, match="mappingproxy"):
+        settings.options["nested"]["region"] = "emea"  # type: ignore[index]  # immutability is the test
+
+
+def test_agent_settings_deep_freezes_tuple_elements() -> None:
+    """Tuple elements containing mutable dicts must become mapping proxies;
+    nested mutation must be rejected."""
+    settings = _settings(options={"items": ({"key": "val"}, {"nested": {"deep": True}})})
+
+    items = settings.options["items"]
+    assert isinstance(items, tuple)
+    assert isinstance(items[0], MappingProxyType)
+    assert isinstance(items[1], MappingProxyType)
+    assert isinstance(items[1]["nested"], MappingProxyType)
+    with pytest.raises(TypeError, match="mappingproxy"):
+        items[0]["key"] = "mutated"  # type: ignore[index]  # immutability is the test
+    with pytest.raises(TypeError, match="mappingproxy"):
+        items[1]["nested"]["deep"] = False  # type: ignore[index]  # immutability is the test

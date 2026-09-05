@@ -23,12 +23,12 @@ from korvid.agent.model_profiles import (
     SetupFieldKind,
     split_reference,
 )
+from korvid.providers.endpoint_discovery import EndpointDiscovery
 from korvid.providers.litellm_runtime import (
     model_cost_entry,
     models_by_provider,
     supported_params,
 )
-from korvid.providers.endpoint_discovery import EndpointDiscovery
 from korvid.providers.models_dev import ModelMetadataSource
 from korvid.providers.special_flows import SpecialFlowRegistry
 

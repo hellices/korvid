@@ -1,69 +1,191 @@
-"""AgentSetupScreen: in-TUI agent setup wizard (`:ai`, plan 4 slice 2).
+"""AgentSetupScreen: the model-profile wizard, generated from descriptors.
 
-Flow modelled on opencode/crush onboarding research: provider -> auth ->
-fetch models from the API -> filterable model list (typed input fallback)
--> live connection test -> save. Completed steps stay visible as a
-checklist so the wizard feels conversational rather than form-like.
+Every question after the model search is rendered from data the catalog
+supplies — an `AuthMethodDescriptor` and its `SetupField`s, the option
+fields, and the endpoint requirement. No stage in this screen knows a
+provider exists: adding one is a catalog/plugin change, never a source
+edit here.
+
+Stage order is load-bearing. The endpoint stage runs *before* the
+auth-method stage because the catalog offers keyless auth only when it is
+handed a non-empty endpoint; asking for the method first would ask with
+`None` and never offer keyless auth to the operator it exists for.
 """
 
 from __future__ import annotations
 
-import dataclasses
-from collections.abc import Callable
+import asyncio
+import re
+from collections.abc import Awaitable, Callable, Mapping, Sequence
+from dataclasses import dataclass
+from enum import Enum
 from typing import ClassVar
 
-from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Vertical
+from textual.containers import Vertical, VerticalScroll
 from textual.screen import ModalScreen
-from textual.widgets import Input, OptionList, Static
+from textual.widget import Widget
+from textual.widgets import Checkbox, Input, OptionList, Static
 from textual.widgets.option_list import Option
 
-from korvid.agent.setup import AgentConfigurator, AgentSettings
+from korvid.agent.model_profiles import (
+    AuthMethodDescriptor,
+    ConnectionAuthConfig,
+    EndpointRequirement,
+    ModelCatalog,
+    ModelConnectionConfig,
+    ModelEntry,
+    SetupField,
+    SetupFieldKind,
+)
+from korvid.ui.widgets.model_search_screen import ModelSearchScreen
 
-# provider -> (auth_method, default base_url, default model); azure asks for
-# auth separately and requires base_url/model, so its defaults are empty.
-_DEFAULTS: dict[str, tuple[str, str, str]] = {
-    "github-copilot": ("device-login", "", "gpt-4o"),
-    "openai-compat": ("api_key", "https://api.openai.com/v1", "gpt-4o-mini"),
-    "azure": ("", "", ""),
-    "ollama": ("none", "http://localhost:11434", "llama3"),
-}
+#: A secret field collects the *name* of an environment variable, never a
+#: value: this is the shape a name has, and the screen never resolves it.
+_ENV_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 
-_PROVIDER_LABELS: dict[str, str] = {
-    "github-copilot": "github-copilot — sign in with GitHub (no API key)",
-    "openai-compat": "openai-compat — OpenAI-compatible API (API key)",
-    "azure": "azure — Azure OpenAI (Entra ID or API key)",
-    "ollama": "ollama — local models, native API (no auth)",
-}
-
-# Registry aliases (providers/registry.py) that all resolve to the wizard's
-# openai-compat entry: settings configured under an alias must still
-# pre-highlight and prefill the wizard on reconnect (issue #167).
-_OPENAI_COMPAT_ALIASES = frozenset({"openai", "vllm", "github", "anthropic", "claude"})
-
-_OptionHandler = Callable[[OptionList.OptionSelected], None]
-_InputHandler = Callable[[Input.Submitted], None]
-
-
-def _canonical_provider(name: str | None) -> str | None:
-    """The wizard entry a configured provider name maps onto, or None."""
-    if not name:
-        return None
-    lowered = name.strip().lower()
-    if lowered in _DEFAULTS:
-        return lowered
-    if lowered in _OPENAI_COMPAT_ALIASES:
-        return "openai-compat"
-    return None
+#: The capability tier is not a profile field — it is the agent's routing
+#: override, persisted separately — but it is asked here so one pass
+#: through the wizard answers everything a working agent needs.
+_TIER_OPTIONS: tuple[tuple[str, str], ...] = (
+    ("automatic", "Automatic"),
+    ("low", "Low"),
+    ("high", "High"),
+)
 
 
-class AgentSetupScreen(ModalScreen["AgentSettings | None"]):
-    """Conversational wizard: one question at a time + completed-step checklist."""
+@dataclass(frozen=True, slots=True)
+class SetupResult:
+    """What the wizard produces: a profile plus the tier choice.
+
+    The tier travels beside the profile rather than inside it because it
+    is not transport configuration — the controller persists it as the
+    agent's own setting.
+    """
+
+    profile: ModelConnectionConfig
+    model_tier: str | None = None
+
+
+class _Nav(Enum):
+    """How a stage ended, and therefore where the wizard goes next."""
+
+    NEXT = "next"
+    BACK = "back"
+    REPEAT = "repeat"
+    CANCEL = "cancel"
+    DONE = "done"
+
+
+def _widget_for(field: SetupField, seed: object | None) -> Widget:
+    """Render one declarative field.
+
+    A `match` on the field kind is exhaustive over a closed set korvid
+    owns — the one place in this screen where dispatching on a value is
+    correct.
+    """
+    match field.kind:
+        case SetupFieldKind.BOOLEAN:
+            return Checkbox(field.label, value=bool(seed), id=f"field-{field.key}")
+        case SetupFieldKind.CHOICE:
+            return OptionList(*field.choices, id=f"field-{field.key}")
+        case SetupFieldKind.INTEGER | SetupFieldKind.TEXT | SetupFieldKind.SECRET_REF:
+            return Input(
+                value="" if seed is None else str(seed),
+                placeholder=field.help_text or field.label,
+                id=f"field-{field.key}",
+            )
+
+
+def _read_field(field: SetupField, widget: Widget) -> tuple[object | None, str]:
+    """Read one field's widget, returning `(value, error)`.
+
+    A `None` value with an empty error means "left blank" — whether that
+    is allowed is the caller's `required` check, not this function's.
+    """
+    if isinstance(widget, Checkbox):
+        return bool(widget.value), ""
+    if isinstance(widget, OptionList):
+        index = widget.highlighted
+        if index is None or index >= widget.option_count:
+            return None, ""
+        return str(widget.get_option_at_index(index).prompt), ""
+    if isinstance(widget, Input):
+        return _read_text_field(field, widget.value.strip())
+    return None, ""
+
+
+def _read_text_field(field: SetupField, raw: str) -> tuple[object | None, str]:
+    if not raw:
+        return None, ""
+    if field.kind is SetupFieldKind.INTEGER:
+        try:
+            return int(raw), ""
+        except ValueError:
+            return None, f"{field.label} must be a whole number — {raw!r} is not."
+    if field.kind is SetupFieldKind.SECRET_REF and not _ENV_NAME_RE.match(raw):
+        return None, (
+            f"{field.label} must be an environment variable name "
+            "(A-Z, digits and underscores), not its value."
+        )
+    return raw, ""
+
+
+def _collect_fields(
+    fields: Sequence[SetupField], read: Callable[[str], Widget | None]
+) -> tuple[dict[str, object] | None, str]:
+    """Read a whole stage, or report the first reason it cannot be read."""
+    values: dict[str, object] = {}
+    for field in fields:
+        widget = read(field.key)
+        if widget is None:
+            continue
+        value, error = _read_field(field, widget)
+        if error:
+            return None, error
+        if value is None:
+            if field.required:
+                return None, f"{field.label} is required."
+            continue
+        values[field.key] = value
+    return values, ""
+
+
+def _merged(
+    previous: Mapping[str, object], claimed: Sequence[SetupField], collected: Mapping[str, object]
+) -> dict[str, object]:
+    """Overlay collected values on the values the wizard did not ask about.
+
+    Keys no descriptor claimed belong to the operator: editing one option
+    must never silently delete the rest.
+    """
+    claimed_keys = {field.key for field in claimed}
+    merged = {key: value for key, value in previous.items() if key not in claimed_keys}
+    merged.update(collected)
+    return merged
+
+
+class AgentSetupScreen(ModalScreen["SetupResult | None"]):
+    """Conversational wizard: one descriptor-generated question at a time.
+
+    Args:
+        catalog: Answers every question the stages ask — search, endpoint
+            requirement, auth methods, option fields, discovery and the
+            connection probe.
+        profile: The profile being edited, or None for a new one. Seeds
+            every stage, so editing never silently resets a value.
+        current_tier: The persisted tier override (None = Automatic).
+        apply_result: Swaps the running agent onto the new profile. When
+            it returns False the wizard stays open and nothing is saved.
+        save_result: Persists the result. Called only after a successful
+            apply, so a refused swap cannot become the configuration a
+            restart activates.
+    """
 
     BINDINGS: ClassVar[list[Binding | tuple[str, str] | tuple[str, str, str]]] = [
         Binding("escape", "cancel", "Cancel", show=True),
+        Binding("ctrl+b", "back", "Back", show=True),
         Binding("ctrl+r", "retry", "Retry test", show=False),
     ]
 
@@ -71,10 +193,11 @@ class AgentSetupScreen(ModalScreen["AgentSettings | None"]):
     AgentSetupScreen {
         align: center middle;
     }
-    AgentSetupScreen Vertical {
-        width: 70;
-        max-width: 90%;
+    AgentSetupScreen VerticalScroll {
+        width: 74;
+        max-width: 92%;
         height: auto;
+        max-height: 80%;
         border: round $primary;
         padding: 1 2;
         background: $surface;
@@ -82,6 +205,9 @@ class AgentSetupScreen(ModalScreen["AgentSettings | None"]):
     AgentSetupScreen OptionList {
         height: auto;
         max-height: 10;
+    }
+    AgentSetupScreen #stage-body {
+        height: auto;
     }
     AgentSetupScreen #setup-steps {
         color: $success;
@@ -93,83 +219,60 @@ class AgentSetupScreen(ModalScreen["AgentSettings | None"]):
 
     def __init__(
         self,
-        configurator: AgentConfigurator,
-        apply_settings: Callable[[AgentSettings], bool] | None = None,
+        catalog: ModelCatalog,
+        *,
+        profile: ModelConnectionConfig | None = None,
         current_tier: str | None = None,
-        current_settings: AgentSettings | None = None,
+        apply_result: Callable[[SetupResult], bool] | None = None,
+        save_result: Callable[[SetupResult], Awaitable[None]] | None = None,
     ) -> None:
         super().__init__()
-        self._configurator = configurator
-        self._apply_settings = apply_settings
-        # Explicitly configured tier override (None = Automatic): an
-        # explicit low/high choice is preserved across a wizard reopen;
-        # there is no per-provider heuristic (e.g. no Ollama suggestion).
+        self._catalog = catalog
+        self._seed = profile if profile is not None else ModelConnectionConfig(model="")
+        self._apply_result = apply_result
+        self._save_result = save_result
+        #: The persisted tier override; the wizard's own answer is a draft
+        #: until it dismisses.
         self._model_tier = current_tier
-        # Kept settings from a configured (possibly :ai off'd) agent
-        # (issue #167): the wizard starts from them so reconnecting is
-        # confirm-through, not re-entry. Registry aliases normalize onto
-        # the wizard's canonical entries for highlighting/prefilling.
-        self._current_settings = current_settings
-        self._current_canonical = _canonical_provider(
-            current_settings.provider if current_settings is not None else None
-        )
-        self._provider = ""
-        self._auth_method = ""
-        self._base_url: str | None = None
-        self._api_key_env: str | None = None
-        self._models: list[str] = []
-        self._chosen_model = ""
-        self._settings: AgentSettings | None = None
-        self._done_steps: list[str] = []
+        self._reference = ""
+        self._endpoint: str | None = None
+        self._method: AuthMethodDescriptor | None = None
+        self._auth_values: dict[str, object] = {}
+        self._option_fields: tuple[SetupField, ...] = ()
+        self._option_values: dict[str, object] = {}
+        self._done_steps: dict[str, str] = {}
+        #: Resolved by whatever ends the mounted stage — a submitted input,
+        #: a chosen option, or one of the navigation bindings.
+        self._stage_nav: asyncio.Future[_Nav] | None = None
+
+    # ------------------------------------------------------------------
+    # Composition
+    # ------------------------------------------------------------------
 
     def compose(self) -> ComposeResult:
-        with Vertical():
+        with VerticalScroll():
             yield Static(id="setup-steps")
-            yield Static("Which AI provider would you like to use?", id="setup-title")
-            yield OptionList(
-                *(Option(_PROVIDER_LABELS[p], id=p) for p in _DEFAULTS),
-                id="setup-provider",
-            )
-            yield OptionList("api_key", "entra", id="setup-auth")
-            yield Input(id="setup-base-url", placeholder="base URL (empty for default)")
-            yield Input(id="setup-api-key-env", placeholder="env var holding the API key")
-            yield Input(id="setup-model-filter", placeholder="type to filter — Enter to select")
-            yield OptionList(id="setup-model-list")
-            yield Input(id="setup-model", placeholder="model")
-            yield OptionList(
-                Option("Automatic", id="automatic"),
-                Option("Low", id="low"),
-                Option("High", id="high"),
-                id="setup-tier",
-            )
-            yield Static(id="setup-device-code")
+            yield Static("", id="setup-title")
+            yield Vertical(id="stage-body")
+            # Hidden here rather than in on_mount: a screen pushed over a
+            # running app mounts its children asynchronously, so on_mount
+            # can run before this node exists.
+            device_code = Static(id="setup-device-code")
+            device_code.display = False
+            yield device_code
             yield Static(id="setup-status")
 
     def on_mount(self) -> None:
-        for widget_id in (
-            "#setup-auth",
-            "#setup-base-url",
-            "#setup-api-key-env",
-            "#setup-model-filter",
-            "#setup-model-list",
-            "#setup-model",
-            "#setup-tier",
-            "#setup-device-code",
-        ):
-            self.query_one(widget_id).display = False
-        provider_list = self.query_one("#setup-provider", OptionList)
-        provider_list.highlighted = 0
-        if self._current_canonical is not None:
-            provider_list.highlighted = list(_DEFAULTS).index(self._current_canonical)
-        provider_list.focus()
+        self.run_worker(self._run(), exclusive=True)
 
     # ------------------------------------------------------------------
     # Checklist / status helpers
     # ------------------------------------------------------------------
 
-    def _mark_done(self, step: str) -> None:
-        self._done_steps.append(step)
-        lines = "\n".join(f"✓ {s}" for s in self._done_steps)
+    def _mark_done(self, key: str, step: str) -> None:
+        """Record a completed step, replacing any earlier answer to it."""
+        self._done_steps[key] = step
+        lines = "\n".join(f"✓ {text}" for text in self._done_steps.values())
         self.query_one("#setup-steps", Static).update(lines)
 
     def _ask(self, question: str) -> None:
@@ -179,295 +282,271 @@ class AgentSetupScreen(ModalScreen["AgentSettings | None"]):
         self.query_one("#setup-status", Static).update(text)
 
     # ------------------------------------------------------------------
-    # Stage transitions
+    # Stage machine
     # ------------------------------------------------------------------
 
-    def _option_handlers(self) -> dict[str, _OptionHandler]:
-        return {
-            "setup-provider": self._select_provider,
-            "setup-auth": self._select_auth,
-            "setup-model-list": self._select_model_option,
-            "setup-tier": self._select_tier_option,
-        }
-
-    def _input_handlers(self) -> dict[str, _InputHandler]:
-        return {
-            "setup-base-url": self._submit_base_url,
-            "setup-api-key-env": self._submit_api_key_env,
-            "setup-model-filter": self._submit_model_filter,
-            "setup-model": self._submit_model,
-        }
-
-    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
-        event.stop()
-        widget_id = event.option_list.id
-        if widget_id is None:
-            return
-        handler = self._option_handlers().get(widget_id)
-        if handler is not None:
-            handler(event)
-
-    def _select_provider(self, event: OptionList.OptionSelected) -> None:
-        self._provider = event.option.id or str(event.option.prompt)
-        self.query_one("#setup-provider").display = False
-        self._mark_done(f"Provider: {self._provider}")
-        if self._provider == "azure":
-            self._ask("How should korvid authenticate with Azure?")
-            auth_list = self.query_one("#setup-auth", OptionList)
-            auth_list.display = True
-            auth_list.highlighted = 0
-            current = self._current_settings
-            if (
-                self._current_canonical == "azure"
-                and current is not None
-                and current.auth_method == "entra"
-            ):
-                # Confirm-through reconnect must not silently switch
-                # the retained Entra flow to api_key (issue #167).
-                auth_list.highlighted = 1
-            auth_list.focus()
-            return
-        self._auth_method = _DEFAULTS[self._provider][0]
-        current = self._current_settings
-        if (
-            current is not None
-            and self._current_canonical == self._provider
-            and current.auth_method
-        ):
-            # Confirm-through reconnect keeps the retained auth method:
-            # a no-auth endpoint (local vLLM) must not be reset to
-            # api_key and prompted for a nonexistent key env.
-            self._auth_method = current.auth_method
-        self._after_auth_method()
-
-    def _select_auth(self, event: OptionList.OptionSelected) -> None:
-        self._auth_method = str(event.option.prompt)
-        self.query_one("#setup-auth").display = False
-        self._mark_done(f"Auth: {self._auth_method}")
-        self._after_auth_method()
-
-    def _select_model_option(self, event: OptionList.OptionSelected) -> None:
-        self._choose_model(str(event.option.prompt))
-
-    def _select_tier_option(self, event: OptionList.OptionSelected) -> None:
-        self._choose_tier(event.option.id or "automatic")
-
-    def _after_auth_method(self) -> None:
-        if self._provider == "github-copilot":
-            self.run_worker(self._copilot_connect(), exclusive=True)
-            return
-        _, base_url, _ = _DEFAULTS[self._provider]
-        current = self._current_settings
-        if current is not None and self._current_canonical == self._provider and current.base_url:
-            # Same provider as the kept settings: start from the kept
-            # endpoint, not the provider default (issue #167 reconnect).
-            base_url = current.base_url
-        self._ask(f"Where is your {self._provider} endpoint?")
-        base_input = self.query_one("#setup-base-url", Input)
-        base_input.value = base_url
-        base_input.display = True
-        base_input.focus()
-
-    def on_input_submitted(self, event: Input.Submitted) -> None:
-        event.stop()
-        widget_id = event.input.id
-        if widget_id is None:
-            return
-        handler = self._input_handlers().get(widget_id)
-        if handler is not None:
-            handler(event)
-
-    def _submit_base_url(self, event: Input.Submitted) -> None:
-        self._base_url = event.input.value.strip() or None
-        self._mark_done(f"Endpoint: {self._base_url or 'default'}")
-        if self._auth_method == "api_key":
-            self._ask("Which environment variable holds your API key?")
-            env_input = self.query_one("#setup-api-key-env", Input)
-            current = self._current_settings
-            if (
-                current is not None
-                and self._current_canonical == self._provider
-                and current.api_key_env
-            ):
-                env_input.value = current.api_key_env
-            env_input.display = True
-            env_input.focus()
-        else:
-            self.run_worker(self._fetch_models(), exclusive=True)
-
-    def _submit_api_key_env(self, event: Input.Submitted) -> None:
-        self._api_key_env = event.input.value.strip() or None
-        self._mark_done(f"API key env: {self._api_key_env or '(none)'}")
-        self.run_worker(self._fetch_models(), exclusive=True)
-
-    def _submit_model_filter(self, event: Input.Submitted) -> None:
-        model_list = self.query_one("#setup-model-list", OptionList)
-        if model_list.highlighted is not None and model_list.option_count:
-            option = model_list.get_option_at_index(model_list.highlighted)
-            self._choose_model(str(option.prompt))
-
-    def _submit_model(self, event: Input.Submitted) -> None:
-        model = event.input.value.strip()
-        if not model:
-            self._status("Model is required")
-            return
-        self._choose_model(model)
-
-    def on_input_changed(self, event: Input.Changed) -> None:
-        if event.input.id != "setup-model-filter":
-            return
-        event.stop()
-        needle = event.value.strip().lower()
-        matches = [m for m in self._models if needle in m.lower()]
-        self._populate_model_list(matches)
-
-    def on_key(self, event: events.Key) -> None:
-        # Let ↑/↓ drive the model list while the filter input keeps focus
-        # (crush/opencode-style type-to-filter picker).
-        if event.key not in ("up", "down"):
-            return
-        filter_input = self.query_one("#setup-model-filter", Input)
-        if not filter_input.display or not filter_input.has_focus:
-            return
-        event.stop()
-        model_list = self.query_one("#setup-model-list", OptionList)
-        if not model_list.option_count:
-            return
-        current = model_list.highlighted or 0
-        delta = 1 if event.key == "down" else -1
-        model_list.highlighted = (current + delta) % model_list.option_count
-
-    # ------------------------------------------------------------------
-    # Model step
-    # ------------------------------------------------------------------
-
-    def _draft_settings(self, model: str) -> AgentSettings:
-        return AgentSettings(
-            provider=self._provider,
-            auth_method=self._auth_method,
-            base_url=self._base_url,
-            model=model,
-            api_key_env=self._api_key_env,
-            # The tier is whatever the wizard's Automatic/Low/High step (or
-            # a preserved prior override) set — never a per-provider guess.
-            model_tier=self._model_tier,
-            options=self._current_settings.options if self._current_settings is not None else {},
+    async def _run(self) -> None:
+        stages: tuple[Callable[[_Nav], Awaitable[_Nav]], ...] = (
+            self._stage_model,
+            self._stage_endpoint,
+            self._stage_auth_method,
+            self._stage_auth_fields,
+            self._stage_authorize,
+            self._stage_options,
+            self._stage_tier,
+            self._stage_finish,
         )
+        index = 0
+        direction = _Nav.NEXT
+        while 0 <= index < len(stages):
+            outcome = await stages[index](direction)
+            if outcome is _Nav.CANCEL:
+                self.dismiss(None)
+                return
+            if outcome is _Nav.DONE:
+                return
+            direction = outcome
+            index += {_Nav.NEXT: 1, _Nav.BACK: -1, _Nav.REPEAT: 0}[outcome]
+            index = max(index, 0)
 
-    def _show_model_step(self, models: list[str]) -> None:
-        self._models = models
-        default_model = _DEFAULTS[self._provider][2]
-        current = self._current_settings
-        if current is not None and self._current_canonical == self._provider and current.model:
-            # Reconnect flow (issue #167): the kept model beats the default.
-            default_model = current.model
-        if models:
-            self._ask(f"Choose a model ({len(models)} available)")
-            self.query_one("#setup-model-filter", Input).display = True
-            model_list = self.query_one("#setup-model-list", OptionList)
-            model_list.display = True
-            self._populate_model_list(models)
-            if default_model in models:
-                model_list.highlighted = models.index(default_model)
-            self.query_one("#setup-model-filter", Input).focus()
-        else:
-            self._ask("Which model should korvid use?")
-            model_input = self.query_one("#setup-model", Input)
-            model_input.value = default_model
-            model_input.display = True
-            model_input.focus()
+    async def _mount_stage(self, question: str, widgets: Sequence[Widget]) -> None:
+        body = self.query_one("#stage-body", Vertical)
+        await body.remove_children()
+        self._ask(question)
+        self._status("")
+        self.query_one("#setup-device-code", Static).display = False
+        await body.mount_all(list(widgets))
+        for widget in widgets:
+            if widget.focusable:
+                widget.focus()
+                break
 
-    def _populate_model_list(self, models: list[str]) -> None:
-        model_list = self.query_one("#setup-model-list", OptionList)
-        model_list.clear_options()
-        model_list.add_options([Option(m) for m in models])
-        if models:
-            model_list.highlighted = 0
+    async def _await_nav(self) -> _Nav:
+        """Wait for the mounted stage to be submitted, or navigated away."""
+        future: asyncio.Future[_Nav] = asyncio.get_running_loop().create_future()
+        self._stage_nav = future
+        try:
+            return await future
+        finally:
+            self._stage_nav = None
 
-    def _choose_model(self, model: str) -> None:
-        self.query_one("#setup-model-filter", Input).display = False
-        self.query_one("#setup-model-list", OptionList).display = False
-        self._mark_done(f"Model: {model}")
-        self._chosen_model = model
-        self._ask_tier()
+    def _resolve_nav(self, outcome: _Nav) -> None:
+        future = self._stage_nav
+        if future is not None and not future.done():
+            future.set_result(outcome)
 
-    # ------------------------------------------------------------------
-    # Tier step
-    # ------------------------------------------------------------------
-
-    def _ask_tier(self) -> None:
-        self._ask("Which capability tier should this model use?")
-        tier_list = self.query_one("#setup-tier", OptionList)
-        tier_index = {None: 0, "low": 1, "high": 2}[self._model_tier]
-        tier_list.highlighted = tier_index
-        tier_list.display = True
-        tier_list.focus()
-
-    def _choose_tier(self, tier_id: str) -> None:
-        self.query_one("#setup-tier", OptionList).display = False
-        self._model_tier = None if tier_id == "automatic" else tier_id
-        self._mark_done(f"Tier: {tier_id.capitalize()}")
-        self._settings = self._draft_settings(self._chosen_model)
-        self.run_worker(self._probe(), exclusive=True)
+    def _stage_widget(self, key: str) -> Widget | None:
+        found = self.query(f"#field-{key}")
+        return found.first() if found else None
 
     # ------------------------------------------------------------------
-    # Workers
+    # Stages
     # ------------------------------------------------------------------
 
-    async def _copilot_connect(self) -> None:
-        """Copilot: reuse an existing login when possible, else device login,
-        then offer the models the API actually serves."""
-        self._status("Checking for an existing GitHub login…")
-        models = await self._configurator.list_models(self._draft_settings(""))
-        if models:
-            self._mark_done("GitHub login (already signed in)")
-            self._status("")
-            self._show_model_step(models)
-            return
+    async def _stage_model(self, direction: _Nav) -> _Nav:
+        """The model search (Task 10's screen) is the first question."""
+        discovered = await self._discover()
+        initial = self._reference or self._seed.model
+        reference = await self.app.push_screen_wait(
+            ModelSearchScreen(self._catalog, initial_query=initial, discovered=discovered)
+        )
+        if reference is None:
+            return _Nav.CANCEL
+        self._reference = reference
+        self._mark_done("model", f"Model: {reference}")
+        return _Nav.NEXT
+
+    async def _discover(self) -> tuple[ModelEntry, ...]:
+        """Best-effort live listing. Empty is the normal offline case."""
+        try:
+            return await self._catalog.discover(self._draft_profile())
+        except Exception:  # discovery is advisory: never an error dialog
+            return ()
+
+    async def _stage_endpoint(self, direction: _Nav) -> _Nav:
+        requirement = self._catalog.endpoint_requirement(self._reference)
+        if requirement is EndpointRequirement.UNSUPPORTED:
+            self._endpoint = None
+            self._done_steps.pop("endpoint", None)
+            return direction
+        seed = self._endpoint if self._endpoint is not None else self._seed.endpoint
+        widget = Input(
+            value=seed or "",
+            placeholder="endpoint URL",
+            id="setup-endpoint",
+        )
+        required = requirement is EndpointRequirement.REQUIRED
+        question = (
+            "Which endpoint should korvid connect to?"
+            if required
+            else "Which endpoint should korvid connect to? (blank for the provider default)"
+        )
+        await self._mount_stage(question, [widget])
+        while True:
+            outcome = await self._await_nav()
+            if outcome is not _Nav.NEXT:
+                return outcome
+            value = self.query_one("#setup-endpoint", Input).value.strip()
+            if not value and required:
+                self._status("An endpoint is required for this model.")
+                continue
+            self._endpoint = value or None
+            self._mark_done("endpoint", f"Endpoint: {self._endpoint or 'provider default'}")
+            return _Nav.NEXT
+
+    async def _stage_auth_method(self, direction: _Nav) -> _Nav:
+        """Recomputed on every visit: a stale method list is a trap."""
+        methods = self._catalog.auth_methods(self._reference, endpoint=self._endpoint)
+        if not methods:
+            self._method = None
+            self._done_steps.pop("auth", None)
+            return direction
+        chosen = self._method.id if self._method is not None else self._seed.auth.method
+        options = OptionList(
+            *(Option(method.display_name, id=method.id) for method in methods),
+            id="setup-auth",
+        )
+        await self._mount_stage("How should korvid authenticate?", [options])
+        ids = [method.id for method in methods]
+        options.highlighted = ids.index(chosen) if chosen in ids else 0
+        outcome = await self._await_nav()
+        if outcome is not _Nav.NEXT:
+            return outcome
+        index = options.highlighted or 0
+        method = methods[min(index, len(methods) - 1)]
+        if self._method is not None and self._method.id != method.id:
+            self._auth_values = {}
+        self._method = method
+        self._mark_done("auth", f"Auth: {method.display_name}")
+        return _Nav.NEXT
+
+    async def _stage_auth_fields(self, direction: _Nav) -> _Nav:
+        method = self._method
+        if method is None or not method.fields:
+            self._auth_values = {}
+            return direction
+        seeds = self._auth_seeds(method)
+        widgets = [_widget_for(field, seeds.get(field.key)) for field in method.fields]
+        await self._mount_stage(method.display_name, self._labelled(method.fields, widgets))
+        return await self._collect_stage(method.fields, self._store_auth_values)
+
+    def _auth_seeds(self, method: AuthMethodDescriptor) -> dict[str, object]:
+        """Seed order: what this wizard already collected, then the edited
+        profile (only for the same method), then the descriptor default."""
+        seeds: dict[str, object] = {}
+        for field in method.fields:
+            if field.key in self._auth_values:
+                seeds[field.key] = self._auth_values[field.key]
+            elif self._seed.auth.method == method.id and field.key in self._seed.auth.settings:
+                seeds[field.key] = self._seed.auth.settings[field.key]
+            elif field.default is not None:
+                seeds[field.key] = field.default
+        return seeds
+
+    def _store_auth_values(self, values: dict[str, object]) -> None:
+        self._auth_values = values
+
+    async def _stage_authorize(self, direction: _Nav) -> _Nav:
+        """Interactive sign-in, when the catalog says the profile needs one."""
+        if direction is _Nav.BACK:
+            return direction
+        profile = self._draft_profile()
         device = self.query_one("#setup-device-code", Static)
         try:
-            prompt = await self._configurator.begin_device_login()
-            device.display = True
-            device.update(f"Enter code {prompt.user_code} at {prompt.verification_uri}")
-            self._status("Waiting for authorization…")
-            await self._configurator.finish_device_login()
-        except Exception as exc:  # login errors must not crash the app
-            self._status(f"Login failed: {exc}")
-            return
+            prompt = await self._catalog.begin_auth(profile)
+        except Exception as exc:  # sign-in errors must not crash the app
+            self._status(f"Authorization failed: {exc} — press Ctrl+R to retry, Esc to cancel")
+            return await self._await_nav()
+        if prompt is None:
+            return _Nav.NEXT
+        device.display = True
+        device.update(f"Enter code {prompt.user_code} at {prompt.verification_uri}")
+        self._status("Waiting for authorization…")
+        try:
+            await self._catalog.finish_auth(profile)
+        except Exception as exc:  # keep the wizard open on a failed login
+            self._status(f"Login failed: {exc} — press Ctrl+R to retry, Esc to cancel")
+            return await self._await_nav()
         device.display = False
-        self._mark_done("GitHub login")
-        self._status("Fetching available models…")
-        models = await self._configurator.list_models(self._draft_settings(""))
+        self._mark_done("authorize", "Signed in")
         self._status("")
-        self._show_model_step(models)
+        return _Nav.NEXT
 
-    async def _fetch_models(self) -> None:
-        self._status("Fetching available models…")
-        models = await self._configurator.list_models(self._draft_settings(""))
-        self._status("")
-        self._show_model_step(models)
+    async def _stage_options(self, direction: _Nav) -> _Nav:
+        fields = self._catalog.option_fields(self._reference)
+        self._option_fields = fields
+        if not fields:
+            return direction
+        seeds = self._option_seeds(fields)
+        widgets = [_widget_for(field, seeds.get(field.key)) for field in fields]
+        await self._mount_stage("Model options", self._labelled(fields, widgets))
+        return await self._collect_stage(fields, self._store_option_values)
 
-    async def _probe(self) -> None:
-        settings = self._settings
-        if settings is None:
-            return
+    def _option_seeds(self, fields: Sequence[SetupField]) -> dict[str, object]:
+        """Profile first, descriptor default second: editing a profile must
+        start from its own options or it silently resets them."""
+        seeds: dict[str, object] = {}
+        for field in fields:
+            if field.key in self._option_values:
+                seeds[field.key] = self._option_values[field.key]
+            elif field.key in self._seed.options:
+                seeds[field.key] = self._seed.options[field.key]
+            elif field.default is not None:
+                seeds[field.key] = field.default
+        return seeds
+
+    def _store_option_values(self, values: dict[str, object]) -> None:
+        self._option_values = values
+
+    async def _stage_tier(self, direction: _Nav) -> _Nav:
+        options = OptionList(
+            *(Option(label, id=tier_id) for tier_id, label in _TIER_OPTIONS),
+            id="setup-tier",
+        )
+        await self._mount_stage("Which capability tier should this model use?", [options])
+        ids = [tier_id for tier_id, _ in _TIER_OPTIONS]
+        options.highlighted = ids.index(self._model_tier or "automatic")
+        outcome = await self._await_nav()
+        if outcome is not _Nav.NEXT:
+            return outcome
+        tier_id = ids[options.highlighted or 0]
+        self._model_tier = None if tier_id == "automatic" else tier_id
+        self._mark_done("tier", f"Tier: {dict(_TIER_OPTIONS)[tier_id]}")
+        return _Nav.NEXT
+
+    async def _stage_finish(self, direction: _Nav) -> _Nav:
+        if direction is _Nav.BACK:
+            return direction
+        result = SetupResult(profile=self._draft_profile(), model_tier=self._model_tier)
+        await self._mount_stage("Testing the connection…", [])
         self._status("Testing connection…")
         try:
-            await self._configurator.test(settings)
+            await self._catalog.test(result.profile)
         except Exception as exc:  # keep the wizard open on probe failure
             self._status(f"Test failed: {exc} — press Ctrl+R to retry, Esc to cancel")
-            return
+            return await self._await_nav()
         applied = False
-        if self._apply_settings is not None:
-            if not self._apply_settings(settings):
-                # The app refused the swap (busy turn / rebuild failure): stay
-                # open and do NOT persist, so a restart cannot silently activate
-                # a configuration that never took effect.
+        if self._apply_result is not None:
+            if not self._apply_result(result):
+                # The app refused the swap (busy turn / rebuild failure):
+                # stay open and do NOT persist, so a restart cannot silently
+                # activate a configuration that never took effect.
                 self._status("Apply failed — press Ctrl+R to retry, Esc to cancel")
-                return
+                return await self._await_nav()
             applied = True
+        if self._save_result is not None:
+            saved = await self._persist(result, applied=applied)
+            if not saved:
+                return await self._await_nav()
+        self.dismiss(result)
+        return _Nav.DONE
+
+    async def _persist(self, result: SetupResult, *, applied: bool) -> bool:
+        save = self._save_result
+        if save is None:
+            return True
         try:
-            await self._configurator.save(settings)
+            await save(result)
         except Exception as exc:  # keep the wizard open on save failure
             if applied:
                 # The runtime already swapped: warn that the change is live
@@ -478,35 +557,77 @@ class AgentSetupScreen(ModalScreen["AgentSettings | None"]):
                 )
             else:
                 self._status(f"Save failed: {exc} — press Ctrl+R to retry, Esc to cancel")
+            return False
+        return True
+
+    # ------------------------------------------------------------------
+    # Field stage plumbing
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _labelled(fields: Sequence[SetupField], widgets: Sequence[Widget]) -> list[Widget]:
+        """Pair every non-self-labelling widget with its field label."""
+        rendered: list[Widget] = []
+        for field, widget in zip(fields, widgets, strict=True):
+            if not isinstance(widget, Checkbox):
+                rendered.append(Static(field.label, classes="field-label"))
+            rendered.append(widget)
+        return rendered
+
+    async def _collect_stage(
+        self, fields: Sequence[SetupField], store: Callable[[dict[str, object]], None]
+    ) -> _Nav:
+        while True:
+            outcome = await self._await_nav()
+            if outcome is not _Nav.NEXT:
+                return outcome
+            values, error = _collect_fields(fields, self._stage_widget)
+            if values is None:
+                self._status(error)
+                continue
+            store(values)
+            return _Nav.NEXT
+
+    def _draft_profile(self) -> ModelConnectionConfig:
+        method = self._method.id if self._method is not None else self._seed.auth.method
+        auth_fields = self._method.fields if self._method is not None else ()
+        previous_auth = self._seed.auth.settings if self._seed.auth.method == method else {}
+        return ModelConnectionConfig(
+            model=self._reference or self._seed.model,
+            endpoint=self._endpoint if self._endpoint is not None else self._seed.endpoint,
+            auth=ConnectionAuthConfig(
+                method=method,
+                settings=_merged(previous_auth, auth_fields, self._auth_values),
+            ),
+            options=_merged(self._seed.options, self._option_fields, self._option_values),
+        )
+
+    # ------------------------------------------------------------------
+    # Events
+    # ------------------------------------------------------------------
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        event.stop()
+        self._resolve_nav(_Nav.NEXT)
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        event.stop()
+        widget_id = event.option_list.id or ""
+        if widget_id.startswith("field-"):
+            # One field of a multi-field stage: the stage is submitted as a
+            # whole, so selecting a choice must not skip its siblings.
             return
-        self.dismiss(settings)
+        self._resolve_nav(_Nav.NEXT)
 
     # ------------------------------------------------------------------
     # Actions
     # ------------------------------------------------------------------
 
+    def action_back(self) -> None:
+        self._resolve_nav(_Nav.BACK)
+
     def action_retry(self) -> None:
-        if self._settings is None:
-            return
-        # Re-read the still-visible inputs so an edit after a failed probe is
-        # actually tested (device login is not repeated for Copilot; a model
-        # picked from the list is kept unless the fallback input is visible).
-        updates: dict[str, str | None] = {}
-        base_input = self.query_one("#setup-base-url", Input)
-        if base_input.display:
-            updates["base_url"] = base_input.value.strip() or None
-        env_input = self.query_one("#setup-api-key-env", Input)
-        if env_input.display:
-            updates["api_key_env"] = env_input.value.strip() or None
-        model_input = self.query_one("#setup-model", Input)
-        if model_input.display:
-            model = model_input.value.strip()
-            if not model:
-                self._status("Model is required")
-                return
-            updates["model"] = model
-        self._settings = dataclasses.replace(self._settings, **updates)  # type: ignore[arg-type]  # str|None matches each field
-        self.run_worker(self._probe(), exclusive=True)
+        self._resolve_nav(_Nav.REPEAT)
 
     def action_cancel(self) -> None:
         self.dismiss(None)

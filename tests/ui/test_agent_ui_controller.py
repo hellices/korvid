@@ -429,6 +429,9 @@ class Env:
         with_manifest: bool = True,
         with_logs: bool = True,
         panel: FakePanel | None = None,
+        catalog: Any = None,
+        save_profiles: Any = None,
+        profile_settings: Any = None,
     ) -> None:
         self.ui = FakeUi()
         self.panel = panel if panel is not None else FakePanel()
@@ -495,6 +498,9 @@ class Env:
             rebuild=rebuild,
             disconnect=disconnect,
             available=available,
+            catalog=catalog,
+            save_profiles=save_profiles,
+            profile_settings=profile_settings,
         )
 
     async def _manifest(self, kind: str, namespace: str | None, name: str) -> dict[str, Any]:
@@ -648,6 +654,31 @@ _DEGRADED_CONFIG = KorvidConfig(
     agent_model="llama3",
     agent_model_tier="low",
 )
+
+
+async def test_the_setup_wizard_opens_on_the_configured_snapshot(tmp_path: Path) -> None:
+    """`:ai` after a degraded startup must prefill what is on disk instead
+    of asking for every answer again.
+
+    The snapshot is a *profile* now, so a config that predates profiles is
+    projected onto one rather than dropped: the wizard opens on the model
+    the operator already configured.
+    """
+    from tests.ui.test_agent_ui_controller_profiles import _StubCatalog
+
+    env = Env(
+        tmp_path=tmp_path,
+        session=None,
+        config=_DEGRADED_CONFIG,
+        catalog=_StubCatalog(),
+    )
+    env.controller.handle_command([])
+    screen, _callback = env.ui.screens[-1]
+    # The screen stack is typed as plain `Screen`s; the prefill under test
+    # is the setup screen's own state, so the type is narrowed first.
+    assert isinstance(screen, AgentSetupScreen)
+    assert screen._seed.model == "ollama/llama3"
+    assert screen._seed.endpoint == "http://localhost:11434/v1"
 
 
 # ---------------------------------------------------------------------------
