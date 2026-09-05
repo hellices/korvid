@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import functools
 import re
+from dataclasses import replace
 from typing import Any, Final
 
 from korvid.agent.model_profiles import (
@@ -28,6 +29,7 @@ from korvid.providers.litellm_runtime import (
     models_by_provider,
     supported_params,
 )
+from korvid.providers.models_dev import ModelMetadataSource
 
 #: LiteLLM's own spelling for the Copilot provider. Its ids ship
 #: already-qualified (`github_copilot/claude-haiku-4.5`), and resolving the
@@ -167,7 +169,7 @@ class LiteLLMModelCatalog(ModelCatalog):
         self,
         *,
         flows: SpecialFlowRegistry | None = None,
-        enrichment: Any | None = None,
+        enrichment: ModelMetadataSource | None = None,
         discovery: Any | None = None,
     ) -> None:
         self._flows = flows
@@ -224,7 +226,7 @@ class LiteLLMModelCatalog(ModelCatalog):
         reference: str,
         record: dict[str, Any] | None,
     ) -> ModelEntry:
-        return ModelEntry(
+        entry = ModelEntry(
             reference=reference,
             provider_id=provider,
             display_name=split_reference(reference)[1],
@@ -237,6 +239,43 @@ class LiteLLMModelCatalog(ModelCatalog):
             source=ModelEntrySource.LITELLM,
             credential_env_hints=self._env_hints(provider),
         )
+        return self._overlay(entry)
+
+    def _overlay(self, entry: ModelEntry) -> ModelEntry:
+        """Overlay models.dev enrichment onto a LiteLLM entry.
+
+        LiteLLM wins every conflict. `source` is re-labelled
+        `MODELS_DEV` only when the overlay actually contributed a new
+        fact — restating known data must not claim credit, because the
+        UI's provenance line would be false.
+        """
+        if self._enrichment is None:
+            return entry
+        extra = self._enrichment.metadata(entry.reference)
+        if extra is None:
+            return entry
+        enriched = replace(
+            entry,
+            display_name=extra.display_name or entry.display_name,
+            context_window_tokens=entry.context_window_tokens or extra.context_window_tokens,
+            max_output_tokens=entry.max_output_tokens or extra.max_output_tokens,
+            supports_tools=(
+                entry.supports_tools if entry.supports_tools is not None else extra.supports_tools
+            ),
+            supports_reasoning=(
+                entry.supports_reasoning
+                if entry.supports_reasoning is not None
+                else extra.supports_reasoning
+            ),
+            credential_env_hints=entry.credential_env_hints or extra.credential_env_hints,
+        )
+        if enriched == entry:
+            # models.dev only restated what LiteLLM already knew.
+            # Re-labelling provenance here would credit a source that
+            # contributed nothing, and the UI's "where did this come
+            # from" line would be false.
+            return entry
+        return replace(enriched, source=ModelEntrySource.MODELS_DEV)
 
     def _env_hints(self, provider: str) -> tuple[str, ...]:
         """Return credential env-var hints from the enrichment source.
@@ -247,9 +286,7 @@ class LiteLLMModelCatalog(ModelCatalog):
         """
         if self._enrichment is None:
             return ()
-        # Task 7 wires the enrichment source; for now the interface is
-        # not yet defined, so we return () regardless.
-        return ()  # pragma: no cover - Task 7 fills this in
+        return self._enrichment.env_hints(provider)
 
     # ------------------------------------------------------------------
     # ModelCatalog interface

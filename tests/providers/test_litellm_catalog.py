@@ -9,6 +9,7 @@ import pytest
 from korvid.agent.model_profiles import (
     EndpointRequirement,
     ModelConnectionConfig,
+    ModelEntry,
     ModelEntrySource,
 )
 
@@ -376,3 +377,124 @@ async def test_discovery_without_an_endpoint_returns_nothing_rather_than_raising
     catalog = LiteLLMModelCatalog()
     profile = ModelConnectionConfig(model="openai/gpt-4o")
     assert await catalog.discover(profile) == ()
+
+
+# ---------------------------------------------------------------------------
+# Task 7 — models.dev enrichment and provenance
+# ---------------------------------------------------------------------------
+
+
+class _FakeMetadataSource:
+    """Minimal stub of `ModelMetadataSource` for catalog overlay tests."""
+
+    def __init__(self, entries: dict[str, object]) -> None:
+        self._entries = entries
+
+    def metadata(self, reference: str) -> object | None:  # type: ignore[return]
+        return self._entries.get(reference)
+
+    def env_hints(self, provider_id: str) -> tuple[str, ...]:
+        return ()
+
+
+def test_provenance_stays_litellm_when_the_overlay_adds_nothing() -> None:
+    """An overlay that restates known facts must not claim credit.
+
+    `replace()` returns a new object even when every field is identical, so
+    the naive implementation flips `source` to `MODELS_DEV` for entries
+    models.dev did not actually improve, and the UI's "where did this come
+    from" line becomes false. Compare the dataclasses, not the identities.
+    """
+    from korvid.providers.models_dev import ModelMetadata
+
+    base = ModelEntry(
+        reference="openai/gpt-4o",
+        provider_id="openai",
+        display_name="GPT-4o",
+        context_window_tokens=128_000,
+        max_output_tokens=16_384,
+        supports_tools=True,
+        supports_reasoning=False,
+        credential_env_hints=("OPENAI_API_KEY",),
+        source=ModelEntrySource.LITELLM,
+    )
+    echoing = _FakeMetadataSource(
+        {
+            "openai/gpt-4o": ModelMetadata(
+                display_name="GPT-4o",
+                context_window_tokens=128_000,
+                max_output_tokens=16_384,
+                supports_tools=True,
+                supports_reasoning=False,
+                credential_env_hints=("OPENAI_API_KEY",),
+            )
+        }
+    )
+    catalog = LiteLLMModelCatalog(enrichment=echoing)
+
+    result = catalog._overlay(base)
+
+    assert result == base
+    assert result.source is ModelEntrySource.LITELLM
+
+
+def test_provenance_becomes_models_dev_only_when_a_fact_was_added() -> None:
+    """The mirror image: a genuine contribution must be credited."""
+    from korvid.providers.models_dev import ModelMetadata
+
+    bare = ModelEntry(
+        reference="openai/gpt-4o",
+        provider_id="openai",
+        display_name=None,
+        context_window_tokens=128_000,
+        max_output_tokens=None,
+        supports_tools=True,
+        supports_reasoning=None,
+        credential_env_hints=("OPENAI_API_KEY",),
+        source=ModelEntrySource.LITELLM,
+    )
+    contributing = _FakeMetadataSource({"openai/gpt-4o": ModelMetadata(display_name="GPT-4o")})
+    catalog = LiteLLMModelCatalog(enrichment=contributing)
+
+    result = catalog._overlay(bare)
+
+    assert result.display_name == "GPT-4o"
+    assert result.source is ModelEntrySource.MODELS_DEV
+
+
+def test_enrichment_cannot_create_a_routable_entry_for_unknown_references() -> None:
+    """A reference unknown to LiteLLM must not become routable via enrichment."""
+    from korvid.providers.models_dev import ModelMetadata
+
+    source = _FakeMetadataSource({"unknown/some-model": ModelMetadata(display_name="Some Model")})
+    catalog = LiteLLMModelCatalog(enrichment=source)
+    # The catalog builds its index from LiteLLM, not from enrichment.
+    entry = catalog.entry("unknown/some-model")
+    assert entry is None
+
+
+def test_enrichment_cannot_change_where_a_request_goes() -> None:
+    """Metadata may describe a model. It may never route one."""
+    source = Path("src/korvid/providers/models_dev.py").read_text(encoding="utf-8")
+    for forbidden in ("api_base", "base_url", "acompletion", "api_key", "get_llm_provider"):
+        assert forbidden not in source
+
+
+def test_litellm_context_window_wins_over_enrichment() -> None:
+    """LiteLLM's data wins every conflict — enrichment never overrides."""
+    from korvid.providers.models_dev import ModelMetadata
+
+    base = ModelEntry(
+        reference="openai/gpt-4o",
+        provider_id="openai",
+        display_name="GPT-4o",
+        context_window_tokens=128_000,
+        source=ModelEntrySource.LITELLM,
+    )
+    lower_claim = _FakeMetadataSource({"openai/gpt-4o": ModelMetadata(context_window_tokens=1)})
+    catalog = LiteLLMModelCatalog(enrichment=lower_claim)
+
+    result = catalog._overlay(base)
+
+    assert result.context_window_tokens == 128_000
+    assert result.source is ModelEntrySource.LITELLM
