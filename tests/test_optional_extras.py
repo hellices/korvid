@@ -11,6 +11,8 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import tomllib
+from pathlib import Path
 
 import pytest
 
@@ -29,6 +31,26 @@ leaked = [m for m in {watched!r} if m in sys.modules]
 if leaked:
     raise SystemExit(f"optional extras leaked into base import: {{leaked}}")
 """
+
+
+def test_the_agent_extra_declares_litellm_and_no_per_vendor_extras() -> None:
+    data = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+    extras = data["project"]["optional-dependencies"]
+
+    assert any(spec.startswith("litellm") for spec in extras["agent"])
+    vendor_shaped = [
+        name
+        for name in extras
+        if name.startswith("provider-") or name in {"openai", "anthropic", "azure"}
+    ]
+    assert vendor_shaped == []
+
+
+def test_the_deptry_ignore_for_litellm_is_marked_temporary() -> None:
+    data = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+    ignores = data["tool"]["deptry"]["per_rule_ignores"]["DEP002"]
+
+    assert set(ignores) <= {"korvid", "litellm"}
 
 
 def _assert_import_is_extra_free(module: str) -> None:
