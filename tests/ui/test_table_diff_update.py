@@ -8,6 +8,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from korvid.k8s.metrics import PodMetrics
 from korvid.ui.widgets.resource_table import ResourceTable
 
 from .test_app import _pod, make_app
@@ -38,6 +39,18 @@ def _spy_refresh(table: ResourceTable) -> list[tuple[tuple[Any, ...], dict[str, 
 
     table.refresh = spy  # type: ignore[method-assign]  # test spy
     return calls
+
+
+def _spy_emit(table: ResourceTable) -> list[str]:
+    built: list[str] = []
+    original = table._emit_row
+
+    def spy(obj: Any, cells: Any, **kwargs: Any) -> Any:
+        built.append(f"{obj.namespace}/{obj.name}")
+        return original(obj, cells, **kwargs)
+
+    table._emit_row = spy  # type: ignore[method-assign]  # documented performance contract
+    return built
 
 
 def _plain_refreshes(
@@ -121,6 +134,61 @@ async def test_modified_pod_updates_cells_without_clear() -> None:
             label="phase cell updated",
         )
         assert calls == []
+
+
+async def test_repaint_rebuilds_only_the_changed_row() -> None:
+    """The documented row memo keeps repaint work proportional to changed rows."""
+    app = make_app([_pod("alpha"), _pod("beta"), _pod("gamma")])
+    async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 3, label="pods loaded")
+        built = _spy_emit(table)
+
+        app.store.apply_event("pods", "default", "MODIFIED", _pod("beta", phase="Failed"))
+        await until(
+            pilot,
+            lambda: str(table.get_row("default/beta")[2]) == "Failed",
+            label="phase cell updated",
+        )
+
+        assert built == ["default/beta"]
+
+
+async def test_unchanged_repaint_rebuilds_nothing() -> None:
+    app = make_app([_pod("alpha"), _pod("beta")])
+    async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 2, label="pods loaded")
+        built = _spy_emit(table)
+
+        table.show("pods", app.store.get("pods", "default"), all_namespaces=False, pattern="")
+
+        assert built == []
+
+
+async def test_metrics_refresh_for_an_unchanged_summary() -> None:
+    samples: dict[tuple[str, str], PodMetrics] = {}
+
+    def lookup(namespace: str, name: str) -> PodMetrics | None:
+        return samples.get((namespace, name))
+
+    app = make_app([_pod("alpha")])
+    async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 1, label="pod loaded")
+        rows = app.store.get("pods", "default")
+        table.show("pods", rows, all_namespaces=False, pattern="", metrics=lookup)
+        assert str(table.get_row("default/alpha")[4]) == "-"
+
+        samples[("default", "alpha")] = PodMetrics(
+            name="alpha",
+            namespace="default",
+            cpu_cores=0.5,
+            memory_bytes=1024 * 1024,
+        )
+        table.show("pods", rows, all_namespaces=False, pattern="", metrics=lookup)
+
+        assert str(table.get_row("default/alpha")[4]) != "-"
 
 
 async def test_deleted_pod_removed_without_clear() -> None:

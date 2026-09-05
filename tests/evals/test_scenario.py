@@ -95,6 +95,18 @@ def test_load_scenario_parses_evidence_alternative_groups(tmp_path: Path) -> Non
     assert [evidence.tool for evidence in group] == ["diagnose_pod", "get_resource"]
 
 
+def test_load_scenario_rejects_missing_expected_evidence(tmp_path: Path) -> None:
+    text = _MINIMAL.replace(
+        "  expected_evidence:\n"
+        "    - tool: diagnose_pod\n"
+        "      args: {pod: checkout-1, namespace: shop}\n"
+        "      contains: exit=137\n",
+        "",
+    )
+    with pytest.raises(ValueError, match="expected_evidence"):
+        load_scenario(_write(tmp_path, text))
+
+
 def test_load_scenario_rejects_timestamps_after_the_anchor(tmp_path: Path) -> None:
     """Fixture timestamps are authored against SCENARIO_NOW; a later instant
     would rebase into the run's future and distort ages and event order."""

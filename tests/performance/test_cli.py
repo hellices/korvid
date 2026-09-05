@@ -387,6 +387,41 @@ def test_cli_replay_live_returns_nonzero_for_digest_failure(
     )
 
 
+def test_cli_replay_live_rejects_duration_that_orphans_a_burst(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    calls: list[WorkloadProfile] = []
+
+    async def record(
+        profile: WorkloadProfile,
+        _options: ReplayOptions,
+        *,
+        context: str,
+        expected_cluster_id: str,
+        run_id: str,
+    ) -> ReplayReport:
+        del context, expected_cluster_id, run_id
+        calls.append(profile)
+        return _make_report(profile)
+
+    monkeypatch.setattr(cli, "run_live_replay", record)
+    exit_code = cli.main(
+        [
+            "replay-live",
+            "--profile",
+            "tests/performance/profiles/aks-1k.json",
+            *_LIVE_IDENTITY_ARGS,
+            "--duration",
+            "10",
+        ]
+    )
+
+    assert exit_code == 1
+    assert "falls outside duration_seconds" in capsys.readouterr().err
+    assert calls == []
+
+
 def test_cli_replay_live_fails_when_a_ui_scenario_did_not_pass(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

@@ -10,6 +10,7 @@ import pytest
 from korvid.evals.live_journey import (
     NamespaceBoundReadOps,
     guard_live_target,
+    guard_namespace_ownership,
 )
 from korvid.k8s.discovery import PODS_META, ResourceMeta
 from korvid.k8s.helm import HelmReleaseSummary
@@ -29,6 +30,23 @@ def test_guard_live_target_accepts_only_dedicated_cluster_and_owned_namespace() 
         guard_live_target("aks-korvid-contract-test", "default")
     with pytest.raises(ValueError, match="non-empty run suffix"):
         guard_live_target("aks-korvid-contract-test", "korvid-agent-eval-")
+
+
+def test_namespace_ownership_requires_managed_and_matching_run_labels() -> None:
+    namespace = "korvid-agent-eval-run-123"
+    labels = {
+        "app.kubernetes.io/managed-by": "korvid-agent-eval",
+        "korvid.dev/eval-run": "run-123",
+    }
+    guard_namespace_ownership(namespace, {"metadata": {"labels": labels}})
+
+    with pytest.raises(ValueError, match="managed-by"):
+        guard_namespace_ownership(namespace, {"metadata": {"labels": {}}})
+    with pytest.raises(ValueError, match="eval-run"):
+        guard_namespace_ownership(
+            namespace,
+            {"metadata": {"labels": {**labels, "korvid.dev/eval-run": "other"}}},
+        )
 
 
 class _ReadSpy(ReadOps):

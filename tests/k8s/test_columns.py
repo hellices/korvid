@@ -56,6 +56,8 @@ def test_parse_jsonpath_caches_compiled_segments() -> None:
         "spec.replicas",  # missing the required leading dot
         ".spec..replicas",  # empty segment between dots
         ".spec.containers[0.image",  # unclosed/malformed index
+        ".spec.containers[abc].image",  # non-numeric index
+        ".spec.containers[-1].image",  # negative index
     ],
 )
 def test_parse_jsonpath_rejects_malformed_expressions(expr: str) -> None:
@@ -81,6 +83,14 @@ def test_evaluate_renders_bool_and_composite_jsonpath_values() -> None:
     assert (
         evaluate(CustomColumn("C", "jsonpath", ".spec.containers[1]"), _MANIFEST)
         == '{"name": "sidecar", "image": "envoy:1.30"}'
+    )
+
+
+def test_evaluate_renders_missing_values_as_none() -> None:
+    assert evaluate(CustomColumn("TIER", "label", "tier"), _MANIFEST) == "<none>"
+    assert evaluate(CustomColumn("X", "jsonpath", ".spec.nodeName"), _MANIFEST) == "<none>"
+    assert (
+        evaluate(CustomColumn("X", "jsonpath", ".spec.containers[9].image"), _MANIFEST) == "<none>"
     )
 
 

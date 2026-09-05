@@ -184,6 +184,15 @@ class _UsageThenRaiseProvider(ScriptedProvider):
             yield  # pragma: no cover
 
 
+class _ClosableProvider(ScriptedProvider):
+    def __init__(self, script: list[list[dict[str, Any]]], closed: list[bool]) -> None:
+        super().__init__(script)
+        self._closed = closed
+
+    async def aclose(self) -> None:
+        self._closed.append(True)
+
+
 async def test_run_scenario_smoke_passes_with_a_correct_scripted_run() -> None:
     scenario = _oom_scenario()
     report = await run_scenario(
@@ -214,6 +223,21 @@ async def test_run_scenario_smoke_passes_with_a_correct_scripted_run() -> None:
         assert run.error is None
         assert run.outcome == "success"
         assert run.failure_class is None
+
+
+async def test_run_scenario_closes_the_provider_after_every_repetition() -> None:
+    scenario = _oom_scenario()
+    closed: list[bool] = []
+
+    report = await run_scenario(
+        scenario,
+        provider_factory=lambda: _ClosableProvider(_good_script(), closed),
+        executor_factory=lambda: _executor_factory(scenario),
+        repetitions=2,
+    )
+
+    assert len(report.runs) == 2
+    assert closed == [True, True]
 
 
 async def test_run_scenario_grades_a_wrong_answer_as_failure() -> None:
@@ -704,10 +728,10 @@ async def test_the_eval_recorder_merges_producer_and_ingress_records() -> None:
 
     class Producing(RecordedExecution):
         async def execute(self, name: str, arguments: dict[str, Any]) -> str:
-            return "line oneline two"
+            return "line one\x07line two"
 
         async def execute_recorded(self, name: str, arguments: dict[str, Any]) -> ToolOutcome:
-            return ToolOutcome(text="line oneline two", redactions=producer)
+            return ToolOutcome(text="line one\x07line two", redactions=producer)
 
     recording = _RecordingExecutor(Producing(), max_result_chars=3_000)
     outcome = await recording.execute_recorded("get_events", {"namespace": "shop"})
@@ -724,7 +748,7 @@ async def test_an_eval_session_snapshot_inventories_the_recorder_redaction() -> 
 
     class Noisy(RecordedExecution):
         async def execute(self, name: str, arguments: dict[str, Any]) -> str:
-            return "restarts=7"
+            return "restarts\x07=7"
 
     provider = ScriptedProvider(
         [
