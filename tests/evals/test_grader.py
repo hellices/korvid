@@ -313,6 +313,18 @@ def test_grade_evidence_rejects_swapped_argument_values() -> None:
     assert not result.evidence_fetched
 
 
+def test_grade_evidence_requires_every_expected_target_argument() -> None:
+    records = [
+        ToolRecord(
+            name="list_resources",
+            arguments={"kind": "pods", "namespace": "shop"},
+            result="... exit=137 (OOMKilled) ...",
+        )
+    ]
+    result = grade(_scenario(), "OOMKilled, exit 137.", records)
+    assert not result.evidence_fetched
+
+
 def test_grade_negation_scope_ends_at_causal_conjunctions() -> None:
     """'the pod is not healthy because the readiness probe is failing' —
     the negator scopes over 'healthy' only; the cause after 'because' is a

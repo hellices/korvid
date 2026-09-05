@@ -15,10 +15,29 @@ from __future__ import annotations
 import pytest
 
 from korvid.evals.fake_kube import FakeKubeClient, builtin_aliases
+from korvid.evals.grader import grade
 from korvid.evals.scenario import Scenario, bundled_scenarios_dir, load_scenarios
 from korvid.tools.executor import ToolExecutor
 
 BUNDLED = load_scenarios(bundled_scenarios_dir())
+
+_GRADING_CASES = {
+    "service-endpoints-not-ready": (
+        (
+            "No endpoints are ready; the readiness probe returns 503.",
+            "The endpoint is not serving traffic because its readiness probe fails.",
+        ),
+        "The Service selector does not match, so there are no endpoints.",
+    ),
+    "pvc-wait-for-first-consumer": (
+        (
+            "WaitForFirstConsumer defers binding until a Pod is scheduled; this is expected.",
+            "The StorageClass uses WaitForFirstConsumer, so binding waits until a consumer Pod "
+            "exists; that Pod does not exist yet. This is expected.",
+        ),
+        "The StorageClass does not exist, so provisioning failed.",
+    ),
+}
 
 
 def _executor(scenario: Scenario) -> ToolExecutor:
@@ -72,6 +91,16 @@ def test_fixture_owner_references_use_uids() -> None:
                     f"{scenario.id}: {obj.get('kind')} {metadata.get('name')} "
                     f"owner {ref.get('kind')} {ref.get('name')} has no uid"
                 )
+
+
+@pytest.mark.parametrize("scenario_id", sorted(_GRADING_CASES))
+def test_diagnostic_scenario_keywords_discriminate_realistic_answers(scenario_id: str) -> None:
+    scenario = next(item for item in BUNDLED if item.id == scenario_id)
+    correct, wrong = _GRADING_CASES[scenario_id]
+
+    for answer in correct:
+        assert grade(scenario, answer, []).diagnosis_success, answer
+    assert not grade(scenario, wrong, []).diagnosis_success
 
 
 @pytest.mark.parametrize(

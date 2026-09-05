@@ -7,10 +7,12 @@ from typing import Any
 
 import pytest
 
+from korvid.evals.journey import bundled_journeys_dir, load_journeys
 from korvid.evals.live_journey import (
     NamespaceBoundReadOps,
     guard_live_target,
     guard_namespace_ownership,
+    retarget_journey_namespace,
 )
 from korvid.k8s.discovery import PODS_META, ResourceMeta
 from korvid.k8s.helm import HelmReleaseSummary
@@ -47,6 +49,28 @@ def test_namespace_ownership_requires_managed_and_matching_run_labels() -> None:
             namespace,
             {"metadata": {"labels": {**labels, "korvid.dev/eval-run": "other"}}},
         )
+
+
+def test_retarget_journey_namespace_updates_live_identity_and_targets() -> None:
+    journey = next(
+        item for item in load_journeys(bundled_journeys_dir()) if item.id == "triage-and-correct"
+    )
+    namespace = "korvid-agent-eval-run-123"
+
+    retargeted = retarget_journey_namespace(
+        journey,
+        namespace,
+        context="aks-korvid-contract-test",
+    )
+
+    assert retargeted.interaction.kube_context == "aks-korvid-contract-test"
+    assert namespace in retargeted.turns[0].user
+    assert retargeted.turns[0].expected_evidence[0][0].args["namespace"] == namespace
+    assert retargeted.turns[1].forbidden_targets[0]["namespace"] == namespace
+    assert retargeted.turns[1].interaction is not None
+    assert retargeted.turns[1].interaction.focused_pane.selected is not None
+    assert retargeted.turns[1].interaction.focused_pane.selected.uid is None
+    assert journey.turns[0].expected_evidence[0][0].args["namespace"] == "shop"
 
 
 class _ReadSpy(ReadOps):

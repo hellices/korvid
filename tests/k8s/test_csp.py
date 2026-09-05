@@ -39,6 +39,11 @@ def test_first_recognized_node_wins() -> None:
     assert info.provider == "aws"
 
 
+def test_managed_label_alone_identifies_aks() -> None:
+    info = detect_provider([_node(None, {"kubernetes.azure.com/cluster": "mc"})])
+    assert (info.provider, info.distribution, info.display) == ("azure", "aks", "aks")
+
+
 # ---------------------------------------------------------------------------
 # KubeClient.detect_cloud_provider (cached per connection)
 # ---------------------------------------------------------------------------

@@ -8,7 +8,9 @@ of taking the run down with it.
 
 from __future__ import annotations
 
-from korvid.evals.serving import ProbeResult, serving_metadata
+import pytest
+
+from korvid.evals.serving import ProbeResult, ollama_root, serving_metadata
 
 _VERSION = {"version": "0.5.1"}
 _SHOW = {
@@ -22,6 +24,17 @@ _TAGS = {
         {"name": "qwen3:8b", "digest": "bbb"},
     ]
 }
+
+
+@pytest.mark.parametrize(
+    ("base_url", "expected"),
+    [
+        ("http://host:11434/v1", "http://host:11434"),
+        ("http://host:11434", "http://host:11434"),
+    ],
+)
+def test_ollama_root_reaches_the_native_api(base_url: str, expected: str) -> None:
+    assert ollama_root(base_url) == expected
 
 
 def test_serving_metadata_records_every_pinning_field() -> None:

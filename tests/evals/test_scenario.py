@@ -107,6 +107,15 @@ def test_load_scenario_rejects_missing_expected_evidence(tmp_path: Path) -> None
         load_scenario(_write(tmp_path, text))
 
 
+def test_load_scenario_requires_forbidden_claims_for_negative_controls(tmp_path: Path) -> None:
+    text = _MINIMAL.replace("root_cause: oom_killed", "root_cause: none").replace(
+        "  must_not_mention:\n    - image pull\n",
+        "",
+    )
+    with pytest.raises(ValueError, match="must_not_mention"):
+        load_scenario(_write(tmp_path, text))
+
+
 def test_load_scenario_rejects_timestamps_after_the_anchor(tmp_path: Path) -> None:
     """Fixture timestamps are authored against SCENARIO_NOW; a later instant
     would rebase into the run's future and distort ages and event order."""

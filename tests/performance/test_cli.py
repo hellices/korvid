@@ -316,6 +316,11 @@ def test_cli_writes_seed_manifests_yaml(tmp_path: Path) -> None:
         "Pod",
     ]
     assert documents[0]["metadata"]["name"] == "korvid-perf-aks186-0"
+    expected_labels = {
+        "app.kubernetes.io/managed-by": "korvid-performance",
+        "korvid.dev/performance-run": "aks186",
+    }
+    assert all(document["metadata"]["labels"] == expected_labels for document in documents)
     assert documents[2]["spec"]["nodeSelector"] == {"korvid.dev/pool": "perftest"}
 
 
@@ -388,6 +393,7 @@ def test_cli_replay_live_returns_nonzero_for_digest_failure(
 
 
 def test_cli_replay_live_rejects_duration_that_orphans_a_burst(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -414,12 +420,129 @@ def test_cli_replay_live_rejects_duration_that_orphans_a_burst(
             *_LIVE_IDENTITY_ARGS,
             "--duration",
             "10",
+            *_live_artifacts(tmp_path),
         ]
     )
 
     assert exit_code == 1
     assert "falls outside duration_seconds" in capsys.readouterr().err
     assert calls == []
+
+
+@pytest.mark.parametrize(
+    ("command", "option", "value"),
+    [
+        ("replay", "--time-scale", "0.5"),
+        ("replay", "--sample-interval", "0"),
+        ("replay", "--input-ack-timeout", "inf"),
+        ("replay", "--input-sample-pairs", "0"),
+        ("replay-live", "--duration", "0"),
+        ("replay-live", "--sample-interval", "0"),
+    ],
+)
+def test_cli_rejects_unusable_scalar_options(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    command: str,
+    option: str,
+    value: str,
+) -> None:
+    calls: list[str] = []
+
+    async def replay(*args: object, **kwargs: object) -> ReplayReport:
+        calls.append(command)
+        profile = args[0]
+        assert isinstance(profile, WorkloadProfile)
+        return _make_report(profile)
+
+    monkeypatch.setattr(cli, "run_replay", replay)
+    monkeypatch.setattr(cli, "run_live_replay", replay)
+    argv = [command, "--profile", str(profile_path(tmp_path))]
+    if command == "replay-live":
+        argv.extend([*_LIVE_IDENTITY_ARGS, *_live_artifacts(tmp_path)])
+    argv.extend([option, value])
+
+    assert cli.main(argv) == 1
+    assert option in capsys.readouterr().err
+    assert calls == []
+
+
+@pytest.mark.parametrize("drop", ["--json", "--out", "--cpu-profile", "--allocation-snapshot"])
+def test_cli_replay_live_requires_all_four_artifacts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    drop: str,
+) -> None:
+    artifacts = _live_artifacts(tmp_path)
+    index = artifacts.index(drop)
+    del artifacts[index : index + 2]
+
+    async def unexpected(*args: object, **kwargs: object) -> ReplayReport:
+        raise AssertionError("live replay must not start without every artifact")
+
+    monkeypatch.setattr(cli, "run_live_replay", unexpected)
+    exit_code = cli.main(
+        ["replay-live", "--profile", str(profile_path(tmp_path)), *_LIVE_IDENTITY_ARGS, *artifacts]
+    )
+
+    assert exit_code == 1
+    assert "all four artifacts" in capsys.readouterr().err
+
+
+def test_cli_replay_live_rejects_artifact_not_named_for_the_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    artifacts = _live_artifacts(tmp_path)
+    artifacts[1] = str(tmp_path / "result.json")
+    monkeypatch.setattr(cli, "run_live_replay", fake_run_live_replay)
+
+    exit_code = cli.main(
+        ["replay-live", "--profile", str(profile_path(tmp_path)), *_LIVE_IDENTITY_ARGS, *artifacts]
+    )
+
+    assert exit_code == 1
+    assert "must include the run id" in capsys.readouterr().err
+
+
+def test_cli_replay_live_rejects_artifact_paths_that_alias_one_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    (tmp_path / "sub").mkdir()
+    artifacts = _live_artifacts(tmp_path)
+    artifacts[3] = str(tmp_path / "sub" / ".." / "aks186-live.json")
+    monkeypatch.setattr(cli, "run_live_replay", fake_run_live_replay)
+
+    exit_code = cli.main(
+        ["replay-live", "--profile", str(profile_path(tmp_path)), *_LIVE_IDENTITY_ARGS, *artifacts]
+    )
+
+    assert exit_code == 1
+    assert "distinct destinations" in capsys.readouterr().err
+
+
+def test_cli_replay_live_reports_an_unwritable_allocation_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    artifacts = _live_artifacts(tmp_path)
+    artifacts[artifacts.index("--allocation-snapshot") + 1] = str(
+        tmp_path / "missing-dir" / "aks186-live.alloc.txt"
+    )
+    monkeypatch.setattr(cli, "run_live_replay", fake_run_live_replay)
+
+    exit_code = cli.main(
+        ["replay-live", "--profile", str(profile_path(tmp_path)), *_LIVE_IDENTITY_ARGS, *artifacts]
+    )
+
+    assert exit_code == 1
+    assert "allocation snapshot" in capsys.readouterr().err
 
 
 def test_cli_replay_live_fails_when_a_ui_scenario_did_not_pass(
