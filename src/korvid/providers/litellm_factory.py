@@ -20,10 +20,12 @@ steps below it:
 2. a reference korvid would have to guess at,
 3. a reference a special flow claims (delegated) or the deny-list claims
    (refused) — both before any LiteLLM call,
-4. keyless auth with no endpoint (one field of the operator's profile),
-5. the credential, resolved by exactly the method the profile names,
-6. the routing call,
-7. a provider that genuinely has nowhere to send the request.
+4. a trust bundle that cannot be loaded (a flow owns its own transport,
+   so this comes after the claim),
+5. keyless auth with no endpoint (one field of the operator's profile),
+6. the credential, resolved by exactly the method the profile names,
+7. the routing call,
+8. a provider that genuinely has nowhere to send the request.
 """
 
 from __future__ import annotations
@@ -41,7 +43,7 @@ from korvid.agent.model_profiles import (
     SpecialFlow,
     split_reference,
 )
-from korvid.providers import litellm_runtime
+from korvid.providers import litellm_runtime, net
 from korvid.providers.litellm_provider import LiteLLMProvider
 from korvid.providers.litellm_request import OMIT_API_KEY, ResolvedApiKey, build_plan
 from korvid.providers.litellm_settings import DEVICE_LOGIN_PREFIXES
@@ -104,6 +106,7 @@ def create_provider_from_profile(
     catalog: ModelCatalog | None = None,
     flows: SpecialFlowRegistry | None = None,
     credentials: CredentialStore | None = None,
+    ca_bundle: str | None = None,
 ) -> LLMProvider | None:
     """Build a provider, or None when the profile is unusable.
 
@@ -120,6 +123,10 @@ def create_provider_from_profile(
             resolve.
         credentials: The secret store `keyring` auth reads. `None` uses
             the OS keyring directly.
+        ca_bundle: Path to the trust bundle from `network.ca_bundle`, or
+            `None` for the SDK's own trust. One trust decision covers
+            every korvid-owned HTTPS client, so the same setting that
+            reaches the cluster client reaches this one.
 
     Returns:
         The provider, or None with the reason logged as a warning.
@@ -137,6 +144,11 @@ def create_provider_from_profile(
     claimed, provider = _claimed_provider(profile, reference, flows)
     if claimed:
         return provider
+
+    problem = _apply_trust(ca_bundle)
+    if problem is not None:
+        _refuse("%s", problem)
+        return None
 
     problem = _refuse_keyless_without_endpoint(profile)
     if problem is not None:
@@ -298,7 +310,45 @@ def _build_from_flow(
 
 
 # ---------------------------------------------------------------------------
-# Step 4 — keyless auth, against an endpoint the operator named
+# Step 4 — the trust the operator configured
+# ---------------------------------------------------------------------------
+
+
+def _apply_trust(ca_bundle: str | None) -> str | None:
+    """Put the operator's CA bundle in front of every request, or refuse.
+
+    Validated before it is applied, and refused if it will not load. The
+    trap is that LiteLLM does not refuse: measured on 1.98.0, a bundle
+    path it cannot read falls back to its own certifi store, silently,
+    with verification still on — so a typo'd path looks like a working
+    profile right up until the corporate endpoint's certificate is
+    rejected, or worse, until a certificate the operator never trusted is
+    accepted. `build_verify` opens it first and names the path.
+
+    Verification is never weakened here: the bundle *adds* the roots the
+    operator chose, and the context LiteLLM builds from it still requires
+    a certificate and still checks the hostname.
+
+    Args:
+        ca_bundle: Path from `network.ca_bundle`, or None for the SDK's
+            own trust store.
+
+    Returns:
+        None when there is nothing to do or the trust was applied, or the
+        refusal text.
+    """
+    if ca_bundle is None:
+        return None
+    try:
+        net.build_verify(ca_bundle)
+        litellm_runtime.apply_ca_bundle(ca_bundle)
+    except ValueError as exc:
+        return f"{exc}"
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Step 5 — keyless auth, against an endpoint the operator named
 # ---------------------------------------------------------------------------
 
 
@@ -329,7 +379,7 @@ def _refuse_keyless_without_endpoint(profile: ModelConnectionConfig) -> str | No
 
 
 # ---------------------------------------------------------------------------
-# Step 5 — the credential, by exactly the method the profile names
+# Step 6 — the credential, by exactly the method the profile names
 # ---------------------------------------------------------------------------
 
 
@@ -416,7 +466,7 @@ def _from_keyring(
 
 
 # ---------------------------------------------------------------------------
-# Step 6 — routing, delegated
+# Step 7 — routing, delegated
 # ---------------------------------------------------------------------------
 
 
@@ -424,10 +474,19 @@ def _route(reference: str, endpoint: str | None) -> tuple[str, str] | None:
     """Resolve the reference through LiteLLM, or refuse.
 
     Safe by this point: every reference that makes the call dangerous was
-    claimed or refused above. The prefix the operator wrote is passed
-    through as the provider, so a private or in-house prefix resolves as
-    itself instead of being rejected by a table korvid does not own; a
-    reference with no prefix is left entirely to LiteLLM's own rules.
+    claimed or refused above. The reference is passed exactly as the
+    operator wrote it, with **no** provider hint — the resolution korvid
+    gets here is the same one every later call will get, so a reference
+    that builds is a reference that can be dispatched.
+
+    Supplying the written prefix as a hint would make this call succeed
+    for any prefix at all. Measured on 1.98.0, that is validation
+    bypassed rather than a private provider supported: the same hint at
+    call time raises `Unmapped LLM provider for this endpoint`, and
+    without it the call raises `LLM Provider NOT provided`. Either way
+    the profile can never complete a request, so accepting it here only
+    moves the failure from startup — where it names the field — to the
+    first message the operator sends.
 
     The returned host is deliberately ignored — no refusal reads it.
     Routing is here to validate the reference and to name the provider
@@ -438,14 +497,20 @@ def _route(reference: str, endpoint: str | None) -> tuple[str, str] | None:
     """
     prefix, tag = split_reference(reference)
     try:
-        routed = litellm_runtime.get_llm_provider(
-            model=reference,
-            custom_llm_provider=prefix or None,
-            api_base=endpoint,
-        )
+        routed = litellm_runtime.get_llm_provider(model=reference, api_base=endpoint)
     except Exception:  # the SDK raises its own errors for a bad reference
-        _refuse("litellm cannot resolve the model reference %r", reference)
+        _refuse(
+            "litellm cannot dispatch the model reference %r: set `model` on this "
+            "profile to a reference litellm resolves, or install a flow that "
+            "claims this prefix",
+            reference,
+        )
         return None
+    provider_id = str(routed[1]) if len(routed) > 1 and routed[1] else prefix
+    if not provider_id:
+        _refuse("litellm resolved no provider for the model reference %r", reference)
+        return None
+    return provider_id, tag or reference
     provider_id = str(routed[1]) if len(routed) > 1 and routed[1] else prefix
     if not provider_id:
         _refuse("litellm resolved no provider for the model reference %r", reference)
@@ -454,7 +519,7 @@ def _route(reference: str, endpoint: str | None) -> tuple[str, str] | None:
 
 
 # ---------------------------------------------------------------------------
-# Step 7 — a provider with nowhere to send the request
+# Step 8 — a provider with nowhere to send the request
 # ---------------------------------------------------------------------------
 
 

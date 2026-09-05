@@ -30,7 +30,7 @@ from korvid.providers.litellm_settings import KEYLESS_API_KEY_SENTINEL
 # Korvid-owned option keys — transport selectors, not model parameters.
 # ---------------------------------------------------------------------------
 _KORVID_OWNED_OPTIONS: frozenset[str] = frozenset(
-    {"native_thinking", "ca_bundle", "num_ctx_source"}
+    {"native_thinking", "ca_bundle", "num_ctx_source", "ssl_verify"}
 )
 
 

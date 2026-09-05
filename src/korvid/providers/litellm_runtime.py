@@ -111,6 +111,55 @@ def supported_params(model: str, provider: str) -> tuple[str, ...]:
     return tuple(params or ())
 
 
+#: The module attribute LiteLLM reads for its own TLS trust. Named rather
+#: than written inline so the tripwire below and the assignment can never
+#: disagree about which attribute korvid means.
+_SSL_VERIFY_ATTR: Final = "ssl_verify"
+
+
+def apply_ca_bundle(path: str) -> None:
+    """Point LiteLLM's own TLS trust at the operator's CA bundle.
+
+    Two client shapes live under LiteLLM and they do not read the same
+    setting (measured on 1.98.0):
+
+    * Providers built on a vendor SDK client resolve their trust through
+      `get_ssl_configuration()` called with **no arguments**, so they see
+      only this module-level `litellm.ssl_verify` — a per-request
+      `ssl_verify` never reaches them.
+    * Providers on LiteLLM's own httpx handler read the per-request
+      value, and fall back to this global.
+
+    So korvid sets both: the global here, and the per-request one on the
+    request plan. Setting only one leaves a whole class of providers on
+    the default trust store while the operator believes their corporate
+    root is in effect.
+
+    The value must be a *path*: `get_ssl_configuration` builds its own
+    `SSLContext` and silently discards a pre-built one, so assigning a
+    context here would look configured and verify against certifi.
+    Verification itself is untouched — the resulting context is
+    `CERT_REQUIRED`, hostname-checking, TLS 1.2 minimum.
+
+    Args:
+        path: Filesystem path to a PEM bundle the caller has already
+            proven loadable. LiteLLM falls back to certifi *without
+            error* for a path it cannot read, so an unvalidated path
+            would disable the operator's trust root silently.
+
+    Raises:
+        ValueError: if LiteLLM no longer exposes the setting. A rename
+            upstream would otherwise leave korvid writing an attribute
+            nothing reads, and the operator's trust quietly unapplied.
+    """
+    if not hasattr(_litellm, _SSL_VERIFY_ATTR):
+        raise ValueError(
+            "network.ca_bundle cannot be applied: this litellm release no "
+            f"longer exposes `{_SSL_VERIFY_ATTR}`. Pin a supported release."
+        )
+    setattr(_litellm, _SSL_VERIFY_ATTR, path)
+
+
 #: LiteLLM's own suffix for an environment variable naming a base URL.
 #: The convention is the SDK's, not a vendor list korvid maintains: every
 #: provider that needs a host publishes it as `<PROVIDER>_API_BASE`.
