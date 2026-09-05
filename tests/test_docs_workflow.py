@@ -33,7 +33,7 @@ PINNED_ACTIONS = {
     "astral-sh/setup-uv": "20cfd1bf945f4377ade1205e4dbc17946fc9a30d",
     "actions/configure-pages": "45bfe0192ca1faeb007ade9deae92b16b8254a0d",
     "actions/upload-pages-artifact": "fc324d3547104276b827a68afc52ff2a11cc49c9",
-    "actions/deploy-pages": "cd2ce8fcbc39b97be8ca5fce6e763baed58fa128",
+    "actions/deploy-pages": "368f82528645a54fb793d4d04e342629a3f51346",
 }
 
 
