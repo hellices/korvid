@@ -3855,3 +3855,109 @@ def test_a_config_with_no_profiles_still_uses_the_legacy_factory(
     built = cast("Any", _create_initial_provider(config, None, None, object(), [], object()))
     assert built == "built-from-scalars"
     assert seen[0]["model"] == "m"
+
+
+def test_the_profile_factory_is_given_the_configured_trust_bundle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`network.ca_bundle` is one trust decision for every korvid-owned
+    HTTPS client. The legacy factory took it; the profile factory has to
+    take it too, or a corporate endpoint stops verifying against the CA
+    the operator named the moment a profile exists."""
+    from korvid.__main__ import _create_initial_provider
+    from korvid.core.config import KorvidConfig
+
+    captured: dict[str, Any] = {}
+
+    def _from_profile(profile: Any, **kwargs: Any) -> str:
+        captured.update(kwargs)
+        return "built"
+
+    monkeypatch.setattr(
+        "korvid.providers.litellm_factory.create_provider_from_profile", _from_profile
+    )
+    config = KorvidConfig(
+        model_connections=_profile_connections("openai/gpt-4o"),
+        network_ca_bundle="/etc/korvid/corporate-root.pem",
+    )
+
+    assert (
+        cast("Any", _create_initial_provider(config, None, None, object(), [], object())) == "built"
+    )
+    assert captured["ca_bundle"] == "/etc/korvid/corporate-root.pem"
+
+
+def test_an_installed_flow_entry_point_builds_the_provider_instead_of_routing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The registry the composition root builds has to be the same kind
+    the catalog and the wizard build.
+
+    An empty `SpecialFlowRegistry()` claims the device-login prefixes and
+    nothing else, so an installed flow is never asked and its references
+    are refused instead of delegated. Here a real entry point is
+    installed: the flow's own `build_provider` must be what answers, and
+    LiteLLM routing must never see the reference.
+    """
+    from korvid.__main__ import _create_initial_provider
+    from korvid.agent.model_profiles import SpecialFlow
+    from korvid.core.config import KorvidConfig
+
+    built: list[Any] = []
+
+    class _FlowProvider(LLMProvider):
+        @property
+        def descriptor(self) -> ModelDescriptor:
+            return ModelDescriptor(provider="acme", model="internal")
+
+        @property
+        def capabilities(self) -> ModelCapabilities:
+            return ModelCapabilities.unknown()
+
+        async def complete(
+            self,
+            messages: list[dict[str, Any]],
+            tools: list[dict[str, Any]],
+            *,
+            stream: bool = True,
+        ) -> AsyncIterator[dict[str, Any]]:
+            yield {"type": "done"}
+
+    def _build(profile: Any) -> LLMProvider:
+        built.append(profile)
+        return _FlowProvider()
+
+    flow = SpecialFlow(
+        prefix="acme",
+        display_name="Acme",
+        auth_methods=(),
+        build_provider=_build,
+    )
+
+    class _EntryPoint:
+        name = "acme"
+        group = "korvid.provider"
+
+        def load(self) -> SpecialFlow:
+            return flow
+
+    routed: list[str] = []
+
+    def _record(model: str, **kwargs: object) -> tuple[str, str, None, None]:
+        # Recorded rather than raised: the factory refuses on any routing
+        # exception, so an AssertionError here would be swallowed into a
+        # plain "cannot resolve" refusal and prove nothing.
+        routed.append(model)
+        return ("internal-v2", "acme", None, None)
+
+    monkeypatch.setattr(
+        "korvid.providers.special_flows._iter_entry_points", lambda: (_EntryPoint(),)
+    )
+    monkeypatch.setattr("korvid.providers.litellm_runtime.get_llm_provider", _record)
+
+    config = KorvidConfig(model_connections=_profile_connections("acme/internal-v2"))
+    provider = _create_initial_provider(config, None, None, object(), [], object())
+
+    assert isinstance(provider, _FlowProvider)
+    assert [profile.model for profile in built] == ["acme/internal-v2"]
+    assert routed == [], "a claimed reference must never reach litellm routing"

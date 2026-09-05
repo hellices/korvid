@@ -34,6 +34,7 @@ from korvid.providers.litellm_factory import (
 from korvid.providers.litellm_provider import LiteLLMProvider
 from korvid.providers.litellm_request import RequestPlan
 from korvid.providers.special_flows import SpecialFlowRegistry
+from tests.providers.tls_ca import mint_ca_and_server_cert
 
 FACTORY_LOGGER = "korvid.providers.litellm_factory"
 SRC_ROOT = Path(korvid.providers.litellm_factory.__file__).resolve().parents[2]
@@ -308,6 +309,195 @@ def test_a_flow_with_no_builder_is_refused_not_routed(monkeypatch: pytest.Monkey
 
 
 # ---------------------------------------------------------------------------
+# A reference LiteLLM cannot dispatch is refused, never "built"
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("reference", ["company/internal-v2", "x/y", "not-a-vendor/model"])
+@pytest.mark.parametrize("endpoint", [None, "http://gw.internal/v1"])
+def test_a_prefix_litellm_cannot_route_is_refused_rather_than_built(
+    reference: str, endpoint: str | None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An in-house prefix resolves to nothing LiteLLM can dispatch.
+
+    Measured on 1.98.0: `get_llm_provider("company/internal-v2")` raises
+    `BadRequestError`, and echoing the operator's own prefix back as
+    `custom_llm_provider` silences that error without making the
+    reference usable — the call it "built" then dies at request time with
+    `Unmapped LLM provider for this endpoint`. A provider korvid hands to
+    the agent must be one that can actually make a request, endpoint or
+    no endpoint.
+    """
+    monkeypatch.setenv("MY_KEY", "sk-live")
+    profile = _profile(reference, base_url=endpoint, auth=_env_auth("MY_KEY"))
+    assert create_provider_from_profile(profile) is None
+
+
+def test_the_unroutable_refusal_names_the_reference_and_the_field(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ "Refused" is not a message. The operator has to learn which field
+    to edit, and the refusal must not leak the credential it resolved."""
+    monkeypatch.setenv("MY_KEY", "sk-super-secret")
+    profile = _profile(
+        "company/internal-v2", base_url="http://gw.internal/v1", auth=_env_auth("MY_KEY")
+    )
+    with caplog.at_level(logging.WARNING, logger=FACTORY_LOGGER):
+        assert create_provider_from_profile(profile) is None
+    assert "company/internal-v2" in caplog.text
+    assert "model" in caplog.text
+    assert "sk-super-secret" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "reference",
+    [
+        "openai/gpt-4o",
+        "anthropic/claude-sonnet-4-5",
+        "gemini/gemini-2.5-pro",
+        "groq/llama-3.3-70b-versatile",
+        "hosted_vllm/qwen",
+        "gpt-4o",
+    ],
+)
+def test_every_reference_the_factory_builds_is_one_litellm_can_dispatch(reference: str) -> None:
+    """The anti-false-success rule, stated as an invariant rather than a
+    list: whatever the factory builds, LiteLLM must be able to resolve the
+    exact model string the plan will send — with no korvid-supplied
+    provider hint propping it up."""
+    from korvid.providers import litellm_runtime
+
+    provider = create_provider_from_profile(_profile(reference))
+    assert isinstance(provider, LiteLLMProvider)
+    routed = litellm_runtime.get_llm_provider(model=provider._plan.model)
+    assert routed[1]
+
+
+# ---------------------------------------------------------------------------
+# The trust bundle the operator configured
+# ---------------------------------------------------------------------------
+
+
+def test_a_configured_bundle_is_applied_before_a_request_can_be_made(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The bundle is in force by the time the provider exists.
+
+    Applied at construction rather than per request, for two measured
+    reasons on 1.98.0. A vendor-SDK-shaped client resolves its trust
+    with a no-argument `get_ssl_configuration()`, so it never sees a
+    per-request value; and a per-request value that no provider consumes
+    is forwarded into the request *body*, which would ship a local
+    filesystem path to the vendor. One process-wide setting, applied
+    before any client can be built, is what both shapes read.
+    """
+    import litellm
+
+    monkeypatch.setattr(litellm, "ssl_verify", True, raising=False)
+    ca_pem, _cert, _key = mint_ca_and_server_cert(tmp_path)
+    plan = _plan_for(_profile("openai/gpt-4o"), ca_bundle=str(ca_pem))
+    assert litellm.ssl_verify == str(ca_pem)
+    assert "ssl_verify" not in plan.call_kwargs([], [], stream=False)
+
+
+def test_no_configured_bundle_leaves_litellms_own_trust_untouched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without a bundle the SDK's default trust applies unchanged — korvid
+    has no opinion to impose, and must not invent one."""
+    import litellm
+
+    monkeypatch.setattr(litellm, "ssl_verify", True, raising=False)
+    plan = _plan_for(_profile("openai/gpt-4o"))
+    assert litellm.ssl_verify is True
+    assert "ssl_verify" not in plan.call_kwargs([], [], stream=False)
+
+
+def test_an_unloadable_bundle_disables_the_agent_instead_of_falling_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The trap this refusal exists for: measured on 1.98.0, LiteLLM
+    resolves a `ssl_verify` path that does not exist by falling back to
+    its bundled certifi store — silently, with verification still on, so
+    nothing looks wrong while the operator's chosen trust root is gone.
+    korvid fails closed instead, and names the path."""
+    import litellm
+
+    monkeypatch.setattr(litellm, "ssl_verify", True, raising=False)
+    missing = tmp_path / "corporate-root.pem"
+    with caplog.at_level(logging.WARNING, logger=FACTORY_LOGGER):
+        assert (
+            create_provider_from_profile(_profile("openai/gpt-4o"), ca_bundle=str(missing)) is None
+        )
+    assert "corporate-root.pem" in caplog.text
+    assert "ca_bundle" in caplog.text
+    assert litellm.ssl_verify is True
+
+
+def test_a_malformed_bundle_is_refused_rather_than_ignored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import litellm
+
+    monkeypatch.setattr(litellm, "ssl_verify", True, raising=False)
+    bad = tmp_path / "garbage.pem"
+    bad.write_text("this is not a certificate")
+    assert create_provider_from_profile(_profile("openai/gpt-4o"), ca_bundle=str(bad)) is None
+    assert litellm.ssl_verify is True
+
+
+def test_a_litellm_that_lost_the_setting_disables_the_agent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A rename upstream must not become "trust silently not applied".
+
+    korvid writes one attribute on the SDK to put the operator's CA in
+    front of every client. If a future release stops reading it, the
+    write still succeeds and every request then runs on the default trust
+    store — so the absence is checked, and a profile that needs the
+    bundle is refused instead."""
+    from korvid.providers import litellm_runtime
+
+    monkeypatch.delattr(litellm_runtime._litellm, "ssl_verify", raising=False)
+    ca_pem, _cert, _key = mint_ca_and_server_cert(tmp_path)
+    assert create_provider_from_profile(_profile("openai/gpt-4o"), ca_bundle=str(ca_pem)) is None
+
+
+def test_the_bundle_is_never_carried_as_a_model_option(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A trust path in the call kwargs is a trust path in the request
+    body: measured on 1.98.0, anything the provider does not consume is
+    forwarded to the vendor. Neither korvid's own key nor LiteLLM's may
+    appear there."""
+    import litellm
+
+    monkeypatch.setattr(litellm, "ssl_verify", True, raising=False)
+    ca_pem, _cert, _key = mint_ca_and_server_cert(tmp_path)
+    plan = _plan_for(
+        _profile("openai/gpt-4o", options={"ca_bundle": "/somewhere/else.pem"}),
+        ca_bundle=str(ca_pem),
+    )
+    kwargs = plan.call_kwargs([], [], stream=False)
+    assert "ca_bundle" not in kwargs
+    assert "ssl_verify" not in kwargs
+    assert litellm.ssl_verify == str(ca_pem)
+
+
+def test_a_profile_option_can_never_disable_verification(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`ssl_verify: false` in a profile's options would turn TLS
+    verification off for a corporate endpoint. It is korvid's transport
+    setting, so it never reaches the wire from there."""
+    import litellm
+
+    monkeypatch.setattr(litellm, "ssl_verify", True, raising=False)
+    plan = _plan_for(_profile("openai/gpt-4o", options={"ssl_verify": False}))
+    assert "ssl_verify" not in plan.call_kwargs([], [], stream=False)
+
+
+# ---------------------------------------------------------------------------
 # Auth resolution: five methods, none falling back to another
 # ---------------------------------------------------------------------------
 
@@ -358,7 +548,10 @@ def test_provider_default_passes_no_key_so_the_sdk_chain_applies() -> None:
     delegate — the SDK sees an explicit argument and stops consulting its
     own chain."""
     plan = _plan_for(
-        _profile("bedrock-x/model", auth=ConnectionAuthConfig(method="provider-default"))
+        _profile(
+            "bedrock/amazon.titan-text-lite-v1",
+            auth=ConnectionAuthConfig(method="provider-default"),
+        )
     )
     assert "api_key" not in plan.call_kwargs([], [], stream=True)
     assert plan.api_key is OMIT_API_KEY
@@ -444,7 +637,6 @@ def test_the_factory_never_logs_a_secret(
         "groq/llama-3.3-70b-versatile",
         "xai/grok-4",
         "hosted_vllm/qwen",
-        "company/internal-v2",
     ],
 )
 @pytest.mark.parametrize(
@@ -463,11 +655,25 @@ def test_keyless_auth_requires_an_explicit_endpoint(
 
     Routing is deliberately **not** patched: these are real references
     resolved by the real `get_llm_provider`, so the test would catch a
-    rule that had quietly acquired a provider dimension. Forty
-    combinations, one answer per endpoint column, whatever the prefix.
+    rule that had quietly acquired a provider dimension. One answer per
+    endpoint column, whatever the prefix.
+
+    Every reference here is one LiteLLM can dispatch. An in-house prefix
+    it cannot route is a different rule and has its own test: it is
+    refused in *every* column, endpoint or not, because no endpoint makes
+    an unroutable reference callable.
     """
     profile = _profile(reference, base_url=endpoint, auth=_none_auth())
     assert (create_provider_from_profile(profile) is not None) is allowed
+
+
+@pytest.mark.parametrize("endpoint", [None, "", "   ", "http://localhost:8000/v1"])
+def test_a_keyless_profile_with_an_unroutable_prefix_is_refused_in_every_column(
+    endpoint: str | None,
+) -> None:
+    """Naming a host does not make an unroutable reference callable."""
+    profile = _profile("company/internal-v2", base_url=endpoint, auth=_none_auth())
+    assert create_provider_from_profile(profile) is None
 
 
 def test_the_keyless_refusal_names_the_missing_field(
@@ -603,7 +809,7 @@ def test_korvid_owned_options_never_reach_the_wire() -> None:
 
 
 def test_capabilities_come_from_the_catalog_and_stay_unknown_without_one() -> None:
-    provider = create_provider_from_profile(_profile("x/y"), catalog=None)
+    provider = create_provider_from_profile(_profile("hosted_vllm/qwen"), catalog=None)
     assert provider is not None
     caps = provider.capabilities
     assert caps.supports_tools is None
@@ -622,7 +828,9 @@ def test_provenance_records_where_each_fact_came_from() -> None:
         supports_reasoning=False,
         source=ModelEntrySource.LITELLM,
     )
-    provider = create_provider_from_profile(_profile("x/y"), catalog=cast("Any", _Catalog(entry)))
+    provider = create_provider_from_profile(
+        _profile("hosted_vllm/qwen"), catalog=cast("Any", _Catalog(entry))
+    )
     assert provider is not None
     caps = provider.capabilities
     assert caps.context_window_tokens == 128_000
@@ -633,8 +841,10 @@ def test_provenance_records_where_each_fact_came_from() -> None:
 
 
 def test_a_catalog_fact_left_unknown_gets_no_provenance() -> None:
-    entry = ModelEntry(reference="x/y", provider_id="x", supports_tools=True)
-    provider = create_provider_from_profile(_profile("x/y"), catalog=cast("Any", _Catalog(entry)))
+    entry = ModelEntry(reference="hosted_vllm/qwen", provider_id="hosted_vllm", supports_tools=True)
+    provider = create_provider_from_profile(
+        _profile("hosted_vllm/qwen"), catalog=cast("Any", _Catalog(entry))
+    )
     assert provider is not None
     assert provider.capabilities.context_window_tokens is None
     assert "context_window_tokens" not in provider.capabilities.provenance
@@ -643,9 +853,12 @@ def test_a_catalog_fact_left_unknown_gets_no_provenance() -> None:
 def test_a_profile_option_overrides_a_catalog_capability() -> None:
     """An operator who sets num_ctx knows their deployment better than a
     table does."""
-    entry = ModelEntry(reference="x/y", provider_id="x", context_window_tokens=128_000)
+    entry = ModelEntry(
+        reference="hosted_vllm/qwen", provider_id="hosted_vllm", context_window_tokens=128_000
+    )
     provider = create_provider_from_profile(
-        _profile("x/y", options={"num_ctx": 8192}), catalog=cast("Any", _Catalog(entry))
+        _profile("hosted_vllm/qwen", options={"num_ctx": 8192}),
+        catalog=cast("Any", _Catalog(entry)),
     )
     assert provider is not None
     caps = provider.capabilities
@@ -656,8 +869,12 @@ def test_a_profile_option_overrides_a_catalog_capability() -> None:
 def test_a_catalogs_max_output_tokens_is_display_only() -> None:
     """`ModelEntry.max_output_tokens` has no capability counterpart; it
     must not be read as the context window."""
-    entry = ModelEntry(reference="x/y", provider_id="x", max_output_tokens=4096)
-    provider = create_provider_from_profile(_profile("x/y"), catalog=cast("Any", _Catalog(entry)))
+    entry = ModelEntry(
+        reference="hosted_vllm/qwen", provider_id="hosted_vllm", max_output_tokens=4096
+    )
+    provider = create_provider_from_profile(
+        _profile("hosted_vllm/qwen"), catalog=cast("Any", _Catalog(entry))
+    )
     assert provider is not None
     assert provider.capabilities.context_window_tokens is None
 
@@ -667,12 +884,14 @@ def test_a_catalog_that_raises_does_not_prevent_the_build() -> None:
         def entry(self, reference: str) -> ModelEntry | None:
             raise RuntimeError("catalog exploded")
 
-    provider = create_provider_from_profile(_profile("x/y"), catalog=cast("Any", _Boom()))
+    provider = create_provider_from_profile(
+        _profile("hosted_vllm/qwen"), catalog=cast("Any", _Boom())
+    )
     assert isinstance(provider, LiteLLMProvider)
     assert provider.capabilities.provenance == {}
 
 
 def test_capabilities_are_never_inferred_from_the_reference() -> None:
-    provider = create_provider_from_profile(_profile("x/gpt-4o-with-tools-2000k"))
+    provider = create_provider_from_profile(_profile("hosted_vllm/gpt-4o-with-tools-2000k"))
     assert provider is not None
     assert provider.capabilities == ModelCapabilities.unknown()

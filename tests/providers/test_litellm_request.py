@@ -193,3 +193,20 @@ def test_empty_supported_keeps_all_options() -> None:
         supported=[],
     )
     assert plan.extra == {"temperature": 0.5, "max_tokens": 1024}
+
+
+def test_a_profile_option_cannot_turn_verification_off() -> None:
+    """`ssl_verify: false` in a profile's options is a request to stop
+    verifying certificates.
+
+    Two things go wrong if it is treated as a model parameter. LiteLLM's
+    own httpx handlers read it and would honour it, and — measured on
+    1.98.0 — anything left in the call kwargs that the provider does not
+    consume is forwarded into the *request body*, so the value reaches
+    the vendor as an unknown field. Trust is korvid's transport
+    decision, so the key is owned and dropped even where the provider
+    reports it as supported.
+    """
+    plan = _plan(options={"ssl_verify": False}, supported=["ssl_verify"])
+    assert "ssl_verify" not in plan.call_kwargs([], [], stream=True)
+    assert plan.extra == {}

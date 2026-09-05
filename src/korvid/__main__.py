@@ -101,6 +101,7 @@ if TYPE_CHECKING:
     from korvid.agent.model_profiles import ModelCatalog
     from korvid.agent.provider import LLMProvider
     from korvid.agent.session import AgentSession
+    from korvid.providers.litellm_factory import CredentialStore
 
 logger = logging.getLogger(__name__)
 
@@ -719,8 +720,9 @@ def _agent_unavailable_wiring(
 
 
 def _create_provider_from_active_profile(
-    profile: Any,
-    credentials: Any,
+    profile: ModelConnectionConfig,
+    credentials: CredentialStore | None,
+    ca_bundle: str | None,
 ) -> LLMProvider | None:
     """Build the provider a named connection profile describes.
 
@@ -730,20 +732,30 @@ def _create_provider_from_active_profile(
     factory refuses returns None with the reason logged — a
     misconfigured connection disables the agent, it never stops korvid
     from starting.
+
+    Args:
+        profile: The active connection profile.
+        credentials: The secret store `keyring` auth reads, or None for
+            the OS keyring.
+        ca_bundle: `network.ca_bundle` — one trust decision for every
+            korvid-owned HTTPS client, this one included.
     """
     from korvid.providers.litellm_catalog import LiteLLMModelCatalog
     from korvid.providers.litellm_factory import create_provider_from_profile
+    from korvid.providers.litellm_runtime import models_by_provider
     from korvid.providers.special_flows import SpecialFlowRegistry
 
-    # One registry, shared: the catalog drops the references no installed
-    # flow can serve, and the factory refuses those same prefixes rather
-    # than handing them to routing.
-    flows = SpecialFlowRegistry()
+    # One registry, shared, and built the same way the catalog and the
+    # wizard build theirs: an installed flow that is not discovered here
+    # is a prefix the factory hands to routing instead of to the flow
+    # that owns it, so the provider it would have built never exists.
+    flows = SpecialFlowRegistry.from_entry_points(reserved_prefixes=models_by_provider())
     return create_provider_from_profile(
         profile,
         catalog=LiteLLMModelCatalog(flows=flows),
         flows=flows,
         credentials=credentials,
+        ca_bundle=ca_bundle,
     )
 
 
@@ -753,21 +765,23 @@ def _create_initial_provider(
     ollama_options: Any,
     plugin_registry: Any,
     startup_warnings: list[str] | None,
-    credentials: Any = None,
+    credentials: CredentialStore | None = None,
 ) -> LLMProvider | None:
     """Build the initial LLM provider, converting plugin errors to warnings.
 
     Two factories are wired here on purpose, and one is chosen per call:
     a config with an active profile is built from that profile, and a
     config with no profiles at all keeps the legacy scalar path. That
-    path stays live until Task 18 deletes it.
+    path stays live until Task 18 deletes it. `network.ca_bundle` goes to
+    whichever one runs — the operator's trust does not depend on which
+    shape their config happens to be in.
     """
     from korvid.providers.plugin_registry import ProviderPluginError
     from korvid.providers.registry import create_provider
 
     profile = config.model_connections.active_profile
     if profile is not None:
-        return _create_provider_from_active_profile(profile, credentials)
+        return _create_provider_from_active_profile(profile, credentials, config.network_ca_bundle)
 
     try:
         return create_provider(
