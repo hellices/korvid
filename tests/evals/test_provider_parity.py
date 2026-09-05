@@ -12,7 +12,6 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -38,8 +37,11 @@ def _eval_env(**overrides: str) -> dict[str, str]:
     return env
 
 
-def _build(env: Mapping[str, str]) -> Any:
-    return provider_factory_from_env(env)()
+def _build(env: Mapping[str, str]) -> LiteLLMProvider:
+    """The eval provider, narrowed to the type the product ships."""
+    provider = provider_factory_from_env(env)()
+    assert isinstance(provider, LiteLLMProvider)
+    return provider
 
 
 def test_eval_provider_is_the_shipped_transport() -> None:
@@ -68,7 +70,7 @@ def test_eval_descriptor_matches_the_app_for_an_equivalent_profile() -> None:
     )
     eval_provider = _build(_eval_env())
 
-    assert app_provider is not None
+    assert isinstance(app_provider, LiteLLMProvider)
     assert eval_provider.descriptor == app_provider.descriptor
     assert eval_provider.descriptor.provider == "openai"
     assert eval_provider.descriptor.model == "gpt-4o"
@@ -83,7 +85,7 @@ def test_eval_capabilities_match_the_app_for_an_equivalent_profile() -> None:
     )
     eval_provider = _build(_eval_env())
 
-    assert app_provider is not None
+    assert isinstance(app_provider, LiteLLMProvider)
     assert eval_provider.capabilities == app_provider.capabilities
     assert eval_provider.capabilities.supports_tools is True
     assert eval_provider.capabilities.provenance["supports_tools"] is CapabilitySource.CATALOG
@@ -109,7 +111,7 @@ def test_eval_plan_matches_the_app_for_an_equivalent_profile() -> None:
         )
     )
 
-    assert app_provider is not None
+    assert isinstance(app_provider, LiteLLMProvider)
     assert eval_provider._plan == app_provider._plan
 
 

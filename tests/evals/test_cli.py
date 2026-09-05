@@ -25,6 +25,7 @@ from korvid.evals.grader import CitationReport, GradeResult, citation_report
 from korvid.evals.harness import PromptGrind, resolve_eval_policy
 from korvid.evals.runner import RunMetrics, ScenarioReport
 from korvid.evals.scripted import ScriptedProvider
+from korvid.providers.litellm_provider import LiteLLMProvider
 from tests.evals.fixtures import EVAL_INTERACTION
 
 
@@ -104,14 +105,21 @@ def test_provider_factory_rejects_invalid_environment(
         provider_factory_from_env(env)
 
 
+def _shipped_provider(env: dict[str, str]) -> LiteLLMProvider:
+    """Build the eval provider and narrow it to the type the product ships."""
+    provider = provider_factory_from_env(env)()
+    assert isinstance(provider, LiteLLMProvider)
+    return provider
+
+
 def test_provider_factory_defaults_the_eval_timeout() -> None:
     """An unset timeout is still bound — a local model must not hang forever."""
-    provider = provider_factory_from_env(
+    provider = _shipped_provider(
         {
             "KORVID_EVAL_BASE_URL": "http://localhost:1234/v1",
             "KORVID_EVAL_MODEL": "openai/large-local-model",
         }
-    )()
+    )
 
     assert provider._plan.timeout == DEFAULT_EVAL_TIMEOUT_SECONDS
 
