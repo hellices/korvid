@@ -1109,6 +1109,7 @@ class WorkspaceController:
             refs,
             namespace=namespace,
             resolve=self._view_for_component,
+            aliases=self._view.aliases(),
             lookup=self._hierarchy_lookup(scope),
         )
         self._hierarchy_ctx = (title, refs, namespace, scope)
@@ -1186,6 +1187,7 @@ class WorkspaceController:
             ret.refs,
             namespace=ret.namespace,
             resolve=self._view_for_component,
+            aliases=self._view.aliases(),
             lookup=self._hierarchy_lookup(ret.tree_scope),
         )
         self._hierarchy_ctx = (ret.title, ret.refs, ret.namespace, ret.tree_scope)
@@ -1226,6 +1228,7 @@ class WorkspaceController:
                 refs,
                 namespace=namespace,
                 resolve=self._view_for_component,
+                aliases=self._view.aliases(),
                 lookup=self._hierarchy_lookup(scope),
             )
         )

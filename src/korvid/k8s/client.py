@@ -45,6 +45,7 @@ from korvid.k8s.metrics import PodMetrics, parse_pod_metrics_list
 from korvid.k8s.models import GenericSummary, PodSummary, summary_for
 from korvid.k8s.reads import ReadOps
 from korvid.k8s.telemetry import ReadOperation, ReadTelemetry, ReadTelemetryEvent
+from korvid.k8s.watch_events import WatchEvent, WatchProgress
 from korvid.k8s.writes import WriteOps
 
 logger = logging.getLogger(__name__)
@@ -576,7 +577,7 @@ class KubeClient(ReadOps, WriteOps):
         path: str,
         query: list[tuple[str, str]],
         known: dict[str, dict[str, Any]],
-    ) -> AsyncIterator[tuple[str, dict[str, Any]]]:
+    ) -> AsyncIterator[WatchEvent[dict[str, Any]]]:
         while True:
             await asyncio.sleep(LIST_POLL_INTERVAL)
             _, items, current = await self._list_watch_snapshot(meta, path, query)
@@ -587,10 +588,11 @@ class KubeClient(ReadOps, WriteOps):
                 if key not in current:
                     yield ("DELETED", old)
             known = current
+            yield WatchProgress.POLL
 
     async def _watch_resource_events(
         self, meta: ResourceMeta, namespace: str | None
-    ) -> AsyncIterator[tuple[str, dict[str, Any]]]:
+    ) -> AsyncIterator[WatchEvent[dict[str, Any]]]:
         if self._api is None:
             raise RuntimeError("connect() first")
 
@@ -620,6 +622,7 @@ class KubeClient(ReadOps, WriteOps):
                     self._observe_read("watch_event", path, payload=raw_object, object_count=1)
                     yield (event_type, raw_object)
                     del event, raw_object
+                    yield WatchProgress.LIVE_EVENT
         except (k8s_client.exceptions.ApiException, ApiStatusError) as exc:
             if self._watch_requires_poll_fallback(path, exc):
                 logger.info("%s rejects watch (405); falling back to LIST polling", meta.plural)
@@ -628,11 +631,15 @@ class KubeClient(ReadOps, WriteOps):
 
     async def watch_resources(
         self, meta: ResourceMeta, namespace: str | None
-    ) -> AsyncGenerator[tuple[str, PodSummary | GenericSummary], None]:
+    ) -> AsyncGenerator[WatchEvent[PodSummary | GenericSummary], None]:
         """Yield projected summaries from one shared raw LIST/WATCH transport."""
         if meta.identity == HELM_RELEASES_META.identity:
             tracker = ReleaseTracker()
-            async for event_type, item in self._watch_resource_events(meta, namespace):
+            async for event in self._watch_resource_events(meta, namespace):
+                if isinstance(event, WatchProgress):
+                    yield event
+                    continue
+                event_type, item = event
                 tracker_event = "ADDED" if event_type == "SNAPSHOT" else event_type
                 projected = tracker.apply(tracker_event, release_from_secret(item))
                 item.clear()
@@ -643,7 +650,11 @@ class KubeClient(ReadOps, WriteOps):
                     yield (projected_type, release)
             return
 
-        async for event_type, item in self._watch_resource_events(meta, namespace):
+        async for event in self._watch_resource_events(meta, namespace):
+            if isinstance(event, WatchProgress):
+                yield event
+                continue
+            event_type, item = event
             if meta.identity == HELM_REVISIONS_META.identity:
                 summary: PodSummary | GenericSummary = revision_from_secret(item)
             elif meta.identity == PODS_META.identity:

@@ -10,7 +10,8 @@ from __future__ import annotations
 import base64
 import gzip
 import json
-from typing import Any
+from collections.abc import AsyncIterator
+from typing import Any, TypeVar
 
 import pytest
 
@@ -29,6 +30,18 @@ from korvid.k8s.helm import (
     release_uid,
     revision_from_secret,
 )
+from korvid.k8s.watch_events import WatchEvent, WatchProgress
+
+_T = TypeVar("_T")
+
+
+async def _watch_rows(events: AsyncIterator[WatchEvent[_T]]) -> list[tuple[str, _T]]:
+    rows: list[tuple[str, _T]] = []
+    async for event in events:
+        if isinstance(event, WatchProgress):
+            continue
+        rows.append(event)
+    return rows
 
 
 def _payload(
@@ -350,10 +363,8 @@ class TestWatchHelmReleases:
             patch.object(client, "_request_json", request_json),
             patch("korvid.k8s.client.k8s_watch.Watch", return_value=fake_watch),
         ):
-            collected = [
-                (ev, r.name)
-                async for ev, r in client.watch_resources(HELM_RELEASES_META, "default")
-            ]
+            rows = await _watch_rows(client.watch_resources(HELM_RELEASES_META, "default"))
+            collected = [(event_type, row.name) for event_type, row in rows]
         assert ("SNAPSHOT", "web") in collected
         assert ("SNAPSHOT", "db") in collected
         assert request_json.await_args is not None
@@ -431,7 +442,8 @@ class TestWatchHelmReleases:
             patch("korvid.k8s.client.k8s_watch.Watch", return_value=_FakeWatch([])),
         ):
             collected = []
-            async for ev, row in client.watch_resources(HELM_RELEASES_META, "default"):
+            rows = await _watch_rows(client.watch_resources(HELM_RELEASES_META, "default"))
+            for ev, row in rows:
                 assert isinstance(row, HelmReleaseSummary)
                 collected.append((ev, row.name, row.revision))
         assert collected == [("SNAPSHOT", "web", 1), ("SNAPSHOT", "web", 2)]
@@ -449,10 +461,32 @@ class TestWatchHelmReleases:
             patch("korvid.k8s.client.k8s_watch.Watch", return_value=_FakeWatch(watch_events)),
         ):
             collected = []
-            async for ev, row in client.watch_resources(HELM_RELEASES_META, "default"):
+            rows = await _watch_rows(client.watch_resources(HELM_RELEASES_META, "default"))
+            for ev, row in rows:
                 assert isinstance(row, HelmReleaseSummary)
                 collected.append((ev, row.revision))
         assert collected == [("SNAPSHOT", 1), ("MODIFIED", 2), ("MODIFIED", 1)]
+
+    async def test_suppressed_live_revision_still_emits_progress(self) -> None:
+        client = KubeClient()
+        list_resp = {"metadata": {"resourceVersion": "5"}, "items": [_secret("web", 2)]}
+        watch_events = [{"type": "ADDED", "raw_object": _secret("web", 1)}]
+        with (
+            patch.object(client, "_api", MagicMock()),
+            patch.object(client, "_request_json", AsyncMock(return_value=list_resp)),
+            patch("korvid.k8s.client.k8s_watch.Watch", return_value=_FakeWatch(watch_events)),
+        ):
+            events = [
+                event async for event in client.watch_resources(HELM_RELEASES_META, "default")
+            ]
+
+        rows = [event for event in events if not isinstance(event, WatchProgress)]
+        revisions: list[tuple[str, int]] = []
+        for event_type, row in rows:
+            assert isinstance(row, HelmReleaseSummary)
+            revisions.append((event_type, row.revision))
+        assert revisions == [("SNAPSHOT", 2)]
+        assert events[-1] is WatchProgress.LIVE_EVENT
 
 
 class TestWatchHelmRevisions:
@@ -467,10 +501,8 @@ class TestWatchHelmRevisions:
             patch.object(client, "_request_json", AsyncMock(return_value=list_resp)),
             patch("korvid.k8s.client.k8s_watch.Watch", return_value=_FakeWatch([])),
         ):
-            collected = [
-                (ev, r.name)
-                async for ev, r in client.watch_resources(HELM_REVISIONS_META, "default")
-            ]
+            rows = await _watch_rows(client.watch_resources(HELM_REVISIONS_META, "default"))
+            collected = [(event_type, row.name) for event_type, row in rows]
         assert collected == [("SNAPSHOT", "web.v1"), ("SNAPSHOT", "web.v2")]
 
 

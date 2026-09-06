@@ -16,6 +16,7 @@ from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.logs import LogLine
 from korvid.k8s.models import GenericSummary, PodSummary
 from korvid.k8s.telemetry import ReadTelemetry, ReadTelemetryEvent
+from korvid.k8s.watch_events import WatchEvent, WatchProgress
 from tests.performance import live, manifests
 from tests.performance import replay as replay_mod
 from tests.performance.live import (
@@ -155,7 +156,7 @@ class _FakeKubeClient:
 
     async def watch_resources(
         self, meta: ResourceMeta, namespace: str | None
-    ) -> AsyncIterator[tuple[str, PodSummary | GenericSummary]]:
+    ) -> AsyncIterator[WatchEvent[PodSummary | GenericSummary]]:
         assert meta == PODS_META
         self.watch_resources_calls += 1
         self.watch_metas.append(meta)
@@ -179,6 +180,7 @@ class _FakeKubeClient:
                 if self.read_telemetry is not None:
                     self.read_telemetry(ReadTelemetryEvent("watch_event", "/api/v1/pods"))
                 yield event
+                yield WatchProgress.LIVE_EVENT
         finally:
             self.watch_finished = True
 

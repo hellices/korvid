@@ -77,8 +77,9 @@ discovery groups; unrelated CRDs keep generic presentation.
 LIST, WATCH, resourceVersion anchoring, polling fallback, and read telemetry
 share one transport. Snapshot rows are marked explicitly as `SNAPSHOT` within
 the existing event tuple contract. They upsert rows but do not reset a failed
-WATCH's retry budget. Live events and completed streams retain existing health
-semantics. Helm projections preserve snapshot markers after aggregation.
+WATCH's retry budget. Explicit `WatchProgress` values carry live-event and
+successful-poll health independently of projected rows; completed streams retain
+their health semantics. Helm projections preserve snapshot and progress signals.
 
 ## Workstream A: Commands
 
@@ -108,7 +109,7 @@ summary converters and Helm tracker.
 
 **Produces:** shared snapshot/watch/poll implementation and
 `KubeClient.watch_resources(meta, namespace)` returning an explicitly closable
-`AsyncGenerator[tuple[str, PodSummary | GenericSummary], None]`. Retire public
+`AsyncGenerator[WatchEvent[PodSummary | GenericSummary], None]`. Retire public
 Pod/generic/Helm watch entrypoints after migrating all callers, including
 performance and contract adapters. Resource-specific projections are private
 implementation details of the single entrypoint.

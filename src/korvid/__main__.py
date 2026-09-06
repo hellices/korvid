@@ -67,6 +67,7 @@ from korvid.k8s.telepresence import (
     TelepresenceCLI,
     find_telepresence,
 )
+from korvid.k8s.watch_events import WatchEvent
 from korvid.tools.executor import (
     ToolExecutor,
     UIBridge,
@@ -1395,21 +1396,21 @@ def _make_switch_context(
 
 def _make_watch_source(
     kube: KubeClient, aliases: dict[str, ResourceMeta]
-) -> Callable[[str, str], AsyncIterator[tuple[str, Summary]]]:
+) -> Callable[[str, str], AsyncIterator[WatchEvent[Summary]]]:
     """Watch source for the WatchManager: kind + scope -> summary events.
 
     Extracted from _run for complexity; *aliases* is the live shared dict
     that background discovery mutates.
     """
 
-    async def source(kind: str, scope: str) -> AsyncIterator[tuple[str, Summary]]:
+    async def source(kind: str, scope: str) -> AsyncIterator[WatchEvent[Summary]]:
         ns = None if scope == ALL_NAMESPACES else scope
         meta = aliases.get(kind)
         if meta is None:
             logger.warning("Unknown resource kind %r requested for watch; stopping", kind)
             raise ValueError(f"Unknown resource kind: {kind!r}")
-        async for event, summary in kube.watch_resources(meta, ns):
-            yield event, summary
+        async for event in kube.watch_resources(meta, ns):
+            yield event
 
     return source
 

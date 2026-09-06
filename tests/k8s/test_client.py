@@ -7,7 +7,7 @@ from copy import deepcopy
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -22,6 +22,18 @@ from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.helm import HELM_RELEASES_META
 from korvid.k8s.models import ReplicaSetSummary
 from korvid.k8s.telemetry import ReadTelemetryEvent
+from korvid.k8s.watch_events import WatchEvent, WatchProgress
+
+_T = TypeVar("_T")
+
+
+async def _watch_rows(events: AsyncIterator[WatchEvent[_T]]) -> list[tuple[str, _T]]:
+    rows: list[tuple[str, _T]] = []
+    async for event in events:
+        if isinstance(event, WatchProgress):
+            continue
+        rows.append(event)
+    return rows
 
 
 async def test_load_refreshable_kube_config_refreshes_expired_exec_token(
@@ -346,11 +358,15 @@ async def test_watch_resources_projects_pods_from_common_raw_path() -> None:
         patch.object(client, "_request_json", request_json),
         patch("korvid.k8s.client.k8s_watch.Watch", return_value=fake_watch),
     ):
-        collected = [(ev, p.name) async for ev, p in client.watch_resources(PODS_META, "default")]
+        events = [event async for event in client.watch_resources(PODS_META, "default")]
 
-    assert collected[0] == ("SNAPSHOT", "alpha")
-    assert collected[1] == ("SNAPSHOT", "beta")
-    assert collected[2] == ("MODIFIED", "alpha")
+    rows = [event for event in events if not isinstance(event, WatchProgress)]
+    assert [(event_type, pod.name) for event_type, pod in rows] == [
+        ("SNAPSHOT", "alpha"),
+        ("SNAPSHOT", "beta"),
+        ("MODIFIED", "alpha"),
+    ]
+    assert events[-1] is WatchProgress.LIVE_EVENT
     request_json.assert_awaited_once_with("/api/v1/namespaces/default/pods", query_params=[])
 
 
@@ -368,10 +384,8 @@ async def test_resource_watch_emits_pod_list_open_and_event_telemetry() -> None:
         patch.object(client, "_request_json", AsyncMock(return_value=list_response)),
         patch("korvid.k8s.client.k8s_watch.Watch", return_value=fake_watch),
     ):
-        collected = [
-            (event_type, pod.name)
-            async for event_type, pod in client.watch_resources(PODS_META, "default")
-        ]
+        rows = await _watch_rows(client.watch_resources(PODS_META, "default"))
+        collected = [(event_type, pod.name) for event_type, pod in rows]
 
     assert collected == [("SNAPSHOT", "listed"), ("MODIFIED", "watched")]
     assert [event.operation for event in seen] == ["list", "watch_open", "watch_event"]
@@ -399,10 +413,8 @@ async def test_no_telemetry_preserves_existing_watch_behavior() -> None:
             "korvid.k8s.client.json.dumps", side_effect=AssertionError("unexpected serialization")
         ),
     ):
-        collected = [
-            (event_type, pod.name)
-            async for event_type, pod in client.watch_resources(PODS_META, "default")
-        ]
+        rows = await _watch_rows(client.watch_resources(PODS_META, "default"))
+        collected = [(event_type, pod.name) for event_type, pod in rows]
 
     assert collected == [("SNAPSHOT", "listed")]
 
@@ -693,6 +705,7 @@ async def test_watch_releases_last_raw_snapshot_before_waiting_for_live_events()
     with patch.object(client, "_watch_resource_events", raw_events):
         stream = client.watch_resources(secret_meta, "default")
         first = await stream.__anext__()
+        assert not isinstance(first, WatchProgress)
         assert first[0] == "SNAPSHOT"
         del first
         gc.collect()
@@ -725,7 +738,8 @@ async def test_watch_resources_projects_generic_summaries_from_common_raw_path()
         patch.object(client, "_request_json", AsyncMock(return_value=list_resp)),
         patch("korvid.k8s.client.k8s_watch.Watch", return_value=fake_watch),
     ):
-        collected = [(ev, s.name) async for ev, s in client.watch_resources(meta, "default")]
+        rows = await _watch_rows(client.watch_resources(meta, "default"))
+        collected = [(event_type, summary.name) for event_type, summary in rows]
 
     assert collected[0] == ("SNAPSHOT", "dep-a")
     assert collected[1] == ("SNAPSHOT", "dep-b")
@@ -748,9 +762,8 @@ async def test_watch_resources_emits_generic_list_open_and_event_telemetry() -> 
         patch.object(client, "_request_json", AsyncMock(return_value=list_resp)),
         patch("korvid.k8s.client.k8s_watch.Watch", return_value=fake_watch),
     ):
-        collected = [
-            (ev, summary.name) async for ev, summary in client.watch_resources(meta, "default")
-        ]
+        rows = await _watch_rows(client.watch_resources(meta, "default"))
+        collected = [(event_type, summary.name) for event_type, summary in rows]
 
     assert collected == [("SNAPSHOT", "dep-a"), ("MODIFIED", "dep-a")]
     assert [event.operation for event in seen] == ["list", "watch_open", "watch_event"]
@@ -778,9 +791,8 @@ async def test_watch_resources_initial_snapshot_reuses_computed_summaries() -> N
         patch.object(client, "_object_summary", side_effect=original_summary) as summary_mock,
         patch("korvid.k8s.client.k8s_watch.Watch", return_value=fake_watch),
     ):
-        collected = [
-            (ev, summary.name) async for ev, summary in client.watch_resources(meta, "default")
-        ]
+        rows = await _watch_rows(client.watch_resources(meta, "default"))
+        collected = [(event_type, summary.name) for event_type, summary in rows]
 
     assert collected == [("SNAPSHOT", "dep-a")]
     assert summary_mock.call_count == 1
@@ -808,7 +820,9 @@ async def test_watch_resources_replicaset_yields_rich_summary() -> None:
         patch.object(client, "_request_json", AsyncMock(return_value=list_resp)),
         patch("korvid.k8s.client.k8s_watch.Watch", return_value=fake_watch),
     ):
-        collected = [s async for _, s in client.watch_resources(meta, "default")]
+        collected = [
+            summary for _, summary in await _watch_rows(client.watch_resources(meta, "default"))
+        ]
 
     assert isinstance(collected[0], ReplicaSetSummary)
     assert collected[0].revision == "2"
@@ -895,11 +909,34 @@ def _pkg_meta() -> ResourceMeta:
 async def _take(gen: Any, n: int) -> list[tuple[str, str]]:
     """First *n* (event, name) pairs from an endless watch generator."""
     out: list[tuple[str, str]] = []
-    async for ev, s in gen:
+    async for event in gen:
+        if isinstance(event, WatchProgress):
+            continue
+        ev, s = event
         out.append((ev, s.name))
         if len(out) >= n:
             break
     return out
+
+
+async def test_successful_empty_poll_emits_explicit_progress() -> None:
+    client = KubeClient()
+    meta = _pkg_meta()
+    snapshots: list[dict[str, Any]] = [
+        {"metadata": {}, "items": []},
+        {"metadata": {}, "items": []},
+    ]
+
+    with (
+        patch.object(client, "_api", MagicMock()),
+        patch.object(client, "_request_json", AsyncMock(side_effect=snapshots)),
+        patch.object(client_mod, "LIST_POLL_INTERVAL", 0.0),
+    ):
+        stream = client.watch_resources(meta, "olm")
+        progress = await asyncio.wait_for(stream.__anext__(), timeout=2.0)
+        await stream.aclose()
+
+    assert progress is WatchProgress.POLL
 
 
 async def test_unwatchable_kind_polls_lists_and_diffs_instead_of_watching() -> None:
@@ -2124,9 +2161,8 @@ async def test_watch_resources_fills_generic_custom_column_values() -> None:
         patch.object(client, "_request_json", AsyncMock(return_value=list_resp)),
         patch("korvid.k8s.client.k8s_watch.Watch", return_value=_FakeWatch(watch_events)),
     ):
-        seen = [
-            summary.custom async for _, summary in client.watch_resources(_deploy_meta(), "default")
-        ]
+        rows = await _watch_rows(client.watch_resources(_deploy_meta(), "default"))
+        seen = [summary.custom for _, summary in rows]
     assert seen == [("payments",), ("billing",)]
 
 
@@ -2145,7 +2181,8 @@ async def test_watch_resources_fills_pod_custom_column_values() -> None:
         patch.object(client, "_request_json", AsyncMock(return_value=list_response)),
         patch("korvid.k8s.client.k8s_watch.Watch", return_value=_FakeWatch([])),
     ):
-        seen = [summary.custom async for _, summary in client.watch_resources(PODS_META, "default")]
+        rows = await _watch_rows(client.watch_resources(PODS_META, "default"))
+        seen = [summary.custom for _, summary in rows]
     assert seen == [("payments",)]
 
 

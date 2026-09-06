@@ -12,7 +12,7 @@ object's view), ``d`` to ``("describe", ...)``, Escape to ``None``.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, ClassVar
 
@@ -23,16 +23,17 @@ from textual.widgets import Footer, Static, Tree
 from textual.widgets.tree import TreeNode
 
 from korvid.k8s.components import ComponentRef
+from korvid.k8s.discovery import ResourceMeta, canonical_resource_alias, resolve_resource
 
 #: Runtime ownership chain expanded under manifest components. Only the
 #: workload kinds whose children the store already watches; anything else
 #: renders as a leaf.
-_RUNTIME_CHILDREN: dict[str, tuple[str, str]] = {
-    "deployments": ("replicasets", "ReplicaSet"),
-    "replicasets": ("pods", "Pod"),
-    "statefulsets": ("pods", "Pod"),
-    "daemonsets": ("pods", "Pod"),
-    "jobs": ("pods", "Pod"),
+_RUNTIME_CHILDREN: dict[tuple[str, str], tuple[str, str]] = {
+    ("apps", "deployments"): ("apps", "replicasets"),
+    ("apps", "replicasets"): ("", "pods"),
+    ("apps", "statefulsets"): ("", "pods"),
+    ("apps", "daemonsets"): ("", "pods"),
+    ("batch", "jobs"): ("", "pods"),
 }
 
 
@@ -121,24 +122,31 @@ def _runtime_children(
     namespace: str,
     lookup: Callable[[str, str], list[Any] | None],
     cache: _BucketCache,
+    aliases: Mapping[str, ResourceMeta],
 ) -> list[HierarchyNode]:
     """Live descendants of one object via ownerReferences, recursively."""
-    step = _RUNTIME_CHILDREN.get(view)
+    parent = aliases.get(view)
+    if parent is None or parent.synthetic:
+        return []
+    step = _RUNTIME_CHILDREN.get((parent.group, parent.plural))
     if step is None or not parent_uid:
         return []
-    child_view, child_kind = step
+    child = resolve_resource(aliases, *step)
+    if child is None:
+        return []
+    child_view = canonical_resource_alias(aliases, child)
     nodes: list[HierarchyNode] = []
     index = _owner_index(lookup, cache, child_view, namespace)
     for obj in index.get((namespace, parent_uid), []):
         name = str(getattr(obj, "name", ""))
         nodes.append(
             HierarchyNode(
-                label=f"{child_kind}/{name}{_status_suffix(obj)}",
+                label=f"{child.kind}/{name}{_status_suffix(obj)}",
                 kind=child_view,
                 namespace=namespace,
                 name=name,
                 children=_runtime_children(
-                    child_view, str(getattr(obj, "uid", "")), namespace, lookup, cache
+                    child_view, str(getattr(obj, "uid", "")), namespace, lookup, cache, aliases
                 ),
             )
         )
@@ -152,6 +160,7 @@ def build_hierarchy(
     namespace: str,
     resolve: Callable[[ComponentRef], tuple[str, bool] | None],
     lookup: Callable[[str, str], list[Any] | None],
+    aliases: Mapping[str, ResourceMeta],
 ) -> HierarchyNode:
     """Component refs → display tree rooted at *root_label*.
 
@@ -161,7 +170,8 @@ def build_hierarchy(
     summaries from a watch covering that namespace, or None when no watch
     feeds the view right now; a component missing from a *watched* view is
     marked "(missing)" but stays navigable so describe can surface the 404
-    explanation.
+    explanation. ``aliases`` resolves runtime-child API identities to the
+    same canonical view keys used by the store.
     """
     root = HierarchyNode(label=root_label)
     cache: _BucketCache = {}
@@ -186,7 +196,7 @@ def build_hierarchy(
                 kind=view,
                 namespace=ns,
                 name=ref.name,
-                children=_runtime_children(view, uid, ns, lookup, cache),
+                children=_runtime_children(view, uid, ns, lookup, cache, aliases),
             )
         )
     return root

@@ -16,7 +16,7 @@ async def test_app_completion_uses_catalog_at_startup_and_after_discovery() -> N
         )
         app.on_aliases_updated()
         assert bar.command_words == command_words(app.aliases)
-        assert "widgets.example.io" in bar.command_words
+        assert bar.complete("widgets.") == "widgets.example.io"
 
 
 async def test_namespace_picker_preserves_the_resource_view() -> None:

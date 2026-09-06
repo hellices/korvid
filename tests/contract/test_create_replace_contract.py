@@ -19,6 +19,7 @@ import pytest
 
 from korvid.k8s.client import KubeClient
 from korvid.k8s.errors import ApiStatusError
+from korvid.k8s.watch_events import WatchProgress
 
 from .conftest import CONFIGMAP, NODE, configmap_manifest
 
@@ -84,7 +85,10 @@ async def test_watch_sees_live_object_lifecycle(client: KubeClient, namespace: s
     seen: list[str] = []
     try:
         async with asyncio.timeout(60):
-            async for _event, summary in client.watch_resources(CONFIGMAP, namespace):
+            async for event in client.watch_resources(CONFIGMAP, namespace):
+                if isinstance(event, WatchProgress):
+                    continue
+                _event, summary = event
                 seen.append(summary.name)
                 if "watch-me" in seen:
                     break

@@ -7,6 +7,7 @@ from korvid.k8s.client import KubeClient
 from korvid.k8s.discovery import PODS_META, ResourceMeta, build_alias_map, canonical_resource_alias
 from korvid.k8s.helm import HELM_RELEASES_META, HELM_REVISIONS_META
 from korvid.k8s.models import GenericSummary, PodSummary
+from korvid.k8s.watch_events import WatchEvent, WatchProgress
 from tests.ui.test_app import make_app
 
 _FLUX = ResourceMeta("HelmRelease", "helmreleases", "helm.toolkit.fluxcd.io", "v2", True, ("hr",))
@@ -23,12 +24,13 @@ class ResourceClient(KubeClient):
 
     async def watch_resources(
         self, meta: ResourceMeta, namespace: str | None
-    ) -> AsyncGenerator[tuple[str, PodSummary | GenericSummary], None]:
+    ) -> AsyncGenerator[WatchEvent[PodSummary | GenericSummary], None]:
         self.watched.append((meta, namespace))
         yield (
             "SNAPSHOT",
             GenericSummary(name="web", namespace="default", kind=meta.kind, created=""),
         )
+        yield WatchProgress.LIVE_EVENT
 
     async def get_object(
         self, meta: ResourceMeta, namespace: str | None, name: str
@@ -52,11 +54,17 @@ async def test_one_watch_entrypoint_preserves_each_resource_identity() -> None:
     aliases = build_alias_map(metas)
     source = _make_watch_source(client, aliases)
     store = ResourceStore()
+    progress: list[WatchProgress] = []
     for meta in metas:
         key = canonical_resource_alias(aliases, meta)
-        async for event, summary in source(key, "*"):
+        async for item in source(key, "*"):
+            if isinstance(item, WatchProgress):
+                progress.append(item)
+                continue
+            event, summary = item
             store.apply_event(key, "*", event, summary)
     assert client.watched == [(meta, None) for meta in metas]
+    assert progress == [WatchProgress.LIVE_EVENT] * len(metas)
     assert len(store.get("helmreleases", "*")) == 1
     assert len(store.get("helmreleases.helm.toolkit.fluxcd.io", "*")) == 1
     store.clear("helmreleases", "*")

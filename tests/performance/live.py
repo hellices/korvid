@@ -94,6 +94,7 @@ from korvid.k8s.discovery import PODS_META, ResourceMeta
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.models import GenericSummary, PodSummary
 from korvid.k8s.telemetry import ReadTelemetry
+from korvid.k8s.watch_events import WatchEvent, WatchProgress
 from korvid.ui.widgets.describe_screen import DescribeScreen
 from korvid.ui.widgets.resource_table import ResourceTable
 from tests.performance import manifests
@@ -301,7 +302,7 @@ class KubeReadClient(Protocol):
 
     def watch_resources(
         self, meta: ResourceMeta, namespace: str | None
-    ) -> AsyncIterator[tuple[str, PodSummary | GenericSummary]]: ...
+    ) -> AsyncIterator[WatchEvent[PodSummary | GenericSummary]]: ...
 
     async def get_object(
         self, meta: ResourceMeta, namespace: str | None, name: str
@@ -908,11 +909,15 @@ def make_live_watch_source(
     """
     sequence = 0
 
-    async def _source(kind: str, _scope: str) -> AsyncIterator[tuple[str, PodSummary]]:
+    async def _source(kind: str, _scope: str) -> AsyncIterator[WatchEvent[PodSummary]]:
         nonlocal sequence
         if kind != "pods":
             raise ValueError(f"run_live_replay only watches pods, got kind={kind!r}")
-        async for event_type, summary in kube.watch_resources(PODS_META, None):
+        async for event in kube.watch_resources(PODS_META, None):
+            if isinstance(event, WatchProgress):
+                yield event
+                continue
+            event_type, summary = event
             if not isinstance(summary, PodSummary):
                 raise TypeError("Pod watch returned a non-Pod summary")
             pod = summary

@@ -240,8 +240,10 @@ entrypoint. Its shared transport owns LIST, resourceVersion anchoring, WATCH,
 and list-only/405 polling. Pod and Helm logic only project the resulting
 objects; they do not implement separate transport loops. Initial rows use
 `SNAPSHOT` events, which upsert the store without resetting the watch manager's
-failure count. Only live progress or normal stream completion proves a
-connection healthy.
+failure count. Typed `WatchProgress` signals report live transport activity and
+successful polls, including empty polls and Helm events that produce no visible
+row. The manager consumes these signals without storing them or adding timeline
+entries. Normal stream completion also proves a connection healthy.
 
 ### Why interfaces and not callables
 
