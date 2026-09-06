@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import TypeVar
+
+_T = TypeVar("_T")
 
 
 @dataclass(frozen=True)
@@ -39,6 +42,10 @@ class ResourceMeta:
     def qualified_name(self) -> str:
         """The unambiguous API name, or the name of a synthetic view."""
         return f"{self.plural}.{self.group}" if self.group else self.plural
+
+    def configured_value(self, values: Mapping[str, _T]) -> _T | None:
+        """Select identity-specific configuration before a plural-wide default."""
+        return values.get(self.qualified_name, values.get(self.plural))
 
 
 PODS_META = ResourceMeta("Pod", "pods", "", "v1", True, ("po",))
@@ -78,7 +85,10 @@ def canonical_resource_alias(aliases: Mapping[str, ResourceMeta], meta: Resource
         candidate = aliases.get(alias)
         if candidate is not None and candidate.identity == meta.identity:
             return alias
-    for alias, candidate in aliases.items():
-        if candidate.identity == meta.identity:
-            return alias
+    fallback = min(
+        (alias for alias, candidate in aliases.items() if candidate.identity == meta.identity),
+        default=None,
+    )
+    if fallback is not None:
+        return fallback
     raise ValueError(f"Resource {meta.qualified_name!r} is not discovered")

@@ -211,11 +211,11 @@ class KubeClient(ReadOps, WriteOps):
         self._api: k8s_client.ApiClient | None = None
         self._core_v1: k8s_client.CoreV1Api | None = None
         self._ssar_warned = False
-        #: User-configured extra table columns (issue #45), keyed by plural
-        #: kind; values are extracted from the raw manifest at summary time
-        #: (the manifest is discarded afterwards). Secrets are dropped as
-        #: defense in depth: their values only render through the masking
-        #: pipeline, never through raw-manifest extraction.
+        #: User-configured extra table columns (issue #45), keyed by qualified
+        #: resource name or bare plural fallback; values are extracted from the
+        #: raw manifest at summary time (the manifest is discarded afterwards).
+        #: Core Secrets are dropped as defense in depth: their values only
+        #: render through the masking pipeline, never raw-manifest extraction.
         self._custom_columns: Mapping[str, tuple[CustomColumn, ...]] = {
             kind: columns for kind, columns in (custom_columns or {}).items() if kind != "secrets"
         }
@@ -291,7 +291,7 @@ class KubeClient(ReadOps, WriteOps):
     def _object_summary(self, meta: ResourceMeta, manifest: dict[str, Any]) -> GenericSummary:
         """summary_for + configured custom column values (issue #45)."""
         summary = summary_for(meta.kind, manifest, group=meta.group, version=meta.version)
-        columns = self._custom_columns.get(meta.plural)
+        columns = meta.configured_value(self._custom_columns)
         if not columns:
             return summary
         return dataclasses.replace(summary, custom=evaluate_all(columns, manifest))
@@ -536,6 +536,8 @@ class KubeClient(ReadOps, WriteOps):
             "name": metadata.get("name") or "",
             "namespace": metadata.get("namespace") or "",
         }
+        if "uid" in metadata:
+            retained["uid"] = metadata["uid"]
         if meta.identity in (HELM_RELEASES_META.identity, HELM_REVISIONS_META.identity):
             labels = metadata.get("labels") or {}
             retained["labels"] = {key: labels[key] for key in ("name", "version") if key in labels}

@@ -1230,11 +1230,16 @@ class KorvidApp(App[None]):
         plural = meta.plural if meta is not None else kind
         group = meta.group if meta is not None else ""
         synthetic = meta.synthetic if meta is not None else False
+        configured_view = (
+            meta.configured_value(self.config.views)
+            if meta is not None
+            else self.config.views.get(kind)
+        )
         selected_view, warnings = validate_selected_view(
             plural,
             group=group,
             synthetic=synthetic,
-            view=self.config.views.get(plural),
+            view=configured_view,
         )
         for warning in warnings:
             if warning in self._reported_view_warnings:

@@ -1216,6 +1216,30 @@ views:
     assert len(config.warnings) == 2
 
 
+def test_views_qualified_real_helmrelease_is_not_rejected_as_synthetic(tmp_path: Path) -> None:
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        """
+views:
+  helmreleases:
+    columns:
+      - name: SYNTHETIC
+        label: synthetic
+  helmreleases.helm.toolkit.fluxcd.io:
+    columns:
+      - name: TEAM
+        label: team
+"""
+    )
+    config = load_config(cfg)
+    assert set(config.views) == {"helmreleases.helm.toolkit.fluxcd.io"}
+    assert [c.name for c in config.views["helmreleases.helm.toolkit.fluxcd.io"].columns] == ["TEAM"]
+    assert any("views.helmreleases: synthetic" in warning for warning in config.warnings)
+    assert not any(
+        "views.helmreleases.helm.toolkit.fluxcd.io" in warning for warning in config.warnings
+    )
+
+
 def test_views_builtin_colliding_names_dropped_with_warning(tmp_path: Path) -> None:
     cfg = tmp_path / "config.yaml"
     cfg.write_text(

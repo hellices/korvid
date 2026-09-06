@@ -100,6 +100,12 @@ focused pane.
 Add columns sourced from labels, annotations, or a bounded JSONPath subset
 under `views:` in `config.yaml`:
 
+Use a qualified key such as `helmreleases.helm.toolkit.fluxcd.io` to configure
+one API group independently. Qualified settings take precedence over a bare
+plural default, and the same choice is used for values, headers, sorting, and
+agent resource listings. The synthetic Helm browser does not inherit a Flux
+view's columns.
+
 ```yaml
 views:
   pods:

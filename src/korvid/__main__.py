@@ -280,9 +280,11 @@ def _connectors(
 
 
 def _custom_column_names(config: KorvidConfig) -> dict[str, tuple[str, ...]]:
-    """Configured custom column *names* per plural (issue #158): the client
-    computes the values onto GenericSummary.custom; the tool layer needs the
-    names to render them as name=value in list_resources."""
+    """Configured custom column names per qualified resource or bare fallback.
+
+    The client computes values onto GenericSummary.custom; the tool layer needs
+    the matching names to render them as name=value in list_resources.
+    """
     return {kind: tuple(col.name for col in view.columns) for kind, view in config.views.items()}
 
 

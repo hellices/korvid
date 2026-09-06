@@ -717,11 +717,13 @@ class WorkspaceController:
         """The effective `views:` entry for the selected resource identity."""
         meta = self._view.aliases().get(kind)
         plural = meta.plural if meta is not None else kind
+        views = self._config().views
+        configured_view = meta.configured_value(views) if meta is not None else views.get(kind)
         selected, _warnings = validate_selected_view(
             plural,
             group=meta.group if meta is not None else "",
             synthetic=meta.synthetic if meta is not None else False,
-            view=self._config().views.get(plural),
+            view=configured_view,
         )
         return selected.config if selected is not None else None
 

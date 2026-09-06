@@ -8,6 +8,7 @@ from korvid.core.config import KorvidConfig, ViewConfig
 from korvid.core.store import Summary
 from korvid.k8s.columns import CustomColumn
 from korvid.k8s.discovery import ResourceMeta
+from korvid.k8s.helm import HELM_RELEASES_META
 from korvid.k8s.models import GenericSummary
 from korvid.k8s.olm import OPERATORS_GROUP
 from korvid.ui.widgets import resource_table
@@ -399,3 +400,58 @@ async def test_foreign_replicaset_renders_native_looking_custom_column() -> None
         await until(pilot, lambda: table.row_count == 1, label="replicaset rendered")
         assert _header_labels(table) == ["NAME", "AGE", "REVISION"]
         assert _row(table, 0)[-1] == "custom-revision"
+
+
+async def test_qualified_flux_view_gets_columns_without_leaking_to_synthetic_helm() -> None:
+    key = "helmreleases.helm.toolkit.fluxcd.io"
+    flux = ResourceMeta("HelmRelease", "helmreleases", "helm.toolkit.fluxcd.io", "v2", True)
+    config = _views_config(key, ViewConfig(columns=(_TEAM,)))
+    rows: list[Summary] = [
+        GenericSummary(
+            name="zeta",
+            namespace="default",
+            kind="HelmRelease",
+            created="",
+            custom=("beta",),
+        ),
+        GenericSummary(
+            name="alpha",
+            namespace="default",
+            kind="HelmRelease",
+            created="",
+            custom=("alpha",),
+        ),
+    ]
+    app = make_app(
+        [],
+        extra_data={key: rows},
+        aliases={
+            "pods": ResourceMeta("Pod", "pods", "", "v1", True),
+            "helmreleases": HELM_RELEASES_META,
+            key: flux,
+        },
+        config=config,
+    )
+    async with app.run_test() as pilot:
+        await pilot.press("colon")
+        await pilot.press(*"helmreleases")
+        await pilot.press("enter")
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: app.current_kind == "helmreleases", label="synthetic selected")
+        assert "TEAM" not in _header_labels(table)
+
+        await pilot.press("colon")
+        await pilot.press(*key)
+        await pilot.press("enter")
+        await until(pilot, lambda: table.row_count == 2, label="Flux releases rendered")
+        assert _header_labels(table) == ["NAME", "AGE", "TEAM"]
+        await pilot.press("colon")
+        await pilot.press(*"sort")
+        await pilot.press("space")
+        await pilot.press(*"TEAM")
+        await pilot.press("enter")
+        await until(
+            pilot,
+            lambda: [_row(table, i)[0] for i in range(table.row_count)] == ["alpha", "zeta"],
+            label="Flux releases sorted by TEAM",
+        )

@@ -1048,6 +1048,41 @@ async def test_405_poll_fallback_deletes_live_additions_missing_from_relist() ->
     ]
 
 
+async def test_poll_delete_preserves_uid_from_retained_tombstone() -> None:
+    client = KubeClient()
+    meta = replace(_deploy_meta(), watchable=False)
+    item = _generic("dep-a")
+    item["metadata"]["uid"] = "dep-uid"
+    item["metadata"]["labels"] = {"unneeded": "drop-me"}
+    item["spec"] = {"payload": "drop-me"}
+    item["status"] = {"payload": "drop-me"}
+    assert client._raw_resource_tombstone(meta, item) == {
+        "metadata": {"name": "dep-a", "namespace": "default", "uid": "dep-uid"}
+    }
+    snapshots = [
+        {"metadata": {}, "items": [item]},
+        {"metadata": {}, "items": []},
+    ]
+    rows: list[tuple[str, Any]] = []
+
+    with (
+        patch.object(client, "_api", MagicMock()),
+        patch.object(client, "_request_json", AsyncMock(side_effect=snapshots)),
+        patch.object(client_mod, "LIST_POLL_INTERVAL", 0.0),
+    ):
+        async for event in client.watch_resources(meta, "default"):
+            if isinstance(event, WatchProgress):
+                continue
+            rows.append(event)
+            if len(rows) == 2:
+                break
+
+    assert [(event_type, summary.name, summary.uid) for event_type, summary in rows] == [
+        ("SNAPSHOT", "dep-a", "dep-uid"),
+        ("DELETED", "dep-a", "dep-uid"),
+    ]
+
+
 async def test_watch_non_405_api_status_error_still_raises() -> None:
     """A non-405 ApiStatusError from the raw adapter propagates with its
     status, reason and body intact - the body disambiguates same-status
@@ -2145,6 +2180,32 @@ async def test_list_objects_fills_custom_column_values() -> None:
     ):
         summaries = await client.list_objects(_deploy_meta(), "default")
     assert summaries[0].custom == ("payments",)
+
+
+async def test_list_objects_prefers_qualified_custom_columns() -> None:
+    from korvid.k8s.columns import CustomColumn
+
+    meta = ResourceMeta("HelmRelease", "helmreleases", "helm.toolkit.fluxcd.io", "v2", True)
+    client = KubeClient(
+        custom_columns={
+            "helmreleases": (CustomColumn("BARE", "label", "team"),),
+            meta.qualified_name: (CustomColumn("QUALIFIED", "annotation", "owner"),),
+        }
+    )
+    manifest = _generic("web")
+    manifest["metadata"]["labels"] = {"team": "payments"}
+    manifest["metadata"]["annotations"] = {"owner": "platform"}
+    with (
+        patch.object(client, "_api", MagicMock()),
+        patch.object(
+            client,
+            "_request_json",
+            AsyncMock(return_value={"items": [manifest]}),
+        ),
+    ):
+        summaries = await client.list_objects(meta, "default")
+
+    assert summaries[0].custom == ("platform",)
 
 
 async def test_watch_resources_fills_generic_custom_column_values() -> None:

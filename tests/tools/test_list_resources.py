@@ -246,6 +246,30 @@ async def test_list_resources_renders_custom_columns_with_names() -> None:
     assert "x" * 500 not in out  # clamped: hostile/oversized values stay bounded
 
 
+async def test_list_resources_prefers_qualified_custom_column_names() -> None:
+    meta = ResourceMeta("HelmRelease", "helmreleases", "helm.toolkit.fluxcd.io", "v2", True)
+    summary = GenericSummary(
+        name="web",
+        namespace="prod",
+        kind="HelmRelease",
+        created="",
+        custom=("platform",),
+    )
+    ex = ToolExecutor(
+        ListingKube([summary]),  # type: ignore[arg-type]  # read-only fake
+        {"helmreleases.helm.toolkit.fluxcd.io": meta},
+        custom_columns={
+            "helmreleases": ("BARE",),
+            "helmreleases.helm.toolkit.fluxcd.io": ("OWNER",),
+        },
+    )
+
+    out = await ex.execute("list_resources", {"kind": "helmreleases.helm.toolkit.fluxcd.io"})
+
+    assert "OWNER=platform" in out
+    assert "BARE=" not in out
+
+
 async def test_custom_column_values_cannot_forge_extra_rows() -> None:
     """Values come from arbitrary annotations/JSONPath: embedded newlines or
     control characters must flatten to one printable line, not inject rows

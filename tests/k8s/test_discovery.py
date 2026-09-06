@@ -85,6 +85,36 @@ def test_resource_lookup_uses_identity_not_a_colliding_bare_alias() -> None:
     assert canonical_resource_alias(aliases, custom) == "deployments"
 
 
+def test_partial_alias_map_selection_is_independent_of_insertion_order() -> None:
+    from korvid.k8s.discovery import canonical_resource_alias
+
+    aliases = {"pod": PODS_META, "po": PODS_META}
+    reverse = dict(reversed(list(aliases.items())))
+    assert canonical_resource_alias(aliases, PODS_META) == "po"
+    assert canonical_resource_alias(reverse, PODS_META) == "po"
+
+
+def test_canonical_alias_does_not_fabricate_an_undiscovered_view() -> None:
+    from korvid.k8s.discovery import canonical_resource_alias
+
+    with pytest.raises(ValueError, match="not discovered"):
+        canonical_resource_alias({}, PODS_META)
+
+
+def test_resource_configuration_prefers_qualified_keys_and_preserves_empty_values() -> None:
+    meta = ResourceMeta("HelmRelease", "helmreleases", "helm.toolkit.fluxcd.io", "v2", True)
+    configured: dict[str, tuple[str, ...]] = {
+        "helmreleases": ("bare",),
+        meta.qualified_name: ("qualified",),
+    }
+    assert meta.configured_value(configured) == ("qualified",)
+    configured[meta.qualified_name] = ()
+    assert meta.configured_value(configured) == ()
+    del configured[meta.qualified_name]
+    assert meta.configured_value(configured) == ("bare",)
+    assert meta.configured_value({}) is None
+
+
 _CORE: dict[str, Any] = {
     "resources": [
         {
