@@ -1313,3 +1313,116 @@ def test_the_factory_still_names_no_vendor_after_the_credential_boundary() -> No
         )
     ]
     assert offenders == []
+
+
+# ---------------------------------------------------------------------------
+# End to end from the file on disk: `load_config` freezes, the factory
+# builds, and `acompletion` has to be handed plain mutable structures it
+# owns.
+# ---------------------------------------------------------------------------
+
+
+_FROZEN_PROFILE_YAML = """
+agent:
+  active: gateway
+  profiles:
+    gateway:
+      model: openai/gpt-4o
+      endpoint: https://gateway.example/v1
+      auth:
+        method: none
+      options:
+        temperature: 0.2
+        max_tokens: 4096
+        seed: 7
+        timeout: 120
+        extra_headers:
+          x-team: platform
+          x-env: prod
+        response_format:
+          type: json_object
+        stop:
+          - "\\n\\n"
+        prediction:
+          type: content
+          content:
+            - type: text
+              text: alpha
+            - type: text
+              text: beta
+"""
+
+
+def _gateway_plan(tmp_path: Path) -> RequestPlan:
+    """The plan the composition root would build from this file on disk."""
+    from korvid.core.config import load_config
+
+    path = tmp_path / "config.yaml"
+    path.write_text(_FROZEN_PROFILE_YAML, encoding="utf-8")
+    profile = load_config(path).model_connections.active_profile
+    assert profile is not None
+    assert profile.config_error is None, profile.config_error
+
+    provider = create_provider_from_profile(profile)
+    assert isinstance(provider, LiteLLMProvider)
+    return provider._plan
+
+
+def test_a_frozen_profile_from_disk_reaches_the_wire_as_plain_structures(
+    tmp_path: Path,
+) -> None:
+    """`load_config` returns `MappingProxyType`/tuple all the way down.
+
+    `copy.deepcopy` cannot copy a `mappingproxy` — it raises `TypeError:
+    cannot pickle 'mappingproxy' object` — so this whole path used to
+    fail for any profile with a nested option mapping or a list of
+    mappings, which is every profile that sets `extra_headers`.
+    """
+    plan = _gateway_plan(tmp_path)
+    kwargs = plan.call_kwargs([{"role": "user", "content": "hi"}], [], stream=True)
+
+    assert kwargs["extra_headers"] == {"x-team": "platform", "x-env": "prod"}
+    assert type(kwargs["extra_headers"]) is dict
+    assert kwargs["response_format"] == {"type": "json_object"}
+    assert kwargs["stop"] == ["\n\n"]
+    assert type(kwargs["stop"]) is list
+    assert kwargs["prediction"] == {
+        "type": "content",
+        "content": [{"type": "text", "text": "alpha"}, {"type": "text", "text": "beta"}],
+    }
+    assert type(kwargs["prediction"]["content"]) is list
+    assert all(type(item) is dict for item in kwargs["prediction"]["content"])
+
+
+def test_the_call_owns_its_structures_so_the_sdk_cannot_edit_the_profile(
+    tmp_path: Path,
+) -> None:
+    """LiteLLM edits several of the structures it is handed in place. The
+    profile is loaded once per process, so an edit that reached it would
+    outlive the request that made it."""
+    plan = _gateway_plan(tmp_path)
+    kwargs = plan.call_kwargs([], [], stream=True)
+
+    kwargs["extra_headers"]["x-team"] = "mutated"
+    kwargs["prediction"]["content"].append({"type": "text", "text": "gamma"})
+    kwargs["stop"].append("STOP")
+
+    again = plan.call_kwargs([], [], stream=True)
+    assert again["extra_headers"] == {"x-team": "platform", "x-env": "prod"}
+    assert again["prediction"]["content"] == [
+        {"type": "text", "text": "alpha"},
+        {"type": "text", "text": "beta"},
+    ]
+    assert again["stop"] == ["\n\n"]
+
+
+def test_the_operators_ordinary_parameters_survive_the_whole_path(tmp_path: Path) -> None:
+    """The materialize boundary must not cost the operator the settings
+    they actually wrote."""
+    plan = _gateway_plan(tmp_path)
+    kwargs = plan.call_kwargs([], [], stream=True)
+
+    assert kwargs["temperature"] == 0.2
+    assert kwargs["max_tokens"] == 4096
+    assert kwargs["seed"] == 7
+    assert kwargs["timeout"] == 120.0

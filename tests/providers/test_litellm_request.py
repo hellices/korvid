@@ -280,3 +280,101 @@ def test_a_declared_credential_is_snapshotted_onto_the_plan() -> None:
     assert plan.call_kwargs([], [], stream=True)["token_provider"] == "callable"
     with pytest.raises(TypeError, match="does not support item assignment"):
         plan.credential["token_provider"] = "replaced"  # type: ignore[index]  # frozen by design
+
+
+# ---------------------------------------------------------------------------
+# The frozen-config boundary: `load_config` hands out MappingProxyType and
+# tuples, and `acompletion` has to be handed plain mutable JSON structures.
+# ---------------------------------------------------------------------------
+
+
+def test_a_frozen_nested_option_mapping_survives_into_the_call() -> None:
+    """`load_config` freezes every nested mapping into a `MappingProxyType`.
+
+    `copy.deepcopy` cannot copy one — it falls through to `__reduce_ex__`
+    and raises `TypeError: cannot pickle 'mappingproxy' object` — so a
+    profile with any nested option mapping used to take down the whole
+    request rather than send it.
+    """
+    options = MappingProxyType(
+        {"extra_headers": MappingProxyType({"x-team": "platform", "x-env": "prod"})}
+    )
+    plan = build_plan(
+        model="openai/gpt-4o",
+        api_key="k",
+        base_url=None,
+        options=options,
+        supported=["extra_headers"],
+    )
+    kwargs = plan.call_kwargs([], [], stream=True)
+    assert kwargs["extra_headers"] == {"x-team": "platform", "x-env": "prod"}
+    assert type(kwargs["extra_headers"]) is dict
+
+
+def test_a_frozen_list_of_mappings_becomes_independent_plain_lists() -> None:
+    """Frozen sequences arrive as tuples of proxies.
+
+    LiteLLM serializes what it is handed and several of its own paths
+    mutate a list in place, so the call has to receive plain `list`/`dict`
+    — and mutating what the call received must not reach the plan.
+    """
+    frames: tuple[Mapping[str, object], ...] = (
+        MappingProxyType({"type": "text", "text": "a"}),
+        MappingProxyType({"type": "text", "text": "b"}),
+    )
+    options: Mapping[str, object] = MappingProxyType(
+        {"prediction": MappingProxyType({"type": "content", "content": frames})}
+    )
+    plan = build_plan(
+        model="openai/gpt-4o",
+        api_key="k",
+        base_url=None,
+        options=options,
+        supported=["prediction"],
+    )
+    kwargs = plan.call_kwargs([], [], stream=True)
+    content = kwargs["prediction"]["content"]
+    assert type(content) is list
+    assert content == [{"type": "text", "text": "a"}, {"type": "text", "text": "b"}]
+    assert all(type(item) is dict for item in content)
+
+    content.append({"type": "text", "text": "c"})
+    content[0]["text"] = "mutated"
+    again = plan.call_kwargs([], [], stream=True)
+    assert again["prediction"]["content"] == [
+        {"type": "text", "text": "a"},
+        {"type": "text", "text": "b"},
+    ]
+    assert frames[0]["text"] == "a"
+
+
+def test_two_calls_from_one_plan_never_share_a_nested_structure() -> None:
+    """One plan serves every request on the connection. Handing two calls
+    the same nested object would let one request's in-place edit reach
+    the next one."""
+    plan = build_plan(
+        model="openai/gpt-4o",
+        api_key="k",
+        base_url=None,
+        options=MappingProxyType({"extra_headers": MappingProxyType({"x": "1"})}),
+        supported=["extra_headers"],
+    )
+    first = plan.call_kwargs([], [], stream=True)
+    second = plan.call_kwargs([], [], stream=True)
+    assert first["extra_headers"] is not second["extra_headers"]
+
+
+def test_a_frozen_sequence_option_reaches_the_wire_as_a_list() -> None:
+    """`stop: ["\\n\\n"]` in a profile is a tuple by the time it is read.
+    The SDK and the outbound snapshot both expect the list the operator
+    wrote."""
+    plan = build_plan(
+        model="openai/gpt-4o",
+        api_key="k",
+        base_url=None,
+        options=MappingProxyType({"stop": ("\n\n", "END")}),
+        supported=["stop"],
+    )
+    stop = plan.call_kwargs([], [], stream=True)["stop"]
+    assert stop == ["\n\n", "END"]
+    assert type(stop) is list

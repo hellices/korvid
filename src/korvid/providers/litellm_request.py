@@ -19,7 +19,6 @@ is only reachable through ``**kwargs``, so korvid uses the named ones.
 
 from __future__ import annotations
 
-import copy
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -44,6 +43,49 @@ _KORVID_OWNED_OPTIONS: frozenset[str] = frozenset(
 #: parameters. They are lifted onto the plan and must never be left in the
 #: extras, where the per-provider allowlist would decide their fate.
 _LIFTED: frozenset[str] = frozenset({"api_version", "timeout"})
+
+
+# ---------------------------------------------------------------------------
+# The frozen-config boundary
+# ---------------------------------------------------------------------------
+
+
+def _materialize(value: object) -> object:
+    """One frozen config value as an independent, plain, mutable structure.
+
+    `load_config` copy-owns every parsed value: mappings become
+    `MappingProxyType` and sequences become tuples, recursively. Neither
+    shape can cross this boundary as it is.
+
+    * `copy.deepcopy` **raises** on a `mappingproxy` — it has no copier, so
+      it falls through to `__reduce_ex__` and fails with `TypeError: cannot
+      pickle 'mappingproxy' object`. Any profile with a nested option
+      mapping (`extra_headers` is the common one) took the whole request
+      down with it.
+    * A tuple is not the shape the SDK expects. LiteLLM's per-provider
+      transforms index and extend the sequences they are handed, and the
+      outbound snapshot records plain JSON, so a tuple would either raise
+      or serialize as something the operator did not write.
+
+    Mappings become plain `dict`, `list`/`tuple` become plain `list`, and
+    everything else is returned as-is: the remaining config value types are
+    JSON scalars, which are immutable and cannot alias.
+    """
+    if isinstance(value, Mapping):
+        return {str(key): _materialize(item) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return [_materialize(item) for item in value]
+    return value
+
+
+def materialize_options(options: Mapping[str, object]) -> dict[str, object]:
+    """A plain, mutable, independently-owned copy of *options*.
+
+    The provider layer's replacement for `copy.deepcopy` at the boundary
+    between frozen configuration and the SDK. See `_materialize` for why a
+    deep copy is both impossible and wrong here.
+    """
+    return {str(key): _materialize(item) for key, item in options.items()}
 
 
 def _positive_seconds(value: object) -> float | None:
@@ -166,10 +208,10 @@ class RequestPlan:
             kwargs["timeout"] = self.timeout
         if stream:
             kwargs["stream_options"] = {"include_usage": True}
-        kwargs.update(copy.deepcopy(dict(self.extra)))
-        # Last, and not deep-copied: a declared credential parameter is a
-        # live callable the transport invokes per request, and an operator
-        # option must never be able to replace it.
+        kwargs.update(materialize_options(self.extra))
+        # Last, and neither copied nor materialized: a declared credential
+        # parameter is a live callable the transport invokes per request,
+        # and an operator option must never be able to replace it.
         kwargs.update(self.credential)
         return kwargs
 
@@ -231,12 +273,14 @@ def build_plan(
         supported_set = frozenset(supported)
         filtered = {k: v for k, v in filtered.items() if k in supported_set}
 
-    # 4. Deep-copy so a frozen MappingProxyType in the profile can never be
-    #    mutated by a downstream SDK call. The credential parameters are
-    #    snapshotted rather than copied: they hold a live callable the
-    #    transport invokes, so a copy would be wrong, but the plan must own
-    #    a mapping the declaration that supplied it cannot rewrite later.
-    extra: dict[str, object] = copy.deepcopy(filtered)
+    # 4. Materialize, so the plan owns plain mutable structures a downstream
+    #    SDK call can edit without reaching the frozen profile — and so a
+    #    `MappingProxyType` from the profile does not take the request down
+    #    on the way. The credential parameters are snapshotted rather than
+    #    copied: they hold a live callable the transport invokes, so a copy
+    #    would be wrong, but the plan must own a mapping the declaration
+    #    that supplied it cannot rewrite later.
+    extra: dict[str, object] = materialize_options(filtered)
 
     return RequestPlan(
         model=model,
