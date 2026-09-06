@@ -9,7 +9,7 @@ from typing import Any, cast
 from textual.widgets import Input
 
 from korvid.agent.events import TextDelta, TurnComplete
-from korvid.ui.messages import UnknownCommand
+from korvid.ui.messages import BuiltinCommand, BuiltinOperation
 from korvid.ui.widgets.agent_panel import AgentPanel, ChatEntry
 from korvid.ui.widgets.status_bar import StatusBar
 from tests.ui.test_agent_wiring import StubSession, make_app
@@ -31,7 +31,7 @@ async def test_ai_off_disconnects_the_session_and_updates_the_status() -> None:
     app = make_app(session, disconnect_agent=lambda: closed.append(True))
     async with app.run_test() as pilot:
         assert "AI on" in _status(app)
-        app.on_unknown_command(UnknownCommand("ai off"))
+        app.on_builtin_command(BuiltinCommand(BuiltinOperation.AI, ("off",)))
         await pilot.pause()
         assert app._agent_ui.session is None
         assert "AI off" in _status(app)
@@ -43,7 +43,7 @@ async def test_ai_off_disables_prompt_submission_and_shows_the_hint() -> None:
     app = make_app(session)
     async with app.run_test() as pilot:
         await pilot.press("ctrl+a")
-        app.on_unknown_command(UnknownCommand("ai off"))
+        app.on_builtin_command(BuiltinCommand(BuiltinOperation.AI, ("off",)))
         await pilot.pause()
         inp = app.query_one(AgentPanel).query_one("#agent-input", Input)
         assert inp.disabled is True
@@ -62,7 +62,7 @@ async def test_ai_off_keeps_the_conversation_transcript() -> None:
         inp.value = "how are my pods?"
         await pilot.press("enter")
         await until(pilot, lambda: "all good" in _panel_text(app), label="turn done")
-        app.on_unknown_command(UnknownCommand("ai off"))
+        app.on_builtin_command(BuiltinCommand(BuiltinOperation.AI, ("off",)))
         await pilot.pause()
         assert "all good" in _panel_text(app)  # disconnect never erases history
 
@@ -70,7 +70,7 @@ async def test_ai_off_keeps_the_conversation_transcript() -> None:
 async def test_ai_off_is_idempotent_when_already_off() -> None:
     app = make_app(session=None, model=None)
     async with app.run_test() as pilot:
-        app.on_unknown_command(UnknownCommand("ai off"))
+        app.on_builtin_command(BuiltinCommand(BuiltinOperation.AI, ("off",)))
         await pilot.pause()
         assert app._agent_ui.session is None  # no crash, still off
         assert any("off" in n.message for n in app._notifications)
@@ -85,7 +85,7 @@ async def test_ai_off_refuses_while_a_turn_is_running() -> None:
         inp.value = "q"
         await pilot.press("enter")
         await until(pilot, lambda: bool(session.prompts), label="turn running")
-        app.on_unknown_command(UnknownCommand("ai off"))
+        app.on_builtin_command(BuiltinCommand(BuiltinOperation.AI, ("off",)))
         await pilot.pause()
         assert app._agent_ui.session is not None  # unchanged: never cancels midway
         assert any("busy" in n.message.lower() for n in app._notifications)
@@ -99,7 +99,7 @@ async def test_reconnect_after_off_restores_the_agent() -> None:
     app = make_app(session, rebuild_agent=lambda s: fresh)
     async with app.run_test() as pilot:
         await pilot.press("ctrl+a")
-        app.on_unknown_command(UnknownCommand("ai off"))
+        app.on_builtin_command(BuiltinCommand(BuiltinOperation.AI, ("off",)))
         await pilot.pause()
         assert "AI off" in _status(app)
         settings = AgentSettings(
@@ -142,7 +142,7 @@ async def test_ctrl_a_after_off_keeps_the_transcript() -> None:
         inp.value = "how are my pods?"
         await pilot.press("enter")
         await until(pilot, lambda: "all good" in _panel_text(app), label="turn done")
-        app.on_unknown_command(UnknownCommand("ai off"))
+        app.on_builtin_command(BuiltinCommand(BuiltinOperation.AI, ("off",)))
         await pilot.pause()
         await pilot.press("ctrl+a")  # hide
         await pilot.press("ctrl+a")  # …and reopen
@@ -187,9 +187,9 @@ async def test_bare_ai_after_off_prefills_the_wizard() -> None:
     )
     app._agent_ui._settings = settings
     async with app.run_test() as pilot:
-        app.on_unknown_command(UnknownCommand("ai off"))
+        app.on_builtin_command(BuiltinCommand(BuiltinOperation.AI, ("off",)))
         await pilot.pause()
-        app.on_unknown_command(UnknownCommand("ai"))
+        app.on_builtin_command(BuiltinCommand(BuiltinOperation.AI))
         await pilot.pause()
         assert isinstance(app.screen, AgentSetupScreen)
         screen = app.screen

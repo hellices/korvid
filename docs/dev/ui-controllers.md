@@ -39,7 +39,7 @@ KorvidApp  (ui/app.py)
 │                       (ui/resource_inspect_controller.py)  describe, Secret masking, container pick, hint details
 ├── IntegrationController
 │                       (ui/integration_controller.py)  `:mcp` on/off/follow and `:tp` status/hint
-├── CommandRouter        (ui/command_router.py)          which owner an unresolved `:` command belongs to
+├── CommandRouter        (ui/command_router.py)          dispatches typed built-in commands to feature owners
 └── ...
 ```
 
@@ -226,6 +226,22 @@ teardown) and `reset_view_after_switch` (adopt pods in the new cluster's default
 namespace). It serializes with navigation by taking the workspace controller's
 `nav_lock`, which `:mcp` toggles and write execution share for the same
 reason.
+
+### Resource identity and watch ownership
+
+`k8s/discovery.py` owns qualified resource aliases and identity lookup.
+Controllers retain the resolved group/plural/synthetic identity when choosing
+a view key; a same-plural CRD must not inherit another API group's renderer,
+drill relation, or describe target. Synthetic Helm views and Flux HelmRelease
+resources have independent aliases and watch/store buckets.
+
+`KubeClient.watch_resources(meta, namespace)` is the single resource watch
+entrypoint. Its shared transport owns LIST, resourceVersion anchoring, WATCH,
+and list-only/405 polling. Pod and Helm logic only project the resulting
+objects; they do not implement separate transport loops. Initial rows use
+`SNAPSHOT` events, which upsert the store without resetting the watch manager's
+failure count. Only live progress or normal stream completion proves a
+connection healthy.
 
 ### Why interfaces and not callables
 
@@ -668,9 +684,11 @@ tests added before the move where the behaviour is not already pinned.
       hold: the MCP follow flag, and the telepresence hinted/probing/reprobe
       trio. It reaches the proposal sweeps through `IntegrationProposals`
       and the `:ctx` navigation lock through `SwitchSerializer`.
-    - `CommandRouter` (`ui/command_router.py`) decides which of those owners
-      an unresolved `:` command belongs to, and produces exactly one message
-      of its own — the unknown-command report. `OperatorController` answers
+    - `CommandRouter` (`ui/command_router.py`) dispatches `BuiltinCommand`
+      messages to those owners. The immutable catalog in `ui/command.py`
+      owns command aliases, parsing, help, and completion; built-ins never
+      travel through `UnknownCommand`. The router produces the
+      unknown-command report only for unresolved input. `OperatorController` answers
       the `:operators` half through `explain_missing_catalog()`, because only
       the OLM owner can tell an undiscovered API group from a syntax error on
       a discovered view.

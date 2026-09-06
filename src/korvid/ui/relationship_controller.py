@@ -30,7 +30,7 @@ from korvid.core.relationships import (
     SummaryLike,
     build_relationship_graph,
 )
-from korvid.k8s.discovery import ResourceMeta
+from korvid.k8s.discovery import ResourceMeta, resolve_resource
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.relationship_facts import GATEWAY_GROUP, RelationKind, is_gateway_route_kind
 
@@ -122,8 +122,8 @@ def _is_gateway_resource(meta: ResourceMeta) -> bool:
 def _resolve_fixed(
     spec: GraphSourceSpec, aliases: Mapping[str, ResourceMeta]
 ) -> ResourceMeta | None:
-    meta = aliases.get(spec.plural)
-    if meta is not None and meta.group == spec.group and meta.kind == spec.kind:
+    meta = resolve_resource(aliases, spec.group, spec.plural)
+    if meta is not None and meta.kind == spec.kind:
         return meta
     return None
 

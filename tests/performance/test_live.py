@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 
-from korvid.k8s.discovery import ResourceMeta
+from korvid.k8s.discovery import PODS_META, ResourceMeta
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.logs import LogLine
 from korvid.k8s.models import GenericSummary, PodSummary
@@ -104,7 +104,8 @@ class _FakeKubeClient:
         self.closed = False
         self.events: asyncio.Queue[tuple[str, PodSummary]] = asyncio.Queue()
         self.list_pods_calls: list[str] = []
-        self.watch_pods_calls = 0
+        self.watch_resources_calls = 0
+        self.watch_metas: list[ResourceMeta] = []
         self.watch_namespaces: list[str | None] = []
         self.watch_finished = False
         self.on_list_pods: Callable[[str], None] | None = None
@@ -147,13 +148,17 @@ class _FakeKubeClient:
             self.read_telemetry(ReadTelemetryEvent("list", f"/api/v1/namespaces/{namespace}/pods"))
         return [pod for (ns, _name), pod in self.pods.items() if ns == namespace]
 
-    def _initial_watch_pods(self, namespace: str | None) -> list[PodSummary]:
+    def _initial_watch_resources(self, namespace: str | None) -> list[PodSummary]:
         if namespace is not None:
             return [pod for pod in self.pods.values() if pod.namespace == namespace]
         return [*self.pods.values(), *self.distractor_pods]
 
-    async def watch_pods(self, namespace: str | None) -> AsyncIterator[tuple[str, PodSummary]]:
-        self.watch_pods_calls += 1
+    async def watch_resources(
+        self, meta: ResourceMeta, namespace: str | None
+    ) -> AsyncIterator[tuple[str, PodSummary | GenericSummary]]:
+        assert meta == PODS_META
+        self.watch_resources_calls += 1
+        self.watch_metas.append(meta)
         self.watch_namespaces.append(namespace)
         self.watch_finished = False
         try:
@@ -165,8 +170,8 @@ class _FakeKubeClient:
                 raise self.watch_error
             if self.read_telemetry is not None:
                 self.read_telemetry(ReadTelemetryEvent("list", "/api/v1/pods"))
-            for pod in self._initial_watch_pods(namespace):
-                yield ("ADDED", pod)
+            for pod in self._initial_watch_resources(namespace):
+                yield ("SNAPSHOT", pod)
             if self.read_telemetry is not None:
                 self.read_telemetry(ReadTelemetryEvent("watch_open", "/api/v1/pods"))
             while True:
@@ -413,11 +418,12 @@ async def test_run_live_replay_full_happy_path_matches_cluster_digest(
     assert app_client.closed
 
     # MEDIUM finding: the app-path client's telemetry is the *only* source of
-    # `report.api` - every "list" comes from `watch_pods`'s own internal
+    # `report.api` - every "list" comes from `watch_resources`'s own internal
     # LIST-then-WATCH, not from any harness read. Three watches, not one: the
     # `namespace_switch` UI-at-scale scenario really scopes down to a seeded
     # namespace and back, and a scope change restarts the application watch.
-    assert app_client.watch_pods_calls == 3
+    assert app_client.watch_resources_calls == 3
+    assert app_client.watch_metas == [PODS_META, PODS_META, PODS_META]
     # Every watch stays cluster-wide: `make_live_watch_source` pins the read to
     # the owned namespace set regardless of the UI scope, so scoping the table
     # to one namespace never re-targets (or widens) the underlying watch.
@@ -430,7 +436,7 @@ async def test_run_live_replay_full_happy_path_matches_cluster_digest(
 
     # The harness client never watches - it is only ever used for the
     # ownership gate and the final independent re-read.
-    assert harness_client.watch_pods_calls == 0
+    assert harness_client.watch_resources_calls == 0
 
     # LOW finding: the ownership gate's validated snapshot is reused as the
     # pre-churn uid snapshot - each namespace is only `list_pods`-ed twice on

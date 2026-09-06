@@ -84,7 +84,7 @@ async def test_watch_sees_live_object_lifecycle(client: KubeClient, namespace: s
     seen: list[str] = []
     try:
         async with asyncio.timeout(60):
-            async for _event, summary in client.watch_objects(CONFIGMAP, namespace):
+            async for _event, summary in client.watch_resources(CONFIGMAP, namespace):
                 seen.append(summary.name)
                 if "watch-me" in seen:
                     break

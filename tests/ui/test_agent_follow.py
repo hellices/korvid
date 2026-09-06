@@ -10,7 +10,7 @@ methods, exactly like MCP follow mode (issue #153) does for external reads.
 from __future__ import annotations
 
 from korvid.agent.events import AgentEvent, ToolCallFinished, ToolCallStarted
-from korvid.ui.messages import UnknownCommand
+from korvid.ui.messages import BuiltinCommand, BuiltinOperation
 from korvid.ui.widgets.describe_screen import DescribeScreen
 from tests.ui.agent_session_fakes import FakeSession
 from tests.ui.test_agent_ui_drive import make_app
@@ -98,9 +98,9 @@ async def test_ai_follow_command_toggles_state() -> None:
     async with app.run_test() as pilot:
         await pilot.pause()
         assert app._agent_ui._follow is True  # default on
-        app.on_unknown_command(UnknownCommand("ai follow off"))
+        app.on_builtin_command(BuiltinCommand(BuiltinOperation.AI, ("follow", "off")))
         assert app._agent_ui._follow is False
-        app.on_unknown_command(UnknownCommand("ai follow"))  # bare toggle
+        app.on_builtin_command(BuiltinCommand(BuiltinOperation.AI, ("follow",)))  # bare toggle
         assert app._agent_ui._follow is True
 
 

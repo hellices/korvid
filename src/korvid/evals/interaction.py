@@ -334,6 +334,8 @@ class EvalUiBridge(AgentUiBridge):
         )
 
     def _drill_down(self, action: DrillDown) -> tuple[bool, str, InteractionContext]:
+        from korvid.evals.fake_kube import builtin_aliases
+
         all_namespaces = self._focused.scope == ALL_NAMESPACES_SCOPE
         parent = self._fixture_resource(
             self._focused.kind,
@@ -347,14 +349,15 @@ class EvalUiBridge(AgentUiBridge):
                 f"ERROR: {action.name!r} is not visible in the current pane",
                 self._context,
             )
-        child = drill_child(self._focused.kind.lower())
+        meta = builtin_aliases().get(self._focused.kind.lower())
+        child = drill_child(meta) if meta is not None else None
         if child is None:
             return (
                 False,
                 f"ERROR: {self._focused.kind} does not support drill-down",
                 self._context,
             )
-        pane = replace(self._focused, kind=child, selected=None)
+        pane = replace(self._focused, kind=child[1], selected=None)
         return True, f"drilled into {action.name}", self._focus(pane)
 
     @property

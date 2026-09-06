@@ -201,6 +201,31 @@ async def test_event_resets_failure_streak() -> None:
     await mgr.stop_all()
 
 
+async def test_snapshot_does_not_reset_failure_streak() -> None:
+    """A successful re-LIST is not proof that the live watch is healthy."""
+    store = ResourceStore()
+    errors: list[str] = []
+    calls = 0
+
+    async def source(kind: str, scope: str) -> AsyncIterator[tuple[str, Summary]]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("first failure")
+            yield  # pragma: no cover
+        yield ("SNAPSHOT", _pod("listed"))
+        raise RuntimeError("watch never opened")
+
+    mgr = WatchManager(store, source, on_error=errors.append, retry_delay=0, max_retries=2)
+    await mgr.start("pods", "default")
+    await asyncio.sleep(0.05)
+
+    assert calls == 2
+    assert mgr.active == set()
+    assert len(errors) == 1
+    assert "watch never opened" in errors[0]
+
+
 async def test_api_status_error_uses_explain_message() -> None:
     """ApiStatusError(403) → on_error message is the human-readable explain_api_error text."""
     store = ResourceStore()
@@ -253,10 +278,10 @@ async def test_reconnect_relist_drops_stale_pods() -> None:
         nonlocal calls
         calls += 1
         if calls == 1:
-            yield ("ADDED", _pod("a"))
-            yield ("ADDED", _pod("b"))
+            yield ("SNAPSHOT", _pod("a"))
+            yield ("SNAPSHOT", _pod("b"))
             raise ApiStatusError(500, "connection reset")
-        yield ("ADDED", _pod("a"))
+        yield ("SNAPSHOT", _pod("a"))
         reconnected.set()
         while True:
             await asyncio.sleep(0.01)
@@ -322,7 +347,7 @@ async def test_405_reports_once_without_retries_and_keeps_listed_rows() -> None:
 
     async def source(kind: str, scope: str) -> AsyncIterator[tuple[str, Summary]]:
         attempts.append(1)
-        yield ("ADDED", _ns_pod("listed", "olm"))
+        yield ("SNAPSHOT", _ns_pod("listed", "olm"))
         raise ApiStatusError(405, "Method Not Allowed")
 
     mgr = WatchManager(store, source, on_error=errors.append, retry_delay=0, max_retries=5)
@@ -380,7 +405,7 @@ async def test_403_purges_rows_seeded_by_the_forbidden_list() -> None:
     errors: list[str] = []
 
     async def source(kind: str, scope: str) -> AsyncIterator[tuple[str, Summary]]:
-        yield ("ADDED", _ns_pod("stale", "other-ns"))
+        yield ("SNAPSHOT", _ns_pod("stale", "other-ns"))
         raise ApiStatusError(403, "Forbidden")
 
     mgr = WatchManager(store, source, on_error=errors.append, retry_delay=0)

@@ -1,15 +1,14 @@
 """Direct tests for `CommandRouter` (issue #187 / Deep Task 9).
 
-`:` commands the command bar could not resolve to a resource kind land in
-one place. The router's whole job is deciding *which owner* gets them - it
-holds no feature logic of its own, so these tests assert on where each
-command went and on the one message the router itself produces: the
-unknown-command report.
+App-owned commands arrive with a canonical operation identity. Genuinely
+unknown commands use a separate path that only checks the operator-catalog
+special case before reporting them.
 """
 
 from __future__ import annotations
 
 from korvid.ui.command_router import CommandRouter
+from korvid.ui.messages import BuiltinCommand, BuiltinOperation, UnknownCommand
 
 from .test_write_coordinator import FakeUi
 
@@ -85,17 +84,21 @@ class Harness:
         )
 
 
+def _builtin(operation: BuiltinOperation, *arguments: str) -> BuiltinCommand:
+    return BuiltinCommand(operation, arguments)
+
+
 def test_ai_and_agent_reach_the_agent_owner() -> None:
     h = Harness()
-    h.router.route("ai on")
-    h.router.route("agent off")
+    h.router.route_builtin(_builtin(BuiltinOperation.AI, "on"))
+    h.router.route_builtin(_builtin(BuiltinOperation.AI, "off"))
     assert h.agent.commands == [["on"], ["off"]]
     assert h.ui.notifications == []
 
 
 def test_model_reaches_the_agent_owner() -> None:
     h = Harness()
-    h.router.route("model list")
+    h.router.route_builtin(_builtin(BuiltinOperation.MODEL, "list"))
     assert h.agent.model_commands == [["list"]]
 
 
@@ -103,8 +106,8 @@ def test_agent_commands_fall_through_when_the_agent_is_unavailable() -> None:
     """Without the [agent] extra there is no owner: the command is unknown,
     not silently swallowed."""
     h = Harness(agent_available=False)
-    h.router.route("ai on")
-    h.router.route("model list")
+    h.router.route_builtin(_builtin(BuiltinOperation.AI, "on"))
+    h.router.route_builtin(_builtin(BuiltinOperation.MODEL, "list"))
     assert h.agent.commands == []
     assert h.agent.model_commands == []
     assert len(h.ui.notifications) == 2
@@ -113,44 +116,36 @@ def test_agent_commands_fall_through_when_the_agent_is_unavailable() -> None:
 
 def test_mcp_reaches_the_integration_owner() -> None:
     h = Harness()
-    h.router.route("mcp follow on")
+    h.router.route_builtin(_builtin(BuiltinOperation.MCP, "follow", "on"))
     assert h.integrations.mcp == [["follow", "on"]]
 
 
 def test_tp_and_telepresence_reach_the_integration_owner() -> None:
     h = Harness()
-    h.router.route("tp")
-    h.router.route("telepresence")
+    h.router.route_builtin(_builtin(BuiltinOperation.TELEPRESENCE))
+    h.router.route_builtin(_builtin(BuiltinOperation.TELEPRESENCE))
     assert h.integrations.telepresence == 2
 
 
 def test_proposals_reaches_the_proposal_owner() -> None:
     h = Harness()
-    h.router.route("proposals")
+    h.router.route_builtin(_builtin(BuiltinOperation.PROPOSALS))
     assert h.proposals.reviews == 1
 
 
 def test_pf_reaches_the_forward_owner() -> None:
     h = Harness()
-    h.router.route("pf")
+    h.router.route_builtin(_builtin(BuiltinOperation.PORT_FORWARDS))
     assert h.forwards.lists == 1
 
 
-def test_zero_argument_commands_reject_trailing_arguments() -> None:
-    h = Harness()
-    h.router.route("tp extra")
-    h.router.route("telepresence extra")
-    h.router.route("proposals extra")
-    h.router.route("pf stop")
-    assert h.integrations.telepresence == 0
-    assert h.proposals.reviews == 0
-    assert h.forwards.lists == 0
-    assert len(h.ui.notifications) == 4
+def test_legacy_text_router_is_removed() -> None:
+    assert not hasattr(Harness().router, "route")
 
 
 def test_operators_without_a_discovered_catalog_is_explained_by_its_owner() -> None:
     h = Harness(catalog_missing=True)
-    h.router.route("operators")
+    h.router.route_unknown(UnknownCommand("operators"))
     assert h.operators.explanations == 1
     assert h.ui.notifications == []
 
@@ -159,21 +154,21 @@ def test_operators_on_a_discovered_catalog_reports_the_syntax_error() -> None:
     """A syntax error on a discovered view (`:operators ns extra`) must not
     be reported as a missing API group."""
     h = Harness(catalog_missing=False)
-    h.router.route("operators ns extra")
+    h.router.route_unknown(UnknownCommand("operators ns extra"))
     assert h.operators.explanations == 0
     assert any("Unknown resource or command" in message for message in h.ui.messages())
 
 
 def test_malformed_operators_command_is_not_explained_as_a_missing_catalog() -> None:
     h = Harness(catalog_missing=True)
-    h.router.route("operators ns extra")
+    h.router.route_unknown(UnknownCommand("operators ns extra"))
     assert h.operators.explanations == 0
     assert any("Unknown resource or command" in message for message in h.ui.messages())
 
 
 def test_an_unknown_command_is_reported_verbatim() -> None:
     h = Harness()
-    h.router.route("frobnicate [bold]everything[/bold]")
+    h.router.route_unknown(UnknownCommand("frobnicate [bold]everything[/bold]"))
     message = h.ui.messages()[0]
     assert "frobnicate [bold]everything[/bold]" in message
     assert "CRD not installed?" in message
@@ -182,7 +177,7 @@ def test_an_unknown_command_is_reported_verbatim() -> None:
 
 def test_an_empty_command_is_reported_not_routed() -> None:
     h = Harness()
-    h.router.route("   ")
+    h.router.route_unknown(UnknownCommand("   "))
     assert h.agent.commands == []
     assert h.integrations.mcp == []
     assert len(h.ui.notifications) == 1

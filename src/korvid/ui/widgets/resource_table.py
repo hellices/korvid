@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from collections.abc import Set as AbstractSet
 from datetime import UTC, datetime
+from types import MappingProxyType
 from typing import Final, NamedTuple, Protocol, Self, cast
 
 from rich.cells import cell_len
@@ -166,6 +167,27 @@ def _adapt_standard_renderer(factory: _StandardRendererFactory, name: str) -> _R
     return adapted
 
 
+_render_replicaset_rows = _adapt_standard_renderer(
+    lambda table: table._add_replicaset_rows, "_render_replicaset_rows"
+)
+_render_helm_release_rows = _adapt_standard_renderer(
+    lambda table: table._add_helm_release_rows, "_render_helm_release_rows"
+)
+_render_helm_revision_rows = _adapt_standard_renderer(
+    lambda table: table._add_helm_revision_rows, "_render_helm_revision_rows"
+)
+_render_package_rows = _adapt_standard_renderer(
+    lambda table: table._add_package_rows, "_render_package_rows"
+)
+_render_subscription_rows = _adapt_standard_renderer(
+    lambda table: table._add_subscription_rows, "_render_subscription_rows"
+)
+_render_csv_rows = _adapt_standard_renderer(lambda table: table._add_csv_rows, "_render_csv_rows")
+_render_generic_rows = _adapt_standard_renderer(
+    lambda table: table._add_generic_rows, "_render_generic_rows"
+)
+
+
 # In-place removals cost O(rows) each (DataTable.remove_row rebuilds its
 # row-location map); cap them so a bulk drop (e.g. a narrowing filter) takes
 # the linear rebuild path instead of a quadratic remove loop.
@@ -276,45 +298,81 @@ def _csv_phase_cell(phase: str) -> Text:
     return Text(phase, style=_CSV_PHASE_STYLE.get(phase, "yellow"))
 
 
-_COLS_BY_KIND: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
-    "pods": (_POD_COLS, _POD_COLS_ALL_NS),
-    "replicasets": (_RS_COLS, _RS_COLS_ALL_NS),
-    "helmreleases": (_HELM_COLS, _HELM_COLS_ALL_NS),
-    "helmrevisions": (_HELM_REV_COLS, _HELM_REV_COLS_ALL_NS),
-    "packagemanifests": (_PKG_COLS, _PKG_COLS_ALL_NS),
-    "subscriptions": (_SUB_COLS, _SUB_COLS_ALL_NS),
-    "clusterserviceversions": (_CSV_COLS, _CSV_COLS_ALL_NS),
-}
+class _Presentation(NamedTuple):
+    columns: tuple[str, ...]
+    all_namespace_columns: tuple[str, ...]
+    renderer: _RowRenderer
 
 
-#: OLM plurals are only special when served by the OLM API groups: a CRD
-#: from another group whose plural happens to be "subscriptions" must keep
-#: the generic rendering (its summaries are generic too).
-_KIND_GROUPS: dict[str, str] = {
-    "packagemanifests": PACKAGES_GROUP,
-    "subscriptions": OPERATORS_GROUP,
-    "clusterserviceversions": OPERATORS_GROUP,
-}
+_GENERIC_PRESENTATION = _Presentation(
+    _GENERIC_COLS,
+    _GENERIC_COLS_ALL_NS,
+    _render_generic_rows,
+)
+
+# Resource presentation is an identity decision, not a plural-only decision:
+# foreign CRDs may deliberately reuse Kubernetes or synthetic view plurals.
+_PRESENTATIONS: Mapping[tuple[str, str, bool], _Presentation] = MappingProxyType(
+    {
+        ("", "pods", False): _Presentation(
+            _POD_COLS,
+            _POD_COLS_ALL_NS,
+            _render_pod_rows,
+        ),
+        ("apps", "replicasets", False): _Presentation(
+            _RS_COLS,
+            _RS_COLS_ALL_NS,
+            _render_replicaset_rows,
+        ),
+        ("", "helmreleases", True): _Presentation(
+            _HELM_COLS,
+            _HELM_COLS_ALL_NS,
+            _render_helm_release_rows,
+        ),
+        ("", "helmrevisions", True): _Presentation(
+            _HELM_REV_COLS,
+            _HELM_REV_COLS_ALL_NS,
+            _render_helm_revision_rows,
+        ),
+        (PACKAGES_GROUP, "packagemanifests", False): _Presentation(
+            _PKG_COLS,
+            _PKG_COLS_ALL_NS,
+            _render_package_rows,
+        ),
+        (OPERATORS_GROUP, "subscriptions", False): _Presentation(
+            _SUB_COLS,
+            _SUB_COLS_ALL_NS,
+            _render_subscription_rows,
+        ),
+        (OPERATORS_GROUP, "clusterserviceversions", False): _Presentation(
+            _CSV_COLS,
+            _CSV_COLS_ALL_NS,
+            _render_csv_rows,
+        ),
+    }
+)
 
 
-def _typed_kind(kind: str, group: str) -> str:
-    """*kind* when its typed rendering applies to this API *group*, else a
-    name that falls through every typed lookup to the generic path."""
-    expected = _KIND_GROUPS.get(kind)
-    if expected is not None and group != expected:
-        return f"{group}/{kind}"
-    return kind
+def _presentation_for(kind: str, *, group: str, synthetic: bool) -> _Presentation:
+    return _PRESENTATIONS.get((group, kind, synthetic), _GENERIC_PRESENTATION)
 
 
-def _columns_for(kind: str, *, all_namespaces: bool, view: ViewConfig | None) -> tuple[str, ...]:
+def _columns_for(
+    kind: str,
+    *,
+    all_namespaces: bool,
+    view: ViewConfig | None,
+    group: str = "",
+    synthetic: bool = False,
+) -> tuple[str, ...]:
     """Column headers for *kind*; unknown kinds get the generic NAME/AGE set.
 
     A configured view (issue #45) appends its custom column names after the
     defaults, or replaces everything but the identity columns (NAME, and
     NAMESPACE in all-namespaces mode) when `replace` is set.
     """
-    single, all_ns = _COLS_BY_KIND.get(kind, (_GENERIC_COLS, _GENERIC_COLS_ALL_NS))
-    base = all_ns if all_namespaces else single
+    presentation = _presentation_for(kind, group=group, synthetic=synthetic)
+    base = presentation.all_namespace_columns if all_namespaces else presentation.columns
     if view is None:
         return base
     names = tuple(column.name for column in view.columns)
@@ -341,8 +399,18 @@ def sanitize_views(
         if view.replace:
             sanitized[kind] = view
             continue
-        single, all_ns = _COLS_BY_KIND.get(kind, (_GENERIC_COLS, _GENERIC_COLS_ALL_NS))
-        builtin = {header.lower() for header in (*single, *all_ns)}
+        presentations = [
+            presentation
+            for (_group, plural, _synthetic), presentation in _PRESENTATIONS.items()
+            if plural == kind
+        ]
+        if not presentations:
+            presentations = [_GENERIC_PRESENTATION]
+        builtin = {
+            header.lower()
+            for presentation in presentations
+            for header in (*presentation.columns, *presentation.all_namespace_columns)
+        }
         kept = tuple(column for column in view.columns if column.name.lower() not in builtin)
         for column in view.columns:
             if column.name.lower() in builtin:
@@ -479,7 +547,7 @@ def _decorate_columns(
 
 
 class ResourceTable(DataTable[str | Text]):
-    _last_kind: str | None = None
+    _last_identity: tuple[str, str, bool] | None = None
     _last_all_namespaces: bool | None = None
     _last_sort: SortSpec | None = None
     _active_view: ViewConfig | None = None
@@ -497,7 +565,7 @@ class ResourceTable(DataTable[str | Text]):
 
     def on_mount(self) -> None:
         self.cursor_type = "row"
-        self._last_kind = None
+        self._last_identity = None
         self._last_all_namespaces = None
         self._last_sort = None
         self._active_view = None
@@ -506,7 +574,7 @@ class ResourceTable(DataTable[str | Text]):
         #: Keeps a repaint proportional to the rows that actually changed.
         self._row_memo: dict[str, tuple[Summary, object, tuple[str, list[str | Text]]]] = {}
         #: Cell-set shape the memo was built for; a change invalidates it.
-        self._memo_signature: tuple[str, bool, ViewConfig | None] | None = None
+        self._memo_signature: tuple[tuple[str, str, bool], bool, ViewConfig | None] | None = None
         #: Cells currently in the table, so the diff never has to read them
         #: back out of the DataTable one `get_row` at a time.
         self._emitted: dict[str, list[str | Text]] = {}
@@ -528,22 +596,25 @@ class ResourceTable(DataTable[str | Text]):
         pattern: str,
         metrics: MetricsLookup | None = None,
         group: str = "",
+        synthetic: bool = False,
         sort: SortSpec | None = None,
         view: ViewConfig | None = None,
     ) -> None:
-        """Render rows into the table; rebuilds columns when (kind, all_namespaces, sort) changes.
+        """Render rows; rebuild columns when resource identity, scope, or sort changes.
 
-        ``group`` is the API group serving *kind*: typed renderings that are
-        specific to one group (the OLM tables) apply only there. ``view`` is
-        the kind's custom column config (issue #45), if any.
+        ``group`` and ``synthetic`` identify the resource serving *kind*.
+        Typed renderings apply only to their registered identity; same-plural
+        foreign CRDs use the generic presentation. ``view`` is the kind's
+        custom column config (issue #45), if any.
         """
-        kind = _typed_kind(kind, group)
+        identity = (group, kind, synthetic)
+        presentation = _presentation_for(kind, group=group, synthetic=synthetic)
         # Same logical view (kind/scope/columns) means the cursor should
         # survive the re-render — including a sort change, where the selected
         # resource moves with its row key (issue #89). Only a different
         # resource set resets to the top.
-        same_view = (kind, all_namespaces, view) == (
-            self._last_kind,
+        same_view = (identity, all_namespaces, view) == (
+            self._last_identity,
             self._last_all_namespaces,
             self._active_view,
         )
@@ -555,7 +626,7 @@ class ResourceTable(DataTable[str | Text]):
         # The memo holds finished cell lists, so it is only valid while the
         # cell set has the same shape. Sort is deliberately absent: it
         # reorders rows and decorates headers, it does not change any cell.
-        signature = (kind, all_namespaces, view)
+        signature = (identity, all_namespaces, view)
         if signature != self._memo_signature:
             self._row_memo.clear()
             self._memo_signature = signature
@@ -565,7 +636,12 @@ class ResourceTable(DataTable[str | Text]):
         self._active_view = view
         self._pending_rows = []
         self._render_rows(
-            kind, rows, all_namespaces=all_namespaces, pattern=pattern, metrics=metrics, sort=sort
+            presentation.renderer,
+            rows,
+            all_namespaces=all_namespaces,
+            pattern=pattern,
+            metrics=metrics,
+            sort=sort,
         )
         pending, self._pending_rows = self._pending_rows, []
         self._prune_memo(pending)
@@ -588,12 +664,18 @@ class ResourceTable(DataTable[str | Text]):
             custom_names = tuple(column.name for column in view.columns) if view else ()
             self.add_columns(
                 *_decorate_columns(
-                    _columns_for(kind, all_namespaces=all_namespaces, view=view),
+                    _columns_for(
+                        kind,
+                        group=group,
+                        synthetic=synthetic,
+                        all_namespaces=all_namespaces,
+                        view=view,
+                    ),
                     sort,
                     custom_names,
                 )
             )
-            self._last_kind = kind
+            self._last_identity = identity
             self._last_all_namespaces = all_namespaces
             self._last_sort = sort
         else:
@@ -1036,7 +1118,7 @@ class ResourceTable(DataTable[str | Text]):
 
     def _render_rows(
         self,
-        kind: str,
+        renderer: _RowRenderer,
         rows: list[Summary],
         *,
         all_namespaces: bool,
@@ -1054,7 +1136,6 @@ class ResourceTable(DataTable[str | Text]):
                 else ()
             )
             rows = sort_rows(rows, sort, metrics=metrics, custom_columns=custom_names)
-        renderer = _row_renderer(kind)
         renderer(
             self,
             rows,
@@ -1327,36 +1408,5 @@ class ResourceTable(DataTable[str | Text]):
             self._emit_row(obj, cells, all_namespaces=all_namespaces, stamp=stamp)
 
 
-_render_replicaset_rows = _adapt_standard_renderer(
-    lambda table: table._add_replicaset_rows, "_render_replicaset_rows"
-)
-_render_helm_release_rows = _adapt_standard_renderer(
-    lambda table: table._add_helm_release_rows, "_render_helm_release_rows"
-)
-_render_helm_revision_rows = _adapt_standard_renderer(
-    lambda table: table._add_helm_revision_rows, "_render_helm_revision_rows"
-)
-_render_package_rows = _adapt_standard_renderer(
-    lambda table: table._add_package_rows, "_render_package_rows"
-)
-_render_subscription_rows = _adapt_standard_renderer(
-    lambda table: table._add_subscription_rows, "_render_subscription_rows"
-)
-_render_csv_rows = _adapt_standard_renderer(lambda table: table._add_csv_rows, "_render_csv_rows")
-_render_generic_rows = _adapt_standard_renderer(
-    lambda table: table._add_generic_rows, "_render_generic_rows"
-)
-
-_ROW_RENDERERS: dict[str, _RowRenderer] = {
-    "pods": _render_pod_rows,
-    "replicasets": _render_replicaset_rows,
-    "helmreleases": _render_helm_release_rows,
-    "helmrevisions": _render_helm_revision_rows,
-    "packagemanifests": _render_package_rows,
-    "subscriptions": _render_subscription_rows,
-    "clusterserviceversions": _render_csv_rows,
-}
-
-
-def _row_renderer(kind: str) -> _RowRenderer:
-    return _ROW_RENDERERS.get(kind, _render_generic_rows)
+def _row_renderer(kind: str, *, group: str = "", synthetic: bool = False) -> _RowRenderer:
+    return _presentation_for(kind, group=group, synthetic=synthetic).renderer

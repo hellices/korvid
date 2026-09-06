@@ -58,7 +58,7 @@ from korvid.core.watch import WatchManager
 from korvid.k8s.components import (
     ComponentRef,
 )
-from korvid.k8s.discovery import PODS_META, ResourceMeta
+from korvid.k8s.discovery import PODS_META, ResourceMeta, canonical_resource_alias
 from korvid.k8s.helm import (
     HELM_RELEASES_META,
     HELM_REVISIONS_META,
@@ -86,7 +86,7 @@ from korvid.ui.agent_ui_controller import (
     DisplayedPaneContext,
 )
 from korvid.ui.bridge_dispatch import AppContextDispatch
-from korvid.ui.command import command_help
+from korvid.ui.command import command_help, command_words
 from korvid.ui.command_router import CommandRouter
 from korvid.ui.context_switch_coordinator import (
     ContextSurface,
@@ -103,6 +103,7 @@ from korvid.ui.integration_controller import IntegrationController
 from korvid.ui.log_controller import LogController
 from korvid.ui.messages import (
     AgentPromptSubmitted,
+    BuiltinCommand,
     ClearFilter,
     ExternalProposalExpired,
     ExternalProposalsChanged,
@@ -169,7 +170,6 @@ from korvid.ui.workspace_controller import (
 from korvid.ui.workspace_state import PaneState, WorkspaceState, filtered_rows
 from korvid.ui.write_coordinator import (
     WriteCoordinator,
-    canonical_meta_kind,
     gvr_label,
     write_locus,
 )
@@ -1099,9 +1099,7 @@ class KorvidApp(App[None]):
         # Wire the `known` closure into CommandBar so parse_command can resolve aliases.
         command_bar = self._command_bar
         command_bar.known = lambda a: self._canonical_kind(a) if a in self.aliases else None
-        command_bar.command_words = sorted(
-            {*self.aliases, "ns", "namespaces", "ctx", "context", "contexts", "q", "quit"}
-        )
+        command_bar.command_words = command_words(self.aliases)
         # Seed session-scoped log display settings from config (logs.wrap /
         # logs.timestamps); the w/t keys toggle them from there.
         log_pane = self._log_pane
@@ -1184,9 +1182,7 @@ class KorvidApp(App[None]):
             command_bar = self._command_bar
         except Exception:
             return  # app is shutting down or not composed yet
-        command_bar.command_words = sorted(
-            {*self.aliases, "ns", "namespaces", "ctx", "context", "contexts", "q", "quit"}
-        )
+        command_bar.command_words = command_words(self.aliases)
         # A kind discovered late can turn display-only tree nodes navigable.
         self._workspace_ctl.refresh_hierarchy()
 
@@ -1240,6 +1236,7 @@ class KorvidApp(App[None]):
             pattern="",
             metrics=metrics,
             group=meta.group if meta is not None else "",
+            synthetic=meta.synthetic if meta is not None else False,
             sort=pane.sorts.get(kind),
             view=self.config.views.get(plural),
         )
@@ -1397,7 +1394,7 @@ class KorvidApp(App[None]):
         return self._canonical_meta_kind(meta)
 
     def _canonical_meta_kind(self, meta: ResourceMeta) -> str:
-        return canonical_meta_kind(self.aliases, meta)
+        return canonical_resource_alias(self.aliases, meta)
 
     def _focus_row(self, row_key: str) -> bool:
         """Move the focused table's cursor to *row_key*; False when absent."""
@@ -1465,10 +1462,13 @@ class KorvidApp(App[None]):
         """
         await self._inspect.describe_selected()
 
+    def on_builtin_command(self, message: BuiltinCommand) -> None:
+        """Dispatch the catalog's typed operation to its feature owner."""
+        self._commands.route_builtin(message)
+
     def on_unknown_command(self, message: UnknownCommand) -> None:
-        """A `:` command the bar could not resolve to a kind: the router
-        hands it to the owner that implements it."""
-        self._commands.route(message.text)
+        """Report commands the catalog and resource discovery cannot resolve."""
+        self._commands.route_unknown(message)
 
     @property
     def integrations(self) -> IntegrationController:

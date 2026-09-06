@@ -34,6 +34,14 @@ issues its own fresh read against the API server. Press `?` at any time to
 see the complete effective key set for the current view, including any
 remaps from your config.
 
+Use `:` to select a resource view. Tab completion includes both discovered
+resource aliases and built-in commands. When API groups share a resource name,
+use the qualified plural, such as `:deployments.apps` or
+`:helmreleases.helm.toolkit.fluxcd.io`. The latter opens Flux resources;
+`:helm` and `:helmreleases` continue to open the Secret-backed Helm browser.
+Qualified views retain their resource identity through watches, describe, and
+drill-down.
+
 ## Follow one signal
 
 A typical investigation starts at a troubled row and ends at its cause:
@@ -74,6 +82,9 @@ then `default`. Switch with `:ns <name>`, the `:ns` picker, `0` for
 all-namespaces, or `1`–`9` for your configured `favorite_namespaces`. A
 watch denied by RBAC stops with one concise notice instead of retrying or
 fanning out into other namespaces.
+
+Both `:ns <name>` and the namespace picker preserve the current resource view;
+selecting a namespace while browsing deployments does not switch to pods.
 
 `:ctx` switches kubeconfig context. korvid probes the target first — loads
 its credentials in isolation and runs a self-access review — so an

@@ -8,7 +8,7 @@ import dataclasses
 import json
 import logging
 import re
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from datetime import datetime, timedelta
 from typing import Any, cast
@@ -27,10 +27,11 @@ from korvid.k8s.drain import DrainPlan, build_drain_plan
 from korvid.k8s.dryrun import diff_manifests
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.helm import (
+    HELM_RELEASES_META,
+    HELM_REVISIONS_META,
     HELM_SECRET_TYPE,
     HelmReleaseIdentity,
     HelmReleaseSummary,
-    HelmRevisionSummary,
     ReleaseTracker,
     decode_release,
     release_detail,
@@ -491,107 +492,6 @@ class KubeClient(ReadOps, WriteOps):
         self._observe_read("list", path, payload=data, object_count=len(items))
         return [self._pod_summary(item) for item in items]
 
-    async def watch_pods(self, namespace: str | None) -> AsyncIterator[tuple[str, PodSummary]]:
-        """LIST then watch pods; namespace=None watches cluster-wide."""
-        if namespace is not None:
-            async for item in self._watch_pods_namespaced(namespace):
-                yield item
-        else:
-            async for item in self._watch_pods_cluster():
-                yield item
-
-    async def _watch_pods_namespaced(self, namespace: str) -> AsyncIterator[tuple[str, PodSummary]]:
-        """Per-namespace pod watch via CoreV1Api (LIST then stream)."""
-        if self._core_v1 is None:
-            raise RuntimeError("connect() first")
-        path = self._pods_path(namespace)
-
-        # LIST first: yield pre-existing pods as ADDED and anchor the watch at
-        # the snapshot's resourceVersion so no events are missed between LIST
-        # and Watch.  A 410-Gone mid-stream propagates to WatchManager, which
-        # retries by calling watch_pods again — the fresh call re-LISTs,
-        # which is the intended relist fallback; no separate 410 handling needed.
-        try:
-            resp = await self._core_v1.list_namespaced_pod(namespace, _preload_content=False)
-            data = await _to_dict(resp)
-        except ApiStatusError as exc:
-            self._observe_read_error(path, exc)
-            raise
-        except k8s_client.exceptions.ApiException as exc:
-            self._observe_read_error(path, exc)
-            raise ApiStatusError(int(exc.status or 0), str(exc.reason or "")) from exc
-
-        items = data.get("items", [])
-        self._observe_read("list", path, payload=data, object_count=len(items))
-        resource_version: str | None = (data.get("metadata") or {}).get("resourceVersion")
-        for item in items:
-            yield ("ADDED", self._pod_summary(item))
-
-        watch_kwargs: dict[str, Any] = {}
-        if resource_version is not None:
-            watch_kwargs["resource_version"] = resource_version
-
-        w = k8s_watch.Watch()
-        self._observe_read("watch_open", path)
-        try:
-            async with w.stream(
-                self._core_v1.list_namespaced_pod, namespace, **watch_kwargs
-            ) as stream:
-                async for event in stream:
-                    raw_object = event["raw_object"]
-                    self._observe_read("watch_event", path, payload=raw_object, object_count=1)
-                    yield (
-                        str(event["type"]),
-                        self._pod_summary(raw_object),
-                    )
-        except ApiStatusError as exc:
-            self._observe_read_error(path, exc)
-            raise
-        except k8s_client.exceptions.ApiException as exc:
-            self._observe_read_error(path, exc)
-            raise ApiStatusError(int(exc.status or 0), str(exc.reason or "")) from exc
-
-    async def _watch_pods_cluster(self) -> AsyncIterator[tuple[str, PodSummary]]:
-        """Cluster-wide pod watch via raw /api/v1/pods path (LIST then stream)."""
-        if self._api is None:
-            raise RuntimeError("connect() first")
-
-        path = self._pods_path(None)
-        try:
-            data = await self._request_json(path)
-        except ApiStatusError as exc:
-            self._observe_read_error(path, exc)
-            raise
-
-        items = data.get("items", [])
-        self._observe_read("list", path, payload=data, object_count=len(items))
-        resource_version: str | None = (data.get("metadata") or {}).get("resourceVersion")
-        for item in items:
-            yield ("ADDED", self._pod_summary(item))
-
-        watch_kwargs: dict[str, Any] = {}
-        if resource_version is not None:
-            watch_kwargs["resource_version"] = resource_version
-
-        watch_func = self._make_raw_watch_callable(path)
-        w = k8s_watch.Watch()
-        self._observe_read("watch_open", path)
-        try:
-            async with w.stream(watch_func, **watch_kwargs) as stream:
-                async for event in stream:
-                    raw_object = event["raw_object"]
-                    self._observe_read("watch_event", path, payload=raw_object, object_count=1)
-                    yield (
-                        str(event["type"]),
-                        self._pod_summary(raw_object),
-                    )
-        except ApiStatusError as exc:
-            self._observe_read_error(path, exc)
-            raise
-        except k8s_client.exceptions.ApiException as exc:
-            self._observe_read_error(path, exc)
-            raise ApiStatusError(int(exc.status or 0), str(exc.reason or "")) from exc
-
     def _list_path(self, meta: ResourceMeta, namespace: str | None) -> str:
         """LIST/WATCH path for a kind; cluster-scoped kinds have no
         namespaced path regardless of scope."""
@@ -599,28 +499,16 @@ class KubeClient(ReadOps, WriteOps):
             return f"{meta.api_base}/namespaces/{_path_segment(namespace)}/{meta.plural}"
         return f"{meta.api_base}/{meta.plural}"
 
-    async def _initial_object_snapshot(
+    def _watch_target(
         self, meta: ResourceMeta, namespace: str | None
-    ) -> tuple[str, str | None, list[GenericSummary], dict[str, GenericSummary]]:
-        list_path = self._list_path(meta, namespace)
-        try:
-            data = await self._request_json(list_path)
-        except ApiStatusError as exc:
-            self._observe_read_error(list_path, exc)
-            raise
+    ) -> tuple[str, list[tuple[str, str]]]:
+        if meta.identity in (HELM_RELEASES_META.identity, HELM_REVISIONS_META.identity):
+            return self._helm_secrets_base(namespace), self._helm_secrets_query()
+        if meta.synthetic:
+            raise ValueError(f"unsupported synthetic watch resource: {meta.plural}")
+        return self._list_path(meta, namespace), []
 
-        items = data.get("items", [])
-        self._observe_read("list", list_path, payload=data, object_count=len(items))
-        resource_version = (data.get("metadata") or {}).get("resourceVersion")
-        summaries: list[GenericSummary] = []
-        known: dict[str, GenericSummary] = {}
-        for item in items:
-            summary = self._object_summary(meta, item)
-            summaries.append(summary)
-            known[f"{summary.namespace}/{summary.name}"] = summary
-        return list_path, resource_version, summaries, known
-
-    def _watch_objects_requires_poll_fallback(
+    def _watch_requires_poll_fallback(
         self,
         list_path: str,
         exc: ApiStatusError | k8s_client.exceptions.ApiException,
@@ -635,101 +523,141 @@ class KubeClient(ReadOps, WriteOps):
             str(getattr(exc, "body", "") or ""),
         ) from exc
 
-    async def watch_objects(
-        self, meta: ResourceMeta, namespace: str | None
-    ) -> AsyncIterator[tuple[str, GenericSummary]]:
-        """LIST then watch any resource kind; None namespace = all namespaces.
+    @staticmethod
+    def _raw_resource_key(item: dict[str, Any]) -> str:
+        metadata = item.get("metadata") or {}
+        return f"{metadata.get('namespace') or ''}/{metadata.get('name') or ''}"
 
-        Contract mirrors watch_pods: pre-existing items are yielded as ADDED
-        first, then live watch events from the snapshot resourceVersion.
-        ApiException is wrapped as ApiStatusError at both the LIST and watch phases.
+    @staticmethod
+    def _raw_resource_tombstone(meta: ResourceMeta, item: dict[str, Any]) -> dict[str, Any]:
+        metadata = item.get("metadata") or {}
+        retained: dict[str, Any] = {
+            "name": metadata.get("name") or "",
+            "namespace": metadata.get("namespace") or "",
+        }
+        if meta.identity in (HELM_RELEASES_META.identity, HELM_REVISIONS_META.identity):
+            labels = metadata.get("labels") or {}
+            retained["labels"] = {key: labels[key] for key in ("name", "version") if key in labels}
+        return {"metadata": retained}
 
-        Kinds whose server offers no watch (``meta.watchable`` False, or a
-        server that advertises watch and then rejects it with 405 - OLM's
-        packageserver, issue #141) degrade to periodic re-LIST diffing: the
-        stream stays alive and incremental, so the view keeps rendering
-        without the clear/retry/die loop.
-        """
-        if self._api is None:
-            raise RuntimeError("connect() first")
+    @classmethod
+    def _track_raw_event(
+        cls,
+        meta: ResourceMeta,
+        event_type: str,
+        item: dict[str, Any],
+        known: dict[str, dict[str, Any]],
+    ) -> None:
+        key = cls._raw_resource_key(item)
+        if event_type == "DELETED":
+            known.pop(key, None)
+        elif event_type in ("ADDED", "MODIFIED"):
+            known[key] = cls._raw_resource_tombstone(meta, item)
 
-        # LIST phase --------------------------------------------------------
-        list_path, resource_version, initial_summaries, known = await self._initial_object_snapshot(
-            meta, namespace
-        )
-        for summary in initial_summaries:
-            yield ("ADDED", summary)
-
-        if not meta.watchable:
-            async for event in self._poll_objects(meta, list_path, known):
-                yield event
-            return
-
-        # Watch phase -------------------------------------------------------
-        watch_kwargs: dict[str, Any] = {}
-        if resource_version is not None:
-            watch_kwargs["resource_version"] = resource_version
-
-        watch_func = self._make_raw_watch_callable(list_path)
-
-        w = k8s_watch.Watch()
-        self._observe_read("watch_open", list_path)
+    async def _list_watch_snapshot(
+        self, meta: ResourceMeta, path: str, query: list[tuple[str, str]]
+    ) -> tuple[str | None, list[dict[str, Any]], dict[str, dict[str, Any]]]:
         try:
-            async with w.stream(watch_func, **watch_kwargs) as stream:
-                async for event in stream:
-                    raw_object = event["raw_object"]
-                    self._observe_read("watch_event", list_path, payload=raw_object, object_count=1)
-                    yield (
-                        str(event["type"]),
-                        self._object_summary(meta, raw_object),
-                    )
-        except (k8s_client.exceptions.ApiException, ApiStatusError) as exc:
-            # The raw-watch adapter surfaces HTTP errors as ApiStatusError
-            # (via _raise_for_status); the kubernetes client's own paths
-            # raise ApiException - both carry .status/.reason, and the 405
-            # fallback must catch both.
-            if self._watch_objects_requires_poll_fallback(list_path, exc):
-                # Discovery advertised watch but the server refuses it: as
-                # deterministic as it gets - poll instead of letting the
-                # manager burn retries clearing and re-seeding the store.
-                logger.info("%s rejects watch (405); falling back to LIST polling", meta.plural)
-                async for event in self._poll_objects(meta, list_path, known):
-                    yield event
+            data = await self._request_json(path, query_params=query)
+        except ApiStatusError as exc:
+            self._observe_read_error(path, exc)
+            raise
+        items: list[dict[str, Any]] = list(data.get("items", []))
+        self._observe_read("list", path, payload=data, object_count=len(items))
+        resource_version = str((data.get("metadata") or {}).get("resourceVersion") or "") or None
+        known = {
+            self._raw_resource_key(item): self._raw_resource_tombstone(meta, item) for item in items
+        }
+        return resource_version, items, known
 
-    async def _poll_objects(
-        self, meta: ResourceMeta, list_path: str, known: dict[str, GenericSummary]
-    ) -> AsyncIterator[tuple[str, GenericSummary]]:
-        """Endless re-LIST diff stream for kinds without a watch endpoint.
-
-        Each round upserts every present row (ADDED doubles as MODIFIED in
-        the store) and emits DELETED for rows that vanished since the last
-        round, so the table stays incremental - never cleared. *known* is
-        seeded with the initial LIST's rows.
-        """
+    async def _poll_resource_events(
+        self,
+        meta: ResourceMeta,
+        path: str,
+        query: list[tuple[str, str]],
+        known: dict[str, dict[str, Any]],
+    ) -> AsyncIterator[tuple[str, dict[str, Any]]]:
         while True:
             await asyncio.sleep(LIST_POLL_INTERVAL)
-            try:
-                data = await self._request_json(list_path)
-            except ApiStatusError as exc:
-                self._observe_read_error(list_path, exc)
-                raise
-            items = data.get("items", [])
-            self._observe_read("list", list_path, payload=data, object_count=len(items))
-            current: dict[str, GenericSummary] = {}
-            for item in items:
-                summary = self._object_summary(meta, item)
-                current[f"{summary.namespace}/{summary.name}"] = summary
-                yield ("ADDED", summary)
+            _, items, current = await self._list_watch_snapshot(meta, path, query)
+            for index in range(len(items)):
+                yield ("ADDED", items[index])
+            items.clear()
             for key, old in known.items():
                 if key not in current:
                     yield ("DELETED", old)
             known = current
 
+    async def _watch_resource_events(
+        self, meta: ResourceMeta, namespace: str | None
+    ) -> AsyncIterator[tuple[str, dict[str, Any]]]:
+        if self._api is None:
+            raise RuntimeError("connect() first")
+
+        path, query = self._watch_target(meta, namespace)
+        resource_version, items, known = await self._list_watch_snapshot(meta, path, query)
+        for index in range(len(items)):
+            yield ("SNAPSHOT", items[index])
+        items.clear()
+
+        if not meta.watchable:
+            async for event in self._poll_resource_events(meta, path, query, known):
+                yield event
+            return
+
+        watch_kwargs: dict[str, Any] = {}
+        if resource_version is not None:
+            watch_kwargs["resource_version"] = resource_version
+        watch_func = self._make_raw_watch_callable(path, extra_query=query)
+        w = k8s_watch.Watch()
+        self._observe_read("watch_open", path)
+        try:
+            async with w.stream(watch_func, **watch_kwargs) as stream:
+                async for event in stream:
+                    raw_object = cast(dict[str, Any], event["raw_object"])
+                    event_type = str(event["type"])
+                    self._track_raw_event(meta, event_type, raw_object, known)
+                    self._observe_read("watch_event", path, payload=raw_object, object_count=1)
+                    yield (event_type, raw_object)
+                    del event, raw_object
+        except (k8s_client.exceptions.ApiException, ApiStatusError) as exc:
+            if self._watch_requires_poll_fallback(path, exc):
+                logger.info("%s rejects watch (405); falling back to LIST polling", meta.plural)
+                async for event in self._poll_resource_events(meta, path, query, known):
+                    yield event
+
+    async def watch_resources(
+        self, meta: ResourceMeta, namespace: str | None
+    ) -> AsyncGenerator[tuple[str, PodSummary | GenericSummary], None]:
+        """Yield projected summaries from one shared raw LIST/WATCH transport."""
+        if meta.identity == HELM_RELEASES_META.identity:
+            tracker = ReleaseTracker()
+            async for event_type, item in self._watch_resource_events(meta, namespace):
+                tracker_event = "ADDED" if event_type == "SNAPSHOT" else event_type
+                projected = tracker.apply(tracker_event, release_from_secret(item))
+                item.clear()
+                del item
+                for projected_type, release in projected:
+                    if event_type == "SNAPSHOT":
+                        projected_type = "SNAPSHOT"
+                    yield (projected_type, release)
+            return
+
+        async for event_type, item in self._watch_resource_events(meta, namespace):
+            if meta.identity == HELM_REVISIONS_META.identity:
+                summary: PodSummary | GenericSummary = revision_from_secret(item)
+            elif meta.identity == PODS_META.identity:
+                summary = self._pod_summary(item)
+            else:
+                summary = self._object_summary(meta, item)
+            item.clear()
+            del item
+            yield (event_type, summary)
+
     async def list_objects(self, meta: ResourceMeta, namespace: str | None) -> list[GenericSummary]:
         """LIST any resource kind and return GenericSummary items.
 
-        Reuses the path logic of watch_objects' LIST phase.
-        ApiException is wrapped as ApiStatusError.
+        Kept lean for tool reads; ApiException is wrapped as ApiStatusError.
         """
         if self._api is None:
             raise RuntimeError("connect() first")
@@ -796,41 +724,6 @@ class KubeClient(ReadOps, WriteOps):
             else "/api/v1/secrets"
         )
 
-    async def _watch_helm_secrets(
-        self, namespace: str | None
-    ) -> AsyncIterator[tuple[str, dict[str, Any]]]:
-        """LIST then watch helm release Secrets; same contract as watch_objects."""
-        if self._api is None:
-            raise RuntimeError("connect() first")
-        base = self._helm_secrets_base(namespace)
-        params = self._helm_secrets_query()
-        data = await self._request_json(f"{base}?{urlencode(params)}")
-        resource_version: str | None = (data.get("metadata") or {}).get("resourceVersion")
-        for item in data.get("items", []):
-            yield ("ADDED", item)
-        watch_kwargs: dict[str, Any] = {}
-        if resource_version is not None:
-            watch_kwargs["resource_version"] = resource_version
-        # The watch adapter appends its own query params: hand it the bare
-        # path plus the selectors, never a path with the query pre-embedded.
-        watch_func = self._make_raw_watch_callable(base, extra_query=params)
-        w = k8s_watch.Watch()
-        try:
-            async with w.stream(watch_func, **watch_kwargs) as stream:
-                async for event in stream:
-                    yield (str(event["type"]), event["raw_object"])
-        except k8s_client.exceptions.ApiException as exc:
-            raise ApiStatusError(int(exc.status or 0), str(exc.reason or "")) from exc
-
-    async def watch_helm_releases(
-        self, namespace: str | None
-    ) -> AsyncIterator[tuple[str, HelmReleaseSummary]]:
-        """Release rows (latest revision per release) from the Secret stream."""
-        tracker = ReleaseTracker()
-        async for event_type, secret in self._watch_helm_secrets(namespace):
-            for out in tracker.apply(event_type, release_from_secret(secret)):
-                yield out
-
     async def list_helm_releases(self, namespace: str | None) -> list[HelmReleaseSummary]:
         """Latest revision per release, LIST-only (the helm_list_releases
         tool, issue #161): same Secret parsing as the browser's synthetic
@@ -847,13 +740,6 @@ class KubeClient(ReadOps, WriteOps):
             if current is None or release.revision > current.revision:
                 latest[key] = release
         return sorted(latest.values(), key=lambda r: (r.namespace, r.name))
-
-    async def watch_helm_revisions(
-        self, namespace: str | None
-    ) -> AsyncIterator[tuple[str, HelmRevisionSummary]]:
-        """One row per revision Secret (drill-down history under a release)."""
-        async for event_type, secret in self._watch_helm_secrets(namespace):
-            yield (event_type, revision_from_secret(secret))
 
     @staticmethod
     def _helm_revision(secret: dict[str, Any]) -> int:

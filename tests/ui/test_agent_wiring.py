@@ -20,7 +20,7 @@ from korvid.core.store import ResourceStore
 from korvid.core.watch import WatchManager
 from korvid.k8s.models import PodSummary
 from korvid.ui.app import KorvidApp
-from korvid.ui.messages import AgentPromptSubmitted
+from korvid.ui.messages import AgentPromptSubmitted, BuiltinCommand, BuiltinOperation
 from korvid.ui.widgets.agent_panel import AgentPanel
 from tests.ui.agent_session_fakes import FakeSession, fake_policy
 from tests.ui.waits import until
@@ -264,8 +264,6 @@ async def test_setup_hint_not_duplicated_on_retoggle() -> None:
 
 
 async def test_ai_command_pushes_setup_screen() -> None:
-    from korvid.ui.messages import UnknownCommand
-
     class NoopConfigurator:
         async def begin_device_login(self) -> Any:
             raise NotImplementedError
@@ -284,7 +282,7 @@ async def test_ai_command_pushes_setup_screen() -> None:
 
     app = make_app(session=None, model=None, agent_configurator=NoopConfigurator())
     async with app.run_test() as pilot:
-        app.on_unknown_command(UnknownCommand("ai"))
+        app.on_builtin_command(BuiltinCommand(BuiltinOperation.AI))
         await until(
             pilot,
             lambda: _agent_setup_screen_initialized(app),
@@ -294,11 +292,9 @@ async def test_ai_command_pushes_setup_screen() -> None:
 
 
 async def test_ai_command_without_configurator_notifies() -> None:
-    from korvid.ui.messages import UnknownCommand
-
     app = make_app(session=None, model=None)
     async with app.run_test() as pilot:
-        app.on_unknown_command(UnknownCommand("ai"))
+        app.on_builtin_command(BuiltinCommand(BuiltinOperation.AI))
         await until(
             pilot,
             lambda: "Agent setup unavailable" in _notification_text(app),
@@ -321,12 +317,11 @@ async def test_ai_command_without_configurator_notifies() -> None:
 
 
 async def test_ai_payload_without_a_session_notifies_agent_is_off() -> None:
-    from korvid.ui.messages import UnknownCommand
     from korvid.ui.widgets.payload_inspector import PayloadInspectorScreen
 
     app = make_app(session=None, model=None)
     async with app.run_test() as pilot:
-        app.on_unknown_command(UnknownCommand("ai payload"))
+        app.on_builtin_command(BuiltinCommand(BuiltinOperation.AI, ("payload",)))
         await until(
             pilot,
             lambda: "Agent is off" in _notification_text(app),
@@ -336,12 +331,11 @@ async def test_ai_payload_without_a_session_notifies_agent_is_off() -> None:
 
 
 async def test_ai_payload_without_snapshot_notifies_nothing_was_sent() -> None:
-    from korvid.ui.messages import UnknownCommand
     from korvid.ui.widgets.payload_inspector import PayloadInspectorScreen
 
     app = make_app(StubSession([]))
     async with app.run_test() as pilot:
-        app.on_unknown_command(UnknownCommand("ai payload"))
+        app.on_builtin_command(BuiltinCommand(BuiltinOperation.AI, ("payload",)))
         await until(
             pilot,
             lambda: "No provider payload has been sent" in _notification_text(app),
@@ -351,7 +345,6 @@ async def test_ai_payload_without_snapshot_notifies_nothing_was_sent() -> None:
 
 
 async def test_ai_payload_refuses_transient_snapshot_during_busy_turn() -> None:
-    from korvid.ui.messages import UnknownCommand
     from korvid.ui.widgets.payload_inspector import PayloadInspectorScreen
 
     session = StubSession([], block=True, snapshot=_snapshot())
@@ -359,7 +352,7 @@ async def test_ai_payload_refuses_transient_snapshot_during_busy_turn() -> None:
     async with app.run_test() as pilot:
         app.on_agent_prompt_submitted(AgentPromptSubmitted("inspect pods"))
         await until(pilot, lambda: session.prompts, label="agent turn running")
-        app.on_unknown_command(UnknownCommand("ai payload"))
+        app.on_builtin_command(BuiltinCommand(BuiltinOperation.AI, ("payload",)))
         await until(
             pilot,
             lambda: "busy" in _notification_text(app).lower(),
@@ -369,12 +362,11 @@ async def test_ai_payload_refuses_transient_snapshot_during_busy_turn() -> None:
 
 
 async def test_ai_payload_opens_inspector_for_idle_snapshot() -> None:
-    from korvid.ui.messages import UnknownCommand
     from korvid.ui.widgets.payload_inspector import PayloadInspectorScreen
 
     app = make_app(StubSession([], snapshot=_snapshot()))
     async with app.run_test() as pilot:
-        app.on_unknown_command(UnknownCommand("ai payload"))
+        app.on_builtin_command(BuiltinCommand(BuiltinOperation.AI, ("payload",)))
         await until(
             pilot,
             lambda: isinstance(app.screen, PayloadInspectorScreen),
@@ -414,7 +406,6 @@ async def test_apply_agent_settings_enables_agent() -> None:
 
 async def test_model_command_swaps_model_and_saves() -> None:
     from korvid.agent.setup import AgentConfigurator, AgentSettings
-    from korvid.ui.messages import UnknownCommand
 
     saved: list[AgentSettings] = []
 
@@ -450,7 +441,7 @@ async def test_model_command_swaps_model_and_saves() -> None:
     )
     async with app.run_test() as pilot:
         app._agent_ui.apply_settings(settings)
-        app.on_unknown_command(UnknownCommand("model gpt-4o"))
+        app.on_builtin_command(BuiltinCommand(BuiltinOperation.MODEL, ("gpt-4o",)))
         await until(
             pilot,
             lambda: app._agent_ui._model_name == "gpt-4o",
@@ -464,12 +455,10 @@ async def test_model_command_swaps_model_and_saves() -> None:
 
 
 async def test_model_command_without_config_does_not_crash() -> None:
-    from korvid.ui.messages import UnknownCommand
-
     app = make_app(session=None, model=None)
     async with app.run_test() as pilot:
-        app.on_unknown_command(UnknownCommand("model gpt-4o"))
-        app.on_unknown_command(UnknownCommand("model"))
+        app.on_builtin_command(BuiltinCommand(BuiltinOperation.MODEL, ("gpt-4o",)))
+        app.on_builtin_command(BuiltinCommand(BuiltinOperation.MODEL))
         await until(
             pilot,
             lambda: len(app._notifications) >= 2,
@@ -483,7 +472,6 @@ async def test_model_command_does_not_persist_when_apply_fails() -> None:
     must NOT be written to config.yaml — otherwise the failed change silently
     takes effect after restart."""
     from korvid.agent.setup import AgentConfigurator, AgentSettings
-    from korvid.ui.messages import UnknownCommand
 
     saved: list[AgentSettings] = []
 
@@ -520,7 +508,7 @@ async def test_model_command_does_not_persist_when_apply_fails() -> None:
     )
     async with app.run_test() as pilot:
         app._agent_ui.apply_settings(settings)
-        app.on_unknown_command(UnknownCommand("model gpt-4o"))
+        app.on_builtin_command(BuiltinCommand(BuiltinOperation.MODEL, ("gpt-4o",)))
         await until(
             pilot,
             lambda: len(rebuilds) >= 2,
@@ -534,7 +522,6 @@ async def test_model_command_save_failure_warns_about_restart_revert() -> None:
     """If the swap succeeded but persisting failed, the user must be told the
     model is live now but will revert on restart."""
     from korvid.agent.setup import AgentConfigurator, AgentSettings
-    from korvid.ui.messages import UnknownCommand
 
     class Cfg(AgentConfigurator):
         async def begin_device_login(self) -> Any:
@@ -566,7 +553,7 @@ async def test_model_command_save_failure_warns_about_restart_revert() -> None:
     )
     async with app.run_test() as pilot:
         app._agent_ui.apply_settings(settings)
-        app.on_unknown_command(UnknownCommand("model gpt-4o"))
+        app.on_builtin_command(BuiltinCommand(BuiltinOperation.MODEL, ("gpt-4o",)))
         await until(
             pilot,
             lambda: app._agent_ui._model_name == "gpt-4o",
@@ -580,7 +567,7 @@ async def test_model_command_save_failure_warns_about_restart_revert() -> None:
         # A second failed switch must not claim the app will revert to the
         # live-but-unsaved model: the in-memory snapshot is not what is on
         # disk, so the warning must not name a specific model at all.
-        app.on_unknown_command(UnknownCommand("model claude-3"))
+        app.on_builtin_command(BuiltinCommand(BuiltinOperation.MODEL, ("claude-3",)))
         await until(
             pilot,
             lambda: app._agent_ui._model_name == "claude-3",
@@ -599,7 +586,6 @@ async def test_model_command_works_after_configured_startup() -> None:
     """A session built from config.yaml at startup must seed _agent_settings
     so :model works without running the :ai wizard first."""
     from korvid.agent.setup import AgentConfigurator, AgentSettings
-    from korvid.ui.messages import UnknownCommand
 
     saved: list[AgentSettings] = []
 
@@ -645,7 +631,7 @@ async def test_model_command_works_after_configured_startup() -> None:
         rebuild_agent=lambda s: StubSession([], policy=fake_policy(model=s.model)),
     )
     async with app.run_test() as pilot:
-        app.on_unknown_command(UnknownCommand("model gpt-4o"))
+        app.on_builtin_command(BuiltinCommand(BuiltinOperation.MODEL, ("gpt-4o",)))
         await until(
             pilot,
             lambda: app._agent_ui._model_name == "gpt-4o",
@@ -668,7 +654,6 @@ async def test_model_command_recovers_a_startup_that_built_no_session() -> None:
     would ask the operator to retype everything korvid already knows.
     """
     from korvid.agent.setup import AgentConfigurator, AgentSettings
-    from korvid.ui.messages import UnknownCommand
 
     saved: list[AgentSettings] = []
 
@@ -716,7 +701,7 @@ async def test_model_command_recovers_a_startup_that_built_no_session() -> None:
     )
     async with app.run_test() as pilot:
         assert app._agent_ui.session is None
-        app.on_unknown_command(UnknownCommand("model llama3"))
+        app.on_builtin_command(BuiltinCommand(BuiltinOperation.MODEL, ("llama3",)))
         await until(
             pilot,
             lambda: app._agent_ui.session is rebuilt,
@@ -894,7 +879,6 @@ async def test_apply_agent_settings_notifies_on_install_hint_rebuild_error() -> 
 async def test_options_preserved_across_model_change() -> None:
     """Options seeded from config must survive a :model switch."""
     from korvid.agent.setup import AgentConfigurator, AgentSettings
-    from korvid.ui.messages import UnknownCommand
 
     saved: list[AgentSettings] = []
 
@@ -946,7 +930,7 @@ async def test_options_preserved_across_model_change() -> None:
         rebuild_agent=rebuild,
     )
     async with app.run_test() as pilot:
-        app.on_unknown_command(UnknownCommand("model gpt-4o"))
+        app.on_builtin_command(BuiltinCommand(BuiltinOperation.MODEL, ("gpt-4o",)))
         await until(
             pilot,
             lambda: rebuilt,
@@ -958,8 +942,6 @@ async def test_options_preserved_across_model_change() -> None:
 
 
 async def test_rebuild_failure_keeps_previous_runtime_and_settings() -> None:
-    from korvid.ui.messages import UnknownCommand
-
     old_session = StubSession([], policy=fake_policy(model="llama3"))
 
     class Cfg2:
@@ -1002,7 +984,7 @@ async def test_rebuild_failure_keeps_previous_runtime_and_settings() -> None:
         rebuild_agent=lambda s: None,  # rebuild always fails
     )
     async with app.run_test() as pilot:
-        app.on_unknown_command(UnknownCommand("model gpt-4o"))
+        app.on_builtin_command(BuiltinCommand(BuiltinOperation.MODEL, ("gpt-4o",)))
         await until(
             pilot,
             lambda: any("rebuild failed" in str(n.message).lower() for n in app._notifications),
@@ -1074,14 +1056,12 @@ async def test_input_reenabled_even_when_panel_closed() -> None:
 async def test_model_query_requires_live_runtime() -> None:
     """`:model` must not report a model as active when the provider failed to
     build at startup (session None) even though config carried a model name."""
-    from korvid.ui.messages import UnknownCommand
-
     # Startup with a config model name but no session (e.g. missing API key).
     app = make_app(session=None, model="gpt-4o")
     notices: list[str] = []
     app.notify = lambda msg, **kw: notices.append(str(msg))  # type: ignore[method-assign]
     async with app.run_test():
-        app.on_unknown_command(UnknownCommand("model"))
+        app.on_builtin_command(BuiltinCommand(BuiltinOperation.MODEL))
     assert notices, "expected a notification"
     assert "gpt-4o" not in notices[-1]
     assert "not configured" in notices[-1]
@@ -1115,21 +1095,20 @@ class FakeMCP:
 
 
 async def test_mcp_command_toggles_server_and_status_bar() -> None:
-    from korvid.ui.messages import UnknownCommand
     from korvid.ui.widgets.status_bar import StatusBar
 
     mcp = FakeMCP()
     app = make_app(StubSession([]), mcp=mcp)
     async with app.run_test() as pilot:
         assert "MCP off" in str(app.query_one(StatusBar).render())
-        app.on_unknown_command(UnknownCommand("mcp on"))
+        app.on_builtin_command(BuiltinCommand(BuiltinOperation.MCP, ("on",)))
         await until(
             pilot,
             lambda: mcp.calls == ["start"],
             label="MCP started",
         )
         assert "MCP on :7878" in str(app.query_one(StatusBar).render())
-        app.on_unknown_command(UnknownCommand("mcp off"))
+        app.on_builtin_command(BuiltinCommand(BuiltinOperation.MCP, ("off",)))
         await until(
             pilot,
             lambda: mcp.calls == ["start", "stop"],
@@ -1139,13 +1118,11 @@ async def test_mcp_command_toggles_server_and_status_bar() -> None:
 
 
 async def test_mcp_command_bare_and_bad_args_do_not_touch_server() -> None:
-    from korvid.ui.messages import UnknownCommand
-
     mcp = FakeMCP()
     app = make_app(StubSession([]), mcp=mcp)
     async with app.run_test() as pilot:
-        app.on_unknown_command(UnknownCommand("mcp"))
-        app.on_unknown_command(UnknownCommand("mcp bogus"))
+        app.on_builtin_command(BuiltinCommand(BuiltinOperation.MCP))
+        app.on_builtin_command(BuiltinCommand(BuiltinOperation.MCP, ("bogus",)))
         await until(
             pilot,
             lambda: len(app._notifications) == 2,
@@ -1155,11 +1132,9 @@ async def test_mcp_command_bare_and_bad_args_do_not_touch_server() -> None:
 
 
 async def test_mcp_command_without_controller_does_not_crash() -> None:
-    from korvid.ui.messages import UnknownCommand
-
     app = make_app(StubSession([]))
     async with app.run_test() as pilot:
-        app.on_unknown_command(UnknownCommand("mcp on"))
+        app.on_builtin_command(BuiltinCommand(BuiltinOperation.MCP, ("on",)))
         await until(
             pilot,
             lambda: "MCP unavailable" in _notification_text(app),
@@ -1193,9 +1168,8 @@ async def test_agent_unavailable_makes_ai_and_model_unknown_commands() -> None:
     async with app.run_test():
         msgs: list[str] = []
         app.notify = lambda msg, **kw: msgs.append(str(msg))  # type: ignore[method-assign]
-        from korvid.ui.messages import UnknownCommand
 
-        app.on_unknown_command(UnknownCommand("ai"))
-        app.on_unknown_command(UnknownCommand("model"))
+        app.on_builtin_command(BuiltinCommand(BuiltinOperation.AI))
+        app.on_builtin_command(BuiltinCommand(BuiltinOperation.MODEL))
         assert len(msgs) == 2
         assert all("Unknown resource or command" in m for m in msgs)

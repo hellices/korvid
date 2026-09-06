@@ -107,9 +107,10 @@ class WatchManager:
             first_connection = False
             try:
                 async for event_type, obj in self._source(kind, scope):
-                    # A connection that delivers events is healthy — reset the
-                    # failure streak so hours-long streams don't inherit old failures.
-                    failures = 0
+                    # A LIST snapshot proves the read path works, not that a
+                    # live watch ever opened. Only live events reset failures.
+                    if event_type != "SNAPSHOT":
+                        failures = 0
                     self._store.apply_event(kind, scope, event_type, obj)
                     self._emit_event(kind, scope, event_type, obj)
                 # Stream ended normally (server-side watch timeout) -> reconnect.

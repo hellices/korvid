@@ -60,7 +60,7 @@ from korvid.k8s.helm import HELM_RELEASES_META, HELM_REVISIONS_META
 from korvid.k8s.helmcli import HelmCLI, find_helm
 from korvid.k8s.metrics import MetricsPoller
 from korvid.k8s.models import reset_age_memo
-from korvid.k8s.olm import OPERATORS_GROUP, PACKAGES_GROUP
+from korvid.k8s.olm import PACKAGES_GROUP
 from korvid.k8s.telepresence import (
     TRAFFIC_MANAGER_NAME,
     TRAFFIC_MANAGER_NAMESPACE,
@@ -403,26 +403,11 @@ async def _discover_in_background(
     """Merge full API discovery into *aliases* once available (shared dict)."""
     try:
         metas = await kube.discover_resources()
-        discovered = build_alias_map(metas)
+        discovered = build_alias_map([PODS_META, HELM_RELEASES_META, HELM_REVISIONS_META, *metas])
     except Exception:
         logger.warning("Resource discovery failed; staying pods-only", exc_info=True)
         return
-    # Synthetic view kinds own their plurals outright: every discovered alias
-    # whose target plural collides (e.g. Flux's HelmRelease CRD contributes
-    # "hr" -> plural "helmreleases") is dropped, because navigation routes by
-    # plural and the alias would silently open the Secret-backed browser
-    # instead of the CRD it named.
-    reserved = {HELM_RELEASES_META.plural, HELM_REVISIONS_META.plural}
-    aliases.update({a: m for a, m in discovered.items() if m.plural not in reserved})
-    aliases.update(build_alias_map([HELM_RELEASES_META, HELM_REVISIONS_META]))
-    # build_alias_map keeps only the first meta per colliding alias, which
-    # can hide the OLM kinds behind a same-plural CRD from another group
-    # (e.g. a messaging "subscriptions"). Keep them reachable under their
-    # kubectl-style plural.group alias so the install flow and the agent's
-    # operator tool resolve the right API regardless of discovery order.
-    for meta in metas:
-        if meta.group in (PACKAGES_GROUP, OPERATORS_GROUP) and meta.plural not in reserved:
-            aliases.setdefault(f"{meta.plural}.{meta.group}", meta)
+    aliases.update(discovered)
     # Where OLM serves the operator catalog, `:operators` opens it - unless a
     # real kind (e.g. OLM v1's Operator) already claims that alias.
     pkg_meta = aliases.get(f"packagemanifests.{PACKAGES_GROUP}")
@@ -1419,22 +1404,12 @@ def _make_watch_source(
 
     async def source(kind: str, scope: str) -> AsyncIterator[tuple[str, Summary]]:
         ns = None if scope == ALL_NAMESPACES else scope
-        if kind == "pods":
-            async for ev, pod in kube.watch_pods(ns):
-                yield (ev, pod)
-        elif kind == HELM_RELEASES_META.plural:
-            async for ev, rel in kube.watch_helm_releases(ns):
-                yield (ev, rel)
-        elif kind == HELM_REVISIONS_META.plural:
-            async for ev, rev in kube.watch_helm_revisions(ns):
-                yield (ev, rev)
-        elif kind in aliases:
-            meta = aliases[kind]
-            async for ev, obj in kube.watch_objects(meta, ns):
-                yield (ev, obj)
-        else:
+        meta = aliases.get(kind)
+        if meta is None:
             logger.warning("Unknown resource kind %r requested for watch; stopping", kind)
             raise ValueError(f"Unknown resource kind: {kind!r}")
+        async for event, summary in kube.watch_resources(meta, ns):
+            yield event, summary
 
     return source
 
@@ -1445,19 +1420,19 @@ def _make_get_manifest(
     """Describe fetcher: helm kinds decode release Secrets, the rest GET raw."""
 
     async def get_manifest(kind: str, namespace: str | None, name: str) -> dict[str, Any]:
-        if kind == HELM_RELEASES_META.plural:
+        meta = aliases.get(kind)
+        if meta is None:
+            raise ValueError(f"Unknown resource kind: {kind!r}")
+        if meta.identity == HELM_RELEASES_META.identity:
             if namespace is None:
                 raise ValueError("helm releases are namespaced; namespace required")
             return await kube.get_helm_release(namespace, name)
-        if kind == HELM_REVISIONS_META.plural:
+        if meta.identity == HELM_REVISIONS_META.identity:
             # Revision rows are named "<release>.v<revision>".
             release, _, rev = name.rpartition(".v")
             if namespace is None or not release or not rev.isdigit():
                 raise ValueError(f"not a helm revision row: {name!r}")
             return await kube.get_helm_release(namespace, release, revision=int(rev))
-        meta = aliases.get(kind)
-        if meta is None:
-            raise ValueError(f"Unknown resource kind: {kind!r}")
         return await kube.get_object(meta, namespace, name)
 
     return get_manifest

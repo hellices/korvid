@@ -15,6 +15,8 @@ from typing import Any
 import pytest
 
 from korvid.k8s.helm import (
+    HELM_RELEASES_META,
+    HELM_REVISIONS_META,
     HELM_SECRET_TYPE,
     MAX_DISPLAY_CHARS,
     HelmReleaseIdentity,
@@ -335,7 +337,7 @@ from .test_client import _FakeWatch  # noqa: E402
 
 
 class TestWatchHelmReleases:
-    async def test_lists_then_watches_with_type_field_selector(self) -> None:
+    async def test_unified_watch_uses_common_path_with_helm_projection(self) -> None:
         client = KubeClient()
         list_resp = {
             "metadata": {"resourceVersion": "42"},
@@ -348,14 +350,17 @@ class TestWatchHelmReleases:
             patch.object(client, "_request_json", request_json),
             patch("korvid.k8s.client.k8s_watch.Watch", return_value=fake_watch),
         ):
-            collected = [(ev, r.name) async for ev, r in client.watch_helm_releases("default")]
-        assert ("ADDED", "web") in collected
-        assert ("ADDED", "db") in collected
+            collected = [
+                (ev, r.name)
+                async for ev, r in client.watch_resources(HELM_RELEASES_META, "default")
+            ]
+        assert ("SNAPSHOT", "web") in collected
+        assert ("SNAPSHOT", "db") in collected
         assert request_json.await_args is not None
-        path = request_json.await_args.args[0]
-        assert "/api/v1/namespaces/default/secrets" in path
-        assert "fieldSelector=type%3Dhelm.sh%2Frelease.v1" in path
-        assert "labelSelector=owner%3Dhelm" in path  # non-helm Secrets of this type stay out
+        assert request_json.await_args.args[0] == "/api/v1/namespaces/default/secrets"
+        params = dict(request_json.await_args.kwargs["query_params"])
+        assert params["fieldSelector"] == "type=helm.sh/release.v1"
+        assert params["labelSelector"] == "owner=helm"
 
     async def test_watch_phase_gets_bare_path_with_selector_params(self) -> None:
         """The watch adapter passes query params through call_api; a path that
@@ -371,7 +376,7 @@ class TestWatchHelmReleases:
                 client, "_make_raw_watch_callable", wraps=client._make_raw_watch_callable
             ) as factory,
         ):
-            _ = [r async for r in client.watch_helm_releases("default")]
+            _ = [r async for r in client.watch_resources(HELM_RELEASES_META, "default")]
         assert factory.call_args is not None
         path = factory.call_args.args[0]
         assert "?" not in path
@@ -406,9 +411,13 @@ class TestWatchHelmReleases:
             patch.object(client, "_request_json", request_json),
             patch("korvid.k8s.client.k8s_watch.Watch", return_value=_FakeWatch([])),
         ):
-            _ = [r async for r in client.watch_helm_releases(None)]
+            _ = [r async for r in client.watch_resources(HELM_RELEASES_META, None)]
         assert request_json.await_args is not None
-        assert request_json.await_args.args[0].startswith("/api/v1/secrets?")
+        assert request_json.await_args.args[0] == "/api/v1/secrets"
+        assert dict(request_json.await_args.kwargs["query_params"]) == {
+            "fieldSelector": "type=helm.sh/release.v1",
+            "labelSelector": "owner=helm",
+        }
 
     async def test_multiple_revisions_collapse_to_latest(self) -> None:
         client = KubeClient()
@@ -421,10 +430,11 @@ class TestWatchHelmReleases:
             patch.object(client, "_request_json", AsyncMock(return_value=list_resp)),
             patch("korvid.k8s.client.k8s_watch.Watch", return_value=_FakeWatch([])),
         ):
-            collected = [
-                (ev, r.name, r.revision) async for ev, r in client.watch_helm_releases("default")
-            ]
-        assert collected == [("ADDED", "web", 1), ("MODIFIED", "web", 2)]
+            collected = []
+            async for ev, row in client.watch_resources(HELM_RELEASES_META, "default"):
+                assert isinstance(row, HelmReleaseSummary)
+                collected.append((ev, row.name, row.revision))
+        assert collected == [("SNAPSHOT", "web", 1), ("SNAPSHOT", "web", 2)]
 
     async def test_watch_events_flow_through_tracker(self) -> None:
         client = KubeClient()
@@ -438,8 +448,11 @@ class TestWatchHelmReleases:
             patch.object(client, "_request_json", AsyncMock(return_value=list_resp)),
             patch("korvid.k8s.client.k8s_watch.Watch", return_value=_FakeWatch(watch_events)),
         ):
-            collected = [(ev, r.revision) async for ev, r in client.watch_helm_releases("default")]
-        assert collected == [("ADDED", 1), ("MODIFIED", 2), ("MODIFIED", 1)]
+            collected = []
+            async for ev, row in client.watch_resources(HELM_RELEASES_META, "default"):
+                assert isinstance(row, HelmReleaseSummary)
+                collected.append((ev, row.revision))
+        assert collected == [("SNAPSHOT", 1), ("MODIFIED", 2), ("MODIFIED", 1)]
 
 
 class TestWatchHelmRevisions:
@@ -454,8 +467,11 @@ class TestWatchHelmRevisions:
             patch.object(client, "_request_json", AsyncMock(return_value=list_resp)),
             patch("korvid.k8s.client.k8s_watch.Watch", return_value=_FakeWatch([])),
         ):
-            collected = [(ev, r.name) async for ev, r in client.watch_helm_revisions("default")]
-        assert collected == [("ADDED", "web.v1"), ("ADDED", "web.v2")]
+            collected = [
+                (ev, r.name)
+                async for ev, r in client.watch_resources(HELM_REVISIONS_META, "default")
+            ]
+        assert collected == [("SNAPSHOT", "web.v1"), ("SNAPSHOT", "web.v2")]
 
 
 class TestGetHelmRelease:

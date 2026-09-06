@@ -1,22 +1,35 @@
 """Drill-down relation registry: parent kind -> child kind + ownership matching."""
 
+from korvid.k8s.discovery import PODS_META, ResourceMeta
+from korvid.k8s.helm import HELM_RELEASES_META
 from korvid.k8s.models import GenericSummary, PodSummary
 from korvid.k8s.relations import drill_child, owned_by
 
 
 class TestDrillChild:
     def test_deployments_drill_to_replicasets(self) -> None:
-        assert drill_child("deployments") == "replicasets"
+        parent = ResourceMeta("Deployment", "deployments", "apps", "v1", True)
+        assert drill_child(parent) == ("apps", "replicasets", False)
 
     def test_replicasets_drill_to_pods(self) -> None:
-        assert drill_child("replicasets") == "pods"
+        parent = ResourceMeta("ReplicaSet", "replicasets", "apps", "v1", True)
+        assert drill_child(parent) == ("", "pods", False)
 
     def test_unrelated_kind_has_no_child(self) -> None:
-        assert drill_child("configmaps") is None
+        assert drill_child(ResourceMeta("ConfigMap", "configmaps", "", "v1", True)) is None
 
     def test_pods_have_no_child(self) -> None:
         # Pods drill into containers, which is a separate screen, not a kind.
-        assert drill_child("pods") is None
+        assert drill_child(PODS_META) is None
+
+    def test_foreign_deployment_does_not_inherit_native_chain(self) -> None:
+        parent = ResourceMeta("Deployment", "deployments", "example.io", "v1", True)
+        assert drill_child(parent) is None
+
+    def test_helm_history_belongs_only_to_synthetic_releases(self) -> None:
+        flux = ResourceMeta("HelmRelease", "helmreleases", "helm.toolkit.fluxcd.io", "v2", True)
+        assert drill_child(HELM_RELEASES_META) == ("", "helmrevisions", True)
+        assert drill_child(flux) is None
 
 
 class TestOwnedBy:
