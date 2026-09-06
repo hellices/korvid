@@ -2531,6 +2531,18 @@ def test_an_active_profile_is_built_by_the_profile_factory(
     assert seen[0][0].model == "anthropic/claude-sonnet-4-5"
 
 
+class _StubCredentialStore:
+    """The whole `CredentialStore` protocol: one `load`, and nothing else.
+
+    Never consulted here — the factory is monkeypatched — but it is the
+    declared parameter type, so the wiring is exercised with a value the
+    real factory would accept rather than a bare `object`.
+    """
+
+    def load(self, key: str) -> str | None:
+        return None
+
+
 def test_the_profile_factory_is_given_the_credential_store_and_a_shared_registry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2548,7 +2560,7 @@ def test_the_profile_factory_is_given_the_credential_store_and_a_shared_registry
     monkeypatch.setattr(
         "korvid.providers.litellm_factory.create_provider_from_profile", _from_profile
     )
-    store = object()
+    store = _StubCredentialStore()
     config = KorvidConfig(model_connections=_profile_connections("openai/gpt-4o"))
 
     built = cast("Any", _create_initial_provider(config, store))

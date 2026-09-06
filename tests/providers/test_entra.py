@@ -123,7 +123,7 @@ async def test_the_declaration_hands_over_a_refreshing_provider_and_its_close(
     assert set(resolved.parameters) == {"azure_ad_token_provider"}
     provider = resolved.parameters["azure_ad_token_provider"]
     assert inspect.iscoroutinefunction(provider)
-    assert await provider() == "tok-1"  # type: ignore[operator]  # asserted above
+    assert await provider() == "tok-1"
     assert resolved.aclose is not None
     await resolved.aclose()
     assert cred.closed == 1

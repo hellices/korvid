@@ -83,7 +83,7 @@ def test_a_broken_declaration_disables_only_itself() -> None:
         def prefix(self) -> str:
             raise RuntimeError("boom")
 
-    registry = SpecialFlowRegistry([Exploding(), _flow("good")])  # type: ignore[list-item]  # deliberately invalid
+    registry = SpecialFlowRegistry([Exploding(), _flow("good")])  # deliberately invalid
     assert registry.claim("good/x") is not None
     assert registry.errors
 

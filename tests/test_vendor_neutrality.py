@@ -153,6 +153,11 @@ def _named_line_span(tree: ast.Module, name: str) -> set[int]:
             defined = targets[0] if targets else None
         elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
             defined = node.target.id
+        else:
+            # Nothing that can define *name*, so nothing that can contribute
+            # lines. Skipping here is also what leaves `node` narrowed to the
+            # statement types below, which are the ones carrying positions.
+            continue
         if defined == name and node.end_lineno is not None:
             lines.update(range(node.lineno, node.end_lineno + 1))
     return lines

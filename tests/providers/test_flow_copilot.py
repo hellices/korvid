@@ -68,14 +68,21 @@ def _store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TokenStore:
     return TokenStore(fallback_path=tmp_path / ".config" / "korvid" / "credentials.json")
 
 
-class _FakeDeviceFlow:
-    """A `GitHubDeviceFlow` that never leaves the process."""
+class _FakeDeviceFlow(GitHubDeviceFlow):
+    """A `GitHubDeviceFlow` that never leaves the process.
+
+    A real subclass, not a look-alike: `CopilotDeviceLogin` is typed against
+    `GitHubDeviceFlow`, so anything the fake is allowed to stand in for is
+    exactly what the production factory may return. `__init__` deliberately
+    does not call `super().__init__` — that would open an `httpx` client this
+    double must never own.
+    """
 
     def __init__(
         self,
         *,
         token: str = "gho_tok",
-        error: Exception | None = None,
+        error: BaseException | None = None,
         prompt: DeviceCodePrompt | None = None,
     ) -> None:
         self.token = token
@@ -104,7 +111,7 @@ class _FakeDeviceFlow:
 
 
 def _login(store: TokenStore, flow: _FakeDeviceFlow) -> CopilotDeviceLogin:
-    return CopilotDeviceLogin(flow_factory=lambda: flow, store=store)  # type: ignore[arg-type]  # test double
+    return CopilotDeviceLogin(flow_factory=lambda: flow, store=store)
 
 
 # ---------------------------------------------------------------------------

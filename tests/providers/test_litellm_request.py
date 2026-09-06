@@ -5,23 +5,34 @@ RED → GREEN sequence as described in task-13-brief.md.
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
+from types import MappingProxyType
+from typing import Final
+
 import pytest
 
-from korvid.providers.litellm_request import OMIT_API_KEY, build_plan
+from korvid.providers.litellm_request import OMIT_API_KEY, RequestPlan, ResolvedApiKey, build_plan
 from korvid.providers.litellm_settings import KEYLESS_API_KEY_SENTINEL
 
+_NO_OPTIONS: Final[Mapping[str, object]] = MappingProxyType({})
 
-def _plan(**kwargs):  # type: ignore[no-untyped-def]
+
+def _plan(
+    *,
+    model: str = "openai/gpt-4o",
+    api_key: ResolvedApiKey = "k",
+    base_url: str | None = None,
+    options: Mapping[str, object] = _NO_OPTIONS,
+    supported: Sequence[str] = (),
+) -> RequestPlan:
     """Convenience wrapper with safe defaults."""
-    defaults: dict[str, object] = {
-        "model": "openai/gpt-4o",
-        "api_key": "k",
-        "base_url": None,
-        "options": {},
-        "supported": [],
-    }
-    defaults.update(kwargs)
-    return build_plan(**defaults)
+    return build_plan(
+        model=model,
+        api_key=api_key,
+        base_url=base_url,
+        options=options,
+        supported=supported,
+    )
 
 
 def test_option_keys_are_filtered_to_what_the_provider_accepts() -> None:

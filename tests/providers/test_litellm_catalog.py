@@ -438,13 +438,13 @@ async def test_a_prefixless_reference_is_not_discovered_under_an_invented_vendor
 # ---------------------------------------------------------------------------
 
 
-class _FakeMetadataSource:
+class _FakeMetadataSource(ModelMetadataSource):
     """Minimal stub of `ModelMetadataSource` for catalog overlay tests."""
 
-    def __init__(self, entries: dict[str, object]) -> None:
+    def __init__(self, entries: dict[str, ModelMetadata]) -> None:
         self._entries = entries
 
-    def metadata(self, reference: str) -> object | None:  # type: ignore[return]  # malformed source exercises runtime rejection
+    def metadata(self, reference: str) -> ModelMetadata | None:
         return self._entries.get(reference)
 
     def env_hints(self, provider_id: str) -> tuple[str, ...]:

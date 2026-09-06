@@ -60,6 +60,10 @@ def test_litellm_logging_cannot_reach_the_terminal() -> None:
 
     import korvid.providers.litellm_runtime  # noqa: F401 - import applies the fix
 
-    logger = litellm.verbose_logger
+    logger = getattr(litellm, "verbose_logger", None)
+    # The same attribute guard `_litellm_import._detach_litellm_logging` uses:
+    # the SDK re-exports `verbose_logger` without declaring it public, so the
+    # runtime contract — not the module's export list — is what korvid checks.
+    assert isinstance(logger, logging.Logger), "litellm no longer ships `verbose_logger`"
     assert not any(type(h) is logging.StreamHandler for h in logger.handlers), logger.handlers
     assert logger.propagate is False

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -897,7 +898,9 @@ agent:
     before = load_config(path).model_connections
     save_model_connections(path, before)
     after = load_config(path).model_connections
-    assert after.profiles["main"].options["nested"]["depth"] == 1
+    nested = after.profiles["main"].options["nested"]
+    assert isinstance(nested, Mapping)
+    assert nested["depth"] == 1
     assert after.profiles["main"].options["items"] == (1, 2)
     assert after == before
 

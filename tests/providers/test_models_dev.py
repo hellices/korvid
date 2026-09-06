@@ -8,7 +8,7 @@ import json
 import ssl
 import stat
 import threading
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -35,6 +35,13 @@ if TYPE_CHECKING:
     # for typing, gives new code somewhere to point.
     import httpx as httpx_types
 
+    #: What `httpx.MockTransport` accepts. Both spellings are used below:
+    #: a plain function for the ordinary cases, and a coroutine function
+    #: where the handler has to await something mid-request.
+    _MockHandler = Callable[
+        [httpx_types.Request], "httpx_types.Response | Awaitable[httpx_types.Response]"
+    ]
+
 _DOCUMENT = {
     "anthropic": {
         "id": "anthropic",
@@ -54,22 +61,21 @@ _DOCUMENT = {
 }
 
 
-def _source(
-    tmp_path: Path,
-    handler,  # type: ignore[type-arg]  # httpx's sync/async transport handler is untyped
-) -> ModelsDevSource:
-    def factory():  # type: ignore[return]  # pytest-loaded httpx cannot expose its generic type
-        return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+def _source(tmp_path: Path, handler: _MockHandler) -> ModelsDevSource:
+    def factory() -> httpx_types.AsyncClient:
+        client: httpx_types.AsyncClient = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        return client
 
     return ModelsDevSource(cache_path=tmp_path / "models-dev.json", client_factory=factory)
 
 
-def _ok(request: httpx.Request) -> httpx.Response:
-    return httpx.Response(
+def _ok(request: httpx_types.Request) -> httpx_types.Response:
+    response: httpx_types.Response = httpx.Response(
         200,
         json=_DOCUMENT,
         headers={"content-type": "application/json", "etag": '"v1"'},
     )
+    return response
 
 
 def _age_cache(cache_path: Path, seconds: int) -> None:
@@ -95,9 +101,9 @@ async def test_a_refresh_stores_metadata_and_hints(tmp_path: Path) -> None:
 
 
 async def test_the_request_carries_no_korvid_state(tmp_path: Path) -> None:
-    seen: list[httpx.Request] = []
+    seen: list[httpx_types.Request] = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx_types.Request) -> httpx_types.Response:
         seen.append(request)
         return _ok(request)
 
@@ -114,8 +120,11 @@ async def test_the_request_carries_no_korvid_state(tmp_path: Path) -> None:
 async def test_a_response_over_the_ceiling_is_refused(tmp_path: Path) -> None:
     oversized = b"[" + b"0," * (MAX_RESPONSE_BYTES // 2) + b"0]"
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, content=oversized, headers={"content-type": "application/json"})
+    def handler(request: httpx_types.Request) -> httpx_types.Response:
+        response: httpx_types.Response = httpx.Response(
+            200, content=oversized, headers={"content-type": "application/json"}
+        )
+        return response
 
     source = _source(tmp_path, handler)
     assert await source.refresh() is RefreshOutcome.UNAVAILABLE
@@ -123,8 +132,11 @@ async def test_a_response_over_the_ceiling_is_refused(tmp_path: Path) -> None:
 
 
 async def test_a_non_json_content_type_is_refused(tmp_path: Path) -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, text="<html>hi</html>", headers={"content-type": "text/html"})
+    def handler(request: httpx_types.Request) -> httpx_types.Response:
+        response: httpx_types.Response = httpx.Response(
+            200, text="<html>hi</html>", headers={"content-type": "text/html"}
+        )
+        return response
 
     assert await _source(tmp_path, handler).refresh() is RefreshOutcome.UNAVAILABLE
 
@@ -142,8 +154,11 @@ async def test_a_non_json_content_type_is_refused(tmp_path: Path) -> None:
 async def test_a_malformed_document_never_reaches_the_catalog(
     tmp_path: Path, payload: object
 ) -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json=payload, headers={"content-type": "application/json"})
+    def handler(request: httpx_types.Request) -> httpx_types.Response:
+        response: httpx_types.Response = httpx.Response(
+            200, json=payload, headers={"content-type": "application/json"}
+        )
+        return response
 
     source = _source(tmp_path, handler)
     outcome = await source.refresh()
@@ -156,7 +171,7 @@ async def test_a_failed_refresh_keeps_the_previous_cache(tmp_path: Path) -> None
     await source.refresh()
     _age_cache(tmp_path / "models-dev.json", CACHE_TTL_SECONDS + 60)
 
-    def boom(request: httpx.Request) -> httpx.Response:
+    def boom(request: httpx_types.Request) -> httpx_types.Response:
         raise httpx.ConnectError("offline", request=request)
 
     stale = _source(tmp_path, boom)
@@ -236,7 +251,7 @@ async def test_a_fresh_cache_makes_no_request(tmp_path: Path) -> None:
     """
     calls = 0
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx_types.Request) -> httpx_types.Response:
         nonlocal calls
         calls += 1
         return _ok(request)
@@ -372,9 +387,10 @@ async def test_an_explicit_refresh_revalidates_a_cache_inside_its_ttl(tmp_path: 
     """
     seen: list[str | None] = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx_types.Request) -> httpx_types.Response:
         seen.append(request.headers.get("if-none-match"))
-        return httpx.Response(304, headers={"etag": '"v1"'})
+        response: httpx_types.Response = httpx.Response(304, headers={"etag": '"v1"'})
+        return response
 
     await _source(tmp_path, _ok).refresh()  # a cache well inside its TTL
     source = _source(tmp_path, handler)

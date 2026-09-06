@@ -34,7 +34,7 @@ import inspect
 import json
 import ssl
 import threading
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Any, ClassVar
@@ -125,7 +125,10 @@ async def _drop_cached_clients() -> None:
                 if inspect.isawaitable(result):
                     await result
             break
-    litellm.in_memory_llm_clients_cache.flush_cache()
+    # `InMemoryCache.flush_cache` carries no annotations in 1.98.0, so it is
+    # bound through the signature it actually has before being called.
+    flush_cache: Callable[[], None] = litellm.in_memory_llm_clients_cache.flush_cache
+    flush_cache()
 
 
 @pytest.fixture(autouse=True)
