@@ -85,12 +85,10 @@ AI data boundary.
 ## The agent extra: dependencies and lockdown
 
 **Dependency surface.** `[agent]` pulls approximately **55 distributions**,
-including `litellm`, `boto3`, `openai`, `tiktoken` and `tokenizers`. That is a
-real increase, and the mitigation is scope: the extra is optional, a base TUI
-install reaches no AI distribution, and `tests/test_optional_extras.py` pins
-that import graph. The cost buys correctness — the alternative is a
-hand-maintained vendor routing table, and a stale table routes credentials to
-the wrong host.
+including `litellm`, `boto3`, `openai`, `tiktoken` and `tokenizers`. The extra
+is optional, `tests/test_optional_extras.py` pins that import graph, and the
+alternative — a hand-maintained vendor routing table — routes credentials to
+the wrong host when it drifts.
 
 **Lockdown at import.** `providers/litellm_runtime.py` sets eight attributes on
 the `litellm` module before any completion call is possible. Each is a channel
@@ -110,12 +108,10 @@ to a third party or the terminal:
 
 Two are private attributes, set deliberately because they are what the SDK
 reads at call time. All eight are checked for *existence before* assignment, so
-a rename upstream raises at import naming the missing attribute instead of
-creating a fresh unused one and leaving the real sink open; a test asserts the
-same list. `providers/_litellm_import.py` also sets
-`LITELLM_LOCAL_MODEL_COST_MAP=true` before the import (via `setdefault`),
-suppressing the SDK's startup price-table fetch, and strips every
-`StreamHandler` from its loggers with `propagate=False`.
+a rename upstream raises at import instead of leaving the real sink open; a
+test asserts the same list. `providers/_litellm_import.py` also sets
+`LITELLM_LOCAL_MODEL_COST_MAP=true` before the import, suppressing the SDK's
+startup price-table fetch, and strips `StreamHandler`s from its loggers.
 
 **The GitHub Copilot routing hazard.** Given a reference under its own
 `github_copilot` prefix, LiteLLM starts an **interactive device-code login and
@@ -133,8 +129,8 @@ optional model metadata, under these bounds:
 
 - **Never at startup**, on mount, on a keystroke, or during routing. Only
   <kbd>Ctrl</kbd>+<kbd>R</kbd> on the model search screen contacts it, forcing
-  a revalidation; otherwise korvid serves its cache, revalidating on its own at
-  most once a day. No HTTP client exists until then.
+  a revalidation; otherwise korvid serves its cache unchanged. No HTTP client
+  exists until then.
 - **No credentials, no korvid state** — no API key, cluster context or
   conversation data.
 - **Verified TLS, one trust decision** — the client comes from the same builder

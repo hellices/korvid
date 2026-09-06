@@ -667,3 +667,138 @@ def test_the_migration_docs_name_the_profile_the_migration_really_creates() -> N
     notes = _text("docs/release-notes/unreleased.md")
     assert f"active: {LEGACY_PROFILE_NAME}" in notes
     assert f"\n    {LEGACY_PROFILE_NAME}:\n" in notes
+
+
+# ---------------------------------------------------------------------------
+# 7. models.dev: no auto-revalidation claim; production caller always forced
+# ---------------------------------------------------------------------------
+
+_AUTO_REVALID_PATTERNS = re.compile(
+    r"revalidat\w*\s+on\s+(?:its|korvid'?s?\s+own|its\s+own)",
+    re.IGNORECASE,
+)
+
+
+@pytest.mark.parametrize("path", _MARKDOWN_FILES, ids=_relative)
+def test_no_doc_claims_models_dev_auto_revalidates(path: Path) -> None:
+    """The CACHE_TTL_SECONDS guard exists for hypothetical future callers.
+
+    Production has exactly one refresh call-site — the setup UI's Ctrl-R
+    action — and it always passes `force=True`, bypassing the TTL. Claiming
+    korvid "revalidates on its own" describes a behaviour nothing performs
+    today. Normalizing whitespace catches the claim even if it wraps across
+    a line break.
+    """
+    normalized = " ".join(path.read_text(encoding="utf-8").split())
+    assert not _AUTO_REVALID_PATTERNS.search(normalized), (
+        f"{_relative(path)} claims models.dev auto-revalidates"
+    )
+
+
+def test_models_dev_production_caller_always_uses_force() -> None:
+    """The UI always passes force=True, making CACHE_TTL_SECONDS inactive in production.
+
+    `ModelsDevSource.refresh(force=False)` would return CACHED inside the TTL
+    window, but no production call site passes False.  This test reads the
+    source of every call to the catalog's `refresh_metadata` in
+    model_search_screen.py rather than hard-coding the boolean, so the
+    relationship drifts visibly.
+    """
+    source = _text("src/korvid/ui/widgets/model_search_screen.py")
+    # Find actual awaited catalog calls (not the method definition itself).
+    calls = re.findall(r"await\s+self\._catalog\.refresh_metadata\([^)]*\)", source)
+    assert calls, "model_search_screen.py must still await self._catalog.refresh_metadata"
+    for call in calls:
+        assert "force=True" in call, (
+            f"model_search_screen.py calls refresh_metadata without force=True: {call!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 8. Provider-plugin reserved-prefix semantics match the live constants
+# ---------------------------------------------------------------------------
+
+
+def test_provider_plugin_guide_names_all_reserved_prefix_sets() -> None:
+    """provider-plugins.md must describe all three reserved sets from live constants.
+
+    The three sets are distinct in `litellm_settings.py`:
+    - `RETIRED_PROVIDER_ALIASES`: never routable aliases
+    - `DEVICE_LOGIN_PREFIXES`: device-login traps
+    - `_SELF_SERVED_PROVIDER_NAMES`: korvid's own routes (routable but
+      unregistrable by third parties)
+
+    The LiteLLM dynamic catalog (`models_by_provider()`) is the fourth fence.
+    Reading all names from the live constants means adding a new alias forces
+    a doc update rather than silently leaving the guide stale.
+    """
+    from korvid.providers.litellm_settings import (
+        _SELF_SERVED_PROVIDER_NAMES,
+        DEVICE_LOGIN_PREFIXES,
+        RETIRED_PROVIDER_ALIASES,
+    )
+
+    guide = _text("docs/provider-plugins.md")
+
+    for name in RETIRED_PROVIDER_ALIASES:
+        assert name in guide, f"retired alias {name!r} missing from provider-plugins.md"
+    for name in DEVICE_LOGIN_PREFIXES:
+        assert name in guide, f"device-login prefix {name!r} missing from provider-plugins.md"
+    for name in _SELF_SERVED_PROVIDER_NAMES:
+        assert name in guide, f"self-served prefix {name!r} missing from provider-plugins.md"
+
+
+def test_provider_plugin_guide_names_litellm_dynamic_catalog() -> None:
+    """provider-plugins.md must explain that LiteLLM's dynamic prefix table is also reserved.
+
+    `SpecialFlowRegistry.from_entry_points()` receives `models_by_provider()`
+    as `reserved_prefixes`, so a third party cannot shadow any prefix the SDK
+    ships natively. The guide must name `models_by_provider` — reading the
+    live function name means a rename fails this test before it silently
+    leaves the guide lying.
+    """
+    from korvid.providers.litellm_runtime import models_by_provider as _fn  # noqa: F401
+
+    guide = _text("docs/provider-plugins.md")
+    assert "models_by_provider" in guide, (
+        "provider-plugins.md must mention models_by_provider (LiteLLM's dynamic catalog)"
+    )
+
+
+def test_provider_plugin_guide_does_not_say_two_lists() -> None:
+    """The guide must describe three sets, not two.
+
+    Claiming 'two lists' omits the LiteLLM dynamic catalog, which is a
+    third enforced fence.  Whitespace is collapsed so wrapping does not hide
+    a stale count.
+    """
+    guide = " ".join(_text("docs/provider-plugins.md").split())
+    assert "Two lists are enforced" not in guide, (
+        "provider-plugins.md still says 'Two lists' — update to three sets"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 9. Keyring auth documents the profile.model fallback
+# ---------------------------------------------------------------------------
+
+
+def test_keyring_auth_documents_profile_model_fallback() -> None:
+    """agent.md must say keyring falls back to profile.model when auth.key is absent.
+
+    `_from_keyring` uses `_named_setting(profile.auth.settings) or profile.model`
+    as the entry name.  An operator who stores a key under the model reference
+    instead of a named `auth.key` must be able to discover this from the docs
+    rather than from source code.
+    """
+    from korvid.providers.litellm_factory import _from_keyring  # noqa: F401
+
+    agent = _text("docs/agent.md")
+    # The keyring row must name the fallback.
+    keyring_row = next(
+        (line for line in agent.splitlines() if "keyring" in line and "|" in line), None
+    )
+    assert keyring_row is not None, "agent.md must have a keyring row in the auth table"
+    assert "profile.model" in keyring_row, (
+        "agent.md keyring row must document the profile.model fallback"
+    )

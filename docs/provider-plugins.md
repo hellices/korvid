@@ -86,39 +86,38 @@ fails the `[a-z0-9][a-z0-9_-]*` pattern and is rejected outright, while
 `Company_LLM` and `company-llm` normalize alike and collide, so the second
 declaration is rejected rather than silently shadowing the first.
 
-Two lists are enforced whatever the transport publishes, and they are not
+Three sets are enforced whatever the transport publishes, and they are not
 interchangeable:
 
-- **Never routable**: the retired aliases `openai-compat`, `vllm`, `github`,
+- **Never routable** — the retired aliases `openai-compat`, `vllm`, `github`,
   `claude`, plus the device-login prefix `github-copilot`. These stay claimed
   even with no flow to serve them — a retired alias an operator still reads as
   korvid's own must stay unroutable, and `github-copilot` starts an interactive
   device login inside the SDK's own routing call (see the
   [threat model](threat-model.md#the-agent-extra-dependencies-and-lockdown)).
-- **Not registrable by a third party, but still routable**: those five plus
-  `openai`, `azure`, `anthropic` and `ollama`. korvid's own distribution may
-  register them, and `openai/gpt-4o` stays dispatchable. Reserving a name says
-  who may *declare* it, never whether korvid dispatches it.
+- **korvid's own routes** — `openai`, `azure`, `anthropic` and `ollama`. Fully
+  routable (`openai/gpt-4o` stays dispatchable), but unregistrable by a third
+  party. Held statically so a vendor release dropping a row from
+  `models_by_provider()` cannot hand an operator's prefix to whoever registered
+  the entry point. korvid's own distribution may still declare them.
+- **LiteLLM's dynamic catalog** — every prefix `models_by_provider()` publishes
+  at startup. A third party cannot shadow a name the SDK ships natively; korvid's
+  own distribution is still exempt.
 
-A rejected registration is reported, not fatal: the registry collects a reason
-for the setup UI's banner and korvid starts normally.
+A rejected entry-point name is reported at startup, not fatal: the registry
+collects the reason for the setup UI's banner and korvid starts normally.
 
 ### Selected-only loading, and what a failure costs
 
 Construction reads entry-point **names only** and imports nothing. A name is
-loaded the first time a reference resolving to it is claimed, and only that
-one: loading every declared entry point at startup would run arbitrary
-third-party module-level code on every start and let one broken plugin break
-TUI wiring.
+loaded the first time a reference resolving to it is claimed, and only that one.
 
-A load that raises is therefore a logged warning and a setup-banner line, never
-a startup exception, and the result is memoized so a repeated claim neither
-reloads nor re-reports. What the failure costs depends on who else can serve
-the prefix: one the standard transport **also** publishes goes back to being
-routed, since refusing it would disable every ordinary reference under it over
-an optional module that raised; one nothing else can serve stays claimed and
-refused. A flow claiming only an *option* shares its prefix rather than owning
-it, so ordinary references under it stay routable either way.
+A load that raises is a logged warning and a setup-banner line, never a startup
+exception; the result is memoized so a repeated claim neither reloads nor
+re-reports. A prefix the standard transport **also** publishes falls back to
+being routed; one nothing else can serve stays claimed and refused. An
+option-only flow shares its prefix, so ordinary references under it stay
+routable either way.
 
 ### Option claiming
 
@@ -158,12 +157,11 @@ def korvid_provider_default_credentials() -> tuple[ProviderDefaultCredential, ..
     return (ProviderDefaultCredential("company-llm", "Company SSO", _resolve),)
 ```
 
-korvid consults a chain only when the profile already says
-`auth.method: provider-default`, so an installed package cannot change how a
-profile authenticates behind the operator's back — and never on a name korvid
-ships. When `resolve` raises `CredentialUnavailable`, korvid refuses the
-profile while it is being built rather than on the first message, quoting that
-message. korvid's own Entra ID chain for `azure` is declared this way.
+korvid consults a chain only when the profile says `auth.method: provider-default`,
+so an installed package cannot change authentication behind the operator's back —
+and never on a name korvid ships. When `resolve` raises `CredentialUnavailable`,
+korvid refuses the profile at build time, quoting that message. korvid's own
+Entra ID chain for `azure` is declared this way.
 
 ## The `ProviderPlugin` compatibility path
 
@@ -314,9 +312,9 @@ are exactly `secret`, `password`, `token`, `api_key` (and `apikey`),
 first, so `apiKey`, `clientSecret` and `clientAPIKey` are all rejected. Keep
 secrets in environment variables and pass the name via `auth.key`.
 
-Treat `options` as read-only and accept sequences as either `list` or `tuple`:
-live wizard and reconnect flows deep-freeze nested mappings and convert every
-`list` to a `tuple`, while startup from `config.yaml` preserves YAML lists.
+Treat `options` as read-only and accept both `list` and `tuple` for sequences:
+live wizard and reconnect flows deep-freeze nested mappings and convert lists to
+tuples; startup from `config.yaml` preserves YAML lists.
 
 ## Lifecycle and compatibility
 
@@ -326,17 +324,16 @@ live wizard and reconnect flows deep-freeze nested mappings and convert every
    prefix it owns is never routed, so it cannot be silently bypassed.
 3. `build_provider(profile)` returns an `LLMProvider` or `None`, and receives no
    kube client, UI handle, audit handle or write executor.
-4. Every call into a flow is guarded: one that raises disables itself, not the
-   profiles it has nothing to do with, and the reason reaches the setup banner.
+4. Every call into a flow is guarded: a failure disables that flow, not
+   unrelated profiles, and the reason reaches the setup banner.
 5. korvid calls `LLMProvider.aclose()` when the provider is replaced or at
    shutdown. **Your provider owns the injected `CredentialSource`**: close it
-   in `aclose()`, in a `finally` block, or you leak token-refresh sessions.
+   in `aclose()` in a `finally` block, or you leak token-refresh sessions.
 
 Failures stay bounded. An unbuildable profile disables the agent cleanly:
 startup keeps korvid running with the agent off and the reason logged, and a
-live rebuild rejects the new provider and keeps the previous one. Load and
-construction errors become `ProviderPluginError` messages capped at 200
-characters so tracebacks and secrets do not leak.
+live rebuild keeps the previous provider. Load and construction errors become
+`ProviderPluginError` messages capped at 200 characters.
 
 ## Operator checklist
 

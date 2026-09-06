@@ -91,20 +91,18 @@ new one.
 respect the write gate: a pending approval dialog is dismissed unexecuted,
 while an approved write finishes and is audited.
 
-**Follow mode** mirrors each successful read onto the screen, for models that
-answer in text without touching the screen tools: a listing navigates the view,
-a `diagnose_*` or resource read opens the describe pane, a log read opens the
-live log pane. It is on by default — `agent.follow: false`, or
-`:ai follow off` / `:ai follow on`. A mirror is refused while an approval
-dialog or a describe screen you are reading is open.
+**Follow mode** mirrors each successful read: a listing navigates the view,
+`diagnose_*` or a resource read opens the describe pane, a log read opens the
+live log pane. On by default — `agent.follow: false`, or `:ai follow off` /
+`:ai follow on`. A mirror is refused while an approval dialog or a describe
+screen you are reading is open.
 
 ## Inspecting what the agent sends
 
 `:ai payload` opens a read-only view of the exact sanitized request most
 recently sent to the provider — the literal payload, not a re-derived
-approximation. Every message, tool result and tool-call argument passes through
-the same `OutboundPolicy` redaction step whatever the provider: `Secret`
-values, the `kubectl.kubernetes.io/last-applied-configuration` annotation, and
+approximation. `Secret` values, the
+`kubectl.kubernetes.io/last-applied-configuration` annotation, and
 credential-shaped text are masked before the inspector, or the network, sees
 them.
 
@@ -162,7 +160,7 @@ entry — and the other three methods ignore it.
 | Method | Meaning |
 |---|---|
 | `environment` | Key in the environment variable named by `auth.key`; refused when it is unset. |
-| `keyring` | Key in the OS keychain entry named by `auth.key`. |
+| `keyring` | Key in the OS keychain entry named by `auth.key`; falls back to `profile.model` if absent. |
 | `provider-default` | A declared credential chain for the prefix — Entra ID, plus anything on the `korvid.credential` entry point; `azure` needs `[entra]`. |
 | `device-login` | Interactive device-code sign-in, used by the `github-copilot` flow. |
 | `none` | No credential; requires `endpoint`, since a keyless request without one goes to whatever host the SDK defaults to. |
@@ -198,10 +196,8 @@ pipx install --force 'korvid[all,entra]==0.3.0'
 
 In a source checkout, `uv sync --extra entra` does the same job.
 
-A backend korvid cannot already reach through a profile `endpoint` registers a
-special flow on the `korvid.provider` entry point;
-[Provider plugins](provider-plugins.md) has that contract and the API 2
-surface.
+A non-standard backend registers a flow on the `korvid.provider` entry point;
+[Provider plugins](provider-plugins.md) has the API 2 contract.
 
 ## Model search
 
@@ -218,8 +214,7 @@ keystroke, or during routing: only <kbd>Ctrl</kbd>+<kbd>R</kbd> on the search
 screen contacts it, forcing an `ETag`-conditional revalidation and reporting
 the outcome inline (`Model metadata updated.`, `Model metadata already up to
 date.`, `Model metadata unavailable — keeping what korvid already had.`).
-Otherwise korvid serves its `0600` cache, revalidating on its own initiative at
-most once a day.
+Otherwise korvid serves its `0600` cache unchanged between operator-requested refreshes.
 
 Enrichment is on by default; `agent.model_search.models_dev: false` disables it
 permanently, and only `true` and `false` parse — anything else warns at startup
