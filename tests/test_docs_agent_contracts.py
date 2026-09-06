@@ -31,6 +31,7 @@ import pytest
 
 from korvid.agent.provider_plugin import PROVIDER_PLUGIN_API_VERSION
 from korvid.tools.registry import TOOLS_BY_NAME
+from tests.config_keys import names_key
 
 _REPO_ROOT = Path(__file__).parents[1]
 
@@ -212,11 +213,6 @@ def test_the_tool_description_removal_note_names_which_arm_uses_which_wording(
     assert "MCP" in text
 
 
-def _names_key(text: str, key: str) -> bool:
-    """Whether *text* names *key* as a key rather than as a prefix of one."""
-    return re.search(rf"{re.escape(key)}(?![\w.])", text) is not None
-
-
 def test_the_agent_page_links_the_migration_note_instead_of_restating_it() -> None:
     """A product guide is not a migration manual.
 
@@ -236,7 +232,7 @@ def test_the_agent_page_links_the_migration_note_instead_of_restating_it() -> No
     # Matched as whole keys: today's supported `agent.profiles` merely
     # *contains* the retired singular spelling, so a substring test would
     # read the replacement as the thing it replaced.
-    assert [key for key in removed_keys if _names_key(agent, key)] == []
+    assert [key for key in removed_keys if names_key(agent, key)] == []
     assert "model_tier" in agent, "the supported key still has to be on the page"
     assert re.search(
         r"\[[^\]]*(?:migration|upgrade)[^\]]*\]\(release-notes/unreleased\.md\)",

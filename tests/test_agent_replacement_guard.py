@@ -28,7 +28,6 @@ from __future__ import annotations
 import ast
 import importlib
 import importlib.util
-import re
 import subprocess
 import sys
 from collections.abc import Iterable
@@ -39,6 +38,7 @@ import pytest
 from korvid.agent.engine import AgentEngine
 from korvid.agent.native_engine import NativeAgentEngine
 from korvid.agent.session import AgentSession, DefaultAgentSession
+from tests.config_keys import named_keys
 
 _REPO_ROOT = Path(__file__).parents[1]
 _SRC = _REPO_ROOT / "src" / "korvid"
@@ -114,16 +114,6 @@ _FORBIDDEN_SELECTORS = (
 #: operator is told what replaced them.
 _REMOVED_CONFIG_KEYS = ("agent.profile", "agent.prompts")
 
-#: The removed keys, matched on word boundaries rather than as substrings.
-#: `agent.profiles` is a *current* key — the named model connections korvid
-#: reads today — and it contains the removed `agent.profile` as a prefix. A
-#: substring test therefore reports every module that documents the key the
-#: program actually has as if it were advertising the key the program
-#: removed, which is a guard that fails on correct code.
-_REMOVED_CONFIG_KEY_RE = re.compile(
-    r"\b(?:{})\b".format("|".join(re.escape(key) for key in _REMOVED_CONFIG_KEYS))
-)
-
 #: Files allowed to name a removed config key: the startup migration error,
 #: the tests that pin it, this guard, and the operator-facing migration
 #: records that explain the supersession. Kept exact — a surface that has
@@ -172,8 +162,14 @@ def _found(text: str, needles: Iterable[str]) -> list[str]:
 
 
 def _removed_config_keys(text: str) -> list[str]:
-    """Removed config keys named in *text*, as whole keys."""
-    return sorted(set(_REMOVED_CONFIG_KEY_RE.findall(text)))
+    """Removed config keys named in *text*, as whole keys.
+
+    Key matching lives in `tests/config_keys.py` because
+    `tests/test_docs_agent_contracts.py` asks the same question about the
+    same keys, and the two had already drifted into two regexes that
+    disagreed about a trailing dot.
+    """
+    return named_keys(text, _REMOVED_CONFIG_KEYS)
 
 
 _SRC_FILES = _python_sources(_SRC)
@@ -288,12 +284,37 @@ def test_the_surviving_profiles_key_is_not_read_as_the_removed_one() -> None:
     that protects the deletion and a guard that fails on correct code, so
     it gets its own test rather than being an implementation detail of
     the scan above.
+
+    The boundary is symmetric and excludes `.` on both sides, because a
+    dotted name is ambiguous between a config key and a module path.
+    `korvid.agent.prompts` is a plausible import and must not be read as
+    the retired `agent.prompts` setting; `agent.profile.model` is a
+    longer path, and if a child key ever has to be guarded it gets its
+    own entry in `_REMOVED_CONFIG_KEYS` rather than a looser regex.
     """
     assert _removed_config_keys("writes `agent.active`/`agent.profiles`") == []
     assert _removed_config_keys("agent.profile_manager rewrites nothing") == []
+    assert _removed_config_keys("korvid.agent.prompts is a module path") == []
+    assert _removed_config_keys("agent.profile.model is a longer path") == []
     assert _removed_config_keys("agent.profile was removed") == ["agent.profile"]
     assert _removed_config_keys("use `agent.profile:` no more") == ["agent.profile"]
     assert _removed_config_keys("agent.prompts was removed") == ["agent.prompts"]
+
+
+def test_both_key_guards_ask_the_same_matcher() -> None:
+    """The two guards that match config keys must not own two regexes.
+
+    They did, and the two disagreed about a trailing dot: this module
+    used `\\b`, which matches `agent.profile` inside `agent.profile.model`,
+    while `tests/test_docs_agent_contracts.py` used a lookahead that does
+    not. A guard whose meaning depends on which file you read it in is
+    not a guard, so both import `tests/config_keys.py`.
+    """
+    contracts = (_TESTS / "test_docs_agent_contracts.py").read_text(encoding="utf-8")
+    here = Path(__file__).read_text(encoding="utf-8")
+    for source in (contracts, here):
+        assert "from tests.config_keys import" in source
+    assert "(?![\\w.])" not in contracts, "the docs guard grew its own matcher again"
 
 
 def test_every_migration_surface_still_names_a_removed_key() -> None:
