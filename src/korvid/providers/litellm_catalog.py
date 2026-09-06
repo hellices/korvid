@@ -514,9 +514,24 @@ class LiteLLMModelCatalog(ModelCatalog):
         return await flow.finish_auth(profile)
 
     def _claiming_flow(self, profile: ModelConnectionConfig) -> SpecialFlow | None:
-        """The flow this profile's reference resolves to, by prefix or option."""
+        """The flow this profile's reference resolves to, by prefix or option.
+
+        Mirrors `litellm_factory._claim`, and has to: the two read the
+        same registry about the same profile, and a disagreement means
+        the wizard signs an operator in through a flow the factory will
+        then decline to build with.
+
+        A flow that declares `claims_option` *shares* its prefix rather
+        than owning it. The bare `claim()` still resolves it — the wizard
+        needs that to render the option's own fields — but answering the
+        *sign-in* there would start a login for every ordinary reference
+        under the prefix, including the ones that never turned the option
+        on. Only `claim_by_option` may select such a flow, and only when
+        the option is strictly `True`.
+        """
         if self._flows is None:
             return None
-        return self._flows.claim(profile.model) or self._flows.claim_by_option(
-            profile.model, profile.options
-        )
+        flow = self._flows.claim(profile.model)
+        if flow is not None and flow.claims_option is None:
+            return flow
+        return self._flows.claim_by_option(profile.model, profile.options)

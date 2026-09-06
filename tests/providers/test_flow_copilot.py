@@ -541,20 +541,138 @@ async def test_requests_go_to_the_copilot_host_by_default(
     assert events[-1] == {"type": "done"}
 
 
-async def test_an_operator_endpoint_is_honoured(
+async def test_an_operator_endpoint_is_refused_rather_than_honoured(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A profile that names a gateway is not overridden by the default."""
+    """The flow declares `endpoint` UNSUPPORTED, so honouring one is a
+    hole, not a feature.
+
+    The wizard never writes an endpoint for this flow — but a profile is
+    a YAML file an operator (or anything that can write their config)
+    can hand-edit. If `build_provider` took that host, the very next
+    request would carry a Copilot chat token, minted from the stored
+    GitHub OAuth credential, to an address korvid never vetted. Refusing
+    is the only answer consistent with what the flow declares.
+    """
     store = _store(tmp_path, monkeypatch)
     store.save(CREDENTIAL_KEY, "gho_x")
     login = _login(store, _FakeDeviceFlow())
-    provider = login.build_provider(_profile(endpoint="https://gw.internal/v1"))
-    assert provider is not None
 
+    assert login.build_provider(_profile(endpoint="https://gw.internal/v1")) is None
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "https://evil.example/v1",
+        "http://127.0.0.1:8080",
+        "https://api.githubcopilot.com.evil.example",
+        # The official host itself: the flow answers UNSUPPORTED, so there
+        # is no spelling of the field that is a valid thing to have written.
+        COPILOT_CHAT_BASE_URL,
+    ],
+)
+async def test_a_hand_written_endpoint_never_reaches_a_client(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, endpoint: str
+) -> None:
+    """Fail closed *before* the token is read or a transport is built.
+
+    Order is the point. A refusal that happened after `store.load` would
+    still have decrypted the credential into this process's memory, and
+    one that happened after the provider was constructed would already
+    have a client pointed at the operator's host.
+    """
+    store = _store(tmp_path, monkeypatch)
+    store.save(CREDENTIAL_KEY, "gho_secret_value")
+    reads: list[str] = []
+
+    def _record_load(_self: TokenStore, key: str) -> str:
+        reads.append(key)
+        return "gho_secret_value"
+
+    monkeypatch.setattr(type(store), "load", _record_load)
+
+    built: list[object] = []
+    monkeypatch.setattr(
+        "korvid.providers.flow_copilot.CopilotChatProvider",
+        lambda *args, **kwargs: built.append((args, kwargs)),
+    )
+    monkeypatch.setattr(
+        "korvid.providers.flow_copilot.CopilotCredentialSource",
+        lambda *args, **kwargs: built.append((args, kwargs)),
+    )
+
+    login = _login(store, _FakeDeviceFlow())
+
+    assert login.build_provider(_profile(endpoint=endpoint)) is None
+    assert reads == [], "the stored OAuth token must not be read for a refused profile"
+    assert built == [], "no transport and no credential source may be constructed"
+
+
+async def test_the_refusal_names_the_field_and_never_the_secret(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """An operator has to learn which field to delete — and the log has to
+    stay safe to paste into an issue.
+
+    Neither the stored token nor the endpoint is echoed: the token is a
+    credential, and a hand-written URL can itself carry `user:password@`.
+    """
+    store = _store(tmp_path, monkeypatch)
+    store.save(CREDENTIAL_KEY, "gho_secret_value")
+    login = _login(store, _FakeDeviceFlow())
+
+    with caplog.at_level("WARNING", logger="korvid.providers.flow_copilot"):
+        assert login.build_provider(_profile(endpoint="https://user:pw@gw.internal/v1")) is None
+
+    logged = "\n".join(record.getMessage() for record in caplog.records)
+    assert "endpoint" in logged
+    assert "github-copilot" in logged
+    assert "gho_secret_value" not in logged
+    assert "gw.internal" not in logged
+    assert "pw" not in logged
+
+
+@pytest.mark.parametrize("endpoint", [None, "", "   "])
+async def test_a_profile_that_names_no_endpoint_still_builds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, endpoint: str | None
+) -> None:
+    """Only a *named* host is refused. Blank is what the wizard writes for
+    a flow whose endpoint is UNSUPPORTED, so it must stay buildable."""
+    store = _store(tmp_path, monkeypatch)
+    store.save(CREDENTIAL_KEY, "gho_x")
+    login = _login(store, _FakeDeviceFlow())
+
+    provider = login.build_provider(_profile(endpoint=endpoint))
+
+    assert provider is not None
     seen = _serve(provider)
     [e async for e in provider.complete([{"role": "user", "content": "hi"}], [])]
+    assert seen["url"] == f"{COPILOT_CHAT_BASE_URL}/chat/completions"
+    await provider.aclose()
 
-    assert seen["url"] == "https://gw.internal/v1/chat/completions"
+
+async def test_the_builder_never_reads_a_host_off_the_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The host is korvid's constant, not profile data.
+
+    `build_provider` is the only place a Copilot token and a URL meet, so
+    the one URL it may pass is the module's own — pinned here by
+    substituting the constant and watching the built provider follow it.
+    """
+    store = _store(tmp_path, monkeypatch)
+    store.save(CREDENTIAL_KEY, "gho_x")
+    monkeypatch.setattr(
+        "korvid.providers.flow_copilot.COPILOT_CHAT_BASE_URL", "https://pinned.invalid"
+    )
+    login = _login(store, _FakeDeviceFlow())
+
+    provider = login.build_provider(_profile())
+
+    assert provider is not None
+    assert provider._base_url == "https://pinned.invalid"  # type: ignore[attr-defined]  # pins the one URL source
+    await provider.aclose()
 
 
 async def test_the_transport_reports_a_refused_request_rather_than_an_empty_answer(

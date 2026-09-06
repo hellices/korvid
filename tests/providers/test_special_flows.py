@@ -442,3 +442,70 @@ def test_an_unasked_for_prefix_is_still_claimed_before_anything_is_loaded(
     registry = SpecialFlowRegistry.from_entry_points(reserved_prefixes={"ollama"})
 
     assert "ollama" in registry.claimed_prefixes
+
+
+# ---------------------------------------------------------------------------
+# Task 17 review round 2 — the deny-list is validated here, not borrowed
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("name", ["github-copilot", "github_copilot", "GitHub-Copilot"])
+def test_a_third_party_cannot_take_a_device_login_prefix_the_transport_stops_publishing(
+    monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    """`from_entry_points` must own this refusal outright.
+
+    Today `github_copilot` also happens to be in `models_by_provider()`,
+    so the reserved-prefix rule catches a third party squatting it — but
+    only *transitively*, through a table LiteLLM publishes and may stop
+    publishing at any release. The prefix is on korvid's own
+    `_ALWAYS_CLAIMED` list because routing it starts an interactive
+    device login; a third-party plugin claiming it would intercept every
+    Copilot reference and be handed the profile that names the stored
+    OAuth credential. That refusal cannot depend on a vendor table.
+    """
+    monkeypatch.setattr(
+        "korvid.providers.special_flows._iter_entry_points",
+        lambda: (_DistEntryPoint(name, _flow("github-copilot"), "acme-korvid-plugin"),),
+    )
+
+    registry = SpecialFlowRegistry.from_entry_points(reserved_prefixes={"openai"})
+
+    assert registry.claim("github-copilot/gpt-4o") is None
+    assert registry.claim("github_copilot/gpt-4o") is None
+    assert any("reserved" in message for message in registry.errors)
+
+
+def test_korvids_own_device_login_flow_is_still_exempt_without_the_transport_table(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The deny-list protects routing from third parties, not korvid from
+    itself — and that has to hold whether or not the standard transport's
+    table happens to name the prefix."""
+    flow = _flow("github-copilot")
+    monkeypatch.setattr(
+        "korvid.providers.special_flows._iter_entry_points",
+        lambda: (_DistEntryPoint("github-copilot", flow, "korvid"),),
+    )
+
+    registry = SpecialFlowRegistry.from_entry_points()
+
+    assert registry.claim("github_copilot/gpt-4o") is flow
+    assert registry.errors == ()
+
+
+@pytest.mark.parametrize("name", ["openai-compat", "vllm", "github", "claude"])
+def test_a_retired_alias_entry_point_is_refused_without_the_transport_table(
+    monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    """The companion half of the same list: a retired alias is claimable
+    by nobody, and that too is decided here rather than borrowed."""
+    monkeypatch.setattr(
+        "korvid.providers.special_flows._iter_entry_points",
+        lambda: (_DistEntryPoint(name, _flow(name), "korvid"),),
+    )
+
+    registry = SpecialFlowRegistry.from_entry_points()
+
+    assert registry.claim(f"{name}/x") is None
+    assert any("reserved" in message for message in registry.errors)

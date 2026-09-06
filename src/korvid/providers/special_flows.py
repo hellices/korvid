@@ -177,10 +177,19 @@ class SpecialFlowRegistry:
         table. It does two jobs: a third party may not shadow a name in
         it, and a name in it is one korvid can hand back to routing if
         the flow sharing it turns out not to be loadable.
+
+        `_ALWAYS_CLAIMED` is checked here too, and not left to overlap
+        with *reserved_prefixes* by luck. Every name on it is one korvid
+        must keep away from a third party whatever the transport
+        publishes — a retired alias an operator still reads as korvid's
+        own, and a prefix whose routing starts an interactive device
+        login. `github_copilot` happens to be in `models_by_provider()`
+        today; the refusal must not be a consequence of that.
         """
         registry = cls()
         reserved = {normalize_prefix(prefix) for prefix in reserved_prefixes}
         registry._routable_prefixes = frozenset(reserved)
+        exclusive = reserved | _ALWAYS_CLAIMED
 
         for ep in _iter_entry_points():
             try:
@@ -189,7 +198,7 @@ class SpecialFlowRegistry:
                 continue
             normalized = normalize_prefix(name)
             if normalized in _FORBIDDEN_PREFIXES or (
-                normalized in reserved and not _is_korvids_own(ep)
+                normalized in exclusive and not _is_korvids_own(ep)
             ):
                 registry._errors.append(
                     f"entry-point prefix {name!r} (normalized: {normalized!r}) is reserved"

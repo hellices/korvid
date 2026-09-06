@@ -684,3 +684,131 @@ async def test_a_flow_that_declares_no_sign_in_is_not_invented() -> None:
 
     assert await catalog.begin_auth(ModelConnectionConfig(model="acme/model")) is None
     assert await catalog.finish_auth(ModelConnectionConfig(model="acme/model")) is None
+
+
+# ---------------------------------------------------------------------------
+# Task 17 review round 2 — an option flow's sign-in follows the option
+# ---------------------------------------------------------------------------
+#
+# `litellm_factory._claim` refuses to answer a bare `registry.claim()` hit
+# whose flow declares `claims_option`: such a flow *shares* its prefix
+# rather than owning it, so only `claim_by_option` may select it. The
+# catalog drives the same flows through the wizard's sign-in stages, so it
+# has to read a claim exactly the same way — otherwise the wizard runs a
+# device login for a profile the factory will then build on the ordinary
+# transport.
+
+
+def _option_flow(**kwargs: object) -> object:
+    """A flow that shares `ollama/` and activates on `native_thinking`."""
+    from korvid.agent.model_profiles import SetupField, SetupFieldKind
+
+    return _make_flow(
+        "ollama",
+        claims_option="native_thinking",
+        option_fields=(
+            SetupField(key="native_thinking", label="Native thinking", kind=SetupFieldKind.BOOLEAN),
+        ),
+        **kwargs,
+    )
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        pytest.param({}, id="absent"),
+        pytest.param({"native_thinking": False}, id="off"),
+        pytest.param({"native_thinking": "true"}, id="a-truthy-string"),
+        pytest.param({"native_thinking": 1}, id="a-truthy-int"),
+    ],
+)
+async def test_an_option_flow_is_not_signed_into_when_the_option_is_not_on(
+    options: dict[str, object],
+) -> None:
+    """The catalog must mirror the factory's claim semantics.
+
+    A flow that declares `claims_option` shares a prefix the standard
+    transport already routes. `registry.claim("ollama/x")` still resolves
+    it — the wizard needs that to render the option's own fields — but
+    answering the *sign-in* there would start a login for every ordinary
+    `ollama/*` profile, including ones that never turned the option on
+    and that the factory will build on the shared transport.
+    """
+    from korvid.agent.model_profiles import DeviceLoginPrompt
+    from korvid.providers.special_flows import SpecialFlowRegistry
+
+    started: list[ModelConnectionConfig] = []
+    finished: list[ModelConnectionConfig] = []
+
+    async def _begin(profile: ModelConnectionConfig) -> DeviceLoginPrompt:
+        started.append(profile)
+        return DeviceLoginPrompt(
+            user_code="ABCD-1234", verification_uri="https://host/login", expires_in_seconds=900
+        )
+
+    async def _finish(profile: ModelConnectionConfig) -> str:
+        finished.append(profile)
+        return "some-credential"
+
+    registry = SpecialFlowRegistry([_option_flow(begin_auth=_begin, finish_auth=_finish)])
+    catalog = LiteLLMModelCatalog(flows=registry)
+    profile = ModelConnectionConfig(model="ollama/qwen3:8b", options=options)
+
+    assert await catalog.begin_auth(profile) is None
+    assert await catalog.finish_auth(profile) is None
+    assert started == [], "no login may be started for an option that is not on"
+    assert finished == [], "no credential may be stored for an option that is not on"
+
+
+async def test_an_option_flow_is_signed_into_once_the_option_is_on() -> None:
+    """The narrowing must not remove the path the option exists for: with
+    `native_thinking: true` the flow owns the reference, and its sign-in
+    is the only one the wizard can offer."""
+    from korvid.agent.model_profiles import DeviceLoginPrompt
+    from korvid.providers.special_flows import SpecialFlowRegistry
+
+    prompt = DeviceLoginPrompt(
+        user_code="ABCD-1234", verification_uri="https://host/login", expires_in_seconds=900
+    )
+    seen: list[ModelConnectionConfig] = []
+
+    async def _begin(profile: ModelConnectionConfig) -> DeviceLoginPrompt:
+        seen.append(profile)
+        return prompt
+
+    async def _finish(profile: ModelConnectionConfig) -> str:
+        seen.append(profile)
+        return "some-credential"
+
+    registry = SpecialFlowRegistry([_option_flow(begin_auth=_begin, finish_auth=_finish)])
+    catalog = LiteLLMModelCatalog(flows=registry)
+    profile = ModelConnectionConfig(model="ollama/qwen3:8b", options={"native_thinking": True})
+
+    assert await catalog.begin_auth(profile) is prompt
+    assert await catalog.finish_auth(profile) == "some-credential"
+    assert seen == [profile, profile]
+
+
+async def test_a_prefix_owning_flow_still_signs_in_without_any_option() -> None:
+    """The narrowing is scoped to flows that declare `claims_option`. A
+    flow that owns its prefix outright answers as it always did, whatever
+    the profile's options say."""
+    from korvid.agent.model_profiles import DeviceLoginPrompt
+    from korvid.providers.special_flows import SpecialFlowRegistry
+
+    prompt = DeviceLoginPrompt(
+        user_code="ABCD-1234", verification_uri="https://host/login", expires_in_seconds=900
+    )
+
+    async def _begin(profile: ModelConnectionConfig) -> DeviceLoginPrompt:
+        return prompt
+
+    registry = SpecialFlowRegistry([_make_flow("acme", begin_auth=_begin)])
+    catalog = LiteLLMModelCatalog(flows=registry)
+
+    assert (
+        await catalog.begin_auth(
+            ModelConnectionConfig(model="acme/model", options={"native_thinking": False})
+        )
+        is prompt
+    )

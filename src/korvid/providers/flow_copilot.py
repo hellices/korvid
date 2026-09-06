@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
@@ -36,6 +37,8 @@ from korvid.agent.model_profiles import (
 from korvid.agent.provider import REQUEST_SENT, LLMProvider
 from korvid.providers.net import make_client
 from korvid.providers.token_store import TokenStore
+
+logger = logging.getLogger(__name__)
 
 #: The prefix an operator writes, and the one this flow declares. The
 #: registry folds the SDK's underscore spelling onto it.
@@ -418,8 +421,26 @@ class CopilotDeviceLogin:
         a disabled agent with the reason it already logged, and a token
         must never be consumed under an auth method the operator did not
         name.
+
+        The chat host is korvid's own constant and never profile data.
+        This flow answers `EndpointRequirement.UNSUPPORTED`, so the wizard
+        never writes one — but a profile is a YAML file, and honouring a
+        hand-written `endpoint` would send a Copilot chat token, minted
+        from the stored GitHub OAuth credential, to an address korvid
+        never vetted. So a named endpoint is refused *first*, before the
+        credential is read and before any client exists.
         """
         if profile.auth.method != AUTH_METHOD:
+            return None
+        if _names_an_endpoint(profile):
+            # Neither the endpoint nor the token is echoed: the token is a
+            # credential, and a hand-written URL can carry `user:pass@`.
+            logger.warning(
+                "a %s profile named an endpoint, which this flow does not support; "
+                "refusing it rather than sending a Copilot token to that host — "
+                "remove the profile's endpoint field",
+                PREFIX,
+            )
             return None
         _prefix, tag = split_reference(profile.model)
         if not tag:
@@ -428,7 +449,7 @@ class CopilotDeviceLogin:
         if not token:
             return None
         return CopilotChatProvider(
-            base_url=profile.endpoint or COPILOT_CHAT_BASE_URL,
+            base_url=COPILOT_CHAT_BASE_URL,
             model=tag,
             credentials=CopilotCredentialSource(token),
         )
@@ -438,6 +459,17 @@ class CopilotDeviceLogin:
             await self._pending.aclose()
             self._pending = None
             self._prompt = None
+
+
+def _names_an_endpoint(profile: ModelConnectionConfig) -> bool:
+    """Did the profile actually name a host?
+
+    Blank is what a profile carries for a flow whose endpoint is
+    UNSUPPORTED, so only a non-blank value is a refusal. Whitespace is
+    stripped: `endpoint: "   "` is not a host, and treating it as one
+    once produced a request to the relative URL `/%20%20%20/…`.
+    """
+    return bool((profile.endpoint or "").strip())
 
 
 def copilot_flow() -> SpecialFlow:
