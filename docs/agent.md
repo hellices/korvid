@@ -172,6 +172,16 @@ entry — and the other three methods ignore it.
 | Ollama (`ollama`) | `options.native_thinking: true` selects native `/api/chat`; the same `options` mapping tunes `num_ctx`, `temperature`, `seed`, `think`, `keep_alive`, `num_predict`. |
 | Any LiteLLM-supported prefix | 2,000+ models ship in the bundled catalog; use any prefix directly. |
 
+`options` carries **model parameters** — `temperature`, `max_tokens`, `seed`,
+`timeout`, `api_version`, `extra_headers` and whatever else the provider
+accepts. It does not carry the request itself. korvid owns `model`,
+`messages`, `stream`, `stream_options`, `tools`, `tool_choice`, `base_url`,
+`api_base`, `api_key`, `custom_llm_provider` and any credential-shaped key,
+and drops those from a profile rather than letting one re-route the request,
+swap the credential or mute the agent's tools. An option the provider does not
+list as supported is dropped too — unless the capability lookup itself failed,
+in which case it is forwarded so the vendor's error names it.
+
 A config still using the retired flat scalars is migrated on load into one
 profile named `default`, which `agent.active` then selects; the scalars are
 dropped on the next save. The `agent.ollama.*` block is read **only** by that

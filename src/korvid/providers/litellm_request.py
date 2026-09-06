@@ -20,6 +20,7 @@ is only reachable through ``**kwargs``, so korvid uses the named ones.
 from __future__ import annotations
 
 import math
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
@@ -42,7 +43,121 @@ _KORVID_OWNED_OPTIONS: frozenset[str] = frozenset(
 #: Options that are named ``acompletion`` parameters rather than model
 #: parameters. They are lifted onto the plan and must never be left in the
 #: extras, where the per-provider allowlist would decide their fate.
+#: Composed into ``RESERVED_CALL_ARGUMENTS`` below rather than restated
+#: there, so the rule that removes them from the extras and the rule that
+#: lifts them can never name different keys.
 _LIFTED: frozenset[str] = frozenset({"api_version", "timeout"})
+
+
+# ---------------------------------------------------------------------------
+# Reserved call arguments — the engine owns the request, the operator owns
+# the model parameters, and the two sets never overlap.
+# ---------------------------------------------------------------------------
+
+#: Call arguments korvid decides and an operator option may never occupy.
+#:
+#: The per-provider allowlist is no protection here: measured on litellm
+#: 1.98.0, ``get_supported_openai_params`` reports ``stream``,
+#: ``stream_options``, ``tools`` and ``tool_choice`` as supported for
+#: essentially every provider, so a profile option of that name passes the
+#: filter and — before this set existed — was merged *after* the engine's
+#: own value and replaced it. What that bought an operator (or anyone who
+#: could write their config file) was re-routing the request to another
+#: host, swapping the credential, muting the agent's tools, or turning
+#: streaming off underneath a streaming reader.
+#:
+#: ``tool_choice`` is owned even though korvid never sets it. korvid drives
+#: the tool loop; a profile that forced or disabled tool calls would change
+#: the agent's behaviour while still reporting the tools as available.
+#: ``functions``/``function_call`` are the deprecated spellings of exactly
+#: those two arguments and are owned for the same reason.
+#:
+#: ``client`` is owned because a flow passes its own transport there, and
+#: ``api_base``/``custom_llm_provider`` because both reach LiteLLM through
+#: ``**kwargs`` and both re-route the request.
+#:
+#: ``_LIFTED`` is composed in rather than restated: ``api_version`` and
+#: ``timeout`` *are* the operator's to set, they simply travel by the
+#: plan's named parameters, and this set is what takes them out of the
+#: extras on the way.
+RESERVED_CALL_ARGUMENTS: Final[frozenset[str]] = _LIFTED | frozenset(
+    {
+        # The conversation itself.
+        "model",
+        "messages",
+        # How the response is read.
+        "stream",
+        "stream_options",
+        # Tool dispatch, in both the current and the deprecated spelling.
+        "tools",
+        "tool_choice",
+        "functions",
+        "function_call",
+        # Who the request authenticates as, and where it goes.
+        "api_key",
+        "api_base",
+        "base_url",
+        "custom_llm_provider",
+        "client",
+    }
+)
+
+#: Splits ASCII camelCase and acronym boundaries so ``apiKey``, ``APIKey``
+#: and ``api_key`` tokenize the same way. The same two transitions
+#: ``core/config.py`` splits on before it refuses a secret-bearing key.
+_CAMEL_BOUNDARY_RE: Final[re.Pattern[str]] = re.compile(
+    r"(?<=[a-z0-9])(?=[A-Z])"  # lowerUpper: apiKey → api_Key
+    r"|(?<=[A-Z])(?=[A-Z][a-z])"  # ACRONYMWord: APIKey → API_Key
+)
+
+_SEPARATOR_RE: Final[re.Pattern[str]] = re.compile(r"[^a-z0-9]+")
+
+#: Key segments that name a credential rather than a model parameter.
+#: Deliberately the same vocabulary ``core/config.py`` refuses in a
+#: profile's options, so the two boundaries cannot disagree about what a
+#: credential looks like — and deliberately the *singular* ``token``:
+#: ``max_tokens`` and ``max_completion_tokens`` tokenize to ``tokens`` and
+#: must keep working.
+_CREDENTIAL_SEGMENTS: Final[frozenset[str]] = frozenset(
+    {"apikey", "authorization", "credential", "credentials", "password", "secret", "token"}
+)
+
+#: Credential names that are only credential names as a pair. ``key`` alone
+#: is a real model parameter segment (``prompt_cache_key``), so it is
+#: matched as a two-token window instead.
+_CREDENTIAL_SEGMENT_PAIRS: Final[tuple[tuple[str, str], ...]] = (("api", "key"), ("access", "key"))
+
+
+def _key_segments(key: str) -> tuple[str, ...]:
+    """*key* as lowercase word segments, camelCase boundaries included."""
+    lowered = _CAMEL_BOUNDARY_RE.sub("_", key).lower()
+    return tuple(part for part in _SEPARATOR_RE.split(lowered) if part)
+
+
+def _names_a_credential(key: str) -> bool:
+    """Whether *key* names a credential or an auth selector.
+
+    Matched by shape rather than by a list of vendor parameter names: that
+    list is unbounded, it would go stale on the next SDK release, and this
+    module must not branch on a vendor. Anything that matches is dropped
+    rather than merely prevented from overriding — an argument the
+    provider does not consume is forwarded into the *request body*
+    (measured on 1.98.0), so a credential-shaped option would send
+    whatever it holds to the vendor as an unknown field.
+    """
+    segments = _key_segments(key)
+    if _CREDENTIAL_SEGMENTS.intersection(segments):
+        return True
+    return any(
+        segments[index : index + 2] == pair
+        for pair in _CREDENTIAL_SEGMENT_PAIRS
+        for index in range(len(segments) - 1)
+    )
+
+
+def is_reserved_call_argument(key: str) -> bool:
+    """Whether *key* is korvid's to decide rather than the operator's."""
+    return key in RESERVED_CALL_ARGUMENTS or _names_a_credential(key)
 
 
 # ---------------------------------------------------------------------------
@@ -208,12 +323,28 @@ class RequestPlan:
             kwargs["timeout"] = self.timeout
         if stream:
             kwargs["stream_options"] = {"include_usage": True}
-        kwargs.update(materialize_options(self.extra))
-        # Last, and neither copied nor materialized: a declared credential
-        # parameter is a live callable the transport invokes per request,
-        # and an operator option must never be able to replace it.
+        kwargs.update(self._operator_arguments())
+        # Last, and neither copied nor filtered: a declared credential
+        # parameter is a live callable the transport invokes per request.
         kwargs.update(self.credential)
         return kwargs
+
+    def _operator_arguments(self) -> dict[str, Any]:
+        """The profile's own parameters, in the shape the SDK is handed.
+
+        Filtered rather than merely out-ordered, and filtered *here* rather
+        than only in ``build_plan``: ``RequestPlan`` is a public dataclass a
+        caller can assemble directly, and the reserved policy has to hold
+        for every plan that reaches the wire. An engine argument the plan
+        deliberately *omits* — no ``api_key`` under ``provider-default``, no
+        ``tools`` on a toolless request, no ``stream_options`` on a blocking
+        one — is exactly the case a merge order alone would not protect.
+        """
+        return {
+            key: _materialize(value)
+            for key, value in self.extra.items()
+            if not is_reserved_call_argument(key) and key not in self.credential
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -260,9 +391,15 @@ def build_plan(
         api_version = raw_api_version
     timeout = _positive_seconds(options.get("timeout"))
 
-    # 2. Strip korvid-owned transport selectors — they must never reach the wire.
+    # 2. Strip everything that is not the operator's to set: korvid-owned
+    #    transport selectors, which must never reach the wire, and the
+    #    reserved call arguments, which korvid decides. `_LIFTED` is a
+    #    subset of the reserved set, so `api_version` and `timeout` leave
+    #    with them rather than through a second rule.
     filtered = {
-        k: v for k, v in options.items() if k not in _KORVID_OWNED_OPTIONS and k not in _LIFTED
+        k: v
+        for k, v in options.items()
+        if k not in _KORVID_OWNED_OPTIONS and not is_reserved_call_argument(k)
     }
 
     # 3. Keep only what the provider accepts.  An empty `supported` means the

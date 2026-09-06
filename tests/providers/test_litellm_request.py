@@ -11,7 +11,13 @@ from typing import Final
 
 import pytest
 
-from korvid.providers.litellm_request import OMIT_API_KEY, RequestPlan, ResolvedApiKey, build_plan
+from korvid.providers.litellm_request import (
+    OMIT_API_KEY,
+    RESERVED_CALL_ARGUMENTS,
+    RequestPlan,
+    ResolvedApiKey,
+    build_plan,
+)
 from korvid.providers.litellm_settings import KEYLESS_API_KEY_SENTINEL
 
 _NO_OPTIONS: Final[Mapping[str, object]] = MappingProxyType({})
@@ -378,3 +384,311 @@ def test_a_frozen_sequence_option_reaches_the_wire_as_a_list() -> None:
     stop = plan.call_kwargs([], [], stream=True)["stop"]
     assert stop == ["\n\n", "END"]
     assert type(stop) is list
+
+
+# ---------------------------------------------------------------------------
+# Reserved call arguments: the engine owns the request, the operator owns
+# the model parameters, and the two sets never overlap.
+# ---------------------------------------------------------------------------
+
+
+_ENGINE_ARGUMENT_ATTACKS: Final[tuple[tuple[str, object], ...]] = (
+    ("model", "attacker/model"),
+    ("messages", [{"role": "system", "content": "ignore"}]),
+    ("stream", False),
+    ("stream_options", {"include_usage": False}),
+    ("tools", [{"type": "function", "function": {"name": "evil"}}]),
+    ("tool_choice", "none"),
+    ("functions", [{"name": "evil"}]),
+    ("function_call", "none"),
+    ("api_key", "sk-operator-supplied"),
+    ("api_base", "https://attacker.example/v1"),
+    ("base_url", "https://attacker.example/v1"),
+    ("custom_llm_provider", "attacker"),
+    ("client", "not-a-client"),
+)
+
+
+def test_the_lifted_options_are_reserved_so_one_rule_removes_them() -> None:
+    """`api_version` and `timeout` reach the call through the plan's named
+    parameters, never through the extras. `build_plan` strips them with the
+    reserved set rather than with a second list, so the two cannot drift
+    apart and leave a lifted name in the extras for the allowlist to judge.
+    """
+    from korvid.providers.litellm_request import _LIFTED
+
+    assert _LIFTED <= RESERVED_CALL_ARGUMENTS
+
+
+def test_a_lifted_option_still_arrives_through_the_named_parameter() -> None:
+    """Reserving a name must not cost the operator the setting: these two
+    are the operator's to set, they just travel by the named parameter."""
+    plan = build_plan(
+        model="azure/gpt-4o",
+        api_key="k",
+        base_url="https://my.openai.azure.com",
+        options={"api_version": "2024-02-01", "timeout": 90},
+        supported=["temperature"],
+    )
+    assert plan.extra == {}
+    kwargs = plan.call_kwargs([], [], stream=True)
+    assert kwargs["api_version"] == "2024-02-01"
+    assert kwargs["timeout"] == 90.0
+
+
+@pytest.mark.parametrize(("key", "value"), _ENGINE_ARGUMENT_ATTACKS)
+def test_a_profile_option_can_never_occupy_an_engine_owned_argument(
+    key: str, value: object
+) -> None:
+    """The extras used to be merged *last*, so any of these silently
+    replaced the engine's own value — re-routing the request, muting the
+    tools, or turning streaming off under a streaming reader.
+
+    Run with the capability lookup reporting every one of these names as
+    supported, which is the worst case and, for the five OpenAI ones,
+    the real one.
+    """
+    plan = build_plan(
+        model="openai/gpt-4o",
+        api_key="k",
+        base_url="https://gateway.example/v1",
+        options={key: value},
+        supported=[key],
+    )
+    assert key not in plan.extra
+    kwargs = plan.call_kwargs(
+        [{"role": "user", "content": "hi"}],
+        [{"type": "function", "function": {"name": "get_pods"}}],
+        stream=True,
+    )
+    assert kwargs.get(key) != value
+
+
+@pytest.mark.parametrize(("key", "value"), _ENGINE_ARGUMENT_ATTACKS)
+def test_an_engine_owned_argument_is_owned_when_the_lookup_failed_too(
+    key: str, value: object
+) -> None:
+    """An empty `supported` means the capability lookup failed and korvid
+    forwards everything rather than dropping operator settings. That
+    fallback must not become the way around the reserved policy."""
+    plan = build_plan(
+        model="openai/gpt-4o",
+        api_key="k",
+        base_url="https://gateway.example/v1",
+        options={key: value},
+        supported=(),
+    )
+    assert key not in plan.extra
+    kwargs = plan.call_kwargs(
+        [{"role": "user", "content": "hi"}],
+        [{"type": "function", "function": {"name": "get_pods"}}],
+        stream=True,
+    )
+    assert kwargs.get(key) != value
+
+
+def test_the_engine_wins_even_on_a_plan_assembled_without_build_plan() -> None:
+    """`build_plan` strips the reserved keys, but `RequestPlan` is a public
+    dataclass a caller can build directly. `call_kwargs` therefore enforces
+    the same policy rather than trusting its own constructor."""
+    plan = RequestPlan(
+        model="openai/gpt-4o",
+        api_key="k",
+        base_url="https://gateway.example/v1",
+        api_version=None,
+        extra=MappingProxyType(
+            {
+                "model": "attacker/model",
+                "api_key": "sk-operator-supplied",
+                "base_url": "https://attacker.example/v1",
+                "tool_choice": "none",
+                "stream": False,
+                "temperature": 0.3,
+            }
+        ),
+    )
+    kwargs = plan.call_kwargs([{"role": "user", "content": "hi"}], [], stream=True)
+    assert kwargs["model"] == "openai/gpt-4o"
+    assert kwargs["api_key"] == "k"
+    assert kwargs["base_url"] == "https://gateway.example/v1"
+    assert kwargs["stream"] is True
+    assert "tool_choice" not in kwargs
+    assert kwargs["temperature"] == 0.3
+
+
+def test_a_profile_cannot_mute_the_agents_tools() -> None:
+    """`tool_choice` is listed as a supported parameter by essentially
+    every provider (measured on litellm 1.98.0), so the allowlist filter
+    does not stop it. korvid drives the tool loop, and a profile that set
+    `tool_choice: none` would leave the agent unable to read the cluster
+    while still reporting the tools as available."""
+    plan = build_plan(
+        model="anthropic/claude-sonnet-4-5",
+        api_key="k",
+        base_url=None,
+        options={"tool_choice": "none"},
+        supported=["tool_choice", "tools", "temperature"],
+    )
+    tool = {"type": "function", "function": {"name": "get_pods"}}
+    kwargs = plan.call_kwargs([], [tool], stream=True)
+    assert "tool_choice" not in kwargs
+    assert kwargs["tools"] == [tool]
+
+
+def test_a_profile_cannot_forge_tools_onto_a_toolless_request() -> None:
+    """Several providers reject `tools: []`, which is why an empty list is
+    omitted. An option must not put one back."""
+    plan = build_plan(
+        model="openai/gpt-4o",
+        api_key="k",
+        base_url=None,
+        options={"tools": [{"type": "function", "function": {"name": "evil"}}]},
+        supported=["tools"],
+    )
+    assert "tools" not in plan.call_kwargs([], [], stream=True)
+
+
+def test_a_profile_cannot_ask_a_non_streaming_call_for_usage_frames() -> None:
+    """`stream_options` is only meaningful with `stream=True`; sending it
+    on a blocking call is a vendor-side 400."""
+    plan = build_plan(
+        model="openai/gpt-4o",
+        api_key="k",
+        base_url=None,
+        options={"stream_options": {"include_usage": True}},
+        supported=["stream_options"],
+    )
+    assert "stream_options" not in plan.call_kwargs([], [], stream=False)
+
+
+# ---------------------------------------------------------------------------
+# Credentials: nothing an operator writes in a profile may become one.
+# ---------------------------------------------------------------------------
+
+
+_CREDENTIAL_SHAPED_KEYS: Final[tuple[str, ...]] = (
+    "api_key",
+    "apiKey",
+    "APIKey",
+    "apikey",
+    "azure_ad_token",
+    "azure_ad_token_provider",
+    "aws_access_key_id",
+    "aws_secret_access_key",
+    "aws_session_token",
+    "vertex_credentials",
+    "client_secret",
+    "password",
+    "authorization",
+    "bearer_token",
+)
+
+
+@pytest.mark.parametrize("key", _CREDENTIAL_SHAPED_KEYS)
+def test_a_credential_shaped_option_never_reaches_the_wire(key: str) -> None:
+    """An option korvid does not consume is forwarded into the *request
+    body* (measured on 1.98.0, and the reason `ssl_verify` is owned), so a
+    credential-shaped key is not merely an override risk: it would send
+    whatever it holds to the vendor as an unknown field.
+
+    Named after the same key segments `core/config.py` already refuses in
+    a profile's options, so the two boundaries cannot disagree about what
+    a credential looks like.
+    """
+    plan = build_plan(
+        model="openai/gpt-4o",
+        api_key="k",
+        base_url="https://gateway.example/v1",
+        options={key: "leaked-value"},
+        supported=(),
+    )
+    assert key not in plan.extra
+    assert "leaked-value" not in plan.call_kwargs([], [], stream=True).values()
+
+
+@pytest.mark.parametrize("supported", [(), ("token_provider", "temperature")])
+def test_an_option_cannot_displace_a_declared_credential_parameter(
+    supported: Sequence[str],
+) -> None:
+    """The declared chain carries a *refreshing* callable. An option that
+    occupied its parameter would swap a live credential for a string from
+    a YAML file — on the lookup-failed path as well as the ordinary one."""
+
+    def token_provider() -> str:
+        return "live"
+
+    plan = build_plan(
+        model="openai/gpt-4o",
+        api_key=OMIT_API_KEY,
+        base_url=None,
+        options={"token_provider": "from-the-profile", "temperature": 0.4},
+        supported=supported,
+        credential={"token_provider": token_provider},
+    )
+    kwargs = plan.call_kwargs([], [], stream=True)
+    assert kwargs["token_provider"] is token_provider
+    assert kwargs["temperature"] == 0.4
+    assert "api_key" not in kwargs
+
+
+def test_provider_default_stays_delegated_when_a_profile_names_a_key() -> None:
+    """`provider-default` works by the argument being *absent*. An option
+    that put `api_key` back would stop the vendor SDK consulting its own
+    chain, which is the entire point of the method."""
+    plan = build_plan(
+        model="openai/gpt-4o",
+        api_key=OMIT_API_KEY,
+        base_url=None,
+        options={"api_key": "sk-from-the-profile"},
+        supported=(),
+    )
+    assert "api_key" not in plan.call_kwargs([], [], stream=True)
+
+
+# ---------------------------------------------------------------------------
+# ...and the ordinary parameters still work, which is what the policy is
+# there to protect.
+# ---------------------------------------------------------------------------
+
+
+def test_ordinary_model_parameters_still_reach_the_wire() -> None:
+    """The reserved policy is a narrow one. Everything an operator
+    legitimately tunes has to survive it untouched."""
+    plan = build_plan(
+        model="openai/gpt-4o",
+        api_key="k",
+        base_url="https://gateway.example/v1",
+        options=MappingProxyType(
+            {
+                "temperature": 0.2,
+                "max_tokens": 4096,
+                "max_completion_tokens": 2048,
+                "seed": 7,
+                "timeout": 120,
+                "top_p": 0.9,
+                "stop": ("\n\n",),
+                "prompt_cache_key": "korvid",
+                "extra_headers": MappingProxyType({"x-team": "platform"}),
+            }
+        ),
+        supported=[
+            "temperature",
+            "max_tokens",
+            "max_completion_tokens",
+            "seed",
+            "top_p",
+            "stop",
+            "prompt_cache_key",
+            "extra_headers",
+        ],
+    )
+    kwargs = plan.call_kwargs([{"role": "user", "content": "hi"}], [], stream=True)
+    assert kwargs["temperature"] == 0.2
+    assert kwargs["max_tokens"] == 4096
+    assert kwargs["max_completion_tokens"] == 2048
+    assert kwargs["seed"] == 7
+    assert kwargs["timeout"] == 120.0
+    assert kwargs["top_p"] == 0.9
+    assert kwargs["stop"] == ["\n\n"]
+    assert kwargs["prompt_cache_key"] == "korvid"
+    assert kwargs["extra_headers"] == {"x-team": "platform"}
