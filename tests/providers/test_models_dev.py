@@ -5,6 +5,7 @@ import json
 import stat
 from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -21,6 +22,12 @@ from korvid.providers.models_dev import (
 )
 
 httpx = pytest.importorskip("httpx")
+
+if TYPE_CHECKING:
+    # `httpx` above is a *value* to a type checker, so annotations written
+    # as `httpx.Request` do not resolve. The real module, imported only
+    # for typing, gives new code somewhere to point.
+    import httpx as httpx_types
 
 _DOCUMENT = {
     "anthropic": {
@@ -188,12 +195,13 @@ async def test_a_slow_drip_cannot_outlast_the_whole_request_budget(
             yield b'"m%d": {},' % i
         yield b'"last": {}}}}'
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
+    def handler(request: httpx_types.Request) -> httpx_types.Response:
+        response: httpx_types.Response = httpx.Response(
             200,
             content=drip(),
             headers={"content-type": "application/json"},
         )
+        return response
 
     # Seed a cache and age it past the TTL, so the refresh actually goes
     # out and there is stale data whose survival can be checked.
