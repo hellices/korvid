@@ -86,28 +86,31 @@ network at all.
 
 **Primary layer (always available):** LiteLLM ships
 `model_prices_and_context_window.json` inside its wheel. korvid reads that
-table at startup — no GET request, no internet required. The model search
-screen (`:ai`) and tier routing both use it. Over 2,000 models from dozens of providers
-are discoverable and routable offline, as long as you can reach the model
-endpoint itself.
+table at startup — no GET request, no internet required. The `:ai` wizard's
+model search screen and tier routing both use it. Over 2,000 models from dozens
+of providers are discoverable and routable offline, as long as you can reach
+the model endpoint itself.
 
 **Optional enrichment layer (models.dev):** korvid may fetch a single JSON
 document from `https://models.dev/api.json` to add context lengths,
 quantization info, and env-variable hints. This fetch is **never made at
-startup** and **never made during routing**. It happens only when you press
-<kbd>Ctrl</kbd>+<kbd>R</kbd> on the model search screen of the `:ai` wizard.
-Opening that screen, typing a query, and picking a model make no request.
+startup**, on mount, on a keystroke, or **during routing**. It happens only
+when you press <kbd>Ctrl</kbd>+<kbd>R</kbd> on the `:ai` wizard's model search
+screen; opening that screen, typing a query and picking a model make no
+request, and no HTTP client is built until the key is pressed.
 
-The result is cached at `$XDG_CACHE_HOME/korvid/models-dev.json`
-(Linux default: `~/.cache/korvid/models-dev.json`; macOS:
-`~/Library/Caches/korvid/models-dev.json`; Windows:
-`%LOCALAPPDATA%\korvid\models-dev.json`). The cache file is written
-with mode `0600`. korvid never revalidates it on its own initiative more
-than once a day; <kbd>Ctrl</kbd>+<kbd>R</kbd> is an explicit request and
-revalidates regardless of that window, as a conditional `If-None-Match`
-request that transfers no document when nothing has changed. That request
-is built by the same client builder as every other korvid HTTPS call, so
-`network.ca_bundle` covers it.
+The cache is `$XDG_CACHE_HOME/korvid/models-dev.json` whenever that variable is
+set — on every platform, Windows and macOS included. With it unset the path
+follows the platform convention: `~/Library/Caches/korvid/models-dev.json` on
+macOS, `%LOCALAPPDATA%\korvid\models-dev.json` on Windows (falling back to
+`~/AppData/Local` when that variable is unset too), and
+`~/.cache/korvid/models-dev.json` everywhere else. The file is written with
+mode `0600`. korvid never revalidates it on its own initiative more than once a
+day; <kbd>Ctrl</kbd>+<kbd>R</kbd> is an explicit request and revalidates
+regardless of that window, as a conditional `If-None-Match` request that
+transfers no document when nothing has changed. That request is built by the
+same client builder as every other korvid HTTPS call, so `network.ca_bundle`
+covers it.
 
 In a fully air-gapped deployment, disable the models.dev fetch permanently:
 
@@ -117,16 +120,18 @@ agent:
     models_dev: false
 ```
 
-With this setting korvid builds no models.dev source and no HTTP client for
-one, so there is no code path left that could open the socket: model search
-uses only the LiteLLM bundled table, and <kbd>Ctrl</kbd>+<kbd>R</kbd>
-answers `Model metadata refresh is disabled — no source is configured,
-nothing was contacted.` without touching the network.
+The key defaults to `true`. With it set to `false` korvid builds no models.dev
+source and no HTTP client for one, so there is no code path left that could
+open the socket: model search uses only the LiteLLM bundled table, and
+<kbd>Ctrl</kbd>+<kbd>R</kbd> answers `Model metadata refresh is disabled — no
+source is configured, nothing was contacted.` without touching the network.
 
-The key is parsed strictly. Only the booleans `true` and `false` are
-accepted; any other value (including the string `"false"`) is reported as a
-config warning and treated as `false`, so a typo in an air-gapped
-deployment cannot silently re-enable the fetch.
+The key is parsed strictly. Only the booleans `true` and `false` are accepted;
+any other value (including the string `"false"`) is reported as a config
+warning and treated as `false` — it fails closed, so a typo in an air-gapped
+deployment cannot silently re-enable the fetch. A `model_search` block that is
+not a mapping names no key at all: that warns and leaves the default in
+place.
 
 ## Offline installation bundles
 
@@ -176,8 +181,8 @@ Kubernetes credentials are separate operator-supplied dependencies.
 
 ## Internalize the remaining dependencies
 
-- **LLM endpoint**: run Ollama/vLLM inside the network and point
-  `agent.base_url` at it, with `network.ca_bundle` for its CA.
+- **LLM endpoint**: run Ollama/vLLM inside the network and point the active
+  profile's `endpoint` at it, with `network.ca_bundle` for its CA.
 - **Helm charts**: mirror charts into an internal repository (e.g.
   ChartMuseum, Harbor). The repository dialog (`Ctrl-R` from the chart
   picker) has an optional CA file field; when set, korvid validates the path

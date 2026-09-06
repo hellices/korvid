@@ -67,7 +67,7 @@ src/korvid/
 - Interfaces at layer boundaries are `abc.ABC` (e.g., `agent/provider.py: LLMProvider`).
 - No DI containers, no service locators. Dependencies are injected via constructors, wired once in `__main__.py`.
 - The UI Bus is Textual `Message` subclasses defined in `ui/messages.py`. `core/`/`agent/` expose plain async functions; `ui/` workers translate results into Messages.
-- Plugins/providers register via `importlib.metadata.entry_points` groups: `korvid.provider`, `korvid.panel`, `korvid.tool`.
+- Plugins/providers register via `importlib.metadata.entry_points` groups: `korvid.provider` (a `SpecialFlow` declaration, or a module exposing `korvid_special_flows()`), `korvid.credential` (a `ProviderDefaultCredential` chain), `korvid.panel`, `korvid.tool`.
 - **Optional extras**: `mcp/`'s stack (mcp/anyio/starlette/uvicorn) ships in the `[mcp]` extra; `providers/`'s stack (litellm + ~55 transitive distributions including boto3, openai, tiktoken, tokenizers, plus httpx/keyring) in `[agent]`; `obs/`'s HTTP client in `[observability]` (the connector boundary itself is stdlib, so `tools/` can import it unconditionally). `__main__.py` imports both lazily — a missing extra degrades to a None wiring unless the feature was explicitly requested, in which case startup fails with an install hint. Import-graph tests in `tests/test_optional_extras.py` pin this boundary.
 
 ## Style Rules

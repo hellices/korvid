@@ -604,3 +604,66 @@ def test_the_airgap_guide_quotes_the_answer_the_screen_really_gives() -> None:
     disabled = _REFRESH_MESSAGES[MetadataRefresh.DISABLED]
 
     assert _collapsed(disabled) in guide
+
+
+def test_the_agent_guide_quotes_every_refresh_answer_it_shows() -> None:
+    """`docs/agent.md` quotes three of the four refresh outcomes verbatim.
+
+    They are the sentences a reader matches against their own screen after
+    pressing `Ctrl-R`. `_REFRESH_MESSAGES` is the source, so a reword there
+    must fail here rather than leave the guide quoting a sentence korvid no
+    longer prints. The fourth (`DISABLED`) belongs to the air-gap guide and
+    is pinned by the test above.
+    """
+    guide = _collapsed(_text("docs/agent.md"))
+
+    for outcome in (
+        MetadataRefresh.UPDATED,
+        MetadataRefresh.UNCHANGED,
+        MetadataRefresh.UNAVAILABLE,
+    ):
+        assert _collapsed(_REFRESH_MESSAGES[outcome]) in guide, outcome
+
+
+def test_the_threat_model_lists_every_litellm_lockdown_flag() -> None:
+    """A lockdown table that omits a flag understates what korvid closes.
+
+    The table is the whole security claim of that section: each row is a
+    channel that would otherwise carry prompts, tool arguments or usage
+    records off the machine. Read out of `LOCKDOWN_FLAGS` so adding a ninth
+    flag without documenting it fails.
+    """
+    from korvid.providers.litellm_runtime import LOCKDOWN_FLAGS
+
+    threat_model = _text("docs/threat-model.md")
+    rows = {
+        line.split("|")[1].strip().strip("`")
+        for line in threat_model.splitlines()
+        if line.startswith("| `") and line.count("|") == 3
+    }
+
+    assert {name for name, _ in LOCKDOWN_FLAGS} <= rows
+
+    # The prose counts them in words, so the count has to be spelled the way
+    # the page spells it — a ninth flag then fails here as well as in the row
+    # comparison above.
+    words = {6: "six", 7: "seven", 8: "eight", 9: "nine", 10: "ten"}
+    spelled = words.get(len(LOCKDOWN_FLAGS), str(len(LOCKDOWN_FLAGS)))
+    assert f"{spelled} attributes" in threat_model
+
+
+def test_the_migration_docs_name_the_profile_the_migration_really_creates() -> None:
+    """The legacy profile name is read out of `core/config.py`, not guessed.
+
+    An operator whose `config.yaml` still has the flat scalars looks for the
+    profile korvid wrote. A doc naming a different one sends them to a key
+    that is not in the file.
+    """
+    from korvid.core.config import LEGACY_PROFILE_NAME
+
+    assert f"`{LEGACY_PROFILE_NAME}`" in _text("docs/agent.md")
+    # The release note shows the file korvid writes back, so the name has to
+    # appear as the key it really writes, not only in prose around it.
+    notes = _text("docs/release-notes/unreleased.md")
+    assert f"active: {LEGACY_PROFILE_NAME}" in notes
+    assert f"\n    {LEGACY_PROFILE_NAME}:\n" in notes

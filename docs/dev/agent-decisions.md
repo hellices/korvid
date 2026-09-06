@@ -366,7 +366,7 @@ hand-maintained vendor routing table — five separate transport modules
 `configurator.py`) and their alias mapping — was deleted in full. Routing is
 now derived from the model reference via LiteLLM's bundled tables plus a
 small registry of special flows. See the design document:
-[`docs/superpowers/specs/2026-09-05-provider-neutral-model-profiles-design.md`](../superpowers/specs/2026-09-05-provider-neutral-model-profiles-design.md).
+[`docs/dev/specs/2026-09-05-provider-neutral-model-profiles-design.md`](specs/2026-09-05-provider-neutral-model-profiles-design.md).
 
 **What was evaluated and rejected.**
 

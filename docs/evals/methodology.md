@@ -164,14 +164,17 @@ evidence on screen.
 
 The eval builds its provider with the same
 `create_provider_from_profile` the TUI's composition root calls, from a
-`ModelConnectionConfig` assembled out of the variables below. Routing,
-credential resolution, capability lookup, option filtering and TLS trust
-are the product's, so a score is evidence about korvid rather than about
-an eval-only transport.
+`ModelConnectionConfig` assembled out of the eight variables below — the same
+shape a configured connection parses into, over the same entry-point special
+flows and the same bundled model catalog. Routing, credential resolution,
+capability lookup, option filtering and TLS trust are the product's, so a score
+is evidence about korvid rather than about an eval-only transport. No variable
+holds a credential: `KORVID_EVAL_API_KEY_ENV` names one, and the production
+`environment` auth method reads it.
 
 | Variable | Meaning |
 |---|---|
-| `KORVID_EVAL_BASE_URL` | Endpoint base URL. Required. |
+| `KORVID_EVAL_BASE_URL` | The endpoint URL, carried as the profile's `endpoint` (profiles have no `base_url` key). Required. |
 | `KORVID_EVAL_MODEL` | Model reference, `provider/model`. Required. |
 | `KORVID_EVAL_PROVIDER` | Compatibility only: the prefix put in front of `KORVID_EVAL_MODEL` when that value contains no `/`. It is joined into a reference, never compared against a vendor list. |
 | `KORVID_EVAL_API_KEY_ENV` | The **name** of the variable holding the key. Preferred: the profile then stores a name, never a secret. |

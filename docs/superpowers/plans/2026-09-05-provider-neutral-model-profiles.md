@@ -956,7 +956,7 @@ korvid ships no provider class table and no per-vendor extras.
 approval gate, the audit log and the outbound-snapshot contract are unchanged.
 
 Draft while the remaining commit groups land. Design:
-`docs/superpowers/specs/2026-09-05-provider-neutral-model-profiles-design.md`
+`docs/dev/specs/2026-09-05-provider-neutral-model-profiles-design.md`
 BODY
 )"
 ```
@@ -4318,7 +4318,7 @@ async def test_two_interleaved_tool_calls_are_keyed_by_tool_call_index() -> None
     assert json.loads(calls[1]["arguments"]) == {"ns": "default"}
 
 
-async def test_a_tool_call_with_unparseable_arguments_surfaces_the_raw_text() -> None:
+async def test_a_tool_call_with_unparsable_arguments_surfaces_the_raw_text() -> None:
     """Truncation mid-stream is real. The harness must see what arrived
     and refuse it, rather than the provider inventing `{}`. This is the
     *complete* call whose JSON is bad - distinct from the partial call
@@ -4568,7 +4568,7 @@ arguments split across later ones. They are accumulated by the tool call's
 own index - not choice.index, which is 0 for every chunk at n=1 and would
 merge parallel calls - and emitted whole at stream end, so the harness
 never sees half a call. A stream that fails mid-flight drops its partial
-calls entirely. Unparseable arguments on a complete call surface raw
+calls entirely. Unparsable arguments on a complete call surface raw
 rather than being replaced with {} - a truncated call must be refused,
 not silently repaired.
 
@@ -5881,7 +5881,7 @@ korvid ships no provider class table and no per-vendor extras.
 approval gate, the audit log and the outbound-snapshot contract are unchanged.
 
 Design:
-`docs/superpowers/specs/2026-09-05-provider-neutral-model-profiles-design.md`
+`docs/dev/specs/2026-09-05-provider-neutral-model-profiles-design.md`
 BODY
 )"
 ```

@@ -19,24 +19,30 @@ korvid now ships a **named-profile** configuration model and a searchable
     profiles:
       local:
         model: ollama/qwen3:8b
+        endpoint: http://localhost:11434
         auth: {method: none}
       gpt:
         model: openai/gpt-4o
         auth: {method: environment, key: OPENAI_API_KEY}
   ```
 
-  `:ai switch <name>` switches profiles from inside the TUI.
+  `auth.method: none` requires an `endpoint`: a keyless request without one
+  would go to whichever default host the SDK picks, so korvid refuses it.
+  Inside the TUI, `:ai` opens the profile manager once profiles exist and
+  `Enter` activates the highlighted one; `:model <name>` switches the active
+  profile's model.
 
-- **Model catalog.** `:ai` opens a fuzzy-search screen over LiteLLM's bundled
-  table (2,000+ models, no internet required). An optional enrichment layer
-  from `models.dev` adds context lengths and quantization info; it is fetched
-  only when you press <kbd>Ctrl</kbd>+<kbd>R</kbd> on that screen, which
-  always revalidates — conditionally, so an unchanged document is a round
-  trip and not a download — while korvid's own background reads stay behind a
+- **Model catalog.** The `:ai` wizard's model step is a fuzzy search over
+  LiteLLM's bundled table (2,000+ models, no internet required). An optional
+  enrichment layer from `models.dev` adds context lengths and quantization
+  info; it is fetched only when you press <kbd>Ctrl</kbd>+<kbd>R</kbd> on that
+  screen, which always revalidates — conditionally, so an unchanged document
+  is a round trip and not a download — while korvid's own reads stay behind a
   24-hour cache. The fetch is verified with `network.ca_bundle` like every
-  other korvid HTTPS call, and `agent.model_search.models_dev: false`
-  disables it permanently: no source, no client, no socket — see
-  [Model search](../agent.md#model-search) and the
+  other korvid HTTPS call. `agent.model_search.models_dev` defaults to `true`
+  and setting it `false` disables the layer permanently: no source, no client,
+  no socket. Only `true` and `false` parse; anything else warns at startup and
+  fails closed to `false`. See [Model search](../agent.md#model-search) and the
   [airgap guide](../airgap.md#offline-model-catalog).
 
 - **Model-first selection.** The catalog is the starting point for choosing a
@@ -98,7 +104,7 @@ the reason for it are visible without re-reading configuration.
 The flat `agent.provider`/`agent.model`/`agent.base_url` scalar shape was the
 old way to configure a single connection. These keys are no longer written on
 save, but an existing config that still has them is **migrated automatically**
-into a named profile called `_legacy_` on first load, and the scalars are
+into a named profile called `default` on first load, and the scalars are
 removed from the file on next save. No manual editing is required.
 
 ```yaml
@@ -110,16 +116,21 @@ agent:
 
 # after (written back on save)
 agent:
-  active: _legacy_
+  active: default
   profiles:
-    _legacy_:
+    default:
       model: ollama/qwen3:8b
       endpoint: http://localhost:11434
       auth: {method: none}
 ```
 
-Every other `agent:` key retains its meaning: `model_tier`, `rules`, `follow`,
-`disable_in_protected`, and the `agent.ollama.*` tuning knobs.
+`agent.model_tier`, `agent.rules`, `agent.follow` and
+`agent.disable_in_protected` all keep their meaning. The `agent.ollama.*`
+tuning block does **not**: it is read only by this migration, which folds its
+six knobs into the new profile's `options`. Once `agent.profiles` is present in
+the file the block is ignored entirely, and the next save removes it along with
+`agent.enabled` and the other legacy scalars — `active: null` is the new off
+switch. Put those knobs in a profile's `options` instead.
 
 ### Migration warning: a large `agent.rules` block can now fail to start
 

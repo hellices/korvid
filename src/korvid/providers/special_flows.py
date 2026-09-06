@@ -210,7 +210,7 @@ class SpecialFlowRegistry:
         The two lists are not interchangeable. `_ALWAYS_CLAIMED` also
         keeps its names away from *routing*; `_RESERVED_NAMES` never
         does, so `openai/gpt-4o` stays dispatchable while `openai`
-        remains unregisterable by anyone but korvid.
+        remains unregistrable by anyone but korvid.
         """
         registry = cls()
         reserved = {normalize_prefix(prefix) for prefix in reserved_prefixes}
