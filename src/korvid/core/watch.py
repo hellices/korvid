@@ -112,8 +112,9 @@ class WatchManager:
                         failures = 0
                         continue
                     event_type, obj = event
-                    self._store.apply_event(kind, scope, event_type, obj)
-                    self._emit_event(kind, scope, event_type, obj)
+                    verb = "ADDED" if event_type == "SNAPSHOT" else event_type
+                    self._store.apply_event(kind, scope, verb, obj)
+                    self._emit_event(kind, scope, verb, obj)
                 # Stream ended normally (server-side watch timeout) -> reconnect.
                 failures = 0
             except asyncio.CancelledError:

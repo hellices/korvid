@@ -81,7 +81,6 @@ from korvid.ui.app import (
 )
 from korvid.ui.context_switch_coordinator import ContextSwitchResult
 from korvid.ui.hints import EventsFetcher
-from korvid.ui.widgets.resource_table import sanitize_views
 
 if TYPE_CHECKING:
     # Embedded-agent types appear only in annotations here: an MCP-only or
@@ -1235,13 +1234,6 @@ def _load_startup_config(
     )
     if resolved_ns != config.namespace:
         config = dataclasses.replace(config, namespace=resolved_ns)
-    # Kind-aware column validation lives in the UI layer (only it knows each
-    # kind's headers); config parsing already rejected the universal names.
-    views, view_warnings = sanitize_views(config.views)
-    if view_warnings:
-        config = dataclasses.replace(
-            config, views=views, warnings=(*config.warnings, *view_warnings)
-        )
     return config
 
 

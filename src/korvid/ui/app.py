@@ -159,7 +159,7 @@ from korvid.ui.widgets.namespace_picker import NamespacePicker
 from korvid.ui.widgets.operator_install import OperatorInstallPrompt
 from korvid.ui.widgets.pick_screen import PickScreen
 from korvid.ui.widgets.resize_prompt import ResizePrompt
-from korvid.ui.widgets.resource_table import ResourceTable
+from korvid.ui.widgets.resource_table import ResourceTable, validate_selected_view
 from korvid.ui.widgets.status_bar import StatusBar
 from korvid.ui.widgets.top_bar import KeyEntry, TopBar
 from korvid.ui.workspace_controller import (
@@ -406,6 +406,7 @@ class KorvidApp(App[None]):
         #: looking at", which is exactly what this boundary names.
         self._view = AppViewState(self)
         self.config = config
+        self._reported_view_warnings: set[str] = set()
         self.store = store
         self.watch_manager = watch_manager
         self._list_namespaces = list_namespaces
@@ -1227,6 +1228,19 @@ class KorvidApp(App[None]):
         # serving group scopes group-specific renderings (the OLM tables).
         meta = self.aliases.get(kind)
         plural = meta.plural if meta is not None else kind
+        group = meta.group if meta is not None else ""
+        synthetic = meta.synthetic if meta is not None else False
+        selected_view, warnings = validate_selected_view(
+            plural,
+            group=group,
+            synthetic=synthetic,
+            view=self.config.views.get(plural),
+        )
+        for warning in warnings:
+            if warning in self._reported_view_warnings:
+                continue
+            self._reported_view_warnings.add(warning)
+            self.notify(warning, title="Config warning", severity="warning")
         table.show(
             plural,
             rows,
@@ -1235,10 +1249,10 @@ class KorvidApp(App[None]):
             # the full summaries, not just names) — no name pattern remains.
             pattern="",
             metrics=metrics,
-            group=meta.group if meta is not None else "",
-            synthetic=meta.synthetic if meta is not None else False,
+            group=group,
+            synthetic=synthetic,
             sort=pane.sorts.get(kind),
-            view=self.config.views.get(plural),
+            view=selected_view,
         )
         if empty_state:
             self._refresh_empty_state(kind, table.row_count)

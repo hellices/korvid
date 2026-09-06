@@ -272,6 +272,30 @@ async def test_progress_signal_is_not_stored_or_emitted_to_timeline() -> None:
     await mgr.stop_all()
 
 
+async def test_snapshot_is_emitted_as_added_to_existing_row_consumers() -> None:
+    store = ResourceStore()
+    recorded = asyncio.Event()
+    seen: list[tuple[str, str]] = []
+
+    async def source(kind: str, scope: str) -> AsyncIterator[WatchEvent[Summary]]:
+        yield ("SNAPSHOT", _pod("existing"))
+        await asyncio.Event().wait()
+
+    def on_event(kind: str, scope: str, event_type: str, obj: Summary) -> None:
+        seen.append((event_type, obj.name))
+        recorded.set()
+
+    mgr = WatchManager(store, source)
+    mgr.on_event = on_event
+    await mgr.start("pods", "default")
+    try:
+        await asyncio.wait_for(recorded.wait(), timeout=2.0)
+        assert seen == [("ADDED", "existing")]
+        assert [obj.name for obj in store.get("pods", "default")] == ["existing"]
+    finally:
+        await mgr.stop_all()
+
+
 async def test_snapshot_does_not_reset_failure_streak() -> None:
     """A successful re-LIST is not proof that the live watch is healthy."""
     store = ResourceStore()

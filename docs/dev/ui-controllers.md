@@ -240,10 +240,19 @@ entrypoint. Its shared transport owns LIST, resourceVersion anchoring, WATCH,
 and list-only/405 polling. Pod and Helm logic only project the resulting
 objects; they do not implement separate transport loops. Initial rows use
 `SNAPSHOT` events, which upsert the store without resetting the watch manager's
-failure count. Typed `WatchProgress` signals report live transport activity and
+failure count. The manager translates snapshot rows to `ADDED` for store and
+timeline consumers, preserving the initial observed-resource history.
+Typed `WatchProgress` signals report live transport activity and
 successful polls, including empty polls and Helm events that produce no visible
 row. The manager consumes these signals without storing them or adding timeline
 entries. Normal stream completion also proves a connection healthy.
+
+Custom-column validation also waits for the selected identity. One plural-keyed
+configuration can apply to both a native resource and a foreign CRD, so native
+headers must not cause columns to be discarded from the shared configuration at
+startup. `validate_selected_view` produces an effective `SelectedView` for the
+actual presentation; its value indices keep displayed and sorted columns aligned
+with the raw summary values. Rendering and sort commands use the same validation.
 
 ### Why interfaces and not callables
 

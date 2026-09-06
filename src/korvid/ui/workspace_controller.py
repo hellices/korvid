@@ -67,6 +67,7 @@ from korvid.ui.ui_surface import UiSurface
 from korvid.ui.view_state import ViewState
 from korvid.ui.widgets.hierarchy_screen import HierarchyScreen, build_hierarchy
 from korvid.ui.widgets.relationship_screen import GotoResult, RelationshipScreen
+from korvid.ui.widgets.resource_table import validate_selected_view
 from korvid.ui.workspace_state import HierarchyReturn, PaneState, WorkspaceState
 
 logger = logging.getLogger(__name__)
@@ -713,9 +714,16 @@ class WorkspaceController:
     # ------------------------------------------------------------------
 
     def _view_for(self, kind: str) -> ViewConfig | None:
-        """The `views:` config entry for a view kind, resolved via its meta."""
+        """The effective `views:` entry for the selected resource identity."""
         meta = self._view.aliases().get(kind)
-        return self._config().views.get(meta.plural if meta is not None else kind)
+        plural = meta.plural if meta is not None else kind
+        selected, _warnings = validate_selected_view(
+            plural,
+            group=meta.group if meta is not None else "",
+            synthetic=meta.synthetic if meta is not None else False,
+            view=self._config().views.get(plural),
+        )
+        return selected.config if selected is not None else None
 
     def sort_by(self, column: str) -> None:
         """Apply/flip a sort column for the current view kind and re-render."""
@@ -1268,12 +1276,24 @@ class WorkspaceController:
         uid = str((manifest.get("metadata") or {}).get("uid") or "")
         if not uid:
             return []
+        aliases = self._view.aliases()
+        meta = resolve_resource(aliases, "apps", "deployments")
+        if meta is None:
+            return []
+        view_kind = canonical_resource_alias(aliases, meta)
         lookup = self._hierarchy_lookup(self._state.current_scope)
         refs: list[ComponentRef] = []
-        for obj in lookup("deployments", namespace) or []:
+        for obj in lookup(view_kind, namespace) or []:
             if obj.namespace != namespace or uid not in getattr(obj, "owner_uids", ()):
                 continue
-            refs.append(ComponentRef(kind="Deployment", name=str(obj.name), namespace=namespace))
+            refs.append(
+                ComponentRef(
+                    kind=meta.kind,
+                    name=str(obj.name),
+                    api_version=f"{meta.group}/{meta.version}",
+                    namespace=obj.namespace,
+                )
+            )
             if len(refs) >= MAX_COMPONENT_DOCS:
                 break
         return refs

@@ -18,7 +18,7 @@ from textual.widgets.data_table import Column, RowDoesNotExist, RowKey
 from korvid.core.config import ViewConfig
 from korvid.core.sorting import SortSpec, sort_rows
 from korvid.core.store import Summary
-from korvid.k8s.columns import MISSING
+from korvid.k8s.columns import MISSING, CustomColumn
 from korvid.k8s.helm import HelmReleaseSummary, HelmRevisionSummary
 from korvid.k8s.metrics import PodMetrics
 from korvid.k8s.models import (
@@ -304,6 +304,17 @@ class _Presentation(NamedTuple):
     renderer: _RowRenderer
 
 
+class SelectedView(NamedTuple):
+    """A configured view filtered for one concrete resource identity.
+
+    `value_indices` maps the effective columns back to the raw configured
+    column values stored on each summary.
+    """
+
+    config: ViewConfig
+    value_indices: tuple[int, ...]
+
+
 _GENERIC_PRESENTATION = _Presentation(
     _GENERIC_COLS,
     _GENERIC_COLS_ALL_NS,
@@ -382,44 +393,44 @@ def _columns_for(
     return (*base, *names)
 
 
-def sanitize_views(
-    views: dict[str, ViewConfig],
-) -> tuple[dict[str, ViewConfig], tuple[str, ...]]:
-    """Drop custom columns that shadow a kind's actual built-in headers.
+def validate_selected_view(
+    plural: str,
+    *,
+    group: str,
+    synthetic: bool,
+    view: ViewConfig | None,
+) -> tuple[SelectedView | None, tuple[str, ...]]:
+    """Validate *view* against the selected resource's actual presentation.
 
-    Config parsing rejects the universal identity/sort names, but only the
-    UI knows each kind's full header set (STATUS, READY, NODE, ...). A
-    shadowing name would render two identical headers and decorate both
-    with the sort arrow. `replace: true` views keep such names — their
-    built-ins are hidden. Called once from the composition root.
+    Config is keyed by plural, so the same raw view may serve resources from
+    different API groups. Validation therefore happens only after discovery
+    resolves the selected `(group, plural, synthetic)` identity. Append views
+    drop columns that shadow that identity's built-ins; replacement views keep
+    every requested column because those built-ins are hidden.
     """
-    sanitized: dict[str, ViewConfig] = {}
+    if view is None:
+        return None, ()
+    indices = tuple(range(len(view.columns)))
+    if view.replace:
+        return SelectedView(view, indices), ()
+
+    presentation = _presentation_for(plural, group=group, synthetic=synthetic)
+    builtin = {
+        header.lower() for header in (*presentation.columns, *presentation.all_namespace_columns)
+    }
+    kept: list[CustomColumn] = []
+    kept_indices: list[int] = []
     warnings: list[str] = []
-    for kind, view in views.items():
-        if view.replace:
-            sanitized[kind] = view
+    for index, column in enumerate(view.columns):
+        if column.name.lower() in builtin:
+            warnings.append(f"views.{plural}.{column.name}: shadows a built-in column of this kind")
             continue
-        presentations = [
-            presentation
-            for (_group, plural, _synthetic), presentation in _PRESENTATIONS.items()
-            if plural == kind
-        ]
-        if not presentations:
-            presentations = [_GENERIC_PRESENTATION]
-        builtin = {
-            header.lower()
-            for presentation in presentations
-            for header in (*presentation.columns, *presentation.all_namespace_columns)
-        }
-        kept = tuple(column for column in view.columns if column.name.lower() not in builtin)
-        for column in view.columns:
-            if column.name.lower() in builtin:
-                warnings.append(
-                    f"views.{kind}.{column.name}: shadows a built-in column of this kind"
-                )
-        if kept:
-            sanitized[kind] = ViewConfig(columns=kept, replace=view.replace)
-    return sanitized, tuple(warnings)
+        kept.append(column)
+        kept_indices.append(index)
+    if not kept:
+        return None, tuple(warnings)
+    effective = view if len(kept) == len(view.columns) else ViewConfig(columns=tuple(kept))
+    return SelectedView(effective, tuple(kept_indices)), tuple(warnings)
 
 
 def _ready_cell(ready: str) -> Text:
@@ -550,7 +561,7 @@ class ResourceTable(DataTable[str | Text]):
     _last_identity: tuple[str, str, bool] | None = None
     _last_all_namespaces: bool | None = None
     _last_sort: SortSpec | None = None
-    _active_view: ViewConfig | None = None
+    _active_view: SelectedView | None = None
     #: Row keys whose widths this widget folded into the columns itself,
     #: pending consumption by the next `_update_dimensions`. Created lazily so
     #: the hook is safe before `on_mount` has run.
@@ -574,7 +585,7 @@ class ResourceTable(DataTable[str | Text]):
         #: Keeps a repaint proportional to the rows that actually changed.
         self._row_memo: dict[str, tuple[Summary, object, tuple[str, list[str | Text]]]] = {}
         #: Cell-set shape the memo was built for; a change invalidates it.
-        self._memo_signature: tuple[tuple[str, str, bool], bool, ViewConfig | None] | None = None
+        self._memo_signature: tuple[tuple[str, str, bool], bool, SelectedView | None] | None = None
         #: Cells currently in the table, so the diff never has to read them
         #: back out of the DataTable one `get_row` at a time.
         self._emitted: dict[str, list[str | Text]] = {}
@@ -598,17 +609,18 @@ class ResourceTable(DataTable[str | Text]):
         group: str = "",
         synthetic: bool = False,
         sort: SortSpec | None = None,
-        view: ViewConfig | None = None,
+        view: SelectedView | None = None,
     ) -> None:
         """Render rows; rebuild columns when resource identity, scope, or sort changes.
 
         ``group`` and ``synthetic`` identify the resource serving *kind*.
         Typed renderings apply only to their registered identity; same-plural
         foreign CRDs use the generic presentation. ``view`` is the kind's
-        custom column config (issue #45), if any.
+        validated custom column config (issue #45), if any.
         """
         identity = (group, kind, synthetic)
         presentation = _presentation_for(kind, group=group, synthetic=synthetic)
+        effective_view = view.config if view is not None else None
         # Same logical view (kind/scope/columns) means the cursor should
         # survive the re-render — including a sort change, where the selected
         # resource moves with its row key (issue #89). Only a different
@@ -661,7 +673,11 @@ class ResourceTable(DataTable[str | Text]):
         if not same_view or sort != self._last_sort:
             viewport = None
             self.clear(columns=True)
-            custom_names = tuple(column.name for column in view.columns) if view else ()
+            custom_names = (
+                tuple(column.name for column in effective_view.columns)
+                if effective_view is not None
+                else ()
+            )
             self.add_columns(
                 *_decorate_columns(
                     _columns_for(
@@ -669,7 +685,7 @@ class ResourceTable(DataTable[str | Text]):
                         group=group,
                         synthetic=synthetic,
                         all_namespaces=all_namespaces,
-                        view=view,
+                        view=effective_view,
                     ),
                     sort,
                     custom_names,
@@ -1079,9 +1095,9 @@ class ResourceTable(DataTable[str | Text]):
         if view is not None:
             values: tuple[str, ...] = getattr(obj, "custom", ())
             extras: list[str | Text] = [
-                values[i] if i < len(values) else MISSING for i in range(len(view.columns))
+                values[index] if index < len(values) else MISSING for index in view.value_indices
             ]
-            cells = [cells[0], *extras] if view.replace else [*cells, *extras]
+            cells = [cells[0], *extras] if view.config.replace else [*cells, *extras]
         if all_namespaces:
             cells.insert(0, obj.namespace)
         row = (f"{obj.namespace}/{obj.name}", cells)
@@ -1112,7 +1128,7 @@ class ResourceTable(DataTable[str | Text]):
         cells nobody can see.
         """
         view = self._active_view
-        if view is not None and view.replace:
+        if view is not None and view.config.replace:
             return None
         return volatile
 
@@ -1130,11 +1146,16 @@ class ResourceTable(DataTable[str | Text]):
             # User-selected order wins over the per-kind defaults below; the
             # keys come from the data model (issue #37), pre-applied here so
             # every row path renders in the same order.
-            custom_names = (
-                tuple(column.name for column in self._active_view.columns)
-                if self._active_view is not None
-                else ()
-            )
+            custom_names: tuple[str, ...] = ()
+            if self._active_view is not None:
+                aligned = [""] * (max(self._active_view.value_indices, default=-1) + 1)
+                for column, index in zip(
+                    self._active_view.config.columns,
+                    self._active_view.value_indices,
+                    strict=True,
+                ):
+                    aligned[index] = column.name
+                custom_names = tuple(aligned)
             rows = sort_rows(rows, sort, metrics=metrics, custom_columns=custom_names)
         renderer(
             self,

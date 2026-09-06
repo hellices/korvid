@@ -372,13 +372,13 @@ class _NamespacePickerApp(App[None]):
 
 async def test_namespace_picker_preserves_current_view() -> None:
     from korvid.ui.widgets.namespace_picker import NamespacePicker
+    from tests.ui.waits import until
 
     app = _NamespacePickerApp()
     async with app.run_test() as pilot:
         app.query_one(NamespacePicker).open(["prod"])
         await pilot.press("enter")
-        await pilot.pause()
-
-    assert app.navigation is not None
-    assert app.navigation.view is None
-    assert app.navigation.namespace == "prod"
+        await until(pilot, lambda: app.navigation is not None, label="namespace command delivered")
+        assert app.navigation is not None
+        assert app.navigation.view is None
+        assert app.navigation.namespace == "prod"
