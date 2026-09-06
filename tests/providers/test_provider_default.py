@@ -294,3 +294,98 @@ def test_a_module_declaring_several_chains_answers_under_its_own_name(
 
     assert registry.resolve("acme/x") is wanted
     assert registry.errors == ()
+
+
+def test_an_entry_point_may_load_a_declaration_directly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A module attribute that *is* a declaration is accepted, the same
+    way a `SpecialFlow` object is on the flow group."""
+    declared = _declaration("acme")
+    monkeypatch.setattr(
+        "korvid.providers.provider_default._iter_entry_points",
+        lambda: (_EntryPoint("acme", declared, "acme-korvid-creds"),),
+    )
+
+    registry = ProviderDefaultRegistry.from_entry_points()
+
+    assert registry.resolve("acme/x") is declared
+
+
+def test_an_entry_point_that_declares_nothing_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "korvid.providers.provider_default._iter_entry_points",
+        lambda: (_EntryPoint("acme", object(), "acme-korvid-creds"),),
+    )
+
+    registry = ProviderDefaultRegistry.from_entry_points()
+
+    assert registry.resolve("acme/x") is None
+    assert any("declares no ProviderDefaultCredential" in message for message in registry.errors)
+    assert not any("raised" in message for message in registry.errors), (
+        "a package that declares nothing did not raise; saying so sends the "
+        "operator looking for a traceback that does not exist"
+    )
+
+
+def test_an_entry_point_whose_name_cannot_be_read_is_skipped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Distribution metadata can be unreadable for any reason, and one
+    broken package must not cost every other package its declaration."""
+
+    class _Unreadable:
+        group = "korvid.credential"
+
+        @property
+        def name(self) -> str:
+            raise RuntimeError("unreadable metadata")
+
+    good = _EntryPoint("acme", _Module(_declaration("acme")), "acme-korvid-creds")
+    monkeypatch.setattr(
+        "korvid.providers.provider_default._iter_entry_points",
+        lambda: (_Unreadable(), good),
+    )
+
+    registry = ProviderDefaultRegistry.from_entry_points()
+
+    assert registry.resolve("acme/x") is not None
+
+
+def test_an_object_pretending_to_be_a_declaration_is_rejected_by_type() -> None:
+    """Duck typing is not enough here.
+
+    A declaration is consulted for a credential, so it is checked by type
+    before its `prefix` is read at all — an object that merely *looks*
+    like one never reaches the registry's prefix table.
+    """
+
+    class _Hostile:
+        @property
+        def prefix(self) -> str:
+            raise RuntimeError("boom")
+
+    good = _declaration("acme")
+    registry = ProviderDefaultRegistry((_Hostile(), good))
+
+    assert registry.resolve("acme/x") is good
+    assert any("non-ProviderDefaultCredential" in message for message in registry.errors)
+
+
+def test_a_loaded_declaration_rejected_by_validation_is_not_exposed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A declaration already made by the composition root wins, and the
+    entry point that duplicates it is reported rather than shadowing it."""
+    wired = _declaration("acme")
+    monkeypatch.setattr(
+        "korvid.providers.provider_default._iter_entry_points",
+        lambda: (_EntryPoint("acme", _Module(_declaration("acme")), "acme-korvid-creds"),),
+    )
+
+    registry = ProviderDefaultRegistry.from_entry_points()
+    registry._register(wired)
+
+    assert registry.resolve("acme/x") is wired

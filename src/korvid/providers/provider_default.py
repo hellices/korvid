@@ -69,6 +69,18 @@ _RESERVED: frozenset[str] = frozenset(normalize_prefix(name) for name in RESERVE
 _NO_PARAMETERS: Mapping[str, object] = MappingProxyType({})
 
 
+class _NoDeclaration(ValueError):
+    """The loaded object carried no declaration.
+
+    A distinct type because the reason has to reach the operator: a
+    package that declares nothing did not *raise*, and reporting it as
+    `raised on load: ValueError` sends whoever installed it looking for a
+    traceback that does not exist. Third-party exception *messages* are
+    never reported — they are unbounded and may carry a secret — so only
+    korvid's own marker is quoted.
+    """
+
+
 class CredentialUnavailable(Exception):
     """A declared chain cannot supply a credential right now.
 
@@ -146,7 +158,7 @@ def _load_declaration(
             return obj
         factory = getattr(obj, "korvid_provider_default_credentials", None)
         if not callable(factory):
-            return ValueError("no ProviderDefaultCredential found in loaded object")
+            return _NoDeclaration("declares no ProviderDefaultCredential")
         declared = [
             candidate for candidate in factory() if isinstance(candidate, ProviderDefaultCredential)
         ]
@@ -157,7 +169,7 @@ def _load_declaration(
             return candidate
     if declared:
         return declared[0]
-    return ValueError("no ProviderDefaultCredential found in loaded object")
+    return _NoDeclaration("declares no ProviderDefaultCredential")
 
 
 class ProviderDefaultRegistry:
@@ -256,7 +268,12 @@ class ProviderDefaultRegistry:
 
         loaded = _load_declaration(entry_point, normalized)
         if isinstance(loaded, Exception):
-            self._fail(normalized, entry_point.name, f"raised on load: {type(loaded).__name__}")
+            reason = (
+                str(loaded)
+                if isinstance(loaded, _NoDeclaration)
+                else f"raised on load: {type(loaded).__name__}"
+            )
+            self._fail(normalized, entry_point.name, reason)
             return None
         if normalize_prefix(loaded.prefix) != normalized:
             self._fail(
