@@ -450,7 +450,7 @@ class _FakeMetadataSource:
     def env_hints(self, provider_id: str) -> tuple[str, ...]:
         return ()
 
-    async def refresh(self) -> RefreshOutcome:
+    async def refresh(self, *, force: bool = False) -> RefreshOutcome:
         return RefreshOutcome.CACHED
 
 
@@ -883,6 +883,8 @@ class _RecordingMetadataSource(ModelMetadataSource):
         after: dict[str, ModelMetadata] | None = None,
     ) -> None:
         self.calls = 0
+        #: How each call asked to be served — one entry per `refresh`.
+        self.forced: list[bool] = []
         self._outcome = outcome
         self._after = after or {}
         self._entries: dict[str, ModelMetadata] = {}
@@ -893,8 +895,9 @@ class _RecordingMetadataSource(ModelMetadataSource):
     def env_hints(self, provider_id: str) -> tuple[str, ...]:
         return ()
 
-    async def refresh(self) -> RefreshOutcome:
+    async def refresh(self, *, force: bool = False) -> RefreshOutcome:
         self.calls += 1
+        self.forced.append(force)
         if self._outcome is RefreshOutcome.UPDATED:
             self._entries = dict(self._after)
         return self._outcome
@@ -980,3 +983,41 @@ async def test_an_unavailable_refresh_keeps_the_index_it_had() -> None:
     assert await catalog.refresh_metadata() is MetadataRefresh.UNAVAILABLE
 
     assert catalog.search("gpt", limit=5) == before
+
+
+async def test_an_explicit_refresh_reaches_the_source_as_a_forced_one() -> None:
+    """The operator's keypress has to survive the boundary.
+
+    `ui/` cannot import `korvid.providers`, so the only way an explicit
+    refresh can outrank the source's freshness window is if the catalog
+    carries the request across. A catalog that dropped `force` would leave
+    Ctrl-R answering "served from cache" for up to a day.
+    """
+    source = _RecordingMetadataSource(RefreshOutcome.NOT_MODIFIED)
+    catalog = LiteLLMModelCatalog(enrichment=source)
+
+    assert await catalog.refresh_metadata(force=True) is MetadataRefresh.UNCHANGED
+
+    assert source.forced == [True]
+
+
+async def test_a_default_refresh_leaves_the_freshness_window_in_place() -> None:
+    """Anything korvid decides to refresh on its own keeps the TTL.
+
+    `force` is opt-in at the call site: a future caller that is not an
+    operator keypress inherits the bounded, cache-first behaviour rather
+    than a fetch per call.
+    """
+    source = _RecordingMetadataSource(RefreshOutcome.CACHED)
+    catalog = LiteLLMModelCatalog(enrichment=source)
+
+    assert await catalog.refresh_metadata() is MetadataRefresh.CACHED
+
+    assert source.forced == [False]
+
+
+async def test_a_forced_refresh_without_a_source_still_reports_disabled() -> None:
+    """Forcing cannot conjure a source an installation deliberately lacks."""
+    catalog = LiteLLMModelCatalog()
+
+    assert await catalog.refresh_metadata(force=True) is MetadataRefresh.DISABLED

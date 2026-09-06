@@ -50,7 +50,7 @@ class _FakeCatalog(ModelCatalog):
     async def finish_auth(self, profile: ModelConnectionConfig) -> str | None:
         return None
 
-    async def refresh_metadata(self) -> MetadataRefresh:
+    async def refresh_metadata(self, *, force: bool = False) -> MetadataRefresh:
         return MetadataRefresh.DISABLED
 
 

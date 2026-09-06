@@ -133,7 +133,7 @@ class _FakeCatalog(ModelCatalog):
     async def begin_auth(self, profile: ModelConnectionConfig) -> DeviceLoginPrompt | None:
         return self._device_prompt
 
-    async def refresh_metadata(self) -> MetadataRefresh:
+    async def refresh_metadata(self, *, force: bool = False) -> MetadataRefresh:
         self.metadata_refreshes += 1
         return MetadataRefresh.DISABLED
 

@@ -29,8 +29,10 @@ from pathlib import Path
 
 import pytest
 
+from korvid.agent.model_profiles import MetadataRefresh
 from korvid.agent.provider_plugin import PROVIDER_PLUGIN_API_VERSION
 from korvid.tools.registry import TOOLS_BY_NAME
+from korvid.ui.widgets.model_search_screen import _REFRESH_MESSAGES
 from tests.config_keys import names_key
 
 _REPO_ROOT = Path(__file__).parents[1]
@@ -582,3 +584,23 @@ def test_the_wrap_scan_reads_the_paragraphs_and_skips_the_diagram() -> None:
     assert len(numbered) > 100
     assert not any("flowchart LR" in line for _, line in numbered)
     assert any("korvid" in line for _, line in numbered)
+
+
+def _collapsed(text: str) -> str:
+    """Markdown wraps sentences across lines; a reader does not see the wrap."""
+    return " ".join(text.split())
+
+
+def test_the_airgap_guide_quotes_the_answer_the_screen_really_gives() -> None:
+    """A doc that quotes a message an operator will see must quote it exactly.
+
+    The air-gap guide is read by someone who cannot check korvid against the
+    internet, and it tells them what `Ctrl-R` answers once models.dev is
+    disabled. A paraphrase drifting from `_REFRESH_MESSAGES` leaves them
+    matching a sentence korvid never prints against a screen that says
+    something else, with no way to tell which of the two is wrong.
+    """
+    guide = _collapsed(_text("docs/airgap.md"))
+    disabled = _REFRESH_MESSAGES[MetadataRefresh.DISABLED]
+
+    assert _collapsed(disabled) in guide

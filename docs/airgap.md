@@ -38,7 +38,7 @@ trust decision for it, and how to configure that trust:**
 | Agent LLM endpoint (OpenAI-compatible, native Ollama) | **korvid** | `network.ca_bundle` |
 | `:ai` wizard connection test | **korvid** | `network.ca_bundle` (same builder — the test and the live agent cannot disagree) |
 | Prometheus / Loki observability connectors | **korvid** | `network.ca_bundle` (same builder again — see [`docs/observability.md`](observability.md)) |
-| models.dev metadata refresh (optional, explicit) | **korvid** | disable with `agent.model_search.models_dev: false` |
+| models.dev metadata refresh (optional, explicit) | **korvid** | `network.ca_bundle` (same builder again); disable entirely with `agent.model_search.models_dev: false` |
 | Internal Helm chart repository | **helm** (korvid passes it through) | CA-file field in the repo dialog → `helm repo add --ca-file` |
 | Kubernetes API server | kubeconfig | `certificate-authority[-data]` in kubeconfig |
 | OLM catalogs, bundle/operand images | cluster nodes / container runtime | registry mirror + node trust configuration |
@@ -71,7 +71,8 @@ agent:
   file fails with an error naming the configured path — never a silent
   fallback to default trust.
 - The same bundle covers OpenAI-compatible completions, native Ollama
-  completions, and the `:ai` setup wizard's connection test.
+  completions, the `:ai` setup wizard's connection test, and the optional
+  models.dev metadata refresh.
 - When `network.ca_bundle` is unset, standard environment behavior applies
   (`SSL_CERT_FILE`, `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`).
 - The system trust store is never modified.
@@ -99,8 +100,12 @@ The result is cached at `$XDG_CACHE_HOME/korvid/models-dev.json`
 (Linux default: `~/.cache/korvid/models-dev.json`; macOS:
 `~/Library/Caches/korvid/models-dev.json`; Windows:
 `%LOCALAPPDATA%\korvid\models-dev.json`). The cache file is written
-with mode `0600` and is served unconditionally for 24 hours before a
-re-fetch is attempted.
+with mode `0600`. korvid never revalidates it on its own initiative more
+than once a day; <kbd>Ctrl</kbd>+<kbd>R</kbd> is an explicit request and
+revalidates regardless of that window, as a conditional `If-None-Match`
+request that transfers no document when nothing has changed. That request
+is built by the same client builder as every other korvid HTTPS call, so
+`network.ca_bundle` covers it.
 
 In a fully air-gapped deployment, disable the models.dev fetch permanently:
 
@@ -110,10 +115,11 @@ agent:
     models_dev: false
 ```
 
-With this setting korvid builds no models.dev client at all, so there is no
-code path left that could open the socket: model search uses only the
-LiteLLM bundled table, and <kbd>Ctrl</kbd>+<kbd>R</kbd> answers
-`models.dev enrichment is disabled` without touching the network.
+With this setting korvid builds no models.dev source and no HTTP client for
+one, so there is no code path left that could open the socket: model search
+uses only the LiteLLM bundled table, and <kbd>Ctrl</kbd>+<kbd>R</kbd>
+answers `Model metadata refresh is disabled — no source is configured,
+nothing was contacted.` without touching the network.
 
 The key is parsed strictly. Only the booleans `true` and `false` are
 accepted; any other value (including the string `"false"`) is reported as a

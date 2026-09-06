@@ -239,7 +239,11 @@ catalog. The catalog has two layers:
    <kbd>Ctrl</kbd>+<kbd>R</kbd> on the search screen, which reports the
    outcome inline and re-renders the current query. The result is cached in
    the platform cache directory (`$XDG_CACHE_HOME/korvid/models-dev.json`,
-   mode `0600`, TTL 24 h).
+   mode `0600`). korvid revalidates that cache on its own initiative at most
+   once a day; <kbd>Ctrl</kbd>+<kbd>R</kbd> always revalidates, conditionally
+   on the stored `ETag`, so an unchanged document costs a round trip and no
+   download. `network.ca_bundle` covers that request like every other korvid
+   HTTPS call.
 
    To disable models.dev enrichment permanently, set:
 
@@ -249,9 +253,9 @@ catalog. The catalog has two layers:
        models_dev: false
    ```
 
-   korvid then builds no models.dev client, so <kbd>Ctrl</kbd>+<kbd>R</kbd>
-   reports it disabled. Only `true` and `false` parse; anything else warns
-   and disables.
+   korvid then builds no models.dev source and no client, so
+   <kbd>Ctrl</kbd>+<kbd>R</kbd> reports it disabled. Only `true` and `false`
+   parse; anything else warns and disables.
 
    A network observer can infer that an instance refreshed its model
    metadata — the only outbound agent connection carrying no cluster

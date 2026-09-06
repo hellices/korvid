@@ -271,7 +271,7 @@ class ModelCatalog(ABC):
         empty tuple means "type it yourself", never an error dialog."""
 
     @abstractmethod
-    async def refresh_metadata(self) -> MetadataRefresh:
+    async def refresh_metadata(self, *, force: bool = False) -> MetadataRefresh:
         """Revalidate the optional metadata layer, because a human asked.
 
         This is the *only* way that layer is ever contacted: it is never
@@ -284,6 +284,15 @@ class ModelCatalog(ABC):
         is a UI worker, and an exception there would tear down a screen
         the operator is in the middle of using. `DISABLED` is a normal
         answer — an installation may deliberately have no source at all.
+
+        Args:
+            force: `True` when the request came from an operator who is
+                waiting for it. A metadata layer may keep a local copy and
+                serve it without asking anyone — the right default for a
+                refresh korvid decided to make, and the wrong answer for a
+                key a human pressed *because* they want the current
+                document. `ui/` cannot reach past this boundary to say so,
+                so the boundary carries it.
         """
 
     @abstractmethod

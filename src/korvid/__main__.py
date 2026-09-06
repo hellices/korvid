@@ -970,7 +970,10 @@ def _build_model_catalog(
 
     Args:
         ca_bundle: `network.ca_bundle` — one trust decision for every
-            korvid-owned HTTPS client, the probe's included.
+            korvid-owned HTTPS client, the probe's and the models.dev
+            refresh's included. The bundle is held, not opened: a client
+            is built when an operator asks for a refresh, so a
+            misconfigured path can never keep the TUI from starting.
         models_dev: `agent.model_search.models_dev`. `False` builds **no**
             metadata source at all rather than a source nobody calls:
             an air-gapped deployment's guarantee is that the object which
@@ -990,7 +993,9 @@ def _build_model_catalog(
         return None
     # Constructed only when enabled: "disabled" has to mean the object that
     # could make the request does not exist, not that nobody calls it.
-    enrichment: ModelMetadataSource | None = ModelsDevSource() if models_dev else None
+    enrichment: ModelMetadataSource | None = (
+        ModelsDevSource(ca_bundle=ca_bundle) if models_dev else None
+    )
     flows = SpecialFlowRegistry.from_entry_points(reserved_prefixes=models_by_provider())
     return LiteLLMModelCatalog(
         flows=flows,

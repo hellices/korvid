@@ -28,6 +28,21 @@ from korvid.core.config import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _cache_home_away_from_the_operator(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Keep composition-root tests out of the real user cache.
+
+    `_build_model_catalog()` constructs the models.dev source, and that
+    source reads whatever cache is already on disk. Run under a developer's
+    own account that is `~/Library/Caches/korvid/models-dev.json`: a real
+    file whose presence, contents or staleness would decide what these
+    tests see, and which a test has no business reading or writing. The
+    subprocess probes below inherit the redirected environment too, so the
+    isolation holds across the process boundary.
+    """
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+
+
 class _BoomProvider:
     async def aclose(self) -> None:
         raise RuntimeError("boom")
@@ -2745,21 +2760,28 @@ async def test_the_kill_switch_constructs_no_metadata_source(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """`agent.model_search.models_dev: false` must leave nothing that *could*
-    reach the network — not a source that is merely never called."""
+    reach the network — not a source that is merely never called, and not a
+    client waiting for someone to hand it a URL."""
     pytest.importorskip("litellm")
     import korvid.providers.models_dev as models_dev_module
     from korvid.__main__ import _build_model_catalog
     from korvid.agent.model_profiles import MetadataRefresh
+    from korvid.providers import net
 
     def _refuse(**kwargs: Any) -> None:
         raise AssertionError("ModelsDevSource must not be constructed when disabled")
 
-    monkeypatch.setattr(models_dev_module, "ModelsDevSource", _refuse)
+    def _refuse_client(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("no HTTPS client may be built when models.dev is disabled")
 
-    catalog = _build_model_catalog(models_dev=False)
+    monkeypatch.setattr(models_dev_module, "ModelsDevSource", _refuse)
+    monkeypatch.setattr(net, "make_client", _refuse_client)
+
+    catalog = _build_model_catalog(models_dev=False, ca_bundle="/etc/pki/corp-root.pem")
 
     assert catalog is not None
     assert await catalog.refresh_metadata() is MetadataRefresh.DISABLED
+    assert await catalog.refresh_metadata(force=True) is MetadataRefresh.DISABLED
 
 
 async def test_the_default_wiring_can_actually_refresh(
@@ -2772,10 +2794,10 @@ async def test_the_default_wiring_can_actually_refresh(
     from korvid.agent.model_profiles import MetadataRefresh
     from korvid.providers.models_dev import ModelsDevSource, RefreshOutcome
 
-    calls: list[str] = []
+    calls: list[bool] = []
 
-    async def _record(self: ModelsDevSource) -> RefreshOutcome:
-        calls.append("refresh")
+    async def _record(self: ModelsDevSource, *, force: bool = False) -> RefreshOutcome:
+        calls.append(force)
         return RefreshOutcome.NOT_MODIFIED
 
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
@@ -2785,5 +2807,78 @@ async def test_the_default_wiring_can_actually_refresh(
     assert catalog is not None
     assert calls == []
 
-    assert await catalog.refresh_metadata() is MetadataRefresh.UNCHANGED
-    assert calls == ["refresh"]
+    assert await catalog.refresh_metadata(force=True) is MetadataRefresh.UNCHANGED
+    assert calls == [True]
+
+
+async def test_the_wired_source_trusts_the_configured_bundle(tmp_path: Path) -> None:
+    """`network.ca_bundle` has to reach *this* client, at the composition root.
+
+    models.dev is korvid's own outbound HTTPS call, so it goes through the
+    same `net.make_client` as the live providers and the wizard's probe.
+    Before this, a deployment behind a TLS-inspecting proxy got
+    "unavailable" from the refresh key forever, while every other korvid
+    client worked — with nothing in the UI to explain the difference.
+    """
+    pytest.importorskip("litellm")
+    from korvid.__main__ import _build_model_catalog
+    from korvid.providers.net import _CANamedClient
+    from tests.providers.tls_ca import mint_ca_and_server_cert
+
+    ca_pem, _, _ = mint_ca_and_server_cert(tmp_path)
+
+    catalog = _build_model_catalog(ca_bundle=str(ca_pem))
+    assert catalog is not None
+
+    source = catalog._enrichment  # type: ignore[attr-defined]  # the wired catalog is the concrete one
+    assert source is not None
+    client = source._client_factory()
+    try:
+        assert isinstance(client, _CANamedClient)
+        assert client._ca_bundle_path == str(ca_pem)
+    finally:
+        await client.aclose()
+
+
+def test_building_the_catalog_constructs_no_http_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`Never at startup` covers the client, not just the request.
+
+    The trust configuration is *held* by the source and spent when an
+    operator asks for a refresh. Building a client during wiring would
+    read the CA bundle off disk on every start — and turn a misconfigured
+    `network.ca_bundle` into a failure to launch the TUI at all.
+    """
+    pytest.importorskip("litellm")
+    from korvid.__main__ import _build_model_catalog
+    from korvid.providers import net
+
+    def _refuse(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("no HTTPS client may be constructed during startup wiring")
+
+    monkeypatch.setattr(net, "make_client", _refuse)
+
+    assert _build_model_catalog(ca_bundle="/etc/pki/corp-root.pem") is not None
+
+
+def test_the_wired_source_reads_no_cache_outside_the_test_sandbox(tmp_path: Path) -> None:
+    """These tests must never touch the operator's own metadata cache.
+
+    Constructing the source *reads* a cache file, so without the autouse
+    redirect above this module would read — and a refresh would write —
+    `~/Library/Caches/korvid/models-dev.json` on the machine running it.
+    That makes the suite depend on state no test created, and leaves state
+    behind for the next one. Pinned here so removing the fixture fails a
+    test rather than quietly reaching into a home directory.
+    """
+    pytest.importorskip("litellm")
+    from korvid.__main__ import _build_model_catalog
+
+    catalog = _build_model_catalog()
+    assert catalog is not None
+
+    source = catalog._enrichment  # type: ignore[attr-defined]  # the wired catalog is the concrete one
+    assert source is not None
+    cache_path = source._cache_path
+    assert (tmp_path / "cache") in cache_path.parents

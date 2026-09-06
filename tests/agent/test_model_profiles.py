@@ -136,6 +136,21 @@ def test_the_catalog_contract_carries_an_explicit_metadata_refresh() -> None:
     assert getattr(ModelCatalog.refresh_metadata, "__isabstractmethod__", False)
 
 
+def test_the_refresh_contract_can_be_asked_to_revalidate() -> None:
+    """An explicit refresh has to be expressible at this boundary.
+
+    `ui/` may not import `korvid.providers`, so a screen cannot reach past
+    the catalog to tell a metadata source that a human is waiting. Without
+    `force` on the contract, the source's own freshness window silently
+    outranks the operator, and the one key bound to this action does
+    nothing for up to a day. Keyword-only, defaulting to `False`: every
+    caller that is not an explicit request keeps cache-first behaviour.
+    """
+    params = inspect.signature(ModelCatalog.refresh_metadata).parameters
+    assert params["force"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert params["force"].default is False
+
+
 def test_the_refresh_outcome_vocabulary_is_provider_neutral() -> None:
     """The operator is told what happened, not which vendor answered.
 

@@ -157,9 +157,16 @@ subject to the following constraints:
 
 - **Never at startup** and **never during routing** — only when the operator
   presses <kbd>Ctrl</kbd>+<kbd>R</kbd> on the `:ai` wizard's model search
-  screen. Opening that screen makes no request.
+  screen. Opening that screen makes no request, and neither does building the
+  HTTP client: none exists until an operator asks for a refresh.
 - **No credentials, no korvid state** — the request carries no API key, no
-  cluster context, and no conversation data.
+  cluster context, and no conversation data. It carries no trust
+  configuration either: `network.ca_bundle` is transport setup, never payload.
+- **Verified TLS, one trust decision** — the client is built by the same
+  builder as every other korvid-owned HTTPS client, so `network.ca_bundle`
+  applies here too and verification can never be switched off. A bundle that
+  will not load makes the refresh report itself unavailable; it never retries
+  unverified.
 - **10-second timeout** — a slow or unreachable endpoint times out silently.
 - **12 MiB streaming ceiling** — a response larger than this is refused.
 - **`application/json` only** — a non-JSON content type is refused.
@@ -169,7 +176,10 @@ subject to the following constraints:
   silently discarded.
 - **Cached `0600`** — the result is written to the platform cache directory
   (`$XDG_CACHE_HOME/korvid/models-dev.json`; `~/Library/Caches/korvid/` on
-  macOS) with mode `0600` and served unconditionally for 24 hours.
+  macOS) with mode `0600`. korvid revalidates it on its own initiative at most
+  once a day; an explicit <kbd>Ctrl</kbd>+<kbd>R</kbd> revalidates regardless,
+  conditionally on the stored `ETag`. Concurrent refreshes coalesce into one
+  request.
 - **Disableable** — `agent.model_search.models_dev: false` prevents the
   fetch permanently: korvid then constructs no models.dev source at all, so
   there is no socket to open. Only `true` and `false` parse; anything else

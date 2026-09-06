@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import http.server
+import inspect
 import json
+import ssl
 import stat
-from collections.abc import AsyncIterator
+import threading
+from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import pytest
 
@@ -20,6 +25,7 @@ from korvid.providers.models_dev import (
     RefreshOutcome,
     default_cache_path,
 )
+from tests.providers.tls_ca import mint_ca_and_server_cert
 
 httpx = pytest.importorskip("httpx")
 
@@ -222,6 +228,12 @@ async def test_a_slow_drip_cannot_outlast_the_whole_request_budget(
 
 
 async def test_a_fresh_cache_makes_no_request(tmp_path: Path) -> None:
+    """The TTL governs every caller that did not explicitly ask to revalidate.
+
+    Both spellings of "not explicit" are pinned: the default, and
+    `force=False` written out. A refresh korvid decided to make on its own
+    stays a cache read.
+    """
     calls = 0
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -232,15 +244,17 @@ async def test_a_fresh_cache_makes_no_request(tmp_path: Path) -> None:
     source = _source(tmp_path, handler)
     await source.refresh()
     assert await _source(tmp_path, handler).refresh() is RefreshOutcome.CACHED
+    assert await _source(tmp_path, handler).refresh(force=False) is RefreshOutcome.CACHED
     assert calls == 1
 
 
 async def test_a_stale_cache_revalidates_with_the_stored_etag(tmp_path: Path) -> None:
     seen: list[str | None] = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx_types.Request) -> httpx_types.Response:
         seen.append(request.headers.get("if-none-match"))
-        return httpx.Response(304, headers={"etag": '"v1"'})
+        response: httpx_types.Response = httpx.Response(304, headers={"etag": '"v1"'})
+        return response
 
     source = _source(tmp_path, _ok)
     await source.refresh()
@@ -326,3 +340,250 @@ async def test_a_source_answers_refresh_through_the_metadata_contract(tmp_path: 
 
     source = _source(tmp_path, _ok)
     assert isinstance(await source.refresh(), RefreshOutcome)
+
+
+# ---------------------------------------------------------------------------
+# The explicit refresh: `force` is the only thing that bypasses the TTL
+# ---------------------------------------------------------------------------
+
+
+def test_the_metadata_contract_declares_the_force_flag() -> None:
+    """The bypass belongs on the ABC, not on this one class.
+
+    The catalog holds its source by `ModelMetadataSource`, so a `force`
+    that existed only on `ModelsDevSource` would make an operator's
+    explicit refresh work or silently degrade to a cache read depending on
+    which implementation happened to be injected. Keyword-only with a
+    `False` default: every existing caller keeps the freshness window, and
+    a caller that wants a revalidation has to say so at the call site.
+    """
+    params = inspect.signature(ModelMetadataSource.refresh).parameters
+    assert params["force"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert params["force"].default is False
+
+
+async def test_an_explicit_refresh_revalidates_a_cache_inside_its_ttl(tmp_path: Path) -> None:
+    """Ctrl-R means "go and look", not "read the file you already have".
+
+    The TTL exists so korvid does not hammer models.dev on its own
+    initiative. An operator who presses the refresh key has overridden
+    that judgement: answering `CACHED` for up to a day makes the only
+    control they have over this layer do nothing at all.
+    """
+    seen: list[str | None] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers.get("if-none-match"))
+        return httpx.Response(304, headers={"etag": '"v1"'})
+
+    await _source(tmp_path, _ok).refresh()  # a cache well inside its TTL
+    source = _source(tmp_path, handler)
+
+    assert await source.refresh(force=True) is RefreshOutcome.NOT_MODIFIED
+    # Exactly one request, and a conditional one: forcing past the TTL must
+    # not also throw away the ETag and pull 4 MiB that has not changed.
+    assert seen == ['"v1"']
+
+
+async def test_an_explicit_refresh_of_a_fresh_cache_takes_new_metadata(tmp_path: Path) -> None:
+    """A forced revalidation that finds something new applies it."""
+    changed = {
+        "anthropic": {
+            "env": ["ANTHROPIC_API_KEY"],
+            "models": {"claude-sonnet-4-5": {"name": "Claude Sonnet 4.5 (new)"}},
+        }
+    }
+
+    def handler(request: httpx_types.Request) -> httpx_types.Response:
+        response: httpx_types.Response = httpx.Response(
+            200,
+            json=changed,
+            headers={"content-type": "application/json", "etag": '"v2"'},
+        )
+        return response
+
+    await _source(tmp_path, _ok).refresh()
+    source = _source(tmp_path, handler)
+
+    assert await source.refresh(force=True) is RefreshOutcome.UPDATED
+
+    entry = source.metadata("anthropic/claude-sonnet-4-5")
+    assert entry is not None
+    assert entry.display_name == "Claude Sonnet 4.5 (new)"
+    envelope = json.loads((tmp_path / "models-dev.json").read_text(encoding="utf-8"))
+    assert envelope["etag"] == '"v2"'
+
+
+async def test_two_explicit_refreshes_at_once_make_one_request(tmp_path: Path) -> None:
+    """Concurrent forced refreshes coalesce into a single conditional GET.
+
+    Once `force` bypasses the TTL, the TTL is no longer the thing that
+    keeps korvid from repeating itself. Two screens — or one held key that
+    outran a screen's own guard — must still be one request out; the
+    caller that arrives second reports what the first one got.
+    """
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls = 0
+
+    async def handler(request: httpx_types.Request) -> httpx_types.Response:
+        nonlocal calls
+        calls += 1
+        started.set()
+        await release.wait()
+        response: httpx_types.Response = _ok(request)
+        return response
+
+    source = _source(tmp_path, handler)
+    first = asyncio.create_task(source.refresh(force=True))
+    await started.wait()
+    second = asyncio.create_task(source.refresh(force=True))
+    await asyncio.sleep(0)  # let the joiner reach the guard before the reply
+    release.set()
+
+    outcomes = list(await asyncio.gather(first, second))
+
+    assert outcomes == [RefreshOutcome.UPDATED, RefreshOutcome.UPDATED]
+    assert calls == 1
+
+
+async def test_a_forced_refresh_never_joins_a_cache_read(tmp_path: Path) -> None:
+    """A cache read is not a revalidation, so it cannot answer one.
+
+    Coalescing must not become a second TTL: a `CACHED` answer means the
+    other caller never went to the network, and reporting it to a forced
+    caller would re-introduce exactly the short-circuit `force` exists to
+    bypass.
+    """
+    calls = 0
+
+    def handler(request: httpx_types.Request) -> httpx_types.Response:
+        nonlocal calls
+        calls += 1
+        response: httpx_types.Response = httpx.Response(304, headers={"etag": '"v1"'})
+        return response
+
+    await _source(tmp_path, _ok).refresh()
+    source = _source(tmp_path, handler)
+
+    assert await source.refresh() is RefreshOutcome.CACHED
+    assert calls == 0
+    assert await source.refresh(force=True) is RefreshOutcome.NOT_MODIFIED
+    assert calls == 1
+
+
+# ---------------------------------------------------------------------------
+# `network.ca_bundle` reaches this client too (issue #168)
+# ---------------------------------------------------------------------------
+
+
+@contextlib.contextmanager
+def _tls_document_server(
+    cert_pem: Path, key_pem: Path, seen: list[tuple[str, dict[str, str]]]
+) -> Iterator[str]:
+    """A local HTTPS server that serves `_DOCUMENT` and records the request."""
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # http.server API name
+            seen.append((self.path, {k.lower(): v for k, v in self.headers.items()}))
+            body = json.dumps(_DOCUMENT).encode("utf-8")
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(body)))
+            self.send_header("etag", '"tls-v1"')
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args: object) -> None:
+            return None
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    server_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    server_ctx.minimum_version = ssl.TLSVersion.TLSv1_2  # no legacy TLS
+    server_ctx.load_cert_chain(certfile=str(cert_pem), keyfile=str(key_pem))
+    server.socket = server_ctx.wrap_socket(server.socket, server_side=True)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"https://127.0.0.1:{server.server_address[1]}/api.json"
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+
+async def test_the_default_client_is_built_through_korvids_trust(tmp_path: Path) -> None:
+    """This client is a korvid-owned HTTPS client like any other.
+
+    Built through `net.make_client`, so a configured bundle produces the
+    same verifying context — and the same "TLS verification failed against
+    network.ca_bundle '<path>'" message — as the live providers and the
+    wizard's probe. Nothing here can express "do not verify".
+    """
+    from korvid.providers.net import _CANamedClient
+
+    ca_pem, _, _ = mint_ca_and_server_cert(tmp_path)
+
+    configured = cast("httpx_types.AsyncClient", models_dev._default_client_factory(str(ca_pem)))
+    default = cast("httpx_types.AsyncClient", models_dev._default_client_factory(None))
+    try:
+        assert isinstance(configured, _CANamedClient)
+        assert configured._ca_bundle_path == str(ca_pem)
+        # No bundle: httpx default trust, untouched. Not a downgrade.
+        assert isinstance(default, httpx.AsyncClient)
+        assert not isinstance(default, _CANamedClient)
+    finally:
+        await configured.aclose()
+        await default.aclose()
+
+
+async def test_a_private_ca_endpoint_needs_the_configured_bundle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End to end over real TLS: the bundle decides, and only the bundle.
+
+    A deployment behind a TLS-inspecting proxy is the case this exists
+    for — with `network.ca_bundle` unwired, the refresh key answers
+    "unavailable" forever and no message says why. The untrusted half is
+    also the no-downgrade proof: a client that skipped verification would
+    succeed there.
+    """
+    ca_pem, cert_pem, key_pem = mint_ca_and_server_cert(tmp_path)
+    seen: list[tuple[str, dict[str, str]]] = []
+
+    with _tls_document_server(cert_pem, key_pem, seen) as url:
+        monkeypatch.setattr(models_dev, "MODELS_DEV_URL", url)
+
+        untrusted = ModelsDevSource(cache_path=tmp_path / "untrusted.json")
+        assert await untrusted.refresh(force=True) is RefreshOutcome.UNAVAILABLE
+        assert untrusted.metadata("anthropic/claude-sonnet-4-5") is None
+
+        trusted = ModelsDevSource(cache_path=tmp_path / "trusted.json", ca_bundle=str(ca_pem))
+        assert await trusted.refresh(force=True) is RefreshOutcome.UPDATED
+        assert trusted.metadata("anthropic/claude-sonnet-4-5") is not None
+
+
+async def test_the_tls_request_carries_no_trust_configuration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Trust is transport configuration; it never becomes payload.
+
+    Asserted on what the server actually received, through the production
+    client rather than a mock transport: a bare conditional GET, no body,
+    no credential header, and the configured bundle path nowhere in it.
+    """
+    ca_pem, cert_pem, key_pem = mint_ca_and_server_cert(tmp_path)
+    seen: list[tuple[str, dict[str, str]]] = []
+
+    with _tls_document_server(cert_pem, key_pem, seen) as url:
+        monkeypatch.setattr(models_dev, "MODELS_DEV_URL", url)
+        source = ModelsDevSource(cache_path=tmp_path / "cache.json", ca_bundle=str(ca_pem))
+        assert await source.refresh(force=True) is RefreshOutcome.UPDATED
+
+    assert len(seen) == 1
+    path, headers = seen[0]
+    assert path == "/api.json"  # no query string, ever
+    forbidden = {"authorization", "cookie", "x-api-key", "proxy-authorization"}
+    assert not forbidden & set(headers)
+    assert int(headers.get("content-length", "0")) == 0
+    assert not any(str(ca_pem) in value for value in headers.values())

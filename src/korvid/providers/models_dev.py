@@ -25,6 +25,7 @@ from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from enum import Enum
+from functools import partial
 from pathlib import Path
 from typing import Any, Final
 
@@ -71,7 +72,7 @@ class ModelMetadataSource(ABC):
     def env_hints(self, provider_id: str) -> tuple[str, ...]: ...
 
     @abstractmethod
-    async def refresh(self) -> RefreshOutcome:
+    async def refresh(self, *, force: bool = False) -> RefreshOutcome:
         """Revalidate this source, on an explicit operator request only.
 
         On the ABC rather than only on the concrete class: the catalog
@@ -80,6 +81,14 @@ class ModelMetadataSource(ABC):
         answers `CACHED` — never by omitting the method, which would make
         the action's reachability depend on the runtime type it happened
         to be given.
+
+        Args:
+            force: `True` when a human asked for this refresh and is
+                waiting for the answer. A source that serves a local copy
+                inside a freshness window must go and look anyway — the
+                window is korvid's own restraint, and the operator has
+                just overridden it. The default keeps every other caller
+                cache-first.
         """
 
 
@@ -198,14 +207,23 @@ def _parse(
     return metadata, env_hints
 
 
-def _default_client_factory() -> AbstractAsyncContextManager[Any]:
+def _default_client_factory(ca_bundle: str | None = None) -> AbstractAsyncContextManager[Any]:
+    """The production client: korvid's own trust, nothing else.
+
+    Built through `net.make_client`, so `network.ca_bundle` reaches this
+    request exactly as it reaches the live providers and the wizard's
+    probe — a deployment behind a TLS-inspecting proxy either trusts all
+    of them or none of them. There is no insecure mode to fall back to:
+    an unreadable or malformed bundle raises, and `refresh` reports the
+    refresh as unavailable rather than retrying without verification.
+    """
     try:
-        import httpx
+        from korvid.providers import net
     except ImportError as exc:
         raise ImportError(
             "httpx is required for models.dev enrichment. Install korvid[agent] or korvid[mcp]."
         ) from exc
-    return httpx.AsyncClient()
+    return net.make_client(ca_bundle, timeout=REQUEST_TIMEOUT_SECONDS)
 
 
 class ModelsDevSource(ModelMetadataSource):
@@ -215,8 +233,12 @@ class ModelsDevSource(ModelMetadataSource):
         cache_path: Where to store the cache envelope. Defaults to the
             platform cache directory.
         client_factory: Callable that returns an async HTTP client context
-            manager. Defaults to `httpx.AsyncClient`.
+            manager. Defaults to a `network.ca_bundle`-aware client. An
+            injected factory is the test seam and wins outright — the
+            bundle is then that factory's business.
         clock: Time source (injectable for tests).
+        ca_bundle: `network.ca_bundle`. One trust decision for every
+            korvid-owned HTTPS client; this one is no exception.
     """
 
     def __init__(
@@ -225,13 +247,23 @@ class ModelsDevSource(ModelMetadataSource):
         cache_path: Path | None = None,
         client_factory: Callable[[], AbstractAsyncContextManager[Any]] | None = None,
         clock: Callable[[], float] = time.time,
+        ca_bundle: str | None = None,
     ) -> None:
         self._cache_path = cache_path or default_cache_path()
-        self._client_factory = client_factory or _default_client_factory
+        # Bound, not called: the client is built when an operator asks for
+        # a refresh, so startup neither opens a socket nor reads the CA
+        # bundle off disk.
+        self._client_factory = client_factory or partial(_default_client_factory, ca_bundle)
         self._clock = clock
         self._metadata: dict[str, ModelMetadata] = {}
         self._env_hints: dict[str, tuple[str, ...]] = {}
         self._loaded = False
+        #: Serialises refreshes so concurrent callers are one request out.
+        self._refresh_lock = asyncio.Lock()
+        #: Bumped by every completed refresh, with its outcome, so a caller
+        #: that waited can report what it waited for.
+        self._completed = 0
+        self._last_outcome: RefreshOutcome | None = None
         # Try to load from cache on construction (sync, best-effort).
         self._load_cache()
 
@@ -251,14 +283,57 @@ class ModelsDevSource(ModelMetadataSource):
     # Refresh
     # ------------------------------------------------------------------
 
-    async def refresh(self) -> RefreshOutcome:
-        """Explicitly revalidate. Called only from the setup UI's
-        'refresh model metadata' action — never at startup.
+    async def refresh(self, *, force: bool = False) -> RefreshOutcome:
+        """Revalidate, on an explicit request or when the cache has aged out.
+
+        Called only from the setup UI's 'refresh model metadata' action —
+        never at startup.
+
+        Args:
+            force: `True` when a human pressed the refresh key. The 24-hour
+                freshness window is korvid's restraint about how often it
+                will contact models.dev on its own; an operator who asked
+                has overridden it, and answering `CACHED` would make the
+                only control they have over this layer do nothing. The
+                request is still conditional, so forcing costs a round trip
+                and an ETag comparison, not 4 MiB of unchanged document.
         """
+        # Read before waiting: if the counter has moved by the time this
+        # call holds the lock, somebody else's refresh is the answer.
+        completed_before = self._completed
+        async with self._refresh_lock:
+            joined = self._joinable_outcome(completed_before, force=force)
+            if joined is not None:
+                return joined
+            outcome = await self._refresh_now(force=force)
+            self._completed += 1
+            self._last_outcome = outcome
+            return outcome
+
+    def _joinable_outcome(self, completed_before: int, *, force: bool) -> RefreshOutcome | None:
+        """The outcome of a refresh that landed while this call waited.
+
+        Two screens — or one held key that outran a screen's own guard —
+        must not become two requests to models.dev. Once `force` bypasses
+        the TTL, the TTL is no longer what stops korvid repeating itself,
+        so the caller that arrives second reports what the first one got.
+
+        A `CACHED` answer is never joinable by a forced caller: the other
+        caller never went to the network, so joining it would re-introduce
+        exactly the short-circuit `force` exists to bypass.
+        """
+        if self._completed == completed_before or self._last_outcome is None:
+            return None
+        if force and self._last_outcome is RefreshOutcome.CACHED:
+            return None
+        return self._last_outcome
+
+    async def _refresh_now(self, *, force: bool) -> RefreshOutcome:
+        """One revalidation, under one deadline. Never raises."""
         cached = self._read_envelope()
         now = self._clock()
 
-        if cached is not None:
+        if not force and cached is not None:
             age = now - cached.get("fetched_at", 0)
             if age < CACHE_TTL_SECONDS:
                 return RefreshOutcome.CACHED
@@ -279,6 +354,9 @@ class ModelsDevSource(ModelMetadataSource):
             # in-memory tables both stand, and korvid stays usable.
             return RefreshOutcome.UNAVAILABLE
         except Exception:
+            # A misconfigured `network.ca_bundle` lands here too: trust is
+            # never downgraded to get an answer, and enrichment is not
+            # worth failing a running TUI over.
             return RefreshOutcome.UNAVAILABLE
 
     async def _revalidate(

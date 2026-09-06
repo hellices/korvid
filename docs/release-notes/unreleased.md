@@ -30,8 +30,12 @@ korvid now ships a **named-profile** configuration model and a searchable
 - **Model catalog.** `:ai` opens a fuzzy-search screen over LiteLLM's bundled
   table (2,000+ models, no internet required). An optional enrichment layer
   from `models.dev` adds context lengths and quantization info; it is fetched
-  only when you press <kbd>Ctrl</kbd>+<kbd>R</kbd> on that screen, and
-  `agent.model_search.models_dev: false` disables it permanently — see
+  only when you press <kbd>Ctrl</kbd>+<kbd>R</kbd> on that screen, which
+  always revalidates — conditionally, so an unchanged document is a round
+  trip and not a download — while korvid's own background reads stay behind a
+  24-hour cache. The fetch is verified with `network.ca_bundle` like every
+  other korvid HTTPS call, and `agent.model_search.models_dev: false`
+  disables it permanently: no source, no client, no socket — see
   [Model search](../agent.md#model-search) and the
   [airgap guide](../airgap.md#offline-model-catalog).
 

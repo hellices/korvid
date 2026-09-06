@@ -494,7 +494,7 @@ class LiteLLMModelCatalog(ModelCatalog):
             prefix=prefix,
         )
 
-    async def refresh_metadata(self) -> MetadataRefresh:
+    async def refresh_metadata(self, *, force: bool = False) -> MetadataRefresh:
         """Revalidate the enrichment source, because a human asked.
 
         The only caller is the setup UI's explicit action. Nothing here
@@ -506,14 +506,22 @@ class LiteLLMModelCatalog(ModelCatalog):
         next search shows what was fetched. Every failure the source can
         report arrives as an outcome, never an exception: this runs in a
         UI worker, and a raise there would tear down a live screen.
+
+        Args:
+            force: Carried straight through to the source. The catalog has
+                no opinion about freshness windows — it owns the
+                vocabulary, not the caching — but dropping the flag here
+                would leave the operator's keypress meaning "read the
+                cache" for as long as that window lasts.
         """
         source = self._enrichment
         if source is None:
             # Deliberately not an error: `agent.model_search.models_dev:
             # false` and a base install both land here, and both are
-            # working configurations.
+            # working configurations. Forcing cannot conjure a source an
+            # installation deliberately does not have.
             return MetadataRefresh.DISABLED
-        outcome = await source.refresh()
+        outcome = await source.refresh(force=force)
         if outcome is RefreshOutcome.UPDATED:
             self._invalidate_index()
         return _REFRESH_OUTCOMES.get(outcome, MetadataRefresh.UNAVAILABLE)

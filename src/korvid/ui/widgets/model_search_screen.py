@@ -7,7 +7,7 @@ A provider name is a label and a search term, never a gate.
 from __future__ import annotations
 
 import re
-from typing import ClassVar
+from typing import ClassVar, Final
 
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -33,7 +33,8 @@ _IDLE_HINT = "Type to search · Enter submits · Ctrl-R refreshes metadata · Es
 
 #: What each outcome tells the operator. Plain sentences: the refresh is
 #: something a human just asked for, so it answers in their terms rather
-#: than echoing an enum name or an HTTP status.
+#: than echoing an enum name or an HTTP status. Every `MetadataRefresh`
+#: member needs an entry — the test suite pins the two together.
 _REFRESH_MESSAGES: dict[MetadataRefresh, str] = {
     MetadataRefresh.UPDATED: "Model metadata updated.",
     MetadataRefresh.UNCHANGED: "Model metadata already up to date.",
@@ -43,6 +44,16 @@ _REFRESH_MESSAGES: dict[MetadataRefresh, str] = {
         "Model metadata refresh is disabled — no source is configured, nothing was contacted."
     ),
 }
+
+#: What an outcome this screen has no sentence for gets said about it.
+#: A `KeyError` here would surface as an unhandled worker exception with
+#: the status line still reading "Refreshing model metadata…" — the
+#: operator would be left watching a refresh that already finished. The
+#: wording claims only what is safe for *any* unrecognised outcome:
+#: whatever korvid had, it still has.
+_UNKNOWN_OUTCOME_MESSAGE: Final[str] = (
+    "Model metadata refresh finished — keeping what korvid already had."
+)
 
 #: Outcomes that can change what a row says, and so need the current query
 #: re-ranked. `UNCHANGED` and `UNAVAILABLE` changed nothing, and `CACHED`
@@ -224,13 +235,19 @@ class ModelSearchScreen(ModalScreen["str | None"]):
     async def _refresh_metadata(self) -> None:
         """Await the catalog's refresh and report what it did.
 
+        Asks for a *forced* revalidation: this method runs only because a
+        human pressed the key, and the metadata layer will otherwise serve
+        a local copy for as long as its freshness window lasts. Cache-first
+        is the right default for a refresh korvid decided to make on its
+        own, and the wrong answer for one an operator is waiting on.
+
         Wrapped so that no failure mode reaches the worker: an unhandled
         exception in a worker dismisses nothing and fixes nothing — it
         just leaves the operator on a screen whose status line still says
         the refresh is running.
         """
         try:
-            outcome = await self._catalog.refresh_metadata()
+            outcome = await self._catalog.refresh_metadata(force=True)
         except Exception:  # a refresh is advisory; never an error dialog
             outcome = MetadataRefresh.UNAVAILABLE
         finally:
@@ -243,7 +260,10 @@ class ModelSearchScreen(ModalScreen["str | None"]):
             # into `query_one` and raise `NoMatches` against widgets that
             # no longer exist.
             return
-        message = _REFRESH_MESSAGES[outcome]
+        # `.get`, not `[]`: an outcome this screen has no sentence for is
+        # a status line, not a `KeyError` inside a worker that leaves
+        # "Refreshing…" on screen forever.
+        message = _REFRESH_MESSAGES.get(outcome, _UNKNOWN_OUTCOME_MESSAGE)
         if outcome in _RERENDERING_OUTCOMES:
             # Re-rank the query the operator is looking at, so refreshed
             # facts show up now rather than after they retype it. The
