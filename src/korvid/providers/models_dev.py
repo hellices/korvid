@@ -15,6 +15,7 @@ Contract (design §Model Catalog Architecture, layer 2):
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import platform
@@ -35,7 +36,8 @@ MODELS_DEV_URL: Final[str] = "https://models.dev/api.json"
 #: redirect to something unbounded does.
 MAX_RESPONSE_BYTES: Final[int] = 12 * 1024 * 1024
 
-#: Whole-request budget. Enrichment is never worth making a human wait.
+#: Whole-request budget: connect, headers, body and parse together, not
+#: per socket operation. Enrichment is never worth making a human wait.
 REQUEST_TIMEOUT_SECONDS: Final[float] = 10.0
 
 #: Revalidate at most daily; serve the cache unconditionally in between.
@@ -264,9 +266,26 @@ class ModelsDevSource(ModelMetadataSource):
         etag: str | None = cached.get("etag") if cached is not None else None
 
         try:
-            result = await self._fetch(etag)
+            # One deadline over connect, headers, body and parse. An HTTP
+            # client's own timeout is spent *per operation*, so a server
+            # that answers every individual read inside the limit — a
+            # slow drip, a stalled proxy — can hold an operator's refresh
+            # open for as long as it likes. The documented budget is a
+            # whole-request budget, so it is enforced as one.
+            async with asyncio.timeout(REQUEST_TIMEOUT_SECONDS):
+                return await self._revalidate(etag=etag, cached=cached, now=now)
+        except TimeoutError:
+            # Same answer as a refused connection: the stale cache and the
+            # in-memory tables both stand, and korvid stays usable.
+            return RefreshOutcome.UNAVAILABLE
         except Exception:
             return RefreshOutcome.UNAVAILABLE
+
+    async def _revalidate(
+        self, *, etag: str | None, cached: dict[str, Any] | None, now: float
+    ) -> RefreshOutcome:
+        """Fetch, parse and store, under the caller's deadline."""
+        result = await self._fetch(etag)
 
         if result is None:
             # 304 Not Modified — touch the timestamp to reset TTL.
@@ -303,6 +322,9 @@ class ModelsDevSource(ModelMetadataSource):
                 "GET",
                 MODELS_DEV_URL,
                 headers=headers,
+                # A per-operation ceiling under `refresh`'s total deadline:
+                # it fails a single stalled socket call fast, but only the
+                # outer `asyncio.timeout` bounds the whole request.
                 timeout=REQUEST_TIMEOUT_SECONDS,
                 follow_redirects=False,
             ) as response,

@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import stat
+from collections.abc import AsyncIterator
 from pathlib import Path
 
 import pytest
 
+from korvid.providers import models_dev
 from korvid.providers.models_dev import (
     CACHE_TTL_SECONDS,
     MAX_RESPONSE_BYTES,
@@ -146,6 +149,68 @@ async def test_a_failed_refresh_keeps_the_previous_cache(tmp_path: Path) -> None
     stale = _source(tmp_path, boom)
     assert await stale.refresh() is RefreshOutcome.UNAVAILABLE
     assert stale.metadata("anthropic/claude-sonnet-4-5") is not None
+
+
+async def test_a_slow_drip_cannot_outlast_the_whole_request_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Many sub-timeout chunks must not add up past the total deadline.
+
+    `REQUEST_TIMEOUT_SECONDS` is documented as a *whole-request* budget,
+    but an HTTP client spends it per operation: a server that answers
+    every individual read comfortably inside the limit can hold the
+    connection — and the operator's refresh — open indefinitely. The
+    deadline has to wrap the entire fetch/read/parse, not each socket
+    call.
+
+    Deterministic by construction, not by wall clock: `asyncio.sleep`
+    never returns early, so delivering every chunk provably cannot fit in
+    the budget. Nothing here asserts on elapsed time.
+    """
+    budget = 0.05
+    per_chunk = 0.02
+    total_chunks = 200
+
+    # The premise of the test: each individual read is well inside the
+    # budget, so no per-operation timeout would ever fire.
+    assert per_chunk < budget
+    assert per_chunk * total_chunks > budget
+
+    monkeypatch.setattr(models_dev, "REQUEST_TIMEOUT_SECONDS", budget)
+
+    delivered: list[int] = []
+
+    async def drip() -> AsyncIterator[bytes]:
+        yield b'{"anthropic": {"models": {'
+        for i in range(total_chunks):
+            await asyncio.sleep(per_chunk)
+            delivered.append(i)
+            yield b'"m%d": {},' % i
+        yield b'"last": {}}}}'
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=drip(),
+            headers={"content-type": "application/json"},
+        )
+
+    # Seed a cache and age it past the TTL, so the refresh actually goes
+    # out and there is stale data whose survival can be checked.
+    await _source(tmp_path, _ok).refresh()
+    cache_path = tmp_path / "models-dev.json"
+    _age_cache(cache_path, CACHE_TTL_SECONDS + 60)
+    before = cache_path.read_bytes()
+
+    source = _source(tmp_path, handler)
+    assert await source.refresh() is RefreshOutcome.UNAVAILABLE
+
+    # Cut short: the read never got through the drip.
+    assert len(delivered) < total_chunks
+    # Stale data survives a timeout exactly as it survives a refused
+    # connection — the failure is silent and total.
+    assert source.metadata("anthropic/claude-sonnet-4-5") is not None
+    assert cache_path.read_bytes() == before
 
 
 async def test_a_fresh_cache_makes_no_request(tmp_path: Path) -> None:

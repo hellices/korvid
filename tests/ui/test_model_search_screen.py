@@ -60,6 +60,9 @@ class _FakeCatalog(ModelCatalog):
         refresh_outcome: MetadataRefresh = MetadataRefresh.UPDATED,
         refresh_gate: asyncio.Event | None = None,
     ) -> None:
+        #: How many searches the screen has asked for. A refresh that
+        #: invalidated nothing must not silently re-run one.
+        self.search_calls = 0
         #: How many times the screen asked for an explicit metadata refresh.
         self.refresh_calls = 0
         self._refresh_outcome = refresh_outcome
@@ -83,6 +86,7 @@ class _FakeCatalog(ModelCatalog):
         )
 
     def search(self, query: str, *, limit: int = 50) -> tuple[ModelEntry, ...]:
+        self.search_calls += 1
         q = query.strip().lower()
         if not q:
             return ()
@@ -588,6 +592,61 @@ async def test_a_disabled_source_leaves_the_results_alone() -> None:
 
         assert results.option_count == before
         assert screen.query_one("#model-query", Input).value == "openai/gpt-4o"
+
+
+async def test_a_cache_hit_re_renders_nothing() -> None:
+    """`CACHED` means the TTL had not expired: no request, no new facts.
+
+    The catalog only drops its memoised index on a real update, so
+    re-ranking here would re-render byte-identical rows and overwrite the
+    operator's search summary with a sentence about a cache.
+    """
+    catalog = _FakeCatalog(refresh_outcome=MetadataRefresh.CACHED)
+    app = _Host(catalog, initial_query="openai/gpt-4o")
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: app.screen_ref is not None)
+        screen = app.screen_ref
+        assert screen is not None
+        results = screen.query_one("#model-results", OptionList)
+        await until(pilot, lambda: results.option_count > 0, label="initial results")
+        searches_before = catalog.search_calls
+
+        await pilot.press("ctrl+r")
+        await until(pilot, lambda: "cache" in _status_text(screen).lower(), label="outcome shown")
+
+        assert catalog.search_calls == searches_before
+        assert _status_text(screen).startswith("Model metadata served from cache")
+
+
+async def test_a_refresh_landing_after_unmount_touches_no_widget() -> None:
+    """The completion path must check the screen is still there.
+
+    The screen-owned worker is cancelled on dismissal, but cancellation
+    only lands at an `await`: a refresh whose await returns in the same
+    tick the screen goes away runs on to the status line regardless, and
+    `query_one` on a screen whose widgets are gone raises. Driving the
+    coroutine directly is the only way to pin that window deterministically
+    — a scheduling race cannot be asserted on.
+    """
+    catalog = _FakeCatalog(refresh_outcome=MetadataRefresh.UPDATED)
+    app = _Host(catalog, initial_query="openai/gpt-4o")
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: app.screen_ref is not None)
+        screen = app.screen_ref
+        assert screen is not None
+        await until(
+            pilot,
+            lambda: screen.query_one("#model-results", OptionList).option_count > 0,
+            label="initial results",
+        )
+
+        screen.dismiss(None)
+        await until(pilot, lambda: app.result is None, label="dismissed")
+        await until(pilot, lambda: not screen.is_attached, label="unmounted")
+
+        await screen._refresh_metadata()
+
+        assert catalog.refresh_calls == 1
 
 
 async def test_a_refresh_that_raises_is_reported_not_crashed() -> None:

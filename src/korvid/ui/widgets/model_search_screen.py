@@ -45,12 +45,11 @@ _REFRESH_MESSAGES: dict[MetadataRefresh, str] = {
 }
 
 #: Outcomes that can change what a row says, and so need the current query
-#: re-ranked. `UNCHANGED` and `UNAVAILABLE` changed nothing; `CACHED` is
-#: here because the cache may hold facts this catalog instance has not
-#: rendered yet.
-_RERENDERING_OUTCOMES: frozenset[MetadataRefresh] = frozenset(
-    {MetadataRefresh.UPDATED, MetadataRefresh.CACHED}
-)
+#: re-ranked. `UNCHANGED` and `UNAVAILABLE` changed nothing, and `CACHED`
+#: means the TTL had not expired — no request was made and the catalog
+#: invalidated no index, so a re-rank would redraw identical rows over the
+#: operator's search summary.
+_RERENDERING_OUTCOMES: frozenset[MetadataRefresh] = frozenset({MetadataRefresh.UPDATED})
 
 
 def _capability_suffix(entry: ModelEntry) -> str:
@@ -236,6 +235,14 @@ class ModelSearchScreen(ModalScreen["str | None"]):
             outcome = MetadataRefresh.UNAVAILABLE
         finally:
             self._refreshing = False
+        if not self.is_attached:
+            # The operator left while the call was out. The worker is
+            # screen-owned and so is cancelled on dismissal, but
+            # cancellation only lands at an `await`: a refresh that
+            # returns in the same tick the screen goes away would run on
+            # into `query_one` and raise `NoMatches` against widgets that
+            # no longer exist.
+            return
         message = _REFRESH_MESSAGES[outcome]
         if outcome in _RERENDERING_OUTCOMES:
             # Re-rank the query the operator is looking at, so refreshed
