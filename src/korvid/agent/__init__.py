@@ -15,7 +15,7 @@ grouped by the part of the harness that owns it:
 | provider | the `LLMProvider` ABC every adapter and plugin implements |
 | evidence | the citation ledger |
 | events | what a turn yields to the UI |
-| setup | the configurator contract the setup screen drives |
+| setup | the declarative model-profile vocabulary the setup screen renders |
 
 Five public contracts are deliberately **not** in that list: they live in
 two submodules a plugin author imports them from directly.

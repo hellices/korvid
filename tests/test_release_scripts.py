@@ -1827,6 +1827,69 @@ def test_runtime_install_hint_consumers_use_the_shared_helper() -> None:
         assert "isolated_install_hint(" in source
 
 
+def _documented_korvid_imports() -> frozenset[str]:
+    """Every first-party module the runbook tells a release manager to import.
+
+    Read out of the runbook's own `python -c 'import ...'` lines rather than
+    restated here: a list spelled in the test would drift from the document
+    it is supposed to pin.
+    """
+    return frozenset(
+        module.strip()
+        for statement in re.findall(r"'import ([^']+)'", _release_runbook())
+        for module in statement.split(",")
+        if module.strip().startswith("korvid")
+    )
+
+
+def test_the_runbook_import_smoke_names_only_modules_that_exist() -> None:
+    """The pre-tag gate must import modules korvid actually ships.
+
+    The runbook's import line runs against a *published* wheel, minutes
+    before an irreversible tag push. A module that was deleted from `src/`
+    turns that gate into a `ModuleNotFoundError` the release manager has to
+    diagnose under time pressure — or, worse, into a step they skip.
+    """
+    package = Path(__file__).parents[1] / "src" / "korvid"
+    documented = _documented_korvid_imports()
+    assert documented, "the runbook must keep an import smoke check"
+    missing = sorted(
+        module
+        for module in documented
+        if not (
+            package.joinpath(*module.split(".")[1:]).with_suffix(".py").is_file()
+            or package.joinpath(*module.split(".")[1:], "__init__.py").is_file()
+        )
+    )
+    assert missing == []
+
+
+def test_the_runbook_import_smoke_probes_the_same_modules_as_the_script() -> None:
+    """One published list of feature modules, not two that can disagree.
+
+    `smoke_install.py` proves an extra installed by importing a first-party
+    module that reaches it. The runbook's manual upgrade gate proves the
+    same thing about a *published* wheel. It may reach further than the
+    smoke matrix does — `korvid.obs` has no variant there — but where the
+    two cover the same package they must name the same module, or the
+    runbook can go on importing something the script already knows is gone.
+    """
+    documented = _documented_korvid_imports()
+    probed = set(smoke_install.required_korvid_modules("all"))
+    covered = {module.rpartition(".")[0] for module in probed}
+    disagreeing = sorted(
+        module
+        for module in documented
+        if module.rpartition(".")[0] in covered and module not in probed
+    )
+    assert disagreeing == []
+    for variant in ("agent", "mcp"):
+        feature = set(smoke_install.required_korvid_modules(variant)) - set(
+            smoke_install.required_korvid_modules("base")
+        )
+        assert documented & feature, f"the runbook proves nothing about the {variant} extra"
+
+
 def test_release_smoke_docs_describe_a_ci_venv_pip_check() -> None:
     root = Path(__file__).parents[1]
     runbook = markdown_section(_release_runbook(), "What the smoke matrix proves")
