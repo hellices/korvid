@@ -10,7 +10,7 @@ import pytest
 from textual.app import App, ComposeResult
 from textual.widgets import OptionList, Static
 
-from korvid.agent.model_profiles import ModelCatalog, ModelEntry
+from korvid.agent.model_profiles import MetadataRefresh, ModelCatalog, ModelEntry
 from korvid.core.config import ModelConnectionConfig, ModelConnectionsConfig
 from korvid.ui.widgets.profile_manager_screen import (
     ProfileManagerResult,
@@ -49,6 +49,9 @@ class _FakeCatalog(ModelCatalog):
 
     async def finish_auth(self, profile: ModelConnectionConfig) -> str | None:
         return None
+
+    async def refresh_metadata(self) -> MetadataRefresh:
+        return MetadataRefresh.DISABLED
 
 
 def _make_profiles(**kwargs: str) -> ModelConnectionsConfig:

@@ -951,7 +951,9 @@ def _close_agent_in_background(
     task.add_done_callback(_reap)
 
 
-def _build_model_catalog(*, ca_bundle: str | None = None) -> ModelCatalog | None:
+def _build_model_catalog(
+    *, ca_bundle: str | None = None, models_dev: bool = True
+) -> ModelCatalog | None:
     """Build the catalog, or None when the agent extra is absent.
 
     A missing extra degrades to None — the TUI runs without an agent.
@@ -961,25 +963,38 @@ def _build_model_catalog(*, ca_bundle: str | None = None) -> ModelCatalog | None
     factory the running agent uses, trust and credential store included,
     so a profile that tests green cannot fail differently at startup.
 
+    Nothing here touches the network. `ModelsDevSource()` reads whatever
+    cache is already on disk and stops; the only thing that revalidates it
+    is the setup UI's explicit refresh action, through
+    `ModelCatalog.refresh_metadata`.
+
     Args:
         ca_bundle: `network.ca_bundle` — one trust decision for every
             korvid-owned HTTPS client, the probe's included.
+        models_dev: `agent.model_search.models_dev`. `False` builds **no**
+            metadata source at all rather than a source nobody calls:
+            an air-gapped deployment's guarantee is that the object which
+            could make the request does not exist, and the refresh action
+            then reports itself disabled.
     """
     try:
         from korvid.providers.endpoint_discovery import EndpointDiscovery
         from korvid.providers.litellm_catalog import LiteLLMModelCatalog
         from korvid.providers.litellm_runtime import models_by_provider
-        from korvid.providers.models_dev import ModelsDevSource
+        from korvid.providers.models_dev import ModelMetadataSource, ModelsDevSource
         from korvid.providers.profile_probe import ProfileProbe
         from korvid.providers.provider_default import ProviderDefaultRegistry
         from korvid.providers.special_flows import SpecialFlowRegistry
         from korvid.providers.token_store import TokenStore
     except ImportError:
         return None
+    # Constructed only when enabled: "disabled" has to mean the object that
+    # could make the request does not exist, not that nobody calls it.
+    enrichment: ModelMetadataSource | None = ModelsDevSource() if models_dev else None
     flows = SpecialFlowRegistry.from_entry_points(reserved_prefixes=models_by_provider())
     return LiteLLMModelCatalog(
         flows=flows,
-        enrichment=ModelsDevSource(),
+        enrichment=enrichment,
         discovery=EndpointDiscovery(),
         tester=ProfileProbe(
             catalog=LiteLLMModelCatalog(flows=flows),
@@ -1612,7 +1627,10 @@ async def _wire_and_run(config: KorvidConfig, kube: KubeClient, state: _RunState
         agent_model_name=_active_model_name(config),
         # The profile screens' single source of answers, and the one path
         # that writes `agent.profiles` back (issue #182).
-        agent_catalog=_build_model_catalog(ca_bundle=config.network_ca_bundle),
+        agent_catalog=_build_model_catalog(
+            ca_bundle=config.network_ca_bundle,
+            models_dev=config.agent_model_search_models_dev,
+        ),
         agent_save_profiles=_persist_model_profiles,
         rebuild_agent=agent.rebuild,
         disconnect_agent=agent.disconnect,

@@ -27,10 +27,12 @@ korvid now ships a **named-profile** configuration model and a searchable
 
   `:ai switch <name>` switches profiles from inside the TUI.
 
-- **Model catalog.** `:model search` opens a fuzzy-search screen over
-  LiteLLM's bundled table (2,000+ models, no internet required). An optional
-  enrichment layer from `models.dev` adds context lengths and quantization
-  info — see [Model search](../agent.md#model-search) and the
+- **Model catalog.** `:ai` opens a fuzzy-search screen over LiteLLM's bundled
+  table (2,000+ models, no internet required). An optional enrichment layer
+  from `models.dev` adds context lengths and quantization info; it is fetched
+  only when you press <kbd>Ctrl</kbd>+<kbd>R</kbd> on that screen, and
+  `agent.model_search.models_dev: false` disables it permanently — see
+  [Model search](../agent.md#model-search) and the
   [airgap guide](../airgap.md#offline-model-catalog).
 
 - **Model-first selection.** The catalog is the starting point for choosing a

@@ -9,6 +9,7 @@ import pytest
 
 from korvid.agent.model_profiles import (
     EndpointRequirement,
+    MetadataRefresh,
     ModelConnectionConfig,
     ModelEntry,
     ModelEntrySource,
@@ -25,6 +26,11 @@ from korvid.providers.litellm_runtime import (  # noqa: E402
     ProviderSDKError,
     model_cost_entry,
     models_by_provider,
+)
+from korvid.providers.models_dev import (  # noqa: E402
+    ModelMetadata,
+    ModelMetadataSource,
+    RefreshOutcome,
 )
 
 _SRC = Path("src/korvid")
@@ -444,6 +450,9 @@ class _FakeMetadataSource:
     def env_hints(self, provider_id: str) -> tuple[str, ...]:
         return ()
 
+    async def refresh(self) -> RefreshOutcome:
+        return RefreshOutcome.CACHED
+
 
 def test_provenance_stays_litellm_when_the_overlay_adds_nothing() -> None:
     """An overlay that restates known facts must not claim credit.
@@ -857,3 +866,117 @@ async def test_a_prefix_owning_flow_still_signs_in_without_any_option() -> None:
         )
         is prompt
     )
+
+
+# ---------------------------------------------------------------------------
+# The explicit metadata refresh — the production wiring for Task 7's source
+# ---------------------------------------------------------------------------
+
+
+class _RecordingMetadataSource(ModelMetadataSource):
+    """A metadata source whose refresh is counted and scripted."""
+
+    def __init__(
+        self,
+        outcome: RefreshOutcome = RefreshOutcome.UPDATED,
+        *,
+        after: dict[str, ModelMetadata] | None = None,
+    ) -> None:
+        self.calls = 0
+        self._outcome = outcome
+        self._after = after or {}
+        self._entries: dict[str, ModelMetadata] = {}
+
+    def metadata(self, reference: str) -> ModelMetadata | None:
+        return self._entries.get(reference)
+
+    def env_hints(self, provider_id: str) -> tuple[str, ...]:
+        return ()
+
+    async def refresh(self) -> RefreshOutcome:
+        self.calls += 1
+        if self._outcome is RefreshOutcome.UPDATED:
+            self._entries = dict(self._after)
+        return self._outcome
+
+
+@pytest.mark.parametrize(
+    ("outcome", "expected"),
+    [
+        (RefreshOutcome.UPDATED, MetadataRefresh.UPDATED),
+        (RefreshOutcome.NOT_MODIFIED, MetadataRefresh.UNCHANGED),
+        (RefreshOutcome.CACHED, MetadataRefresh.CACHED),
+        (RefreshOutcome.UNAVAILABLE, MetadataRefresh.UNAVAILABLE),
+    ],
+)
+async def test_every_source_outcome_maps_to_the_neutral_vocabulary(
+    outcome: RefreshOutcome, expected: MetadataRefresh
+) -> None:
+    """Each provider-layer outcome has exactly one operator-facing answer.
+
+    A missing arm would either raise into the UI worker or report a
+    refresh that did not happen as one that did.
+    """
+    source = _RecordingMetadataSource(outcome)
+    catalog = LiteLLMModelCatalog(enrichment=source)
+
+    result = await catalog.refresh_metadata()
+
+    assert result is expected
+    assert source.calls == 1
+
+
+async def test_the_refresh_never_hands_a_provider_type_upward() -> None:
+    """`RefreshOutcome` lives in `korvid.providers`, which `ui/` may not
+    import. Returning one would make the UI's rendering depend on it."""
+    catalog = LiteLLMModelCatalog(enrichment=_RecordingMetadataSource())
+
+    result = await catalog.refresh_metadata()
+
+    assert isinstance(result, MetadataRefresh)
+    assert not isinstance(result, RefreshOutcome)
+
+
+async def test_a_catalog_without_enrichment_reports_disabled_and_calls_nothing() -> None:
+    """`agent.model_search.models_dev: false` (and a base install) leave the
+    catalog with no source at all. The action must say so rather than
+    pretending a refresh happened."""
+    catalog = LiteLLMModelCatalog()
+
+    assert await catalog.refresh_metadata() is MetadataRefresh.DISABLED
+
+
+async def test_an_updated_refresh_is_visible_to_the_next_search() -> None:
+    """The index is a cached property built from the enrichment overlay.
+
+    Without invalidation the operator refreshes, is told it worked, and
+    sees exactly the rows they saw before — the failure this action exists
+    to avoid.
+    """
+    probe = LiteLLMModelCatalog()
+    reference = probe.search("gpt", limit=1)[0].reference
+    source = _RecordingMetadataSource(
+        RefreshOutcome.UPDATED,
+        after={reference: ModelMetadata(reference=reference, display_name="Refreshed Name")},
+    )
+    catalog = LiteLLMModelCatalog(enrichment=source)
+    before = catalog.entry(reference)
+    assert before is not None
+    assert before.display_name != "Refreshed Name"
+
+    assert await catalog.refresh_metadata() is MetadataRefresh.UPDATED
+
+    after = catalog.entry(reference)
+    assert after is not None
+    assert after.display_name == "Refreshed Name"
+
+
+async def test_an_unavailable_refresh_keeps_the_index_it_had() -> None:
+    """A failed refresh is silent and total: nothing is dropped."""
+    source = _RecordingMetadataSource(RefreshOutcome.UNAVAILABLE)
+    catalog = LiteLLMModelCatalog(enrichment=source)
+    before = catalog.search("gpt", limit=5)
+
+    assert await catalog.refresh_metadata() is MetadataRefresh.UNAVAILABLE
+
+    assert catalog.search("gpt", limit=5) == before

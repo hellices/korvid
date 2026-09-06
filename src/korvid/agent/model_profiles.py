@@ -44,6 +44,7 @@ __all__ = [
     "ConnectionAuthConfig",
     "DeviceLoginPrompt",
     "EndpointRequirement",
+    "MetadataRefresh",
     "ModelCatalog",
     "ModelConnectionConfig",
     "ModelConnectionsConfig",
@@ -99,6 +100,29 @@ class ModelEntrySource(Enum):
     MODELS_DEV = "models.dev"
     ENDPOINT = "endpoint"
     MANUAL = "manual"
+
+
+class MetadataRefresh(Enum):
+    """What an explicit metadata refresh did, in the operator's terms.
+
+    The catalog's optional enrichment layer is the only thing behind this,
+    and `ui/` must be able to render the answer without importing
+    `korvid.providers` — the layer rules forbid it, and the base install
+    does not ship that stack at all. So the vocabulary names *outcomes*,
+    never a source, a vendor or an HTTP status.
+    """
+
+    #: New metadata was fetched and is now in the catalog.
+    UPDATED = "updated"
+    #: The source was revalidated and had nothing new.
+    UNCHANGED = "unchanged"
+    #: A fresh local copy was used; no request was made.
+    CACHED = "cached"
+    #: The refresh could not complete. Whatever was there is still there.
+    UNAVAILABLE = "unavailable"
+    #: This installation has no metadata source — switched off in config,
+    #: or the optional extra is absent. Nothing was contacted.
+    DISABLED = "disabled"
 
 
 @dataclass(frozen=True, slots=True)
@@ -245,6 +269,22 @@ class ModelCatalog(ABC):
     async def discover(self, profile: ModelConnectionConfig) -> tuple[ModelEntry, ...]:
         """Live-list models from the profile's endpoint. Best effort: an
         empty tuple means "type it yourself", never an error dialog."""
+
+    @abstractmethod
+    async def refresh_metadata(self) -> MetadataRefresh:
+        """Revalidate the optional metadata layer, because a human asked.
+
+        This is the *only* way that layer is ever contacted: it is never
+        awaited at startup, on mount, on a keystroke, or on any routing
+        path. The setup UI binds one visible key to it and renders the
+        answer; everything else in korvid reads whatever is already
+        cached.
+
+        Implementations return an outcome rather than raising: the caller
+        is a UI worker, and an exception there would tear down a screen
+        the operator is in the middle of using. `DISABLED` is a normal
+        answer — an installation may deliberately have no source at all.
+        """
 
     @abstractmethod
     async def test(self, profile: ModelConnectionConfig) -> str:

@@ -83,20 +83,22 @@ network at all.
 
 **Primary layer (always available):** LiteLLM ships
 `model_prices_and_context_window.json` inside its wheel. korvid reads that
-table at startup — no GET request, no internet required. `:model search`
-and tier routing both use it. Over 2,000 models from dozens of providers
+table at startup — no GET request, no internet required. The model search
+screen (`:ai`) and tier routing both use it. Over 2,000 models from dozens of providers
 are discoverable and routable offline, as long as you can reach the model
 endpoint itself.
 
 **Optional enrichment layer (models.dev):** korvid may fetch a single JSON
 document from `https://models.dev/api.json` to add context lengths,
 quantization info, and env-variable hints. This fetch is **never made at
-startup** and **never made during routing**. It happens only when you
-explicitly open the model search screen or run `:model refresh`.
+startup** and **never made during routing**. It happens only when you press
+<kbd>Ctrl</kbd>+<kbd>R</kbd> on the model search screen of the `:ai` wizard.
+Opening that screen, typing a query, and picking a model make no request.
 
 The result is cached at `$XDG_CACHE_HOME/korvid/models-dev.json`
-(Linux/macOS default: `~/.cache/korvid/models-dev.json`;
-Windows: `%LOCALAPPDATA%\korvid\models-dev.json`). The cache file is written
+(Linux default: `~/.cache/korvid/models-dev.json`; macOS:
+`~/Library/Caches/korvid/models-dev.json`; Windows:
+`%LOCALAPPDATA%\korvid\models-dev.json`). The cache file is written
 with mode `0600` and is served unconditionally for 24 hours before a
 re-fetch is attempted.
 
@@ -108,8 +110,15 @@ agent:
     models_dev: false
 ```
 
-With this setting, `:model search` uses only the LiteLLM bundled table and
-never attempts an outbound connection.
+With this setting korvid builds no models.dev client at all, so there is no
+code path left that could open the socket: model search uses only the
+LiteLLM bundled table, and <kbd>Ctrl</kbd>+<kbd>R</kbd> answers
+`models.dev enrichment is disabled` without touching the network.
+
+The key is parsed strictly. Only the booleans `true` and `false` are
+accepted; any other value (including the string `"false"`) is reported as a
+config warning and treated as `false`, so a typo in an air-gapped
+deployment cannot silently re-enable the fetch.
 
 ## Offline installation bundles
 

@@ -19,6 +19,7 @@ from korvid.agent.model_profiles import (
     AuthMethodDescriptor,
     ConnectionAuthConfig,
     EndpointRequirement,
+    MetadataRefresh,
     ModelCatalog,
     ModelConnectionConfig,
     ModelConnectionsConfig,
@@ -65,6 +66,9 @@ class _StubCatalog(ModelCatalog):
 
     async def finish_auth(self, profile: ModelConnectionConfig) -> str | None:
         return None
+
+    async def refresh_metadata(self) -> MetadataRefresh:
+        return MetadataRefresh.DISABLED
 
 
 def _profiles(active: str | None = "default", **extra: object) -> ModelConnectionsConfig:

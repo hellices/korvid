@@ -2392,7 +2392,7 @@ def test_the_app_is_wired_with_a_catalog_that_can_probe() -> None:
     """The composition root builds the catalog with the configured trust —
     without it the wizard's probe and the runtime could disagree on the CA."""
     source = Path("src/korvid/__main__.py").read_text(encoding="utf-8")
-    assert "_build_model_catalog(ca_bundle=config.network_ca_bundle)" in source
+    assert "ca_bundle=config.network_ca_bundle" in source
 
 
 def _profiles_config(path: Path, *, tier: str | None = None) -> None:
@@ -2703,3 +2703,87 @@ def test_an_installed_credential_entry_point_resolves_provider_default(
     kwargs = provider._plan.call_kwargs([], [], stream=True)
     assert kwargs["acme_token_provider"] is _token
     assert "api_key" not in kwargs
+
+
+# ---------------------------------------------------------------------------
+# models.dev is wired to one explicit action, and to a permanent kill switch
+# ---------------------------------------------------------------------------
+
+
+def test_the_catalog_is_built_with_the_configured_trust_and_kill_switch() -> None:
+    """The composition root passes both decisions it owns: the CA bundle and
+    whether the optional metadata source exists at all."""
+    source = Path("src/korvid/__main__.py").read_text(encoding="utf-8")
+    assert "_build_model_catalog(" in source
+    assert "ca_bundle=config.network_ca_bundle" in source
+    assert "models_dev=config.agent_model_search_models_dev" in source
+
+
+def test_building_the_catalog_never_refreshes_the_metadata_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ "Never at startup" is enforced here, where startup happens.
+
+    Constructing the source reads the on-disk cache; only the setup UI's
+    explicit action may revalidate it over the network.
+    """
+    pytest.importorskip("litellm")
+    from korvid.__main__ import _build_model_catalog
+    from korvid.providers.models_dev import ModelsDevSource
+
+    async def _refuse(self: ModelsDevSource) -> None:
+        raise AssertionError("refresh must never run during startup wiring")
+
+    monkeypatch.setattr(ModelsDevSource, "refresh", _refuse)
+
+    catalog = _build_model_catalog()
+
+    assert catalog is not None
+
+
+async def test_the_kill_switch_constructs_no_metadata_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`agent.model_search.models_dev: false` must leave nothing that *could*
+    reach the network — not a source that is merely never called."""
+    pytest.importorskip("litellm")
+    import korvid.providers.models_dev as models_dev_module
+    from korvid.__main__ import _build_model_catalog
+    from korvid.agent.model_profiles import MetadataRefresh
+
+    def _refuse(**kwargs: Any) -> None:
+        raise AssertionError("ModelsDevSource must not be constructed when disabled")
+
+    monkeypatch.setattr(models_dev_module, "ModelsDevSource", _refuse)
+
+    catalog = _build_model_catalog(models_dev=False)
+
+    assert catalog is not None
+    assert await catalog.refresh_metadata() is MetadataRefresh.DISABLED
+
+
+async def test_the_default_wiring_can_actually_refresh(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The gap this closes: a source was constructed and nothing could call
+    it. With the switch on, the action reaches the source."""
+    pytest.importorskip("litellm")
+    from korvid.__main__ import _build_model_catalog
+    from korvid.agent.model_profiles import MetadataRefresh
+    from korvid.providers.models_dev import ModelsDevSource, RefreshOutcome
+
+    calls: list[str] = []
+
+    async def _record(self: ModelsDevSource) -> RefreshOutcome:
+        calls.append("refresh")
+        return RefreshOutcome.NOT_MODIFIED
+
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    monkeypatch.setattr(ModelsDevSource, "refresh", _record)
+
+    catalog = _build_model_catalog()
+    assert catalog is not None
+    assert calls == []
+
+    assert await catalog.refresh_metadata() is MetadataRefresh.UNCHANGED
+    assert calls == ["refresh"]

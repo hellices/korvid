@@ -27,6 +27,7 @@ from korvid.agent.model_profiles import (
     AuthMethodDescriptor,
     DeviceLoginPrompt,
     EndpointRequirement,
+    MetadataRefresh,
     ModelCatalog,
     ModelConnectionConfig,
     ModelEntry,
@@ -92,6 +93,9 @@ class _FakeCatalog(ModelCatalog):
         self._device_prompt = device_prompt
         self._finish_error = finish_error
         self.tested: list[ModelConnectionConfig] = []
+        #: Explicit metadata refreshes the wizard asked for. The
+        #: wizard asks for none: only the search screen's key does.
+        self.metadata_refreshes = 0
         self.discovered_for: list[ModelConnectionConfig] = []
         self.finished: list[ModelConnectionConfig] = []
 
@@ -128,6 +132,10 @@ class _FakeCatalog(ModelCatalog):
 
     async def begin_auth(self, profile: ModelConnectionConfig) -> DeviceLoginPrompt | None:
         return self._device_prompt
+
+    async def refresh_metadata(self) -> MetadataRefresh:
+        self.metadata_refreshes += 1
+        return MetadataRefresh.DISABLED
 
     async def finish_auth(self, profile: ModelConnectionConfig) -> str | None:
         if self._finish_error is not None:

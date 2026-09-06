@@ -384,7 +384,7 @@ small registry of special flows. See the design document:
 **Why LiteLLM won.** Three properties together:
 
 1. **An offline, versioned catalog.** `model_prices_and_context_window.json`
-   ships inside the wheel. `:model search` and tier routing work with no
+   ships inside the wheel. Model search and tier routing work with no
    network call at startup. The team maintaining it tracks provider changes
    continuously; a hand-maintained table does that work by accident and
    incorrectly.

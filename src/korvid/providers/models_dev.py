@@ -68,6 +68,18 @@ class ModelMetadataSource(ABC):
     @abstractmethod
     def env_hints(self, provider_id: str) -> tuple[str, ...]: ...
 
+    @abstractmethod
+    async def refresh(self) -> RefreshOutcome:
+        """Revalidate this source, on an explicit operator request only.
+
+        On the ABC rather than only on the concrete class: the catalog
+        holds sources by this type, and the setup UI's refresh action has
+        to reach one through it. A source that has nothing to revalidate
+        answers `CACHED` — never by omitting the method, which would make
+        the action's reachability depend on the runtime type it happened
+        to be given.
+        """
+
 
 class RefreshOutcome(Enum):
     UPDATED = "updated"

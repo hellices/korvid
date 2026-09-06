@@ -8,7 +8,7 @@ from typing import Any
 import pytest
 import yaml
 
-from korvid.agent.model_profiles import ModelConnectionsConfig
+from korvid.agent.model_profiles import ModelConnectionConfig, ModelConnectionsConfig
 from korvid.core.config import (
     ConfigMigrationError,
     KorvidConfig,
@@ -1374,3 +1374,75 @@ def test_no_bounded_options_message_hardcodes_the_agent_options_root(
     assert error is not None
     assert error.startswith("agent.profiles[local].auth")
     assert "agent.options" not in error
+
+
+# ---------------------------------------------------------------------------
+# `agent.model_search.models_dev` — the permanent kill switch (Task 19)
+# ---------------------------------------------------------------------------
+
+
+def test_models_dev_enrichment_is_on_when_the_key_is_absent(tmp_path: Path) -> None:
+    """Zero config keeps the optional layer available; nothing is fetched
+    until the operator explicitly asks for it."""
+    path = write_config(tmp_path, "agent:\n  active: null\n")
+    cfg = load_config(path)
+    assert cfg.agent_model_search_models_dev is True
+    assert cfg.warnings == ()
+
+
+def test_models_dev_can_be_disabled_permanently(tmp_path: Path) -> None:
+    path = write_config(tmp_path, "agent:\n  model_search:\n    models_dev: false\n")
+    cfg = load_config(path)
+    assert cfg.agent_model_search_models_dev is False
+    assert cfg.warnings == ()
+
+
+def test_models_dev_true_is_accepted_explicitly(tmp_path: Path) -> None:
+    path = write_config(tmp_path, "agent:\n  model_search:\n    models_dev: true\n")
+    cfg = load_config(path)
+    assert cfg.agent_model_search_models_dev is True
+    assert cfg.warnings == ()
+
+
+@pytest.mark.parametrize("value", ["'false'", "'no'", "0", "[]", "null"])
+def test_an_uninterpretable_models_dev_value_fails_closed_with_a_warning(
+    tmp_path: Path, value: str
+) -> None:
+    """A present value korvid cannot read is still a restriction attempt.
+
+    The parse is strict — no truthiness — and it fails *closed*, exactly
+    like `debug.images`: an air-gapped operator who wrote `models_dev:
+    'false'` must not have the outbound fetch silently re-enabled by a
+    quoting mistake.
+    """
+    path = write_config(tmp_path, f"agent:\n  model_search:\n    models_dev: {value}\n")
+    cfg = load_config(path)
+    assert cfg.agent_model_search_models_dev is False
+    assert any("agent.model_search.models_dev" in w for w in cfg.warnings), cfg.warnings
+
+
+def test_a_non_mapping_model_search_block_warns_and_keeps_the_default(tmp_path: Path) -> None:
+    """The block names no key, so there is no restriction to honour — but
+    the operator wrote something korvid ignored, and silence would hide it."""
+    path = write_config(tmp_path, "agent:\n  model_search: nope\n")
+    cfg = load_config(path)
+    assert cfg.agent_model_search_models_dev is True
+    assert any("agent.model_search" in w for w in cfg.warnings), cfg.warnings
+
+
+def test_saving_profiles_preserves_the_model_search_block(tmp_path: Path) -> None:
+    """The wizard writes `agent.active`/`agent.profiles` and nothing else:
+    a save must never silently re-enable a disabled outbound fetch."""
+    path = write_config(
+        tmp_path,
+        "agent:\n  model_search:\n    models_dev: false\n  active: null\n  profiles: {}\n",
+    )
+    save_model_connections(
+        path,
+        ModelConnectionsConfig(
+            active="default", profiles={"default": ModelConnectionConfig(model="openai/gpt-4o")}
+        ),
+    )
+    raw = yaml.safe_load(path.read_text())
+    assert raw["agent"]["model_search"] == {"models_dev": False}
+    assert load_config(path).agent_model_search_models_dev is False

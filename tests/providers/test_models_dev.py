@@ -11,6 +11,7 @@ from korvid.providers.models_dev import (
     MAX_RESPONSE_BYTES,
     MODELS_DEV_URL,
     REQUEST_TIMEOUT_SECONDS,
+    ModelMetadataSource,
     ModelsDevSource,
     RefreshOutcome,
     default_cache_path,
@@ -192,3 +193,63 @@ def test_the_bounds_are_actually_bounds() -> None:
     assert REQUEST_TIMEOUT_SECONDS <= 10.0
     assert MAX_RESPONSE_BYTES <= 16 * 1024 * 1024
     assert MODELS_DEV_URL.startswith("https://")
+
+
+@pytest.mark.parametrize(
+    ("system", "expected_parts"),
+    [
+        ("Darwin", ("Library", "Caches", "korvid", "models-dev.json")),
+        ("Linux", (".cache", "korvid", "models-dev.json")),
+    ],
+)
+def test_the_cache_lands_where_each_platform_keeps_caches(
+    monkeypatch: pytest.MonkeyPatch, system: str, expected_parts: tuple[str, ...]
+) -> None:
+    """No `XDG_CACHE_HOME`, so the platform convention decides.
+
+    macOS is the one that is easy to get wrong: `~/.cache` exists there
+    too, and writing to it would put the cache somewhere no macOS tool
+    (or documentation) looks.
+    """
+    monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
+    monkeypatch.setattr("korvid.providers.models_dev.platform.system", lambda: system)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: Path("/home/operator")))
+
+    assert default_cache_path() == Path("/home/operator").joinpath(*expected_parts)
+
+
+def test_the_windows_cache_follows_localappdata(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
+    monkeypatch.setattr("korvid.providers.models_dev.platform.system", lambda: "Windows")
+    monkeypatch.setenv("LOCALAPPDATA", str(Path("C:/Users/op/AppData/Local")))
+
+    assert default_cache_path() == Path("C:/Users/op/AppData/Local/korvid/models-dev.json")
+
+
+def test_the_cache_path_never_depends_on_the_config_directory(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A cache is disposable; config is not. Deleting the cache must never
+    be able to take a profile with it."""
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+
+    path = default_cache_path()
+
+    assert (tmp_path / "config") not in path.parents
+    assert path.name == "models-dev.json"
+
+
+async def test_a_source_answers_refresh_through_the_metadata_contract(tmp_path: Path) -> None:
+    """`refresh` is on `ModelMetadataSource`, not only on this class.
+
+    The catalog holds sources by the ABC, so the setup UI's refresh action
+    reaches one through it — a source that declared `refresh` only on the
+    concrete type would make the action's reachability depend on which
+    implementation happened to be injected.
+    """
+    assert issubclass(ModelsDevSource, ModelMetadataSource)
+    assert getattr(ModelMetadataSource.refresh, "__isabstractmethod__", False)
+
+    source = _source(tmp_path, _ok)
+    assert isinstance(await source.refresh(), RefreshOutcome)

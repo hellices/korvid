@@ -6,12 +6,15 @@ list. A provider name is a label and a search term, never a gate.
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from textual.app import App, ComposeResult
 from textual.widgets import Input, OptionList, Static
 
 from korvid.agent.model_profiles import (
     EndpointRequirement,
+    MetadataRefresh,
     ModelCatalog,
     ModelEntry,
     ModelEntrySource,
@@ -51,18 +54,43 @@ class _FakeCatalog(ModelCatalog):
         *[_entry(f"manyco/model-{i}") for i in range(60)],
     )
 
+    def __init__(
+        self,
+        *,
+        refresh_outcome: MetadataRefresh = MetadataRefresh.UPDATED,
+        refresh_gate: asyncio.Event | None = None,
+    ) -> None:
+        #: How many times the screen asked for an explicit metadata refresh.
+        self.refresh_calls = 0
+        self._refresh_outcome = refresh_outcome
+        #: When set, `refresh_metadata` blocks until the test releases it,
+        #: which is how an in-flight second press is observed at all.
+        self._refresh_gate = refresh_gate
+        #: Display names the entries take on after a successful refresh.
+        self._refreshed_names: dict[str, str] = {}
+
     async def _boom(self) -> None:  # pragma: no cover
         raise AssertionError("network must not be called during search")
+
+    def _visible(self) -> tuple[ModelEntry, ...]:
+        if not self._refreshed_names:
+            return self._ENTRIES
+        return tuple(
+            e
+            if e.reference not in self._refreshed_names
+            else _entry(e.reference, self._refreshed_names[e.reference])
+            for e in self._ENTRIES
+        )
 
     def search(self, query: str, *, limit: int = 50) -> tuple[ModelEntry, ...]:
         q = query.strip().lower()
         if not q:
             return ()
-        matched = [e for e in self._ENTRIES if q in e.reference.lower()]
+        matched = [e for e in self._visible() if q in e.reference.lower()]
         return tuple(matched[:limit])
 
     def entry(self, reference: str) -> ModelEntry | None:
-        return next((e for e in self._ENTRIES if e.reference == reference), None)
+        return next((e for e in self._visible() if e.reference == reference), None)
 
     def auth_methods(self, reference: str, *, endpoint: str | None = None) -> tuple[()]:
         return ()
@@ -84,6 +112,14 @@ class _FakeCatalog(ModelCatalog):
 
     async def finish_auth(self, profile: object) -> str | None:
         raise AssertionError("network must not be called during search")
+
+    async def refresh_metadata(self) -> MetadataRefresh:
+        self.refresh_calls += 1
+        if self._refresh_gate is not None:
+            await self._refresh_gate.wait()
+        if self._refresh_outcome is MetadataRefresh.UPDATED:
+            self._refreshed_names["openai/gpt-4o"] = "GPT-4o (refreshed)"
+        return self._refresh_outcome
 
 
 # ---------------------------------------------------------------------------
@@ -357,3 +393,253 @@ async def test_the_screen_never_calls_the_network() -> None:
         )
         # If we reach here the screen never called discover/test/begin_auth/finish_auth
         assert screen.query_one("#model-results", OptionList).option_count > 0
+
+
+# ---------------------------------------------------------------------------
+# The explicit metadata refresh (Task 7's contract: never at startup)
+# ---------------------------------------------------------------------------
+
+
+def _status_text(screen: ModelSearchScreen) -> str:
+    return str(screen.query_one("#search-status", Static).render())
+
+
+async def test_opening_the_screen_refreshes_nothing() -> None:
+    """ "Never fetched at startup" includes mounting the screen.
+
+    The docs claimed opening this screen triggered the fetch. It must not:
+    an air-gapped operator opening model search would sit through a
+    ten-second timeout for metadata they never asked to revalidate.
+    """
+    catalog = _FakeCatalog()
+    app = _Host(catalog)
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: app.screen_ref is not None)
+        screen = app.screen_ref
+        assert screen is not None
+        await until(pilot, lambda: isinstance(screen.focused, Input), label="mounted")
+
+        for ch in "gpt":
+            await pilot.press(ch)
+        await until(
+            pilot,
+            lambda: screen.query_one("#model-results", OptionList).option_count > 0,
+            label="results",
+        )
+
+    assert catalog.refresh_calls == 0
+
+
+async def test_prefilled_editing_still_refreshes_nothing() -> None:
+    """The prefilled search on mount is a search, not a revalidation."""
+    catalog = _FakeCatalog()
+    app = _Host(catalog, initial_query="openai/gpt-4o")
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: app.screen_ref is not None)
+        screen = app.screen_ref
+        assert screen is not None
+        await until(
+            pilot,
+            lambda: screen.query_one("#model-results", OptionList).option_count > 0,
+            label="prefilled results",
+        )
+
+    assert catalog.refresh_calls == 0
+
+
+async def test_the_refresh_key_is_bound_and_visible() -> None:
+    """An action nothing announces is an action nobody finds."""
+    keys = {
+        binding.key: binding
+        for binding in ModelSearchScreen.BINDINGS
+        if not isinstance(binding, tuple)
+    }
+    assert "ctrl+r" in keys
+    assert keys["ctrl+r"].action == "refresh_metadata"
+    assert keys["ctrl+r"].show is True
+
+    app = _Host()
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: app.screen_ref is not None)
+        screen = app.screen_ref
+        assert screen is not None
+        await until(pilot, lambda: "Ctrl-R" in _status_text(screen), label="hint rendered")
+
+
+async def test_the_refresh_key_runs_the_refresh_exactly_once() -> None:
+    catalog = _FakeCatalog(refresh_outcome=MetadataRefresh.CACHED)
+    app = _Host(catalog)
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: app.screen_ref is not None)
+        screen = app.screen_ref
+        assert screen is not None
+
+        await pilot.press("ctrl+r")
+        await until(pilot, lambda: catalog.refresh_calls == 1, label="refresh started")
+        await until(pilot, lambda: "cache" in _status_text(screen).lower(), label="outcome shown")
+
+    assert catalog.refresh_calls == 1
+
+
+async def test_a_second_press_while_one_is_in_flight_starts_nothing() -> None:
+    """The action is a bounded network call. Holding the key must not queue
+    a fetch per keypress, and an exclusive worker that cancels its
+    predecessor would abandon a refresh that was nearly done."""
+    gate = asyncio.Event()
+    catalog = _FakeCatalog(refresh_gate=gate)
+    app = _Host(catalog)
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: app.screen_ref is not None)
+        screen = app.screen_ref
+        assert screen is not None
+
+        await pilot.press("ctrl+r")
+        await until(pilot, lambda: catalog.refresh_calls == 1, label="first refresh in flight")
+        await pilot.press("ctrl+r")
+        await pilot.press("ctrl+r")
+        await until(
+            pilot,
+            lambda: "already" in _status_text(screen).lower(),
+            label="in-flight notice",
+        )
+        assert catalog.refresh_calls == 1
+
+        gate.set()
+        await until(pilot, lambda: "updated" in _status_text(screen).lower(), label="finished")
+
+        # The guard releases once the refresh completes.
+        await pilot.press("ctrl+r")
+        await until(pilot, lambda: catalog.refresh_calls == 2, label="second refresh allowed")
+
+
+@pytest.mark.parametrize(
+    ("outcome", "expected"),
+    [
+        (MetadataRefresh.UPDATED, "updated"),
+        (MetadataRefresh.UNCHANGED, "already up to date"),
+        (MetadataRefresh.CACHED, "cache"),
+        (MetadataRefresh.UNAVAILABLE, "unavailable"),
+        (MetadataRefresh.DISABLED, "disabled"),
+    ],
+)
+async def test_every_outcome_is_reported_to_the_operator(
+    outcome: MetadataRefresh, expected: str
+) -> None:
+    """Silence after a keypress reads as a broken key."""
+    catalog = _FakeCatalog(refresh_outcome=outcome)
+    app = _Host(catalog)
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: app.screen_ref is not None)
+        screen = app.screen_ref
+        assert screen is not None
+
+        await pilot.press("ctrl+r")
+        await until(
+            pilot,
+            lambda: expected in _status_text(screen).lower(),
+            label=f"{outcome.value} reported",
+        )
+
+    assert catalog.refresh_calls == 1
+
+
+async def test_refreshed_metadata_appears_in_the_current_query() -> None:
+    """Refreshing while a query is on screen must re-render it.
+
+    Otherwise the operator refreshes, is told it worked, and sees the rows
+    they already had until they retype the query.
+    """
+    catalog = _FakeCatalog(refresh_outcome=MetadataRefresh.UPDATED)
+    app = _Host(catalog, initial_query="openai/gpt-4o")
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: app.screen_ref is not None)
+        screen = app.screen_ref
+        assert screen is not None
+        results = screen.query_one("#model-results", OptionList)
+        await until(pilot, lambda: results.option_count > 0, label="initial results")
+        assert "refreshed" not in str(results.get_option_at_index(0).prompt).lower()
+
+        await pilot.press("ctrl+r")
+        await until(
+            pilot,
+            lambda: "refreshed" in str(results.get_option_at_index(0).prompt).lower(),
+            label="rerendered with refreshed metadata",
+        )
+
+
+async def test_a_disabled_source_leaves_the_results_alone() -> None:
+    """Nothing changed, so nothing is re-rendered — and the query survives."""
+    catalog = _FakeCatalog(refresh_outcome=MetadataRefresh.DISABLED)
+    app = _Host(catalog, initial_query="openai/gpt-4o")
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: app.screen_ref is not None)
+        screen = app.screen_ref
+        assert screen is not None
+        results = screen.query_one("#model-results", OptionList)
+        await until(pilot, lambda: results.option_count > 0, label="initial results")
+        before = results.option_count
+
+        await pilot.press("ctrl+r")
+        await until(
+            pilot,
+            lambda: "disabled" in _status_text(screen).lower(),
+            label="disabled reported",
+        )
+
+        assert results.option_count == before
+        assert screen.query_one("#model-query", Input).value == "openai/gpt-4o"
+
+
+async def test_a_refresh_that_raises_is_reported_not_crashed() -> None:
+    """A worker exception would tear the screen down mid-setup."""
+
+    class _Exploding(_FakeCatalog):
+        async def refresh_metadata(self) -> MetadataRefresh:
+            self.refresh_calls += 1
+            raise RuntimeError("metadata source blew up")
+
+    catalog = _Exploding()
+    app = _Host(catalog)
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: app.screen_ref is not None)
+        screen = app.screen_ref
+        assert screen is not None
+
+        await pilot.press("ctrl+r")
+        await until(
+            pilot,
+            lambda: "unavailable" in _status_text(screen).lower(),
+            label="failure reported",
+        )
+        assert app.result == "unset"
+
+
+async def test_cancelling_while_a_refresh_is_in_flight_does_not_crash() -> None:
+    """Esc during a refresh is ordinary operator behaviour.
+
+    The worker outlives the screen's widgets for as long as the network
+    call runs. If the completion path then wrote to a status line that no
+    longer exists, the reward for pressing Esc would be a crash dialog on
+    top of the wizard.
+    """
+    gate = asyncio.Event()
+    catalog = _FakeCatalog(refresh_gate=gate)
+    app = _Host(catalog)
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: app.screen_ref is not None)
+        screen = app.screen_ref
+        assert screen is not None
+        screen.query_one("#model-query", Input).value = "gpt"
+        await pilot.pause()
+
+        await pilot.press("ctrl+r")
+        await until(pilot, lambda: catalog.refresh_calls == 1, label="refresh started")
+
+        await pilot.press("escape")
+        await until(pilot, lambda: app.result is None, label="screen dismissed")
+
+        gate.set()
+        await pilot.pause()
+        await pilot.pause()
+
+        assert app.result is None

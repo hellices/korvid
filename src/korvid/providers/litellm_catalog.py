@@ -17,6 +17,7 @@ from korvid.agent.model_profiles import (
     AuthMethodDescriptor,
     DeviceLoginPrompt,
     EndpointRequirement,
+    MetadataRefresh,
     ModelCatalog,
     ModelConnectionConfig,
     ModelEntry,
@@ -32,8 +33,19 @@ from korvid.providers.litellm_runtime import (
     models_by_provider,
     supported_params,
 )
-from korvid.providers.models_dev import ModelMetadataSource
+from korvid.providers.models_dev import ModelMetadataSource, RefreshOutcome
 from korvid.providers.special_flows import SpecialFlowRegistry
+
+#: The one place a provider-layer refresh outcome becomes an operator-facing
+#: one. A `dict` rather than same-named members so the two vocabularies stay
+#: free to diverge: `NOT_MODIFIED` is HTTP's word for it, and the UI says
+#: "already up to date".
+_REFRESH_OUTCOMES: Final[dict[RefreshOutcome, MetadataRefresh]] = {
+    RefreshOutcome.UPDATED: MetadataRefresh.UPDATED,
+    RefreshOutcome.NOT_MODIFIED: MetadataRefresh.UNCHANGED,
+    RefreshOutcome.CACHED: MetadataRefresh.CACHED,
+    RefreshOutcome.UNAVAILABLE: MetadataRefresh.UNAVAILABLE,
+}
 
 #: LiteLLM's own spelling for the Copilot provider. Its ids ship
 #: already-qualified (`github_copilot/claude-haiku-4.5`), and resolving the
@@ -314,6 +326,17 @@ class LiteLLMModelCatalog(ModelCatalog):
             return ()
         return self._enrichment.env_hints(provider)
 
+    def _invalidate_index(self) -> None:
+        """Drop the memoised index so the next read rebuilds the overlay.
+
+        `_index` and `_by_reference` are `cached_property` values built
+        from the enrichment source as it was at first read. Without this,
+        a refresh that genuinely updated the source would report success
+        and change nothing the operator can see until korvid restarts.
+        """
+        self.__dict__.pop("_index", None)
+        self.__dict__.pop("_by_reference", None)
+
     # ------------------------------------------------------------------
     # ModelCatalog interface
     # ------------------------------------------------------------------
@@ -470,6 +493,30 @@ class LiteLLMModelCatalog(ModelCatalog):
             api_key=api_key,
             prefix=prefix,
         )
+
+    async def refresh_metadata(self) -> MetadataRefresh:
+        """Revalidate the enrichment source, because a human asked.
+
+        The only caller is the setup UI's explicit action. Nothing here
+        runs at startup, on a search, or on a routing call — the source's
+        own contract forbids it, and this is the single path that could
+        break that promise.
+
+        A source that updated invalidates the memoised index, so the very
+        next search shows what was fetched. Every failure the source can
+        report arrives as an outcome, never an exception: this runs in a
+        UI worker, and a raise there would tear down a live screen.
+        """
+        source = self._enrichment
+        if source is None:
+            # Deliberately not an error: `agent.model_search.models_dev:
+            # false` and a base install both land here, and both are
+            # working configurations.
+            return MetadataRefresh.DISABLED
+        outcome = await source.refresh()
+        if outcome is RefreshOutcome.UPDATED:
+            self._invalidate_index()
+        return _REFRESH_OUTCOMES.get(outcome, MetadataRefresh.UNAVAILABLE)
 
     async def test(self, profile: ModelConnectionConfig) -> str:
         """Probe the profile and return a short human-readable result.

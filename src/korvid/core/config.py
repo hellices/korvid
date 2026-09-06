@@ -378,6 +378,15 @@ class KorvidConfig:
     #: Small local models rarely volunteer the UI tools, so this defaults
     #: on; runtime toggle: `:ai follow on|off`.
     agent_follow: bool = True
+    #: `agent.model_search.models_dev`: whether this installation has an
+    #: optional models.dev metadata source at all. `True` (the default)
+    #: only means the source exists — it is contacted solely by the setup
+    #: UI's explicit "refresh model metadata" action, never at startup and
+    #: never on a routing call. `False` is the permanent kill switch an
+    #: air-gapped deployment sets: the composition root then builds no
+    #: source, so there is nothing left that *could* reach the network,
+    #: and the refresh action reports itself disabled.
+    agent_model_search_models_dev: bool = True
     mcp_enabled: bool = False
     mcp_port: int = 7878
     #: `mcp.write_proposals` (issue #110): expose the external write-proposal
@@ -487,6 +496,7 @@ def load_config(path: Path | None = None) -> KorvidConfig:
     )
     agent_rules, rules_warnings = _parse_agent_rules(agent_raw.get("rules"))
     warnings.extend(rules_warnings)
+    models_dev = _parse_models_dev(agent_raw, warnings)
     if "namespaces" in raw:
         warnings.append(
             "namespaces: no longer controls the namespace picker or watches"
@@ -538,6 +548,7 @@ def load_config(path: Path | None = None) -> KorvidConfig:
         protected_contexts=_parse_protected_contexts(raw.get("protected_contexts")),
         agent_disable_in_protected=agent_raw.get("disable_in_protected") is True,
         agent_follow=agent_raw.get("follow") is not False,
+        agent_model_search_models_dev=models_dev,
         mcp_enabled=mcp_raw.get("enabled") is True,
         mcp_port=_parse_port(mcp_raw.get("port")),
         mcp_write_proposals=mcp_raw.get("write_proposals") is True,
@@ -639,6 +650,42 @@ def _observability_rejections(raw: Mapping[str, Any], label: str, warnings: list
         )
         rejected = True
     return rejected
+
+
+def _parse_models_dev(agent_raw: Mapping[str, Any], warnings: list[str]) -> bool:
+    """Parse `agent.model_search.models_dev` — the enrichment kill switch.
+
+    Strict, not truthy: only `true` and `false` are read as themselves.
+    Everything else present fails **closed**, the same rule `debug.images`
+    already uses, and for the same reason — a present value korvid cannot
+    interpret is still an operator trying to restrict something, and a
+    quoting slip (`models_dev: 'false'`) must not silently re-enable an
+    outbound fetch in an air-gapped deployment. The failure is loud: the
+    warning names the key and says what was assumed.
+
+    A `model_search` block that is not a mapping names no key at all, so
+    there is no restriction to honour: it warns and keeps the default.
+    """
+    default = KorvidConfig.agent_model_search_models_dev
+    if "model_search" not in agent_raw:
+        return default
+    block = agent_raw["model_search"]
+    if not isinstance(block, dict):
+        warnings.append(
+            "agent.model_search: must be a mapping — ignored, model metadata"
+            " enrichment stays available"
+        )
+        return default
+    if "models_dev" not in block:
+        return default
+    value = block["models_dev"]
+    if value is True or value is False:
+        return value
+    warnings.append(
+        "agent.model_search.models_dev: must be true or false — treating"
+        f" {value!r} as false, so no model metadata is fetched"
+    )
+    return False
 
 
 def _mapping_positive_int(

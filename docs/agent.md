@@ -135,8 +135,8 @@ references (`ollama:qwen3:8b`) are **not** accepted: a model tag can itself
 contain a colon (e.g. `qwen3:8b`), so the colon cannot serve as a separator.
 
 To switch profiles, run `:ai switch <name>` or edit `agent.active` in the
-config file. To search for available models, run `:model search` — the catalog
-is explained in [Model search](#model-search) below.
+config file. `:model [name]` sets the model directly; to browse what is
+available, run `:ai` — see [Model search](#model-search) below.
 
 A full three-profile `~/.config/korvid/config.yaml`:
 
@@ -224,8 +224,8 @@ the API 2 contract and the operator checklist.
 
 ## Model search
 
-`:model search` opens a fuzzy-search screen over korvid's model catalog. The
-catalog has two layers:
+The `:ai` wizard opens with a fuzzy-search screen over korvid's model
+catalog. The catalog has two layers:
 
 1. **Bundled (primary)**: LiteLLM ships a `model_prices_and_context_window.json`
    table inside its wheel. korvid reads that table at startup — no network call,
@@ -235,9 +235,11 @@ catalog has two layers:
 2. **models.dev (optional enrichment)**: korvid may fetch a single JSON document
    from `https://models.dev/api.json` to add context lengths, quantization info,
    and environment-variable hints. This fetch is **never made at startup** and
-   **never made during a routing call** — it is an explicit refresh when you open
-   the search screen or run `:model refresh`. The result is cached at
-   `$XDG_CACHE_HOME/korvid/models-dev.json` (mode `0600`, TTL 24 h).
+   **never made during a routing call** — it happens only when you press
+   <kbd>Ctrl</kbd>+<kbd>R</kbd> on the search screen, which reports the
+   outcome inline and re-renders the current query. The result is cached in
+   the platform cache directory (`$XDG_CACHE_HOME/korvid/models-dev.json`,
+   mode `0600`, TTL 24 h).
 
    To disable models.dev enrichment permanently, set:
 
@@ -247,10 +249,13 @@ catalog has two layers:
        models_dev: false
    ```
 
-   A network observer can infer that a korvid instance refreshed its model
-   metadata. This is the only outbound connection the agent makes that does not
-   carry a cluster payload. See the [threat model](threat-model.md#modelsdev)
-   for the full residual-risk statement.
+   korvid then builds no models.dev client, so <kbd>Ctrl</kbd>+<kbd>R</kbd>
+   reports it disabled. Only `true` and `false` parse; anything else warns
+   and disables.
+
+   A network observer can infer that an instance refreshed its model
+   metadata — the only outbound agent connection carrying no cluster
+   payload. See the [threat model](threat-model.md#modelsdev).
 
 Routing never consults models.dev: `provider/model` is resolved by LiteLLM's
 bundled tables (plus any registered special flows) with no external calls.

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import inspect
 from pathlib import Path
 
 import pytest
@@ -10,6 +11,7 @@ import pytest
 from korvid.agent.model_profiles import (
     AuthMethodDescriptor,
     EndpointRequirement,
+    MetadataRefresh,
     ModelCatalog,
     ModelEntry,
     ModelEntrySource,
@@ -114,3 +116,35 @@ def test_the_catalog_contract_has_no_adapter_list() -> None:
         "discover",
         "test",
     } <= names
+
+
+# ---------------------------------------------------------------------------
+# The explicit metadata refresh contract (Task 7 wiring / Task 19 kill switch)
+# ---------------------------------------------------------------------------
+
+
+def test_the_catalog_contract_carries_an_explicit_metadata_refresh() -> None:
+    """The setup UI's "refresh model metadata" action needs a boundary.
+
+    Without one the UI would have to reach into `korvid.providers` for
+    `ModelsDevSource`, which the layer rules forbid outright — and the
+    refresh would stay unreachable, which is exactly the gap this closes.
+    """
+    names = {name for name in vars(ModelCatalog) if not name.startswith("_")}
+    assert "refresh_metadata" in names
+    assert inspect.iscoroutinefunction(ModelCatalog.refresh_metadata)
+    assert getattr(ModelCatalog.refresh_metadata, "__isabstractmethod__", False)
+
+
+def test_the_refresh_outcome_vocabulary_is_provider_neutral() -> None:
+    """The operator is told what happened, not which vendor answered.
+
+    `MetadataRefresh` is what `ui/` renders, so a member named after
+    models.dev — or a value carrying an HTTP status — would put a
+    provider-layer concept in the base TUI's vocabulary.
+    """
+    members = {member.name for member in MetadataRefresh}
+    assert members == {"UPDATED", "UNCHANGED", "CACHED", "UNAVAILABLE", "DISABLED"}
+    for member in MetadataRefresh:
+        assert "models" not in member.value
+        assert "http" not in member.value

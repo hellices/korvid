@@ -156,7 +156,8 @@ korvid makes at most one conditional GET of `https://models.dev/api.json`,
 subject to the following constraints:
 
 - **Never at startup** and **never during routing** — only when the operator
-  explicitly opens the model search screen or runs `:model refresh`.
+  presses <kbd>Ctrl</kbd>+<kbd>R</kbd> on the `:ai` wizard's model search
+  screen. Opening that screen makes no request.
 - **No credentials, no korvid state** — the request carries no API key, no
   cluster context, and no conversation data.
 - **10-second timeout** — a slow or unreachable endpoint times out silently.
@@ -166,12 +167,13 @@ subject to the following constraints:
 - **Schema-validated** — the document is parsed against a strict schema;
   a response that passes size and content-type checks but fails validation is
   silently discarded.
-- **Cached `0600`** — the result is written to
-  `$XDG_CACHE_HOME/korvid/models-dev.json` with mode `0600` and served
-  unconditionally for 24 hours. A valid cached document is never re-fetched
-  within the TTL.
+- **Cached `0600`** — the result is written to the platform cache directory
+  (`$XDG_CACHE_HOME/korvid/models-dev.json`; `~/Library/Caches/korvid/` on
+  macOS) with mode `0600` and served unconditionally for 24 hours.
 - **Disableable** — `agent.model_search.models_dev: false` prevents the
-  fetch permanently.
+  fetch permanently: korvid then constructs no models.dev source at all, so
+  there is no socket to open. Only `true` and `false` parse; anything else
+  warns and disables.
 
 **Residual risk.** A network observer can infer that a korvid instance
 refreshed its model metadata from `models.dev`. No cluster payload, user
