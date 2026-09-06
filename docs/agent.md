@@ -116,7 +116,7 @@ labels still appear in it; sanitization removes secret material and known
 credential patterns only. Press `e` to export the displayed payload to a
 private, `0o600` file — never overwritten, never auto-deleted, so treat it
 like any other cluster-derived artifact. [The threat model](threat-model.md)
-carries the full boundary and the residual risks.
+carries the boundary and the residual risks.
 
 ## Connect a provider
 
@@ -126,15 +126,29 @@ provider, authentication and a live test call, and saves it to
 `Ctrl-A` toggles the panel's *visibility*; `:ai off` releases the provider
 connection without discarding the saved configuration.
 
-| Provider | Auth | `agent.provider` |
+A connection is a **profile** under `agent.profiles.<name>`; `agent.active`
+names the one in use. Its `model` is a `<prefix>/<tag>` reference — the
+prefix picks the route, the tag is the model.
+
+| Provider | Auth | `model` prefix |
 |---|---|---|
 | GitHub Copilot | device login inside korvid (no PAT) | `github-copilot` |
 | Azure OpenAI / AI Foundry | Entra ID — `az login` or managed identity (needs the `entra` extra, below) | `azure` |
-| OpenAI, GitHub Models, Anthropic (compat endpoint), vLLM | API key from an environment variable, or none | `openai-compat` |
-| Ollama (local) | none | `ollama` — native `/api/chat`; `agent.ollama` tuning: `num_ctx`, `temperature`, `seed`, `think`, `keep_alive`, `num_predict` |
+| OpenAI, GitHub Models, Anthropic, vLLM, any compatible endpoint | API key from an environment variable, or none | `openai`, `anthropic`, `github`, … — add `endpoint` for a self-hosted server |
+| Ollama (local) | none | `ollama` — `options.native_thinking: true` selects native `/api/chat`; `options` also tunes `num_ctx`, `temperature`, `seed`, `think`, `keep_alive`, `num_predict` |
 
-`api_key_env` names the environment variable holding the key — the key itself
-never lives in the config file.
+```yaml
+agent:
+  active: main
+  profiles:
+    main:
+      model: openai/gpt-4o
+      auth: {method: environment, key: OPENAI_API_KEY}
+```
+
+`auth.method` is `environment`, `keyring`, `provider-default`, `device-login`
+or `none`; `auth.key` names the environment variable holding the key, which
+never lives in the config file. An older scalar config migrates on load.
 
 !!! warning "GitHub Copilot"
 
@@ -153,8 +167,8 @@ pipx install --force 'korvid[all,entra]==0.3.0'
 
 In a source checkout, `uv sync --extra entra` does the same job.
 
-If your backend already speaks an OpenAI-compatible API, prefer
-`openai-compat` over a plugin. A backend whose protocol or auth flow truly
+If your backend already speaks an OpenAI-compatible API, prefer a profile with
+an `endpoint` over a plugin. A backend whose protocol or auth flow truly
 differs registers as a [Provider plugin](provider-plugins.md): trusted,
 in-process code that receives the same sanitized payload a built-in provider
 gets, and is outside korvid's visibility past the handoff. That page carries

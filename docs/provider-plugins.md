@@ -16,17 +16,29 @@ protocol or the auth flow truly differs from anything korvid already speaks.
 > anywhere; korvid has no visibility past the handoff. See
 > [`SECURITY.md`](https://github.com/hellices/korvid/blob/main/SECURITY.md) to report a vulnerability.
 
+!!! warning "The `korvid.provider` group now carries special flows"
+
+    korvid deleted its hand-written vendor adapter table. Routing is derived
+    from the model reference, so the `ProviderPlugin` construction path
+    described below is **no longer wired**: korvid loads `korvid.provider`
+    entry points as `SpecialFlow` objects and calls the flow's
+    `build_provider(profile)`. The API 2 surface, the event contract, the
+    options limits and the secret policy on this page still describe what a
+    provider must satisfy, but a plugin registered as a `ProviderPlugin`
+    class is not instantiated by current builds. See
+    `korvid.providers.flow_ollama_thinking` for a shipped flow.
+
 ## When you should not write a plugin
 
 A built-in configuration covers most backends:
 
-- **OpenAI, Azure OpenAI, GitHub Models, Anthropic compatibility endpoint,
-  vLLM, local gateways, internal proxies** — `provider: openai-compat`, or one
-  of its built-in aliases `openai`, `azure`, `vllm`, `github`, `anthropic`,
-  `claude`. Any backend that already speaks an OpenAI-compatible `/v1` API
-  belongs here rather than in a plugin.
-- **Native Ollama `/api/chat`** — `provider: ollama`.
-- **GitHub Copilot device login** — `provider: github-copilot`.
+- **OpenAI, Azure OpenAI, GitHub Models, Anthropic, vLLM, local gateways,
+  internal proxies** — a profile whose `model` prefix names the vendor, plus
+  an `endpoint` for a self-hosted server. Any backend reachable that way
+  belongs in a profile rather than in a plugin.
+- **Native Ollama `/api/chat`** — `model: ollama/<tag>` with
+  `options.native_thinking: true`.
+- **GitHub Copilot device login** — `model: github-copilot/<tag>`.
 
 A plugin is warranted only for a genuinely different protocol or auth scheme
 composed behind korvid's public `CredentialSource` boundary.
@@ -50,7 +62,7 @@ dependencies = [
 company-llm = "acme_korvid_provider.plugin:CompanyProviderPlugin"
 ```
 
-The entry-point name is the operator-facing `agent.provider` value. korvid
+The entry-point name is the operator-facing `model` prefix. korvid
 normalizes provider names by lowercasing and collapsing runs of `-`, `_`, and
 `.` into `-`, so `Company_LLM`, `company.llm`, and `company-llm` all collide.
 Two installed distributions claiming the same normalized name are rejected.
@@ -62,21 +74,23 @@ configured directly in `~/.config/korvid/config.yaml`:
 
 ```yaml
 agent:
-  provider: company-llm
-  base_url: https://llm.example.internal
-  model: cluster-brain
-  auth: {method: api_key}
-  api_key_env: COMPANY_LLM_TOKEN
-  options:
-    tenant: platform
-    fallback_models:
-      - cluster-brain
-      - cluster-brain-canary
+  active: company
+  profiles:
+    company:
+      model: company-llm/cluster-brain
+      endpoint: https://llm.example.internal
+      auth:
+        method: environment
+        key: COMPANY_LLM_TOKEN
+      options:
+        tenant: platform
+        fallback_models:
+          - cluster-brain
+          - cluster-brain-canary
 ```
 
-`api_key_env` names the environment variable; the secret itself never belongs
-in the config file. Plugin auth methods are limited to `none`, `api_key`, and
-`entra`.
+`auth.key` names the environment variable; the secret itself never belongs
+in the config file.
 
 ## API 2: exact public surface
 
@@ -386,7 +400,7 @@ segments are exactly `secret`, `password`, `token`, `api_key` (and the compact
 form `apikey`), `authorization`, and `credential`. CamelCase keys are split at
 word boundaries before matching, so `apiKey`, `clientSecret`, `accessToken`,
 `APIKey`, and `clientAPIKey` are all rejected. Store secrets in environment
-variables and pass only the variable name via `agent.api_key_env`.
+variables and pass only the variable name via the profile's `auth.key`.
 
 Treat `options` as read-only, and accept sequence values as either `list` or
 `tuple`: the top-level mapping is always read-only, live wizard/reconnect flows
@@ -398,26 +412,26 @@ startup from `config.yaml` preserves YAML lists as lists.
 Plugin lifecycle in current korvid builds:
 
 1. korvid discovers all `korvid.provider` entry points across installed
-   distributions.
-2. It loads **only the selected** provider's entry point; unselected plugin
-   modules are never imported.
-3. It validates `api_version`, `metadata.name`, and `auth_methods`, then caches
-   the instantiated `ProviderPlugin`.
-4. korvid builds credentials first and passes only `ProviderPluginConfig` plus
-   `CredentialSource | None` into `create()`. Plugins do **not** receive kube
-   clients, UI handles, audit handles, or write executors.
-5. Your `LLMProvider` instance is wrapped in `ValidatedPluginProvider`.
-6. korvid calls `LLMProvider.aclose()` when the provider is replaced or at
+   distributions and reads the `SpecialFlow` each one publishes.
+2. A flow owns its `prefix`. A reference under a claimed prefix is never
+   routed, so a flow can never be silently bypassed.
+3. The flow's `build_provider(profile)` is called with the profile the
+   operator configured, and returns an `LLMProvider` or `None`. It receives
+   no kube client, UI handle, audit handle, or write executor.
+4. Every call into a flow is guarded: a flow that raises disables itself,
+   not the profiles it has nothing to do with.
+5. korvid calls `LLMProvider.aclose()` when the provider is replaced or at
    shutdown. **Your adapter owns the injected `CredentialSource`**: close it
    in `aclose()` (in a `finally` block) alongside any HTTP clients or other
    resources. Failure to close credentials leaks token-refresh HTTP sessions.
 
 Failures stay bounded. The built-in names — `github-copilot`, `ollama`,
 `openai-compat`, `openai`, `azure`, `vllm`, `github`, `anthropic`, `claude` —
-are reserved and never hit the plugin registry, and an unknown provider
-disables the agent cleanly instead of crashing. A plugin failure at startup
-becomes a warning with the agent disabled; a failure during a live rebuild
-rejects the new provider and keeps the previous one open. Factory, load, and
+are reserved and may not be claimed by a third party, and an unbuildable
+profile disables the agent cleanly instead of crashing. A failure at startup
+leaves korvid running with the agent off and the reason logged; a failure
+during a live rebuild rejects the new provider and keeps the previous one
+open. Factory, load, and
 metadata errors become `ProviderPluginError` messages capped at 200 characters
 so tracebacks and secrets do not leak.
 
@@ -425,9 +439,10 @@ so tracebacks and secrets do not leak.
 
 Before shipping a plugin:
 
-1. Confirm the backend truly needs a plugin instead of `openai-compat`.
+1. Confirm the backend truly needs a plugin instead of a profile.
 2. Pick a unique provider name that does not collide with built-ins or another
    installed distribution after normalization.
-3. Keep secrets out of `agent.options`; use env vars and `CredentialSource`.
+3. Keep secrets out of a profile's `options`; use env vars and
+   `CredentialSource`.
 4. Test both startup and live reconfiguration paths.
 5. Verify every emitted event matches the API 2 table above.
