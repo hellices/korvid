@@ -28,6 +28,7 @@ from __future__ import annotations
 import ast
 import importlib
 import importlib.util
+import re
 import subprocess
 import sys
 from collections.abc import Iterable
@@ -113,16 +114,27 @@ _FORBIDDEN_SELECTORS = (
 #: operator is told what replaced them.
 _REMOVED_CONFIG_KEYS = ("agent.profile", "agent.prompts")
 
+#: The removed keys, matched on word boundaries rather than as substrings.
+#: `agent.profiles` is a *current* key — the named model connections korvid
+#: reads today — and it contains the removed `agent.profile` as a prefix. A
+#: substring test therefore reports every module that documents the key the
+#: program actually has as if it were advertising the key the program
+#: removed, which is a guard that fails on correct code.
+_REMOVED_CONFIG_KEY_RE = re.compile(
+    r"\b(?:{})\b".format("|".join(re.escape(key) for key in _REMOVED_CONFIG_KEYS))
+)
+
 #: Files allowed to name a removed config key: the startup migration error,
-#: the tests that pin it, this guard, the operator-facing migration
-#: documentation, and the decision record that explains the supersession.
+#: the tests that pin it, this guard, and the operator-facing migration
+#: records that explain the supersession. Kept exact — a surface that has
+#: stopped naming a removed key is a hole in the guard, not a spare seat,
+#: so `test_every_migration_surface_still_names_a_removed_key` fails on it.
 _MIGRATION_SURFACES = frozenset(
     {
         "src/korvid/core/config.py",
         "tests/core/test_config.py",
         "tests/test_main_wiring.py",
         "tests/test_agent_replacement_guard.py",
-        "docs/agent.md",
         "docs/dev/agent-decisions.md",
         "docs/release-notes/unreleased.md",
     }
@@ -157,6 +169,11 @@ def _current_docs() -> list[Path]:
 
 def _found(text: str, needles: Iterable[str]) -> list[str]:
     return [needle for needle in needles if needle in text]
+
+
+def _removed_config_keys(text: str) -> list[str]:
+    """Removed config keys named in *text*, as whole keys."""
+    return sorted(set(_REMOVED_CONFIG_KEY_RE.findall(text)))
 
 
 _SRC_FILES = _python_sources(_SRC)
@@ -255,12 +272,43 @@ def test_removed_config_keys_appear_only_on_migration_surfaces() -> None:
     offenders = sorted(
         _relative(path)
         for path in (*_SRC_FILES, *_TEST_FILES, *_MARKDOWN_FILES)
-        if _found(path.read_text(encoding="utf-8"), _REMOVED_CONFIG_KEYS)
+        if _removed_config_keys(path.read_text(encoding="utf-8"))
     )
     assert set(offenders) <= _MIGRATION_SURFACES, (
         f"removed config keys named outside the migration surfaces: "
         f"{sorted(set(offenders) - _MIGRATION_SURFACES)}"
     )
+
+
+def test_the_surviving_profiles_key_is_not_read_as_the_removed_one() -> None:
+    """`agent.profiles` is the key korvid reads *today*.
+
+    It contains `agent.profile` as a prefix, so a substring test reports
+    every module that names the current key as if it were advertising the
+    removed one. The distinction is the whole difference between a guard
+    that protects the deletion and a guard that fails on correct code, so
+    it gets its own test rather than being an implementation detail of
+    the scan above.
+    """
+    assert _removed_config_keys("writes `agent.active`/`agent.profiles`") == []
+    assert _removed_config_keys("agent.profile_manager rewrites nothing") == []
+    assert _removed_config_keys("agent.profile was removed") == ["agent.profile"]
+    assert _removed_config_keys("use `agent.profile:` no more") == ["agent.profile"]
+    assert _removed_config_keys("agent.prompts was removed") == ["agent.prompts"]
+
+
+def test_every_migration_surface_still_names_a_removed_key() -> None:
+    """A surface that stopped naming one is a hole, not a spare seat.
+
+    The allow-list is what keeps the scan above meaningful; an entry that
+    no longer corresponds to anything silently re-permits a whole file.
+    """
+    stale = sorted(
+        name
+        for name in _MIGRATION_SURFACES
+        if not _removed_config_keys((_REPO_ROOT / name).read_text(encoding="utf-8"))
+    )
+    assert stale == []
 
 
 def test_the_startup_migration_error_still_names_both_removed_keys() -> None:
