@@ -425,8 +425,8 @@ class ReplicaSetSummary(GenericSummary):
     ) -> ReplicaSetSummary:
         base = GenericSummary.from_manifest(kind, manifest, group=group, version=version)
         meta = manifest.get("metadata") or {}
-        spec = manifest.get("spec") or {}
-        status = manifest.get("status") or {}
+        spec = _str_map(manifest.get("spec"))
+        status = _str_map(manifest.get("status"))
         desired = int(spec.get("replicas") or 0)
         return cls(
             **(
@@ -653,12 +653,44 @@ class CSVSummary(GenericSummary):
         )
 
 
-#: OLM's API group; other groups also define kinds named "Subscription", so
-#: the dispatch below checks the manifest's apiVersion, not just the kind.
-_DISCOVERY_GROUP_PREFIX = "discovery.k8s.io/"
-_STORAGE_CLASS_GROUP_PREFIX = "storage.k8s.io/"
-_OLM_GROUP_PREFIX = "operators.coreos.com/"
-_PACKAGES_GROUP_PREFIX = "packages.operators.coreos.com/"
+@dataclass(frozen=True)
+class _PodStatusFacts:
+    phase: str
+    ready: str
+    restarts: int
+    node: str | None
+    ready_condition: bool
+
+
+def _pod_status_facts(manifest: dict[str, Any]) -> _PodStatusFacts:
+    """Status fields shared by the rich pod view and lean LIST projection."""
+    meta = _str_map(manifest.get("metadata"))
+    spec = _str_map(manifest.get("spec"))
+    status = _str_map(manifest.get("status"))
+    raw_statuses = status.get("containerStatuses")
+    statuses = (
+        [item for item in raw_statuses if isinstance(item, dict)]
+        if isinstance(raw_statuses, list)
+        else []
+    )
+    raw_conditions = status.get("conditions")
+    conditions = (
+        [item for item in raw_conditions if isinstance(item, dict)]
+        if isinstance(raw_conditions, list)
+        else []
+    )
+    ready_count = sum(1 for item in statuses if item.get("ready"))
+    node_name = spec.get("nodeName")
+    return _PodStatusFacts(
+        phase=_display_phase(meta, spec, status, statuses),
+        ready=f"{ready_count}/{len(statuses)}",
+        restarts=sum(int(item.get("restartCount", 0)) for item in statuses),
+        node=node_name if isinstance(node_name, str) else None,
+        ready_condition=any(
+            condition.get("type") == "Ready" and condition.get("status") == "True"
+            for condition in conditions
+        ),
+    )
 
 
 @dataclass(frozen=True)
@@ -679,7 +711,7 @@ class PodListSummary(GenericSummary):
     ready_condition: bool = False
 
     @classmethod
-    def from_pod_manifest(
+    def from_manifest(
         cls,
         kind: str,
         manifest: dict[str, Any],
@@ -688,81 +720,75 @@ class PodListSummary(GenericSummary):
         version: str | None = None,
     ) -> PodListSummary:
         base = GenericSummary.from_manifest(kind, manifest, group=group, version=version)
-        meta = manifest.get("metadata") or {}
-        spec = _str_map(manifest.get("spec"))
-        status = _str_map(manifest.get("status"))
-        statuses: list[dict[str, Any]] = status.get("containerStatuses") or []
-        ready_count = sum(1 for s in statuses if s.get("ready"))
-        conditions: list[dict[str, Any]] = status.get("conditions") or []
+        facts = _pod_status_facts(manifest)
         return cls(
             **vars(base),
-            phase=_display_phase(meta, spec, status, statuses),
-            ready=f"{ready_count}/{len(statuses)}",
-            restarts=sum(int(s.get("restartCount", 0)) for s in statuses),
-            node=str(spec.get("nodeName") or ""),
-            ready_condition=any(
-                condition.get("type") == "Ready" and condition.get("status") == "True"
-                for condition in conditions
-            ),
+            phase=facts.phase,
+            ready=facts.ready,
+            restarts=facts.restarts,
+            node=facts.node or "",
+            ready_condition=facts.ready_condition,
         )
+
+
+_SUMMARY_TYPES: dict[tuple[str, str], type[GenericSummary]] = {
+    ("", "Pod"): PodListSummary,
+    ("apps", "ReplicaSet"): ReplicaSetSummary,
+    ("discovery.k8s.io", "EndpointSlice"): EndpointSliceSummary,
+    ("storage.k8s.io", "StorageClass"): StorageClassSummary,
+    ("packages.operators.coreos.com", "PackageManifest"): PackageManifestSummary,
+    ("operators.coreos.com", "Subscription"): OLMSubscriptionSummary,
+    ("operators.coreos.com", "ClusterServiceVersion"): CSVSummary,
+}
+
+_KNOWN_NATIVE_TYPE_META: dict[str, tuple[str, str]] = {
+    "Pod": ("", "v1"),
+    "ReplicaSet": ("apps", "v1"),
+}
+
+
+def _summary_type_meta(
+    kind: str,
+    manifest: dict[str, Any],
+    group: str | None,
+    version: str | None,
+) -> tuple[str, str]:
+    """Resolve discovery metadata, manifest TypeMeta, then known fixture defaults."""
+    api_version = manifest.get("apiVersion")
+    manifest_group = _api_group(api_version)
+    manifest_version = _api_version(api_version)
+    if not api_version:
+        default_group, default_version = _KNOWN_NATIVE_TYPE_META.get(kind, ("", ""))
+        manifest_group = default_group
+        manifest_version = default_version
+    return (
+        manifest_group if group is None else group,
+        manifest_version if version is None else version,
+    )
 
 
 def summary_for(
     kind: str, manifest: dict[str, Any], *, group: str | None = None, version: str | None = None
 ) -> GenericSummary:
-    """Build the richest summary available for *kind* (ReplicaSet gets history fields).
+    """Build the summary specialized for the resource's canonical API group and kind.
 
     Args:
         kind: The Kubernetes kind name.
         manifest: The raw object manifest.
         group: Authoritative API group from the resource discovery metadata.
-            When provided, it takes precedence over the manifest's `apiVersion`
-            for group-sensitive dispatch (e.g. EndpointSlice). When absent the
-            existing `apiVersion`-prefix fallback is used so direct callers and
-            tests that do not have ResourceMeta continue to work unchanged.
+            When provided, it takes precedence over the manifest's `apiVersion`.
         version: Authoritative API version from the resource discovery metadata
             (e.g. `"v1"`, `"v1beta1"`). When provided, it takes precedence over
-            the manifest's `apiVersion` for version-sensitive relationship
-            extraction (e.g. PodDisruptionBudget's v1-vs-v1beta1 empty-selector
-            semantics). When absent the existing `apiVersion`-suffix fallback is
-            used so direct callers and tests that do not have ResourceMeta
-            continue to work unchanged.
+            the manifest's `apiVersion` for relationship extraction.
     """
-    if kind == "Pod":
-        return PodListSummary.from_pod_manifest(kind, manifest, group=group, version=version)
-    if kind == "ReplicaSet":
-        return ReplicaSetSummary.from_manifest(kind, manifest, group=group, version=version)
-    if kind == "EndpointSlice":
-        # Use the authoritative group when available to avoid misclassifying
-        # LIST items that omit apiVersion/TypeMeta (native K8s behaviour).
-        is_discovery = (
-            group == "discovery.k8s.io"
-            if group is not None
-            else str(manifest.get("apiVersion") or "").startswith(_DISCOVERY_GROUP_PREFIX)
-        )
-        if is_discovery:
-            return EndpointSliceSummary.from_manifest(kind, manifest, group=group, version=version)
-        return GenericSummary.from_manifest(kind, manifest, group=group, version=version)
-    if kind == "StorageClass":
-        is_storage_class = (
-            group == "storage.k8s.io"
-            if group is not None
-            else str(manifest.get("apiVersion") or "").startswith(_STORAGE_CLASS_GROUP_PREFIX)
-        )
-        if is_storage_class:
-            return StorageClassSummary.from_manifest(kind, manifest, group=group, version=version)
-        return GenericSummary.from_manifest(kind, manifest, group=group, version=version)
-    api_version = str(manifest.get("apiVersion") or "")
-    if kind == "PackageManifest" and api_version.startswith(_PACKAGES_GROUP_PREFIX):
-        return PackageManifestSummary.from_manifest(kind, manifest, group=group, version=version)
-    if api_version.startswith(_OLM_GROUP_PREFIX):
-        renderer: type[GenericSummary] | None = {
-            "Subscription": OLMSubscriptionSummary,
-            "ClusterServiceVersion": CSVSummary,
-        }.get(kind)
-        if renderer is not None:
-            return renderer.from_manifest(kind, manifest, group=group, version=version)
-    return GenericSummary.from_manifest(kind, manifest, group=group, version=version)
+    resolved_group, resolved_version = _summary_type_meta(kind, manifest, group, version)
+    summary_type = _SUMMARY_TYPES.get((resolved_group, kind), GenericSummary)
+    return summary_type.from_manifest(
+        kind,
+        manifest,
+        group=resolved_group,
+        version=resolved_version,
+    )
 
 
 def _terminated_reason(terminated: dict[str, Any]) -> str | None:
@@ -1096,12 +1122,10 @@ class PodSummary:
 
     @classmethod
     def from_manifest(cls, obj: dict[str, Any]) -> PodSummary:
-        meta = obj.get("metadata") or {}
-        spec = obj.get("spec") or {}
-        status = obj.get("status") or {}
-        statuses: list[dict[str, Any]] = status.get("containerStatuses") or []
-        ready_count = sum(1 for s in statuses if s.get("ready"))
-        restarts = sum(int(s.get("restartCount", 0)) for s in statuses)
+        meta = _str_map(obj.get("metadata"))
+        spec = _str_map(obj.get("spec"))
+        status = _str_map(obj.get("status"))
+        facts = _pod_status_facts(obj)
         cpu_request = _effective_value(spec, "requests", "cpu")
         mem_request = _effective_value(spec, "requests", "memory")
         cpu_limit = _pod_level_limit(spec, "cpu")
@@ -1109,10 +1133,10 @@ class PodSummary:
         return cls(
             name=str(meta.get("name", "")),
             namespace=str(meta.get("namespace", "")),
-            phase=_display_phase(meta, spec, status, statuses),
-            ready=f"{ready_count}/{len(statuses)}",
-            restarts=restarts,
-            node=spec.get("nodeName"),
+            phase=facts.phase,
+            ready=facts.ready,
+            restarts=facts.restarts,
+            node=facts.node,
             qos=str(status.get("qosClass") or "-"),
             cpu_request=_format_effective(cpu_request, "cpu"),
             mem_request=_format_effective(mem_request, "memory"),

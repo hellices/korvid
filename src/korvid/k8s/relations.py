@@ -1,7 +1,7 @@
 """Ownership relations between resource kinds for drill-down navigation.
 
-The registry maps a parent kind (canonical lowercase plural) to the child
-kind reached by drilling down. Matching is ownerReferences-based: a child
+The registry maps a discovered resource identity to its child's identity.
+Matching is ownerReferences-based: a child
 belongs to a parent when the parent's uid appears in the child's owner uids.
 
 Slice 1 registers the Deployment rollout chain; later slices only add
@@ -12,25 +12,18 @@ from __future__ import annotations
 
 from typing import Any
 
-_DRILL_CHILDREN: dict[str, str] = {
-    "deployments": "replicasets",
-    "replicasets": "pods",
-    "helmreleases": "helmrevisions",
-}
+from korvid.k8s.discovery import ResourceMeta
 
-_DRILL_ALIASES: dict[str, str] = {
-    "deploy": "deployments",
-    "deployment": "deployments",
-    "rs": "replicasets",
-    "replicaset": "replicasets",
-    "helmrelease": "helmreleases",
+_DRILL_CHILDREN: dict[tuple[str, str, bool], tuple[str, str, bool]] = {
+    ("apps", "deployments", False): ("apps", "replicasets", False),
+    ("apps", "replicasets", False): ("", "pods", False),
+    ("", "helmreleases", True): ("", "helmrevisions", True),
 }
 
 
-def drill_child(parent_kind: str) -> str | None:
-    """Child kind shown for a canonical kind or supported navigation alias."""
-    normalized = parent_kind.lower()
-    return _DRILL_CHILDREN.get(_DRILL_ALIASES.get(normalized, normalized))
+def drill_child(parent: ResourceMeta) -> tuple[str, str, bool] | None:
+    """Return the child's group, plural, and synthetic flag for this resource."""
+    return _DRILL_CHILDREN.get(parent.identity)
 
 
 def owned_by(obj: Any, parent_uid: str) -> bool:

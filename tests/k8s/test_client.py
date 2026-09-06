@@ -1,8 +1,13 @@
 import asyncio
+import contextlib
+import gc
+import weakref
+from collections.abc import AsyncIterator
 from copy import deepcopy
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -12,10 +17,23 @@ from kubernetes_asyncio.client.exceptions import ApiException
 
 from korvid.k8s import client as client_mod
 from korvid.k8s.client import KubeClient
-from korvid.k8s.discovery import ResourceMeta
+from korvid.k8s.discovery import PODS_META, ResourceMeta
 from korvid.k8s.errors import ApiStatusError
+from korvid.k8s.helm import HELM_RELEASES_META
 from korvid.k8s.models import ReplicaSetSummary
 from korvid.k8s.telemetry import ReadTelemetryEvent
+from korvid.k8s.watch_events import WatchEvent, WatchProgress
+
+_T = TypeVar("_T")
+
+
+async def _watch_rows(events: AsyncIterator[WatchEvent[_T]]) -> list[tuple[str, _T]]:
+    rows: list[tuple[str, _T]] = []
+    async for event in events:
+        if isinstance(event, WatchProgress):
+            continue
+        rows.append(event)
+    return rows
 
 
 async def test_load_refreshable_kube_config_refreshes_expired_exec_token(
@@ -324,49 +342,52 @@ async def test_list_pods_emits_list_telemetry() -> None:
     assert seen[0].status is None
 
 
-async def test_watch_pods_yields_list_items_first() -> None:
-    """Pre-existing pods from the initial LIST appear as ADDED before watch events."""
+async def test_watch_resources_projects_pods_from_common_raw_path() -> None:
+    """Pods use the same raw LIST/WATCH transport as every other resource."""
     client = KubeClient()
     list_resp = {
         "metadata": {"resourceVersion": "100"},
         "items": [_pod("alpha"), _pod("beta")],
     }
-    fake_v1 = AsyncMock()
-    fake_v1.list_namespaced_pod.return_value = list_resp
-
+    request_json = AsyncMock(return_value=list_resp)
     watch_events = [{"type": "MODIFIED", "raw_object": _pod("alpha")}]
     fake_watch = _FakeWatch(watch_events)
 
     with (
-        patch.object(client, "_core_v1", fake_v1),
+        patch.object(client, "_api", MagicMock()),
+        patch.object(client, "_request_json", request_json),
         patch("korvid.k8s.client.k8s_watch.Watch", return_value=fake_watch),
     ):
-        collected = [(ev, p.name) async for ev, p in client.watch_pods("default")]
+        events = [event async for event in client.watch_resources(PODS_META, "default")]
 
-    assert collected[0] == ("ADDED", "alpha")
-    assert collected[1] == ("ADDED", "beta")
-    assert collected[2] == ("MODIFIED", "alpha")
+    rows = [event for event in events if not isinstance(event, WatchProgress)]
+    assert [(event_type, pod.name) for event_type, pod in rows] == [
+        ("SNAPSHOT", "alpha"),
+        ("SNAPSHOT", "beta"),
+        ("MODIFIED", "alpha"),
+    ]
+    assert events[-1] is WatchProgress.LIVE_EVENT
+    request_json.assert_awaited_once_with("/api/v1/namespaces/default/pods", query_params=[])
 
 
-async def test_pod_watch_emits_list_open_and_event_telemetry() -> None:
+async def test_resource_watch_emits_pod_list_open_and_event_telemetry() -> None:
     seen: list[ReadTelemetryEvent] = []
     client = KubeClient(read_telemetry=seen.append)
-    fake_v1 = AsyncMock()
-    fake_v1.list_namespaced_pod.return_value = {
+    list_response = {
         "metadata": {"resourceVersion": "100"},
         "items": [_pod("listed")],
     }
     fake_watch = _FakeWatch([{"type": "MODIFIED", "raw_object": _pod("watched")}])
 
     with (
-        patch.object(client, "_core_v1", fake_v1),
+        patch.object(client, "_api", MagicMock()),
+        patch.object(client, "_request_json", AsyncMock(return_value=list_response)),
         patch("korvid.k8s.client.k8s_watch.Watch", return_value=fake_watch),
     ):
-        collected = [
-            (event_type, pod.name) async for event_type, pod in client.watch_pods("default")
-        ]
+        rows = await _watch_rows(client.watch_resources(PODS_META, "default"))
+        collected = [(event_type, pod.name) for event_type, pod in rows]
 
-    assert collected == [("ADDED", "listed"), ("MODIFIED", "watched")]
+    assert collected == [("SNAPSHOT", "listed"), ("MODIFIED", "watched")]
     assert [event.operation for event in seen] == ["list", "watch_open", "watch_event"]
     assert {event.path for event in seen} == {"/api/v1/namespaces/default/pods"}
     assert seen[0].object_count == 1
@@ -378,72 +399,69 @@ async def test_pod_watch_emits_list_open_and_event_telemetry() -> None:
 
 async def test_no_telemetry_preserves_existing_watch_behavior() -> None:
     client = KubeClient()
-    fake_v1 = AsyncMock()
-    fake_v1.list_namespaced_pod.return_value = {
+    list_response = {
         "metadata": {"resourceVersion": "100"},
         "items": [_pod("listed")],
     }
     fake_watch = _FakeWatch([])
 
     with (
-        patch.object(client, "_core_v1", fake_v1),
+        patch.object(client, "_api", MagicMock()),
+        patch.object(client, "_request_json", AsyncMock(return_value=list_response)),
         patch("korvid.k8s.client.k8s_watch.Watch", return_value=fake_watch),
         patch(
             "korvid.k8s.client.json.dumps", side_effect=AssertionError("unexpected serialization")
         ),
     ):
-        collected = [
-            (event_type, pod.name) async for event_type, pod in client.watch_pods("default")
-        ]
+        rows = await _watch_rows(client.watch_resources(PODS_META, "default"))
+        collected = [(event_type, pod.name) for event_type, pod in rows]
 
-    assert collected == [("ADDED", "listed")]
+    assert collected == [("SNAPSHOT", "listed")]
 
 
-async def test_watch_pods_passes_resource_version_to_watch() -> None:
+async def test_watch_resources_passes_pod_resource_version_to_watch() -> None:
     """resource_version captured from the LIST is forwarded to Watch.stream."""
     client = KubeClient()
     list_resp: dict[str, Any] = {"metadata": {"resourceVersion": "999"}, "items": []}
-    fake_v1 = AsyncMock()
-    fake_v1.list_namespaced_pod.return_value = list_resp
-
     fake_watch = _FakeWatch([])
 
     with (
-        patch.object(client, "_core_v1", fake_v1),
+        patch.object(client, "_api", MagicMock()),
+        patch.object(client, "_request_json", AsyncMock(return_value=list_resp)),
         patch("korvid.k8s.client.k8s_watch.Watch", return_value=fake_watch),
     ):
-        async for _ in client.watch_pods("default"):
+        async for _ in client.watch_resources(PODS_META, "default"):
             pass  # drain
 
     assert fake_watch.captured_kwargs.get("resource_version") == "999"
 
 
-async def test_watch_pods_list_api_error_raises_api_status_error() -> None:
-    """ApiException from the initial LIST is wrapped as ApiStatusError."""
+async def test_watch_resources_pod_list_error_raises_api_status_error() -> None:
     client = KubeClient()
-    fake_v1 = AsyncMock()
-    fake_v1.list_namespaced_pod.side_effect = ApiException(status=403, reason="Forbidden")
 
     with (
-        patch.object(client, "_core_v1", fake_v1),
+        patch.object(client, "_api", MagicMock()),
+        patch.object(
+            client, "_request_json", AsyncMock(side_effect=ApiStatusError(403, "Forbidden"))
+        ),
         pytest.raises(ApiStatusError, match="API 403: Forbidden") as exc_info,
     ):
-        async for _ in client.watch_pods("default"):
+        async for _ in client.watch_resources(PODS_META, "default"):
             pass
     assert exc_info.value.status == 403
 
 
-async def test_watch_pods_list_error_emits_error_telemetry() -> None:
+async def test_watch_resources_pod_list_error_emits_error_telemetry() -> None:
     seen: list[ReadTelemetryEvent] = []
     client = KubeClient(read_telemetry=seen.append)
-    fake_v1 = AsyncMock()
-    fake_v1.list_namespaced_pod.side_effect = ApiException(status=403, reason="Forbidden")
-
     with (
-        patch.object(client, "_core_v1", fake_v1),
+        patch.object(client, "_api", MagicMock()),
+        patch.object(
+            client, "_request_json", AsyncMock(side_effect=ApiStatusError(403, "Forbidden"))
+        ),
         pytest.raises(ApiStatusError, match="API 403: Forbidden"),
     ):
-        async for _ in client.watch_pods("default"):
+        async for _ in client.watch_resources(PODS_META, "default"):
             pass
 
     assert [event.operation for event in seen] == ["error"]
@@ -453,22 +471,22 @@ async def test_watch_pods_list_error_emits_error_telemetry() -> None:
     assert seen[0].object_count == 0
 
 
-async def test_watch_pods_watch_error_emits_error_telemetry() -> None:
+async def test_watch_resources_pod_watch_error_emits_error_telemetry() -> None:
     seen: list[ReadTelemetryEvent] = []
     client = KubeClient(read_telemetry=seen.append)
-    fake_v1 = AsyncMock()
-    fake_v1.list_namespaced_pod.return_value = {
+    list_response = {
         "metadata": {"resourceVersion": "100"},
         "items": [],
     }
     fake_watch = _FakeWatch([], raise_at=0, raise_exc=ApiException(status=410, reason="Gone"))
 
     with (
-        patch.object(client, "_core_v1", fake_v1),
+        patch.object(client, "_api", MagicMock()),
+        patch.object(client, "_request_json", AsyncMock(return_value=list_response)),
         patch("korvid.k8s.client.k8s_watch.Watch", return_value=fake_watch),
         pytest.raises(ApiStatusError, match="API 410: Gone"),
     ):
-        async for _ in client.watch_pods("default"):
+        async for _ in client.watch_resources(PODS_META, "default"):
             pass
 
     assert [event.operation for event in seen] == ["list", "watch_open", "error"]
@@ -476,8 +494,7 @@ async def test_watch_pods_watch_error_emits_error_telemetry() -> None:
     assert seen[-1].status == 410
 
 
-async def test_watch_pods_all_namespaces_uses_cluster_path() -> None:
-    """watch_pods(None) LISTs /api/v1/pods without a /namespaces/ segment."""
+async def test_watch_resources_pods_all_namespaces_uses_cluster_path() -> None:
     client = KubeClient()
     list_resp: dict[str, Any] = {"metadata": {"resourceVersion": "100"}, "items": []}
     request_json_mock = AsyncMock(return_value=list_resp)
@@ -488,7 +505,7 @@ async def test_watch_pods_all_namespaces_uses_cluster_path() -> None:
         patch.object(client, "_request_json", request_json_mock),
         patch("korvid.k8s.client.k8s_watch.Watch", return_value=fake_watch),
     ):
-        async for _ in client.watch_pods(None):
+        async for _ in client.watch_resources(PODS_META, None):
             pass
 
     called_path: str = request_json_mock.call_args[0][0]
@@ -602,7 +619,7 @@ async def test_list_pods_api_error_raises_api_status_error() -> None:
 
 
 # ---------------------------------------------------------------------------
-# watch_objects
+# watch_resources
 # ---------------------------------------------------------------------------
 
 
@@ -616,8 +633,97 @@ def _deploy_meta() -> ResourceMeta:
     return ResourceMeta("Deployment", "deployments", "apps", "v1", True)
 
 
-async def test_watch_objects_yields_list_items_first() -> None:
-    """Pre-existing items from the initial LIST appear as ADDED before watch events."""
+def test_retained_watch_tombstone_strips_secret_payload_and_unneeded_labels() -> None:
+    client = KubeClient()
+    secret_meta = ResourceMeta("Secret", "secrets", "", "v1", True)
+    secret: dict[str, Any] = {
+        "metadata": {
+            "name": "credentials",
+            "namespace": "default",
+            "labels": {"team": "payments"},
+        },
+        "data": {"token": "sensitive"},
+        "stringData": {"password": "also-sensitive"},
+    }
+
+    tombstone = client._raw_resource_tombstone(secret_meta, secret)
+
+    assert tombstone == {"metadata": {"name": "credentials", "namespace": "default"}}
+    secret["metadata"]["labels"] = {
+        "name": "payments",
+        "version": "7",
+        "status": "deployed",
+        "unneeded": "drop-me",
+    }
+    helm_tombstone = client._raw_resource_tombstone(HELM_RELEASES_META, secret)
+    assert helm_tombstone == {
+        "metadata": {
+            "name": "credentials",
+            "namespace": "default",
+            "labels": {"name": "payments", "version": "7"},
+        }
+    }
+
+
+def test_synthetic_watch_dispatch_uses_identity_not_presentation_metadata() -> None:
+    client = KubeClient()
+    meta = replace(HELM_RELEASES_META, shortnames=("releases",), watchable=False)
+    path, query = client._watch_target(meta, "default")
+    assert path == "/api/v1/namespaces/default/secrets"
+    assert dict(query)["labelSelector"] == "owner=helm"
+
+
+async def test_watch_releases_last_raw_snapshot_before_waiting_for_live_events() -> None:
+    class Payload(dict[str, str]):
+        pass
+
+    client = KubeClient()
+    secret_meta = ResourceMeta("Secret", "secrets", "", "v1", True)
+    payload = Payload(token="sensitive")
+    payload_ref = weakref.ref(payload)
+    items = [
+        {
+            "metadata": {"name": "credentials", "namespace": "default"},
+            "data": payload,
+        }
+    ]
+    waiting_for_live_event = asyncio.Event()
+    release = asyncio.Event()
+
+    async def raw_events(
+        meta: ResourceMeta, namespace: str | None
+    ) -> AsyncIterator[tuple[str, dict[str, Any]]]:
+        assert meta == secret_meta
+        assert namespace == "default"
+        item = items.pop()
+        yield ("SNAPSHOT", item)
+        del item
+        waiting_for_live_event.set()
+        await release.wait()
+
+    del payload
+    with patch.object(client, "_watch_resource_events", raw_events):
+        stream = client.watch_resources(secret_meta, "default")
+        first = await stream.__anext__()
+        assert not isinstance(first, WatchProgress)
+        assert first[0] == "SNAPSHOT"
+        del first
+        gc.collect()
+        assert payload_ref() is None
+        pending = asyncio.create_task(stream.__anext__())
+        await waiting_for_live_event.wait()
+        gc.collect()
+        try:
+            assert payload_ref() is None
+        finally:
+            pending.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await pending
+            await stream.aclose()
+
+
+async def test_watch_resources_projects_generic_summaries_from_common_raw_path() -> None:
+    """Generic resources share the Pod LIST/WATCH transport."""
     client = KubeClient()
     meta = _deploy_meta()
     list_resp = {
@@ -632,14 +738,15 @@ async def test_watch_objects_yields_list_items_first() -> None:
         patch.object(client, "_request_json", AsyncMock(return_value=list_resp)),
         patch("korvid.k8s.client.k8s_watch.Watch", return_value=fake_watch),
     ):
-        collected = [(ev, s.name) async for ev, s in client.watch_objects(meta, "default")]
+        rows = await _watch_rows(client.watch_resources(meta, "default"))
+        collected = [(event_type, summary.name) for event_type, summary in rows]
 
-    assert collected[0] == ("ADDED", "dep-a")
-    assert collected[1] == ("ADDED", "dep-b")
+    assert collected[0] == ("SNAPSHOT", "dep-a")
+    assert collected[1] == ("SNAPSHOT", "dep-b")
     assert collected[2] == ("MODIFIED", "dep-a")
 
 
-async def test_watch_objects_emits_list_open_and_event_telemetry() -> None:
+async def test_watch_resources_emits_generic_list_open_and_event_telemetry() -> None:
     seen: list[ReadTelemetryEvent] = []
     client = KubeClient(read_telemetry=seen.append)
     meta = _deploy_meta()
@@ -655,11 +762,10 @@ async def test_watch_objects_emits_list_open_and_event_telemetry() -> None:
         patch.object(client, "_request_json", AsyncMock(return_value=list_resp)),
         patch("korvid.k8s.client.k8s_watch.Watch", return_value=fake_watch),
     ):
-        collected = [
-            (ev, summary.name) async for ev, summary in client.watch_objects(meta, "default")
-        ]
+        rows = await _watch_rows(client.watch_resources(meta, "default"))
+        collected = [(event_type, summary.name) for event_type, summary in rows]
 
-    assert collected == [("ADDED", "dep-a"), ("MODIFIED", "dep-a")]
+    assert collected == [("SNAPSHOT", "dep-a"), ("MODIFIED", "dep-a")]
     assert [event.operation for event in seen] == ["list", "watch_open", "watch_event"]
     assert {event.path for event in seen} == {"/apis/apps/v1/namespaces/default/deployments"}
     assert seen[0].object_count == 1
@@ -669,7 +775,7 @@ async def test_watch_objects_emits_list_open_and_event_telemetry() -> None:
     assert seen[2].decoded_bytes > 0
 
 
-async def test_watch_objects_initial_snapshot_reuses_computed_summaries() -> None:
+async def test_watch_resources_initial_snapshot_reuses_computed_summaries() -> None:
     client = KubeClient()
     meta = _deploy_meta()
     list_resp = {
@@ -685,15 +791,14 @@ async def test_watch_objects_initial_snapshot_reuses_computed_summaries() -> Non
         patch.object(client, "_object_summary", side_effect=original_summary) as summary_mock,
         patch("korvid.k8s.client.k8s_watch.Watch", return_value=fake_watch),
     ):
-        collected = [
-            (ev, summary.name) async for ev, summary in client.watch_objects(meta, "default")
-        ]
+        rows = await _watch_rows(client.watch_resources(meta, "default"))
+        collected = [(event_type, summary.name) for event_type, summary in rows]
 
-    assert collected == [("ADDED", "dep-a")]
+    assert collected == [("SNAPSHOT", "dep-a")]
     assert summary_mock.call_count == 1
 
 
-async def test_watch_objects_replicaset_yields_rich_summary() -> None:
+async def test_watch_resources_replicaset_yields_rich_summary() -> None:
     """ReplicaSet kinds get ReplicaSetSummary (revision/desired/ready) via summary_for."""
     client = KubeClient()
     meta = ResourceMeta("ReplicaSet", "replicasets", "apps", "v1", True, ("rs",))
@@ -715,14 +820,16 @@ async def test_watch_objects_replicaset_yields_rich_summary() -> None:
         patch.object(client, "_request_json", AsyncMock(return_value=list_resp)),
         patch("korvid.k8s.client.k8s_watch.Watch", return_value=fake_watch),
     ):
-        collected = [s async for _, s in client.watch_objects(meta, "default")]
+        collected = [
+            summary for _, summary in await _watch_rows(client.watch_resources(meta, "default"))
+        ]
 
     assert isinstance(collected[0], ReplicaSetSummary)
     assert collected[0].revision == "2"
     assert collected[0].ready == "3/3"
 
 
-async def test_watch_objects_passes_resource_version_to_watch() -> None:
+async def test_watch_resources_passes_generic_resource_version_to_watch() -> None:
     """resourceVersion from the LIST snapshot is forwarded to Watch.stream."""
     client = KubeClient()
     meta = _deploy_meta()
@@ -734,13 +841,13 @@ async def test_watch_objects_passes_resource_version_to_watch() -> None:
         patch.object(client, "_request_json", AsyncMock(return_value=list_resp)),
         patch("korvid.k8s.client.k8s_watch.Watch", return_value=fake_watch),
     ):
-        async for _ in client.watch_objects(meta, "default"):
+        async for _ in client.watch_resources(meta, "default"):
             pass
 
     assert fake_watch.captured_kwargs.get("resource_version") == "500"
 
 
-async def test_watch_objects_all_namespaces_uses_cluster_path() -> None:
+async def test_watch_resources_all_namespaces_uses_cluster_path() -> None:
     """namespace=None uses a cluster-scoped LIST path (no /namespaces/ segment)."""
     client = KubeClient()
     meta = _deploy_meta()
@@ -753,7 +860,7 @@ async def test_watch_objects_all_namespaces_uses_cluster_path() -> None:
         patch.object(client, "_request_json", request_json_mock),
         patch("korvid.k8s.client.k8s_watch.Watch", return_value=fake_watch),
     ):
-        async for _ in client.watch_objects(meta, None):
+        async for _ in client.watch_resources(meta, None):
             pass
 
     called_path: str = request_json_mock.call_args[0][0]
@@ -763,7 +870,7 @@ async def test_watch_objects_all_namespaces_uses_cluster_path() -> None:
     assert "/namespaces/" not in str(fake_watch.captured_args)
 
 
-async def test_watch_objects_cluster_scoped_kind_ignores_namespace() -> None:
+async def test_watch_resources_cluster_scoped_kind_ignores_namespace() -> None:
     """A cluster-scoped kind (namespaced=False) never uses a /namespaces/ path."""
     client = KubeClient()
     meta = ResourceMeta("Node", "nodes", "", "v1", False)
@@ -776,7 +883,7 @@ async def test_watch_objects_cluster_scoped_kind_ignores_namespace() -> None:
         patch.object(client, "_request_json", request_json_mock),
         patch("korvid.k8s.client.k8s_watch.Watch", return_value=fake_watch),
     ):
-        async for _ in client.watch_objects(meta, "default"):
+        async for _ in client.watch_resources(meta, "default"):
             pass
 
     called_path: str = request_json_mock.call_args[0][0]
@@ -784,7 +891,7 @@ async def test_watch_objects_cluster_scoped_kind_ignores_namespace() -> None:
 
 
 # ---------------------------------------------------------------------------
-# watch_objects — list-only kinds poll instead of watching (issue #141)
+# watch_resources — list-only kinds poll instead of watching (issue #141)
 # ---------------------------------------------------------------------------
 
 
@@ -802,11 +909,34 @@ def _pkg_meta() -> ResourceMeta:
 async def _take(gen: Any, n: int) -> list[tuple[str, str]]:
     """First *n* (event, name) pairs from an endless watch generator."""
     out: list[tuple[str, str]] = []
-    async for ev, s in gen:
+    async for event in gen:
+        if isinstance(event, WatchProgress):
+            continue
+        ev, s = event
         out.append((ev, s.name))
         if len(out) >= n:
             break
     return out
+
+
+async def test_successful_empty_poll_emits_explicit_progress() -> None:
+    client = KubeClient()
+    meta = _pkg_meta()
+    snapshots: list[dict[str, Any]] = [
+        {"metadata": {}, "items": []},
+        {"metadata": {}, "items": []},
+    ]
+
+    with (
+        patch.object(client, "_api", MagicMock()),
+        patch.object(client, "_request_json", AsyncMock(side_effect=snapshots)),
+        patch.object(client_mod, "LIST_POLL_INTERVAL", 0.0),
+    ):
+        stream = client.watch_resources(meta, "olm")
+        progress = await asyncio.wait_for(stream.__anext__(), timeout=2.0)
+        await stream.aclose()
+
+    assert progress is WatchProgress.POLL
 
 
 async def test_unwatchable_kind_polls_lists_and_diffs_instead_of_watching() -> None:
@@ -828,9 +958,9 @@ async def test_unwatchable_kind_polls_lists_and_diffs_instead_of_watching() -> N
         patch.object(client_mod, "LIST_POLL_INTERVAL", 0.0),
         patch("korvid.k8s.client.k8s_watch.Watch", watch_factory),
     ):
-        events = await _take(client.watch_objects(meta, "olm"), 5)
+        events = await _take(client.watch_resources(meta, "olm"), 5)
 
-    assert events[:2] == [("ADDED", "etcd"), ("ADDED", "kafka")]
+    assert events[:2] == [("SNAPSHOT", "etcd"), ("SNAPSHOT", "kafka")]
     # Second LIST round: upserts for present rows, DELETED for the vanished one.
     assert ("ADDED", "postgres") in events[2:]
     assert ("DELETED", "kafka") in events[2:]
@@ -857,9 +987,9 @@ async def test_watch_405_falls_back_to_list_polling() -> None:
         patch.object(client_mod, "LIST_POLL_INTERVAL", 0.0),
         patch("korvid.k8s.client.k8s_watch.Watch", return_value=fake_watch),
     ):
-        events = await _take(client.watch_objects(meta, "default"), 3)
+        events = await _take(client.watch_resources(meta, "default"), 3)
 
-    assert events[0] == ("ADDED", "dep-a")
+    assert events[0] == ("SNAPSHOT", "dep-a")
     assert ("ADDED", "dep-b") in events[1:]
 
 
@@ -883,10 +1013,74 @@ async def test_watch_405_api_exception_also_falls_back_to_polling() -> None:
         patch.object(client_mod, "LIST_POLL_INTERVAL", 0.0),
         patch("korvid.k8s.client.k8s_watch.Watch", return_value=fake_watch),
     ):
-        events = await _take(client.watch_objects(meta, "default"), 3)
+        events = await _take(client.watch_resources(meta, "default"), 3)
 
-    assert events[0] == ("ADDED", "dep-a")
+    assert events[0] == ("SNAPSHOT", "dep-a")
     assert ("ADDED", "dep-b") in events[1:]
+
+
+async def test_405_poll_fallback_deletes_live_additions_missing_from_relist() -> None:
+    client = KubeClient()
+    meta = _deploy_meta()
+    snapshots = [
+        {"metadata": {"resourceVersion": "1"}, "items": [_generic("dep-a")]},
+        {"metadata": {}, "items": [_generic("dep-a")]},
+    ]
+    fake_watch = _FakeWatch(
+        [{"type": "ADDED", "raw_object": _generic("dep-b")}],
+        raise_at=1,
+        raise_exc=ApiStatusError(405, "Method Not Allowed"),
+    )
+
+    with (
+        patch.object(client, "_api", MagicMock()),
+        patch.object(client, "_request_json", AsyncMock(side_effect=snapshots)),
+        patch.object(client_mod, "LIST_POLL_INTERVAL", 0.0),
+        patch("korvid.k8s.client.k8s_watch.Watch", return_value=fake_watch),
+    ):
+        events = await _take(client.watch_resources(meta, "default"), 4)
+
+    assert events == [
+        ("SNAPSHOT", "dep-a"),
+        ("ADDED", "dep-b"),
+        ("ADDED", "dep-a"),
+        ("DELETED", "dep-b"),
+    ]
+
+
+async def test_poll_delete_preserves_uid_from_retained_tombstone() -> None:
+    client = KubeClient()
+    meta = replace(_deploy_meta(), watchable=False)
+    item = _generic("dep-a")
+    item["metadata"]["uid"] = "dep-uid"
+    item["metadata"]["labels"] = {"unneeded": "drop-me"}
+    item["spec"] = {"payload": "drop-me"}
+    item["status"] = {"payload": "drop-me"}
+    assert client._raw_resource_tombstone(meta, item) == {
+        "metadata": {"name": "dep-a", "namespace": "default", "uid": "dep-uid"}
+    }
+    snapshots = [
+        {"metadata": {}, "items": [item]},
+        {"metadata": {}, "items": []},
+    ]
+    rows: list[tuple[str, Any]] = []
+
+    with (
+        patch.object(client, "_api", MagicMock()),
+        patch.object(client, "_request_json", AsyncMock(side_effect=snapshots)),
+        patch.object(client_mod, "LIST_POLL_INTERVAL", 0.0),
+    ):
+        async for event in client.watch_resources(meta, "default"):
+            if isinstance(event, WatchProgress):
+                continue
+            rows.append(event)
+            if len(rows) == 2:
+                break
+
+    assert [(event_type, summary.name, summary.uid) for event_type, summary in rows] == [
+        ("SNAPSHOT", "dep-a", "dep-uid"),
+        ("DELETED", "dep-a", "dep-uid"),
+    ]
 
 
 async def test_watch_non_405_api_status_error_still_raises() -> None:
@@ -906,12 +1100,12 @@ async def test_watch_non_405_api_status_error_still_raises() -> None:
         patch("korvid.k8s.client.k8s_watch.Watch", return_value=fake_watch),
         pytest.raises(ApiStatusError, match="Gone") as excinfo,
     ):
-        async for _ in client.watch_objects(meta, "default"):
+        async for _ in client.watch_resources(meta, "default"):
             pass
     assert excinfo.value.body == '{"kind":"Status"}'
 
 
-async def test_watch_objects_list_error_emits_error_telemetry() -> None:
+async def test_watch_resources_list_error_emits_error_telemetry() -> None:
     seen: list[ReadTelemetryEvent] = []
     client = KubeClient(read_telemetry=seen.append)
     meta = _deploy_meta()
@@ -925,7 +1119,7 @@ async def test_watch_objects_list_error_emits_error_telemetry() -> None:
         ),
         pytest.raises(ApiStatusError, match="API 401: Unauthorized"),
     ):
-        async for _ in client.watch_objects(meta, "default"):
+        async for _ in client.watch_resources(meta, "default"):
             pass
 
     assert [event.operation for event in seen] == ["error"]
@@ -949,11 +1143,11 @@ async def test_watch_non_405_api_exception_still_raises() -> None:
         patch("korvid.k8s.client.k8s_watch.Watch", return_value=fake_watch),
         pytest.raises(ApiStatusError, match="boom"),
     ):
-        async for _ in client.watch_objects(meta, "default"):
+        async for _ in client.watch_resources(meta, "default"):
             pass
 
 
-async def test_watch_objects_watch_error_emits_error_telemetry() -> None:
+async def test_watch_resources_watch_error_emits_error_telemetry() -> None:
     seen: list[ReadTelemetryEvent] = []
     client = KubeClient(read_telemetry=seen.append)
     meta = _deploy_meta()
@@ -966,7 +1160,7 @@ async def test_watch_objects_watch_error_emits_error_telemetry() -> None:
         patch("korvid.k8s.client.k8s_watch.Watch", return_value=fake_watch),
         pytest.raises(ApiStatusError, match="boom"),
     ):
-        async for _ in client.watch_objects(meta, "default"):
+        async for _ in client.watch_resources(meta, "default"):
             pass
 
     assert [event.operation for event in seen] == ["list", "watch_open", "error"]
@@ -1065,7 +1259,7 @@ async def test_list_events_for_raises_api_status_error() -> None:
 
 
 # ---------------------------------------------------------------------------
-# watch_objects — core-group regression (group == "")
+# watch_resources — core-group regression (group == "")
 # ---------------------------------------------------------------------------
 
 
@@ -1073,7 +1267,7 @@ def _service_meta() -> ResourceMeta:
     return ResourceMeta("Service", "services", "", "v1", True)
 
 
-async def test_watch_objects_core_group_does_not_use_empty_group_in_watch() -> None:
+async def test_watch_resources_core_group_does_not_use_empty_group_in_watch() -> None:
     """Regression: watch for core resources (group=="") must NOT call CustomObjectsApi.
 
     CustomObjectsApi.list_*_custom_object with group="" produces the URL
@@ -1090,7 +1284,7 @@ async def test_watch_objects_core_group_does_not_use_empty_group_in_watch() -> N
         patch.object(client, "_request_json", AsyncMock(return_value=list_resp)),
         patch("korvid.k8s.client.k8s_watch.Watch", return_value=fake_watch),
     ):
-        async for _ in client.watch_objects(meta, "default"):
+        async for _ in client.watch_resources(meta, "default"):
             pass
 
     # With the broken CustomObjectsApi approach, the first positional arg passed
@@ -1101,7 +1295,7 @@ async def test_watch_objects_core_group_does_not_use_empty_group_in_watch() -> N
     )
 
 
-async def test_watch_objects_core_group_watch_list_path_is_api_v1() -> None:
+async def test_watch_resources_core_group_watch_list_path_is_api_v1() -> None:
     """The watch callable for a core-group resource must close over the /api/v1 path.
 
     This verifies that meta.api_base ("/api/v1") is used, not "/apis//v1".
@@ -1124,7 +1318,7 @@ async def test_watch_objects_core_group_watch_list_path_is_api_v1() -> None:
         patch.object(client, "_request_json", AsyncMock(return_value=list_resp)),
         patch("korvid.k8s.client.k8s_watch.Watch", return_value=fake_watch),
     ):
-        async for _ in client.watch_objects(meta, "default"):
+        async for _ in client.watch_resources(meta, "default"):
             pass
 
         # Invoke the captured callable while the patch is still active.
@@ -1140,11 +1334,11 @@ async def test_watch_objects_core_group_watch_list_path_is_api_v1() -> None:
 
 
 # ---------------------------------------------------------------------------
-# watch_objects — mid-stream error propagation
+# watch_resources — mid-stream error propagation
 # ---------------------------------------------------------------------------
 
 
-async def test_watch_objects_mid_stream_api_exception_raises_api_status_error() -> None:
+async def test_watch_resources_mid_stream_api_exception_raises_api_status_error() -> None:
     """An ApiException raised inside the watch stream must surface as ApiStatusError."""
     client = KubeClient()
     meta = _deploy_meta()
@@ -1160,7 +1354,7 @@ async def test_watch_objects_mid_stream_api_exception_raises_api_status_error() 
         patch("korvid.k8s.client.k8s_watch.Watch", return_value=fake_watch),
         pytest.raises(ApiStatusError, match="API 410: Gone"),
     ):
-        async for _ in client.watch_objects(meta, "default"):
+        async for _ in client.watch_resources(meta, "default"):
             pass
 
 
@@ -1169,7 +1363,7 @@ async def test_watch_objects_mid_stream_api_exception_raises_api_status_error() 
 # ---------------------------------------------------------------------------
 
 
-async def test_watch_objects_encodes_namespace_in_list_path() -> None:
+async def test_watch_resources_encodes_namespace_in_list_path() -> None:
     """A namespace with path metacharacters must be percent-encoded, not interpolated raw."""
     client = KubeClient()
     meta = _deploy_meta()
@@ -1182,7 +1376,7 @@ async def test_watch_objects_encodes_namespace_in_list_path() -> None:
         patch.object(client, "_request_json", request_json_mock),
         patch("korvid.k8s.client.k8s_watch.Watch", return_value=fake_watch),
     ):
-        async for _ in client.watch_objects(meta, "bad/ns?watch=true"):
+        async for _ in client.watch_resources(meta, "bad/ns?watch=true"):
             pass
 
     called_path: str = request_json_mock.call_args[0][0]
@@ -1988,7 +2182,33 @@ async def test_list_objects_fills_custom_column_values() -> None:
     assert summaries[0].custom == ("payments",)
 
 
-async def test_watch_objects_fills_custom_column_values() -> None:
+async def test_list_objects_prefers_qualified_custom_columns() -> None:
+    from korvid.k8s.columns import CustomColumn
+
+    meta = ResourceMeta("HelmRelease", "helmreleases", "helm.toolkit.fluxcd.io", "v2", True)
+    client = KubeClient(
+        custom_columns={
+            "helmreleases": (CustomColumn("BARE", "label", "team"),),
+            meta.qualified_name: (CustomColumn("QUALIFIED", "annotation", "owner"),),
+        }
+    )
+    manifest = _generic("web")
+    manifest["metadata"]["labels"] = {"team": "payments"}
+    manifest["metadata"]["annotations"] = {"owner": "platform"}
+    with (
+        patch.object(client, "_api", MagicMock()),
+        patch.object(
+            client,
+            "_request_json",
+            AsyncMock(return_value={"items": [manifest]}),
+        ),
+    ):
+        summaries = await client.list_objects(meta, "default")
+
+    assert summaries[0].custom == ("platform",)
+
+
+async def test_watch_resources_fills_generic_custom_column_values() -> None:
     from korvid.k8s.columns import CustomColumn
 
     client = KubeClient(custom_columns={"deployments": (CustomColumn("TEAM", "label", "team"),)})
@@ -2002,28 +2222,28 @@ async def test_watch_objects_fills_custom_column_values() -> None:
         patch.object(client, "_request_json", AsyncMock(return_value=list_resp)),
         patch("korvid.k8s.client.k8s_watch.Watch", return_value=_FakeWatch(watch_events)),
     ):
-        seen = [
-            summary.custom async for _, summary in client.watch_objects(_deploy_meta(), "default")
-        ]
+        rows = await _watch_rows(client.watch_resources(_deploy_meta(), "default"))
+        seen = [summary.custom for _, summary in rows]
     assert seen == [("payments",), ("billing",)]
 
 
-async def test_watch_pods_fills_custom_column_values() -> None:
+async def test_watch_resources_fills_pod_custom_column_values() -> None:
     from korvid.k8s.columns import CustomColumn
 
     client = KubeClient(custom_columns={"pods": (CustomColumn("TEAM", "label", "team"),)})
     pod = _pod("api-1")
     pod["metadata"]["labels"] = {"team": "payments"}
-    fake_v1 = AsyncMock()
-    fake_v1.list_namespaced_pod.return_value = {
+    list_response = {
         "metadata": {"resourceVersion": "5"},
         "items": [pod],
     }
     with (
-        patch.object(client, "_core_v1", fake_v1),
+        patch.object(client, "_api", MagicMock()),
+        patch.object(client, "_request_json", AsyncMock(return_value=list_response)),
         patch("korvid.k8s.client.k8s_watch.Watch", return_value=_FakeWatch([])),
     ):
-        seen = [summary.custom async for _, summary in client.watch_pods("default")]
+        rows = await _watch_rows(client.watch_resources(PODS_META, "default"))
+        seen = [summary.custom for _, summary in rows]
     assert seen == [("payments",)]
 
 

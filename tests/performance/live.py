@@ -61,7 +61,7 @@ performs the ownership gate, the ground-truth re-read, and nothing else, while
 a single telemetry-wired *application-path* client
 (`LiveDependencies.kube_client_factory`) is only ever handed to
 `make_live_watch_source`. This keeps `ReplayReport.api` reporting exactly the
-production application read path (the real `KubeClient.watch_pods` LIST+WATCH
+production application read path (the real `KubeClient.watch_resources` LIST+WATCH
 telemetry) instead of being diluted by the harness's own bookkeeping reads.
 Mutation traffic is likewise never reported as application read telemetry: its
 throttles are counted separately in `ChurnSummary.mutation_throttles`.
@@ -90,10 +90,11 @@ from korvid.core.config import KorvidConfig
 from korvid.core.store import ALL_NAMESPACES, ResourceStore
 from korvid.core.watch import WatchManager, WatchSource
 from korvid.k8s.client import KubeClient, load_refreshable_kube_config, resolve_context_name
-from korvid.k8s.discovery import ResourceMeta
+from korvid.k8s.discovery import PODS_META, ResourceMeta
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.models import GenericSummary, PodSummary
 from korvid.k8s.telemetry import ReadTelemetry
+from korvid.k8s.watch_events import WatchEvent, WatchProgress
 from korvid.ui.widgets.describe_screen import DescribeScreen
 from korvid.ui.widgets.resource_table import ResourceTable
 from tests.performance import manifests
@@ -299,7 +300,9 @@ class KubeReadClient(Protocol):
 
     async def list_pods(self, namespace: str) -> list[PodSummary]: ...
 
-    def watch_pods(self, namespace: str | None) -> AsyncIterator[tuple[str, PodSummary]]: ...
+    def watch_resources(
+        self, meta: ResourceMeta, namespace: str | None
+    ) -> AsyncIterator[WatchEvent[PodSummary | GenericSummary]]: ...
 
     async def get_object(
         self, meta: ResourceMeta, namespace: str | None, name: str
@@ -336,7 +339,7 @@ class LiveDependencies:
     two separate seams (constructing two separate `KubeReadClient`
     connections at runtime): the former is wired with `recorder.record_api`
     and used *only* for the real application read path
-    (`make_live_watch_source`'s `watch_pods`), so `ReplayReport.api` reports
+    (`make_live_watch_source`'s `watch_resources`), so `ReplayReport.api` reports
     exactly the production LIST+WATCH telemetry an operator would see. The
     latter is never wired to telemetry and is used *only* for the harness's
     own bookkeeping reads (the ownership gate and the ground-truth re-read) -
@@ -906,11 +909,18 @@ def make_live_watch_source(
     """
     sequence = 0
 
-    async def _source(kind: str, _scope: str) -> AsyncIterator[tuple[str, PodSummary]]:
+    async def _source(kind: str, _scope: str) -> AsyncIterator[WatchEvent[PodSummary]]:
         nonlocal sequence
         if kind != "pods":
             raise ValueError(f"run_live_replay only watches pods, got kind={kind!r}")
-        async for event_type, pod in kube.watch_pods(None):
+        async for event in kube.watch_resources(PODS_META, None):
+            if isinstance(event, WatchProgress):
+                yield event
+                continue
+            event_type, summary = event
+            if not isinstance(summary, PodSummary):
+                raise TypeError("Pod watch returned a non-Pod summary")
+            pod = summary
             if pod.namespace not in expected_namespaces:
                 continue
             owned = event_type == "MODIFIED" and _owns(pod.labels, run_id)

@@ -976,6 +976,27 @@ def test_startup_namespace_precedence(monkeypatch: pytest.MonkeyPatch) -> None:
     assert _load_startup_config(False).namespace == "default"
 
 
+def test_startup_preserves_qualified_custom_column_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import korvid.__main__ as main_mod
+    from korvid.__main__ import _custom_column_names, _load_startup_config
+    from korvid.core.config import KorvidConfig, ViewConfig
+    from korvid.k8s.columns import CustomColumn
+
+    key = "helmreleases.helm.toolkit.fluxcd.io"
+    view = ViewConfig(columns=(CustomColumn("TEAM", "label", "team"),))
+    config = KorvidConfig(namespace="default", views={key: view})
+    monkeypatch.setattr(main_mod, "load_config", lambda: config)
+    monkeypatch.setattr(main_mod, "resolve_context_name", lambda name: name)
+    monkeypatch.setattr(main_mod, "resolve_context_namespace", lambda name: None)
+
+    loaded = _load_startup_config(False)
+
+    assert loaded.views == {key: view}
+    assert _custom_column_names(loaded) == {key: ("TEAM",)}
+
+
 def test_load_startup_config_wraps_config_migration_error_as_system_exit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

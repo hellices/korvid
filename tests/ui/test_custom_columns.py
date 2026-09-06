@@ -7,8 +7,12 @@ from dataclasses import replace
 from korvid.core.config import KorvidConfig, ViewConfig
 from korvid.core.store import Summary
 from korvid.k8s.columns import CustomColumn
+from korvid.k8s.discovery import ResourceMeta
+from korvid.k8s.helm import HELM_RELEASES_META
 from korvid.k8s.models import GenericSummary
-from korvid.ui.widgets.resource_table import ResourceTable, _columns_for, sanitize_views
+from korvid.k8s.olm import OPERATORS_GROUP
+from korvid.ui.widgets import resource_table
+from korvid.ui.widgets.resource_table import ResourceTable, _columns_for
 
 from .test_app import _pod, make_app
 from .waits import until
@@ -196,26 +200,258 @@ async def test_replace_view_sort_command_rejects_hidden_builtin() -> None:
 
 
 # ---------------------------------------------------------------------------
-# sanitize_views — kind-aware header collision check (PR #78 review round 3)
+# selected-view validation — actual identity header collision check
 # ---------------------------------------------------------------------------
 
 
-class TestSanitizeViews:
-    def test_drops_names_colliding_with_kind_builtin_headers(self) -> None:
+class TestValidateSelectedView:
+    def test_native_view_drops_names_colliding_with_its_builtin_headers(self) -> None:
         status = CustomColumn("STATUS", "label", "s")
         team = CustomColumn("TEAM", "label", "team")
-        views, warnings = sanitize_views({"pods": ViewConfig(columns=(status, team))})
-        assert [c.name for c in views["pods"].columns] == ["TEAM"]
+        selected, warnings = resource_table.validate_selected_view(
+            "pods",
+            group="",
+            synthetic=False,
+            view=ViewConfig(columns=(status, team)),
+        )
+        assert selected is not None
+        assert [c.name for c in selected.config.columns] == ["TEAM"]
+        assert selected.value_indices == (1,)
         assert any("STATUS" in w for w in warnings)
 
     def test_replace_views_keep_builtin_like_names(self) -> None:
         status = CustomColumn("STATUS", "label", "s")
-        views, warnings = sanitize_views({"pods": ViewConfig(columns=(status,), replace=True)})
-        assert [c.name for c in views["pods"].columns] == ["STATUS"]
+        selected, warnings = resource_table.validate_selected_view(
+            "pods",
+            group="",
+            synthetic=False,
+            view=ViewConfig(columns=(status,), replace=True),
+        )
+        assert selected is not None
+        assert [c.name for c in selected.config.columns] == ["STATUS"]
+        assert selected.value_indices == (0,)
         assert warnings == ()
 
-    def test_view_removed_when_all_columns_collide(self) -> None:
+    def test_append_view_removed_when_all_columns_collide(self) -> None:
         ready = CustomColumn("ready", "label", "r")  # case-insensitive
-        views, warnings = sanitize_views({"pods": ViewConfig(columns=(ready,))})
-        assert views == {}
+        selected, warnings = resource_table.validate_selected_view(
+            "pods",
+            group="",
+            synthetic=False,
+            view=ViewConfig(columns=(ready,)),
+        )
+        assert selected is None
         assert len(warnings) == 1
+
+    def test_foreign_subscription_keeps_olm_looking_column(self) -> None:
+        channel = CustomColumn("CHANNEL", "label", "channel")
+        selected, warnings = resource_table.validate_selected_view(
+            "subscriptions",
+            group="messaging.example.com",
+            synthetic=False,
+            view=ViewConfig(columns=(channel,)),
+        )
+        assert selected is not None
+        assert selected.config.columns == (channel,)
+        assert selected.value_indices == (0,)
+        assert warnings == ()
+
+    def test_foreign_replicaset_keeps_native_looking_column(self) -> None:
+        revision = CustomColumn("REVISION", "label", "revision")
+        selected, warnings = resource_table.validate_selected_view(
+            "replicasets",
+            group="example.com",
+            synthetic=False,
+            view=ViewConfig(columns=(revision,)),
+        )
+        assert selected is not None
+        assert selected.config.columns == (revision,)
+        assert selected.value_indices == (0,)
+        assert warnings == ()
+
+    def test_same_plural_validation_does_not_mutate_raw_view_between_groups(self) -> None:
+        channel = CustomColumn("CHANNEL", "label", "channel")
+        team = CustomColumn("TEAM", "label", "team")
+        raw = ViewConfig(columns=(channel, team))
+
+        native, native_warnings = resource_table.validate_selected_view(
+            "subscriptions",
+            group=OPERATORS_GROUP,
+            synthetic=False,
+            view=raw,
+        )
+        foreign, foreign_warnings = resource_table.validate_selected_view(
+            "subscriptions",
+            group="messaging.example.com",
+            synthetic=False,
+            view=raw,
+        )
+
+        assert native is not None
+        assert [column.name for column in native.config.columns] == ["TEAM"]
+        assert native.value_indices == (1,)
+        assert native_warnings
+        assert foreign is not None
+        assert foreign.config == raw
+        assert foreign.value_indices == (0, 1)
+        assert foreign_warnings == ()
+        assert raw.columns == (channel, team)
+
+
+async def test_native_collision_filter_preserves_custom_value_alignment_and_warns() -> None:
+    status = CustomColumn("STATUS", "label", "status")
+    team = CustomColumn("TEAM", "label", "team")
+    config = _views_config("pods", ViewConfig(columns=(status, team)))
+    pods = [
+        replace(_pod("alpha"), custom=("custom-status-a", "zeta")),
+        replace(_pod("zeta"), custom=("custom-status-z", "alpha")),
+    ]
+    app = make_app(pods, config=config)
+    async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 2, label="pods rendered")
+        headers = _header_labels(table)
+        assert headers.count("STATUS") == 1
+        assert headers[-1] == "TEAM"
+        assert [_row(table, i)[-1] for i in range(table.row_count)] == ["zeta", "alpha"]
+        assert any("views.pods.STATUS" in n.message for n in app._notifications)
+        await pilot.press("colon")
+        await pilot.press(*"sort")
+        await pilot.press("space")
+        await pilot.press(*"TEAM")
+        await pilot.press("enter")
+        await until(
+            pilot,
+            lambda: [_row(table, i)[0] for i in range(table.row_count)] == ["zeta", "alpha"],
+            label="pods sorted by retained TEAM value",
+        )
+        assert sum("views.pods.STATUS" in n.message for n in app._notifications) == 1
+
+
+async def test_foreign_subscription_renders_and_sorts_native_looking_custom_column() -> None:
+    channel = CustomColumn("CHANNEL", "label", "channel")
+    config = _views_config("subscriptions", ViewConfig(columns=(channel,)))
+    foreign = ResourceMeta("Subscription", "subscriptions", "messaging.example.com", "v1", True)
+    rows: list[Summary] = [
+        GenericSummary(
+            name="zeta",
+            namespace="default",
+            kind="Subscription",
+            created="",
+            custom=("beta",),
+        ),
+        GenericSummary(
+            name="alpha",
+            namespace="default",
+            kind="Subscription",
+            created="",
+            custom=("alpha",),
+        ),
+    ]
+    app = make_app(
+        [],
+        extra_data={"subscriptions": rows},
+        aliases={"pods": ResourceMeta("Pod", "pods", "", "v1", True), "subscriptions": foreign},
+        config=config,
+    )
+    async with app.run_test() as pilot:
+        await pilot.press("colon")
+        await pilot.press(*"subscriptions")
+        await pilot.press("enter")
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 2, label="subscriptions rendered")
+        assert _header_labels(table) == ["NAME", "AGE", "CHANNEL"]
+        await pilot.press("colon")
+        await pilot.press(*"sort")
+        await pilot.press("space")
+        await pilot.press(*"CHANNEL")
+        await pilot.press("enter")
+        await until(
+            pilot,
+            lambda: [_row(table, i)[0] for i in range(table.row_count)] == ["alpha", "zeta"],
+            label="subscriptions sorted by CHANNEL",
+        )
+
+
+async def test_foreign_replicaset_renders_native_looking_custom_column() -> None:
+    revision = CustomColumn("REVISION", "label", "revision")
+    config = _views_config("replicasets", ViewConfig(columns=(revision,)))
+    foreign = ResourceMeta("ReplicaSet", "replicasets", "example.com", "v1", True)
+    rows: list[Summary] = [
+        GenericSummary(
+            name="custom-rs",
+            namespace="default",
+            kind="ReplicaSet",
+            created="",
+            custom=("custom-revision",),
+        )
+    ]
+    app = make_app(
+        [],
+        extra_data={"replicasets": rows},
+        aliases={"pods": ResourceMeta("Pod", "pods", "", "v1", True), "replicasets": foreign},
+        config=config,
+    )
+    async with app.run_test() as pilot:
+        await pilot.press("colon")
+        await pilot.press(*"replicasets")
+        await pilot.press("enter")
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 1, label="replicaset rendered")
+        assert _header_labels(table) == ["NAME", "AGE", "REVISION"]
+        assert _row(table, 0)[-1] == "custom-revision"
+
+
+async def test_qualified_flux_view_gets_columns_without_leaking_to_synthetic_helm() -> None:
+    key = "helmreleases.helm.toolkit.fluxcd.io"
+    flux = ResourceMeta("HelmRelease", "helmreleases", "helm.toolkit.fluxcd.io", "v2", True)
+    config = _views_config(key, ViewConfig(columns=(_TEAM,)))
+    rows: list[Summary] = [
+        GenericSummary(
+            name="zeta",
+            namespace="default",
+            kind="HelmRelease",
+            created="",
+            custom=("beta",),
+        ),
+        GenericSummary(
+            name="alpha",
+            namespace="default",
+            kind="HelmRelease",
+            created="",
+            custom=("alpha",),
+        ),
+    ]
+    app = make_app(
+        [],
+        extra_data={key: rows},
+        aliases={
+            "pods": ResourceMeta("Pod", "pods", "", "v1", True),
+            "helmreleases": HELM_RELEASES_META,
+            key: flux,
+        },
+        config=config,
+    )
+    async with app.run_test() as pilot:
+        await pilot.press("colon")
+        await pilot.press(*"helmreleases")
+        await pilot.press("enter")
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: app.current_kind == "helmreleases", label="synthetic selected")
+        assert "TEAM" not in _header_labels(table)
+
+        await pilot.press("colon")
+        await pilot.press(*key)
+        await pilot.press("enter")
+        await until(pilot, lambda: table.row_count == 2, label="Flux releases rendered")
+        assert _header_labels(table) == ["NAME", "AGE", "TEAM"]
+        await pilot.press("colon")
+        await pilot.press(*"sort")
+        await pilot.press("space")
+        await pilot.press(*"TEAM")
+        await pilot.press("enter")
+        await until(
+            pilot,
+            lambda: [_row(table, i)[0] for i in range(table.row_count)] == ["alpha", "zeta"],
+            label="Flux releases sorted by TEAM",
+        )

@@ -4,26 +4,33 @@ import pytest
 
 from korvid.core.store import Summary
 from korvid.k8s.metrics import PodMetrics
+from korvid.k8s.olm import OPERATORS_GROUP, PACKAGES_GROUP
 from korvid.ui.widgets import resource_table
 
 
 @pytest.mark.parametrize(
-    ("kind", "renderer_name"),
+    ("kind", "group", "synthetic", "renderer_name"),
     [
-        ("pods", "_render_pod_rows"),
-        ("replicasets", "_render_replicaset_rows"),
-        ("helmreleases", "_render_helm_release_rows"),
-        ("helmrevisions", "_render_helm_revision_rows"),
-        ("packagemanifests", "_render_package_rows"),
-        ("subscriptions", "_render_subscription_rows"),
-        ("clusterserviceversions", "_render_csv_rows"),
-        ("widgets", "_render_generic_rows"),
+        ("pods", "", False, "_render_pod_rows"),
+        ("replicasets", "apps", False, "_render_replicaset_rows"),
+        ("helmreleases", "", True, "_render_helm_release_rows"),
+        ("helmrevisions", "", True, "_render_helm_revision_rows"),
+        ("packagemanifests", PACKAGES_GROUP, False, "_render_package_rows"),
+        ("subscriptions", OPERATORS_GROUP, False, "_render_subscription_rows"),
+        ("clusterserviceversions", OPERATORS_GROUP, False, "_render_csv_rows"),
+        ("widgets", "example.io", False, "_render_generic_rows"),
     ],
 )
 def test_row_renderer_selects_specialized_and_fallback_renderers(
-    kind: str, renderer_name: str
+    kind: str,
+    group: str,
+    synthetic: bool,
+    renderer_name: str,
 ) -> None:
-    assert resource_table._row_renderer(kind).__name__ == renderer_name
+    assert (
+        resource_table._row_renderer(kind, group=group, synthetic=synthetic).__name__
+        == renderer_name
+    )
 
 
 def test_adapt_standard_renderer_uses_factory_and_display_name() -> None:
@@ -80,7 +87,7 @@ def test_specialized_renderer_honors_subclass_override_of_add_rows() -> None:
 
     table = _SubTable()
     rows: list[Summary] = []
-    renderer = resource_table._row_renderer("replicasets")
+    renderer = resource_table._row_renderer("replicasets", group="apps")
     renderer(table, rows, all_namespaces=False, pattern="x", metrics=None, presorted=True)
 
     assert len(override_calls) == 1, (

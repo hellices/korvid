@@ -21,10 +21,11 @@ from collections.abc import AsyncIterator, Callable
 from korvid.core.errors import explain_api_error
 from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
 from korvid.k8s.errors import ApiStatusError
+from korvid.k8s.watch_events import WatchEvent, WatchProgress
 
 logger = logging.getLogger(__name__)
 
-WatchSource = Callable[[str, str], AsyncIterator[tuple[str, Summary]]]
+WatchSource = Callable[[str, str], AsyncIterator[WatchEvent[Summary]]]
 
 
 def _is_forbidden(exc: Exception) -> bool:
@@ -106,12 +107,14 @@ class WatchManager:
                 self._store.clear(kind, scope)
             first_connection = False
             try:
-                async for event_type, obj in self._source(kind, scope):
-                    # A connection that delivers events is healthy — reset the
-                    # failure streak so hours-long streams don't inherit old failures.
-                    failures = 0
-                    self._store.apply_event(kind, scope, event_type, obj)
-                    self._emit_event(kind, scope, event_type, obj)
+                async for event in self._source(kind, scope):
+                    if isinstance(event, WatchProgress):
+                        failures = 0
+                        continue
+                    event_type, obj = event
+                    verb = "ADDED" if event_type == "SNAPSHOT" else event_type
+                    self._store.apply_event(kind, scope, verb, obj)
+                    self._emit_event(kind, scope, verb, obj)
                 # Stream ended normally (server-side watch timeout) -> reconnect.
                 failures = 0
             except asyncio.CancelledError:

@@ -13,6 +13,7 @@ from textual.app import App, ComposeResult
 from textual.widgets import Static, Tree
 
 from korvid.k8s.components import ComponentRef
+from korvid.k8s.discovery import PODS_META, ResourceMeta, build_alias_map
 from korvid.ui.widgets.hierarchy_screen import (
     HierarchyNode,
     HierarchyScreen,
@@ -44,6 +45,17 @@ _VIEWS = {
     "ClusterRole": ("clusterroles", False),
 }
 
+_ALIASES = build_alias_map(
+    [
+        ResourceMeta("Deployment", "deployments", "apps", "v1", True),
+        ResourceMeta("ReplicaSet", "replicasets", "apps", "v1", True),
+        PODS_META,
+        ResourceMeta("Service", "services", "", "v1", True),
+        ResourceMeta("ConfigMap", "configmaps", "", "v1", True),
+        ResourceMeta("ClusterRole", "clusterroles", "rbac.authorization.k8s.io", "v1", False),
+    ]
+)
+
 
 def _resolve(ref: ComponentRef) -> tuple[str, bool] | None:
     return _VIEWS.get(ref.kind)
@@ -67,7 +79,12 @@ def test_components_become_child_nodes() -> None:
         "configmaps": [_Live("web-config", "default")],
     }
     root = build_hierarchy(
-        "helm/web", refs, namespace="default", resolve=_resolve, lookup=_lookup_from(data)
+        "helm/web",
+        refs,
+        namespace="default",
+        resolve=_resolve,
+        lookup=_lookup_from(data),
+        aliases=_ALIASES,
     )
     assert root.label == "helm/web"
     assert [c.label for c in root.children] == ["Service/web", "ConfigMap/web-config"]
@@ -90,13 +107,98 @@ def test_deployment_expands_runtime_descendants_by_owner_uids() -> None:
         ],
     }
     root = build_hierarchy(
-        "helm/web", refs, namespace="default", resolve=_resolve, lookup=_lookup_from(data)
+        "helm/web",
+        refs,
+        namespace="default",
+        resolve=_resolve,
+        lookup=_lookup_from(data),
+        aliases=_ALIASES,
     )
     dep = root.children[0]
     assert [c.label for c in dep.children] == ["ReplicaSet/web-abc"]
     rs = dep.children[0]
     assert [c.label for c in rs.children] == ["Pod/web-abc-1", "Pod/web-abc-2"]
     assert rs.children[0].kind == "pods"
+
+
+def test_hierarchy_expands_qualified_parent_and_child_buckets() -> None:
+    deployment = ResourceMeta("Deployment", "deployments", "apps", "v1", True)
+    replica_set = ResourceMeta("ReplicaSet", "replicasets", "apps", "v1", True)
+    aliases = build_alias_map(
+        [
+            ResourceMeta("Deployment", "deployments", "example.io", "v1", True),
+            ResourceMeta("ReplicaSet", "replicasets", "example.io", "v1", True),
+            deployment,
+            replica_set,
+            PODS_META,
+        ]
+    )
+    data = {
+        "deployments.apps": [_Live("web", "default", uid="dep-1")],
+        "replicasets.apps": [_Live("web-rs", "default", uid="rs-1", owner_uids=("dep-1",))],
+        "replicasets": [_Live("wrong-group", "default", owner_uids=("dep-1",))],
+        "pods": [_Live("web-pod", "default", owner_uids=("rs-1",))],
+    }
+    root = build_hierarchy(
+        "helm/web",
+        [ComponentRef("Deployment", "web", api_version="apps/v1")],
+        namespace="default",
+        resolve=lambda ref: ("deployments.apps", True),
+        lookup=_lookup_from(data),
+        aliases=aliases,
+    )
+    parent = root.children[0]
+    assert parent.kind == "deployments.apps"
+    assert [(child.kind, child.name) for child in parent.children] == [
+        ("replicasets.apps", "web-rs")
+    ]
+    assert [(child.kind, child.name) for child in parent.children[0].children] == [
+        ("pods", "web-pod")
+    ]
+
+
+def test_foreign_workload_does_not_expand_native_hierarchy_children() -> None:
+    aliases = build_alias_map(
+        [
+            ResourceMeta("Deployment", "deployments", "example.io", "v1", True),
+            ResourceMeta("ReplicaSet", "replicasets", "apps", "v1", True),
+        ]
+    )
+    data = {
+        "deployments": [_Live("web", "default", uid="dep-1")],
+        "replicasets": [_Live("not-a-child", "default", owner_uids=("dep-1",))],
+    }
+    root = build_hierarchy(
+        "helm/web",
+        [ComponentRef("Deployment", "web", api_version="example.io/v1")],
+        namespace="default",
+        resolve=_resolve,
+        lookup=_lookup_from(data),
+        aliases=aliases,
+    )
+    assert root.children[0].children == []
+
+
+def test_hierarchy_does_not_fall_back_to_foreign_child_when_native_is_undiscovered() -> None:
+    aliases = build_alias_map(
+        [
+            ResourceMeta("Deployment", "deployments", "apps", "v1", True),
+            ResourceMeta("ReplicaSet", "replicasets", "example.io", "v1", True),
+        ]
+    )
+    data = {
+        "deployments": [_Live("web", "default", uid="dep-1")],
+        "replicasets": [_Live("not-a-child", "default", owner_uids=("dep-1",))],
+    }
+    root = build_hierarchy(
+        "helm/web",
+        [ComponentRef("Deployment", "web", api_version="apps/v1")],
+        namespace="default",
+        resolve=_resolve,
+        lookup=_lookup_from(data),
+        aliases=aliases,
+    )
+    assert root.children[0].children == []
 
 
 def test_live_status_decorates_runtime_descendants() -> None:
@@ -113,7 +215,12 @@ def test_live_status_decorates_runtime_descendants() -> None:
         ],
     }
     root = build_hierarchy(
-        "helm/web", refs, namespace="default", resolve=_resolve, lookup=_lookup_from(data)
+        "helm/web",
+        refs,
+        namespace="default",
+        resolve=_resolve,
+        lookup=_lookup_from(data),
+        aliases=_ALIASES,
     )
     rs = root.children[0].children[0]
     assert rs.label == "ReplicaSet/web-abc  1/1"
@@ -124,7 +231,12 @@ def test_live_status_decorates_declared_components() -> None:
     refs = [ComponentRef(kind="Pod", name="standalone")]
     data = {"pods": [_Live("standalone", "default", phase="Pending", ready="0/1")]}
     root = build_hierarchy(
-        "helm/web", refs, namespace="default", resolve=_resolve, lookup=_lookup_from(data)
+        "helm/web",
+        refs,
+        namespace="default",
+        resolve=_resolve,
+        lookup=_lookup_from(data),
+        aliases=_ALIASES,
     )
     assert root.children[0].label == "Pod/standalone  Pending 0/1"
 
@@ -133,7 +245,12 @@ def test_missing_live_object_is_marked() -> None:
     refs = [ComponentRef(kind="Service", name="gone")]
     data = {"services": [_Live("other", "default")]}
     root = build_hierarchy(
-        "helm/web", refs, namespace="default", resolve=_resolve, lookup=_lookup_from(data)
+        "helm/web",
+        refs,
+        namespace="default",
+        resolve=_resolve,
+        lookup=_lookup_from(data),
+        aliases=_ALIASES,
     )
     node = root.children[0]
     assert node.label == "Service/gone (missing)"
@@ -146,7 +263,12 @@ def test_unwatched_view_gets_no_missing_marker() -> None:
     that the object is gone - claiming "missing" there would be a lie."""
     refs = [ComponentRef(kind="Service", name="web")]
     root = build_hierarchy(
-        "helm/web", refs, namespace="default", resolve=_resolve, lookup=_lookup_from({})
+        "helm/web",
+        refs,
+        namespace="default",
+        resolve=_resolve,
+        lookup=_lookup_from({}),
+        aliases=_ALIASES,
     )
     assert root.children[0].label == "Service/web"
 
@@ -157,7 +279,12 @@ def test_watched_empty_bucket_marks_missing() -> None:
     refs = [ComponentRef(kind="Service", name="web")]
     data: dict[str, list[_Live]] = {"services": []}
     root = build_hierarchy(
-        "helm/web", refs, namespace="default", resolve=_resolve, lookup=_lookup_from(data)
+        "helm/web",
+        refs,
+        namespace="default",
+        resolve=_resolve,
+        lookup=_lookup_from(data),
+        aliases=_ALIASES,
     )
     assert root.children[0].label == "Service/web (missing)"
 
@@ -168,7 +295,12 @@ def test_cluster_scoped_component_never_inherits_release_namespace() -> None:
     refs = [ComponentRef(kind="ClusterRole", name="web-role")]
     data = {"clusterroles": [_Live("web-role", "")]}
     root = build_hierarchy(
-        "helm/web", refs, namespace="default", resolve=_resolve, lookup=_lookup_from(data)
+        "helm/web",
+        refs,
+        namespace="default",
+        resolve=_resolve,
+        lookup=_lookup_from(data),
+        aliases=_ALIASES,
     )
     node = root.children[0]
     assert node.label == "ClusterRole/web-role"
@@ -178,7 +310,12 @@ def test_cluster_scoped_component_never_inherits_release_namespace() -> None:
 def test_unknown_kind_is_shown_but_not_navigable() -> None:
     refs = [ComponentRef(kind="MyCustomThing", name="x")]
     root = build_hierarchy(
-        "helm/web", refs, namespace="default", resolve=_resolve, lookup=_lookup_from({})
+        "helm/web",
+        refs,
+        namespace="default",
+        resolve=_resolve,
+        lookup=_lookup_from({}),
+        aliases=_ALIASES,
     )
     node = root.children[0]
     assert node.label == "MyCustomThing/x"
@@ -189,7 +326,12 @@ def test_component_namespace_overrides_release_namespace() -> None:
     refs = [ComponentRef(kind="Service", name="web", namespace="other")]
     data = {"services": [_Live("web", "other")]}
     root = build_hierarchy(
-        "helm/web", refs, namespace="default", resolve=_resolve, lookup=_lookup_from(data)
+        "helm/web",
+        refs,
+        namespace="default",
+        resolve=_resolve,
+        lookup=_lookup_from(data),
+        aliases=_ALIASES,
     )
     assert root.children[0].namespace == "other"
 
@@ -346,7 +488,9 @@ def test_lookup_receives_the_component_namespace() -> None:
         return None
 
     refs = [ComponentRef(kind="Service", name="web", namespace="other")]
-    build_hierarchy("helm/web", refs, namespace="default", resolve=_resolve, lookup=lookup)
+    build_hierarchy(
+        "helm/web", refs, namespace="default", resolve=_resolve, lookup=lookup, aliases=_ALIASES
+    )
     assert calls == [("services", "other")]
 
 

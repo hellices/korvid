@@ -57,7 +57,7 @@ from korvid.k8s.components import (
     installplan_components,
     reference_components,
 )
-from korvid.k8s.discovery import ResourceMeta
+from korvid.k8s.discovery import ResourceMeta, canonical_resource_alias, resolve_resource
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.helm import HELM_RELEASES_META
 from korvid.k8s.olm import OPERATORS_GROUP, PACKAGES_GROUP
@@ -67,6 +67,7 @@ from korvid.ui.ui_surface import UiSurface
 from korvid.ui.view_state import ViewState
 from korvid.ui.widgets.hierarchy_screen import HierarchyScreen, build_hierarchy
 from korvid.ui.widgets.relationship_screen import GotoResult, RelationshipScreen
+from korvid.ui.widgets.resource_table import validate_selected_view
 from korvid.ui.workspace_state import HierarchyReturn, PaneState, WorkspaceState
 
 logger = logging.getLogger(__name__)
@@ -713,9 +714,18 @@ class WorkspaceController:
     # ------------------------------------------------------------------
 
     def _view_for(self, kind: str) -> ViewConfig | None:
-        """The `views:` config entry for a view kind, resolved via its meta."""
+        """The effective `views:` entry for the selected resource identity."""
         meta = self._view.aliases().get(kind)
-        return self._config().views.get(meta.plural if meta is not None else kind)
+        plural = meta.plural if meta is not None else kind
+        views = self._config().views
+        configured_view = meta.configured_value(views) if meta is not None else views.get(kind)
+        selected, _warnings = validate_selected_view(
+            plural,
+            group=meta.group if meta is not None else "",
+            synthetic=meta.synthetic if meta is not None else False,
+            view=configured_view,
+        )
+        return selected.config if selected is not None else None
 
     def sort_by(self, column: str) -> None:
         """Apply/flip a sort column for the current view kind and re-render."""
@@ -831,13 +841,17 @@ class WorkspaceController:
     # Drill (issue #157)
     # ------------------------------------------------------------------
 
+    def _drill_child_identity(self) -> tuple[str, str, bool] | None:
+        meta = self._view.aliases().get(self._state.current_kind)
+        return drill_child(meta) if meta is not None else None
+
     def can_drill(self) -> bool:
         """True when Enter drills on the current view (topbar hint)."""
         if self._state.current_kind == "pods":
             return True
         if self.hierarchy_root_kind() is not None:
             return True
-        return drill_child(self._view.canonical_kind(self._state.current_kind)) is not None
+        return self._drill_child_identity() is not None
 
     async def drill_down_selected(self, row_key: str) -> bool:
         """Keyboard Enter: push a drill level for the selected row.
@@ -846,7 +860,7 @@ class WorkspaceController:
         False means Enter is a no-op and the caller should leave the
         keypress unconsumed for a later handler.
         """
-        if drill_child(self._view.canonical_kind(self._state.current_kind)) is None:
+        if self._drill_child_identity() is None:
             return False  # kind has no drill-down chain; Enter is a no-op
         parts = row_key.split("/", 1)
         if len(parts) == 2:
@@ -915,11 +929,14 @@ class WorkspaceController:
         """Push a drill level for (namespace, name) and navigate to the child
         kind. Returns an error message, or None on success."""
         canonical = self._view.canonical_kind(self._state.current_kind)
-        child = drill_child(canonical)
-        if child is None:
+        identity = self._drill_child_identity()
+        if identity is None:
             return f"{canonical} has no drill-down chain"
-        if child not in self._view.aliases():
-            return f"{child} not discovered yet, try again shortly"
+        group, plural, synthetic = identity
+        child_meta = resolve_resource(self._view.aliases(), group, plural, synthetic=synthetic)
+        if child_meta is None:
+            return f"{plural} not discovered yet, try again shortly"
+        child = canonical_resource_alias(self._view.aliases(), child_meta)
         obj = next(
             (
                 o
@@ -1102,6 +1119,7 @@ class WorkspaceController:
             refs,
             namespace=namespace,
             resolve=self._view_for_component,
+            aliases=self._view.aliases(),
             lookup=self._hierarchy_lookup(scope),
         )
         self._hierarchy_ctx = (title, refs, namespace, scope)
@@ -1179,6 +1197,7 @@ class WorkspaceController:
             ret.refs,
             namespace=ret.namespace,
             resolve=self._view_for_component,
+            aliases=self._view.aliases(),
             lookup=self._hierarchy_lookup(ret.tree_scope),
         )
         self._hierarchy_ctx = (ret.title, ret.refs, ret.namespace, ret.tree_scope)
@@ -1219,6 +1238,7 @@ class WorkspaceController:
                 refs,
                 namespace=namespace,
                 resolve=self._view_for_component,
+                aliases=self._view.aliases(),
                 lookup=self._hierarchy_lookup(scope),
             )
         )
@@ -1258,12 +1278,24 @@ class WorkspaceController:
         uid = str((manifest.get("metadata") or {}).get("uid") or "")
         if not uid:
             return []
+        aliases = self._view.aliases()
+        meta = resolve_resource(aliases, "apps", "deployments")
+        if meta is None:
+            return []
+        view_kind = canonical_resource_alias(aliases, meta)
         lookup = self._hierarchy_lookup(self._state.current_scope)
         refs: list[ComponentRef] = []
-        for obj in lookup("deployments", namespace) or []:
+        for obj in lookup(view_kind, namespace) or []:
             if obj.namespace != namespace or uid not in getattr(obj, "owner_uids", ()):
                 continue
-            refs.append(ComponentRef(kind="Deployment", name=str(obj.name), namespace=namespace))
+            refs.append(
+                ComponentRef(
+                    kind=meta.kind,
+                    name=str(obj.name),
+                    api_version=f"{meta.group}/{meta.version}",
+                    namespace=obj.namespace,
+                )
+            )
             if len(refs) >= MAX_COMPONENT_DOCS:
                 break
         return refs

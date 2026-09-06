@@ -1463,7 +1463,8 @@ class AgentUiController:
                 "ask them to close it (Esc) before changing the view"
             )
         canonical = self._view.canonical_kind(self._view.current_kind())
-        child = drill_child(canonical)
+        meta = self._view.aliases().get(canonical)
+        child = drill_child(meta) if meta is not None else None
         if child is None:
             return (
                 f"ERROR: {canonical} has no drill-down chain - "
@@ -1490,7 +1491,7 @@ class AgentUiController:
             return f"ERROR: {error}"
         self._mark_action(f"drill → {drill.breadcrumb()}")
         return (
-            f"drilled into {canonical}/{name} — now showing the {child} it owns "
+            f"drilled into {canonical}/{name} — now showing the {child[1]} it owns "
             f"({drill.breadcrumb()})"
         )
 
@@ -1543,7 +1544,9 @@ class AgentUiController:
         top_screen = self._screens.top_screen()
         view_before = (self._view.current_kind(), self._view.current_scope())
         try:
-            manifest = await get_manifest(meta.plural, namespace, name)
+            manifest = await get_manifest(
+                self._view.canonical_kind(kind.strip().lower()), namespace, name
+            )
         except ApiStatusError as exc:
             return f"ERROR: {explain_api_error(exc.status, exc.reason, meta.plural, namespace)}"
         except Exception as exc:
@@ -1551,7 +1554,7 @@ class AgentUiController:
         events: list[dict[str, Any]] = []
         # Events are name-scoped only, so restrict to pods (same rule as `d`).
         get_events = self._get_events()
-        if get_events is not None and namespace and meta.plural == "pods":
+        if get_events is not None and namespace and meta.identity == ("", "pods", False):
             try:
                 events = await get_events.fetch(namespace, name)
             except Exception:  # events are best-effort; the manifest still shows

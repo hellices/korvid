@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from enum import Enum
+
 from textual.message import Message
 
 from korvid.tools.proposals import WriteProposal
@@ -103,6 +105,33 @@ class SortCommand(Message):
     def __init__(self, column: str | None) -> None:
         super().__init__()
         self.column = column
+
+
+class BuiltinOperation(Enum):
+    """Canonical identities for app-owned commands."""
+
+    AI = "ai"
+    MODEL = "model"
+    MCP = "mcp"
+    PROPOSALS = "proposals"
+    PORT_FORWARDS = "pf"
+    TELEPRESENCE = "tp"
+
+
+class BuiltinCommand(Message):
+    """Command whose operation is implemented by the application."""
+
+    operation: BuiltinOperation
+    arguments: tuple[str, ...]
+
+    def __init__(
+        self,
+        operation: BuiltinOperation,
+        arguments: tuple[str, ...] = (),
+    ) -> None:
+        super().__init__()
+        self.operation = operation
+        self.arguments = arguments
 
 
 class AgentPromptSubmitted(Message):

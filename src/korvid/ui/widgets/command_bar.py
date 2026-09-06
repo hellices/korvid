@@ -3,10 +3,19 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from textual.events import Key
+from textual.reactive import var
 from textual.suggester import Suggester
 from textual.widgets import Input
 
-from korvid.ui.command import parse_command
+from korvid.ui.command import ArgumentCompletion, argument_completion, parse_command
+
+
+def _unknown_resource(_: str) -> str | None:
+    return None
+
+
+def _default_known() -> Callable[[str], str | None]:
+    return _unknown_resource
 
 
 class _CommandSuggester(Suggester):
@@ -27,14 +36,16 @@ class _CommandSuggester(Suggester):
 class CommandBar(Input):
     """Hidden `:` command input; Enter dispatches onto the UI Bus."""
 
+    known: var[Callable[[str], str | None]] = var(_default_known, init=False)
+    command_words: var[list[str]] = var(list, init=False)
+    namespace_words: var[list[str]] = var(list, init=False)
+    context_words: var[list[str]] = var(list, init=False)
+
     def on_mount(self) -> None:
         self.display = False
         self.placeholder = "pods | deploy all | ns <name> | q"
-        self.known: Callable[[str], str | None] = lambda _: None
-        self.command_words: list[str] = []
-        self.namespace_words: list[str] = []
-        self.context_words: list[str] = []
-        self.suggester = _CommandSuggester(self)
+        if self.suggester is None:
+            self.suggester = _CommandSuggester(self)
 
     def complete(self, value: str) -> str | None:
         """Return the full completed command for ``value``, or None."""
@@ -49,15 +60,19 @@ class CommandBar(Input):
         return self._complete_argument(head, rest)
 
     def _complete_argument(self, head: str, rest: str) -> str | None:
-        """Second-token completion: namespaces for :ns, contexts for :ctx."""
-        if head in {"ns", "namespaces"} and rest:
-            for ns in self.namespace_words:
-                if ns.startswith(rest) and ns != rest:
-                    return f"{head} {ns}"
-        if head in {"ctx", "context", "contexts"} and rest:
-            for ctx in self.context_words:
-                if ctx.startswith(rest) and ctx != rest:
-                    return f"{head} {ctx}"
+        """Complete an argument using the catalogued completion kind."""
+        completion = argument_completion(head, self.known)
+        words = (
+            self.namespace_words
+            if completion is ArgumentCompletion.NAMESPACE
+            else self.context_words
+            if completion is ArgumentCompletion.CONTEXT
+            else ()
+        )
+        if rest:
+            for word in words:
+                if word.startswith(rest) and word != rest:
+                    return f"{head} {word}"
         return None
 
     def open(self) -> None:

@@ -25,7 +25,7 @@ class NamespacePicker(OptionList):
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         event.stop()
         self.dismiss_picker()
-        self.post_message(NavigateCommand("pods", namespace=str(event.option.prompt)))
+        self.post_message(NavigateCommand(None, namespace=str(event.option.prompt)))
 
     async def on_key(self, event: Key) -> None:
         if event.key == "escape":

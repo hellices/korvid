@@ -5,6 +5,7 @@ from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
 from korvid.core.watch import WatchManager
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.models import PodSummary
+from korvid.k8s.watch_events import WatchEvent, WatchProgress
 
 
 def _pod(name: str) -> PodSummary:
@@ -14,9 +15,9 @@ def _pod(name: str) -> PodSummary:
 
 
 def make_source(
-    events: list[tuple[str, PodSummary]], forever: bool = True
-) -> Callable[[str, str], AsyncIterator[tuple[str, Summary]]]:
-    async def source(kind: str, scope: str) -> AsyncIterator[tuple[str, Summary]]:
+    events: list[WatchEvent[PodSummary]], forever: bool = True
+) -> Callable[[str, str], AsyncIterator[WatchEvent[Summary]]]:
+    async def source(kind: str, scope: str) -> AsyncIterator[WatchEvent[Summary]]:
         for ev in events:
             yield ev
         while forever:  # simulate an open stream
@@ -119,75 +120,25 @@ async def test_failing_watch_reports_and_removes_task() -> None:
     assert "boom" in errors[0]
 
 
-async def test_normal_stream_end_resets_failure_streak() -> None:
-    """Empty-stream normal end resets the failure counter (focus: no-event connection counts).
-
-    Sequence with max_retries=3:
-      calls 1-2: fail  → failures=2
-      call  3:   normal empty end (0 events) → failures resets to 0
-      calls 4-5: fail  → failures=2
-      call  6:   blocks forever (signals `done`)
-    With fix:    failures never reach 3, on_error never fires.
-    Without fix: call 4 would be the 3rd consecutive failure → on_error fires, task dies.
-    """
+async def test_empty_poll_progress_between_failures_allows_another_retry() -> None:
+    """A successful empty polling round explicitly breaks the failure streak."""
     store = ResourceStore()
     errors: list[str] = []
     calls = 0
     done = asyncio.Event()
 
-    async def source(kind: str, scope: str) -> AsyncIterator[tuple[str, Summary]]:
-        nonlocal calls
-        calls += 1
-        if calls <= 2:
-            raise RuntimeError(f"failure {calls}")
-            yield ("", _pod(""))  # pragma: no cover - typing aid
-        elif calls == 3:
-            return  # normal empty end — must reset streak
-            yield ("", _pod(""))  # pragma: no cover - typing aid
-        elif calls <= 5:
-            raise RuntimeError(f"failure {calls}")
-            yield ("", _pod(""))  # pragma: no cover - typing aid
-        else:
-            done.set()
-            await asyncio.Event().wait()  # block; keeps task alive for assertion
-            yield ("", _pod(""))  # pragma: no cover - typing aid
-
-    mgr = WatchManager(store, source, on_error=errors.append, retry_delay=0, max_retries=3)
-    await mgr.start("pods", "default")
-    await asyncio.wait_for(done.wait(), timeout=2.0)
-    assert errors == []
-    assert mgr.active == {("pods", "default")}
-    await mgr.stop_all()
-
-
-async def test_event_resets_failure_streak() -> None:
-    """Receiving an event resets failures so a later exception starts a fresh streak.
-
-    Sequence with max_retries=3:
-      call 1: raises  → failures=1
-      call 2: yields 1 event → failures resets to 0; then raises → failures=1
-      call 3: raises  → failures=2
-      call 4: blocks (signals `done`)
-    With fix:    failures=2 < 3, on_error never fires.
-    Without fix: failures=3 at call 3 → on_error fires, `done` never set (timeout).
-    """
-    store = ResourceStore()
-    errors: list[str] = []
-    calls = 0
-    done = asyncio.Event()
-
-    async def source(kind: str, scope: str) -> AsyncIterator[tuple[str, Summary]]:
+    async def source(kind: str, scope: str) -> AsyncIterator[WatchEvent[Summary]]:
         nonlocal calls
         calls += 1
         if calls == 1:
             raise RuntimeError("first failure")
             yield  # pragma: no cover
         elif calls == 2:
-            yield ("ADDED", _pod("p"))  # event received — must reset failures
-            raise RuntimeError("source closed after event")
+            yield WatchProgress.POLL
+            raise RuntimeError("failure after empty poll")
         elif calls == 3:
-            raise RuntimeError("second failure")
-            yield ("", _pod(""))  # pragma: no cover
+            raise RuntimeError("second failure after empty poll")
+            yield  # pragma: no cover
         else:
             done.set()
             await asyncio.Event().wait()
@@ -199,6 +150,180 @@ async def test_event_resets_failure_streak() -> None:
     assert errors == []
     assert mgr.active == {("pods", "default")}
     await mgr.stop_all()
+
+
+async def test_healthy_empty_watch_completion_between_failures_allows_retry() -> None:
+    """A normally completed watch session explicitly breaks the failure streak."""
+    store = ResourceStore()
+    errors: list[str] = []
+    calls = 0
+    done = asyncio.Event()
+
+    async def source(kind: str, scope: str) -> AsyncIterator[WatchEvent[Summary]]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("first failure")
+            yield  # pragma: no cover
+        elif calls == 2:
+            return
+            yield  # pragma: no cover
+        elif calls == 3:
+            raise RuntimeError("isolated failure after healthy completion")
+            yield  # pragma: no cover
+        done.set()
+        await asyncio.Event().wait()
+        yield ("", _pod(""))  # pragma: no cover
+
+    mgr = WatchManager(store, source, on_error=errors.append, retry_delay=0, max_retries=2)
+    await mgr.start("pods", "default")
+    await asyncio.wait_for(done.wait(), timeout=2.0)
+
+    assert calls == 4
+    assert errors == []
+    assert mgr.active == {("pods", "default")}
+    await mgr.stop_all()
+
+
+async def test_suppressed_live_event_progress_between_failures_allows_another_retry() -> None:
+    """Transport progress resets retries even when projection emits no row."""
+    store = ResourceStore()
+    errors: list[str] = []
+    calls = 0
+    done = asyncio.Event()
+
+    async def source(kind: str, scope: str) -> AsyncIterator[WatchEvent[Summary]]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("first failure")
+            yield  # pragma: no cover
+        elif calls == 2:
+            yield WatchProgress.LIVE_EVENT
+            raise RuntimeError("failure after suppressed live event")
+        elif calls == 3:
+            raise RuntimeError("second failure after suppressed live event")
+            yield  # pragma: no cover
+        else:
+            done.set()
+            await asyncio.Event().wait()
+            yield ("", _pod(""))  # pragma: no cover
+
+    mgr = WatchManager(store, source, on_error=errors.append, retry_delay=0, max_retries=3)
+    await mgr.start("pods", "default")
+    await asyncio.wait_for(done.wait(), timeout=2.0)
+    assert errors == []
+    assert mgr.active == {("pods", "default")}
+    await mgr.stop_all()
+
+
+async def test_row_event_without_progress_does_not_reset_failure_streak() -> None:
+    """Rows alone are not transport-health evidence."""
+    store = ResourceStore()
+    errors: list[str] = []
+    reported = asyncio.Event()
+    calls = 0
+
+    async def source(kind: str, scope: str) -> AsyncIterator[WatchEvent[Summary]]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("first failure")
+            yield  # pragma: no cover
+        yield ("ADDED", _pod("projected"))
+        raise RuntimeError("second failure")
+
+    def on_error(message: str) -> None:
+        errors.append(message)
+        reported.set()
+
+    mgr = WatchManager(store, source, on_error=on_error, retry_delay=0, max_retries=2)
+    await mgr.start("pods", "default")
+    await asyncio.wait_for(reported.wait(), timeout=2.0)
+
+    assert calls == 2
+    assert mgr.active == set()
+    assert len(errors) == 1
+    assert "second failure" in errors[0]
+
+
+async def test_progress_signal_is_not_stored_or_emitted_to_timeline() -> None:
+    """Progress is control-plane state, never a synthetic resource row."""
+    store = ResourceStore()
+    row_applied = asyncio.Event()
+    seen: list[tuple[str, str]] = []
+
+    async def source(kind: str, scope: str) -> AsyncIterator[WatchEvent[Summary]]:
+        yield WatchProgress.LIVE_EVENT
+        yield ("ADDED", _pod("api"))
+        await asyncio.Event().wait()
+
+    def on_event(kind: str, scope: str, event_type: str, obj: Summary) -> None:
+        seen.append((event_type, obj.name))
+        row_applied.set()
+
+    mgr = WatchManager(store, source, retry_delay=0)
+    mgr.on_event = on_event
+    await mgr.start("pods", "default")
+    await asyncio.wait_for(row_applied.wait(), timeout=2.0)
+
+    assert [pod.name for pod in store.get("pods", "default")] == ["api"]
+    assert seen == [("ADDED", "api")]
+    await mgr.stop_all()
+
+
+async def test_snapshot_is_emitted_as_added_to_existing_row_consumers() -> None:
+    store = ResourceStore()
+    recorded = asyncio.Event()
+    seen: list[tuple[str, str]] = []
+
+    async def source(kind: str, scope: str) -> AsyncIterator[WatchEvent[Summary]]:
+        yield ("SNAPSHOT", _pod("existing"))
+        await asyncio.Event().wait()
+
+    def on_event(kind: str, scope: str, event_type: str, obj: Summary) -> None:
+        seen.append((event_type, obj.name))
+        recorded.set()
+
+    mgr = WatchManager(store, source)
+    mgr.on_event = on_event
+    await mgr.start("pods", "default")
+    try:
+        await asyncio.wait_for(recorded.wait(), timeout=2.0)
+        assert seen == [("ADDED", "existing")]
+        assert [obj.name for obj in store.get("pods", "default")] == ["existing"]
+    finally:
+        await mgr.stop_all()
+
+
+async def test_snapshot_does_not_reset_failure_streak() -> None:
+    """A successful re-LIST is not proof that the live watch is healthy."""
+    store = ResourceStore()
+    errors: list[str] = []
+    reported = asyncio.Event()
+    calls = 0
+
+    async def source(kind: str, scope: str) -> AsyncIterator[WatchEvent[Summary]]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("first failure")
+            yield  # pragma: no cover
+        yield ("SNAPSHOT", _pod("listed"))
+        raise RuntimeError("watch never opened")
+
+    def on_error(message: str) -> None:
+        errors.append(message)
+        reported.set()
+
+    mgr = WatchManager(store, source, on_error=on_error, retry_delay=0, max_retries=2)
+    await mgr.start("pods", "default")
+    await asyncio.wait_for(reported.wait(), timeout=2.0)
+
+    assert calls == 2
+    assert mgr.active == set()
+    assert len(errors) == 1
+    assert "watch never opened" in errors[0]
 
 
 async def test_api_status_error_uses_explain_message() -> None:
@@ -253,10 +378,10 @@ async def test_reconnect_relist_drops_stale_pods() -> None:
         nonlocal calls
         calls += 1
         if calls == 1:
-            yield ("ADDED", _pod("a"))
-            yield ("ADDED", _pod("b"))
+            yield ("SNAPSHOT", _pod("a"))
+            yield ("SNAPSHOT", _pod("b"))
             raise ApiStatusError(500, "connection reset")
-        yield ("ADDED", _pod("a"))
+        yield ("SNAPSHOT", _pod("a"))
         reconnected.set()
         while True:
             await asyncio.sleep(0.01)
@@ -322,7 +447,7 @@ async def test_405_reports_once_without_retries_and_keeps_listed_rows() -> None:
 
     async def source(kind: str, scope: str) -> AsyncIterator[tuple[str, Summary]]:
         attempts.append(1)
-        yield ("ADDED", _ns_pod("listed", "olm"))
+        yield ("SNAPSHOT", _ns_pod("listed", "olm"))
         raise ApiStatusError(405, "Method Not Allowed")
 
     mgr = WatchManager(store, source, on_error=errors.append, retry_delay=0, max_retries=5)
@@ -380,7 +505,7 @@ async def test_403_purges_rows_seeded_by_the_forbidden_list() -> None:
     errors: list[str] = []
 
     async def source(kind: str, scope: str) -> AsyncIterator[tuple[str, Summary]]:
-        yield ("ADDED", _ns_pod("stale", "other-ns"))
+        yield ("SNAPSHOT", _ns_pod("stale", "other-ns"))
         raise ApiStatusError(403, "Forbidden")
 
     mgr = WatchManager(store, source, on_error=errors.append, retry_delay=0)

@@ -11,6 +11,7 @@ from korvid.k8s.models import (
     GenericSummary,
     OLMSubscriptionSummary,
     PackageManifestSummary,
+    PodListSummary,
     PodSummary,
     ReplicaSetSummary,
     StorageClassSummary,
@@ -389,6 +390,86 @@ def test_replicaset_summary_missing_revision() -> None:
 def test_summary_for_dispatches_replicaset() -> None:
     summary = summary_for("ReplicaSet", _rs_manifest())
     assert isinstance(summary, ReplicaSetSummary)
+
+
+@pytest.mark.parametrize(
+    ("kind", "manifest", "summary_type"),
+    [
+        (
+            "Pod",
+            {"metadata": {"name": "pod"}, "spec": {}, "status": {}},
+            PodListSummary,
+        ),
+        ("ReplicaSet", _rs_manifest(), ReplicaSetSummary),
+    ],
+)
+def test_summary_for_defaults_known_native_kinds_when_type_meta_is_absent(
+    kind: str,
+    manifest: dict[str, Any],
+    summary_type: type[GenericSummary],
+) -> None:
+    summary = summary_for(kind, manifest)
+    assert isinstance(summary, summary_type)
+
+
+@pytest.mark.parametrize(
+    ("kind", "api_version", "summary_type"),
+    [
+        ("Pod", "v1", PodListSummary),
+        ("ReplicaSet", "apps/v1", ReplicaSetSummary),
+    ],
+)
+def test_summary_for_dispatches_native_kinds_from_type_meta(
+    kind: str,
+    api_version: str,
+    summary_type: type[GenericSummary],
+) -> None:
+    manifest: dict[str, Any] = {
+        "apiVersion": api_version,
+        "metadata": {"name": "native"},
+        "spec": {},
+        "status": {},
+    }
+    summary = summary_for(kind, manifest)
+    assert isinstance(summary, summary_type)
+
+
+@pytest.mark.parametrize(
+    ("kind", "native_group", "manifest"),
+    [
+        (
+            "Pod",
+            "",
+            {
+                "apiVersion": "example.io/v1",
+                "metadata": {"name": "custom-pod"},
+                "spec": ["foreign", "shape"],
+            },
+        ),
+        (
+            "ReplicaSet",
+            "apps",
+            {
+                "apiVersion": "example.io/v1",
+                "metadata": {"name": "custom-rs"},
+                "spec": ["foreign", "shape"],
+            },
+        ),
+    ],
+)
+def test_summary_for_same_named_foreign_crds_stay_generic(
+    kind: str,
+    native_group: str,
+    manifest: dict[str, Any],
+) -> None:
+    inferred = summary_for(kind, manifest)
+    authoritative = summary_for(kind, manifest, group="example.io")
+    overridden = summary_for(kind, manifest, group=native_group)
+
+    assert type(inferred) is GenericSummary
+    assert inferred.desired is None
+    assert type(authoritative) is GenericSummary
+    assert type(overridden) is not GenericSummary
 
 
 def test_summary_for_falls_back_to_generic() -> None:
@@ -1265,6 +1346,83 @@ def test_summary_for_dispatches_olm_subscription() -> None:
     assert summary.state == "AtLatestKnown"
 
 
+@pytest.mark.parametrize(
+    ("kind", "group", "manifest", "summary_type"),
+    [
+        (
+            "PackageManifest",
+            "packages.operators.coreos.com",
+            {
+                "metadata": {"name": "cert-manager", "namespace": "olm"},
+                "status": {"catalogSource": "catalog"},
+            },
+            PackageManifestSummary,
+        ),
+        (
+            "Subscription",
+            "operators.coreos.com",
+            {
+                "metadata": {"name": "cert-manager", "namespace": "operators"},
+                "spec": {"channel": "stable"},
+            },
+            OLMSubscriptionSummary,
+        ),
+        (
+            "ClusterServiceVersion",
+            "operators.coreos.com",
+            {
+                "metadata": {"name": "cert-manager.v1", "namespace": "operators"},
+                "spec": {"version": "1.0.0"},
+            },
+            CSVSummary,
+        ),
+    ],
+)
+def test_summary_for_olm_uses_authoritative_group_without_type_meta(
+    kind: str,
+    group: str,
+    manifest: dict[str, Any],
+    summary_type: type[GenericSummary],
+) -> None:
+    summary = summary_for(kind, manifest, group=group)
+    assert isinstance(summary, summary_type)
+
+
+@pytest.mark.parametrize(
+    ("kind", "manifest_group", "authoritative_group", "summary_type"),
+    [
+        (
+            "PackageManifest",
+            "packages.operators.coreos.com",
+            "example.io",
+            GenericSummary,
+        ),
+        ("Subscription", "operators.coreos.com", "example.io", GenericSummary),
+        ("ClusterServiceVersion", "operators.coreos.com", "example.io", GenericSummary),
+        (
+            "PackageManifest",
+            "example.io",
+            "packages.operators.coreos.com",
+            PackageManifestSummary,
+        ),
+        ("Subscription", "example.io", "operators.coreos.com", OLMSubscriptionSummary),
+        ("ClusterServiceVersion", "example.io", "operators.coreos.com", CSVSummary),
+    ],
+)
+def test_summary_for_olm_authoritative_group_wins_type_meta_conflicts(
+    kind: str,
+    manifest_group: str,
+    authoritative_group: str,
+    summary_type: type[GenericSummary],
+) -> None:
+    manifest: dict[str, Any] = {
+        "apiVersion": f"{manifest_group}/v1",
+        "metadata": {"name": "conflicting"},
+    }
+    summary = summary_for(kind, manifest, group=authoritative_group)
+    assert type(summary) is summary_type
+
+
 def test_summary_for_leaves_non_olm_subscription_kinds_generic() -> None:
     """Other API groups also define a Subscription kind (e.g. eventing);
     only operators.coreos.com objects get the OLM columns."""
@@ -1290,6 +1448,34 @@ def test_summary_for_dispatches_csv() -> None:
     assert summary.version == "1.14.4"
     assert summary.phase == "Succeeded"
     assert summary.display_name == "cert-manager"
+
+
+def test_pod_list_and_rich_summaries_share_status_facts() -> None:
+    manifest: dict[str, Any] = {
+        "metadata": {"name": "checkout", "namespace": "prod"},
+        "spec": {"nodeName": "node-1", "containers": [{"name": "app"}]},
+        "status": {
+            "phase": "Running",
+            "containerStatuses": [
+                {
+                    "name": "app",
+                    "ready": False,
+                    "restartCount": 4,
+                    "state": {"waiting": {"reason": "CrashLoopBackOff"}},
+                }
+            ],
+        },
+    }
+    lean = summary_for("Pod", manifest)
+    rich = PodSummary.from_manifest(manifest)
+
+    assert isinstance(lean, PodListSummary)
+    assert (lean.phase, lean.ready, lean.restarts, lean.node) == (
+        rich.phase,
+        rich.ready,
+        rich.restarts,
+        rich.node,
+    )
 
 
 def test_packagemanifest_summary_tolerates_non_list_channels() -> None:
@@ -1625,6 +1811,21 @@ def test_summary_for_pdb_without_version_falls_back_to_manifest_api_version() ->
     manifest_v1beta1 = dict(manifest, apiVersion="policy/v1beta1")
     summary_v1beta1 = summary_for("PodDisruptionBudget", manifest_v1beta1)
     assert summary_v1beta1.relationships.selectors == ()
+
+
+def test_summary_for_authoritative_version_wins_type_meta_conflict() -> None:
+    manifest: dict[str, Any] = {
+        "apiVersion": "policy/v1beta1",
+        "metadata": {"name": "all", "namespace": "prod"},
+        "spec": {"selector": {}},
+    }
+    summary = summary_for(
+        "PodDisruptionBudget",
+        manifest,
+        group="policy",
+        version="v1",
+    )
+    assert summary.relationships.selectors[0].empty_matches is True
 
 
 def test_pod_summary_never_retains_secret_values() -> None:

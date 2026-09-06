@@ -1,4 +1,11 @@
+from dataclasses import FrozenInstanceError
+
+import pytest
+from textual.app import App, ComposeResult
+from textual.message import Message
+
 from korvid.core.store import ALL_NAMESPACES
+from korvid.ui import command, messages
 from korvid.ui.command import parse_command
 from korvid.ui.messages import (
     NavigateCommand,
@@ -124,10 +131,19 @@ def test_builtin_names_reserved_over_resource_aliases() -> None:
     def crd_known(head: str) -> str | None:
         return {"model": "models", "agent": "agents", "ai": "ais", "mcp": "mcps"}.get(head)
 
-    for text in ("ai", "ai payload", "agent", "model gpt-4o", "mcp", "mcp on"):
+    expected = (
+        ("ai", "AI", ()),
+        ("ai payload", "AI", ("payload",)),
+        ("agent", "AI", ()),
+        ("model gpt-4o", "MODEL", ("gpt-4o",)),
+        ("mcp", "MCP", ()),
+        ("mcp on", "MCP", ("on",)),
+    )
+    for text, operation_name, arguments in expected:
         msg = parse_command(text, crd_known)
-        assert isinstance(msg, UnknownCommand)
-        assert msg.text == text
+        assert isinstance(msg, messages.BuiltinCommand)
+        assert msg.operation is messages.BuiltinOperation[operation_name]
+        assert msg.arguments == arguments
 
 
 def test_proposals_is_reserved_over_resource_aliases() -> None:
@@ -139,8 +155,87 @@ def test_proposals_is_reserved_over_resource_aliases() -> None:
         return "proposals" if head == "proposals" else None
 
     msg = parse_command("proposals", crd_known)
+    assert isinstance(msg, messages.BuiltinCommand)
+    assert msg.operation is messages.BuiltinOperation.PROPOSALS
+    assert msg.arguments == ()
+
+
+@pytest.mark.parametrize(
+    ("text", "operation_name", "arguments"),
+    [
+        ("ai first second", "AI", ("first", "second")),
+        ("agent first second", "AI", ("first", "second")),
+        ("model first second", "MODEL", ("first", "second")),
+        ("mcp first second", "MCP", ("first", "second")),
+        ("proposals", "PROPOSALS", ()),
+        ("pf", "PORT_FORWARDS", ()),
+        ("tp", "TELEPRESENCE", ()),
+        ("telepresence", "TELEPRESENCE", ()),
+    ],
+)
+def test_app_owned_builtin_aliases_have_canonical_operations(
+    text: str, operation_name: str, arguments: tuple[str, ...]
+) -> None:
+    msg = parse_command(text, lambda _: "shadow-resource")
+    assert isinstance(msg, messages.BuiltinCommand)
+    assert msg.operation is messages.BuiltinOperation[operation_name]
+    assert msg.arguments == arguments
+
+
+@pytest.mark.parametrize("text", ["tp extra", "telepresence extra", "proposals extra", "pf stop"])
+def test_zero_argument_builtins_reject_arguments(text: str) -> None:
+    msg = parse_command(text, _known)
     assert isinstance(msg, UnknownCommand)
-    assert msg.text == "proposals"
+    assert msg.text == text
+
+
+@pytest.mark.parametrize(
+    "field", ["aliases", "help", "operation", "completion", "maximum_arguments"]
+)
+def test_command_catalog_is_immutable(field: str) -> None:
+    descriptor = command.COMMANDS[0]
+    with pytest.raises(FrozenInstanceError, match="cannot assign"):
+        setattr(descriptor, field, None)
+
+
+def test_command_words_are_derived_from_catalog_and_resources() -> None:
+    words = command.command_words(["pods", "deploy", "model"])
+    catalog_aliases = {alias for descriptor in command.COMMANDS for alias in descriptor.aliases}
+    assert words == sorted(catalog_aliases | {"pods", "deploy"})
+
+
+@pytest.mark.parametrize(
+    ("alias", "message_type"),
+    [
+        ("q", QuitCommand),
+        ("quit", QuitCommand),
+        ("ns", ShowNamespacePicker),
+        ("namespaces", ShowNamespacePicker),
+        ("ctx", messages.ShowContextPicker),
+        ("context", messages.ShowContextPicker),
+        ("contexts", messages.ShowContextPicker),
+        ("sort", SortCommand),
+    ],
+)
+def test_dedicated_builtin_aliases_precede_resources(
+    alias: str, message_type: type[Message]
+) -> None:
+    assert isinstance(parse_command(alias, lambda _: "shadow-resource"), message_type)
+
+
+@pytest.mark.parametrize("head", ["ns", "namespaces", "deploy", "pods"])
+def test_argument_completion_uses_namespaces_for_scope_commands(head: str) -> None:
+    assert command.argument_completion(head, _known) is command.ArgumentCompletion.NAMESPACE
+
+
+@pytest.mark.parametrize("head", ["ctx", "context", "contexts"])
+def test_argument_completion_uses_contexts_for_context_aliases(head: str) -> None:
+    assert command.argument_completion(head, _known) is command.ArgumentCompletion.CONTEXT
+
+
+def test_argument_completion_is_absent_for_non_scope_builtins_and_unknowns() -> None:
+    assert command.argument_completion("model", _known) is None
+    assert command.argument_completion("frobnicate", _known) is None
 
 
 def test_command_help_lists_proposals() -> None:
@@ -259,3 +354,31 @@ def test_command_help_describes_every_ai_argument() -> None:
     assert "disconnect" in description.lower()
     assert "payload" in description.lower()
     assert "(also :agent)" in description
+
+
+class _NamespacePickerApp(App[None]):
+    def __init__(self) -> None:
+        super().__init__()
+        self.navigation: NavigateCommand | None = None
+
+    def compose(self) -> ComposeResult:
+        from korvid.ui.widgets.namespace_picker import NamespacePicker
+
+        yield NamespacePicker()
+
+    def on_navigate_command(self, message: NavigateCommand) -> None:
+        self.navigation = message
+
+
+async def test_namespace_picker_preserves_current_view() -> None:
+    from korvid.ui.widgets.namespace_picker import NamespacePicker
+    from tests.ui.waits import until
+
+    app = _NamespacePickerApp()
+    async with app.run_test() as pilot:
+        app.query_one(NamespacePicker).open(["prod"])
+        await pilot.press("enter")
+        await until(pilot, lambda: app.navigation is not None, label="namespace command delivered")
+        assert app.navigation is not None
+        assert app.navigation.view is None
+        assert app.navigation.namespace == "prod"

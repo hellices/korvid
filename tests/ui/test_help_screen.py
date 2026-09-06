@@ -159,13 +159,18 @@ def test_command_help_covers_grammar() -> None:
     assert any("ai" in k for k in entries)
 
 
-def test_command_help_covers_every_reserved_builtin() -> None:
-    """Each reserved builtin (:ai, :model, :mcp, ...) has a help row."""
-    from korvid.ui.command import _RESERVED_BUILTINS
+def test_command_help_covers_every_catalogued_command() -> None:
+    """Every descriptor contributes help that names all of its aliases."""
+    from korvid.ui.command import COMMANDS
 
-    joined = " ".join(f"{cmd} {desc}" for cmd, desc in command_help())
-    for name in _RESERVED_BUILTINS:
-        assert f":{name}" in joined, f"missing help entry for builtin :{name}"
+    rows = command_help()
+    for descriptor in COMMANDS:
+        assert all(row in rows for row in descriptor.help)
+        descriptor_help = " ".join(
+            f"{usage} {description}" for usage, description in descriptor.help
+        )
+        for alias in descriptor.aliases:
+            assert alias in descriptor_help, f"missing help for command alias {alias!r}"
 
 
 def test_body_text_documents_all_close_keys() -> None:

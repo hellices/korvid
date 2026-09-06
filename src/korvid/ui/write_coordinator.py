@@ -39,7 +39,7 @@ import contextlib
 import dataclasses
 import logging
 import weakref
-from collections.abc import Awaitable, Callable, Coroutine, Mapping
+from collections.abc import Awaitable, Callable, Coroutine
 from typing import Any, ClassVar, Protocol, TypeVar
 
 from korvid.core.audit import AuditLog
@@ -108,25 +108,6 @@ def write_locus(ns: str | None) -> str:
     """Namespace qualifier shown in every approval dialog so identically
     named workloads in different namespaces are distinguishable."""
     return f" in namespace {ns}" if ns else " (cluster-scoped)"
-
-
-def canonical_meta_kind(aliases: Mapping[str, ResourceMeta], meta: ResourceMeta) -> str:
-    """The alias that names *meta* in this session's alias table.
-
-    Not always the bare plural: when a same-plural resource from another
-    group won the alias collision, the group-qualified alias is the one that
-    resolves back to this meta, and anything keyed on the kind (the session
-    timeline, the write audit's view label) must use it.
-    """
-    if aliases.get(meta.plural) == meta:
-        return meta.plural
-    qualified = gvr_label(meta)
-    if aliases.get(qualified) == meta:
-        return qualified
-    return min(
-        (alias for alias, candidate in aliases.items() if candidate == meta),
-        default=qualified,
-    )
 
 
 @dataclasses.dataclass(frozen=True)

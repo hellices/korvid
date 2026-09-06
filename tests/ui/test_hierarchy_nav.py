@@ -1017,6 +1017,52 @@ async def test_owned_workloads_fallback_is_capped() -> None:
         assert len(refs) == MAX_COMPONENT_DOCS
 
 
+async def test_csv_owned_workloads_preserve_native_identity_after_alias_collision() -> None:
+    foreign = ResourceMeta("Deployment", "deployments", "example.io", "v1", True)
+    aliases = {**_ALIASES, "deployments": foreign, "deployments.apps": _DEPLOY_META}
+    owned = GenericSummary(
+        name="native-controller",
+        namespace="operators",
+        kind="Deployment",
+        created="",
+        uid="native-uid",
+        owner_uids=("csv-uid",),
+    )
+    wrong = GenericSummary(
+        name="foreign-controller",
+        namespace="operators",
+        kind="Deployment",
+        created="",
+        uid="foreign-uid",
+        owner_uids=("csv-uid",),
+    )
+    app, _ = make_app(
+        {"deployments.apps": [owned], "deployments": [wrong]},
+        namespace="operators",
+        aliases=aliases,
+    )
+    async with app.run_test() as pilot:
+        await app.watch_manager.start("deployments.apps", "operators")
+        await app.watch_manager.start("deployments", "operators")
+        await until(
+            pilot,
+            lambda: (
+                bool(app.store.get("deployments.apps", "operators"))
+                and bool(app.store.get("deployments", "operators"))
+            ),
+            label="both Deployment identities watched",
+        )
+        refs = app._workspace_ctl._refs_from_owned_workloads(
+            {"metadata": {"uid": "csv-uid"}}, "operators"
+        )
+        assert refs == [
+            ComponentRef(
+                "Deployment", "native-controller", api_version="apps/v1", namespace="operators"
+            )
+        ]
+        assert app._workspace_ctl._view_for_component(refs[0]) == ("deployments.apps", True)
+
+
 async def test_alias_discovery_refreshes_open_tree() -> None:
     """A kind discovered while the tree is open (background alias merge)
     turns its display-only nodes navigable on the next aliases update."""

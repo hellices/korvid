@@ -33,6 +33,88 @@ def test_alias_map_first_meta_wins_on_conflict() -> None:
     assert aliases["f"] is a  # deterministic: earlier discovery order wins
 
 
+def test_same_plural_resources_keep_qualified_aliases() -> None:
+    native = ResourceMeta("Deployment", "deployments", "apps", "v1", True)
+    custom = ResourceMeta("Deployment", "deployments", "example.io", "v1", True)
+    aliases = build_alias_map([custom, native])
+    assert aliases["deployments"] is custom
+    assert aliases["deployments.apps"] is native
+    assert aliases["deployments.example.io"] is custom
+
+
+def test_qualified_names_cannot_be_shadowed_by_shortnames() -> None:
+    custom = ResourceMeta("Custom", "customs", "example.io", "v1", True, ("deployments.apps",))
+    native = ResourceMeta("Deployment", "deployments", "apps", "v1", True)
+    aliases = build_alias_map([custom, native])
+    assert aliases["deployments.apps"] is native
+
+
+def test_synthetic_helm_and_flux_have_independent_aliases() -> None:
+    from korvid.k8s.helm import HELM_RELEASES_META
+
+    flux = ResourceMeta(
+        "HelmRelease", "helmreleases", "helm.toolkit.fluxcd.io", "v2", True, ("hr",)
+    )
+    aliases = build_alias_map([HELM_RELEASES_META, flux])
+    assert aliases["helmreleases"] is HELM_RELEASES_META
+    assert aliases["helmreleases.helm.toolkit.fluxcd.io"] is flux
+    assert aliases["hr"] is flux
+
+
+def test_resource_lookup_preserves_group_and_synthetic_identity() -> None:
+    from korvid.k8s.discovery import canonical_resource_alias, resolve_resource
+    from korvid.k8s.helm import HELM_RELEASES_META
+
+    flux = ResourceMeta("HelmRelease", "helmreleases", "helm.toolkit.fluxcd.io", "v2", True)
+    aliases = build_alias_map([HELM_RELEASES_META, flux])
+    assert resolve_resource(aliases, flux.group, flux.plural) is flux
+    assert resolve_resource(aliases, "", "helmreleases") is None
+    assert resolve_resource(aliases, "", "helmreleases", synthetic=True) is HELM_RELEASES_META
+    assert canonical_resource_alias(aliases, flux) == "helmreleases.helm.toolkit.fluxcd.io"
+    assert canonical_resource_alias(aliases, HELM_RELEASES_META) == "helmreleases"
+
+
+def test_resource_lookup_uses_identity_not_a_colliding_bare_alias() -> None:
+    from korvid.k8s.discovery import canonical_resource_alias, resolve_resource
+
+    native = ResourceMeta("Deployment", "deployments", "apps", "v1", True)
+    custom = ResourceMeta("Deployment", "deployments", "example.io", "v1", True)
+    aliases = build_alias_map([custom, native])
+    assert resolve_resource(aliases, "apps", "deployments") is native
+    assert canonical_resource_alias(aliases, native) == "deployments.apps"
+    assert canonical_resource_alias(aliases, custom) == "deployments"
+
+
+def test_partial_alias_map_selection_is_independent_of_insertion_order() -> None:
+    from korvid.k8s.discovery import canonical_resource_alias
+
+    aliases = {"pod": PODS_META, "po": PODS_META}
+    reverse = dict(reversed(list(aliases.items())))
+    assert canonical_resource_alias(aliases, PODS_META) == "po"
+    assert canonical_resource_alias(reverse, PODS_META) == "po"
+
+
+def test_canonical_alias_does_not_fabricate_an_undiscovered_view() -> None:
+    from korvid.k8s.discovery import canonical_resource_alias
+
+    with pytest.raises(ValueError, match="not discovered"):
+        canonical_resource_alias({}, PODS_META)
+
+
+def test_resource_configuration_prefers_qualified_keys_and_preserves_empty_values() -> None:
+    meta = ResourceMeta("HelmRelease", "helmreleases", "helm.toolkit.fluxcd.io", "v2", True)
+    configured: dict[str, tuple[str, ...]] = {
+        "helmreleases": ("bare",),
+        meta.qualified_name: ("qualified",),
+    }
+    assert meta.configured_value(configured) == ("qualified",)
+    configured[meta.qualified_name] = ()
+    assert meta.configured_value(configured) == ()
+    del configured[meta.qualified_name]
+    assert meta.configured_value(configured) == ("bare",)
+    assert meta.configured_value({}) is None
+
+
 _CORE: dict[str, Any] = {
     "resources": [
         {

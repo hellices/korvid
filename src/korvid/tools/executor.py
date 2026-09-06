@@ -861,9 +861,9 @@ class ToolExecutor(RecordedExecution):
         #: and a direct call gets an error naming the missing config.
         self._metrics = metrics
         self._logs = logs
-        #: Configured custom column *names* per plural (issue #45): values
-        #: arrive on GenericSummary.custom from the client; the names let
-        #: list_resources render them as name=value for the model.
+        #: Configured custom column *names* per qualified resource or bare
+        #: plural fallback (issue #45): values arrive on GenericSummary.custom
+        #: from the client; names render them as name=value for the model.
         self._custom_columns = dict(custom_columns or {})
 
     async def execute(self, name: str, arguments: dict[str, Any]) -> str:
@@ -1063,7 +1063,9 @@ class ToolExecutor(RecordedExecution):
         summaries = await self._kube.list_objects(meta, namespace)
         if not summaries:
             return "(none)"
-        column_names = self._custom_columns.get(meta.plural, ())
+        column_names = meta.configured_value(self._custom_columns)
+        if column_names is None:
+            column_names = ()
         lines = []
         for s in summaries:
             line = f"{s.namespace}/{s.name}  -  age={s.age()}"
