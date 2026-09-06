@@ -1338,3 +1338,51 @@ class TestBoundedJsonDepth:
         with pytest.raises(ConnectorError, match="nested too deeply") as caught:
             await backend.get_json("/x", {})
         assert caught.value.kind == "backend"
+
+    async def test_100_sibling_objects_parse(self) -> None:
+        """Closing braces reduce depth; 100 siblings must not trip the limit."""
+        body = b"[" + b",".join([b"{}"] * 100) + b"]"
+        backend = _backend(lambda request: httpx.Response(200, content=body))
+        answer = await backend.get_json("/x", {})
+        assert len(answer.payload) == 100
+
+    async def test_unterminated_string_with_deep_brackets_is_not_json_not_depth_refusal(
+        self,
+    ) -> None:
+        """An unterminated string holds >MAX_JSON_DEPTH brackets without depth refusal.
+
+        The depth scanner skips the brackets because they are inside a string
+        literal that never closes. Only `json.loads` then sees the body —
+        as malformed JSON, not a depth violation.
+        """
+        deep_brackets = b"[" * (MAX_JSON_DEPTH + 1)
+        body = b'["' + deep_brackets  # opening array, then unterminated string with brackets
+        backend = _backend(lambda request: httpx.Response(200, content=body))
+        with pytest.raises(ConnectorError, match="not JSON") as caught:
+            await backend.get_json("/x", {})
+        assert caught.value.kind == "backend"
+
+    async def test_prometheus_matrix_depth6_envelope_parses(self) -> None:
+        """A realistic Prometheus matrix response (depth 6) must parse end-to-end.
+
+        `{data: {result: [{metric: {pod: "x"}, values: [[ts, "v"]]}]}}` nests
+        six levels; both Prometheus and Loki use this fixed shape, so it is a
+        floor for what the limit must allow, not a ceiling.
+        """
+        matrix_payload = {
+            "status": "success",
+            "data": {
+                "resultType": "matrix",
+                "result": [
+                    {
+                        "metric": {"pod": "api-1", "namespace": "prod"},
+                        "values": [[1_786_000_000, "0.42"]],
+                    }
+                ],
+            },
+        }
+        body = json.dumps(matrix_payload).encode()
+        backend = _backend(lambda request: httpx.Response(200, content=body))
+        answer = await backend.get_json("/x", {})
+        result = answer.payload["data"]["result"]
+        assert result[0]["metric"]["pod"] == "api-1"
