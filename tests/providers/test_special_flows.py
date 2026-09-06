@@ -8,6 +8,11 @@ from korvid.agent.model_profiles import (
     SetupFieldKind,
     SpecialFlow,
 )
+from korvid.providers.litellm_settings import (
+    DEVICE_LOGIN_PREFIXES,
+    RESERVED_PROVIDER_NAMES,
+    RETIRED_PROVIDER_ALIASES,
+)
 from korvid.providers.special_flows import SpecialFlowRegistry
 
 
@@ -509,3 +514,70 @@ def test_a_retired_alias_entry_point_is_refused_without_the_transport_table(
 
     assert registry.claim(f"{name}/x") is None
     assert any("reserved" in message for message in registry.errors)
+
+
+# ---------------------------------------------------------------------------
+# Task 18 review round — the reserved names are an input here, not a list
+# kept alive by a module nothing constructs
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("name", sorted(RESERVED_PROVIDER_NAMES))
+def test_a_reserved_name_is_refused_a_third_party_without_the_transport_table(
+    monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    """Every reserved name is refused here, not transitively elsewhere.
+
+    Four of these names — `openai`, `azure`, `anthropic`, `ollama` — are
+    refused today only because LiteLLM's `models_by_provider()` happens to
+    publish them, and that table is a vendor's release artefact. The other
+    five are refused by the retired-alias and device-login lists. Passing
+    no `reserved_prefixes` removes the transitive half, which is the whole
+    point: an operator's `provider: openai` must keep meaning what it
+    always meant whether or not a LiteLLM release still ships the row.
+    """
+    monkeypatch.setattr(
+        "korvid.providers.special_flows._iter_entry_points",
+        lambda: (_DistEntryPoint(name, _flow(name), "acme-korvid-plugin"),),
+    )
+
+    registry = SpecialFlowRegistry.from_entry_points()
+
+    assert registry.claim(f"{name}/x") is None
+    assert any("reserved" in message for message in registry.errors)
+
+
+def test_a_reserved_name_korvid_serves_itself_stays_routable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reserving a name must not unroute it.
+
+    `openai/gpt-4o` is a reference the standard transport serves. The
+    reservation is about who may *register* the prefix, never about
+    whether korvid will dispatch it, so the prefix must stay out of
+    `claimed_prefixes` — a claimed prefix nothing serves is refused by the
+    factory, which would disable every profile under it.
+    """
+    monkeypatch.setattr("korvid.providers.special_flows._iter_entry_points", tuple)
+
+    registry = SpecialFlowRegistry.from_entry_points(reserved_prefixes={"openai", "azure"})
+
+    routable = RESERVED_PROVIDER_NAMES - RETIRED_PROVIDER_ALIASES - DEVICE_LOGIN_PREFIXES
+    assert routable
+    assert not (routable & registry.claimed_prefixes)
+
+
+def test_korvids_own_flow_may_still_claim_a_reserved_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`ollama` is reserved and korvid ships the flow that claims it."""
+    flow = _flow("ollama", claims_option="native_thinking")
+    monkeypatch.setattr(
+        "korvid.providers.special_flows._iter_entry_points",
+        lambda: (_DistEntryPoint("ollama", flow, "korvid"),),
+    )
+
+    registry = SpecialFlowRegistry.from_entry_points()
+
+    assert registry.claim_by_option("ollama/x", {"native_thinking": True}) is flow
+    assert registry.errors == ()

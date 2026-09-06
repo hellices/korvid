@@ -1498,32 +1498,43 @@ class TestDiscoveryFailure:
 
 class TestSingleSourceProviderNames:
     """RESERVED_PROVIDER_NAMES is the one list of names a plugin may not
-    claim. It is stated literally — there is no vendor table left for it
-    to drift from."""
+    claim, and it is defined where the *live* registry reads it."""
 
-    def test_reserved_names_are_a_literal_set_nothing_can_widen(self) -> None:
-        """The names used to be assembled from per-vendor alias constants a
-        registry dispatched on. Task 18 deleted that table; the reservation
-        is now a literal list, so a third party cannot claim a prefix by
-        adding a vendor arm somewhere else."""
-        from korvid.providers.plugin_registry import RESERVED_PROVIDER_NAMES
+    def test_the_reserved_names_are_the_ones_the_live_registry_enforces(self) -> None:
+        """One definition, two consumers — never two lists.
 
-        assert (
-            frozenset(
-                {
-                    "openai-compat",
-                    "openai",
-                    "azure",
-                    "vllm",
-                    "github",
-                    "anthropic",
-                    "claude",
-                    "ollama",
-                    "github-copilot",
-                }
-            )
-            == RESERVED_PROVIDER_NAMES
+        This module's `load_selected` refusal is defence in depth on a
+        construction path current builds do not wire. The refusal that
+        runs on every start is `special_flows.from_entry_points`. A
+        reserved name spelled here as well as there is a name that will
+        eventually be spelled differently in one of the two places, so
+        the constant is imported rather than restated.
+        """
+        from korvid.providers import litellm_settings, plugin_registry, special_flows
+
+        assert plugin_registry.RESERVED_PROVIDER_NAMES is litellm_settings.RESERVED_PROVIDER_NAMES
+        assert special_flows._RESERVED_NAMES == litellm_settings.RESERVED_PROVIDER_NAMES
+
+    def test_the_reserved_names_compose_the_sets_that_state_a_reason(self) -> None:
+        """Each part is reserved for its own reason, and nothing is loose.
+
+        The retired aliases and the device-login prefixes carry stricter
+        rules than reservation alone — both are also kept away from
+        routing — so they keep their own names. What is left is the set
+        korvid serves itself, and the union has to be exactly the three.
+        """
+        from korvid.providers.litellm_settings import (
+            _SELF_SERVED_PROVIDER_NAMES,
+            DEVICE_LOGIN_PREFIXES,
+            RESERVED_PROVIDER_NAMES,
+            RETIRED_PROVIDER_ALIASES,
         )
+
+        assert RETIRED_PROVIDER_ALIASES | DEVICE_LOGIN_PREFIXES | _SELF_SERVED_PROVIDER_NAMES == (
+            RESERVED_PROVIDER_NAMES
+        )
+        assert not (RETIRED_PROVIDER_ALIASES & _SELF_SERVED_PROVIDER_NAMES)
+        assert not (DEVICE_LOGIN_PREFIXES & _SELF_SERVED_PROVIDER_NAMES)
 
     def test_every_special_flow_prefix_is_reserved(self) -> None:
         """A prefix korvid ships a flow for must never be claimable by a

@@ -5,6 +5,15 @@ Discovers third-party LLM provider plugins via
 ``korvid.provider`` entry-point group, but only calls `.load()` on the
 *selected* entry point. Unselected plugins are never imported—this
 keeps startup fast and avoids side-effects from unused packages.
+
+The `korvid.provider` group now carries `SpecialFlow` declarations, which
+`providers.special_flows.SpecialFlowRegistry` loads on the live startup
+path; the `ProviderPlugin` construction path below is the published API 2
+contract and is not wired by current builds (see
+`docs/provider-plugins.md`). `RESERVED_PROVIDER_NAMES` is therefore *not*
+defined here: it lives in `litellm_settings`, where the live registry
+reads it, and this module's own defence-in-depth check consumes the same
+frozenset rather than a second copy of it that could disagree.
 """
 
 from __future__ import annotations
@@ -23,6 +32,7 @@ from korvid.agent.provider_plugin import (
     ProviderPluginMetadata,
     ValidatedPluginProvider,
 )
+from korvid.providers.litellm_settings import RESERVED_PROVIDER_NAMES
 
 if TYPE_CHECKING:
     from korvid.agent.credentials import CredentialSource
@@ -37,27 +47,12 @@ _MAX_NAME_LENGTH = 100
 _ENTRY_POINT_GROUP: str = "korvid.provider"
 _ALLOWED_AUTH_METHODS: frozenset[str] = frozenset({"none", "api_key", "entra"})
 
-#: Names a third-party plugin may not claim. These were korvid's own
-#: adapter identifiers; the adapters are gone, but the names are not free
-#: again. An operator's existing `provider: openai` or a reference
-#: prefixed `github-copilot` must keep meaning what it always meant, so a
-#: plugin registering one of them is refused rather than silently
-#: shadowing the built-in routing. Written out as literals because there
-#: is no longer an adapter table to derive them from — the list is
-#: historical fact about names in the wild, not a routing decision.
-RESERVED_PROVIDER_NAMES: frozenset[str] = frozenset(
-    {
-        "openai-compat",
-        "openai",
-        "azure",
-        "vllm",
-        "github",
-        "anthropic",
-        "claude",
-        "ollama",
-        "github-copilot",
-    }
-)
+__all__ = [
+    "RESERVED_PROVIDER_NAMES",
+    "ProviderPluginError",
+    "ProviderPluginRegistry",
+    "normalize_provider_name",
+]
 
 
 class ProviderPluginError(Exception):

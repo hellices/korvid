@@ -21,7 +21,11 @@ from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
 from korvid.agent.model_profiles import SpecialFlow, split_reference
-from korvid.providers.litellm_settings import DEVICE_LOGIN_PREFIXES, RETIRED_PROVIDER_ALIASES
+from korvid.providers.litellm_settings import (
+    DEVICE_LOGIN_PREFIXES,
+    RESERVED_PROVIDER_NAMES,
+    RETIRED_PROVIDER_ALIASES,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +49,17 @@ _FORBIDDEN_PREFIXES: frozenset[str] = frozenset(
 #: prefix starts an interactive login inside the SDK's own routing call.
 _ALWAYS_CLAIMED: frozenset[str] = _FORBIDDEN_PREFIXES | frozenset(
     prefix.lower().replace("_", "-") for prefix in DEVICE_LOGIN_PREFIXES
+)
+
+#: Names korvid ships a route or a flow for, normalized. A third party
+#: may not register one; korvid's own distribution still may, and every
+#: one of them stays routable — this decides who may *declare* a prefix,
+#: never whether korvid will dispatch it. Held here rather than inferred
+#: from the standard transport's published table, because that table is
+#: a vendor's release artefact and a dropped row would silently hand an
+#: operator's `provider: openai` to whoever registered the entry point.
+_RESERVED_NAMES: frozenset[str] = frozenset(
+    name.lower().replace("_", "-") for name in RESERVED_PROVIDER_NAMES
 )
 
 
@@ -178,18 +193,25 @@ class SpecialFlowRegistry:
         it, and a name in it is one korvid can hand back to routing if
         the flow sharing it turns out not to be loadable.
 
-        `_ALWAYS_CLAIMED` is checked here too, and not left to overlap
-        with *reserved_prefixes* by luck. Every name on it is one korvid
-        must keep away from a third party whatever the transport
-        publishes — a retired alias an operator still reads as korvid's
-        own, and a prefix whose routing starts an interactive device
-        login. `github_copilot` happens to be in `models_by_provider()`
-        today; the refusal must not be a consequence of that.
+        `_ALWAYS_CLAIMED` and `_RESERVED_NAMES` are checked here too, and
+        not left to overlap with *reserved_prefixes* by luck. Every name
+        on them is one korvid must keep away from a third party whatever
+        the transport publishes — a retired alias an operator still reads
+        as korvid's own, a prefix whose routing starts an interactive
+        device login, and a name korvid ships a route or a flow for.
+        `github_copilot`, `openai`, `azure`, `anthropic` and `ollama` all
+        happen to be in `models_by_provider()` today; the refusal must
+        not be a consequence of that.
+
+        The two lists are not interchangeable. `_ALWAYS_CLAIMED` also
+        keeps its names away from *routing*; `_RESERVED_NAMES` never
+        does, so `openai/gpt-4o` stays dispatchable while `openai`
+        remains unregisterable by anyone but korvid.
         """
         registry = cls()
         reserved = {normalize_prefix(prefix) for prefix in reserved_prefixes}
         registry._routable_prefixes = frozenset(reserved)
-        exclusive = reserved | _ALWAYS_CLAIMED
+        exclusive = reserved | _ALWAYS_CLAIMED | _RESERVED_NAMES
 
         for ep in _iter_entry_points():
             try:

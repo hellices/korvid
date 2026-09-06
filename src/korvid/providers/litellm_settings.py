@@ -32,3 +32,23 @@ RETIRED_PROVIDER_ALIASES: frozenset[str] = frozenset({"openai-compat", "vllm", "
 #: `special_flows.normalize_prefix` folds LiteLLM's underscore form onto
 #: it, so both spellings hit the same claim.
 DEVICE_LOGIN_PREFIXES: frozenset[str] = frozenset({"github-copilot"})
+
+#: The reserved names korvid still serves itself, either through the
+#: standard transport or through a flow of its own. Unlike the two sets
+#: above these stay fully routable — reserving a name says who may
+#: *register* it, never whether korvid will dispatch it.
+#:
+#: They are listed because the refusal must not be a consequence of a
+#: vendor's release artefact. Measured on litellm 1.98.0, all four are
+#: rows in `models_by_provider()`, which is the only thing refusing them
+#: to a third party today; a release that drops a row would hand an
+#: operator's `provider: openai` to whoever registered the entry point.
+_SELF_SERVED_PROVIDER_NAMES: frozenset[str] = frozenset({"openai", "azure", "anthropic", "ollama"})
+
+#: Every name a third-party plugin may not register, in korvid's
+#: normalized spelling. Composed rather than restated: each part is
+#: reserved for its own reason, and one list spelled twice is one list
+#: that will disagree with itself.
+RESERVED_PROVIDER_NAMES: frozenset[str] = (
+    RETIRED_PROVIDER_ALIASES | DEVICE_LOGIN_PREFIXES | _SELF_SERVED_PROVIDER_NAMES
+)

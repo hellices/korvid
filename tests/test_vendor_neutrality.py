@@ -55,10 +55,6 @@ ALLOWED: frozenset[str] = frozenset(
         # literal OAuth scope string Entra requires. Not a branch: it is the
         # identifier of an external protocol, like a URL.
         "src/korvid/providers/entra.py",
-        # RESERVED_PROVIDER_NAMES: the plugin registry must refuse
-        # third-party plugins that squat on a name korvid ships. Removing
-        # the names would remove the protection.
-        "src/korvid/providers/plugin_registry.py",
         # Cluster CSP *display* names ("azure" -> "Azure") for the system
         # prompt. This describes the Kubernetes cluster, not the model.
         "src/korvid/agent/prompt_harness.py",
@@ -76,8 +72,11 @@ ALLOWED: frozenset[str] = frozenset(
         # rewrite, and it must be able to name the string it excludes.
         "src/korvid/providers/litellm_catalog.py",
         "src/korvid/providers/litellm_runtime.py",
-        # RETIRED_PROVIDER_ALIASES: the migration-only map from korvid's old
-        # adapter names to LiteLLM prefixes (Task 3).
+        # RETIRED_PROVIDER_ALIASES, DEVICE_LOGIN_PREFIXES and the reserved
+        # names composed from them: the names a third-party plugin may not
+        # register and the retired spellings that must stay unroutable.
+        # `special_flows.from_entry_points` reads them on every start, so
+        # removing the names removes the protection.
         "src/korvid/providers/litellm_settings.py",
     }
 )
