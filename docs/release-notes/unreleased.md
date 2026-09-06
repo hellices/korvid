@@ -43,6 +43,15 @@ korvid now ships a **named-profile** configuration model and a searchable
   model: search for what you want, select it, and the profile is saved. The
   routing prefix is not something an operator needs to know in advance.
 
+- **Endpoint discovery.** For a profile with its own endpoint, the search
+  screen can also list what that endpoint actually serves. The listing now
+  uses `network.ca_bundle` like every other korvid HTTPS call — an endpoint
+  the running agent trusts is one the setup screen trusts, with no insecure
+  fallback — and the whole attempt is bounded by a single 5-second deadline
+  rather than a per-read one. The profile's key is sent as a bearer token to
+  that endpoint only: no redirect is followed, and it is never logged or
+  stored. Failures stay best-effort: an empty listing, never an error dialog.
+
 ## Breaking: the agent's configuration and plugin APIs
 
 The embedded agent was rebuilt as one interaction harness — a single

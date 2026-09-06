@@ -37,6 +37,7 @@ trust decision for it, and how to configure that trust:**
 | --- | --- | --- |
 | Agent LLM endpoint (OpenAI-compatible, native Ollama) | **korvid** | `network.ca_bundle` |
 | `:ai` wizard connection test | **korvid** | `network.ca_bundle` (same builder — the test and the live agent cannot disagree) |
+| `:ai` model discovery (listing a profile endpoint's models) | **korvid** | `network.ca_bundle` (same builder again — an endpoint the agent can reach is one the setup screen can list) |
 | Prometheus / Loki observability connectors | **korvid** | `network.ca_bundle` (same builder again — see [`docs/observability.md`](observability.md)) |
 | models.dev metadata refresh (optional, explicit) | **korvid** | `network.ca_bundle` (same builder again); disable entirely with `agent.model_search.models_dev: false` |
 | Internal Helm chart repository | **helm** (korvid passes it through) | CA-file field in the repo dialog → `helm repo add --ca-file` |
@@ -71,8 +72,9 @@ agent:
   file fails with an error naming the configured path — never a silent
   fallback to default trust.
 - The same bundle covers OpenAI-compatible completions, native Ollama
-  completions, the `:ai` setup wizard's connection test, and the optional
-  models.dev metadata refresh.
+  completions, the `:ai` setup wizard's connection test, the model listing
+  that wizard offers for an endpoint, and the optional models.dev metadata
+  refresh.
 - When `network.ca_bundle` is unset, standard environment behavior applies
   (`SSL_CERT_FILE`, `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`).
 - The system trust store is never modified.

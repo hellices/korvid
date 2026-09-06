@@ -190,6 +190,24 @@ refreshed its model metadata from `models.dev`. No cluster payload, user
 identity, or credential crosses that channel. This is the only outbound
 connection the agent component makes that does not carry a provider payload.
 
+## Setup model discovery
+
+Listing an endpoint's models from the `:ai` wizard is the one setup-time
+request that carries a credential.
+
+- **Operator's endpoint only, on request only.** Both attempts join a path
+  onto the configured URL, keeping its scheme, host and port; anything naming
+  no `http(s)` origin is refused before a client exists. Redirects are
+  refused on the request, so a 3xx is a failed attempt, not a detour.
+- **The key is borrowed, never kept.** Sent as `Authorization: Bearer <key>`
+  for the call, never stored, never logged — korvid formats and scrubs its
+  own failures, so not even a proxy quoting the request back writes the key
+  into a debug log. No key, no header.
+- **Same trust, one budget.** The client comes from the shared builder, so
+  `network.ca_bundle` applies and verification cannot be switched off. One
+  5-second deadline covers both attempts, their reads and the parse, under a
+  2 MiB, JSON-only, 500-entry ceiling. Every failure is an empty listing.
+
 ## The GitHub Copilot routing hazard
 
 LiteLLM's own `github_copilot` provider, if given a model reference under

@@ -2882,3 +2882,32 @@ def test_the_wired_source_reads_no_cache_outside_the_test_sandbox(tmp_path: Path
     assert source is not None
     cache_path = source._cache_path
     assert (tmp_path / "cache") in cache_path.parents
+
+
+async def test_the_wired_discovery_trusts_the_configured_bundle(tmp_path: Path) -> None:
+    """Setup discovery has to reach the same endpoint the runtime will.
+
+    A profile pointing at an internal endpoint behind a TLS-inspecting
+    proxy tested green (the probe honours `network.ca_bundle`) and then
+    listed no models at all, because discovery built a bare
+    `httpx.AsyncClient` on default trust. One bundle, every korvid-owned
+    HTTPS client, this one included.
+    """
+    pytest.importorskip("litellm")
+    from korvid.__main__ import _build_model_catalog
+    from korvid.providers.net import _CANamedClient
+    from tests.providers.tls_ca import mint_ca_and_server_cert
+
+    ca_pem, _, _ = mint_ca_and_server_cert(tmp_path)
+
+    catalog = _build_model_catalog(ca_bundle=str(ca_pem))
+    assert catalog is not None
+
+    discovery = catalog._discovery  # type: ignore[attr-defined]  # the wired catalog is the concrete one
+    assert discovery is not None
+    client = discovery._client_factory()
+    try:
+        assert isinstance(client, _CANamedClient)
+        assert client._ca_bundle_path == str(ca_pem)
+    finally:
+        await client.aclose()
