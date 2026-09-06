@@ -1234,9 +1234,8 @@ views:
     config = load_config(cfg)
     assert set(config.views) == {"helmreleases.helm.toolkit.fluxcd.io"}
     assert [c.name for c in config.views["helmreleases.helm.toolkit.fluxcd.io"].columns] == ["TEAM"]
-    assert any("views.helmreleases: synthetic" in warning for warning in config.warnings)
-    assert not any(
-        "views.helmreleases.helm.toolkit.fluxcd.io" in warning for warning in config.warnings
+    assert config.warnings == (
+        "views.helmreleases: synthetic view kinds don't support custom columns",
     )
 
 
