@@ -23,6 +23,74 @@ import httpx
 from korvid.obs.connector import ConnectorError, QueryLimits, mask_in
 from korvid.obs.credentials import resolve_token_async
 
+MAX_JSON_DEPTH = 64
+"""How deeply a backend answer may nest before it is refused unparsed.
+
+`json.loads` recurses once per nesting level, so a body of 200_000 open
+brackets is a stack exhaustion primitive rather than a parse. Relying on
+`RecursionError` to stop it is not a bound: whether it fires depends on the
+interpreter's stack, the recursion limit, and how deep korvid's own call
+stack already is — one build refuses the body, the next parses it (round-20
+review).
+
+64 is well past anything either backend produces. A Prometheus `matrix`
+answer — `{data: {result: [{metric: {...}, values: [[ts, "v"]]}]}}` — nests
+six levels, and a Loki `streams` answer nests six as well; both are fixed
+shapes, not recursive ones, so no legitimate payload grows deeper with more
+data. It is also comfortably below the default recursion limit of 1000, so
+the parser never reaches its own ceiling.
+"""
+
+
+def _end_of_json_string(body: str, index: int) -> int:
+    """The index just past the string literal whose opening quote is at `index`.
+
+    Returns `len(body)` for an unterminated string: the precheck then sees
+    no more structure and leaves the complaint to `json.loads`, which
+    describes the malformation far better than a depth check could.
+    """
+    index += 1
+    size = len(body)
+    while index < size:
+        char = body[index]
+        if char == "\\":
+            # Both `\"` and `\\` — skipping two characters is what keeps an
+            # escaped quote inside the string and an escaped backslash from
+            # swallowing the closing one.
+            index += 2
+            continue
+        if char == '"':
+            return index + 1
+        index += 1
+    return size
+
+
+def _exceeds_json_depth(body: str, limit: int) -> bool:
+    """Whether `body` nests structure deeper than `limit`, without parsing it.
+
+    One linear pass over an already byte-capped string, skipping string
+    literals so that a log line full of brackets is content and not
+    structure. Unbalanced closers are not an error here — they only make
+    the running depth smaller, and `json.loads` reports them.
+    """
+    depth = 0
+    index = 0
+    size = len(body)
+    while index < size:
+        quote = body.find('"', index)
+        segment = body[index:] if quote < 0 else body[index:quote]
+        for char in segment:
+            if char in "[{":
+                depth += 1
+                if depth > limit:
+                    return True
+            elif char in "]}":
+                depth -= 1
+        if quote < 0:
+            return False
+        index = _end_of_json_string(body, quote)
+    return False
+
 
 def endpoint_host(url: str) -> str:
     """The host of `url`, for messages that must not leak a credential.
@@ -192,7 +260,8 @@ class HttpBackend:
             ConnectorError: `config` for an unusable credential, `auth`,
                 `permission`, `timeout`, `network`, `limit` for an
                 oversized body, or `backend` for anything the backend
-                itself refused or malformed.
+                itself refused or malformed — including a body nested
+                deeper than `MAX_JSON_DEPTH`, which is refused unparsed.
         """
         # One budget for the whole call. httpx's timeout starts when the
         # request does, so it bounds neither the wait for a concurrency
@@ -216,11 +285,24 @@ class HttpBackend:
                 f" {self.limits.timeout_seconds:g}s (including time spent waiting for a"
                 f" free request slot) — raise the timeout or narrow the window",
             ) from exc
+        if _exceeds_json_depth(body, MAX_JSON_DEPTH):
+            # Refused before `json.loads` sees it: the parser recurses per
+            # level, so the alternative is an interpreter-dependent
+            # `RecursionError` — or, on a build with more stack, no refusal
+            # at all. Nothing from the body travels with this message; it
+            # is attacker-shaped and may echo a credential.
+            raise ConnectorError(
+                "backend",
+                f"{self.endpoint} returned a body nested too deeply to parse"
+                f" (more than {MAX_JSON_DEPTH} levels)",
+            )
         try:
             parsed = json.loads(body)
         except RecursionError as exc:
-            # Not a ValueError: a deeply nested body would otherwise escape
-            # the connector's error contract as a generic tool failure.
+            # Unreachable behind the precheck above, and kept anyway: a
+            # `RecursionError` is not a `ValueError`, so without this a
+            # deeply nested body escapes the connector's error contract as
+            # a generic tool failure.
             raise ConnectorError(
                 "backend", f"{self.endpoint} returned a body nested too deeply to parse"
             ) from exc

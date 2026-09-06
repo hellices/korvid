@@ -110,6 +110,7 @@ label scope beyond what `label_mappings` resolved.
 | time window | 60 min (max 360) | **refused**, not shortened |
 | result series / log lines | 50 / 200 | truncated, and the result says so |
 | response bytes | 1 MiB | request aborted |
+| JSON nesting depth | 64 | **refused unparsed**, as a `backend` error |
 | concurrent requests (`max_concurrency`) | 2 per backend | excess calls queue on a semaphore; the wait is inside the request timeout |
 | request timeout | 10 s | reported as a timeout, budgets the whole call |
 
@@ -118,6 +119,16 @@ shrinking it would answer a different question from the one that was asked.
 Truncation is never silent: every result carries `truncated: yes|no`, the
 window it covers, the endpoint that answered, and the query that ran, so it
 participates in the agent's evidence citations like any cluster read.
+
+The nesting bound is checked *before* parsing, by a single linear pass over
+the already byte-capped body that ignores brackets inside JSON strings. A
+body of 200,000 open brackets is a stack-exhaustion primitive, not a
+payload, and leaving it to the parser's own `RecursionError` makes the
+refusal depend on the interpreter's stack rather than on korvid. 64 levels
+is far past the six a Prometheus `matrix` or a Loki `streams` answer nests,
+and neither shape deepens with more data. A malformed body — an
+unterminated string, say — is still described by the JSON parser, not by
+the depth check.
 
 Concurrency is a bound like the others, not a tuning hint: each backend
 admits `max_concurrency` requests at a time — **2** by default — and queues
