@@ -39,9 +39,8 @@ from korvid.agent.events import (
 )
 from korvid.agent.interaction import ResourceIdentity
 from korvid.agent.session import AgentSession
-from korvid.agent.setup import AgentSettings
 from korvid.core.audit import AuditLog
-from korvid.core.config import KorvidConfig
+from korvid.core.config import KorvidConfig, ModelConnectionConfig, ModelConnectionsConfig
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.models import PodSummary
 from korvid.k8s.writes import WriteOps
@@ -430,7 +429,6 @@ class Env:
         panel: FakePanel | None = None,
         catalog: Any = None,
         save_profiles: Any = None,
-        profile_settings: Any = None,
     ) -> None:
         self.ui = FakeUi()
         self.panel = panel if panel is not None else FakePanel()
@@ -498,7 +496,6 @@ class Env:
             available=available,
             catalog=catalog,
             save_profiles=save_profiles,
-            profile_settings=profile_settings,
         )
 
     async def _manifest(self, kind: str, namespace: str | None, name: str) -> dict[str, Any]:
@@ -614,15 +611,12 @@ async def test_model_command_rejects_trailing_arguments(env: Env) -> None:
     assert "Usage: :model [name]" in env.ui.messages()
 
 
-async def test_applying_settings_swaps_the_session_and_the_configured_tier(
+async def test_applying_a_profile_swaps_the_session_and_the_configured_tier(
     tmp_path: Path,
 ) -> None:
     fresh = ScriptedSession(policy=fake_policy(model="m-2"))
-    env = Env(tmp_path=tmp_path, rebuild=lambda settings: fresh)
-    settings = AgentSettings(
-        provider="ollama", auth_method="none", base_url=None, model="m-2", model_tier="low"
-    )
-    assert env.controller.apply_settings(settings) is True
+    env = Env(tmp_path=tmp_path, rebuild=lambda profile, tier: fresh)
+    assert env.controller.apply_profile(ModelConnectionConfig(model="ollama/m-2"), "low") is True
     assert env.controller.session is fresh
     assert env.controller.model_name == "m-2"
     assert env.controller.configured_model_tier == "low"
@@ -630,11 +624,8 @@ async def test_applying_settings_swaps_the_session_and_the_configured_tier(
 
 async def test_a_failed_rebuild_keeps_the_previous_session(tmp_path: Path) -> None:
     previous = ScriptedSession()
-    env = Env(tmp_path=tmp_path, session=previous, rebuild=lambda settings: None)
-    settings = AgentSettings(
-        provider="ollama", auth_method="none", base_url=None, model="m-2", model_tier="high"
-    )
-    assert env.controller.apply_settings(settings) is False
+    env = Env(tmp_path=tmp_path, session=previous, rebuild=lambda profile, tier: None)
+    assert env.controller.apply_profile(ModelConnectionConfig(model="ollama/m-2"), "high") is False
     assert env.controller.session is previous
 
 
@@ -643,25 +634,29 @@ async def test_a_failed_rebuild_keeps_the_previous_session(tmp_path: Path) -> No
 # ---------------------------------------------------------------------------
 
 
+_DEGRADED_PROFILE = ModelConnectionConfig(
+    model="ollama/llama3",
+    endpoint="http://localhost:11434/v1",
+)
 _DEGRADED_CONFIG = KorvidConfig(
     namespace="default",
     agent_enabled=True,
-    agent_provider="ollama",
-    agent_auth_method="none",
-    agent_base_url="http://localhost:11434/v1",
-    agent_model="llama3",
     agent_model_tier="low",
+    model_connections=ModelConnectionsConfig(
+        active="default", profiles={"default": _DEGRADED_PROFILE}
+    ),
 )
 
 
-async def test_the_setup_wizard_opens_on_the_configured_snapshot(tmp_path: Path) -> None:
-    """`:ai` after a degraded startup must prefill what is on disk instead
+async def test_the_profile_manager_opens_on_the_configured_snapshot(tmp_path: Path) -> None:
+    """`:ai` after a degraded startup must open on what is on disk instead
     of asking for every answer again.
 
-    The snapshot is a *profile* now, so a config that predates profiles is
-    projected onto one rather than dropped: the wizard opens on the model
-    the operator already configured.
+    A config that predates profiles is migrated onto one by `load_config`
+    rather than dropped, so `:ai` reaches the manager holding the model
+    the operator already configured — not a blank wizard.
     """
+    from korvid.ui.widgets.profile_manager_screen import ProfileManagerScreen
     from tests.ui.test_agent_ui_controller_profiles import _StubCatalog
 
     env = Env(
@@ -672,11 +667,12 @@ async def test_the_setup_wizard_opens_on_the_configured_snapshot(tmp_path: Path)
     )
     env.controller.handle_command([])
     screen, _callback = env.ui.screens[-1]
-    # The screen stack is typed as plain `Screen`s; the prefill under test
-    # is the setup screen's own state, so the type is narrowed first.
-    assert isinstance(screen, AgentSetupScreen)
-    assert screen._seed.model == "ollama/llama3"
-    assert screen._seed.endpoint == "http://localhost:11434/v1"
+    # The screen stack is typed as plain `Screen`s; the state under test
+    # is the manager screen's own, so the type is narrowed first.
+    assert isinstance(screen, ProfileManagerScreen)
+    assert screen._profiles.active == "default"
+    assert screen._profiles.profiles["default"].model == "ollama/llama3"
+    assert screen._profiles.profiles["default"].endpoint == "http://localhost:11434/v1"
 
 
 # ---------------------------------------------------------------------------

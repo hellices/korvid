@@ -42,9 +42,8 @@ from textual.worker import Worker, WorkerError, WorkerState
 from korvid.agent.events import AgentEvent
 from korvid.agent.interaction import PaneContext, ResourceIdentity
 from korvid.agent.model_profiles import ModelCatalog
-from korvid.agent.setup import AgentSettings
 from korvid.core.audit import AuditLog
-from korvid.core.config import KorvidConfig, ModelConnectionsWriter
+from korvid.core.config import KorvidConfig, ModelConnectionConfig, ModelConnectionsWriter
 from korvid.core.filters import ResourceFilter
 from korvid.core.keybindings import plan_keybindings, shift_alias_keys
 from korvid.core.mcp import MCPControllerBase
@@ -369,7 +368,9 @@ class KorvidApp(App[None]):
         #: Writes `agent.active`/`agent.profiles` — and the first-run model
         #: tier that belongs with them — back to config.yaml.
         agent_save_profiles: ModelConnectionsWriter | None = None,
-        rebuild_agent: Callable[[AgentSettings], AgentSession | None] | None = None,
+        rebuild_agent: (
+            Callable[[ModelConnectionConfig, str | None], AgentSession | None] | None
+        ) = None,
         disconnect_agent: Callable[[], None] | None = None,
         agent_available: bool = True,
         write_ops: WriteOps | None = None,
@@ -1806,8 +1807,9 @@ class KorvidApp(App[None]):
         # status refresh (navigation always lands here).
         self._refresh_top_bar()
         # Availability comes from the actual runtime, not the config flag —
-        # create_provider may return None (unknown provider, missing base_url/
-        # model) while agent_enabled is still true in config.
+        # the provider factory refuses an unusable profile (no endpoint for
+        # keyless auth, a reference it cannot resolve) and returns None while
+        # a profile is still active in config.
         label = "AI on" if self._agent_ui.session is not None else "AI off"
         if self._agent_ui.session is not None and self._agent_ui.blocked_in_protected():
             label = "AI blocked"

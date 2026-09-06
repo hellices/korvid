@@ -19,7 +19,7 @@ from pathlib import Path
 from stat import S_IMODE
 from tempfile import mkstemp
 from types import MappingProxyType
-from typing import Any, Final, Protocol, TypedDict, cast
+from typing import Any, Final, Protocol, cast
 from urllib.parse import urlsplit, urlunsplit
 
 import yaml
@@ -334,18 +334,14 @@ class KorvidConfig:
     #: order. Purely local navigation state — never an authorization list.
     favorite_namespaces: tuple[str, ...] = ()
     #: Named model connection profiles (`agent.active` / `agent.profiles`).
-    #: The single source of truth for provider configuration; the legacy
-    #: scalars below are derived from `model_connections.active_profile`
-    #: during the compatibility cycle and are removed with it.
+    #: The single source of truth for provider configuration. A legacy
+    #: `agent.provider`/`agent.model`/... block is migrated into a profile
+    #: on load, so nothing downstream reads the old scalars.
     model_connections: ModelConnectionsConfig = field(default_factory=ModelConnectionsConfig)
+    #: Whether an agent can be built at all: exactly "a profile is active".
+    #: `agent.enabled: false` and `agent.active: null` are the same state,
+    #: which is why the migration expresses the former as the latter.
     agent_enabled: bool = False
-    agent_provider: str | None = None
-    agent_base_url: str | None = None
-    agent_model: str | None = None
-    agent_api_key_env: str | None = None
-    agent_auth_method: str | None = None
-    agent_options: dict[str, object] = field(default_factory=dict)
-    agent_options_error: str | None = None
     #: Explicit model-capability tier override (`agent.model_tier`): `low` or
     #: `high`, or `None` for automatic routing. Replaces the removed
     #: `agent.profile` key — see `ConfigMigrationError`. It is consumed by
@@ -363,13 +359,6 @@ class KorvidConfig:
     #: `korvid.agent.prompt_harness.PromptHarness`, which never lets a rule
     #: widen what the safety contract above it granted.
     agent_rules: tuple[str, ...] = ()
-    #: Native Ollama tuning (issue #72): `agent.ollama.*` in config.yaml.
-    agent_ollama_num_ctx: int = 16384
-    agent_ollama_temperature: float = 0.0
-    agent_ollama_seed: int | None = None
-    agent_ollama_think: bool = False
-    agent_ollama_keep_alive: str | int | None = None
-    agent_ollama_num_predict: int | None = None
     keybindings: dict[str, str] = field(default_factory=dict)
     log_buffer_lines: int = 5000
     log_wrap: bool = False
@@ -450,43 +439,6 @@ def load_config(path: Path | None = None) -> KorvidConfig:
     agent_raw: dict[str, Any] = agent_value if isinstance(agent_value, dict) else {}
     warnings: list[str] = []
     model_connections = _resolve_model_connections(agent_raw, warnings)
-    if "profiles" in agent_raw:
-        # New profile format: derive scalars from the active profile.
-        scalars = _derive_legacy_scalars(model_connections, warnings)
-        agent_enabled = scalars["agent_enabled"]
-        agent_provider = scalars["agent_provider"]
-        agent_base_url = scalars["agent_base_url"]
-        agent_model = scalars["agent_model"]
-        agent_api_key_env = scalars["agent_api_key_env"]
-        agent_auth_method = scalars["agent_auth_method"]
-        agent_options = scalars["agent_options"]
-        agent_options_error = scalars["agent_options_error"]
-    else:
-        # Legacy format: read scalars directly from agent_raw.
-        provider_raw: str | None = agent_raw.get("provider")
-        # Canonicalize early: github_copilot, GitHub.Copilot etc. all become
-        # github-copilot so auth-method defaults and the composition root's
-        # OAuth token lookup match without case/separator awareness.
-        agent_provider = (
-            _canonicalize_provider_name(provider_raw) if isinstance(provider_raw, str) else None
-        )
-        # Auto-activation: provider present -> on, unless explicitly disabled (§6.3).
-        agent_enabled = bool(agent_provider) and agent_raw.get("enabled", True) is not False
-        agent_api_key_env = _opt_str(agent_raw.get("api_key_env"))
-        auth_value = agent_raw.get("auth")
-        auth_raw: dict[str, Any] = auth_value if isinstance(auth_value, dict) else {}
-        agent_options, agent_options_error = (
-            _parse_agent_options(agent_raw["options"]) if "options" in agent_raw else ({}, None)
-        )
-        agent_auth_method = _opt_str(auth_raw.get("method"))
-        if agent_auth_method is None and agent_provider:
-            # Back-compat: configs written before agent.auth existed.
-            agent_auth_method = _legacy_auth_method(agent_raw, agent_provider)
-        agent_base_url = _opt_str(agent_raw.get("base_url"))
-        agent_model = _opt_str(agent_raw.get("model"))
-        if agent_options_error is not None:
-            warnings.append(agent_options_error)
-    ollama_raw = _legacy_ollama_raw(agent_raw)
     mcp_value = raw.get("mcp")
     mcp_raw: dict[str, Any] = mcp_value if isinstance(mcp_value, dict) else {}
     logs_value = raw.get("logs")
@@ -561,22 +513,9 @@ def load_config(path: Path | None = None) -> KorvidConfig:
         namespace=raw.get("namespace"),
         favorite_namespaces=favorites,
         model_connections=model_connections,
-        agent_enabled=agent_enabled,
-        agent_provider=agent_provider,
-        agent_base_url=agent_base_url,
-        agent_model=agent_model,
-        agent_api_key_env=agent_api_key_env,
-        agent_auth_method=agent_auth_method,
-        agent_options=agent_options,
-        agent_options_error=agent_options_error,
+        agent_enabled=model_connections.active_profile is not None,
         agent_model_tier=model_tier,
         agent_rules=agent_rules,
-        agent_ollama_num_ctx=_parse_num_ctx(ollama_raw.get("num_ctx")),
-        agent_ollama_temperature=_parse_temperature(ollama_raw.get("temperature")),
-        agent_ollama_seed=_parse_seed(ollama_raw.get("seed")),
-        agent_ollama_think=ollama_raw.get("think") is True,
-        agent_ollama_keep_alive=_parse_keep_alive(ollama_raw.get("keep_alive")),
-        agent_ollama_num_predict=_parse_num_predict(ollama_raw.get("num_predict"), warnings),
         keybindings=dict(raw.get("keybindings") or {}),
         log_buffer_lines=_parse_buffer_lines(raw.get("log_buffer_lines")),
         log_wrap=logs_raw.get("wrap") is True,
@@ -1059,278 +998,15 @@ def save_model_connections(
     _atomic_write_text(path, yaml.safe_dump(raw, sort_keys=False))
 
 
-#: Provider prefixes the *interim* legacy transport cannot serve. Between
-#: this task and Task 15 the running transport is still the legacy one,
-#: which speaks only bearer-token OpenAI-compatible HTTP, Azure and
-#: Ollama. Anything else must disable the agent visibly rather than be
-#: silently routed through a bearer-token client — sending an
-#: `Authorization: Bearer` to a vendor that expects its own header is a
-#: credential leak, not a degraded experience. Deleted in Task 18.
-_PREFIXES_WITHOUT_LEGACY_TRANSPORT: frozenset[str] = frozenset(
-    {"anthropic", "bedrock", "gemini", "vertex_ai", "cohere", "mistral", "groq", "xai"}
-)
-
-
 #: The auth-settings key naming the environment variable an API key lives
 #: in. A *name*: nothing in this module reads the environment, so a secret
 #: value can never travel from a profile into a projection or back to disk.
 _AUTH_ENV_KEY_SETTING: str = "key"
 
-#: The provider prefix whose SDK credential chain the interim transport
-#: actually implements (`EntraCredentialSource`), and the one whose
-#: device-login token store exists (`CopilotCredentialSource`).
-_ENTRA_PREFIX: str = "azure"
-_DEVICE_LOGIN_PREFIX: str = "github-copilot"
-
-#: Common auth ids the interim transport serves for every provider,
-#: mapped onto the transport's own vocabulary. `environment` is absent:
-#: it carries a variable name and is handled separately.
-_LEGACY_TRANSPORT_AUTH: Mapping[str, str] = MappingProxyType({"none": "none"})
-
-#: Common auth ids the interim transport serves for exactly one provider
-#: prefix, as `method -> (required prefix, transport method)`.
-#: `provider-default` is Azure's Entra chain and nothing else;
-#: `device-login` has a token store only behind GitHub Copilot. Offering
-#: either anywhere else would build a client with no credential at all.
-_PREFIX_BOUND_LEGACY_AUTH: Mapping[str, tuple[str, str]] = MappingProxyType(
-    {
-        "provider-default": (_ENTRA_PREFIX, "entra"),
-        "device-login": (_DEVICE_LOGIN_PREFIX, "device-login"),
-    }
-)
-
-
-def _project_legacy_auth(
-    prefix: str, auth: ConnectionAuthConfig
-) -> tuple[tuple[str, str | None] | None, str | None]:
-    """Translate a profile's common auth id into the transport's own.
-
-    Profiles speak the five common ids (`none`, `environment`, `keyring`,
-    `provider-default`, `device-login`); the *interim* transport speaks
-    `none`, `api_key`, `entra` and `device-login`. They are different
-    alphabets, so a method handed straight through is rejected deep inside
-    the provider factory as "unknown agent auth method" and disables an
-    agent the operator configured correctly.
-
-    Refuses rather than downgrades: a method the transport cannot serve
-    must not fall back to an unauthenticated request or to whatever
-    `api_key_env` happens to be set.
-
-    Args:
-        prefix: The profile's provider prefix.
-        auth: The profile's auth block.
-
-    Returns:
-        `((transport method, api key variable name), None)`, or `None`
-        paired with a human-readable refusal.
-    """
-    method = auth.method
-    if method == "environment":
-        key = auth.settings.get(_AUTH_ENV_KEY_SETTING)
-        if not isinstance(key, str) or not key:
-            return None, (
-                "auth method 'environment' needs the name of the environment variable "
-                f"holding the API key (auth.{_AUTH_ENV_KEY_SETTING})"
-            )
-        return ("api_key", key), None
-    direct = _LEGACY_TRANSPORT_AUTH.get(method)
-    if direct is not None:
-        return (direct, None), None
-    bound = _PREFIX_BOUND_LEGACY_AUTH.get(method)
-    if bound is None:
-        return None, f"auth method {method!r} needs the new transport (Task 15)"
-    required, translated = bound
-    if prefix != required:
-        return None, f"auth method {method!r} is only available for the {required!r} provider"
-    return (translated, None), None
-
-
-def _legacy_azure_base_url(profile: ModelConnectionConfig) -> str | None:
-    """Rebuild the deployment-scoped URL the legacy transport needs."""
-    if profile.endpoint is None:
-        return None
-    deployment = profile.options.get("azure_deployment")
-    if not isinstance(deployment, str) or not deployment:
-        return profile.endpoint
-    return f"{profile.endpoint.rstrip('/')}/openai/deployments/{deployment}"
-
-
-@dataclass(frozen=True, slots=True)
-class LegacyTransportProjection:
-    """One profile as the scalars the *interim* legacy transport speaks.
-
-    Temporary, and deleted with the transport in Task 18. It exists as a
-    public value so startup, the `:ai` wizard's connection probe and a
-    profile switch all reach the transport through one projection — a
-    second, parallel one is how an Azure deployment path or an unsupported
-    provider prefix ends up handled one way at boot and another way at
-    runtime.
-    """
-
-    provider: str
-    #: The *transport's* vocabulary (`none`, `api_key`, `entra`,
-    #: `device-login`) — never the profile's common id, which the
-    #: provider factory does not know.
-    auth_method: str
-    base_url: str | None
-    model: str
-    api_key_env: str | None
-    options: dict[str, object]
-
-
-def project_legacy_transport(
-    profile: ModelConnectionConfig,
-) -> tuple[LegacyTransportProjection | None, str | None]:
-    """Project *profile* onto the legacy transport, or say why it cannot be.
-
-    Returns `(projection, None)` when the transport can serve the profile
-    and `(None, reason)` when it cannot. It refuses rather than guesses:
-    routing a provider the legacy client cannot speak through a
-    bearer-token HTTP call would send `Authorization: Bearer` to a vendor
-    that expects its own header, which is a credential leak rather than a
-    degraded experience.
-
-    The auth method is *translated*, not passed through: profiles speak
-    the five common ids and the transport speaks its own four
-    (`_project_legacy_auth`).
-
-    Args:
-        profile: The connection to project.
-
-    Returns:
-        The projection, or `None` paired with a human-readable refusal.
-    """
-    if profile.config_error is not None:
-        return None, f"the profile was rejected: {profile.config_error}"
-    sep = MODEL_REFERENCE_SEPARATOR
-    if sep not in profile.model:
-        return None, f"model {profile.model!r} has no provider prefix"
-    prefix, tag = profile.model.split(sep, 1)
-    if prefix in _PREFIXES_WITHOUT_LEGACY_TRANSPORT:
-        return None, f"the {prefix!r} provider needs the new transport (Task 15)"
-    auth, auth_refusal = _project_legacy_auth(prefix, profile.auth)
-    if auth is None:
-        return None, auth_refusal
-    auth_method, api_key_env = auth
-    return (
-        LegacyTransportProjection(
-            provider=prefix,
-            auth_method=auth_method,
-            base_url=_legacy_azure_base_url(profile)
-            if prefix == _ENTRA_PREFIX
-            else profile.endpoint,
-            model=tag,
-            api_key_env=api_key_env,
-            options=cast("dict[str, object]", _thaw_config_value(profile.options)),
-        ),
-        None,
-    )
-
-
-class _LegacyScalars(TypedDict):
-    agent_enabled: bool
-    agent_provider: str | None
-    agent_base_url: str | None
-    agent_model: str | None
-    agent_api_key_env: str | None
-    agent_auth_method: str | None
-    agent_options: dict[str, object]
-    agent_options_error: str | None
-
-
-def _empty_legacy_scalars() -> _LegacyScalars:
-    return _LegacyScalars(
-        agent_enabled=False,
-        agent_provider=None,
-        agent_base_url=None,
-        agent_model=None,
-        agent_api_key_env=None,
-        agent_auth_method=None,
-        agent_options={},
-        agent_options_error=None,
-    )
-
-
-def _derive_legacy_scalars(profiles: ModelConnectionsConfig, warnings: list[str]) -> _LegacyScalars:
-    """Project the active profile onto the pre-profile scalar fields.
-
-    Temporary. It exists only so commit groups 1-3 stay buildable while
-    the transport is still the legacy one, and Task 18 deletes it. The
-    projection itself is `project_legacy_transport`, shared with every
-    runtime path that has to reach the same transport; this wrapper adds
-    only the config-file context a startup warning needs.
-    """
-    profile = profiles.active_profile
-    if profile is None:
-        return _empty_legacy_scalars()
-    projection, refusal = project_legacy_transport(profile)
-    if projection is None:
-        warnings.append(f"agent.profiles.{profiles.active}: {refusal} — the agent is disabled")
-        return _empty_legacy_scalars()
-    return _LegacyScalars(
-        agent_enabled=True,
-        agent_provider=projection.provider,
-        agent_base_url=projection.base_url,
-        agent_model=projection.model,
-        agent_api_key_env=projection.api_key_env,
-        agent_auth_method=projection.auth_method,
-        agent_options=projection.options,
-        agent_options_error=None,
-    )
-
-
-def save_agent_config(
-    path: Path,
-    *,
-    provider: str,
-    auth_method: str,
-    base_url: str | None,
-    model: str,
-    api_key_env: str | None,
-    model_tier: str | None = None,
-) -> None:
-    """Persist managed agent fields, preserving unrelated keys (read-modify-write)."""
-    raw: dict[str, Any] = {}
-    if path.is_file():
-        raw = yaml.safe_load(path.read_text()) or {}
-    existing = raw.get("agent")
-    agent: dict[str, Any] = dict(existing) if isinstance(existing, dict) else {}
-    agent["provider"] = provider
-    agent["model"] = model
-    # An explicit low/high override is a deliberate choice and is written
-    # out so it survives a restart and reopening `:ai` never resets it to
-    # Automatic. Automatic (None) instead pops any previously persisted
-    # override — choosing Automatic in the wizard must actually clear a
-    # stale explicit tier, not leave it stuck.
-    if model_tier is not None:
-        agent["model_tier"] = model_tier
-    else:
-        agent.pop("model_tier", None)
-    # Merge into any existing auth mapping: only `method` is managed here,
-    # unrelated nested keys must survive the read-modify-write.
-    existing_auth = agent.get("auth")
-    auth: dict[str, Any] = dict(existing_auth) if isinstance(existing_auth, dict) else {}
-    auth["method"] = auth_method
-    agent["auth"] = auth
-    # A completed wizard/model save is a user-confirmed enable: clear any
-    # stale explicit-disable switch so it cannot silently win after restart.
-    agent.pop("enabled", None)
-    if base_url:
-        agent["base_url"] = base_url
-    else:
-        agent.pop("base_url", None)
-    if api_key_env:
-        agent["api_key_env"] = api_key_env
-    else:
-        agent.pop("api_key_env", None)
-    raw["agent"] = agent
-    path.parent.mkdir(parents=True, exist_ok=True)
-    _atomic_write_text(path, yaml.safe_dump(raw, sort_keys=False))
-
 
 def save_topbar_state(path: Path, *, expanded: bool) -> None:
     """Persist the top bar collapse/expand choice (issue #142), preserving
-    unrelated keys (same read-modify-write shape as save_agent_config)."""
+    unrelated keys (same read-modify-write shape as save_model_connections)."""
     raw: dict[str, Any] = {}
     if path.is_file():
         loaded = yaml.safe_load(path.read_text())
@@ -1416,86 +1092,6 @@ def _parse_model_tier(value: Any) -> str | None:
     raise ConfigMigrationError(
         f"agent.model_tier must be absent, null, 'low', or 'high' (got {value!r})."
     )
-
-
-def _parse_num_ctx(value: Any) -> int:
-    """Coerce `agent.ollama.num_ctx` to a positive int; fall back to 16384."""
-    parsed = _parse_positive_int(value)
-    return parsed if parsed is not None else 16384
-
-
-def _parse_positive_int(value: Any) -> int | None:
-    """Coerce a value to a positive int, or None.
-
-    Permissive on purpose (existing `num_ctx`/legacy compatibility): a
-    numeric string or a value `int()` can otherwise accept is coerced
-    rather than rejected. `num_predict` does *not* use this — see
-    `_parse_num_predict` for that stricter contract.
-    """
-    if isinstance(value, bool):  # YAML `true` would silently become 1
-        return None
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError, OverflowError):
-        return None
-    return parsed if parsed > 0 else None
-
-
-def _parse_num_predict(value: Any, warnings: list[str]) -> int | None:
-    """Coerce `agent.ollama.num_predict` to a strictly positive `int`, or None.
-
-    Unlike `_parse_positive_int` (kept for `num_ctx`'s existing permissive
-    compatibility), this rejects anything that is not *already* an actual
-    positive `int`: a `bool` (a stealth `int` subclass), a `float` (even
-    one that looks integral, like `2.0`, or truncates cleanly, like
-    `1.9`), a numeric string, and any non-positive integer. An absent
-    value is silently `None` — the provider then omits the option. A
-    *provided* invalid value both resolves to `None` and appends a
-    startup config warning, so a typo is surfaced instead of silently
-    capping (or not capping) generation.
-    """
-    if value is None:
-        return None
-    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-        warnings.append("agent.ollama.num_predict: must be a positive integer — ignoring the value")
-        return None
-    return value
-
-
-def _parse_seed(value: Any) -> int | None:
-    """Coerce `agent.ollama.seed` to a non-negative int, or None.
-
-    Unlike num_ctx, `seed: 0` is a valid (reproducible) sampling seed and
-    must not fall back to the server's random default.
-    """
-    if isinstance(value, bool):
-        return None
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError, OverflowError):
-        return None
-    return parsed if parsed >= 0 else None
-
-
-def _parse_temperature(value: Any) -> float:
-    """Coerce `agent.ollama.temperature` to a non-negative float; fall back to 0.0."""
-    if isinstance(value, bool):
-        return 0.0
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError, OverflowError):
-        return 0.0
-    # Non-finite values (.inf/.nan) would serialize as invalid JSON downstream.
-    return parsed if parsed >= 0 and isfinite(parsed) else 0.0
-
-
-def _parse_keep_alive(value: Any) -> str | int | None:
-    """`agent.ollama.keep_alive` passthrough: duration string ("10m") or integer seconds."""
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int) or (isinstance(value, str) and value):
-        return value
-    return None
 
 
 def _opt_str(value: Any) -> str | None:
@@ -1589,11 +1185,6 @@ def _parse_bounded_options(value: Any, *, root: str) -> tuple[dict[str, object],
             f"{root} exceeds max serialized budget {_MAX_AGENT_OPTIONS_SERIALIZED_BYTES} bytes",
         )
     return parsed, None
-
-
-def _parse_agent_options(value: Any) -> tuple[dict[str, object], str | None]:
-    """`agent.options`, validated. Thin wrapper over `_parse_bounded_options`."""
-    return _parse_bounded_options(value, root="agent.options")
 
 
 def _parse_profile_entry(
@@ -1769,31 +1360,30 @@ def _legacy_model_reference(provider: str, model: str) -> str:
     return f"{provider}{MODEL_REFERENCE_SEPARATOR}{model}"
 
 
-def _legacy_auth_method(agent_raw: dict[str, Any], provider: str) -> str:
+def _legacy_auth(agent_raw: dict[str, Any], provider: str) -> ConnectionAuthConfig:
+    """The legacy `agent.auth`/`agent.api_key_env` pair as profile auth.
+
+    Configs written before `agent.auth` existed carry no method at all,
+    so one is inferred: GitHub Copilot only ever had a device login, and
+    everything else is keyed exactly when it names an environment
+    variable. The inference lives here, in the migration, rather than in
+    `load_config` — a provider name compared inline in the loader is a
+    routing decision the rest of korvid no longer makes.
+    """
     auth_value = agent_raw.get("auth")
     auth_map: dict[str, Any] = auth_value if isinstance(auth_value, dict) else {}
-    legacy_method = _opt_str(auth_map.get("method"))
     api_key_env = _opt_str(agent_raw.get("api_key_env"))
+    legacy_method = _opt_str(auth_map.get("method"))
     if legacy_method is None:
         if provider == "github-copilot":
-            return "device-login"
-        return "api_key" if api_key_env else "none"
-    return legacy_method
-
-
-def _legacy_auth(agent_raw: dict[str, Any], provider: str) -> ConnectionAuthConfig:
-    legacy_method = _legacy_auth_method(agent_raw, provider)
+            legacy_method = "device-login"
+        else:
+            legacy_method = "api_key" if api_key_env else "none"
     method = common_auth_method(legacy_method)
-    api_key_env = _opt_str(agent_raw.get("api_key_env"))
     settings: dict[str, object] = {}
     if method == "environment" and api_key_env:
         settings[_AUTH_ENV_KEY_SETTING] = api_key_env
     return ConnectionAuthConfig(method=method, settings=settings)
-
-
-def _legacy_ollama_raw(agent_raw: dict[str, Any]) -> dict[str, Any]:
-    ollama_value = agent_raw.get("ollama")
-    return ollama_value if isinstance(ollama_value, dict) else {}
 
 
 def _legacy_options(
@@ -1827,7 +1417,9 @@ def _legacy_options(
     """
     options: dict[str, object] = {}
     if provider == "ollama":
-        options.update(_legacy_ollama_options(_legacy_ollama_raw(agent_raw), warnings))
+        ollama_value = agent_raw.get("ollama")
+        ollama_raw: dict[str, Any] = ollama_value if isinstance(ollama_value, dict) else {}
+        options.update(_legacy_ollama_options(ollama_raw, warnings))
         options["native_api"] = True
         # The key the shipped flow claims. `native_api` stays for the
         # profiles written before the flow existed; both spellings mean

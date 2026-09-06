@@ -212,6 +212,11 @@ def test_the_tool_description_removal_note_names_which_arm_uses_which_wording(
     assert "MCP" in text
 
 
+def _names_key(text: str, key: str) -> bool:
+    """Whether *text* names *key* as a key rather than as a prefix of one."""
+    return re.search(rf"{re.escape(key)}(?![\w.])", text) is not None
+
+
 def test_the_agent_page_links_the_migration_note_instead_of_restating_it() -> None:
     """A product guide is not a migration manual.
 
@@ -228,7 +233,10 @@ def test_the_agent_page_links_the_migration_note_instead_of_restating_it() -> No
 
     agent = _text("docs/agent.md")
     assert "Upgrading from the profile-based agent" not in agent
-    assert [key for key in removed_keys if key in agent] == []
+    # Matched as whole keys: today's supported `agent.profiles` merely
+    # *contains* the retired singular spelling, so a substring test would
+    # read the replacement as the thing it replaced.
+    assert [key for key in removed_keys if _names_key(agent, key)] == []
     assert "model_tier" in agent, "the supported key still has to be on the page"
     assert re.search(
         r"\[[^\]]*(?:migration|upgrade)[^\]]*\]\(release-notes/unreleased\.md\)",
@@ -291,34 +299,31 @@ def test_the_agent_page_states_cloud_provider_detection_truthfully() -> None:
     assert "unknown" in window.casefold()
 
 
-def test_the_ollama_row_names_the_namespace_its_six_keys_actually_live_under() -> None:
-    """The tuning knobs are read out of `agent.ollama.*`, not the bare names.
+def test_the_ollama_row_names_the_six_keys_and_where_they_live() -> None:
+    """The tuning knobs are read out of a profile's `options`, not the bare
+    names.
 
-    `Config` groups exactly six `agent_ollama_<key>` fields directly under
-    the "Native Ollama tuning (issue #72): `agent.ollama.*` in config.yaml"
-    comment, ending at the unrelated `keybindings` field. The provider
-    table's Ollama row lists the six key names but, before this test, never
-    said which namespace an operator has to nest them under in
-    `config.yaml` — `num_ctx: 32768` at the top level of the agent block is
-    silently ignored. Both the six keys and the `agent.ollama` namespace
-    they require have to be on the page.
+    `_options_from` reads exactly six keys off `profile.options`. They used
+    to be dedicated `agent_ollama_<key>` config fields under a retired
+    per-vendor namespace; Task 18 deleted those, so the row has to name
+    `options` instead — `num_ctx: 32768` at the top level of a profile is
+    silently ignored. Both the six keys and the `options` mapping they nest
+    under have to be on the page.
     """
-    config = _text("src/korvid/core/config.py")
-    start = config.index("Native Ollama tuning (issue #72)")
-    end = config.index("keybindings", start)
-    block = config[start:end]
-    keys = re.findall(r"agent_ollama_(\w+):", block)
+    flow = _text("src/korvid/providers/flow_ollama_thinking.py")
+    start = flow.index("def _options_from(")
+    end = flow.index("def _credentials_for(", start)
+    block = flow[start:end]
+    keys = re.findall(r"profile_options\.get\(\"(\w+)\"\)", block)
     assert keys == ["num_ctx", "temperature", "seed", "think", "keep_alive", "num_predict"], (
-        "the six ollama keys config.py actually defines must drive this test, not a hand-written list"
+        "the six ollama keys the flow actually reads must drive this test, not a hand-written list"
     )
 
     agent = _text("docs/agent.md")
     row = next(line for line in agent.splitlines() if line.strip().startswith("| Ollama"))
     for key in keys:
         assert key in row, f"the Ollama row must still name {key}"
-    assert "agent.ollama" in row, (
-        "the Ollama row must say the six keys nest under the `agent.ollama` namespace"
-    )
+    assert "options" in row, "the Ollama row must say the six keys nest under a profile's `options`"
 
 
 # ---------------------------------------------------------------------------

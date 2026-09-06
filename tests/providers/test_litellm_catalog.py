@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import inspect
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -380,6 +381,50 @@ async def test_discovery_without_an_endpoint_returns_nothing_rather_than_raising
     catalog = LiteLLMModelCatalog()
     profile = ModelConnectionConfig(model="openai/gpt-4o")
     assert await catalog.discover(profile) == ()
+
+
+class _RecordingDiscovery:
+    """Records the prefix `discover` resolved, and lists nothing."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    async def list_models(
+        self, *, base_url: str, api_key: str | None, prefix: str
+    ) -> tuple[ModelEntry, ...]:
+        self.calls.append(prefix)
+        return ()
+
+
+async def test_discovery_uses_the_profile_prefix() -> None:
+    discovery = _RecordingDiscovery()
+    catalog = LiteLLMModelCatalog(discovery=cast("Any", discovery))
+
+    await catalog.discover(
+        ModelConnectionConfig(model="hosted_vllm/qwen", endpoint="https://gpu.internal/v1")
+    )
+
+    assert discovery.calls == ["hosted_vllm"]
+
+
+async def test_a_prefixless_reference_is_not_discovered_under_an_invented_vendor() -> None:
+    """A bare reference names no provider, and korvid must not pick one.
+
+    Labelling an unknown endpoint's models `openai/...` writes a provider
+    prefix the operator never chose into every entry the wizard offers,
+    and the resulting reference points at a vendor that may have nothing
+    to do with the endpoint. Discovering nothing is the honest answer.
+    """
+    discovery = _RecordingDiscovery()
+    catalog = LiteLLMModelCatalog(discovery=cast("Any", discovery))
+
+    assert (
+        await catalog.discover(
+            ModelConnectionConfig(model="bare-model", endpoint="https://gpu.internal/v1")
+        )
+        == ()
+    )
+    assert discovery.calls == []
 
 
 # ---------------------------------------------------------------------------

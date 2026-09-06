@@ -124,7 +124,7 @@ _PARAM_FIELDS: Final[dict[str, SetupField]] = {
         key="api_version",
         label="API version",
         kind=SetupFieldKind.TEXT,
-        help_text="Provider API version string (e.g. 2024-02-01 for Azure).",
+        help_text="Provider API version string, if the endpoint requires one (e.g. 2024-02-01).",
     ),
 }
 
@@ -434,14 +434,25 @@ class LiteLLMModelCatalog(ModelCatalog):
     async def discover(self, profile: ModelConnectionConfig) -> tuple[ModelEntry, ...]:
         """Live-list models from the profile's endpoint.
 
+        Every discovered entry is labelled with the profile's own provider
+        prefix, because that is the only prefix korvid knows the operator
+        chose. A reference with no prefix therefore discovers nothing:
+        inventing one would write a provider the operator never named into
+        every entry offered, pointing the resulting reference at a vendor
+        that may have nothing to do with the endpoint.
+
         Returns `()` when no discovery prober is injected, when the profile
-        has a config error, or when the profile has no endpoint.
+        has a config error, when the profile has no endpoint, or when its
+        reference names no provider.
         """
         if self._discovery is None:
             return ()
         if profile.config_error is not None:
             return ()
         if not profile.endpoint:
+            return ()
+        prefix = split_reference(profile.model)[0]
+        if not prefix:
             return ()
 
         # Resolve the key from the profile's explicit auth config, without
@@ -454,7 +465,6 @@ class LiteLLMModelCatalog(ModelCatalog):
 
                 api_key = os.environ.get(key_name)
 
-        prefix = split_reference(profile.model)[0] or "openai"
         return await self._discovery.list_models(
             base_url=profile.endpoint,
             api_key=api_key,

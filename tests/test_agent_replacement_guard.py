@@ -228,7 +228,6 @@ def test_the_agent_package_ships_exactly_the_harness_modules() -> None:
         "provider_plugin.py",
         "request_gateway.py",
         "session.py",
-        "setup.py",
         "tool_harness.py",
     }
 
@@ -427,9 +426,7 @@ _PUBLIC_SURFACE = {
     "ToolCallStarted",
     "TurnComplete",
     "TurnInterrupted",
-    # setup
-    "AgentConfigurator",
-    "AgentSettings",
+    # model_profiles
     "DeviceLoginPrompt",
 }
 

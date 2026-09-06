@@ -1497,34 +1497,46 @@ class TestDiscoveryFailure:
 
 
 class TestSingleSourceProviderNames:
-    """RESERVED_PROVIDER_NAMES must derive from the same constants that
-    registry.py uses for dispatch, so the two cannot drift."""
+    """RESERVED_PROVIDER_NAMES is the one list of names a plugin may not
+    claim. It is stated literally — there is no vendor table left for it
+    to drift from."""
 
-    def test_reserved_is_union_of_canonical_constants(self) -> None:
-        from korvid.providers.plugin_registry import (
-            GITHUB_COPILOT_PROVIDER,
-            OLLAMA_PROVIDER,
-            OPENAI_COMPAT_ALIASES,
-            RESERVED_PROVIDER_NAMES,
+    def test_reserved_names_are_a_literal_set_nothing_can_widen(self) -> None:
+        """The names used to be assembled from per-vendor alias constants a
+        registry dispatched on. Task 18 deleted that table; the reservation
+        is now a literal list, so a third party cannot claim a prefix by
+        adding a vendor arm somewhere else."""
+        from korvid.providers.plugin_registry import RESERVED_PROVIDER_NAMES
+
+        assert (
+            frozenset(
+                {
+                    "openai-compat",
+                    "openai",
+                    "azure",
+                    "vllm",
+                    "github",
+                    "anthropic",
+                    "claude",
+                    "ollama",
+                    "github-copilot",
+                }
+            )
+            == RESERVED_PROVIDER_NAMES
         )
 
-        expected = OPENAI_COMPAT_ALIASES | {OLLAMA_PROVIDER, GITHUB_COPILOT_PROVIDER}
-        assert expected == RESERVED_PROVIDER_NAMES
-
-    def test_registry_dispatch_uses_same_constants(self) -> None:
-        """registry.py must import and use the canonical constants from
-        plugin_registry.py — not independently defined sets."""
-        import korvid.providers.registry as reg_mod
-        from korvid.providers.plugin_registry import (
-            GITHUB_COPILOT_PROVIDER,
-            OLLAMA_PROVIDER,
-            OPENAI_COMPAT_ALIASES,
+    def test_every_special_flow_prefix_is_reserved(self) -> None:
+        """A prefix korvid ships a flow for must never be claimable by a
+        plugin: the flow would be shadowed and its credential path with it."""
+        from korvid.providers.flow_copilot import korvid_special_flows as copilot_flows
+        from korvid.providers.flow_ollama_thinking import (
+            korvid_special_flows as ollama_flows,
         )
+        from korvid.providers.plugin_registry import RESERVED_PROVIDER_NAMES
 
-        # Verify the module references are the same objects.
-        assert reg_mod.OPENAI_COMPAT_ALIASES is OPENAI_COMPAT_ALIASES  # type: ignore[attr-defined]  # re-export identity check
-        assert reg_mod.OLLAMA_PROVIDER is OLLAMA_PROVIDER  # type: ignore[attr-defined]  # re-export identity check
-        assert reg_mod.GITHUB_COPILOT_PROVIDER is GITHUB_COPILOT_PROVIDER  # type: ignore[attr-defined]  # re-export identity check
+        shipped = {flow.prefix for flow in (*copilot_flows(), *ollama_flows())}
+        assert shipped  # the fixture is the precondition
+        assert shipped <= RESERVED_PROVIDER_NAMES
 
     def test_all_reserved_names_are_canonical_form(self) -> None:
         """Every reserved name must already be in normalized form."""

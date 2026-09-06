@@ -37,9 +37,15 @@ _MAX_NAME_LENGTH = 100
 _ENTRY_POINT_GROUP: str = "korvid.provider"
 _ALLOWED_AUTH_METHODS: frozenset[str] = frozenset({"none", "api_key", "entra"})
 
-# Single-source canonical built-in provider sets.  registry.py imports these
-# for dispatch routing so the two modules cannot drift independently.
-OPENAI_COMPAT_ALIASES: frozenset[str] = frozenset(
+#: Names a third-party plugin may not claim. These were korvid's own
+#: adapter identifiers; the adapters are gone, but the names are not free
+#: again. An operator's existing `provider: openai` or a reference
+#: prefixed `github-copilot` must keep meaning what it always meant, so a
+#: plugin registering one of them is refused rather than silently
+#: shadowing the built-in routing. Written out as literals because there
+#: is no longer an adapter table to derive them from — the list is
+#: historical fact about names in the wild, not a routing decision.
+RESERVED_PROVIDER_NAMES: frozenset[str] = frozenset(
     {
         "openai-compat",
         "openai",
@@ -48,17 +54,10 @@ OPENAI_COMPAT_ALIASES: frozenset[str] = frozenset(
         "github",
         "anthropic",
         "claude",
+        "ollama",
+        "github-copilot",
     }
 )
-OLLAMA_PROVIDER: str = "ollama"
-GITHUB_COPILOT_PROVIDER: str = "github-copilot"
-
-# Centralized reserved names — union of all built-in identifiers that must
-# never be claimed by third-party plugins.
-RESERVED_PROVIDER_NAMES: frozenset[str] = OPENAI_COMPAT_ALIASES | {
-    OLLAMA_PROVIDER,
-    GITHUB_COPILOT_PROVIDER,
-}
 
 
 class ProviderPluginError(Exception):

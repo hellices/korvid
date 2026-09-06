@@ -26,9 +26,7 @@ from korvid.agent.model_profiles import (
     SetupField,
 )
 from korvid.agent.session import AgentSession
-from korvid.agent.setup import AgentSettings
 from korvid.core.config import KEEP_MODEL_TIER, KorvidConfig, ModelTierWrite
-from korvid.ui.agent_ui_controller import settings_from_profile
 from korvid.ui.widgets.agent_setup_screen import AgentSetupScreen, SetupResult
 from korvid.ui.widgets.profile_manager_screen import ProfileManagerResult, ProfileManagerScreen
 
@@ -104,10 +102,10 @@ class _Saver:
 
 
 def _rebuilding(session: AgentSession | None) -> Any:
-    built: list[AgentSettings] = []
+    built: list[tuple[ModelConnectionConfig, str | None]] = []
 
-    def _rebuild(settings: AgentSettings) -> AgentSession | None:
-        built.append(settings)
+    def _rebuild(profile: ModelConnectionConfig, model_tier: str | None) -> AgentSession | None:
+        built.append((profile, model_tier))
         return session
 
     _rebuild.built = built  # type: ignore[attr-defined]  # test-only recorder
@@ -122,7 +120,6 @@ def _env(
     rebuild: Any = None,
     saver: _Saver | None = None,
     catalog: Any = "stub",
-    profile_settings: Any = None,
     config: KorvidConfig | None = None,
 ) -> Env:
     resolved = profiles if profiles is not None else _profiles()
@@ -133,7 +130,6 @@ def _env(
         rebuild=rebuild,
         catalog=_StubCatalog() if catalog == "stub" else catalog,
         save_profiles=saver if saver is not None else _Saver(),
-        profile_settings=profile_settings,
     )
 
 
@@ -212,10 +208,10 @@ async def test_activation_hands_the_factory_the_profile_it_named(tmp_path: Path)
     env.controller.handle_command([])
     _activate(env, "staging")
 
-    built = rebuild.built[-1]
-    assert built.model == "model-y"
-    assert built.base_url == "http://staging.example"
-    assert built.api_key_env == "STAGING_KEY"
+    profile, _tier = rebuild.built[-1]
+    assert profile.model == "acme/model-y"
+    assert profile.endpoint == "http://staging.example"
+    assert profile.auth.settings["key"] == "STAGING_KEY"
 
 
 async def test_a_refused_rebuild_keeps_the_previous_session_and_pointer(tmp_path: Path) -> None:
@@ -235,9 +231,9 @@ async def test_a_refused_rebuild_keeps_the_previous_session_and_pointer(tmp_path
 async def test_a_profile_with_a_config_error_is_never_handed_to_the_factory(tmp_path: Path) -> None:
     handed: list[ModelConnectionConfig] = []
 
-    def _factory(profile: ModelConnectionConfig, tier: str | None) -> AgentSettings | None:
+    def _factory(profile: ModelConnectionConfig, tier: str | None) -> AgentSession | None:
         handed.append(profile)
-        return settings_from_profile(profile, tier)
+        return FakeSession()
 
     broken = ModelConnectionConfig(model="acme/model-z", options={"bad": object()})
     assert broken.config_error is not None  # the fixture is the precondition
@@ -249,9 +245,8 @@ async def test_a_profile_with_a_config_error_is_never_handed_to_the_factory(tmp_
     env = _env(
         tmp_path,
         profiles=profiles,
-        rebuild=_rebuilding(FakeSession()),
+        rebuild=_factory,
         saver=saver,
-        profile_settings=_factory,
     )
     env.controller.handle_command([])
     _activate(env, "broken")
@@ -262,7 +257,12 @@ async def test_a_profile_with_a_config_error_is_never_handed_to_the_factory(tmp_
     assert "invalid" in env.ui.notifications[-1][0].lower()
 
 
-async def test_a_profile_without_a_provider_prefix_is_refused_not_guessed(tmp_path: Path) -> None:
+async def test_a_profile_the_factory_refuses_is_never_persisted(tmp_path: Path) -> None:
+    """The factory owns every refusal reason now (an unroutable reference,
+    a keyless profile with no endpoint). Whatever it refuses, the pointer
+    on disk and the live session must both stay where they were — a
+    persisted `agent.active` would make the refusal survive the restart.
+    """
     profiles = ModelConnectionsConfig(
         active="default",
         profiles={
@@ -271,7 +271,7 @@ async def test_a_profile_without_a_provider_prefix_is_refused_not_guessed(tmp_pa
         },
     )
     saver = _Saver()
-    env = _env(tmp_path, profiles=profiles, rebuild=_rebuilding(FakeSession()), saver=saver)
+    env = _env(tmp_path, profiles=profiles, rebuild=_rebuilding(None), saver=saver)
     env.controller.handle_command([])
     _activate(env, "bare")
 
@@ -483,16 +483,15 @@ async def test_agent_model_tier_and_agent_follow_still_come_from_settings(tmp_pa
 async def test_the_tier_travels_to_the_factory_with_the_profile(tmp_path: Path) -> None:
     seen: list[str | None] = []
 
-    def _factory(profile: ModelConnectionConfig, tier: str | None) -> AgentSettings | None:
+    def _factory(profile: ModelConnectionConfig, tier: str | None) -> AgentSession | None:
         seen.append(tier)
-        return settings_from_profile(profile, tier)
+        return FakeSession()
 
     profiles = _profiles()
     env = _env(
         tmp_path,
         profiles=profiles,
-        rebuild=_rebuilding(FakeSession()),
-        profile_settings=_factory,
+        rebuild=_factory,
         config=_config(profiles, agent_model_tier="high"),
     )
     env.controller.handle_command([])
@@ -531,95 +530,6 @@ async def test_a_cancelled_wizard_persists_nothing(tmp_path: Path) -> None:
     callback(None)
 
     assert saver.calls == []
-
-
-# ---------------------------------------------------------------------------
-# The interim factory
-# ---------------------------------------------------------------------------
-
-
-def test_settings_from_profile_never_carries_a_secret_value(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The profile stores a variable *name*; resolution belongs to the
-    provider factory, not to anything that renders or persists."""
-    monkeypatch.setenv("SOME_KEY", "sk-secret-value")
-    profile = ModelConnectionConfig(
-        model="acme/model-x",
-        auth=ConnectionAuthConfig(method="environment", settings={"key": "SOME_KEY"}),
-    )
-    settings = settings_from_profile(profile, None)
-
-    assert settings is not None
-    assert settings.api_key_env == "SOME_KEY"
-    assert "sk-secret-value" not in repr(settings)
-
-
-def test_settings_from_profile_refuses_a_reference_without_a_provider() -> None:
-    assert settings_from_profile(ModelConnectionConfig(model="bare"), None) is None
-
-
-def test_settings_from_profile_refuses_a_prefix_the_legacy_transport_cannot_serve() -> None:
-    """Startup refuses these with a warning. A profile switch reaching the
-    same prefix through a second, laxer projection would send a bearer
-    token to a vendor that expects its own header."""
-    profile = ModelConnectionConfig(model="anthropic/claude-sonnet-4-5")
-
-    assert settings_from_profile(profile, None) is None
-
-
-def test_settings_from_profile_refuses_a_profile_with_a_config_error() -> None:
-    broken = ModelConnectionConfig(model="acme/model-x", options={"bad": object()})
-    assert broken.config_error is not None  # the fixture is the precondition
-
-    assert settings_from_profile(broken, None) is None
-
-
-def test_settings_from_profile_reattaches_the_azure_deployment_path() -> None:
-    """The projection has to be the one startup uses, deployment path and
-    all: a `:ai` switch that drops it configures a 404."""
-    from korvid.core.config import load_config
-
-    profile = ModelConnectionConfig(
-        model="azure/gpt-4o",
-        endpoint="https://x.openai.azure.com",
-        auth=ConnectionAuthConfig(method="environment", settings={"key": "AZURE_OPENAI_API_KEY"}),
-        options={"azure_deployment": "my-dep"},
-    )
-    settings = settings_from_profile(profile, None)
-
-    assert settings is not None
-    assert settings.base_url == "https://x.openai.azure.com/openai/deployments/my-dep"
-    assert load_config  # the startup path this must agree with
-
-
-def test_settings_from_profile_matches_the_scalars_startup_derives(tmp_path: Path) -> None:
-    from korvid.core.config import load_config
-
-    path = tmp_path / "config.yaml"
-    path.write_text(
-        "agent:\n"
-        "  active: main\n"
-        "  profiles:\n"
-        "    main:\n"
-        "      model: azure/gpt-4o\n"
-        "      endpoint: https://x.openai.azure.com\n"
-        "      auth:\n"
-        "        method: environment\n"
-        "        key: AZURE_OPENAI_API_KEY\n"
-        "      options:\n"
-        "        azure_deployment: my-dep\n",
-        encoding="utf-8",
-    )
-    startup = load_config(path)
-    settings = settings_from_profile(startup.model_connections.profiles["main"], None)
-
-    assert settings is not None
-    assert settings.provider == startup.agent_provider
-    assert settings.base_url == startup.agent_base_url
-    assert settings.model == startup.agent_model
-    assert settings.api_key_env == startup.agent_api_key_env
-    assert settings.auth_method == startup.agent_auth_method
 
 
 # ---------------------------------------------------------------------------
@@ -866,11 +776,14 @@ async def test_a_failed_model_save_keeps_the_session_and_warns_about_the_revert(
     assert env.controller.profiles.profiles["default"].model == "acme/model-x"
 
 
-async def test_model_refuses_a_reference_the_transport_cannot_serve(tmp_path: Path) -> None:
+async def test_model_leaves_everything_alone_when_the_factory_refuses(tmp_path: Path) -> None:
+    """`:model` applies before it persists, so a reference the factory
+    refuses must leave the live session *and* the stored model untouched
+    rather than taking effect on the next start."""
     saver = _Saver()
     session = FakeSession()
-    env = _env(tmp_path, session=session, rebuild=_rebuilding(FakeSession()), saver=saver)
-    env.controller.handle_model_command(["anthropic/claude-sonnet-4-5"])
+    env = _env(tmp_path, session=session, rebuild=_rebuilding(None), saver=saver)
+    env.controller.handle_model_command(["acme/model-the-factory-refuses"])
 
     assert saver.calls == []
     assert env.controller.session is session
@@ -878,23 +791,26 @@ async def test_model_refuses_a_reference_the_transport_cannot_serve(tmp_path: Pa
 
 
 async def test_model_on_a_legacy_startup_creates_the_default_profile(tmp_path: Path) -> None:
-    """A config.yaml still holding the pre-profile scalars has no profile
-    to edit. `:model` has to be the whole recovery, so it files the
-    configuration korvid already has as a profile instead of asking the
-    operator to re-run the wizard."""
+    """A config.yaml still holding the pre-profile scalars is migrated into
+    a profile by `load_config`, so `:model` is still the whole recovery:
+    it edits what korvid already knows instead of asking the operator to
+    re-run the wizard."""
+    from korvid.core.config import load_config
+
     saver = _Saver()
-    legacy = KorvidConfig(
-        namespace="default",
-        agent_enabled=True,
-        agent_provider="ollama",
-        agent_auth_method="api_key",
-        agent_api_key_env="OLLAMA_KEY",
-        agent_base_url="http://localhost:11434/v1",
-        agent_model="llama3",
+    legacy_path = tmp_path / "legacy.yaml"
+    legacy_path.write_text(
+        "agent:\n"
+        "  provider: ollama\n"
+        "  model: llama3\n"
+        "  base_url: http://localhost:11434/v1\n"
+        "  api_key_env: OLLAMA_KEY\n",
+        encoding="utf-8",
     )
+    legacy = load_config(legacy_path)
     env = _env(
         tmp_path,
-        profiles=ModelConnectionsConfig(),
+        profiles=legacy.model_connections,
         rebuild=_rebuilding(FakeSession()),
         saver=saver,
         config=legacy,
@@ -906,8 +822,7 @@ async def test_model_on_a_legacy_startup_creates_the_default_profile(tmp_path: P
     created = written.profiles["default"]
     assert created.model == "ollama/llama3.2"
     assert created.endpoint == "http://localhost:11434/v1"
-    # The profile vocabulary, not the transport's: a profile written with
-    # `api_key` would be refused by the projection on the next start.
+    # The profile vocabulary, not the legacy transport's `api_key`.
     assert created.auth.method == "environment"
     assert dict(created.auth.settings) == {"key": "OLLAMA_KEY"}
 

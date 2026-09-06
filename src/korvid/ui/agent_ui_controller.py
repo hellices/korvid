@@ -59,17 +59,14 @@ from korvid.agent.model_profiles import (
     suggest_profile_name,
 )
 from korvid.agent.navigation import EvidenceTarget, target_for
-from korvid.agent.setup import AgentSettings, profile_refusal, settings_from_profile
 from korvid.core.audit import AuditLog
 from korvid.core.config import (
     KEEP_MODEL_TIER,
     LEGACY_PROFILE_NAME,
     MODEL_REFERENCE_SEPARATOR,
-    ConnectionAuthConfig,
     KorvidConfig,
     ModelConnectionsWriter,
     ModelTierWrite,
-    common_auth_method,
 )
 from korvid.core.errors import explain_api_error
 from korvid.core.impact import ImpactAction
@@ -131,35 +128,6 @@ WriteOpBuild = tuple[ResourceMeta, str | None, Callable[[str | None], Awaitable[
 
 #: A (namespace, pod, container) log target.
 Triple = tuple[str, str, str]
-
-#: The auth-settings key that names the environment variable holding an API
-#: key. It is a *name*: nothing here reads the environment, so a secret
-#: value cannot travel from a profile into the session or back to disk.
-_ENV_KEY_SETTING = "key"
-
-
-def _profile_from_settings(settings: AgentSettings | None) -> ModelConnectionConfig | None:
-    """The profile a pre-profile configuration describes, if any.
-
-    Used to seed a first-run wizard, and to give `:model` something to
-    edit, on a machine whose config.yaml still holds the legacy scalars.
-    The auth method is translated back into the profile vocabulary
-    (`common_auth_method`): a profile written with the *transport's*
-    spelling would be refused by the projection on the next start.
-    """
-    if settings is None or not settings.provider or not settings.model:
-        return None
-    auth_settings: dict[str, object] = {}
-    if settings.api_key_env:
-        auth_settings[_ENV_KEY_SETTING] = settings.api_key_env
-    return ModelConnectionConfig(
-        model=f"{settings.provider}{MODEL_REFERENCE_SEPARATOR}{settings.model}",
-        endpoint=settings.base_url,
-        auth=ConnectionAuthConfig(
-            method=common_auth_method(settings.auth_method), settings=auth_settings
-        ),
-        options=dict(settings.options),
-    )
 
 
 def _model_reference(argument: str, current: str) -> str:
@@ -550,7 +518,7 @@ class AgentUiController:
         tasks: TurnTasks | None = None,
         session: AgentSession | None = None,
         model_name: str | None = None,
-        rebuild: Callable[[AgentSettings], AgentSession | None] | None = None,
+        rebuild: Callable[[ModelConnectionConfig, str | None], AgentSession | None] | None = None,
         disconnect: Callable[[], None] | None = None,
         available: bool = True,
         #: Answers every question the profile screens ask. None when the
@@ -560,10 +528,6 @@ class AgentUiController:
         #: Writes `agent.active`/`agent.profiles`. Injected by the
         #: composition root, which owns every path korvid writes to.
         save_profiles: ModelConnectionsWriter | None = None,
-        #: Profile -> the record the runtime is built from. Replaced by the
-        #: profile-native provider factory in Task 15.
-        profile_settings: Callable[[ModelConnectionConfig, str | None], AgentSettings | None]
-        | None = None,
     ) -> None:
         self._panel = panel
         self._screens = screens
@@ -600,9 +564,6 @@ class AgentUiController:
         self._rebuild = rebuild
         self._catalog = catalog
         self._save_profiles = save_profiles
-        self._profile_settings = (
-            profile_settings if profile_settings is not None else settings_from_profile
-        )
         #: Releases the live provider on `:ai off` (issue #167) — session
         #: state only; persisted configuration is untouched.
         self._disconnect = disconnect
@@ -610,7 +571,6 @@ class AgentUiController:
         #: panel is not mounted and :ai/:model/Ctrl-A are not offered.
         self._available = available
         settings = config()
-        self._settings: AgentSettings | None = None
         #: model tier as explicitly configured (None = Automatic) — seeds
         #: the `:ai` wizard's tier step and `:model` rebuilds so an
         #: explicit low/high override survives across them.
@@ -623,23 +583,6 @@ class AgentUiController:
         #: callback is the safety net for wizards that never reached the
         #: hook, so it skips this one instead of filing a duplicate.
         self._saved_setup_result: SetupResult | None = None
-        # config.yaml naming a provider and a model is enough to seed the
-        # settings snapshot, whether or not the composition root managed to
-        # build a session from it. A startup that degraded (a provider the
-        # router refuses, say `supports_tools=False`) still has to be
-        # recoverable with a single `:model <name>` — and reconnect and the
-        # `:ai` wizard have to open on what is configured — instead of
-        # asking the operator to retype a configuration korvid already has.
-        if settings.agent_provider and settings.agent_model:
-            self._settings = AgentSettings(
-                provider=settings.agent_provider,
-                auth_method=settings.agent_auth_method or "none",
-                base_url=settings.agent_base_url,
-                model=settings.agent_model,
-                api_key_env=settings.agent_api_key_env,
-                model_tier=settings.agent_model_tier,
-                options=settings.agent_options,
-            )
         #: Agent follow: mirror the built-in agent's cluster reads on screen
         #: — small models rarely volunteer the UI tools, so without this the
         #: screen sits idle while the agent reads "behind its back". Config
@@ -685,11 +628,6 @@ class AgentUiController:
         """Explicitly configured model tier (None = Automatic), as last set
         by config.yaml or the `:ai` wizard."""
         return self._configured_tier
-
-    @property
-    def settings(self) -> AgentSettings | None:
-        """The settings snapshot `:model` edits, or None when unconfigured."""
-        return self._settings
 
     @property
     def profiles(self) -> ModelConnectionsConfig:
@@ -855,12 +793,10 @@ class AgentUiController:
                 callback=self._handle_manager_result,
             )
             return
-        # No profile on disk, but a degraded startup can still have left
-        # legacy scalars in memory: prefill from them rather than ask for
-        # every answer a second time.
+        # Nothing configured at all: the wizard collects every answer.
         self._ui.push_screen(
             self._setup_screen(
-                _profile_from_settings(self._settings),
+                None,
                 ask_tier=True,
                 apply_result=self._apply_result,
                 save_result=self._save_setup_result,
@@ -918,26 +854,7 @@ class AgentUiController:
 
     def _apply_result(self, result: SetupResult) -> bool:
         """Swap the runtime onto a wizard result, or refuse and say why."""
-        settings = self._profile_settings(result.profile, result.model_tier)
-        if settings is None:
-            self._ui.notify(
-                f"Cannot connect to {result.profile.model!r} — {self._refusal(result.profile)}",
-                severity="warning",
-                markup=False,
-            )
-            return False
-        return self.apply_settings(settings)
-
-    @staticmethod
-    def _refusal(profile: ModelConnectionConfig) -> str:
-        """Why a profile could not be built, phrased for the operator.
-
-        The injected factory answers None for several different reasons;
-        reporting only one of them tells the operator to fix something
-        that is not broken.
-        """
-        reason = profile_refusal(profile)
-        return reason if reason else "the model reference needs a provider prefix (provider/model)"
+        return self.apply_profile(result.profile, result.model_tier)
 
     def _handle_setup_result(self, result: SetupResult | None) -> None:
         """A completed first-run wizard: name the profile and persist it.
@@ -1037,16 +954,8 @@ class AgentUiController:
                 markup=False,
             )
             return
-        settings = self._profile_settings(profile, self._configured_tier)
-        if settings is None:
-            self._ui.notify(
-                f"Profile {name!r} cannot be built: {self._refusal(profile)}",
-                severity="warning",
-                markup=False,
-            )
-            return
-        if not self.apply_settings(settings):
-            return  # apply_settings already notified the reason
+        if not self.apply_profile(profile, self._configured_tier):
+            return  # apply_profile already notified the reason
         if self._persist_profiles(dataclasses.replace(self._profiles, active=name)):
             self._ui.notify(f"Agent profile {name!r} activated", markup=False)
 
@@ -1105,18 +1014,10 @@ class AgentUiController:
             return
         name, profiles = placed
         profile = profiles.profiles[name]
-        settings = self._profile_settings(profile, self._configured_tier)
-        if settings is None:
-            self._ui.notify(
-                f"Cannot connect to {profile.model!r} — {self._refusal(profile)}",
-                severity="warning",
-                markup=False,
-            )
-            return
         # Apply first: persistence must be conditional on a successful
         # swap, or a refused change would silently take effect on restart.
-        if not self.apply_settings(settings):
-            return  # apply_settings already notified the reason
+        if not self.apply_profile(profile, self._configured_tier):
+            return  # apply_profile already notified the reason
         if self._persist_profiles(profiles):
             self._ui.notify(f"Agent model set to {profile.model}", markup=False)
 
@@ -1135,11 +1036,7 @@ class AgentUiController:
             profile's model replaced, or None when nothing is configured.
         """
         name = self._profiles.active or LEGACY_PROFILE_NAME
-        # A pre-profile config.yaml (or a startup that degraded) holds the
-        # connection in the legacy scalars only. `:model <name>` is the
-        # whole recovery, so it files those scalars as a profile rather
-        # than sending the operator back through the wizard.
-        profile = self._profiles.active_profile or _profile_from_settings(self._settings)
+        profile = self._profiles.active_profile
         if profile is None:
             return None
         profiles = dict(self._profiles.profiles)
@@ -1161,11 +1058,17 @@ class AgentUiController:
             f"{'mirrored on screen' if self._follow else 'no longer mirrored'}"
         )
 
-    def apply_settings(self, settings: AgentSettings) -> bool:
-        """Swap in a fresh session built from the wizard's settings.
+    def apply_profile(self, profile: ModelConnectionConfig, model_tier: str | None) -> bool:
+        """Swap in a fresh session built from a connection profile.
 
-        Transactional: on any failure the previous session/settings are kept
-        and False is returned; the swap is also refused while a turn is live.
+        Transactional: on any failure the previous session is kept and
+        False is returned; the swap is also refused while a turn is live.
+
+        The profile goes to the injected rebuild hook unchanged. Whatever
+        the factory refuses it refuses with a logged reason, and a `None`
+        session is reported here as "check configuration" rather than
+        guessed at — a specific reason korvid invented would send the
+        operator to fix something that is not broken.
         """
         if self._rebuild is None:
             self._ui.notify(
@@ -1180,24 +1083,25 @@ class AgentUiController:
             )
             return False
         try:
-            session = self._rebuild(settings)
+            session = self._rebuild(profile, model_tier)
         except Exception as exc:
             self._ui.notify(f"Agent rebuild failed: {exc}", severity="error", markup=False)
             return False
         if session is None:
             self._ui.notify(
-                "Agent rebuild failed — check configuration; keeping previous agent",
+                f"Cannot connect to {profile.model} — check the configuration"
+                " (see the log for the reason); keeping previous agent",
                 severity="error",
+                markup=False,
             )
             return False
         self._session = session
         self._session_closed = False  # a fresh session, not the closed one
         self._disconnected = False  # reconnected (issue #167)
         self._model_name = session.policy.model.model
-        self._settings = settings
         # Once applied (and persisted by the wizard) the tier is an explicit
         # choice — reopening :ai must preserve it.
-        self._configured_tier = settings.model_tier
+        self._configured_tier = model_tier
         self._refresh_status()
         # Always re-enable: the hint may have disabled the input while the
         # panel was open earlier; only focus/header rendering depends on

@@ -35,7 +35,9 @@ _VARIANT_MODULES = {
 #: First-party modules that exercise the installed variant rather than only
 #: proving that its third-party dependencies resolved.
 _BASE_KORVID_MODULES = frozenset({"korvid.__main__", "korvid.ui.app"})
-_AGENT_KORVID_MODULES = frozenset({"korvid.providers.registry", "korvid.providers.token_store"})
+_AGENT_KORVID_MODULES = frozenset(
+    {"korvid.providers.litellm_factory", "korvid.providers.token_store"}
+)
 _MCP_KORVID_MODULES = frozenset({"korvid.mcp.server"})
 _VARIANT_KORVID_MODULES = {
     "base": _BASE_KORVID_MODULES,

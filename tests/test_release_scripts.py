@@ -495,7 +495,7 @@ def test_smoke_install_required_modules_follow_the_selected_variant() -> None:
 
 def test_smoke_install_required_korvid_modules_follow_the_selected_variant() -> None:
     base = {"korvid.__main__", "korvid.ui.app"}
-    agent = {"korvid.providers.registry", "korvid.providers.token_store"}
+    agent = {"korvid.providers.litellm_factory", "korvid.providers.token_store"}
     mcp = {"korvid.mcp.server"}
     assert smoke_install.required_korvid_modules("base") == base
     assert smoke_install.required_korvid_modules("agent") == base | agent
@@ -641,7 +641,7 @@ def test_smoke_install_runs_a_fresh_install_then_a_separate_expansion(
     # The fresh install must never be reached through a base install first.
     assert base_requirement not in installs[0]
     assert any("keyring" in " ".join(args) for args in commands)
-    assert any("korvid.providers.registry" in " ".join(args) for args in commands)
+    assert any("korvid.providers.litellm_factory" in " ".join(args) for args in commands)
     assert any("korvid.__main__" in " ".join(args) for args in commands)
     assert any("find_spec('mcp')" in " ".join(args) for args in commands)
 

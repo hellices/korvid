@@ -92,17 +92,15 @@ async def test_factory_and_providers_share_one_trust_builder(tmp_path: Path) -> 
     """The :ai connection test and the live providers build their clients
     through the same CA-aware client — they cannot disagree about trust,
     and all three name the configured bundle on failure."""
+    from korvid.providers.flow_ollama_thinking import OllamaProvider
     from korvid.providers.net import _CANamedClient
-    from korvid.providers.ollama import OllamaProvider
-    from korvid.providers.openai_compat import OpenAICompatProvider
 
     ca_pem, _, _ = _mint_ca_and_server_cert(tmp_path)
     factory_client = make_http_client_factory(str(ca_pem))()
-    openai = OpenAICompatProvider(base_url="https://llm.corp/v1", model="m", ca_bundle=str(ca_pem))
     ollama = OllamaProvider(base_url="https://ollama.corp", model="m", ca_bundle=str(ca_pem))
-    clients = [factory_client, openai._get_client(), ollama._get_client()]
+    clients = [factory_client, ollama._get_client()]
     try:
-        assert len(clients) == 3  # wizard test + both live providers
+        assert len(clients) == 2  # discovery + the native live provider
         # Same builder → same verification posture for wizard and runtime.
         assert all(isinstance(c, _CANamedClient) for c in clients)
         assert all(
@@ -117,11 +115,11 @@ async def test_injected_clients_keep_precedence(tmp_path: Path) -> None:
     """Constructor-injected clients (the test seam) are never replaced by
     the CA configuration."""
     ca_pem, _, _ = _mint_ca_and_server_cert(tmp_path)
-    from korvid.providers.openai_compat import OpenAICompatProvider
+    from korvid.providers.flow_ollama_thinking import OllamaProvider
 
     injected = httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(200)))
-    provider = OpenAICompatProvider(
-        base_url="https://x/v1", model="m", client=injected, ca_bundle=str(ca_pem)
+    provider = OllamaProvider(
+        base_url="https://x", model="m", client=injected, ca_bundle=str(ca_pem)
     )
     assert provider._get_client() is injected
     await injected.aclose()

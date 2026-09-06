@@ -30,25 +30,16 @@ from korvid.agent.interaction import (
     UiAction,
     UiActionResult,
 )
-from korvid.agent.setup import (
-    AgentConfigurator,
-    AgentSettings,
-    profile_refusal,
-    settings_from_profile,
-)
 from korvid.core.audit import AuditLog, default_audit_path
 from korvid.core.config import (
     DEFAULT_CONFIG_PATH,
     KEEP_MODEL_TIER,
-    LEGACY_PROFILE_NAME,
     ConfigMigrationError,
-    ConnectionAuthConfig,
     KorvidConfig,
     ModelConnectionConfig,
     ModelConnectionsConfig,
     ModelTierWrite,
     ObservabilityBackend,
-    common_auth_method,
     context_is_protected,
     load_config,
     save_model_connections,
@@ -619,10 +610,11 @@ class AgentWiring:
 
     #: The live session, or None when the agent is off/unavailable.
     session: AgentSession | None
-    #: The `:ai` wizard's provider configurator, or None when unavailable.
-    configurator: AgentConfigurator | None
+    #: Whether the agent feature is wired at all. False on an install
+    #: without the `[agent]` extra, where `:ai` reports unavailable.
+    available: bool
     #: Swap provider and session together, or None when unavailable.
-    rebuild: Callable[[AgentSettings], AgentSession | None] | None
+    rebuild: Callable[[ModelConnectionConfig, str | None], AgentSession | None] | None
     #: Re-arm a live session for a new cluster (`:ctx`).
     retarget: Callable[[AgentSession | None, bool, ClusterFacts | None], None]
     #: `:ai off` — release provider and session for the session.
@@ -695,7 +687,7 @@ def _agent_unavailable_wiring(
 
     return AgentWiring(
         session=None,
-        configurator=None,
+        available=False,
         rebuild=None,
         retarget=_retarget_noop,
         disconnect=lambda: None,
@@ -748,50 +740,20 @@ def _create_provider_from_active_profile(
 
 def _create_initial_provider(
     config: KorvidConfig,
-    oauth: str | None,
-    ollama_options: Any,
-    plugin_registry: Any,
-    startup_warnings: list[str] | None,
     credentials: CredentialStore | None = None,
 ) -> LLMProvider | None:
-    """Build the initial LLM provider, converting plugin errors to warnings.
+    """Build the initial LLM provider from the active connection profile.
 
-    Two factories are wired here on purpose, and one is chosen per call:
-    a config with an active profile is built from that profile, and a
-    config with no profiles at all keeps the legacy scalar path. That
-    path stays live until Task 18 deletes it. `network.ca_bundle` goes to
-    whichever one runs — the operator's trust does not depend on which
-    shape their config happens to be in.
+    One factory, one input. A config with no active profile has the agent
+    off, which is a `None` provider rather than a fallback path: the
+    legacy scalars a second factory used to read no longer exist, because
+    `load_config` migrates that shape into a profile before anything here
+    sees it.
     """
-    from korvid.providers.plugin_registry import ProviderPluginError
-    from korvid.providers.registry import create_provider
-
     profile = config.model_connections.active_profile
-    if profile is not None:
-        return _create_provider_from_active_profile(profile, credentials, config.network_ca_bundle)
-
-    try:
-        return create_provider(
-            enabled=config.agent_enabled,
-            provider=config.agent_provider,
-            auth_method=config.agent_auth_method,
-            base_url=config.agent_base_url,
-            model=config.agent_model,
-            api_key_env=config.agent_api_key_env,
-            oauth_token=oauth,
-            ollama=ollama_options,
-            ca_bundle=config.network_ca_bundle,
-            plugin_registry=plugin_registry,
-            options=config.agent_options,
-            options_error=config.agent_options_error,
-        )
-    except ProviderPluginError as exc:
-        # Plugin failure at startup degrades to warning — the TUI remains
-        # operational with provider=None; the :ai wizard can still reconfigure.
-        if startup_warnings is not None:
-            startup_warnings.append(f"Provider plugin failed: {exc}")
-        logger.warning("provider plugin failed at startup: %s — agent disabled", exc)
+    if profile is None:
         return None
+    return _create_provider_from_active_profile(profile, credentials, config.network_ca_bundle)
 
 
 def _agent_environment(
@@ -867,9 +829,9 @@ def _warn_agent_disabled(error: Exception, startup_warnings: list[str] | None) -
     """Record one actionable warning for a session korvid refused to build.
 
     The agent is the only thing that degrades: the TUI, the write
-    perimeter and the MCP server are unaffected, and the wizard's
-    configurator and rebuild stay wired so the operator can fix the
-    configuration from inside the running app.
+    perimeter and the MCP server are unaffected, and the wizard's catalog
+    and rebuild stay wired so the operator can fix the configuration from
+    inside the running app.
 
     Both hints are fixed text. Only the exception's own message — which
     the prompt harness authors and bounds — varies, so nothing an
@@ -987,61 +949,57 @@ def _close_agent_in_background(
     task.add_done_callback(_reap)
 
 
-def _build_model_catalog(configurator: AgentConfigurator | None = None) -> ModelCatalog | None:
+def _build_model_catalog(*, ca_bundle: str | None = None) -> ModelCatalog | None:
     """Build the catalog, or None when the agent extra is absent.
 
     A missing extra degrades to None — the TUI runs without an agent.
     A *broken* extra is different: it is reported, not swallowed.
 
+    The wizard's connection test is a real request built by the same
+    factory the running agent uses, trust and credential store included,
+    so a profile that tests green cannot fail differently at startup.
+
     Args:
-        configurator: The `:ai` wizard's configurator, which owns the only
-            transport korvid currently speaks. It is what makes the
-            wizard's connection test a real probe; without it the catalog
-            reports that testing is unavailable rather than pretending.
+        ca_bundle: `network.ca_bundle` — one trust decision for every
+            korvid-owned HTTPS client, the probe's included.
     """
     try:
         from korvid.providers.endpoint_discovery import EndpointDiscovery
         from korvid.providers.litellm_catalog import LiteLLMModelCatalog
         from korvid.providers.litellm_runtime import models_by_provider
         from korvid.providers.models_dev import ModelsDevSource
+        from korvid.providers.profile_probe import ProfileProbe
         from korvid.providers.special_flows import SpecialFlowRegistry
+        from korvid.providers.token_store import TokenStore
     except ImportError:
         return None
+    flows = SpecialFlowRegistry.from_entry_points(reserved_prefixes=models_by_provider())
     return LiteLLMModelCatalog(
-        flows=SpecialFlowRegistry.from_entry_points(reserved_prefixes=models_by_provider()),
+        flows=flows,
         enrichment=ModelsDevSource(),
         discovery=EndpointDiscovery(),
-        tester=None if configurator is None else _make_profile_tester(configurator),
+        tester=ProfileProbe(
+            catalog=LiteLLMModelCatalog(flows=flows),
+            flows=flows,
+            credentials=TokenStore(),
+            ca_bundle=ca_bundle,
+        ),
     )
 
 
-def _make_profile_tester(
-    configurator: AgentConfigurator,
-) -> Callable[[ModelConnectionConfig], Awaitable[str]]:
-    """Probe a profile through the transport the runtime still speaks.
+def _active_model_name(config: KorvidConfig) -> str | None:
+    """The model the active profile names, for the header before a session.
 
-    Interim, and replaced by the profile-native factory in Task 15. The
-    profile is translated by the same projection startup derives its
-    scalars from, so the probe reaches exactly the host the agent would:
-    a provider prefix the transport cannot serve is refused here as well,
-    and an Azure deployment path is on the probed URL too. A probe that
-    projected the profile its own way could report success against a host
-    the agent will never use.
+    Only a display fallback: once a session exists the controller reads
+    the model off the resolved policy. The bare tag is what the header
+    used to show, so the prefix is dropped rather than shown here.
     """
+    from korvid.agent.model_profiles import split_reference
 
-    async def _test(profile: ModelConnectionConfig) -> str:
-        settings = settings_from_profile(profile, None)
-        if settings is None:
-            raise ProfileNotConnectable(
-                f"cannot test {profile.model!r}: {profile_refusal(profile)}"
-            )
-        return await configurator.test(settings)
-
-    return _test
-
-
-class ProfileNotConnectable(RuntimeError):
-    """The interim transport cannot serve this profile, so it was not probed."""
+    profile = config.model_connections.active_profile
+    if profile is None:
+        return None
+    return split_reference(profile.model)[1] or None
 
 
 def _build_agent_wiring(
@@ -1056,7 +1014,7 @@ def _build_agent_wiring(
     startup_warnings: list[str] | None = None,
     observability: ObservabilityWiring | None = None,
 ) -> AgentWiring:
-    """Build the initial agent session plus the :ai wizard's configurator/rebuild hooks.
+    """Build the initial agent session plus the `:ai` wizard's rebuild hook.
 
     Provider adapters and credential storage are optional (issue #73): a
     base installation gets a session-less wiring whose `:ai` command reports
@@ -1082,29 +1040,13 @@ def _build_agent_wiring(
     # Deferred behind the capability probe: the agent loop is only composed
     # when this wiring is actually built (issue #73 requires MCP-only
     # startups not to import the session or the engine at all).
-    from korvid.providers.configurator import ProviderConfigurator
-    from korvid.providers.ollama import OllamaOptions
-    from korvid.providers.plugin_registry import ProviderPluginRegistry
-    from korvid.providers.registry import create_provider
     from korvid.providers.token_store import TokenStore
 
-    plugin_registry = ProviderPluginRegistry()
     token_store = TokenStore()
-    oauth = token_store.load("github-oauth") if config.agent_provider == "github-copilot" else None
-    ollama_options = OllamaOptions(
-        num_ctx=config.agent_ollama_num_ctx,
-        temperature=config.agent_ollama_temperature,
-        seed=config.agent_ollama_seed,
-        think=config.agent_ollama_think,
-        keep_alive=config.agent_ollama_keep_alive,
-        num_predict=config.agent_ollama_num_predict,
-    )
-    provider = _create_initial_provider(
-        config, oauth, ollama_options, plugin_registry, startup_warnings, token_store
-    )
-    # Ownership transfers immediately: if anything below raises (tools,
-    # session, configurator), the teardown guard still closes the provider
-    # (a GitHub Copilot provider eagerly holds a credential HTTP client).
+    provider = _create_initial_provider(config, token_store)
+    # Ownership transfers immediately: if anything below raises (tools or
+    # session), the teardown guard still closes the provider — a provider
+    # can eagerly hold a credential HTTP client.
     provider_box[0] = provider
 
     # Per-cluster agent inputs: a `:ctx` switch replaces both, so a wizard
@@ -1150,38 +1092,14 @@ def _build_agent_wiring(
             # in the box, so teardown still releases it.
             _warn_agent_disabled(error, startup_warnings)
 
-    configurator = ProviderConfigurator(
-        token_store,
-        _persist_agent_settings,
-        # network.ca_bundle (issue #168): endpoint calls (probe + model
-        # listing) share the live providers' trust; GitHub Copilot
-        # discovery keeps default trust like the live copilot provider.
-        ca_bundle=config.network_ca_bundle,
-        plugin_registry=plugin_registry,
-    )
     close_tasks: set[asyncio.Task[None]] = set()
 
-    def build_provider(settings: AgentSettings) -> LLMProvider | None:
-        return create_provider(
-            enabled=True,
-            provider=settings.provider,
-            auth_method=settings.auth_method,
-            base_url=settings.base_url,
-            model=settings.model,
-            api_key_env=settings.api_key_env,
-            oauth_token=token_store.load("github-oauth"),
-            # ollama_options is captured from startup config: the :ai wizard
-            # does not edit agent.ollama.*, so the values cannot go stale. If
-            # config reload is ever added, re-derive the options here.
-            ollama=ollama_options,
-            ca_bundle=config.network_ca_bundle,
-            plugin_registry=plugin_registry,
-            options=settings.options,
-        )
+    def build_provider(profile: ModelConnectionConfig) -> LLMProvider | None:
+        return _create_provider_from_active_profile(profile, token_store, config.network_ca_bundle)
 
     return AgentWiring(
         session=session_box[0],
-        configurator=configurator,
+        available=True,
         rebuild=_make_rebuild_agent(
             build_provider, compose, provider_box, session_box, tier_box, close_tasks
         ),
@@ -1192,47 +1110,6 @@ def _build_agent_wiring(
         tool_bridge=ui_proxy,
         ui_bridge=agent_ui_proxy,
     )
-
-
-def _persist_agent_settings(settings: AgentSettings) -> None:
-    """Write what the `:ai` wizard chose back to config.yaml.
-
-    `AgentSettings.auth_method` speaks the *interim transport's* alphabet
-    (`api_key`, `entra`, `device-login`, `none`); a profile's `auth.method`
-    speaks the five common ids. The translation is `common_auth_method`'s
-    and only its — writing the transport's id straight into a profile
-    produces one `project_legacy_transport` refuses by name at the next
-    start, disabling an agent the operator configured correctly.
-    """
-    method = common_auth_method(settings.auth_method)
-    auth_settings: dict[str, object] = {}
-    # Only `environment` carries a variable name, and it is a *name*:
-    # nothing here reads the environment, so no secret value can travel
-    # from these settings into the file.
-    if method == "environment" and settings.api_key_env:
-        auth_settings["key"] = settings.api_key_env
-    profile = ModelConnectionConfig(
-        model=f"{settings.provider}/{settings.model}",
-        endpoint=settings.base_url,
-        auth=ConnectionAuthConfig(method=method, settings=auth_settings),
-        options=dict(settings.options),
-    )
-    config = load_config(DEFAULT_CONFIG_PATH)
-    profiles_by_name = {
-        name: existing_profile
-        for name, existing_profile in config.model_connections.profiles.items()
-        if existing_profile.config_error is None
-    }
-    profiles_by_name[LEGACY_PROFILE_NAME] = profile
-    profiles = dataclasses.replace(
-        config.model_connections,
-        active=LEGACY_PROFILE_NAME,
-        profiles=profiles_by_name,
-    )
-    try:
-        save_model_connections(DEFAULT_CONFIG_PATH, profiles)
-    except OSError:
-        logger.warning("could not write config: applied now, reverts on restart")
 
 
 def _persist_model_profiles(
@@ -1251,13 +1128,13 @@ def _persist_model_profiles(
 
 
 def _make_rebuild_agent(
-    build_provider: Callable[[AgentSettings], LLMProvider | None],
+    build_provider: Callable[[ModelConnectionConfig], LLMProvider | None],
     compose: Callable[[LLMProvider, str | None], tuple[AgentSession, Any]],
     provider_box: list[LLMProvider | None],
     session_box: list[AgentSession | None],
     tier_box: list[str | None],
     close_tasks: set[asyncio.Task[None]],
-) -> Callable[[AgentSettings], AgentSession | None]:
+) -> Callable[[ModelConnectionConfig, str | None], AgentSession | None]:
     """The `:ai` wizard's swap, as one transaction.
 
     Nothing the app can observe moves until the *whole* replacement —
@@ -1266,12 +1143,14 @@ def _make_rebuild_agent(
     running, so a mistyped endpoint costs a notification, not the session.
     """
 
-    def rebuild_agent(settings: AgentSettings) -> AgentSession | None:
-        new_provider = build_provider(settings)
+    def rebuild_agent(
+        profile: ModelConnectionConfig, model_tier: str | None
+    ) -> AgentSession | None:
+        new_provider = build_provider(profile)
         if new_provider is None:
             return None
         try:
-            new_session, _policy = compose(new_provider, settings.model_tier)
+            new_session, _policy = compose(new_provider, model_tier)
         except Exception:
             _close_provider_in_background(new_provider, close_tasks)
             raise
@@ -1279,7 +1158,7 @@ def _make_rebuild_agent(
         old_session = session_box[0]
         provider_box[0] = new_provider
         session_box[0] = new_session
-        tier_box[0] = settings.model_tier
+        tier_box[0] = model_tier
         _close_agent_in_background(old_session, old_provider, close_tasks)
         return new_session
 
@@ -1726,16 +1605,16 @@ async def _wire_and_run(config: KorvidConfig, kube: KubeClient, state: _RunState
         audit=AuditLog(default_audit_path(), context=config.kube_context),
         check_permission=kube.can_i,
         agent_session=agent.session,
-        agent_model_name=config.agent_model,
+        agent_model_name=_active_model_name(config),
         # The profile screens' single source of answers, and the one path
         # that writes `agent.profiles` back (issue #182).
-        agent_catalog=_build_model_catalog(agent.configurator),
+        agent_catalog=_build_model_catalog(ca_bundle=config.network_ca_bundle),
         agent_save_profiles=_persist_model_profiles,
         rebuild_agent=agent.rebuild,
         disconnect_agent=agent.disconnect,
-        # The wiring returns no configurator only when the [agent] extra is
+        # The wiring reports unavailable only when the [agent] extra is
         # absent — the app then hides the agent panel and its commands.
-        agent_available=agent.configurator is not None,
+        agent_available=agent.available,
         mcp=mcp_controller,
         metrics=MetricsPoller(kube.list_pod_metrics),
         pod_resize_supported=pod_resize_supported,

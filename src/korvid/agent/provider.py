@@ -1,9 +1,10 @@
 """LLMProvider ABC — the pluggable boundary (design doc §6.3, standards §3).
 
-Concrete adapters live in korvid/providers/ and are selected by the
-config-driven factory in korvid.providers.registry. Third-party adapters
-target the public contract in korvid.agent.provider_plugin; their
-discovery/loading stays outside this ABC boundary.
+Concrete providers are built from a connection profile by
+`korvid.providers.litellm_factory.create_provider_from_profile`, which
+delegates routing rather than owning a name-to-class table. Third-party
+adapters target the public contract in korvid.agent.provider_plugin;
+their discovery/loading stays outside this ABC boundary.
 """
 
 from __future__ import annotations

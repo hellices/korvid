@@ -221,7 +221,7 @@ class ModelSearchScreen(ModalScreen["str | None"]):
         if " " in query or "\t" in query:
             return "Reference must not contain whitespace — use provider/model format."
         if "/" not in query:
-            return "Use provider/model format — e.g. openai/gpt-4o."
+            return "Use provider/model format — the prefix before the slash names the provider."
         provider, _ = split_reference(query)
         if not _PROVIDER_PREFIX_RE.match(provider):
             return (

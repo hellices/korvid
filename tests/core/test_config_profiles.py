@@ -17,7 +17,6 @@ from korvid.core.config import (
     _legacy_model_reference,
     is_valid_profile_name,
     load_config,
-    project_legacy_transport,
     save_model_connections,
 )
 
@@ -432,6 +431,7 @@ agent:
         pytest.param("seed: 0", ("seed", 0), id="zero-seed-is-not-absent"),
         pytest.param("num_predict: 192", ("num_predict", 192), id="strict-int-kept"),
         pytest.param("keep_alive: 5m", ("keep_alive", "5m"), id="non-numeric-verbatim"),
+        pytest.param("keep_alive: 300", ("keep_alive", 300), id="integer-seconds-stay-an-int"),
     ],
 )
 def test_legacy_ollama_numbers_keep_the_old_parser_s_coercion(
@@ -490,6 +490,20 @@ def test_an_uncoercible_legacy_ollama_value_is_dropped_with_a_warning(
     assert profile.config_error is None
     assert key not in profile.options
     assert any(f"agent.ollama.{key}" in warning for warning in cfg.warnings)
+
+
+def test_a_non_mapping_legacy_ollama_section_is_ignored(tmp_path: Path) -> None:
+    """`agent.ollama: <scalar>` carries no knobs to migrate, and it must
+    not take the whole profile down with it."""
+    path = _write(
+        tmp_path, "agent:\n  provider: ollama\n  model: llama3\n  ollama: not-a-mapping\n"
+    )
+    profile = load_config(path).model_connections.active_profile
+
+    assert profile is not None
+    assert profile.model == "ollama/llama3"
+    assert profile.options["native_api"] is True
+    assert set(profile.options) == {"native_api", "native_thinking"}
 
 
 @pytest.mark.parametrize(
@@ -833,7 +847,7 @@ def test_the_azure_sdk_builds_the_url_from_the_resource_root(
 
 
 # ---------------------------------------------------------------------------
-# Task 3 tests: profile writer and derived legacy scalars
+# Task 3 tests: profile writer and profile parsing
 # ---------------------------------------------------------------------------
 
 
@@ -1056,52 +1070,9 @@ agent:
     assert raw["agent"]["profiles"]["broken"] == {"endpoint": "http://example.invalid"}
 
 
-def test_derived_scalars_refuse_a_prefix_the_legacy_transport_cannot_serve(
-    tmp_path: Path,
-) -> None:
-    path = _write(
-        tmp_path,
-        """
-agent:
-  active: main
-  profiles:
-    main:
-      model: anthropic/claude-sonnet-4-5
-""",
-    )
-    cfg = load_config(path)
-    assert cfg.agent_enabled is False
-    assert cfg.agent_provider is None
-    assert any("anthropic" in w and "Task 15" in w for w in cfg.warnings)
-
-
-def test_derived_scalars_reattach_the_azure_deployment_path(tmp_path: Path) -> None:
-    """Group 1's transport is still the legacy string-concatenating one,
-    which posts to `<base_url>/chat/completions`. The profile holds the
-    resource root, so the projection has to rebuild what Task 2 stripped
-    or every interim Azure request 404s."""
-    path = _write(
-        tmp_path,
-        """
-agent:
-  active: main
-  profiles:
-    main:
-      model: azure/gpt-4o
-      endpoint: https://x.openai.azure.com
-      auth:
-        method: environment
-        key: AZURE_OPENAI_API_KEY
-      options:
-        azure_deployment: my-dep
-""",
-    )
-    cfg = load_config(path)
-    assert cfg.agent_provider == "azure"
-    assert cfg.agent_base_url == "https://x.openai.azure.com/openai/deployments/my-dep"
-
-
-def test_a_profile_with_a_config_error_yields_no_legacy_scalars(tmp_path: Path) -> None:
+def test_an_inline_secret_is_rejected_and_recorded_on_the_profile(tmp_path: Path) -> None:
+    """The secret-bearing option keeps the profile from ever being built:
+    `config_error` is the field the factory refuses on."""
     path = _write(
         tmp_path,
         """
@@ -1115,221 +1086,16 @@ agent:
 """,
     )
     cfg = load_config(path)
-    assert cfg.agent_enabled is False
+    profile = cfg.model_connections.profiles["main"]
+
+    assert profile.config_error is not None
+    assert "api_key" not in profile.options
     assert any("rejected" in w for w in cfg.warnings)
 
 
-# ---------------------------------------------------------------------------
-# The shared interim projection
-# ---------------------------------------------------------------------------
-
-
-def test_the_shared_projection_is_the_one_startup_derives_its_scalars_from(
-    tmp_path: Path,
-) -> None:
-    """Startup and every later profile switch must reach the same scalars.
-
-    `project_legacy_transport` is that single path: a second, parallel
-    projection is how an Azure deployment URL or an unsupported prefix
-    ends up handled one way at startup and another way at `:ai` time.
-    """
-    path = _write(
-        tmp_path,
-        """
-agent:
-  active: main
-  profiles:
-    main:
-      model: azure/gpt-4o
-      endpoint: https://x.openai.azure.com
-      auth:
-        method: environment
-        key: AZURE_OPENAI_API_KEY
-      options:
-        azure_deployment: my-dep
-""",
-    )
-    cfg = load_config(path)
-    projection, refusal = project_legacy_transport(cfg.model_connections.profiles["main"])
-
-    assert refusal is None
-    assert projection is not None
-    assert projection.provider == cfg.agent_provider
-    assert projection.base_url == cfg.agent_base_url
-    assert projection.model == cfg.agent_model
-    assert projection.api_key_env == cfg.agent_api_key_env
-    assert projection.auth_method == cfg.agent_auth_method
-
-
-def test_the_shared_projection_refuses_a_prefix_the_legacy_transport_cannot_serve() -> None:
-    projection, refusal = project_legacy_transport(
-        ModelConnectionConfig(model="anthropic/claude-sonnet-4-5")
-    )
-
-    assert projection is None
-    assert refusal is not None
-    assert "anthropic" in refusal
-    assert "Task 15" in refusal
-
-
-def test_the_shared_projection_refuses_a_reference_without_a_provider_prefix() -> None:
-    projection, refusal = project_legacy_transport(ModelConnectionConfig(model="bare"))
-
-    assert projection is None
-    assert refusal is not None
-    assert "prefix" in refusal
-
-
-def test_the_shared_projection_refuses_a_profile_with_a_config_error() -> None:
-    broken = ModelConnectionConfig(model="openai/gpt-4o", options={"bad": object()})
-    assert broken.config_error is not None  # the fixture is the precondition
-
-    projection, refusal = project_legacy_transport(broken)
-
-    assert projection is None
-    assert refusal is not None
-    assert "rejected" in refusal
-
-
-# ---------------------------------------------------------------------------
-# Auth methods: the common ids the transport actually speaks
-# ---------------------------------------------------------------------------
-
-
-def test_the_projection_translates_environment_auth_into_the_transports_api_key() -> None:
-    """`environment` is the profile vocabulary; the interim transport only
-    knows `api_key`. Handing it the profile spelling verbatim makes
-    `build_credentials` reject it as an unknown method and disables an
-    agent the operator configured correctly."""
-    profile = ModelConnectionConfig(
-        model="openai/gpt-4o",
-        endpoint="https://api.example/v1",
-        auth=ConnectionAuthConfig(method="environment", settings={"key": "OPENAI_API_KEY"}),
-    )
-    projection, refusal = project_legacy_transport(profile)
-
-    assert refusal is None
-    assert projection is not None
-    assert projection.auth_method == "api_key"
-    assert projection.api_key_env == "OPENAI_API_KEY"
-
-
-def test_the_projection_refuses_environment_auth_without_a_variable_name() -> None:
-    """`api_key` with no variable name is not a connection: the transport
-    would raise "api_key_env is not set" from inside the provider factory
-    instead of the profile being refused where the reason is known."""
-    profile = ModelConnectionConfig(
-        model="openai/gpt-4o",
-        auth=ConnectionAuthConfig(method="environment", settings={}),
-    )
-    projection, refusal = project_legacy_transport(profile)
-
-    assert projection is None
-    assert refusal is not None
-    assert "environment" in refusal
-
-
-def test_the_projection_maps_azure_provider_default_onto_entra() -> None:
-    """Azure's SDK credential chain *is* Entra ID, which the interim
-    transport speaks."""
-    profile = ModelConnectionConfig(
-        model="azure/gpt-4o",
-        endpoint="https://x.openai.azure.com",
-        auth=ConnectionAuthConfig(method="provider-default"),
-    )
-    projection, refusal = project_legacy_transport(profile)
-
-    assert refusal is None
-    assert projection is not None
-    assert projection.auth_method == "entra"
-    assert projection.api_key_env is None
-
-
-def test_the_projection_refuses_provider_default_for_a_non_azure_provider() -> None:
-    """There is no SDK credential chain behind the bearer-token client:
-    silently downgrading to an unauthenticated request would connect as
-    nobody, or leak whatever `api_key_env` happened to be lying around."""
-    profile = ModelConnectionConfig(
-        model="openai/gpt-4o",
-        endpoint="https://api.example/v1",
-        auth=ConnectionAuthConfig(method="provider-default"),
-    )
-    projection, refusal = project_legacy_transport(profile)
-
-    assert projection is None
-    assert refusal is not None
-    assert "provider-default" in refusal
-
-
-def test_the_projection_keeps_none_auth_as_none() -> None:
-    profile = ModelConnectionConfig(
-        model="ollama/llama3", endpoint="http://localhost:11434", auth=ConnectionAuthConfig()
-    )
-    projection, refusal = project_legacy_transport(profile)
-
-    assert refusal is None
-    assert projection is not None
-    assert projection.auth_method == "none"
-
-
-def test_the_projection_allows_device_login_only_for_github_copilot() -> None:
-    profile = ModelConnectionConfig(
-        model="github-copilot/gpt-4o",
-        auth=ConnectionAuthConfig(method="device-login"),
-    )
-    projection, refusal = project_legacy_transport(profile)
-
-    assert refusal is None
-    assert projection is not None
-    assert projection.auth_method == "device-login"
-
-
-def test_the_projection_refuses_device_login_for_any_other_provider() -> None:
-    """Only the Copilot adapter has a device-login token store; any other
-    provider would be built with no credential at all."""
-    profile = ModelConnectionConfig(
-        model="openai/gpt-4o",
-        endpoint="https://api.example/v1",
-        auth=ConnectionAuthConfig(method="device-login"),
-    )
-    projection, refusal = project_legacy_transport(profile)
-
-    assert projection is None
-    assert refusal is not None
-    assert "device-login" in refusal
-
-
-def test_the_projection_refuses_keyring_auth_with_a_reason() -> None:
-    """The interim transport has no keyring reader. Refusing names the
-    reason; passing `keyring` through names none."""
-    profile = ModelConnectionConfig(
-        model="openai/gpt-4o",
-        endpoint="https://api.example/v1",
-        auth=ConnectionAuthConfig(method="keyring"),
-    )
-    projection, refusal = project_legacy_transport(profile)
-
-    assert projection is None
-    assert refusal is not None
-    assert "keyring" in refusal
-
-
-def test_the_projection_refuses_an_auth_method_it_does_not_know() -> None:
-    profile = ModelConnectionConfig(
-        model="openai/gpt-4o",
-        endpoint="https://api.example/v1",
-        auth=ConnectionAuthConfig(method="mtls"),
-    )
-    projection, refusal = project_legacy_transport(profile)
-
-    assert projection is None
-    assert refusal is not None
-    assert "mtls" in refusal
-
-
-def test_an_environment_profile_disables_nothing_at_startup(tmp_path: Path) -> None:
+def test_an_environment_profile_comes_up_enabled(tmp_path: Path) -> None:
     """The whole point of the mapping: a profile written by the wizard has
-    to come up enabled, with the scalars the transport speaks."""
+    to come up enabled, with nothing to warn about."""
     path = _write(
         tmp_path,
         """
@@ -1347,35 +1113,15 @@ agent:
     cfg = load_config(path)
 
     assert cfg.agent_enabled is True
-    assert cfg.agent_auth_method == "api_key"
-    assert cfg.agent_api_key_env == "OPENAI_API_KEY"
+    assert cfg.model_connections.active_profile is not None
+    assert cfg.model_connections.active_profile.auth.method == "environment"
     assert cfg.warnings == ()
-
-
-def test_a_keyring_profile_disables_the_agent_with_the_keyring_reason(tmp_path: Path) -> None:
-    path = _write(
-        tmp_path,
-        """
-agent:
-  active: main
-  profiles:
-    main:
-      model: openai/gpt-4o
-      endpoint: https://api.example/v1
-      auth:
-        method: keyring
-""",
-    )
-    cfg = load_config(path)
-
-    assert cfg.agent_enabled is False
-    assert any("keyring" in warning for warning in cfg.warnings)
 
 
 def test_a_profile_never_carries_the_secret_itself(tmp_path: Path) -> None:
     """`auth.key` is a variable *name*. Nothing in the config layer reads
-    the environment, so a projection cannot move a secret value into the
-    file or into a rendered profile."""
+    the environment, so no round-trip can move a secret value into the
+    file."""
     path = _write(
         tmp_path,
         """
@@ -1391,11 +1137,10 @@ agent:
 """,
     )
     cfg = load_config(path)
-    projection, _refusal = project_legacy_transport(cfg.model_connections.profiles["main"])
+    profile = cfg.model_connections.profiles["main"]
 
-    assert projection is not None
-    assert projection.api_key_env == "OPENAI_API_KEY"
-    assert "sk-" not in repr(projection)
+    assert profile.auth.settings["key"] == "OPENAI_API_KEY"
+    assert "sk-" not in repr(profile)
     save_model_connections(path, cfg.model_connections)
     assert "sk-" not in path.read_text(encoding="utf-8")
 
