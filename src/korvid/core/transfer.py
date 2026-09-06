@@ -16,7 +16,7 @@ import os
 import posixpath
 import tarfile
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from pathlib import Path
@@ -402,7 +402,10 @@ def _as_bytes(data: object) -> bytes:
 
 
 def _parse_error_channel(payload: bytes) -> str | None:
-    """Return the failure message from a channel-3 status, None on success."""
+    """Return the failure message from a channel-3 status, None on success.
+
+    Empty or malformed status frames fail every exec operation, including reads.
+    """
     text = payload.decode("utf-8", errors="replace").strip()
     if not text:
         return "invalid exec outcome: expected an explicit Success status"
@@ -567,7 +570,9 @@ def _require_upload_protocol(ws: Any) -> None:
         # ws.protocol stays None. Its handshake response is the only available
         # negotiated value; missing response metadata must fail closed.
         response = getattr(ws, "_response", None)
-        protocol = getattr(response, "headers", {}).get("Sec-WebSocket-Protocol")
+        headers = getattr(response, "headers", None)
+        if isinstance(headers, Mapping):
+            protocol = headers.get("Sec-WebSocket-Protocol")
     if protocol != "v5.channel.k8s.io":
         raise TransferError(
             "upload requires v5.channel.k8s.io for stdin EOF "

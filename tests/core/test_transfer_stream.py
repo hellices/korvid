@@ -66,7 +66,7 @@ class FakeWs:
         self.sent: list[bytes] = []
         self.closed = False
         self.protocol = protocol
-        self._response = SimpleNamespace(headers={})
+        self._response: object = SimpleNamespace(headers={})
         self._fail_send = fail_send
 
     def __aiter__(self) -> FakeWs:
@@ -212,6 +212,19 @@ class TestDownload:
             await download(FakeExec(ws), "/var/log/app.log", dest)
         assert not dest.exists()
 
+    @pytest.mark.parametrize("status", [b" ", b"null", b"[]"])
+    async def test_invalid_status_does_not_create_destination(
+        self, tmp_path: Path, status: bytes
+    ) -> None:
+        archive = tar_bytes("app.log", b"data")
+        ws = FakeWs([b"\x01" + archive, b"\x03" + status], protocol="v4.channel.k8s.io")
+        dest = tmp_path / "app.log"
+        with pytest.raises(TransferError, match="invalid exec outcome"):
+            await download(FakeExec(ws), "/var/log/app.log", dest)
+        assert not dest.exists()
+        assert list(tmp_path.iterdir()) == []
+        assert ws.closed
+
 
 class TestUpload:
     async def test_sends_tar_on_stdin_channel(self, tmp_path: Path) -> None:
@@ -281,6 +294,38 @@ class TestUpload:
         ws._response = SimpleNamespace(headers={"Sec-WebSocket-Protocol": "v5.channel.k8s.io"})
         assert await upload(FakeExec(ws), src, "/opt/f") == 1
         assert ws.sent[-1] == b"\xff\x00"
+
+    @pytest.mark.parametrize(
+        "response",
+        [
+            None,
+            SimpleNamespace(),
+            SimpleNamespace(headers=None),
+            SimpleNamespace(headers={}),
+            SimpleNamespace(headers="not-a-mapping"),
+        ],
+        ids=[
+            "missing-response",
+            "missing-headers",
+            "none-headers",
+            "empty-headers",
+            "invalid-headers",
+        ],
+    )
+    async def test_unavailable_response_headers_send_no_archive(
+        self, tmp_path: Path, response: object
+    ) -> None:
+        src = tmp_path / "f"
+        src.write_bytes(b"x")
+        ws = FakeWs([b"\x03" + SUCCESS], protocol=None)
+        if response is None:
+            del ws._response
+        else:
+            ws._response = response
+        with pytest.raises(TransferError, match=r"requires v5.*no file data sent"):
+            await upload(FakeExec(ws), src, "/opt/f")
+        assert ws.sent == []
+        assert ws.closed
 
     @pytest.mark.parametrize("status", [b" ", b"null", b"[]", b"{}", b'"Success"', b"not json"])
     async def test_requires_explicit_success_status(self, tmp_path: Path, status: bytes) -> None:
@@ -633,6 +678,14 @@ class TestListRemoteDir:
         ws = FakeWs([b"\x01" + b"partial\n"])
         with pytest.raises(TransferError, match="without reporting an outcome"):
             await list_remote_dir(FakeExec(ws), "/srv")
+
+    @pytest.mark.parametrize("status", [b" ", b"null", b"[]"])
+    async def test_invalid_status_rejects_listing(self, status: bytes) -> None:
+        ws = FakeWs([b"\x01file\nsubdir/\n", b"\x03" + status], protocol="v4.channel.k8s.io")
+        with pytest.raises(TransferError, match="invalid exec outcome"):
+            await list_remote_dir(FakeExec(ws), "/srv")
+        assert ws.closed
+        assert ws.sent == []
 
     async def test_symlink_marker_stripped_as_file(self) -> None:
         # -p suffixes only real directories; a dangling `@`-free symlink to a
