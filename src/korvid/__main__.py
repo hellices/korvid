@@ -104,7 +104,7 @@ _MCP_INSTALL_HINT = (
     f"are not installed — {isolated_install_hint(feature='mcp')}"
 )
 _AGENT_INSTALL_HINT = (
-    "the embedded agent is enabled (agent.provider in config.yaml) but its "
+    "the embedded agent is enabled (agent.active names a profile in config.yaml) but its "
     f"dependencies are not installed — {isolated_install_hint(feature='agent')}"
 )
 

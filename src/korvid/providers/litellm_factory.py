@@ -427,7 +427,7 @@ def _refuse_keyless_without_endpoint(profile: ModelConnectionConfig) -> str | No
     if profile.endpoint and profile.endpoint.strip():
         return None
     return (
-        "keyless auth ('none') requires an endpoint: set base_url on this "
+        "keyless auth ('none') requires an endpoint: set `endpoint` on this "
         "profile, or choose an auth method that supplies a credential"
     )
 
@@ -637,7 +637,7 @@ def _refuse_unreachable_provider(
     resolved = api_key if isinstance(api_key, str) else None
     if not litellm_runtime.requires_explicit_api_base(reference, api_key=resolved, api_base=None):
         return None
-    return f"{reference!r} cannot be reached without an endpoint: set base_url on this profile"
+    return f"{reference!r} cannot be reached without an endpoint: set `endpoint` on this profile"
 
 
 # ---------------------------------------------------------------------------

@@ -253,7 +253,7 @@ Without the `[agent]` extra the agent surface is simply absent — no agent
 panel, and `Ctrl-A` / `:ai` / `:model` are not registered. Without the
 `[mcp]` extra the `:mcp` command reports the feature as unavailable with
 an install hint. Explicitly enabling a feature whose extra is missing
-(`--mcp`, `agent.provider` in config) fails at startup with an actionable
+(`--mcp`, `agent.active` in config) fails at startup with an actionable
 message. `[entra]` adds Entra ID auth for Azure OpenAI.
 
 Remove the tool with the installer that created its environment:

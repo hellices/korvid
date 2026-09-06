@@ -1275,6 +1275,37 @@ def test_missing_agent_extra_fails_actionably_when_enabled(
         )
 
 
+def test_the_missing_agent_extra_hint_names_a_key_that_still_exists(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The hint used to point at `agent.provider`, which startup rejects.
+
+    `agent_enabled` is derived from `agent.active` naming a parsed
+    profile; the flat `agent.provider` scalar was retired and is migrated
+    away on load. An operator told to look at `agent.provider` is sent to
+    a key their config.yaml is not supposed to contain.
+    """
+    from korvid.__main__ import _build_agent_wiring
+    from korvid.core.config import KorvidConfig
+    from korvid.k8s.client import KubeClient
+
+    _uninstall_packages(monkeypatch, *_AGENT_ROOTS)
+    with pytest.raises(SystemExit) as excinfo:
+        _build_agent_wiring(
+            KorvidConfig(
+                agent_enabled=True,
+                model_connections=_profiles(
+                    ModelConnectionConfig(model="ollama/m", endpoint="http://x:11434")
+                ),
+            ),
+            cast("KubeClient", object()),
+            {},
+        )
+    message = str(excinfo.value)
+    assert "agent.active" in message
+    assert "agent.provider" not in message
+
+
 def test_missing_first_party_module_is_not_treated_as_missing_extra(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

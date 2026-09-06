@@ -691,7 +691,24 @@ def test_the_keyless_refusal_names_the_missing_field(
     with caplog.at_level(logging.WARNING, logger=FACTORY_LOGGER):
         assert create_provider_from_profile(profile) is None
     assert "endpoint" in caplog.text.lower()
-    assert "base_url" in caplog.text
+
+
+def test_the_keyless_refusal_names_the_key_the_operator_can_actually_set(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """`base_url` is not a key a profile has.
+
+    It was the flat pre-profile shape's spelling, and the migration
+    rewrites it into `endpoint`. A refusal that tells an operator to "set
+    base_url on this profile" names a key `_parse_model_connections`
+    never reads, so following the instruction literally leaves the
+    profile refused for the same reason a second time.
+    """
+    profile = _profile("openai/gpt-4o", base_url=None, auth=_none_auth())
+    with caplog.at_level(logging.WARNING, logger=FACTORY_LOGGER):
+        assert create_provider_from_profile(profile) is None
+    assert "base_url" not in caplog.text
+    assert "endpoint" in caplog.text
 
 
 def test_the_none_auth_rule_reads_one_profile_field_and_nothing_else() -> None:
@@ -751,7 +768,20 @@ def test_a_provider_that_cannot_be_reached_without_an_endpoint_is_refused(
     profile = _profile("azure/gpt-4o", auth=_env_auth("MY_KEY"))
     with caplog.at_level(logging.WARNING, logger=FACTORY_LOGGER):
         assert create_provider_from_profile(profile) is None
-    assert "base_url" in caplog.text
+    assert "endpoint" in caplog.text
+
+
+def test_the_unreachable_refusal_names_the_key_the_operator_can_actually_set(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Same rule as the keyless refusal: name `endpoint`, not `base_url`."""
+    monkeypatch.delenv("AZURE_API_BASE", raising=False)
+    monkeypatch.setenv("MY_KEY", "sk-live")
+    profile = _profile("azure/gpt-4o", auth=_env_auth("MY_KEY"))
+    with caplog.at_level(logging.WARNING, logger=FACTORY_LOGGER):
+        assert create_provider_from_profile(profile) is None
+    assert "base_url" not in caplog.text
+    assert "`endpoint`" in caplog.text
 
 
 def test_the_same_provider_builds_once_the_endpoint_is_named(
