@@ -722,6 +722,7 @@ def _create_provider_from_active_profile(
     from korvid.providers.litellm_catalog import LiteLLMModelCatalog
     from korvid.providers.litellm_factory import create_provider_from_profile
     from korvid.providers.litellm_runtime import models_by_provider
+    from korvid.providers.provider_default import ProviderDefaultRegistry
     from korvid.providers.special_flows import SpecialFlowRegistry
 
     # One registry, shared, and built the same way the catalog and the
@@ -734,6 +735,7 @@ def _create_provider_from_active_profile(
         catalog=LiteLLMModelCatalog(flows=flows),
         flows=flows,
         credentials=credentials,
+        provider_defaults=ProviderDefaultRegistry.from_entry_points(),
         ca_bundle=ca_bundle,
     )
 
@@ -969,6 +971,7 @@ def _build_model_catalog(*, ca_bundle: str | None = None) -> ModelCatalog | None
         from korvid.providers.litellm_runtime import models_by_provider
         from korvid.providers.models_dev import ModelsDevSource
         from korvid.providers.profile_probe import ProfileProbe
+        from korvid.providers.provider_default import ProviderDefaultRegistry
         from korvid.providers.special_flows import SpecialFlowRegistry
         from korvid.providers.token_store import TokenStore
     except ImportError:
@@ -982,6 +985,7 @@ def _build_model_catalog(*, ca_bundle: str | None = None) -> ModelCatalog | None
             catalog=LiteLLMModelCatalog(flows=flows),
             flows=flows,
             credentials=TokenStore(),
+            provider_defaults=ProviderDefaultRegistry.from_entry_points(),
             ca_bundle=ca_bundle,
         ),
     )

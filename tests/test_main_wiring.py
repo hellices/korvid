@@ -2632,3 +2632,74 @@ def test_an_installed_flow_entry_point_builds_the_provider_instead_of_routing(
     assert isinstance(provider, _FlowProvider)
     assert [profile.model for profile in built] == ["acme/internal-v2"]
     assert routed == [], "a claimed reference must never reach litellm routing"
+
+
+def test_an_installed_credential_entry_point_resolves_provider_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The composition root has to hand the factory a *discovered* registry.
+
+    `provider_defaults=None` behaves as an empty registry, which is the
+    same shape as a working one and therefore fails silently: the profile
+    still builds, `provider-default` still omits the api key, and the
+    request goes out with whatever ambient credential the SDK finds — or
+    with none. A declared chain that is installed but never consulted is
+    the exact failure this wiring exists to prevent.
+    """
+    from korvid.__main__ import _create_initial_provider
+    from korvid.core.config import ConnectionAuthConfig, KorvidConfig
+    from korvid.providers.litellm_provider import LiteLLMProvider
+    from korvid.providers.provider_default import ProviderDefaultCredential, ResolvedCredential
+
+    closed: list[int] = []
+
+    async def _aclose() -> None:
+        closed.append(1)
+
+    async def _token() -> str:
+        return "tok"
+
+    declaration = ProviderDefaultCredential(
+        prefix="acme",
+        display_name="Acme identity",
+        resolve=lambda: ResolvedCredential(
+            parameters={"acme_token_provider": _token}, aclose=_aclose
+        ),
+    )
+
+    class _Module:
+        @staticmethod
+        def korvid_provider_default_credentials() -> tuple[ProviderDefaultCredential, ...]:
+            return (declaration,)
+
+    class _EntryPoint:
+        name = "acme"
+        group = "korvid.credential"
+        dist = None
+
+        def load(self) -> type[_Module]:
+            return _Module
+
+    monkeypatch.setattr(
+        "korvid.providers.provider_default._iter_entry_points", lambda: (_EntryPoint(),)
+    )
+    monkeypatch.setattr(
+        "korvid.providers.litellm_runtime.get_llm_provider",
+        lambda model, **kwargs: ("internal-v2", "acme", None, None),
+    )
+    monkeypatch.setattr(
+        "korvid.providers.litellm_runtime.requires_explicit_api_base",
+        lambda *args, **kwargs: False,
+    )
+
+    config = KorvidConfig(
+        model_connections=_profile_connections(
+            "acme/internal-v2", auth=ConnectionAuthConfig(method="provider-default")
+        )
+    )
+    provider = _create_initial_provider(config)
+
+    assert isinstance(provider, LiteLLMProvider)
+    kwargs = provider._plan.call_kwargs([], [], stream=True)
+    assert kwargs["acme_token_provider"] is _token
+    assert "api_key" not in kwargs

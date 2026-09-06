@@ -24,6 +24,7 @@ steps below it:
    so this comes after the claim),
 5. keyless auth with no endpoint (one field of the operator's profile),
 6. the credential, resolved by exactly the method the profile names,
+   including the chain a declaration contributes for `provider-default`,
 7. the routing call,
 8. a provider that genuinely has nowhere to send the request.
 """
@@ -53,6 +54,11 @@ from korvid.providers.litellm_request import (
     build_plan,
 )
 from korvid.providers.litellm_settings import DEVICE_LOGIN_PREFIXES
+from korvid.providers.provider_default import (
+    CredentialUnavailable,
+    ProviderDefaultRegistry,
+    ResolvedCredential,
+)
 from korvid.providers.special_flows import SpecialFlowRegistry, normalize_prefix
 
 if TYPE_CHECKING:
@@ -112,6 +118,7 @@ def create_provider_from_profile(
     catalog: ModelCatalog | None = None,
     flows: SpecialFlowRegistry | None = None,
     credentials: CredentialStore | None = None,
+    provider_defaults: ProviderDefaultRegistry | None = None,
     ca_bundle: str | None = None,
 ) -> LLMProvider | None:
     """Build a provider, or None when the profile is unusable.
@@ -129,6 +136,11 @@ def create_provider_from_profile(
             resolve.
         credentials: The secret store `keyring` auth reads. `None` uses
             the OS keyring directly.
+        provider_defaults: The declared `provider-default` credential
+            chains. `None` behaves as an empty registry, which leaves
+            `provider-default` doing what it does everywhere else:
+            passing no `api_key`, so the transport consults its own
+            chain.
         ca_bundle: Path to the trust bundle from `network.ca_bundle`, or
             `None` for the SDK's own trust. One trust decision covers
             every korvid-owned HTTPS client, so the same setting that
@@ -165,6 +177,10 @@ def create_provider_from_profile(
     if not resolved:
         return None
 
+    declared, contribution = _declared_credential(profile, reference, provider_defaults)
+    if not declared:
+        return None
+
     routed = _route(reference, _endpoint(profile))
     if routed is None:
         return None
@@ -181,11 +197,13 @@ def create_provider_from_profile(
         base_url=_endpoint(profile),
         options=profile.options,
         supported=litellm_runtime.supported_params(model_tag, provider_id),
+        credential=contribution.parameters,
     )
     return LiteLLMProvider(
         plan=plan,
         descriptor=ModelDescriptor(provider=provider_id, model=model_tag),
         capabilities=_capabilities(reference, profile.options, catalog),
+        on_close=contribution.aclose,
     )
 
 
@@ -499,6 +517,55 @@ def _from_keyring(
         _refuse("the keyring holds no entry named %r", entry)
         return False, None
     return True, secret
+
+
+# ---------------------------------------------------------------------------
+# Step 6b — the credential chain a declaration contributes
+# ---------------------------------------------------------------------------
+
+
+def _declared_credential(
+    profile: ModelConnectionConfig,
+    reference: str,
+    provider_defaults: ProviderDefaultRegistry | None,
+) -> tuple[bool, ResolvedCredential]:
+    """What a declared chain contributes for `provider-default`, if any.
+
+    Only `provider-default` is asked. Every other method has already
+    resolved a credential the operator named, and letting a declaration
+    contribute there would let an installed package turn a profile
+    authenticated one way into one authenticated with an ambient
+    identity.
+
+    Nothing here knows which reference a declaration covers, or what a
+    contribution contains: the registry answers by prefix and the
+    parameters go onto the plan untouched. That is the whole point of the
+    boundary — the module that decides *whether* a credential is resolved
+    must not be the module that knows *whose* it is.
+
+    Returns:
+        `(True, contribution)`, or `(False, empty)` with the reason
+        logged. A chain that raises is a refusal, never a fall-through:
+        an unresolved credential must not become an unauthenticated
+        request.
+    """
+    if profile.auth.method != "provider-default" or provider_defaults is None:
+        return True, ResolvedCredential()
+    try:
+        declaration = provider_defaults.resolve(reference)
+    except Exception:  # third-party registry state can raise anything
+        _refuse("the declared credential chain for %r could not be resolved", reference)
+        return False, ResolvedCredential()
+    if declaration is None:
+        return True, ResolvedCredential()
+    try:
+        return True, declaration.resolve()
+    except CredentialUnavailable as exc:
+        _refuse("%s", exc)
+        return False, ResolvedCredential()
+    except Exception:  # third-party declaration code can raise anything
+        _refuse("the declared credential chain for %r failed", reference)
+        return False, ResolvedCredential()
 
 
 # ---------------------------------------------------------------------------

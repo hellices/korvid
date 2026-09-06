@@ -142,11 +142,13 @@ async def test_probe_threads_its_wiring_into_the_factory(
     catalog = object()
     flows = object()
     credentials = object()
+    provider_defaults = object()
 
     probe = ProfileProbe(
         catalog=catalog,  # type: ignore[arg-type]  # a stub is enough: the probe only forwards it
         flows=flows,  # type: ignore[arg-type]  # ditto
         credentials=credentials,  # type: ignore[arg-type]  # ditto
+        provider_defaults=provider_defaults,  # type: ignore[arg-type]  # ditto
         ca_bundle="/etc/ssl/corp.pem",
     )
     await probe(_PROFILE)
@@ -157,6 +159,7 @@ async def test_probe_threads_its_wiring_into_the_factory(
             "catalog": catalog,
             "flows": flows,
             "credentials": credentials,
+            "provider_defaults": provider_defaults,
             "ca_bundle": "/etc/ssl/corp.pem",
         }
     ]

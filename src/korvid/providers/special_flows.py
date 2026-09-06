@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 _ENTRY_POINT_GROUP: str = "korvid.provider"
 
 #: korvid's own distribution name, normalized. Entry points shipped by it
-#: are exempt from the reserved-prefix rule (see `_is_korvids_own`).
+#: are exempt from the reserved-prefix rule (see `is_korvids_own`).
 _OWN_DISTRIBUTION: str = "korvid"
 
 # Applied to the *declared* (un-normalized) spelling.
@@ -86,7 +86,7 @@ def _iter_entry_points() -> Iterable[importlib.metadata.EntryPoint]:
         return ()
 
 
-def _is_korvids_own(entry_point: importlib.metadata.EntryPoint) -> bool:
+def is_korvids_own(entry_point: importlib.metadata.EntryPoint) -> bool:
     """Was this entry point declared by korvid's own distribution?
 
     The reserved-prefix rule protects routing from third parties, not
@@ -94,6 +94,10 @@ def _is_korvids_own(entry_point: importlib.metadata.EntryPoint) -> bool:
     exactly the ones the SDK would otherwise route into an interactive
     device login. The exemption is distribution *identity*, never the
     flow's own say-so, so a plugin cannot buy it by choosing a name.
+
+    Public within `providers/` because `provider_default.py` makes the
+    same exemption on the same reserved set, and two copies of a security
+    check are two checks that will eventually differ.
     """
     try:
         name = getattr(getattr(entry_point, "dist", None), "name", None)
@@ -220,7 +224,7 @@ class SpecialFlowRegistry:
                 continue
             normalized = normalize_prefix(name)
             if normalized in _FORBIDDEN_PREFIXES or (
-                normalized in exclusive and not _is_korvids_own(ep)
+                normalized in exclusive and not is_korvids_own(ep)
             ):
                 registry._errors.append(
                     f"entry-point prefix {name!r} (normalized: {normalized!r}) is reserved"

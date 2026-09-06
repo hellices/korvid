@@ -23,6 +23,7 @@ import copy
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Any, Final
 
 from korvid.providers.litellm_settings import KEYLESS_API_KEY_SENTINEL
@@ -87,6 +88,11 @@ class _OmitApiKey:
 #: The "do not pass ``api_key``" marker. Compared with ``is``.
 OMIT_API_KEY: Final = _OmitApiKey()
 
+#: No declared credential chain — the ordinary case. Immutable, because a
+#: shared mutable default would let one plan's credential leak into every
+#: other plan built without one.
+_NO_CREDENTIAL: Final[Mapping[str, object]] = MappingProxyType({})
+
 #: A credential in its three resolved states: the key itself, ``None`` for
 #: a genuinely keyless endpoint, or ``OMIT_API_KEY`` to pass no argument at
 #: all. Named so the factory can carry a resolution result without
@@ -120,6 +126,14 @@ class RequestPlan:
     #: default. Named rather than an extra because ``get_supported_openai_params``
     #: lists it for no provider, so the allowlist filter would drop it.
     timeout: float | None = None
+    #: Transport call parameters contributed by a declared ``provider-default``
+    #: credential chain. Named rather than left among the extras for the same
+    #: reason ``timeout`` is: ``get_supported_openai_params`` lists none of
+    #: them, so the allowlist filter would drop exactly the parameter that
+    #: carries the credential. They hold a *refreshing* callable, never a
+    #: resolved secret, and they are applied last so no profile option can
+    #: replace one.
+    credential: Mapping[str, object] = _NO_CREDENTIAL
 
     def call_kwargs(
         self,
@@ -153,6 +167,10 @@ class RequestPlan:
         if stream:
             kwargs["stream_options"] = {"include_usage": True}
         kwargs.update(copy.deepcopy(dict(self.extra)))
+        # Last, and not deep-copied: a declared credential parameter is a
+        # live callable the transport invokes per request, and an operator
+        # option must never be able to replace it.
+        kwargs.update(self.credential)
         return kwargs
 
 
@@ -168,6 +186,7 @@ def build_plan(
     base_url: str | None,
     options: Mapping[str, object],
     supported: Sequence[str],
+    credential: Mapping[str, object] = _NO_CREDENTIAL,
 ) -> RequestPlan:
     """Resolve config into a plan, dropping options the provider rejects.
 
@@ -181,6 +200,9 @@ def build_plan(
         supported: Parameter names the provider accepts. An *empty* sequence
             means the capability lookup failed; in that case all non-owned keys
             are forwarded rather than silently dropped.
+        credential: Call parameters from a declared ``provider-default``
+            credential chain. Never filtered against *supported*, which lists
+            none of them, and never overridden by an option.
 
     Returns:
         A frozen ``RequestPlan`` ready for snapshotting and wiring.
@@ -210,7 +232,10 @@ def build_plan(
         filtered = {k: v for k, v in filtered.items() if k in supported_set}
 
     # 4. Deep-copy so a frozen MappingProxyType in the profile can never be
-    #    mutated by a downstream SDK call.
+    #    mutated by a downstream SDK call. The credential parameters are
+    #    snapshotted rather than copied: they hold a live callable the
+    #    transport invokes, so a copy would be wrong, but the plan must own
+    #    a mapping the declaration that supplied it cannot rewrite later.
     extra: dict[str, object] = copy.deepcopy(filtered)
 
     return RequestPlan(
@@ -220,4 +245,5 @@ def build_plan(
         api_version=api_version,
         extra=extra,
         timeout=timeout,
+        credential=MappingProxyType(dict(credential)),
     )

@@ -29,7 +29,14 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from collections.abc import AsyncGenerator, AsyncIterator, Iterator
+import logging
+from collections.abc import (
+    AsyncGenerator,
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Iterator,
+)
 from contextlib import aclosing
 from dataclasses import dataclass
 from typing import Any, Final
@@ -40,6 +47,8 @@ from korvid.agent.model_policy import ModelCapabilities, ModelDescriptor
 from korvid.agent.provider import REQUEST_SENT, LLMProvider, OperatorSafeProviderError
 from korvid.providers.litellm_request import RequestPlan
 from korvid.providers.litellm_runtime import ProviderSDKError, acompletion, exceptions
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Written messages — evidence-free by construction
@@ -426,6 +435,12 @@ class LiteLLMProvider(LLMProvider):
         client: An optional pre-built SDK client. Only used by tests, and
             passed through `acompletion(client=...)` — which is a
             kwargs-only parameter in 1.98.0.
+        on_close: Releases whatever a declared `provider-default`
+            credential chain opened, or None when nothing was declared.
+            This provider owns it because it owns the plan that carries
+            the chain's parameters: `:model` rebuilds the provider and
+            `:ai off` drops it, and the credential's own HTTP client has
+            to go with it.
     """
 
     def __init__(
@@ -435,6 +450,7 @@ class LiteLLMProvider(LLMProvider):
         descriptor: ModelDescriptor,
         capabilities: ModelCapabilities | None = None,
         client: Any | None = None,
+        on_close: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self._plan = plan
         self._descriptor = descriptor
@@ -442,6 +458,21 @@ class LiteLLMProvider(LLMProvider):
             capabilities if capabilities is not None else ModelCapabilities.unknown()
         )
         self._client = client
+        self._on_close = on_close
+
+    async def aclose(self) -> None:
+        """Release the declared credential chain, if there is one.
+
+        A chain that fails to close is logged and swallowed: this runs on
+        the rebuild and shutdown paths, where raising would take down a
+        `:model` switch over a credential library's teardown.
+        """
+        if self._on_close is None:
+            return
+        try:
+            await self._on_close()
+        except Exception:  # credential library teardown, in any state
+            logger.warning("the provider-default credential failed to close")
 
     @property
     def descriptor(self) -> ModelDescriptor:

@@ -133,6 +133,17 @@ are composed *after* the immutable safety contract and cannot widen it.
   two different measurements are no longer both called "success". A run's
   per-turn `success` is derived from its outcome and can no longer
   contradict it.
+- **Entra ID actually resolves for an `azure` profile.** `auth.method:
+  provider-default` used to mean only "pass no API key and let the SDK look",
+  and the SDK's own Entra chain is behind a process-wide opt-in that is off by
+  default — so an `azure` profile relying on `az login` or a managed identity
+  authenticated with nothing. korvid now declares the credential chain, per
+  reference prefix, and resolves it while the profile is being built. A
+  missing `entra` extra is refused there, naming the install command, instead
+  of surfacing as an `ImportError` from inside the provider SDK on the first
+  message. Third parties can declare a chain the same way, on the
+  `korvid.credential` entry-point group — see
+  [Provider plugins](../provider-plugins.md).
 - **Truncation marker.** A tool result too large for the tier's budget is
   still shortened from the middle, and the marker the model reads there now
   names the budget it hit: `… [middle truncated — tier result budget]`. It

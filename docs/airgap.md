@@ -6,8 +6,8 @@ endpoint to internalize, and who owns the trust for it — korvid configures
 TLS only for the connections it makes itself, and there is **no way to
 disable TLS verification** through korvid configuration, by design. Optional
 features that authenticate against an external identity provider (for
-example GitHub Copilot or Entra device login) still need their own external
-connectivity; they are called out below.
+example the GitHub Copilot device login, or Microsoft Entra ID) still need
+their own external connectivity; they are called out below.
 
 ## The artifact and trust path
 
@@ -43,7 +43,8 @@ trust decision for it, and how to configure that trust:**
 | OLM catalogs, bundle/operand images | cluster nodes / container runtime | registry mirror + node trust configuration |
 | Workload, debug, and node-shell images | container runtime | registry mirror + node trust configuration |
 | Telepresence and other external CLIs | the CLI itself | its own configuration |
-| GitHub Copilot / Entra device login | the provider SDK | requires its usual external connectivity |
+| GitHub Copilot device login | the provider SDK | requires its usual external connectivity |
+| Microsoft Entra ID (`azure` profiles) | `azure-identity` | requires its usual external connectivity; `network.ca_bundle` does **not** reach the token endpoint |
 
 ## Corporate CA for the agent (`network.ca_bundle`)
 

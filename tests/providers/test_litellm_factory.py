@@ -33,6 +33,12 @@ from korvid.providers.litellm_factory import (
 )
 from korvid.providers.litellm_provider import LiteLLMProvider
 from korvid.providers.litellm_request import RequestPlan
+from korvid.providers.provider_default import (
+    CredentialUnavailable,
+    ProviderDefaultCredential,
+    ProviderDefaultRegistry,
+    ResolvedCredential,
+)
 from korvid.providers.special_flows import SpecialFlowRegistry
 from tests.providers.tls_ca import mint_ca_and_server_cert
 
@@ -1106,3 +1112,174 @@ def test_a_broken_flow_is_still_reported_when_its_prefix_falls_back(
     )
 
     assert any("ollama" in message for message in flows.errors)
+
+
+# ---------------------------------------------------------------------------
+# Step 6b — the declared provider-default credential chain
+# ---------------------------------------------------------------------------
+
+
+def _chain(prefix: str, parameters: dict[str, object], **kwargs: Any) -> ProviderDefaultCredential:
+    closed: list[int] = kwargs.pop("closed", [])
+
+    async def _aclose() -> None:
+        closed.append(1)
+
+    return ProviderDefaultCredential(
+        prefix=prefix,
+        display_name=prefix,
+        resolve=lambda: ResolvedCredential(parameters=parameters, aclose=_aclose),
+        **kwargs,
+    )
+
+
+def test_a_declared_chain_contributes_its_call_parameters() -> None:
+    """`provider-default` still omits `api_key`, and now may also carry
+    the parameters a declared chain contributes — the transport resolves
+    the credential itself, per request."""
+    registry = ProviderDefaultRegistry((_chain("openai", {"token_provider": "callable"}),))
+
+    plan = _plan_for(
+        _profile("openai/gpt-4o", auth=ConnectionAuthConfig(method="provider-default")),
+        provider_defaults=registry,
+    )
+
+    assert plan.api_key is OMIT_API_KEY
+    kwargs = plan.call_kwargs([], [], stream=True)
+    assert "api_key" not in kwargs
+    assert kwargs["token_provider"] == "callable"
+
+
+def test_a_declared_chain_is_only_consulted_for_provider_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A chain must never turn a profile the operator authenticated some
+    other way into one that authenticates with an ambient identity."""
+    monkeypatch.setenv("KORVID_TEST_KEY", "sk-from-the-operator")
+    registry = ProviderDefaultRegistry((_chain("openai", {"token_provider": "callable"}),))
+
+    plan = _plan_for(
+        _profile("openai/gpt-4o", auth=_env_auth("KORVID_TEST_KEY")),
+        provider_defaults=registry,
+    )
+
+    assert plan.api_key == "sk-from-the-operator"
+    assert "token_provider" not in plan.call_kwargs([], [], stream=True)
+
+
+def test_a_reference_with_no_declared_chain_keeps_delegating_to_the_sdk() -> None:
+    """The registry answering `None` is the ordinary case, not a failure."""
+    registry = ProviderDefaultRegistry((_chain("openai", {"token_provider": "callable"}),))
+
+    plan = _plan_for(
+        _profile(
+            "bedrock/amazon.titan-text-lite-v1",
+            auth=ConnectionAuthConfig(method="provider-default"),
+        ),
+        provider_defaults=registry,
+    )
+
+    kwargs = plan.call_kwargs([], [], stream=True)
+    assert "api_key" not in kwargs
+    assert "token_provider" not in kwargs
+
+
+def test_a_chain_that_cannot_supply_a_credential_refuses_the_profile(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The refusal happens at build time, where korvid can say what to
+    install, rather than as an SDK ImportError on the first message."""
+
+    def _unavailable() -> ResolvedCredential:
+        raise CredentialUnavailable("install the entra extra")
+
+    registry = ProviderDefaultRegistry(
+        (ProviderDefaultCredential(prefix="openai", display_name="openai", resolve=_unavailable),)
+    )
+
+    with caplog.at_level(logging.WARNING, logger=FACTORY_LOGGER):
+        provider = create_provider_from_profile(
+            _profile("openai/gpt-4o", auth=ConnectionAuthConfig(method="provider-default")),
+            provider_defaults=registry,
+        )
+
+    assert provider is None
+    assert "install the entra extra" in caplog.text
+
+
+def test_a_chain_that_raises_anything_else_refuses_the_profile(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Third-party declaration code can raise anything, and a credential
+    that could not be resolved must never fall through to an
+    unauthenticated request."""
+
+    def _explode() -> ResolvedCredential:
+        raise RuntimeError("boom")
+
+    registry = ProviderDefaultRegistry(
+        (ProviderDefaultCredential(prefix="openai", display_name="openai", resolve=_explode),)
+    )
+
+    with caplog.at_level(logging.WARNING, logger=FACTORY_LOGGER):
+        provider = create_provider_from_profile(
+            _profile("openai/gpt-4o", auth=ConnectionAuthConfig(method="provider-default")),
+            provider_defaults=registry,
+        )
+
+    assert provider is None
+    assert "openai/gpt-4o" in caplog.text
+
+
+def test_a_declared_parameter_cannot_be_overridden_by_a_profile_option() -> None:
+    """An operator option must not be able to replace the credential the
+    declared chain resolved — that is a credential downgrade written in a
+    config file."""
+    registry = ProviderDefaultRegistry((_chain("openai", {"temperature": "from-the-chain"}),))
+
+    plan = _plan_for(
+        _profile(
+            "openai/gpt-4o",
+            auth=ConnectionAuthConfig(method="provider-default"),
+            options={"temperature": 0.5},
+        ),
+        provider_defaults=registry,
+    )
+
+    assert plan.call_kwargs([], [], stream=True)["temperature"] == "from-the-chain"
+
+
+async def test_closing_the_provider_releases_the_declared_credential() -> None:
+    """`:model` rebuilds the provider and `:ai off` drops it; either way
+    the credential's own client has to go with it."""
+    closed: list[int] = []
+    registry = ProviderDefaultRegistry(
+        (_chain("openai", {"token_provider": "callable"}, closed=closed),)
+    )
+
+    provider = create_provider_from_profile(
+        _profile("openai/gpt-4o", auth=ConnectionAuthConfig(method="provider-default")),
+        provider_defaults=registry,
+    )
+    assert provider is not None
+    await provider.aclose()
+
+    assert closed == [1]
+
+
+def test_the_factory_still_names_no_vendor_after_the_credential_boundary() -> None:
+    """The boundary is data-driven, so the module that consults it must
+    stay free of the names it resolves for."""
+    source = FACTORY_SOURCE.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    offenders = [
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and any(
+            token in node.value.lower()
+            for token in ("azure", "entra", "openai", "anthropic", "copilot", "ollama")
+        )
+    ]
+    assert offenders == []

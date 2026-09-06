@@ -67,6 +67,28 @@ normalizes provider names by lowercasing and collapsing runs of `-`, `_`, and
 `.` into `-`, so `Company_LLM`, `company.llm`, and `company-llm` all collide.
 Two installed distributions claiming the same normalized name are rejected.
 
+### Credential chains for `provider-default`
+
+A backend whose *transport* korvid already speaks but whose *credential* it
+does not may declare a chain rather than a whole provider. A declaration is
+data — a prefix, a display name, and a callable returning the transport call
+parameters that carry a refreshing credential — published on the
+`korvid.credential` group:
+
+```toml
+[project.entry-points."korvid.credential"]
+company-llm = "acme_korvid_provider.credentials"
+```
+
+The module exposes `korvid_provider_default_credentials()` returning
+`ProviderDefaultCredential` declarations. korvid consults one only when the
+profile already says `auth.method: provider-default`, so an installed package
+cannot change how a profile authenticates behind the operator's back — and
+never on a name korvid ships. `resolve` raises `CredentialUnavailable`, with
+an operator-facing message, when it cannot supply a credential: korvid refuses
+the profile while it is being built rather than on the first message. korvid's
+own Entra ID chain for `azure` is declared this way.
+
 ## Operator configuration
 
 Today, the `:ai` wizard exposes only the built-ins. Third-party plugins are

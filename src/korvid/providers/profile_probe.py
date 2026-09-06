@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Final
 
 from korvid.agent.outbound import OutboundPolicy, provider_prepared_messages
 from korvid.providers.litellm_factory import CredentialStore, create_provider_from_profile
+from korvid.providers.provider_default import ProviderDefaultRegistry
 
 if TYPE_CHECKING:
     from korvid.agent.model_profiles import ModelCatalog, ModelConnectionConfig
@@ -51,11 +52,17 @@ class ProfileProbe:
         catalog: ModelCatalog | None = None,
         flows: SpecialFlowRegistry | None = None,
         credentials: CredentialStore | None = None,
+        provider_defaults: ProviderDefaultRegistry | None = None,
         ca_bundle: str | None = None,
     ) -> None:
         self._catalog = catalog
         self._flows = flows
         self._credentials = credentials
+        # The wizard's "test connection" has to resolve the same
+        # credential the live agent will: a probe that passes without the
+        # declared chain, or fails without it, is a probe that answers a
+        # different question from the one the operator asked.
+        self._provider_defaults = provider_defaults
         # network.ca_bundle (issue #168): the probe provider must be built
         # with the same trust as the live agent — the wizard's test and the
         # runtime can never disagree about the CA.
@@ -81,6 +88,7 @@ class ProfileProbe:
             catalog=self._catalog,
             flows=self._flows,
             credentials=self._credentials,
+            provider_defaults=self._provider_defaults,
             ca_bundle=self._ca_bundle,
         )
         if provider is None:

@@ -133,7 +133,7 @@ prefix picks the route, the tag is the model.
 | Provider | Auth | `model` prefix |
 |---|---|---|
 | GitHub Copilot | device login inside korvid (no PAT) | `github-copilot` |
-| Azure OpenAI / AI Foundry | Entra ID — `az login` or managed identity (needs the `entra` extra, below) | `azure` |
+| Azure OpenAI / AI Foundry | `provider-default` resolves Entra ID: `az login` or managed identity (needs the `entra` extra, below) | `azure` |
 | OpenAI, GitHub Models, Anthropic, vLLM, any compatible endpoint | API key from an environment variable, or none | `openai`, `anthropic`, `github`, … — add `endpoint` for a self-hosted server |
 | Ollama (local) | none | `ollama` — `options.native_thinking: true` selects native `/api/chat`; `options` also tunes `num_ctx`, `temperature`, `seed`, `think`, `keep_alive`, `num_predict` |
 

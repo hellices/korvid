@@ -245,3 +245,27 @@ def test_a_profile_option_cannot_turn_verification_off() -> None:
     plan = _plan(options={"ssl_verify": False}, supported=["ssl_verify"])
     assert "ssl_verify" not in plan.call_kwargs([], [], stream=True)
     assert plan.extra == {}
+
+
+def test_a_declared_credential_is_snapshotted_onto_the_plan() -> None:
+    """The plan owns its credential parameters.
+
+    They are not deep-copied — they carry a live callable the transport
+    invokes per request, and a copy of a callable is the wrong object —
+    but the mapping is snapshotted, so the declaration that supplied it
+    cannot rewrite the parameters of a plan already in use.
+    """
+    supplied: dict[str, object] = {"token_provider": "callable"}
+    plan = build_plan(
+        model="openai/gpt-4o",
+        api_key="sk-test",
+        base_url=None,
+        options={},
+        supported=(),
+        credential=supplied,
+    )
+    supplied["token_provider"] = "replaced"
+
+    assert plan.call_kwargs([], [], stream=True)["token_provider"] == "callable"
+    with pytest.raises(TypeError, match="does not support item assignment"):
+        plan.credential["token_provider"] = "replaced"  # type: ignore[index]  # frozen by design

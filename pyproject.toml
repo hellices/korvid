@@ -46,6 +46,16 @@ korvid = "korvid.cli:main"
 github-copilot = "korvid.providers.flow_copilot"
 ollama = "korvid.providers.flow_ollama_thinking"
 
+# Credential chains `auth.method: provider-default` resolves through,
+# published on the extension point a third-party chain uses. Named for
+# the reference prefix the declaration covers, for the same reason the
+# group above is: the registry resolves by name without importing
+# anything, so the two must match exactly. A chain contributes call
+# parameters to every request under its prefix, so a reserved name is
+# refused to every distribution but korvid's own.
+[project.entry-points."korvid.credential"]
+azure = "korvid.providers.entra"
+
 # PyPI builds the project page's sidebar from these. Without them a stranger
 # deciding whether to trust the package has nowhere to click.
 [project.urls]
