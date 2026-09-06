@@ -122,33 +122,81 @@ carries the boundary and the residual risks.
 
 The quickest path is inside the TUI: `:ai` (alias `:agent`) opens a wizard for
 provider, authentication and a live test call, and saves it to
-`~/.config/korvid/config.yaml`. `:model <name>` switches models later.
-`Ctrl-A` toggles the panel's *visibility*; `:ai off` releases the provider
-connection without discarding the saved configuration.
+`~/.config/korvid/config.yaml`. `Ctrl-A` toggles the panel's *visibility*;
+`:ai off` releases the provider connection without discarding the saved
+configuration.
+
+### Named profiles and model references
 
 A connection is a **profile** under `agent.profiles.<name>`; `agent.active`
-names the one in use. Its `model` is a `<prefix>/<tag>` reference — the
-prefix picks the route, the tag is the model.
+names the one in use. Every model reference is `<prefix>/<tag>` — the prefix
+picks the transport route, the tag is the model identifier. Colon-form
+references (`ollama:qwen3:8b`) are **not** accepted: a model tag can itself
+contain a colon (e.g. `qwen3:8b`), so the colon cannot serve as a separator.
 
-| Provider | Auth | `model` prefix |
-|---|---|---|
-| GitHub Copilot | device login inside korvid (no PAT) | `github-copilot` |
-| Azure OpenAI / AI Foundry | `provider-default` resolves Entra ID: `az login` or managed identity (needs the `entra` extra, below) | `azure` |
-| OpenAI, GitHub Models, Anthropic, vLLM, any compatible endpoint | API key from an environment variable, or none | `openai`, `anthropic`, `github`, … — add `endpoint` for a self-hosted server |
-| Ollama (local) | none | `ollama` — `options.native_thinking: true` selects native `/api/chat`; `options` also tunes `num_ctx`, `temperature`, `seed`, `think`, `keep_alive`, `num_predict` |
+To switch profiles, run `:ai switch <name>` or edit `agent.active` in the
+config file. To search for available models, run `:model search` — the catalog
+is explained in [Model search](#model-search) below.
+
+A full three-profile `~/.config/korvid/config.yaml`:
 
 ```yaml
 agent:
-  active: main
+  active: local
+
   profiles:
-    main:
+
+    # Local Ollama endpoint — no API key, nothing leaves the machine.
+    local:
+      model: ollama/qwen3:8b
+      auth:
+        method: none
+      options:
+        num_ctx: 32768
+
+    # OpenAI with the key in the environment, never in this file.
+    gpt:
       model: openai/gpt-4o
-      auth: {method: environment, key: OPENAI_API_KEY}
+      auth:
+        method: environment
+        key: OPENAI_API_KEY
+
+    # Azure OpenAI / AI Foundry with Entra ID credential (needs [entra]).
+    azure-work:
+      model: azure/gpt-4.1
+      endpoint: https://my-hub.openai.azure.com/openai/deployments/gpt-4.1
+      auth:
+        method: provider-default
 ```
 
-`auth.method` is `environment`, `keyring`, `provider-default`, `device-login`
-or `none`; `auth.key` names the environment variable holding the key, which
-never lives in the config file. An older scalar config migrates on load.
+### Auth methods
+
+`auth.method` is one of five values:
+
+| Method | Meaning |
+|---|---|
+| `environment` | Read the API key from `auth.key` (the variable name, not the value). Fails at startup if the variable is unset. |
+| `keyring` | Read the key from the OS keychain under `auth.key`. |
+| `provider-default` | Resolve a declared credential chain for the prefix — used for Azure / Entra ID, and extensible by `korvid.credential` entry points. The `[entra]` extra is required for `azure` profiles. |
+| `device-login` | Perform an interactive device-code login when the provider requires it. Used by the `github-copilot` flow. |
+| `none` | No credential. For a private local endpoint that needs no key. |
+
+`auth.key` names the environment variable. The secret itself **never belongs
+in the config file**.
+
+### Supported prefixes
+
+| Prefix | Auth | Notes |
+|---|---|---|
+| `openai` | `environment` / `keyring` | Also covers any OpenAI-compatible endpoint; set `endpoint` for a self-hosted server. |
+| `anthropic` | `environment` / `keyring` | |
+| `azure` | `provider-default` (Entra ID via `az login` or managed identity) | Requires the `[entra]` extra. `endpoint` is the deployment URL. |
+| `github-copilot` | `device-login` | Unofficial internal API; requires an active Copilot subscription. |
+| Ollama (`ollama`) | `none` | `options.native_thinking: true` selects native `/api/chat`; `options` also tunes `num_ctx`, `temperature`, `seed`, `think`, `keep_alive`, `num_predict`. |
+| Any LiteLLM-supported prefix | varies | LiteLLM ships a catalog of 2,000+ models; use any of its prefixes directly. |
+
+An older single-scalar config (`agent.provider`, `agent.model`) is migrated
+automatically on first load.
 
 !!! warning "GitHub Copilot"
 
@@ -173,6 +221,39 @@ differs registers as a [Provider plugin](provider-plugins.md): trusted,
 in-process code that receives the same sanitized payload a built-in provider
 gets, and is outside korvid's visibility past the handoff. That page carries
 the API 2 contract and the operator checklist.
+
+## Model search
+
+`:model search` opens a fuzzy-search screen over korvid's model catalog. The
+catalog has two layers:
+
+1. **Bundled (primary)**: LiteLLM ships a `model_prices_and_context_window.json`
+   table inside its wheel. korvid reads that table at startup — no network call,
+   no internet required. 2,000+ models from dozens of providers are discoverable
+   entirely offline.
+
+2. **models.dev (optional enrichment)**: korvid may fetch a single JSON document
+   from `https://models.dev/api.json` to add context lengths, quantization info,
+   and environment-variable hints. This fetch is **never made at startup** and
+   **never made during a routing call** — it is an explicit refresh when you open
+   the search screen or run `:model refresh`. The result is cached at
+   `$XDG_CACHE_HOME/korvid/models-dev.json` (mode `0600`, TTL 24 h).
+
+   To disable models.dev enrichment permanently, set:
+
+   ```yaml
+   agent:
+     model_search:
+       models_dev: false
+   ```
+
+   A network observer can infer that a korvid instance refreshed its model
+   metadata. This is the only outbound connection the agent makes that does not
+   carry a cluster payload. See the [threat model](threat-model.md#modelsdev)
+   for the full residual-risk statement.
+
+Routing never consults models.dev: `provider/model` is resolved by LiteLLM's
+bundled tables (plus any registered special flows) with no external calls.
 
 ## Stop, correct, or follow
 
@@ -221,11 +302,15 @@ the [migration notes](release-notes/unreleased.md).
 
 ```yaml
 agent:
-  provider: ollama
-  base_url: http://localhost:11434
-  model: qwen3:8b
-  # Omit for automatic routing; set only to override what routing decided.
-  model_tier: low   # low | high
+  active: local
+  profiles:
+    local:
+      model: ollama/qwen3:8b
+      endpoint: http://localhost:11434
+      auth:
+        method: none
+      # Omit for automatic routing; set only to override what routing decided.
+      # model_tier: low   # low | high
   rules:
     - "Never include node names in an answer."
 ```

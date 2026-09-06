@@ -1,8 +1,18 @@
 # Provider plugins
 
-Third-party provider plugins are the escape hatch for LLM backends that do
-**not** fit korvid's built-in providers. Reach for one only when the wire
-protocol or the auth flow truly differs from anything korvid already speaks.
+korvid routes every model reference through LiteLLM's bundled catalog. Over
+2,000 models from dozens of providers work out of the box — no plugin needed.
+**You almost certainly do not need a plugin.** The only reasons to write one
+are:
+
+- Your backend's wire protocol is not OpenAI-compatible and LiteLLM does not
+  support it.
+- Your auth flow is genuinely non-standard — for example, a credential that
+  refreshes through a proprietary OIDC variant.
+
+If your backend speaks an OpenAI-compatible API at any URL, a profile with an
+`endpoint` is the right answer. If the auth is non-standard but the transport
+is fine, a `korvid.credential` chain (see below) covers it without a plugin.
 
 > **Security warning:** provider plugins are trusted, in-process Python code
 > loaded into the korvid process. Selected-only loading avoids importing
@@ -16,32 +26,82 @@ protocol or the auth flow truly differs from anything korvid already speaks.
 > anywhere; korvid has no visibility past the handoff. See
 > [`SECURITY.md`](https://github.com/hellices/korvid/blob/main/SECURITY.md) to report a vulnerability.
 
-!!! warning "The `korvid.provider` group now carries special flows"
+## Special flows (the current extension point)
 
-    korvid deleted its hand-written vendor adapter table. Routing is derived
-    from the model reference, so the `ProviderPlugin` construction path
-    described below is **no longer wired**: korvid loads `korvid.provider`
-    entry points as `SpecialFlow` objects and calls the flow's
-    `build_provider(profile)`. The API 2 surface, the event contract, the
-    options limits and the secret policy on this page still describe what a
-    provider must satisfy, but a plugin registered as a `ProviderPlugin`
-    class is not instantiated by current builds. See
-    `korvid.providers.flow_ollama_thinking` for a shipped flow.
+The `korvid.provider` entry-point group now loads **`SpecialFlow`** objects,
+not `ProviderPlugin` objects. A `SpecialFlow` claims a prefix and builds a
+provider for profiles under that prefix. This is the extension mechanism
+that third parties should use for non-standard backends.
 
-## When you should not write a plugin
+```python
+from korvid.agent.model_profiles import SpecialFlow, ModelConnectionConfig
+from korvid.agent.provider import LLMProvider
 
-A built-in configuration covers most backends:
 
-- **OpenAI, Azure OpenAI, GitHub Models, Anthropic, vLLM, local gateways,
-  internal proxies** — a profile whose `model` prefix names the vendor, plus
-  an `endpoint` for a self-hosted server. Any backend reachable that way
-  belongs in a profile rather than in a plugin.
-- **Native Ollama `/api/chat`** — `model: ollama/<tag>` with
-  `options.native_thinking: true`.
-- **GitHub Copilot device login** — `model: github-copilot/<tag>`.
+class MyFlow(SpecialFlow):
+    prefix = "my-backend"          # claimed prefix; must be unique
 
-A plugin is warranted only for a genuinely different protocol or auth scheme
-composed behind korvid's public `CredentialSource` boundary.
+    def build_provider(
+        self, profile: ModelConnectionConfig
+    ) -> LLMProvider | None:
+        # Return an LLMProvider, or None to fall back to the standard transport.
+        ...
+```
+
+The entry point registers the flow object, not a class:
+
+```toml
+[project.entry-points."korvid.provider"]
+my-backend = "my_pkg.flow:MyFlow"
+```
+
+### Prefix claiming rules
+
+korvid normalizes prefixes by lowercasing and collapsing runs of `-`, `_`, and
+`.` to `-`. Two flows whose names normalize to the same string collide. A flow
+that claims a prefix blocks LiteLLM from routing that prefix — even if the flow
+is later removed. `DEVICE_LOGIN_PREFIXES` in `providers/litellm_settings.py`
+always claims `github-copilot` regardless of whether the Copilot flow is
+installed, because LiteLLM's own copilot resolver starts an interactive device
+login inside the routing call. See the
+[threat model](threat-model.md#the-github-copilot-routing-hazard).
+
+The following names are **reserved** and may never be claimed by a third party
+(after normalization):
+
+- **Served by korvid:** `openai`, `azure`, `anthropic`, `ollama`
+- **Device-login trap:** `github-copilot`
+- **Retired aliases:** `openai-compat`, `vllm`, `github`, `claude`
+
+A registration that uses any of these names is rejected at startup with an
+error naming the offender.
+
+### Option claiming
+
+A flow receives its profile's `options` mapping. Use it for flow-specific
+config (tenant ids, feature flags, extra headers). The same option-key secret
+policy applies: keys named `secret`, `password`, `token`, `api_key`, etc. are
+rejected before the flow sees them. See the
+[Options contract](#options-contract-immutability-and-secret-policy) section
+for the full list of constraints.
+
+## The `ProviderPlugin` compatibility path
+
+`ProviderPlugin` / `ProviderPluginConfig` (the pre-flow API) **is not wired in
+current builds**. korvid loads `korvid.provider` entry points as `SpecialFlow`
+objects; a plugin registered as a `ProviderPlugin` class is not instantiated.
+The API 2 surface described below (event contract, options limits, secret
+policy, `LLMProvider`, `ModelCapabilities`) still describes what a provider
+must satisfy, but the construction path is `SpecialFlow.build_provider`, not
+`ProviderPlugin.create`.
+
+If you have an existing API 2 plugin, migrate it by:
+
+1. Implementing `SpecialFlow` with the same `prefix` as your entry point name.
+2. Moving the logic from `ProviderPlugin.create` into `SpecialFlow.build_provider`.
+3. Updating your entry point to point at the `SpecialFlow` class.
+
+For reference, `korvid.providers.flow_ollama_thinking` is a shipped example.
 
 ## Packaging and entry point
 

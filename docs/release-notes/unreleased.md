@@ -3,6 +3,40 @@
 These notes cover changes on `main` that have not been tagged yet. Released
 versions are listed under [Release notes](v0.3.0.md).
 
+## Named profiles and model search (user-visible)
+
+korvid now ships a **named-profile** configuration model and a searchable
+**model catalog** with over 2,000 entries.
+
+- **Named profiles.** `agent.profiles.<name>` holds each connection;
+  `agent.active` picks the one in use. A profile's `model` is always a
+  `<prefix>/<tag>` reference — the prefix routes the call, the tag identifies
+  the model. Example:
+
+  ```yaml
+  agent:
+    active: local
+    profiles:
+      local:
+        model: ollama/qwen3:8b
+        auth: {method: none}
+      gpt:
+        model: openai/gpt-4o
+        auth: {method: environment, key: OPENAI_API_KEY}
+  ```
+
+  `:ai switch <name>` switches profiles from inside the TUI.
+
+- **Model catalog.** `:model search` opens a fuzzy-search screen over
+  LiteLLM's bundled table (2,000+ models, no internet required). An optional
+  enrichment layer from `models.dev` adds context lengths and quantization
+  info — see [Model search](../agent.md#model-search) and the
+  [airgap guide](../airgap.md#offline-model-catalog).
+
+- **Model-first selection.** The catalog is the starting point for choosing a
+  model: search for what you want, select it, and the profile is saved. The
+  routing prefix is not something an operator needs to know in advance.
+
 ## Breaking: the agent's configuration and plugin APIs
 
 The embedded agent was rebuilt as one interaction harness — a single
@@ -44,9 +78,33 @@ then a conservative `low` fallback. The agent panel header shows the resolved
 route as `tier (source)` — for example `low (catalog)` — so both the tier and
 the reason for it are visible without re-reading configuration.
 
-Every other `agent:` key keeps its meaning: `provider`, `base_url`, `model`,
-`auth`, `api_key_env`, `follow`, `disable_in_protected`, and the
-`agent.ollama.*` tuning knobs.
+### Provider scalar keys removed
+
+The flat `agent.provider`/`agent.model`/`agent.base_url` scalar shape was the
+old way to configure a single connection. These keys are no longer written on
+save, but an existing config that still has them is **migrated automatically**
+into a named profile called `_legacy_` on first load, and the scalars are
+removed from the file on next save. No manual editing is required.
+
+```yaml
+# before (migrated automatically)
+agent:
+  provider: ollama
+  base_url: http://localhost:11434
+  model: qwen3:8b
+
+# after (written back on save)
+agent:
+  active: _legacy_
+  profiles:
+    _legacy_:
+      model: ollama/qwen3:8b
+      endpoint: http://localhost:11434
+      auth: {method: none}
+```
+
+Every other `agent:` key retains its meaning: `model_tier`, `rules`, `follow`,
+`disable_in_protected`, and the `agent.ollama.*` tuning knobs.
 
 ### Migration warning: a large `agent.rules` block can now fail to start
 
@@ -149,3 +207,18 @@ are composed *after* the immutable safety contract and cannot widen it.
   names the budget it hit: `… [middle truncated — tier result budget]`. It
   is a small change to what the model sees, so a campaign comparing scores
   across this release is comparing two slightly different prompts.
+
+## Dependency note: `[agent]` grew
+
+The `[agent]` extra now transitively installs approximately **55
+distributions**, up from a handful, because it includes `litellm`, which
+brings `boto3`, `openai`, `tiktoken`, `tokenizers`, and their dependencies.
+This is a real increase.
+
+A base install (`pip install korvid`, no extra) is unchanged — it reaches no
+AI library and starts no HTTP client. The import-graph test in
+`tests/test_optional_extras.py` pins that boundary.
+
+The alternative to LiteLLM — maintaining vendor adapters by hand — is a
+correctness risk: stale routing tables silently send credentials to the wrong
+host. The increased dependency count is the tradeoff for a maintained catalog.

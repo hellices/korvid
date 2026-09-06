@@ -38,6 +38,7 @@ trust decision for it, and how to configure that trust:**
 | Agent LLM endpoint (OpenAI-compatible, native Ollama) | **korvid** | `network.ca_bundle` |
 | `:ai` wizard connection test | **korvid** | `network.ca_bundle` (same builder — the test and the live agent cannot disagree) |
 | Prometheus / Loki observability connectors | **korvid** | `network.ca_bundle` (same builder again — see [`docs/observability.md`](observability.md)) |
+| models.dev metadata refresh (optional, explicit) | **korvid** | disable with `agent.model_search.models_dev: false` |
 | Internal Helm chart repository | **helm** (korvid passes it through) | CA-file field in the repo dialog → `helm repo add --ca-file` |
 | Kubernetes API server | kubeconfig | `certificate-authority[-data]` in kubeconfig |
 | OLM catalogs, bundle/operand images | cluster nodes / container runtime | registry mirror + node trust configuration |
@@ -57,9 +58,13 @@ network:
   ca_bundle: /etc/korvid/company-ca.pem
 
 agent:
-  provider: openai-compat
-  base_url: https://llm.corp.example/v1
-  model: qwen3:32b
+  active: corp
+  profiles:
+    corp:
+      model: openai/qwen3:32b
+      endpoint: https://llm.corp.example/v1
+      auth:
+        method: none
 ```
 
 - The bundle is validated at startup: a missing, unreadable, or malformed
@@ -70,6 +75,41 @@ agent:
 - When `network.ca_bundle` is unset, standard environment behavior applies
   (`SSL_CERT_FILE`, `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`).
 - The system trust store is never modified.
+
+## Offline model catalog
+
+korvid's model catalog has two layers, and the primary one works with no
+network at all.
+
+**Primary layer (always available):** LiteLLM ships
+`model_prices_and_context_window.json` inside its wheel. korvid reads that
+table at startup — no GET request, no internet required. `:model search`
+and tier routing both use it. Over 2,000 models from dozens of providers
+are discoverable and routable offline, as long as you can reach the model
+endpoint itself.
+
+**Optional enrichment layer (models.dev):** korvid may fetch a single JSON
+document from `https://models.dev/api.json` to add context lengths,
+quantization info, and env-variable hints. This fetch is **never made at
+startup** and **never made during routing**. It happens only when you
+explicitly open the model search screen or run `:model refresh`.
+
+The result is cached at `$XDG_CACHE_HOME/korvid/models-dev.json`
+(Linux/macOS default: `~/.cache/korvid/models-dev.json`;
+Windows: `%LOCALAPPDATA%\korvid\models-dev.json`). The cache file is written
+with mode `0600` and is served unconditionally for 24 hours before a
+re-fetch is attempted.
+
+In a fully air-gapped deployment, disable the models.dev fetch permanently:
+
+```yaml
+agent:
+  model_search:
+    models_dev: false
+```
+
+With this setting, `:model search` uses only the LiteLLM bundled table and
+never attempts an outbound connection.
 
 ## Offline installation bundles
 

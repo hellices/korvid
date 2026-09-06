@@ -100,6 +100,100 @@ AI data boundary.
 - **Accidental export** — a payload or log capture copied, emailed or committed
   without the exporter realizing what it holds.
 
+## Dependency surface (`[agent]` extra)
+
+The `[agent]` extra currently pulls approximately **55 distributions**,
+including `litellm`, `boto3`, `openai`, `tiktoken`, and `tokenizers`. This
+is a real increase compared to a base install, which has no model transport
+at all.
+
+**The mitigation is scope.** The `[agent]` extra is optional. A base TUI
+install — the default — reaches no AI distribution. A test in
+`tests/test_optional_extras.py` proves that `import korvid` never reaches
+`litellm` when the extra is absent: the import graph is pinned, not assumed.
+
+**The counter-argument for accepting the cost.** The alternative to LiteLLM
+is a hand-maintained vendor routing table. A hand-maintained table is a
+correctness risk: provider endpoints, model identifiers, and auth conventions
+change without notice, and a silently stale table routes credentials to the
+wrong host. LiteLLM's bundled catalog is maintained by a team whose only job
+is to track that surface, and every entry is checked at release time. A
+55-distribution transitive set is the tradeoff for that correctness guarantee.
+
+## LiteLLM lockdown
+
+`providers/litellm_runtime.py` sets the following attributes on the `litellm`
+module before any completion call is possible:
+
+| Attribute | Value | Why |
+|---|---|---|
+| `litellm.telemetry` | `False` | disables usage reporting |
+| `litellm.success_callback` | `[]` | clears any pre-configured success callbacks |
+| `litellm.failure_callback` | `[]` | clears any failure callbacks |
+| `litellm.callbacks` | `[]` | clears general-purpose hooks |
+| `litellm._async_success_callback` | `[]` | disables async success callbacks |
+| `litellm._async_failure_callback` | `[]` | disables async failure callbacks |
+
+`_async_success_callback` is a private attribute. korvid sets it deliberately
+because it is the attribute LiteLLM checks at call time. If LiteLLM renames
+it, a test that checks `litellm._async_success_callback == []` fails
+immediately, surfacing the change rather than silently reopening the channel.
+All six attributes are also checked at startup: a version that removes one
+fails with an explicit error naming the missing attribute, rather than
+silently leaving it at its default.
+
+`providers/_litellm_import.py` sets `LITELLM_LOCAL_MODEL_COST_MAP=true`
+before `import litellm` (using `os.environ.setdefault`, so an operator's
+explicit `false` wins). This suppresses LiteLLM's startup network fetch of
+its own model price table and its associated stderr warning inside a Textual
+application. It also strips all `StreamHandler`s from LiteLLM's own loggers
+and sets `propagate=False`, so LiteLLM never writes onto korvid's terminal
+canvas.
+
+## models.dev
+
+korvid makes at most one conditional GET of `https://models.dev/api.json`,
+subject to the following constraints:
+
+- **Never at startup** and **never during routing** — only when the operator
+  explicitly opens the model search screen or runs `:model refresh`.
+- **No credentials, no korvid state** — the request carries no API key, no
+  cluster context, and no conversation data.
+- **10-second timeout** — a slow or unreachable endpoint times out silently.
+- **12 MiB streaming ceiling** — a response larger than this is refused.
+- **`application/json` only** — a non-JSON content type is refused.
+- **Redirects refused** — korvid does not follow HTTP redirects.
+- **Schema-validated** — the document is parsed against a strict schema;
+  a response that passes size and content-type checks but fails validation is
+  silently discarded.
+- **Cached `0600`** — the result is written to
+  `$XDG_CACHE_HOME/korvid/models-dev.json` with mode `0600` and served
+  unconditionally for 24 hours. A valid cached document is never re-fetched
+  within the TTL.
+- **Disableable** — `agent.model_search.models_dev: false` prevents the
+  fetch permanently.
+
+**Residual risk.** A network observer can infer that a korvid instance
+refreshed its model metadata from `models.dev`. No cluster payload, user
+identity, or credential crosses that channel. This is the only outbound
+connection the agent component makes that does not carry a provider payload.
+
+## The GitHub Copilot routing hazard
+
+LiteLLM's own `github_copilot` provider, if given a model reference under
+that prefix, starts an **interactive device-code login and writes a credential
+file** (`~/.config/litellm/github_copilot/api-key.json`) from inside its
+routing call — before any korvid code can intercept the result. This happens
+even if the intent was simply to discover what the reference resolves to.
+
+korvid claims the `github-copilot` prefix **before** any routing call reaches
+LiteLLM. The `SpecialFlowRegistry` asserts the claim unconditionally at
+startup; `DEVICE_LOGIN_PREFIXES` in `providers/litellm_settings.py` names the
+prefix so the claim survives even if the korvid-side Copilot flow is
+uninstalled. A reference under `github-copilot/…` is either served by
+korvid's own flow or refused with a clear error — it can never silently pass
+through to LiteLLM's routing.
+
 ## Mitigations (implemented today)
 
 - **Redaction before reduction** — one shared recursive redactor runs where a

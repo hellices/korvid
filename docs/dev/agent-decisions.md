@@ -355,3 +355,71 @@ iteration, and (c) a documented way to hand back an externally repaired
 history. If Pydantic AI grows all three, re-run this evaluation — the
 `AgentEngine` ABC exists so a second engine can be written without touching
 the session, the UI or the tools.
+
+---
+
+## 8. Provider selection: LiteLLM over a hand-maintained table
+
+**Decision.** korvid's provider transport is LiteLLM (MIT). The
+hand-maintained vendor routing table — five separate transport modules
+(`github_copilot.py`, `ollama.py`, `openai_compat.py`, `registry.py`,
+`configurator.py`) and their alias mapping — was deleted in full. Routing is
+now derived from the model reference via LiteLLM's bundled tables plus a
+small registry of special flows. See the design document:
+[`docs/superpowers/specs/2026-09-05-provider-neutral-model-profiles-design.md`](../superpowers/specs/2026-09-05-provider-neutral-model-profiles-design.md).
+
+**What was evaluated and rejected.**
+
+- **Pydantic AI** — see §7. The loop blockers apply to any framework; the
+  provider question was separate.
+- **OpenAI Agents SDK** — vendor-specific; would have left Azure, Anthropic,
+  and Ollama on hand-maintained adapters.
+- **aisuite** — small routing table, no offline catalog, no capability
+  metadata; korvid would have been maintaining a second table alongside it.
+- **A continued hand-maintained table** — correctness risk. Provider endpoints,
+  model identifiers, and auth conventions change without notice, and a stale
+  routing entry silently sends credentials to the wrong host. With five
+  adapters each owning their own auth logic, divergence was the steady state.
+
+**Why LiteLLM won.** Three properties together:
+
+1. **An offline, versioned catalog.** `model_prices_and_context_window.json`
+   ships inside the wheel. `:model search` and tier routing work with no
+   network call at startup. The team maintaining it tracks provider changes
+   continuously; a hand-maintained table does that work by accident and
+   incorrectly.
+2. **Transport parity.** Every model LiteLLM ships, an operator can use by
+   naming its prefix. No new adapter is ever needed for a supported provider.
+3. **One authentication contract.** The existing `CredentialSource` boundary
+   is preserved; LiteLLM receives a credential from korvid's own chain, never
+   the other way around.
+
+**The dependency tradeoff and its bound.** `[agent]` currently pulls
+~55 distributions, including `boto3`, `openai`, `tiktoken`, and `tokenizers`.
+This is a real increase. The bound on the risk is the extra's optional
+nature: a base install (`pip install korvid`, no extra) reaches no AI
+distribution. `tests/test_optional_extras.py` pins that boundary.
+
+**Why the special-flow registry is not a provider list in disguise.** The
+`SpecialFlowRegistry` exists for two purposes that have nothing to do with
+per-vendor routing: (a) to claim `github-copilot` so LiteLLM's own copilot
+path — which starts an interactive login inside a routing call — is
+unreachable; and (b) to serve backends with genuinely non-standard auth or
+protocol (the `ollama-thinking` flow for native `/api/chat`, for example). A
+flow that names a LiteLLM-supported prefix and wraps a call korvid could
+make directly is not a special flow; it is a provider plugin, and the plugin
+doc says to reach for one only when the wire protocol or auth truly differs.
+
+**Why references use a slash.** `provider/model` is the canonical form
+because a model tag can itself contain a colon (`qwen3:8b`). A
+colon-separated form (`ollama:qwen3:8b`) cannot be parsed unambiguously: the
+first colon could be the provider separator or part of the tag. LiteLLM's own
+convention is slash; korvid adopts it uniformly. The split is performed once,
+in `agent.model_profiles.split_reference`, and every consumer calls that
+function — there are no local splits anywhere in the codebase.
+
+**Licensing.** LiteLLM is MIT-licensed. models.dev is MIT-licensed. korvid
+links LiteLLM as a normal PyPI dependency and fetches models.dev's published
+JSON over its public API — neither is vendored. No attribution file is
+required. If the repository later grows a `THIRD_PARTY.md`, both belong in
+it. This reasoning is recorded here so the next person does not re-derive it.
