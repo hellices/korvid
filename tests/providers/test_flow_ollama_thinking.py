@@ -21,10 +21,19 @@ from korvid.agent.model_profiles import (
     ModelConnectionConfig,
     SpecialFlow,
 )
+from korvid.agent.provider import (
+    MAX_REASONING_CHARS,
+    MAX_TOOL_ARGUMENT_CHARS,
+    MAX_TOOL_CALLS_PER_RESPONSE,
+    REQUEST_SENT,
+    STREAM_TRUNCATED,
+    ProviderStreamError,
+    ProviderStreamLimitError,
+    ProviderStreamTruncatedError,
+)
 from korvid.providers.flow_ollama_thinking import (
     OllamaOptions,
     OllamaProvider,
-    ProviderError,
     build_provider,
     ollama_thinking_flow,
 )
@@ -359,7 +368,7 @@ async def test_non_2xx_raises_provider_error() -> None:
     provider = build_provider(_profile())
     assert isinstance(provider, OllamaProvider)
     provider._client = _client("model not found", status=404)
-    with pytest.raises(ProviderError, match="HTTP 404"):
+    with pytest.raises(ProviderStreamError, match="does not have this model"):
         await _events(provider)
 
 
@@ -487,3 +496,249 @@ async def test_a_migrated_install_puts_the_old_think_value_on_the_wire(
     capture: dict[str, Any] = {}
     await _events(_built(profile, capture))
     assert capture["json"]["think"] is expected
+
+
+# ---------------------------------------------------------------------------
+# The terminal marker and the cumulative bounds (issue #336)
+# ---------------------------------------------------------------------------
+
+#: A value shaped like a credential, so a test can prove a refusal did not
+#: echo the server text it came from.
+_SECRET_ISH = "bearer-leaked-token-value"
+
+
+async def _drain(provider: OllamaProvider, seen: list[dict[str, Any]]) -> None:
+    """Consume a stream into `seen` so `pytest.raises` wraps one call."""
+    async for event in provider.complete([{"role": "user", "content": "hi"}], []):
+        seen.append(event)
+
+
+def _on(body: str, *, status: int = 200) -> OllamaProvider:
+    """The native transport on a mock wire, with no builder in the way."""
+    provider = build_provider(_profile())
+    assert isinstance(provider, OllamaProvider)
+    provider._client = _client(body, status=status)
+    provider._owns_client = True
+    return provider
+
+
+async def test_a_stream_that_never_said_done_is_refused() -> None:
+    """`done: true` is this protocol's terminal marker. Without it the
+    server stopped mid-answer, whether or not the socket closed tidily."""
+    seen: list[dict[str, Any]] = []
+    body = _ndjson({"message": {"role": "assistant", "content": "par"}, "done": False})
+
+    with pytest.raises(ProviderStreamTruncatedError, match="ended before") as raised:
+        await _drain(_on(body), seen)
+
+    assert raised.value.operator_message() == STREAM_TRUNCATED
+    assert [e["type"] for e in seen] == [REQUEST_SENT, "text_delta"]
+    assert {"type": "done"} not in seen
+
+
+async def test_a_truncated_stream_emits_neither_its_calls_nor_its_usage() -> None:
+    seen: list[dict[str, Any]] = []
+    body = _ndjson(
+        {
+            "message": {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"function": {"name": "get_logs", "arguments": {}}}],
+            },
+            "done": False,
+        },
+        {"prompt_eval_count": 3, "eval_count": 4, "done": False},
+    )
+
+    with pytest.raises(ProviderStreamTruncatedError):
+        await _drain(_on(body), seen)
+
+    assert [e["type"] for e in seen] == [REQUEST_SENT]
+
+
+async def test_reading_stops_at_the_first_done_chunk() -> None:
+    """The server may keep writing; the turn is over. Anything after the
+    terminal chunk belongs to a response the runtime already closed."""
+    body = _ndjson(
+        {"message": {"role": "assistant", "content": "hi"}, "done": False},
+        _done(prompt_eval_count=3, eval_count=4),
+        {"message": {"role": "assistant", "content": " and more"}, "done": False},
+        {"prompt_eval_count": 99, "eval_count": 99, "done": True},
+    )
+
+    events = await _events(_on(body))
+
+    assert [e["text"] for e in events if e["type"] == "text_delta"] == ["hi"]
+    assert [e for e in events if e["type"] == "usage"] == [
+        {"type": "usage", "input_tokens": 3, "output_tokens": 4}
+    ]
+    assert events[-1] == {"type": "done"}
+
+
+async def test_the_final_chunks_own_content_is_still_delivered() -> None:
+    """Stopping *at* the marker is not stopping *before* it: the terminal
+    chunk carries the last token on some servers."""
+    body = _ndjson(
+        {"message": {"role": "assistant", "content": "hi"}, "done": False},
+        {"message": {"role": "assistant", "content": "!"}, "done": True},
+    )
+
+    events = await _events(_on(body))
+
+    assert [e["text"] for e in events if e["type"] == "text_delta"] == ["hi", "!"]
+
+
+async def test_a_mid_stream_server_error_is_refused_without_quoting_it() -> None:
+    """The server can report a failure with HTTP 200. Its text is the
+    server's, so the refusal carries a written sentence instead."""
+    seen: list[dict[str, Any]] = []
+    body = _ndjson({"error": f"unauthorized: {_SECRET_ISH}"})
+
+    with pytest.raises(ProviderStreamError) as raised:
+        await _drain(_on(body), seen)
+
+    assert _SECRET_ISH not in str(raised.value)
+    assert raised.value.operator_message() == str(raised.value)
+
+
+async def test_an_unreadable_line_is_refused_without_quoting_it() -> None:
+    seen: list[dict[str, Any]] = []
+
+    with pytest.raises(ProviderStreamError) as raised:
+        await _drain(_on(f"not json {_SECRET_ISH}\n"), seen)
+
+    assert _SECRET_ISH not in str(raised.value)
+
+
+@pytest.mark.parametrize("status", [401, 403, 404, 429, 500])
+async def test_a_refused_request_never_quotes_the_servers_answer(status: int) -> None:
+    seen: list[dict[str, Any]] = []
+
+    with pytest.raises(ProviderStreamError) as raised:
+        await _drain(_on(f"denied: {_SECRET_ISH}", status=status), seen)
+
+    assert _SECRET_ISH not in str(raised.value)
+    assert raised.value.operator_message() == str(raised.value)
+    assert seen == [{"type": REQUEST_SENT}]
+
+
+async def test_a_connection_that_fails_mid_stream_is_translated() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadError(f"reset while reading {_SECRET_ISH}", request=request)
+
+    provider = build_provider(_profile())
+    assert isinstance(provider, OllamaProvider)
+    provider._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    provider._owns_client = True
+    seen: list[dict[str, Any]] = []
+
+    with pytest.raises(ProviderStreamError) as raised:
+        await _drain(provider, seen)
+
+    assert _SECRET_ISH not in str(raised.value)
+
+
+def _thinking(total: int, *, piece: int = 4_096) -> str:
+    """Reasoning that arrives `piece` characters at a time, then finishes."""
+    chunks: list[dict[str, Any]] = []
+    written = 0
+    while written < total:
+        step = min(piece, total - written)
+        chunks.append({"message": {"role": "assistant", "thinking": "t" * step}, "done": False})
+        written += step
+    chunks.append(
+        {
+            "message": {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"function": {"name": "get_logs", "arguments": {}}}],
+            },
+            "done": True,
+        }
+    )
+    return _ndjson(*chunks)
+
+
+async def test_reasoning_that_stops_exactly_at_the_bound_is_kept() -> None:
+    provider = _on(_thinking(MAX_REASONING_CHARS))
+
+    events = await _events(provider)
+
+    call_id = next(e["id"] for e in events if e["type"] == "tool_call")
+    assert len(provider._thinking_by_call_id[call_id]) == MAX_REASONING_CHARS
+
+
+async def test_reasoning_one_character_past_the_bound_is_refused() -> None:
+    """Reasoning is held for the *next* request, so it is the one buffer
+    the engine's per-response budget never sees."""
+    seen: list[dict[str, Any]] = []
+
+    with pytest.raises(ProviderStreamLimitError, match="limit"):
+        await _drain(_on(_thinking(MAX_REASONING_CHARS + 1)), seen)
+
+    assert [e["type"] for e in seen] == [REQUEST_SENT]
+
+
+def _call(name: str = "get_logs", **arguments: Any) -> dict[str, Any]:
+    return {"function": {"name": name, "arguments": arguments}}
+
+
+async def test_arguments_that_stop_exactly_at_the_bound_are_kept() -> None:
+    # `{"a": "xxx"}` — the serialized form is what is bounded, so the
+    # padding is sized against it rather than against the raw value.
+    padding = MAX_TOOL_ARGUMENT_CHARS - len(json.dumps({"a": ""}))
+    body = _ndjson(
+        {"message": {"role": "assistant", "tool_calls": [_call(a="x" * padding)]}, "done": True}
+    )
+
+    events = await _events(_on(body))
+
+    call = next(e for e in events if e["type"] == "tool_call")
+    assert len(call["arguments"]) == MAX_TOOL_ARGUMENT_CHARS
+
+
+async def test_arguments_one_character_past_the_bound_are_refused() -> None:
+    padding = MAX_TOOL_ARGUMENT_CHARS - len(json.dumps({"a": ""})) + 1
+    body = _ndjson(
+        {"message": {"role": "assistant", "tool_calls": [_call(a="x" * padding)]}, "done": True}
+    )
+    seen: list[dict[str, Any]] = []
+
+    with pytest.raises(ProviderStreamLimitError, match="limit"):
+        await _drain(_on(body), seen)
+
+    assert [e["type"] for e in seen] == [REQUEST_SENT]
+
+
+async def test_exactly_the_permitted_number_of_calls_is_kept() -> None:
+    body = _ndjson(
+        {
+            "message": {
+                "role": "assistant",
+                "tool_calls": [_call() for _ in range(MAX_TOOL_CALLS_PER_RESPONSE)],
+            },
+            "done": True,
+        }
+    )
+
+    events = await _events(_on(body))
+
+    assert len([e for e in events if e["type"] == "tool_call"]) == MAX_TOOL_CALLS_PER_RESPONSE
+
+
+async def test_one_call_too_many_stops_the_stream_before_it_grows() -> None:
+    """The count is cumulative across chunks: the native protocol may
+    report calls on several messages of one answer."""
+    body = _ndjson(
+        *(
+            {"message": {"role": "assistant", "tool_calls": [_call()]}, "done": False}
+            for _ in range(MAX_TOOL_CALLS_PER_RESPONSE + 1)
+        ),
+        _done(),
+    )
+    seen: list[dict[str, Any]] = []
+
+    with pytest.raises(ProviderStreamLimitError, match="limit"):
+        await _drain(_on(body), seen)
+
+    assert [e["type"] for e in seen] == [REQUEST_SENT]

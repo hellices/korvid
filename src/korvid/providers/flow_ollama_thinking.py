@@ -18,7 +18,7 @@ import logging
 import os
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from itertools import count
 from typing import Any
 
@@ -34,7 +34,23 @@ from korvid.agent.model_profiles import (
     SpecialFlow,
     split_reference,
 )
-from korvid.agent.provider import REQUEST_SENT, LLMProvider
+from korvid.agent.provider import (
+    MAX_REASONING_CHARS,
+    MAX_TOOL_ARGUMENT_CHARS,
+    REQUEST_SENT,
+    STREAM_FAILED,
+    STREAM_MALFORMED,
+    STREAM_TRUNCATED,
+    TIMED_OUT,
+    UNREACHABLE,
+    LLMProvider,
+    ProviderProtocolError,
+    ProviderStreamTruncatedError,
+    ProviderTransportError,
+    append_bounded,
+    guard_tool_call_count,
+    status_error,
+)
 from korvid.providers.net import make_client
 from korvid.providers.static_creds import StaticHeaderSource
 from korvid.providers.token_store import TokenStore
@@ -54,8 +70,33 @@ _MAX_THINKING_ENTRIES = 64
 _SERVABLE_AUTH_METHODS = frozenset({"none", "environment", "keyring"})
 
 
-class ProviderError(Exception):
-    """Raised when the upstream API returns a non-2xx response."""
+@dataclass
+class _NativeAnswer:
+    """What one native stream said about itself, beside its text.
+
+    Held apart from `complete` because the reading loop is a generator of
+    its own: an async generator cannot hand a value back on return.
+    """
+
+    finished: bool = False
+    thinking: str = ""
+    usage: dict[str, int] | None = None
+    tool_calls: list[dict[str, str]] = field(default_factory=list)
+
+
+def _parse_line(line: str) -> dict[str, Any]:
+    """Read one NDJSON line, refusing anything this protocol cannot read.
+
+    The decoder's own message quotes the document it choked on, so the
+    refusal carries a written sentence instead.
+    """
+    try:
+        chunk = json.loads(line)
+    except ValueError as exc:
+        raise ProviderProtocolError(STREAM_MALFORMED) from exc
+    if not isinstance(chunk, dict):
+        raise ProviderProtocolError(STREAM_MALFORMED)
+    return chunk
 
 
 @dataclass(frozen=True)
@@ -210,56 +251,94 @@ class OllamaProvider(LLMProvider):
         The `stream` parameter is part of the LLMProvider signature but has
         no effect here: the native request always streams NDJSON and the
         events yielded are identical either way.
+
+        `done: true` is this protocol's terminal marker (issue #336). The
+        chunk carrying it holds the turn's counts, so those are harvested
+        and reading stops there — a server that keeps writing is writing
+        into a response the runtime has already closed. A stream that ended
+        without the marker is refused: the text that arrived stays, but no
+        call, no usage and no `done` follows it.
+
+        Raises:
+            ProviderStatusError: The server refused the request.
+            ProviderProtocolError: The server wrote a line this protocol
+                cannot read, or declared its own failure mid-answer.
+            ProviderTransportError: The connection failed or timed out.
+            ProviderStreamTruncatedError: The stream ended without `done`.
+            ProviderStreamLimitError: A cumulative bound was passed.
         """
         client = self._get_client()
-        tool_calls: list[dict[str, str]] = []
-        usage: dict[str, int] | None = None
-        thinking = ""
+        state = _NativeAnswer()
 
-        async with client.stream(
-            "POST",
-            f"{self._base_url}/api/chat",
-            json=self._payload(messages, tools),
-            headers=await self._headers(),
-        ) as resp:
-            # The request is on the wire: headers came back, so whatever
-            # the status says, this provider has the payload (PR #197).
-            yield {"type": REQUEST_SENT}
-            if resp.status_code >= 300:
-                await resp.aread()
-                raise ProviderError(f"Upstream returned HTTP {resp.status_code}: {resp.text}")
+        try:
+            async with client.stream(
+                "POST",
+                f"{self._base_url}/api/chat",
+                json=self._payload(messages, tools),
+                headers=await self._headers(),
+            ) as resp:
+                # The request is on the wire: headers came back, so whatever
+                # the status says, this provider has the payload (PR #197).
+                yield {"type": REQUEST_SENT}
+                if resp.status_code >= 300:
+                    # Read so the connection is released, then discarded:
+                    # the body is the server's text, not korvid's.
+                    await resp.aread()
+                    raise status_error(resp.status_code)
+                async for event in self._read_lines(resp, state):
+                    yield event
+        except httpx.TimeoutException as exc:
+            raise ProviderTransportError(TIMED_OUT) from exc
+        except httpx.HTTPError as exc:
+            # An `httpx` error carries the request it failed on, headers
+            # included, so it is translated rather than re-raised.
+            raise ProviderTransportError(UNREACHABLE) from exc
 
-            async for line in resp.aiter_lines():
-                if not line.strip():
-                    continue
-                chunk: dict[str, Any] = json.loads(line)
-                # The server can report a failure mid-stream with HTTP 200:
-                # an {"error": ...} object after generation has started.
-                # Treat it as a hard failure, not a truncated "success".
-                if chunk.get("error"):
-                    raise ProviderError(f"Native stream error: {chunk['error']}")
-                message: dict[str, Any] = chunk.get("message") or {}
-                # message.thinking is never rendered as answer text, but it
-                # is accumulated so the reasoning state can be re-attached
-                # to the assistant history on the next iteration (the
-                # streaming contract expects thinking to be echoed back
-                # with tool calls).
-                thinking += str(message.get("thinking") or "")
-                content: str | None = message.get("content")
-                if content:
-                    yield {"type": "text_delta", "text": content}
-                self._collect_tool_calls(message, tool_calls)
-                if chunk.get("done"):
-                    usage = _usage_from_chunk(chunk)
+        if not state.finished:
+            raise ProviderStreamTruncatedError(STREAM_TRUNCATED)
 
-        self._remember_thinking(thinking, tool_calls)
-        for call in tool_calls:
+        self._remember_thinking(state.thinking, state.tool_calls)
+        for call in state.tool_calls:
             yield {"type": "tool_call", **call}
 
-        if usage is not None:
-            yield {"type": "usage", **usage}
+        if state.usage is not None:
+            yield {"type": "usage", **state.usage}
 
         yield {"type": "done"}
+
+    async def _read_lines(
+        self, resp: httpx.Response, state: _NativeAnswer
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Yield this protocol's text deltas, stopping at `done: true`."""
+        async for line in resp.aiter_lines():
+            if not line.strip():
+                continue
+            chunk = _parse_line(line)
+            # The server can report a failure mid-stream with HTTP 200:
+            # an {"error": ...} object after generation has started.
+            # Treat it as a hard failure, not a truncated "success" — and
+            # never quote it, because the text is the server's.
+            if chunk.get("error"):
+                raise ProviderProtocolError(STREAM_FAILED)
+            message: dict[str, Any] = chunk.get("message") or {}
+            # message.thinking is never rendered as answer text, but it
+            # is accumulated so the reasoning state can be re-attached
+            # to the assistant history on the next iteration (the
+            # streaming contract expects thinking to be echoed back
+            # with tool calls). The accumulation is bounded: this buffer
+            # outlives the response, so the engine's own budget never
+            # sees it.
+            state.thinking = append_bounded(
+                state.thinking, str(message.get("thinking") or ""), limit=MAX_REASONING_CHARS
+            )
+            content: str | None = message.get("content")
+            if content:
+                yield {"type": "text_delta", "text": content}
+            self._collect_tool_calls(message, state.tool_calls)
+            if chunk.get("done"):
+                state.usage = _usage_from_chunk(chunk)
+                state.finished = True
+                return
 
     def _collect_tool_calls(self, message: dict[str, Any], acc: list[dict[str, str]]) -> None:
         """Fold native tool calls into acc, serializing object arguments exactly once.
@@ -268,16 +347,33 @@ class OllamaProvider(LLMProvider):
         older servers that omit it, a monotonically unique `call_N` id is
         generated so the runtime's id-based tool-result correlation keeps
         working across iterations.
+
+        Both the number of calls and one call's serialized arguments are
+        bounded (issue #336): the protocol lets a single answer report
+        calls across several messages, so the count is cumulative over the
+        whole response.
+
+        Raises:
+            ProviderStreamLimitError: A cumulative bound was passed.
         """
         for call in message.get("tool_calls") or []:
             fn: dict[str, Any] = call.get("function") or {}
             arguments = fn.get("arguments")
             native_id = call.get("id")
+            guard_tool_call_count(len(acc) + 1)
+            # Arguments arrive whole here rather than in fragments, so the
+            # bound is checked against an empty accumulator: the question
+            # is only whether this call's own text fits.
+            serialized = append_bounded(
+                "",
+                json.dumps(arguments if isinstance(arguments, dict) else {}),
+                limit=MAX_TOOL_ARGUMENT_CHARS,
+            )
             acc.append(
                 {
                     "id": str(native_id) if native_id else f"call_{next(self._id_counter)}",
                     "name": str(fn.get("name", "")),
-                    "arguments": json.dumps(arguments if isinstance(arguments, dict) else {}),
+                    "arguments": serialized,
                 }
             )
 
