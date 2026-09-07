@@ -48,6 +48,7 @@ from .engine_fakes import (
     assistant_tool_calls,
     build_harness,
     make_policy,
+    reasoning,
     roles,
     system_message,
     text_delta,
@@ -404,6 +405,27 @@ async def test_provider_response_is_bounded_by_the_history_policy(
     assert errors
     assert "ProviderResponseLimitError" in errors[-1].message
     assert sum(len(event.text) for event in events if isinstance(event, TextDelta)) <= 256
+
+
+async def test_reasoning_counts_against_the_budget_by_its_real_length(
+    engine_factory: EngineFactory,
+) -> None:
+    """A reasoning event is generated output like any other (issue #336).
+
+    Charging it a flat one character per event let a provider stream any
+    amount of chain-of-thought past a budget the answer text obeys — and
+    reasoning is exactly the channel a model can be made to write into.
+    """
+    harness = engine_factory(
+        [[reasoning("r" * 200), reasoning("s" * 200), text_delta("ok"), DONE]],
+        policy=make_policy(max_history_chars=256),
+    )
+
+    events = await harness.run()
+
+    errors = [event for event in events if isinstance(event, AgentError)]
+    assert errors
+    assert "ProviderResponseLimitError" in errors[-1].message
 
 
 # -- how many calls one response may make ------------------------------------

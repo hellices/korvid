@@ -708,9 +708,15 @@ def _excess_notice(count: int) -> str:
 
 
 def _stream_event_chars(event: Mapping[str, Any]) -> int:
-    """Character cost of one normalized provider stream event."""
+    """Character cost of one normalized provider stream event.
+
+    Reasoning is charged by its real length, not as one event: it is
+    generated output the model chose to produce, and a flat cost would let
+    a provider stream any amount of chain-of-thought past a budget the
+    answer text obeys (issue #336).
+    """
     kind = str(event.get("type", ""))
-    if kind == "text_delta":
+    if kind in ("text_delta", "reasoning"):
         return len(str(event.get("text", "")))
     if kind == "tool_call":
         return sum(len(str(event.get(field, ""))) for field in ("id", "name", "arguments"))
