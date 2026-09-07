@@ -173,9 +173,10 @@ entry — and the other three methods ignore it.
 | Any LiteLLM-supported prefix | 2,000+ models ship in the bundled catalog; use any prefix directly. |
 
 `options` carries **model parameters** only. `model`, `messages`, `stream`,
-`tools`, `tool_choice`, `base_url`, `api_key`, `custom_llm_provider` and any
-credential-shaped key belong to korvid and are dropped from a profile, so none
-can re-route a request or mute the agent's tools.
+`tools`, `tool_choice`, `base_url`, `api_key`, `custom_llm_provider`, any
+credential-shaped key and LiteLLM's controls (`mock_*`, `fallbacks`, callbacks,
+`litellm_*`) are korvid's, and are dropped from a profile: none can re-route a
+request, mute the agent's tools or fabricate an answer.
 
 A config still using the retired flat scalars is migrated on load into one
 profile named `default`, which `agent.active` then selects; the scalars are
