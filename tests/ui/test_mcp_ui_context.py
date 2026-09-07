@@ -156,7 +156,7 @@ async def test_real_mcp_http_open_describe_and_follow_mirror(tmp_path: Path) -> 
             executor,
             READ_TOOLS + UI_TOOLS,
             port=0,
-            capability_token="cap-tok",
+            capability_token="test-capability-token-0123456789AB",
             endpoint_path=tmp_path / "endpoint.json",
             ui=proxy,
             follow_enabled=lambda: True,

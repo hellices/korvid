@@ -5,6 +5,7 @@ from __future__ import annotations
 import ctypes
 import errno
 import json
+import logging
 import os
 import stat
 import sys
@@ -17,6 +18,7 @@ _MAX_REGISTRY_BYTES = 256 * 1024
 _WINDOWS = os.name == "nt"
 _DARWIN = sys.platform == "darwin"
 _MAX_PID = 0xFFFFFFFF if _WINDOWS else 0x7FFFFFFF
+logger = logging.getLogger(__name__)
 _SYSTEM_SID = "S-1-5-18"
 _ADMINISTRATORS_SID = "S-1-5-32-544"
 
@@ -97,6 +99,10 @@ class _AccessAllowedAce(ctypes.Structure):
 
 class EndpointRegistryError(RuntimeError):
     """The local MCP endpoint registry cannot be used safely."""
+
+
+class _RegistryNotFound(FileNotFoundError):
+    """The registry does not exist yet."""
 
 
 @dataclass(frozen=True)
@@ -612,8 +618,12 @@ def _same_file(left: os.stat_result, right: os.stat_result) -> bool:
 def _preopen_snapshot(path: Path) -> os.stat_result:
     try:
         snapshot = path.lstat()
+    except FileNotFoundError:
+        raise _RegistryNotFound from None
     except OSError:
-        raise EndpointRegistryError(_MISSING) from None
+        raise EndpointRegistryError(
+            "MCP endpoint registry cannot be inspected; check its path permissions."
+        ) from None
     if not stat.S_ISREG(snapshot.st_mode):
         raise EndpointRegistryError(_UNSAFE)
     return snapshot
@@ -722,7 +732,9 @@ def _read_registry_bytes(path: Path) -> bytes:
     except EndpointRegistryError:
         raise
     except OSError:
-        raise EndpointRegistryError(_MISSING) from None
+        raise EndpointRegistryError(
+            "MCP endpoint registry cannot be read; check its file permissions."
+        ) from None
     finally:
         os.close(fd)
 
@@ -756,6 +768,20 @@ def _valid_integer(value: object) -> TypeGuard[int]:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
+def _valid_capability(value: object) -> TypeGuard[str]:
+    return (
+        isinstance(value, str)
+        and len(value) >= 32
+        and all(0x21 <= ord(character) <= 0x7E for character in value)
+    )
+
+
+def validate_capability_token(capability: str) -> None:
+    """Reject credentials that strict endpoint discovery cannot authenticate."""
+    if not _valid_capability(capability):
+        raise ValueError("capability token must contain at least 32 printable ASCII characters")
+
+
 def _parse_endpoint_pid(pid_key: str, value: object) -> int:
     if not isinstance(value, dict):
         raise EndpointRegistryError(_INVALID)
@@ -786,26 +812,94 @@ def _parse_endpoint(pid_key: str, value: object) -> TUIEndpoint:
         raise EndpointRegistryError(
             "MCP endpoint registry contains a non-loopback URL; restart korvid."
         )
-    if (
-        not isinstance(capability, str)
-        or len(capability) < 32
-        or any(not 0x21 <= ord(character) <= 0x7E for character in capability)
-    ):
+    if not _valid_capability(capability):
         raise EndpointRegistryError(_OUTDATED)
     return TUIEndpoint(pid=pid, port=port, url=url, capability=capability)
 
 
-def _parse_endpoints(data: bytes) -> list[TUIEndpoint]:
+def endpoint_record(
+    *,
+    pid: int,
+    port: int,
+    url: str,
+    capability: str,
+) -> dict[str, object]:
+    """Build a canonical registry record using the reader's validation rules."""
+    record: dict[str, object] = {
+        "pid": pid,
+        "port": port,
+        "url": url,
+        "capability": capability,
+    }
+    endpoint = _parse_endpoint(str(pid), record)
+    return {
+        "pid": endpoint.pid,
+        "port": endpoint.port,
+        "url": endpoint.url,
+        "capability": endpoint.capability,
+    }
+
+
+def _registry_document(data: bytes, *, normalize: bool) -> dict[str, Any]:
     document = _parse_json(data)
-    if not isinstance(document, dict) or set(document) != {"servers"}:
+    if not isinstance(document, dict) or not isinstance(document.get("servers"), dict):
         raise EndpointRegistryError(_INVALID)
-    servers = document["servers"]
-    if not isinstance(servers, dict):
+    if not normalize and set(document) != {"servers"}:
         raise EndpointRegistryError(_INVALID)
-    endpoints: list[TUIEndpoint] = []
+    servers: dict[str, object] = document["servers"]
+    if not normalize:
+        return {"servers": servers}
+    repaired = set(document) != {"servers"}
+    canonical: dict[str, dict[str, object]] = {}
     for pid_key, entry in servers.items():
         if not isinstance(pid_key, str):
-            raise EndpointRegistryError(_INVALID)
+            repaired = True
+            continue
+        try:
+            endpoint = _parse_endpoint(pid_key, entry)
+        except EndpointRegistryError:
+            repaired = True
+            continue
+        canonical[pid_key] = {
+            "pid": endpoint.pid,
+            "port": endpoint.port,
+            "url": endpoint.url,
+            "capability": endpoint.capability,
+        }
+    if repaired:
+        logger.warning("MCP endpoint registry update ignored invalid metadata or endpoint records.")
+    return {"servers": canonical}
+
+
+def load_registry_for_update(path: Path) -> dict[str, Any]:
+    """Load and normalize a private registry for safe replacement."""
+    try:
+        data = _read_registry_bytes(path)
+    except _RegistryNotFound:
+        return {"servers": {}}
+    try:
+        return _registry_document(data, normalize=True)
+    except EndpointRegistryError:
+        logger.warning("MCP endpoint registry contents are invalid; rebuilding it.")
+        return {"servers": {}}
+
+
+def serialize_registry(registry: dict[str, Any]) -> str:
+    """Serialize a registry without allowing a writer to exceed the read cap."""
+    try:
+        payload = json.dumps(registry, separators=(",", ":"), allow_nan=False)
+    except (TypeError, ValueError, RecursionError):
+        raise EndpointRegistryError(_INVALID) from None
+    if len(payload.encode("utf-8")) > _MAX_REGISTRY_BYTES:
+        raise EndpointRegistryError(_TOO_LARGE)
+    return payload
+
+
+def _parse_endpoints(data: bytes) -> list[TUIEndpoint]:
+    document = _registry_document(data, normalize=False)
+    servers: dict[str, object] = document["servers"]
+    endpoints: list[TUIEndpoint] = []
+    for pid_key, entry in servers.items():
         pid = _parse_endpoint_pid(pid_key, entry)
         if isinstance(entry, dict) and set(entry) == {"pid", "port", "url"}:
             if _pid_alive(pid):
@@ -846,7 +940,11 @@ def _pid_alive(pid: int) -> bool:
 def read_endpoints(path: Path | None = None) -> list[TUIEndpoint]:
     """Read and validate all live endpoints from the private registry."""
     registry_path = path or default_endpoint_path()
-    endpoints = _parse_endpoints(_read_registry_bytes(registry_path))
+    try:
+        data = _read_registry_bytes(registry_path)
+    except _RegistryNotFound:
+        raise EndpointRegistryError(_MISSING) from None
+    endpoints = _parse_endpoints(data)
     return [endpoint for endpoint in endpoints if _pid_alive(endpoint.pid)]
 
 

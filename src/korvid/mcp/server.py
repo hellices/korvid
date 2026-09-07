@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import json
 import logging
 import os
 import secrets
@@ -42,8 +41,15 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from korvid.core.audit import interprocess_lock
 from korvid.core.mcp import MCPControllerBase
+from korvid.mcp.registry import (
+    EndpointRegistryError,
+    endpoint_record,
+    load_registry_for_update,
+    open_private_file,
+    serialize_registry,
+    validate_capability_token,
+)
 from korvid.mcp.registry import default_endpoint_path as default_endpoint_path
-from korvid.mcp.registry import open_private_file
 from korvid.tools.executor import (
     PROPOSAL_TOOL_NAMES,
     ToolExecutor,
@@ -79,30 +85,19 @@ def _endpoint_lock_path(endpoint_path: Path) -> Path:
     return endpoint_path.with_name(endpoint_path.name + ".lock")
 
 
-def _load_registry(path: Path) -> dict[str, Any] | None:
-    """Parse the discovery registry; None when absent, torn, or when the
-    file holds foreign (non-registry) data that must be left untouched."""
-    try:
-        data = json.loads(path.read_text())
-    except (OSError, ValueError):
-        return None
-    if isinstance(data, dict) and isinstance(data.get("servers"), dict):
-        return data
-    return None
-
-
 def _replace_atomically(path: Path, registry: dict[str, Any]) -> None:
     """Temp file + rename so readers never observe a torn record.
 
     The credential file must be private before writing: POSIX 0600 or a
     protected Windows DACL, never a post-write permission change.
     """
+    payload = serialize_registry(registry)
     tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
     tmp.unlink(missing_ok=True)  # a stale tmp could carry a foreign mode
     fd = open_private_file(tmp)
     try:
         with os.fdopen(fd, "w") as handle:
-            handle.write(json.dumps(registry))
+            handle.write(payload)
         tmp.replace(path)
     except OSError:
         tmp.unlink(missing_ok=True)
@@ -169,7 +164,10 @@ class KorvidMCPServer:
         self._endpoint_path = endpoint_path or default_endpoint_path()
         #: The stdio adapter consumes this internal bridge credential from the
         #: private registry. It is never a model-visible authentication flow.
-        self._capability_token = capability_token or secrets.token_urlsafe(32)
+        self._capability_token = (
+            secrets.token_urlsafe(32) if capability_token is None else capability_token
+        )
+        validate_capability_token(self._capability_token)
         #: MCP follow mode (issue #153): mirror external cluster reads in
         #: the TUI. All three are optional wiring from the composition root;
         #: without them reads stay response-only (the pre-#153 behavior).
@@ -526,7 +524,7 @@ class KorvidMCPServer:
             # instance - never on the event-loop thread.
             try:
                 await asyncio.to_thread(self._write_endpoint, port)
-            except OSError:
+            except (OSError, EndpointRegistryError):
                 self._startup_error = (
                     "MCP endpoint registry could not be published; check permissions"
                 )
@@ -591,15 +589,13 @@ class KorvidMCPServer:
         path = self._endpoint_path
         path.parent.mkdir(parents=True, exist_ok=True)
         with interprocess_lock(_endpoint_lock_path(path)):
-            registry = _load_registry(path)
-            if registry is None:  # absent, torn, or foreign data
-                registry = {"servers": {}}
-            registry["servers"][str(os.getpid())] = {
-                "url": f"http://{_HOST}:{port}/mcp",
-                "port": port,
-                "pid": os.getpid(),
-                "capability": self._capability_token,
-            }
+            registry = load_registry_for_update(path)
+            registry["servers"][str(os.getpid())] = endpoint_record(
+                pid=os.getpid(),
+                port=port,
+                url=f"http://{_HOST}:{port}/mcp",
+                capability=self._capability_token,
+            )
             _replace_atomically(path, registry)
 
     def _remove_endpoint(self) -> None:
@@ -613,9 +609,7 @@ class KorvidMCPServer:
             return
         try:
             with interprocess_lock(_endpoint_lock_path(path)):
-                registry = _load_registry(path)
-                if registry is None:
-                    return
+                registry = load_registry_for_update(path)
                 entry = registry["servers"].get(str(os.getpid()))
                 if (
                     not isinstance(entry, dict)
@@ -628,7 +622,7 @@ class KorvidMCPServer:
                     _replace_atomically(path, registry)
                 else:
                     path.unlink(missing_ok=True)
-        except OSError:
+        except (OSError, EndpointRegistryError):
             return
 
 

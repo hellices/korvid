@@ -20,7 +20,7 @@ from korvid.tools.registry import mcp_tool_schemas
 
 from .test_server import RecordingExecutor
 
-_TOKEN = "private-transport-capability"
+_TOKEN = "private-transport-capability-012345"
 _HEADERS = {"Accept": "application/json, text/event-stream"}
 
 
