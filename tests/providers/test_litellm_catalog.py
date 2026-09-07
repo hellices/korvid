@@ -254,6 +254,35 @@ def test_litellms_github_copilot_provider_never_reaches_the_catalog() -> None:
     )
 
 
+def test_no_device_login_prefix_is_offered_when_nothing_serves_it() -> None:
+    """The exclusion is the deny-list's, not one vendor's.
+
+    Every prefix in `DEVICE_LOGIN_PREFIXES` resolves through an
+    interactive login, so with no flow installed the catalog must offer
+    none of their ids under any spelling. Offering one would put a
+    blocking device-code poll behind a keystroke in the picker, and the
+    factory would refuse the saved profile afterwards anyway.
+    """
+    from korvid.providers.litellm_settings import DEVICE_LOGIN_PREFIXES
+    from korvid.providers.special_flows import normalize_prefix
+
+    published = {
+        provider
+        for provider in models_by_provider()
+        if normalize_prefix(provider) in {normalize_prefix(p) for p in DEVICE_LOGIN_PREFIXES}
+    }
+    assert published, "litellm publishes no device-login provider; the exclusion is dead code"
+
+    catalog = LiteLLMModelCatalog()
+    offenders = {
+        entry.reference
+        for provider in published
+        for entry in catalog.search(provider, limit=500)
+        if normalize_prefix(entry.reference.split("/", 1)[0]) == normalize_prefix(provider)
+    }
+    assert offenders == set()
+
+
 @pytest.mark.parametrize(
     "reference",
     ["github_copilot/gpt-4o", "github-copilot/gpt-4o"],

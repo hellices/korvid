@@ -113,14 +113,17 @@ test asserts the same list. `providers/_litellm_import.py` also sets
 `LITELLM_LOCAL_MODEL_COST_MAP=true` before the import, suppressing the SDK's
 startup price-table fetch, and strips `StreamHandler`s from its loggers.
 
-**The GitHub Copilot routing hazard.** Given a reference under its own
-`github_copilot` prefix, LiteLLM starts an **interactive device-code login and
-writes a credential file** (`~/.config/litellm/github_copilot/api-key.json`)
-from inside its routing call, even if the intent was only to resolve the
-reference. `DEVICE_LOGIN_PREFIXES` in `providers/litellm_settings.py` claims
-`github-copilot` ahead of routing, the underscore spelling folds onto the same
-claim, and the claim holds whether or not korvid's Copilot flow is installed.
-Such a reference is either served by that flow or refused.
+**The device-login routing hazard.** Given a reference under LiteLLM's own
+`github_copilot` or `chatgpt` prefix, the SDK starts an **interactive
+device-code sign-in and writes a credential file** (under
+`~/.config/litellm/`) from inside its routing call, even if the intent was
+only to resolve the reference — and it replaces the profile's credential,
+`chatgpt` its endpoint too. `DEVICE_LOGIN_PREFIXES` in
+`providers/litellm_settings.py` claims both ahead of routing, the underscore
+spelling folds onto the same claim, and the claim holds whether or not
+korvid's Copilot flow is installed. Such a reference is either served by a
+flow korvid ships or refused. A test rediscovers the set from the installed
+release, so a future one adding a third device-code provider fails there.
 
 ## models.dev
 

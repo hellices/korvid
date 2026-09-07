@@ -199,6 +199,13 @@ are composed *after* the immutable safety contract and cannot widen it.
 
 ## Other agent-visible changes
 
+- **Device-login prefixes are refused, not resolved.** LiteLLM 1.98 resolves
+  both `github_copilot/…` and `chatgpt/…` by starting an interactive
+  device-code sign-in *inside* its routing call — writing a credential file
+  under `~/.config/litellm/` and ignoring the profile's own key (and, for
+  `chatgpt`, its endpoint). korvid claims both prefixes before it routes, so
+  such a profile is served by a flow korvid ships or refused with a logged
+  reason. Neither appears in model search unless a flow serves it.
 - **Evidence citations.** Each successful cluster read mints a numbered
   reference the answer cites; opening a citation navigates to the exact
   object the read looked at. Screen actions and writes never mint evidence.

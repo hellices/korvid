@@ -22,16 +22,25 @@ RETIRED_PROVIDER_ALIASES: frozenset[str] = frozenset({"openai-compat", "vllm", "
 #: Reference prefixes that must never reach LiteLLM's routing call,
 #: whatever is installed.
 #:
-#: Measured on 1.98.0: resolving `github_copilot/...` starts an
-#: interactive GitHub device login *inside* `get_llm_provider`, blocks
-#: polling for a code and writes `~/.config/litellm/github_copilot/
-#: api-key.json` before it raises. So the prefix has to be claimed
-#: *before* routing even when no flow is installed to serve it —
-#: otherwise uninstalling the plugin turns the reference back into a
-#: device-login trap. Stored in korvid's normalized (hyphen) spelling;
-#: `special_flows.normalize_prefix` folds LiteLLM's underscore form onto
-#: it, so both spellings hit the same claim.
-DEVICE_LOGIN_PREFIXES: frozenset[str] = frozenset({"github-copilot"})
+#: Measured on 1.98.0, for both of them: resolving one of these prefixes
+#: constructs the provider's `Authenticator` *inside* `get_llm_provider`,
+#: which creates a credential directory under `~/.config/litellm/` and
+#: then asks it for a token — printing a user code and blocking on a
+#: five-second poll when none is cached. Neither honours the profile: the
+#: credential the operator configured is replaced by the authenticator's,
+#: and `chatgpt` replaces the endpoint too, so no argument korvid could
+#: pass makes such a reference safe to resolve.
+#:
+#: So a prefix here has to be claimed *before* routing even when no flow
+#: is installed to serve it — otherwise uninstalling the plugin turns the
+#: reference back into a device-login trap. Stored in korvid's normalized
+#: (hyphen) spelling; `special_flows.normalize_prefix` folds LiteLLM's
+#: underscore form onto it, so both spellings hit the same claim.
+#:
+#: `tests/providers/test_device_login_prefixes.py` rediscovers this set
+#: from the installed release, so a future one that ships a third
+#: device-code provider fails there rather than in a terminal.
+DEVICE_LOGIN_PREFIXES: frozenset[str] = frozenset({"github-copilot", "chatgpt"})
 
 #: The reserved names korvid still serves itself, either through the
 #: standard transport or through a flow of its own. Unlike the two sets

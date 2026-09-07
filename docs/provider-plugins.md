@@ -90,10 +90,11 @@ Three sets are enforced whatever the transport publishes, and they are not
 interchangeable:
 
 - **Never routable** — the retired aliases `openai-compat`, `vllm`, `github`,
-  `claude`, plus the device-login prefix `github-copilot`. These stay claimed
-  even with no flow to serve them — a retired alias an operator still reads as
-  korvid's own must stay unroutable, and `github-copilot` starts an interactive
-  device login inside the SDK's own routing call (see the
+  `claude`, plus the device-login prefixes `github-copilot` and `chatgpt`.
+  These stay claimed even with no flow to serve them — a retired alias an
+  operator still reads as korvid's own must stay unroutable, and a
+  device-login prefix starts an interactive sign-in inside the SDK's own
+  routing call (see the
   [threat model](threat-model.md#the-agent-extra-dependencies-and-lockdown)).
 - **korvid's own routes** — `openai`, `azure`, `anthropic` and `ollama`. Fully
   routable (`openai/gpt-4o` stays dispatchable), but unregistrable by a third

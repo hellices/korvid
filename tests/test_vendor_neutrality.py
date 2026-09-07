@@ -91,13 +91,6 @@ ALLOWED: frozenset[str] = frozenset(
         # The two flows LiteLLM structurally cannot own (Task 17).
         "src/korvid/providers/flow_copilot.py",
         "src/korvid/providers/flow_ollama_thinking.py",
-        # Reads LiteLLM's shipped tables; the vendor names are *data* this
-        # module iterates and rewrites, never a branch it takes. The
-        # github_copilot exclusion in litellm_catalog.py is exactly such a
-        # rewrite, and it must be able to name the string it excludes.
-        # `litellm_runtime.py` is deliberately absent: it is the single
-        # import boundary for the SDK and spells no vendor at all.
-        "src/korvid/providers/litellm_catalog.py",
         # RETIRED_PROVIDER_ALIASES, DEVICE_LOGIN_PREFIXES and the reserved
         # names composed from them: the names a third-party plugin may not
         # register and the retired spellings that must stay unroutable.
@@ -328,13 +321,8 @@ ALLOWED_TOKENS: dict[str, frozenset[str]] = {
     "src/korvid/providers/entra.py": frozenset({"azure"}),
     "src/korvid/providers/flow_copilot.py": frozenset({"copilot"}),
     "src/korvid/providers/flow_ollama_thinking.py": frozenset({"ollama"}),
-    # The catalog's only *written* vendor tokens are the Copilot prefixes
-    # it rewrites, because resolving them through litellm starts a device
-    # login. Everything else it handles is data it iterates, not a name it
-    # spells. If a provider frozenset ever lands here, this fails.
-    "src/korvid/providers/litellm_catalog.py": frozenset({"copilot"}),
     # The reserved-name sets: the retired adapter spellings, the
-    # device-login prefix, and the four names korvid routes or flows
+    # device-login prefixes, and the four names korvid routes or flows
     # itself. Nothing else - a fifth self-served name would be a provider
     # table growing back one row at a time.
     "src/korvid/providers/litellm_settings.py": frozenset(

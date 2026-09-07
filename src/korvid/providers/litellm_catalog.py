@@ -33,8 +33,9 @@ from korvid.providers.litellm_runtime import (
     models_by_provider,
     supported_params,
 )
+from korvid.providers.litellm_settings import DEVICE_LOGIN_PREFIXES
 from korvid.providers.models_dev import ModelMetadataSource, RefreshOutcome
-from korvid.providers.special_flows import SpecialFlowRegistry
+from korvid.providers.special_flows import SpecialFlowRegistry, normalize_prefix
 
 #: The one place a provider-layer refresh outcome becomes an operator-facing
 #: one. A `dict` rather than same-named members so the two vocabularies stay
@@ -47,13 +48,16 @@ _REFRESH_OUTCOMES: Final[dict[RefreshOutcome, MetadataRefresh]] = {
     RefreshOutcome.UNAVAILABLE: MetadataRefresh.UNAVAILABLE,
 }
 
-#: LiteLLM's own spelling for the Copilot provider. Its ids ship
-#: already-qualified (`github_copilot/claude-haiku-4.5`), and resolving the
-#: prefix starts an interactive device login *inside* the routing call, so
-#: the entries are re-prefixed onto korvid's own claimed spelling rather
-#: than offered as LiteLLM writes them.
-_LITELLM_COPILOT_PROVIDER: Final = "github_copilot"
-_KORVID_COPILOT_PREFIX: Final = "github-copilot"
+#: The prefixes whose *resolution* is an interactive login, in korvid's
+#: normalized spelling. LiteLLM publishes their ids already qualified
+#: (`github_copilot/claude-haiku-4.5`, `chatgpt/gpt-5.2`), so an entry is
+#: either re-prefixed onto the spelling korvid claims — which is what the
+#: flow serving it answers to — or dropped when nothing serves it. Read
+#: from the deny-list rather than restated, so the picker and the factory
+#: cannot end up disagreeing about which references are safe.
+_DEVICE_LOGIN_PREFIXES: Final[frozenset[str]] = frozenset(
+    normalize_prefix(prefix) for prefix in DEVICE_LOGIN_PREFIXES
+)
 
 # ---------------------------------------------------------------------------
 # Static auth-method descriptors
@@ -241,19 +245,17 @@ class LiteLLMModelCatalog(ModelCatalog):
                     model_id if model_id.startswith(f"{provider}/") else f"{provider}/{model_id}"
                 )
                 entry_provider = provider
-                if provider == _LITELLM_COPILOT_PROVIDER:
-                    if (
-                        self._flows is None
-                        or self._flows.claim(f"{_KORVID_COPILOT_PREFIX}/") is None
-                    ):
-                        # No flow owns Copilot in this installation, so there
-                        # is nothing safe to route these to. Drop them rather
-                        # than offer a reference whose resolution blocks on a
-                        # device-login poll.
+                claimed = normalize_prefix(provider)
+                if claimed in _DEVICE_LOGIN_PREFIXES:
+                    if self._flows is None or self._flows.claim(f"{claimed}/") is None:
+                        # Nothing owns this prefix in this installation, so
+                        # there is nothing safe to route these to. Drop them
+                        # rather than offer a reference whose resolution
+                        # blocks on a device-login poll.
                         continue
                     _, tag = split_reference(reference)
-                    reference = f"{_KORVID_COPILOT_PREFIX}/{tag}"
-                    entry_provider = _KORVID_COPILOT_PREFIX
+                    reference = f"{claimed}/{tag}"
+                    entry_provider = claimed
                 entries.append(self._entry_from(entry_provider, reference, record))
         return tuple(entries)
 
