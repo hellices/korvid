@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
 import platform
 import time
@@ -207,6 +208,39 @@ def _parse(
     return metadata, env_hints
 
 
+def _cache_age(envelope: dict[str, Any], now: float) -> float | None:
+    """How long ago *envelope* was written, or None when it cannot say.
+
+    The cache file lives in a user-writable directory, so its fields are
+    input rather than korvid's own state. `fetched_at` is read by the
+    freshness check — the one step of a refresh that runs *before* the
+    error handling — so anything that is not a finite, non-future number
+    has to be answered here instead of thrown out of a method documented
+    as never raising. An unusable timestamp is not evidence of freshness:
+    the caller revalidates, which is what an aged-out cache does anyway.
+    """
+    value = envelope.get("fetched_at")
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    age = now - float(value)
+    # A future timestamp is either a tamper or a clock that moved; either
+    # way, honouring it would pin korvid to this envelope until it passes.
+    if not math.isfinite(age) or age < 0:
+        return None
+    return age
+
+
+def _cache_etag(envelope: dict[str, Any]) -> str | None:
+    """The envelope's validator, or None when it is not one.
+
+    A non-string `etag` cannot become an `if-none-match` header. Sending
+    it would raise inside the request and cost the operator the refresh,
+    so it is treated as absent and the GET goes out unconditional.
+    """
+    value = envelope.get("etag")
+    return value if isinstance(value, str) else None
+
+
 def _default_client_factory(ca_bundle: str | None = None) -> AbstractAsyncContextManager[Any]:
     """The production client: korvid's own trust, nothing else.
 
@@ -334,11 +368,11 @@ class ModelsDevSource(ModelMetadataSource):
         now = self._clock()
 
         if not force and cached is not None:
-            age = now - cached.get("fetched_at", 0)
-            if age < CACHE_TTL_SECONDS:
+            age = _cache_age(cached, now)
+            if age is not None and age < CACHE_TTL_SECONDS:
                 return RefreshOutcome.CACHED
 
-        etag: str | None = cached.get("etag") if cached is not None else None
+        etag: str | None = _cache_etag(cached) if cached is not None else None
 
         try:
             # One deadline over connect, headers, body and parse. An HTTP

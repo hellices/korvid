@@ -8,9 +8,10 @@ import json
 import ssl
 import stat
 import threading
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Final, cast
 
 import pytest
 
@@ -282,6 +283,115 @@ async def test_the_cache_file_is_owner_only(tmp_path: Path) -> None:
     path = tmp_path / "models-dev.json"
     await _source(tmp_path, _ok).refresh()
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+# ---------------------------------------------------------------------------
+# A tampered cache envelope
+# ---------------------------------------------------------------------------
+#
+# The envelope is a JSON file in the user's cache directory, and `refresh`
+# is documented as never raising. Its freshness check read `fetched_at`
+# *outside* the guarded block, so a value that is not a number took the
+# subtraction — and the exception — straight out through a method whose
+# callers do not catch anything.
+
+#: `fetched_at` values that make the freshness question unanswerable.
+TAMPERED_TIMESTAMPS: Final[tuple[object, ...]] = ("not-a-number", None, [], {"then": 1})
+
+
+def _tamper(cache_path: Path, **fields: object) -> None:
+    """Rewrite envelope fields, leaving the cached document intact."""
+    data = json.loads(cache_path.read_text(encoding="utf-8"))
+    data.update(fields)
+    cache_path.write_text(json.dumps(data), encoding="utf-8")
+
+
+@pytest.mark.parametrize("stamp", TAMPERED_TIMESTAMPS, ids=repr)
+async def test_an_unusable_timestamp_never_escapes_an_unforced_refresh(
+    tmp_path: Path, stamp: object
+) -> None:
+    """The refresh korvid makes on its own is the one with no `force`.
+
+    An unreadable timestamp is not evidence of freshness, so the cache is
+    revalidated rather than trusted — and when the network is gone too,
+    the answer is the same `UNAVAILABLE` any other failed refresh gives.
+    """
+    path = tmp_path / "models-dev.json"
+    await _source(tmp_path, _ok).refresh()
+    _tamper(path, fetched_at=stamp)
+
+    def boom(request: httpx_types.Request) -> httpx_types.Response:
+        raise httpx.ConnectError("refused")
+
+    source = _source(tmp_path, boom)
+
+    assert await source.refresh() is RefreshOutcome.UNAVAILABLE
+    assert await source.refresh(force=False) is RefreshOutcome.UNAVAILABLE
+    # The tables the TUI reads still answer from the cached document: a
+    # bad timestamp costs the freshness claim, not the metadata.
+    assert source.metadata("anthropic/claude-sonnet-4-5") is not None
+
+
+async def test_an_unusable_timestamp_is_replaced_by_the_refresh_it_forces(
+    tmp_path: Path,
+) -> None:
+    """Self-healing, so the tamper cannot pin korvid to one bad envelope."""
+    path = tmp_path / "models-dev.json"
+    await _source(tmp_path, _ok).refresh()
+    _tamper(path, fetched_at="not-a-number")
+
+    assert await _source(tmp_path, _ok).refresh() is RefreshOutcome.UPDATED
+
+    stored = json.loads(path.read_text(encoding="utf-8"))
+    assert isinstance(stored["fetched_at"], int | float)
+
+
+async def test_a_timestamp_from_the_future_is_not_evidence_of_freshness(
+    tmp_path: Path,
+) -> None:
+    """A number can be as unusable as a string.
+
+    `fetched_at` a year ahead makes every unforced refresh answer
+    `CACHED` until the date passes — a cache pinned by whatever wrote the
+    file. Freshness is measured forward from the write, so an age that
+    cannot be one is treated as no answer.
+    """
+    path = tmp_path / "models-dev.json"
+    await _source(tmp_path, _ok).refresh()
+    _tamper(path, fetched_at=time.time() + 365 * 24 * 3600)
+
+    calls = 0
+
+    def handler(request: httpx_types.Request) -> httpx_types.Response:
+        nonlocal calls
+        calls += 1
+        return _ok(request)
+
+    assert await _source(tmp_path, handler).refresh() is RefreshOutcome.UPDATED
+    assert calls == 1
+
+
+async def test_an_unusable_etag_is_not_sent_as_a_conditional_header(
+    tmp_path: Path,
+) -> None:
+    """The other field the envelope hands to the network.
+
+    A non-string `etag` is not a validator; sending it would fail the
+    request and cost the operator the refresh, so it is treated as
+    absent and the GET goes out unconditional.
+    """
+    path = tmp_path / "models-dev.json"
+    await _source(tmp_path, _ok).refresh()
+    _tamper(path, fetched_at=0, etag={"not": "a validator"})
+
+    seen: list[str | None] = []
+
+    def handler(request: httpx_types.Request) -> httpx_types.Response:
+        seen.append(request.headers.get("if-none-match"))
+        return _ok(request)
+
+    assert await _source(tmp_path, handler).refresh() is RefreshOutcome.UPDATED
+    assert seen == [None]
 
 
 def test_the_default_cache_path_follows_the_platform_convention(
