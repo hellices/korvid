@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Final
 
-from korvid.option_keys import names_a_credential
+from korvid.option_keys import names_a_credential, normalized_segments
 from korvid.providers.litellm_settings import KEYLESS_API_KEY_SENTINEL
 
 # ---------------------------------------------------------------------------
@@ -102,6 +102,77 @@ RESERVED_CALL_ARGUMENTS: Final[frozenset[str]] = _LIFTED | frozenset(
     }
 )
 
+# ---------------------------------------------------------------------------
+# LiteLLM's own control arguments — they decide whether a request happens,
+# where it goes, and what comes back if it does not.
+# ---------------------------------------------------------------------------
+
+#: Segments that make a key one of LiteLLM's controls wherever they appear
+#: in it, matched as whole singularized words (see `normalized_segments`).
+#:
+#: * `mock` — `mock_response` and `mock_tool_calls` return a fabricated
+#:   completion, with assistant text and tool calls taken from the
+#:   argument, before any transport runs. `mock_timeout` and `mock_delay`
+#:   join them (measured in `main.py` on 1.98.0; two of the four are not
+#:   in `litellm.all_litellm_params`, so that list is no substitute).
+#: * `fallback` — `fallbacks` and `context_window_fallback_dict` re-run
+#:   the call against a different model, with that model's credentials and
+#:   endpoint, and return its answer as this one's.
+#: * `callback` — `callbacks`, `success_callback` and `failure_callback`
+#:   accept plain *strings* naming exporters, which is exactly the shape a
+#:   YAML file can hold, and each one is handed the prompt and the answer.
+#: * `litellm` — every `litellm_*` argument is SDK plumbing
+#:   (`litellm_logging_obj`, `litellm_proxy_api_base`, …), and
+#:   `use_litellm_proxy` re-points the request at a proxy.
+#:
+#: Measured against every parameter LiteLLM reports as supported for any
+#: provider on 1.98.0 — 92 names — none of which carries one of these
+#: segments, so the rule costs an operator nothing they can really set.
+_CONTROL_SEGMENTS: Final[frozenset[str]] = frozenset({"mock", "fallback", "callback", "litellm"})
+
+#: Controls whose names carry no segment worth reserving on its own, so
+#: they are named exactly. Each is read out of `**kwargs` by 1.98.0's
+#: `completion`/`acompletion`:
+#:
+#: * `model_list` sends the call down `batch_completion_models`, and
+#:   `deployment_id` rewrites `model` and forces `custom_llm_provider` to
+#:   one vendor's adapter — both re-route a request korvid addressed
+#:   itself. `proxy_server_request` is a smaller relative of the same
+#:   thing. (LiteLLM has a third: a bare boolean flag named after that
+#:   same vendor. It is deliberately *not* reserved here, because naming
+#:   it would put a vendor literal in the routing surface, which
+#:   `tests/test_vendor_neutrality.py` forbids for good reason. It is the
+#:   least of the three: `custom_llm_provider` and `deployment_id` are
+#:   both already reserved, korvid still owns `base_url`, and the flag
+#:   can therefore change a request's shape against the operator's own
+#:   endpoint but cannot send it anywhere else.)
+#: * `logger_fn` is handed every request and every response.
+#: * `acompletion`, `atext_completion`, `text_completion` and
+#:   `original_function` select a *different code path* inside LiteLLM
+#:   from the one korvid's response reader was written against.
+#: * `caching`, `cache` and `preset_cache_key` let an answer come from a
+#:   cache entry instead of from the provider — including one addressed
+#:   by a key the profile chose.
+#:
+#: Only `deployment_id` collides with a supported parameter anywhere (for
+#: `litellm_proxy`, which reports 77 of them). Reserving it costs that one
+#: deployment selector; korvid owns which model a request addresses.
+_LITELLM_CONTROL_ARGUMENTS: Final[frozenset[str]] = frozenset(
+    {
+        "model_list",
+        "deployment_id",
+        "proxy_server_request",
+        "logger_fn",
+        "acompletion",
+        "atext_completion",
+        "text_completion",
+        "original_function",
+        "caching",
+        "cache",
+        "preset_cache_key",
+    }
+)
+
 # Credential-shaped keys are judged by `korvid.option_keys`, the one
 # vocabulary `core/config.py` also refuses a profile's options by. Two
 # copies of it drifted: the plural spellings (`api_keys`, `secrets`,
@@ -109,17 +180,38 @@ RESERVED_CALL_ARGUMENTS: Final[frozenset[str]] = _LIFTED | frozenset(
 # and `credentials` was in one copy only.
 
 
+def names_a_litellm_control(key: str) -> bool:
+    """Whether *key* is one of LiteLLM's controls rather than a parameter.
+
+    Args:
+        key: The option key as it was written.
+
+    Returns:
+        True when the key names a control korvid has to decide itself.
+    """
+    if key in _LITELLM_CONTROL_ARGUMENTS:
+        return True
+    return any(segment in _CONTROL_SEGMENTS for segment in normalized_segments(key))
+
+
 def is_reserved_call_argument(key: str) -> bool:
     """Whether *key* is korvid's to decide rather than the operator's.
 
-    Reserved for two reasons: the engine owns the argument, or the key
-    names a credential. Anything that matches is dropped rather than
-    merely prevented from overriding — an argument the provider does not
-    consume is forwarded into the *request body* (measured on 1.98.0), so
-    a credential-shaped option would send whatever it holds to the vendor
-    as an unknown field.
+    Reserved for three reasons: the engine owns the argument, the key
+    names a credential, or the key is one of LiteLLM's own controls.
+    Anything that matches is dropped rather than merely prevented from
+    overriding — an argument the provider does not consume is forwarded
+    into the *request body* (measured on 1.98.0), so a credential-shaped
+    option would send whatever it holds to the vendor as an unknown field.
+
+    The per-provider allowlist stands in for none of this:
+    `get_supported_openai_params` reports nothing at all for 27 of
+    LiteLLM's providers on 1.98.0, and korvid forwards every option
+    untouched on that path rather than crippling a provider it cannot
+    introspect — so on those providers a profile's `options` reach
+    `acompletion` exactly as written.
     """
-    return key in RESERVED_CALL_ARGUMENTS or names_a_credential(key)
+    return key in RESERVED_CALL_ARGUMENTS or names_a_credential(key) or names_a_litellm_control(key)
 
 
 # ---------------------------------------------------------------------------

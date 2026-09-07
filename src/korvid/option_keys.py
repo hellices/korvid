@@ -1,4 +1,4 @@
-"""One vocabulary for option-key names that would carry a credential.
+"""One way to read an option key's name, shared by the gates that judge it.
 
 Two gates judge the same key names and have to agree about them:
 
@@ -26,6 +26,11 @@ both layers import it legally.
 Matching is by *word segment*, never by substring. `monkey` contains
 "key", `token_count` counts units of text, and `max_tokens` is a
 parameter every provider supports — none of them names a credential.
+
+The credential vocabulary lives here because both gates need it. The
+tokenizer is here for the same reason: `providers/litellm_request.py`
+also reads key names to spot LiteLLM's own control arguments, and that
+vocabulary is the vendor's, so it stays with the vendor's module.
 """
 
 from __future__ import annotations
@@ -153,6 +158,22 @@ def _matched_pair(singulars: tuple[str, ...]) -> str | None:
     return None
 
 
+def normalized_segments(key: str) -> tuple[str, ...]:
+    """*key* as lowercase word segments, each reduced to its singular.
+
+    The form a vocabulary is matched against, so that a plural spelling
+    can never mean something the singular does not. Callers that need the
+    words exactly as written want `key_segments` instead.
+
+    Args:
+        key: The option key as it was written.
+
+    Returns:
+        The key's singularized word segments, in order.
+    """
+    return tuple(_singular(segment) for segment in key_segments(key))
+
+
 def matched_credential_segment(key: str) -> str | None:
     """The credential name *key* carries, in canonical spelling, or None.
 
@@ -167,7 +188,7 @@ def matched_credential_segment(key: str) -> str | None:
         The canonical segment that matched, or `None` when the key names
         no credential.
     """
-    singulars = tuple(_singular(segment) for segment in key_segments(key))
+    singulars = normalized_segments(key)
     paired = _matched_pair(singulars)
     if paired is not None:
         return paired

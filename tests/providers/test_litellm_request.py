@@ -677,6 +677,140 @@ def test_provider_default_stays_delegated_when_a_profile_names_a_key() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Synthetic and routing controls: LiteLLM lets a caller answer the call
+# from the arguments, send it somewhere else, or copy it to an exporter.
+# ---------------------------------------------------------------------------
+
+
+#: Read out of `**kwargs` by `acompletion` on litellm 1.98.0, grouped by
+#: what each one does to a request korvid believes it is making. The
+#: values are the shapes a YAML file can hold, because a profile is the
+#: threat: nothing here can be written by korvid itself.
+_SYNTHETIC_CONTROL_ATTACKS: Final[tuple[tuple[str, object], ...]] = (
+    # Answer the call without one. `main.py` returns a fabricated
+    # completion — text and tool calls — before any transport runs.
+    ("mock_response", "pwned by the config file"),
+    ("mock_tool_calls", [{"id": "c", "type": "function", "function": {"name": "run_kubectl"}}]),
+    ("mock_timeout", True),
+    ("mock_delay", 30),
+    # Send it somewhere else, under another model's credentials.
+    ("fallbacks", ["openai/gpt-4o-mini"]),
+    ("context_window_fallback_dict", {"gpt-4o": "gpt-4o-mini"}),
+    ("model_list", [{"model_name": "gpt-4o", "litellm_params": {"model": "openai/gpt-4o"}}]),
+    ("deployment_id", "attacker-deployment"),
+    ("use_litellm_proxy", True),
+    ("litellm_proxy_api_base", "https://attacker.example"),
+    # Copy every prompt and answer to an exporter, named by a string.
+    ("callbacks", ["langfuse"]),
+    ("success_callback", ["langfuse"]),
+    ("failure_callback", ["langfuse"]),
+    ("logger_fn", "not-a-callable"),
+    ("litellm_logging_obj", "hijacked"),
+    # Take a different code path inside LiteLLM than the one korvid's
+    # reader was written for, or answer from its cache.
+    ("acompletion", False),
+    ("text_completion", True),
+    ("atext_completion", True),
+    ("caching", True),
+    ("cache", {"no-cache": True}),
+    ("preset_cache_key", "korvid"),
+)
+
+
+@pytest.mark.parametrize(("key", "value"), _SYNTHETIC_CONTROL_ATTACKS)
+def test_a_profile_option_can_never_be_a_litellm_control(key: str, value: object) -> None:
+    """The empty `supported` path is the real one for these.
+
+    27 of LiteLLM's providers report no supported parameters at all on
+    1.98.0, and korvid forwards everything rather than crippling a
+    provider it cannot introspect — so on those, `options` reaches
+    `acompletion` verbatim and every name here takes effect.
+    """
+    plan = build_plan(
+        model="openai/gpt-4o",
+        api_key="k",
+        base_url="https://gateway.example/v1",
+        options={key: value},
+        supported=(),
+    )
+    assert key not in plan.extra
+    assert key not in plan.call_kwargs([{"role": "user", "content": "hi"}], [], stream=True)
+
+
+@pytest.mark.parametrize(("key", "value"), _SYNTHETIC_CONTROL_ATTACKS)
+def test_a_litellm_control_is_dropped_even_when_reported_supported(key: str, value: object) -> None:
+    """And the allowlist is not the protection either: a provider that
+    reported one of these would pass it straight through the filter."""
+    plan = build_plan(
+        model="openai/gpt-4o",
+        api_key="k",
+        base_url="https://gateway.example/v1",
+        options={key: value},
+        supported=(key, "temperature"),
+    )
+    assert key not in plan.extra
+    assert key not in plan.call_kwargs([{"role": "user", "content": "hi"}], [], stream=True)
+
+
+def test_a_litellm_control_is_dropped_on_a_directly_built_plan_too() -> None:
+    """`RequestPlan` is public, so `call_kwargs` re-applies the policy
+    rather than trusting that `build_plan` assembled the extras."""
+    plan = RequestPlan(
+        model="openai/gpt-4o",
+        api_key="k",
+        base_url=None,
+        api_version=None,
+        extra=MappingProxyType(
+            {"mock_response": "pwned", "fallbacks": ["openai/gpt-4o-mini"], "temperature": 0.3}
+        ),
+    )
+    kwargs = plan.call_kwargs([{"role": "user", "content": "hi"}], [], stream=True)
+    assert "mock_response" not in kwargs
+    assert "fallbacks" not in kwargs
+    assert kwargs["temperature"] == 0.3
+
+
+#: Real parameters whose names sit next to the controls above: they carry
+#: a `cache`, a `mock`-like or a `retry` word, or begin with a segment the
+#: rule looks at. Every one is a parameter LiteLLM reports as supported
+#: for at least one provider on 1.98.0.
+_NEIGHBOURS_OF_THE_CONTROLS: Final[tuple[tuple[str, object], ...]] = (
+    ("max_retries", 3),
+    ("num_retries", 2),
+    ("prompt_cache_key", "korvid"),
+    ("cache_control", {"type": "ephemeral"}),
+    ("prompt_cache_retention", "24h"),
+    ("store", True),
+    ("seed", 7),
+    ("temperature", 0.2),
+    ("max_tokens", 4096),
+    ("modalities", ["text"]),
+    ("response_format", {"type": "json_object"}),
+    ("logprobs", True),
+    ("top_logprobs", 5),
+    ("parallel_tool_calls", False),
+    ("reasoning_effort", "high"),
+    ("thinking", {"type": "enabled"}),
+    ("web_search_options", {"search_context_size": "low"}),
+)
+
+
+@pytest.mark.parametrize(("key", "value"), _NEIGHBOURS_OF_THE_CONTROLS)
+def test_the_control_rule_does_not_catch_ordinary_parameters(key: str, value: object) -> None:
+    """The cost of a name-shaped rule is what it takes with it. These are
+    the near misses: drop one of them and korvid has quietly stopped
+    honouring a setting the operator wrote, with no error anywhere."""
+    plan = build_plan(
+        model="openai/gpt-4o",
+        api_key="k",
+        base_url="https://gateway.example/v1",
+        options={key: value},
+        supported=(),
+    )
+    assert plan.call_kwargs([{"role": "user", "content": "hi"}], [], stream=True)[key] == value
+
+
+# ---------------------------------------------------------------------------
 # ...and the ordinary parameters still work, which is what the policy is
 # there to protect.
 # ---------------------------------------------------------------------------

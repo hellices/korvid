@@ -20,7 +20,12 @@ from typing import Final
 import pytest
 
 from korvid.core.config import load_config
-from korvid.option_keys import key_segments, matched_credential_segment, names_a_credential
+from korvid.option_keys import (
+    key_segments,
+    matched_credential_segment,
+    names_a_credential,
+    normalized_segments,
+)
 from korvid.providers.litellm_request import build_plan
 
 # ---------------------------------------------------------------------------
@@ -141,6 +146,21 @@ def test_keys_are_split_the_same_way_on_both_sides() -> None:
     assert key_segments("APIKey") == ("api", "key")
     assert key_segments("api-key") == ("api", "key")
     assert key_segments("MAX_TOKENS") == ("max", "tokens")
+
+
+def test_the_matching_form_folds_plurals_and_leaves_short_words_alone() -> None:
+    """The form a vocabulary is looked up in.
+
+    `providers/litellm_request.py` matches LiteLLM's control words by it,
+    so `fallbacks` has to reduce to `fallback` — and `pass`, `class` and
+    anything under four letters must survive untouched, or the folding
+    would invent words the operator never wrote.
+    """
+    assert normalized_segments("fallbacks") == ("fallback",)
+    assert normalized_segments("success_callbacks") == ("success", "callback")
+    assert normalized_segments("mockResponse") == ("mock", "response")
+    assert normalized_segments("gas") == ("gas",)
+    assert normalized_segments("class_pass") == ("class", "pass")
 
 
 # ---------------------------------------------------------------------------

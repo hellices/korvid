@@ -30,12 +30,11 @@ from __future__ import annotations
 
 import asyncio
 import http.server
-import inspect
 import json
 import ssl
 import threading
-from collections.abc import AsyncIterator, Callable, Iterator
-from contextlib import contextmanager, suppress
+from collections.abc import AsyncIterator, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -46,6 +45,7 @@ from korvid.agent.provider import OperatorSafeProviderError
 from korvid.core.config import ConnectionAuthConfig, ModelConnectionConfig
 from korvid.providers.litellm_factory import create_provider_from_profile
 from korvid.providers.litellm_provider import LiteLLMProvider
+from tests.providers.litellm_clients import drop_cached_clients
 from tests.providers.tls_ca import mint_ca_and_server_cert
 
 #: One reference per LiteLLM client shape. `openai/` is served by the
@@ -105,32 +105,6 @@ def _https_endpoint(cert_pem: Path, key_pem: Path) -> Iterator[str]:
         server.server_close()
 
 
-async def _drop_cached_clients() -> None:
-    """Close and forget every client LiteLLM cached, without leaking one.
-
-    The cache holds live `httpx`/`aiohttp` sessions. Flushing it alone
-    drops the last reference to an *open* session, whose finalizer raises
-    a `ResourceWarning` that this suite's `filterwarnings = ["error"]`
-    turns into a failure in whichever unrelated test happens to be
-    running when the collector gets to it.
-    """
-    cache = getattr(litellm.in_memory_llm_clients_cache, "cache_dict", {})
-    for client in list(cache.values()):
-        for name in ("aclose", "close"):
-            closer = getattr(client, name, None)
-            if closer is None:
-                continue
-            with suppress(Exception):  # a half-built client must not fail a test
-                result = closer()
-                if inspect.isawaitable(result):
-                    await result
-            break
-    # `InMemoryCache.flush_cache` carries no annotations in 1.98.0, so it is
-    # bound through the signature it actually has before being called.
-    flush_cache: Callable[[], None] = litellm.in_memory_llm_clients_cache.flush_cache
-    flush_cache()
-
-
 @pytest.fixture(autouse=True)
 async def _isolated_litellm_trust(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[None]:
     """Restore LiteLLM's global trust and drop its cached clients.
@@ -144,10 +118,10 @@ async def _isolated_litellm_trust(monkeypatch: pytest.MonkeyPatch) -> AsyncItera
     that reuses one process has to flush.
     """
     monkeypatch.setattr(litellm, "ssl_verify", True, raising=False)
-    await _drop_cached_clients()
+    await drop_cached_clients()
     _Chat.bodies = []
     yield
-    await _drop_cached_clients()
+    await drop_cached_clients()
 
 
 def _profile(reference: str, endpoint: str, **options: object) -> ModelConnectionConfig:
