@@ -285,7 +285,7 @@ def test_read_endpoints_rejects_non_regular_paths_before_opening(
 
     original_open = os.open
 
-    def guarded_open(file: Any, flags: int, mode: int = 0o777) -> int:
+    def guarded_open(file: Any, flags: int, mode: int = 0o600) -> int:
         if Path(os.fsdecode(file)) == path:
             raise AssertionError("unsafe path reached os.open")
         return int(original_open(file, flags, mode))
@@ -363,7 +363,7 @@ def test_read_endpoints_rejects_a_file_replaced_between_check_and_open(
     original_open = os.open
     replaced = False
 
-    def replacing_open(file: Any, flags: int, mode: int = 0o777) -> int:
+    def replacing_open(file: Any, flags: int, mode: int = 0o600) -> int:
         nonlocal replaced
         if Path(os.fsdecode(file)) == path and not replaced:
             replacement.replace(path)
