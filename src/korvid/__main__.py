@@ -33,16 +33,14 @@ from korvid.agent.interaction import (
 from korvid.core.audit import AuditLog, default_audit_path
 from korvid.core.config import (
     DEFAULT_CONFIG_PATH,
-    KEEP_MODEL_TIER,
+    ConfigFileModelConnectionsWriter,
     ConfigMigrationError,
     KorvidConfig,
     ModelConnectionConfig,
-    ModelConnectionsConfig,
-    ModelTierWrite,
+    ModelConnectionsWriter,
     ObservabilityBackend,
     context_is_protected,
     load_config,
-    save_model_connections,
     save_topbar_state,
 )
 from korvid.core.mcp import MCPControllerBase
@@ -1137,19 +1135,23 @@ def _build_agent_wiring(
     )
 
 
-def _persist_model_profiles(
-    profiles: ModelConnectionsConfig, *, model_tier: ModelTierWrite = KEEP_MODEL_TIER
-) -> None:
-    """Write the profile set the UI produced back to config.yaml.
+def _profile_writer() -> ModelConnectionsWriter:
+    """The seam the UI persists profiles through.
 
-    Failures propagate: the caller applied the profile to the live session
-    already and must tell the operator the change reverts on restart.
+    Built here and nowhere else: the composition root owns every path
+    korvid writes to, so the screens are handed a writer rather than a
+    location. The path is read at call time so a test can rebind
+    `DEFAULT_CONFIG_PATH` and get a writer that honours it.
+
+    Failures propagate out of the returned writer: the caller applied the
+    profile to the live session already and must tell the operator the
+    change reverts on restart.
 
     `model_tier` defaults to leaving `agent.model_tier` untouched — only
     the first-run wizard, which actually asks, sends one, and it lands in
     the same write as the profiles so the two can never disagree.
     """
-    save_model_connections(DEFAULT_CONFIG_PATH, profiles, model_tier=model_tier)
+    return ConfigFileModelConnectionsWriter(DEFAULT_CONFIG_PATH)
 
 
 def _make_rebuild_agent(
@@ -1637,7 +1639,7 @@ async def _wire_and_run(config: KorvidConfig, kube: KubeClient, state: _RunState
             ca_bundle=config.network_ca_bundle,
             models_dev=config.agent_model_search_models_dev,
         ),
-        agent_save_profiles=_persist_model_profiles,
+        agent_save_profiles=_profile_writer(),
         rebuild_agent=agent.rebuild,
         disconnect_agent=agent.disconnect,
         # The wiring reports unavailable only when the [agent] extra is

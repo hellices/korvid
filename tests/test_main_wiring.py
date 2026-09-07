@@ -985,7 +985,7 @@ def test_the_profile_writer_updates_only_the_active_profile(
     of a profile korvid rejected, which is the operator's only copy of the
     thing they have to fix."""
     import korvid.__main__ as main_mod
-    from korvid.__main__ import _persist_model_profiles
+    from korvid.__main__ import _profile_writer
     from korvid.core.config import load_config
 
     config_path = tmp_path / "config.yaml"
@@ -1024,7 +1024,7 @@ agent:
     monkeypatch.setattr(main_mod, "DEFAULT_CONFIG_PATH", config_path)
     loaded = load_config(config_path)
 
-    _persist_model_profiles(
+    _profile_writer()(
         ModelConnectionsConfig(
             active="default",
             profiles={
@@ -1063,14 +1063,14 @@ def test_the_profile_writer_never_writes_a_secret_value(
     """A profile stores the *name* of the environment variable, never what
     it holds. The writer reads no secret, so none can reach config.yaml."""
     import korvid.__main__ as main_mod
-    from korvid.__main__ import _persist_model_profiles
+    from korvid.__main__ import _profile_writer
     from korvid.core.config import load_config
 
     monkeypatch.setenv("KORVID_TEST_KEY", "sk-secret-value")
     config_path = tmp_path / "config.yaml"
     monkeypatch.setattr(main_mod, "DEFAULT_CONFIG_PATH", config_path)
 
-    _persist_model_profiles(_profiles(_profile("m1")))
+    _profile_writer()(_profiles(_profile("m1")))
 
     active = load_config(config_path).model_connections.active_profile
     assert active is not None
@@ -2485,14 +2485,14 @@ def test_the_profile_writer_keeps_a_tier_it_was_not_given(
 ) -> None:
     """The composition root's writer is the seam the UI persists through.
     A save that never asked about the tier must not drop the override."""
-    from korvid.__main__ import _persist_model_profiles
+    from korvid.__main__ import _profile_writer
     from korvid.core.config import load_config
 
     path = tmp_path / "config.yaml"
     _profiles_config(path, tier="high")
     monkeypatch.setattr(korvid.__main__, "DEFAULT_CONFIG_PATH", path)
 
-    _persist_model_profiles(load_config(path).model_connections)
+    _profile_writer()(load_config(path).model_connections)
 
     assert yaml.safe_load(path.read_text(encoding="utf-8"))["agent"]["model_tier"] == "high"
 
@@ -2502,7 +2502,7 @@ def test_the_profile_writer_persists_a_first_run_tier(
 ) -> None:
     """And the first-run wizard's answer lands in the same write as the
     profile it was chosen for — including Automatic, which clears it."""
-    from korvid.__main__ import _persist_model_profiles
+    from korvid.__main__ import _profile_writer
     from korvid.core.config import load_config
 
     path = tmp_path / "config.yaml"
@@ -2510,13 +2510,47 @@ def test_the_profile_writer_persists_a_first_run_tier(
     monkeypatch.setattr(korvid.__main__, "DEFAULT_CONFIG_PATH", path)
     profiles = load_config(path).model_connections
 
-    _persist_model_profiles(profiles, model_tier="low")
+    _profile_writer()(profiles, model_tier="low")
     raw = yaml.safe_load(path.read_text(encoding="utf-8"))
     assert raw["agent"]["model_tier"] == "low"
     assert raw["agent"]["active"] == "main"
 
-    _persist_model_profiles(profiles, model_tier=None)
+    _profile_writer()(profiles, model_tier=None)
     assert "model_tier" not in yaml.safe_load(path.read_text(encoding="utf-8"))["agent"]
+
+
+async def test_wire_and_run_hands_the_ui_a_declared_profile_writer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The screens are injected with a `ModelConnectionsWriter`, not a callable.
+
+    The seam crosses core → UI, so it is nominal (AGENTS.md): what the app
+    receives declares itself an implementation of the interface `core`
+    owns, and it is already bound to the one path the composition root
+    chose — the UI never sees a location it could write to.
+    """
+    import korvid.__main__ as main_mod
+    from korvid.core.config import KorvidConfig, ModelConnectionsWriter, load_config
+
+    path = tmp_path / "config.yaml"
+    _profiles_config(path, tier="high")
+    monkeypatch.setattr(main_mod, "DEFAULT_CONFIG_PATH", path)
+    monkeypatch.setattr(main_mod, "KorvidApp", _FakeAppCapturesKwargs)
+    _FakeAppCapturesKwargs.instances.clear()
+
+    kube = _FakeKubeForWiring()
+    state = main_mod._RunState()
+    await main_mod._wire_and_run(KorvidConfig(readonly=True), cast("Any", kube), state)
+    if state.discovery_box:
+        await state.discovery_box[0]
+
+    writer = _FakeAppCapturesKwargs.instances[0].captured["agent_save_profiles"]
+    assert isinstance(writer, ModelConnectionsWriter)
+
+    # And it writes where the composition root said, with the tier
+    # sentinel intact.
+    writer(load_config(path).model_connections)
+    assert yaml.safe_load(path.read_text(encoding="utf-8"))["agent"]["model_tier"] == "high"
 
 
 def _profile_connections(reference: str, **overrides: Any) -> Any:

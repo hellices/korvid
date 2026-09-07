@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum, auto
@@ -18,7 +19,7 @@ from pathlib import Path
 from stat import S_IMODE
 from tempfile import mkstemp
 from types import MappingProxyType
-from typing import Any, Final, Literal, Protocol, cast
+from typing import Any, Final, Literal, cast
 from urllib.parse import urlsplit, urlunsplit
 
 import yaml
@@ -921,14 +922,21 @@ KEEP_MODEL_TIER: Final = KeepModelTier.KEEP
 ModelTierWrite = str | None | KeepModelTier
 
 
-class ModelConnectionsWriter(Protocol):
+class ModelConnectionsWriter(ABC):
     """The single seam that persists profiles — and the tier with them.
 
     Injected into the UI by the composition root so the screens never learn
     a config path, and shaped so a caller that has no opinion about the
     tier physically cannot overwrite one.
+
+    An `abc.ABC` rather than a `Protocol` because this crosses a layer
+    boundary (AGENTS.md): the UI depends on it, `core` owns it, and the
+    dependency is nominal — an implementation declares that it is one, so
+    a signature that drifts is caught at the implementation rather than at
+    whichever call site a checker happens to reach first.
     """
 
+    @abstractmethod
     def __call__(
         self,
         profiles: ModelConnectionsConfig,
@@ -936,6 +944,32 @@ class ModelConnectionsWriter(Protocol):
         model_tier: ModelTierWrite = KEEP_MODEL_TIER,
     ) -> None:
         """Write `profiles`, and `model_tier` when it is not the sentinel."""
+
+
+class ConfigFileModelConnectionsWriter(ModelConnectionsWriter):
+    """`save_model_connections` bound to one file.
+
+    The path is chosen once, at the composition root, and travels no
+    further: what the screens hold is a writer, so no UI code is in a
+    position to name a file korvid writes to.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self._path = path
+
+    def __call__(
+        self,
+        profiles: ModelConnectionsConfig,
+        *,
+        model_tier: ModelTierWrite = KEEP_MODEL_TIER,
+    ) -> None:
+        """Write `profiles` to the bound path.
+
+        Failures propagate: a caller that has already applied the profile
+        to the live session has to tell the operator the change reverts on
+        restart.
+        """
+        save_model_connections(self._path, profiles, model_tier=model_tier)
 
 
 def _thaw_config_value(value: object) -> object:

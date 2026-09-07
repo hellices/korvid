@@ -29,7 +29,7 @@ from korvid.ui.app import KorvidApp
 from korvid.ui.messages import AgentPromptSubmitted, BuiltinCommand, BuiltinOperation
 from korvid.ui.widgets.agent_panel import AgentPanel
 from tests.ui.agent_session_fakes import FakeSession, fake_policy
-from tests.ui.test_agent_ui_controller_profiles import _StubCatalog
+from tests.ui.test_agent_ui_controller_profiles import _Saver, _StubCatalog
 from tests.ui.waits import until
 
 
@@ -418,7 +418,7 @@ async def test_model_command_swaps_model_and_saves() -> None:
     """`:model` persists through the *profile* writer — the only path that
     writes `agent.profiles` — rather than a second, uncoordinated one."""
 
-    saved: list[ModelConnectionsConfig] = []
+    saver = _Saver()
     rebuilt: list[ModelConnectionConfig] = []
 
     def rebuild(profile: ModelConnectionConfig, tier: str | None) -> Any:
@@ -435,7 +435,7 @@ async def test_model_command_swaps_model_and_saves() -> None:
                 options={"tenant": "platform", "features": {"region": "apac"}},
             )
         ),
-        agent_save_profiles=lambda profiles, **_kwargs: saved.append(profiles),
+        agent_save_profiles=saver,
         rebuild_agent=rebuild,
     )
     async with app.run_test() as pilot:
@@ -445,8 +445,8 @@ async def test_model_command_swaps_model_and_saves() -> None:
             lambda: app._agent_ui._model_name == "gpt-4o",
             label="model swap applied",
         )
-        assert saved
-        written = saved[-1]
+        assert saver.calls
+        written = saver.calls[-1]
         assert written.active is not None
         profile = written.profiles[written.active]
         assert profile.model == "ollama/gpt-4o"
@@ -474,7 +474,7 @@ async def test_model_command_does_not_persist_when_apply_fails() -> None:
     must NOT be written to config.yaml — otherwise the failed change silently
     takes effect after restart."""
 
-    saved: list[ModelConnectionsConfig] = []
+    saver = _Saver()
 
     session = StubSession([], policy=fake_policy(model="llama3"))
     rebuilds: list[ModelConnectionConfig] = []
@@ -492,7 +492,7 @@ async def test_model_command_does_not_persist_when_apply_fails() -> None:
                 endpoint="http://localhost:11434/v1",
             )
         ),
-        agent_save_profiles=lambda profiles, **_kwargs: saved.append(profiles),
+        agent_save_profiles=saver,
         rebuild_agent=rebuild,
     )
     async with app.run_test() as pilot:
@@ -503,15 +503,12 @@ async def test_model_command_does_not_persist_when_apply_fails() -> None:
             label="rebuild attempted",
         )
         assert app._agent_ui._model_name == "llama3"  # old session kept
-        assert not saved  # and nothing was persisted
+        assert not saver.calls  # and nothing was persisted
 
 
 async def test_model_command_save_failure_warns_about_restart_revert() -> None:
     """If the swap succeeded but persisting failed, the user must be told the
     model is live now but will revert on restart."""
-
-    def explode(profiles: ModelConnectionsConfig, **_kwargs: Any) -> None:
-        raise RuntimeError("disk full")
 
     app = make_app(
         session=None,
@@ -522,7 +519,7 @@ async def test_model_command_save_failure_warns_about_restart_revert() -> None:
                 endpoint="http://localhost:11434/v1",
             )
         ),
-        agent_save_profiles=explode,
+        agent_save_profiles=_Saver(error=RuntimeError("disk full")),
         rebuild_agent=lambda profile, tier: StubSession(
             [], policy=fake_policy(model=split_reference(profile.model)[1])
         ),
@@ -563,7 +560,7 @@ async def test_model_command_works_after_configured_startup() -> None:
     """A session built from config.yaml at startup must seed _agent_settings
     so :model works without running the :ai wizard first."""
 
-    saved: list[ModelConnectionsConfig] = []
+    saver = _Saver()
 
     session = StubSession([], policy=fake_policy(model="llama3"))
     store = ResourceStore()
@@ -585,7 +582,7 @@ async def test_model_command_works_after_configured_startup() -> None:
         watch_manager=WatchManager(store, source),
         agent_session=session,
         agent_model_name="llama3",
-        agent_save_profiles=lambda profiles, **_kwargs: saved.append(profiles),
+        agent_save_profiles=saver,
         rebuild_agent=lambda profile, tier: StubSession(
             [], policy=fake_policy(model=split_reference(profile.model)[1])
         ),
@@ -597,8 +594,8 @@ async def test_model_command_works_after_configured_startup() -> None:
             lambda: app._agent_ui._model_name == "gpt-4o",
             label="model swap from startup config",
         )
-        assert saved
-        written = saved[-1]
+        assert saver.calls
+        written = saver.calls[-1]
         assert written.active is not None
         profile = written.profiles[written.active]
         assert profile.model == "ollama/gpt-4o"
@@ -617,7 +614,7 @@ async def test_model_command_recovers_a_startup_that_built_no_session() -> None:
     would ask the operator to retype everything korvid already knows.
     """
 
-    saved: list[ModelConnectionsConfig] = []
+    saver = _Saver()
     applied: list[tuple[ModelConnectionConfig, str | None]] = []
 
     rebuilt = StubSession([], policy=fake_policy(model="llama3"))
@@ -645,7 +642,7 @@ async def test_model_command_recovers_a_startup_that_built_no_session() -> None:
         # The composition root degraded: a provider it could not route.
         agent_session=None,
         agent_model_name=None,
-        agent_save_profiles=lambda profiles, **_kwargs: saved.append(profiles),
+        agent_save_profiles=saver,
         rebuild_agent=rebuild,
     )
     async with app.run_test() as pilot:
@@ -657,8 +654,8 @@ async def test_model_command_recovers_a_startup_that_built_no_session() -> None:
             label="degraded startup recovered by :model",
         )
         assert app._agent_ui._model_name == "llama3"
-        assert saved
-        written = saved[-1]
+        assert saver.calls
+        written = saver.calls[-1]
         assert written.active is not None
         profile = written.profiles[written.active]
         assert profile.model == "ollama/llama3"
@@ -808,7 +805,7 @@ async def test_applying_a_profile_notifies_on_install_hint_rebuild_error() -> No
 async def test_options_preserved_across_model_change() -> None:
     """Options seeded from config must survive a :model switch."""
 
-    saved: list[ModelConnectionsConfig] = []
+    saver = _Saver()
 
     rebuilt: list[ModelConnectionConfig] = []
     session = StubSession([])
@@ -837,7 +834,7 @@ async def test_options_preserved_across_model_change() -> None:
         watch_manager=WatchManager(store, source),
         agent_session=session,
         agent_model_name="m",
-        agent_save_profiles=lambda profiles, **_kwargs: saved.append(profiles),
+        agent_save_profiles=saver,
         rebuild_agent=rebuild,
     )
     async with app.run_test() as pilot:
@@ -848,8 +845,8 @@ async def test_options_preserved_across_model_change() -> None:
             label="rebuild triggered",
         )
         assert dict(rebuilt[-1].options) == {"tenant": "platform", "features": {"region": "apac"}}
-        assert saved
-        written = saved[-1]
+        assert saver.calls
+        written = saver.calls[-1]
         assert written.active is not None
         profile = written.profiles[written.active]
         assert dict(profile.options) == {"tenant": "platform", "features": {"region": "apac"}}

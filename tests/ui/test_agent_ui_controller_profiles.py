@@ -27,7 +27,12 @@ from korvid.agent.model_profiles import (
     SetupField,
 )
 from korvid.agent.session import AgentSession
-from korvid.core.config import KEEP_MODEL_TIER, KorvidConfig, ModelTierWrite
+from korvid.core.config import (
+    KEEP_MODEL_TIER,
+    KorvidConfig,
+    ModelConnectionsWriter,
+    ModelTierWrite,
+)
 from korvid.ui.widgets.agent_setup_screen import AgentSetupScreen, SetupResult
 from korvid.ui.widgets.profile_manager_screen import ProfileManagerResult, ProfileManagerScreen
 
@@ -87,7 +92,7 @@ def _config(profiles: ModelConnectionsConfig, **overrides: Any) -> KorvidConfig:
     return KorvidConfig(namespace="default", model_connections=profiles, **overrides)
 
 
-class _Saver:
+class _Saver(ModelConnectionsWriter):
     """Records what the controller asked to persist."""
 
     def __init__(self, error: Exception | None = None) -> None:

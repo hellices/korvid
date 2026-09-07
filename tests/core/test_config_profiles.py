@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from abc import ABC
 from collections.abc import Mapping
 from dataclasses import replace
 from datetime import date
@@ -13,9 +14,13 @@ import yaml
 
 from korvid.core.config import (
     AGENT_PROFILE_NAME_MAX_LENGTH,
+    KEEP_MODEL_TIER,
+    ConfigFileModelConnectionsWriter,
     ConnectionAuthConfig,
     ModelConnectionConfig,
     ModelConnectionsConfig,
+    ModelConnectionsWriter,
+    ModelTierWrite,
     _legacy_model_reference,
     is_valid_profile_name,
     load_config,
@@ -1593,3 +1598,81 @@ agent:
     save_model_connections(path, profiles)
     written = yaml.safe_load(path.read_text(encoding="utf-8"))["agent"]["profiles"]
     assert written["broken"]["options"] == {1: "one"}
+
+
+# ---------------------------------------------------------------------------
+# The writer seam the UI is injected with
+# ---------------------------------------------------------------------------
+
+
+def test_the_writer_seam_is_an_abstract_base_class() -> None:
+    """A boundary interface is an `abc.ABC` (AGENTS.md), not a Protocol.
+
+    `ModelConnectionsWriter` crosses core → UI, and a structural Protocol
+    makes that seam invisible: anything callable enough satisfies it, so
+    no implementation ever declares that it is one and a signature drift
+    is only caught where a checker happens to look. The ABC is nominal —
+    an implementation says so, and the composition root hands over
+    something that says so.
+    """
+    assert issubclass(ModelConnectionsWriter, ABC)
+    assert getattr(ModelConnectionsWriter.__call__, "__isabstractmethod__", False)
+    with pytest.raises(TypeError, match="abstract"):
+        ModelConnectionsWriter()  # type: ignore[abstract]  # the point of the test
+
+    def structural(
+        profiles: ModelConnectionsConfig, *, model_tier: ModelTierWrite = KEEP_MODEL_TIER
+    ) -> None: ...  # pragma: no cover - never called
+
+    assert not isinstance(structural, ModelConnectionsWriter)
+    assert issubclass(ConfigFileModelConnectionsWriter, ModelConnectionsWriter)
+
+
+def test_the_config_file_writer_persists_profiles_and_the_tier(tmp_path: Path) -> None:
+    """The concrete writer is `save_model_connections` bound to one path.
+
+    Binding the path is the whole job: the screens are handed a writer,
+    never a location, so no UI code can choose a file to write to.
+    """
+    path = _write(
+        tmp_path,
+        """
+kube_context: prod
+agent:
+  active: main
+  profiles:
+    main:
+      model: openai/gpt-4o
+""",
+    )
+    writer: ModelConnectionsWriter = ConfigFileModelConnectionsWriter(path)
+    cfg = load_config(path)
+
+    writer(replace(cfg.model_connections, active="main"), model_tier="high")
+
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert raw["kube_context"] == "prod"
+    assert raw["agent"]["active"] == "main"
+    assert raw["agent"]["model_tier"] == "high"
+
+
+def test_the_config_file_writer_leaves_an_unasked_tier_alone(tmp_path: Path) -> None:
+    """The sentinel default survives the adapter.
+
+    A writer that forwarded `None` for "nobody asked" would clear an
+    override every time the profile manager saved.
+    """
+    path = _write(
+        tmp_path,
+        """
+agent:
+  model_tier: high
+  active: main
+  profiles:
+    main:
+      model: openai/gpt-4o
+""",
+    )
+    ConfigFileModelConnectionsWriter(path)(load_config(path).model_connections)
+
+    assert yaml.safe_load(path.read_text(encoding="utf-8"))["agent"]["model_tier"] == "high"
