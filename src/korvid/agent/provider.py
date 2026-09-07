@@ -77,6 +77,111 @@ class OperatorSafeProviderError(Exception):
         return text if text in self.safe_messages else None
 
 
+# ---------------------------------------------------------------------------
+# The stream-safety contract every built-in adapter shares (issue #336)
+# ---------------------------------------------------------------------------
+
+MAX_TOOL_ARGUMENT_CHARS: Final = 65_536
+"""Cumulative cap on one tool call's accumulated argument text.
+
+The same 64 KiB `provider_plugin` already refuses a *third-party* adapter's
+call at. A built-in that accumulated more before the engine's response
+budget saw any of it would make korvid's own adapters the loosest ones it
+ships, so the two answers are deliberately the same number.
+"""
+
+MAX_TOOL_CALLS_PER_RESPONSE: Final = 64
+"""Cap on how many distinct calls one response may accumulate.
+
+Every protocol keys parallel calls by an index the provider chooses, so a
+stream can open a new accumulator entry per fragment. The engine's own
+per-iteration cap is a *policy* number applied after the whole response
+arrived; this is the structural one that keeps the response finite. It is
+far above any real batch — the policy cap ships single digits — so it can
+only be reached by a provider that is malfunctioning or hostile.
+"""
+
+MAX_REASONING_CHARS: Final = 65_536
+"""Cumulative cap on reasoning text an adapter accumulates for later use.
+
+Reasoning that is yielded straight through is charged to the engine's
+response budget as it streams. This bounds the other kind: text an adapter
+holds in memory to re-attach to a later request.
+"""
+
+STREAM_TRUNCATED: Final = (
+    "The provider's answer ended before its protocol said it was complete, "
+    "so korvid discarded it. Retry the request."
+)
+
+STREAM_LIMIT: Final = (
+    "The provider's answer grew past korvid's limit for one response and was "
+    "stopped. Retry, or switch to another model."
+)
+
+STREAM_MESSAGES: Final[tuple[str, ...]] = (STREAM_TRUNCATED, STREAM_LIMIT)
+"""Every sentence this contract may show an operator, written and audited.
+
+Each one is evidence-free by construction: it interpolates no exception,
+no response body, no endpoint and no option value.
+"""
+
+
+class ProviderStreamTruncatedError(OperatorSafeProviderError):
+    """A stream ended without the terminal marker its protocol requires.
+
+    Partial text may already have reached the transcript — it really was
+    streamed — but the response is not a completed one, so no adapter may
+    follow it with tool calls, usage or `done`.
+    """
+
+    safe_messages = frozenset({STREAM_TRUNCATED})
+
+
+class ProviderStreamLimitError(OperatorSafeProviderError):
+    """A stream exhausted one of the cumulative bounds above."""
+
+    safe_messages = frozenset({STREAM_LIMIT})
+
+
+def append_bounded(accumulated: str, fragment: str, *, limit: int) -> str:
+    """Append *fragment*, refusing before the total can pass *limit*.
+
+    The bound is on the total rather than on one fragment because that is
+    the shape of the failure: arguments and reasoning both arrive a few
+    characters at a time, so any per-fragment check is unbounded overall.
+
+    Args:
+        accumulated: What this call or turn has collected so far.
+        fragment: The piece that just arrived.
+        limit: The cumulative character bound to hold.
+
+    Returns:
+        The new accumulated text.
+
+    Raises:
+        ProviderStreamLimitError: Appending would pass *limit*. Nothing is
+            stored, so the caller's accumulator cannot grow past it.
+    """
+    if len(accumulated) + len(fragment) > limit:
+        raise ProviderStreamLimitError(STREAM_LIMIT)
+    return accumulated + fragment
+
+
+def guard_tool_call_count(count: int) -> None:
+    """Refuse a response that opened more accumulators than the bound.
+
+    Args:
+        count: How many distinct calls the response has opened, including
+            the one about to be opened.
+
+    Raises:
+        ProviderStreamLimitError: *count* passes `MAX_TOOL_CALLS_PER_RESPONSE`.
+    """
+    if count > MAX_TOOL_CALLS_PER_RESPONSE:
+        raise ProviderStreamLimitError(STREAM_LIMIT)
+
+
 class LLMProvider(ABC):
     @property
     @abstractmethod
