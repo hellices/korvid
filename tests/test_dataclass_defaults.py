@@ -6,16 +6,17 @@ no `__hash__`::
     ValueError: mutable default <class 'mappingproxy'> for field credential
     is not allowed: use default_factory
 
-CPython 3.12 narrowed that check to `list`/`set`/`dict` instances and gave
-`mappingproxy` a `__hash__` slot, so a `types.MappingProxyType({})` default
-imports cleanly on 3.12+ and explodes only on the oldest interpreter korvid
-supports. The explosion happens while the class body executes — at *import*
-time — so the whole test module fails to collect and the failure looks
-nothing like the field that caused it.
+The check was not changed by `dataclasses` itself; rather, `types.MappingProxyType`
+gained a `__hash__` slot in CPython 3.12 (bpo-87995), so a
+`types.MappingProxyType({})` default imports cleanly on 3.12+ and explodes only on
+the oldest interpreter korvid supports. The explosion happens while the class body
+executes — at *import* time — so the whole test module fails to collect and the
+failure looks nothing like the field that caused it.
 
 The sweep and the reinstated-gate import both fail on the offending code on
-every interpreter; the last test runs the real import under a real 3.11 when
-the machine has one (CI's 3.11 job always does).
+every interpreter; the last test runs the real import under a real 3.11
+(``sys.executable``) when the process is already Python 3.11, and skips on
+newer interpreters because the CI matrix has a dedicated 3.11 job.
 """
 
 from __future__ import annotations
@@ -23,7 +24,6 @@ from __future__ import annotations
 import dataclasses
 import importlib
 import pkgutil
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -158,56 +158,30 @@ def test_the_provider_modules_import_with_python_3_11s_gate_reinstated() -> None
         text=True,
         cwd=_REPO_ROOT,
         check=False,
+        timeout=120,
     )
 
     assert result.returncode == 0, f"import fails under 3.11's rule:\n{result.stderr}"
 
 
-def _python_3_11_import_command() -> list[str] | None:
-    """A command that imports the two modules under a real CPython 3.11.
-
-    `None` when the machine has no 3.11. Discovery is `uv python find`,
-    which neither downloads an interpreter nor builds an environment, so a
-    3.12/3.13 job skips instead of paying for a second toolchain.
-    """
-    if sys.version_info[:2] == (3, 11):
-        return [sys.executable, "-c", _IMPORT_PROBE]
-    uv = shutil.which("uv")
-    if uv is None:
-        return None
-    found = subprocess.run(
-        [uv, "python", "find", "3.11"],
-        capture_output=True,
-        text=True,
-        cwd=_REPO_ROOT,
-        check=False,
-    )
-    if found.returncode != 0:
-        return None
-    reported = subprocess.run(
-        [found.stdout.strip(), "-c", "import sys; print(sys.version_info[:2])"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if reported.stdout.strip() != "(3, 11)":
-        return None
-    return [uv, "run", "--python", "3.11", "--frozen", "python", "-c", _IMPORT_PROBE]
-
-
 def test_the_provider_modules_import_under_python_3_11() -> None:
     """The failure as CI saw it: a collection error on the oldest supported
-    interpreter, from an import that succeeds on every newer one."""
-    command = _python_3_11_import_command()
-    if command is None:
-        pytest.skip("no CPython 3.11 on this machine; the inspection test covers the rule")
+    interpreter, from an import that succeeds on every newer one.
+
+    Runs only when this process is already Python 3.11; the CI matrix has a
+    dedicated 3.11 job so other interpreters skip rather than attempt to
+    discover or install a second toolchain.
+    """
+    if sys.version_info[:2] != (3, 11):
+        pytest.skip("not Python 3.11; the CI 3.11 matrix job covers this")
 
     result = subprocess.run(
-        command,
+        [sys.executable, "-c", _IMPORT_PROBE],
         capture_output=True,
         text=True,
         cwd=_REPO_ROOT,
         check=False,
+        timeout=120,
     )
 
     assert result.returncode == 0, f"import failed under Python 3.11:\n{result.stderr}"
