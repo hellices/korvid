@@ -111,7 +111,7 @@ _AGENT_INSTALL_HINT = (
 #: ModuleNotFoundError: parts of an extra may arrive transitively or be
 #: imported lazily (TokenStore falls back when
 #: keyring is absent), which would misreport the capability as installed.
-_MCP_EXTRA_ROOTS = frozenset({"mcp", "anyio", "starlette", "uvicorn"})
+_MCP_EXTRA_ROOTS = frozenset({"mcp", "httpx2", "anyio", "starlette", "uvicorn"})
 _AGENT_EXTRA_ROOTS = frozenset({"httpx", "keyring"})
 #: The observability connectors need only an HTTP client.
 _OBSERVABILITY_EXTRA_ROOTS = frozenset({"httpx"})
@@ -340,11 +340,11 @@ def _build_mcp_controller(
     obs = observability or ObservabilityWiring()
 
     def factory() -> KorvidMCPServer:
-        # A fresh capability token per server run (issue #110): the token is
+        # A fresh internal capability per server run: the token is
         # published only in the owner-readable endpoint file, so echoing it
         # proves same-user local file access; a restart invalidates every
         # previously handed-out token together with the pending proposals.
-        token = secrets.token_urlsafe(32) if config.mcp_write_proposals else None
+        token = secrets.token_urlsafe(32)
         return KorvidMCPServer(
             ToolExecutor(
                 kube,

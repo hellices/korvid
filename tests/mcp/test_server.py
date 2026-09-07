@@ -8,12 +8,15 @@ import os
 import socket
 import stat
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
+import httpx2
 import pytest
 import yaml
 from mcp import types
+from mcp.client.streamable_http import streamable_http_client
 
 from korvid.core.secrets import MASK_PLACEHOLDER
 from korvid.k8s.discovery import PODS_META
@@ -47,6 +50,22 @@ from tests.tools.executor_fakes import (
 )
 
 
+@pytest.fixture(autouse=True)
+def isolate_registry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+
+
+@asynccontextmanager
+async def authenticated_transport(url: str) -> AsyncIterator[Any]:
+    async with (
+        httpx2.AsyncClient(
+            headers={"Authorization": "Bearer cap-tok"}, trust_env=False, follow_redirects=True
+        ) as client,
+        streamable_http_client(url, http_client=client) as streams,
+    ):
+        yield streams
+
+
 class RecordingExecutor(ToolExecutor):
     """ToolExecutor that records dispatches instead of touching a cluster.
 
@@ -77,6 +96,7 @@ def make_server(
         READ_TOOLS + UI_TOOLS,
         port=port,
         endpoint_path=endpoint_path,
+        capability_token="cap-tok",
     )
 
 
@@ -488,7 +508,6 @@ async def test_streamable_http_roundtrip(tmp_path: Path) -> None:
     """End-to-end: serve on an ephemeral loopback port inside the running
     loop, connect with the MCP SDK client, list tools and call one."""
     from mcp import ClientSession
-    from mcp.client.streamable_http import streamable_http_client
 
     executor = RecordingExecutor()
     endpoint_file = tmp_path / "mcp-endpoint.json"
@@ -500,7 +519,7 @@ async def test_streamable_http_roundtrip(tmp_path: Path) -> None:
         assert entry["port"] == port
         assert entry["url"] == f"http://127.0.0.1:{port}/mcp"
         async with (
-            streamable_http_client(f"http://127.0.0.1:{port}/mcp") as (read, write),
+            authenticated_transport(f"http://127.0.0.1:{port}/mcp") as (read, write),
             ClientSession(read, write) as session,
         ):
             await session.initialize()
@@ -535,7 +554,7 @@ async def test_get_is_refused_with_405_instead_of_an_sse_stream() -> None:
     task = asyncio.create_task(server.run())
     try:
         port = await asyncio.wait_for(server.wait_started(), timeout=10)
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(headers={"Authorization": "Bearer cap-tok"}) as client:
             resp = await client.get(
                 f"http://127.0.0.1:{port}/mcp/",
                 headers={"Accept": "text/event-stream"},
@@ -567,7 +586,7 @@ async def test_shutdown_completes_while_a_client_holds_a_get_connection() -> Non
 
     async def issue_get() -> None:
         async with (
-            httpx.AsyncClient(timeout=30) as client,
+            httpx.AsyncClient(timeout=30, headers={"Authorization": "Bearer cap-tok"}) as client,
             client.stream(
                 "GET",
                 f"http://127.0.0.1:{port}/mcp/",
@@ -604,7 +623,7 @@ async def test_hostile_origin_get_is_rejected_not_answered_405() -> None:
     task = asyncio.create_task(server.run())
     try:
         port = await asyncio.wait_for(server.wait_started(), timeout=10)
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(headers={"Authorization": "Bearer cap-tok"}) as client:
             resp = await client.get(
                 f"http://127.0.0.1:{port}/mcp/",
                 headers={
@@ -639,7 +658,7 @@ async def test_hostile_origin_is_rejected() -> None:
             "Origin": "http://evil.example",
             "Accept": "application/json, text/event-stream",
         }
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(headers={"Authorization": "Bearer cap-tok"}) as client:
             # POST to /mcp/ directly: Starlette's Mount answers bare /mcp
             # with a 307 to the slash form, and a browser-driven attack
             # would follow it (307 preserves method and body).
@@ -912,13 +931,13 @@ async def test_proposal_tools_are_listed_when_configured() -> None:
     assert {"propose_write", "get_write_proposal", "cancel_write_proposal"} <= tools
 
 
-async def test_propose_write_without_capability_is_rejected() -> None:
+async def test_trusted_proposal_dispatch_does_not_require_a_tool_credential() -> None:
     executor = RecordingExecutor()
     server = make_proposal_server(executor)
     result = await server.call_tool("propose_write", dict(_PROPOSE_ARGS))
-    assert result[0].text.startswith("ERROR:")
-    assert "capability" in result[0].text
-    assert executor.calls == []
+    assert result[0].text == "ok"
+    assert executor.calls[0][0] == "propose_write"
+    assert "capability" not in executor.calls[0][1]
 
 
 async def test_propose_write_with_wrong_capability_is_rejected() -> None:
@@ -936,7 +955,7 @@ async def test_non_ascii_capability_is_rejected_not_a_crash() -> None:
     executor = RecordingExecutor()
     server = make_proposal_server(executor)
     result = await server.call_tool("propose_write", {**_PROPOSE_ARGS, "capability": "é" * 8})
-    assert result[0].text == "ERROR: invalid or missing capability token"
+    assert result[0].text == "ERROR: capability is transport-only; use korvid mcp stdio"
     assert executor.calls == []
 
 
@@ -947,14 +966,14 @@ async def test_lone_surrogate_capability_is_rejected_not_a_crash() -> None:
     executor = RecordingExecutor()
     server = make_proposal_server(executor)
     result = await server.call_tool("propose_write", {**_PROPOSE_ARGS, "capability": "\ud800"})
-    assert result[0].text == "ERROR: invalid or missing capability token"
+    assert result[0].text == "ERROR: capability is transport-only; use korvid mcp stdio"
     assert executor.calls == []
 
 
-async def test_propose_write_with_capability_dispatches_with_identity() -> None:
+async def test_propose_write_dispatches_with_transport_identity() -> None:
     executor = RecordingExecutor()
     server = make_proposal_server(executor)
-    result = await server.call_tool("propose_write", {**_PROPOSE_ARGS, "capability": "cap-tok"})
+    result = await server.call_tool("propose_write", dict(_PROPOSE_ARGS))
     assert result[0].text == "ok"
     assert len(executor.calls) == 1
     name, args = executor.calls[0]
@@ -972,7 +991,7 @@ async def test_caller_supplied_reserved_args_are_overridden() -> None:
     server = make_proposal_server(executor)
     await server.call_tool(
         "propose_write",
-        {**_PROPOSE_ARGS, "capability": "cap-tok", "_session_id": "spoofed"},
+        {**_PROPOSE_ARGS, "_session_id": "spoofed"},
     )
     _, args = executor.calls[0]
     assert args["_session_id"] != "spoofed"
@@ -985,25 +1004,22 @@ async def test_reserved_args_are_stripped_from_plain_tools() -> None:
     assert executor.calls == [("list_resources", {"kind": "pods"})]
 
 
-async def test_capability_is_required_for_status_and_cancel() -> None:
+async def test_proposal_status_and_cancel_use_transport_identity() -> None:
     executor = RecordingExecutor()
     server = make_proposal_server(executor)
     for tool in ("get_write_proposal", "cancel_write_proposal"):
         result = await server.call_tool(tool, {"proposal_id": "p1"})
-        assert result[0].text.startswith("ERROR:")
-    assert executor.calls == []
-    result = await server.call_tool(
-        "cancel_write_proposal", {"proposal_id": "p1", "capability": "cap-tok"}
-    )
-    assert result[0].text == "ok"
+        assert result[0].text == "ok"
+    assert len(executor.calls) == 2
+    assert all(args["_session_id"] for _, args in executor.calls)
 
 
-async def test_proposal_tools_without_a_configured_token_are_rejected() -> None:
+async def test_proposals_without_matching_generated_token_are_rejected() -> None:
     executor = RecordingExecutor()
     server = make_proposal_server(executor, capability_token=None)
     result = await server.call_tool("propose_write", {**_PROPOSE_ARGS, "capability": ""})
     assert result[0].text.startswith("ERROR:")
-    assert "not enabled" in result[0].text
+    assert "capability" in result[0].text
     assert executor.calls == []
 
 
@@ -1013,7 +1029,6 @@ async def test_streamable_http_proposal_roundtrip(tmp_path: Path) -> None:
     capability, and the only dispatch is to the proposal bridge — no
     mutation tool is ever reached."""
     from mcp import ClientSession
-    from mcp.client.streamable_http import streamable_http_client
 
     executor = RecordingExecutor()
     endpoint_file = tmp_path / "mcp-endpoint.json"
@@ -1024,17 +1039,15 @@ async def test_streamable_http_proposal_roundtrip(tmp_path: Path) -> None:
         # The capability travels via the discovery file, exactly as a local
         # agent would learn it.
         entry = json.loads(endpoint_file.read_text())["servers"][str(os.getpid())]
-        capability = entry["capability"]
+        assert entry["capability"] == "cap-tok"
         async with (
-            streamable_http_client(f"http://127.0.0.1:{port}/mcp") as (read, write),
+            authenticated_transport(f"http://127.0.0.1:{port}/mcp") as (read, write),
             ClientSession(read, write) as session,
         ):
             await session.initialize()
             listed = await session.list_tools()
             assert "propose_write" in {t.name for t in listed.tools}
-            result = await session.call_tool(
-                "propose_write", {**_PROPOSE_ARGS, "capability": capability}
-            )
+            result = await session.call_tool("propose_write", dict(_PROPOSE_ARGS))
             assert result.content[0].type == "text"
             assert getattr(result.content[0], "text", None) == "ok"
             assert result.is_error is False, "an accepted proposal must not be flagged as an error"
@@ -1074,14 +1087,14 @@ async def test_endpoint_file_publishes_capability_with_owner_only_mode(tmp_path:
         await asyncio.wait_for(task, timeout=10)
 
 
-async def test_endpoint_file_omits_capability_when_proposals_are_off(tmp_path: Path) -> None:
+async def test_endpoint_file_authenticates_reads_when_proposals_are_off(tmp_path: Path) -> None:
     endpoint_file = tmp_path / "mcp-endpoint.json"
     server = make_server(port=0, endpoint_path=endpoint_file)
     task = asyncio.create_task(server.run())
     try:
         await asyncio.wait_for(server.wait_started(), timeout=10)
         entry = json.loads(endpoint_file.read_text())["servers"][str(os.getpid())]
-        assert "capability" not in entry
+        assert entry["capability"] == "cap-tok"
     finally:
         server.request_shutdown()
         await asyncio.wait_for(task, timeout=10)
@@ -1286,7 +1299,6 @@ async def test_a_wrong_capability_is_refused_over_the_real_transport(tmp_path: P
     entirely. This drives a real client over Streamable HTTP.
     """
     from mcp import ClientSession
-    from mcp.client.streamable_http import streamable_http_client
 
     executor = RecordingExecutor()
     server = make_proposal_server(executor, port=0, endpoint_path=tmp_path / "e.json")
@@ -1294,7 +1306,7 @@ async def test_a_wrong_capability_is_refused_over_the_real_transport(tmp_path: P
     try:
         port = await asyncio.wait_for(server.wait_started(), timeout=10)
         async with (
-            streamable_http_client(f"http://127.0.0.1:{port}/mcp") as (read, write),
+            authenticated_transport(f"http://127.0.0.1:{port}/mcp") as (read, write),
             ClientSession(read, write) as session,
         ):
             await session.initialize()
@@ -1342,9 +1354,7 @@ async def test_client_identity_is_threaded_from_the_request_context() -> None:
     )
     await server._on_call_tool(
         ctx,  # type: ignore[arg-type]  # boundary stub
-        mcp_types.CallToolRequestParams(
-            name="propose_write", arguments={**_PROPOSE_ARGS, "capability": "cap-tok"}
-        ),
+        mcp_types.CallToolRequestParams(name="propose_write", arguments=dict(_PROPOSE_ARGS)),
     )
     assert len(executor.calls) == 1
     args = executor.calls[0][1]
@@ -1361,7 +1371,6 @@ async def test_a_log_line_beginning_with_error_is_not_a_failed_call(tmp_path: Pa
     MCP host as a failed tool call.
     """
     from mcp import ClientSession
-    from mcp.client.streamable_http import streamable_http_client
 
     executor = RecordingExecutor()
     executor.result = "ERROR: connection refused\nERROR: retrying"
@@ -1370,7 +1379,7 @@ async def test_a_log_line_beginning_with_error_is_not_a_failed_call(tmp_path: Pa
     try:
         port = await asyncio.wait_for(server.wait_started(), timeout=10)
         async with (
-            streamable_http_client(f"http://127.0.0.1:{port}/mcp") as (read, write),
+            authenticated_transport(f"http://127.0.0.1:{port}/mcp") as (read, write),
             ClientSession(read, write) as session,
         ):
             await session.initialize()
@@ -1387,7 +1396,7 @@ async def test_a_refusal_before_dispatch_is_flagged_as_an_error() -> None:
     """Refusals never reach a producer, so nothing else can supply the bit.
 
     Both pre-dispatch exits — a name outside the configured surface and a
-    failed capability check — have to mark themselves.
+    legacy credential argument — have to mark themselves.
     """
     from mcp import types as mcp_types
 
@@ -1419,7 +1428,6 @@ async def test_a_failed_proposal_is_flagged_even_though_its_producer_says_nothin
     judgement is made per effect and not globally.
     """
     from mcp import ClientSession
-    from mcp.client.streamable_http import streamable_http_client
 
     executor = RecordingExecutor()
     executor.result = "ERROR: unknown proposal id"
@@ -1429,17 +1437,13 @@ async def test_a_failed_proposal_is_flagged_even_though_its_producer_says_nothin
     task = asyncio.create_task(server.run())
     try:
         port = await asyncio.wait_for(server.wait_started(), timeout=10)
-        capability = json.loads(endpoint_file.read_text())["servers"][str(os.getpid())][
-            "capability"
-        ]
+        assert json.loads(endpoint_file.read_text())["servers"][str(os.getpid())]["capability"]
         async with (
-            streamable_http_client(f"http://127.0.0.1:{port}/mcp") as (read, write),
+            authenticated_transport(f"http://127.0.0.1:{port}/mcp") as (read, write),
             ClientSession(read, write) as session,
         ):
             await session.initialize()
-            result = await session.call_tool(
-                "get_write_proposal", {"proposal_id": "nope", "capability": capability}
-            )
+            result = await session.call_tool("get_write_proposal", {"proposal_id": "nope"})
             assert getattr(result.content[0], "text", "") == "ERROR: unknown proposal id"
             assert result.is_error is True, "a failed proposal was reported as successful"
     finally:

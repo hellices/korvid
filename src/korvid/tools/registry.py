@@ -327,7 +327,7 @@ def validate_dispatch_targets(defs: list[ToolDef], *, executor_cls: type, bridge
                 f"tool {d.name!r} ({d.effect}): dispatch target "
                 f"{d.dispatch!r} is a reserved proposal entrypoint — only "
                 f"write_proposal tools may route there, otherwise the "
-                f"proposal capability check is skipped"
+                f"proposal opt-in and caller metadata checks are skipped"
             )
         if d.effect in ("cluster_read", "external_read"):
             cls, role = executor_cls, "executor"
@@ -1300,15 +1300,8 @@ TOOL_DEFS: list[ToolDef] = [
                                 "{'requests'/'limits' -> {'cpu'/'memory' -> quantity}}."
                             ),
                         },
-                        "capability": {
-                            "type": "string",
-                            "description": (
-                                "Write-proposal capability token from the "
-                                "korvid MCP endpoint registry file."
-                            ),
-                        },
                     },
-                    "required": ["action", "name", "capability"],
+                    "required": ["action", "name"],
                     "allOf": [
                         {
                             "if": {
@@ -1387,15 +1380,8 @@ TOOL_DEFS: list[ToolDef] = [
                             "type": "string",
                             "description": "Id returned by propose_write.",
                         },
-                        "capability": {
-                            "type": "string",
-                            "description": (
-                                "Write-proposal capability token from the "
-                                "korvid MCP endpoint registry file."
-                            ),
-                        },
                     },
-                    "required": ["proposal_id", "capability"],
+                    "required": ["proposal_id"],
                 },
             },
         },
@@ -1421,15 +1407,8 @@ TOOL_DEFS: list[ToolDef] = [
                             "type": "string",
                             "description": "Id returned by propose_write.",
                         },
-                        "capability": {
-                            "type": "string",
-                            "description": (
-                                "Write-proposal capability token from the "
-                                "korvid MCP endpoint registry file."
-                            ),
-                        },
                     },
-                    "required": ["proposal_id", "capability"],
+                    "required": ["proposal_id"],
                 },
             },
         },

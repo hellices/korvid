@@ -88,6 +88,7 @@ mcp = [
     "anyio>=4.5",
     "starlette>=1.5.1",
     "uvicorn>=0.52.1",
+    "httpx2>=2.10,<3",
 ]
 # Entra ID (Azure OpenAI) auth for the embedded agent.
 entra = [

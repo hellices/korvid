@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+from pathlib import Path
 
 import pytest
 from textual._context import active_app
@@ -121,18 +122,18 @@ async def test_concurrent_bridge_calls_from_foreign_contexts_stay_serialized() -
         assert app.current_kind == "pods"  # the later call landed last
 
 
-async def test_real_mcp_http_open_describe_and_follow_mirror() -> None:
+async def test_real_mcp_http_open_describe_and_follow_mirror(tmp_path: Path) -> None:
     """The issue's end-to-end requirement: a real Streamable HTTP MCP
     round-trip against a running Textual test app - direct `open_describe`
     and a follow-mirrored `get_resource` both cross the ASGI boundary
     without NoActiveAppError, and the app survives."""
     from mcp import ClientSession
-    from mcp.client.streamable_http import streamable_http_client
 
     from korvid.__main__ import _AgentToolUIBridgeProxy
     from korvid.k8s.discovery import PODS_META
     from korvid.mcp.server import KorvidMCPServer
     from korvid.tools.executor import READ_TOOLS, UI_TOOLS, ToolExecutor
+    from tests.mcp.test_server import authenticated_transport
 
     app = make_app()
     async with app.run_test() as pilot:
@@ -155,6 +156,8 @@ async def test_real_mcp_http_open_describe_and_follow_mirror() -> None:
             executor,
             READ_TOOLS + UI_TOOLS,
             port=0,
+            capability_token="cap-tok",
+            endpoint_path=tmp_path / "endpoint.json",
             ui=proxy,
             follow_enabled=lambda: True,
         )
@@ -162,7 +165,7 @@ async def test_real_mcp_http_open_describe_and_follow_mirror() -> None:
         try:
             port = await asyncio.wait_for(server.wait_started(), timeout=10)
             async with (
-                streamable_http_client(f"http://127.0.0.1:{port}/mcp") as (read, write),
+                authenticated_transport(f"http://127.0.0.1:{port}/mcp") as (read, write),
                 ClientSession(read, write) as session,
             ):
                 await session.initialize()

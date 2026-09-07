@@ -6,13 +6,10 @@ through the same :class:`~korvid.tools.executor.ToolExecutor` the built-in
 agent uses - navigation, filters, log panes and describe views happen on
 the screen the user is already watching.
 
-The server binds to loopback only and enforces Host/Origin validation
-(DNS-rebinding protection - the MCP spec requires both for local servers)
-and exposes read + UI-drive tools
-exclusively: cluster write tools stay with the built-in agent until an
-approval UX for external callers is designed. On startup the actual
-endpoint is published to a small discovery file (see
-:func:`default_endpoint_path`) so wrapper scripts can auto-configure hosts.
+The server binds to loopback, authenticates the internal bridge with a per-run
+capability, and preserves Host/Origin validation. Reads, UI actions and opt-in
+write proposals share the running TUI's existing approval and audit boundaries.
+Startup succeeds only after the owner-only endpoint registry is published.
 """
 
 from __future__ import annotations
@@ -41,10 +38,12 @@ from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import Response
 from starlette.routing import Mount
-from starlette.types import Receive, Scope, Send
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from korvid.core.audit import interprocess_lock
 from korvid.core.mcp import MCPControllerBase
+from korvid.mcp.registry import default_endpoint_path as default_endpoint_path
+from korvid.mcp.registry import open_private_file
 from korvid.tools.executor import (
     PROPOSAL_TOOL_NAMES,
     ToolExecutor,
@@ -74,13 +73,6 @@ _SECURITY_SETTINGS = TransportSecuritySettings(
 )
 
 
-def default_endpoint_path() -> Path:
-    """XDG state dir (falls back to ~/.local/state) / korvid/mcp-endpoint.json."""
-    state = os.environ.get("XDG_STATE_HOME")
-    base = Path(state) if state else Path.home() / ".local" / "state"
-    return base / "korvid" / "mcp-endpoint.json"
-
-
 def _endpoint_lock_path(endpoint_path: Path) -> Path:
     """Sibling lock file serializing endpoint publication/removal across
     korvid processes."""
@@ -102,20 +94,19 @@ def _load_registry(path: Path) -> dict[str, Any] | None:
 def _replace_atomically(path: Path, registry: dict[str, Any]) -> None:
     """Temp file + rename so readers never observe a torn record.
 
-    Owner-only mode: the registry may carry a write-proposal capability
-    token (issue #110), so the file must be *created* 0600 via an atomic
-    open — a chmod after a umask-default create would leave the token
-    briefly world-readable at a predictable path."""
+    The credential file must be private before writing: POSIX 0600 or a
+    protected Windows DACL, never a post-write permission change.
+    """
     tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
     tmp.unlink(missing_ok=True)  # a stale tmp could carry a foreign mode
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    fd = open_private_file(tmp)
     try:
         with os.fdopen(fd, "w") as handle:
             handle.write(json.dumps(registry))
+        tmp.replace(path)
     except OSError:
         tmp.unlink(missing_ok=True)
         raise
-    tmp.replace(path)
 
 
 def _sanitize_client_meta(value: object, *, limit: int = 120) -> str:
@@ -175,12 +166,10 @@ class KorvidMCPServer:
         self._tools = list(tools)
         self._tool_names = {t["function"]["name"] for t in self._tools}
         self._port = port
-        self._endpoint_path = endpoint_path
-        #: Per-run secret gating the write-proposal tools (issue #110): it is
-        #: published only in the owner-readable endpoint file, so a caller
-        #: echoing it has proven local same-user file access — the same trust
-        #: level as the kubeconfig itself. None means proposals are disabled.
-        self._capability_token = capability_token
+        self._endpoint_path = endpoint_path or default_endpoint_path()
+        #: The stdio adapter consumes this internal bridge credential from the
+        #: private registry. It is never a model-visible authentication flow.
+        self._capability_token = capability_token or secrets.token_urlsafe(32)
         #: MCP follow mode (issue #153): mirror external cluster reads in
         #: the TUI. All three are optional wiring from the composition root;
         #: without them reads stay response-only (the pre-#153 behavior).
@@ -202,6 +191,7 @@ class KorvidMCPServer:
         self._session_id = f"mcp-{os.getpid()}-{secrets.token_urlsafe(8)}"
         self._started: anyio.Event = anyio.Event()
         self._bound_port: int | None = None
+        self._startup_error: str | None = None
         self._uvicorn: uvicorn.Server | None = None
         self._shutdown_requested = False
         # mcp 2.x registers handlers as constructor callbacks rather than
@@ -289,9 +279,13 @@ class KorvidMCPServer:
         # the executor ever trusts caller-controlled identity metadata.
         args = {k: v for k, v in (arguments or {}).items() if not k.startswith("_")}
         if name in PROPOSAL_TOOL_NAMES:
-            error = self._authorize_proposal_call(args)
-            if error is not None:
-                return [types.TextContent(type="text", text=error)], True
+            if "capability" in args:
+                return [
+                    types.TextContent(
+                        type="text",
+                        text="ERROR: capability is transport-only; use korvid mcp stdio",
+                    )
+                ], True
             client_name, client_version = self._client_info(ctx)
             args["_session_id"] = self._session_id
             args["_client_name"] = client_name
@@ -391,30 +385,6 @@ class KorvidMCPServer:
             await asyncio.gather(*self._follow_tasks, return_exceptions=True)
         self._follow_tasks.clear()
 
-    def _authorize_proposal_call(self, args: dict[str, Any]) -> str | None:
-        """Capability check for the write-proposal tools; error text or None.
-
-        Pops ``capability`` from ``args`` so the secret never reaches the
-        executor, the store, or a log line. Constant-time comparison: the
-        token is the only thing standing between a local process and the
-        proposal queue, so it must not be guessable byte-by-byte.
-        """
-        supplied = args.pop("capability", None)
-        if self._capability_token is None:
-            return "ERROR: write proposals are not enabled on this server"
-        # Generated tokens are ASCII (`secrets.token_urlsafe`); the supplied
-        # value is untrusted MCP input where `str.encode()` can raise
-        # UnicodeEncodeError (lone surrogates) and `compare_digest` raises
-        # TypeError on non-ASCII str — every mismatch must yield the error
-        # response, never an exception, so reject non-ASCII input first.
-        if (
-            not isinstance(supplied, str)
-            or not supplied.isascii()
-            or not secrets.compare_digest(supplied, self._capability_token)
-        ):
-            return "ERROR: invalid or missing capability token"
-        return None
-
     def _client_info(self, ctx: ServerRequestContext[Any] | None = None) -> tuple[str, str]:
         """Best-effort caller identity from the MCP initialize handshake.
 
@@ -446,6 +416,8 @@ class KorvidMCPServer:
         set either way so callers never hang on a server that will not come
         up."""
         await self._started.wait()
+        if self._startup_error is not None:
+            raise RuntimeError(self._startup_error)
         if self._bound_port is None:
             raise RuntimeError(f"MCP server failed to start on {_HOST}:{self._port}")
         return self._bound_port
@@ -462,21 +434,36 @@ class KorvidMCPServer:
         if self._uvicorn is not None:
             self._uvicorn.should_exit = True
 
-    async def run(self) -> None:
-        """Serve until cancelled (run as a background task in the app loop)."""
-        # json_response=True: our tools are single request/response - no
-        # server->client streaming - and the SDK's SSE path (1.28.x) leaked
-        # its sse_stream_reader on normal completion (ResourceWarning),
-        # while the JSON path cleans up its streams in a finally block.
-        manager = StreamableHTTPSessionManager(
-            app=self._server,
-            stateless=True,
-            json_response=True,
-            security_settings=_SECURITY_SETTINGS,
-        )
+    def _authenticate(self, request: Request) -> Response | None:
+        values = request.headers.getlist("authorization")
+        scheme, _, supplied = values[0].partition(" ") if len(values) == 1 else ("", "", "")
+        if scheme.lower() != "bearer" or not supplied.isascii():
+            supplied = ""
+        if not secrets.compare_digest(supplied, self._capability_token):
+            return Response("Unauthorized", status_code=401)
+        if self._bound_port is None:
+            return Response("MCP unavailable", status_code=503)
+        return None
 
+    def _authenticated_app(self, app: ASGIApp) -> ASGIApp:
         security = TransportSecurityMiddleware(_SECURITY_SETTINGS)
 
+        async def handle(scope: Scope, receive: Receive, send: Send) -> None:
+            if scope["type"] == "http":
+                request = Request(scope, receive)
+                rejection = self._authenticate(request)
+                if rejection is None:
+                    rejection = await security.validate_request(
+                        request, is_post=scope["method"] == "POST"
+                    )
+                if rejection is not None:
+                    await rejection(scope, receive, send)
+                    return
+            await app(scope, receive, send)
+
+        return handle
+
+    def _http_handler(self, manager: StreamableHTTPSessionManager) -> ASGIApp:
         async def handle(scope: Scope, receive: Receive, send: Send) -> None:
             # Only POST carries MCP traffic here. Stateless + JSON responses
             # means no server-initiated messages ever exist, so the SDK's
@@ -489,22 +476,33 @@ class KorvidMCPServer:
             # DNS-rebinding Host/Origin validation the manager would apply,
             # so a hostile origin is refused, never acknowledged with a 405.
             if scope["type"] == "http" and scope["method"] != "POST":
-                request = Request(scope, receive)
-                rejection = await security.validate_request(request, is_post=False)
-                response = rejection or Response(
+                response = Response(
                     "Method Not Allowed", status_code=405, headers={"Allow": "POST"}
                 )
                 await response(scope, receive, send)
                 return
             await manager.handle_request(scope, receive, send)
 
+        return handle
+
+    async def run(self) -> None:
+        """Serve until cancelled (run as a background task in the app loop)."""
+        manager = StreamableHTTPSessionManager(
+            app=self._server,
+            stateless=True,
+            json_response=True,
+            security_settings=_SECURITY_SETTINGS,
+        )
+
         @contextlib.asynccontextmanager
         async def lifespan(_app: Starlette) -> AsyncIterator[None]:
             async with manager.run():
                 yield
 
-        app = Starlette(routes=[Mount("/mcp", app=handle)], lifespan=lifespan)
-        config = uvicorn.Config(app, host=_HOST, port=self._port, log_level="error")
+        app = Starlette(routes=[Mount("/mcp", app=self._http_handler(manager))], lifespan=lifespan)
+        config = uvicorn.Config(
+            self._authenticated_app(app), host=_HOST, port=self._port, log_level="error"
+        )
         server = uvicorn.Server(config)
         self._uvicorn = server
         # Close the startup/shutdown race: a request_shutdown() issued
@@ -519,14 +517,23 @@ class KorvidMCPServer:
             while not server.started:
                 await anyio.sleep(0.02)
             try:
-                self._bound_port = self._actual_port(server)
+                port = self._actual_port(server)
             except RuntimeError:
                 # Startup lost the race against a pre-run request_shutdown():
                 # the sockets are already gone, nothing to publish.
                 return
             # File I/O + interprocess flock may block on a contending korvid
             # instance - never on the event-loop thread.
-            await asyncio.to_thread(self._write_endpoint, self._bound_port)
+            try:
+                await asyncio.to_thread(self._write_endpoint, port)
+            except OSError:
+                self._startup_error = (
+                    "MCP endpoint registry could not be published; check permissions"
+                )
+                server.should_exit = True
+                self._started.set()
+                return
+            self._bound_port = port
             self._started.set()
 
         try:
@@ -574,8 +581,7 @@ class KorvidMCPServer:
         raise RuntimeError("uvicorn reported started without a bound socket")
 
     def _write_endpoint(self, port: int) -> None:
-        """Publish this instance into the discovery registry (best-effort:
-        the server is useful even when the state dir is not writable).
+        """Publish this instance into the registry before accepting MCP requests.
 
         The file holds a ``{"servers": {"<pid>": {...}}}`` registry so that
         concurrent korvid instances each own one entry: publishing merges
@@ -583,27 +589,18 @@ class KorvidMCPServer:
         record.  Runs on a worker thread - the lock may block on a
         contending process."""
         path = self._endpoint_path
-        if path is None:
-            return
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with interprocess_lock(_endpoint_lock_path(path)):
-                registry = _load_registry(path)
-                if registry is None:  # absent, torn, or foreign data
-                    registry = {"servers": {}}
-                registry["servers"][str(os.getpid())] = {
-                    "url": f"http://{_HOST}:{port}/mcp",
-                    "port": port,
-                    "pid": os.getpid(),
-                    **(
-                        {"capability": self._capability_token}
-                        if self._capability_token is not None
-                        else {}
-                    ),
-                }
-                _replace_atomically(path, registry)
-        except OSError:
-            logger.warning("could not write MCP endpoint file %s", path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with interprocess_lock(_endpoint_lock_path(path)):
+            registry = _load_registry(path)
+            if registry is None:  # absent, torn, or foreign data
+                registry = {"servers": {}}
+            registry["servers"][str(os.getpid())] = {
+                "url": f"http://{_HOST}:{port}/mcp",
+                "port": port,
+                "pid": os.getpid(),
+                "capability": self._capability_token,
+            }
+            _replace_atomically(path, registry)
 
     def _remove_endpoint(self) -> None:
         """Drop only *our* registry entry on exit: other live instances (and
@@ -620,7 +617,11 @@ class KorvidMCPServer:
                 if registry is None:
                     return
                 entry = registry["servers"].get(str(os.getpid()))
-                if not isinstance(entry, dict) or entry.get("port") != self._bound_port:
+                if (
+                    not isinstance(entry, dict)
+                    or entry.get("port") != self._bound_port
+                    or entry.get("capability") != self._capability_token
+                ):
                     return
                 del registry["servers"][str(os.getpid())]
                 if registry["servers"]:
@@ -670,7 +671,7 @@ class MCPController(MCPControllerBase):
         self._task = task
         try:
             port = await asyncio.wait_for(server.wait_started(), timeout=10)
-        except (TimeoutError, RuntimeError):
+        except (TimeoutError, RuntimeError) as exc:
             # Bind failure: run() is already returning on its own.  Reap it
             # with a non-cancelling deadline (cancelling and awaiting the
             # cancellation could hang in stream cleanup); if it is somehow
@@ -682,7 +683,9 @@ class MCPController(MCPControllerBase):
                 self._consume_result(task)
                 self._server = None
                 self._task = None
-            return "ERROR: MCP failed to start (port in use?)"
+            if isinstance(exc, RuntimeError):
+                return f"ERROR: {exc}"
+            return "ERROR: MCP failed to start (startup timed out)"
         return f"MCP on :{port}"
 
     async def stop(self) -> str:
