@@ -156,6 +156,14 @@ and delete it, and `t` sets the tier. `:model` prints the active model and
 `:model <name>` switches it; `:ai off` releases the connection without
 discarding the config.
 
+When the test call fails, the wizard stays open and shows korvid's own
+sentence for what happened — a refused credential, a model the provider does
+not know, an answer that never finished. A failure korvid has no written
+words for is reported as "the connection test failed" and the underlying
+reason is written to the log instead: those messages come from the library,
+the keychain or the endpoint, and they routinely quote the key that was
+refused. `Ctrl+R` retries with everything the wizard already collected.
+
 A connection is a **profile** under `agent.profiles.<name>`, and `agent.active`
 names the one in use — editing that key switches profiles outside the TUI.
 Every model reference is `<prefix>/<tag>`: the prefix picks the transport

@@ -7,6 +7,7 @@ streams nothing — onto `ProfileProbe`, which builds its provider with the
 same `create_provider_from_profile` the running agent uses.
 """
 
+import asyncio
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -16,16 +17,24 @@ from korvid.agent.model_policy import ModelDescriptor
 from korvid.agent.model_profiles import ConnectionAuthConfig, ModelConnectionConfig
 from korvid.agent.outbound import OutboundPolicy, OutboundPolicyError
 from korvid.agent.provider import (
+    CREDENTIAL_REFUSED,
     STREAM_LIMIT,
     OperatorSafeProviderError,
+    ProviderProtocolError,
+    ProviderStatusError,
     ProviderStreamLimitError,
 )
 from korvid.providers.profile_probe import (
     PROBE_MAX_RESPONSE_CHARS,
     PROBE_MESSAGE,
+    PROBE_REFUSED,
     ProbeFailed,
     ProfileProbe,
 )
+
+#: A failure text shaped like the ones a real transport raises: a status
+#: line, the credential it refused, and the endpoint it refused it at.
+_LEAKY = "401 Unauthorized: key sk-live-9f3c2a rejected by https://vault.internal.test/v1"
 
 _PROFILE = ModelConnectionConfig(
     model="openai/gpt-4o",
@@ -103,18 +112,221 @@ async def test_probe_policy_failure_prevents_delegation_and_closes_provider(
 ) -> None:
     class BlockingPolicy(OutboundPolicy):
         def prepare(self, *args: Any, **kwargs: Any) -> Any:
-            raise OutboundPolicyError("injected policy failure")
+            raise OutboundPolicyError(_LEAKY)
 
     provider = ScriptedProvider([{"type": "text_delta", "text": "unexpected"}])
     _patch_factory(monkeypatch, provider)
     probe = ProfileProbe()
     probe._outbound = BlockingPolicy(max_request_chars=4_096)
 
-    with pytest.raises(OutboundPolicyError, match="injected policy failure"):
+    with pytest.raises(ProbeFailed, match="connection test failed") as raised:
         await probe(_PROFILE)
 
+    # The policy's own text quotes whatever it refused. It reaches the log,
+    # never the wizard.
+    assert str(raised.value) == PROBE_REFUSED
+    assert "sk-live-9f3c2a" not in str(raised.value)
     assert provider.calls == []
     assert provider.closed
+
+
+async def test_a_factory_failure_is_reported_as_the_written_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Building the provider is where a credential is resolved.
+
+    A store that refuses, a flow that raises, a keyring that is locked —
+    each raises with its own text, and that text routinely quotes the
+    credential and the endpoint it was refused at. The wizard renders the
+    exception, so the probe answers with a written constant instead.
+    """
+
+    def explode(profile: ModelConnectionConfig, **kwargs: Any) -> object:
+        raise RuntimeError(_LEAKY)
+
+    monkeypatch.setattr("korvid.providers.profile_probe.create_provider_from_profile", explode)
+
+    with pytest.raises(ProbeFailed) as raised:
+        await ProfileProbe()(_PROFILE)
+
+    message = str(raised.value)
+    assert message == PROBE_REFUSED
+    assert raised.value.operator_message() == message
+    assert "sk-live-9f3c2a" not in message
+    assert "vault.internal.test" not in message
+    assert "RuntimeError" not in message
+
+
+async def test_a_streaming_failure_is_reported_as_the_written_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A transport failure mid-stream carries the response body with it."""
+
+    class _Exploding(ScriptedProvider):
+        def complete(
+            self,
+            messages: list[dict[str, Any]],
+            tools: list[dict[str, Any]],
+            *,
+            stream: bool = True,
+        ) -> AsyncIterator[dict[str, Any]]:
+            self.calls.append((messages, tools))
+
+            async def gen() -> AsyncIterator[dict[str, Any]]:
+                yield {"type": "text_delta", "text": "partial"}
+                raise RuntimeError(_LEAKY)
+
+            return gen()
+
+    provider = _Exploding([])
+    _patch_factory(monkeypatch, provider)
+
+    with pytest.raises(ProbeFailed) as raised:
+        await ProfileProbe()(_PROFILE)
+
+    assert str(raised.value) == PROBE_REFUSED
+    assert "sk-live-9f3c2a" not in str(raised.value)
+    assert provider.closed
+
+
+async def test_a_close_failure_is_reported_as_the_written_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`aclose` runs on every path, so it is a leak path of its own."""
+
+    class _UncloseableProvider(ScriptedProvider):
+        async def aclose(self) -> None:
+            self.closed = True
+            raise RuntimeError(_LEAKY)
+
+    provider = _UncloseableProvider([{"type": "text_delta", "text": "ok"}, {"type": "done"}])
+    _patch_factory(monkeypatch, provider)
+
+    with pytest.raises(ProbeFailed) as raised:
+        await ProfileProbe()(_PROFILE)
+
+    assert str(raised.value) == PROBE_REFUSED
+    assert "sk-live-9f3c2a" not in str(raised.value)
+    assert provider.closed
+
+
+async def test_a_declared_operator_safe_refusal_is_re_raised_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An adapter's audited sentence is the whole point of the type.
+
+    "The provider refused the credential — check the profile's API key" is
+    what an operator can act on; replacing it with the probe's generic
+    answer would make the wizard less useful, not safer.
+    """
+
+    class _Refusing(ScriptedProvider):
+        def complete(
+            self,
+            messages: list[dict[str, Any]],
+            tools: list[dict[str, Any]],
+            *,
+            stream: bool = True,
+        ) -> AsyncIterator[dict[str, Any]]:
+            self.calls.append((messages, tools))
+
+            async def gen() -> AsyncIterator[dict[str, Any]]:
+                raise ProviderStatusError(CREDENTIAL_REFUSED)
+                yield {}  # pragma: no cover - unreachable, makes this a generator
+
+            return gen()
+
+    provider = _Refusing([])
+    _patch_factory(monkeypatch, provider)
+
+    with pytest.raises(ProviderStatusError) as raised:
+        await ProfileProbe()(_PROFILE)
+
+    assert str(raised.value) == CREDENTIAL_REFUSED
+    assert provider.closed
+
+
+async def test_an_undeclared_operator_safe_message_is_still_withheld(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The promise is per-message, not per-class (see `OperatorSafeProviderError`).
+
+    A third-party adapter is free to raise `ProviderProtocolError(str(sdk_exc))`.
+    That subclass declares two constants and that text is neither, so the
+    class's own contract already calls it unsafe — the probe must not hand
+    it to a wizard that renders `str(exc)`.
+    """
+
+    class _Leaking(ScriptedProvider):
+        def complete(
+            self,
+            messages: list[dict[str, Any]],
+            tools: list[dict[str, Any]],
+            *,
+            stream: bool = True,
+        ) -> AsyncIterator[dict[str, Any]]:
+            self.calls.append((messages, tools))
+
+            async def gen() -> AsyncIterator[dict[str, Any]]:
+                raise ProviderProtocolError(_LEAKY)
+                yield {}  # pragma: no cover - unreachable, makes this a generator
+
+            return gen()
+
+    provider = _Leaking([])
+    _patch_factory(monkeypatch, provider)
+
+    with pytest.raises(ProbeFailed) as raised:
+        await ProfileProbe()(_PROFILE)
+
+    assert str(raised.value) == PROBE_REFUSED
+    assert "sk-live-9f3c2a" not in str(raised.value)
+    assert provider.closed
+
+
+async def test_cancellation_is_never_converted_into_a_probe_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancelling the wizard's probe must cancel the task, not fail it.
+
+    Swallowing `CancelledError` into an ordinary refusal breaks the
+    cancellation protocol: the awaiting worker would carry on as if the
+    probe had merely failed.
+    """
+
+    class _Cancelled(ScriptedProvider):
+        def complete(
+            self,
+            messages: list[dict[str, Any]],
+            tools: list[dict[str, Any]],
+            *,
+            stream: bool = True,
+        ) -> AsyncIterator[dict[str, Any]]:
+            self.calls.append((messages, tools))
+
+            async def gen() -> AsyncIterator[dict[str, Any]]:
+                raise asyncio.CancelledError
+                yield {}  # pragma: no cover - unreachable, makes this a generator
+
+            return gen()
+
+    provider = _Cancelled([])
+    _patch_factory(monkeypatch, provider)
+
+    with pytest.raises(asyncio.CancelledError):
+        await ProfileProbe()(_PROFILE)
+
+    assert provider.closed
+
+
+async def test_every_refusal_the_probe_writes_is_declared_safe() -> None:
+    """`ProbeFailed`'s messages are the wizard's rendered text.
+
+    The class vouches per message, so a constant added to the module
+    without being declared would be a silent hole.
+    """
+    assert PROBE_REFUSED in ProbeFailed.safe_messages
+    assert ProbeFailed(PROBE_REFUSED).operator_message() == PROBE_REFUSED
 
 
 async def test_probe_raises_when_the_factory_refuses(monkeypatch: pytest.MonkeyPatch) -> None:

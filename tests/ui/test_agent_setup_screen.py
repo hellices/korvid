@@ -781,6 +781,49 @@ async def test_a_typed_probe_refusal_reaches_the_operator_as_an_action(
         assert saved == []
 
 
+async def test_the_real_probes_failure_reaches_the_wizard_without_the_providers_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End to end, with the probe the composition root actually wires.
+
+    The wizard renders the exception it catches, and building the provider
+    is where a credential is resolved — a refusal there quotes the key and
+    the endpoint it was refused at. None of that may become the sentence
+    on the operator's screen.
+    """
+    from korvid.providers.profile_probe import PROBE_REFUSED, ProfileProbe
+
+    leaky = "401 Unauthorized: key sk-live-9f3c2a rejected by https://vault.internal.test/v1"
+
+    def explode(profile: ModelConnectionConfig, **kwargs: Any) -> object:
+        raise RuntimeError(leaky)
+
+    monkeypatch.setattr("korvid.providers.profile_probe.create_provider_from_profile", explode)
+
+    class _ProbingCatalog(_FakeCatalog):
+        """Answers `test` through the real probe, as `__main__` wires it."""
+
+        async def test(self, profile: ModelConnectionConfig) -> str:
+            self.tested.append(profile)
+            return await ProfileProbe()(profile)
+
+    app = _Host(_ProbingCatalog())
+    async with app.run_test() as pilot:
+        await _run_to_completion(pilot)
+        await until(
+            pilot,
+            lambda: "Test failed" in _status_text(app),
+            label="probe failure reported",
+        )
+        status = _status_text(app)
+        assert PROBE_REFUSED in status
+        assert "sk-live-9f3c2a" not in status
+        assert "vault.internal.test" not in status
+        assert "RuntimeError" not in status
+        assert "Ctrl+R to retry" in status
+        assert app.result == "unset"
+
+
 async def test_ctrl_r_retries_a_failed_probe() -> None:
     """The retry binding re-runs the probe with what the wizard collected,
     and must work while a widget inside the screen holds focus."""

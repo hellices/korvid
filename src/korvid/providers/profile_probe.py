@@ -14,6 +14,8 @@ what keeps the probe inside the same size budget as a real turn.
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from collections.abc import AsyncGenerator, Mapping
 from contextlib import aclosing
 from typing import TYPE_CHECKING, Any, Final, cast
@@ -26,6 +28,8 @@ from korvid.providers.provider_default import ProviderDefaultRegistry
 if TYPE_CHECKING:
     from korvid.agent.model_profiles import ModelCatalog, ModelConnectionConfig
     from korvid.providers.special_flows import SpecialFlowRegistry
+
+logger = logging.getLogger(__name__)
 
 #: Short enough that a probe costs almost nothing, explicit enough that a
 #: blank answer is a real failure rather than a model being terse.
@@ -52,16 +56,27 @@ _NO_PROVIDER: Final = (
 )
 _NO_TEXT: Final = "the provider answered, but returned no text"
 
+#: What the probe answers with when a failure's own text is not one this
+#: repository wrote. Building the provider resolves a credential, the
+#: policy inspects the payload, and a transport failure carries the
+#: response body — a 401's body quotes the key it refused, and its first
+#: characters are exactly the identifying part. The wizard renders the
+#: exception, so none of that text may be the exception.
+PROBE_REFUSED: Final = (
+    "the connection test failed — the provider's own message is withheld because it can "
+    "quote a credential; see the log for the reason"
+)
+
 
 class ProbeFailed(OperatorSafeProviderError):
     """The probe's own answer that this profile does not work.
 
-    The wizard renders the message directly, so it is one of two written
+    The wizard renders the message directly, so it is one of three written
     constants: nothing from the profile, the endpoint or the provider's
     reply is interpolated into it.
     """
 
-    safe_messages = frozenset({_NO_PROVIDER, _NO_TEXT})
+    safe_messages = frozenset({_NO_PROVIDER, _NO_TEXT, PROBE_REFUSED})
 
 
 class ProfileProbe:
@@ -98,6 +113,16 @@ class ProfileProbe:
     async def __call__(self, profile: ModelConnectionConfig) -> str:
         """Probe *profile* and return the model's reply.
 
+        Every failure leaves here as text this repository wrote. The
+        wizard renders the exception it catches, and a probe touches the
+        three places a provider failure is most likely to quote a secret:
+        the factory resolves a credential, the outbound policy inspects
+        the payload, and the transport carries the response body. So a
+        failure is either a refusal an adapter *declared* operator-safe —
+        "the provider refused the credential", which is the only part an
+        operator can act on — or it is `ProbeFailed(PROBE_REFUSED)`, with
+        the real reason written to the log.
+
         Args:
             profile: The connection to test.
 
@@ -107,20 +132,43 @@ class ProfileProbe:
             the catalog's contract calls it a short result.
 
         Raises:
-            ProbeFailed: No provider could be built from the profile, or
-                the provider streamed no text. Both are answers the wizard
-                shows the operator, so neither may be swallowed.
-            ProviderStreamLimitError: The reply passed
-                `PROBE_MAX_RESPONSE_CHARS`. Cutting it short instead would
-                end the read before the adapter could apply its own
-                terminal-marker postcondition, so an answer longer than
-                the bound that never finished would pass as a connection
-                (issue #336 review).
+            ProbeFailed: No provider could be built from the profile, the
+                provider streamed no text, or the probe failed for a
+                reason whose own text it cannot vouch for. All three are
+                answers the wizard shows the operator.
             OperatorSafeProviderError: Whatever the adapter refused the
-                stream with — a missing terminal marker, a refusing
-                status, an unreadable frame. The probe reads to the end of
+                stream with, when that refusal's message is one the
+                adapter declared safe — a missing terminal marker, a
+                refusing status, an answer past
+                `PROBE_MAX_RESPONSE_CHARS`. The probe reads to the end of
                 the stream precisely so those reach the wizard.
+            asyncio.CancelledError: The probe was cancelled. Never
+                converted: a cancelled task must not look like a profile
+                that does not work.
         """
+        try:
+            return await self._probe(profile)
+        except asyncio.CancelledError:
+            raise
+        except OperatorSafeProviderError as exc:
+            # Per-message, not per-class: the type only vouches for the
+            # texts its class declared, so `ProviderProtocolError(str(sdk_exc))`
+            # — which a third-party adapter is free to raise — is withheld
+            # exactly like an untyped failure.
+            if exc.operator_message() is None:
+                raise self._withheld(exc) from exc
+            raise
+        except Exception as exc:
+            raise self._withheld(exc) from exc
+
+    @staticmethod
+    def _withheld(exc: BaseException) -> ProbeFailed:
+        """Log the real reason and return the sentence the wizard may show."""
+        logger.warning("model connection probe failed", exc_info=exc)
+        return ProbeFailed(PROBE_REFUSED)
+
+    async def _probe(self, profile: ModelConnectionConfig) -> str:
+        """Complete the exchange, unguarded — `__call__` owns the refusals."""
         provider = create_provider_from_profile(
             profile,
             catalog=self._catalog,

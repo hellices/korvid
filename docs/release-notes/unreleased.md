@@ -282,7 +282,13 @@ are composed *after* the immutable safety contract and cannot widen it.
   length rather than as one character. Every provider failure is reported
   in korvid's own written words: a refused status, an unreadable frame or
   a dropped connection no longer quotes the host's response body, which is
-  where a provider echoes the credential it just refused.
+  where a provider echoes the credential it just refused. `:ai`'s
+  connection test holds the same line for the failures that happen before
+  and around the stream — a locked keyring, a credential store that
+  refuses, a request the outbound policy blocks — which used to be printed
+  in the wizard exactly as the library phrased them, quoting the key and
+  the endpoint. The wizard now shows one written sentence and the real
+  reason goes to the log.
 
 ## Dependency note: `[agent]` grew
 
