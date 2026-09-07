@@ -435,7 +435,7 @@ class _FrameSink:
     def feed(self, data: object) -> bytes:
         """Consume one frame; returns any stdout payload it carried."""
         frame = _as_bytes(data)
-        if len(frame) < 2:
+        if not frame:
             return b""
         channel, payload = frame[0], frame[1:]
         if channel == _STDOUT_CHANNEL:

@@ -212,7 +212,7 @@ class TestDownload:
             await download(FakeExec(ws), "/var/log/app.log", dest)
         assert not dest.exists()
 
-    @pytest.mark.parametrize("status", [b" ", b"null", b"[]"])
+    @pytest.mark.parametrize("status", [b"", b" ", b"null", b"[]"])
     async def test_invalid_status_does_not_create_destination(
         self, tmp_path: Path, status: bytes
     ) -> None:
@@ -223,6 +223,14 @@ class TestDownload:
             await download(FakeExec(ws), "/var/log/app.log", dest)
         assert not dest.exists()
         assert list(tmp_path.iterdir()) == []
+        assert ws.closed
+
+    async def test_empty_data_frames_do_not_change_download(self, tmp_path: Path) -> None:
+        archive = tar_bytes("app.log", b"data")
+        ws = FakeWs([b"", b"\x01", b"\x02", b"\x01" + archive, b"\x03" + SUCCESS])
+        dest = tmp_path / "app.log"
+        assert await download(FakeExec(ws), "/var/log/app.log", dest) == 4
+        assert dest.read_bytes() == b"data"
         assert ws.closed
 
 
@@ -327,12 +335,15 @@ class TestUpload:
         assert ws.sent == []
         assert ws.closed
 
-    @pytest.mark.parametrize("status", [b" ", b"null", b"[]", b"{}", b'"Success"', b"not json"])
+    @pytest.mark.parametrize(
+        "status", [b"", b" ", b"null", b"[]", b"{}", b'"Success"', b"not json"]
+    )
     async def test_requires_explicit_success_status(self, tmp_path: Path, status: bytes) -> None:
         src = tmp_path / "f"
         src.write_bytes(b"x")
         ws = FakeWs([b"\x03" + status])
-        with pytest.raises(TransferError, match=r".+"):
+        expected = "invalid exec outcome" if not status.strip() else r".+"
+        with pytest.raises(TransferError, match=expected):
             await upload(FakeExec(ws), src, "/opt/f")
         assert ws.closed
 
@@ -679,7 +690,7 @@ class TestListRemoteDir:
         with pytest.raises(TransferError, match="without reporting an outcome"):
             await list_remote_dir(FakeExec(ws), "/srv")
 
-    @pytest.mark.parametrize("status", [b" ", b"null", b"[]"])
+    @pytest.mark.parametrize("status", [b"", b" ", b"null", b"[]"])
     async def test_invalid_status_rejects_listing(self, status: bytes) -> None:
         ws = FakeWs([b"\x01file\nsubdir/\n", b"\x03" + status], protocol="v4.channel.k8s.io")
         with pytest.raises(TransferError, match="invalid exec outcome"):

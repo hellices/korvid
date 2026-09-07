@@ -313,6 +313,22 @@ async def _open_pane(pilot: Any, app: KorvidApp) -> DescribePane:
     return pane
 
 
+@pytest.mark.parametrize("size", [(80, 24), (120, 40), (180, 55)])
+async def test_describe_pane_search_query_is_painted_before_submission(
+    size: tuple[int, int],
+) -> None:
+    app = make_app()
+    async with app.run_test(size=size) as pilot:
+        pane = await _open_pane(pilot, app)
+        await pilot.press("slash", *"visible-query")
+        search = pane.query_one("#describe-pane-search", Input)
+        await until(pilot, lambda: search.value == "visible-query", label="pane query entered")
+        assert "visible-query" in painted_text(search)
+        await pilot.press("escape")
+        await until(pilot, lambda: not search.display, label="pane search dismissed")
+        assert pane.display
+
+
 async def test_slash_routes_to_describe_pane_search_when_open() -> None:
     app = make_app()
     async with app.run_test() as pilot:

@@ -381,7 +381,7 @@ class DescribePane(Vertical):
         text-style: bold;
     }
     DescribePane #describe-pane-search {
-        height: 1;
+        height: 3;
     }
     DescribePane VerticalScroll {
         height: 1fr;
