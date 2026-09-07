@@ -1749,7 +1749,16 @@ def _restart_prompt() -> str:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(prog="korvid", description="Kubernetes TUI with an agent.")
+    if sys.argv[1:2] == ["mcp"]:
+        from korvid.cli import main as cli_main
+
+        cli_main()
+        return
+    parser = argparse.ArgumentParser(
+        prog="korvid",
+        description="Kubernetes TUI with an agent.",
+        epilog="Connect an MCP host to a running TUI with: korvid mcp stdio [--instance PID]",
+    )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument(
         "--readonly",
@@ -1766,8 +1775,8 @@ def main() -> None:
     parser.add_argument(
         "--mcp",
         action="store_true",
-        help="Expose read + UI-drive tools to external MCP hosts over"
-        " Streamable HTTP on 127.0.0.1 (port from config mcp.port, default 7878).",
+        help="Enable the TUI-owned local MCP endpoint for korvid mcp stdio"
+        " (loopback port from config mcp.port, default 7878).",
     )
     parser.add_argument(
         "--no-restart",

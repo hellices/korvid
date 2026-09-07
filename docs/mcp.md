@@ -2,12 +2,16 @@
 
 Requires the `[mcp]` extra (see the README's
 [installation section](https://github.com/hellices/korvid/blob/main/README.md#installation)).
-Start with `korvid --mcp` (or set `mcp: {enabled: true}` in
-`~/.config/korvid/config.yaml`) to expose the read and UI-drive tools to
-external agents — VS Code Copilot Chat, Claude Code, Cursor, Zed — over a
-[Streamable HTTP MCP](https://modelcontextprotocol.io) server bound to
-`127.0.0.1:7878` (`mcp: {port: N}` to change). Write tools are **not**
-exposed: cluster mutations stay behind the in-TUI confirmation dialog. An
+Start the TUI with `korvid --mcp` (or set `mcp: {enabled: true}` in
+`~/.config/korvid/config.yaml`), then configure your external MCP host to run
+**`korvid mcp stdio`**. The adapter connects to the already-running TUI's
+authenticated loopback endpoint; it does not start another TUI, Kubernetes
+client, embedded agent, or provider. The internal
+[Streamable HTTP MCP](https://modelcontextprotocol.io) endpoint binds to
+`127.0.0.1:7878` (`mcp: {port: N}` to change).
+
+Read and UI-drive tools are exposed; write tools are **not**:
+cluster mutations stay behind the in-TUI confirmation dialog. An
 opt-in *proposal* flow lets external agents queue writes for your review
 (see [Propose a write](#propose-a-write)) — even then, a proposal never
 executes without a fresh user keystroke in the TUI.
@@ -86,25 +90,66 @@ surface — they route to their own backends and never touch `KUBE` above.
 The live endpoint is also published to
 `$XDG_STATE_HOME/korvid/mcp-endpoint.json` (defaulting to
 `~/.local/state/korvid/mcp-endpoint.json` when `XDG_STATE_HOME` is unset)
-while korvid runs — a registry keyed by process id, so multiple korvid
-instances can be discovered side by side:
-
-```json
-{"servers": {"12345": {"url": "http://127.0.0.1:7878/mcp", "port": 7878, "pid": 12345}}}
-```
+while korvid runs. This private registry is keyed by process ID and contains
+the internal credential. Do not copy it into MCP configuration, prompts,
+logs, or issue reports. The stdio adapter reads it automatically.
 
 ## Connect a client
 
 | Host | Configuration |
 |---|---|
-| VS Code | `.vscode/mcp.json`: `{"servers": {"korvid": {"type": "http", "url": "http://127.0.0.1:7878/mcp"}}}` |
-| Claude Code | `claude mcp add --transport http korvid http://127.0.0.1:7878/mcp` |
-| Cursor | `.cursor/mcp.json`: `{"mcpServers": {"korvid": {"type": "http", "url": "http://127.0.0.1:7878/mcp"}}}` |
-| Zed | `settings.json`: `{"context_servers": {"korvid": {"url": "http://127.0.0.1:7878/mcp"}}}` |
+| VS Code | `.vscode/mcp.json`: `{"servers": {"korvid": {"type": "stdio", "command": "korvid", "args": ["mcp", "stdio"]}}}` |
+| Claude Code | `claude mcp add --transport stdio korvid -- korvid mcp stdio` |
+| Cursor | `.cursor/mcp.json`: `{"mcpServers": {"korvid": {"command": "korvid", "args": ["mcp", "stdio"]}}}` |
+| Zed | `settings.json`: `{"context_servers": {"korvid": {"command": "korvid", "args": ["mcp", "stdio"]}}}` |
 
-Without configuration, korvid still runs the server once `mcp.enabled: true`
-is set — no client is required for it to be listening; point any MCP-capable
-host at the published endpoint above.
+The host must find the installed `korvid` executable on its PATH; use an
+absolute executable path if a graphical editor has a different PATH.
+Run the host as the same user as the TUI, with the same `XDG_STATE_HOME`.
+
+One live instance is selected automatically. With multiple instances, append
+`"--instance", "12345"` to the arguments (or run
+`korvid mcp stdio --instance 12345`). Each TUI needs its own configured
+`mcp.port` (for example, 7878 and 7879). No instance is selected
+arbitrarily, and a missing selected PID never falls back to another instance.
+
+Start the TUI and enable MCP before connecting. Missing, stale, invalid, or
+unsafe registry data produces an actionable error on stderr, never protocol
+noise on stdout. Restart the host's MCP connection after a TUI restart,
+`:mcp off`/`:mcp on`, or a kube-context switch. Context switching deliberately
+stops the old MCP run before changing clients and starts a fresh authenticated
+run afterward: an existing stdio connection fails closed instead of silently
+following it into another cluster. Reconnecting discovers the new endpoint
+and credential. OAuth, remote access, and a
+headless Kubernetes backend are not part of this local stdio flow.
+
+## Local transport authentication
+
+Each server run generates a high-entropy capability token. The stdio adapter
+reads it from the private registry and sends it only in the internal HTTP
+`Authorization: Bearer` header. All MCP reads, UI actions, and opt-in proposals
+require authentication before request parsing or dispatch. Tool arguments
+never carry credentials; the legacy `capability` argument is rejected.
+Do not paste a token into client configuration or ask a model to retrieve it.
+
+The registry is atomically created with POSIX owner-only mode `0600`;
+macOS also sets an explicit non-inheriting ACL at creation.
+On Windows it uses a protected DACL for the current user, SYSTEM, and
+Administrators instead of relying on a mode argument. The adapter validates
+file ownership and permissions, rejects symlinks, bounds registry reads,
+accepts only the registered loopback URL, bypasses environment HTTP proxies,
+and refuses redirects. Failed private publication prevents MCP startup.
+
+This separates other unprivileged local accounts, not hostile processes
+running as the same user or an administrator. They remain in the local trust
+domain. Host/Origin checks remain in place; authentication does not replace
+them or the TUI approval gate. See the [threat model](threat-model.md).
+
+**Existing direct HTTP integrations:** unauthenticated requests now receive
+401, including read/UI calls. Migrate host configurations to stdio above.
+Deliberate low-level HTTP integrations must read the private registry and
+authenticate in headers; no token-in-URL or token-in-tool fallback exists.
+This is an internal local transport, not an OAuth-enabled remote service.
 
 ## Read once or follow activity
 
@@ -172,17 +217,12 @@ resize). A proposal never mutates anything by itself:
   outcomes. A context switch, an MCP server restart, or TUI shutdown
   invalidates pending proposals.
 
-Local callers are untrusted: read access alone does not grant proposal
-access. Each server run generates a high-entropy capability token that
-callers must echo as the `capability` argument on every proposal call, and
-publishes it only in the endpoint registry file. korvid creates that file
-with an atomic POSIX owner-only (`0600`) open, never a chmod after the
-fact. On Windows that mode argument does not map onto NTFS ACLs, so the
-token's confidentiality there rests on the enclosing directory's inherited
-permissions rather than on the mode korvid requested — the same platform
-limit [`docs/threat-model.md`](threat-model.md) records for private
-exports. MCP `clientInfo` is caller-supplied metadata, never treated as
-authenticated identity.
+Local callers are untrusted: authentication alone does not enable write
+proposals. The TUI must opt in with `write_proposals: true`; read-only mode
+and all approval, context, UID, and audit checks still apply. Proposals use
+the same authenticated transport as reads, never a second credential in
+tool arguments. MCP `clientInfo` is caller-supplied display metadata, never
+treated as authenticated identity.
 
 ## Representative tools
 

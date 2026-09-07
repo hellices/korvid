@@ -156,7 +156,9 @@ Press `?` in korvid for the complete effective set, including remaps.
   credentials named but never stored, and TLS verification that cannot be
   turned off.
 - **[MCP server](https://hellices.github.io/korvid/mcp/)** — expose korvid's read and UI-drive tools
-  to VS Code, Claude Code, Cursor, or Zed; write tools are never exposed.
+  to VS Code, Claude Code, Cursor, or Zed. Start the TUI with `korvid --mcp`
+  and configure the host to run `korvid mcp stdio`; no token configuration
+  or additional Kubernetes client is needed. Write tools are never exposed.
   An opt-in proposal flow lets external agents queue writes that execute
   only after your keystroke in the TUI.
 - **[Air-gapped operation](https://hellices.github.io/korvid/airgap/)** — internal LLM/Helm/OLM/image

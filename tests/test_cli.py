@@ -75,8 +75,7 @@ else:
 def test_console_entrypoint_delegates_to_the_app_composition_root(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Anything that is not the exact version-only invocation must reach
-    `korvid.__main__.main` unchanged."""
+    """Normal TUI arguments must reach the composition root unchanged."""
     import korvid.__main__ as app_main
     import korvid.cli as cli
 
@@ -119,3 +118,83 @@ def test_console_entrypoint_takes_the_fast_path_only_for_the_exact_version_call(
         cli.main()
 
     assert capsys.readouterr().out.strip() == f"korvid {korvid.__version__}"
+
+
+def test_stdio_help_does_not_import_the_app() -> None:
+    probe = """
+import importlib.abc
+import sys
+
+class Blocker(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname in {"korvid.__main__", "korvid.ui", "korvid.providers", "korvid.k8s", "textual"}:
+            raise RuntimeError(f"stdio imported application code: {fullname}")
+
+sys.meta_path.insert(0, Blocker())
+from korvid.cli import main
+sys.argv = ["korvid", "mcp", "stdio", "--help"]
+main()
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", probe], cwd=ROOT, capture_output=True, text=True, timeout=30
+    )
+    assert result.returncode == 0, result.stderr
+    assert "--instance" in result.stdout
+
+
+@pytest.mark.parametrize("instance", ["0", "-1", "not-a-pid"])
+def test_stdio_rejects_invalid_instance_before_startup(instance: str) -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from korvid.cli import main; main()",
+            "mcp",
+            "stdio",
+            "--instance",
+            instance,
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 2
+    assert "positive" in result.stderr
+    assert result.stdout == ""
+
+
+def test_module_entrypoint_supports_stdio_help() -> None:
+    result = subprocess.run(
+        [sys.executable, "-m", "korvid", "mcp", "stdio", "--help"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "--instance" in result.stdout
+
+
+def test_stdio_missing_extra_has_an_install_hint_without_app_startup() -> None:
+    probe = """
+import importlib.util
+import sys
+real_find_spec = importlib.util.find_spec
+importlib.util.find_spec = lambda name: None if name == "httpx2" else real_find_spec(name)
+from korvid.cli import main
+sys.argv = ["korvid", "mcp", "stdio"]
+try:
+    main()
+finally:
+    assert "korvid.__main__" not in sys.modules
+    assert "korvid.mcp.stdio" not in sys.modules
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", probe], cwd=ROOT, capture_output=True, text=True, timeout=30
+    )
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert "including mcp" in result.stderr
+    assert "uv tool install" in result.stderr
+    assert "Traceback" not in result.stderr
