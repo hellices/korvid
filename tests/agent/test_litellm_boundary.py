@@ -918,6 +918,46 @@ async def test_request_sent_still_distinguishes_sent_from_intended() -> None:
     assert handed_over["messages"] == boundary.wire.messages(0)
 
 
+async def test_a_truncated_answer_ends_the_turn_in_operator_language() -> None:
+    """The whole point of issue #336, end to end.
+
+    A stream that stops without the provider ever saying it finished must
+    not become a stored assistant answer, and the failure the operator
+    reads must be korvid's written sentence rather than a class name — the
+    engine withholds the text of any exception the contract did not
+    declare safe.
+    """
+    boundary = build([_streaming(_chunk(content="half an ans"), finish=None)])
+
+    events = await boundary.run()
+
+    error = events[-1]
+    assert isinstance(error, AgentError)
+    assert "ended before" in error.message
+    assert "ProviderStreamTruncatedError" not in error.message
+    assert [message["role"] for message in boundary.conversation.messages] == ["user"]
+
+
+async def test_a_truncated_tool_round_dispatches_nothing() -> None:
+    """A call the model never finished writing is not a call. The harness
+    would have no way to tell it from one the model meant to send."""
+    recorder = RecordingExecution()
+    boundary = build(
+        [
+            _streaming(
+                _chunk(tool_calls=[_fragment(0, call_id="c1", name="get_logs", arguments="{}")]),
+                finish=None,
+            )
+        ],
+        execution=recorder,
+    )
+
+    events = await boundary.run()
+
+    assert isinstance(events[-1], AgentError)
+    assert recorder.names == []
+
+
 async def test_an_answered_failure_still_counts_as_sent() -> None:
     """An HTTP 500 means the provider has the payload. The panel must show
     that payload rather than a stale one."""
