@@ -120,6 +120,13 @@ class _Proxy:
         return result
 
 
+async def _drain_http_response(response: httpx2.Response) -> None:
+    # The SDK skips notification/error bodies. Consume finite responses before
+    # it closes the stream, rather than discarding an unread TCP response.
+    if not response.headers.get("content-type", "").lower().startswith("text/event-stream"):
+        await response.aread()
+
+
 async def _serve(endpoint: TUIEndpoint) -> None:
     # The registry only accepts loopback /mcp URLs. Normalize its optional
     # trailing slash locally rather than following an authenticated redirect.
@@ -129,10 +136,14 @@ async def _serve(endpoint: TUIEndpoint) -> None:
         timeout=httpx2.Timeout(_CALL_TIMEOUT, connect=_CONNECT_TIMEOUT),
         follow_redirects=False,
         trust_env=False,
+        event_hooks={"response": [_drain_http_response]},
     ) as http:
         proxy = _Proxy(http, url)
-        async with proxy.connect():
-            pass
+        async with asyncio.timeout(_CONNECT_TIMEOUT), proxy.connect() as session:
+            # initialize() queues its notification without awaiting the HTTP
+            # acknowledgement. A round trip drains it before SDK teardown can
+            # cancel that POST and reset the TUI's accepted TCP connection.
+            await session.send_ping()
         with anyio.CancelScope() as lifetime:
             async with (
                 cancellable_stdin(sys.stdin) as source,

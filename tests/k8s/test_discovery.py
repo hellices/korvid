@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
 import ssl
+import traceback
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
@@ -286,11 +289,33 @@ async def test_request_json_wraps_api_exception_as_api_status_error() -> None:
 
     client = KubeClient()
     fake_api = AsyncMock()
-    fake_api.call_api.side_effect = ApiException(status=403, reason="Forbidden")
+    api_error = ApiException(status=403, reason="Forbidden")
+    api_error.body = b'{"kind":"Status","message":"status body contract"}'
+    fake_api.call_api.side_effect = api_error
     client._api = fake_api
 
-    with pytest.raises(ApiStatusError, match="API 403: Forbidden"):
+    with pytest.raises(ApiStatusError, match="API 403: Forbidden") as excinfo:
         await client._request_json("/api/v1")
+
+    assert excinfo.value.body == api_error.body.decode("utf-8")
+    assert excinfo.value.__cause__ is api_error
+
+
+async def _normalized_failure_diagnostics(
+    client: KubeClient, caplog: pytest.LogCaptureFixture
+) -> tuple[KubeClientError, str, str]:
+    async def request_and_log() -> None:
+        try:
+            await client._request_json("/api/v1")
+        except KubeClientError:
+            logging.getLogger(__name__).exception("normalized Kubernetes request failure")
+            raise
+
+    caplog.set_level(logging.ERROR, logger=__name__)
+    with pytest.raises(KubeClientError, match="Kubernetes API") as excinfo:
+        await request_and_log()
+    error = excinfo.value
+    return error, "".join(traceback.format_exception(error)), caplog.text
 
 
 @pytest.mark.parametrize(
@@ -326,10 +351,116 @@ async def test_request_json_normalizes_transport_failures_without_leaking_detail
     fake_api.call_api.side_effect = error
     client._api = fake_api
 
-    with pytest.raises(KubeClientError) as excinfo:
+    with pytest.raises(KubeClientError, match="Kubernetes API") as excinfo:
         await client._request_json("/api/v1")
 
     assert str(excinfo.value) == message
+
+
+@pytest.mark.parametrize(
+    ("error", "sensitive_marker"),
+    [
+        pytest.param(
+            ClientConnectionError("https://user:SENSITIVE_AIOHTTP_TOKEN@example.invalid/private"),
+            "SENSITIVE_AIOHTTP_TOKEN",
+            id="aiohttp",
+        ),
+        pytest.param(
+            ssl.SSLError("SENSITIVE_TLS_CERTIFICATE_DETAIL"),
+            "SENSITIVE_TLS_CERTIFICATE_DETAIL",
+            id="ssl",
+        ),
+        pytest.param(
+            TimeoutError("https://user:SENSITIVE_TIMEOUT_TOKEN@example.invalid/private"),
+            "SENSITIVE_TIMEOUT_TOKEN",
+            id="timeout",
+        ),
+        pytest.param(
+            ConnectionResetError("SENSITIVE_OS_ERROR_DETAIL"),
+            "SENSITIVE_OS_ERROR_DETAIL",
+            id="os",
+        ),
+    ],
+)
+async def test_normalized_transport_error_tracebacks_do_not_leak_context(
+    error: Exception,
+    sensitive_marker: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    client = KubeClient()
+    fake_api = AsyncMock()
+    fake_api.call_api.side_effect = error
+    client._api = fake_api
+
+    normalized, formatted, logged = await _normalized_failure_diagnostics(client, caplog)
+
+    assert normalized.__cause__ is None
+    assert normalized.__suppress_context__
+    assert sensitive_marker not in formatted
+    assert sensitive_marker not in logged
+
+
+@pytest.mark.parametrize(
+    ("error", "sensitive_marker"),
+    [
+        pytest.param(
+            json.JSONDecodeError(
+                "SENSITIVE_JSON_DECODE_DETAIL",
+                '{"token":"SENSITIVE_JSON_BODY"}',
+                0,
+            ),
+            "SENSITIVE_JSON_DECODE_DETAIL",
+            id="json-decode",
+        ),
+        pytest.param(
+            UnicodeDecodeError(
+                "utf-8",
+                b"SENSITIVE_UNICODE_BODY",
+                0,
+                1,
+                "SENSITIVE_UNICODE_DECODE_DETAIL",
+            ),
+            "SENSITIVE_UNICODE_DECODE_DETAIL",
+            id="unicode-decode",
+        ),
+        pytest.param(
+            RecursionError("SENSITIVE_RECURSION_DETAIL"),
+            "SENSITIVE_RECURSION_DETAIL",
+            id="recursion",
+        ),
+    ],
+)
+async def test_normalized_decode_error_tracebacks_do_not_leak_context(
+    error: Exception,
+    sensitive_marker: str,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = KubeClient()
+    response = AsyncMock()
+    response.status = 200
+    response.reason = "OK"
+    response.read.return_value = b'{"token":"SENSITIVE_RESPONSE_BODY"}'
+    fake_api = AsyncMock()
+    fake_api.call_api.return_value = response
+    client._api = fake_api
+
+    def fail_decode(_body: bytes) -> Any:
+        raise error
+
+    monkeypatch.setattr(json, "loads", fail_decode)
+    normalized, formatted, logged = await _normalized_failure_diagnostics(client, caplog)
+
+    assert normalized.__cause__ is None
+    assert normalized.__suppress_context__
+    for marker in (
+        sensitive_marker,
+        "SENSITIVE_RESPONSE_BODY",
+        "SENSITIVE_JSON_BODY",
+        "SENSITIVE_UNICODE_BODY",
+    ):
+        assert marker not in formatted
+        assert marker not in logged
 
 
 async def test_request_json_normalizes_invalid_json_without_leaking_the_body() -> None:
@@ -342,7 +473,7 @@ async def test_request_json_normalizes_invalid_json_without_leaking_the_body() -
     fake_api.call_api.return_value = response
     client._api = fake_api
 
-    with pytest.raises(KubeClientError) as excinfo:
+    with pytest.raises(KubeClientError, match="malformed JSON") as excinfo:
         await client._request_json("/api/v1")
 
     assert str(excinfo.value) == (
@@ -360,7 +491,7 @@ async def test_request_json_rejects_a_valid_non_object_response() -> None:
     fake_api.call_api.return_value = response
     client._api = fake_api
 
-    with pytest.raises(KubeClientError) as excinfo:
+    with pytest.raises(KubeClientError, match="malformed response") as excinfo:
         await client._request_json("/api/v1")
 
     assert str(excinfo.value) == (

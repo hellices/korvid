@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import errno
+import io
 import json
 import os
 import signal
@@ -210,6 +212,208 @@ async def test_stdio_bypasses_environment_http_proxies(tmp_path: Path) -> None:
                 assert result.tools
 
 
+class _PreflightHTTP:
+    def __init__(self) -> None:
+        self.notification_started = asyncio.Event()
+        self.release_acknowledgement = asyncio.Event()
+        self.acknowledged = False
+        self.cancelled = False
+        self.methods: list[str] = []
+
+    async def handle(self, request: httpx2.Request) -> httpx2.Response:
+        body = json.loads(request.content)
+        self.methods.append(body["method"])
+        if body["method"] == "notifications/initialized":
+            self.notification_started.set()
+            try:
+                await self.release_acknowledgement.wait()
+            except asyncio.CancelledError:
+                self.cancelled = True
+                raise
+            self.acknowledged = True
+            return httpx2.Response(202)
+        result = (
+            {
+                "protocolVersion": body["params"]["protocolVersion"],
+                "capabilities": {},
+                "serverInfo": {"name": "preflight", "version": "1"},
+            }
+            if body["method"] == "initialize"
+            else {}
+        )
+        return httpx2.Response(200, json={"jsonrpc": "2.0", "id": body["id"], "result": result})
+
+
+class _DelayedJSONClose(httpx2.AsyncByteStream):
+    def __init__(self) -> None:
+        self.body = b""
+        self.closing = asyncio.Event()
+        self.release_close = asyncio.Event()
+        self.closed = False
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        yield self.body
+
+    async def aclose(self) -> None:
+        self.closing.set()
+        await self.release_close.wait()
+        self.closed = True
+
+
+@pytest.mark.parametrize("response_hook", [False, True])
+async def test_json_stream_closes_before_sdk_delivers_result(response_hook: bool) -> None:
+    from korvid.mcp.stdio import _drain_http_response, _Proxy
+
+    peer = _PreflightHTTP()
+    peer.release_acknowledgement.set()
+    body = _DelayedJSONClose()
+    delivered = asyncio.Event()
+
+    async def handle(request: httpx2.Request) -> httpx2.Response:
+        message = json.loads(request.content)
+        if message["method"] == "tools/list":
+            body.body = json.dumps(
+                {"jsonrpc": "2.0", "id": message["id"], "result": {"tools": []}}
+            ).encode()
+            return httpx2.Response(200, headers={"Content-Type": "application/json"}, stream=body)
+        return await peer.handle(request)
+
+    async with httpx2.AsyncClient(
+        transport=httpx2.MockTransport(handle),
+        event_hooks={"response": [_drain_http_response] if response_hook else []},
+    ) as http:
+
+        async def request_tools() -> types.ListToolsResult:
+            async with _Proxy(http, "http://127.0.0.1:34567/mcp/").connect() as session:
+                result = await session.list_tools()
+                assert body.closed
+                delivered.set()
+                return result
+
+        task = asyncio.create_task(request_tools())
+        try:
+            await asyncio.wait_for(body.closing.wait(), 5)
+            assert not delivered.is_set()
+        finally:
+            body.release_close.set()
+            result = await asyncio.wait_for(task, 5)
+        assert delivered.is_set()
+        assert result.tools == []
+
+
+async def test_preflight_acknowledges_initialization_before_closing_http_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from korvid.mcp import stdio
+    from korvid.mcp.registry import TUIEndpoint
+
+    peer = _PreflightHTTP()
+    original_client = httpx2.AsyncClient
+    original_initialize = ClientSession.initialize
+    original_ping = ClientSession.send_ping
+    ready_at_stdio_start: list[bool] = []
+
+    def client(**kwargs: Any) -> httpx2.AsyncClient:
+        return original_client(transport=httpx2.MockTransport(peer.handle), **kwargs)
+
+    async def initialize(session: ClientSession) -> types.InitializeResult:
+        result = await original_initialize(session)
+        await peer.notification_started.wait()
+        return result
+
+    async def ping(session: ClientSession) -> types.EmptyResult:
+        peer.release_acknowledgement.set()
+        return await original_ping(session)
+
+    @asynccontextmanager
+    async def memory_stream(source: TextIO) -> AsyncIterator[anyio.AsyncFile[str]]:
+        ready_at_stdio_start.append(peer.acknowledged)
+        with io.StringIO() as stream:
+            yield anyio.wrap_file(stream)
+
+    monkeypatch.setattr(httpx2, "AsyncClient", client)
+    monkeypatch.setattr(ClientSession, "initialize", initialize)
+    monkeypatch.setattr(ClientSession, "send_ping", ping)
+    monkeypatch.setattr(stdio, "cancellable_stdin", memory_stream)
+    monkeypatch.setattr(stdio, "cancellable_stdout", memory_stream)
+    endpoint = TUIEndpoint(
+        pid=os.getpid(),
+        port=34567,
+        url="http://127.0.0.1:34567/mcp",
+        capability="preflight-test-credential-" * 3,
+    )
+    await asyncio.wait_for(stdio._serve(endpoint), 5)
+    assert ready_at_stdio_start == [True, True]
+    assert not peer.cancelled
+    assert peer.methods == ["initialize", "notifications/initialized", "ping"]
+
+
+async def test_preflight_consumes_http_acknowledgement_before_reusing_connection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from korvid.mcp import stdio
+    from korvid.mcp.registry import TUIEndpoint
+
+    original_client = httpx2.AsyncClient
+    streams: list[object] = []
+    methods: list[str] = []
+
+    async def observe(response: httpx2.Response) -> None:
+        streams.append(response.extensions["network_stream"])
+        methods.append(json.loads(response.request.content)["method"])
+
+    def client(**kwargs: Any) -> httpx2.AsyncClient:
+        hooks = kwargs.setdefault("event_hooks", {})
+        hooks.setdefault("response", []).append(observe)
+        return original_client(**kwargs)
+
+    @asynccontextmanager
+    async def empty_stdio(source: TextIO) -> AsyncIterator[anyio.AsyncFile[str]]:
+        with io.StringIO() as stream:
+            yield anyio.wrap_file(stream)
+
+    monkeypatch.setattr(httpx2, "AsyncClient", client)
+    monkeypatch.setattr(stdio, "cancellable_stdin", empty_stdio)
+    monkeypatch.setattr(stdio, "cancellable_stdout", empty_stdio)
+    async with _backend(tmp_path) as (executor, path):
+        record = json.loads(path.read_text())["servers"][str(os.getpid())]
+        endpoint = TUIEndpoint(
+            pid=record["pid"],
+            port=record["port"],
+            url=record["url"],
+            capability=record["capability"],
+        )
+        await asyncio.wait_for(stdio._serve(endpoint), 5)
+        assert methods == ["initialize", "notifications/initialized", "ping"]
+        assert len(streams) == 3
+        assert streams[0] is streams[1] is streams[2]
+        assert executor.calls == []
+
+
+@pytest.mark.parametrize("content_type", ["application/json", "text/plain", "text/event-stream"])
+async def test_http_response_cleanup_drains_finite_bodies_but_preserves_sse(
+    content_type: str,
+) -> None:
+    from korvid.mcp.stdio import _drain_http_response
+
+    response = httpx2.Response(
+        202 if content_type == "application/json" else 401,
+        headers={"Content-Type": content_type},
+        stream=httpx2.ByteStream(b"test response body"),
+    )
+    try:
+        await _drain_http_response(response)
+        if content_type == "text/event-stream":
+            assert not response.is_stream_consumed
+            assert not response.is_closed
+        else:
+            assert response.is_stream_consumed
+            assert response.is_closed
+            assert response.content == b"test response body"
+    finally:
+        await response.aclose()
+
+
 def test_authenticated_bridge_never_follows_redirects(monkeypatch: pytest.MonkeyPatch) -> None:
     from korvid.mcp import stdio
     from korvid.mcp.registry import TUIEndpoint
@@ -233,12 +437,14 @@ def test_authenticated_bridge_never_follows_redirects(monkeypatch: pytest.Monkey
         timeout: httpx2.Timeout,
         follow_redirects: bool,
         trust_env: bool,
+        event_hooks: dict[str, list[Any]],
     ) -> httpx2.AsyncClient:
         return original_client(
             headers=headers,
             timeout=timeout,
             follow_redirects=follow_redirects,
             trust_env=trust_env,
+            event_hooks=event_hooks,
             transport=httpx2.MockTransport(redirect),
         )
 
@@ -578,8 +784,12 @@ async def test_stdout_cancellation_reaps_writer_and_restores_descriptor(
                 assert bool(processes) is (relay or sys.platform == "win32")
                 assert all(process.returncode is not None for process in processes)
                 assert len(duplicates) == 1
-                with pytest.raises(OSError, match="Bad file descriptor"):
+                with pytest.raises(OSError, match=r".+") as closed:
                     os.fstat(duplicates[0])
+                assert (
+                    closed.value.errno == errno.EBADF
+                    or getattr(closed.value, "winerror", None) == 6
+                )
             finally:
                 if not task.done():
                     task.cancel()
@@ -696,8 +906,12 @@ async def test_pipe_input_cancellation_reaps_owned_resources(
             assert all(process.returncode is not None for process in processes)
             assert bool(processes) is (relay or sys.platform == "win32")
             for owned_fd in duplicates:
-                with pytest.raises(OSError, match="Bad file descriptor"):
+                with pytest.raises(OSError, match=r".+") as closed:
                     os.fstat(owned_fd)
+                assert (
+                    closed.value.errno == errno.EBADF
+                    or getattr(closed.value, "winerror", None) == 6
+                )
         finally:
             host.close()
             if not task.done():

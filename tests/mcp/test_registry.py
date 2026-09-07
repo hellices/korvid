@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ctypes
 import dataclasses
+import errno
 import json
 import os
 import subprocess
@@ -141,8 +142,9 @@ def test_windows_private_creation_removes_file_when_acl_is_permissive(
         open_private_file(path)
     assert not path.exists()
     assert opened_fd is not None
-    with pytest.raises(OSError, match="Bad file descriptor"):
+    with pytest.raises(OSError, match=r".+") as closed:
         os.fstat(opened_fd)
+    assert closed.value.errno == errno.EBADF or getattr(closed.value, "winerror", None) == 6
 
 
 @pytest.mark.skipif(os.name != "nt", reason="native Windows ACL integration")

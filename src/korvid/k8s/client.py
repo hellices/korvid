@@ -1712,28 +1712,28 @@ async def _request_dict(request: Awaitable[Any]) -> dict[str, Any]:
         raise ApiStatusError(
             int(exc.status or 0),
             str(exc.reason or ""),
-            body=str(getattr(exc, "body", "") or ""),
+            body=(exc.body or b"").decode("utf-8", errors="replace"),
         ) from exc
-    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError) as exc:
+    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError):
         raise KubeClientError(
             "Kubernetes API returned malformed JSON; retry, then check the API server"
-        ) from exc
-    except TimeoutError as exc:
+        ) from None
+    except TimeoutError:
         raise KubeClientError(
             "Kubernetes API request timed out; check cluster connectivity and retry"
-        ) from exc
-    except ssl.SSLError as exc:
+        ) from None
+    except ssl.SSLError:
         raise KubeClientError(
             "Kubernetes API TLS validation failed; check cluster certificates and retry"
-        ) from exc
-    except _AIOHTTP_CLIENT_ERROR as exc:
+        ) from None
+    except _AIOHTTP_CLIENT_ERROR:
         raise KubeClientError(
             "Kubernetes API connection failed; check cluster connectivity and retry"
-        ) from exc
-    except OSError as exc:
+        ) from None
+    except OSError:
         raise KubeClientError(
             "Kubernetes API connection failed; check cluster connectivity and retry"
-        ) from exc
+        ) from None
 
 
 async def _response_dict(resp: Any) -> dict[str, Any]:
