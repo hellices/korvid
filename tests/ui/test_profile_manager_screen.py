@@ -552,3 +552,89 @@ def test_no_vendor_appears_anywhere_in_the_screen_source() -> None:
     source = Path("src/korvid/ui/widgets/profile_manager_screen.py").read_text(encoding="utf-8")
     for vendor in ("openai", "anthropic", "azure", "bedrock", "gemini", "ollama", "copilot"):
         assert vendor not in source.lower()
+
+
+def _row_prompts(app: _Host) -> list[str]:
+    listing = app.screen.query_one("#profile-list", OptionList)
+    return [str(listing.get_option_at_index(i).prompt) for i in range(listing.option_count)]
+
+
+@pytest.mark.asyncio
+async def test_a_key_that_is_not_a_name_is_not_listed_yet_survives_a_delete() -> None:
+    """`unparsed` holds the file's own keys, and YAML builds integers.
+
+    `1` is not a profile name — nothing here can activate, edit or delete
+    it — so it is not a row. It is still the operator's text, so every
+    decision this screen hands back must carry it untouched.
+    """
+    profiles = ModelConnectionsConfig(
+        profiles={"good": ModelConnectionConfig(model="openai/gpt-4o")},
+        unparsed={1: {"model": "openai/gpt-4o-mini"}, "broken": {"no": "model"}},
+    )
+    app = _Host(profiles)
+    prompts: list[str] = []
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: app.screen_ref is not None and app.screen_ref.is_attached)
+        prompts = _row_prompts(app)
+        _highlight(app, "broken")
+        await pilot.press("d")
+        await until(pilot, lambda: app.result != "unset")
+
+    assert [p.split(" ")[0] for p in prompts] == ["good", "broken"]
+    result = app.result
+    assert isinstance(result, ProfileManagerResult)
+    assert result.edited is not None
+    assert "broken" not in result.edited.unparsed
+    assert result.edited.unparsed[1] == {"model": "openai/gpt-4o-mini"}
+
+
+async def test_a_key_that_is_not_a_name_survives_an_add() -> None:
+    """A generated name cannot collide with `1`, and adding beside it
+    must not drop it."""
+    added = ModelConnectionConfig(model="openai/gpt-4o")
+
+    async def open_editor(
+        existing: ModelConnectionConfig | None,
+    ) -> ModelConnectionConfig | None:
+        assert existing is None
+        return added
+
+    profiles = ModelConnectionsConfig(unparsed={1: {"model": "openai/gpt-4o-mini"}})
+    app = _Host(profiles, open_editor)
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: app.screen_ref is not None and app.screen_ref.is_attached)
+        await pilot.press("a")
+        await until(pilot, lambda: app.result != "unset")
+
+    result = app.result
+    assert isinstance(result, ProfileManagerResult)
+    assert result.edited is not None
+    assert result.edited.profiles == {"gpt-4o": added}
+    assert result.edited.unparsed[1] == {"model": "openai/gpt-4o-mini"}
+
+
+async def test_repairing_one_entry_leaves_a_key_that_is_not_a_name_alone() -> None:
+    """Retiring a repaired *name* must not reach the entry filed under a
+    key that only looks like one."""
+    repaired = ModelConnectionConfig(model="openai/gpt-4o")
+
+    async def open_editor(
+        selected: ModelConnectionConfig | None,
+    ) -> ModelConnectionConfig | None:
+        return repaired
+
+    profiles = ModelConnectionsConfig(
+        unparsed={"1": {"no": "model"}, 1: {"model": "openai/gpt-4o-mini"}},
+    )
+    app = _Host(profiles, open_editor)
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: app.screen_ref is not None and app.screen_ref.is_attached)
+        _highlight(app, "1")
+        await pilot.press("e")
+        await until(pilot, lambda: app.result != "unset")
+
+    result = app.result
+    assert isinstance(result, ProfileManagerResult)
+    assert result.edited is not None
+    assert result.edited.profiles == {"1": repaired}
+    assert dict(result.edited.unparsed) == {1: {"model": "openai/gpt-4o-mini"}}

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import replace
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -1426,3 +1427,169 @@ agent:
     raw = yaml.safe_load(path.read_text(encoding="utf-8"))
     assert raw["agent"]["profiles"]["local"]["auth"] == "environment"
     assert load_config(path).model_connections.profiles["local"].config_error is not None
+
+
+def test_a_non_string_profile_key_keeps_the_identity_the_file_gave_it(tmp_path: Path) -> None:
+    """`1:` is a YAML integer key, not the profile named `"1"`.
+
+    Recording it as `"1"` would rename the operator's entry: the next
+    save writes a quoted key, and the load after that accepts it as a
+    perfectly valid profile name — korvid promoting text it refused into
+    a runtime profile, by itself.
+    """
+    path = _write(
+        tmp_path,
+        """
+agent:
+  active: local
+  profiles:
+    local:
+      model: openai/gpt-4o
+    1:
+      model: openai/gpt-4o-mini
+""",
+    )
+    profiles = load_config(path).model_connections
+    assert set(profiles.profiles) == {"local"}
+    assert profiles.unparsed[1] == {"model": "openai/gpt-4o-mini"}
+    assert "1" not in profiles.unparsed
+
+    save_model_connections(path, profiles)
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert raw["agent"]["profiles"][1] == {"model": "openai/gpt-4o-mini"}
+    assert "1" not in raw["agent"]["profiles"]
+
+    reloaded = load_config(path).model_connections
+    assert set(reloaded.profiles) == {"local"}
+    assert reloaded.unparsed[1] == {"model": "openai/gpt-4o-mini"}
+
+
+def test_a_numeric_key_and_its_quoted_twin_stay_two_entries(tmp_path: Path) -> None:
+    """`1:` and `"1":` are different keys to YAML, so collapsing them
+    loses one: the raw half outranks the modelled one on write, so the
+    refused entry would be written over the valid profile."""
+    path = _write(
+        tmp_path,
+        """
+agent:
+  active: "1"
+  profiles:
+    1:
+      model: openai/gpt-4o
+    "1":
+      model: openai/gpt-4o-mini
+""",
+    )
+    profiles = load_config(path).model_connections
+    assert profiles.profiles["1"].model == "openai/gpt-4o-mini"
+    assert profiles.unparsed[1] == {"model": "openai/gpt-4o"}
+
+    save_model_connections(path, profiles)
+    written = yaml.safe_load(path.read_text(encoding="utf-8"))["agent"]["profiles"]
+    assert written[1] == {"model": "openai/gpt-4o"}
+    assert written["1"]["model"] == "openai/gpt-4o-mini"
+
+    reloaded = load_config(path).model_connections
+    assert reloaded.profiles["1"].model == "openai/gpt-4o-mini"
+    assert reloaded.active == "1"
+    assert reloaded.unparsed[1] == {"model": "openai/gpt-4o"}
+
+
+@pytest.mark.parametrize(
+    ("written", "key"),
+    [("true", True), ("1.5", 1.5), ("null", None), ("2026-01-01", date(2026, 1, 1))],
+)
+def test_every_scalar_yaml_key_survives_a_save_as_itself(
+    tmp_path: Path, written: str, key: object
+) -> None:
+    """Bools, floats, nulls and dates are all keys `yaml.safe_load`
+    produces. None of them is a profile name, and a save must not
+    invent one."""
+    path = _write(
+        tmp_path,
+        f"""
+agent:
+  profiles:
+    {written}:
+      model: openai/gpt-4o
+""",
+    )
+    profiles = load_config(path).model_connections
+    assert profiles.profiles == {}
+    assert list(profiles.unparsed) == [key]
+
+    save_model_connections(path, profiles)
+    reloaded = load_config(path).model_connections
+    assert reloaded.profiles == {}
+    assert list(reloaded.unparsed) == [key]
+
+
+def test_a_sequence_profile_key_never_reaches_korvid(tmp_path: Path) -> None:
+    """The tuple-like key YAML can spell is one `safe_load` refuses to
+    build, so the document fails as a document — korvid is never handed
+    half a profile set to preserve."""
+    path = _write(
+        tmp_path,
+        """
+agent:
+  profiles:
+    ? [a, b]
+    : {model: openai/gpt-4o}
+""",
+    )
+    with pytest.raises(yaml.YAMLError, match="unhashable key"):
+        load_config(path)
+
+
+def test_deleting_a_string_profile_leaves_its_numeric_twin_alone(tmp_path: Path) -> None:
+    """Deletion clears a *name* from both halves. A key that only looks
+    like that name is a different entry and must stay."""
+    path = _write(
+        tmp_path,
+        """
+agent:
+  active: "1"
+  profiles:
+    1:
+      model: openai/gpt-4o
+    "1":
+      model: openai/gpt-4o-mini
+""",
+    )
+    profiles = load_config(path).model_connections
+    pruned = replace(
+        profiles,
+        active=None,
+        profiles={k: v for k, v in profiles.profiles.items() if k != "1"},
+        unparsed={k: v for k, v in profiles.unparsed.items() if k != "1"},
+    )
+    save_model_connections(path, pruned)
+
+    written = yaml.safe_load(path.read_text(encoding="utf-8"))["agent"]["profiles"]
+    assert written == {1: {"model": "openai/gpt-4o"}}
+
+
+def test_a_raw_entry_keeps_its_own_nested_keys_through_a_save(tmp_path: Path) -> None:
+    """`unparsed` is held opaquely, so the writer must not rewrite the
+    keys *inside* it either — the operator's text is what they have to
+    repair."""
+    path = _write(
+        tmp_path,
+        """
+agent:
+  active: good
+  profiles:
+    good:
+      model: openai/gpt-4o
+    broken:
+      model: openai/gpt-4o
+      options:
+        1: one
+""",
+    )
+    profiles = load_config(path).model_connections
+    assert profiles.profiles["broken"].options_error is not None
+
+    save_model_connections(path, profiles)
+    written = yaml.safe_load(path.read_text(encoding="utf-8"))["agent"]["profiles"]
+    assert written["broken"]["options"] == {1: "one"}

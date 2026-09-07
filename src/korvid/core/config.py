@@ -283,15 +283,25 @@ class ModelConnectionsConfig:
     operator still has to repair. The values are the objects `yaml.safe_load`
     already built for this same file, held opaquely and never interpreted,
     so retaining them costs nothing the loader had not already allocated.
+
+    The *keys* are opaque for the same reason. `yaml.safe_load` builds
+    integer, boolean, float, null and date keys as readily as strings, and
+    `1:` is not the profile named `"1"`: recording it as one would rename
+    the operator's entry, collide with a real `"1"` profile (whose
+    modelled half the raw one then outranks on write), and hand the next
+    load a key it accepts as a valid profile name — korvid promoting text
+    it refused into a runtime connection by itself. So the file's own key
+    is kept, and `profiles` stays string-only.
     """
 
     active: str | None = None
     profiles: Mapping[str, ModelConnectionConfig] = field(default_factory=dict)
-    #: Raw, unmodelled `agent.profiles` entries keyed by file key. Opaque;
-    #: never read by the runtime. Not compared: two configurations that
-    #: differ only in text korvid refused to interpret are the same
-    #: configuration as far as the agent is concerned.
-    unparsed: Mapping[str, object] = field(default_factory=dict, compare=False)
+    #: Raw, unmodelled `agent.profiles` entries under the file's own key —
+    #: which YAML does not promise is a string. Opaque; never read by the
+    #: runtime. Not compared: two configurations that differ only in text
+    #: korvid refused to interpret are the same configuration as far as
+    #: the agent is concerned.
+    unparsed: Mapping[object, object] = field(default_factory=dict, compare=False)
 
     __hash__ = None  # type: ignore[assignment]  # frozen but genuinely unhashable
 
@@ -309,6 +319,21 @@ class ModelConnectionsConfig:
         if self.active is None:
             return None
         return self.profiles.get(self.active)
+
+    @property
+    def names(self) -> frozenset[str]:
+        """Every profile *name* this set occupies, modelled or not.
+
+        What a generated name must not collide with, and what a screen can
+        list: the modelled profiles plus the string keys of `unparsed`. A
+        non-string `unparsed` key names nothing — no operator can type it
+        and no generator can produce it — so it cannot collide, and
+        folding it in with `str()` would only reintroduce the confusion
+        between `1` and `"1"` that keeping the file's key avoids.
+        """
+        return frozenset(self.profiles) | frozenset(
+            name for name in self.unparsed if isinstance(name, str)
+        )
 
 
 @dataclass(frozen=True)
@@ -920,9 +945,14 @@ def _thaw_config_value(value: object) -> object:
     `RepresenterError`; tuples happen to serialize (SafeRepresenter maps
     `tuple` to `represent_list`) but round-trip back as lists anyway, so
     both are converted here rather than relying on that.
+
+    Keys are passed through untouched. A modelled block's keys are
+    already strings — the bounded validator refuses anything else — and a
+    raw `unparsed` entry is the operator's own text, which this must hand
+    back exactly as `yaml.safe_load` built it.
     """
     if isinstance(value, Mapping):
-        return {str(key): _thaw_config_value(item) for key, item in value.items()}
+        return {key: _thaw_config_value(item) for key, item in value.items()}
     if isinstance(value, tuple | list):
         return [_thaw_config_value(item) for item in value]
     return value
@@ -997,7 +1027,7 @@ def save_model_connections(
         raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     agent_value = raw.get("agent")
     agent: dict[str, Any] = dict(agent_value) if isinstance(agent_value, dict) else {}
-    written: dict[str, Any] = {}
+    written: dict[object, Any] = {}
     for name, profile in profiles.profiles.items():
         # The raw half outranks the modelled one. A profile whose `auth`
         # or `options` was rejected lives in *both*: `profiles` holds the
@@ -1010,9 +1040,11 @@ def save_model_connections(
             if raw_entry is _NO_UNPARSED_ENTRY
             else _thaw_config_value(raw_entry)
         )
-    for name, entry in profiles.unparsed.items():
-        if name not in written:
-            written[name] = _thaw_config_value(entry)
+    for key, entry in profiles.unparsed.items():
+        # `key`, not `name`: the file's key for an unmodelled entry is
+        # whatever YAML built, and it is written back as that.
+        if key not in written:
+            written[key] = _thaw_config_value(entry)
     agent["active"] = profiles.active
     agent["profiles"] = written
     if model_tier is not KEEP_MODEL_TIER:
@@ -1315,7 +1347,7 @@ def _parse_model_connections(
         warnings.append("agent.profiles is not a mapping; no agent profile was loaded")
         return ModelConnectionsConfig()
     profiles: dict[str, ModelConnectionConfig] = {}
-    unparsed: dict[str, object] = {}
+    unparsed: dict[object, object] = {}
     reported_invalid_name = False
     for raw_name, raw_entry in raw_profiles.items():
         name = raw_name if type(raw_name) is str else ""
@@ -1325,7 +1357,11 @@ def _parse_model_connections(
                     "agent.profiles contains an invalid profile name; the entry was ignored"
                 )
                 reported_invalid_name = True
-            unparsed[str(raw_name)] = raw_entry
+            # Under the file's own key, not `str(raw_name)`: see
+            # `ModelConnectionsConfig`. A stringified key would rename the
+            # entry, collide with a real profile of that name, and load
+            # back as a valid profile name the next time.
+            unparsed[raw_name] = raw_entry
             continue
         parsed = _parse_profile_entry(name, raw_entry, warnings)
         if parsed is None:

@@ -169,6 +169,22 @@ async def test_an_unparsed_only_profile_set_still_opens_the_manager(tmp_path: Pa
     assert isinstance(screen, ProfileManagerScreen)
 
 
+async def test_a_profile_set_holding_only_non_name_keys_opens_the_wizard(
+    tmp_path: Path,
+) -> None:
+    """`unparsed` keeps the file's own keys, and `1:` is not a name: the
+    manager cannot list it, activate it or repair it, so `:ai` opens the
+    wizard instead of an empty list. The entry still round-trips: the
+    wizard's save rebuilds the set with `replace`."""
+    env = _env(
+        tmp_path,
+        profiles=ModelConnectionsConfig(unparsed={1: {"no": "model"}}),
+    )
+    env.controller.handle_command([])
+    screen, _callback = env.ui.screens[-1]
+    assert isinstance(screen, AgentSetupScreen)
+
+
 def test_a_missing_agent_extra_reports_the_install_hint_and_does_not_crash(
     tmp_path: Path,
 ) -> None:
@@ -330,6 +346,19 @@ async def test_an_unparsed_entry_survives_an_activation(tmp_path: Path) -> None:
     _activate(env, "staging")
 
     assert dict(saver.calls[-1].unparsed) == {"broken": {"raw": "value"}}
+
+
+async def test_a_key_that_is_not_a_name_survives_an_activation(tmp_path: Path) -> None:
+    """The round-trip is what preserves it: an entry korvid filed under a
+    key it refuses to read as a name is invisible to this controller, so
+    only carrying the whole set through the writer keeps it on disk."""
+    profiles = _profiles(unparsed={1: {"raw": "value"}})
+    saver = _Saver()
+    env = _env(tmp_path, profiles=profiles, rebuild=_rebuilding(FakeSession()), saver=saver)
+    env.controller.handle_command([])
+    _activate(env, "staging")
+
+    assert dict(saver.calls[-1].unparsed) == {1: {"raw": "value"}}
 
 
 async def test_a_cancelled_manager_changes_nothing(tmp_path: Path) -> None:

@@ -772,7 +772,10 @@ class AgentUiController:
         """`:ai` — the profile manager when profiles exist, setup otherwise.
 
         A first run has nothing to list, so it opens the wizard directly
-        rather than showing an empty list with nothing to pick.
+        rather than showing an empty list with nothing to pick. `names`
+        rather than `unparsed` decides: an entry filed under a key that is
+        not a name (`1:`) is not listable, and it survives the wizard's
+        save either way, which rebuilds the set with `replace`.
         """
         catalog = self._catalog
         if catalog is None:
@@ -782,7 +785,7 @@ class AgentUiController:
                 markup=False,
             )
             return
-        if self._profiles.profiles or self._profiles.unparsed:
+        if self._profiles.names:
             self._ui.push_screen(
                 ProfileManagerScreen(
                     self._profiles,
@@ -876,7 +879,7 @@ class AgentUiController:
         Built with `replace` so everything else the file round-trips —
         `unparsed` included — survives.
         """
-        taken = set(self._profiles.profiles) | set(self._profiles.unparsed)
+        taken = self._profiles.names
         name = suggest_profile_name(result.profile.model, taken)
         profiles = dict(self._profiles.profiles)
         profiles[name] = result.profile

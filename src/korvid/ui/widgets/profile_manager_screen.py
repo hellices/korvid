@@ -111,9 +111,20 @@ def _row_label(
 
 
 def _ordered_names(profiles: ModelConnectionsConfig) -> list[str]:
-    """Parsed profiles first (insertion order), then unparsed-only (insertion order)."""
+    """Parsed profiles first (insertion order), then unparsed-only (insertion order).
+
+    Only string keys are listed. `unparsed` holds the file's own keys, and
+    YAML builds integer, boolean and date keys too; those name nothing the
+    operator can activate, edit or delete here, and mixing them into this
+    list would render `1` beside the profile `"1"` as if they were the
+    same row. They are still round-tripped verbatim by every save.
+    """
     parsed_names = list(profiles.profiles)
-    unparsed_only = [n for n in profiles.unparsed if n not in profiles.profiles]
+    unparsed_only = [
+        name
+        for name in profiles.unparsed
+        if isinstance(name, str) and name not in profiles.profiles
+    ]
     return parsed_names + unparsed_only
 
 
@@ -377,7 +388,7 @@ class ProfileManagerScreen(ModalScreen["ProfileManagerResult | None"]):
         if result is None:
             return
         # Replace in-place preserving insertion order
-        remaining_names = (set(self._profiles.profiles) | set(self._profiles.unparsed)) - {name}
+        remaining_names = self._profiles.names - {name}
         target_name = (
             name
             if existing is not None or is_valid_profile_name(name)
@@ -416,8 +427,7 @@ class ProfileManagerScreen(ModalScreen["ProfileManagerResult | None"]):
         if result is None:
             return
         # Append with a generated name
-        existing_names = set(self._profiles.profiles) | set(self._profiles.unparsed)
-        new_name = suggest_profile_name(result.model, existing_names)
+        new_name = suggest_profile_name(result.model, self._profiles.names)
         new_profiles = dict(self._profiles.profiles)
         new_profiles[new_name] = result
         new_config = ModelConnectionsConfig(
