@@ -11,6 +11,9 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
+import pytest
+from textual.widgets import DataTable
+
 from korvid.core.audit import AuditLog
 from korvid.core.config import KorvidConfig
 from korvid.core.secrets import MASK_PLACEHOLDER
@@ -21,6 +24,7 @@ from korvid.k8s.models import GenericSummary
 from korvid.ui.app import KorvidApp
 from korvid.ui.widgets.secret_screen import SecretScreen
 
+from .rendering import painted_text
 from .waits import until
 
 _SECRETS_META = ResourceMeta("Secret", "secrets", "", "v1", True, ())
@@ -178,6 +182,34 @@ async def test_reveal_decodes_and_audits(tmp_path: Path) -> None:
             assert "password" in entry["detail"]
             # timestamp present (who/when/which key)
             assert entry["timestamp"]
+
+
+@pytest.mark.parametrize("size", [(80, 24), (120, 40)])
+async def test_reveal_paints_complete_value_and_remasks(
+    tmp_path: Path, size: tuple[int, int]
+) -> None:
+    value = "visible-[red]-literal-secret"
+    manifest = {
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": {"name": "db-creds", "namespace": "default"},
+        "data": {"password": _b64(value)},
+    }
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_secret_app(audit=AuditLog(audit_path), manifest=manifest)
+    async with app.run_test(size=size) as pilot:
+        screen = await _open_secret_screen(pilot, app)
+        table = screen.query_one(DataTable)
+        assert MASK_PLACEHOLDER in painted_text(table)
+        assert value not in painted_text(table)
+        await pilot.press("x")
+        await until(pilot, lambda: value in _screen_text(screen), label="value revealed")
+        await until(pilot, lambda: len(_audit_entries(audit_path)) == 2, label="reveal audited")
+        assert value in painted_text(table)
+        await pilot.press("x")
+        await until(pilot, lambda: value not in _screen_text(screen), label="value hidden")
+        assert value not in painted_text(table)
+        assert MASK_PLACEHOLDER in painted_text(table)
 
 
 async def test_reveal_toggles_back_to_masked(tmp_path: Path) -> None:

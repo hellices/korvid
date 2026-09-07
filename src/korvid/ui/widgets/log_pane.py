@@ -72,7 +72,7 @@ class LogPane(Widget):
         padding: 0 1;
     }
     LogPane #log-search {
-        height: 1;
+        height: 3;
         display: none;
     }
     LogPane #log-panels {

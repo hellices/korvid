@@ -16,7 +16,7 @@ import os
 import posixpath
 import tarfile
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,12 +30,15 @@ logger = logging.getLogger(__name__)
 #: stdin frame while uploading.
 _COPY_CHUNK = 64 * 1024
 
-#: Exec channel numbers (v4.channel.k8s.io): every websocket frame is
+#: Exec channel numbers (v4/v5.channel.k8s.io): every websocket frame is
 #: prefixed with one byte naming the stream it belongs to.
 _STDIN_CHANNEL = 0
 _STDOUT_CHANNEL = 1
 _STDERR_CHANNEL = 2
 _ERROR_CHANNEL = 3
+
+#: v5 closes stdin independently of the websocket, preserving the outcome stream.
+_STDIN_EOF = b"\xff\x00"
 
 #: How long to keep draining server frames after a mid-send transport
 #: failure: long enough to catch the error the remote tar reported (its
@@ -43,9 +46,8 @@ _ERROR_CHANNEL = 3
 _UPLOAD_DRAIN_GRACE = 0.5
 
 #: How long to wait for the channel-3 status after the whole archive was
-#: sent. The remote tar exits on the archive's end-of-archive marker (no
-#: stdin EOF needed), so the verdict normally arrives promptly; a tar that
-#: never reports leaves the outcome unknown and the upload is failed.
+#: sent and stdin closed. Some tar implementations drain stdin past the
+#: archive's end marker, so its EOF must precede waiting for the verdict.
 _UPLOAD_VERDICT_TIMEOUT = 10.0
 
 #: Cap on buffered remote stderr; only the tail matters for diagnostics.
@@ -400,14 +402,19 @@ def _as_bytes(data: object) -> bytes:
 
 
 def _parse_error_channel(payload: bytes) -> str | None:
-    """Return the failure message from a channel-3 status, None on success."""
+    """Return the failure message from a channel-3 status, None on success.
+
+    Empty or malformed status frames fail every exec operation, including reads.
+    """
     text = payload.decode("utf-8", errors="replace").strip()
     if not text:
-        return None
+        return "invalid exec outcome: expected an explicit Success status"
     try:
         status: dict[str, Any] = json.loads(text)
     except ValueError:
         return text
+    if not isinstance(status, dict):
+        return f"invalid exec outcome: {text}"
     if status.get("status") == "Success":
         return None
     message = status.get("message") or status.get("reason") or text
@@ -428,7 +435,7 @@ class _FrameSink:
     def feed(self, data: object) -> bytes:
         """Consume one frame; returns any stdout payload it carried."""
         frame = _as_bytes(data)
-        if len(frame) < 2:
+        if not frame:
             return b""
         channel, payload = frame[0], frame[1:]
         if channel == _STDOUT_CHANNEL:
@@ -555,6 +562,60 @@ def _with_permission_hint(message: str, remote_path: str) -> str:
     return f"{message}\n{hint}" if hint else message
 
 
+def _require_upload_protocol(ws: Any) -> None:
+    """Refuse uploads before sending file data unless stdin can be half-closed."""
+    protocol = getattr(ws, "protocol", None)
+    if protocol is None:
+        # WsApiClient supplies an HTTP header, not aiohttp's protocols list:
+        # ws.protocol stays None. Its handshake response is the only available
+        # negotiated value; missing response metadata must fail closed.
+        response = getattr(ws, "_response", None)
+        headers = getattr(response, "headers", None)
+        if isinstance(headers, Mapping):
+            protocol = headers.get("Sec-WebSocket-Protocol")
+    if protocol != "v5.channel.k8s.io":
+        raise TransferError(
+            "upload requires v5.channel.k8s.io for stdin EOF "
+            f"(negotiated {protocol or 'no protocol'}); no file data sent"
+        )
+
+
+async def _await_upload_verdict(
+    reader: asyncio.Task[None], sink: _FrameSink, remote_path: str
+) -> None:
+    """Require the remote outcome, distinguishing timeout, closure and transport errors."""
+    done, _pending = await asyncio.wait({reader}, timeout=_UPLOAD_VERDICT_TIMEOUT)
+    if not done:
+        message = "upload sent, but timed out waiting for the remote outcome"
+    else:
+        try:
+            reader.result()
+        except OSError as exc:
+            raise TransferError(
+                _with_permission_hint(sink.error_message(f"connection lost: {exc}"), remote_path)
+            ) from exc
+        if sink.verdict:
+            return
+        message = "upload sent, but the connection closed without reporting an outcome"
+    raise TransferError(_with_permission_hint(sink.error_message(message), remote_path))
+
+
+async def _send_upload_eof(
+    ws: Any, reader: asyncio.Task[None], sink: _FrameSink, remote_path: str
+) -> None:
+    """Close stdin after the archive, allowing a peer that already reported success."""
+    try:
+        await ws.send_bytes(_STDIN_EOF)
+    except OSError as exc:
+        # Some tar implementations exit at the archive marker and close the
+        # socket before EOF. Only a completed Success verdict can settle that race.
+        done, _pending = await asyncio.wait({reader}, timeout=_UPLOAD_DRAIN_GRACE)
+        if reader not in done or not sink.verdict or sink.failure is not None:
+            raise TransferError(
+                _with_permission_hint(sink.error_message(f"connection lost: {exc}"), remote_path)
+            ) from exc
+
+
 async def upload(
     open_exec: OpenExec,
     local_path: Path,
@@ -565,11 +626,10 @@ async def upload(
 
     The remote side runs ``tar xf - -C <parent>``; the local file is packed
     into a single-member archive (named after the remote basename) and sent
-    over the stdin channel. tar exits once it reads the archive's
-    end-of-archive marker, after which the server reports the exec outcome
-    on the error channel — an explicit Success verdict is required before
-    the upload is reported (and audited) as successful. Returns the file's
-    byte count.
+    over the stdin channel. Uploads require a negotiated v5 stream so stdin
+    can be closed after the archive without losing the error channel. An
+    explicit Success verdict is required before the upload is reported (and
+    audited) as successful. Returns the file's byte count.
     """
     arcname = posixpath.basename(remote_path)
     # mkstemp + close: pack_file reopens the path by name, which a
@@ -580,6 +640,7 @@ async def upload(
     try:
         size = await _await_thread(pack_file, local_path, arcname, archive_path)
         async with open_exec(upload_command(remote_path), True) as ws:
+            _require_upload_protocol(ws)
             sink = _FrameSink()
 
             async def _drain() -> None:
@@ -602,10 +663,8 @@ async def upload(
                             sink.error_message(f"connection lost: {exc}"), remote_path
                         )
                     ) from exc
-                # Wait for the server's verdict: tar exits on the archive's
-                # end-of-archive marker, then the status frame arrives and
-                # _drain returns (or the server closes the websocket).
-                await asyncio.wait({reader}, timeout=_UPLOAD_VERDICT_TIMEOUT)
+                await _send_upload_eof(ws, reader, sink, remote_path)
+                await _await_upload_verdict(reader, sink, remote_path)
             finally:
                 reader.cancel()
                 # Cancellation must be observed before the websocket context
@@ -614,17 +673,6 @@ async def upload(
             if sink.failure is not None:
                 raise TransferError(
                     _with_permission_hint(sink.error_message("upload failed"), remote_path)
-                )
-            if not sink.verdict:
-                # The stderr may still carry the permission story even when
-                # the server dropped before any channel-3 verdict.
-                raise TransferError(
-                    _with_permission_hint(
-                        sink.error_message(
-                            "upload sent, but the connection closed without reporting an outcome"
-                        ),
-                        remote_path,
-                    )
                 )
     finally:
         archive_path.unlink(missing_ok=True)

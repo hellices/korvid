@@ -442,6 +442,9 @@ class KubeClient(ReadOps, WriteOps):
         `korvid.core.transfer` speaks the frame protocol on top of it. A
         dedicated ``WsApiClient`` is created per session — it shares the
         kubeconfig ``connect()`` loaded — and closed with the session.
+        Stdin sessions request v5 for independent stdin EOF; the transfer
+        checks the negotiated protocol before sending. Read-only sessions
+        retain the client's default v4 protocol.
         """
         if self._core_v1 is None or self._api is None:
             raise RuntimeError("connect() first")
@@ -449,7 +452,11 @@ class KubeClient(ReadOps, WriteOps):
 
         @asynccontextmanager
         async def _session() -> AsyncIterator[Any]:
-            ws_api = WsApiClient(configuration)
+            ws_api = WsApiClient(
+                configuration,
+                header_name="sec-websocket-protocol" if stdin else None,
+                header_value="v5.channel.k8s.io" if stdin else None,
+            )
             try:
                 core = k8s_client.CoreV1Api(ws_api)
                 kwargs: dict[str, Any] = {

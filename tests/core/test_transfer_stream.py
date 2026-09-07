@@ -13,6 +13,7 @@ import tempfile
 import threading
 from collections.abc import AsyncIterator
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -54,10 +55,18 @@ class FakeMsg:
 class FakeWs:
     """Duck-typed aiohttp websocket: iterate frames, record sent bytes."""
 
-    def __init__(self, frames: list[bytes | str], *, fail_send: bool = False) -> None:
+    def __init__(
+        self,
+        frames: list[bytes | str],
+        *,
+        fail_send: bool = False,
+        protocol: str | None = "v5.channel.k8s.io",
+    ) -> None:
         self._frames = list(frames)
         self.sent: list[bytes] = []
         self.closed = False
+        self.protocol = protocol
+        self._response: object = SimpleNamespace(headers={})
         self._fail_send = fail_send
 
     def __aiter__(self) -> FakeWs:
@@ -86,9 +95,42 @@ class FakeExec:
 
         @contextlib.asynccontextmanager
         async def _cm() -> AsyncIterator[FakeWs]:
-            yield self.ws
+            try:
+                yield self.ws
+            finally:
+                self.ws.closed = True
 
         return _cm()
+
+
+class EofWs(FakeWs):
+    """BusyBox-like peer: its outcome is unavailable until stdin closes."""
+
+    def __init__(self, *, block_send: bool = False) -> None:
+        super().__init__([b"\x03" + SUCCESS])
+        self.eof_received = asyncio.Event()
+        self.outcome_ready = asyncio.Event()
+        self.reader_started = asyncio.Event()
+        self.reader_finished = asyncio.Event()
+        self.send_started = asyncio.Event()
+        self.block_send = block_send
+
+    async def __anext__(self) -> FakeMsg:
+        self.reader_started.set()
+        try:
+            await self.eof_received.wait()
+            await self.outcome_ready.wait()
+            return await super().__anext__()
+        finally:
+            self.reader_finished.set()
+
+    async def send_bytes(self, data: bytes) -> None:
+        self.send_started.set()
+        if self.block_send:
+            await asyncio.Event().wait()
+        await super().send_bytes(data)
+        if data == b"\xff\x00":
+            self.eof_received.set()
 
 
 class TestDownload:
@@ -100,7 +142,8 @@ class TestDownload:
                 b"\x01" + archive[:mid],
                 b"\x01" + archive[mid:],
                 b"\x03" + SUCCESS,
-            ]
+            ],
+            protocol="v4.channel.k8s.io",
         )
         open_exec = FakeExec(ws)
         dest = tmp_path / "app.log"
@@ -169,6 +212,27 @@ class TestDownload:
             await download(FakeExec(ws), "/var/log/app.log", dest)
         assert not dest.exists()
 
+    @pytest.mark.parametrize("status", [b"", b" ", b"null", b"[]"])
+    async def test_invalid_status_does_not_create_destination(
+        self, tmp_path: Path, status: bytes
+    ) -> None:
+        archive = tar_bytes("app.log", b"data")
+        ws = FakeWs([b"\x01" + archive, b"\x03" + status], protocol="v4.channel.k8s.io")
+        dest = tmp_path / "app.log"
+        with pytest.raises(TransferError, match="invalid exec outcome"):
+            await download(FakeExec(ws), "/var/log/app.log", dest)
+        assert not dest.exists()
+        assert list(tmp_path.iterdir()) == []
+        assert ws.closed
+
+    async def test_empty_data_frames_do_not_change_download(self, tmp_path: Path) -> None:
+        archive = tar_bytes("app.log", b"data")
+        ws = FakeWs([b"", b"\x01", b"\x02", b"\x01" + archive, b"\x03" + SUCCESS])
+        dest = tmp_path / "app.log"
+        assert await download(FakeExec(ws), "/var/log/app.log", dest) == 4
+        assert dest.read_bytes() == b"data"
+        assert ws.closed
+
 
 class TestUpload:
     async def test_sends_tar_on_stdin_channel(self, tmp_path: Path) -> None:
@@ -179,14 +243,255 @@ class TestUpload:
         sent_bytes = await upload(open_exec, src, "/opt/tools/dbg.sh")
         assert sent_bytes == len(b"echo hi\n")
         assert open_exec.calls == [(["tar", "xf", "-", "-C", "/opt/tools"], True)]
-        assert all(frame[:1] == b"\x00" for frame in ws.sent)
-        payload = b"".join(frame[1:] for frame in ws.sent)
+        assert ws.sent[-1] == b"\xff\x00"
+        assert all(frame[:1] == b"\x00" for frame in ws.sent[:-1])
+        payload = b"".join(frame[1:] for frame in ws.sent[:-1])
         with tarfile.open(fileobj=io.BytesIO(payload)) as tf:
             member = tf.getmembers()[0]
             assert member.name == "dbg.sh"
             extracted = tf.extractfile(member)
             assert extracted is not None
             assert extracted.read() == b"echo hi\n"
+
+    async def test_waits_for_success_after_stdin_eof(self, tmp_path: Path) -> None:
+        src = tmp_path / "large"
+        content = b"x" * (128 * 1024)
+        src.write_bytes(content)
+        ws = EofWs()
+        task = asyncio.create_task(upload(FakeExec(ws), src, "/opt/large"))
+        try:
+            await asyncio.wait_for(ws.eof_received.wait(), timeout=5)
+            assert not task.done(), "sending EOF is not itself a success verdict"
+            assert len(ws.sent) > 2
+            assert ws.sent[-1] == b"\xff\x00"
+            assert all(frame[0] == 0 for frame in ws.sent[:-1])
+            with tarfile.open(fileobj=io.BytesIO(b"".join(f[1:] for f in ws.sent[:-1]))) as tf:
+                extracted = tf.extractfile("large")
+                assert extracted is not None
+                assert extracted.read() == content
+            ws.outcome_ready.set()
+            assert await asyncio.wait_for(task, timeout=5) == len(content)
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        assert ws.closed
+        assert ws.reader_finished.is_set()
+
+    @pytest.mark.parametrize("protocol", [None, "v4.channel.k8s.io", "v3.channel.k8s.io"])
+    async def test_unsupported_protocol_sends_no_archive(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, protocol: str | None
+    ) -> None:
+        spool = tmp_path / "spool"
+        spool.mkdir()
+        monkeypatch.setattr(tempfile, "tempdir", str(spool))
+        src = tmp_path / "f"
+        src.write_bytes(b"private file")
+        ws = FakeWs([b"\x03" + SUCCESS], protocol=protocol)
+        with pytest.raises(TransferError, match=r"requires v5\.channel\.k8s\.io"):
+            await upload(FakeExec(ws), src, "/opt/f")
+        assert ws.sent == []
+        assert ws.closed
+        assert list(spool.iterdir()) == []
+
+    async def test_reads_negotiated_response_header(self, tmp_path: Path) -> None:
+        src = tmp_path / "f"
+        src.write_bytes(b"x")
+        # WsApiClient sets the request header, not aiohttp's protocols list,
+        # so the public ws.protocol is None even after a v5 handshake.
+        ws = FakeWs([b"\x03" + SUCCESS], protocol=None)
+        ws._response = SimpleNamespace(headers={"Sec-WebSocket-Protocol": "v5.channel.k8s.io"})
+        assert await upload(FakeExec(ws), src, "/opt/f") == 1
+        assert ws.sent[-1] == b"\xff\x00"
+
+    @pytest.mark.parametrize(
+        "response",
+        [
+            None,
+            SimpleNamespace(),
+            SimpleNamespace(headers=None),
+            SimpleNamespace(headers={}),
+            SimpleNamespace(headers="not-a-mapping"),
+        ],
+        ids=[
+            "missing-response",
+            "missing-headers",
+            "none-headers",
+            "empty-headers",
+            "invalid-headers",
+        ],
+    )
+    async def test_unavailable_response_headers_send_no_archive(
+        self, tmp_path: Path, response: object
+    ) -> None:
+        src = tmp_path / "f"
+        src.write_bytes(b"x")
+        ws = FakeWs([b"\x03" + SUCCESS], protocol=None)
+        if response is None:
+            del ws._response
+        else:
+            ws._response = response
+        with pytest.raises(TransferError, match=r"requires v5.*no file data sent"):
+            await upload(FakeExec(ws), src, "/opt/f")
+        assert ws.sent == []
+        assert ws.closed
+
+    @pytest.mark.parametrize(
+        "status", [b"", b" ", b"null", b"[]", b"{}", b'"Success"', b"not json"]
+    )
+    async def test_requires_explicit_success_status(self, tmp_path: Path, status: bytes) -> None:
+        src = tmp_path / "f"
+        src.write_bytes(b"x")
+        ws = FakeWs([b"\x03" + status])
+        expected = "invalid exec outcome" if not status.strip() else r".+"
+        with pytest.raises(TransferError, match=expected):
+            await upload(FakeExec(ws), src, "/opt/f")
+        assert ws.closed
+
+    async def test_verdict_timeout_is_not_reported_as_connection_closed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        src = tmp_path / "f"
+        src.write_bytes(b"x")
+        ws = EofWs()
+        monkeypatch.setattr("korvid.core.transfer._UPLOAD_VERDICT_TIMEOUT", 0.01)
+        with pytest.raises(TransferError, match="timed out waiting for") as excinfo:
+            await upload(FakeExec(ws), src, "/opt/f")
+        assert "connection closed" not in str(excinfo.value)
+        assert ws.closed
+        assert ws.reader_finished.is_set()
+
+    @pytest.mark.parametrize(
+        ("error", "expected"),
+        [
+            (ConnectionResetError("reader disconnected"), TransferError),
+            (RuntimeError("reader disconnected"), RuntimeError),
+        ],
+        ids=["transport-normalized", "unexpected-propagated"],
+    )
+    async def test_reader_failures_are_not_success(
+        self, tmp_path: Path, error: Exception, expected: type[Exception]
+    ) -> None:
+        class BrokenReader(FakeWs):
+            async def __anext__(self) -> FakeMsg:
+                raise error
+
+        src = tmp_path / "f"
+        src.write_bytes(b"x")
+        ws = BrokenReader([])
+        with pytest.raises(expected, match="reader disconnected") as excinfo:
+            await upload(FakeExec(ws), src, "/opt/f")
+        if expected is TransferError:
+            assert excinfo.value.__cause__ is error
+        else:
+            assert excinfo.value is error
+        assert ws.closed
+
+    async def test_eof_send_failure_after_remote_success(self, tmp_path: Path) -> None:
+        class CloseAfterSuccess(FakeWs):
+            def __init__(self) -> None:
+                super().__init__([b"\x03" + SUCCESS])
+                self.verdict_read = asyncio.Event()
+
+            async def __anext__(self) -> FakeMsg:
+                message = await super().__anext__()
+                self.verdict_read.set()
+                return message
+
+            async def send_bytes(self, data: bytes) -> None:
+                if data == b"\xff\x00":
+                    await asyncio.wait_for(self.verdict_read.wait(), timeout=5)
+                    raise ConnectionResetError("peer already completed")
+                await super().send_bytes(data)
+
+        src = tmp_path / "f"
+        src.write_bytes(b"complete file")
+        ws = CloseAfterSuccess()
+        assert await upload(FakeExec(ws), src, "/opt/f") == len(b"complete file")
+        assert ws.verdict_read.is_set()
+        assert ws.closed
+        with tarfile.open(fileobj=io.BytesIO(b"".join(frame[1:] for frame in ws.sent))) as tf:
+            extracted = tf.extractfile("f")
+            assert extracted is not None
+            assert extracted.read() == b"complete file"
+
+    @pytest.mark.parametrize(
+        ("frames", "expected"),
+        [
+            ([], "stdin close failed"),
+            ([b"\x03" + NOT_FOUND], "executable file not found"),
+            ([b"\x03"], "invalid exec outcome"),
+        ],
+        ids=["missing-verdict", "failure-verdict", "invalid-verdict"],
+    )
+    async def test_eof_send_failure_without_success_is_not_success(
+        self, tmp_path: Path, frames: list[bytes | str], expected: str
+    ) -> None:
+        class BrokenEof(FakeWs):
+            async def send_bytes(self, data: bytes) -> None:
+                if data == b"\xff\x00":
+                    raise ConnectionResetError("stdin close failed")
+                await super().send_bytes(data)
+
+        src = tmp_path / "f"
+        src.write_bytes(b"x")
+        ws = BrokenEof(frames)
+        with pytest.raises(TransferError, match=expected):
+            await upload(FakeExec(ws), src, "/opt/f")
+        assert ws.closed
+
+    async def test_eof_send_failure_with_pending_verdict_is_not_success(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        class PendingVerdict(EofWs):
+            async def send_bytes(self, data: bytes) -> None:
+                if data == b"\xff\x00":
+                    raise ConnectionResetError("stdin close failed")
+                await super().send_bytes(data)
+
+        monkeypatch.setattr("korvid.core.transfer._UPLOAD_DRAIN_GRACE", 0.01)
+        src = tmp_path / "f"
+        src.write_bytes(b"x")
+        ws = PendingVerdict()
+        with pytest.raises(TransferError, match="stdin close failed"):
+            await upload(FakeExec(ws), src, "/opt/f")
+        assert ws.closed
+        assert ws.reader_started.is_set()
+        assert ws.reader_finished.is_set()
+
+    async def test_archive_send_failure_is_not_overridden_by_success(self, tmp_path: Path) -> None:
+        src = tmp_path / "f"
+        src.write_bytes(b"x")
+        ws = FakeWs([b"\x03" + SUCCESS], fail_send=True)
+        with pytest.raises(TransferError, match="connection lost"):
+            await upload(FakeExec(ws), src, "/opt/f")
+        assert ws.sent == []
+        assert ws.closed
+
+    @pytest.mark.parametrize("block_send", [False, True], ids=["waiting-for-outcome", "sending"])
+    async def test_cancellation_closes_reader_session_and_spool(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, block_send: bool
+    ) -> None:
+        spool = tmp_path / "spool"
+        spool.mkdir()
+        monkeypatch.setattr(tempfile, "tempdir", str(spool))
+        src = tmp_path / "f"
+        src.write_bytes(b"x")
+        ws = EofWs(block_send=block_send)
+        task = asyncio.create_task(upload(FakeExec(ws), src, "/opt/f"))
+        try:
+            await asyncio.wait_for(ws.reader_started.wait(), timeout=5)
+            await asyncio.wait_for(ws.send_started.wait(), timeout=5)
+            if not block_send:
+                await asyncio.wait_for(ws.eof_received.wait(), timeout=5)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError, match=r"^$"):
+                await task
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        assert ws.reader_finished.is_set()
+        assert ws.closed
+        assert list(spool.iterdir()) == []
 
     async def test_spool_archive_removed_even_on_failure(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -381,7 +686,7 @@ class TestListRemoteDir:
 
     async def test_lists_entries_dirs_first(self) -> None:
         listing = b"app.log\nconfig/\n.hidden\nlib/\n"
-        ws = FakeWs([b"\x01" + listing, b"\x03" + SUCCESS])
+        ws = FakeWs([b"\x01" + listing, b"\x03" + SUCCESS], protocol="v4.channel.k8s.io")
         entries = await list_remote_dir(FakeExec(ws), "/srv")
         assert entries == [
             RemoteEntry("config", True),
@@ -451,6 +756,14 @@ class TestListRemoteDir:
         ws = FakeWs([b"\x01" + b"partial\n"])
         with pytest.raises(TransferError, match="without reporting an outcome"):
             await list_remote_dir(FakeExec(ws), "/srv")
+
+    @pytest.mark.parametrize("status", [b"", b" ", b"null", b"[]"])
+    async def test_invalid_status_rejects_listing(self, status: bytes) -> None:
+        ws = FakeWs([b"\x01file\nsubdir/\n", b"\x03" + status], protocol="v4.channel.k8s.io")
+        with pytest.raises(TransferError, match="invalid exec outcome"):
+            await list_remote_dir(FakeExec(ws), "/srv")
+        assert ws.closed
+        assert ws.sent == []
 
     async def test_symlink_marker_stripped_as_file(self) -> None:
         # -p suffixes only real directories; a dangling `@`-free symlink to a

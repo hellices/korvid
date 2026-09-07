@@ -8,6 +8,9 @@ from collections.abc import AsyncGenerator, AsyncIterator
 from datetime import UTC, datetime
 from typing import Any
 
+import pytest
+from textual.widgets import Input
+
 from korvid.core.config import KorvidConfig
 from korvid.core.store import ResourceStore
 from korvid.core.watch import WatchManager
@@ -18,6 +21,7 @@ from korvid.ui.app import KorvidApp
 from korvid.ui.widgets.log_pane import LogPane
 from korvid.ui.widgets.resource_table import ResourceTable
 
+from .rendering import painted_text
 from .waits import until
 
 # ---------------------------------------------------------------------------
@@ -194,6 +198,24 @@ def _titles_visible(app: KorvidApp) -> bool:
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("size", [(80, 24), (120, 40), (180, 55)])
+async def test_log_search_query_is_painted_before_submission(size: tuple[int, int]) -> None:
+    app = make_app([_pod("api", containers=("main", "sidecar"))], FakeStream())
+    async with app.run_test(size=size) as pilot:
+        await until(pilot, lambda: app.query_one(ResourceTable).row_count == 1, label="pod row")
+        await pilot.press("l")
+        pane = app.query_one(LogPane)
+        await until(pilot, lambda: pane.display, label="log pane open")
+        await pilot.press("slash", *"visible-query")
+        search = pane.query_one("#log-search", Input)
+        await until(pilot, lambda: search.value == "visible-query", label="query entered")
+        assert "visible-query" in painted_text(search)
+        assert "visible-query" not in _richlog_text(app)
+        await pilot.press("escape")
+        await until(pilot, lambda: not search.display, label="search dismissed")
+        assert pane.display
 
 
 async def test_l_on_non_pods_kind_is_inert() -> None:

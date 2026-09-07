@@ -8,6 +8,8 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Any
 
+import pytest
+
 from korvid.core.config import KorvidConfig
 from korvid.core.store import ResourceStore, Summary
 from korvid.core.watch import WatchManager
@@ -143,6 +145,53 @@ async def test_cursor_on_healthy_pod_hides_hint_strip() -> None:
             lambda: not app.query_one(HintStrip).display,
             label="hint strip hidden again on api-1",
         )
+
+
+@pytest.mark.parametrize(
+    ("first_is_troubled", "pattern", "selected", "hint_visible"),
+    [
+        (True, "web-1", "web-1", False),
+        (False, "web-1", "web-1", True),
+        (True, "missing", None, False),
+    ],
+)
+async def test_filter_refreshes_hint_when_selected_pod_changes(
+    first_is_troubled: bool,
+    pattern: str,
+    selected: str | None,
+    hint_visible: bool,
+) -> None:
+    app, _ = make_app(
+        [
+            _pod("api-1", (_CRASH,) if first_is_troubled else ()),
+            _pod("web-1", () if first_is_troubled else (_CRASH,)),
+        ]
+    )
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: app.query_one(ResourceTable).row_count == 2, label="pod rows")
+        strip = app.query_one(HintStrip)
+        await until(pilot, lambda: strip.display == first_is_troubled, label="initial hint")
+        await pilot.press("slash", *pattern, "enter")
+        await until(pilot, lambda: _selected_name(app) == selected, label="filtered selection")
+        assert strip.display == hint_visible
+        if hint_visible:
+            assert "CrashLoopBackOff" in _strip_text(app)
+
+
+async def test_clearing_filter_preserves_hint_for_selected_pod() -> None:
+    app, _ = make_app([_pod("api-1"), _pod("web-1", (_CRASH,))])
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: app.query_one(ResourceTable).row_count == 2, label="pod rows")
+        await pilot.press("down")
+        strip = app.query_one(HintStrip)
+        await until(pilot, lambda: strip.display, label="troubled row selected")
+        await pilot.press("slash", *"web-1", "enter")
+        await until(pilot, lambda: app.query_one(ResourceTable).row_count == 1, label="filtered")
+        await pilot.press("slash", "escape")
+        await until(pilot, lambda: app.query_one(ResourceTable).row_count == 2, label="all rows")
+        assert _selected_name(app) == "web-1"
+        assert strip.display
+        assert "CrashLoopBackOff" in _strip_text(app)
 
 
 async def test_warning_event_is_fetched_and_appended() -> None:

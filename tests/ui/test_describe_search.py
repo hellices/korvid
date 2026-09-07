@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+import pytest
 from rich.text import Text
 from textual.widgets import Input, Static
 
@@ -22,6 +23,7 @@ from korvid.ui.widgets.describe_screen import (
 )
 from korvid.ui.widgets.resource_table import ResourceTable
 
+from .rendering import painted_text
 from .waits import until
 
 _PODS_META = ResourceMeta("Pod", "pods", "", "v1", True, ("po",))
@@ -209,6 +211,20 @@ def test_body_search_display_row_none_without_hits() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("size", [(80, 24), (120, 40), (180, 55)])
+async def test_describe_search_query_is_painted_before_submission(size: tuple[int, int]) -> None:
+    app = make_app()
+    async with app.run_test(size=size) as pilot:
+        screen = await _open_describe_screen(pilot, app)
+        await pilot.press("slash", *"visible-query")
+        search = screen.query_one("#describe-search", Input)
+        await until(pilot, lambda: search.value == "visible-query", label="query entered")
+        assert "visible-query" in painted_text(search)
+        await pilot.press("escape")
+        await until(pilot, lambda: not search.display, label="search dismissed")
+        assert app.screen is screen
+
+
 async def test_slash_opens_search_input_in_describe_screen() -> None:
     app = make_app()
     async with app.run_test() as pilot:
@@ -295,6 +311,22 @@ async def _open_pane(pilot: Any, app: KorvidApp) -> DescribePane:
     pane.show("Pod: my-pod", dict(_POD_MANIFEST), list(_EVENTS_LIST))
     await until(pilot, lambda: pane.display, label="describe pane visible")
     return pane
+
+
+@pytest.mark.parametrize("size", [(80, 24), (120, 40), (180, 55)])
+async def test_describe_pane_search_query_is_painted_before_submission(
+    size: tuple[int, int],
+) -> None:
+    app = make_app()
+    async with app.run_test(size=size) as pilot:
+        pane = await _open_pane(pilot, app)
+        await pilot.press("slash", *"visible-query")
+        search = pane.query_one("#describe-pane-search", Input)
+        await until(pilot, lambda: search.value == "visible-query", label="pane query entered")
+        assert "visible-query" in painted_text(search)
+        await pilot.press("escape")
+        await until(pilot, lambda: not search.display, label="pane search dismissed")
+        assert pane.display
 
 
 async def test_slash_routes_to_describe_pane_search_when_open() -> None:
