@@ -188,6 +188,13 @@ the agent component makes that carries no provider payload.
   same text pass as a result.
 - **Request caps** — results and retained history are bounded, and
   `OutboundPolicy` blocks an over-budget request rather than sending it.
+- **Response caps and completion evidence** — an adapter accepts a streamed
+  answer only against its protocol's own end-of-answer signal, stops reading
+  there, and drops the tool calls and token counts of a stream that ended
+  without one. What it buffers on the way is bounded too: one call's
+  arguments, the number of calls a response may open, held reasoning, and the
+  wizard's connection-test reply. Provider failures are reported in korvid's
+  written words, never by quoting a response body.
 - **Protected contexts and CA trust** — `agent.disable_in_protected` refuses
   prompts on [protected contexts](ops.md#protected-contexts), and
   `network.ca_bundle` makes internal TLS verify rather than be disabled

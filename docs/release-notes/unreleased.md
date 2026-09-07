@@ -251,6 +251,27 @@ are composed *after* the immutable safety contract and cannot widen it.
   names the budget it hit: `… [middle truncated — tier result budget]`. It
   is a small change to what the model sees, so a campaign comparing scores
   across this release is comparing two slightly different prompts.
+- **A cut-off answer is refused instead of reported as a whole one.** Each
+  built-in transport now needs its protocol's own end-of-answer signal
+  before it will report success: the wire's `[DONE]` for the Copilot
+  dialect, `done: true` for Ollama's native API, and — measured against
+  LiteLLM 1.98, which puts a `finish_reason` on the last chunk of *every*
+  stream — a `finish_reason` the provider itself sent for the shared
+  transport. Without it the turn ends with an error: text that really
+  streamed stays on screen, but the tool calls, the token counts and the
+  answer are not accepted. Reading also stops at that signal, so a host
+  that keeps writing cannot append to a turn korvid has closed. A whole
+  non-streaming response is unaffected; it is complete on its own terms.
+- **Hidden buffers are bounded.** One tool call's arguments (64 KiB), the
+  number of calls one response may open (64), the reasoning an adapter
+  holds for the next request (64 KiB) and the wizard's connection-test
+  reply (4,096 characters) all have limits now — they used to grow with
+  whatever the provider sent, out of reach of the per-response budget.
+  Reasoning that streams through is charged to that budget by its real
+  length rather than as one character. Every provider failure is reported
+  in korvid's own written words: a refused status, an unreadable frame or
+  a dropped connection no longer quotes the host's response body, which is
+  where a provider echoes the credential it just refused.
 
 ## Dependency note: `[agent]` grew
 

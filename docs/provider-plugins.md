@@ -293,6 +293,13 @@ overlong strings or out-of-range token counts raise
 JSON-encoded, not a nested mapping, and `ValidatedPluginProvider.aclose()`
 forwards to your provider once — duplicate closes are swallowed.
 
+korvid's own built-in transports hold themselves to the same numbers while
+they assemble a response: one call's accumulated arguments stop at 65,536
+characters and one response may open at most 64 calls. A built-in also
+refuses a streamed answer whose protocol never said it finished, so a plugin
+that emits `done` for a truncated stream is claiming more than korvid's own
+adapters do.
+
 These four are the whole contract. korvid's own transport yields one extra
 internal event so the `:ai payload` inspector can tell a request that reached
 the wire from one that never did; it is not part of API 2, and a third party

@@ -110,6 +110,17 @@ them.
 labels still appear in it. Press `e` to export it to a private, `0o600` file.
 [The threat model](threat-model.md) has the boundary and residual risks.
 
+## What counts as a finished answer
+
+A streamed answer is accepted only when the provider's own protocol says it
+finished — `[DONE]`, `done: true`, or a `finish_reason` the provider sent —
+and reading stops at that point. A stream that ends without it fails the
+turn: the text that arrived stays on screen, but its tool calls and token
+counts are discarded rather than treated as a complete response. What an
+adapter buffers before the turn's budget can see it is bounded as well: a
+call's arguments, how many calls one response may open, reasoning kept for
+the next request, and the wizard's connection-test reply.
+
 ## Connect a provider
 
 `:ai` (alias `:agent`) is the quickest path. On a first run it opens the setup
