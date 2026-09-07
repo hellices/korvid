@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, Final
 
@@ -311,6 +311,19 @@ _NO_CREDENTIAL: Final[Mapping[str, object]] = MappingProxyType({})
 ResolvedApiKey = str | _OmitApiKey | None
 
 
+def _no_credential() -> Mapping[str, object]:
+    """Return the shared empty credential mapping.
+
+    A factory rather than the constant itself because CPython 3.11's
+    `dataclasses` rejects any field default whose class has no `__hash__`,
+    and `mappingproxy` gained one only in 3.12 — so the constant imports
+    on a new interpreter and raises `ValueError` on the oldest supported
+    one. The one shared object is returned rather than a fresh proxy: it
+    is immutable, so sharing it is safe, and a default costs no allocation.
+    """
+    return _NO_CREDENTIAL
+
+
 # ---------------------------------------------------------------------------
 # RequestPlan
 # ---------------------------------------------------------------------------
@@ -344,7 +357,7 @@ class RequestPlan:
     #: carries the credential. They hold a *refreshing* callable, never a
     #: resolved secret, and they are applied last so no profile option can
     #: replace one.
-    credential: Mapping[str, object] = _NO_CREDENTIAL
+    credential: Mapping[str, object] = field(default_factory=_no_credential)
 
     def call_kwargs(
         self,

@@ -69,6 +69,19 @@ _RESERVED: frozenset[str] = frozenset(normalize_prefix(name) for name in RESERVE
 _NO_PARAMETERS: Mapping[str, object] = MappingProxyType({})
 
 
+def _no_parameters() -> Mapping[str, object]:
+    """Return the shared empty parameter mapping.
+
+    A factory rather than the constant itself because CPython 3.11's
+    `dataclasses` rejects any field default whose class has no `__hash__`,
+    and `mappingproxy` gained one only in 3.12 — so the constant imports
+    on a new interpreter and raises `ValueError` on the oldest supported
+    one. The one shared object is returned rather than a fresh proxy: it
+    is immutable, so sharing it is safe, and a default costs no allocation.
+    """
+    return _NO_PARAMETERS
+
+
 class _NoDeclaration(ValueError):
     """The loaded object carried no declaration.
 
@@ -102,7 +115,7 @@ class ResolvedCredential:
     profile outlives.
     """
 
-    parameters: Mapping[str, object] = _NO_PARAMETERS
+    parameters: Mapping[str, object] = field(default_factory=_no_parameters)
     #: Releases whatever the chain opened, or None when it opened nothing.
     #: Awaited by the provider's own `aclose`, so a rebuilt agent does not
     #: leak a credential's HTTP client.

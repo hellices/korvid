@@ -13,6 +13,7 @@ import pytest
 
 from korvid.providers.litellm_request import (
     _KORVID_OWNED_OPTIONS,
+    _NO_CREDENTIAL,
     OMIT_API_KEY,
     RESERVED_CALL_ARGUMENTS,
     RequestPlan,
@@ -914,3 +915,54 @@ def test_ordinary_model_parameters_still_reach_the_wire() -> None:
     assert kwargs["stop"] == ["\n\n"]
     assert kwargs["prompt_cache_key"] == "korvid"
     assert kwargs["extra_headers"] == {"x-team": "platform"}
+
+
+def test_the_default_credential_is_the_one_shared_immutable_mapping() -> None:
+    """The default has to be a `default_factory` — Python 3.11 rejects an
+    unhashable constant — but it must still hand back the shared read-only
+    object, so a plan built without a credential costs no allocation and
+    cannot become a channel into the next plan built the same way.
+    (`build_plan` snapshots a *supplied* chain instead; that is separate.)"""
+    first = RequestPlan(
+        model="openai/gpt-4o",
+        api_key="k",
+        base_url=None,
+        api_version=None,
+        extra=MappingProxyType({}),
+    )
+    second = RequestPlan(
+        model="openai/gpt-4o",
+        api_key="k",
+        base_url=None,
+        api_version=None,
+        extra=MappingProxyType({}),
+    )
+
+    assert first.credential is _NO_CREDENTIAL
+    assert second.credential is _NO_CREDENTIAL
+    with pytest.raises(TypeError, match="does not support item assignment"):
+        first.credential["api_key"] = "leaked"  # type: ignore[index]  # read-only by design
+
+
+def test_a_plan_built_without_a_credential_carries_an_empty_read_only_one() -> None:
+    """`build_plan` reaches the same default through its own parameter."""
+    plan = build_plan(model="openai/gpt-4o", api_key="k", base_url=None, options={}, supported=())
+
+    assert plan.credential == {}
+    with pytest.raises(TypeError, match="does not support item assignment"):
+        plan.credential["api_key"] = "leaked"  # type: ignore[index]  # read-only by design
+
+
+def test_an_explicit_credential_still_replaces_the_default() -> None:
+    """The factory must not intercept a constructor argument."""
+    plan = RequestPlan(
+        model="openai/gpt-4o",
+        api_key=OMIT_API_KEY,
+        base_url=None,
+        api_version=None,
+        extra=MappingProxyType({}),
+        credential=MappingProxyType({"azure_ad_token_provider": "callable"}),
+    )
+
+    assert plan.credential == {"azure_ad_token_provider": "callable"}
+    assert plan.credential is not _NO_CREDENTIAL

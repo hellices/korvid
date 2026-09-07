@@ -23,6 +23,7 @@ from __future__ import annotations
 import pytest
 
 from korvid.providers.provider_default import (
+    _NO_PARAMETERS,
     CredentialUnavailable,
     ProviderDefaultCredential,
     ProviderDefaultRegistry,
@@ -389,3 +390,26 @@ def test_a_loaded_declaration_rejected_by_validation_is_not_exposed(
     registry._register(wired)
 
     assert registry.resolve("acme/x") is wired
+
+
+def test_the_default_parameters_are_the_one_shared_immutable_mapping() -> None:
+    """A chain that contributes nothing gets the shared read-only mapping,
+    not a fresh dict a later caller could fill in for everyone. The field
+    reaches it through a factory because Python 3.11 refuses an unhashable
+    constant as a dataclass default."""
+    first = ResolvedCredential()
+    second = ResolvedCredential()
+
+    assert first.parameters is _NO_PARAMETERS
+    assert second.parameters is _NO_PARAMETERS
+    assert first.aclose is None
+    with pytest.raises(TypeError, match="does not support item assignment"):
+        first.parameters["api_key"] = "leaked"  # type: ignore[index]  # read-only by design
+
+
+def test_explicit_parameters_still_replace_the_default() -> None:
+    """The factory must not intercept a constructor argument."""
+    resolved = ResolvedCredential(parameters={"azure_ad_token_provider": "callable"})
+
+    assert resolved.parameters == {"azure_ad_token_provider": "callable"}
+    assert resolved.parameters is not _NO_PARAMETERS
