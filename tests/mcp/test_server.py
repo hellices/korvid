@@ -68,7 +68,7 @@ def isolate_registry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 def _write_private_registry(path: Path, document: object) -> None:
     fd = open_private_file(path)
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        json.dump(document, handle)
+        json.dump(document, handle, separators=(",", ":"))
 
 
 @asynccontextmanager
@@ -161,6 +161,11 @@ def test_publication_normalizes_registry_and_preserves_valid_instances(
             "extra": True,
         },
     )
+    monkeypatch.setattr(
+        endpoint_registry,
+        "_pid_alive",
+        lambda pid: pid in {os.getpid(), other_pid},
+    )
 
     server = make_server(endpoint_path=path)
     server._write_endpoint(7888)
@@ -173,11 +178,6 @@ def test_publication_normalizes_registry_and_preserves_valid_instances(
     assert len(warnings) == 1
     assert "ignored" in warnings[0]
     assert other_capability not in warnings[0]
-    monkeypatch.setattr(
-        endpoint_registry,
-        "_pid_alive",
-        lambda pid: pid in {os.getpid(), other_pid},
-    )
     assert read_endpoints(path) == [
         TUIEndpoint(other_pid, 7999, "http://127.0.0.1:7999/mcp", other_capability),
         TUIEndpoint(
@@ -283,6 +283,38 @@ def test_atomic_replacement_rejects_oversized_registry(tmp_path: Path) -> None:
     with pytest.raises(EndpointRegistryError, match="too large"):
         _replace_atomically(path, {"servers": {}, "padding": "x" * (256 * 1024)})
     assert not path.exists()
+
+
+def test_publication_prunes_dead_records_before_the_size_limit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "mcp-endpoint.json"
+    dead_capability = "dead-capability-token-0123456789ABCDEF"
+    dead_servers = {
+        str(pid): {
+            "pid": pid,
+            "port": 7999,
+            "url": "http://127.0.0.1:7999/mcp",
+            "capability": dead_capability,
+        }
+        for pid in range(1_000_000, 1_002_080)
+    }
+    _write_private_registry(path, {"servers": dead_servers})
+    assert path.stat().st_size <= 256 * 1024
+    monkeypatch.setattr(endpoint_registry, "_pid_alive", lambda pid: pid == os.getpid())
+
+    server = make_server(endpoint_path=path)
+    server._write_endpoint(7888)
+
+    assert read_endpoints(path) == [
+        TUIEndpoint(
+            os.getpid(),
+            7888,
+            "http://127.0.0.1:7888/mcp",
+            _TEST_CAPABILITY,
+        )
+    ]
 
 
 async def test_run_reports_unsafe_registry_as_failed_startup(tmp_path: Path) -> None:
@@ -1073,7 +1105,10 @@ async def test_controller_pending_task_reports_the_live_run() -> None:
         task.cancel()
 
 
-async def test_remove_endpoint_preserves_other_live_instances(tmp_path: Path) -> None:
+async def test_remove_endpoint_preserves_other_live_instances(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The discovery file is a pid-keyed registry: instance B exiting must
     drop only its own entry, leaving instance A's record discoverable."""
     endpoint_file = tmp_path / "mcp-endpoint.json"
@@ -1084,6 +1119,11 @@ async def test_remove_endpoint_preserves_other_live_instances(tmp_path: Path) ->
         "capability": "other-live-capability-token-0123456789",
     }
     _write_private_registry(endpoint_file, {"servers": {"999999": other}})
+    monkeypatch.setattr(
+        endpoint_registry,
+        "_pid_alive",
+        lambda pid: pid in {os.getpid(), 999999},
+    )
     server = make_server(port=0, endpoint_path=endpoint_file)
     task = asyncio.create_task(server.run())
     try:

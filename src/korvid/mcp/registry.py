@@ -24,7 +24,10 @@ _ADMINISTRATORS_SID = "S-1-5-32-544"
 
 _MISSING = "MCP endpoint registry is unavailable; start the korvid TUI with MCP enabled."
 _UNSAFE = "MCP endpoint registry is unsafe; restart korvid to recreate a private registry."
-_TOO_LARGE = "MCP endpoint registry is too large; restart korvid to recreate it."
+_TOO_LARGE = (
+    "MCP endpoint registry is too large; stop korvid instances, remove the invalid "
+    "registry, and restart korvid."
+)
 _CHANGED = "MCP endpoint registry changed while reading; retry the MCP command."
 _INVALID = "MCP endpoint registry is invalid; restart the korvid TUI to refresh it."
 _OUTDATED = (
@@ -36,7 +39,7 @@ _TOKEN_QUERY = 0x0008
 _TOKEN_USER_CLASS = 1
 _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 _STILL_ACTIVE = 259
-_ERROR_ACCESS_DENIED = 5
+_ERROR_INVALID_PARAMETER = 87
 _SDDL_REVISION_1 = 1
 _GENERIC_WRITE = 0x40000000
 _CREATE_NEW = 1
@@ -860,6 +863,9 @@ def _registry_document(data: bytes, *, normalize: bool) -> dict[str, Any]:
         except EndpointRegistryError:
             repaired = True
             continue
+        if not _pid_alive(endpoint.pid):
+            repaired = True
+            continue
         canonical[pid_key] = {
             "pid": endpoint.pid,
             "port": endpoint.port,
@@ -910,12 +916,12 @@ def _parse_endpoints(data: bytes) -> list[TUIEndpoint]:
 
 
 def _windows_pid_alive(pid: int) -> bool:
-    """Query process state without sending a Windows console signal."""
+    """Return false only when Windows proves that the process is gone."""
     kernel32, advapi32 = _windows_libraries()
     _configure_windows_api(kernel32, advapi32)
     handle = kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
     if not handle:
-        return _windows_last_error() == _ERROR_ACCESS_DENIED
+        return _windows_last_error() != _ERROR_INVALID_PARAMETER
     try:
         exit_code = wintypes.DWORD()
         if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):

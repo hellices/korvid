@@ -535,7 +535,7 @@ async def test_request_json_propagates_cancellation() -> None:
     fake_api.call_api.side_effect = asyncio.CancelledError()
     client._api = fake_api
 
-    with pytest.raises(asyncio.CancelledError):
+    with pytest.raises(asyncio.CancelledError, match=r"^$"):
         await client._request_json("/api/v1")
 
 

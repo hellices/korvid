@@ -304,7 +304,7 @@ async def test_describe_reports_an_events_client_error_but_still_opens() -> None
 async def test_describe_propagates_cancellation() -> None:
     h = Harness(manifest_error=asyncio.CancelledError())
 
-    with pytest.raises(asyncio.CancelledError):
+    with pytest.raises(asyncio.CancelledError, match=r"^$"):
         await h.controller.describe_selected()
 
 

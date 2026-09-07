@@ -623,6 +623,16 @@ async def test_enter_on_subscription_opens_hierarchy_from_operator_refs() -> Non
         await until(pilot, lambda: table.row_count == 1, label="subscription listed")
         await pilot.press("enter")
         await until(pilot, lambda: isinstance(app.screen, HierarchyScreen), label="hierarchy open")
+        await until(
+            pilot,
+            lambda: (
+                bool(app.screen.query("Tree"))
+                and any(
+                    "Deployment/argocd-operator-controller" in label for label in _tree_labels(app)
+                )
+            ),
+            label="operator component nodes populated",
+        )
         labels = _tree_labels(app)
         assert any("Deployment/argocd-operator-controller" in label for label in labels)
         assert any("ClusterServiceVersion/argocd-operator.v1.14.4" in label for label in labels)

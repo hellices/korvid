@@ -300,7 +300,10 @@ def test_read_endpoints_rejects_non_regular_paths_before_opening(
 def test_read_endpoints_rejects_files_over_256_kib(tmp_path: Path) -> None:
     path = tmp_path / "mcp-endpoint.json"
     _write_private_bytes(path, b"x" * (256 * 1024 + 1))
-    with pytest.raises(EndpointRegistryError, match="too large"):
+    with pytest.raises(
+        EndpointRegistryError,
+        match=r"too large.*stop.*remove.*restart",
+    ):
         read_endpoints(path)
 
 
@@ -618,6 +621,31 @@ def test_windows_liveness_never_calls_os_kill(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr(os, "kill", forbidden_kill)
     assert registry._pid_alive(123)
     assert not registry._pid_alive(456)
+
+
+@pytest.mark.parametrize(
+    ("error_code", "expected_alive"),
+    [
+        (87, False),
+        (5, True),
+        (8, True),
+    ],
+)
+def test_windows_liveness_prunes_only_definitely_invalid_pids(
+    monkeypatch: pytest.MonkeyPatch,
+    error_code: int,
+    expected_alive: bool,
+) -> None:
+    class Kernel32:
+        @staticmethod
+        def OpenProcess(access: int, inherit: bool, pid: int) -> int:
+            return 0
+
+    monkeypatch.setattr(registry, "_windows_libraries", lambda: (Kernel32(), object()))
+    monkeypatch.setattr(registry, "_configure_windows_api", lambda kernel32, advapi32: None)
+    monkeypatch.setattr(registry, "_windows_last_error", lambda: error_code)
+
+    assert registry._windows_pid_alive(123) is expected_alive
 
 
 def test_windows_api_configures_process_handles_for_64_bit_safety() -> None:
