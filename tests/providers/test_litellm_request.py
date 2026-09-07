@@ -12,6 +12,7 @@ from typing import Final
 import pytest
 
 from korvid.providers.litellm_request import (
+    _KORVID_OWNED_OPTIONS,
     OMIT_API_KEY,
     RESERVED_CALL_ARGUMENTS,
     RequestPlan,
@@ -514,6 +515,62 @@ def test_the_engine_wins_even_on_a_plan_assembled_without_build_plan() -> None:
     assert kwargs["stream"] is True
     assert "tool_choice" not in kwargs
     assert kwargs["temperature"] == 0.3
+
+
+def test_a_plan_built_directly_cannot_carry_a_korvid_owned_transport_selector() -> None:
+    """The owned keys are transport decisions, not model parameters.
+
+    `build_plan` strips them, but `RequestPlan` is a public dataclass and
+    only `call_kwargs` stands between a directly built plan and
+    `acompletion`. Two failures, not one: LiteLLM's own httpx handlers
+    read `ssl_verify` and would honour it — turning certificate
+    verification off for the request — and anything the provider does not
+    consume is forwarded into the *request body* (measured on 1.98.0), so
+    `ca_bundle` would travel to the vendor as an unknown field.
+    """
+    plan = RequestPlan(
+        model="openai/gpt-4o",
+        api_key="k",
+        base_url="https://gateway.example/v1",
+        api_version=None,
+        extra=MappingProxyType(
+            {
+                "ssl_verify": False,
+                "ca_bundle": "/tmp/attacker-ca.pem",
+                "native_thinking": True,
+                "num_ctx_source": "profile",
+                "temperature": 0.3,
+            }
+        ),
+    )
+
+    kwargs = plan.call_kwargs([{"role": "user", "content": "hi"}], [], stream=True)
+
+    for owned in ("ssl_verify", "ca_bundle", "native_thinking", "num_ctx_source"):
+        assert owned not in kwargs
+    assert False not in kwargs.values()
+    assert kwargs["temperature"] == 0.3
+
+
+def test_every_korvid_owned_option_is_dropped_at_the_call_boundary() -> None:
+    """Derived from the owned set, so a key added there is covered here.
+
+    A test naming the four keys by hand would keep passing when a fifth
+    transport selector is introduced and filtered in `build_plan` alone.
+    """
+    plan = RequestPlan(
+        model="openai/gpt-4o",
+        api_key="k",
+        base_url=None,
+        api_version=None,
+        extra=MappingProxyType(dict.fromkeys(_KORVID_OWNED_OPTIONS, "owned-value")),
+    )
+
+    kwargs = plan.call_kwargs([{"role": "user", "content": "hi"}], [], stream=True)
+
+    assert _KORVID_OWNED_OPTIONS
+    assert not _KORVID_OWNED_OPTIONS & kwargs.keys()
+    assert "owned-value" not in kwargs.values()
 
 
 def test_a_profile_cannot_mute_the_agents_tools() -> None:

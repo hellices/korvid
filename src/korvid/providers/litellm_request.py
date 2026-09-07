@@ -393,11 +393,19 @@ class RequestPlan:
         deliberately *omits* — no ``api_key`` under ``provider-default``, no
         ``tools`` on a toolless request, no ``stream_options`` on a blocking
         one — is exactly the case a merge order alone would not protect.
+
+        The korvid-owned transport selectors are dropped for the same
+        reason and are the sharper case: ``ssl_verify`` is read by
+        LiteLLM's own httpx handlers, so a directly built plan carrying it
+        would turn certificate verification off for the request, and one
+        the provider does not consume is forwarded into the request body.
         """
         return {
             key: _materialize(value)
             for key, value in self.extra.items()
-            if not is_reserved_call_argument(key) and key not in self.credential
+            if not is_reserved_call_argument(key)
+            and key not in _KORVID_OWNED_OPTIONS
+            and key not in self.credential
         }
 
 
