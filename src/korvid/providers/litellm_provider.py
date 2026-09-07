@@ -44,7 +44,16 @@ from typing import Any, Final
 import httpx
 
 from korvid.agent.model_policy import ModelCapabilities, ModelDescriptor
-from korvid.agent.provider import REQUEST_SENT, LLMProvider, OperatorSafeProviderError
+from korvid.agent.provider import (
+    MAX_TOOL_ARGUMENT_CHARS,
+    REQUEST_SENT,
+    STREAM_TRUNCATED,
+    LLMProvider,
+    OperatorSafeProviderError,
+    ProviderStreamTruncatedError,
+    append_bounded,
+    guard_tool_call_count,
+)
 from korvid.providers.litellm_request import RequestPlan
 from korvid.providers.litellm_runtime import ProviderSDKError, acompletion, exceptions
 
@@ -292,6 +301,13 @@ def _merge_fragment(fragment: Any, partial: _PartialToolCall) -> None:
     and the arguments arrive split across later ones with `id=None` and
     `name=None`, so the first fragment that carries each wins and the
     arguments are appended in arrival order.
+
+    The append is bounded (issue #336): the arguments of one call arrive a
+    few characters at a time, so only a running total can hold a limit.
+
+    Raises:
+        ProviderStreamLimitError: The call's arguments passed the shared
+            cumulative bound.
     """
     identifier = _as_text(getattr(fragment, "id", None))
     if identifier and not partial.id:
@@ -300,7 +316,11 @@ def _merge_fragment(fragment: Any, partial: _PartialToolCall) -> None:
     name = _as_text(getattr(function, "name", None))
     if name and not partial.name:
         partial.name = name
-    partial.arguments += _as_text(getattr(function, "arguments", None))
+    partial.arguments = append_bounded(
+        partial.arguments,
+        _as_text(getattr(function, "arguments", None)),
+        limit=MAX_TOOL_ARGUMENT_CHARS,
+    )
 
 
 def _absorb_tool_calls(fragments: Any, calls: dict[int, _PartialToolCall]) -> None:
@@ -308,11 +328,23 @@ def _absorb_tool_calls(fragments: Any, calls: dict[int, _PartialToolCall]) -> No
 
     `choice.index` is `0` on every chunk when `n=1`, so keying on it would
     merge two parallel calls into one malformed call.
+
+    The provider chooses the indices — they may be sparse and they arrive
+    interleaved — so the count that is bounded is the number of open
+    accumulators, checked before a new one is created. A fragment for a
+    call already open is not a new call.
+
+    Raises:
+        ProviderStreamLimitError: The stream opened more calls than the
+            shared bound allows.
     """
     for fragment in fragments or ():
         index = getattr(fragment, "index", None)
-        if isinstance(index, int) and not isinstance(index, bool):
-            _merge_fragment(fragment, calls.setdefault(index, _PartialToolCall()))
+        if not isinstance(index, int) or isinstance(index, bool):
+            continue
+        if index not in calls:
+            guard_tool_call_count(len(calls) + 1)
+        _merge_fragment(fragment, calls.setdefault(index, _PartialToolCall()))
 
 
 def _chunk_events(chunk: Any, calls: dict[int, _PartialToolCall]) -> Iterator[dict[str, Any]]:
@@ -360,6 +392,25 @@ async def _close_quietly(response: Any) -> None:
         await close()
 
 
+def _finished(response: Any) -> bool:
+    """Did the provider itself say this stream ended?
+
+    Measured on 1.98.0 against a real transport: the wrapper puts
+    `finish_reason="stop"` on the last chunk of *every* stream, including
+    one that was cut off mid-answer, so the per-chunk field cannot tell a
+    finished answer from a truncated one. `received_finish_reason` is set
+    only from a reason a frame really carried, and is therefore the one
+    semantic terminal signal this dialect exposes.
+
+    Read defensively: if a future litellm renames it, this reads `None`
+    and every stream is refused as truncated — loud and fail-closed rather
+    than a silently unenforced rule. `test_the_real_wrapper_reports_the_
+    finish_reason_the_provider_sent` pins the name so that rename is
+    caught here instead of in production.
+    """
+    return bool(getattr(response, "received_finish_reason", None))
+
+
 async def _stream_events(response: Any) -> AsyncGenerator[dict[str, Any], None]:
     """Normalize a LiteLLM stream into korvid's events.
 
@@ -369,6 +420,15 @@ async def _stream_events(response: Any) -> AsyncGenerator[dict[str, Any], None]:
     cannot tell arguments the model never finished writing from arguments
     it meant to send. Usage is likewise taken only from a stream that
     ended — and only from the frames the provider itself sent.
+
+    A stream that reached a clean EOF without the provider ever saying it
+    finished is treated the same way (issue #336): text that arrived has
+    genuinely been streamed and stays, but no call, no usage and no `done`
+    follows it, because none of them describes a completed answer.
+
+    Nothing after the wire's own `[DONE]` reaches this loop — the SDK
+    stops there, pinned by
+    `test_nothing_after_the_wire_terminal_marker_is_delivered`.
     """
     calls: dict[int, _PartialToolCall] = {}
     usage: dict[str, Any] | None = None
@@ -376,6 +436,8 @@ async def _stream_events(response: Any) -> AsyncGenerator[dict[str, Any], None]:
         async for chunk in response:
             for event in _chunk_events(chunk, calls):
                 yield event
+        if not _finished(response):
+            raise ProviderStreamTruncatedError(STREAM_TRUNCATED)
         # Read here, inside the `try`: the provenance record belongs to the
         # wrapper, which the `finally` below is about to close.
         usage = _provider_usage(response)

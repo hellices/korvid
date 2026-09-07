@@ -28,7 +28,15 @@ from korvid.agent.model_policy import (
     ModelCapabilities,
     ModelDescriptor,
 )
-from korvid.agent.provider import REQUEST_SENT, OperatorSafeProviderError
+from korvid.agent.provider import (
+    MAX_TOOL_ARGUMENT_CHARS,
+    MAX_TOOL_CALLS_PER_RESPONSE,
+    REQUEST_SENT,
+    STREAM_TRUNCATED,
+    OperatorSafeProviderError,
+    ProviderStreamLimitError,
+    ProviderStreamTruncatedError,
+)
 from korvid.providers import litellm_provider
 from korvid.providers.litellm_provider import LiteLLMProvider, ProviderRequestError
 from korvid.providers.litellm_request import RequestPlan, build_plan
@@ -85,11 +93,26 @@ def _sse(chunks: list[dict[str, Any]]) -> bytes:
     return (body + "data: [DONE]\n\n").encode()
 
 
-def _streaming(chunks: list[dict[str, Any]]) -> Handler:
+def _finish(reason: str = "stop") -> dict[str, Any]:
+    """The terminal frame an OpenAI-compatible provider really sends.
+
+    `finish_reason` is the semantic end of a choice, and the only end
+    LiteLLM reports honestly — see
+    `test_litellm_synthesizes_a_finish_reason_the_provider_never_sent`.
+    Appending it by default keeps every other test on a *complete* stream,
+    so a test about usage or fragments is not silently also a test about
+    truncation.
+    """
+    return _chunk(choices=[{"index": 0, "delta": {}, "finish_reason": reason}])
+
+
+def _streaming(chunks: list[dict[str, Any]], *, finish: str | None = "stop") -> Handler:
+    frames = [*chunks, _finish(finish)] if finish is not None else list(chunks)
+
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
-            content=_sse(chunks),
+            content=_sse(frames),
             headers={"content-type": "text/event-stream"},
             request=request,
         )
@@ -611,7 +634,7 @@ async def test_litellm_synthesizes_usage_the_provider_never_sent() -> None:
     synthesized = getattr(yielded[-1], "usage", None)
     assert synthesized is not None
     assert synthesized.prompt_tokens > 0
-    assert [getattr(chunk, "usage", None) for chunk in wrapper.chunks] == [None, None]
+    assert [getattr(chunk, "usage", None) for chunk in wrapper.chunks] == [None, None, None]
 
 
 @pytest.mark.filterwarnings("ignore:Accessing the 'model_")
@@ -733,6 +756,252 @@ async def test_the_stream_ends_with_the_terminal_done_event() -> None:
     assert events[-1] == {"type": "done"}
 
 
+# ---------------------------------------------------------------------------
+# Terminal evidence (issue #336)
+#
+# The wrapper is the only thing between korvid and the wire, so what
+# counts as "the provider finished" has to be measured on it, against a
+# real MockTransport, rather than assumed.
+# ---------------------------------------------------------------------------
+
+
+async def test_litellm_synthesizes_a_finish_reason_the_provider_never_sent() -> None:
+    """The measurement the whole terminal rule rests on.
+
+    Measured on 1.98.0: a stream whose frames carried no `finish_reason`
+    is still yielded with `finish_reason="stop"` on its last chunk — the
+    wrapper puts one there — while `received_finish_reason` stays `None`.
+    So the per-chunk field cannot distinguish a provider that finished
+    from one whose connection stopped, and the wrapper's own record can.
+    """
+    wrapper = await acompletion(
+        model=_MODEL,
+        messages=_MESSAGES,
+        stream=True,
+        api_key=_SECRET,
+        client=_client(_streaming([_delta(content="hi")], finish=None)),
+    )
+    async with aclosing(wrapper):
+        reasons = [
+            getattr(choice, "finish_reason", None)
+            async for chunk in wrapper
+            for choice in (getattr(chunk, "choices", None) or ())
+        ]
+
+    assert "stop" in reasons, "1.98.0 synthesizes a stop the provider never sent"
+    assert wrapper.received_finish_reason is None
+
+
+async def test_the_real_wrapper_reports_the_finish_reason_the_provider_sent() -> None:
+    """The other half: a provider that really finished is recorded as
+    having finished, under the attribute korvid reads."""
+    wrapper = await acompletion(
+        model=_MODEL,
+        messages=_MESSAGES,
+        stream=True,
+        api_key=_SECRET,
+        client=_client(_streaming([_delta(content="hi")], finish="length")),
+    )
+    async with aclosing(wrapper):
+        async for _ in wrapper:
+            pass
+
+    assert hasattr(wrapper, "received_finish_reason"), (
+        "the attribute korvid reads terminal evidence from has been renamed"
+    )
+    assert wrapper.received_finish_reason == "length"
+
+
+async def test_nothing_after_the_wire_terminal_marker_is_delivered() -> None:
+    """`[DONE]` ends the body, and the SDK stops there.
+
+    Pinned rather than assumed: korvid's own "stop at the first terminal
+    marker" is only true end to end while this is.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = (
+            f"data: {json.dumps(_delta(content='hi'))}\n\n"
+            f"data: {json.dumps(_finish())}\n\n"
+            "data: [DONE]\n\n"
+            f"data: {json.dumps(_delta(content=' and more'))}\n\n"
+        )
+        return httpx.Response(
+            200,
+            content=body.encode(),
+            headers={"content-type": "text/event-stream"},
+            request=request,
+        )
+
+    events = await _events(_provider(handler))
+
+    assert [e["text"] for e in events if e["type"] == "text_delta"] == ["hi"]
+    assert events[-1] == {"type": "done"}
+
+
+async def test_a_stream_that_never_said_it_finished_is_refused() -> None:
+    """A clean EOF is not a completed answer.
+
+    The connection closing tidily after half a response is exactly what a
+    truncated stream looks like from here, so the absence of the marker
+    has to be the failure — otherwise korvid reports a partial answer as
+    a whole one.
+    """
+    collected: list[dict[str, Any]] = []
+    provider = _provider(_streaming([_delta(content="par")], finish=None))
+
+    with pytest.raises(ProviderStreamTruncatedError, match="ended before"):
+        await _collect_into(provider, collected)
+
+    assert [e["type"] for e in collected] == [REQUEST_SENT, "text_delta"]
+    assert {"type": "done"} not in collected
+
+
+@pytest.mark.filterwarnings("ignore:Accessing the 'model_")
+async def test_a_truncated_stream_emits_neither_its_calls_nor_its_usage() -> None:
+    """Everything the round accumulated is dropped with it: a tool call
+    the model never finished writing must not be dispatched, and a token
+    count for an answer that never arrived is not a measurement."""
+    collected: list[dict[str, Any]] = []
+    provider = _provider(
+        _streaming(
+            [
+                _delta(tool_calls=[_fragment(0, call_id="c1", name="get_pods", arguments="{}")]),
+                _chunk(choices=[], usage={"prompt_tokens": 11, "completion_tokens": 7}),
+            ],
+            finish=None,
+        )
+    )
+
+    with pytest.raises(ProviderStreamTruncatedError):
+        await _collect_into(provider, collected)
+
+    assert [e["type"] for e in collected] == [REQUEST_SENT]
+
+
+async def test_a_finished_tool_call_round_is_not_read_as_truncated() -> None:
+    """`tool_calls` is how a tool-only answer ends. Requiring `stop`
+    would refuse every real tool round."""
+    events = await _events(
+        _provider(
+            _streaming(
+                [_delta(tool_calls=[_fragment(0, call_id="c1", name="get_pods", arguments="{}")])],
+                finish="tool_calls",
+            )
+        )
+    )
+
+    assert [e["name"] for e in events if e["type"] == "tool_call"] == ["get_pods"]
+    assert events[-1] == {"type": "done"}
+
+
+async def test_a_truncation_is_reported_in_operator_language() -> None:
+    """The runtime withholds undeclared exception text, so the refusal
+    has to carry a message the contract declared safe."""
+    provider = _provider(_streaming([], finish=None))
+
+    with pytest.raises(ProviderStreamTruncatedError) as raised:
+        await _events(provider)
+
+    assert isinstance(raised.value, OperatorSafeProviderError)
+    assert raised.value.operator_message() == STREAM_TRUNCATED
+
+
+# ---------------------------------------------------------------------------
+# Cumulative bounds (issue #336)
+# ---------------------------------------------------------------------------
+
+
+def _argument_fragments(index: int, total: int, *, piece: int = 4_096) -> list[dict[str, Any]]:
+    """A call whose arguments arrive `piece` characters at a time."""
+    frames = [_delta(tool_calls=[_fragment(index, call_id=f"c{index}", name="get_pods")])]
+    written = 0
+    while written < total:
+        chunk = min(piece, total - written)
+        frames.append(_delta(tool_calls=[_fragment(index, arguments="x" * chunk)]))
+        written += chunk
+    return frames
+
+
+async def test_arguments_that_stop_exactly_at_the_bound_are_kept() -> None:
+    events = await _events(
+        _provider(_streaming(_argument_fragments(0, MAX_TOOL_ARGUMENT_CHARS), finish="tool_calls"))
+    )
+
+    call = next(e for e in events if e["type"] == "tool_call")
+    assert len(call["arguments"]) == MAX_TOOL_ARGUMENT_CHARS
+
+
+async def test_arguments_one_character_past_the_bound_are_refused() -> None:
+    """The fragments are small; only the running total is not."""
+    collected: list[dict[str, Any]] = []
+    provider = _provider(
+        _streaming(_argument_fragments(0, MAX_TOOL_ARGUMENT_CHARS + 1), finish="tool_calls")
+    )
+
+    with pytest.raises(ProviderStreamLimitError, match="limit"):
+        await _collect_into(provider, collected)
+
+    assert [e["type"] for e in collected] == [REQUEST_SENT]
+
+
+async def test_the_bound_counts_one_calls_own_fragments_not_the_whole_stream() -> None:
+    """Two calls that are each half the bound are both legitimate."""
+    half = MAX_TOOL_ARGUMENT_CHARS // 2
+    events = await _events(
+        _provider(
+            _streaming(
+                _argument_fragments(0, half) + _argument_fragments(1, half),
+                finish="tool_calls",
+            )
+        )
+    )
+
+    assert [len(e["arguments"]) for e in events if e["type"] == "tool_call"] == [half, half]
+
+
+async def test_a_stream_may_open_exactly_the_permitted_number_of_calls() -> None:
+    frames = [
+        _delta(tool_calls=[_fragment(index, call_id=f"c{index}", name="get_pods")])
+        for index in range(MAX_TOOL_CALLS_PER_RESPONSE)
+    ]
+
+    events = await _events(_provider(_streaming(frames, finish="tool_calls")))
+
+    assert len([e for e in events if e["type"] == "tool_call"]) == MAX_TOOL_CALLS_PER_RESPONSE
+
+
+async def test_one_call_too_many_stops_the_stream_before_it_grows() -> None:
+    """Sparse, interleaved indices: the provider chooses them, so the
+    accumulator must count entries rather than trust the largest one."""
+    frames = [
+        _delta(tool_calls=[_fragment(index * 7, call_id=f"c{index}", name="get_pods")])
+        for index in range(MAX_TOOL_CALLS_PER_RESPONSE + 1)
+    ]
+    collected: list[dict[str, Any]] = []
+
+    with pytest.raises(ProviderStreamLimitError, match="limit"):
+        await _collect_into(_provider(_streaming(frames, finish="tool_calls")), collected)
+
+    assert [e["type"] for e in collected] == [REQUEST_SENT]
+
+
+async def test_repeating_one_index_is_not_a_new_call() -> None:
+    """Fragments for a call already open must not count again, or a long
+    ordinary answer would be refused as if it were a flood."""
+    frames = [
+        _delta(tool_calls=[_fragment(0, call_id="c0", name="get_pods")]),
+        *(
+            _delta(tool_calls=[_fragment(0, arguments="x")])
+            for _ in range(MAX_TOOL_CALLS_PER_RESPONSE * 4)
+        ),
+    ]
+
+    events = await _events(_provider(_streaming(frames, finish="tool_calls")))
+
+    assert len([e for e in events if e["type"] == "tool_call"]) == 1
+
+
 async def test_the_plan_is_what_reaches_the_wire() -> None:
     """The provider adds nothing of its own: the payload is the plan's."""
     seen: list[dict[str, Any]] = []
@@ -754,7 +1023,13 @@ async def test_the_plan_is_what_reaches_the_wire() -> None:
 async def test_a_non_streaming_call_yields_the_same_event_shapes() -> None:
     """`stream` is part of the LLMProvider signature, so passing False
     must produce the same normalized events rather than an attempt to
-    iterate a ModelResponse."""
+    iterate a ModelResponse.
+
+    The body deliberately carries no `finish_reason`: a whole answer is
+    complete on its own terms — the response either parsed or it did not
+    — so the streaming path's terminal-marker rule (issue #336) must not
+    be imposed on it.
+    """
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
@@ -781,7 +1056,6 @@ async def test_a_non_streaming_call_yields_the_same_event_shapes() -> None:
                                 }
                             ],
                         },
-                        "finish_reason": "tool_calls",
                     }
                 ],
                 "usage": {"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18},

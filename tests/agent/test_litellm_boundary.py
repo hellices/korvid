@@ -136,13 +136,30 @@ def _sse(chunks: Sequence[dict[str, Any]]) -> bytes:
     return (body + "data: [DONE]\n\n").encode()
 
 
-def _streaming(*chunks: dict[str, Any]) -> Handler:
+def _finish(reason: str = "stop") -> dict[str, Any]:
+    """The frame on which a provider says the choice is finished.
+
+    korvid refuses a stream that never carries one (issue #336), so every
+    well-formed fixture here ends with it — otherwise these boundary tests
+    would all be testing truncation instead of what they are named for.
+    """
+    return {
+        "id": "chatcmpl-1",
+        "object": "chat.completion.chunk",
+        "created": 1,
+        "model": "gpt-4o",
+        "choices": [{"index": 0, "delta": {}, "finish_reason": reason}],
+    }
+
+
+def _streaming(*chunks: dict[str, Any], finish: str | None = "stop") -> Handler:
     """A well-formed SSE answer."""
+    frames = [*chunks, _finish(finish)] if finish is not None else list(chunks)
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
-            content=_sse(chunks),
+            content=_sse(frames),
             headers={"content-type": "text/event-stream"},
             request=request,
         )
