@@ -1299,3 +1299,130 @@ agent:
     with pytest.raises(ValueError, match="model_tier"):
         save_model_connections(path, cfg.model_connections, model_tier="medium")
     assert path.read_text(encoding="utf-8") == before
+
+
+@pytest.mark.parametrize(
+    ("written", "raw"),
+    [
+        ("environment", "environment"),
+        ("[environment]", ["environment"]),
+        ("42", 42),
+        ("true", True),
+    ],
+)
+def test_a_present_non_mapping_auth_block_is_refused_not_read_as_absent(
+    tmp_path: Path, written: str, raw: object
+) -> None:
+    """`auth: environment` is an instruction, not an absent block.
+
+    Reading it as absent would build the connection with method `none`
+    while the file says a credential is in play — a silent downgrade to
+    unauthenticated. It goes through the same bounded validator a bad
+    `auth` mapping goes through, so it reaches `config_error` too.
+    """
+    path = _write(
+        tmp_path,
+        f"""
+agent:
+  active: local
+  profiles:
+    local:
+      model: openai/gpt-4o
+      auth: {written}
+""",
+    )
+    cfg = load_config(path)
+    profile = cfg.model_connections.profiles["local"]
+    assert profile.auth.method == "none"
+    assert profile.auth.settings == {}
+    assert profile.auth.settings_error is not None
+    assert profile.config_error == profile.auth.settings_error
+    assert any("profiles[local].auth" in warning for warning in cfg.warnings)
+    # Kept verbatim: the refused block is the one thing the operator edits.
+    assert cfg.model_connections.unparsed["local"] == {"model": "openai/gpt-4o", "auth": raw}
+
+
+@pytest.mark.parametrize(
+    ("written", "raw"),
+    [
+        ("num_ctx", "num_ctx"),
+        ("[num_ctx]", ["num_ctx"]),
+        ("8192", 8192),
+        ("false", False),
+    ],
+)
+def test_a_present_non_mapping_options_block_is_refused_not_dropped(
+    tmp_path: Path, written: str, raw: object
+) -> None:
+    """A scalar `options:` is settings korvid cannot apply; dropping it
+    silently would connect with a configuration the file does not describe."""
+    path = _write(
+        tmp_path,
+        f"""
+agent:
+  active: local
+  profiles:
+    local:
+      model: openai/gpt-4o
+      options: {written}
+""",
+    )
+    cfg = load_config(path)
+    profile = cfg.model_connections.profiles["local"]
+    assert profile.options == {}
+    assert profile.options_error is not None
+    assert profile.config_error == profile.options_error
+    assert any("profiles[local].options" in warning for warning in cfg.warnings)
+    assert cfg.model_connections.unparsed["local"] == {"model": "openai/gpt-4o", "options": raw}
+
+
+@pytest.mark.parametrize(
+    "block",
+    ["", "\n      auth:", "\n      auth: null", "\n      options:", "\n      options: null"],
+)
+def test_an_absent_or_null_block_defaults_safely_and_is_never_unparsed(
+    tmp_path: Path, block: str
+) -> None:
+    """`null` is the YAML spelling of "not set" — the reading
+    `agent.model_tier` already gives it — so it defaults exactly like an
+    absent key: no error, and nothing to repair."""
+    path = _write(
+        tmp_path,
+        f"""
+agent:
+  active: local
+  profiles:
+    local:
+      model: openai/gpt-4o{block}
+""",
+    )
+    cfg = load_config(path)
+    profile = cfg.model_connections.profiles["local"]
+    assert profile.auth == ConnectionAuthConfig(method="none", settings={})
+    assert profile.options == {}
+    assert profile.config_error is None
+    assert "local" not in cfg.model_connections.unparsed
+    assert not any("profiles[local]" in warning for warning in cfg.warnings)
+
+
+def test_a_refused_scalar_block_survives_an_unrelated_save(tmp_path: Path) -> None:
+    """The raw half outranks the modelled one for a scalar block too:
+    activating another profile must not delete the line to be repaired."""
+    path = _write(
+        tmp_path,
+        """
+agent:
+  active: local
+  profiles:
+    good:
+      model: openai/gpt-4o
+    local:
+      model: openai/gpt-4o
+      auth: environment
+""",
+    )
+    cfg = load_config(path)
+    save_model_connections(path, replace(cfg.model_connections, active="good"))
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert raw["agent"]["profiles"]["local"]["auth"] == "environment"
+    assert load_config(path).model_connections.profiles["local"].config_error is not None

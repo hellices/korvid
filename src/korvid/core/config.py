@@ -1219,6 +1219,56 @@ def _parse_bounded_options(value: Any, *, root: str) -> tuple[dict[str, object],
     return parsed, None
 
 
+#: "this profile key was not written at all", as distinct from written
+#: with a value korvid cannot model. `None` cannot serve: `auth:` with
+#: nothing after it is a present key whose value is `None`.
+_ABSENT_BLOCK: Final = object()
+
+
+def _profile_block(raw: Mapping[str, Any], key: str) -> tuple[Mapping[str, Any], str | None]:
+    """Split a profile's `auth:`/`options:` value into a block and a refusal.
+
+    Missing and present are different answers, and the difference is the
+    point. A missing key — and `key: null`, the YAML spelling of "not
+    set" that `agent.model_tier` already reads that way — is the operator
+    saying nothing, so it defaults to an empty block with no error.
+
+    A present value that is not a mapping is the operator saying
+    something korvid cannot model: `auth: environment` is a string, not a
+    block. Reading it as absent would build the connection with method
+    `none` while the file says a credential is in play, and would drop an
+    `options:` line without a word. So it is refused through the same
+    bounded validator a bad mapping goes through — one vocabulary for
+    both shapes of "this block is unusable" — and the reason reaches
+    `config_error`, which every provider build refuses on. `debug.images`
+    fails closed on a present non-mapping for the same reason.
+
+    Returns:
+        The mapping to model (empty when absent or refused) and the
+        rejection reason, or `None` when there is nothing to refuse.
+    """
+    value = raw.get(key, _ABSENT_BLOCK)
+    if value is _ABSENT_BLOCK or value is None:
+        return {}, None
+    if isinstance(value, Mapping):
+        return value, None
+    return {}, _parse_bounded_options(value, root=key)[1]
+
+
+def _record_refusal(config: object, attribute: str, reason: str | None) -> None:
+    """Record on *config* why a present block was refused before modelling.
+
+    `_validated_config_mapping` can only refuse a mapping it was handed;
+    a present `auth: environment` is a shape it never sees. The reason
+    still has to reach `config_error`, so it is written to the same
+    frozen field `__post_init__` computes — rather than being passed
+    through `__init__`, where any caller could forge one and
+    `dataclasses.replace` would carry a stale one past a repair.
+    """
+    if reason is not None:
+        object.__setattr__(config, attribute, reason)
+
+
 def _parse_profile_entry(
     name: str, raw: object, warnings: list[str]
 ) -> ModelConnectionConfig | None:
@@ -1230,18 +1280,19 @@ def _parse_profile_entry(
     if model is None:
         warnings.append(f"agent.profiles[{name}] has no model reference; the profile was ignored")
         return None
-    auth_raw = raw.get("auth")
-    auth_map: dict[str, Any] = auth_raw if isinstance(auth_raw, dict) else {}
+    auth_map, auth_refusal = _profile_block(raw, "auth")
     method = _opt_str(auth_map.get("method")) or "none"
     settings = {key: value for key, value in auth_map.items() if key != "method"}
-    options_raw = raw.get("options")
-    options: Mapping[str, object] = options_raw if isinstance(options_raw, dict) else {}
+    options, options_refusal = _profile_block(raw, "options")
+    auth = ConnectionAuthConfig(method=method, settings=settings)
+    _record_refusal(auth, "settings_error", auth_refusal)
     profile = ModelConnectionConfig(
         model=model,
         endpoint=_opt_str(raw.get("endpoint")),
-        auth=ConnectionAuthConfig(method=method, settings=settings),
+        auth=auth,
         options=options,
     )
+    _record_refusal(profile, "options_error", options_refusal)
     # The dataclasses validated and (on rejection) emptied these mappings;
     # the parser is the layer that knows the profile's name, so it is the
     # layer that turns the reason into an operator-facing warning. The
