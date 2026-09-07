@@ -372,10 +372,13 @@ class ModelConnectionConfig:
 class ModelConnectionsConfig:
     active: str | None = None
     profiles: Mapping[str, ModelConnectionConfig] = field(default_factory=dict)
-    unparsed: Mapping[str, object] = field(default_factory=dict, compare=False)
+    unparsed: Mapping[object, object] = field(default_factory=dict, compare=False)
 
     @property
     def active_profile(self) -> ModelConnectionConfig | None: ...
+
+    @property
+    def names(self) -> frozenset[str]: ...
 ```
 
 Rules the implementation must hold:
@@ -390,12 +393,24 @@ Rules the implementation must hold:
 - A rejected mapping collapses to empty and records **why** in
   `options_error`/`settings_error`; `config_error` surfaces the first reason.
   **Anything that builds a provider refuses while `config_error` is set.**
+- A **present** `auth:`/`options:` that is not a mapping is refused the same
+  way, not read as absent. `auth: environment` is a string; treating it as an
+  empty block would build the connection with method `none` while the file
+  says a credential is in play. Absence — and `key:` with nothing after it,
+  the `null` spelling `agent.model_tier` already reads as "not set" — still
+  defaults to an empty block with no error.
 - `profiles` preserves the file's insertion order. Nothing sorts it.
 - `unparsed` carries the raw YAML of entries korvid could not fully model so a
   save cannot silently delete an operator's broken-but-precious profile. It is
   never read by anything that builds, activates or lists a connection. An
   explicit delete must clear the name from **both** `profiles` and `unparsed`,
   or the writer re-emits it and the profile becomes undeletable.
+- `unparsed` is keyed by the **file's own key**, which YAML does not promise is
+  a string. `1:` is not the profile `"1"`: stringifying it would rename the
+  entry, collide with a real `"1"` whose modelled half the raw one then
+  outranks on write, and load back as a name korvid accepts. `profiles` stays
+  string-only, and `names` — modelled profiles plus the string keys of
+  `unparsed` — is what the UI lists and what a generated name must avoid.
 - The dataclasses are `frozen=True` but hold mappings, so `__hash__ = None`.
 
 `KorvidConfig` stores `model_connections: ModelConnectionsConfig`. Core never imports
