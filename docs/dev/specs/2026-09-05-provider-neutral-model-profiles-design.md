@@ -819,8 +819,10 @@ anything else in korvid imports directly.
 
 - `providers/_litellm_import.py` — the **import wrapper**, and the *only*
   module in korvid that executes `import litellm`. It is stdlib-only above that
-  import: it sets `LITELLM_LOCAL_MODEL_COST_MAP` in `os.environ` *before* the
-  import statement, performs the import inside the `try:` that turns a missing
+  import: it forces `LITELLM_LOCAL_MODEL_COST_MAP` to `true` in `os.environ`
+  *before* the import statement — an ambient `false` is overwritten, because a
+  startup fetch is not a setting this process can honour — performs the import
+  inside the `try:` that turns a missing
   extra into korvid's existing install hint, and detaches LiteLLM's stderr
   logging. It applies no policy of its own — the wrapper exists to make the
   import itself safe, which is a thing no code running *after* the import can
@@ -863,8 +865,11 @@ the import.
 
 The wrapper therefore, in this order:
 
-1. `os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "true")` — `setdefault`,
-   not assignment, so an operator who deliberately wants the remote map keeps it.
+1. `os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "true"` — assignment, not
+   `setdefault`: an ambient `false` inherited from the operator's shell, a CI
+   image or a stale profile would otherwise re-arm the blocking startup fetch,
+   and korvid prices nothing, so the remote map is never a configuration it can
+   honour. The write is process-local.
 2. `import litellm` (inside the `try:` that raises the install hint on
    `ImportError`; the import is not part of the sorted top-level import block, so
    the ordering cannot be rearranged by an import sorter).
@@ -1040,8 +1045,9 @@ the corporate mirror.
   exception, bypassing logging entirely. A test drives a provider error under
   `capsys` and asserts stdout stayed empty.
 - `import litellm` happens exactly once, in `providers/_litellm_import.py`,
-  with `LITELLM_LOCAL_MODEL_COST_MAP` already set — so importing korvid's
-  provider layer makes **no network call**, and LiteLLM's `StreamHandler`s are
+  with `LITELLM_LOCAL_MODEL_COST_MAP` forced to `true` first — so importing
+  korvid's provider layer makes **no network call** even when the environment
+  korvid was started from says otherwise, and LiteLLM's `StreamHandler`s are
   detached so nothing it logs can corrupt the TUI. A subprocess test asserts zero
   socket connections across import and full catalog construction.
 - korvid never routes to LiteLLM's `github_copilot` provider, whose provider

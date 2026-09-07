@@ -109,8 +109,9 @@ to a third party or the terminal:
 Two are private attributes, set deliberately because they are what the SDK
 reads at call time. All eight are checked for *existence before* assignment, so
 a rename upstream raises at import instead of leaving the real sink open; a
-test asserts the same list. `providers/_litellm_import.py` also sets
-`LITELLM_LOCAL_MODEL_COST_MAP=true` before the import, suppressing the SDK's
+test asserts the same list. `providers/_litellm_import.py` also forces
+`LITELLM_LOCAL_MODEL_COST_MAP=true` before the import — assignment, not a
+default, so an ambient `false` cannot re-arm it — suppressing the SDK's
 startup price-table fetch, and strips `StreamHandler`s from its loggers.
 
 **The device-login routing hazard.** Given a reference under LiteLLM's own

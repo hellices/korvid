@@ -1625,9 +1625,11 @@ from types import ModuleType
 from korvid.agent.install_hint import isolated_install_hint
 
 # Must be set BEFORE `import litellm`: LiteLLM reads it at module scope and
-# never re-reads it. `setdefault`, not assignment, so an operator who
-# deliberately exports "false" keeps the remote map.
-os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "true")
+# never re-reads it. Assignment, not `setdefault`: an ambient
+# `LITELLM_LOCAL_MODEL_COST_MAP=false` would otherwise re-arm the blocking
+# startup fetch. korvid prices nothing, so the remote map is never a setting
+# it can honour; the write is process-local.
+os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "true"
 
 try:
     import litellm as _litellm  # noqa: E402 - must follow the environ line above
