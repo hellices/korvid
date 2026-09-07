@@ -119,15 +119,85 @@ STREAM_LIMIT: Final = (
     "stopped. Retry, or switch to another model."
 )
 
-STREAM_MESSAGES: Final[tuple[str, ...]] = (STREAM_TRUNCATED, STREAM_LIMIT)
+STREAM_MALFORMED: Final = (
+    "The provider sent an answer korvid could not read. Retry, or check that "
+    "the endpoint speaks this provider's protocol."
+)
+
+STREAM_FAILED: Final = (
+    "The provider reported a failure while it was answering. Retry, or check "
+    "the provider's own logs."
+)
+
+CREDENTIAL_REFUSED: Final = (
+    "The provider refused the credential. Check the profile's API key, or "
+    "re-run `:ai` to authenticate again."
+)
+
+NOT_PERMITTED: Final = (
+    "The credential is not permitted to use this model. Check the account's access to it."
+)
+
+RATE_LIMITED: Final = (
+    "The provider applied a rate limit. Wait and retry, or switch to another model."
+)
+
+MODEL_UNKNOWN: Final = (
+    "The provider does not have this model. Check the model reference in the profile."
+)
+
+REQUEST_REJECTED: Final = (
+    "The provider rejected the request. Check the model reference and any "
+    "per-model options in the profile."
+)
+
+UNAVAILABLE: Final = "The provider is unavailable right now. Retry shortly."
+
+SERVER_ERROR: Final = "The provider failed with a server error."
+
+TIMED_OUT: Final = "The provider timed out before answering. Retry, or raise the request timeout."
+
+UNREACHABLE: Final = (
+    "korvid could not reach the provider: the connection failed. Check the "
+    "endpoint, the network and any proxy."
+)
+
+STREAM_MESSAGES: Final[tuple[str, ...]] = (
+    STREAM_TRUNCATED,
+    STREAM_LIMIT,
+    STREAM_MALFORMED,
+    STREAM_FAILED,
+    CREDENTIAL_REFUSED,
+    NOT_PERMITTED,
+    RATE_LIMITED,
+    MODEL_UNKNOWN,
+    REQUEST_REJECTED,
+    UNAVAILABLE,
+    SERVER_ERROR,
+    TIMED_OUT,
+    UNREACHABLE,
+)
 """Every sentence this contract may show an operator, written and audited.
 
 Each one is evidence-free by construction: it interpolates no exception,
-no response body, no endpoint and no option value.
+no response body, no endpoint and no option value. Adapters translate
+*into* this vocabulary; none of them writes a message of its own from a
+provider's answer, because the first characters of a 401 body are exactly
+the part that identifies the key.
 """
 
 
-class ProviderStreamTruncatedError(OperatorSafeProviderError):
+class ProviderStreamError(OperatorSafeProviderError):
+    """Base of the typed answers an adapter may refuse a response with.
+
+    A caller that only needs "korvid would not accept this answer" catches
+    this; the subclasses say which of the five situations it was.
+    """
+
+    safe_messages = frozenset(STREAM_MESSAGES)
+
+
+class ProviderStreamTruncatedError(ProviderStreamError):
     """A stream ended without the terminal marker its protocol requires.
 
     Partial text may already have reached the transcript — it really was
@@ -138,10 +208,67 @@ class ProviderStreamTruncatedError(OperatorSafeProviderError):
     safe_messages = frozenset({STREAM_TRUNCATED})
 
 
-class ProviderStreamLimitError(OperatorSafeProviderError):
+class ProviderStreamLimitError(ProviderStreamError):
     """A stream exhausted one of the cumulative bounds above."""
 
     safe_messages = frozenset({STREAM_LIMIT})
+
+
+class ProviderProtocolError(ProviderStreamError):
+    """The answer was not this protocol's, or declared its own failure."""
+
+    safe_messages = frozenset({STREAM_MALFORMED, STREAM_FAILED})
+
+
+class ProviderStatusError(ProviderStreamError):
+    """The provider answered the request by refusing it."""
+
+    safe_messages = frozenset(
+        {
+            CREDENTIAL_REFUSED,
+            NOT_PERMITTED,
+            RATE_LIMITED,
+            MODEL_UNKNOWN,
+            REQUEST_REJECTED,
+            UNAVAILABLE,
+            SERVER_ERROR,
+        }
+    )
+
+
+class ProviderTransportError(ProviderStreamError):
+    """The request or the answer never made it across the network."""
+
+    safe_messages = frozenset({TIMED_OUT, UNREACHABLE})
+
+
+_STATUS_MESSAGES: Final[tuple[tuple[int, str], ...]] = (
+    (401, CREDENTIAL_REFUSED),
+    (403, NOT_PERMITTED),
+    (404, MODEL_UNKNOWN),
+    (429, RATE_LIMITED),
+    (503, UNAVAILABLE),
+)
+
+
+def status_error(status: int) -> ProviderStatusError:
+    """Translate a refusing HTTP status into an operator-safe failure.
+
+    The status *class* is what an operator can act on — a wrong key, a
+    model the account cannot reach, a rate limit — and it is knowable
+    without reading a single byte of the body, which is the point: the
+    body is where a provider echoes the credential it just refused.
+
+    Args:
+        status: The response status an adapter received.
+
+    Returns:
+        The failure to raise, carrying a written message and nothing else.
+    """
+    for code, message in _STATUS_MESSAGES:
+        if status == code:
+            return ProviderStatusError(message)
+    return ProviderStatusError(SERVER_ERROR if status >= 500 else REQUEST_REJECTED)
 
 
 def append_bounded(accumulated: str, fragment: str, *, limit: int) -> str:

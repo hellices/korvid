@@ -34,7 +34,21 @@ from korvid.agent.model_profiles import (
     SpecialFlow,
     split_reference,
 )
-from korvid.agent.provider import REQUEST_SENT, LLMProvider
+from korvid.agent.provider import (
+    MAX_TOOL_ARGUMENT_CHARS,
+    REQUEST_SENT,
+    STREAM_MALFORMED,
+    STREAM_TRUNCATED,
+    TIMED_OUT,
+    UNREACHABLE,
+    LLMProvider,
+    ProviderProtocolError,
+    ProviderStreamTruncatedError,
+    ProviderTransportError,
+    append_bounded,
+    guard_tool_call_count,
+    status_error,
+)
 from korvid.providers.net import make_client
 from korvid.providers.token_store import TokenStore
 
@@ -68,10 +82,6 @@ _EDITOR_HEADERS = {
 
 class DeviceLoginError(Exception):
     """Device login failed, expired, or the token exchange was rejected."""
-
-
-class ProviderError(Exception):
-    """Raised when the upstream API returns a non-2xx response."""
 
 
 @dataclass(frozen=True)
@@ -256,14 +266,9 @@ class CopilotChatProvider(LLMProvider):
         finally:
             await self._credentials.aclose()
 
-    async def complete(
-        self,
-        messages: list[dict[str, Any]],
-        tools: list[dict[str, Any]],
-        *,
-        stream: bool = True,
-    ) -> AsyncIterator[dict[str, Any]]:
-        """Yield completion events as an async generator."""
+    def _payload(
+        self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]
+    ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": self._model,
             "messages": messages,
@@ -272,42 +277,64 @@ class CopilotChatProvider(LLMProvider):
         }
         if tools:
             payload["tools"] = tools
+        return payload
 
+    async def complete(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        *,
+        stream: bool = True,
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Yield completion events as an async generator.
+
+        This dialect's terminal marker is on the wire — `data: [DONE]` —
+        so its absence is knowable, and it decides whether the answer was
+        an answer (issue #336). Reading stops at the first one, and a
+        stream that ended without one yields no call, no usage and no
+        `done`: text that arrived really was streamed and stays, but a
+        truncated response must not be reported as a completed one.
+
+        Raises:
+            ProviderStatusError: The host refused the request.
+            ProviderProtocolError: The host wrote something this dialect
+                cannot read.
+            ProviderTransportError: The connection failed or timed out.
+            ProviderStreamTruncatedError: The stream ended without `[DONE]`.
+            ProviderStreamLimitError: The response passed a cumulative bound.
+        """
         # tool_calls[index] = {"id": str, "name": str, "arguments": str}
         tool_acc: dict[int, dict[str, str]] = {}
-        last_usage: dict[str, int] | None = None
+        answer = _Answer()
 
         client = self._get_client()
-        async with client.stream(
-            "POST",
-            f"{self._base_url}/chat/completions",
-            json=payload,
-            headers=await self._credentials.headers(),
-        ) as resp:
-            # The request is on the wire: headers came back, so whatever
-            # the status says, this provider has the payload (PR #197).
-            yield {"type": REQUEST_SENT}
-            if resp.status_code >= 300:
-                await resp.aread()
-                raise ProviderError(f"Upstream returned HTTP {resp.status_code}: {resp.text}")
+        try:
+            async with client.stream(
+                "POST",
+                f"{self._base_url}/chat/completions",
+                json=self._payload(messages, tools),
+                headers=await self._credentials.headers(),
+            ) as resp:
+                # The request is on the wire: headers came back, so whatever
+                # the status says, this provider has the payload (PR #197).
+                yield {"type": REQUEST_SENT}
+                if resp.status_code >= 300:
+                    # The body is read so the connection can be released,
+                    # and then discarded: a 401 body quotes the credential
+                    # it refused, so only the status class is reported.
+                    await resp.aread()
+                    raise status_error(resp.status_code)
+                async for event in _read_frames(resp, tool_acc, answer):
+                    yield event
+        except httpx.TimeoutException as exc:
+            raise ProviderTransportError(TIMED_OUT) from exc
+        except httpx.HTTPError as exc:
+            # An `httpx` error carries the request it failed on, headers
+            # included, so it is translated rather than re-raised.
+            raise ProviderTransportError(UNREACHABLE) from exc
 
-            async for line in resp.aiter_lines():
-                # SSE permits both "data:<value>" and "data: <value>" —
-                # strip at most one optional leading space.
-                if not line.startswith("data:"):
-                    continue
-                payload_str = line[len("data:") :].removeprefix(" ")
-                if payload_str == "[DONE]":
-                    break
-
-                chunk: dict[str, Any] = json.loads(payload_str)
-                raw_usage = chunk.get("usage")
-                if raw_usage:
-                    last_usage = raw_usage
-
-                text = _chunk_text(chunk, tool_acc)
-                if text:
-                    yield {"type": "text_delta", "text": text}
+        if not answer.finished:
+            raise ProviderStreamTruncatedError(STREAM_TRUNCATED)
 
         for idx in sorted(tool_acc):
             acc = tool_acc[idx]
@@ -321,18 +348,78 @@ class CopilotChatProvider(LLMProvider):
         # Emit usage only when both component counts are present —
         # defaulting a missing count to 0 would make an incomplete report
         # look exact (the runtime treats any usage event as authoritative).
-        if last_usage and "prompt_tokens" in last_usage and "completion_tokens" in last_usage:
+        usage = answer.usage
+        if usage and "prompt_tokens" in usage and "completion_tokens" in usage:
             yield {
                 "type": "usage",
-                "input_tokens": int(last_usage["prompt_tokens"]),
-                "output_tokens": int(last_usage["completion_tokens"]),
+                "input_tokens": int(usage["prompt_tokens"]),
+                "output_tokens": int(usage["completion_tokens"]),
             }
 
         yield {"type": "done"}
 
 
+@dataclass
+class _Answer:
+    """What the stream said about itself, beside the text it yielded."""
+
+    finished: bool = False
+    usage: dict[str, int] | None = None
+
+
+async def _read_frames(
+    resp: httpx.Response,
+    tool_acc: dict[int, dict[str, str]],
+    answer: _Answer,
+) -> AsyncIterator[dict[str, Any]]:
+    """Yield this dialect's text deltas, stopping at the first `[DONE]`."""
+    async for line in resp.aiter_lines():
+        # SSE permits both "data:<value>" and "data: <value>" — strip at
+        # most one optional leading space.
+        if not line.startswith("data:"):
+            continue
+        payload_str = line[len("data:") :].removeprefix(" ")
+        if payload_str == "[DONE]":
+            answer.finished = True
+            return
+
+        chunk = _parse_chunk(payload_str)
+        raw_usage = chunk.get("usage")
+        if raw_usage:
+            answer.usage = raw_usage
+
+        text = _chunk_text(chunk, tool_acc)
+        if text:
+            yield {"type": "text_delta", "text": text}
+
+
+def _parse_chunk(payload_str: str) -> dict[str, Any]:
+    """Read one SSE frame, refusing anything this dialect cannot read.
+
+    The decoder's own message quotes the document it choked on, and this
+    body is the one place a leaked credential would come straight back, so
+    the refusal carries a written sentence instead.
+    """
+    try:
+        chunk = json.loads(payload_str)
+    except ValueError as exc:
+        raise ProviderProtocolError(STREAM_MALFORMED) from exc
+    if not isinstance(chunk, dict):
+        raise ProviderProtocolError(STREAM_MALFORMED)
+    return chunk
+
+
 def _chunk_text(chunk: dict[str, Any], tool_acc: dict[int, dict[str, str]]) -> str | None:
-    """Extract one chunk's text delta; fold tool-call fragments into `tool_acc`."""
+    """Extract one chunk's text delta; fold tool-call fragments into `tool_acc`.
+
+    The fold is bounded (issue #336): a new index is counted before its
+    accumulator is created, and arguments go through the shared cumulative
+    bound, because both the number of indices and the length of one call's
+    arguments are the host's to choose.
+
+    Raises:
+        ProviderStreamLimitError: A cumulative bound was passed.
+    """
     choices: list[dict[str, Any]] = chunk.get("choices", [])
     if not choices:
         return None
@@ -340,13 +427,17 @@ def _chunk_text(chunk: dict[str, Any], tool_acc: dict[int, dict[str, str]]) -> s
     delta: dict[str, Any] = choices[0].get("delta", {})
     for frag in delta.get("tool_calls") or []:
         idx: int = frag["index"]
+        if idx not in tool_acc:
+            guard_tool_call_count(len(tool_acc) + 1)
         acc = tool_acc.setdefault(idx, {"id": "", "name": "", "arguments": ""})
         if frag.get("id"):
             acc["id"] = frag["id"]
         fn: dict[str, str] = frag.get("function", {})
         if fn.get("name"):
             acc["name"] = fn["name"]
-        acc["arguments"] += fn.get("arguments", "")
+        acc["arguments"] = append_bounded(
+            acc["arguments"], fn.get("arguments", ""), limit=MAX_TOOL_ARGUMENT_CHARS
+        )
 
     content: str | None = delta.get("content")
     return content or None

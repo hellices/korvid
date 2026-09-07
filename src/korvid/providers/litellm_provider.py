@@ -45,9 +45,18 @@ import httpx
 
 from korvid.agent.model_policy import ModelCapabilities, ModelDescriptor
 from korvid.agent.provider import (
+    CREDENTIAL_REFUSED,
     MAX_TOOL_ARGUMENT_CHARS,
+    MODEL_UNKNOWN,
+    NOT_PERMITTED,
+    RATE_LIMITED,
+    REQUEST_REJECTED,
     REQUEST_SENT,
+    SERVER_ERROR,
     STREAM_TRUNCATED,
+    TIMED_OUT,
+    UNAVAILABLE,
+    UNREACHABLE,
     LLMProvider,
     OperatorSafeProviderError,
     ProviderStreamTruncatedError,
@@ -61,51 +70,31 @@ logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Written messages — evidence-free by construction
+#
+# The vocabulary is the shared one in `agent/provider.py`, so the three
+# built-in adapters say the same sentence about the same situation. The
+# two below are this SDK's own: nothing else can raise them.
 # ---------------------------------------------------------------------------
 
-_AUTH: Final = (
-    "The provider refused the credential. Check the profile's API key, or "
-    "re-run `:ai` to authenticate again."
-)
-_PERMISSION: Final = (
-    "The credential is not permitted to use this model. Check the account's access to it."
-)
-_RATE_LIMIT: Final = (
-    "The provider applied a rate limit. Wait and retry, or switch to another model."
-)
 _CONTEXT: Final = (
     "The request exceeded the model's context window. Start a new session, or "
     "shorten the conversation."
 )
-_NOT_FOUND: Final = (
-    "The provider does not have this model. Check the model reference in the profile."
-)
-_BAD_REQUEST: Final = (
-    "The provider rejected the request. Check the model reference and any "
-    "per-model options in the profile."
-)
-_TIMEOUT: Final = "The provider timed out before answering. Retry, or raise the request timeout."
-_UNREACHABLE: Final = (
-    "korvid could not reach the provider: the connection failed. Check the "
-    "endpoint, the network and any proxy."
-)
-_UNAVAILABLE: Final = "The provider is unavailable right now. Retry shortly."
-_INTERNAL: Final = "The provider failed with a server error."
 _GENERIC: Final = "The provider failed to answer the request."
 
 #: Ordered because the classes nest: `ContextWindowExceededError` is a
 #: `BadRequestError`, so the specific row has to be tried first.
 _MESSAGES: Final[tuple[tuple[type[Exception], str], ...]] = (
-    (exceptions.AuthenticationError, _AUTH),
-    (exceptions.PermissionDeniedError, _PERMISSION),
-    (exceptions.RateLimitError, _RATE_LIMIT),
+    (exceptions.AuthenticationError, CREDENTIAL_REFUSED),
+    (exceptions.PermissionDeniedError, NOT_PERMITTED),
+    (exceptions.RateLimitError, RATE_LIMITED),
     (exceptions.ContextWindowExceededError, _CONTEXT),
-    (exceptions.NotFoundError, _NOT_FOUND),
-    (exceptions.BadRequestError, _BAD_REQUEST),
-    (exceptions.Timeout, _TIMEOUT),
-    (exceptions.APIConnectionError, _UNREACHABLE),
-    (exceptions.ServiceUnavailableError, _UNAVAILABLE),
-    (exceptions.InternalServerError, _INTERNAL),
+    (exceptions.NotFoundError, MODEL_UNKNOWN),
+    (exceptions.BadRequestError, REQUEST_REJECTED),
+    (exceptions.Timeout, TIMED_OUT),
+    (exceptions.APIConnectionError, UNREACHABLE),
+    (exceptions.ServiceUnavailableError, UNAVAILABLE),
+    (exceptions.InternalServerError, SERVER_ERROR),
 )
 
 #: Every message this module can put in front of an operator. Derived from
@@ -114,7 +103,7 @@ _MESSAGES: Final[tuple[tuple[type[Exception], str], ...]] = (
 #: undeclared one would read as a translation that silently stopped
 #: working. The three that no row names are listed explicitly.
 WRITTEN_MESSAGES: Final[frozenset[str]] = frozenset(
-    {message for _, message in _MESSAGES} | {_TIMEOUT, _UNREACHABLE, _GENERIC}
+    {message for _, message in _MESSAGES} | {TIMED_OUT, UNREACHABLE, _GENERIC}
 )
 
 
@@ -201,9 +190,9 @@ def _translate(exc: Exception) -> ProviderRequestError:
     """
     marker = _transport_marker(exc)
     if marker is httpx.TimeoutException:
-        return ProviderRequestError(_TIMEOUT)
+        return ProviderRequestError(TIMED_OUT)
     if marker is httpx.TransportError:
-        return ProviderRequestError(_UNREACHABLE)
+        return ProviderRequestError(UNREACHABLE)
     for kind, message in _MESSAGES:
         if isinstance(exc, kind):
             return ProviderRequestError(message)

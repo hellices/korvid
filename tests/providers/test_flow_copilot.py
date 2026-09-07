@@ -27,7 +27,16 @@ from korvid.agent.model_profiles import (
     ModelConnectionConfig,
     SpecialFlow,
 )
-from korvid.agent.provider import REQUEST_SENT
+from korvid.agent.provider import (
+    MAX_TOOL_ARGUMENT_CHARS,
+    MAX_TOOL_CALLS_PER_RESPONSE,
+    REQUEST_SENT,
+    STREAM_MALFORMED,
+    STREAM_TRUNCATED,
+    ProviderStreamError,
+    ProviderStreamLimitError,
+    ProviderStreamTruncatedError,
+)
 from korvid.providers.flow_copilot import (
     COPILOT_CHAT_BASE_URL,
     CREDENTIAL_KEY,
@@ -37,12 +46,15 @@ from korvid.providers.flow_copilot import (
     DeviceCodePrompt,
     DeviceLoginError,
     GitHubDeviceFlow,
-    ProviderError,
     copilot_flow,
 )
 from korvid.providers.special_flows import SpecialFlowRegistry
 from korvid.providers.static_creds import StaticHeaderSource
 from korvid.providers.token_store import TokenStore
+
+#: A value shaped like a credential, so a test can prove a refusal did
+#: not echo the body it came from.
+_SECRET_ISH = "gho_leaked_token_value"
 
 
 def _client(handler: Callable[[httpx.Request], httpx.Response]) -> httpx.AsyncClient:
@@ -698,7 +710,7 @@ async def test_the_transport_reports_a_refused_request_rather_than_an_empty_answ
     provider._client = httpx.AsyncClient(  # type: ignore[attr-defined]  # injected transport
         transport=httpx.MockTransport(handler)
     )
-    with pytest.raises(ProviderError, match="HTTP 401"):
+    with pytest.raises(ProviderStreamError, match="refused the credential"):
         [e async for e in provider.complete([{"role": "user", "content": "hi"}], [])]
 
 
@@ -814,7 +826,7 @@ async def test_the_first_event_acknowledges_the_transport() -> None:
 async def test_an_http_error_acknowledges_before_it_raises() -> None:
     seen: list[dict[str, Any]] = []
     provider = _sse_provider("nope", status=401)
-    with pytest.raises(ProviderError, match="HTTP 401"):
+    with pytest.raises(ProviderStreamError, match="refused the credential"):
         await _drain(provider, seen)
     assert seen == [{"type": REQUEST_SENT}]
 
@@ -1103,6 +1115,223 @@ async def test_anything_after_done_is_not_read() -> None:
     )
     events = await _stream(_sse_provider(body))
     assert [e["text"] for e in events if e["type"] == "text_delta"] == ["hi"]
+
+
+# ---------------------------------------------------------------------------
+# The terminal marker and the cumulative bounds (issue #336)
+# ---------------------------------------------------------------------------
+
+
+async def test_a_stream_that_never_sent_done_is_refused() -> None:
+    """This dialect's terminal marker is on the wire, so its absence is
+    knowable: a connection that closed tidily after half an answer is a
+    truncated answer, not a short one."""
+    seen: list[dict[str, Any]] = []
+    provider = _sse_provider('data: {"choices":[{"delta":{"content":"par"}}]}\n\n')
+
+    with pytest.raises(ProviderStreamTruncatedError, match="ended before") as raised:
+        await _drain(provider, seen)
+
+    assert raised.value.operator_message() == STREAM_TRUNCATED
+    assert [e["type"] for e in seen] == [REQUEST_SENT, "text_delta"]
+    assert {"type": "done"} not in seen
+
+
+async def test_a_truncated_stream_emits_neither_its_calls_nor_its_usage() -> None:
+    """A tool call the model never finished writing must not be
+    dispatched, and a cost for an answer that never arrived is not a
+    measurement."""
+    seen: list[dict[str, Any]] = []
+    body = (
+        'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1",'
+        '"function":{"name":"get_logs","arguments":"{}"}}]}}]}\n\n'
+        'data: {"choices":[],"usage":{"prompt_tokens":3,"completion_tokens":4}}\n\n'
+    )
+
+    with pytest.raises(ProviderStreamTruncatedError):
+        await _drain(_sse_provider(body), seen)
+
+    assert [e["type"] for e in seen] == [REQUEST_SENT]
+
+
+async def test_the_stream_stops_at_the_first_done_even_mid_answer() -> None:
+    """Two terminal markers are not two answers: everything after the
+    first one belongs to a turn the runtime has already closed."""
+    body = (
+        'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'
+        "data: [DONE]\n\n"
+        'data: {"choices":[],"usage":{"prompt_tokens":9,"completion_tokens":9}}\n\n'
+        "data: [DONE]\n\n"
+    )
+
+    events = await _stream(_sse_provider(body))
+
+    assert [e for e in events if e["type"] == "usage"] == []
+    assert events[-1] == {"type": "done"}
+
+
+async def test_an_unreadable_chunk_is_refused_without_quoting_the_host() -> None:
+    """A host that writes something other than JSON is a protocol
+    failure. The refusal must not carry the bytes: this stream's body is
+    the one place a leaked credential would be echoed straight back."""
+    seen: list[dict[str, Any]] = []
+    body = f"data: not json {_SECRET_ISH}\n\ndata: [DONE]\n\n"
+
+    with pytest.raises(ProviderStreamError) as raised:
+        await _drain(_sse_provider(body), seen)
+
+    assert _SECRET_ISH not in str(raised.value)
+    assert raised.value.operator_message() == STREAM_MALFORMED
+
+
+@pytest.mark.parametrize("status", [401, 403, 404, 429, 500])
+async def test_a_refused_request_never_quotes_the_hosts_answer(status: int) -> None:
+    """Providers echo the credential they refused in their own 401
+    bodies, so the status is reported and the body never is."""
+    seen: list[dict[str, Any]] = []
+    provider = _sse_provider(f"denied: {_SECRET_ISH}", status=status)
+
+    with pytest.raises(ProviderStreamError) as raised:
+        await _drain(provider, seen)
+
+    message = str(raised.value)
+    assert _SECRET_ISH not in message
+    assert raised.value.operator_message() == message
+    assert seen == [{"type": REQUEST_SENT}]
+
+
+async def test_a_connection_that_fails_mid_stream_is_translated() -> None:
+    """An `httpx` error carries the request — including its headers — so
+    it is translated here rather than allowed to escape as itself."""
+    seen: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadError(f"reset while reading {_SECRET_ISH}", request=request)
+
+    provider = CopilotChatProvider(
+        base_url=COPILOT_CHAT_BASE_URL,
+        model="gpt-4o",
+        credentials=StaticHeaderSource("cop-1"),
+        client=_client(handler),
+    )
+
+    with pytest.raises(ProviderStreamError) as raised:
+        await _drain(provider, seen)
+
+    assert _SECRET_ISH not in str(raised.value)
+
+
+def _fragment_chunks(index: int, total: int, *, piece: int = 4_096) -> list[dict[str, Any]]:
+    """One call whose arguments arrive `piece` characters at a time."""
+    chunks: list[dict[str, Any]] = [
+        {
+            "choices": [
+                {
+                    "delta": {
+                        "tool_calls": [
+                            {"index": index, "id": f"c{index}", "function": {"name": "get_logs"}}
+                        ]
+                    }
+                }
+            ]
+        }
+    ]
+    written = 0
+    while written < total:
+        step = min(piece, total - written)
+        chunks.append(
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {"index": index, "function": {"arguments": "x" * step}}
+                            ]
+                        }
+                    }
+                ]
+            }
+        )
+        written += step
+    return chunks
+
+
+async def test_arguments_that_stop_exactly_at_the_bound_are_kept() -> None:
+    events = await _stream(
+        _sse_provider(_sse(*_fragment_chunks(0, MAX_TOOL_ARGUMENT_CHARS)))
+    )
+
+    call = next(e for e in events if e["type"] == "tool_call")
+    assert len(call["arguments"]) == MAX_TOOL_ARGUMENT_CHARS
+
+
+async def test_arguments_one_character_past_the_bound_are_refused() -> None:
+    seen: list[dict[str, Any]] = []
+    provider = _sse_provider(_sse(*_fragment_chunks(0, MAX_TOOL_ARGUMENT_CHARS + 1)))
+
+    with pytest.raises(ProviderStreamLimitError, match="limit"):
+        await _drain(provider, seen)
+
+    assert [e["type"] for e in seen] == [REQUEST_SENT]
+
+
+async def test_two_calls_are_bounded_one_at_a_time() -> None:
+    half = MAX_TOOL_ARGUMENT_CHARS // 2
+    events = await _stream(
+        _sse_provider(_sse(*_fragment_chunks(0, half), *_fragment_chunks(1, half)))
+    )
+
+    assert [len(e["arguments"]) for e in events if e["type"] == "tool_call"] == [half, half]
+
+
+def _opening(index: int) -> dict[str, Any]:
+    return {
+        "choices": [
+            {
+                "delta": {
+                    "tool_calls": [
+                        {"index": index, "id": f"c{index}", "function": {"name": "get_logs"}}
+                    ]
+                }
+            }
+        ]
+    }
+
+
+async def test_exactly_the_permitted_number_of_calls_is_kept() -> None:
+    events = await _stream(
+        _sse_provider(_sse(*(_opening(i) for i in range(MAX_TOOL_CALLS_PER_RESPONSE))))
+    )
+
+    assert len([e for e in events if e["type"] == "tool_call"]) == MAX_TOOL_CALLS_PER_RESPONSE
+
+
+async def test_one_call_too_many_stops_the_stream_before_it_grows() -> None:
+    """Sparse indices: the host chooses them, so what is counted is the
+    number of accumulators, not the largest index seen."""
+    seen: list[dict[str, Any]] = []
+    provider = _sse_provider(
+        _sse(*(_opening(i * 7) for i in range(MAX_TOOL_CALLS_PER_RESPONSE + 1)))
+    )
+
+    with pytest.raises(ProviderStreamLimitError, match="limit"):
+        await _drain(provider, seen)
+
+    assert [e["type"] for e in seen] == [REQUEST_SENT]
+
+
+async def test_more_fragments_for_one_open_call_are_not_new_calls() -> None:
+    chunks = [
+        _opening(0),
+        *(
+            {"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": "x"}}]}}]}
+            for _ in range(MAX_TOOL_CALLS_PER_RESPONSE * 4)
+        ),
+    ]
+
+    events = await _stream(_sse_provider(_sse(*chunks)))
+
+    assert len([e for e in events if e["type"] == "tool_call"]) == 1
 
 
 async def test_a_chunk_with_no_choices_is_skipped_rather_than_raising() -> None:

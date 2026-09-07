@@ -120,6 +120,45 @@ def test_a_message_built_from_a_provider_never_inherits_the_exemption(
     assert error("HTTP 401: bearer sk-secret").operator_message() is None
 
 
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [
+        (401, contract.CREDENTIAL_REFUSED),
+        (403, contract.NOT_PERMITTED),
+        (404, contract.MODEL_UNKNOWN),
+        (429, contract.RATE_LIMITED),
+        (400, contract.REQUEST_REJECTED),
+        (422, contract.REQUEST_REJECTED),
+        (500, contract.SERVER_ERROR),
+        (502, contract.SERVER_ERROR),
+        (503, contract.UNAVAILABLE),
+    ],
+)
+def test_a_refusing_status_becomes_the_written_message_for_its_class(
+    status: int, expected: str
+) -> None:
+    """The status class is what an operator can act on, and it is knowable
+    without reading a byte of the body."""
+    error = contract.status_error(status)
+
+    assert isinstance(error, contract.ProviderStatusError)
+    assert error.operator_message() == expected
+
+
+def test_every_typed_failure_shares_one_catchable_base() -> None:
+    """A caller that only needs "korvid would not accept this answer"
+    must not have to enumerate five classes."""
+    for error in (
+        ProviderStreamTruncatedError,
+        ProviderStreamLimitError,
+        contract.ProviderProtocolError,
+        contract.ProviderStatusError,
+        contract.ProviderTransportError,
+    ):
+        assert issubclass(error, contract.ProviderStreamError)
+        assert issubclass(error, OperatorSafeProviderError)
+
+
 def test_every_written_message_is_evidence_free() -> None:
     """A written sentence is safe because it interpolates nothing. Pinning
     that here keeps a later `f"...{exc}"` from being added to the table."""
@@ -131,9 +170,16 @@ def test_every_written_message_is_evidence_free() -> None:
 
 
 def test_the_written_messages_are_exactly_what_the_types_declare() -> None:
-    declared = set(ProviderStreamTruncatedError.safe_messages) | set(
-        ProviderStreamLimitError.safe_messages
-    )
+    declared: set[str] = set()
+    for error in (
+        ProviderStreamTruncatedError,
+        ProviderStreamLimitError,
+        contract.ProviderProtocolError,
+        contract.ProviderStatusError,
+        contract.ProviderTransportError,
+    ):
+        declared |= set(error.safe_messages)
+
     assert declared == set(contract.STREAM_MESSAGES)
 
 
