@@ -18,7 +18,7 @@ from pathlib import Path
 from stat import S_IMODE
 from tempfile import mkstemp
 from types import MappingProxyType
-from typing import Any, Final, Protocol, cast
+from typing import Any, Final, Literal, Protocol, cast
 from urllib.parse import urlsplit, urlunsplit
 
 import yaml
@@ -1287,7 +1287,9 @@ def _profile_block(raw: Mapping[str, Any], key: str) -> tuple[Mapping[str, Any],
     return {}, _parse_bounded_options(value, root=key)[1]
 
 
-def _record_refusal(config: object, attribute: str, reason: str | None) -> None:
+def _record_refusal(
+    config: object, attribute: Literal["settings_error", "options_error"], reason: str | None
+) -> None:
     """Record on *config* why a present block was refused before modelling.
 
     `_validated_config_mapping` can only refuse a mapping it was handed;
@@ -1296,6 +1298,10 @@ def _record_refusal(config: object, attribute: str, reason: str | None) -> None:
     frozen field `__post_init__` computes — rather than being passed
     through `__init__`, where any caller could forge one and
     `dataclasses.replace` would carry a stale one past a repair.
+
+    `attribute` is a `Literal` of the two fields that exist: `object.__setattr__`
+    would happily invent a third from a typo, and an error nothing reads is
+    the same as no error at all.
     """
     if reason is not None:
         object.__setattr__(config, attribute, reason)

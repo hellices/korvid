@@ -1011,6 +1011,8 @@ class AgentUiController:
             else:
                 self._ui.notify("Agent not configured — run :ai first", severity="warning")
             return
+        if self._refuse_rejected_active_profile():
+            return
         placed = self._model_change(args[0])
         if placed is None:
             self._ui.notify("Agent not configured — run :ai first", severity="warning")
@@ -1023,6 +1025,38 @@ class AgentUiController:
             return  # apply_profile already notified the reason
         if self._persist_profiles(profiles):
             self._ui.notify(f"Agent model set to {profile.model}", markup=False)
+
+    def _refuse_rejected_active_profile(self) -> bool:
+        """Refuse `:model` while the active profile is one korvid rejected.
+
+        A rejected profile is held in two halves: the modelled one with the
+        refused block *emptied* and the reason on `config_error`, and the
+        operator's raw text under the same name in `unparsed`, which the
+        writer writes in preference to the modelled half.
+
+        `dataclasses.replace` re-validates that emptied block — an empty
+        mapping passes — so a `:model` swap on such a profile cleared
+        `options_error`, connected, reported success and persisted a set
+        whose raw twin still won the write: the next start read the
+        rejected block again and reverted the swap. Refusing here is the
+        same fail-closed rule activation already applies, and it keeps the
+        repair explicit: the block is fixed in `:ai`'s profile manager, not
+        silently dropped by a model change.
+
+        Returns:
+            True when the command was refused (and the operator told).
+        """
+        name = self._profiles.active
+        profile = self._profiles.active_profile
+        if name is None or profile is None or profile.config_error is None:
+            return False
+        self._ui.notify(
+            f"Profile {name!r} is invalid: {profile.config_error}"
+            " — repair it in :ai before changing its model",
+            severity="warning",
+            markup=False,
+        )
+        return True
 
     def _model_change(self, reference: str) -> tuple[str, ModelConnectionsConfig] | None:
         """Place `:model <reference>` in the profile set, or None if there

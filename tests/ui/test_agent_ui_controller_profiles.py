@@ -870,6 +870,138 @@ async def test_model_without_any_configuration_still_asks_for_the_wizard(tmp_pat
 
 
 # ---------------------------------------------------------------------------
+# `:model` is refused while the active profile is one korvid rejected
+# ---------------------------------------------------------------------------
+
+
+def _rejected_config(tmp_path: Path, block: str) -> KorvidConfig:
+    """A real config whose active profile carries a refused `block`.
+
+    Loaded rather than hand-built, because the defect lives in the pairing
+    the loader produces: the modelled profile holds the *emptied* block
+    plus the reason, and the operator's raw text is kept under the same
+    name in `unparsed` — which `save_model_connections` writes in
+    preference to the modelled half.
+    """
+    from korvid.core.config import load_config
+
+    path = tmp_path / f"rejected-{block}.yaml"
+    path.write_text(
+        "agent:\n"
+        "  active: local\n"
+        "  profiles:\n"
+        "    local:\n"
+        "      model: acme/model-x\n"
+        f"      {block}: not-a-mapping\n",
+        encoding="utf-8",
+    )
+    config = load_config(path)
+    profile = config.model_connections.active_profile
+    assert profile is not None  # the fixture is the precondition
+    assert profile.config_error is not None
+    assert "local" in config.model_connections.unparsed
+    return config
+
+
+def _rejected_env(
+    tmp_path: Path, block: str, saver: _Saver, session: AgentSession
+) -> tuple[Env, Any]:
+    config = _rejected_config(tmp_path, block)
+    rebuild = _rebuilding(FakeSession())
+    env = _env(
+        tmp_path,
+        profiles=config.model_connections,
+        config=config,
+        session=session,
+        rebuild=rebuild,
+        saver=saver,
+    )
+    return env, rebuild
+
+
+@pytest.mark.parametrize("block", ["options", "auth"])
+async def test_model_refuses_to_change_a_rejected_active_profile(
+    tmp_path: Path, block: str
+) -> None:
+    """`dataclasses.replace` re-validates an *already emptied* block, so a
+    rejected profile's `options_error` silently cleared and the swap
+    connected and saved — while the raw twin in `unparsed` still won the
+    write and the next start read the rejected block again. Same
+    fail-closed rule as activation: repair first, then change the model."""
+    saver = _Saver()
+    previous = FakeSession()
+    env, rebuild = _rejected_env(tmp_path, block, saver, previous)
+    env.controller.handle_model_command(["model-z"])
+
+    assert rebuild.built == []
+    assert saver.calls == []
+    assert env.controller.session is previous
+    assert env.controller.profiles.profiles["local"].model == "acme/model-x"
+    message, severity = env.ui.notifications[-1]
+    assert "'local'" in message
+    assert ":ai" in message
+    assert severity == "warning"
+
+
+@pytest.mark.parametrize("block", ["options", "auth"])
+async def test_a_refused_model_change_keeps_the_rejected_block_intact(
+    tmp_path: Path, block: str
+) -> None:
+    """The rejected text is the one thing the operator has to edit, so a
+    refused `:model` must leave the whole set — the raw entry included —
+    the identical object it was, not a re-validated copy."""
+    saver = _Saver()
+    env, _rebuild = _rejected_env(tmp_path, block, saver, FakeSession())
+    before = env.controller.profiles
+    raw = before.unparsed["local"]
+    env.controller.handle_model_command(["model-z"])
+
+    assert env.controller.profiles is before
+    assert env.controller.profiles.unparsed["local"] is raw
+    assert raw == {"model": "acme/model-x", block: "not-a-mapping"}
+    assert env.controller.profiles.profiles["local"].config_error is not None
+
+
+@pytest.mark.parametrize("block", ["options", "auth"])
+async def test_a_full_reference_does_not_repair_a_rejected_profile(
+    tmp_path: Path, block: str
+) -> None:
+    """Typing the provider too is still a model change, not a repair:
+    accepting it would drop the refused block without a word. Repair is
+    explicit, in the profile manager."""
+    saver = _Saver()
+    env, rebuild = _rejected_env(tmp_path, block, saver, FakeSession())
+    env.controller.handle_model_command(["openai/gpt-4o"])
+
+    assert saver.calls == []
+    assert env.controller.profiles.profiles["local"].model == "acme/model-x"
+    assert rebuild.built == []
+
+
+async def test_model_still_changes_a_healthy_profile_beside_a_rejected_one(
+    tmp_path: Path,
+) -> None:
+    """The gate is about the *active* profile: another profile korvid
+    refused must not freeze the one the operator is actually on."""
+    saver = _Saver()
+    broken = ModelConnectionConfig(model="acme/model-broken", options={"bad": object()})
+    assert broken.config_error is not None  # the fixture is the precondition
+    raw: dict[object, object] = {
+        "broken": {"model": "acme/model-broken", "options": "not-a-mapping"}
+    }
+    profiles = ModelConnectionsConfig(
+        active="default",
+        profiles={"default": ModelConnectionConfig(model="acme/model-x"), "broken": broken},
+        unparsed=raw,
+    )
+    env = _model_env(tmp_path, profiles=profiles, saver=saver)
+    env.controller.handle_model_command(["model-z"])
+
+    assert saver.calls[-1].profiles["default"].model == "acme/model-z"
+    assert dict(saver.calls[-1].unparsed) == raw
+
+
+# ---------------------------------------------------------------------------
 # The first-run tier is persisted with the profiles, in one write
 # ---------------------------------------------------------------------------
 

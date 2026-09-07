@@ -241,10 +241,11 @@ are composed *after* the immutable safety contract and cannot widen it.
   so korvid connected with no credential, or without the settings the file
   named, and said nothing. Such a profile is now reported and refused until it
   is fixed, and the line is preserved verbatim by the next save instead of
-  being overwritten. An absent block, and `auth:` with nothing after it, still
-  mean "not set". Entries filed under a key that is not a name (`1:`) keep that
-  exact key through a save, so they can no longer collide with, or be promoted
-  into, the profile named `"1"`.
+  being overwritten. `:model` is refused on such a profile as well: the block
+  is repaired in `:ai`, never dropped by a model change. An absent block, and
+  `auth:` with nothing after it, still mean "not set". Entries filed under a
+  key that is not a name (`1:`) keep that exact key through a save, so they
+  can no longer collide with, or be promoted into, the profile named `"1"`.
 - **Truncation marker.** A tool result too large for the tier's budget is
   still shortened from the middle, and the marker the model reads there now
   names the budget it hit: `… [middle truncated — tier result budget]`. It
