@@ -15,7 +15,13 @@ import pytest
 from korvid.agent.model_policy import ModelDescriptor
 from korvid.agent.model_profiles import ConnectionAuthConfig, ModelConnectionConfig
 from korvid.agent.outbound import OutboundPolicy, OutboundPolicyError
-from korvid.providers.profile_probe import PROBE_MESSAGE, ProfileProbe
+from korvid.agent.provider import OperatorSafeProviderError
+from korvid.providers.profile_probe import (
+    PROBE_MAX_RESPONSE_CHARS,
+    PROBE_MESSAGE,
+    ProbeFailed,
+    ProfileProbe,
+)
 
 _PROFILE = ModelConnectionConfig(
     model="openai/gpt-4o",
@@ -115,16 +121,22 @@ async def test_probe_raises_when_the_factory_refuses(monkeypatch: pytest.MonkeyP
     """
     _patch_factory(monkeypatch, None)
 
-    with pytest.raises(RuntimeError, match="configuration incomplete"):
+    with pytest.raises(ProbeFailed, match="configuration incomplete") as raised:
         await ProfileProbe()(_PROFILE)
+
+    # The wizard renders the message, so it has to be one the contract
+    # declared safe rather than whatever text a failure carried.
+    assert isinstance(raised.value, OperatorSafeProviderError)
+    assert raised.value.operator_message() == str(raised.value)
 
 
 async def test_probe_raises_on_empty_text(monkeypatch: pytest.MonkeyPatch) -> None:
     provider = ScriptedProvider([{"type": "done"}])
     _patch_factory(monkeypatch, provider)
 
-    with pytest.raises(RuntimeError, match="provider returned no text"):
+    with pytest.raises(ProbeFailed, match="returned no text") as raised:
         await ProfileProbe()(_PROFILE)
+    assert raised.value.operator_message() == str(raised.value)
     assert provider.closed
 
 
@@ -163,3 +175,68 @@ async def test_probe_threads_its_wiring_into_the_factory(
             "ca_bundle": "/etc/ssl/corp.pem",
         }
     ]
+
+
+async def test_the_answer_is_bounded_so_a_probe_stays_a_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The catalog's contract is "a short human-readable result".
+
+    A probe asks for one word; a provider that echoes, loops, or streams
+    a whole document in reply must not turn a connectivity check into an
+    unbounded string in the wizard.
+    """
+    provider = ScriptedProvider(
+        [{"type": "text_delta", "text": "z" * 4_096} for _ in range(64)] + [{"type": "done"}]
+    )
+    _patch_factory(monkeypatch, provider)
+
+    result = await ProfileProbe()(_PROFILE)
+
+    assert len(result) == PROBE_MAX_RESPONSE_CHARS
+    assert provider.closed
+
+
+async def test_an_answer_that_fits_is_returned_whole(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bound is a ceiling, not a truncation every probe pays."""
+    provider = ScriptedProvider([{"type": "text_delta", "text": "ok"}, {"type": "done"}])
+    _patch_factory(monkeypatch, provider)
+
+    assert await ProfileProbe()(_PROFILE) == "ok"
+
+
+async def test_the_probe_stops_reading_once_it_has_enough(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bounding the string is not enough on its own: the stream has to
+    stop, or the provider still pays for everything it sends."""
+    sent = 0
+
+    class _Endless(ScriptedProvider):
+        def complete(
+            self,
+            messages: list[dict[str, Any]],
+            tools: list[dict[str, Any]],
+            *,
+            stream: bool = True,
+        ) -> AsyncIterator[dict[str, Any]]:
+            self.calls.append((messages, tools))
+
+            async def gen() -> AsyncIterator[dict[str, Any]]:
+                nonlocal sent
+                while True:
+                    sent += 1
+                    yield {"type": "text_delta", "text": "z" * 1_024}
+
+            return gen()
+
+    provider = _Endless([])
+    _patch_factory(monkeypatch, provider)
+
+    result = await ProfileProbe()(_PROFILE)
+
+    assert len(result) == PROBE_MAX_RESPONSE_CHARS
+    assert sent <= (PROBE_MAX_RESPONSE_CHARS // 1_024) + 1
+    assert provider.closed

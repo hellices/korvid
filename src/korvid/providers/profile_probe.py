@@ -14,10 +14,12 @@ what keeps the probe inside the same size budget as a real turn.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from typing import TYPE_CHECKING, Final
+from collections.abc import AsyncGenerator, Mapping
+from contextlib import aclosing
+from typing import TYPE_CHECKING, Any, Final, cast
 
 from korvid.agent.outbound import OutboundPolicy, provider_prepared_messages
+from korvid.agent.provider import OperatorSafeProviderError
 from korvid.providers.litellm_factory import CredentialStore, create_provider_from_profile
 from korvid.providers.provider_default import ProviderDefaultRegistry
 
@@ -36,6 +38,29 @@ PROBE_MESSAGE: Final[Mapping[str, str]] = {
 #: echoes or a policy that grows cannot turn a connectivity check into an
 #: expensive request.
 PROBE_MAX_REQUEST_CHARS: Final[int] = 4_096
+
+#: And the answer is bounded the same way (issue #336). The catalog's
+#: contract is "a short human-readable result", the question asked was for
+#: one word, and this reply is held in memory outside any turn — so a
+#: provider that echoes, loops or answers with a document is read up to
+#: here and no further.
+PROBE_MAX_RESPONSE_CHARS: Final[int] = 4_096
+
+_NO_PROVIDER: Final = (
+    "configuration incomplete — provider could not be created; see the log for the reason"
+)
+_NO_TEXT: Final = "the provider answered, but returned no text"
+
+
+class ProbeFailed(OperatorSafeProviderError):
+    """The probe's own answer that this profile does not work.
+
+    The wizard renders the message directly, so it is one of two written
+    constants: nothing from the profile, the endpoint or the provider's
+    reply is interpolated into it.
+    """
+
+    safe_messages = frozenset({_NO_PROVIDER, _NO_TEXT})
 
 
 class ProfileProbe:
@@ -76,12 +101,14 @@ class ProfileProbe:
             profile: The connection to test.
 
         Returns:
-            The concatenated reply text, stripped.
+            The concatenated reply text, stripped, and never longer than
+            `PROBE_MAX_RESPONSE_CHARS` — the wizard shows this string, and
+            the catalog's contract calls it a short result.
 
         Raises:
-            RuntimeError: When no provider could be built from the profile,
-                or when the provider streamed no text. Both are answers the
-                wizard shows the operator, so neither may be swallowed.
+            ProbeFailed: No provider could be built from the profile, or
+                the provider streamed no text. Both are answers the wizard
+                shows the operator, so neither may be swallowed.
         """
         provider = create_provider_from_profile(
             profile,
@@ -92,10 +119,7 @@ class ProfileProbe:
             ca_bundle=self._ca_bundle,
         )
         if provider is None:
-            raise RuntimeError(
-                "configuration incomplete — provider could not be created;"
-                " see the log for the reason"
-            )
+            raise ProbeFailed(_NO_PROVIDER)
         text = ""
         try:
             prepared = self._outbound.prepare(
@@ -104,13 +128,31 @@ class ProfileProbe:
                 [],
                 iteration=1,
             )
-            async for event in provider.complete(prepared.messages, prepared.tools):
-                if event.get("type") == "text_delta":
+            # `aclosing`, not a bare `async for`: the loop below may stop
+            # at the bound, and an abandoned generator has to release its
+            # HTTP response then and there. `complete` is declared
+            # `AsyncIterator` by the ABC and is an async generator — the
+            # cast names what the object already is, as `native_engine`
+            # does for the same reason.
+            stream = cast(
+                "AsyncGenerator[dict[str, Any], None]",
+                provider.complete(prepared.messages, prepared.tools),
+            )
+            async with aclosing(stream) as events:
+                async for event in events:
+                    if event.get("type") != "text_delta":
+                        continue
                     text += str(event.get("text", ""))
+                    if len(text) >= PROBE_MAX_RESPONSE_CHARS:
+                        # Reading stops as well as the string: bounding
+                        # only the answer would still let the provider
+                        # bill for everything it went on to send.
+                        text = text[:PROBE_MAX_RESPONSE_CHARS]
+                        break
         finally:
             # Closed on every path: a probe that leaks its client would
             # leak one per keystroke in the wizard.
             await provider.aclose()
         if not text.strip():
-            raise RuntimeError("provider returned no text")
+            raise ProbeFailed(_NO_TEXT)
         return text.strip()
