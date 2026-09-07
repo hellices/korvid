@@ -9,6 +9,7 @@ already cached in this test process's `sys.modules` can mask a regression.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 import tomllib
@@ -19,8 +20,16 @@ import pytest
 from tests.fixtures.provider_plugin.site_helpers import FIXTURES_DIR
 
 #: Top-level third-party modules that only the optional extras may pull in.
+#: Every probe below is built from these two tuples rather than repeating
+#: them: four copies of the agent list had already drifted apart, and the
+#: one that mattered — `openai`, which `providers/litellm_runtime.py`
+#: imports directly for `ProviderSDKError` — was in none of them.
 _MCP_MODULES = ("mcp", "anyio", "starlette", "uvicorn")
-_AGENT_MODULES = ("httpx", "keyring", "litellm")
+_AGENT_MODULES = ("httpx", "keyring", "litellm", "openai")
+
+#: Distribution names in an extra that are not top-level import names.
+#: Empty today: every `[agent]` distribution imports under its own name.
+_IMPORT_NAMES: dict[str, str] = {}
 
 _PROBE = """
 import sys
@@ -31,6 +40,28 @@ leaked = [m for m in {watched!r} if m in sys.modules]
 if leaked:
     raise SystemExit(f"optional extras leaked into base import: {{leaked}}")
 """
+
+
+def _declared_imports(extra: str) -> frozenset[str]:
+    """The top-level modules an extra's declared distributions provide."""
+    data = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+    names = (
+        re.split(r"[<>=!~\[; ]", spec, maxsplit=1)[0].strip()
+        for spec in data["project"]["optional-dependencies"][extra]
+    )
+    return frozenset(_IMPORT_NAMES.get(name, name) for name in names)
+
+
+def test_the_agent_watch_list_covers_every_distribution_the_extra_declares() -> None:
+    """The watch list is the `[agent]` extra, not a memory of it.
+
+    Every probe in this module is built from `_AGENT_MODULES`, so a
+    distribution the extra declares but the list omits is a stack no test
+    watches — which is what let `openai` sit in the extra, be imported
+    directly by `providers/litellm_runtime.py`, and never be checked
+    against a base install.
+    """
+    assert frozenset(_AGENT_MODULES) == _declared_imports("agent")
 
 
 def test_the_agent_extra_declares_litellm_and_no_per_vendor_extras() -> None:
@@ -138,7 +169,7 @@ def test_agentless_wiring_does_not_scan_provider_plugins() -> None:
         "metadata.distributions = boom\n"
         "real_find_spec = importlib.util.find_spec\n"
         "def fake_find_spec(name, *args, **kwargs):\n"
-        "    if name in {'httpx', 'keyring', 'litellm'}:\n"
+        f"    if name in {set(_AGENT_MODULES)!r}:\n"
         "        return None\n"
         "    return real_find_spec(name, *args, **kwargs)\n"
         "importlib.util.find_spec = fake_find_spec\n"
@@ -189,7 +220,7 @@ def test_agent_outbound_does_not_load_optional_extras() -> None:
     probe = (
         "import sys\n"
         "import korvid.agent.outbound  # noqa: F401\n"
-        "watched = ('textual', 'httpx', 'keyring', 'litellm', 'mcp', 'anyio', 'starlette', 'uvicorn')\n"
+        f"watched = {('textual', *_AGENT_MODULES, *_MCP_MODULES)!r}\n"
         "leaked = [m for m in watched if m in sys.modules]\n"
         "if leaked:\n"
         "    raise SystemExit(f'agent outbound leaked optional extras into base import: {leaked}')\n"
@@ -197,16 +228,21 @@ def test_agent_outbound_does_not_load_optional_extras() -> None:
     _run_subprocess_probe(probe)
 
 
-def test_the_base_install_does_not_import_litellm() -> None:
-    """The base install must not reach LiteLLM through the app entry points."""
+def test_the_base_install_does_not_import_the_agent_stack() -> None:
+    """The base install must not reach the `[agent]` stack through the app
+    entry points — checked after each of them, so the second cannot hide
+    behind the first."""
     probe = (
         "import sys\n"
+        f"watched = {_AGENT_MODULES!r}\n"
+        "def check(where):\n"
+        "    leaked = [m for m in watched if m in sys.modules]\n"
+        "    if leaked:\n"
+        "        raise SystemExit(f'{leaked} leaked into the base import graph via {where}')\n"
         "import korvid.__main__  # noqa: F401\n"
-        "if 'litellm' in sys.modules:\n"
-        "    raise SystemExit('litellm leaked into the base import graph')\n"
+        "check('korvid.__main__')\n"
         "import korvid.ui.app  # noqa: F401\n"
-        "if 'litellm' in sys.modules:\n"
-        "    raise SystemExit('litellm leaked into the base import graph')\n"
+        "check('korvid.ui.app')\n"
     )
     _run_subprocess_probe(probe)
 
@@ -231,7 +267,7 @@ def test_requesting_the_agent_explicitly_without_the_extra_fails_with_a_hint() -
     probe = (
         "import korvid.__main__ as main\n"
         "from korvid.core.config import KorvidConfig\n"
-        "main._missing_extra_packages = lambda roots: ['httpx', 'keyring', 'litellm']\n"
+        f"main._missing_extra_packages = lambda roots: {sorted(_AGENT_MODULES)!r}\n"
         "try:\n"
         "    main._build_agent_wiring(KorvidConfig(agent_enabled=True), object(), {})\n"
         "except SystemExit as exc:\n"
@@ -300,7 +336,7 @@ _MISSING_AGENT_EXTRA = (
     "import sys\n"
     "real_find_spec = importlib.util.find_spec\n"
     "def fake_find_spec(name, *args, **kwargs):\n"
-    "    if name in {'httpx', 'keyring', 'litellm'}:\n"
+    f"    if name in {set(_AGENT_MODULES)!r}:\n"
     "        return None\n"
     "    return real_find_spec(name, *args, **kwargs)\n"
     "importlib.util.find_spec = fake_find_spec\n"
