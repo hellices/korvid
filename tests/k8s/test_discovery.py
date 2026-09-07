@@ -283,21 +283,35 @@ async def test_discover_resources_skips_group_without_name() -> None:
     assert any(m.plural == "pods" for m in metas)
 
 
-async def test_request_json_wraps_api_exception_as_api_status_error() -> None:
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        (None, ""),
+        (b'{"kind":"Status"}', '{"kind":"Status"}'),
+        ('{"kind":"Status"}', '{"kind":"Status"}'),
+        (b"invalid \xff", "invalid \ufffd"),
+    ],
+    ids=["absent", "bytes", "text", "invalid-utf8"],
+)
+async def test_request_json_wraps_api_exception_as_api_status_error(
+    body: bytes | str | None,
+    expected: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """_request_json must wrap ApiException as ApiStatusError."""
     from kubernetes_asyncio.client.exceptions import ApiException
 
     client = KubeClient()
     fake_api = AsyncMock()
     api_error = ApiException(status=403, reason="Forbidden")
-    api_error.body = b'{"kind":"Status","message":"status body contract"}'
+    monkeypatch.setattr(api_error, "body", body)
     fake_api.call_api.side_effect = api_error
     client._api = fake_api
 
     with pytest.raises(ApiStatusError, match="API 403: Forbidden") as excinfo:
         await client._request_json("/api/v1")
 
-    assert excinfo.value.body == api_error.body.decode("utf-8")
+    assert excinfo.value.body == expected
     assert excinfo.value.__cause__ is api_error
 
 

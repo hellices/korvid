@@ -198,7 +198,7 @@ def test_publication_fails_closed_when_registry_cannot_be_read(
     _write_private_registry(path, original)
     original_open = os.open
 
-    def deny_registry_open(file: Any, flags: int, mode: int = 0o777) -> int:
+    def deny_registry_open(file: Any, flags: int, mode: int = 0o600) -> int:
         if Path(os.fsdecode(file)) == path:
             raise PermissionError("registry read denied")
         return original_open(file, flags, mode)

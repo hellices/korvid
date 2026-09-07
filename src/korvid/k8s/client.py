@@ -1709,10 +1709,14 @@ async def _request_dict(request: Awaitable[Any]) -> dict[str, Any]:
     try:
         return await _response_dict(await request)
     except k8s_client.exceptions.ApiException as exc:
+        body = exc.body
+        body_text = (
+            body.decode("utf-8", errors="replace") if isinstance(body, bytes) else str(body or "")
+        )
         raise ApiStatusError(
             int(exc.status or 0),
             str(exc.reason or ""),
-            body=(exc.body or b"").decode("utf-8", errors="replace"),
+            body=body_text,
         ) from exc
     except (json.JSONDecodeError, UnicodeDecodeError, RecursionError):
         raise KubeClientError(
