@@ -2424,14 +2424,18 @@ async def test_a_profile_the_factory_refuses_reports_a_reason(
     the connection could not be built and where the reason is."""
     pytest.importorskip("litellm")
     from korvid.__main__ import _build_model_catalog
+    from korvid.providers.profile_probe import ProbeFailed
 
     factory = _RecordingFactory(refuse=True)
     monkeypatch.setattr("korvid.providers.profile_probe.create_provider_from_profile", factory)
     catalog = _build_model_catalog()
     assert catalog is not None
 
-    with pytest.raises(RuntimeError, match="provider could not be created"):
+    with pytest.raises(ProbeFailed, match="provider could not be created") as raised:
         await catalog.test(ModelConnectionConfig(model="openai/gpt-4o"))
+
+    # The wizard renders this text, so it has to be a declared-safe one.
+    assert raised.value.operator_message() == str(raised.value)
 
 
 def test_the_app_is_wired_with_a_catalog_that_can_probe() -> None:

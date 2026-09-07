@@ -1244,9 +1244,7 @@ def _fragment_chunks(index: int, total: int, *, piece: int = 4_096) -> list[dict
                 "choices": [
                     {
                         "delta": {
-                            "tool_calls": [
-                                {"index": index, "function": {"arguments": "x" * step}}
-                            ]
+                            "tool_calls": [{"index": index, "function": {"arguments": "x" * step}}]
                         }
                     }
                 ]
@@ -1257,9 +1255,7 @@ def _fragment_chunks(index: int, total: int, *, piece: int = 4_096) -> list[dict
 
 
 async def test_arguments_that_stop_exactly_at_the_bound_are_kept() -> None:
-    events = await _stream(
-        _sse_provider(_sse(*_fragment_chunks(0, MAX_TOOL_ARGUMENT_CHARS)))
-    )
+    events = await _stream(_sse_provider(_sse(*_fragment_chunks(0, MAX_TOOL_ARGUMENT_CHARS))))
 
     call = next(e for e in events if e["type"] == "tool_call")
     assert len(call["arguments"]) == MAX_TOOL_ARGUMENT_CHARS
