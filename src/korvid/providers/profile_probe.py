@@ -19,7 +19,7 @@ from contextlib import aclosing
 from typing import TYPE_CHECKING, Any, Final, cast
 
 from korvid.agent.outbound import OutboundPolicy, provider_prepared_messages
-from korvid.agent.provider import OperatorSafeProviderError
+from korvid.agent.provider import OperatorSafeProviderError, append_bounded
 from korvid.providers.litellm_factory import CredentialStore, create_provider_from_profile
 from korvid.providers.provider_default import ProviderDefaultRegistry
 
@@ -42,8 +42,9 @@ PROBE_MAX_REQUEST_CHARS: Final[int] = 4_096
 #: And the answer is bounded the same way (issue #336). The catalog's
 #: contract is "a short human-readable result", the question asked was for
 #: one word, and this reply is held in memory outside any turn — so a
-#: provider that echoes, loops or answers with a document is read up to
-#: here and no further.
+#: provider that answers past this is refused rather than quietly cut
+#: short: truncating would end the read before the adapter could say
+#: whether the stream ever finished.
 PROBE_MAX_RESPONSE_CHARS: Final[int] = 4_096
 
 _NO_PROVIDER: Final = (
@@ -101,7 +102,7 @@ class ProfileProbe:
             profile: The connection to test.
 
         Returns:
-            The concatenated reply text, stripped, and never longer than
+            The concatenated reply text, stripped. It is never longer than
             `PROBE_MAX_RESPONSE_CHARS` — the wizard shows this string, and
             the catalog's contract calls it a short result.
 
@@ -109,6 +110,16 @@ class ProfileProbe:
             ProbeFailed: No provider could be built from the profile, or
                 the provider streamed no text. Both are answers the wizard
                 shows the operator, so neither may be swallowed.
+            ProviderStreamLimitError: The reply passed
+                `PROBE_MAX_RESPONSE_CHARS`. Cutting it short instead would
+                end the read before the adapter could apply its own
+                terminal-marker postcondition, so an answer longer than
+                the bound that never finished would pass as a connection
+                (issue #336 review).
+            OperatorSafeProviderError: Whatever the adapter refused the
+                stream with — a missing terminal marker, a refusing
+                status, an unreadable frame. The probe reads to the end of
+                the stream precisely so those reach the wizard.
         """
         provider = create_provider_from_profile(
             profile,
@@ -129,11 +140,11 @@ class ProfileProbe:
                 iteration=1,
             )
             # `aclosing`, not a bare `async for`: the loop below may stop
-            # at the bound, and an abandoned generator has to release its
-            # HTTP response then and there. `complete` is declared
-            # `AsyncIterator` by the ABC and is an async generator — the
-            # cast names what the object already is, as `native_engine`
-            # does for the same reason.
+            # at the bound's refusal, and an abandoned generator has to
+            # release its HTTP response then and there. `complete` is
+            # declared `AsyncIterator` by the ABC and is an async
+            # generator — the cast names what the object already is, as
+            # `native_engine` does for the same reason.
             stream = cast(
                 "AsyncGenerator[dict[str, Any], None]",
                 provider.complete(prepared.messages, prepared.tools),
@@ -142,13 +153,12 @@ class ProfileProbe:
                 async for event in events:
                     if event.get("type") != "text_delta":
                         continue
-                    text += str(event.get("text", ""))
-                    if len(text) >= PROBE_MAX_RESPONSE_CHARS:
-                        # Reading stops as well as the string: bounding
-                        # only the answer would still let the provider
-                        # bill for everything it went on to send.
-                        text = text[:PROBE_MAX_RESPONSE_CHARS]
-                        break
+                    # The shared cumulative bound: it refuses *before* the
+                    # accumulator grows, so nothing past the cap is kept
+                    # and nothing after the refusal is read.
+                    text = append_bounded(
+                        text, str(event.get("text", "")), limit=PROBE_MAX_RESPONSE_CHARS
+                    )
         finally:
             # Closed on every path: a probe that leaks its client would
             # leak one per keystroke in the wizard.

@@ -15,7 +15,11 @@ import pytest
 from korvid.agent.model_policy import ModelDescriptor
 from korvid.agent.model_profiles import ConnectionAuthConfig, ModelConnectionConfig
 from korvid.agent.outbound import OutboundPolicy, OutboundPolicyError
-from korvid.agent.provider import OperatorSafeProviderError
+from korvid.agent.provider import (
+    STREAM_LIMIT,
+    OperatorSafeProviderError,
+    ProviderStreamLimitError,
+)
 from korvid.providers.profile_probe import (
     PROBE_MAX_RESPONSE_CHARS,
     PROBE_MESSAGE,
@@ -177,17 +181,63 @@ async def test_probe_threads_its_wiring_into_the_factory(
     ]
 
 
-async def test_the_answer_is_bounded_so_a_probe_stays_a_probe(
+async def test_an_answer_past_the_bound_fails_the_probe_instead_of_being_cut_short(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The catalog's contract is "a short human-readable result".
 
-    A probe asks for one word; a provider that echoes, loops, or streams
-    a whole document in reply must not turn a connectivity check into an
-    unbounded string in the wizard.
+    Truncating to the bound and returning was the bug: the probe stopped
+    reading at the cap, so it never reached the point where a provider
+    says whether it finished, and a cut-off stream longer than the cap
+    green-lit the profile with a success string. Passing the bound is now
+    the answer itself — a typed, operator-safe refusal.
     """
     provider = ScriptedProvider(
         [{"type": "text_delta", "text": "z" * 4_096} for _ in range(64)] + [{"type": "done"}]
+    )
+    _patch_factory(monkeypatch, provider)
+
+    with pytest.raises(ProviderStreamLimitError, match="grew past") as raised:
+        await ProfileProbe()(_PROFILE)
+
+    assert raised.value.operator_message() == STREAM_LIMIT
+    assert provider.closed
+
+
+async def test_an_over_long_answer_is_refused_even_when_the_stream_ends_properly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A terminal marker after the bound does not rescue the answer.
+
+    The wizard's result is shown to an operator and held outside any turn,
+    so "the provider did finish, eventually" is not the question. One
+    character past the cap is a refusal whatever follows it.
+    """
+    provider = ScriptedProvider(
+        [
+            {"type": "text_delta", "text": "z" * PROBE_MAX_RESPONSE_CHARS},
+            {"type": "text_delta", "text": "!"},
+            {"type": "done"},
+        ]
+    )
+    _patch_factory(monkeypatch, provider)
+
+    with pytest.raises(ProviderStreamLimitError):
+        await ProfileProbe()(_PROFILE)
+
+    assert provider.closed
+
+
+async def test_an_answer_exactly_at_the_bound_is_accepted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bound is a ceiling that may be reached, not one that may be passed."""
+    provider = ScriptedProvider(
+        [
+            {"type": "text_delta", "text": "z" * (PROBE_MAX_RESPONSE_CHARS - 1)},
+            {"type": "text_delta", "text": "z"},
+            {"type": "done"},
+        ]
     )
     _patch_factory(monkeypatch, provider)
 
@@ -195,6 +245,24 @@ async def test_the_answer_is_bounded_so_a_probe_stays_a_probe(
 
     assert len(result) == PROBE_MAX_RESPONSE_CHARS
     assert provider.closed
+
+
+async def test_the_refusal_is_one_the_wizard_may_render(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The wizard prints the exception. A limit refusal has to be a
+    written, evidence-free sentence that tells the operator what to do —
+    and it must not name the exception type or quote the answer."""
+    provider = ScriptedProvider([{"type": "text_delta", "text": "z" * (4_096 * 2)}])
+    _patch_factory(monkeypatch, provider)
+
+    with pytest.raises(OperatorSafeProviderError) as raised:
+        await ProfileProbe()(_PROFILE)
+
+    message = raised.value.operator_message()
+    assert message == str(raised.value)
+    assert "z" * 64 not in message
+    assert "Retry" in message
 
 
 async def test_an_answer_that_fits_is_returned_whole(
@@ -207,11 +275,12 @@ async def test_an_answer_that_fits_is_returned_whole(
     assert await ProfileProbe()(_PROFILE) == "ok"
 
 
-async def test_the_probe_stops_reading_once_it_has_enough(
+async def test_the_probe_reads_nothing_after_the_bound_is_passed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Bounding the string is not enough on its own: the stream has to
-    stop, or the provider still pays for everything it sends."""
+    """Refusing the answer is not enough on its own: the stream has to
+    stop at the refusal, or the provider still bills for everything it
+    goes on to send."""
     sent = 0
 
     class _Endless(ScriptedProvider):
@@ -235,8 +304,10 @@ async def test_the_probe_stops_reading_once_it_has_enough(
     provider = _Endless([])
     _patch_factory(monkeypatch, provider)
 
-    result = await ProfileProbe()(_PROFILE)
+    with pytest.raises(ProviderStreamLimitError):
+        await ProfileProbe()(_PROFILE)
 
-    assert len(result) == PROBE_MAX_RESPONSE_CHARS
-    assert sent <= (PROBE_MAX_RESPONSE_CHARS // 1_024) + 1
+    # Exactly one fragment past the bound is read, and not one more: the
+    # refusal happens before the accumulator can grow.
+    assert sent == (PROBE_MAX_RESPONSE_CHARS // 1_024) + 1
     assert provider.closed

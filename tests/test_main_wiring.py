@@ -2438,6 +2438,33 @@ async def test_a_profile_the_factory_refuses_reports_a_reason(
     assert raised.value.operator_message() == str(raised.value)
 
 
+async def test_the_production_catalog_refuses_an_answer_past_the_probes_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`catalog.test()` is the wizard's whole verdict on a profile.
+
+    Truncating an over-long answer and returning it made that verdict a
+    lie for the case the bound exists for: the read stopped before the
+    adapter could say whether the stream ever finished, so a provider that
+    streamed 4 KiB and then died passed (issue #336 review). The catalog
+    must raise instead, with a message it declared safe to render.
+    """
+    pytest.importorskip("litellm")
+    from korvid.__main__ import _build_model_catalog
+    from korvid.agent.provider import STREAM_LIMIT, ProviderStreamLimitError
+    from korvid.providers.profile_probe import PROBE_MAX_RESPONSE_CHARS
+
+    factory = _RecordingFactory(reply="z" * (PROBE_MAX_RESPONSE_CHARS + 1))
+    monkeypatch.setattr("korvid.providers.profile_probe.create_provider_from_profile", factory)
+    catalog = _build_model_catalog()
+    assert catalog is not None
+
+    with pytest.raises(ProviderStreamLimitError, match="grew past") as raised:
+        await catalog.test(ModelConnectionConfig(model="openai/gpt-4o"))
+
+    assert raised.value.operator_message() == STREAM_LIMIT
+
+
 def test_the_app_is_wired_with_a_catalog_that_can_probe() -> None:
     """The composition root builds the catalog with the configured trust —
     without it the wizard's probe and the runtime could disagree on the CA."""

@@ -866,3 +866,63 @@ def test_tui_states_the_multi_pod_log_stream_cap() -> None:
     assert "`[pod/container]`" in flat
     assert "bounded ring buffer of 5000" in flat
     assert "reconnect automatically" in flat
+
+
+def test_agent_guide_tells_a_self_hosted_operator_how_to_diagnose_a_refused_stream() -> None:
+    """Issue #336 review: the refusal needs an operator-facing recovery.
+
+    korvid now refuses a stream whose provider never said it finished, and
+    the wizard's connection test is where a self-hosted or proxied
+    endpoint hits it first. Without a diagnosis the page turns a real
+    misconfiguration into "korvid stopped working with my gateway", so
+    three facts have to be on it: a clean end of body is not the signal, a
+    bare `[DONE]` from a proxy is not either, and there is a command that
+    shows which of the two is happening.
+    """
+    from korvid.providers.profile_probe import PROBE_MAX_RESPONSE_CHARS
+
+    agent = _source("agent.md")
+    flat = " ".join(agent.split())
+
+    section = agent.split("### Self-hosted endpoints and proxies", 1)
+    assert len(section) == 2, "the agent guide must carry a self-hosted troubleshooting section"
+    body = section[1].split("\n## ", 1)[0]
+
+    assert "finish_reason" in body
+    assert re.search(r"(not|neither) .{0,80}`data: \[DONE\]`", body, re.S), (
+        "a proxy-appended `[DONE]` must be named as insufficient on its own"
+    )
+    assert re.search(r"cleanly is not (one|the signal)", body), (
+        "a clean end of the response body must be named as insufficient"
+    )
+    assert "curl" in body, "the page must show how to inspect the raw frames"
+    assert "stream" in body, "the inspection has to be of a streamed request"
+    assert re.search(r"(upgrade|middleware|rewrit)", body, re.I), (
+        "the recovery — upgrade the proxy or stop rewriting chunks — must be stated"
+    )
+    assert '"done": true' in body, (
+        "Ollama's own marker belongs beside it, or the reader cannot tell "
+        "which signal applies to their endpoint"
+    )
+    assert "[DONE]" in body, "the Copilot dialect's wire marker belongs beside it too"
+
+    # The bound the connection test applies is a refusal now, not a trim.
+    assert re.search(r"refusal, not a trim", flat), (
+        "the guide must say an over-long connection-test answer fails rather "
+        "than being shown cut short"
+    )
+    assert PROBE_MAX_RESPONSE_CHARS == 4_096, (
+        "the release note publishes this number; update both together"
+    )
+
+
+def test_the_release_note_sends_a_broken_gateway_to_that_section() -> None:
+    """A behaviour change an operator can hit needs its recovery linked
+    from the note that announces it, not only from the guide."""
+    notes = _source("release-notes/unreleased.md")
+
+    assert "#self-hosted-endpoints-and-proxies" in notes, (
+        "the release note must link the agent guide's troubleshooting anchor"
+    )
+    assert re.search(r"connection test.{0,200}(fail|refus)", notes, re.S | re.I)
+    assert "4,096 characters" in notes

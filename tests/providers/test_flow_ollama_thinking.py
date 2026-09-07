@@ -26,7 +26,10 @@ from korvid.agent.provider import (
     MAX_TOOL_ARGUMENT_CHARS,
     MAX_TOOL_CALLS_PER_RESPONSE,
     REQUEST_SENT,
+    STREAM_FAILED,
+    STREAM_MALFORMED,
     STREAM_TRUNCATED,
+    ProviderProtocolError,
     ProviderStreamError,
     ProviderStreamLimitError,
     ProviderStreamTruncatedError,
@@ -590,23 +593,67 @@ async def test_the_final_chunks_own_content_is_still_delivered() -> None:
 
 async def test_a_mid_stream_server_error_is_refused_without_quoting_it() -> None:
     """The server can report a failure with HTTP 200. Its text is the
-    server's, so the refusal carries a written sentence instead."""
+    server's, so the refusal carries a written sentence instead.
+
+    The type and the sentence are both asserted: a failure the server
+    *declared* is not the same situation as a stream that merely stopped,
+    and only `STREAM_FAILED` tells the operator to go and read the
+    server's own logs. Refusing it as a truncation would send them to
+    "retry the request" for a fault a retry cannot fix.
+    """
     seen: list[dict[str, Any]] = []
     body = _ndjson({"error": f"unauthorized: {_SECRET_ISH}"})
 
-    with pytest.raises(ProviderStreamError) as raised:
+    with pytest.raises(ProviderProtocolError, match="reported a failure") as raised:
         await _drain(_on(body), seen)
 
+    assert raised.value.operator_message() == STREAM_FAILED
     assert _SECRET_ISH not in str(raised.value)
-    assert raised.value.operator_message() == str(raised.value)
+    # The acknowledgement is all that may have been yielded: no text, no
+    # call, no usage and no `done` follows a declared failure.
+    assert [e["type"] for e in seen] == [REQUEST_SENT]
+
+
+async def test_a_mid_stream_error_after_content_still_refuses_the_whole_answer() -> None:
+    """Text that really streamed stays; the answer is still not a finished
+    one, and the failure is the server's rather than a truncation."""
+    seen: list[dict[str, Any]] = []
+    body = _ndjson(
+        {"message": {"role": "assistant", "content": "par"}, "done": False},
+        {"error": f"overloaded: {_SECRET_ISH}"},
+        {"message": {"role": "assistant", "content": "tial"}, "done": True},
+    )
+
+    with pytest.raises(ProviderProtocolError) as raised:
+        await _drain(_on(body), seen)
+
+    assert raised.value.operator_message() == STREAM_FAILED
+    assert [e["type"] for e in seen] == [REQUEST_SENT, "text_delta"]
+    assert {"type": "done"} not in seen
 
 
 async def test_an_unreadable_line_is_refused_without_quoting_it() -> None:
+    """A line this protocol cannot read is a protocol failure named as
+    one: `STREAM_MALFORMED` sends the operator to check that the endpoint
+    speaks Ollama's native API, which is the actual fault."""
     seen: list[dict[str, Any]] = []
 
-    with pytest.raises(ProviderStreamError) as raised:
+    with pytest.raises(ProviderProtocolError, match="could not read") as raised:
         await _drain(_on(f"not json {_SECRET_ISH}\n"), seen)
 
+    assert raised.value.operator_message() == STREAM_MALFORMED
+    assert _SECRET_ISH not in str(raised.value)
+    assert [e["type"] for e in seen] == [REQUEST_SENT]
+
+
+async def test_a_line_that_is_not_an_object_is_refused_the_same_way() -> None:
+    """Valid JSON is not enough: this protocol's frames are objects."""
+    seen: list[dict[str, Any]] = []
+
+    with pytest.raises(ProviderProtocolError) as raised:
+        await _drain(_on(f'"{_SECRET_ISH}"\n'), seen)
+
+    assert raised.value.operator_message() == STREAM_MALFORMED
     assert _SECRET_ISH not in str(raised.value)
 
 

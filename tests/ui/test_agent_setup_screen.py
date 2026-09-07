@@ -34,6 +34,13 @@ from korvid.agent.model_profiles import (
     SetupField,
     SetupFieldKind,
 )
+from korvid.agent.provider import (
+    STREAM_LIMIT,
+    STREAM_TRUNCATED,
+    OperatorSafeProviderError,
+    ProviderStreamLimitError,
+    ProviderStreamTruncatedError,
+)
 from korvid.ui.widgets.agent_setup_screen import AgentSetupScreen, SetupResult
 from korvid.ui.widgets.model_search_screen import ModelSearchScreen
 
@@ -728,6 +735,48 @@ async def test_probe_failure_keeps_the_screen_open_and_shows_the_error() -> None
             lambda: "connection refused" in _status_text(app),
             label="probe failure reported",
         )
+        assert app.result == "unset"
+        assert saved == []
+
+
+@pytest.mark.parametrize(
+    "refusal",
+    [
+        ProviderStreamLimitError(STREAM_LIMIT),
+        ProviderStreamTruncatedError(STREAM_TRUNCATED),
+    ],
+    ids=["over the probe's bound", "never finished"],
+)
+async def test_a_typed_probe_refusal_reaches_the_operator_as_an_action(
+    refusal: OperatorSafeProviderError,
+) -> None:
+    """The probe's typed refusals are rendered, not swallowed or renamed.
+
+    A profile whose answer never finished, or ran past the probe's bound,
+    used to test green (issue #336 review). It now fails, so the sentence
+    the operator reads has to say what to do about it — and must not be a
+    class name, a traceback or a quoted response body.
+    """
+    saved: list[SetupResult] = []
+
+    async def _save(result: SetupResult) -> None:
+        saved.append(result)
+
+    app = _Host(_FakeCatalog(test_error=refusal), save_result=_save)
+    async with app.run_test() as pilot:
+        await _run_to_completion(pilot)
+        await until(
+            pilot,
+            lambda: str(refusal) in _status_text(app),
+            label="probe refusal reported",
+        )
+        status = _status_text(app)
+        assert refusal.operator_message() == str(refusal)
+        assert type(refusal).__name__ not in status
+        assert "Retry" in status
+        assert "Ctrl+R to retry" in status
+        # A refused probe is not a configured profile: nothing is applied
+        # and nothing is written.
         assert app.result == "unset"
         assert saved == []
 

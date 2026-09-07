@@ -262,11 +262,22 @@ are composed *after* the immutable safety contract and cannot widen it.
   answer are not accepted. Reading also stops at that signal, so a host
   that keeps writing cannot append to a turn korvid has closed. A whole
   non-streaming response is unaffected; it is complete on its own terms.
+  **Self-hosted and proxied endpoints:** a clean end of the response body
+  is not the signal, and for an OpenAI-compatible endpoint neither is a
+  bare `data: [DONE]` — some gateways append one of their own. If `:ai`'s
+  connection test now fails against a gateway that used to work, stream a
+  request through it and count `finish_reason` in the raw frames; none
+  means the field is dropped or rewritten in transit, and the proxy needs
+  upgrading or its chunk-rewriting middleware turning off. [The agent
+  guide](../agent.md#self-hosted-endpoints-and-proxies) has the command.
 - **Hidden buffers are bounded.** One tool call's arguments (64 KiB), the
   number of calls one response may open (64), the reasoning an adapter
   holds for the next request (64 KiB) and the wizard's connection-test
   reply (4,096 characters) all have limits now — they used to grow with
   whatever the provider sent, out of reach of the per-response budget.
+  An answer past the connection-test bound fails the test rather than
+  being shown cut short: trimming it would end the read before the
+  adapter could tell whether the stream had finished at all.
   Reasoning that streams through is charged to that budget by its real
   length rather than as one character. Every provider failure is reported
   in korvid's own written words: a refused status, an unreadable frame or

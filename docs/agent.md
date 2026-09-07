@@ -119,7 +119,32 @@ turn: the text that arrived stays on screen, but its tool calls and token
 counts are discarded rather than treated as a complete response. What an
 adapter buffers before the turn's budget can see it is bounded as well: a
 call's arguments, how many calls one response may open, reasoning kept for
-the next request, and the wizard's connection-test reply.
+the next request, and the wizard's connection-test reply. The reply bound
+is a refusal, not a trim: an answer past it fails the test rather than
+being shown cut short.
+
+### Self-hosted endpoints and proxies
+
+A gateway that streams tokens but forwards no stop signal is refused, and
+`:ai`'s connection test is where you will see it first. For an
+OpenAI-compatible endpoint the signal is the `finish_reason` the provider
+itself sent — the body ending cleanly is not one, and neither is a bare
+`data: [DONE]`, which some proxies add themselves. Ollama's native API
+sends `"done": true`; the Copilot dialect sends the wire's `[DONE]`.
+
+To see what your gateway really forwards, stream one request through it:
+
+```sh
+curl -N -H 'Content-Type: application/json' \
+  -d '{"model":"MODEL","stream":true,"messages":[{"role":"user","content":"ok"}]}' \
+  https://gateway.internal/v1/chat/completions | grep -c finish_reason
+```
+
+`0` means the field is being dropped or rewritten in transit: upgrade the
+proxy, or turn off any middleware that rebuilds streamed chunks. Until
+then, a non-streaming-only backend is unaffected — the rule applies to
+streams, which is where "the connection died" and "the answer ended" are
+otherwise indistinguishable.
 
 ## Connect a provider
 
