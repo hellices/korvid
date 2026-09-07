@@ -107,6 +107,15 @@ TOKEN_QUANTITY_SEGMENTS: Final[frozenset[str]] = frozenset(
 )
 
 
+#: Words that make a *preceding* `token` an identifier rather than a
+#: credential. `return_token_ids` and `allowed_token_ids` are supported
+#: parameters on litellm 1.98.0 and name *which* token, never its value.
+#: Read forward only: `id_token` is the OIDC bearer credential, so a
+#: symmetric rule would exempt it. `_singular` leaves `ids` alone (it is
+#: three letters), which is why both spellings are listed.
+TOKEN_IDENTIFIER_SEGMENTS: Final[frozenset[str]] = frozenset({"id", "ids"})
+
+
 def key_segments(key: str) -> tuple[str, ...]:
     """*key* as lowercase word segments.
 
@@ -147,6 +156,18 @@ def _is_token_quantity(singulars: tuple[str, ...], index: int) -> bool:
     before = singulars[index - 1 : index]
     after = singulars[index + 1 : index + 2]
     return any(neighbour in TOKEN_QUANTITY_SEGMENTS for neighbour in before + after)
+
+
+def _is_token_identifier(singulars: tuple[str, ...], index: int) -> bool:
+    """Whether the `token` segment at *index* names which token, not its value.
+
+    Directional on purpose: only a *following* `id`/`ids` makes `token`
+    an identifier. `id_token` is a credential and stays one.
+    """
+    if singulars[index] != "token":
+        return False
+    after = singulars[index + 1 : index + 2]
+    return any(neighbour in TOKEN_IDENTIFIER_SEGMENTS for neighbour in after)
 
 
 def _matched_pair(singulars: tuple[str, ...]) -> str | None:
@@ -193,8 +214,11 @@ def matched_credential_segment(key: str) -> str | None:
     if paired is not None:
         return paired
     for index, segment in enumerate(singulars):
-        if segment in CREDENTIAL_SEGMENTS and not _is_token_quantity(singulars, index):
-            return segment
+        if segment not in CREDENTIAL_SEGMENTS:
+            continue
+        if _is_token_quantity(singulars, index) or _is_token_identifier(singulars, index):
+            continue
+        return segment
     return None
 
 

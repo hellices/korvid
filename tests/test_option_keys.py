@@ -60,6 +60,11 @@ CREDENTIAL_KEYS: Final[tuple[str, ...]] = (
     "access_tokens",
     "azure_ad_tokens",
     "client_secrets",
+    # `id` before `token` is the OIDC credential, not an identifier — the
+    # direction is the whole difference (see the token-identifier sweep).
+    "id_token",
+    "id_tokens",
+    "idToken",
     # case and separator spellings of the same names
     "apiKey",
     "apiKeys",
@@ -100,6 +105,12 @@ BENIGN_KEYS: Final[tuple[str, ...]] = (
     "tokens_per_minute",
     "num_tokens",
     "token_limit",
+    # `token` followed by `id`/`ids` names *which* token, never its value.
+    # Both are parameters litellm 1.98.0 reports as supported.
+    "return_token_ids",
+    "allowed_token_ids",
+    "token_id",
+    "tokenIds",
     "monkey",
     "monkeys",
     "client_key",
@@ -246,3 +257,100 @@ def test_a_nested_credential_key_is_refused_where_the_nesting_is_parsed(
     assert profile.config_error is not None
     assert "api_key" in profile.config_error
     assert dict(profile.options) == {}
+
+
+# ---------------------------------------------------------------------------
+# The whole vendor parameter surface, swept
+# ---------------------------------------------------------------------------
+#
+# A false positive here is not cosmetic: a parameter the vendor supports
+# and the gate reads as a credential is refused in `config.yaml` and
+# dropped on the way to `acompletion`, so the operator cannot set it at
+# all. The two gates share one vocabulary, so one sweep measures both.
+
+#: Supported parameters that name a credential *correctly*. `api_key` is
+#: the connection secret; it belongs to the profile's auth block and to
+#: `RESERVED_CALL_ARGUMENTS`, never to `options`, so the gate matching it
+#: is the gate working. Measured on litellm 1.98.0.
+CREDENTIAL_SUPPORTED_PARAMS: Final[frozenset[str]] = frozenset({"api_key"})
+
+#: Model names the survey asks about. `get_supported_openai_params`
+#: branches on the model for several providers, so one probe would
+#: under-report the surface the operator can actually reach.
+SURVEY_MODELS: Final[tuple[str, ...]] = (
+    "",
+    "gpt-4o",
+    "o1",
+    "claude-3-5-sonnet-20240620",
+    "gemini-2.5-pro",
+    "llama3",
+)
+
+#: Floors, well under what litellm 1.98.0 reports (149 providers, 122 of
+#: them with parameters, 93 distinct names). They exist so a survey that
+#: silently stops finding anything fails instead of passing vacuously.
+MIN_PROVIDERS_WITH_PARAMS: Final[int] = 100
+MIN_DISTINCT_PARAMS: Final[int] = 60
+
+
+def _supported_parameter_surface() -> dict[str, set[str]]:
+    """Every parameter litellm reports as supported, to the providers reporting it."""
+    litellm = pytest.importorskip("litellm")
+
+    surface: dict[str, set[str]] = {}
+    for entry in litellm.provider_list:
+        provider = entry.value if hasattr(entry, "value") else str(entry)
+        for model in SURVEY_MODELS:
+            supported = litellm.get_supported_openai_params(
+                model=model, custom_llm_provider=provider
+            )
+            for key in supported or ():
+                surface.setdefault(key, set()).add(provider)
+    return surface
+
+
+def test_no_supported_parameter_is_mistaken_for_a_credential() -> None:
+    """Sweep every provider litellm knows, not the handful korvid tests.
+
+    `token` is the vocabulary's one word with an innocent meaning, and the
+    innocent spellings are not only quantities: `return_token_ids` and
+    `allowed_token_ids` name *which* token, never its value. Reading them
+    as credentials would refuse a supported parameter in `config.yaml`
+    and drop it before the request — the operator would have no way to
+    set it.
+    """
+    surface = _supported_parameter_surface()
+    providers = {provider for owners in surface.values() for provider in owners}
+
+    assert len(providers) >= MIN_PROVIDERS_WITH_PARAMS
+    assert len(surface) >= MIN_DISTINCT_PARAMS
+
+    flagged = {key for key in surface if names_a_credential(key)}
+    assert flagged == CREDENTIAL_SUPPORTED_PARAMS, (
+        f"supported parameters read as credentials: {sorted(flagged - CREDENTIAL_SUPPORTED_PARAMS)}"
+    )
+
+
+def test_the_token_identifier_exemption_is_directional() -> None:
+    """The exemption reads forward only, because `id_token` is a credential.
+
+    `id` before `token` is the OIDC identity token — a bearer credential.
+    `id` after it is an identifier of a token. A symmetric neighbour rule
+    would exempt both and put an OIDC token in `config.yaml`.
+    """
+    assert matched_credential_segment("token_ids") is None
+    assert matched_credential_segment("id_token") == "token"
+    assert matched_credential_segment("idTokens") == "token"
+
+
+@pytest.mark.parametrize(
+    "key",
+    ["id_token", "access_token", "api_key", "client_secret", "password", "authorization"],
+)
+def test_the_sweep_does_not_cost_the_gate_a_security_positive(key: str) -> None:
+    """The names the gate exists for, asserted next to the sweep.
+
+    A vocabulary change that widened an exemption until nothing matched
+    would pass the sweep. These are what it must still refuse.
+    """
+    assert names_a_credential(key) is True
