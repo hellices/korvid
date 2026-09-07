@@ -43,6 +43,7 @@ uv run pytest --cov                   # tests with coverage (gate: 80%)
 ```
 src/korvid/
 ├── __main__.py     # composition root — ALL wiring (constructor injection) happens here
+├── option_keys.py  # stdlib-only leaf: the credential-shaped-key vocabulary core/ and providers/ share
 ├── ui/             # Textual App/Screens/Widgets + ui/messages.py (UI Bus messages)
 ├── core/           # pure Python: ResourceStore, WatchManager, ActionExecutor, AuditLog
 ├── tools/          # pure Python: tool schemas, ToolExecutor, UIBridge, diagnose
@@ -50,20 +51,33 @@ src/korvid/
 ├── mcp/            # MCP adapter (optional extra: korvid[mcp])
 ├── obs/            # bounded read-only Prometheus/Loki connectors (optional extra: korvid[observability])
 ├── k8s/            # pure Python: kubernetes.aio wrapper
+├── evals/          # offline evaluation harness (not imported by the TUI)
 └── providers/      # concrete LLMProvider implementations (optional extra: korvid[agent])
 ```
+
+This table is the readable copy of `tach.toml`, and
+`tests/test_layer_documentation.py` fails when the two disagree.
 
 | Layer | May import | Textual imports allowed? |
 |---|---|---|
 | `ui/` | core, agent, k8s, tools | **Yes — only here** |
-| `core/` | k8s | No |
+| `core/` | k8s, option_keys | No |
 | `tools/` | core, k8s, obs | No |
 | `agent/` | core, k8s, tools | No |
 | `mcp/` | core, tools | No |
 | `obs/` | core | No |
 | `k8s/` | (stdlib + kubernetes client) | No |
-| `providers/` | agent | No |
+| `providers/` | agent, option_keys | No |
+| `evals/` | agent, k8s, providers, tools | No |
+| `option_keys/` | (stdlib only) | No |
 
+- `korvid.option_keys` is a leaf with **no korvid dependency of its own**, and
+  that is what lets both `core/` and `providers/` import it. They may not
+  import each other, but they judge the same key names: `core/config.py`
+  refuses a credential-shaped key in a profile's `options`, and
+  `providers/litellm_request.py` drops one on the way to the provider. The
+  rule they have to agree on therefore lives below both of them, in the
+  standard library only.
 - Interfaces at layer boundaries are `abc.ABC` (e.g., `agent/provider.py: LLMProvider`).
 - No DI containers, no service locators. Dependencies are injected via constructors, wired once in `__main__.py`.
 - The UI Bus is Textual `Message` subclasses defined in `ui/messages.py`. `core/`/`agent/` expose plain async functions; `ui/` workers translate results into Messages.
