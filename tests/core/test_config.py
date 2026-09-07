@@ -396,6 +396,18 @@ def test_agent_options_rejects_unsupported_objects(tmp_path: Path) -> None:
         # Compact lowercase form (finding round 6)
         ("apikey", "apikey"),
         ("my_apikey", "apikey"),
+        # Plural spellings. These passed this gate *and* the request gate
+        # until both started judging by `korvid.option_keys`, so a profile
+        # could put a credential in the request body as an unknown field.
+        ("api_keys", "api_key"),
+        ("apikeys", "apikey"),
+        ("access_keys", "access_key"),
+        ("secrets", "secret"),
+        ("passwords", "password"),
+        ("credentials", "credential"),
+        ("access_tokens", "token"),
+        ("clientSecrets", "secret"),
+        ("API_KEYS", "api_key"),
     ],
 )
 def test_agent_options_rejects_secret_key_segments(tmp_path: Path, key: str, expected: str) -> None:
@@ -403,6 +415,31 @@ def test_agent_options_rejects_secret_key_segments(tmp_path: Path, key: str, exp
     assert cfg.agent_options == {}
     assert cfg.agent_options_error is not None
     assert expected in cfg.agent_options_error
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "max_tokens",
+        "max_completion_tokens",
+        "token_count",
+        "context_window_tokens",
+        "num_tokens",
+        "token_limit",
+        "prompt_tokens",
+        "monkey",
+    ],
+)
+def test_agent_options_accepts_the_parameters_that_count_tokens(tmp_path: Path, key: str) -> None:
+    """`token` is also the LLM unit of text.
+
+    A blanket `token` segment refused `token_count` while letting the
+    plural `access_tokens` through — exactly backwards. A `token` next to
+    a quantity word is a measurement; anywhere else it is a credential.
+    """
+    cfg = _load_agent_options_config(tmp_path, {key: 1024})
+    assert cfg.agent_options_error is None
+    assert cfg.agent_options == {key: 1024}
 
 
 @pytest.mark.parametrize(

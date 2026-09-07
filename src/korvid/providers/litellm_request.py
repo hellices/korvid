@@ -20,12 +20,12 @@ is only reachable through ``**kwargs``, so korvid uses the named ones.
 from __future__ import annotations
 
 import math
-import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Final
 
+from korvid.option_keys import names_a_credential
 from korvid.providers.litellm_settings import KEYLESS_API_KEY_SENTINEL
 
 # ---------------------------------------------------------------------------
@@ -102,62 +102,24 @@ RESERVED_CALL_ARGUMENTS: Final[frozenset[str]] = _LIFTED | frozenset(
     }
 )
 
-#: Splits ASCII camelCase and acronym boundaries so ``apiKey``, ``APIKey``
-#: and ``api_key`` tokenize the same way. The same two transitions
-#: ``core/config.py`` splits on before it refuses a secret-bearing key.
-_CAMEL_BOUNDARY_RE: Final[re.Pattern[str]] = re.compile(
-    r"(?<=[a-z0-9])(?=[A-Z])"  # lowerUpper: apiKey → api_Key
-    r"|(?<=[A-Z])(?=[A-Z][a-z])"  # ACRONYMWord: APIKey → API_Key
-)
-
-_SEPARATOR_RE: Final[re.Pattern[str]] = re.compile(r"[^a-z0-9]+")
-
-#: Key segments that name a credential rather than a model parameter.
-#: Deliberately the same vocabulary ``core/config.py`` refuses in a
-#: profile's options, so the two boundaries cannot disagree about what a
-#: credential looks like — and deliberately the *singular* ``token``:
-#: ``max_tokens`` and ``max_completion_tokens`` tokenize to ``tokens`` and
-#: must keep working.
-_CREDENTIAL_SEGMENTS: Final[frozenset[str]] = frozenset(
-    {"apikey", "authorization", "credential", "credentials", "password", "secret", "token"}
-)
-
-#: Credential names that are only credential names as a pair. ``key`` alone
-#: is a real model parameter segment (``prompt_cache_key``), so it is
-#: matched as a two-token window instead.
-_CREDENTIAL_SEGMENT_PAIRS: Final[tuple[tuple[str, str], ...]] = (("api", "key"), ("access", "key"))
-
-
-def _key_segments(key: str) -> tuple[str, ...]:
-    """*key* as lowercase word segments, camelCase boundaries included."""
-    lowered = _CAMEL_BOUNDARY_RE.sub("_", key).lower()
-    return tuple(part for part in _SEPARATOR_RE.split(lowered) if part)
-
-
-def _names_a_credential(key: str) -> bool:
-    """Whether *key* names a credential or an auth selector.
-
-    Matched by shape rather than by a list of vendor parameter names: that
-    list is unbounded, it would go stale on the next SDK release, and this
-    module must not branch on a vendor. Anything that matches is dropped
-    rather than merely prevented from overriding — an argument the
-    provider does not consume is forwarded into the *request body*
-    (measured on 1.98.0), so a credential-shaped option would send
-    whatever it holds to the vendor as an unknown field.
-    """
-    segments = _key_segments(key)
-    if _CREDENTIAL_SEGMENTS.intersection(segments):
-        return True
-    return any(
-        segments[index : index + 2] == pair
-        for pair in _CREDENTIAL_SEGMENT_PAIRS
-        for index in range(len(segments) - 1)
-    )
+# Credential-shaped keys are judged by `korvid.option_keys`, the one
+# vocabulary `core/config.py` also refuses a profile's options by. Two
+# copies of it drifted: the plural spellings (`api_keys`, `secrets`,
+# `passwords`, `access_tokens`) were in neither copy and reached the wire,
+# and `credentials` was in one copy only.
 
 
 def is_reserved_call_argument(key: str) -> bool:
-    """Whether *key* is korvid's to decide rather than the operator's."""
-    return key in RESERVED_CALL_ARGUMENTS or _names_a_credential(key)
+    """Whether *key* is korvid's to decide rather than the operator's.
+
+    Reserved for two reasons: the engine owns the argument, or the key
+    names a credential. Anything that matches is dropped rather than
+    merely prevented from overriding — an argument the provider does not
+    consume is forwarded into the *request body* (measured on 1.98.0), so
+    a credential-shaped option would send whatever it holds to the vendor
+    as an unknown field.
+    """
+    return key in RESERVED_CALL_ARGUMENTS or names_a_credential(key)
 
 
 # ---------------------------------------------------------------------------

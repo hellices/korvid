@@ -581,6 +581,20 @@ _CREDENTIAL_SHAPED_KEYS: Final[tuple[str, ...]] = (
     "password",
     "authorization",
     "bearer_token",
+    # Plural spellings. `core/config.py` accepted every one of these and
+    # so did this module, so a profile could name a credential in a
+    # spelling neither gate had, and the value went into the request body.
+    "api_keys",
+    "apikeys",
+    "apiKeys",
+    "API_KEYS",
+    "access_keys",
+    "secrets",
+    "passwords",
+    "credentials",
+    "access_tokens",
+    "client_secrets",
+    "azure_ad_tokens",
 )
 
 
@@ -591,9 +605,9 @@ def test_a_credential_shaped_option_never_reaches_the_wire(key: str) -> None:
     credential-shaped key is not merely an override risk: it would send
     whatever it holds to the vendor as an unknown field.
 
-    Named after the same key segments `core/config.py` already refuses in
-    a profile's options, so the two boundaries cannot disagree about what
-    a credential looks like.
+    Judged by `korvid.option_keys`, the one vocabulary `core/config.py`
+    refuses a profile's options by, so the two boundaries cannot disagree
+    about what a credential looks like.
     """
     plan = build_plan(
         model="openai/gpt-4o",
@@ -601,6 +615,23 @@ def test_a_credential_shaped_option_never_reaches_the_wire(key: str) -> None:
         base_url="https://gateway.example/v1",
         options={key: "leaked-value"},
         supported=(),
+    )
+    assert key not in plan.extra
+    assert "leaked-value" not in plan.call_kwargs([], [], stream=True).values()
+
+
+@pytest.mark.parametrize("key", _CREDENTIAL_SHAPED_KEYS)
+def test_a_credential_shaped_option_is_dropped_even_when_reported_supported(
+    key: str,
+) -> None:
+    """The allowlist is no protection: a provider that reported the name
+    as supported would let it straight through the filter."""
+    plan = build_plan(
+        model="openai/gpt-4o",
+        api_key="k",
+        base_url="https://gateway.example/v1",
+        options={key: "leaked-value"},
+        supported=(key, "temperature"),
     )
     assert key not in plan.extra
     assert "leaked-value" not in plan.call_kwargs([], [], stream=True).values()

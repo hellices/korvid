@@ -1096,6 +1096,42 @@ agent:
     assert any("rejected" in w for w in cfg.warnings)
 
 
+def test_a_plural_inline_secret_is_refused_and_the_profile_still_survives(
+    tmp_path: Path,
+) -> None:
+    """`api_keys` used to pass this gate and the request gate both.
+
+    The refusal keeps the existing semantics: the profile is still there
+    with its model and endpoint, `options` is empty, `config_error` is
+    set — so `:ai` can show it and the factory refuses to build it — and
+    the operator gets a warning naming the segment.
+    """
+    path = _write(
+        tmp_path,
+        """
+agent:
+  active: main
+  profiles:
+    main:
+      model: openai/gpt-4o
+      endpoint: https://gateway.example/v1
+      options:
+        api_keys:
+          - inline-secret-value
+        temperature: 0.2
+""",
+    )
+    cfg = load_config(path)
+    profile = cfg.model_connections.profiles["main"]
+
+    assert profile.model == "openai/gpt-4o"
+    assert profile.endpoint == "https://gateway.example/v1"
+    assert dict(profile.options) == {}
+    assert profile.config_error is not None
+    assert "api_key" in profile.config_error
+    assert any("rejected" in w for w in cfg.warnings)
+
+
 def test_an_environment_profile_comes_up_enabled(tmp_path: Path) -> None:
     """The whole point of the mapping: a profile written by the wizard has
     to come up enabled, with nothing to warn about."""
