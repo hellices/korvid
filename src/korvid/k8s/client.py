@@ -8,7 +8,8 @@ import dataclasses
 import json
 import logging
 import re
-from collections.abc import AsyncGenerator, AsyncIterator, Mapping, Sequence
+import ssl
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from datetime import datetime, timedelta
 from typing import Any, cast
@@ -17,6 +18,7 @@ from urllib.parse import quote, urlencode
 from kubernetes_asyncio import client as k8s_client
 from kubernetes_asyncio import config as k8s_config
 from kubernetes_asyncio import watch as k8s_watch
+from kubernetes_asyncio.client import rest as k8s_rest
 from kubernetes_asyncio.stream import WsApiClient
 
 from korvid.k8s.columns import CustomColumn, evaluate_all
@@ -25,7 +27,7 @@ from korvid.k8s.csp import ProviderInfo, detect_provider
 from korvid.k8s.discovery import PODS_META, ResourceMeta
 from korvid.k8s.drain import DrainPlan, build_drain_plan
 from korvid.k8s.dryrun import diff_manifests
-from korvid.k8s.errors import ApiStatusError
+from korvid.k8s.errors import ApiStatusError, KubeClientError
 from korvid.k8s.helm import (
     HELM_RELEASES_META,
     HELM_REVISIONS_META,
@@ -49,6 +51,9 @@ from korvid.k8s.watch_events import WatchEvent, WatchProgress
 from korvid.k8s.writes import WriteOps
 
 logger = logging.getLogger(__name__)
+_AIOHTTP_CLIENT_ERROR = (
+    k8s_rest.aiohttp.ClientError  # type: ignore[attr-defined]  # Kubernetes REST transport
+)
 
 #: Re-LIST cadence for kinds without a watch endpoint (OLM's packageserver,
 #: issue #141): catalog-ish content changes rarely, so a slow poll keeps the
@@ -390,14 +395,10 @@ class KubeClient(ReadOps, WriteOps):
             raise RuntimeError("connect() first")
         path = self._namespaces_path()
         try:
-            resp = await self._core_v1.list_namespace(_preload_content=False)
-            data = await _to_dict(resp)
+            data = await _request_dict(self._core_v1.list_namespace(_preload_content=False))
         except ApiStatusError as exc:
             self._observe_read_error(path, exc)
             raise
-        except k8s_client.exceptions.ApiException as exc:
-            self._observe_read_error(path, exc)
-            raise ApiStatusError(int(exc.status or 0), str(exc.reason or "")) from exc
         items = data.get("items", [])
         self._observe_read("list", path, payload=data, object_count=len(items))
         return [item["metadata"]["name"] for item in items]
@@ -414,8 +415,7 @@ class KubeClient(ReadOps, WriteOps):
         if self._core_v1 is None:
             raise RuntimeError("connect() first")
         try:
-            resp = await self._core_v1.list_node(limit=5, _preload_content=False)
-            data = await _to_dict(resp)
+            data = await _request_dict(self._core_v1.list_node(limit=5, _preload_content=False))
         except Exception as exc:
             # Best-effort probe: RBAC denials arrive as ApiException, but
             # transport failures (DNS, TLS, connection reset) surface as
@@ -488,14 +488,12 @@ class KubeClient(ReadOps, WriteOps):
             raise RuntimeError("connect() first")
         path = self._pods_path(namespace)
         try:
-            resp = await self._core_v1.list_namespaced_pod(namespace, _preload_content=False)
-            data = await _to_dict(resp)
+            data = await _request_dict(
+                self._core_v1.list_namespaced_pod(namespace, _preload_content=False)
+            )
         except ApiStatusError as exc:
             self._observe_read_error(path, exc)
             raise
-        except k8s_client.exceptions.ApiException as exc:
-            self._observe_read_error(path, exc)
-            raise ApiStatusError(int(exc.status or 0), str(exc.reason or "")) from exc
         items = data.get("items", [])
         self._observe_read("list", path, payload=data, object_count=len(items))
         return [self._pod_summary(item) for item in items]
@@ -944,15 +942,16 @@ class KubeClient(ReadOps, WriteOps):
             "spec": {"resourceAttributes": attrs},
         }
         try:
-            resp = await self._api.call_api(
-                "/apis/authorization.k8s.io/v1/selfsubjectaccessreviews",
-                "POST",
-                auth_settings=["BearerToken"],
-                header_params={"Content-Type": "application/json"},
-                body=body,
-                _preload_content=False,
+            data = await _request_dict(
+                self._api.call_api(
+                    "/apis/authorization.k8s.io/v1/selfsubjectaccessreviews",
+                    "POST",
+                    auth_settings=["BearerToken"],
+                    header_params={"Content-Type": "application/json"},
+                    body=body,
+                    _preload_content=False,
+                )
             )
-            data = await _to_dict(resp)
         except Exception:
             # Fail-open, but make the silently disabled pre-check visible to
             # operators: warn on the first failure, debug afterwards.
@@ -1542,15 +1541,13 @@ class KubeClient(ReadOps, WriteOps):
             selector += f",involvedObject.kind={kind}"
         if uid and _UID_RE.match(uid):
             selector += f",involvedObject.uid={uid}"
-        try:
-            resp = await self._core_v1.list_namespaced_event(
+        data = await _request_dict(
+            self._core_v1.list_namespaced_event(
                 namespace,
                 field_selector=selector,
                 _preload_content=False,
             )
-            data = await _to_dict(resp)
-        except k8s_client.exceptions.ApiException as exc:
-            raise ApiStatusError(int(exc.status or 0), str(exc.reason or "")) from exc
+        )
         result: list[dict[str, Any]] = list(data.get("items", []))
         return result
 
@@ -1648,11 +1645,11 @@ class KubeClient(ReadOps, WriteOps):
         *,
         header_params: dict[str, str] | None = None,
     ) -> dict[str, Any]:
-        """Raw GET through the ApiClient; wraps ApiException as ApiStatusError."""
+        """Raw GET through the ApiClient with normalized expected failures."""
         if self._api is None:
             raise RuntimeError("connect() first")
-        try:
-            resp = await self._api.call_api(
+        return await _request_dict(
+            self._api.call_api(
                 path,
                 "GET",
                 auth_settings=["BearerToken"],
@@ -1660,12 +1657,7 @@ class KubeClient(ReadOps, WriteOps):
                 header_params=header_params,
                 _preload_content=False,
             )
-            body = await resp.read()
-            _raise_for_status(resp, body)
-            result: dict[str, Any] = json.loads(body)
-            return result
-        except k8s_client.exceptions.ApiException as exc:
-            raise ApiStatusError(int(exc.status or 0), str(exc.reason or "")) from exc
+        )
 
     async def discover_resources(self) -> list[ResourceMeta]:
         """Return every LIST-able resource from /api/v1 and /apis.
@@ -1684,8 +1676,10 @@ class KubeClient(ReadOps, WriteOps):
 
         async def _fetch(name: str, version: str) -> list[ResourceMeta]:
             try:
-                rl = await self._request_json(f"/apis/{name}/{version}")
-            except ApiStatusError:
+                path = f"/apis/{name}/{version}"
+                rl = await self._request_json(path)
+            except (ApiStatusError, KubeClientError) as exc:
+                logger.warning("API discovery skipped %s: %s", path, exc)
                 return []  # a broken aggregated API must not kill discovery
             return _parse_resource_list(rl, group=name, version=version)
 
@@ -1705,19 +1699,64 @@ class KubeClient(ReadOps, WriteOps):
             await self._api.close()
 
 
-async def _to_dict(resp: Any) -> dict[str, Any]:
-    """Normalize aiohttp response or dict into a plain dict.
+async def _request_dict(request: Awaitable[Any]) -> dict[str, Any]:
+    """Await and decode one JSON request, normalizing expected client failures.
 
     Raises ApiStatusError on a non-2xx status: with ``_preload_content=False``
     kubernetes_asyncio never raises for HTTP errors, so an unchecked error
     Status body would otherwise be parsed as if it were the requested object.
     """
+    try:
+        return await _response_dict(await request)
+    except k8s_client.exceptions.ApiException as exc:
+        raise ApiStatusError(
+            int(exc.status or 0),
+            str(exc.reason or ""),
+            body=str(getattr(exc, "body", "") or ""),
+        ) from exc
+    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError) as exc:
+        raise KubeClientError(
+            "Kubernetes API returned malformed JSON; retry, then check the API server"
+        ) from exc
+    except TimeoutError as exc:
+        raise KubeClientError(
+            "Kubernetes API request timed out; check cluster connectivity and retry"
+        ) from exc
+    except ssl.SSLError as exc:
+        raise KubeClientError(
+            "Kubernetes API TLS validation failed; check cluster certificates and retry"
+        ) from exc
+    except _AIOHTTP_CLIENT_ERROR as exc:
+        raise KubeClientError(
+            "Kubernetes API connection failed; check cluster connectivity and retry"
+        ) from exc
+    except OSError as exc:
+        raise KubeClientError(
+            "Kubernetes API connection failed; check cluster connectivity and retry"
+        ) from exc
+
+
+async def _response_dict(resp: Any) -> dict[str, Any]:
+    """Decode a raw successful response as one JSON object."""
     if isinstance(resp, dict):
         return resp
-    body = await resp.read()
+    read = getattr(resp, "read", None)
+    if not callable(read):
+        raise _malformed_response_error()
+    body = await read()
+    if not isinstance(body, bytes):
+        raise _malformed_response_error()
     _raise_for_status(resp, body)
-    result: dict[str, Any] = json.loads(body)
+    result = json.loads(body)
+    if not isinstance(result, dict):
+        raise _malformed_response_error()
     return result
+
+
+def _malformed_response_error() -> KubeClientError:
+    return KubeClientError(
+        "Kubernetes API returned a malformed response; retry, then check the API server"
+    )
 
 
 def _raise_for_status(resp: Any, body: bytes) -> None:

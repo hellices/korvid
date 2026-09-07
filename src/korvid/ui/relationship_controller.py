@@ -31,7 +31,7 @@ from korvid.core.relationships import (
     build_relationship_graph,
 )
 from korvid.k8s.discovery import ResourceMeta, resolve_resource
-from korvid.k8s.errors import ApiStatusError
+from korvid.k8s.errors import ApiStatusError, KubeClientError
 from korvid.k8s.relationship_facts import GATEWAY_GROUP, RelationKind, is_gateway_route_kind
 
 #: Gateway API resources are an optional cluster feature discovered at
@@ -717,7 +717,7 @@ class RelationshipSnapshotLoader:
                 summaries = await self._lister.list_objects(meta, list_namespace)
             except ApiStatusError as exc:
                 return meta, None, _api_error_coverage(meta, scope, exc)
-            except OSError as exc:  # declared network/transport failures -> failed
+            except (KubeClientError, OSError) as exc:
                 record = CoverageRecord(
                     group=meta.group,
                     resource=meta.plural,

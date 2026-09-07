@@ -14,6 +14,7 @@ from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
 from korvid.core.watch import WatchManager
 from korvid.k8s.components import MAX_COMPONENT_DOCS, ComponentRef
 from korvid.k8s.discovery import ResourceMeta
+from korvid.k8s.errors import KubeClientError
 from korvid.k8s.helm import (
     HELM_RELEASES_META,
     HELM_REVISIONS_META,
@@ -230,6 +231,34 @@ async def test_enter_on_release_opens_hierarchy_tree() -> None:
             label="hierarchy dismissed to release view",
         )
         assert app.current_kind == "helmreleases"
+
+
+async def test_hierarchy_client_failure_notifies_without_opening_a_screen() -> None:
+    app, _ = make_app(_HELM_DATA, components=_WEB_COMPONENTS)
+
+    async def fail_components(namespace: str, name: str) -> list[ComponentRef]:
+        raise KubeClientError(
+            "Kubernetes API connection failed; check cluster connectivity and retry"
+        )
+
+    app._get_helm_components = fail_components
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "helm", "helmreleases")
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 1, label="release listed")
+
+        await app._workspace_ctl._open_hierarchy("default", "web")
+
+        assert not isinstance(app.screen, HierarchyScreen)
+        await until(
+            pilot,
+            lambda: any(
+                "Kubernetes API connection failed" in str(notification.message)
+                and notification.severity == "error"
+                for notification in app._notifications
+            ),
+            label="hierarchy client failure notification",
+        )
 
 
 async def test_h_on_release_opens_revision_history() -> None:

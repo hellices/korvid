@@ -2,20 +2,30 @@
 
 from __future__ import annotations
 
+import asyncio
+import ssl
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from aiohttp import ClientConnectionError
 
+from korvid.k8s import errors as errors_mod
 from korvid.k8s.client import KubeClient
 from korvid.k8s.discovery import PODS_META, ResourceMeta, build_alias_map
-from korvid.k8s.errors import ApiStatusError
+from korvid.k8s.errors import ApiStatusError, KubeClientError
 
 
 def test_api_base_core_and_group() -> None:
     assert PODS_META.api_base == "/api/v1"
     deploy = ResourceMeta("Deployment", "deployments", "apps", "v1", True, ("deploy",))
     assert deploy.api_base == "/apis/apps/v1"
+
+
+def test_kube_client_error_is_a_k8s_layer_exception() -> None:
+    error_type = getattr(errors_mod, "KubeClientError", None)
+    assert isinstance(error_type, type)
+    assert issubclass(error_type, Exception)
 
 
 def test_alias_map_covers_plural_kind_and_shortnames() -> None:
@@ -199,8 +209,20 @@ async def test_discover_resources_keeps_list_only_kinds_as_unwatchable() -> None
     assert "peeks" not in by_plural  # no list verb: not a view
 
 
-async def test_discover_resources_skips_broken_group() -> None:
-    """A broken aggregated API (ApiStatusError) is skipped, not fatal."""
+@pytest.mark.parametrize(
+    "error",
+    [
+        pytest.param(ApiStatusError(503, "Service Unavailable"), id="api-status"),
+        pytest.param(
+            KubeClientError(
+                "Kubernetes API connection failed; check cluster connectivity and retry"
+            ),
+            id="client-error",
+        ),
+    ],
+)
+async def test_discover_resources_skips_broken_group(error: Exception) -> None:
+    """A broken aggregated API group is skipped without hiding core failures."""
     client = KubeClient()
 
     async def fake_request(path: str) -> dict[str, Any]:
@@ -208,7 +230,7 @@ async def test_discover_resources_skips_broken_group() -> None:
             return _CORE
         if path == "/apis":
             return {"groups": [{"name": "broken.io", "preferredVersion": {"version": "v1"}}]}
-        raise ApiStatusError(503, "Service Unavailable")
+        raise error
 
     with patch.object(client, "_request_json", side_effect=fake_request):
         metas = await client.discover_resources()
@@ -268,6 +290,107 @@ async def test_request_json_wraps_api_exception_as_api_status_error() -> None:
     client._api = fake_api
 
     with pytest.raises(ApiStatusError, match="API 403: Forbidden"):
+        await client._request_json("/api/v1")
+
+
+@pytest.mark.parametrize(
+    ("error", "message"),
+    [
+        pytest.param(
+            ClientConnectionError("https://user:token@cluster/private"),
+            "Kubernetes API connection failed; check cluster connectivity and retry",
+            id="aiohttp",
+        ),
+        pytest.param(
+            ssl.SSLError("certificate contains private details"),
+            "Kubernetes API TLS validation failed; check cluster certificates and retry",
+            id="ssl",
+        ),
+        pytest.param(
+            TimeoutError("https://user:token@cluster/private"),
+            "Kubernetes API request timed out; check cluster connectivity and retry",
+            id="timeout",
+        ),
+        pytest.param(
+            ConnectionResetError("response body contained a credential"),
+            "Kubernetes API connection failed; check cluster connectivity and retry",
+            id="os",
+        ),
+    ],
+)
+async def test_request_json_normalizes_transport_failures_without_leaking_details(
+    error: Exception, message: str
+) -> None:
+    client = KubeClient()
+    fake_api = AsyncMock()
+    fake_api.call_api.side_effect = error
+    client._api = fake_api
+
+    with pytest.raises(KubeClientError) as excinfo:
+        await client._request_json("/api/v1")
+
+    assert str(excinfo.value) == message
+
+
+async def test_request_json_normalizes_invalid_json_without_leaking_the_body() -> None:
+    client = KubeClient()
+    response = AsyncMock()
+    response.status = 200
+    response.reason = "OK"
+    response.read.return_value = b'{"token":"secret"'
+    fake_api = AsyncMock()
+    fake_api.call_api.return_value = response
+    client._api = fake_api
+
+    with pytest.raises(KubeClientError) as excinfo:
+        await client._request_json("/api/v1")
+
+    assert str(excinfo.value) == (
+        "Kubernetes API returned malformed JSON; retry, then check the API server"
+    )
+
+
+async def test_request_json_rejects_a_valid_non_object_response() -> None:
+    client = KubeClient()
+    response = AsyncMock()
+    response.status = 200
+    response.reason = "OK"
+    response.read.return_value = b'["credential", "secret"]'
+    fake_api = AsyncMock()
+    fake_api.call_api.return_value = response
+    client._api = fake_api
+
+    with pytest.raises(KubeClientError) as excinfo:
+        await client._request_json("/api/v1")
+
+    assert str(excinfo.value) == (
+        "Kubernetes API returned a malformed response; retry, then check the API server"
+    )
+
+
+async def test_request_json_preserves_http_status_before_decoding() -> None:
+    client = KubeClient()
+    response = AsyncMock()
+    response.status = 503
+    response.reason = "Service Unavailable"
+    response.read.return_value = b"not-json"
+    fake_api = AsyncMock()
+    fake_api.call_api.return_value = response
+    client._api = fake_api
+
+    with pytest.raises(ApiStatusError, match="API 503: Service Unavailable") as excinfo:
+        await client._request_json("/api/v1")
+
+    assert excinfo.value.body == "not-json"
+
+
+async def test_request_json_propagates_cancellation() -> None:
+    client = KubeClient()
+    fake_api = AsyncMock()
+    fake_api.call_api.side_effect = asyncio.CancelledError()
+    client._api = fake_api
+
+    with pytest.raises(asyncio.CancelledError):
         await client._request_json("/api/v1")
 
 

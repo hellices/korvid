@@ -35,7 +35,7 @@ from typing import Any, Protocol
 
 from korvid.core.audit import AuditLog
 from korvid.core.errors import explain_api_error
-from korvid.k8s.errors import ApiStatusError
+from korvid.k8s.errors import ApiStatusError, KubeClientError
 from korvid.k8s.models import ContainerTrouble, PodSummary
 from korvid.ui.hints import EventsFetcher, pod_needs_hint
 from korvid.ui.log_controller import StreamLogsFn
@@ -161,7 +161,7 @@ class ResourceInspectController:
         except ApiStatusError as exc:
             self._ui.notify(explain_api_error(exc.status, exc.reason, kind, ns), severity="error")
             return
-        except ValueError as exc:
+        except (KubeClientError, ValueError) as exc:
             self._ui.notify(str(exc), severity="error")
             return
 
@@ -178,6 +178,8 @@ class ResourceInspectController:
                     explain_api_error(exc.status, exc.reason, "events", namespace),
                     severity="warning",
                 )
+            except KubeClientError as exc:
+                self._ui.notify(str(exc), severity="warning")
 
         if self._context.crossed(epoch):
             # The fetches awaited through a context switch: the manifest (or
@@ -209,7 +211,7 @@ class ResourceInspectController:
                 severity="error",
             )
             return
-        except ValueError as exc:
+        except (KubeClientError, ValueError) as exc:
             self._ui.notify(str(exc), severity="error")
             return
         if self._context.crossed(epoch):
@@ -289,7 +291,7 @@ class ResourceInspectController:
         if get_manifest is not None:
             try:
                 manifest = await get_manifest("pods", namespace, name)
-            except (ApiStatusError, ValueError) as exc:
+            except (ApiStatusError, KubeClientError, ValueError) as exc:
                 logger.debug("manifest fetch for container list failed: %s", exc)
             else:
                 rows = build_container_rows(manifest)
@@ -397,6 +399,13 @@ class ResourceInspectController:
         except ApiStatusError:
             self._ui.notify(
                 f"{action} cancelled - pod {name} no longer exists.",
+                severity="warning",
+            )
+            return False
+        except KubeClientError:
+            self._ui.notify(
+                f"{action} cancelled - pod {name} could not be verified. "
+                "Retry when the cluster is reachable.",
                 severity="warning",
             )
             return False

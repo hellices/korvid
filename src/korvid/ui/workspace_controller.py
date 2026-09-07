@@ -58,7 +58,7 @@ from korvid.k8s.components import (
     reference_components,
 )
 from korvid.k8s.discovery import ResourceMeta, canonical_resource_alias, resolve_resource
-from korvid.k8s.errors import ApiStatusError
+from korvid.k8s.errors import ApiStatusError, KubeClientError
 from korvid.k8s.helm import HELM_RELEASES_META
 from korvid.k8s.olm import OPERATORS_GROUP, PACKAGES_GROUP
 from korvid.k8s.relations import drill_child, owned_by
@@ -1078,16 +1078,16 @@ class WorkspaceController:
         self, root: str, namespace: str, name: str
     ) -> list[ComponentRef] | None:
         """Component refs for the root, or None when unavailable (notified)."""
-        if root == "HelmRelease":
-            fetch = self._get_helm_components()
-            if fetch is None:
-                return None
-            try:
+        try:
+            if root == "HelmRelease":
+                fetch = self._get_helm_components()
+                if fetch is None:
+                    return None
                 return await fetch(namespace, name)
-            except (ApiStatusError, ValueError) as exc:
-                self._ui.notify(f"hierarchy for {name} unavailable: {exc}", severity="error")
-                return None
-        return await self._operator_component_refs(root, namespace, name)
+            return await self._operator_component_refs(root, namespace, name)
+        except (ApiStatusError, KubeClientError, ValueError) as exc:
+            self._ui.notify(f"hierarchy for {name} unavailable: {exc}", severity="error")
+            return None
 
     def open_hierarchy(self, namespace: str, name: str) -> None:
         """Launch the exclusive worker that gathers refs and pushes the tree."""

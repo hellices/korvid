@@ -1,10 +1,14 @@
-"""korvid exceptions wrapping kubernetes_asyncio API errors (k8s-layer only).
+"""korvid exceptions normalizing Kubernetes client failures (k8s-layer only).
 
-Callers in core/ import ApiStatusError instead of ApiException so the
-third-party kubernetes_asyncio exception type never leaks past the k8s layer.
+Callers import these types instead of third-party transport/API exceptions so
+the kubernetes_asyncio implementation never leaks past the k8s layer.
 """
 
 from __future__ import annotations
+
+
+class KubeClientError(Exception):
+    """Raised when a Kubernetes request fails without an HTTP API status."""
 
 
 class ApiStatusError(Exception):
