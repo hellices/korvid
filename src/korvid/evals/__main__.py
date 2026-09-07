@@ -133,9 +133,20 @@ def _eval_auth(env: Mapping[str, str]) -> ConnectionAuthConfig:
     """
     named = env.get("KORVID_EVAL_API_KEY_ENV", "").strip()
     if not named and env.get(_LEGACY_API_KEY_VAR, "").strip():
+        # One string literal, read from nothing. This warning fires only
+        # when an inline credential is in scope, and CodeQL reports any
+        # credential-shaped expression at an output sink as clear-text
+        # logging of the credential itself (alert #12,
+        # `py/clear-text-logging-sensitive-data`) — interpolating the
+        # legacy variable's *name* here did exactly that. Naming the
+        # replacement keeps the notice actionable; the deprecated
+        # spelling is named in this module's docstring and in
+        # `docs/evals/methodology.md`, neither of which is an output
+        # stream.
         print(
-            f"warning: {_LEGACY_API_KEY_VAR} is deprecated; set KORVID_EVAL_API_KEY_ENV"
-            " to the name of the variable holding the key instead.",
+            "warning: an inline eval API key variable is set; that form is"
+            " deprecated and will be removed. Set KORVID_EVAL_API_KEY_ENV to"
+            " the name of the variable holding the key instead.",
             file=sys.stderr,
         )
         named = _LEGACY_API_KEY_VAR

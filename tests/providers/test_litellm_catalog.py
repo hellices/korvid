@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import ast
 import inspect
-from pathlib import Path
+from pathlib import Path, PurePath, PureWindowsPath
 from typing import Any, cast
 
 import pytest
@@ -34,6 +34,20 @@ from korvid.providers.models_dev import (  # noqa: E402
 )
 
 _SRC = Path("src/korvid")
+
+
+def _module_id(path: PurePath, root: PurePath = _SRC) -> str:
+    """*path* relative to *root*, spelled with forward slashes.
+
+    Every structural assertion below compares a set of module paths
+    against POSIX literals. `str(Path)` renders the *host* separator, so
+    the same code that passes on Linux and macOS builds
+    `providers\\_litellm_import.py` on the Windows runner and never
+    matches. `as_posix` is the one spelling that means the same thing on
+    every platform, and it is spelled here once so a new structural
+    check cannot reintroduce the difference.
+    """
+    return path.relative_to(root).as_posix()
 
 
 def _imported_module_names(path: Path) -> list[str]:
@@ -138,13 +152,28 @@ def test_a_renamed_lockdown_flag_fails_the_import_loudly(
         importlib.reload(runtime)
 
 
+def test_module_ids_are_spelled_with_forward_slashes_on_every_platform() -> None:
+    """The Windows failure, reproduced on every runner.
+
+    `str(Path)` renders the host separator, so the two structural checks
+    below built `providers\\_litellm_import.py` on the Windows job and
+    compared it against a POSIX literal. Driving the shared helper with
+    a `PureWindowsPath` reproduces that without a Windows host.
+    """
+    root = PureWindowsPath(r"C:\repo\src\korvid")
+    module = root / "providers" / "_litellm_import.py"
+
+    assert _module_id(module, root) == "providers/_litellm_import.py"
+    assert "\\" not in _module_id(module, root)
+
+
 def test_exactly_one_korvid_module_imports_litellm() -> None:
     """The env var that makes the import offline has to be set in a file
     that runs first — an import sorter would reorder a plain top-level
     `import litellm` above any `korvid` import in the same block.
     """
     offenders = {
-        str(path.relative_to(_SRC))
+        _module_id(path)
         for path in sorted(_SRC.rglob("*.py"))
         if any(
             name == "litellm" or name.startswith("litellm.")
@@ -156,7 +185,7 @@ def test_exactly_one_korvid_module_imports_litellm() -> None:
 
 def test_exactly_one_korvid_module_imports_the_wrapper() -> None:
     importers = {
-        str(path.relative_to(_SRC))
+        _module_id(path)
         for path in sorted(_SRC.rglob("*.py"))
         if "korvid.providers._litellm_import" in _imported_module_names(path)
     }

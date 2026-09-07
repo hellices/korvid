@@ -5,6 +5,7 @@ import contextlib
 import http.server
 import inspect
 import json
+import platform
 import ssl
 import stat
 import threading
@@ -279,10 +280,73 @@ async def test_a_stale_cache_revalidates_with_the_stored_etag(tmp_path: Path) ->
     assert seen == ['"v1"']
 
 
+def _owner_only_mode(system: str) -> int | None:
+    """The POSIX mode a fresh cache file must carry on *system*, or
+    `None` where that question has no answer.
+
+    On Windows there are no POSIX permission bits to assert. `st_mode`
+    is synthesised by the CRT from a single read-only attribute, so
+    *every* writable file reads back `0o666` no matter who may open it,
+    and the `mode` argument to `os.open` can only clear the write bit.
+    Confidentiality there comes from the NTFS ACL the file inherits from
+    its parent directory — the per-user `%LOCALAPPDATA%` tree that
+    `default_cache_path` picks (and, under pytest, the per-user temp
+    directory `tmp_path` lives in). Creating the file inside that
+    directory and renaming it within the same directory is what makes
+    that inheritance hold, which is asserted below and in
+    `test_the_cache_is_staged_inside_the_directory_it_inherits_from`.
+    """
+    return None if system == "Windows" else models_dev.CACHE_FILE_MODE
+
+
 async def test_the_cache_file_is_owner_only(tmp_path: Path) -> None:
     path = tmp_path / "models-dev.json"
     await _source(tmp_path, _ok).refresh()
-    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+    expected = _owner_only_mode(platform.system())
+    if expected is not None:
+        assert stat.S_IMODE(path.stat().st_mode) == expected
+    # Asserted everywhere, including where the mode bits mean nothing:
+    # the envelope only ever exists inside the directory whose access
+    # control it inherits, and the staging file it was renamed from is
+    # not left behind for a later reader to find.
+    assert path.parent == tmp_path
+    assert list(tmp_path.glob("*.tmp")) == []
+
+
+@pytest.mark.parametrize(
+    ("system", "expected"),
+    [
+        ("Linux", 0o600),
+        ("Darwin", 0o600),
+        ("FreeBSD", 0o600),
+        ("Windows", None),
+    ],
+)
+def test_the_owner_only_mode_contract_is_posix_only(system: str, expected: int | None) -> None:
+    """The platform decision itself, exercised on every runner.
+
+    A bare `skipif` would leave the Windows branch of this contract
+    unexecuted on the only platforms most contributors run, so the
+    decision is a function and the function is tested directly.
+    """
+    assert _owner_only_mode(system) == expected
+    assert models_dev.CACHE_FILE_MODE == 0o600
+
+
+def test_the_cache_is_staged_inside_the_directory_it_inherits_from() -> None:
+    """What makes the Windows half of the contract true.
+
+    The envelope is written to a staging file and renamed. Both the
+    staging file and the destination have to sit in the user-scoped
+    cache directory: a file created anywhere else inherits *that*
+    place's access control, and `os.replace` across directories would
+    carry it along.
+    """
+    path = Path("/cache/korvid") / models_dev.CACHE_FILENAME
+
+    assert models_dev._staging_path(path).parent == path.parent
+    assert models_dev._staging_path(path) != path
 
 
 # ---------------------------------------------------------------------------

@@ -47,6 +47,18 @@ CACHE_TTL_SECONDS: Final[int] = 24 * 60 * 60
 
 CACHE_FILENAME: Final[str] = "models-dev.json"
 
+#: The POSIX mode a freshly written cache envelope carries: readable and
+#: writable by its owner, by nobody else.
+#:
+#: Windows has no equivalent to assert. The `mode` argument to `os.open`
+#: there can only clear the read-only attribute, `st_mode` is synthesised
+#: by the CRT (every writable file reads back `0o666`), and access is
+#: decided by the NTFS ACL the file inherits from its parent directory —
+#: the per-user `%LOCALAPPDATA%` tree `default_cache_path` selects. That
+#: inheritance is why `_write_envelope` stages and renames *within* the
+#: cache directory instead of anywhere shared.
+CACHE_FILE_MODE: Final[int] = 0o600
+
 
 @dataclass(frozen=True, slots=True)
 class ModelMetadata:
@@ -118,6 +130,21 @@ def default_cache_path() -> Path:
         base = Path.home() / ".cache"
 
     return base / "korvid" / CACHE_FILENAME
+
+
+def _staging_path(path: Path) -> Path:
+    """Where the cache envelope is written before it is renamed onto
+    *path*.
+
+    A sibling, deliberately. The staging file inherits its access
+    control from the directory it is created in, and `os.replace` inside
+    one directory keeps it; creating it anywhere shared — or renaming
+    across directories — would hand the envelope whatever protection
+    that other place has. On Windows that inheritance *is* the
+    protection, because there are no mode bits to set (see
+    `CACHE_FILE_MODE`).
+    """
+    return path.with_suffix(".tmp")
 
 
 def _positive_int(value: object) -> int | None:
@@ -485,13 +512,19 @@ class ModelsDevSource(ModelMetadataSource):
             return None
 
     def _write_envelope(self, envelope: dict[str, Any]) -> None:
-        """Write the cache envelope atomically with 0o600 permissions."""
+        """Write the cache envelope atomically, owner-only.
+
+        The mode is `CACHE_FILE_MODE` where a mode means something, and
+        the staging file is a sibling everywhere — on Windows that
+        sibling relationship, not the mode, is what keeps the envelope
+        inside the per-user directory's access control.
+        """
         import contextlib
 
         path = self._cache_path
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".tmp")
-        fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        tmp = _staging_path(path)
+        fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, CACHE_FILE_MODE)
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 json.dump(envelope, f)
