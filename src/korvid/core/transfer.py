@@ -600,6 +600,22 @@ async def _await_upload_verdict(
     raise TransferError(_with_permission_hint(sink.error_message(message), remote_path))
 
 
+async def _send_upload_eof(
+    ws: Any, reader: asyncio.Task[None], sink: _FrameSink, remote_path: str
+) -> None:
+    """Close stdin after the archive, allowing a peer that already reported success."""
+    try:
+        await ws.send_bytes(_STDIN_EOF)
+    except OSError as exc:
+        # Some tar implementations exit at the archive marker and close the
+        # socket before EOF. Only a completed Success verdict can settle that race.
+        done, _pending = await asyncio.wait({reader}, timeout=_UPLOAD_DRAIN_GRACE)
+        if reader not in done or not sink.verdict or sink.failure is not None:
+            raise TransferError(
+                _with_permission_hint(sink.error_message(f"connection lost: {exc}"), remote_path)
+            ) from exc
+
+
 async def upload(
     open_exec: OpenExec,
     local_path: Path,
@@ -637,7 +653,6 @@ async def upload(
             try:
                 try:
                     await _send_archive(ws, archive_path, size, progress)
-                    await ws.send_bytes(_STDIN_EOF)
                 except OSError as exc:
                     # The connection usually drops because the remote command
                     # died; drain what the server managed to say, then prefer
@@ -648,6 +663,7 @@ async def upload(
                             sink.error_message(f"connection lost: {exc}"), remote_path
                         )
                     ) from exc
+                await _send_upload_eof(ws, reader, sink, remote_path)
                 await _await_upload_verdict(reader, sink, remote_path)
             finally:
                 reader.cancel()

@@ -386,7 +386,46 @@ class TestUpload:
             assert excinfo.value is error
         assert ws.closed
 
-    async def test_eof_send_failure_is_not_success(self, tmp_path: Path) -> None:
+    async def test_eof_send_failure_after_remote_success(self, tmp_path: Path) -> None:
+        class CloseAfterSuccess(FakeWs):
+            def __init__(self) -> None:
+                super().__init__([b"\x03" + SUCCESS])
+                self.verdict_read = asyncio.Event()
+
+            async def __anext__(self) -> FakeMsg:
+                message = await super().__anext__()
+                self.verdict_read.set()
+                return message
+
+            async def send_bytes(self, data: bytes) -> None:
+                if data == b"\xff\x00":
+                    await asyncio.wait_for(self.verdict_read.wait(), timeout=5)
+                    raise ConnectionResetError("peer already completed")
+                await super().send_bytes(data)
+
+        src = tmp_path / "f"
+        src.write_bytes(b"complete file")
+        ws = CloseAfterSuccess()
+        assert await upload(FakeExec(ws), src, "/opt/f") == len(b"complete file")
+        assert ws.verdict_read.is_set()
+        assert ws.closed
+        with tarfile.open(fileobj=io.BytesIO(b"".join(frame[1:] for frame in ws.sent))) as tf:
+            extracted = tf.extractfile("f")
+            assert extracted is not None
+            assert extracted.read() == b"complete file"
+
+    @pytest.mark.parametrize(
+        ("frames", "expected"),
+        [
+            ([], "stdin close failed"),
+            ([b"\x03" + NOT_FOUND], "executable file not found"),
+            ([b"\x03"], "invalid exec outcome"),
+        ],
+        ids=["missing-verdict", "failure-verdict", "invalid-verdict"],
+    )
+    async def test_eof_send_failure_without_success_is_not_success(
+        self, tmp_path: Path, frames: list[bytes | str], expected: str
+    ) -> None:
         class BrokenEof(FakeWs):
             async def send_bytes(self, data: bytes) -> None:
                 if data == b"\xff\x00":
@@ -395,9 +434,37 @@ class TestUpload:
 
         src = tmp_path / "f"
         src.write_bytes(b"x")
-        ws = BrokenEof([b"\x03" + SUCCESS])
+        ws = BrokenEof(frames)
+        with pytest.raises(TransferError, match=expected):
+            await upload(FakeExec(ws), src, "/opt/f")
+        assert ws.closed
+
+    async def test_eof_send_failure_with_pending_verdict_is_not_success(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        class PendingVerdict(EofWs):
+            async def send_bytes(self, data: bytes) -> None:
+                if data == b"\xff\x00":
+                    raise ConnectionResetError("stdin close failed")
+                await super().send_bytes(data)
+
+        monkeypatch.setattr("korvid.core.transfer._UPLOAD_DRAIN_GRACE", 0.01)
+        src = tmp_path / "f"
+        src.write_bytes(b"x")
+        ws = PendingVerdict()
         with pytest.raises(TransferError, match="stdin close failed"):
             await upload(FakeExec(ws), src, "/opt/f")
+        assert ws.closed
+        assert ws.reader_started.is_set()
+        assert ws.reader_finished.is_set()
+
+    async def test_archive_send_failure_is_not_overridden_by_success(self, tmp_path: Path) -> None:
+        src = tmp_path / "f"
+        src.write_bytes(b"x")
+        ws = FakeWs([b"\x03" + SUCCESS], fail_send=True)
+        with pytest.raises(TransferError, match="connection lost"):
+            await upload(FakeExec(ws), src, "/opt/f")
+        assert ws.sent == []
         assert ws.closed
 
     @pytest.mark.parametrize("block_send", [False, True], ids=["waiting-for-outcome", "sending"])
