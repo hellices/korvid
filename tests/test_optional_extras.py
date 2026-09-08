@@ -77,7 +77,7 @@ def test_the_agent_extra_declares_litellm_and_no_per_vendor_extras() -> None:
     assert vendor_shaped == []
 
 
-def test_the_deptry_ignore_for_litellm_is_marked_temporary() -> None:
+def test_deptry_ignores_only_the_project_package() -> None:
     data = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
     ignores = data["tool"]["deptry"]["per_rule_ignores"]["DEP002"]
 
