@@ -863,21 +863,21 @@ def _metadata_text(
         f"{keyring}"
         'Requires-Dist: litellm==1.98.0; extra == "agent"\n'
         'Requires-Dist: openai<3.0.0,>=2.20.0; extra == "agent"\n'
-        'Requires-Dist: mcp<2,>=1.10; extra == "mcp"\n'
-        'Requires-Dist: httpx2>=2.10,<3; extra == "mcp"\n'
+        'Requires-Dist: mcp<3,>=2.0.0; extra == "mcp"\n'
+        'Requires-Dist: httpx2<3,>=2.12.0; extra == "mcp"\n'
         'Requires-Dist: anyio>=4.5; extra == "mcp"\n'
-        'Requires-Dist: starlette>=0.36; extra == "mcp"\n'
-        'Requires-Dist: uvicorn>=0.30; extra == "mcp"\n'
+        'Requires-Dist: starlette>=1.5.1; extra == "mcp"\n'
+        'Requires-Dist: uvicorn>=0.52.1; extra == "mcp"\n'
         'Requires-Dist: httpx>=0.27; extra == "observability"\n'
         'Requires-Dist: httpx>=0.27; extra == "all"\n'
         'Requires-Dist: keyring>=25.7.0; extra == "all"\n'
         'Requires-Dist: litellm==1.98.0; extra == "all"\n'
         'Requires-Dist: openai<3.0.0,>=2.20.0; extra == "all"\n'
-        'Requires-Dist: mcp<2,>=1.10; extra == "all"\n'
-        'Requires-Dist: httpx2>=2.10,<3; extra == "all"\n'
+        'Requires-Dist: mcp<3,>=2.0.0; extra == "all"\n'
+        'Requires-Dist: httpx2<3,>=2.12.0; extra == "all"\n'
         'Requires-Dist: anyio>=4.5; extra == "all"\n'
-        'Requires-Dist: starlette>=0.36; extra == "all"\n'
-        'Requires-Dist: uvicorn>=0.30; extra == "all"\n'
+        'Requires-Dist: starlette>=1.5.1; extra == "all"\n'
+        'Requires-Dist: uvicorn>=0.52.1; extra == "all"\n'
         "\n"
         f"{body}"
     )
@@ -900,6 +900,8 @@ def _fake_dist(
     tmp_path: Path,
     metadata_text: str,
     *,
+    wheel_metadata_text: str | None = None,
+    sdist_metadata_text: str | None = None,
     wheel_members: tuple[str | zipfile.ZipInfo, ...] = (),
     sdist_members: tuple[str | tarfile.TarInfo, ...] = (),
     include_wheel_package: bool = True,
@@ -910,11 +912,14 @@ def _fake_dist(
     with zipfile.ZipFile(dist / "korvid-1.2.3-py3-none-any.whl", "w") as wheel:
         if include_wheel_package:
             wheel.writestr("korvid/__init__.py", "")
-        wheel.writestr("korvid-1.2.3.dist-info/METADATA", metadata_text)
+        wheel.writestr(
+            "korvid-1.2.3.dist-info/METADATA",
+            metadata_text if wheel_metadata_text is None else wheel_metadata_text,
+        )
         for member in wheel_members:
             wheel.writestr(member, "")
     pkg_info = tmp_path / "PKG-INFO"
-    pkg_info.write_text(metadata_text)
+    pkg_info.write_text(metadata_text if sdist_metadata_text is None else sdist_metadata_text)
     with tarfile.open(dist / "korvid-1.2.3.tar.gz", "w:gz") as sdist:
         sdist.add(pkg_info, arcname="korvid-1.2.3/PKG-INFO")
         required = ("korvid-1.2.3/pyproject.toml",) if include_sdist_project else ()
@@ -1064,6 +1069,66 @@ def test_sdist_required_member_must_be_a_regular_file(tmp_path: Path, member_typ
 def test_wheel_and_sdist_metadata_match_version_and_extras(tmp_path: Path) -> None:
     dist = _fake_dist(tmp_path, _metadata_text())
     assert check_artifacts.main(["--dist", str(dist), "--version", "1.2.3"]) == 0
+
+
+@pytest.mark.parametrize(
+    ("artifact_kind", "artifact_name"),
+    [
+        pytest.param("wheel", "korvid-1.2.3-py3-none-any.whl", id="wheel"),
+        pytest.param("sdist", "korvid-1.2.3.tar.gz", id="sdist"),
+    ],
+)
+def test_artifact_metadata_rejects_a_weaker_httpx2_floor(
+    tmp_path: Path,
+    artifact_kind: str,
+    artifact_name: str,
+) -> None:
+    safe = _metadata_text()
+    weak = safe.replace("httpx2<3,>=2.12.0", "httpx2<3,>=2.10")
+    if artifact_kind == "wheel":
+        dist = _fake_dist(tmp_path, safe, wheel_metadata_text=weak)
+    else:
+        dist = _fake_dist(tmp_path, safe, sdist_metadata_text=weak)
+
+    with pytest.raises(
+        ValueError,
+        match=rf"{re.escape(artifact_name)}: extra .*httpx2",
+    ):
+        check_artifacts.main(["--dist", str(dist), "--version", "1.2.3"])
+
+
+def test_requirement_identity_normalizes_equivalent_pep508_formatting() -> None:
+    source = 'Widget[socks,HTTP] >= 1.0, < 2 ; python_version < "3.13"'
+    metadata = "widget[http,socks]<2,>=1.0;python_version<'3.13'"
+
+    assert check_artifacts._requirement_identity(source) == (
+        check_artifacts._requirement_identity(metadata)
+    )
+
+
+def test_metadata_extra_marker_preserves_the_source_condition() -> None:
+    source = check_artifacts._requirement_identity(
+        'widget>=1; python_version < "3.13" or sys_platform == "win32"'
+    )
+    metadata = check_artifacts._requirement_identity(
+        'widget>=1; (python_version < "3.13" or sys_platform == "win32") and extra == "feature"'
+    )
+
+    extra, marker = check_artifacts._metadata_extra(metadata.marker)
+
+    assert extra == "feature"
+    assert marker == source.marker
+
+
+def test_artifact_metadata_rejects_an_unsupported_requirement(
+    tmp_path: Path,
+) -> None:
+    safe = _metadata_text()
+    malformed = safe.replace("httpx2<3,>=2.12.0", "httpx2=>2.12.0")
+    dist = _fake_dist(tmp_path, safe, wheel_metadata_text=malformed)
+
+    with pytest.raises(ValueError, match="unsupported requirement"):
+        check_artifacts.main(["--dist", str(dist), "--version", "1.2.3"])
 
 
 @pytest.mark.parametrize(

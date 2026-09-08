@@ -91,6 +91,28 @@ def test_locked_mcp_http_client_includes_security_fixes() -> None:
     assert all(version >= Version("2.12.0") for version in versions)
 
 
+def test_development_git_library_rejects_known_vulnerable_versions() -> None:
+    project = tomllib.loads((_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    requirements = [Requirement(value) for value in project["dependency-groups"]["dev"]]
+    git_libraries = [
+        requirement for requirement in requirements if requirement.name.casefold() == "gitpython"
+    ]
+    assert len(git_libraries) == 1, (
+        "the development Git dependency needs an explicit security floor"
+    )
+    assert Version("3.1.58") not in git_libraries[0].specifier
+    assert Version("3.1.59") in git_libraries[0].specifier
+
+
+def test_locked_development_git_library_includes_security_fixes() -> None:
+    lock = tomllib.loads(_uv_lock())
+    versions = [
+        Version(package["version"]) for package in lock["package"] if package["name"] == "gitpython"
+    ]
+    assert versions, "the development Git library must remain in the locked graph"
+    assert all(version >= Version("3.1.59") for version in versions)
+
+
 def test_workflow_jobs_returns_jobs_mapping_for_relock_workflow() -> None:
     jobs = workflow_jobs(_RELOCK_WORKFLOW)
     assert {"relock", "propose"} <= jobs.keys()

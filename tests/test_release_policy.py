@@ -501,6 +501,18 @@ def test_first_published_0_4_release_note_records_the_security_remediation() -> 
     assert "https://hellices.github.io/korvid/release-notes/v0.4.0/" in notes
 
 
+def test_first_published_0_4_release_note_distinguishes_development_security_fixes() -> None:
+    notes = _FIRST_PUBLISHED_0_4_NOTE.read_text(encoding="utf-8")
+    security = markdown_section(notes, "Security fixes")
+    project = tomllib.loads((_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    assert "GitPython>=3.1.59" in project["dependency-groups"]["dev"]
+    assert "GitPython" in security
+    assert "3.1.59" in security
+    assert "development-only" in security
+    for cve in ("CVE-2026-78675", "CVE-2026-78676", "CVE-2026-78677", "CVE-2026-78678"):
+        assert cve in security
+
+
 def test_release_history_marks_the_unpublished_audit_note() -> None:
     unpublished = _UNPUBLISHED_RELEASE_NOTE.read_text(encoding="utf-8")
 
@@ -511,6 +523,16 @@ def test_release_history_marks_the_unpublished_audit_note() -> None:
         f"[korvid v{_FIRST_PUBLISHED_0_4_VERSION}](v{_FIRST_PUBLISHED_0_4_VERSION}.md)"
         in unpublished
     )
+
+
+def test_unpublished_release_commands_are_disabled_historical_examples() -> None:
+    unpublished = _UNPUBLISHED_RELEASE_NOTE.read_text(encoding="utf-8")
+    commands = re.findall(r"^```sh\n(.*?)^```", unpublished, re.MULTILINE | re.DOTALL)
+    assert commands, "the audit record must preserve the historical examples"
+    for block in commands:
+        assert all(
+            not line.strip() or line.lstrip().startswith("#") for line in block.splitlines()
+        ), "unpublished release commands must remain commented, not executable instructions"
 
 
 def test_release_history_navigation_keeps_the_current_release_note() -> None:
