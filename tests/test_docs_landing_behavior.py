@@ -6,11 +6,13 @@ import shutil
 import subprocess
 from html.parser import HTMLParser
 from pathlib import Path
+from typing import NoReturn
 
 import pytest
 
 ROOT = Path(__file__).parent.parent
 JS_TESTS = ROOT / "tests" / "js"
+_DIAGNOSTIC_LIMIT = 4096
 
 
 class _SceneMarkupParser(HTMLParser):
@@ -63,15 +65,95 @@ class _SceneMarkupParser(HTMLParser):
             self._inside_switcher = False
 
 
+def _bounded_timeout_output(output: bytes | str | None) -> str:
+    if output is None:
+        return "<none>"
+    text = output.decode(errors="replace") if isinstance(output, bytes) else output
+    if len(text) <= _DIAGNOSTIC_LIMIT:
+        return text
+    head = _DIAGNOSTIC_LIMIT // 2
+    tail = _DIAGNOSTIC_LIMIT - head
+    omitted = len(text) - _DIAGNOSTIC_LIMIT
+    return f"{text[:head]}\n... <{omitted} characters truncated from middle> ...\n{text[-tail:]}"
+
+
 def _run_harness(name: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["node", str(JS_TESTS / name)],
-        capture_output=True,
-        text=True,
-        check=False,
-        cwd=ROOT,
-        timeout=10,
-    )
+    found = shutil.which("node")
+    if found is None:
+        raise RuntimeError("node is not installed")
+    node = str(Path(found).resolve())
+    try:
+        return subprocess.run(
+            [node, str(JS_TESTS / name)],
+            capture_output=True,
+            text=True,
+            check=False,
+            cwd=ROOT,
+            timeout=10,
+        )
+    except subprocess.TimeoutExpired as error:
+        error.add_note(
+            "\n".join(
+                (
+                    f"Node harness: {name}",
+                    f"Node executable: {node}",
+                    f"Captured stdout:\n{_bounded_timeout_output(error.stdout)}",
+                    f"Captured stderr:\n{_bounded_timeout_output(error.stderr)}",
+                )
+            )
+        )
+        raise
+
+
+def test_harness_timeout_preserves_bounded_diagnostics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resolved = str(ROOT / "node-diagnostic.exe")
+    calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    def timeout(*args: object, **kwargs: object) -> NoReturn:
+        calls.append((args, kwargs))
+        raise subprocess.TimeoutExpired(
+            [resolved, str(JS_TESTS / "scene_fallback_harness.mjs")],
+            10,
+            output=(
+                b"stdout-start\n"
+                + b"x" * 10_000
+                + b"stdout-middle"
+                + b"x" * 10_000
+                + b"stdout-tail"
+            ),
+            stderr=(
+                b"stderr-start\n"
+                + b"y" * 10_000
+                + b"stderr-middle"
+                + b"y" * 10_000
+                + b"stderr-tail"
+            ),
+        )
+
+    monkeypatch.setattr(shutil, "which", lambda executable: resolved)
+    monkeypatch.setattr(subprocess, "run", timeout)
+
+    with pytest.raises(subprocess.TimeoutExpired, match="timed out") as raised:
+        _run_harness("scene_fallback_harness.mjs")
+
+    command = calls[0][0][0]
+    options = calls[0][1]
+    assert command == [resolved, str(JS_TESTS / "scene_fallback_harness.mjs")]
+    assert options["timeout"] == 10
+    assert "stdin" not in options
+    note = "\n".join(raised.value.__notes__)
+    assert f"Node executable: {resolved}" in note
+    assert "stdout-start" in note
+    assert "stderr-start" in note
+    assert "stdout-tail" in note
+    assert "stderr-tail" in note
+    assert "stdout-middle" not in note
+    assert "stderr-middle" not in note
+    assert "truncated" in note
+    assert _bounded_timeout_output(None) == "<none>"
+    assert _bounded_timeout_output("complete string") == "complete string"
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
@@ -80,6 +162,7 @@ def test_scene_switcher_behavior() -> None:
 
     assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
     assert "not ok" not in result.stdout
+    assert "scene-switcher stage=complete" in result.stderr
 
 
 def test_landing_markup_connects_scene_controls_to_fallback_content() -> None:
@@ -98,3 +181,4 @@ def test_scene_fallback_behavior() -> None:
 
     assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
     assert "not ok" not in result.stdout
+    assert "scene-fallback stage=complete" in result.stderr

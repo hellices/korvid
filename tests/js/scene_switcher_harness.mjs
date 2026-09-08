@@ -16,6 +16,13 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { createContext, runInContext } from "node:vm";
 
+function milestone(stage, scenario = null) {
+  const detail = scenario === null ? "" : ` scenario=${JSON.stringify(scenario)}`;
+  console.error(`scene-switcher stage=${stage}${detail}`);
+}
+
+milestone("imports-complete");
+
 const CONTROLLER = new URL(
   "../../docs/assets/javascripts/visual-storytelling.js",
   import.meta.url,
@@ -296,7 +303,9 @@ function run(
     };
   }
   const context = createContext(sandbox);
-  runInContext(readFileSync(CONTROLLER, "utf8"), context, { filename: "visual-storytelling.js" });
+  const source = readFileSync(CONTROLLER, "utf8");
+  milestone("source-loaded");
+  runInContext(source, context, { filename: "visual-storytelling.js" });
   return { errors, observers, media, queries };
 }
 
@@ -997,6 +1006,7 @@ const scenarios = {
 
 let failed = 0;
 for (const [name, scenario] of Object.entries(scenarios)) {
+  milestone("scenario-begin", name);
   try {
     await scenario();
     console.log(`ok ${name}`);
@@ -1004,6 +1014,9 @@ for (const [name, scenario] of Object.entries(scenarios)) {
     failed += 1;
     console.log(`not ok ${name}`);
     console.log(String(error.message ?? error));
+  } finally {
+    milestone("scenario-end", name);
   }
 }
+milestone("complete");
 process.exit(failed === 0 ? 0 : 1);

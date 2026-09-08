@@ -1741,18 +1741,15 @@ def test_every_absolute_repository_link_resolves_to_a_real_path() -> None:
     assert not broken, f"links to paths that do not exist: {broken}"
 
 
-def test_readme_has_no_relative_links_because_pypi_cannot_follow_them() -> None:
-    """The README is the PyPI project page (`readme = "README.md"`).
-
-    PyPI renders it outside the repository, so a relative target such as
-    `docs/mcp.md` becomes a dead link and `docs/assets/demo.gif` becomes a
-    broken image - on the page that has to sell the project. Anchors are
-    fine: they resolve inside the rendered document.
-    """
-    readme = _readme()
-    targets = re.findall(r"\]\(([^)]+)\)", readme)
+@pytest.mark.parametrize("document", ["README", "release notes"])
+def test_published_markdown_has_no_relative_links(document: str) -> None:
+    """PyPI and GitHub Releases render these outside their repository paths."""
+    text = _readme() if document == "README" else _release_notes()
+    targets = re.findall(r"\]\(([^)]+)\)", text)
     relative = [t for t in targets if not t.startswith(("http://", "https://", "#"))]
-    assert not relative, f"README links PyPI cannot resolve: {sorted(set(relative))}"
+    assert not relative, (
+        f"{document} links cannot resolve after publication: {sorted(set(relative))}"
+    )
 
 
 def test_readme_recommends_an_isolated_install_for_an_application() -> None:

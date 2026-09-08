@@ -1,14 +1,33 @@
 from __future__ import annotations
 
+import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
 SCRIPTS = Path(__file__).parents[1] / "scripts" / "release"
-sys.path.insert(0, str(SCRIPTS))
+with pytest.MonkeyPatch.context() as _import_path:
+    _import_path.syspath_prepend(str(SCRIPTS))
+    import release_config  # type: ignore[import-not-found]  # scripts/release via scoped sys.path
 
-import release_config  # type: ignore[import-not-found]  # noqa: E402  # scripts/release via sys.path
+
+def test_import_does_not_change_the_process_module_search_path() -> None:
+    script = (
+        "import sys\n"
+        "import pytest\n"
+        "before = sys.path.copy()\n"
+        "import tests.test_release_config\n"
+        "assert sys.path == before, (before, sys.path)\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=SCRIPTS.parents[1],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def _pyproject(tmp_path: Path, *, version: str = "0.4.0", upgrade_from: str = "0.3.0") -> Path:
