@@ -89,12 +89,8 @@ def _heading_slugs(name: str) -> set[str]:
 def test_agent_offers_an_installable_entra_command_for_tool_users() -> None:
     """Finding 4: `uv sync --extra entra` only works in a source checkout."""
     source = _source("agent.md")
-    version = re.search(
-        r'^version = "([^"]+)"', (ROOT / "pyproject.toml").read_text(encoding="utf-8"), re.MULTILINE
-    )
-    assert version is not None
-    assert f"uv tool install --force 'korvid[all,entra]=={version.group(1)}'" in source
-    assert f"pipx install --force 'korvid[all,entra]=={version.group(1)}'" in source
+    assert "uv tool install --force 'korvid[all,entra]'" in source
+    assert "pipx install --force 'korvid[all,entra]'" in source
     assert "uv sync --extra entra" in source
 
 
@@ -893,7 +889,7 @@ def test_agent_guide_tells_a_self_hosted_operator_how_to_diagnose_a_refused_stre
 def test_the_release_note_sends_a_broken_gateway_to_that_section() -> None:
     """A behaviour change an operator can hit needs its recovery linked
     from the note that announces it, not only from the guide."""
-    notes = _source("release-notes/unreleased.md")
+    notes = _source("release-notes/v0.4.0.md")
 
     assert "#self-hosted-endpoints-and-proxies" in notes, (
         "the release note must link the agent guide's troubleshooting anchor"

@@ -227,7 +227,7 @@ profile named `default`, which `agent.active` then selects; the scalars are
 dropped on the next save. The `agent.ollama.*` block is read **only** by that
 migration — once `agent.profiles` exists it is ignored and removed on save, so
 those knobs belong in a profile's `options`. See the
-[migration notes](release-notes/unreleased.md).
+[migration notes](release-notes/v0.4.0.md).
 
 !!! warning "GitHub Copilot"
 
@@ -239,15 +239,16 @@ Entra ID ships in its own extra; a tool-managed install reinstalls the complete
 set:
 
 ```sh
-uv tool install --force 'korvid[all,entra]==0.3.0'
+uv tool install --force 'korvid[all,entra]'
 # or
-pipx install --force 'korvid[all,entra]==0.3.0'
+pipx install --force 'korvid[all,entra]'
 ```
 
 In a source checkout, `uv sync --extra entra` does the same job.
 
-A non-standard backend registers a flow on the `korvid.provider` entry point;
-[Provider plugins](provider-plugins.md) has the API 2 contract.
+A non-standard transport registers a `SpecialFlow` on the `korvid.provider`
+entry point; custom authentication can use a `korvid.credential` chain instead.
+[Provider plugins](provider-plugins.md) describes both extension points.
 
 ## Model search
 

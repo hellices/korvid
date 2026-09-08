@@ -2,10 +2,18 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
 
+function milestone(stage, scenario = null) {
+  const detail = scenario === null ? "" : ` scenario=${JSON.stringify(scenario)}`;
+  console.error(`scene-fallback stage=${stage}${detail}`);
+}
+
+milestone("imports-complete");
+
 const source = readFileSync(
   new URL("../../docs/assets/javascripts/scene-fallback.js", import.meta.url),
   "utf8",
 );
+milestone("source-loaded");
 
 function run({ enhanced = false, readyState = "loading" } = {}) {
   const videos = ["agent.png", "mcp.png"].map((poster) => ({
@@ -106,11 +114,15 @@ const scenarios = {
 };
 
 for (const [name, scenario] of Object.entries(scenarios)) {
+  milestone("scenario-begin", name);
   try {
     scenario();
     console.log(`ok ${name}`);
   } catch (error) {
     console.error(`not ok ${name}`);
     throw error;
+  } finally {
+    milestone("scenario-end", name);
   }
 }
+milestone("complete");

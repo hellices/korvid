@@ -1,12 +1,29 @@
 from __future__ import annotations
 
+import tomllib
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-UPGRADE_SOURCE_VERSION = "0.2.0"
+_ROOT = Path(__file__).parents[1]
+
+
+def _upgrade_source_version() -> str:
+    try:
+        pyproject = tomllib.loads((_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+        version = pyproject["tool"]["korvid"]["release"]["upgrade-from"]
+    except (FileNotFoundError, OSError, KeyError, TypeError, tomllib.TOMLDecodeError) as exc:
+        raise AssertionError(
+            "pyproject.toml must define [tool.korvid.release].upgrade-from"
+        ) from exc
+    if not isinstance(version, str) or not version:
+        raise AssertionError("pyproject.toml must define a non-empty release upgrade source")
+    return version
+
+
+UPGRADE_SOURCE_VERSION = _upgrade_source_version()
 
 
 def _markdown_fence(line: str) -> tuple[str, int] | None:
