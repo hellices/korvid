@@ -5992,6 +5992,12 @@ the required check can prove that no sensitive expression reaches it.
 | 6 | Windows treated POSIX mode bits as meaningful and structural guards compared native path separators | Credible — Windows reported `0o666` for a writable cache file and produced backslashes in module ids | `ce79e53d` | platform-logic cache tests plus a `PureWindowsPath` regression test; the CodeQL warning sink is also pinned to a literal |
 | 7 | Device-flow authorization and login failures still rendered arbitrary exception text | Credible — this was the same credential/body disclosure class fixed for `ProfileProbe` | `86bda1a5` | both stages cover secret-bearing failures, declared safe messages and cancellation |
 | 8 | A fixed `models-dev.tmp` could be pre-created with loose permissions or shared by concurrent processes | Credible — `O_TRUNC` preserves an existing file's mode | `b76a24c5` | hostile pre-creation, unique sibling staging, replace failure cleanup and POSIX `0600` |
+| 9 | `ProfileProbe._probe` awaited `aclose` in a bare `finally`, so a failing close masked the exchange's own failure — a declared-safe refusal reached the wizard as the generic sentence | Credible — the close is bookkeeping, and it was outranking the one message an operator can act on | this round | `tests/providers/test_profile_probe.py` — safe refusal survives a failing close (and the close is logged), two secret-bearing failures still yield one written sentence, and cancellation is never converted or swallowed in either order; the existing success-plus-failing-close test pins that an otherwise clean run still refuses generically |
+
+The CI `mypy` failure of the same round (`comparison-overlap` on the two
+withheld sign-in sentences, both literal constants) is fixed by asserting the
+cardinality of a typed `set[str]` — the same guarantee, checked where a future
+edit that collapses them would actually be caught.
 
 Gates run for the group: `ruff check`/`ruff format --check` (`src/`, `tests/`),
 `mypy` (strict, all 528 files), `tach check`, the full `pytest` suite, and

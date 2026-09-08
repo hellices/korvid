@@ -21,7 +21,7 @@ from contextlib import aclosing
 from typing import TYPE_CHECKING, Any, Final, cast
 
 from korvid.agent.outbound import OutboundPolicy, provider_prepared_messages
-from korvid.agent.provider import OperatorSafeProviderError, append_bounded
+from korvid.agent.provider import LLMProvider, OperatorSafeProviderError, append_bounded
 from korvid.providers.litellm_factory import CredentialStore, create_provider_from_profile
 from korvid.providers.provider_default import ProviderDefaultRegistry
 
@@ -162,13 +162,53 @@ class ProfileProbe:
             raise self._withheld(exc) from exc
 
     @staticmethod
+    async def _close_quietly(provider: LLMProvider) -> None:
+        """Release the client while a failure is already on its way out.
+
+        Args:
+            provider: The provider whose client has to be released.
+
+        Raises:
+            asyncio.CancelledError: The close was cancelled. Never
+                suppressed — dropping it would leave a cancelled task
+                looking like an ordinary probe failure.
+        """
+        try:
+            await provider.aclose()
+        except Exception:
+            logger.warning("model connection probe could not close its provider", exc_info=True)
+
+    @staticmethod
     def _withheld(exc: BaseException) -> ProbeFailed:
         """Log the real reason and return the sentence the wizard may show."""
         logger.warning("model connection probe failed", exc_info=exc)
         return ProbeFailed(PROBE_REFUSED)
 
     async def _probe(self, profile: ModelConnectionConfig) -> str:
-        """Complete the exchange, unguarded — `__call__` owns the refusals."""
+        """Complete the exchange, unguarded — `__call__` owns the refusals.
+
+        The provider is released on every path, but not by a bare
+        `finally`: a close that fails while the exchange is already
+        unwinding would *replace* the exchange's own failure, so a
+        declared-safe refusal would reach the wizard as the generic
+        sentence instead. A failure that arrives on its own — nothing
+        else went wrong — is the probe's failure and leaves here intact
+        for `__call__` to filter.
+
+        Args:
+            profile: The connection to test.
+
+        Returns:
+            The reply text, bounded and unstripped of the caller's checks.
+
+        Raises:
+            ProbeFailed: Nothing could be built, or the provider streamed
+                no text.
+            Exception: Whatever the factory, the policy, the stream or —
+                on an otherwise clean run — `aclose` raised.
+            asyncio.CancelledError: The probe or its close was cancelled.
+                Never suppressed, in either order.
+        """
         provider = create_provider_from_profile(
             profile,
             catalog=self._catalog,
@@ -207,10 +247,20 @@ class ProfileProbe:
                     text = append_bounded(
                         text, str(event.get("text", "")), limit=PROBE_MAX_RESPONSE_CHARS
                     )
-        finally:
-            # Closed on every path: a probe that leaks its client would
-            # leak one per keystroke in the wizard.
-            await provider.aclose()
+        except BaseException:
+            # The body's failure is the answer the operator gets. A close
+            # that fails while unwinding it would replace a refusal the
+            # adapter declared safe — the one sentence they can act on —
+            # with the probe's generic one, so it is logged instead.
+            # `CancelledError` is not an `Exception` and still escapes
+            # `_close_quietly`: a cancelled probe stays cancelled.
+            await self._close_quietly(provider)
+            raise
+        # Closed on every path: a probe that leaks its client would leak
+        # one per keystroke in the wizard. Nothing failed here, so a
+        # failing close *is* the probe's failure and `__call__` filters it
+        # like any other.
+        await provider.aclose()
         if not text.strip():
             raise ProbeFailed(_NO_TEXT)
         return text.strip()

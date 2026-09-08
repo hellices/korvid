@@ -770,9 +770,16 @@ def test_the_two_withheld_sentences_say_which_half_of_the_sign_in_failed() -> No
     "Start a login" and "wait for the operator to approve one" fail for
     unrelated reasons and are retried differently, so the one thing the
     generic sentence still has to carry is which of the two it was.
+
+    Cardinality, not `!=`: both operands are literal constants, so a
+    direct comparison is one mypy proves at type-check time and rejects
+    as non-overlapping. Counting the distinct sentences asserts exactly
+    the same thing at runtime, where a future edit that collapses them
+    would actually be caught.
     """
-    assert AUTHORIZATION_WITHHELD != LOGIN_WITHHELD
-    for sentence in (AUTHORIZATION_WITHHELD, LOGIN_WITHHELD):
+    sentences: set[str] = {AUTHORIZATION_WITHHELD, LOGIN_WITHHELD}
+    assert len(sentences) == 2
+    for sentence in sentences:
         assert "withheld" in sentence
         assert "log" in sentence
 

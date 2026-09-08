@@ -210,6 +210,128 @@ async def test_a_close_failure_is_reported_as_the_written_refusal(
     assert provider.closed
 
 
+class _FailingProvider(ScriptedProvider):
+    """A provider whose stream and whose `aclose` each fail on demand.
+
+    Both halves of the probe's unwind path are failure paths, and which
+    exception survives the other is the contract these tests pin.
+    """
+
+    def __init__(self, *, body_error: BaseException, close_error: BaseException | None) -> None:
+        super().__init__([])
+        self._body_error = body_error
+        self._close_error = close_error
+
+    def complete(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        *,
+        stream: bool = True,
+    ) -> AsyncIterator[dict[str, Any]]:
+        self.calls.append((messages, tools))
+        error = self._body_error
+
+        async def gen() -> AsyncIterator[dict[str, Any]]:
+            raise error
+            yield {}  # pragma: no cover - unreachable, makes this a generator
+
+        return gen()
+
+    async def aclose(self) -> None:
+        self.closed = True
+        if self._close_error is not None:
+            raise self._close_error
+
+
+async def test_a_close_failure_does_not_mask_a_declared_safe_refusal(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The stream's refusal is the answer; the close is bookkeeping.
+
+    A provider that refused with a sentence it declared operator-safe has
+    told the operator the one thing they can act on. If `aclose` then
+    fails, letting the close failure out would replace that sentence with
+    the probe's generic refusal — the operator would lose the real reason
+    because a socket misbehaved on the way out.
+    """
+    provider = _FailingProvider(
+        body_error=ProviderStreamLimitError(STREAM_LIMIT),
+        close_error=RuntimeError(_LEAKY),
+    )
+    _patch_factory(monkeypatch, provider)
+
+    with (
+        caplog.at_level("WARNING", logger="korvid.providers.profile_probe"),
+        pytest.raises(ProviderStreamLimitError) as raised,
+    ):
+        await ProfileProbe()(_PROFILE)
+
+    assert str(raised.value) == STREAM_LIMIT
+    assert raised.value.operator_message() == STREAM_LIMIT
+    assert "sk-live-9f3c2a" not in str(raised.value)
+    assert provider.closed
+    # Suppressed, not lost: the close failure is still on the record.
+    assert caplog.records
+
+
+async def test_a_close_failure_over_an_unsafe_failure_withholds_both_texts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two secret-bearing failures still leave exactly one written sentence."""
+    close_leak = "500 from https://vault.internal.test/v1 while releasing key sk-live-9f3c2a"
+    provider = _FailingProvider(
+        body_error=RuntimeError(_LEAKY),
+        close_error=RuntimeError(close_leak),
+    )
+    _patch_factory(monkeypatch, provider)
+
+    with pytest.raises(ProbeFailed) as raised:
+        await ProfileProbe()(_PROFILE)
+
+    message = str(raised.value)
+    assert message == PROBE_REFUSED
+    assert "sk-live-9f3c2a" not in message
+    assert "vault.internal.test" not in message
+    assert provider.closed
+
+
+async def test_a_failing_close_never_converts_a_cancelled_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancellation outranks a close that fails while unwinding it."""
+    provider = _FailingProvider(
+        body_error=asyncio.CancelledError(),
+        close_error=RuntimeError(_LEAKY),
+    )
+    _patch_factory(monkeypatch, provider)
+
+    with pytest.raises(asyncio.CancelledError):
+        await ProfileProbe()(_PROFILE)
+
+    assert provider.closed
+
+
+async def test_a_cancellation_while_closing_is_never_swallowed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other order: the body failed, then the close was cancelled.
+
+    Suppressing this one would leave the task looking like an ordinary
+    probe failure while its cancellation was quietly dropped.
+    """
+    provider = _FailingProvider(
+        body_error=RuntimeError(_LEAKY),
+        close_error=asyncio.CancelledError(),
+    )
+    _patch_factory(monkeypatch, provider)
+
+    with pytest.raises(asyncio.CancelledError):
+        await ProfileProbe()(_PROFILE)
+
+    assert provider.closed
+
+
 async def test_a_declared_operator_safe_refusal_is_re_raised_unchanged(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
