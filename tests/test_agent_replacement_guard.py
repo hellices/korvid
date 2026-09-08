@@ -127,6 +127,7 @@ _MIGRATION_SURFACES = frozenset(
         "tests/test_agent_replacement_guard.py",
         "docs/dev/agent-decisions.md",
         "docs/release-notes/v0.4.0.md",
+        "docs/release-notes/v0.4.1.md",
     }
 )
 

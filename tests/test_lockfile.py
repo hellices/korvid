@@ -25,6 +25,8 @@ from urllib.parse import urlsplit
 
 import pytest
 import yaml
+from packaging.requirements import Requirement
+from packaging.version import Version
 
 from tests.release_contracts import run_scripts, workflow_jobs
 
@@ -66,6 +68,27 @@ def test_lockfile_project_version_matches_pyproject() -> None:
     assert lock_version == project["project"]["version"], (
         f"uv.lock korvid version {lock_version!r} != pyproject {project['project']['version']}"
     )
+
+
+def test_mcp_http_client_requirement_rejects_known_vulnerable_versions() -> None:
+    project = tomllib.loads((_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    requirements = [
+        Requirement(value) for value in project["project"]["optional-dependencies"]["mcp"]
+    ]
+    http_client = next(requirement for requirement in requirements if requirement.name == "httpx2")
+    assert Version("2.10.0") not in http_client.specifier
+    assert Version("2.11.0") not in http_client.specifier
+    assert Version("2.12.0") in http_client.specifier
+    assert Version("3.0.0") not in http_client.specifier
+
+
+def test_locked_mcp_http_client_includes_security_fixes() -> None:
+    lock = tomllib.loads(_uv_lock())
+    versions = [
+        Version(package["version"]) for package in lock["package"] if package["name"] == "httpx2"
+    ]
+    assert versions, "the MCP HTTP client must remain in the locked runtime graph"
+    assert all(version >= Version("2.12.0") for version in versions)
 
 
 def test_workflow_jobs_returns_jobs_mapping_for_relock_workflow() -> None:

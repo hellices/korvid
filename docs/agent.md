@@ -227,7 +227,7 @@ profile named `default`, which `agent.active` then selects; the scalars are
 dropped on the next save. The `agent.ollama.*` block is read **only** by that
 migration — once `agent.profiles` exists it is ignored and removed on save, so
 those knobs belong in a profile's `options`. See the
-[migration notes](release-notes/v0.4.0.md).
+[migration notes](release-notes/v0.4.1.md).
 
 !!! warning "GitHub Copilot"
 

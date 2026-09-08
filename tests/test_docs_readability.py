@@ -3,8 +3,11 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from korvid import __version__
+
 ROOT = Path(__file__).parent.parent
 DOCS = ROOT / "docs"
+CURRENT_RELEASE_NOTE = f"release-notes/v{__version__}.md"
 
 
 def _source(name: str) -> str:
@@ -889,7 +892,7 @@ def test_agent_guide_tells_a_self_hosted_operator_how_to_diagnose_a_refused_stre
 def test_the_release_note_sends_a_broken_gateway_to_that_section() -> None:
     """A behaviour change an operator can hit needs its recovery linked
     from the note that announces it, not only from the guide."""
-    notes = _source("release-notes/v0.4.0.md")
+    notes = _source(CURRENT_RELEASE_NOTE)
 
     assert "#self-hosted-endpoints-and-proxies" in notes, (
         "the release note must link the agent guide's troubleshooting anchor"

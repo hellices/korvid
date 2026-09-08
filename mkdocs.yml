@@ -62,7 +62,8 @@ nav:
       - Contributor docs: dev/README.md
       - Release notes:
           - Unreleased: release-notes/unreleased.md
-          - v0.4.0: release-notes/v0.4.0.md
+          - v0.4.1: release-notes/v0.4.1.md
+          - v0.4.0 (unpublished): release-notes/v0.4.0.md
           - v0.3.0: release-notes/v0.3.0.md
           - v0.2.0: release-notes/v0.2.0.md
           - v0.1.2: release-notes/v0.1.2.md
