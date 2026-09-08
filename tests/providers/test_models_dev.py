@@ -5,6 +5,7 @@ import contextlib
 import http.server
 import inspect
 import json
+import os
 import platform
 import ssl
 import stat
@@ -311,7 +312,7 @@ async def test_the_cache_file_is_owner_only(tmp_path: Path) -> None:
     # control it inherits, and the staging file it was renamed from is
     # not left behind for a later reader to find.
     assert path.parent == tmp_path
-    assert list(tmp_path.glob("*.tmp")) == []
+    assert list(tmp_path.iterdir()) == [path]
 
 
 @pytest.mark.parametrize(
@@ -334,19 +335,101 @@ def test_the_owner_only_mode_contract_is_posix_only(system: str, expected: int |
     assert models_dev.CACHE_FILE_MODE == 0o600
 
 
-def test_the_cache_is_staged_inside_the_directory_it_inherits_from() -> None:
-    """What makes the Windows half of the contract true.
+@contextlib.contextmanager
+def _staged(path: Path) -> Iterator[Path]:
+    """Open one staging file for *path* and always clean it up."""
+    fd, tmp = models_dev._open_staging_file(path)
+    try:
+        yield tmp
+    finally:
+        os.close(fd)
+        tmp.unlink(missing_ok=True)
 
-    The envelope is written to a staging file and renamed. Both the
-    staging file and the destination have to sit in the user-scoped
-    cache directory: a file created anywhere else inherits *that*
-    place's access control, and `os.replace` across directories would
-    carry it along.
+
+def test_every_staging_file_is_a_unique_sibling(tmp_path: Path) -> None:
+    """Both halves of the staging name carry a guarantee.
+
+    *Sibling*: a file created anywhere else inherits *that* place's
+    access control, and `os.replace` across directories would carry it
+    along — which is the whole Windows half of the contract, where there
+    are no mode bits to set.
+
+    *Unique*: a fixed name is a name something else can hold first. Two
+    korvid processes refreshing at once would interleave into one
+    staging file, and each open is `O_CREAT | O_EXCL`, so neither can
+    adopt a file it did not create.
     """
-    path = Path("/cache/korvid") / models_dev.CACHE_FILENAME
+    path = tmp_path / models_dev.CACHE_FILENAME
 
-    assert models_dev._staging_path(path).parent == path.parent
-    assert models_dev._staging_path(path) != path
+    with _staged(path) as first, _staged(path) as second:
+        assert first != second
+        assert first.parent == second.parent == path.parent
+        assert path not in (first, second)
+        expected = _owner_only_mode(platform.system())
+        if expected is not None:
+            assert stat.S_IMODE(first.stat().st_mode) == expected
+
+
+async def test_a_staging_file_another_writer_holds_is_left_alone(tmp_path: Path) -> None:
+    """A concurrent refresh is not a collision.
+
+    The fixed `.tmp` name meant a second process opened, truncated and
+    renamed the file the first one was still writing — so whichever
+    finished last published a torn envelope built from both.
+    """
+    path = tmp_path / "models-dev.json"
+
+    with _staged(path) as held:
+        held.write_text("half a document", encoding="utf-8")
+        assert await _source(tmp_path, _ok).refresh() is RefreshOutcome.UPDATED
+
+        assert held.read_text(encoding="utf-8") == "half a document"
+        assert json.loads(path.read_text(encoding="utf-8"))["document"] == _DOCUMENT
+
+
+async def test_a_pre_created_staging_file_cannot_widen_or_poison_the_cache(
+    tmp_path: Path,
+) -> None:
+    """The staging name used to be guessable, and `O_CREAT` on a file
+    that already exists ignores the mode it was asked for.
+
+    Anyone who could create `models-dev.tmp` first therefore chose the
+    permissions the cache ended up with after the rename — and korvid
+    truncated whatever was there to do it.
+    """
+    path = tmp_path / "models-dev.json"
+    decoy = tmp_path / "models-dev.tmp"
+    decoy.write_text("planted", encoding="utf-8")
+    if os.name != "nt":
+        os.chmod(decoy, 0o666)
+
+    assert await _source(tmp_path, _ok).refresh() is RefreshOutcome.UPDATED
+
+    # Neither written through nor renamed away: korvid never touched it.
+    assert decoy.read_text(encoding="utf-8") == "planted"
+    assert json.loads(path.read_text(encoding="utf-8"))["document"] == _DOCUMENT
+    expected = _owner_only_mode(platform.system())
+    if expected is not None:
+        assert stat.S_IMODE(decoy.stat().st_mode) == 0o666
+        assert stat.S_IMODE(path.stat().st_mode) == expected
+
+
+def test_a_rename_that_fails_leaves_no_staging_file_behind(tmp_path: Path) -> None:
+    """Cleanup covers *every* error, not only the ones raised mid-write.
+
+    A staging file left behind is a readable copy of the envelope under
+    a name nothing ever cleans up.
+    """
+    path = tmp_path / models_dev.CACHE_FILENAME
+    # A directory cannot be replaced by a file, so the rename is the step
+    # that fails — after the envelope has already been written and synced.
+    path.mkdir()
+    source = ModelsDevSource(cache_path=path)
+
+    with pytest.raises(OSError, match=r"(?i)director|permission|access"):
+        source._write_envelope({"fetched_at": 0.0, "etag": None, "document": {}})
+
+    assert list(tmp_path.iterdir()) == [path]
 
 
 # ---------------------------------------------------------------------------

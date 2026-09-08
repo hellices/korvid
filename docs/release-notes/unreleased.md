@@ -292,6 +292,15 @@ are composed *after* the immutable safety contract and cannot widen it.
   a device login that cannot start, or that never completes, says which
   of the two halves failed and nothing else, because an authorization
   exchange quotes the very token it is minting.
+- **The models.dev cache is staged under a name nobody can pre-empt.**
+  The envelope was written to a fixed `models-dev.tmp` beside it, so a
+  file already sitting at that name was truncated and then renamed into
+  place — keeping whatever permissions it had been created with — and two
+  korvid processes refreshing at once wrote through each other. Each
+  write now takes its own staging file in the same directory, created
+  exclusively and set to `0600` on POSIX, and removes it on every failure
+  path. On Windows the confidentiality is still the per-user cache
+  directory's inherited ACL, as it always was.
 
 ## Dependency note: `[agent]` grew
 

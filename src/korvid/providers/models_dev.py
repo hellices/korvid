@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from enum import Enum
 from functools import partial
 from pathlib import Path
+from tempfile import mkstemp
 from typing import Any, Final
 
 #: One conditional GET of one public document. No query string, ever.
@@ -48,15 +49,17 @@ CACHE_TTL_SECONDS: Final[int] = 24 * 60 * 60
 CACHE_FILENAME: Final[str] = "models-dev.json"
 
 #: The POSIX mode a freshly written cache envelope carries: readable and
-#: writable by its owner, by nobody else.
+#: writable by its owner, by nobody else. Enforced on the staging
+#: descriptor rather than left to `mkstemp`, whose 0600 a umask can still
+#: subtract from.
 #:
-#: Windows has no equivalent to assert. The `mode` argument to `os.open`
-#: there can only clear the read-only attribute, `st_mode` is synthesised
-#: by the CRT (every writable file reads back `0o666`), and access is
-#: decided by the NTFS ACL the file inherits from its parent directory —
-#: the per-user `%LOCALAPPDATA%` tree `default_cache_path` selects. That
-#: inheritance is why `_write_envelope` stages and renames *within* the
-#: cache directory instead of anywhere shared.
+#: Windows has no equivalent to assert. A `mode` there can only clear the
+#: read-only attribute, `st_mode` is synthesised by the CRT (every
+#: writable file reads back `0o666`), and access is decided by the NTFS
+#: ACL the file inherits from its parent directory — the per-user
+#: `%LOCALAPPDATA%` tree `default_cache_path` selects. That inheritance
+#: is why `_open_staging_file` stages *within* the cache directory and
+#: `_write_envelope` renames within it, instead of anywhere shared.
 CACHE_FILE_MODE: Final[int] = 0o600
 
 
@@ -132,19 +135,50 @@ def default_cache_path() -> Path:
     return base / "korvid" / CACHE_FILENAME
 
 
-def _staging_path(path: Path) -> Path:
-    """Where the cache envelope is written before it is renamed onto
-    *path*.
+def _open_staging_file(path: Path) -> tuple[int, Path]:
+    """Create the file the cache envelope is written to before it is
+    renamed onto *path*, and return its descriptor and name.
 
-    A sibling, deliberately. The staging file inherits its access
-    control from the directory it is created in, and `os.replace` inside
-    one directory keeps it; creating it anywhere shared — or renaming
-    across directories — would hand the envelope whatever protection
-    that other place has. On Windows that inheritance *is* the
-    protection, because there are no mode bits to set (see
-    `CACHE_FILE_MODE`).
+    A *unique sibling*, and both halves carry a guarantee.
+
+    Sibling: the staging file inherits its access control from the
+    directory it is created in, and `os.replace` inside one directory
+    keeps it; creating it anywhere shared — or renaming across
+    directories — would hand the envelope whatever protection that other
+    place has. On Windows that inheritance *is* the protection, because
+    there are no mode bits to set (see `CACHE_FILE_MODE`).
+
+    Unique: a fixed name is a name something else can hold first. Two
+    korvid processes refreshing at once would interleave into one file
+    and publish a torn envelope built from both, and an `O_CREAT` open of
+    a name that already exists ignores the mode it was asked for — so a
+    pre-created, world-readable file would have kept those permissions
+    straight through the rename. `mkstemp` opens with `O_CREAT | O_EXCL`,
+    so it never adopts a file it did not make.
+
+    Args:
+        path: Where the envelope will finally live.
+
+    Returns:
+        An open, writable descriptor and the staging file's own path. The
+        caller owns both: it must close the descriptor and remove the
+        file on every path that does not rename it away.
     """
-    return path.with_suffix(".tmp")
+    fd, name = mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
+    tmp = Path(name)
+    if os.name == "nt":
+        # No POSIX bits to set; confidentiality is the directory's ACL.
+        return fd, tmp
+    try:
+        # `mkstemp` already creates 0600, but a umask subtracts from that
+        # and `CACHE_FILE_MODE` is published as the exact mode. Applied
+        # to the descriptor, so no other name can be chmod'ed instead.
+        os.fchmod(fd, CACHE_FILE_MODE)
+    except OSError:
+        os.close(fd)
+        tmp.unlink(missing_ok=True)
+        raise
+    return fd, tmp
 
 
 def _positive_int(value: object) -> int | None:
@@ -514,22 +548,32 @@ class ModelsDevSource(ModelMetadataSource):
     def _write_envelope(self, envelope: dict[str, Any]) -> None:
         """Write the cache envelope atomically, owner-only.
 
-        The mode is `CACHE_FILE_MODE` where a mode means something, and
-        the staging file is a sibling everywhere — on Windows that
+        Unique same-directory staging file, fsync, atomic replace: an
+        interrupted write can never leave a half-parsed envelope behind,
+        a power loss cannot leave an empty one, and two processes
+        refreshing at once cannot race on a shared name. The mode is
+        `CACHE_FILE_MODE` where a mode means something; on Windows the
         sibling relationship, not the mode, is what keeps the envelope
         inside the per-user directory's access control.
-        """
-        import contextlib
 
+        Raises:
+            OSError: The envelope could not be written or renamed into
+                place. The staging file is removed either way.
+        """
         path = self._cache_path
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = _staging_path(path)
-        fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, CACHE_FILE_MODE)
+        fd, tmp = _open_staging_file(path)
         try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(envelope, f)
-        except Exception:
-            with contextlib.suppress(OSError):
-                tmp.unlink(missing_ok=True)
-            raise
-        os.replace(str(tmp), str(path))
+            # Write through the staging descriptor and fsync it while
+            # still writable: Windows' fsync (_commit) rejects read-only
+            # handles.
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(envelope, handle)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp, path)
+        finally:
+            # Every error, not only the ones raised while writing: a
+            # staging file left behind is a readable copy of the envelope
+            # under a name nothing ever cleans up.
+            tmp.unlink(missing_ok=True)
