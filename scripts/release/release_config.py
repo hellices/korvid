@@ -7,6 +7,7 @@ Prints the selected value on success.
 
 from __future__ import annotations
 
+import stat
 import sys
 import tomllib
 from dataclasses import dataclass
@@ -28,9 +29,19 @@ class ReleaseConfig:
 
 def _read_toml(path: Path) -> dict[str, Any]:
     try:
-        return tomllib.loads(path.read_text(encoding="utf-8"))
+        path_stat = path.stat()
     except FileNotFoundError as exc:
         raise ValueError(f"{path} does not exist") from exc
+    except PermissionError as exc:
+        raise ValueError(f"permission denied reading {path}") from exc
+    except OSError as exc:
+        raise ValueError(f"could not read {path}: {exc}") from exc
+
+    if stat.S_ISDIR(path_stat.st_mode):
+        raise ValueError(f"{path} is a directory, expected a pyproject.toml file")
+
+    try:
+        return tomllib.loads(path.read_text(encoding="utf-8"))
     except IsADirectoryError as exc:
         raise ValueError(f"{path} is a directory, expected a pyproject.toml file") from exc
     except PermissionError as exc:

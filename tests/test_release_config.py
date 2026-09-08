@@ -111,6 +111,24 @@ def test_directory_input_fails_with_clear_error(
     assert captured.err == f"{tmp_path} is a directory, expected a pyproject.toml file\n"
 
 
+def test_directory_input_still_reports_directory_when_read_would_raise_permission_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    original = Path.read_text
+
+    def _windows_directory_error(self: Path, *, encoding: str = "utf-8") -> str:
+        if self == tmp_path:
+            raise PermissionError("access denied")
+        return original(self, encoding=encoding)
+
+    monkeypatch.setattr(Path, "read_text", _windows_directory_error)
+
+    assert release_config.main(["version", "--pyproject", str(tmp_path)]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == f"{tmp_path} is a directory, expected a pyproject.toml file\n"
+
+
 def test_read_denied_pyproject_fails_with_clear_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
