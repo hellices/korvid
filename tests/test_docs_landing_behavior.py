@@ -89,6 +89,7 @@ def _run_harness(name: str) -> subprocess.CompletedProcess[str]:
             text=True,
             check=False,
             cwd=ROOT,
+            stdin=subprocess.DEVNULL,
             timeout=10,
         )
     except subprocess.TimeoutExpired as error:
@@ -97,6 +98,7 @@ def _run_harness(name: str) -> subprocess.CompletedProcess[str]:
                 (
                     f"Node harness: {name}",
                     f"Node executable: {node}",
+                    "Node stdin: subprocess.DEVNULL (noninteractive harness)",
                     f"Captured stdout:\n{_bounded_timeout_output(error.stdout)}",
                     f"Captured stderr:\n{_bounded_timeout_output(error.stderr)}",
                 )
@@ -142,9 +144,10 @@ def test_harness_timeout_preserves_bounded_diagnostics(
     options = calls[0][1]
     assert command == [resolved, str(JS_TESTS / "scene_fallback_harness.mjs")]
     assert options["timeout"] == 10
-    assert "stdin" not in options
+    assert options["stdin"] is subprocess.DEVNULL
     note = "\n".join(raised.value.__notes__)
     assert f"Node executable: {resolved}" in note
+    assert "Node stdin: subprocess.DEVNULL" in note
     assert "stdout-start" in note
     assert "stderr-start" in note
     assert "stdout-tail" in note
