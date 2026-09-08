@@ -8,11 +8,13 @@ import logging
 import os
 import socket
 import stat
+import threading
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
+import anyio
 import httpx2
 import pytest
 import yaml
@@ -32,6 +34,7 @@ from korvid.mcp.registry import (
 from korvid.mcp.server import (
     KorvidMCPServer,
     MCPController,
+    _await_owned_task,
     _replace_atomically,
     default_endpoint_path,
 )
@@ -332,6 +335,250 @@ async def test_run_reports_unsafe_registry_as_failed_startup(tmp_path: Path) -> 
 
     assert task.done()
     assert path.is_dir()
+
+
+async def _cancel_at_checkpoint(task: asyncio.Task[None]) -> None:
+    checkpoint = asyncio.Event()
+    task.cancel()
+    # Cancellation queues the waiter's wakeup before this callback. Resuming
+    # after the callback observes cancellation delivery, not elapsed time.
+    asyncio.get_running_loop().call_soon(checkpoint.set)
+    await checkpoint.wait()
+
+
+@pytest.mark.parametrize("fail", [False, True])
+async def test_owned_task_repeated_cancellation_preserves_worker_outcome(fail: bool) -> None:
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def work() -> None:
+        entered.set()
+        await release.wait()
+        if fail:
+            raise RuntimeError("owned worker failed")
+
+    worker = asyncio.create_task(work())
+    waiter = asyncio.create_task(_await_owned_task(worker))
+    try:
+        await entered.wait()
+        for _ in range(3):
+            await _cancel_at_checkpoint(waiter)
+            assert not worker.done(), "cancellation reached the owned worker"
+            assert not waiter.done(), "cancellation abandoned the owned worker"
+    finally:
+        release.set()
+        outcomes = await asyncio.gather(worker, waiter, return_exceptions=True)
+
+    if fail:
+        assert isinstance(outcomes[0], RuntimeError)
+        assert outcomes[1] is outcomes[0]
+        # An already-finished task takes task.result(): failure still wins
+        # over cancellation rather than being silently discarded.
+        with pytest.raises(RuntimeError, match="owned worker failed"):
+            await _await_owned_task(worker)
+    else:
+        assert outcomes[0] is None
+        assert isinstance(outcomes[1], asyncio.CancelledError)
+
+
+@pytest.mark.parametrize("shutdown", ["request", "cancel", "repeated-cancel", "anyio-cancel"])
+async def test_run_owns_blocked_publication_until_registry_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    shutdown: str,
+) -> None:
+    path = tmp_path / "mcp-endpoint.json"
+    other = {
+        "pid": 999999,
+        "port": 7999,
+        "url": "http://127.0.0.1:7999/mcp",
+        "capability": "other-live-capability-token-0123456789",
+    }
+    _write_private_registry(path, {"servers": {"999999": other}})
+    monkeypatch.setattr(endpoint_registry, "_pid_alive", lambda pid: pid in {os.getpid(), 999999})
+    server = make_server(endpoint_path=path)
+    entered, finished = asyncio.Event(), asyncio.Event()
+    release = threading.Event()
+    loop = asyncio.get_running_loop()
+    write_endpoint = server._write_endpoint
+    remove_endpoint = server._remove_endpoint
+    completion_order: list[str] = []
+
+    def gated_write_endpoint(port: int) -> None:
+        loop.call_soon_threadsafe(entered.set)
+        try:
+            assert release.wait(10), "publication was never released"
+            write_endpoint(port)
+        finally:
+            loop.call_soon_threadsafe(completion_order.append, "published")
+            loop.call_soon_threadsafe(finished.set)
+
+    def observed_remove_endpoint() -> None:
+        loop.call_soon_threadsafe(completion_order.append, "removing")
+        remove_endpoint()
+
+    monkeypatch.setattr(server, "_write_endpoint", gated_write_endpoint)
+    monkeypatch.setattr(server, "_remove_endpoint", observed_remove_endpoint)
+    cancel_scope = anyio.CancelScope()
+
+    async def run() -> None:
+        with cancel_scope:
+            try:
+                await server.run()
+            finally:
+                completion_order.append("returned")
+
+    task = asyncio.create_task(run())
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=10)
+        assert server.bound_port is None
+        assert not server._started.is_set()
+        assert server._uvicorn is not None
+        port = server._actual_port(server._uvicorn)
+        async with httpx2.AsyncClient(trust_env=False) as client:
+            response = await client.post(
+                f"http://127.0.0.1:{port}/mcp/",
+                headers={"Authorization": f"Bearer {_TEST_CAPABILITY}"},
+                json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+            )
+        assert response.status_code == 503
+        if shutdown == "request":
+            server.request_shutdown()
+        elif shutdown == "anyio-cancel":
+            cancel_scope.cancel()
+        else:
+            task.cancel()
+        await asyncio.wait_for(server._started.wait(), timeout=10)
+        if shutdown == "repeated-cancel":
+            await _cancel_at_checkpoint(task)
+            await _cancel_at_checkpoint(task)
+    finally:
+        release.set()
+        await asyncio.wait_for(finished.wait(), timeout=10)
+        server.request_shutdown()
+        if shutdown in {"request", "anyio-cancel"}:
+            await asyncio.wait_for(task, timeout=10)
+        else:
+            with pytest.raises(asyncio.CancelledError, match=r"^$"):
+                await asyncio.wait_for(task, timeout=10)
+        # Reap uvicorn even on RED, where hard cancellation abandons its lifespan.
+        assert server._uvicorn is not None
+        lifespan_stopped = server._uvicorn.lifespan.shutdown_event.is_set()
+        if not lifespan_stopped:
+            await server._uvicorn.shutdown()
+
+    assert completion_order == ["published", "removing", "returned"]
+    assert server.bound_port is None
+    with pytest.raises(RuntimeError, match="failed to start"):
+        await server.wait_started()
+    assert json.loads(path.read_text()) == {"servers": {"999999": other}}
+    assert lifespan_stopped
+    assert server._publication_task is not None
+    assert server._publication_task.done()
+
+
+@pytest.mark.parametrize("published", [False, True])
+async def test_cancelled_publication_failure_is_reported_without_credentials(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    published: bool,
+) -> None:
+    server = make_server(endpoint_path=tmp_path / "mcp-endpoint.json")
+    entered, finished = asyncio.Event(), asyncio.Event()
+    release = threading.Event()
+    loop = asyncio.get_running_loop()
+    write_endpoint = server._write_endpoint
+
+    def fail_publication(port: int) -> None:
+        loop.call_soon_threadsafe(entered.set)
+        try:
+            assert release.wait(10), "publication was never released"
+            if published:
+                write_endpoint(port)
+            raise OSError(f"registry failed with {_TEST_CAPABILITY}")
+        finally:
+            loop.call_soon_threadsafe(finished.set)
+
+    monkeypatch.setattr(server, "_write_endpoint", fail_publication)
+    task = asyncio.create_task(server.run())
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=10)
+        task.cancel()
+        await asyncio.wait_for(server._started.wait(), timeout=10)
+    finally:
+        release.set()
+        await asyncio.wait_for(finished.wait(), timeout=10)
+        with pytest.raises(asyncio.CancelledError, match=r"^$"):
+            await asyncio.wait_for(task, timeout=10)
+        assert server._uvicorn is not None
+        if not server._uvicorn.lifespan.shutdown_event.is_set():
+            await server._uvicorn.shutdown()
+
+    warnings = [record for record in caplog.records if record.levelno >= logging.WARNING]
+    assert len(warnings) == 1
+    assert "registry could not be published" in warnings[0].getMessage()
+    assert warnings[0].exc_info is None
+    assert _TEST_CAPABILITY not in caplog.text
+    assert not server._endpoint_path.exists()
+
+
+@pytest.mark.parametrize("replacement", ["none", "port", "capability"])
+async def test_repeated_cancellation_owns_endpoint_removal_and_preserves_replacements(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    replacement: str,
+) -> None:
+    path = tmp_path / "mcp-endpoint.json"
+    server = make_server(endpoint_path=path)
+    entered, finished = asyncio.Event(), asyncio.Event()
+    release = threading.Event()
+    loop = asyncio.get_running_loop()
+    remove_endpoint = server._remove_endpoint
+    completion_order: list[str] = []
+
+    def gated_remove_endpoint() -> None:
+        loop.call_soon_threadsafe(entered.set)
+        try:
+            assert release.wait(10), "removal was never released"
+            remove_endpoint()
+        finally:
+            loop.call_soon_threadsafe(completion_order.append, "removed")
+            loop.call_soon_threadsafe(finished.set)
+
+    async def run() -> None:
+        try:
+            await server.run()
+        finally:
+            completion_order.append("returned")
+
+    monkeypatch.setattr(server, "_remove_endpoint", gated_remove_endpoint)
+    task = asyncio.create_task(run())
+    try:
+        await asyncio.wait_for(server.wait_started(), timeout=10)
+        document = json.loads(path.read_text())
+        server.request_shutdown()
+        await asyncio.wait_for(entered.wait(), timeout=10)
+        if replacement == "port":
+            document["servers"][str(os.getpid())]["port"] = 7999
+            document["servers"][str(os.getpid())]["url"] = "http://127.0.0.1:7999/mcp"
+        elif replacement == "capability":
+            document["servers"][str(os.getpid())]["capability"] = (
+                "replacement-token-0123456789ABCDEF"
+            )
+        _replace_atomically(path, document)
+        await _cancel_at_checkpoint(task)
+        await _cancel_at_checkpoint(task)
+    finally:
+        release.set()
+        await asyncio.wait_for(finished.wait(), timeout=10)
+        with pytest.raises(asyncio.CancelledError, match=r"^$"):
+            await asyncio.wait_for(task, timeout=10)
+
+    assert completion_order == ["removed", "returned"]
+    if replacement == "none":
+        assert not path.exists()
+    else:
+        assert json.loads(path.read_text()) == document
 
 
 # ---------------------------------------------------------------------------

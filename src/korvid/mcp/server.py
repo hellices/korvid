@@ -104,6 +104,22 @@ def _replace_atomically(path: Path, registry: dict[str, Any]) -> None:
         raise
 
 
+async def _await_owned_task(task: asyncio.Task[None]) -> None:
+    """Defer cancellation until owned cleanup, including its threads, finishes."""
+    cancelled: asyncio.CancelledError | None = None
+    # AnyIO level cancellation must not spin at each await; asyncio callers
+    # can still cancel repeatedly, so shield and retain the task on every wait.
+    with anyio.CancelScope(shield=True):
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError as exc:
+                cancelled = exc
+    task.result()
+    if cancelled is not None:
+        raise cancelled
+
+
 def _sanitize_client_meta(value: object, *, limit: int = 120) -> str:
     """Bound and flatten caller-supplied clientInfo metadata.
 
@@ -189,6 +205,8 @@ class KorvidMCPServer:
         self._session_id = f"mcp-{os.getpid()}-{secrets.token_urlsafe(8)}"
         self._started: anyio.Event = anyio.Event()
         self._bound_port: int | None = None
+        self._endpoint_port: int | None = None
+        self._publication_task: asyncio.Task[None] | None = None
         self._startup_error: str | None = None
         self._uvicorn: uvicorn.Server | None = None
         self._shutdown_requested = False
@@ -403,7 +421,7 @@ class KorvidMCPServer:
 
     @property
     def bound_port(self) -> int | None:
-        """Actual TCP port once started; None before startup completes."""
+        """Actual TCP port while published and not shutting down."""
         return self._bound_port
 
     async def wait_started(self) -> int:
@@ -423,12 +441,14 @@ class KorvidMCPServer:
     def request_shutdown(self) -> None:
         """Ask the HTTP server to exit gracefully; ``run()`` then returns.
 
-        Preferred over cancelling the ``run()`` task: a hard cancel tears
-        down uvicorn mid-request and leaks sockets/streams as warnings.
+        Preferred over cancelling ``run()`` so callers need not handle
+        CancelledError. Both paths retain ownership of transport and registry
+        cleanup until it finishes.
         Safe to call before ``run()`` has started - the flag is re-checked
         once the uvicorn server exists.
         """
         self._shutdown_requested = True
+        self._bound_port = None
         if self._uvicorn is not None:
             self._uvicorn.should_exit = True
 
@@ -520,55 +540,61 @@ class KorvidMCPServer:
                 # Startup lost the race against a pre-run request_shutdown():
                 # the sockets are already gone, nothing to publish.
                 return
-            # File I/O + interprocess flock may block on a contending korvid
-            # instance - never on the event-loop thread.
-            try:
-                await asyncio.to_thread(self._write_endpoint, port)
-            except (OSError, EndpointRegistryError):
-                self._startup_error = (
-                    "MCP endpoint registry could not be published; check permissions"
-                )
-                server.should_exit = True
-                self._started.set()
-                return
-            self._bound_port = port
+            # Keep cleanup identity separate from authenticated readiness.
+            # Cancelling this waiter cannot stop a contending registry thread.
+            self._endpoint_port = port
+            self._publication_task = asyncio.create_task(self._publish_endpoint(port))
+            await asyncio.shield(self._publication_task)
+            if not self._shutdown_requested and not server.should_exit:
+                self._bound_port = port
             self._started.set()
 
+        serve_task = asyncio.create_task(self._serve(server))
         try:
             async with anyio.create_task_group() as tg:
                 tg.start_soon(_publish_when_started)
                 try:
-                    await server.serve()
-                except SystemExit:
-                    # uvicorn raises SystemExit when it cannot bind (port in
-                    # use).  Catch it here, before the task group would wrap
-                    # it in a BaseExceptionGroup that escapes the caller's
-                    # shutdown path - the TUI must keep running without MCP.
-                    logger.error(
-                        "MCP server failed to start on %s:%d (port in use?)",
-                        _HOST,
-                        self._port,
-                    )
+                    # Let uvicorn close its sockets/lifespan normally even if
+                    # run() is cancelled while publication is blocked.
+                    await asyncio.shield(serve_task)
                 finally:
+                    self.request_shutdown()
                     # Wake anyone blocked in wait_started(); with _bound_port
                     # unset they get a RuntimeError instead of hanging.
                     self._started.set()
                     tg.cancel_scope.cancel()
         finally:
-            # Mirror tasks must not outlive the run: after shutdown a :ctx
-            # switch retargets the Kubernetes client/alias map, and a stale
-            # mirror resuming against the new context would act
-            # cross-context. Shielded like the endpoint cleanup below so a
-            # cancellation arriving mid-teardown still reaps them.
-            with contextlib.suppress(asyncio.CancelledError):
-                await asyncio.shield(self._cancel_follow_tasks())
-            # Same offload as publication: the flock may wait on another
-            # korvid instance.  Shielded + suppressed so a cancellation
-            # arriving mid-cleanup still lets the worker thread finish
-            # (and the original CancelledError, if any, re-raises after
-            # this finally as usual).
-            with contextlib.suppress(asyncio.CancelledError):
-                await asyncio.shield(asyncio.to_thread(self._remove_endpoint))
+            await _await_owned_task(asyncio.create_task(self._finish_run(serve_task)))
+
+    async def _serve(self, server: uvicorn.Server) -> None:
+        try:
+            await server.serve()
+        except SystemExit:
+            # Catch bind failure inside the owned task: SystemExit must not
+            # escape into the event loop or the TUI's shutdown path.
+            logger.error("MCP server failed to start on %s:%d (port in use?)", _HOST, self._port)
+
+    async def _publish_endpoint(self, port: int) -> None:
+        try:
+            await asyncio.to_thread(self._write_endpoint, port)
+        except (OSError, EndpointRegistryError):
+            self._startup_error = "MCP endpoint registry could not be published; check permissions"
+            # A cancelled startup still observes failure, without registry
+            # credentials or exception text reaching logs.
+            logger.warning(self._startup_error)
+            self.request_shutdown()
+            self._started.set()
+
+    async def _finish_run(self, serve_task: asyncio.Task[None]) -> None:
+        try:
+            await serve_task
+        finally:
+            await self._cancel_follow_tasks()
+            try:
+                if self._publication_task is not None:
+                    await self._publication_task
+            finally:
+                await asyncio.to_thread(self._remove_endpoint)
 
     @staticmethod
     def _actual_port(server: uvicorn.Server) -> int:
@@ -605,7 +631,7 @@ class KorvidMCPServer:
         added between the read and the write cannot be lost.  Runs on a
         worker thread."""
         path = self._endpoint_path
-        if path is None:
+        if self._endpoint_port is None:
             return
         try:
             with interprocess_lock(_endpoint_lock_path(path)):
@@ -613,7 +639,7 @@ class KorvidMCPServer:
                 entry = registry["servers"].get(str(os.getpid()))
                 if (
                     not isinstance(entry, dict)
-                    or entry.get("port") != self._bound_port
+                    or entry.get("port") != self._endpoint_port
                     or entry.get("capability") != self._capability_token
                 ):
                     return

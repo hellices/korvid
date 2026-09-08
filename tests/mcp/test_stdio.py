@@ -938,6 +938,43 @@ async def test_pipe_input_preserves_final_utf8_line_at_eof(relay: bool) -> None:
             assert await asyncio.wait_for(stdin.readline(), 5) == ""
 
 
+@pytest.mark.parametrize("relay", [False, True])
+async def test_stdio_transport_parses_unterminated_final_ping(relay: bool) -> None:
+    from mcp.server.stdio import stdio_server
+
+    from korvid.mcp._stdio_input import _relay_stdin, cancellable_stdin
+
+    request = {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "ping",
+        "params": {"_meta": {"label": "테스트"}},
+    }
+    read_fd, write_fd = os.pipe()
+    with (
+        os.fdopen(read_fd, "r", encoding="utf-8") as source,
+        os.fdopen(write_fd, "wb", buffering=0) as host,
+        io.StringIO() as output,
+    ):
+        host.write(json.dumps(request, ensure_ascii=False).encode("utf-8"))
+        host.close()
+        context = _relay_stdin(source) if relay else cancellable_stdin(source)
+        async with (
+            context as stdin,
+            stdio_server(stdin=stdin, stdout=anyio.wrap_file(output)) as (read, write),
+            read,
+            write,
+        ):
+            message = await asyncio.wait_for(read.receive(), 5)
+            assert not isinstance(message, Exception)
+            assert isinstance(message.message, types.JSONRPCRequest)
+            assert message.message.id == 2
+            assert message.message.method == "ping"
+            assert message.message.params == request["params"]
+            with pytest.raises(anyio.EndOfStream, match=r"^$"):
+                await asyncio.wait_for(read.receive(), 5)
+
+
 async def test_relay_failure_is_not_silent_eof(monkeypatch: pytest.MonkeyPatch) -> None:
     from korvid.mcp import _stdio_input
 
@@ -1014,7 +1051,7 @@ async def test_relay_cancellation_closes_backpressured_output(
 
 
 @pytest.mark.parametrize("relay", [False, True])
-async def test_stdio_preserves_fragmented_utf8_large_and_unterminated_frames(
+async def test_stdio_round_trip_preserves_fragmented_large_utf8_frames(
     tmp_path: Path, relay: bool
 ) -> None:
     async with _backend(tmp_path), _stdio_process(tmp_path, relay=relay) as process:
@@ -1039,13 +1076,17 @@ async def test_stdio_preserves_fragmented_utf8_large_and_unterminated_frames(
         assert "result" in initialized
         process.stdin.write(
             b'{"jsonrpc":"2.0","method":"notifications/initialized"}\n'
-            b'{"jsonrpc":"2.0","id":2,"method":"ping"}'
+            b'{"jsonrpc":"2.0","id":2,"method":"ping"}\n'
         )
         await process.stdin.drain()
+        ping_response = json.loads(await asyncio.wait_for(process.stdout.readline(), 5))
+        assert ping_response["id"] == 2
+        assert "result" in ping_response
         process.stdin.close()
         out, err = await asyncio.wait_for(process.communicate(), 5)
         assert process.returncode == 0, err.decode()
-        assert all(json.loads(line)["jsonrpc"] == "2.0" for line in out.splitlines())
+        responses = [json.loads(line) for line in out.splitlines()]
+        assert all(response["jsonrpc"] == "2.0" for response in responses)
         assert "Traceback" not in err.decode()
 
 

@@ -79,11 +79,11 @@ async def _running(
     store = ProposalStore()
     audit_path = state / "audit.jsonl"
     servers: list[KorvidMCPServer] = []
+    port = 0
 
     def make_server() -> KorvidMCPServer:
         # Rebind the same endpoint so a stale session is rejected by its old
         # capability, not merely by losing contact with a retired port.
-        port = (servers[0].bound_port or 0) if servers else 0
         server = KorvidMCPServer(
             executor,
             mcp_tool_schemas(write_proposals=write_proposals),
@@ -124,6 +124,9 @@ async def _running(
     async with app.run_test(size=(120, 40)) as pilot:
         try:
             assert (await controller.start()).startswith("MCP on :")
+            bound_port = servers[0].bound_port
+            assert bound_port is not None
+            port = bound_port
             with (state / "stdio-stderr.log").open("w+") as errors:
                 async with (
                     stdio_client(_parameters(state), errlog=errors) as (read, write),
