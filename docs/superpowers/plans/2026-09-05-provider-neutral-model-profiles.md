@@ -5973,6 +5973,33 @@ All SUCCESS.
 
 **Dependencies:** Task 20. **Blocks:** nothing. This is the last task.
 
+#### Round record — PR #364 review and CI after `eb8b4450`
+
+Copilot's review of the branch after #336 and the Python 3.11 fixes left six
+unresolved threads. Five were verified against the code and fixed here, each
+with a RED test written first. The CodeQL "clear-text logging" alert was a
+taint-analysis false positive — the sink printed the constant name, not the
+environment value — but the sink was still replaced with a static warning so
+the required check can prove that no sensitive expression reaches it.
+
+| # | Finding (thread) | Verdict | Commit | Tests |
+|---|---|---|---|---|
+| 1 | `_litellm_import.py`: `setdefault` preserves an inherited `LITELLM_LOCAL_MODEL_COST_MAP=false`, so `import litellm` can still fetch the remote cost map at startup | Credible — the offline guarantee was conditional on the environment korvid was started from | `1824b762` | `tests/providers/test_litellm_offline_import.py::test_an_ambient_false_cannot_re_enable_the_startup_fetch` (subprocess: ambient `false`, a `sys.meta_path` stub recording the value at the moment of import, sockets refused), plus the two existing real-SDK tests |
+| 2 | `ProfileProbe` propagates arbitrary provider/factory/policy exception text to `AgentSetupScreen`, which renders `str(exc)` | Credible — a 401 body quotes the credential it refused, and the wizard printed it verbatim | `ca66a7ac` | `tests/providers/test_profile_probe.py` — factory/policy/stream/`aclose` failures carrying a key and endpoint; declared safe refusal preserved; undeclared `OperatorSafeProviderError` message withheld; `CancelledError` never converted. `tests/ui/test_agent_setup_screen.py::test_the_real_probes_failure_reaches_the_wizard_without_the_providers_text` drives the real probe end to end |
+| 3 | `ModelConnectionsWriter` is a `typing.Protocol` crossing the core/UI boundary, against AGENTS.md | Credible — the seam was structural, so nothing declared it and three test lambdas typechecked against a signature the real writer does not have | `07c6d1db` | `tests/core/test_config_profiles.py` (ABC, abstract `__call__`, a structural function is *not* an instance, concrete writes profiles + tier, unasked tier untouched); `tests/test_main_wiring.py::test_wire_and_run_hands_the_ui_a_declared_profile_writer` |
+| 4 | `tach.toml` permits `providers → option_keys`, but AGENTS.md's layer table still says `providers` may import only `agent` | Credible — the contributor-facing table described a boundary the checker does not enforce; `core → option_keys` and the whole `evals` module were missing too | `efa7ce0b` | `tests/test_layer_documentation.py` — the documented modules and their dependency sets must equal `tach.toml`'s, and the shared stdlib leaf must be named |
+| 5 | `tests/test_optional_extras.py` omits `openai` from `_AGENT_MODULES` and its three duplicated copies | Credible — `openai` is a direct `[agent]` declaration (`providers/litellm_runtime.py` imports it for `ProviderSDKError`) that no base-install guard watched | `0f85ca88` | `tests/test_optional_extras.py::test_the_agent_watch_list_covers_every_distribution_the_extra_declares` derives the set from `pyproject.toml`; every probe is now built from `_AGENT_MODULES`; `..._does_not_import_the_agent_stack` replaces the litellm-only guard |
+| 6 | Windows treated POSIX mode bits as meaningful and structural guards compared native path separators | Credible — Windows reported `0o666` for a writable cache file and produced backslashes in module ids | `ce79e53d` | platform-logic cache tests plus a `PureWindowsPath` regression test; the CodeQL warning sink is also pinned to a literal |
+| 7 | Device-flow authorization and login failures still rendered arbitrary exception text | Credible — this was the same credential/body disclosure class fixed for `ProfileProbe` | `86bda1a5` | both stages cover secret-bearing failures, declared safe messages and cancellation |
+| 8 | A fixed `models-dev.tmp` could be pre-created with loose permissions or shared by concurrent processes | Credible — `O_TRUNC` preserves an existing file's mode | `b76a24c5` | hostile pre-creation, unique sibling staging, replace failure cleanup and POSIX `0600` |
+
+Gates run for the group: `ruff check`/`ruff format --check` (`src/`, `tests/`),
+`mypy` (strict, all 528 files), `tach check`, the full `pytest` suite, and
+`mkdocs build --strict`. `uv.lock` is untouched — every command ran with
+`UV_NO_SYNC=1` behind the mirror. The remaining loop work is GitHub-side:
+push this round, reply to and resolve each thread, re-request review, and wait
+for every required check.
+
 ---
 
 ## Task dependency graph
