@@ -482,14 +482,20 @@ def test_smoke_install_requirement_for_agent_uses_a_pep_508_direct_reference(
 
 def test_smoke_install_required_modules_follow_the_selected_variant() -> None:
     assert smoke_install.required_modules("base") == set()
-    assert smoke_install.required_modules("agent") == {"httpx", "keyring"}
+    assert smoke_install.required_modules("agent") == {"httpx", "keyring", "litellm", "openai"}
     assert smoke_install.required_modules("mcp") == {"mcp"}
-    assert smoke_install.required_modules("all") == {"httpx", "keyring", "mcp"}
+    assert smoke_install.required_modules("all") == {
+        "httpx",
+        "keyring",
+        "litellm",
+        "mcp",
+        "openai",
+    }
 
 
 def test_smoke_install_required_korvid_modules_follow_the_selected_variant() -> None:
     base = {"korvid.__main__", "korvid.ui.app"}
-    agent = {"korvid.providers.registry", "korvid.providers.token_store"}
+    agent = {"korvid.providers.litellm_factory", "korvid.providers.token_store"}
     mcp = {"korvid.mcp.server"}
     assert smoke_install.required_korvid_modules("base") == base
     assert smoke_install.required_korvid_modules("agent") == base | agent
@@ -503,10 +509,18 @@ def test_smoke_install_forbids_optional_feature_packages_outside_their_variant()
         "httpx",
         "keyring",
         "korvid.evals",
+        "litellm",
         "mcp",
+        "openai",
     }
     assert smoke_install.forbidden_modules("agent") == {"korvid.evals", "mcp"}
-    assert smoke_install.forbidden_modules("mcp") == {"httpx", "keyring", "korvid.evals"}
+    assert smoke_install.forbidden_modules("mcp") == {
+        "httpx",
+        "keyring",
+        "korvid.evals",
+        "litellm",
+        "openai",
+    }
     assert smoke_install.forbidden_modules("all") == {"korvid.evals"}
 
 
@@ -627,7 +641,7 @@ def test_smoke_install_runs_a_fresh_install_then_a_separate_expansion(
     # The fresh install must never be reached through a base install first.
     assert base_requirement not in installs[0]
     assert any("keyring" in " ".join(args) for args in commands)
-    assert any("korvid.providers.registry" in " ".join(args) for args in commands)
+    assert any("korvid.providers.litellm_factory" in " ".join(args) for args in commands)
     assert any("korvid.__main__" in " ".join(args) for args in commands)
     assert any("find_spec('mcp')" in " ".join(args) for args in commands)
 
@@ -845,6 +859,8 @@ def _metadata_text(
         "Provides-Extra: all\n"
         'Requires-Dist: httpx>=0.27; extra == "agent"\n'
         f"{keyring}"
+        'Requires-Dist: litellm==1.98.0; extra == "agent"\n'
+        'Requires-Dist: openai<3.0.0,>=2.20.0; extra == "agent"\n'
         'Requires-Dist: mcp<2,>=1.10; extra == "mcp"\n'
         'Requires-Dist: anyio>=4.5; extra == "mcp"\n'
         'Requires-Dist: starlette>=0.36; extra == "mcp"\n'
@@ -852,6 +868,8 @@ def _metadata_text(
         'Requires-Dist: httpx>=0.27; extra == "observability"\n'
         'Requires-Dist: httpx>=0.27; extra == "all"\n'
         'Requires-Dist: keyring>=25.7.0; extra == "all"\n'
+        'Requires-Dist: litellm==1.98.0; extra == "all"\n'
+        'Requires-Dist: openai<3.0.0,>=2.20.0; extra == "all"\n'
         'Requires-Dist: mcp<2,>=1.10; extra == "all"\n'
         'Requires-Dist: anyio>=4.5; extra == "all"\n'
         'Requires-Dist: starlette>=0.36; extra == "all"\n'
@@ -859,6 +877,19 @@ def _metadata_text(
         "\n"
         f"{body}"
     )
+
+
+def test_metadata_fixture_uses_the_declared_litellm_pin() -> None:
+    project = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))["project"]
+    litellm = next(
+        requirement
+        for requirement in project["optional-dependencies"]["agent"]
+        if requirement.startswith("litellm")
+    )
+    metadata = _metadata_text()
+
+    assert f'Requires-Dist: {litellm}; extra == "agent"' in metadata
+    assert f'Requires-Dist: {litellm}; extra == "all"' in metadata
 
 
 def _fake_dist(
@@ -1794,6 +1825,69 @@ def test_runtime_install_hint_consumers_use_the_shared_helper() -> None:
         source = (root / relative).read_text(encoding="utf-8")
         assert "from korvid.agent.install_hint import isolated_install_hint" in source
         assert "isolated_install_hint(" in source
+
+
+def _documented_korvid_imports() -> frozenset[str]:
+    """Every first-party module the runbook tells a release manager to import.
+
+    Read out of the runbook's own `python -c 'import ...'` lines rather than
+    restated here: a list spelled in the test would drift from the document
+    it is supposed to pin.
+    """
+    return frozenset(
+        module.strip()
+        for statement in re.findall(r"'import ([^']+)'", _release_runbook())
+        for module in statement.split(",")
+        if module.strip().startswith("korvid")
+    )
+
+
+def test_the_runbook_import_smoke_names_only_modules_that_exist() -> None:
+    """The pre-tag gate must import modules korvid actually ships.
+
+    The runbook's import line runs against a *published* wheel, minutes
+    before an irreversible tag push. A module that was deleted from `src/`
+    turns that gate into a `ModuleNotFoundError` the release manager has to
+    diagnose under time pressure — or, worse, into a step they skip.
+    """
+    package = Path(__file__).parents[1] / "src" / "korvid"
+    documented = _documented_korvid_imports()
+    assert documented, "the runbook must keep an import smoke check"
+    missing = sorted(
+        module
+        for module in documented
+        if not (
+            package.joinpath(*module.split(".")[1:]).with_suffix(".py").is_file()
+            or package.joinpath(*module.split(".")[1:], "__init__.py").is_file()
+        )
+    )
+    assert missing == []
+
+
+def test_the_runbook_import_smoke_probes_the_same_modules_as_the_script() -> None:
+    """One published list of feature modules, not two that can disagree.
+
+    `smoke_install.py` proves an extra installed by importing a first-party
+    module that reaches it. The runbook's manual upgrade gate proves the
+    same thing about a *published* wheel. It may reach further than the
+    smoke matrix does — `korvid.obs` has no variant there — but where the
+    two cover the same package they must name the same module, or the
+    runbook can go on importing something the script already knows is gone.
+    """
+    documented = _documented_korvid_imports()
+    probed = set(smoke_install.required_korvid_modules("all"))
+    covered = {module.rpartition(".")[0] for module in probed}
+    disagreeing = sorted(
+        module
+        for module in documented
+        if module.rpartition(".")[0] in covered and module not in probed
+    )
+    assert disagreeing == []
+    for variant in ("agent", "mcp"):
+        feature = set(smoke_install.required_korvid_modules(variant)) - set(
+            smoke_install.required_korvid_modules("base")
+        )
+        assert documented & feature, f"the runbook proves nothing about the {variant} extra"
 
 
 def test_release_smoke_docs_describe_a_ci_venv_pip_check() -> None:

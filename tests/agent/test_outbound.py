@@ -1257,7 +1257,7 @@ def test_the_real_ollama_hook_satisfies_the_position_contract() -> None:
     """Adding `tool_name`, `thinking`, `index` and object arguments is
     exactly the dialect work the hook exists for, and none of it touches
     a position's role or content."""
-    from korvid.providers.ollama import OllamaProvider
+    from korvid.providers.flow_ollama_thinking import OllamaProvider
 
     provider = OllamaProvider(base_url="http://x:11434", model="qwen3:8b")
     messages: list[dict[str, Any]] = [

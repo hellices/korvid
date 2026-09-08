@@ -53,7 +53,7 @@ from korvid.agent.prompt_packs import SAFETY_CONTRACT
 from korvid.agent.request_gateway import RequestGateway
 from korvid.agent.session import DefaultAgentSession
 from korvid.agent.tool_harness import ToolHarness
-from korvid.providers.ollama import OllamaOptions, OllamaProvider
+from korvid.providers.flow_ollama_thinking import OllamaOptions, OllamaProvider
 from korvid.tools.executor import RecordedExecution
 
 #: The air-gapped deployment's own endpoint. Every request must go here.

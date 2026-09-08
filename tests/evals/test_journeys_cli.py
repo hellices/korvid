@@ -153,3 +153,99 @@ def test_a_journey_run_with_no_turns_is_not_a_success() -> None:
     run = JourneyRun(turns=(), input_tokens=0, output_tokens=0, tokens_estimated=True)
 
     assert run.success is False
+
+
+# ---------------------------------------------------------------------------
+# `main`'s configuration is the eval's shared configuration
+# ---------------------------------------------------------------------------
+
+
+def _patched_journey_main(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[list[tuple[str, str]], list[str], list[Any]]:
+    """Neuter everything `main` does except read its configuration."""
+    import korvid.evals.__main__ as eval_cli
+    import korvid.evals.journeys_cli as cli
+
+    probed: list[tuple[str, str]] = []
+    keys: list[str] = []
+    factories: list[Any] = []
+
+    async def fake_capture(base_url: str, model: str, **kwargs: Any) -> dict[str, Any]:
+        probed.append((base_url, model))
+        return {"unavailable": []}
+
+    def fake_httpx_fetch(*, api_key: str, timeout_seconds: float) -> Any:
+        keys.append(api_key)
+        return None
+
+    def fake_factory_from_env(env: Any) -> Any:
+        factory = object()
+        factories.append(factory)
+        return factory
+
+    async def fake_run(args: Any, policy: Any = None, **kwargs: Any) -> list[Any]:
+        factories.append(kwargs.get("provider_factory"))
+        return []
+
+    monkeypatch.setattr(eval_cli, "capture_serving", fake_capture)
+    monkeypatch.setattr(eval_cli, "httpx_fetch", fake_httpx_fetch)
+    monkeypatch.setattr(cli, "provider_factory_from_env", fake_factory_from_env)
+    monkeypatch.setattr(cli, "_resolve_policy", lambda factory, tier: _policy())
+    monkeypatch.setattr(cli, "_run", fake_run)
+    monkeypatch.setattr(cli, "render_markdown", lambda reports: "")
+    return probed, keys, factories
+
+
+def test_journey_main_probes_with_the_tag_the_endpoint_knows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`ollama/qwen3:8b` is korvid's routing name; `/api/show` knows `qwen3:8b`."""
+    import korvid.evals.journeys_cli as cli
+
+    probed, _keys, _factories = _patched_journey_main(monkeypatch)
+    monkeypatch.setenv("KORVID_EVAL_BASE_URL", "http://localhost:11434/v1")
+    monkeypatch.setenv("KORVID_EVAL_MODEL", "ollama/qwen3:8b")
+
+    assert cli.main([]) == 0
+    assert probed == [("http://localhost:11434/v1", "qwen3:8b")]
+
+
+def test_journey_main_resolves_the_probe_credential_like_the_profile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The preferred variable names the key's variable; the probe must follow it.
+
+    Reading `KORVID_EVAL_API_KEY` directly meant an operator on the
+    supported convention silently probed unauthenticated.
+    """
+    import korvid.evals.journeys_cli as cli
+
+    _probed, keys, _factories = _patched_journey_main(monkeypatch)
+    monkeypatch.setenv("KORVID_EVAL_BASE_URL", "http://localhost:11434/v1")
+    monkeypatch.setenv("KORVID_EVAL_MODEL", "ollama/qwen3:8b")
+    monkeypatch.setenv("KORVID_EVAL_API_KEY_ENV", "EVAL_TOKEN")
+    monkeypatch.setenv("EVAL_TOKEN", "sk-probe")
+
+    assert cli.main([]) == 0
+    assert keys == ["sk-probe", "sk-probe"]
+
+
+def test_journey_main_configures_the_provider_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Configuration happens once; the run still gets its own providers.
+
+    `provider_factory_from_env` validates by *building* a provider, and a
+    special flow may perform a device login there. Calling it twice in one
+    campaign would ask the operator to authenticate twice.
+    """
+    import korvid.evals.journeys_cli as cli
+
+    _probed, _keys, factories = _patched_journey_main(monkeypatch)
+    monkeypatch.setenv("KORVID_EVAL_BASE_URL", "http://localhost:11434/v1")
+    monkeypatch.setenv("KORVID_EVAL_MODEL", "ollama/qwen3:8b")
+
+    assert cli.main([]) == 0
+    assert len(factories) == 2  # one built, one threaded into the run
+    assert factories[0] is factories[1]

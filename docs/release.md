@@ -158,7 +158,7 @@ uv pip install --python "$upgrade_python" --upgrade \
 "$upgrade_korvid" --version | grep -Fx 'korvid 0.3.0'
 "$upgrade_korvid" --help >/dev/null
 "$upgrade_python" -c \
-  'import korvid.mcp.server, korvid.obs.prometheus, korvid.providers.registry'
+  'import korvid.mcp.server, korvid.obs.prometheus, korvid.providers.litellm_factory'
 runtime_root="$upgrade_root/runtime"
 env HOME="$runtime_root/home" \
   XDG_CONFIG_HOME="$runtime_root/config" \

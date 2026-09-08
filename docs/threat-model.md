@@ -1,13 +1,10 @@
 # Threat model: the external AI data boundary
 
 What korvid sends to embedded AI providers, what it withholds, where the trust
-boundaries are, and the residual risks that are **not** mitigated. Everything
-here is a guarantee that exists in the current code — chiefly
-`agent/outbound.py`, `core/redaction.py` and `tools/structured.py`. It is not a
-general product security overview: [`docs/ops.md`](ops.md) has the cluster-write
-safety model, and
-[`SECURITY.md`](https://github.com/hellices/korvid/blob/main/SECURITY.md) is how
-you report a vulnerability.
+boundaries are, and the residual risks that are **not** mitigated. Every claim
+here exists in current code — chiefly `agent/outbound.py`, `core/redaction.py`
+and `tools/structured.py`. It is not a general security overview:
+[`docs/ops.md`](ops.md) has the cluster-write safety model.
 
 ```mermaid
 flowchart LR
@@ -25,178 +22,222 @@ AI data boundary.
 
 ## Assets
 
-- **kubeconfig** and the credentials and contexts it grants access to.
-- **Cluster reads**: manifests, logs, events, resource listings.
-- **`Secret` values** (`data` / `stringData`), decoded or raw.
-- **Logs and events**, free-form text that may embed application-specific
-  secrets, tokens or identifiers no schema declares.
-- **Credentials**: API keys, OAuth tokens, capability tokens, bearer tokens.
-- **Audit records** (`~/.local/state/korvid/audit.jsonl`): who did what, to
-  which target, in which namespace.
-- **Exported payloads**: the sanitized provider request written by `:ai
-  payload` → export, and any private log or text export.
+- **kubeconfig**, and the credentials and contexts it grants access to.
+- **Cluster reads**: manifests, logs, events, listings, and **`Secret` values**
+  (`data` / `stringData`), decoded or raw.
+- **Logs and events** — free-form text that may embed secrets no schema
+  declares.
+- **Credentials** and **audit records**
+  (`~/.local/state/korvid/audit.jsonl`).
+- **Exported payloads**: the sanitized request `:ai payload` exports, and any
+  private log or text export.
 
 ## Trust boundaries
 
 - **Kubernetes API** — everything korvid reads or writes crosses here first;
-  RBAC on the active context is the only access control at this boundary.
+  RBAC on the active context is the only access control.
 - **TUI and core** — in-process and trusted: the store, watch manager, audit
-  log and write path hold cluster data and credentials in memory and execute
-  approved mutations.
-- **`OutboundPolicy`** — the fail-closed choke point every message, tool
-  result and tool-call argument passes before an embedded provider request is
-  built. It validates shape, redacts `Secret` data and credential-shaped text,
-  strips control characters, enforces a character budget, and produces the
-  immutable `OutboundSnapshot` that is both what ships and what the inspector
-  shows.
-- **Built-in remote providers** (GitHub Copilot, Azure OpenAI, OpenAI,
-  Anthropic-compatible, GitHub Models, vLLM/OpenAI-compatible) — receive the
-  sanitized canonical payload over HTTPS. Transport headers are built
-  separately by each provider's `CredentialSource` and are never part of the
-  snapshot.
-- **Local endpoints** (Ollama, a self-hosted OpenAI-compatible server) — the
-  same sanitization applies; korvid trusts the configured `base_url` to be the
-  intended process. Dialect conversion (`prepare_messages`) runs *before* the
-  policy, so anything an adapter adds is redacted and shown like everything
-  else — and a hook may only add: reordering history or rewriting a role or
-  content blocks the request rather than misfiling redaction records that
-  travel by position.
-- **Trusted provider plugins** — third-party `korvid.provider` entry points run
-  as trusted in-process code (see
-  [`docs/provider-plugins.md`](provider-plugins.md)). `create()` receives only a
-  `ProviderPluginConfig` and an optional `CredentialSource`, never conversation
-  data; the provider it returns is then called with the same sanitized payload
-  the built-ins receive. Nothing after that handoff is policed by korvid.
+  log and write path hold cluster data in memory and execute approved
+  mutations.
+- **`OutboundPolicy`** — the fail-closed choke point every message, tool result
+  and tool-call argument passes before an embedded provider request is built.
+  It validates shape, redacts `Secret` data and credential-shaped text, strips
+  control characters, enforces a character budget, and produces the immutable
+  `OutboundSnapshot` that ships and that the inspector shows.
+- **Model endpoints, remote or local** — receive the sanitized canonical
+  payload over HTTPS; transport headers are built separately from the resolved
+  credential and never enter the snapshot. For a local runtime korvid trusts
+  the profile's configured `endpoint` to be the intended process. Dialect
+  conversion runs *before* the policy and may only add — reordering history
+  blocks the request instead of misfiling position-bound redaction records.
+- **Special flows and provider plugins** — third-party `korvid.provider` entry
+  points are trusted in-process code (see
+  [`docs/provider-plugins.md`](provider-plugins.md)), built from a profile and
+  never from conversation data. What they return receives the same sanitized
+  payload; nothing past that handoff is policed.
 - **MCP loopback and capability tokens** — the MCP server
-  ([`docs/mcp.md`](mcp.md)) is a *separate* surface bound to `127.0.0.1` with
-  its own read/write-proposal contract and capability token. It does not call
-  through `OutboundPolicy` or any embedded provider at all.
-- **Observability connectors** — a second outbound boundary. Queries are
-  composed from a closed catalogue: the model supplies label values and one log
-  substring, never a query, and each value is escaped for the literal it lands
-  in. TLS verification cannot be disabled; a plaintext `http://` endpoint is
-  accepted, and configuring a credential for one warns at startup. Tokens are
-  read at call time, used in one header, and appear in no result, error, audit
-  record or log line. What comes *back* is untrusted text, masked in
-  `ToolExecutor` — before **either** consumer sees it, because MCP never
-  reaches `OutboundPolicy` (see [`docs/observability.md`](observability.md)).
+  ([`docs/mcp.md`](mcp.md)) is a *separate* surface on `127.0.0.1` with its own
+  read/write-proposal contract and token, reaching no embedded provider.
+- **Observability connectors** — a second outbound boundary. Queries come from
+  a closed catalogue: the model supplies label values and one log substring,
+  never a query. TLS verification cannot be disabled, and a token is read at
+  call time, used in one header, and appears in no result, error or log line.
+  What comes *back* is untrusted text, masked in `ToolExecutor` before
+  **either** consumer sees it (see
+  [`docs/observability.md`](observability.md)).
 - **Filesystem exports** — payload and log exports are written `0600` under
-  `$XDG_DATA_HOME/korvid/`. `$XDG_STATE_HOME/korvid/` holds `audit.jsonl` and
-  the MCP endpoint registry, which are *not* private exports and are not
-  sanitized the way provider payloads are.
+  `$XDG_DATA_HOME/korvid/`; `$XDG_STATE_HOME/korvid/` holds `audit.jsonl` and
+  the MCP endpoint registry, which are not sanitized the way payloads are.
 
 ## Attackers and abuse scenarios
 
 - **Malicious cluster content / prompt injection** — a compromised workload's
-  logs, annotations or events carry text engineered to steer the model.
-  `OutboundPolicy` treats all tool-derived text as data rather than
-  instructions and neutralizes control characters and credential-shaped
-  substrings, but it cannot detect semantic prompt injection.
-- **Compromised provider, plugin or MCP client** — any of them could retain,
-  log or re-transmit what they legitimately receive. korvid controls what
-  crosses each boundary, not what the far side does afterward.
-- **Local user or process** — another local account reading exported files, or
-  a process able to reach the MCP loopback port or a local model endpoint.
-- **Accidental export** — a payload or log capture copied, emailed or committed
-  without the exporter realizing what it holds.
+  logs or events carry text engineered to steer the model. `OutboundPolicy`
+  treats tool-derived text as data and neutralizes control characters and
+  credential-shaped substrings, but cannot detect semantic prompt injection.
+- **Compromised provider, plugin or MCP client** — any could retain, log or
+  re-transmit what it legitimately receives; korvid controls what crosses each
+  boundary, not what the far side does next.
+- **Local user or process** — another local account reading exported files or
+  reaching the MCP loopback port, or a capture copied out without the exporter
+  realizing what it holds.
+
+## The agent extra: dependencies and lockdown
+
+**Dependency surface.** `[agent]` pulls approximately **55 distributions**,
+including `litellm`, `boto3`, `openai`, `tiktoken` and `tokenizers`. The extra
+is optional, `tests/test_optional_extras.py` pins that import graph, and the
+alternative — a hand-maintained vendor routing table — routes credentials to
+the wrong host when it drifts.
+
+**Lockdown at import.** `providers/litellm_runtime.py` sets eight attributes on
+the `litellm` module before any completion call is possible. Each is a channel
+that would otherwise carry prompts, tool arguments, usage records or debug text
+to a third party or the terminal:
+
+| Attribute | Value |
+|---|---|
+| `telemetry` | `False` |
+| `turn_off_message_logging` | `True` |
+| `success_callback` | `[]` |
+| `failure_callback` | `[]` |
+| `callbacks` | `[]` |
+| `_async_success_callback` | `[]` |
+| `_async_failure_callback` | `[]` |
+| `suppress_debug_info` | `True` |
+
+Two are private attributes, set deliberately because they are what the SDK
+reads at call time. All eight are checked for *existence before* assignment, so
+a rename upstream raises at import instead of leaving the real sink open; a
+test asserts the same list. `providers/_litellm_import.py` also forces
+`LITELLM_LOCAL_MODEL_COST_MAP=true` before the import — assignment, not a
+default, so an ambient `false` cannot re-arm it — suppressing the SDK's
+startup price-table fetch, and strips `StreamHandler`s from its loggers.
+
+**The device-login routing hazard.** Given a reference under LiteLLM's own
+`github_copilot` or `chatgpt` prefix, the SDK starts an **interactive
+device-code sign-in and writes a credential file** (under
+`~/.config/litellm/`) from inside its routing call, even if the intent was
+only to resolve the reference — and it replaces the profile's credential,
+`chatgpt` its endpoint too. `DEVICE_LOGIN_PREFIXES` in
+`providers/litellm_settings.py` claims both ahead of routing, the underscore
+spelling folds onto the same claim, and the claim holds whether or not
+korvid's Copilot flow is installed. Such a reference is either served by a
+flow korvid ships or refused. A test rediscovers the set from the installed
+release, so a future one adding a third device-code provider fails there.
+
+## models.dev
+
+korvid makes at most one conditional GET of `https://models.dev/api.json` for
+optional model metadata, under these bounds:
+
+- **Never at startup**, on mount, on a keystroke, or during routing. Only
+  <kbd>Ctrl</kbd>+<kbd>R</kbd> on the model search screen contacts it, forcing
+  a revalidation; otherwise korvid serves its cache unchanged. No HTTP client
+  exists until then.
+- **No credentials, no korvid state** — no API key, cluster context or
+  conversation data.
+- **Verified TLS, one trust decision** — the client comes from the same builder
+  as every other korvid-owned HTTPS client, so `network.ca_bundle` applies and
+  verification can never be switched off. A bundle that will not load makes the
+  refresh unavailable; it never retries unverified.
+- **Bounded** — a 10-second deadline over the whole request, a 12 MiB streaming
+  ceiling, `application/json` only, redirects refused, and a strict schema: a
+  document that passes those checks but fails validation is discarded.
+- **Cached `0600`**, revalidated conditionally on the stored `ETag`, so an
+  unchanged document costs a round trip and no download. The cache is
+  `$XDG_CACHE_HOME/korvid/models-dev.json` wherever that variable is set, and
+  otherwise `~/Library/Caches/korvid/models-dev.json` on macOS,
+  `%LOCALAPPDATA%\korvid\models-dev.json` on Windows,
+  `~/.cache/korvid/models-dev.json` elsewhere.
+- **Disableable** — `agent.model_search.models_dev: false` builds no source and
+  no client, so there is no socket to open. Only `true` and `false` are read as
+  themselves; anything else warns and fails **closed** to `false`, so a quoting
+  slip cannot re-enable the fetch in an [air-gapped](airgap.md) deployment.
+
+**Setup model discovery** is the one setup-time request carrying a credential,
+and it goes to the operator's own endpoint on request only. Each attempt joins
+a path onto the configured URL, keeping its scheme, host and port; anything
+naming no `http(s)` origin is refused before a client exists, and redirects are
+refused. The key is borrowed for the call, never stored or logged. One 5-second
+deadline covers both attempts and the parse, under a 2 MiB, JSON-only,
+500-entry ceiling; every failure is an empty listing.
+
+**Residual risk.** A network observer can infer that a korvid instance
+refreshed its model metadata from `models.dev`. No cluster payload, user
+identity or credential crosses that channel; it is the only outbound connection
+the agent component makes that carries no provider payload.
 
 ## Mitigations (implemented today)
 
 - **Redaction before reduction** — one shared recursive redactor runs where a
-  manifest is produced (`ToolExecutor`, and so the MCP server behind it) and
-  again at the outbound boundary. The producer-side pass is not redundant: what
-  marks a value secret is structure, and the size bound elides mapping entries,
-  so a document reduced first can reach the boundary with its credentials
-  intact and every classifier gone.
-- **Secret masking** — every `Secret` object's `data`/`stringData` entries are
-  replaced with `MASK_PLACEHOLDER` at any nesting depth, and the
-  `kubectl.kubernetes.io/last-applied-configuration` annotation is stripped
-  from *every* object, not only `Secret`s.
-- **Credential-key redaction** — the key stays and its **value** is replaced,
-  so the model can still reason about the object's shape. Exact names
-  (`password`, `token`, `apikey`, `authorization`, …) and compound names whose
-  words spell one (`dbPassword`, `AWS_SECRET_ACCESS_KEY`) lose their value
-  whatever type it has; only a boolean is kept, because one bit cannot carry a
-  credential. Only whole compounds count, which is what keeps `secretKeyRef`
-  and `AWS_ACCESS_KEY_ID` readable. In free-form text, an `authorization:` header
-  and a `<credential-word>: …` or `=…` assignment keep their key and lose their
-  value.
-- **Credential-named env values** — a container env entry whose `name` denotes
-  a credential keeps its `name` and loses its `value`; non-credential values
-  (`LOG_LEVEL`, `AWS_REGION`) and `valueFrom` references are preserved.
-- **Untrusted-text treatment** — tool results, screen context, and every string
-  in a tool *definition* (a plugin's `description`, `title` or `default` can
-  carry a credential too) take the same text pass.
-- **Declared result formats** — whether a result is parsed and recursively
-  redacted (`structured_yaml`) or masked as text (`untrusted_text`) comes from
-  the tool registry, and a tool the registry does not define must declare it.
-  There is no default: an undeclared result is refused rather than guessed at,
-  and a declaration cannot override a registry tool.
-- **One reading per document** — structured results are parsed by
-  `load_structured_document`, which refuses a mapping key repeated at any depth
-  and any anchor reference. A repeated `kind:` would otherwise load as ordinary
-  data with the credentials still in it, and a few hundred characters of nested
-  aliases expand into millions of nodes before anything is sent.
-- **Request caps** — structured results are bounded while staying parsable,
-  text results are capped, retained history is bounded, and `OutboundPolicy`
-  enforces a hard `max_request_chars` ceiling that blocks the request instead of
-  sending an unbounded payload; an over-budget request first retries with the
-  oldest retained turn dropped.
-- **Protected contexts** — `protected_contexts` plus
-  `agent.disable_in_protected` can refuse agent prompts entirely on
-  production-labeled contexts (see
-  [`docs/ops.md#protected-contexts`](ops.md#protected-contexts)).
-- **Corporate CA trust** — `network.ca_bundle` lets outbound TLS verification
-  succeed against internal endpoints without disabling it (see
-  [`docs/airgap.md`](airgap.md)).
-- **Private exports** — `write_private_text` creates exports with `O_EXCL`
-  (never silently overwriting) and POSIX mode `0600`.
+  manifest is produced (`ToolExecutor`, and so the MCP server behind it) *and*
+  again at the outbound boundary. The producer-side pass is not redundant: the
+  size bound elides mapping entries, so a document reduced first can reach the
+  boundary with its credentials intact. It replaces a `Secret`'s
+  `data`/`stringData` at any depth and strips
+  `kubectl.kubernetes.io/last-applied-configuration` from *every* object.
+- **Credential-key redaction** — the key stays and its **value** goes, for
+  exact names (`password`, `token`, …) and whole compounds that spell one
+  (`AWS_SECRET_ACCESS_KEY`). Only a boolean survives; one bit cannot carry a
+  credential.
+- **Declared, single-reading parsing** — structural redaction or text masking
+  is chosen by the tool registry, never defaulted, and an undeclared result is
+  refused; `load_structured_document` then rejects a repeated mapping key or
+  any anchor reference, so a second `kind:` cannot smuggle credentials past the
+  classifier. Screen context and every string in a tool *definition* take the
+  same text pass as a result.
+- **Request caps** — results and retained history are bounded, and
+  `OutboundPolicy` blocks an over-budget request rather than sending it.
+- **Response caps and completion evidence** — an adapter accepts a streamed
+  answer only against its protocol's own end-of-answer signal, stops reading
+  there, and drops the tool calls and token counts of a stream that ended
+  without one. What it buffers on the way is bounded too: one call's
+  arguments, the number of calls a response may open, held reasoning, and the
+  wizard's connection-test reply. Provider failures are reported in korvid's
+  written words, never by quoting a response body.
+- **Protected contexts and CA trust** — `agent.disable_in_protected` refuses
+  prompts on [protected contexts](ops.md#protected-contexts), and
+  `network.ca_bundle` makes internal TLS verify rather than be disabled
+  ([`docs/airgap.md`](airgap.md)).
 - **Write approval gate** — every cluster mutation waits for a user keystroke
-  in a confirmation dialog (see
-  [`docs/ops.md#one-write-path-three-drivers`](ops.md#one-write-path-three-drivers));
-  the agent and MCP write-proposal flows can only *request* a write.
-- **Fail-closed audit** — if the audit entry for an executed write cannot be
-  written, the write itself is blocked.
-- **Fail-closed redaction** — if a tool result cannot be redacted, the turn
-  stops: the redactor refuses shapes it cannot reason about, the agent rolls
-  the turn back and makes no further provider request, and an external MCP
-  client gets a safe error naming the shape rather than the document. Which
-  treatment a result gets is stated by its *producer*, so a document cannot
-  skip the structural pass by opening with `ERROR:`.
+  in a [confirmation dialog](ops.md#one-write-path-three-drivers); the agent
+  and MCP write-proposal flows can only *request* a write. Private exports are
+  created with `O_EXCL` and POSIX mode `0600`.
+- **Fail-closed audit and redaction** — a write whose audit entry cannot be
+  written is blocked, and a result that cannot be redacted stops the turn: the
+  agent rolls it back and makes no further provider request, and an MCP client
+  gets a safe error naming the shape rather than the document. The treatment is
+  stated by the result's *producer*, so a document cannot skip the structural
+  pass by opening with `ERROR:`.
 
 ## Residual risks (not mitigated)
 
-These are explicit, current limitations — not aspirational future work.
+Explicit, current limitations — not aspirational future work.
 
 - **Stable identifiers are not anonymized.** Resource names, namespaces,
-  labels, node names and image references cross the boundary unchanged; anyone
-  who can read the payload can correlate it with your cluster's naming.
+  labels, node names and image references cross unchanged; anyone who reads the
+  payload can correlate it with your cluster.
 - **Arbitrary secrets in free-form logs cannot be guaranteed detectable.** The
-  policy masks known credential-shaped patterns and `Secret` fields; it cannot
-  recognize an application-specific token in unstructured log or event text.
-  The same limit applies to positional secrets in a manifest: `--token=…` is
-  masked, `--token` followed by the value as a separate `args` element is not.
-- **Local endpoint trust is not verified.** For `provider: ollama` or a
-  self-hosted `base_url`, korvid sends the sanitized payload to whatever process
-  is listening at that address.
-- **Plugin post-handoff behavior is out of scope.** Trusted in-process plugin
-  code may mutate, retain, log, cache or independently transmit the payload it
-  received; korvid has no visibility past the handoff.
-- **MCP callers own their own AI boundary.** korvid's MCP server hands cluster
-  reads (and, opt-in, write proposals) to external clients without routing them
-  through `OutboundPolicy`, and cannot constrain what model or data policy that
-  client applies. Structured manifests are still redacted producer-side;
-  compound workload diagnoses, logs, and events are credential-pattern masked
-  before their result caps (see [`docs/mcp.md`](mcp.md#mcp-server)). Lists,
-  single-pod diagnoses, and Helm status carry only their tool-specific shaping.
-- **Raw logs and the audit trail are sensitive on their own terms.** Log
-  captures, describe exports and `audit.jsonl` are not provider payloads and
-  are not sanitized like one; treat them with the same care as kubeconfig
-  access.
+  policy masks known credential-shaped patterns and `Secret` fields, not an
+  application-specific token in unstructured text. `--token=…` is masked;
+  `--token` followed by the value as a separate `args` element is not.
+- **Local endpoint trust is not verified.** For an `ollama/…` profile or a
+  self-hosted `endpoint`, korvid sends the sanitized payload to whatever
+  process is listening at that address.
+- **Plugin post-handoff behavior is out of scope.** Trusted in-process code may
+  mutate, retain, log or independently transmit what it received.
+- **MCP callers own their own AI boundary.** The MCP server hands cluster reads
+  (and, opt-in, write proposals) to external clients without routing them
+  through `OutboundPolicy`. Structured manifests are still redacted
+  producer-side; diagnoses, logs and events are credential-pattern masked
+  before their result caps (see [`docs/mcp.md`](mcp.md#mcp-server)).
+- **Raw logs and the audit trail** are not provider payloads and are not
+  sanitized like one.
 - **`0600` does not prove exclusive access on every platform.** On Windows the
   `os.open` mode argument does not map onto NTFS ACLs, so a private export's
-  confidentiality there depends on the enclosing directory's inherited
-  permissions, not on the mode korvid requested.
+  confidentiality depends on the enclosing directory's inherited permissions,
+  not the mode korvid requested.
 
 ## What the inspector proves — and what it does not prove
 
@@ -204,16 +245,14 @@ These are explicit, current limitations — not aspirational future work.
 `messages` and `tools` JSON that `OutboundPolicy.prepare()` produced for the
 most recent provider call, the `model` it was addressed to, and every redaction
 applied along the way. The list spans the whole pipeline, because a redaction
-that removed its own evidence earlier — a stripped control character, a deleted
-last-applied annotation, a mapping elided to fit the size bound — leaves
-nothing for a later pass to rediscover. Each record belongs to the message it
-was taken from rather than to that message's text, and is dropped when that
-message leaves history. This is the real payload, not a re-derived
-approximation; a turn that was blocked or rolled back sent nothing, so it
-leaves the previous handoff on display rather than clearing the view.
+that removed its own evidence earlier — a stripped control character, a mapping
+elided to fit the size bound — leaves nothing for a later pass to rediscover. A
+turn that was blocked or rolled back sent nothing, so it leaves the previous
+handoff on display.
 
-It does **not** show transport-level HTTP headers (`Authorization`, API keys,
-tenant headers), which each provider's `CredentialSource` attaches separately;
-non-message request fields an adapter sets for itself (Ollama's `think`,
-`options.num_ctx`, `keep_alive`), which carry no conversation data; or anything
-a plugin or remote endpoint does with the payload after receiving it.
+It does **not** show transport headers (`Authorization`, API keys, tenant
+headers), attached separately from the resolved credential; non-message request
+fields an adapter sets for itself (Ollama's `think`, `options.num_ctx`); or
+anything a plugin or remote endpoint does with the payload afterwards. Report a
+vulnerability through
+[`SECURITY.md`](https://github.com/hellices/korvid/blob/main/SECURITY.md).

@@ -1497,34 +1497,57 @@ class TestDiscoveryFailure:
 
 
 class TestSingleSourceProviderNames:
-    """RESERVED_PROVIDER_NAMES must derive from the same constants that
-    registry.py uses for dispatch, so the two cannot drift."""
+    """RESERVED_PROVIDER_NAMES is the one list of names a plugin may not
+    claim, and it is defined where the *live* registry reads it."""
 
-    def test_reserved_is_union_of_canonical_constants(self) -> None:
-        from korvid.providers.plugin_registry import (
-            GITHUB_COPILOT_PROVIDER,
-            OLLAMA_PROVIDER,
-            OPENAI_COMPAT_ALIASES,
+    def test_the_reserved_names_are_the_ones_the_live_registry_enforces(self) -> None:
+        """One definition, two consumers — never two lists.
+
+        This module's `load_selected` refusal is defence in depth on a
+        construction path current builds do not wire. The refusal that
+        runs on every start is `special_flows.from_entry_points`. A
+        reserved name spelled here as well as there is a name that will
+        eventually be spelled differently in one of the two places, so
+        the constant is imported rather than restated.
+        """
+        from korvid.providers import litellm_settings, plugin_registry, special_flows
+
+        assert plugin_registry.RESERVED_PROVIDER_NAMES is litellm_settings.RESERVED_PROVIDER_NAMES
+        assert special_flows._RESERVED_NAMES == litellm_settings.RESERVED_PROVIDER_NAMES
+
+    def test_the_reserved_names_compose_the_sets_that_state_a_reason(self) -> None:
+        """Each part is reserved for its own reason, and nothing is loose.
+
+        The retired aliases and the device-login prefixes carry stricter
+        rules than reservation alone — both are also kept away from
+        routing — so they keep their own names. What is left is the set
+        korvid serves itself, and the union has to be exactly the three.
+        """
+        from korvid.providers.litellm_settings import (
+            _SELF_SERVED_PROVIDER_NAMES,
+            DEVICE_LOGIN_PREFIXES,
             RESERVED_PROVIDER_NAMES,
+            RETIRED_PROVIDER_ALIASES,
         )
 
-        expected = OPENAI_COMPAT_ALIASES | {OLLAMA_PROVIDER, GITHUB_COPILOT_PROVIDER}
-        assert expected == RESERVED_PROVIDER_NAMES
-
-    def test_registry_dispatch_uses_same_constants(self) -> None:
-        """registry.py must import and use the canonical constants from
-        plugin_registry.py — not independently defined sets."""
-        import korvid.providers.registry as reg_mod
-        from korvid.providers.plugin_registry import (
-            GITHUB_COPILOT_PROVIDER,
-            OLLAMA_PROVIDER,
-            OPENAI_COMPAT_ALIASES,
+        assert RETIRED_PROVIDER_ALIASES | DEVICE_LOGIN_PREFIXES | _SELF_SERVED_PROVIDER_NAMES == (
+            RESERVED_PROVIDER_NAMES
         )
+        assert not (RETIRED_PROVIDER_ALIASES & _SELF_SERVED_PROVIDER_NAMES)
+        assert not (DEVICE_LOGIN_PREFIXES & _SELF_SERVED_PROVIDER_NAMES)
 
-        # Verify the module references are the same objects.
-        assert reg_mod.OPENAI_COMPAT_ALIASES is OPENAI_COMPAT_ALIASES  # type: ignore[attr-defined]  # re-export identity check
-        assert reg_mod.OLLAMA_PROVIDER is OLLAMA_PROVIDER  # type: ignore[attr-defined]  # re-export identity check
-        assert reg_mod.GITHUB_COPILOT_PROVIDER is GITHUB_COPILOT_PROVIDER  # type: ignore[attr-defined]  # re-export identity check
+    def test_every_special_flow_prefix_is_reserved(self) -> None:
+        """A prefix korvid ships a flow for must never be claimable by a
+        plugin: the flow would be shadowed and its credential path with it."""
+        from korvid.providers.flow_copilot import korvid_special_flows as copilot_flows
+        from korvid.providers.flow_ollama_thinking import (
+            korvid_special_flows as ollama_flows,
+        )
+        from korvid.providers.plugin_registry import RESERVED_PROVIDER_NAMES
+
+        shipped = {flow.prefix for flow in (*copilot_flows(), *ollama_flows())}
+        assert shipped  # the fixture is the precondition
+        assert shipped <= RESERVED_PROVIDER_NAMES
 
     def test_all_reserved_names_are_canonical_form(self) -> None:
         """Every reserved name must already be in normalized form."""

@@ -13,18 +13,34 @@ from types import SimpleNamespace
 from typing import Any, ClassVar, cast
 
 import pytest
+import yaml
 
 import korvid
 import korvid.__main__
 from korvid.__main__ import _close_provider_in_background
 from korvid.agent.model_policy import ModelCapabilities, ModelDescriptor
+from korvid.agent.model_profiles import split_reference
 from korvid.agent.provider import LLMProvider
-from korvid.agent.setup import AgentSettings
-from tests.fixtures.provider_plugin.site_helpers import (
-    FIXTURES_DIR,
-    build_dist_info,
-    discover_provider_entry_points,
+from korvid.core.config import (
+    ConnectionAuthConfig,
+    ModelConnectionConfig,
+    ModelConnectionsConfig,
 )
+
+
+@pytest.fixture(autouse=True)
+def _cache_home_away_from_the_operator(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Keep composition-root tests out of the real user cache.
+
+    `_build_model_catalog()` constructs the models.dev source, and that
+    source reads whatever cache is already on disk. Run under a developer's
+    own account that is `~/Library/Caches/korvid/models-dev.json`: a real
+    file whose presence, contents or staleness would decide what these
+    tests see, and which a test has no business reading or writing. The
+    subprocess probes below inherit the redirected environment too, so the
+    isolation holds across the process boundary.
+    """
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
 
 
 class _BoomProvider:
@@ -236,16 +252,11 @@ async def test_cluster_facts_reach_the_session_as_facts_not_prose(
 
     from korvid.__main__ import _build_agent_wiring
     from korvid.agent.interaction import ClusterFacts
-    from korvid.agent.setup import AgentSettings
     from korvid.core.config import KorvidConfig
 
     config = KorvidConfig(
         agent_enabled=True,
-        agent_provider="openai",
-        agent_auth_method="api_key",
-        agent_base_url="http://localhost:9999/v1",
-        agent_model="m",
-        agent_api_key_env="KORVID_TEST_KEY",
+        model_connections=_profiles(_profile()),
     )
     kube_stub = cast("Any", object())
     azure = ClusterFacts(provider="azure", distribution="aks")
@@ -253,15 +264,7 @@ async def test_cluster_facts_reach_the_session_as_facts_not_prose(
     assert wiring.session is not None
     assert wiring.rebuild is not None
 
-    rebuilt = wiring.rebuild(
-        AgentSettings(
-            provider="openai",
-            auth_method="api_key",
-            base_url="http://localhost:9999/v1",
-            model="m",
-            api_key_env="KORVID_TEST_KEY",
-        )
-    )
+    rebuilt = wiring.rebuild(_profile(), None)
     assert rebuilt is not None
     # A rebuild inherits the cluster the wiring last learned about; what
     # that produces on the wire is pinned by the end-to-end test below.
@@ -369,16 +372,11 @@ async def test_the_low_tier_is_resolved_from_config(monkeypatch: object) -> None
 
     from korvid.__main__ import _build_agent_wiring
     from korvid.agent.model_policy import CapabilitySource, ModelTier
-    from korvid.agent.setup import AgentSettings
     from korvid.core.config import KorvidConfig
 
     config = KorvidConfig(
         agent_enabled=True,
-        agent_provider="openai",
-        agent_auth_method="api_key",
-        agent_base_url="http://localhost:9999/v1",
-        agent_model="m",
-        agent_api_key_env="KORVID_TEST_KEY",
+        model_connections=_profiles(_profile()),
         agent_model_tier="low",
     )
     kube_stub = cast("Any", object())
@@ -401,16 +399,7 @@ async def test_the_low_tier_is_resolved_from_config(monkeypatch: object) -> None
 
     # The wizard's rebuild carries its own tier choice.
     assert rebuild is not None
-    high = rebuild(
-        AgentSettings(
-            provider="openai-compat",
-            auth_method="api_key",
-            base_url="http://localhost:9999/v1",
-            model="m",
-            api_key_env="KORVID_TEST_KEY",
-            model_tier="high",
-        )
-    )
+    high = rebuild(_profile(), "high")
     assert high is not None
     assert high.policy.tier is ModelTier.HIGH
     assert high.policy.route_source is CapabilitySource.USER
@@ -432,11 +421,7 @@ async def test_an_unset_tier_is_routed_not_forced(monkeypatch: object) -> None:
 
     config = KorvidConfig(
         agent_enabled=True,
-        agent_provider="openai",
-        agent_auth_method="api_key",
-        agent_base_url="http://localhost:9999/v1",
-        agent_model="m",
-        agent_api_key_env="KORVID_TEST_KEY",
+        model_connections=_profiles(_profile()),
     )
     kube_stub = cast("Any", object())
     wiring = _build_agent_wiring(config, kube_stub, {}, pod_resize_supported=True)
@@ -469,11 +454,7 @@ async def test_a_ctx_retarget_rearms_the_surface_and_keeps_the_tier(
 
     config = KorvidConfig(
         agent_enabled=True,
-        agent_provider="openai",
-        agent_auth_method="api_key",
-        agent_base_url="http://localhost:9999/v1",
-        agent_model="m",
-        agent_api_key_env="KORVID_TEST_KEY",
+        model_connections=_profiles(_profile()),
         agent_model_tier="low",
     )
     kube_stub = cast("Any", object())
@@ -503,16 +484,11 @@ async def test_a_ctx_retarget_re_arms_a_later_rebuild(monkeypatch: object) -> No
 
     from korvid.__main__ import _build_agent_wiring
     from korvid.agent.interaction import ClusterFacts
-    from korvid.agent.setup import AgentSettings
     from korvid.core.config import KorvidConfig
 
     config = KorvidConfig(
         agent_enabled=True,
-        agent_provider="openai",
-        agent_auth_method="api_key",
-        agent_base_url="http://localhost:9999/v1",
-        agent_model="m",
-        agent_api_key_env="KORVID_TEST_KEY",
+        model_connections=_profiles(_profile()),
         agent_model_tier="low",
     )
     kube_stub = cast("Any", object())
@@ -523,16 +499,7 @@ async def test_a_ctx_retarget_re_arms_a_later_rebuild(monkeypatch: object) -> No
 
     rebuild = wiring.rebuild
     assert rebuild is not None
-    rebuilt = rebuild(
-        AgentSettings(
-            provider="openai",
-            auth_method="api_key",
-            base_url="http://localhost:9999/v1",
-            model="m",
-            api_key_env="KORVID_TEST_KEY",
-            model_tier="low",
-        )
-    )
+    rebuilt = rebuild(_profile(), "low")
     assert rebuilt is not None
     assert "resize_pod" in [t["function"]["name"] for t in rebuilt.policy.tools]
 
@@ -578,7 +545,7 @@ async def test_an_uncomposable_prompt_disables_only_the_agent_at_startup(
     assert wiring.provider_box[0] is not None
     # Recovery is still wired: the wizard can re-point the agent, and the
     # rebuild it drives is the same transaction it always was.
-    assert wiring.configurator is not None
+    assert wiring.available is True
     assert wiring.rebuild is not None
     assert len(warnings) == 1
     warning = warnings[0]
@@ -753,16 +720,7 @@ async def test_a_rebuild_that_cannot_compose_stays_transactional(
     assert rebuild is not None
 
     with pytest.raises(StaticPromptTooLargeError, match="static system prompt"):
-        rebuild(
-            AgentSettings(
-                provider="openai",
-                auth_method="api_key",
-                base_url="http://localhost:9999/v1",
-                model="m",
-                api_key_env="KORVID_TEST_KEY",
-                model_tier="low",
-            )
-        )
+        rebuild(_profile(), "low")
 
     assert wiring.provider_box[0] is live_provider
     assert wiring.session_box[0] is session
@@ -1019,6 +977,107 @@ def test_load_startup_config_wraps_config_migration_error_as_system_exit(
     assert "agent.model_tier" in message
 
 
+def test_the_profile_writer_updates_only_the_active_profile(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The composition root's writer edits one profile and leaves the file
+    otherwise intact — unrelated keys, sibling profiles, and the raw block
+    of a profile korvid rejected, which is the operator's only copy of the
+    thing they have to fix."""
+    import korvid.__main__ as main_mod
+    from korvid.__main__ import _profile_writer
+    from korvid.core.config import load_config
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+kube_context: prod
+ui:
+  topbar: expanded
+agent:
+  active: production
+  profiles:
+    default:
+      model: openai/gpt-3.5
+      endpoint: https://old.default.example
+      auth:
+        method: environment
+        key: OLD_KEY
+      options:
+        temperature: 0.1
+    production:
+      model: azure/gpt-4o
+      endpoint: https://prod.example
+      auth:
+        method: provider-default
+      options:
+        azure_deployment: prod
+    rejected:
+      model: openai/gpt-4o
+      options:
+        api_key: inline-secret
+    bad name:
+      model: openai/gpt-4o
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(main_mod, "DEFAULT_CONFIG_PATH", config_path)
+    loaded = load_config(config_path)
+
+    _profile_writer()(
+        ModelConnectionsConfig(
+            active="default",
+            profiles={
+                **loaded.model_connections.profiles,
+                "default": _profile("m2"),
+            },
+            unparsed=loaded.model_connections.unparsed,
+        )
+    )
+
+    persisted = load_config(config_path)
+    active = persisted.model_connections.active_profile
+    assert persisted.model_connections.active == "default"
+    assert active is not None
+    assert active.model == "openai/m2"
+    assert active.endpoint == "http://localhost:9999/v1"
+    assert active.auth.method == "environment"
+    assert active.auth.settings["key"] == "KORVID_TEST_KEY"
+    assert persisted.model_connections.profiles["production"].endpoint == "https://prod.example"
+    assert persisted.model_connections.profiles["rejected"].config_error is not None
+    assert "bad name" in persisted.model_connections.unparsed
+    assert "rejected" in persisted.model_connections.unparsed
+
+    raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert raw["kube_context"] == "prod"
+    assert raw["ui"]["topbar"] == "expanded"
+    assert set(raw["agent"]["profiles"]) == {"default", "production", "rejected", "bad name"}
+    # The rejected profile's raw block is the operator's only copy of the
+    # thing they have to fix; an unrelated write must not strip it.
+    assert raw["agent"]["profiles"]["rejected"]["options"] == {"api_key": "inline-secret"}
+
+
+def test_the_profile_writer_never_writes_a_secret_value(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A profile stores the *name* of the environment variable, never what
+    it holds. The writer reads no secret, so none can reach config.yaml."""
+    import korvid.__main__ as main_mod
+    from korvid.__main__ import _profile_writer
+    from korvid.core.config import load_config
+
+    monkeypatch.setenv("KORVID_TEST_KEY", "sk-secret-value")
+    config_path = tmp_path / "config.yaml"
+    monkeypatch.setattr(main_mod, "DEFAULT_CONFIG_PATH", config_path)
+
+    _profile_writer()(_profiles(_profile("m1")))
+
+    active = load_config(config_path).model_connections.active_profile
+    assert active is not None
+    assert active.auth.settings["key"] == "KORVID_TEST_KEY"
+    assert "sk-secret-value" not in config_path.read_text(encoding="utf-8")
+
+
 def test_load_startup_config_wraps_migration_error_even_when_agent_disabled(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -1174,12 +1233,11 @@ def test_missing_agent_extra_degrades_when_not_enabled(
     _uninstall_packages(monkeypatch, *_AGENT_ROOTS)
     wiring = _build_agent_wiring(KorvidConfig(), cast("KubeClient", object()), {})
     session = wiring.session
-    configurator = wiring.configurator
     rebuild = wiring.rebuild
     retarget = wiring.retarget
     provider_box = wiring.provider_box
     assert session is None
-    assert configurator is None
+    assert wiring.available is False
     assert rebuild is None
     assert provider_box == [None]
     retarget(None, True, ClusterFacts(provider="aws", distribution=None))  # must not raise
@@ -1206,10 +1264,46 @@ def test_missing_agent_extra_fails_actionably_when_enabled(
         ),
     ):
         _build_agent_wiring(
-            KorvidConfig(agent_enabled=True, agent_provider="ollama"),
+            KorvidConfig(
+                agent_enabled=True,
+                model_connections=_profiles(
+                    ModelConnectionConfig(model="ollama/m", endpoint="http://x:11434")
+                ),
+            ),
             cast("KubeClient", object()),
             {},
         )
+
+
+def test_the_missing_agent_extra_hint_names_a_key_that_still_exists(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The hint used to point at `agent.provider`, which startup rejects.
+
+    `agent_enabled` is derived from `agent.active` naming a parsed
+    profile; the flat `agent.provider` scalar was retired and is migrated
+    away on load. An operator told to look at `agent.provider` is sent to
+    a key their config.yaml is not supposed to contain.
+    """
+    from korvid.__main__ import _build_agent_wiring
+    from korvid.core.config import KorvidConfig
+    from korvid.k8s.client import KubeClient
+
+    _uninstall_packages(monkeypatch, *_AGENT_ROOTS)
+    with pytest.raises(SystemExit) as excinfo:
+        _build_agent_wiring(
+            KorvidConfig(
+                agent_enabled=True,
+                model_connections=_profiles(
+                    ModelConnectionConfig(model="ollama/m", endpoint="http://x:11434")
+                ),
+            ),
+            cast("KubeClient", object()),
+            {},
+        )
+    message = str(excinfo.value)
+    assert "agent.active" in message
+    assert "agent.provider" not in message
 
 
 def test_missing_first_party_module_is_not_treated_as_missing_extra(
@@ -1263,11 +1357,10 @@ def test_httpx_without_keyring_does_not_compose_the_agent(
 
     wiring = _build_agent_wiring(KorvidConfig(), cast("KubeClient", object()), {})
     session = wiring.session
-    configurator = wiring.configurator
     rebuild = wiring.rebuild
     provider_box = wiring.provider_box
     assert session is None
-    assert configurator is None
+    assert wiring.available is False
     assert rebuild is None
     assert provider_box == [None]
     assert "korvid.agent.session" not in sys.modules
@@ -1305,11 +1398,7 @@ async def test_disconnect_agent_releases_the_provider(monkeypatch: object) -> No
 
     config = KorvidConfig(
         agent_enabled=True,
-        agent_provider="openai",
-        agent_auth_method="api_key",
-        agent_base_url="http://localhost:9999/v1",
-        agent_model="m",
-        agent_api_key_env="KORVID_TEST_KEY",
+        model_connections=_profiles(_profile()),
     )
     kube_stub = cast("Any", object())
     wiring = _build_agent_wiring(config, kube_stub, {})
@@ -1336,293 +1425,126 @@ async def test_disconnect_agent_releases_the_provider(monkeypatch: object) -> No
     assert provider_box[0] is None
 
 
-def _install_company_plugin_site(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    build_dist_info(
-        tmp_path,
-        dist_name="company_provider",
-        version="1.0",
-        entry_point_name="company-llm",
-        entry_point_value="company_provider:CompanyProviderPlugin",
-    )
-    build_dist_info(
-        tmp_path,
-        dist_name="unselected_provider",
-        version="1.0",
-        entry_point_name="unselected-thing",
-        entry_point_value="unselected_provider:UnselectedPlugin",
-    )
-    monkeypatch.syspath_prepend(str(FIXTURES_DIR))
+# ---------------------------------------------------------------------------
+# Third-party extension failures degrade the start, they never stop it
+# ---------------------------------------------------------------------------
+
+
+def _raising_flow_entry_point(monkeypatch: pytest.MonkeyPatch, error: Exception) -> None:
+    """Install a `korvid.provider` entry point whose builder always raises."""
+    from korvid.agent.model_profiles import SpecialFlow
+
+    def _build(profile: Any) -> Any:
+        raise error
+
+    class _EntryPoint:
+        name = "corp-llm"
+        group = "korvid.provider"
+
+        def load(self) -> SpecialFlow:
+            return SpecialFlow(
+                prefix="corp-llm",
+                display_name="Corp",
+                auth_methods=(),
+                build_provider=_build,
+            )
+
     monkeypatch.setattr(
-        "korvid.providers.plugin_registry._discover_entry_points",
-        lambda: discover_provider_entry_points(tmp_path),
+        "korvid.providers.special_flows._iter_entry_points", lambda: (_EntryPoint(),)
     )
 
 
-def _company_plugin_config() -> Any:
-    from korvid.core.config import KorvidConfig
-
-    return KorvidConfig(
-        agent_enabled=True,
-        agent_provider="company-llm",
-        agent_auth_method="api_key",
-        agent_base_url="https://fixtures.example.test/v1",
-        agent_model="fixture-model",
-        agent_api_key_env="KORVID_TEST_KEY",
-    )
-
-
-def _company_plugin_settings(*, options: dict[str, object] | None = None) -> AgentSettings:
-    return AgentSettings(
-        provider="company-llm",
-        auth_method="api_key",
-        base_url="https://fixtures.example.test/v1",
-        model="fixture-model",
-        api_key_env="KORVID_TEST_KEY",
-        options=options or {},
-    )
-
-
-class _FakeKubeCloseOnly:
-    def __init__(self) -> None:
-        self.closed = False
-
-    async def close(self) -> None:
-        self.closed = True
-
-
-async def _wait_for_close_count(provider: object, expected: int) -> None:
-    inner = cast("Any", provider)._provider
-    for _ in range(20):
-        if inner.close_calls == expected:
-            return
-        await asyncio.sleep(0.01)
-    assert inner.close_calls == expected
-
-
-async def test_a_plugin_property_that_raises_degrades_the_start_to_a_warning(
+def test_a_third_party_flow_that_raises_leaves_the_start_usable(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
 ) -> None:
-    """A third-party `descriptor`/`capabilities` read is plugin code too.
-
-    `ValidatedPluginProvider` reads both while wrapping the plugin's
-    provider, before korvid has any use for them. A plugin that raises
-    there — a lazy credential read, a probe — must degrade exactly like
-    every other plugin failure: a startup warning, provider None, a
-    usable TUI. Anything the exception carries stays out of the warning.
-    """
-    from korvid.__main__ import _build_agent_wiring
-
-    monkeypatch.setenv("KORVID_TEST_KEY", "fixture-token")
-    _install_company_plugin_site(monkeypatch, tmp_path)
-    config = dataclasses.replace(
-        _company_plugin_config(), agent_options={"raise_in_property": "descriptor"}
-    )
-    warnings: list[str] = []
-
-    wiring = _build_agent_wiring(config, cast("Any", object()), {}, startup_warnings=warnings)
-
-    assert wiring.session is None
-    assert wiring.provider_box[0] is None
-    assert wiring.configurator is not None
-    assert len(warnings) == 1
-    assert "Provider plugin failed" in warnings[0]
-    assert "PLUGIN_SECRET" not in warnings[0]
-
-
-async def test_a_plugin_capabilities_property_that_raises_degrades_the_same_way(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """The capability read is wrapped separately from the descriptor read."""
-    from korvid.__main__ import _build_agent_wiring
-
-    monkeypatch.setenv("KORVID_TEST_KEY", "fixture-token")
-    _install_company_plugin_site(monkeypatch, tmp_path)
-    config = dataclasses.replace(
-        _company_plugin_config(), agent_options={"raise_in_property": "capabilities"}
-    )
-    warnings: list[str] = []
-
-    wiring = _build_agent_wiring(config, cast("Any", object()), {}, startup_warnings=warnings)
-
-    assert wiring.session is None
-    assert wiring.provider_box[0] is None
-    assert len(warnings) == 1
-    assert "Provider plugin failed" in warnings[0]
-    assert "PLUGIN_SECRET" not in warnings[0]
-
-
-async def test_plugin_rebuild_failure_keeps_the_previous_provider_open(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    from korvid.__main__ import _build_agent_wiring
-    from korvid.providers.plugin_registry import ProviderPluginError
-
-    monkeypatch.setenv("KORVID_TEST_KEY", "fixture-token")
-    _install_company_plugin_site(monkeypatch, tmp_path)
-    wiring = _build_agent_wiring(
-        _company_plugin_config(),
-        cast("Any", object()),
-        {},
-    )
-    session = wiring.session
-    rebuild = wiring.rebuild
-    provider_box = wiring.provider_box
-    assert session is not None
-    assert rebuild is not None
-    old_provider = provider_box[0]
-    assert old_provider is not None
-
-    with pytest.raises(ProviderPluginError, match="factory failed"):
-        rebuild(_company_plugin_settings(options={"raise_in_create": True}))
-
-    assert provider_box[0] is old_provider
-    await asyncio.sleep(0.05)
-    assert cast("Any", old_provider)._provider.close_calls == 0
-
-
-async def test_plugin_rebuild_closes_the_replaced_provider_once(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    from korvid.__main__ import _build_agent_wiring
-
-    monkeypatch.setenv("KORVID_TEST_KEY", "fixture-token")
-    _install_company_plugin_site(monkeypatch, tmp_path)
-    wiring = _build_agent_wiring(
-        _company_plugin_config(),
-        cast("Any", object()),
-        {},
-    )
-    session = wiring.session
-    rebuild = wiring.rebuild
-    provider_box = wiring.provider_box
-    assert session is not None
-    assert rebuild is not None
-    old_provider = provider_box[0]
-    assert old_provider is not None
-
-    new_session = rebuild(_company_plugin_settings())
-
-    assert new_session is not None
-    assert provider_box[0] is not None
-    assert provider_box[0] is not old_provider
-    await _wait_for_close_count(old_provider, 1)
-    assert cast("Any", provider_box[0])._provider.close_calls == 0
-
-
-async def test_plugin_disconnect_then_shutdown_does_not_double_close(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    from korvid.__main__ import _build_agent_wiring, _shutdown
-
-    monkeypatch.setenv("KORVID_TEST_KEY", "fixture-token")
-    _install_company_plugin_site(monkeypatch, tmp_path)
-    wiring = _build_agent_wiring(
-        _company_plugin_config(),
-        cast("Any", object()),
-        {},
-    )
-    session = wiring.session
-    disconnect = wiring.disconnect
-    provider_box = wiring.provider_box
-    assert session is not None
-    provider = provider_box[0]
-    assert provider is not None
-
-    disconnect()
-    await _wait_for_close_count(provider, 1)
-    kube = _FakeKubeCloseOnly()
-    await _shutdown(None, provider_box[0], cast("Any", kube))
-
-    assert cast("Any", provider)._provider.close_calls == 1
-    assert kube.closed is True
-
-
-async def test_plugin_shutdown_closes_the_current_provider_once(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    from korvid.__main__ import _build_agent_wiring, _shutdown
-
-    monkeypatch.setenv("KORVID_TEST_KEY", "fixture-token")
-    _install_company_plugin_site(monkeypatch, tmp_path)
-    wiring = _build_agent_wiring(
-        _company_plugin_config(),
-        cast("Any", object()),
-        {},
-    )
-    session = wiring.session
-    provider_box = wiring.provider_box
-    assert session is not None
-    provider = provider_box[0]
-    assert provider is not None
-
-    kube = _FakeKubeCloseOnly()
-    await _shutdown(None, provider, cast("Any", kube))
-
-    assert cast("Any", provider)._provider.close_calls == 1
-    assert kube.closed is True
-
-
-def test_agent_wiring_initial_plugin_error_becomes_warning(monkeypatch: object) -> None:
-    """A ProviderPluginError at initial creation must become a startup warning
-    — the app remains operational with provider=None.
-
-    Uses a production-real path: a fake ProviderPluginRegistry whose
-    load_selected raises ProviderPluginError is injected via the
-    ProviderPluginRegistry constructor in __main__, flowing through
-    _create_initial_provider → create_provider → _create_via_plugin.
-    """
-    import pytest
-
-    mp = monkeypatch
-    assert isinstance(mp, pytest.MonkeyPatch)
-
+    """Third-party code runs inside the provider factory. A flow that raises
+    must disable the agent, not the TUI: no exception escapes the wiring and
+    the wizard stays reachable so the operator can point korvid elsewhere."""
     from korvid.__main__ import _build_agent_wiring
     from korvid.core.config import KorvidConfig
-    from korvid.providers.plugin_registry import ProviderPluginError
 
-    class _BoomRegistry:
-        """Fake registry whose load_selected always raises."""
-
-        def load_selected(self, name: str) -> None:
-            raise ProviderPluginError("bad plugin entrypoint")
-
-    # Replace ProviderPluginRegistry() in __main__ with our fake
-    mp.setattr(
-        "korvid.providers.plugin_registry.ProviderPluginRegistry",
-        lambda: _BoomRegistry(),
-    )
-
+    _raising_flow_entry_point(monkeypatch, RuntimeError("plugin factory failed"))
     config = KorvidConfig(
         agent_enabled=True,
-        agent_provider="corp-llm",
-        agent_auth_method="api_key",
-        agent_base_url="http://x/v1",
-        agent_model="m",
+        model_connections=_profiles(
+            ModelConnectionConfig(model="corp-llm/m", endpoint="http://x/v1")
+        ),
+    )
+
+    wiring = _build_agent_wiring(config, cast("Any", object()), {})
+
+    assert wiring.session is None  # agent off, not a crash
+    assert wiring.provider_box[0] is None
+    assert wiring.available is True  # `:ai` must remain usable
+    assert wiring.rebuild is not None
+
+
+def test_a_third_party_flow_failure_never_reaches_the_operator_verbatim(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Whatever the exception carries — a token, a URL with a key in it —
+    stays out of what korvid shows. The refusal names the profile and points
+    at the log; the plugin's own message is not echoed into the startup
+    warnings the TUI renders."""
+    from korvid.__main__ import _build_agent_wiring
+    from korvid.core.config import KorvidConfig
+
+    _raising_flow_entry_point(monkeypatch, RuntimeError("token=PLUGIN_SECRET"))
+    config = KorvidConfig(
+        agent_enabled=True,
+        model_connections=_profiles(
+            ModelConnectionConfig(model="corp-llm/m", endpoint="http://x/v1")
+        ),
     )
     warnings: list[str] = []
-    kube_stub = cast("Any", object())
-    wiring = _build_agent_wiring(
-        config,
-        kube_stub,
-        {},
-        startup_warnings=warnings,
+
+    _build_agent_wiring(config, cast("Any", object()), {}, startup_warnings=warnings)
+
+    assert not any("PLUGIN_SECRET" in warning for warning in warnings)
+
+
+def test_profile_options_reach_the_provider_factory(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`agent.options` used to be a separate scalar the composition root
+    forwarded. Options travel on the profile now, so the wiring test is that
+    the profile the factory is handed still carries them untouched."""
+    from korvid.__main__ import _build_agent_wiring
+    from korvid.core.config import KorvidConfig
+
+    monkeypatch.setenv("KORVID_TEST_KEY", "k")
+    factory = _RecordingFactory()
+    monkeypatch.setattr("korvid.providers.litellm_factory.create_provider_from_profile", factory)
+    config = KorvidConfig(
+        agent_enabled=True,
+        model_connections=_profiles(_profile(options={"tenant": "corp", "region": "us"})),
     )
-    session = wiring.session
-    configurator = wiring.configurator
-    _rebuild = wiring.rebuild
-    provider_box = wiring.provider_box
-    assert session is None  # provider disabled, not a crash
-    assert provider_box[0] is None
-    assert configurator is not None  # wizard must remain usable
-    assert len(warnings) == 1
-    assert "Provider plugin failed" in warnings[0]
-    assert "bad plugin entrypoint" in warnings[0]
+
+    _build_agent_wiring(config, cast("Any", object()), {})
+
+    assert dict(factory.profiles[0].options) == {"tenant": "corp", "region": "us"}
+
+
+async def test_the_rebuild_builds_through_the_same_factory_as_the_start(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One factory, start and rebuild alike: a second construction path is
+    exactly what Task 18 removed, and a rebuild that took one could serve a
+    connection the start would have refused."""
+    from korvid.__main__ import _build_agent_wiring
+    from korvid.core.config import KorvidConfig
+
+    monkeypatch.setenv("KORVID_TEST_KEY", "k")
+    factory = _RecordingFactory()
+    monkeypatch.setattr("korvid.providers.litellm_factory.create_provider_from_profile", factory)
+    config = KorvidConfig(agent_enabled=True, model_connections=_profiles(_profile()))
+
+    wiring = _build_agent_wiring(config, cast("Any", object()), {})
+    rebuild = wiring.rebuild
+    assert rebuild is not None
+    new_session = rebuild(_profile("new-model"), None)
+
+    assert [p.model for p in factory.profiles] == ["openai/m", "openai/new-model"]
+    if new_session is not None:
+        await new_session.aclose()
 
 
 def test_validate_ca_bundle_accepts_none_and_rejects_missing(tmp_path: Any) -> None:
@@ -1664,8 +1586,8 @@ async def test_a_failed_tool_wiring_during_rebuild_keeps_the_old_session(
     from korvid.__main__ import _build_agent_wiring
 
     monkeypatch.setenv("KORVID_TEST_KEY", "fixture-token")
-    _install_company_plugin_site(monkeypatch, tmp_path)
-    wiring = _build_agent_wiring(_company_plugin_config(), cast("Any", object()), {})
+    providers = _stub_providers(monkeypatch)
+    wiring = _build_agent_wiring(_agent_config(), cast("Any", object()), {})
     session = wiring.session
     provider_box = wiring.provider_box
     session_box = wiring.session_box
@@ -1683,11 +1605,12 @@ async def test_a_failed_tool_wiring_during_rebuild_keeps_the_old_session(
     rebuild = wiring.rebuild
     assert rebuild is not None
     with pytest.raises(RuntimeError, match="tool executor construction failed"):
-        rebuild(_company_plugin_settings())
+        rebuild(_profile("m2"), None)
 
     assert provider_box[0] is old_provider
     assert session_box[0] is session
-    assert cast("Any", old_provider)._provider.close_calls == 0
+    assert cast("Any", old_provider).closed == 0
+    assert providers[-1] is not old_provider  # only the replacement is released
     assert cast("Any", session).finalization_pending is False
 
 
@@ -1698,8 +1621,8 @@ async def test_a_failed_session_build_during_rebuild_closes_only_the_new_provide
     from korvid.__main__ import _build_agent_wiring
 
     monkeypatch.setenv("KORVID_TEST_KEY", "fixture-token")
-    _install_company_plugin_site(monkeypatch, tmp_path)
-    wiring = _build_agent_wiring(_company_plugin_config(), cast("Any", object()), {})
+    _stub_providers(monkeypatch)
+    wiring = _build_agent_wiring(_agent_config(), cast("Any", object()), {})
     session = wiring.session
     provider_box = wiring.provider_box
     assert session is not None
@@ -1716,148 +1639,49 @@ async def test_a_failed_session_build_during_rebuild_closes_only_the_new_provide
     rebuild = wiring.rebuild
     assert rebuild is not None
     with pytest.raises(RuntimeError, match="session construction failed"):
-        rebuild(_company_plugin_settings())
+        rebuild(_profile("m2"), None)
 
     assert provider_box[0] is old_provider
     assert wiring.session_box[0] is session
-    assert cast("Any", old_provider)._provider.close_calls == 0
+    assert cast("Any", old_provider).closed == 0
 
 
 # ---------------------------------------------------------------------------
-# Finding #1: options_error gates third-party plugin creation
+# Finding #5: the copilot flow reads its OAuth token through the credential store
 # ---------------------------------------------------------------------------
 
 
-def test_options_error_gates_plugin_creation_at_startup(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """At initial startup, options_error on a plugin provider must surface
-    as a warning and disable the agent (not silently start with options={})."""
-    from korvid.__main__ import _build_agent_wiring
-
-    monkeypatch.setenv("KORVID_TEST_KEY", "fixture-token")
-    _install_company_plugin_site(monkeypatch, tmp_path)
-    config = dataclasses.replace(
-        _company_plugin_config(),
-        agent_options={},
-        agent_options_error="agent.options must be a mapping with string keys",
-    )
-    warnings: list[str] = []
-    wiring = _build_agent_wiring(
-        config,
-        cast("Any", object()),
-        {},
-        startup_warnings=warnings,
-    )
-    session = wiring.session
-    provider_box = wiring.provider_box
-    # The agent must be disabled (None session) and the warning must be surfaced.
-    assert session is None
-    assert provider_box[0] is None
-    assert any("agent.options" in w for w in warnings)
-
-
-def test_options_error_does_not_gate_builtin_provider(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Built-in providers must remain usable even when options_error exists."""
+def test_github_copilot_profile_loads_oauth_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The composition root hands the factory its `TokenStore`, and the
+    `github-copilot` flow reads the OAuth token through it. Without a
+    stored token the profile is refused: the agent is off, not crashed."""
     from korvid.__main__ import _build_agent_wiring
     from korvid.core.config import KorvidConfig
-
-    monkeypatch.setenv("KORVID_TEST_KEY", "fixture-token")
-    config = KorvidConfig(
-        agent_enabled=True,
-        agent_provider="openai",
-        agent_auth_method="api_key",
-        agent_base_url="http://localhost:9999/v1",
-        agent_model="m",
-        agent_api_key_env="KORVID_TEST_KEY",
-        agent_options={},
-        agent_options_error="agent.options exceeded max depth",
-    )
-    wiring = _build_agent_wiring(
-        config,
-        cast("Any", object()),
-        {},
-    )
-    session = wiring.session
-    # Built-in provider starts fine despite options_error
-    assert session is not None
-
-
-def test_options_error_fails_rebuild_for_plugin_provider(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """At rebuild time, options_error on a plugin must raise ProviderPluginError
-    (the wizard sees it as an actionable failure)."""
-    from korvid.providers.plugin_registry import ProviderPluginError, ProviderPluginRegistry
-    from korvid.providers.registry import create_provider
-
-    monkeypatch.setenv("KORVID_TEST_KEY", "fixture-token")
-    _install_company_plugin_site(monkeypatch, tmp_path)
-    registry = ProviderPluginRegistry()
-
-    with pytest.raises(ProviderPluginError, match=r"agent\.options"):
-        create_provider(
-            enabled=True,
-            provider="company-llm",
-            auth_method="api_key",
-            base_url="https://fixtures.example.test/v1",
-            model="fixture-model",
-            api_key_env="KORVID_TEST_KEY",
-            plugin_registry=registry,
-            options={},
-            options_error="agent.options must be ASCII keys only",
-        )
-
-
-# ---------------------------------------------------------------------------
-# Finding #5: github_copilot variant loads OAuth via canonical name
-# ---------------------------------------------------------------------------
-
-
-def test_github_copilot_variant_loads_oauth_token(monkeypatch: object) -> None:
-    """A config with 'github_copilot' (underscore) must canonicalize to
-    'github-copilot' so the composition root loads the OAuth token."""
-    import pytest
-
-    mp = monkeypatch
-    assert isinstance(mp, pytest.MonkeyPatch)
-
-    from korvid.__main__ import _build_agent_wiring
-    from korvid.core.config import KorvidConfig
-
-    # Config with the canonical name (produced by load_config canonicalization)
-    config = KorvidConfig(
-        agent_enabled=True,
-        agent_provider="github-copilot",
-        agent_auth_method="device-login",
-        agent_model="gpt-4o",
-    )
-    kube_stub = cast("Any", object())
-
-    # Patch TokenStore.load to track what key is requested and return None
-    # (simulating no stored token).
-    loaded_keys: list[str] = []
     from korvid.providers import token_store as ts_mod
+    from korvid.providers.flow_copilot import CREDENTIAL_KEY
+
+    loaded_keys: list[str] = []
 
     def _tracking_load(self: Any, key: str) -> str | None:
         loaded_keys.append(key)
         return None  # no token stored
 
-    mp.setattr(ts_mod.TokenStore, "load", _tracking_load)
+    monkeypatch.setattr(ts_mod.TokenStore, "load", _tracking_load)
+    config = KorvidConfig(
+        agent_enabled=True,
+        model_connections=_profiles(
+            ModelConnectionConfig(
+                model="github-copilot/gpt-4o",
+                auth=ConnectionAuthConfig(method="device-login"),
+            )
+        ),
+    )
 
-    wiring = _build_agent_wiring(config, kube_stub, {})
-    session = wiring.session
-    provider_box = wiring.provider_box
-    # The composition root must have asked for "github-oauth" because the
-    # canonical name matched "github-copilot".
-    assert "github-oauth" in loaded_keys
-    # No token stored → provider is None.
-    assert session is None
-    assert provider_box[0] is None
+    wiring = _build_agent_wiring(config, cast("Any", object()), {})
+
+    assert CREDENTIAL_KEY in loaded_keys
+    assert wiring.session is None
+    assert wiring.provider_box[0] is None
 
 
 class _FakeAppCapturesKwargs:
@@ -2063,17 +1887,15 @@ class _RecordingProvider(LLMProvider):
 
 
 def _stub_providers(monkeypatch: pytest.MonkeyPatch) -> list[_RecordingProvider]:
-    """Make every `create_provider` call hand back a recording provider."""
+    """Make every profile the factory is handed yield a recording provider."""
     built: list[_RecordingProvider] = []
 
-    def _create(**kwargs: Any) -> Any:
-        if not kwargs.get("enabled", False):
-            return None
-        provider = _RecordingProvider(str(kwargs.get("model") or "m"))
+    def _create(profile: Any, **kwargs: Any) -> Any:
+        provider = _RecordingProvider(split_reference(profile.model)[1])
         built.append(provider)
         return provider
 
-    monkeypatch.setattr("korvid.providers.registry.create_provider", _create)
+    monkeypatch.setattr("korvid.providers.litellm_factory.create_provider_from_profile", _create)
     return built
 
 
@@ -2112,24 +1934,25 @@ def _agent_config(**overrides: Any) -> Any:
 
     base: dict[str, Any] = {
         "agent_enabled": True,
-        "agent_provider": "openai",
-        "agent_auth_method": "api_key",
-        "agent_base_url": "http://localhost:9999/v1",
-        "agent_model": "m",
-        "agent_api_key_env": "KORVID_TEST_KEY",
+        "model_connections": _profiles(_profile()),
     }
     base.update(overrides)
     return KorvidConfig(**base)
 
 
-def _settings(model: str = "m2") -> AgentSettings:
-    return AgentSettings(
-        provider="openai",
-        auth_method="api_key",
-        base_url="http://localhost:9999/v1",
-        model=model,
-        api_key_env="KORVID_TEST_KEY",
-    )
+def _profile(model: str = "m", **overrides: Any) -> ModelConnectionConfig:
+    """The one connection the wiring tests start from."""
+    fields: dict[str, Any] = {
+        "model": f"openai/{model}",
+        "endpoint": "http://localhost:9999/v1",
+        "auth": ConnectionAuthConfig(method="environment", settings={"key": "KORVID_TEST_KEY"}),
+    }
+    fields.update(overrides)
+    return ModelConnectionConfig(**fields)
+
+
+def _profiles(profile: ModelConnectionConfig, name: str = "default") -> ModelConnectionsConfig:
+    return ModelConnectionsConfig(active=name, profiles={name: profile})
 
 
 class _CountingBridge:
@@ -2252,7 +2075,7 @@ async def test_rebuild_swaps_both_boxes_and_closes_the_session_first(
 
     rebuild = wiring.rebuild
     assert rebuild is not None
-    new_session = rebuild(_settings())
+    new_session = rebuild(_profile("m2"), None)
     assert new_session is not None
     assert new_session is not old_session
     assert wiring.session_box[0] is new_session
@@ -2372,10 +2195,10 @@ async def test_a_model_that_reports_no_tool_support_warns_instead_of_crashing(
 
             return dataclasses.replace(ModelCapabilities.unknown(), supports_tools=False)
 
-    def _create(**kwargs: Any) -> Any:
-        return _ToollessProvider() if kwargs.get("enabled", False) else None
+    def _create(profile: Any, **kwargs: Any) -> Any:
+        return _ToollessProvider()
 
-    monkeypatch.setattr("korvid.providers.registry.create_provider", _create)
+    monkeypatch.setattr("korvid.providers.litellm_factory.create_provider_from_profile", _create)
     warnings: list[str] = []
     wiring = _build_agent_wiring(
         _agent_config(), cast("Any", object()), {}, startup_warnings=warnings
@@ -2385,3 +2208,814 @@ async def test_a_model_that_reports_no_tool_support_warns_instead_of_crashing(
     assert wiring.session_box == [None]
     assert isinstance(wiring.provider_box[0], _ToollessProvider)
     assert any("tool" in warning for warning in warnings)
+
+
+# ---------------------------------------------------------------------------
+# Task 8 — catalog construction performs no I/O
+# ---------------------------------------------------------------------------
+
+
+def test_building_the_catalog_issues_no_http_request() -> None:
+    """_build_model_catalog() must not make any HTTP requests.
+
+    EndpointDiscovery construction must be I/O-free; only list_models
+    triggers network access, and that is only called from discover().
+    """
+    pytest.importorskip("litellm")
+    from korvid.__main__ import _build_model_catalog
+
+    def _fail_if_called() -> None:
+        raise AssertionError("HTTP client was constructed during catalog build")
+
+    # Inject a client_factory that fails if called — EndpointDiscovery only
+    # calls it inside list_models, so construction must not trigger it.
+    import unittest.mock
+
+    with unittest.mock.patch(
+        "korvid.providers.endpoint_discovery._default_client_factory",
+        side_effect=_fail_if_called,
+    ):
+        catalog = _build_model_catalog()
+
+    assert catalog is not None
+
+
+def test_building_the_catalog_opens_no_socket() -> None:
+    """_build_model_catalog() must open no socket — same invariant as the
+    litellm_offline_import test, now verified at the composition-root level.
+
+    A regression in the wrapper's env-var ordering (LITELLM_LOCAL_MODEL_COST_MAP
+    not set before import) would show up here as a real startup stall.
+    """
+    import subprocess
+    import sys
+    import textwrap
+
+    pytest.importorskip("litellm")
+
+    probe = textwrap.dedent(
+        """
+        import socket
+        import sys
+
+        attempts = []
+
+        def _refuse(self, address):  # noqa: ANN001, ANN202
+            attempts.append(address)
+            raise OSError("network disabled for this probe")
+
+        socket.socket.connect = _refuse
+        socket.socket.connect_ex = lambda self, address: (attempts.append(address), 1)[1]
+
+        from korvid.__main__ import _build_model_catalog
+
+        catalog = _build_model_catalog()
+        assert catalog is not None, "catalog was None"
+
+        print(len(attempts))
+        """
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "0", result.stdout
+
+
+# ---------------------------------------------------------------------------
+# Task 11 review — the production catalog can actually probe a profile
+# ---------------------------------------------------------------------------
+
+
+class _RecordingFactory:
+    """Stands in for the shared provider factory, recording what it built."""
+
+    def __init__(self, reply: str = "ok", refuse: bool = False) -> None:
+        self.profiles: list[ModelConnectionConfig] = []
+        self.kwargs: list[dict[str, Any]] = []
+        self._reply = reply
+        self._refuse = refuse
+
+    def __call__(self, profile: ModelConnectionConfig, **kwargs: Any) -> Any:
+        self.profiles.append(profile)
+        self.kwargs.append(kwargs)
+        if self._refuse:
+            return None
+        return _ProbeProvider(profile, self._reply)
+
+
+class _ProbeProvider:
+    """The minimum surface `ProfileProbe` drives: descriptor, stream, close."""
+
+    def __init__(self, profile: ModelConnectionConfig, reply: str) -> None:
+        self._reply = reply
+        self.closed = 0
+        self.descriptor = ModelDescriptor("stub", split_reference(profile.model)[1])
+        self.capabilities = ModelCapabilities.unknown()
+
+    def complete(self, messages: Any, tools: Any, *, stream: bool = True) -> Any:
+        async def gen() -> Any:
+            yield {"type": "text_delta", "text": self._reply}
+
+        return gen()
+
+    async def aclose(self) -> None:
+        self.closed += 1
+
+
+def _azure_profile() -> ModelConnectionConfig:
+    return ModelConnectionConfig(
+        model="azure/gpt-4o",
+        endpoint="https://x.openai.azure.com",
+        auth=ConnectionAuthConfig(method="environment", settings={"key": "AZURE_OPENAI_API_KEY"}),
+        options={"azure_deployment": "my-dep"},
+    )
+
+
+async def test_the_production_catalog_probes_a_profile_instead_of_raising(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The wizard's last stage calls `catalog.test()`. A stub that raises
+    `NotImplementedError` there makes every real first run end in failure."""
+    pytest.importorskip("litellm")
+    from korvid.__main__ import _build_model_catalog
+
+    factory = _RecordingFactory(reply="connected")
+    monkeypatch.setattr("korvid.providers.profile_probe.create_provider_from_profile", factory)
+    catalog = _build_model_catalog()
+    assert catalog is not None
+
+    result = await catalog.test(ModelConnectionConfig(model="openai/gpt-4o"))
+
+    assert result == "connected"
+    assert [p.model for p in factory.profiles] == ["openai/gpt-4o"]
+
+
+async def test_the_production_catalog_probes_a_vendor_prefix_the_transport_serves(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Routing owns the vendor now. A prefix the interim transport had to
+    refuse is an ordinary profile here — the probe builds it through the
+    same factory as any other, with no vendor arm in between."""
+    pytest.importorskip("litellm")
+    from korvid.__main__ import _build_model_catalog
+
+    factory = _RecordingFactory()
+    monkeypatch.setattr("korvid.providers.profile_probe.create_provider_from_profile", factory)
+    catalog = _build_model_catalog()
+    assert catalog is not None
+
+    assert await catalog.test(ModelConnectionConfig(model="anthropic/claude-sonnet-4-5")) == "ok"
+    assert [p.model for p in factory.profiles] == ["anthropic/claude-sonnet-4-5"]
+
+
+async def test_the_production_catalog_probes_the_profile_startup_would_build(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The probe must reach the host the runtime would. Both sides take the
+    profile itself now, so the guarantee is that the object the wizard
+    probes is the object startup would hand the factory — no projection in
+    between that could disagree about the deployment path."""
+    pytest.importorskip("litellm")
+    from korvid.__main__ import _build_model_catalog, _create_initial_provider
+    from korvid.core.config import load_config
+
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        "agent:\n"
+        "  active: main\n"
+        "  profiles:\n"
+        "    main:\n"
+        "      model: azure/gpt-4o\n"
+        "      endpoint: https://x.openai.azure.com\n"
+        "      auth:\n"
+        "        method: environment\n"
+        "        key: AZURE_OPENAI_API_KEY\n"
+        "      options:\n"
+        "        azure_deployment: my-dep\n",
+        encoding="utf-8",
+    )
+    startup = load_config(path)
+
+    factory = _RecordingFactory()
+    monkeypatch.setattr("korvid.providers.profile_probe.create_provider_from_profile", factory)
+    monkeypatch.setattr("korvid.providers.litellm_factory.create_provider_from_profile", factory)
+    catalog = _build_model_catalog()
+    assert catalog is not None
+
+    await catalog.test(_azure_profile())
+    _create_initial_provider(startup)
+
+    probed, started = factory.profiles
+    assert probed == started
+    assert started.endpoint == "https://x.openai.azure.com"
+    assert dict(started.options) == {"azure_deployment": "my-dep"}
+    assert started.auth.settings["key"] == "AZURE_OPENAI_API_KEY"
+
+
+async def test_a_profile_the_factory_refuses_reports_a_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A refusal is the wizard's answer, not a crash: the operator is told
+    the connection could not be built and where the reason is."""
+    pytest.importorskip("litellm")
+    from korvid.__main__ import _build_model_catalog
+    from korvid.providers.profile_probe import ProbeFailed
+
+    factory = _RecordingFactory(refuse=True)
+    monkeypatch.setattr("korvid.providers.profile_probe.create_provider_from_profile", factory)
+    catalog = _build_model_catalog()
+    assert catalog is not None
+
+    with pytest.raises(ProbeFailed, match="provider could not be created") as raised:
+        await catalog.test(ModelConnectionConfig(model="openai/gpt-4o"))
+
+    # The wizard renders this text, so it has to be a declared-safe one.
+    assert raised.value.operator_message() == str(raised.value)
+
+
+async def test_the_production_catalog_refuses_an_answer_past_the_probes_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`catalog.test()` is the wizard's whole verdict on a profile.
+
+    Truncating an over-long answer and returning it made that verdict a
+    lie for the case the bound exists for: the read stopped before the
+    adapter could say whether the stream ever finished, so a provider that
+    streamed 4 KiB and then died passed (issue #336 review). The catalog
+    must raise instead, with a message it declared safe to render.
+    """
+    pytest.importorskip("litellm")
+    from korvid.__main__ import _build_model_catalog
+    from korvid.agent.provider import STREAM_LIMIT, ProviderStreamLimitError
+    from korvid.providers.profile_probe import PROBE_MAX_RESPONSE_CHARS
+
+    factory = _RecordingFactory(reply="z" * (PROBE_MAX_RESPONSE_CHARS + 1))
+    monkeypatch.setattr("korvid.providers.profile_probe.create_provider_from_profile", factory)
+    catalog = _build_model_catalog()
+    assert catalog is not None
+
+    with pytest.raises(ProviderStreamLimitError, match="grew past") as raised:
+        await catalog.test(ModelConnectionConfig(model="openai/gpt-4o"))
+
+    assert raised.value.operator_message() == STREAM_LIMIT
+
+
+def test_the_app_is_wired_with_a_catalog_that_can_probe() -> None:
+    """The composition root builds the catalog with the configured trust —
+    without it the wizard's probe and the runtime could disagree on the CA."""
+    source = Path("src/korvid/__main__.py").read_text(encoding="utf-8")
+    assert "ca_bundle=config.network_ca_bundle" in source
+
+
+def _profiles_config(path: Path, *, tier: str | None = None) -> None:
+    tier_line = f"  model_tier: {tier}\n" if tier is not None else ""
+    path.write_text(
+        f"agent:\n{tier_line}  active: main\n  profiles:\n    main:\n      model: openai/gpt-4o\n",
+        encoding="utf-8",
+    )
+
+
+def test_the_profile_writer_keeps_a_tier_it_was_not_given(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The composition root's writer is the seam the UI persists through.
+    A save that never asked about the tier must not drop the override."""
+    from korvid.__main__ import _profile_writer
+    from korvid.core.config import load_config
+
+    path = tmp_path / "config.yaml"
+    _profiles_config(path, tier="high")
+    monkeypatch.setattr(korvid.__main__, "DEFAULT_CONFIG_PATH", path)
+
+    _profile_writer()(load_config(path).model_connections)
+
+    assert yaml.safe_load(path.read_text(encoding="utf-8"))["agent"]["model_tier"] == "high"
+
+
+def test_the_profile_writer_persists_a_first_run_tier(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """And the first-run wizard's answer lands in the same write as the
+    profile it was chosen for — including Automatic, which clears it."""
+    from korvid.__main__ import _profile_writer
+    from korvid.core.config import load_config
+
+    path = tmp_path / "config.yaml"
+    _profiles_config(path)
+    monkeypatch.setattr(korvid.__main__, "DEFAULT_CONFIG_PATH", path)
+    profiles = load_config(path).model_connections
+
+    _profile_writer()(profiles, model_tier="low")
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert raw["agent"]["model_tier"] == "low"
+    assert raw["agent"]["active"] == "main"
+
+    _profile_writer()(profiles, model_tier=None)
+    assert "model_tier" not in yaml.safe_load(path.read_text(encoding="utf-8"))["agent"]
+
+
+async def test_wire_and_run_hands_the_ui_a_declared_profile_writer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The screens are injected with a `ModelConnectionsWriter`, not a callable.
+
+    The seam crosses core → UI, so it is nominal (AGENTS.md): what the app
+    receives declares itself an implementation of the interface `core`
+    owns, and it is already bound to the one path the composition root
+    chose — the UI never sees a location it could write to.
+    """
+    import korvid.__main__ as main_mod
+    from korvid.core.config import KorvidConfig, ModelConnectionsWriter, load_config
+
+    path = tmp_path / "config.yaml"
+    _profiles_config(path, tier="high")
+    monkeypatch.setattr(main_mod, "DEFAULT_CONFIG_PATH", path)
+    monkeypatch.setattr(main_mod, "KorvidApp", _FakeAppCapturesKwargs)
+    _FakeAppCapturesKwargs.instances.clear()
+
+    kube = _FakeKubeForWiring()
+    state = main_mod._RunState()
+    await main_mod._wire_and_run(KorvidConfig(readonly=True), cast("Any", kube), state)
+    if state.discovery_box:
+        await state.discovery_box[0]
+
+    writer = _FakeAppCapturesKwargs.instances[0].captured["agent_save_profiles"]
+    assert isinstance(writer, ModelConnectionsWriter)
+
+    # And it writes where the composition root said, with the tier
+    # sentinel intact.
+    writer(load_config(path).model_connections)
+    assert yaml.safe_load(path.read_text(encoding="utf-8"))["agent"]["model_tier"] == "high"
+
+
+def _profile_connections(reference: str, **overrides: Any) -> Any:
+    """One active profile, built the way the config loader builds it."""
+    from korvid.core.config import (
+        ConnectionAuthConfig,
+        ModelConnectionConfig,
+        ModelConnectionsConfig,
+    )
+
+    profile = ModelConnectionConfig(
+        model=reference,
+        auth=overrides.pop("auth", ConnectionAuthConfig(method="provider-default")),
+        **overrides,
+    )
+    return ModelConnectionsConfig(active="main", profiles={"main": profile})
+
+
+def test_an_active_profile_is_built_by_the_profile_factory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Task 15's point, now the only path: no scalar projection on the way
+    in. The profile reaches the factory as the operator wrote it, so a
+    connection the removed transport could not express is built directly.
+    """
+    from korvid.__main__ import _create_initial_provider
+    from korvid.core.config import KorvidConfig
+
+    seen: list[Any] = []
+
+    def _from_profile(profile: Any, **kwargs: Any) -> str:
+        seen.append((profile, kwargs))
+        return "built-from-profile"
+
+    monkeypatch.setattr(
+        "korvid.providers.litellm_factory.create_provider_from_profile", _from_profile
+    )
+
+    config = KorvidConfig(model_connections=_profile_connections("anthropic/claude-sonnet-4-5"))
+    built = cast("Any", _create_initial_provider(config))
+
+    assert built == "built-from-profile"
+    assert seen[0][0].model == "anthropic/claude-sonnet-4-5"
+
+
+class _StubCredentialStore:
+    """The whole `CredentialStore` protocol: one `load`, and nothing else.
+
+    Never consulted here — the factory is monkeypatched — but it is the
+    declared parameter type, so the wiring is exercised with a value the
+    real factory would accept rather than a bare `object`.
+    """
+
+    def load(self, key: str) -> str | None:
+        return None
+
+
+def test_the_profile_factory_is_given_the_credential_store_and_a_shared_registry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keyring auth is unresolvable without a store, and the catalog and
+    the factory have to agree on which flows exist."""
+    from korvid.__main__ import _create_initial_provider
+    from korvid.core.config import KorvidConfig
+
+    captured: dict[str, Any] = {}
+
+    def _from_profile(profile: Any, **kwargs: Any) -> str:
+        captured.update(kwargs)
+        return "built"
+
+    monkeypatch.setattr(
+        "korvid.providers.litellm_factory.create_provider_from_profile", _from_profile
+    )
+    store = _StubCredentialStore()
+    config = KorvidConfig(model_connections=_profile_connections("openai/gpt-4o"))
+
+    built = cast("Any", _create_initial_provider(config, store))
+    assert built == "built"
+    assert captured["credentials"] is store
+    assert captured["flows"] is not None
+    assert captured["catalog"] is not None
+
+
+def test_a_config_with_no_profiles_builds_no_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """There is one factory now. A config with no active profile has the
+    agent off — a `None` provider, not a second construction path that
+    could build a connection the profile factory would have refused."""
+    from korvid.__main__ import _create_initial_provider
+    from korvid.core.config import KorvidConfig
+
+    def _must_not_run(profile: Any, **kwargs: Any) -> None:
+        raise AssertionError("no profile exists to build from")
+
+    monkeypatch.setattr(
+        "korvid.providers.litellm_factory.create_provider_from_profile", _must_not_run
+    )
+
+    assert _create_initial_provider(KorvidConfig(agent_enabled=True)) is None
+
+
+def test_the_profile_factory_is_given_the_configured_trust_bundle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`network.ca_bundle` is one trust decision for every korvid-owned
+    HTTPS client. The profile factory has to take it, or a corporate
+    endpoint stops verifying against the CA the operator named."""
+    from korvid.__main__ import _create_initial_provider
+    from korvid.core.config import KorvidConfig
+
+    captured: dict[str, Any] = {}
+
+    def _from_profile(profile: Any, **kwargs: Any) -> str:
+        captured.update(kwargs)
+        return "built"
+
+    monkeypatch.setattr(
+        "korvid.providers.litellm_factory.create_provider_from_profile", _from_profile
+    )
+    config = KorvidConfig(
+        model_connections=_profile_connections("openai/gpt-4o"),
+        network_ca_bundle="/etc/korvid/corporate-root.pem",
+    )
+
+    assert cast("Any", _create_initial_provider(config)) == "built"
+    assert captured["ca_bundle"] == "/etc/korvid/corporate-root.pem"
+
+
+def test_an_installed_flow_entry_point_builds_the_provider_instead_of_routing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The registry the composition root builds has to be the same kind
+    the catalog and the wizard build.
+
+    An empty `SpecialFlowRegistry()` claims the device-login prefixes and
+    nothing else, so an installed flow is never asked and its references
+    are refused instead of delegated. Here a real entry point is
+    installed: the flow's own `build_provider` must be what answers, and
+    LiteLLM routing must never see the reference.
+    """
+    from korvid.__main__ import _create_initial_provider
+    from korvid.agent.model_profiles import SpecialFlow
+    from korvid.core.config import KorvidConfig
+
+    built: list[Any] = []
+
+    class _FlowProvider(LLMProvider):
+        @property
+        def descriptor(self) -> ModelDescriptor:
+            return ModelDescriptor(provider="acme", model="internal")
+
+        @property
+        def capabilities(self) -> ModelCapabilities:
+            return ModelCapabilities.unknown()
+
+        async def complete(
+            self,
+            messages: list[dict[str, Any]],
+            tools: list[dict[str, Any]],
+            *,
+            stream: bool = True,
+        ) -> AsyncIterator[dict[str, Any]]:
+            yield {"type": "done"}
+
+    def _build(profile: Any) -> LLMProvider:
+        built.append(profile)
+        return _FlowProvider()
+
+    flow = SpecialFlow(
+        prefix="acme",
+        display_name="Acme",
+        auth_methods=(),
+        build_provider=_build,
+    )
+
+    class _EntryPoint:
+        name = "acme"
+        group = "korvid.provider"
+
+        def load(self) -> SpecialFlow:
+            return flow
+
+    routed: list[str] = []
+
+    def _record(model: str, **kwargs: object) -> tuple[str, str, None, None]:
+        # Recorded rather than raised: the factory refuses on any routing
+        # exception, so an AssertionError here would be swallowed into a
+        # plain "cannot resolve" refusal and prove nothing.
+        routed.append(model)
+        return ("internal-v2", "acme", None, None)
+
+    monkeypatch.setattr(
+        "korvid.providers.special_flows._iter_entry_points", lambda: (_EntryPoint(),)
+    )
+    monkeypatch.setattr("korvid.providers.litellm_runtime.get_llm_provider", _record)
+
+    config = KorvidConfig(model_connections=_profile_connections("acme/internal-v2"))
+    provider = _create_initial_provider(config)
+
+    assert isinstance(provider, _FlowProvider)
+    assert [profile.model for profile in built] == ["acme/internal-v2"]
+    assert routed == [], "a claimed reference must never reach litellm routing"
+
+
+def test_an_installed_credential_entry_point_resolves_provider_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The composition root has to hand the factory a *discovered* registry.
+
+    `provider_defaults=None` behaves as an empty registry, which is the
+    same shape as a working one and therefore fails silently: the profile
+    still builds, `provider-default` still omits the api key, and the
+    request goes out with whatever ambient credential the SDK finds — or
+    with none. A declared chain that is installed but never consulted is
+    the exact failure this wiring exists to prevent.
+    """
+    from korvid.__main__ import _create_initial_provider
+    from korvid.core.config import ConnectionAuthConfig, KorvidConfig
+    from korvid.providers.litellm_provider import LiteLLMProvider
+    from korvid.providers.provider_default import ProviderDefaultCredential, ResolvedCredential
+
+    closed: list[int] = []
+
+    async def _aclose() -> None:
+        closed.append(1)
+
+    async def _token() -> str:
+        return "tok"
+
+    declaration = ProviderDefaultCredential(
+        prefix="acme",
+        display_name="Acme identity",
+        resolve=lambda: ResolvedCredential(
+            parameters={"acme_token_provider": _token}, aclose=_aclose
+        ),
+    )
+
+    class _Module:
+        @staticmethod
+        def korvid_provider_default_credentials() -> tuple[ProviderDefaultCredential, ...]:
+            return (declaration,)
+
+    class _EntryPoint:
+        name = "acme"
+        group = "korvid.credential"
+        dist = None
+
+        def load(self) -> type[_Module]:
+            return _Module
+
+    monkeypatch.setattr(
+        "korvid.providers.provider_default._iter_entry_points", lambda: (_EntryPoint(),)
+    )
+    monkeypatch.setattr(
+        "korvid.providers.litellm_runtime.get_llm_provider",
+        lambda model, **kwargs: ("internal-v2", "acme", None, None),
+    )
+    monkeypatch.setattr(
+        "korvid.providers.litellm_runtime.requires_explicit_api_base",
+        lambda *args, **kwargs: False,
+    )
+
+    config = KorvidConfig(
+        model_connections=_profile_connections(
+            "acme/internal-v2", auth=ConnectionAuthConfig(method="provider-default")
+        )
+    )
+    provider = _create_initial_provider(config)
+
+    assert isinstance(provider, LiteLLMProvider)
+    kwargs = provider._plan.call_kwargs([], [], stream=True)
+    assert kwargs["acme_token_provider"] is _token
+    assert "api_key" not in kwargs
+
+
+# ---------------------------------------------------------------------------
+# models.dev is wired to one explicit action, and to a permanent kill switch
+# ---------------------------------------------------------------------------
+
+
+def test_the_catalog_is_built_with_the_configured_trust_and_kill_switch() -> None:
+    """The composition root passes both decisions it owns: the CA bundle and
+    whether the optional metadata source exists at all."""
+    source = Path("src/korvid/__main__.py").read_text(encoding="utf-8")
+    assert "_build_model_catalog(" in source
+    assert "ca_bundle=config.network_ca_bundle" in source
+    assert "models_dev=config.agent_model_search_models_dev" in source
+
+
+def test_building_the_catalog_never_refreshes_the_metadata_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ "Never at startup" is enforced here, where startup happens.
+
+    Constructing the source reads the on-disk cache; only the setup UI's
+    explicit action may revalidate it over the network.
+    """
+    pytest.importorskip("litellm")
+    from korvid.__main__ import _build_model_catalog
+    from korvid.providers.models_dev import ModelsDevSource
+
+    async def _refuse(self: ModelsDevSource) -> None:
+        raise AssertionError("refresh must never run during startup wiring")
+
+    monkeypatch.setattr(ModelsDevSource, "refresh", _refuse)
+
+    catalog = _build_model_catalog()
+
+    assert catalog is not None
+
+
+async def test_the_kill_switch_constructs_no_metadata_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`agent.model_search.models_dev: false` must leave nothing that *could*
+    reach the network — not a source that is merely never called, and not a
+    client waiting for someone to hand it a URL."""
+    pytest.importorskip("litellm")
+    import korvid.providers.models_dev as models_dev_module
+    from korvid.__main__ import _build_model_catalog
+    from korvid.agent.model_profiles import MetadataRefresh
+    from korvid.providers import net
+
+    def _refuse(**kwargs: Any) -> None:
+        raise AssertionError("ModelsDevSource must not be constructed when disabled")
+
+    def _refuse_client(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("no HTTPS client may be built when models.dev is disabled")
+
+    monkeypatch.setattr(models_dev_module, "ModelsDevSource", _refuse)
+    monkeypatch.setattr(net, "make_client", _refuse_client)
+
+    catalog = _build_model_catalog(models_dev=False, ca_bundle="/etc/pki/corp-root.pem")
+
+    assert catalog is not None
+    assert await catalog.refresh_metadata() is MetadataRefresh.DISABLED
+    assert await catalog.refresh_metadata(force=True) is MetadataRefresh.DISABLED
+
+
+async def test_the_default_wiring_can_actually_refresh(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The gap this closes: a source was constructed and nothing could call
+    it. With the switch on, the action reaches the source."""
+    pytest.importorskip("litellm")
+    from korvid.__main__ import _build_model_catalog
+    from korvid.agent.model_profiles import MetadataRefresh
+    from korvid.providers.models_dev import ModelsDevSource, RefreshOutcome
+
+    calls: list[bool] = []
+
+    async def _record(self: ModelsDevSource, *, force: bool = False) -> RefreshOutcome:
+        calls.append(force)
+        return RefreshOutcome.NOT_MODIFIED
+
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    monkeypatch.setattr(ModelsDevSource, "refresh", _record)
+
+    catalog = _build_model_catalog()
+    assert catalog is not None
+    assert calls == []
+
+    assert await catalog.refresh_metadata(force=True) is MetadataRefresh.UNCHANGED
+    assert calls == [True]
+
+
+async def test_the_wired_source_trusts_the_configured_bundle(tmp_path: Path) -> None:
+    """`network.ca_bundle` has to reach *this* client, at the composition root.
+
+    models.dev is korvid's own outbound HTTPS call, so it goes through the
+    same `net.make_client` as the live providers and the wizard's probe.
+    Before this, a deployment behind a TLS-inspecting proxy got
+    "unavailable" from the refresh key forever, while every other korvid
+    client worked — with nothing in the UI to explain the difference.
+    """
+    pytest.importorskip("litellm")
+    from korvid.__main__ import _build_model_catalog
+    from korvid.providers.net import _CANamedClient
+    from tests.providers.tls_ca import mint_ca_and_server_cert
+
+    ca_pem, _, _ = mint_ca_and_server_cert(tmp_path)
+
+    catalog = _build_model_catalog(ca_bundle=str(ca_pem))
+    assert catalog is not None
+
+    source = catalog._enrichment  # type: ignore[attr-defined]  # the wired catalog is the concrete one
+    assert source is not None
+    client = source._client_factory()
+    try:
+        assert isinstance(client, _CANamedClient)
+        assert client._ca_bundle_path == str(ca_pem)
+    finally:
+        await client.aclose()
+
+
+def test_building_the_catalog_constructs_no_http_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`Never at startup` covers the client, not just the request.
+
+    The trust configuration is *held* by the source and spent when an
+    operator asks for a refresh. Building a client during wiring would
+    read the CA bundle off disk on every start — and turn a misconfigured
+    `network.ca_bundle` into a failure to launch the TUI at all.
+    """
+    pytest.importorskip("litellm")
+    from korvid.__main__ import _build_model_catalog
+    from korvid.providers import net
+
+    def _refuse(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("no HTTPS client may be constructed during startup wiring")
+
+    monkeypatch.setattr(net, "make_client", _refuse)
+
+    assert _build_model_catalog(ca_bundle="/etc/pki/corp-root.pem") is not None
+
+
+def test_the_wired_source_reads_no_cache_outside_the_test_sandbox(tmp_path: Path) -> None:
+    """These tests must never touch the operator's own metadata cache.
+
+    Constructing the source *reads* a cache file, so without the autouse
+    redirect above this module would read — and a refresh would write —
+    `~/Library/Caches/korvid/models-dev.json` on the machine running it.
+    That makes the suite depend on state no test created, and leaves state
+    behind for the next one. Pinned here so removing the fixture fails a
+    test rather than quietly reaching into a home directory.
+    """
+    pytest.importorskip("litellm")
+    from korvid.__main__ import _build_model_catalog
+
+    catalog = _build_model_catalog()
+    assert catalog is not None
+
+    source = catalog._enrichment  # type: ignore[attr-defined]  # the wired catalog is the concrete one
+    assert source is not None
+    cache_path = source._cache_path
+    assert (tmp_path / "cache") in cache_path.parents
+
+
+async def test_the_wired_discovery_trusts_the_configured_bundle(tmp_path: Path) -> None:
+    """Setup discovery has to reach the same endpoint the runtime will.
+
+    A profile pointing at an internal endpoint behind a TLS-inspecting
+    proxy tested green (the probe honours `network.ca_bundle`) and then
+    listed no models at all, because discovery built a bare
+    `httpx.AsyncClient` on default trust. One bundle, every korvid-owned
+    HTTPS client, this one included.
+    """
+    pytest.importorskip("litellm")
+    from korvid.__main__ import _build_model_catalog
+    from korvid.providers.net import _CANamedClient
+    from tests.providers.tls_ca import mint_ca_and_server_cert
+
+    ca_pem, _, _ = mint_ca_and_server_cert(tmp_path)
+
+    catalog = _build_model_catalog(ca_bundle=str(ca_pem))
+    assert catalog is not None
+
+    discovery = catalog._discovery  # type: ignore[attr-defined]  # the wired catalog is the concrete one
+    assert discovery is not None
+    client = discovery._client_factory()
+    try:
+        assert isinstance(client, _CANamedClient)
+        assert client._ca_bundle_path == str(ca_pem)
+    finally:
+        await client.aclose()

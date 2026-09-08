@@ -6,8 +6,8 @@ endpoint to internalize, and who owns the trust for it — korvid configures
 TLS only for the connections it makes itself, and there is **no way to
 disable TLS verification** through korvid configuration, by design. Optional
 features that authenticate against an external identity provider (for
-example GitHub Copilot or Entra device login) still need their own external
-connectivity; they are called out below.
+example the GitHub Copilot device login, or Microsoft Entra ID) still need
+their own external connectivity; they are called out below.
 
 ## The artifact and trust path
 
@@ -37,13 +37,16 @@ trust decision for it, and how to configure that trust:**
 | --- | --- | --- |
 | Agent LLM endpoint (OpenAI-compatible, native Ollama) | **korvid** | `network.ca_bundle` |
 | `:ai` wizard connection test | **korvid** | `network.ca_bundle` (same builder — the test and the live agent cannot disagree) |
+| `:ai` model discovery (listing a profile endpoint's models) | **korvid** | `network.ca_bundle` (same builder again — an endpoint the agent can reach is one the setup screen can list) |
 | Prometheus / Loki observability connectors | **korvid** | `network.ca_bundle` (same builder again — see [`docs/observability.md`](observability.md)) |
+| models.dev metadata refresh (optional, explicit) | **korvid** | `network.ca_bundle` (same builder again); disable entirely with `agent.model_search.models_dev: false` |
 | Internal Helm chart repository | **helm** (korvid passes it through) | CA-file field in the repo dialog → `helm repo add --ca-file` |
 | Kubernetes API server | kubeconfig | `certificate-authority[-data]` in kubeconfig |
 | OLM catalogs, bundle/operand images | cluster nodes / container runtime | registry mirror + node trust configuration |
 | Workload, debug, and node-shell images | container runtime | registry mirror + node trust configuration |
 | Telepresence and other external CLIs | the CLI itself | its own configuration |
-| GitHub Copilot / Entra device login | the provider SDK | requires its usual external connectivity |
+| GitHub Copilot device login | the provider SDK | requires its usual external connectivity |
+| Microsoft Entra ID (`azure` profiles) | `azure-identity` | requires its usual external connectivity; `network.ca_bundle` does **not** reach the token endpoint |
 
 ## Corporate CA for the agent (`network.ca_bundle`)
 
@@ -56,19 +59,79 @@ network:
   ca_bundle: /etc/korvid/company-ca.pem
 
 agent:
-  provider: openai-compat
-  base_url: https://llm.corp.example/v1
-  model: qwen3:32b
+  active: corp
+  profiles:
+    corp:
+      model: openai/qwen3:32b
+      endpoint: https://llm.corp.example/v1
+      auth:
+        method: none
 ```
 
 - The bundle is validated at startup: a missing, unreadable, or malformed
   file fails with an error naming the configured path — never a silent
   fallback to default trust.
 - The same bundle covers OpenAI-compatible completions, native Ollama
-  completions, and the `:ai` setup wizard's connection test.
+  completions, the `:ai` setup wizard's connection test, the model listing
+  that wizard offers for an endpoint, and the optional models.dev metadata
+  refresh.
 - When `network.ca_bundle` is unset, standard environment behavior applies
   (`SSL_CERT_FILE`, `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`).
 - The system trust store is never modified.
+
+## Offline model catalog
+
+korvid's model catalog has two layers, and the primary one works with no
+network at all.
+
+**Primary layer (always available):** LiteLLM ships
+`model_prices_and_context_window.json` inside its wheel. korvid reads that
+table at startup — no GET request, no internet required. The `:ai` wizard's
+model search screen and tier routing both use it. Over 2,000 models from dozens
+of providers are discoverable and routable offline, as long as you can reach
+the model endpoint itself.
+
+**Optional enrichment layer (models.dev):** korvid may fetch a single JSON
+document from `https://models.dev/api.json` to add context lengths,
+quantization info, and env-variable hints. This fetch is **never made at
+startup**, on mount, on a keystroke, or **during routing**. It happens only
+when you press <kbd>Ctrl</kbd>+<kbd>R</kbd> on the `:ai` wizard's model search
+screen; opening that screen, typing a query and picking a model make no
+request, and no HTTP client is built until the key is pressed.
+
+The cache is `$XDG_CACHE_HOME/korvid/models-dev.json` whenever that variable is
+set — on every platform, Windows and macOS included. With it unset the path
+follows the platform convention: `~/Library/Caches/korvid/models-dev.json` on
+macOS, `%LOCALAPPDATA%\korvid\models-dev.json` on Windows (falling back to
+`~/AppData/Local` when that variable is unset too), and
+`~/.cache/korvid/models-dev.json` everywhere else. The file is written with
+mode `0600`. korvid never revalidates it on its own initiative more than once a
+day; <kbd>Ctrl</kbd>+<kbd>R</kbd> is an explicit request and revalidates
+regardless of that window, as a conditional `If-None-Match` request that
+transfers no document when nothing has changed. That request is built by the
+same client builder as every other korvid HTTPS call, so `network.ca_bundle`
+covers it.
+
+In a fully air-gapped deployment, disable the models.dev fetch permanently:
+
+```yaml
+agent:
+  model_search:
+    models_dev: false
+```
+
+The key defaults to `true`. With it set to `false` korvid builds no models.dev
+source and no HTTP client for one, so there is no code path left that could
+open the socket: model search uses only the LiteLLM bundled table, and
+<kbd>Ctrl</kbd>+<kbd>R</kbd> answers `Model metadata refresh is disabled — no
+source is configured, nothing was contacted.` without touching the network.
+
+The key is parsed strictly. Only the booleans `true` and `false` are accepted;
+any other value (including the string `"false"`) is reported as a config
+warning and treated as `false` — it fails closed, so a typo in an air-gapped
+deployment cannot silently re-enable the fetch. A `model_search` block that is
+not a mapping names no key at all: that warns and leaves the default in
+place.
 
 ## Offline installation bundles
 
@@ -118,8 +181,8 @@ Kubernetes credentials are separate operator-supplied dependencies.
 
 ## Internalize the remaining dependencies
 
-- **LLM endpoint**: run Ollama/vLLM inside the network and point
-  `agent.base_url` at it, with `network.ca_bundle` for its CA.
+- **LLM endpoint**: run Ollama/vLLM inside the network and point the active
+  profile's `endpoint` at it, with `network.ca_bundle` for its CA.
 - **Helm charts**: mirror charts into an internal repository (e.g.
   ChartMuseum, Harbor). The repository dialog (`Ctrl-R` from the chart
   picker) has an optional CA file field; when set, korvid validates the path

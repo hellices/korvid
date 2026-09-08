@@ -162,12 +162,51 @@ evidence on screen.
 
 ## Reproduction
 
+The eval builds its provider with the same
+`create_provider_from_profile` the TUI's composition root calls, from a
+`ModelConnectionConfig` assembled out of the eight variables below — the same
+shape a configured connection parses into, over the same entry-point special
+flows and the same bundled model catalog. Routing, credential resolution,
+capability lookup, option filtering and TLS trust are the product's, so a score
+is evidence about korvid rather than about an eval-only transport. No variable
+holds a credential: `KORVID_EVAL_API_KEY_ENV` names one, and the production
+`environment` auth method reads it.
+
+| Variable | Meaning |
+|---|---|
+| `KORVID_EVAL_BASE_URL` | The endpoint URL, carried as the profile's `endpoint` (profiles have no `base_url` key). Required. |
+| `KORVID_EVAL_MODEL` | Model reference, `provider/model`. Required. |
+| `KORVID_EVAL_PROVIDER` | Compatibility only: the prefix put in front of `KORVID_EVAL_MODEL` when that value contains no `/`. It is joined into a reference, never compared against a vendor list. |
+| `KORVID_EVAL_API_KEY_ENV` | The **name** of the variable holding the key. Preferred: the profile then stores a name, never a secret. |
+| `KORVID_EVAL_API_KEY` | **Deprecated.** The key itself. Still honoured — and still read by name, so the profile holds `KORVID_EVAL_API_KEY` rather than its value — but it puts a credential in the eval's own variable namespace. Prefer `KORVID_EVAL_API_KEY_ENV`. |
+| `KORVID_EVAL_OPTIONS_JSON` | A JSON object of profile options (`temperature`, `num_ctx`, …), exactly as a configured connection's own `options` block. Options the provider does not accept are dropped by the shared factory, not by the eval. |
+| `KORVID_EVAL_CA_BUNDLE` | The eval's `network.ca_bundle`. A bundle that will not load is refused rather than silently replaced by the default trust store. |
+| `KORVID_EVAL_TIMEOUT_SECONDS` | Request timeout for slow local models (default 60). Carried as the `timeout` profile option and sent as LiteLLM's named `timeout` parameter. |
+
+The timeout can be spelled twice, so its precedence is fixed:
+`KORVID_EVAL_TIMEOUT_SECONDS` wins, then a `timeout` key inside
+`KORVID_EVAL_OPTIONS_JSON`, then the 60-second default. Whichever supplies
+it, the value must be a positive, finite number of seconds — in the JSON, a
+JSON *number*, since that block is typed exactly like a profile's own
+options. Anything else exits with the offending source named, because the
+shared request builder drops a value it cannot use and a dropped timeout
+that had already displaced the default would leave the run unbounded.
+
+The serving probe (`/api/version`, `/api/show`, `/api/tags`, `/api/ps`) is
+asked about the model *tag* — the part after the routing prefix — because
+`ollama/qwen3:8b` is korvid's routing name and the endpoint only knows
+`qwen3:8b`. The split is the same provider-neutral one the factory uses, so
+no vendor is special-cased.
+
+A profile korvid refuses — an unroutable reference, an unset credential
+variable, an unloadable CA bundle — exits non-zero with the reason,
+before the run starts.
+
 Task pack:
 
 ```sh
-export KORVID_EVAL_PROVIDER=ollama
+export KORVID_EVAL_MODEL=ollama/qwen3:8b
 export KORVID_EVAL_BASE_URL=http://127.0.0.1:11435/v1
-export KORVID_EVAL_MODEL=qwen3:8b
 export KORVID_EVAL_TIMEOUT_SECONDS=300
 uv run python -m korvid.evals --model-tier low --reps 3 \
   --out report.md --json report.json

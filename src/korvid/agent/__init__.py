@@ -15,7 +15,7 @@ grouped by the part of the harness that owns it:
 | provider | the `LLMProvider` ABC every adapter and plugin implements |
 | evidence | the citation ledger |
 | events | what a turn yields to the UI |
-| setup | the configurator contract the setup screen drives |
+| setup | the declarative model-profile vocabulary the setup screen renders |
 
 Five public contracts are deliberately **not** in that list: they live in
 two submodules a plugin author imports them from directly.
@@ -140,6 +140,9 @@ if TYPE_CHECKING:
     from .model_policy import (
         ResolvedAgentPolicy as ResolvedAgentPolicy,
     )
+    from .model_profiles import (
+        DeviceLoginPrompt as DeviceLoginPrompt,
+    )
     from .native_engine import NativeAgentEngine as NativeAgentEngine
     from .outbound import (
         OutboundPolicy as OutboundPolicy,
@@ -192,15 +195,6 @@ if TYPE_CHECKING:
     from .session import (
         SessionRetargetError as SessionRetargetError,
     )
-    from .setup import (
-        AgentConfigurator as AgentConfigurator,
-    )
-    from .setup import (
-        AgentSettings as AgentSettings,
-    )
-    from .setup import (
-        DeviceLoginPrompt as DeviceLoginPrompt,
-    )
     from .tool_harness import (
         ToolExecution as ToolExecution,
     )
@@ -212,19 +206,17 @@ if TYPE_CHECKING:
 #: `__all__` and for lazy attribute resolution, so a name can never be
 #: advertised without being importable.
 _EXPORTS: Final[dict[str, str]] = {
-    "AgentConfigurator": "setup",
     "AgentEngine": "engine",
     "AgentError": "events",
     "AgentEvent": "events",
     "AgentSession": "session",
-    "AgentSettings": "setup",
     "AgentTurnRequest": "engine",
     "AgentUiBridge": "interaction",
     "CapabilitySource": "model_policy",
     "ClusterFacts": "interaction",
     "ComposedPrompt": "prompt_harness",
     "DefaultAgentSession": "session",
-    "DeviceLoginPrompt": "setup",
+    "DeviceLoginPrompt": "model_profiles",
     "DrillDown": "interaction",
     "Evidence": "evidence",
     "EvidenceLedger": "evidence",

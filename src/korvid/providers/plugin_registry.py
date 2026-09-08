@@ -5,6 +5,15 @@ Discovers third-party LLM provider plugins via
 ``korvid.provider`` entry-point group, but only calls `.load()` on the
 *selected* entry point. Unselected plugins are never imported—this
 keeps startup fast and avoids side-effects from unused packages.
+
+The `korvid.provider` group now carries `SpecialFlow` declarations, which
+`providers.special_flows.SpecialFlowRegistry` loads on the live startup
+path; the `ProviderPlugin` construction path below is the published API 2
+contract and is not wired by current builds (see
+`docs/provider-plugins.md`). `RESERVED_PROVIDER_NAMES` is therefore *not*
+defined here: it lives in `litellm_settings`, where the live registry
+reads it, and this module's own defence-in-depth check consumes the same
+frozenset rather than a second copy of it that could disagree.
 """
 
 from __future__ import annotations
@@ -23,6 +32,7 @@ from korvid.agent.provider_plugin import (
     ProviderPluginMetadata,
     ValidatedPluginProvider,
 )
+from korvid.providers.litellm_settings import RESERVED_PROVIDER_NAMES
 
 if TYPE_CHECKING:
     from korvid.agent.credentials import CredentialSource
@@ -37,28 +47,12 @@ _MAX_NAME_LENGTH = 100
 _ENTRY_POINT_GROUP: str = "korvid.provider"
 _ALLOWED_AUTH_METHODS: frozenset[str] = frozenset({"none", "api_key", "entra"})
 
-# Single-source canonical built-in provider sets.  registry.py imports these
-# for dispatch routing so the two modules cannot drift independently.
-OPENAI_COMPAT_ALIASES: frozenset[str] = frozenset(
-    {
-        "openai-compat",
-        "openai",
-        "azure",
-        "vllm",
-        "github",
-        "anthropic",
-        "claude",
-    }
-)
-OLLAMA_PROVIDER: str = "ollama"
-GITHUB_COPILOT_PROVIDER: str = "github-copilot"
-
-# Centralized reserved names — union of all built-in identifiers that must
-# never be claimed by third-party plugins.
-RESERVED_PROVIDER_NAMES: frozenset[str] = OPENAI_COMPAT_ALIASES | {
-    OLLAMA_PROVIDER,
-    GITHUB_COPILOT_PROVIDER,
-}
+__all__ = [
+    "RESERVED_PROVIDER_NAMES",
+    "ProviderPluginError",
+    "ProviderPluginRegistry",
+    "normalize_provider_name",
+]
 
 
 class ProviderPluginError(Exception):

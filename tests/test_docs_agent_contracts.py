@@ -29,8 +29,11 @@ from pathlib import Path
 
 import pytest
 
+from korvid.agent.model_profiles import MetadataRefresh
 from korvid.agent.provider_plugin import PROVIDER_PLUGIN_API_VERSION
 from korvid.tools.registry import TOOLS_BY_NAME
+from korvid.ui.widgets.model_search_screen import _REFRESH_MESSAGES
+from tests.config_keys import names_key
 
 _REPO_ROOT = Path(__file__).parents[1]
 
@@ -228,7 +231,10 @@ def test_the_agent_page_links_the_migration_note_instead_of_restating_it() -> No
 
     agent = _text("docs/agent.md")
     assert "Upgrading from the profile-based agent" not in agent
-    assert [key for key in removed_keys if key in agent] == []
+    # Matched as whole keys: today's supported `agent.profiles` merely
+    # *contains* the retired singular spelling, so a substring test would
+    # read the replacement as the thing it replaced.
+    assert [key for key in removed_keys if names_key(agent, key)] == []
     assert "model_tier" in agent, "the supported key still has to be on the page"
     assert re.search(
         r"\[[^\]]*(?:migration|upgrade)[^\]]*\]\(release-notes/unreleased\.md\)",
@@ -291,34 +297,31 @@ def test_the_agent_page_states_cloud_provider_detection_truthfully() -> None:
     assert "unknown" in window.casefold()
 
 
-def test_the_ollama_row_names_the_namespace_its_six_keys_actually_live_under() -> None:
-    """The tuning knobs are read out of `agent.ollama.*`, not the bare names.
+def test_the_ollama_row_names_the_six_keys_and_where_they_live() -> None:
+    """The tuning knobs are read out of a profile's `options`, not the bare
+    names.
 
-    `Config` groups exactly six `agent_ollama_<key>` fields directly under
-    the "Native Ollama tuning (issue #72): `agent.ollama.*` in config.yaml"
-    comment, ending at the unrelated `keybindings` field. The provider
-    table's Ollama row lists the six key names but, before this test, never
-    said which namespace an operator has to nest them under in
-    `config.yaml` — `num_ctx: 32768` at the top level of the agent block is
-    silently ignored. Both the six keys and the `agent.ollama` namespace
-    they require have to be on the page.
+    `_options_from` reads exactly six keys off `profile.options`. They used
+    to be dedicated `agent_ollama_<key>` config fields under a retired
+    per-vendor namespace; Task 18 deleted those, so the row has to name
+    `options` instead — `num_ctx: 32768` at the top level of a profile is
+    silently ignored. Both the six keys and the `options` mapping they nest
+    under have to be on the page.
     """
-    config = _text("src/korvid/core/config.py")
-    start = config.index("Native Ollama tuning (issue #72)")
-    end = config.index("keybindings", start)
-    block = config[start:end]
-    keys = re.findall(r"agent_ollama_(\w+):", block)
+    flow = _text("src/korvid/providers/flow_ollama_thinking.py")
+    start = flow.index("def _options_from(")
+    end = flow.index("def _credentials_for(", start)
+    block = flow[start:end]
+    keys = re.findall(r"profile_options\.get\(\"(\w+)\"\)", block)
     assert keys == ["num_ctx", "temperature", "seed", "think", "keep_alive", "num_predict"], (
-        "the six ollama keys config.py actually defines must drive this test, not a hand-written list"
+        "the six ollama keys the flow actually reads must drive this test, not a hand-written list"
     )
 
     agent = _text("docs/agent.md")
     row = next(line for line in agent.splitlines() if line.strip().startswith("| Ollama"))
     for key in keys:
         assert key in row, f"the Ollama row must still name {key}"
-    assert "agent.ollama" in row, (
-        "the Ollama row must say the six keys nest under the `agent.ollama` namespace"
-    )
+    assert "options" in row, "the Ollama row must say the six keys nest under a profile's `options`"
 
 
 # ---------------------------------------------------------------------------
@@ -581,3 +584,221 @@ def test_the_wrap_scan_reads_the_paragraphs_and_skips_the_diagram() -> None:
     assert len(numbered) > 100
     assert not any("flowchart LR" in line for _, line in numbered)
     assert any("korvid" in line for _, line in numbered)
+
+
+def _collapsed(text: str) -> str:
+    """Markdown wraps sentences across lines; a reader does not see the wrap."""
+    return " ".join(text.split())
+
+
+def test_the_airgap_guide_quotes_the_answer_the_screen_really_gives() -> None:
+    """A doc that quotes a message an operator will see must quote it exactly.
+
+    The air-gap guide is read by someone who cannot check korvid against the
+    internet, and it tells them what `Ctrl-R` answers once models.dev is
+    disabled. A paraphrase drifting from `_REFRESH_MESSAGES` leaves them
+    matching a sentence korvid never prints against a screen that says
+    something else, with no way to tell which of the two is wrong.
+    """
+    guide = _collapsed(_text("docs/airgap.md"))
+    disabled = _REFRESH_MESSAGES[MetadataRefresh.DISABLED]
+
+    assert _collapsed(disabled) in guide
+
+
+def test_the_agent_guide_quotes_every_refresh_answer_it_shows() -> None:
+    """`docs/agent.md` quotes three of the four refresh outcomes verbatim.
+
+    They are the sentences a reader matches against their own screen after
+    pressing `Ctrl-R`. `_REFRESH_MESSAGES` is the source, so a reword there
+    must fail here rather than leave the guide quoting a sentence korvid no
+    longer prints. The fourth (`DISABLED`) belongs to the air-gap guide and
+    is pinned by the test above.
+    """
+    guide = _collapsed(_text("docs/agent.md"))
+
+    for outcome in (
+        MetadataRefresh.UPDATED,
+        MetadataRefresh.UNCHANGED,
+        MetadataRefresh.UNAVAILABLE,
+    ):
+        assert _collapsed(_REFRESH_MESSAGES[outcome]) in guide, outcome
+
+
+def test_the_threat_model_lists_every_litellm_lockdown_flag() -> None:
+    """A lockdown table that omits a flag understates what korvid closes.
+
+    The table is the whole security claim of that section: each row is a
+    channel that would otherwise carry prompts, tool arguments or usage
+    records off the machine. Read out of `LOCKDOWN_FLAGS` so adding a ninth
+    flag without documenting it fails.
+    """
+    from korvid.providers.litellm_runtime import LOCKDOWN_FLAGS
+
+    threat_model = _text("docs/threat-model.md")
+    rows = {
+        line.split("|")[1].strip().strip("`")
+        for line in threat_model.splitlines()
+        if line.startswith("| `") and line.count("|") == 3
+    }
+
+    assert {name for name, _ in LOCKDOWN_FLAGS} <= rows
+
+    # The prose counts them in words, so the count has to be spelled the way
+    # the page spells it — a ninth flag then fails here as well as in the row
+    # comparison above.
+    words = {6: "six", 7: "seven", 8: "eight", 9: "nine", 10: "ten"}
+    spelled = words.get(len(LOCKDOWN_FLAGS), str(len(LOCKDOWN_FLAGS)))
+    assert f"{spelled} attributes" in threat_model
+
+
+def test_the_migration_docs_name_the_profile_the_migration_really_creates() -> None:
+    """The legacy profile name is read out of `core/config.py`, not guessed.
+
+    An operator whose `config.yaml` still has the flat scalars looks for the
+    profile korvid wrote. A doc naming a different one sends them to a key
+    that is not in the file.
+    """
+    from korvid.core.config import LEGACY_PROFILE_NAME
+
+    assert f"`{LEGACY_PROFILE_NAME}`" in _text("docs/agent.md")
+    # The release note shows the file korvid writes back, so the name has to
+    # appear as the key it really writes, not only in prose around it.
+    notes = _text("docs/release-notes/unreleased.md")
+    assert f"active: {LEGACY_PROFILE_NAME}" in notes
+    assert f"\n    {LEGACY_PROFILE_NAME}:\n" in notes
+
+
+# ---------------------------------------------------------------------------
+# 7. models.dev: no auto-revalidation claim; production caller always forced
+# ---------------------------------------------------------------------------
+
+_AUTO_REVALID_PATTERNS = re.compile(
+    r"revalidat\w*\s+on\s+(?:its|korvid'?s?\s+own|its\s+own)",
+    re.IGNORECASE,
+)
+
+
+@pytest.mark.parametrize("path", _MARKDOWN_FILES, ids=_relative)
+def test_no_doc_claims_models_dev_auto_revalidates(path: Path) -> None:
+    """The CACHE_TTL_SECONDS guard exists for hypothetical future callers.
+
+    Production has exactly one refresh call-site — the setup UI's Ctrl-R
+    action — and it always passes `force=True`, bypassing the TTL. Claiming
+    korvid "revalidates on its own" describes a behaviour nothing performs
+    today. Normalizing whitespace catches the claim even if it wraps across
+    a line break.
+    """
+    normalized = " ".join(path.read_text(encoding="utf-8").split())
+    assert not _AUTO_REVALID_PATTERNS.search(normalized), (
+        f"{_relative(path)} claims models.dev auto-revalidates"
+    )
+
+
+def test_models_dev_production_caller_always_uses_force() -> None:
+    """The UI always passes force=True, making CACHE_TTL_SECONDS inactive in production.
+
+    `ModelsDevSource.refresh(force=False)` would return CACHED inside the TTL
+    window, but no production call site passes False.  This test reads the
+    source of every call to the catalog's `refresh_metadata` in
+    model_search_screen.py rather than hard-coding the boolean, so the
+    relationship drifts visibly.
+    """
+    source = _text("src/korvid/ui/widgets/model_search_screen.py")
+    # Find actual awaited catalog calls (not the method definition itself).
+    calls = re.findall(r"await\s+self\._catalog\.refresh_metadata\([^)]*\)", source)
+    assert calls, "model_search_screen.py must still await self._catalog.refresh_metadata"
+    for call in calls:
+        assert "force=True" in call, (
+            f"model_search_screen.py calls refresh_metadata without force=True: {call!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 8. Provider-plugin reserved-prefix semantics match the live constants
+# ---------------------------------------------------------------------------
+
+
+def test_provider_plugin_guide_names_all_reserved_prefix_sets() -> None:
+    """provider-plugins.md must describe all three reserved sets from live constants.
+
+    The three sets are distinct in `litellm_settings.py`:
+    - `RETIRED_PROVIDER_ALIASES`: never routable aliases
+    - `DEVICE_LOGIN_PREFIXES`: device-login traps
+    - `_SELF_SERVED_PROVIDER_NAMES`: korvid's own routes (routable but
+      unregistrable by third parties)
+
+    The LiteLLM dynamic catalog (`models_by_provider()`) is the fourth fence.
+    Reading all names from the live constants means adding a new alias forces
+    a doc update rather than silently leaving the guide stale.
+    """
+    from korvid.providers.litellm_settings import (
+        _SELF_SERVED_PROVIDER_NAMES,
+        DEVICE_LOGIN_PREFIXES,
+        RETIRED_PROVIDER_ALIASES,
+    )
+
+    guide = _text("docs/provider-plugins.md")
+
+    for name in RETIRED_PROVIDER_ALIASES:
+        assert name in guide, f"retired alias {name!r} missing from provider-plugins.md"
+    for name in DEVICE_LOGIN_PREFIXES:
+        assert name in guide, f"device-login prefix {name!r} missing from provider-plugins.md"
+    for name in _SELF_SERVED_PROVIDER_NAMES:
+        assert name in guide, f"self-served prefix {name!r} missing from provider-plugins.md"
+
+
+def test_provider_plugin_guide_names_litellm_dynamic_catalog() -> None:
+    """provider-plugins.md must explain that LiteLLM's dynamic prefix table is also reserved.
+
+    `SpecialFlowRegistry.from_entry_points()` receives `models_by_provider()`
+    as `reserved_prefixes`, so a third party cannot shadow any prefix the SDK
+    ships natively. The guide must name `models_by_provider` — reading the
+    live function name means a rename fails this test before it silently
+    leaves the guide lying.
+    """
+    from korvid.providers.litellm_runtime import models_by_provider as _fn  # noqa: F401
+
+    guide = _text("docs/provider-plugins.md")
+    assert "models_by_provider" in guide, (
+        "provider-plugins.md must mention models_by_provider (LiteLLM's dynamic catalog)"
+    )
+
+
+def test_provider_plugin_guide_does_not_say_two_lists() -> None:
+    """The guide must describe three sets, not two.
+
+    Claiming 'two lists' omits the LiteLLM dynamic catalog, which is a
+    third enforced fence.  Whitespace is collapsed so wrapping does not hide
+    a stale count.
+    """
+    guide = " ".join(_text("docs/provider-plugins.md").split())
+    assert "Two lists are enforced" not in guide, (
+        "provider-plugins.md still says 'Two lists' — update to three sets"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 9. Keyring auth documents the profile.model fallback
+# ---------------------------------------------------------------------------
+
+
+def test_keyring_auth_documents_profile_model_fallback() -> None:
+    """agent.md must say keyring falls back to profile.model when auth.key is absent.
+
+    `_from_keyring` uses `_named_setting(profile.auth.settings) or profile.model`
+    as the entry name.  An operator who stores a key under the model reference
+    instead of a named `auth.key` must be able to discover this from the docs
+    rather than from source code.
+    """
+    from korvid.providers.litellm_factory import _from_keyring  # noqa: F401
+
+    agent = _text("docs/agent.md")
+    # The keyring row must name the fallback.
+    keyring_row = next(
+        (line for line in agent.splitlines() if "keyring" in line and "|" in line), None
+    )
+    assert keyring_row is not None, "agent.md must have a keyring row in the auth table"
+    assert "profile.model" in keyring_row, (
+        "agent.md keyring row must document the profile.model fallback"
+    )

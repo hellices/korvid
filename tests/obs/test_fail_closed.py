@@ -8,6 +8,7 @@ to refuse, not the shape of an answer.
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from typing import Any
 
@@ -17,7 +18,7 @@ import pytest
 from korvid.core.secrets import MASK_PLACEHOLDER
 from korvid.obs.connector import ConnectorError, QueryLimits, QueryScope
 from korvid.obs.credentials import resolve_token, resolve_token_async
-from korvid.obs.http import HttpBackend, endpoint_host
+from korvid.obs.http import MAX_JSON_DEPTH, HttpBackend, endpoint_host
 from korvid.obs.loki import LokiConnector
 from korvid.obs.query import build_selector
 
@@ -1237,3 +1238,151 @@ class TestTheScopeIsNormalisedBeforeUse:
         )
         assert result.scope.workload is None
         assert 'pod="api-1"' in result.query
+
+
+class TestBoundedJsonDepth:
+    """Nesting is bounded explicitly, not by whatever the interpreter tolerates.
+
+    `json.loads` recurses per nesting level, so before this the only thing
+    standing between a hostile body and the process was `RecursionError` —
+    an interpreter detail, not a contract. Some builds parse 200_000 levels
+    happily (a bigger C stack, or a raised recursion limit), which turns a
+    "the connector refuses this" test into a "this build happens to cope"
+    test. The depth is now checked before parsing, so the refusal is the
+    same on every interpreter.
+    """
+
+    def _nested(self, depth: int) -> bytes:
+        return b"[" * depth + b"]" * depth
+
+    async def test_a_body_at_the_documented_depth_is_still_parsed(self) -> None:
+        backend = _backend(
+            lambda request: httpx.Response(200, content=self._nested(MAX_JSON_DEPTH))
+        )
+        answer = await backend.get_json("/x", {})
+        assert isinstance(answer.payload, list)
+
+    async def test_a_body_one_level_past_the_depth_is_refused(self) -> None:
+        backend = _backend(
+            lambda request: httpx.Response(200, content=self._nested(MAX_JSON_DEPTH + 1))
+        )
+        with pytest.raises(ConnectorError) as caught:
+            await backend.get_json("/x", {})
+        assert caught.value.kind == "backend"
+        assert "nested too deeply" in str(caught.value)
+
+    async def test_the_refusal_quotes_no_part_of_the_body(self) -> None:
+        """The body is attacker-shaped and may carry a credential it echoed."""
+        body = b'{"a": "' + b"s3cret" + b'", "b": ' + self._nested(MAX_JSON_DEPTH + 1) + b"}"
+        backend = _backend(lambda request: httpx.Response(200, content=body))
+        with pytest.raises(ConnectorError) as caught:
+            await backend.get_json("/x", {}, secrets=("s3cret",))
+        message = str(caught.value)
+        assert "s3cret" not in message
+        assert "[[" not in message
+
+    async def test_objects_and_arrays_count_toward_the_same_depth(self) -> None:
+        """Alternating shapes must not each get their own budget."""
+        levels = MAX_JSON_DEPTH // 2 + 1
+        body = b'{"a": [' * levels + b"null" + b"]}" * levels
+        backend = _backend(lambda request: httpx.Response(200, content=body))
+        with pytest.raises(ConnectorError, match="nested too deeply") as caught:
+            await backend.get_json("/x", {})
+        assert caught.value.kind == "backend"
+
+    async def test_siblings_are_not_depth(self) -> None:
+        """A wide answer is the normal case: only nesting is bounded."""
+        body = b"[" + b",".join([b"[1]"] * 5_000) + b"]"
+        backend = _backend(lambda request: httpx.Response(200, content=body))
+        answer = await backend.get_json("/x", {})
+        assert len(answer.payload) == 5_000
+
+    async def test_brackets_inside_a_string_are_not_structure(self) -> None:
+        """A log line full of `[` is a legitimate Loki value, not nesting."""
+        body = b'["' + b"[" * (MAX_JSON_DEPTH * 10) + b'"]'
+        backend = _backend(lambda request: httpx.Response(200, content=body))
+        answer = await backend.get_json("/x", {})
+        assert answer.payload == ["[" * (MAX_JSON_DEPTH * 10)]
+
+    async def test_an_escaped_quote_does_not_end_the_string(self) -> None:
+        """Otherwise `\\"` reopens the scan and the rest of a line counts as structure."""
+        body = b'["\\"' + b"[" * (MAX_JSON_DEPTH + 1) + b'"]'
+        backend = _backend(lambda request: httpx.Response(200, content=body))
+        answer = await backend.get_json("/x", {})
+        assert answer.payload == ['"' + "[" * (MAX_JSON_DEPTH + 1)]
+
+    async def test_an_escaped_backslash_does_end_the_string(self) -> None:
+        """The mirror image: `\\\\` must not swallow the closing quote."""
+        body = b'["\\\\", ' + self._nested(MAX_JSON_DEPTH + 1) + b"]"
+        backend = _backend(lambda request: httpx.Response(200, content=body))
+        with pytest.raises(ConnectorError, match="nested too deeply"):
+            await backend.get_json("/x", {})
+
+    async def test_an_unterminated_string_is_left_to_the_parser(self) -> None:
+        """The precheck must not invent a refusal JSON already describes better."""
+        backend = _backend(lambda request: httpx.Response(200, content=b'{"a": "no end'))
+        with pytest.raises(ConnectorError, match="not JSON") as caught:
+            await backend.get_json("/x", {})
+        assert caught.value.kind == "backend"
+
+    async def test_a_recursion_error_is_still_a_backend_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The precheck makes this unreachable; the contract still covers it."""
+
+        def explode(_: str) -> Any:
+            raise RecursionError("too deep")
+
+        monkeypatch.setattr(json, "loads", explode)
+        backend = _backend(lambda request: httpx.Response(200, content=b"[]"))
+        with pytest.raises(ConnectorError, match="nested too deeply") as caught:
+            await backend.get_json("/x", {})
+        assert caught.value.kind == "backend"
+
+    async def test_100_sibling_objects_parse(self) -> None:
+        """Closing braces reduce depth; 100 siblings must not trip the limit."""
+        body = b"[" + b",".join([b"{}"] * 100) + b"]"
+        backend = _backend(lambda request: httpx.Response(200, content=body))
+        answer = await backend.get_json("/x", {})
+        assert len(answer.payload) == 100
+
+    async def test_unterminated_string_with_deep_brackets_is_not_json_not_depth_refusal(
+        self,
+    ) -> None:
+        """An unterminated string holds >MAX_JSON_DEPTH brackets without depth refusal.
+
+        The depth scanner skips the brackets because they are inside a string
+        literal that never closes. Only `json.loads` then sees the body —
+        as malformed JSON, not a depth violation.
+        """
+        deep_brackets = b"[" * (MAX_JSON_DEPTH + 1)
+        body = b'["' + deep_brackets  # opening array, then unterminated string with brackets
+        backend = _backend(lambda request: httpx.Response(200, content=body))
+        with pytest.raises(ConnectorError, match="not JSON") as caught:
+            await backend.get_json("/x", {})
+        assert caught.value.kind == "backend"
+
+    async def test_prometheus_matrix_depth6_envelope_parses(self) -> None:
+        """A realistic Prometheus matrix response (depth 6) must parse end-to-end.
+
+        `{data: {result: [{metric: {pod: "x"}, values: [[ts, "v"]]}]}}` nests
+        six levels; both Prometheus and Loki use this fixed shape, so it is a
+        floor for what the limit must allow, not a ceiling.
+        """
+        matrix_payload = {
+            "status": "success",
+            "data": {
+                "resultType": "matrix",
+                "result": [
+                    {
+                        "metric": {"pod": "api-1", "namespace": "prod"},
+                        "values": [[1_786_000_000, "0.42"]],
+                    }
+                ],
+            },
+        }
+        body = json.dumps(matrix_payload).encode()
+        backend = _backend(lambda request: httpx.Response(200, content=body))
+        answer = await backend.get_json("/x", {})
+        result = answer.payload["data"]["result"]
+        assert result[0]["metric"]["pod"] == "api-1"

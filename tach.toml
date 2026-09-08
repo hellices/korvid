@@ -6,7 +6,7 @@ depends_on = ["korvid.core", "korvid.agent", "korvid.k8s", "korvid.tools"]
 
 [[modules]]
 path = "korvid.core"
-depends_on = ["korvid.k8s"]
+depends_on = ["korvid.k8s", "korvid.option_keys"]
 
 [[modules]]
 path = "korvid.agent"
@@ -26,7 +26,7 @@ depends_on = []
 
 [[modules]]
 path = "korvid.providers"
-depends_on = ["korvid.agent"]
+depends_on = ["korvid.agent", "korvid.option_keys"]
 
 [[modules]]
 path = "korvid.evals"
@@ -35,3 +35,11 @@ depends_on = ["korvid.agent", "korvid.k8s", "korvid.providers", "korvid.tools"]
 [[modules]]
 path = "korvid.obs"
 depends_on = ["korvid.core"]
+
+# A leaf: the credential-shaped-key vocabulary `core` and `providers`
+# both judge an option key by. Neither layer may import the other, so
+# the rule they have to agree on lives below both of them, with no
+# korvid dependency of its own.
+[[modules]]
+path = "korvid.option_keys"
+depends_on = []

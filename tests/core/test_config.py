@@ -1,23 +1,69 @@
 import json
 import os
+from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
 
+from korvid.agent.model_profiles import ModelConnectionConfig, ModelConnectionsConfig
 from korvid.core.config import (
     ConfigMigrationError,
     KorvidConfig,
     load_config,
-    save_agent_config,
+    save_model_connections,
 )
 from tests.platforms import POSIX
 
 
-def _load_agent_options_config(tmp_path: Path, options: object) -> KorvidConfig:
+@dataclass(frozen=True)
+class _ParsedOptions:
+    """What the bounded-options parser made of one profile's `options`.
+
+    The parser is shared: `agent.profiles.<name>.options` is the only
+    caller left now that the scalar `agent.options` block is gone, so the
+    bound-by-bound cases below drive it through a profile.
+    """
+
+    agent_options: Mapping[str, Any]
+    agent_options_error: str | None
+
+
+def _load_agent_options_config(tmp_path: Path, options: object) -> _ParsedOptions:
     path = tmp_path / "config.yaml"
-    path.write_text(yaml.safe_dump({"agent": {"options": options}}, sort_keys=False))
-    return load_config(path)
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "agent": {
+                    "active": "main",
+                    "profiles": {"main": {"model": "openai/gpt-4o", "options": options}},
+                }
+            },
+            sort_keys=False,
+        )
+    )
+    cfg = load_config(path)
+    profile = cfg.model_connections.profiles.get("main")
+    if profile is None:
+        return _ParsedOptions({}, "profile was dropped entirely")
+    return _ParsedOptions(_plain(profile.options), profile.config_error)
+
+
+def _plain(value: Any) -> Any:
+    """Undo the profile's deep freeze so the bound assertions read plainly.
+
+    Profiles hand out `mappingproxy`/tuple so nothing can mutate a loaded
+    config; that immutability is pinned in `test_config_profiles.py`. The
+    cases here are about the parser's *bounds*, so they compare against
+    ordinary dicts and lists.
+    """
+    if isinstance(value, Mapping):
+        return {k: _plain(v) for k, v in value.items()}
+    if isinstance(value, tuple):
+        return [_plain(v) for v in value]
+    return value
 
 
 def test_defaults_when_no_file(tmp_path: Path) -> None:
@@ -31,14 +77,13 @@ def test_load_from_yaml(tmp_path: Path) -> None:
     f.write_text(
         "kube_context: prod\n"
         "namespace: default\n"
-        "agent:\n  provider: anthropic\n"
+        "agent:\n  provider: anthropic\n  model: claude-sonnet-4-5\n"
         "keybindings:\n  quit: q\n"
     )
     cfg = load_config(f)
     assert cfg.kube_context == "prod"
     assert cfg.namespace == "default"
-    assert cfg.agent_provider == "anthropic"
-    assert cfg.agent_enabled is True  # provider present -> auto-enabled
+    assert cfg.agent_enabled is True  # migrated profile present -> auto-enabled
     assert cfg.keybindings == {"quit": "q"}
 
 
@@ -116,53 +161,67 @@ def test_log_buffer_lines_invalid_falls_back(tmp_path: Path) -> None:
 
 
 def test_agent_provider_settings_parsed(tmp_path: Path) -> None:
+    """Every legacy scalar lands on the migrated profile, none is dropped."""
     p = tmp_path / "config.yaml"
     p.write_text(
         "agent:\n  provider: openai-compat\n  base_url: http://localhost:11434/v1\n"
         "  model: llama3\n  api_key_env: MY_KEY\n"
     )
-    cfg = load_config(p)
-    assert cfg.agent_provider == "openai-compat"
-    assert cfg.agent_base_url == "http://localhost:11434/v1"
-    assert cfg.agent_model == "llama3"
-    assert cfg.agent_api_key_env == "MY_KEY"
+    profile = load_config(p).model_connections.active_profile
+    assert profile is not None
+    assert profile.model == "openai/llama3"
+    assert profile.endpoint == "http://localhost:11434/v1"
+    assert profile.auth.method == "environment"
+    assert profile.auth.settings["key"] == "MY_KEY"
 
 
 def test_auth_method_parsed(tmp_path: Path) -> None:
     p = tmp_path / "c.yaml"
-    p.write_text("agent:\n  provider: github-copilot\n  auth:\n    method: device-login\n")
-    cfg = load_config(p)
-    assert cfg.agent_auth_method == "device-login"
+    p.write_text(
+        "agent:\n  provider: github-copilot\n  model: gpt-4o\n  auth:\n    method: device-login\n"
+    )
+    profile = load_config(p).model_connections.active_profile
+    assert profile is not None
+    assert profile.auth.method == "device-login"
 
 
 def test_auth_method_backcompat_api_key(tmp_path: Path) -> None:
     p = tmp_path / "c.yaml"
-    p.write_text("agent:\n  provider: openai-compat\n  api_key_env: K\n")
-    assert load_config(p).agent_auth_method == "api_key"
+    p.write_text("agent:\n  provider: openai-compat\n  model: llama3\n  api_key_env: K\n")
+    profile = load_config(p).model_connections.active_profile
+    assert profile is not None
+    assert profile.auth.method == "environment"
+    assert profile.auth.settings["key"] == "K"
 
 
 def test_auth_method_backcompat_none(tmp_path: Path) -> None:
     p = tmp_path / "c.yaml"
-    p.write_text("agent:\n  provider: ollama\n")
-    assert load_config(p).agent_auth_method == "none"
+    p.write_text("agent:\n  provider: ollama\n  model: llama3\n")
+    profile = load_config(p).model_connections.active_profile
+    assert profile is not None
+    assert profile.auth.method == "none"
 
 
-def test_save_agent_config_preserves_other_keys(tmp_path: Path) -> None:
+def test_legacy_copilot_config_still_infers_device_login(tmp_path: Path) -> None:
     p = tmp_path / "c.yaml"
-    p.write_text("namespace: prod\nlog_buffer_lines: 9000\n")
-    save_agent_config(
-        p,
-        provider="github-copilot",
-        auth_method="device-login",
-        base_url="https://api.githubcopilot.com",
-        model="gpt-4o",
-        api_key_env=None,
-    )
+    p.write_text("agent:\n  provider: github-copilot\n  model: gpt-4o\n")
     cfg = load_config(p)
-    assert cfg.namespace == "prod"
-    assert cfg.log_buffer_lines == 9000
-    assert cfg.agent_provider == "github-copilot"
-    assert cfg.agent_auth_method == "device-login"
+    profile = cfg.model_connections.active_profile
+    assert profile is not None
+    assert profile.model == "github-copilot/gpt-4o"
+    assert profile.auth.method == "device-login"
+
+
+def test_legacy_ollama_options_survive_the_move_out_of_load_config(
+    tmp_path: Path,
+) -> None:
+    p = tmp_path / "c.yaml"
+    p.write_text("agent:\n  provider: ollama\n  model: qwen3:8b\n  ollama:\n    think: true\n")
+    profile = load_config(p).model_connections.active_profile
+    assert profile is not None
+    assert profile.model == "ollama/qwen3:8b"
+    assert profile.options["think"] is True
+    assert profile.options["native_api"] is True
 
 
 def test_agent_options_parses_valid_nested_data(tmp_path: Path) -> None:
@@ -279,8 +338,12 @@ def test_agent_options_serialized_budget_limit_is_exact(tmp_path: Path) -> None:
 
 def test_agent_options_rejects_nonfinite_float(tmp_path: Path) -> None:
     path = tmp_path / "config.yaml"
-    path.write_text("agent:\n  options:\n    temperature: .nan\n")
-    cfg = load_config(path)
+    path.write_text(
+        "agent:\n  active: main\n  profiles:\n    main:\n"
+        "      model: openai/gpt-4o\n      options:\n        temperature: .nan\n"
+    )
+    profile = load_config(path).model_connections.profiles["main"]
+    cfg = _ParsedOptions(_plain(profile.options), profile.config_error)
     assert cfg.agent_options == {}
     assert cfg.agent_options_error is not None
     assert "finite float" in cfg.agent_options_error
@@ -288,8 +351,12 @@ def test_agent_options_rejects_nonfinite_float(tmp_path: Path) -> None:
 
 def test_agent_options_rejects_non_string_keys(tmp_path: Path) -> None:
     path = tmp_path / "config.yaml"
-    path.write_text("agent:\n  options:\n    1: one\n")
-    cfg = load_config(path)
+    path.write_text(
+        "agent:\n  active: main\n  profiles:\n    main:\n"
+        "      model: openai/gpt-4o\n      options:\n        1: one\n"
+    )
+    profile = load_config(path).model_connections.profiles["main"]
+    cfg = _ParsedOptions(_plain(profile.options), profile.config_error)
     assert cfg.agent_options == {}
     assert cfg.agent_options_error is not None
     assert "string keys" in cfg.agent_options_error
@@ -297,8 +364,12 @@ def test_agent_options_rejects_non_string_keys(tmp_path: Path) -> None:
 
 def test_agent_options_rejects_unsupported_objects(tmp_path: Path) -> None:
     path = tmp_path / "config.yaml"
-    path.write_text("agent:\n  options:\n    launched: 2026-08-04\n")
-    cfg = load_config(path)
+    path.write_text(
+        "agent:\n  active: main\n  profiles:\n    main:\n"
+        "      model: openai/gpt-4o\n      options:\n        launched: 2026-08-04\n"
+    )
+    profile = load_config(path).model_connections.profiles["main"]
+    cfg = _ParsedOptions(_plain(profile.options), profile.config_error)
     assert cfg.agent_options == {}
     assert cfg.agent_options_error is not None
     assert "date" in cfg.agent_options_error
@@ -325,6 +396,18 @@ def test_agent_options_rejects_unsupported_objects(tmp_path: Path) -> None:
         # Compact lowercase form (finding round 6)
         ("apikey", "apikey"),
         ("my_apikey", "apikey"),
+        # Plural spellings. These passed this gate *and* the request gate
+        # until both started judging by `korvid.option_keys`, so a profile
+        # could put a credential in the request body as an unknown field.
+        ("api_keys", "api_key"),
+        ("apikeys", "apikey"),
+        ("access_keys", "access_key"),
+        ("secrets", "secret"),
+        ("passwords", "password"),
+        ("credentials", "credential"),
+        ("access_tokens", "token"),
+        ("clientSecrets", "secret"),
+        ("API_KEYS", "api_key"),
     ],
 )
 def test_agent_options_rejects_secret_key_segments(tmp_path: Path, key: str, expected: str) -> None:
@@ -332,6 +415,31 @@ def test_agent_options_rejects_secret_key_segments(tmp_path: Path, key: str, exp
     assert cfg.agent_options == {}
     assert cfg.agent_options_error is not None
     assert expected in cfg.agent_options_error
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "max_tokens",
+        "max_completion_tokens",
+        "token_count",
+        "context_window_tokens",
+        "num_tokens",
+        "token_limit",
+        "prompt_tokens",
+        "monkey",
+    ],
+)
+def test_agent_options_accepts_the_parameters_that_count_tokens(tmp_path: Path, key: str) -> None:
+    """`token` is also the LLM unit of text.
+
+    A blanket `token` segment refused `token_count` while letting the
+    plural `access_tokens` through — exactly backwards. A `token` next to
+    a quantity word is a measurement; anywhere else it is a credential.
+    """
+    cfg = _load_agent_options_config(tmp_path, {key: 1024})
+    assert cfg.agent_options_error is None
+    assert cfg.agent_options == {key: 1024}
 
 
 @pytest.mark.parametrize(
@@ -430,127 +538,15 @@ def test_agent_options_non_ascii_values_accepted(tmp_path: Path) -> None:
     assert cfg.agent_options == {"greeting": "こんにちは"}
 
 
-def test_save_agent_config_creates_file(tmp_path: Path) -> None:
-    p = tmp_path / "sub" / "c.yaml"
-    save_agent_config(
-        p,
-        provider="ollama",
-        auth_method="none",
-        base_url="http://localhost:11434/v1",
-        model="llama3",
-        api_key_env=None,
-    )
-    assert load_config(p).agent_provider == "ollama"
-
-
-def test_save_agent_config_preserves_agent_extension_keys(tmp_path: Path) -> None:
-    p = tmp_path / "c.yaml"
-    p.write_text("agent:\n  provider: ollama\n  custom_note: keepme\n  model: llama3\n")
-    save_agent_config(
-        p,
-        provider="ollama",
-        auth_method="none",
-        base_url="http://localhost:11434/v1",
-        model="llama3",
-        api_key_env=None,
-    )
-    import yaml
-
-    raw = yaml.safe_load(p.read_text())
-    assert raw["agent"]["custom_note"] == "keepme"  # unrelated agent key kept
-
-
-def test_save_agent_config_preserves_agent_options(tmp_path: Path) -> None:
-    p = tmp_path / "c.yaml"
-    p.write_text(
-        yaml.safe_dump(
-            {
-                "agent": {
-                    "provider": "custom-provider",
-                    "model": "cluster-brain",
-                    "options": {
-                        "tenant": "platform",
-                        "scopes": ["read", "write"],
-                        "nested": {"region": "apac"},
-                    },
-                }
-            },
-            sort_keys=False,
-        )
-    )
-    save_agent_config(
-        p,
-        provider="custom-provider",
-        auth_method="none",
-        base_url="https://llm.internal/v1",
-        model="cluster-brain-v2",
-        api_key_env=None,
-    )
-    raw = yaml.safe_load(p.read_text())
-    assert raw["agent"]["options"] == {
-        "tenant": "platform",
-        "scopes": ["read", "write"],
-        "nested": {"region": "apac"},
-    }
-    cfg = load_config(p)
-    assert cfg.agent_options == raw["agent"]["options"]
-    assert cfg.agent_options_error is None
-
-
-def test_save_agent_config_drops_stale_optional_fields(tmp_path: Path) -> None:
-    p = tmp_path / "c.yaml"
-    p.write_text(
-        "agent:\n  provider: openai-compat\n  base_url: https://x/v1\n"
-        "  model: m\n  api_key_env: K\n"
-    )
-    save_agent_config(
-        p,
-        provider="github-copilot",
-        auth_method="device-login",
-        base_url=None,
-        model="gpt-4o",
-        api_key_env=None,
-    )
-    import yaml
-
-    agent = yaml.safe_load(p.read_text())["agent"]
-    assert "base_url" not in agent
-    assert "api_key_env" not in agent
-
-
 def test_scalar_auth_value_does_not_crash(tmp_path: Path) -> None:
     p = tmp_path / "c.yaml"
     p.write_text("agent:\n  provider: ollama\n  model: llama3\n  auth: none\n")
-    cfg = load_config(p)  # must not raise AttributeError
-    assert cfg.agent_auth_method == "none"
+    profile = load_config(p).model_connections.active_profile  # must not raise AttributeError
+    assert profile is not None
+    assert profile.auth.method == "none"
 
 
-def test_backcompat_github_copilot_defaults_to_device_login(tmp_path: Path) -> None:
-    p = tmp_path / "c.yaml"
-    p.write_text("agent:\n  provider: github-copilot\n  model: gpt-4o\n")
-    cfg = load_config(p)
-    assert cfg.agent_auth_method == "device-login"
-
-
-def test_save_agent_config_clears_explicit_disable(tmp_path: Path) -> None:
-    """Completing the wizard is a user-confirmed enable: a stale
-    `agent.enabled: false` must not silently override it after restart."""
-    p = tmp_path / "c.yaml"
-    p.write_text("agent:\n  provider: ollama\n  enabled: false\n  model: llama3\n")
-    save_agent_config(
-        p,
-        provider="ollama",
-        auth_method="none",
-        base_url="http://localhost:11434/v1",
-        model="llama3",
-        api_key_env=None,
-    )
-    import yaml
-
-    assert "enabled" not in yaml.safe_load(p.read_text())["agent"]
-
-
-def test_save_agent_config_interrupted_write_preserves_existing_config(
+def test_saving_profiles_after_an_interrupted_write_preserves_existing_config(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A failure mid-write (disk full / crash) must not truncate the user's
@@ -558,7 +554,11 @@ def test_save_agent_config_interrupted_write_preserves_existing_config(
     import korvid.core.config as cfg_mod
 
     p = tmp_path / "c.yaml"
-    p.write_text("keybindings:\n  q: quit\nagent:\n  provider: ollama\n  model: llama3\n")
+    p.write_text(
+        "keybindings:\n  q: quit\nagent:\n  active: main\n"
+        "  profiles:\n    main:\n      model: openai/gpt-4o\n"
+    )
+    before = load_config(p)
 
     def failing_fsync(fd: int) -> None:
         raise OSError("disk full")
@@ -566,20 +566,14 @@ def test_save_agent_config_interrupted_write_preserves_existing_config(
     with monkeypatch.context() as m:
         m.setattr(cfg_mod, "os_fsync", failing_fsync)
         with pytest.raises(OSError, match="disk full"):
-            save_agent_config(
-                p,
-                provider="openai",
-                auth_method="api-key",
-                base_url=None,
-                model="gpt-4o",
-                api_key_env="OPENAI_API_KEY",
-            )
+            save_model_connections(p, ModelConnectionsConfig())
+
     cfg = load_config(p)  # must still parse as the pre-save configuration
     assert cfg.keybindings == {"q": "quit"}
-    assert cfg.agent_provider == "ollama"
+    assert set(cfg.model_connections.profiles) == set(before.model_connections.profiles)
 
 
-def test_save_agent_config_preserves_restrictive_file_mode(tmp_path: Path) -> None:
+def test_saving_profiles_preserves_restrictive_file_mode(tmp_path: Path) -> None:
     """Atomic replacement must not widen an existing 0600 config to the
     umask-derived default, exposing preserved values.
 
@@ -593,18 +587,12 @@ def test_save_agent_config_preserves_restrictive_file_mode(tmp_path: Path) -> No
     import korvid.core.config as cfg_mod
 
     p = tmp_path / "c.yaml"
-    p.write_text("agent:\n  provider: ollama\n  model: llama3\n")
+    p.write_text("agent:\n  active: main\n  profiles:\n    main:\n      model: openai/gpt-4o\n")
     os.chmod(p, 0o600)
+    profiles = load_config(p).model_connections
 
     if POSIX:
-        save_agent_config(
-            p,
-            provider="ollama",
-            auth_method="none",
-            base_url=None,
-            model="llama3",
-            api_key_env=None,
-        )
+        save_model_connections(p, profiles)
         assert stat.S_IMODE(p.stat().st_mode) == 0o600
     else:
         # Windows: stat mode doesn't reflect POSIX bits; spy on os.chmod
@@ -619,40 +607,11 @@ def test_save_agent_config_preserves_restrictive_file_mode(tmp_path: Path) -> No
         from unittest.mock import patch
 
         with patch.object(cfg_mod, "os_chmod", spy_chmod):
-            save_agent_config(
-                p,
-                provider="ollama",
-                auth_method="none",
-                base_url=None,
-                model="llama3",
-                api_key_env=None,
-            )
+            save_model_connections(p, profiles)
         assert any(mode == 0o600 for _, mode in chmod_calls)
 
 
-def test_save_agent_config_preserves_auth_extension_keys(tmp_path: Path) -> None:
-    """The read-modify-write contract applies to nested `agent.auth` too:
-    only `method` is managed, unrelated auth keys must survive."""
-    import yaml
-
-    p = tmp_path / "c.yaml"
-    p.write_text(
-        "agent:\n  provider: ollama\n  model: llama3\n  auth:\n    method: none\n    tenant_id: contoso\n"
-    )
-    save_agent_config(
-        p,
-        provider="ollama",
-        auth_method="api-key",
-        base_url=None,
-        model="llama3",
-        api_key_env="MY_KEY",
-    )
-    auth = yaml.safe_load(p.read_text())["agent"]["auth"]
-    assert auth["method"] == "api-key"
-    assert auth["tenant_id"] == "contoso"
-
-
-def test_save_agent_config_fsyncs_before_replace(
+def test_saving_profiles_fsyncs_before_replace(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Data must reach disk before the rename, or a power loss can leave an
@@ -681,31 +640,17 @@ def test_save_agent_config_fsyncs_before_replace(
     with monkeypatch.context() as m:
         m.setattr(cfg_mod, "os_fsync", spy_fsync)
         m.setattr(cfg_mod, "os_replace", spy_replace)
-        save_agent_config(
-            tmp_path / "c.yaml",
-            provider="ollama",
-            auth_method="none",
-            base_url=None,
-            model="llama3",
-            api_key_env=None,
-        )
+        save_model_connections(tmp_path / "c.yaml", ModelConnectionsConfig())
     assert calls == ["fsync", "replace"]
 
 
-def test_save_agent_config_does_not_clobber_foreign_tmp(tmp_path: Path) -> None:
+def test_saving_profiles_does_not_clobber_foreign_tmp(tmp_path: Path) -> None:
     """The temp file name must be unique so two concurrent processes cannot
     race on (and delete) each other's temp file."""
     p = tmp_path / "c.yaml"
     foreign = tmp_path / "c.yaml.tmp"
     foreign.write_text("owned by another process")
-    save_agent_config(
-        p,
-        provider="ollama",
-        auth_method="none",
-        base_url=None,
-        model="llama3",
-        api_key_env=None,
-    )
+    save_model_connections(p, ModelConnectionsConfig())
     assert foreign.read_text() == "owned by another process"
 
 
@@ -873,142 +818,6 @@ def test_node_shell_non_string_values_ignored(tmp_path: Path) -> None:
     cfg = load_config(f)
     assert cfg.node_shell_image is None
     assert cfg.node_shell_namespace is None
-
-
-def test_ollama_options_parsed(tmp_path: Path) -> None:
-    p = tmp_path / "config.yaml"
-    p.write_text(
-        "agent:\n  provider: ollama\n  ollama:\n"
-        "    num_ctx: 32768\n    temperature: 0.7\n    seed: 42\n"
-        "    think: true\n    keep_alive: 10m\n"
-    )
-    cfg = load_config(p)
-    assert cfg.agent_ollama_num_ctx == 32768
-    assert cfg.agent_ollama_temperature == 0.7
-    assert cfg.agent_ollama_seed == 42
-    assert cfg.agent_ollama_think is True
-    assert cfg.agent_ollama_keep_alive == "10m"
-
-
-def test_ollama_invalid_values_fall_back(tmp_path: Path) -> None:
-    p = tmp_path / "config.yaml"
-    p.write_text(
-        "agent:\n  provider: ollama\n  ollama:\n"
-        "    num_ctx: -5\n    temperature: hot\n    seed: [1]\n"
-        "    think: yes please\n    keep_alive: {}\n"
-    )
-    cfg = load_config(p)
-    assert cfg.agent_ollama_num_ctx == 16384
-    assert cfg.agent_ollama_temperature == 0.0
-    assert cfg.agent_ollama_seed is None
-    assert cfg.agent_ollama_think is False
-    assert cfg.agent_ollama_keep_alive is None
-
-
-def test_ollama_keep_alive_accepts_integer_seconds(tmp_path: Path) -> None:
-    p = tmp_path / "config.yaml"
-    p.write_text("agent:\n  provider: ollama\n  ollama:\n    keep_alive: 300\n")
-    cfg = load_config(p)
-    assert cfg.agent_ollama_keep_alive == 300
-
-
-def test_ollama_non_mapping_section_is_ignored(tmp_path: Path) -> None:
-    p = tmp_path / "config.yaml"
-    p.write_text("agent:\n  provider: ollama\n  ollama: not-a-mapping\n")
-    cfg = load_config(p)
-    assert cfg.agent_ollama_num_ctx == 16384
-    assert cfg.agent_ollama_think is False
-
-
-def test_ollama_inf_and_overflow_values_fall_back(tmp_path: Path) -> None:
-    p = tmp_path / "config.yaml"
-    huge = str(10**400)
-    p.write_text(
-        f"agent:\n  provider: ollama\n  ollama:\n    num_ctx: .inf\n    temperature: {huge}\n"
-        "    seed: .inf\n"
-    )
-    cfg = load_config(p)
-    assert cfg.agent_ollama_num_ctx == 16384
-    assert cfg.agent_ollama_temperature == 0.0
-    assert cfg.agent_ollama_seed is None
-
-
-def test_ollama_seed_zero_is_valid(tmp_path: Path) -> None:
-    p = tmp_path / "config.yaml"
-    p.write_text("agent:\n  provider: ollama\n  ollama:\n    seed: 0\n")
-    cfg = load_config(p)
-    assert cfg.agent_ollama_seed == 0
-
-
-def test_ollama_negative_seed_falls_back(tmp_path: Path) -> None:
-    p = tmp_path / "config.yaml"
-    p.write_text("agent:\n  provider: ollama\n  ollama:\n    seed: -1\n")
-    cfg = load_config(p)
-    assert cfg.agent_ollama_seed is None
-
-
-def test_ollama_num_predict_invalid_falls_back(tmp_path: Path) -> None:
-    p = tmp_path / "config.yaml"
-    p.write_text("agent:\n  provider: ollama\n  ollama:\n    num_predict: -10\n")
-    cfg = load_config(p)
-    assert cfg.agent_ollama_num_predict is None
-    assert any("num_predict" in w for w in cfg.warnings), cfg.warnings
-
-
-def test_ollama_num_predict_zero_falls_back_with_warning(tmp_path: Path) -> None:
-    p = tmp_path / "config.yaml"
-    p.write_text("agent:\n  provider: ollama\n  ollama:\n    num_predict: 0\n")
-    cfg = load_config(p)
-    assert cfg.agent_ollama_num_predict is None
-    assert any("num_predict" in w for w in cfg.warnings), cfg.warnings
-
-
-def test_ollama_num_predict_bool_falls_back_with_warning(tmp_path: Path) -> None:
-    """`true`/`false` are Python `bool`, a stealth `int` subclass — a YAML
-    author who typos a boolean here must not silently get `num_predict=1`."""
-    p = tmp_path / "config.yaml"
-    p.write_text("agent:\n  provider: ollama\n  ollama:\n    num_predict: true\n")
-    cfg = load_config(p)
-    assert cfg.agent_ollama_num_predict is None
-    assert any("num_predict" in w for w in cfg.warnings), cfg.warnings
-
-
-def test_ollama_num_predict_float_falls_back_with_warning(tmp_path: Path) -> None:
-    """Unlike `num_ctx`'s permissive parser, `num_predict` must reject a
-    fractional value outright instead of silently truncating it — even
-    when the fraction is small enough that truncation would look sane."""
-    p = tmp_path / "config.yaml"
-    p.write_text("agent:\n  provider: ollama\n  ollama:\n    num_predict: 1.9\n")
-    cfg = load_config(p)
-    assert cfg.agent_ollama_num_predict is None
-    assert any("num_predict" in w for w in cfg.warnings), cfg.warnings
-
-
-def test_ollama_num_predict_numeric_string_falls_back_with_warning(tmp_path: Path) -> None:
-    """`num_ctx` accepts a numeric string for legacy compatibility;
-    `num_predict` is a new, stricter contract and must not."""
-    p = tmp_path / "config.yaml"
-    p.write_text('agent:\n  provider: ollama\n  ollama:\n    num_predict: "192"\n')
-    cfg = load_config(p)
-    assert cfg.agent_ollama_num_predict is None
-    assert any("num_predict" in w for w in cfg.warnings), cfg.warnings
-
-
-def test_ollama_num_predict_valid_value_has_no_warning(tmp_path: Path) -> None:
-    p = tmp_path / "config.yaml"
-    p.write_text("agent:\n  provider: ollama\n  ollama:\n    num_predict: 192\n")
-    cfg = load_config(p)
-    assert cfg.agent_ollama_num_predict == 192
-    assert not any("num_predict" in w for w in cfg.warnings), cfg.warnings
-
-
-def test_ollama_num_ctx_still_accepts_a_numeric_string(tmp_path: Path) -> None:
-    """`num_ctx` keeps its existing permissive (`_parse_positive_int`)
-    behavior unchanged — only `num_predict` gets the stricter parser."""
-    p = tmp_path / "config.yaml"
-    p.write_text('agent:\n  provider: ollama\n  ollama:\n    num_ctx: "8192"\n')
-    cfg = load_config(p)
-    assert cfg.agent_ollama_num_ctx == 8192
 
 
 # ---------------------------------------------------------------------------
@@ -1452,72 +1261,6 @@ def test_agent_rules_non_list_value_warns_and_is_empty(tmp_path: Path) -> None:
     assert any("agent.rules" in w for w in cfg.warnings), cfg.warnings
 
 
-def test_save_agent_config_writes_an_explicit_low_tier(tmp_path: Path) -> None:
-    """An explicit tier override must survive a restart."""
-    p = tmp_path / "c.yaml"
-    save_agent_config(
-        p,
-        provider="ollama",
-        auth_method="none",
-        base_url="http://localhost:11434",
-        model="qwen3:8b",
-        api_key_env=None,
-        model_tier="low",
-    )
-    assert load_config(p).agent_model_tier == "low"
-    assert "model_tier: low" in p.read_text()
-
-
-def test_save_agent_config_removes_tier_for_automatic_routing(tmp_path: Path) -> None:
-    """Saving with `model_tier=None` (Automatic) must pop any previously
-    persisted override — reopening the wizard and choosing Automatic must
-    actually clear it, not leave a stale explicit choice in place."""
-    p = tmp_path / "c.yaml"
-    p.write_text("agent:\n  provider: ollama\n  model: qwen3:8b\n  model_tier: low\n")
-    save_agent_config(
-        p,
-        provider="ollama",
-        auth_method="none",
-        base_url="http://localhost:11434",
-        model="qwen3:8b",
-        api_key_env=None,
-        model_tier=None,
-    )
-    assert load_config(p).agent_model_tier is None
-    assert "model_tier" not in p.read_text()
-
-
-def test_save_agent_config_preserves_unrelated_keys_and_rules(tmp_path: Path) -> None:
-    """`save_agent_config` only manages tier/provider/model/auth/base_url/
-    api_key_env — `agent.rules` and any other unrelated keys must survive
-    the read-modify-write untouched."""
-    p = tmp_path / "c.yaml"
-    p.write_text(
-        "namespace: prod\n"
-        "agent:\n"
-        "  provider: ollama\n"
-        "  model: qwen3:8b\n"
-        "  follow: false\n"
-        "  rules:\n"
-        "    - Prefer workload owner evidence.\n"
-    )
-    save_agent_config(
-        p,
-        provider="ollama",
-        auth_method="none",
-        base_url="http://localhost:11434",
-        model="qwen3:14b",
-        api_key_env=None,
-        model_tier="high",
-    )
-    cfg = load_config(p)
-    assert cfg.namespace == "prod"
-    assert cfg.agent_follow is False
-    assert cfg.agent_rules == ("Prefer workload owner evidence.",)
-    assert cfg.agent_model_tier == "high"
-    assert cfg.agent_model == "qwen3:14b"
-
-
 # ---------------------------------------------------------------------------
 # Protected contexts (issue #83)
 # ---------------------------------------------------------------------------
@@ -1608,9 +1351,135 @@ def test_network_section_tolerates_non_mapping(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("provider", ["github_copilot", "GitHub.Copilot"])
 def test_provider_name_canonicalized_at_load(tmp_path: Path, provider: str) -> None:
-    """Config accepts documented underscore and dotted provider spellings."""
+    """Migration canonicalizes the documented legacy spellings, so the profile
+    it writes carries the reference prefix the flow registry claims."""
     f = tmp_path / "config.yaml"
     f.write_text(f"agent:\n  provider: {provider}\n  model: gpt-4o\n")
-    cfg = load_config(f)
-    assert cfg.agent_provider == "github-copilot"
-    assert cfg.agent_auth_method == "device-login"
+    profile = load_config(f).model_connections.active_profile
+    assert profile is not None
+    assert profile.model == "github-copilot/gpt-4o"
+    assert profile.auth.method == "device-login"
+
+
+def test_bounded_options_accept_a_previously_frozen_tuple_value() -> None:
+    from korvid.core.config import _parse_bounded_options
+
+    parsed, error = _parse_bounded_options({"stop": ("a", "b")}, root="options")
+    assert error is None
+    assert parsed == {"stop": ["a", "b"]}
+
+
+def test_bounded_options_refuse_an_inline_secret_key() -> None:
+    from korvid.core.config import _parse_bounded_options
+
+    parsed, error = _parse_bounded_options({"api_key": "sk-inline"}, root="auth")
+    assert parsed == {}
+    assert error is not None
+    assert "sk-inline" not in error
+
+
+def test_bounded_options_name_the_caller_s_root_in_limit_messages() -> None:
+    from korvid.core.config import _parse_bounded_options
+
+    _parsed, error = _parse_bounded_options(
+        {str(index): index for index in range(65)}, root="agent.profiles[local].options"
+    )
+    assert error is not None
+    assert error.startswith("agent.profiles[local].options")
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param({1: "x"}, id="non-string-key"),
+        pytest.param({str(index): index for index in range(65)}, id="mapping-keys"),
+        pytest.param({"stop": list(range(65))}, id="list-items"),
+    ],
+)
+def test_no_bounded_options_message_hardcodes_the_agent_options_root(
+    value: dict[object, object],
+) -> None:
+    """The three messages that used to spell `agent.options` by hand.
+
+    Each of them is reachable only through a different branch, so one
+    parametrized case per branch is what proves the constant is gone
+    rather than moved.
+    """
+    from korvid.core.config import _parse_bounded_options
+
+    _parsed, error = _parse_bounded_options(value, root="agent.profiles[local].auth")
+    assert error is not None
+    assert error.startswith("agent.profiles[local].auth")
+    assert "agent.options" not in error
+
+
+# ---------------------------------------------------------------------------
+# `agent.model_search.models_dev` — the permanent kill switch (Task 19)
+# ---------------------------------------------------------------------------
+
+
+def test_models_dev_enrichment_is_on_when_the_key_is_absent(tmp_path: Path) -> None:
+    """Zero config keeps the optional layer available; nothing is fetched
+    until the operator explicitly asks for it."""
+    path = write_config(tmp_path, "agent:\n  active: null\n")
+    cfg = load_config(path)
+    assert cfg.agent_model_search_models_dev is True
+    assert cfg.warnings == ()
+
+
+def test_models_dev_can_be_disabled_permanently(tmp_path: Path) -> None:
+    path = write_config(tmp_path, "agent:\n  model_search:\n    models_dev: false\n")
+    cfg = load_config(path)
+    assert cfg.agent_model_search_models_dev is False
+    assert cfg.warnings == ()
+
+
+def test_models_dev_true_is_accepted_explicitly(tmp_path: Path) -> None:
+    path = write_config(tmp_path, "agent:\n  model_search:\n    models_dev: true\n")
+    cfg = load_config(path)
+    assert cfg.agent_model_search_models_dev is True
+    assert cfg.warnings == ()
+
+
+@pytest.mark.parametrize("value", ["'false'", "'no'", "0", "[]", "null"])
+def test_an_uninterpretable_models_dev_value_fails_closed_with_a_warning(
+    tmp_path: Path, value: str
+) -> None:
+    """A present value korvid cannot read is still a restriction attempt.
+
+    The parse is strict — no truthiness — and it fails *closed*, exactly
+    like `debug.images`: an air-gapped operator who wrote `models_dev:
+    'false'` must not have the outbound fetch silently re-enabled by a
+    quoting mistake.
+    """
+    path = write_config(tmp_path, f"agent:\n  model_search:\n    models_dev: {value}\n")
+    cfg = load_config(path)
+    assert cfg.agent_model_search_models_dev is False
+    assert any("agent.model_search.models_dev" in w for w in cfg.warnings), cfg.warnings
+
+
+def test_a_non_mapping_model_search_block_warns_and_keeps_the_default(tmp_path: Path) -> None:
+    """The block names no key, so there is no restriction to honour — but
+    the operator wrote something korvid ignored, and silence would hide it."""
+    path = write_config(tmp_path, "agent:\n  model_search: nope\n")
+    cfg = load_config(path)
+    assert cfg.agent_model_search_models_dev is True
+    assert any("agent.model_search" in w for w in cfg.warnings), cfg.warnings
+
+
+def test_saving_profiles_preserves_the_model_search_block(tmp_path: Path) -> None:
+    """The wizard writes `agent.active`/`agent.profiles` and nothing else:
+    a save must never silently re-enable a disabled outbound fetch."""
+    path = write_config(
+        tmp_path,
+        "agent:\n  model_search:\n    models_dev: false\n  active: null\n  profiles: {}\n",
+    )
+    save_model_connections(
+        path,
+        ModelConnectionsConfig(
+            active="default", profiles={"default": ModelConnectionConfig(model="openai/gpt-4o")}
+        ),
+    )
+    raw = yaml.safe_load(path.read_text())
+    assert raw["agent"]["model_search"] == {"models_dev": False}
+    assert load_config(path).agent_model_search_models_dev is False

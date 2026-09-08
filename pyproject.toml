@@ -38,6 +38,24 @@ dependencies = [
 [project.scripts]
 korvid = "korvid.cli:main"
 
+# korvid's own special flows, published on the same extension point a
+# third-party flow uses. Each entry point is named for the reference
+# prefix its flow declares — the registry resolves a claim by name
+# without importing anything, so the two must match exactly.
+[project.entry-points."korvid.provider"]
+github-copilot = "korvid.providers.flow_copilot"
+ollama = "korvid.providers.flow_ollama_thinking"
+
+# Credential chains `auth.method: provider-default` resolves through,
+# published on the extension point a third-party chain uses. Named for
+# the reference prefix the declaration covers, for the same reason the
+# group above is: the registry resolves by name without importing
+# anything, so the two must match exactly. A chain contributes call
+# parameters to every request under its prefix, so a reserved name is
+# refused to every distribution but korvid's own.
+[project.entry-points."korvid.credential"]
+azure = "korvid.providers.entra"
+
 # PyPI builds the project page's sidebar from these. Without them a stranger
 # deciding whether to trust the package has nowhere to click.
 [project.urls]
@@ -51,6 +69,10 @@ Security = "https://github.com/hellices/korvid/blob/main/SECURITY.md"
 [project.optional-dependencies]
 # Embedded AI agent: provider HTTP adapters + OS-keychain credential storage.
 agent = [
+    "litellm==1.98.0",
+    # Imported directly by providers/litellm_runtime.py for ProviderSDKError,
+    # so declared directly even though litellm already pulls it in.
+    "openai>=2.20.0,<3.0.0",
     "httpx>=0.27",
     "keyring>=25.7.0",
 ]
@@ -135,6 +157,10 @@ warn_unused_ignores = true
 mypy_path = "src"
 files = ["src", "tests"]
 
+[[tool.mypy.overrides]]
+module = ["litellm.*"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 addopts = "--strict-markers --tb=short"
@@ -170,6 +196,7 @@ known_first_party = ["korvid"]
 
 [tool.deptry.per_rule_ignores]
 # The [all] extra references the project's own extras (korvid[agent,mcp]).
+# `korvid` itself is declared for the console-script entry point.
 DEP002 = ["korvid"]
 
 [tool.deptry.package_module_name_map]

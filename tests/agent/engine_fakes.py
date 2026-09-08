@@ -57,6 +57,11 @@ def text_delta(text: str) -> dict[str, Any]:
     return {"type": "text_delta", "text": text}
 
 
+def reasoning(text: str) -> dict[str, Any]:
+    """One streamed chain-of-thought chunk, kept out of the transcript."""
+    return {"type": "reasoning", "text": text}
+
+
 def tool_call(call_id: str, name: str, arguments: str = "{}") -> dict[str, Any]:
     """One streamed tool call."""
     return {"type": "tool_call", "id": call_id, "name": name, "arguments": arguments}

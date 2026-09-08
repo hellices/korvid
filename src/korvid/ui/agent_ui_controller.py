@@ -4,8 +4,8 @@
 live directly on `KorvidApp`:
 
 - the session state — session, model, settings, the configured model tier
-  the wizard and `:model` rebuild from, the configurator/rebuild/disconnect
-  seams, the `:ai off` disconnect marker and the follow flag;
+  the wizard and `:model` rebuild from, the rebuild/disconnect seams, the
+  `:ai off` disconnect marker and the follow flag;
 - the turn lifecycle — the bare app-loop task, its cancellation, the
   interrupt-and-submit replacement queue, the finalization of an interrupted
   turn, and the shutdown drain;
@@ -51,10 +51,23 @@ from korvid.agent.events import (
 )
 from korvid.agent.install_hint import isolated_install_hint
 from korvid.agent.interaction import PaneContext, ResourceIdentity
+from korvid.agent.model_profiles import (
+    ModelCatalog,
+    ModelConnectionConfig,
+    ModelConnectionsConfig,
+    split_reference,
+    suggest_profile_name,
+)
 from korvid.agent.navigation import EvidenceTarget, target_for
-from korvid.agent.setup import AgentConfigurator, AgentSettings
 from korvid.core.audit import AuditLog
-from korvid.core.config import KorvidConfig
+from korvid.core.config import (
+    KEEP_MODEL_TIER,
+    LEGACY_PROFILE_NAME,
+    MODEL_REFERENCE_SEPARATOR,
+    KorvidConfig,
+    ModelConnectionsWriter,
+    ModelTierWrite,
+)
 from korvid.core.errors import explain_api_error
 from korvid.core.impact import ImpactAction
 from korvid.core.portforward import OWNER_CHAIN_PLURALS, controller_owner
@@ -74,10 +87,11 @@ from korvid.ui.resize_impact_preview import compose_resize_impact_lines
 from korvid.ui.resource_write_controller import RESTARTABLE, SCALABLE, resize_summary
 from korvid.ui.ui_surface import UiSurface
 from korvid.ui.view_state import ViewState
-from korvid.ui.widgets.agent_setup_screen import AgentSetupScreen
+from korvid.ui.widgets.agent_setup_screen import AgentSetupScreen, SetupResult
 from korvid.ui.widgets.describe_screen import DescribeScreen, provider_footer_note
 from korvid.ui.widgets.log_pane import MAX_PANELS
 from korvid.ui.widgets.payload_inspector import PayloadInspectorScreen
+from korvid.ui.widgets.profile_manager_screen import ProfileManagerResult, ProfileManagerScreen
 from korvid.ui.workspace_controller import ContextGuard
 from korvid.ui.workspace_state import WorkspaceState, filtered_rows
 from korvid.ui.write_coordinator import WriteCoordinator, gvr_label, write_locus
@@ -114,6 +128,24 @@ WriteOpBuild = tuple[ResourceMeta, str | None, Callable[[str | None], Awaitable[
 
 #: A (namespace, pod, container) log target.
 Triple = tuple[str, str, str]
+
+
+def _model_reference(argument: str, current: str) -> str:
+    """The model reference `:model <argument>` means.
+
+    A bare tag keeps the profile's provider prefix — `:model gpt-4o` is a
+    model change, not a vendor change, and dropping the prefix would leave
+    a reference nothing can be built from. An argument that names its own
+    provider is taken verbatim, which is how `:model` moves a profile
+    between vendors deliberately.
+    """
+    prefix, _tag = split_reference(argument)
+    if prefix:
+        return argument
+    current_prefix, _current_tag = split_reference(current)
+    if not current_prefix:
+        return argument
+    return f"{current_prefix}{MODEL_REFERENCE_SEPARATOR}{argument}"
 
 
 async def _aclose(iterator: object) -> None:
@@ -486,10 +518,16 @@ class AgentUiController:
         tasks: TurnTasks | None = None,
         session: AgentSession | None = None,
         model_name: str | None = None,
-        configurator: AgentConfigurator | None = None,
-        rebuild: Callable[[AgentSettings], AgentSession | None] | None = None,
+        rebuild: Callable[[ModelConnectionConfig, str | None], AgentSession | None] | None = None,
         disconnect: Callable[[], None] | None = None,
         available: bool = True,
+        #: Answers every question the profile screens ask. None when the
+        #: [agent] extra is absent (issue #73): `:ai` then reports the
+        #: install hint instead of opening a wizard it cannot drive.
+        catalog: ModelCatalog | None = None,
+        #: Writes `agent.active`/`agent.profiles`. Injected by the
+        #: composition root, which owns every path korvid writes to.
+        save_profiles: ModelConnectionsWriter | None = None,
     ) -> None:
         self._panel = panel
         self._screens = screens
@@ -523,8 +561,9 @@ class AgentUiController:
         #: run on the way down.
         self._session_closed = False
         self._model_name = session.policy.model.model if session is not None else model_name
-        self._configurator = configurator
         self._rebuild = rebuild
+        self._catalog = catalog
+        self._save_profiles = save_profiles
         #: Releases the live provider on `:ai off` (issue #167) — session
         #: state only; persisted configuration is untouched.
         self._disconnect = disconnect
@@ -532,28 +571,18 @@ class AgentUiController:
         #: panel is not mounted and :ai/:model/Ctrl-A are not offered.
         self._available = available
         settings = config()
-        self._settings: AgentSettings | None = None
         #: model tier as explicitly configured (None = Automatic) — seeds
         #: the `:ai` wizard's tier step and `:model` rebuilds so an
         #: explicit low/high override survives across them.
         self._configured_tier = settings.agent_model_tier
-        # config.yaml naming a provider and a model is enough to seed the
-        # settings snapshot, whether or not the composition root managed to
-        # build a session from it. A startup that degraded (a provider the
-        # router refuses, say `supports_tools=False`) still has to be
-        # recoverable with a single `:model <name>` — and reconnect and the
-        # `:ai` wizard have to open on what is configured — instead of
-        # asking the operator to retype a configuration korvid already has.
-        if settings.agent_provider and settings.agent_model:
-            self._settings = AgentSettings(
-                provider=settings.agent_provider,
-                auth_method=settings.agent_auth_method or "none",
-                base_url=settings.agent_base_url,
-                model=settings.agent_model,
-                api_key_env=settings.agent_api_key_env,
-                model_tier=settings.agent_model_tier,
-                options=settings.agent_options,
-            )
+        #: The profile set as korvid last read or wrote it, including the
+        #: `unparsed` entries: every save round-trips them, so activating
+        #: one profile can never delete another the operator must repair.
+        self._profiles = settings.model_connections
+        #: The wizard result its own save hook already wrote. The dismiss
+        #: callback is the safety net for wizards that never reached the
+        #: hook, so it skips this one instead of filing a duplicate.
+        self._saved_setup_result: SetupResult | None = None
         #: Agent follow: mirror the built-in agent's cluster reads on screen
         #: — small models rarely volunteer the UI tools, so without this the
         #: screen sits idle while the agent reads "behind its back". Config
@@ -601,9 +630,14 @@ class AgentUiController:
         return self._configured_tier
 
     @property
-    def settings(self) -> AgentSettings | None:
-        """The settings snapshot `:model` edits, or None when unconfigured."""
-        return self._settings
+    def profiles(self) -> ModelConnectionsConfig:
+        """The profile set as korvid last read or wrote it."""
+        return self._profiles
+
+    @property
+    def active_profile(self) -> str | None:
+        """Name of the profile the agent is connected through, if any."""
+        return self._profiles.active
 
     @property
     def follow_enabled(self) -> bool:
@@ -735,23 +769,234 @@ class AgentUiController:
         self._ui.notify("Agent disconnected — run :ai to reconnect")
 
     def _open_setup(self) -> None:
-        if self._configurator is None:
+        """`:ai` — the profile manager when profiles exist, setup otherwise.
+
+        A first run has nothing to list, so it opens the wizard directly
+        rather than showing an empty list with nothing to pick. `names`
+        rather than `unparsed` decides: an entry filed under a key that is
+        not a name (`1:`) is not listable, and it survives the wizard's
+        save either way, which rebuilds the set with `replace`.
+        """
+        catalog = self._catalog
+        if catalog is None:
             self._ui.notify(
                 f"Agent setup unavailable — {isolated_install_hint(feature='agent')}",
                 severity="warning",
                 markup=False,
             )
             return
-        # The wizard applies the settings itself (via apply_settings) before
-        # persisting, so a refused swap keeps the wizard open and unsaved.
-        self._ui.push_screen(
-            AgentSetupScreen(
-                self._configurator,
-                apply_settings=self.apply_settings,
-                current_tier=self._configured_tier,
-                current_settings=self._settings,
+        if self._profiles.names:
+            self._ui.push_screen(
+                ProfileManagerScreen(
+                    self._profiles,
+                    catalog,
+                    self._edit_profile,
+                    current_tier=self._configured_tier,
+                ),
+                callback=self._handle_manager_result,
             )
+            return
+        # Nothing configured at all: the wizard collects every answer.
+        self._ui.push_screen(
+            self._setup_screen(
+                None,
+                ask_tier=True,
+                apply_result=self._apply_result,
+                save_result=self._save_setup_result,
+            ),
+            callback=self._handle_setup_result,
         )
+
+    def _setup_screen(
+        self,
+        profile: ModelConnectionConfig | None,
+        *,
+        ask_tier: bool = False,
+        apply_result: Callable[[SetupResult], bool] | None = None,
+        save_result: Callable[[SetupResult], Awaitable[None]] | None = None,
+    ) -> AgentSetupScreen:
+        """The wizard. Persistence is the controller's, not the screen's:
+        the wizard produces one profile, the controller decides where it
+        lands in the set it round-trips."""
+        catalog = self._catalog
+        if catalog is None:  # pragma: no cover - every caller checks first
+            raise RuntimeError("the model catalog is not wired")
+        return AgentSetupScreen(
+            catalog,
+            profile=profile,
+            current_tier=self._configured_tier,
+            ask_tier=ask_tier,
+            apply_result=apply_result,
+            save_result=save_result,
+        )
+
+    async def _edit_profile(
+        self, profile: ModelConnectionConfig | None
+    ) -> ModelConnectionConfig | None:
+        """The editor the profile manager opens for add/edit.
+
+        No apply: an edited profile is not the active one until the
+        operator activates it, and the tier it collected stays a draft —
+        `self._configured_tier` is the persisted choice.
+        """
+        if self._catalog is None:
+            return None
+        result = await self._push_setup(profile)
+        return None if result is None else result.profile
+
+    async def _push_setup(self, profile: ModelConnectionConfig | None) -> SetupResult | None:
+        loop = asyncio.get_running_loop()
+        done: asyncio.Future[SetupResult | None] = loop.create_future()
+
+        def _finished(result: SetupResult | None) -> None:
+            if not done.done():
+                done.set_result(result)
+
+        self._ui.push_screen(self._setup_screen(profile), callback=_finished)
+        return await done
+
+    def _apply_result(self, result: SetupResult) -> bool:
+        """Swap the runtime onto a wizard result, or refuse and say why."""
+        return self.apply_profile(result.profile, result.model_tier)
+
+    def _handle_setup_result(self, result: SetupResult | None) -> None:
+        """A completed first-run wizard: name the profile and persist it.
+
+        The wizard's own save hook normally wrote it already — this is the
+        safety net for a wizard dismissed by some other path, so it skips
+        the result the hook has just persisted rather than filing a second,
+        duplicate profile beside it.
+        """
+        if result is None:
+            return
+        if result is self._saved_setup_result:
+            return
+        self._persist_profiles(self._profile_entry(result), model_tier=result.model_tier)
+
+    def _profile_entry(self, result: SetupResult) -> ModelConnectionsConfig:
+        """Place a wizard result in the set as the active profile.
+
+        Built with `replace` so everything else the file round-trips —
+        `unparsed` included — survives.
+        """
+        taken = self._profiles.names
+        name = suggest_profile_name(result.profile.model, taken)
+        profiles = dict(self._profiles.profiles)
+        profiles[name] = result.profile
+        return dataclasses.replace(self._profiles, active=name, profiles=profiles)
+
+    async def _save_setup_result(self, result: SetupResult) -> None:
+        """Persist a wizard result from inside the wizard.
+
+        Raises rather than reports: the screen is still mounted and turns
+        the failure into a visible "will revert on restart" warning that
+        keeps the operator's answers on screen. Swallowing it here would
+        dismiss the wizard on a lie.
+        """
+        entry = self._profile_entry(result)
+        # The tier the wizard just asked about rides along in the same
+        # write: two writers cannot agree, and a tier applied to the live
+        # session but never persisted is silently lost at the next start.
+        self._write_profiles(entry, model_tier=result.model_tier)
+        self._profiles = entry
+        self._saved_setup_result = result
+
+    def _handle_manager_result(self, result: ProfileManagerResult | None) -> None:
+        if result is None:
+            return
+        if result.tier_changed:
+            self._apply_tier_choice(result.model_tier)
+            return
+        if result.activated is not None:
+            self._activate_profile(result.activated)
+            return
+        if result.edited is not None:
+            self._persist_profiles(result.edited)
+
+    def _apply_tier_choice(self, model_tier: str | None) -> None:
+        """Persist the global capability tier, alone.
+
+        The profiles handed to the writer are the ones already round-
+        tripped: the tier and the profile set share one write so they
+        cannot disagree, and reusing the current set is what keeps a tier
+        decision from smuggling a profile edit in with it.
+
+        Nothing is rebuilt. The tier is routing configuration rather than
+        a connection, so a change here does not justify tearing down a
+        working provider mid-session; it reaches the agent at the next
+        profile activation or restart, which is what the notification
+        says. `_configured_tier` moves only once the write succeeded —
+        adopting it regardless would report a tier the next start does
+        not have.
+        """
+        if not self._persist_profiles(self._profiles, model_tier=model_tier):
+            return  # _persist_profiles already notified the reason
+        self._configured_tier = model_tier
+        label = model_tier if model_tier is not None else "automatic"
+        self._ui.notify(
+            f"Agent capability tier set to {label} — applies from the next connection",
+            markup=False,
+        )
+
+    def _activate_profile(self, name: str) -> None:
+        """Build, apply, *then* persist the pointer — never the other way.
+
+        A profile that cannot build a provider must leave both the live
+        session and the persisted `agent.active` exactly as they were.
+        """
+        profile = self._profiles.profiles.get(name)
+        if profile is None:
+            self._ui.notify(f"No profile named {name!r}", severity="warning", markup=False)
+            return
+        if profile.config_error is not None:
+            # Never handed to the factory: connecting with silently
+            # discarded settings is worse than refusing to connect.
+            self._ui.notify(
+                f"Profile {name!r} is invalid: {profile.config_error}",
+                severity="warning",
+                markup=False,
+            )
+            return
+        if not self.apply_profile(profile, self._configured_tier):
+            return  # apply_profile already notified the reason
+        if self._persist_profiles(dataclasses.replace(self._profiles, active=name)):
+            self._ui.notify(f"Agent profile {name!r} activated", markup=False)
+
+    def _persist_profiles(
+        self, profiles: ModelConnectionsConfig, *, model_tier: ModelTierWrite = KEEP_MODEL_TIER
+    ) -> bool:
+        """Write the profile set and adopt what was written.
+
+        The in-memory set is refreshed from the value handed to the writer
+        — `unparsed` included — so the round-trip stays authoritative.
+
+        Only a caller that *asked* the operator about the tier passes one;
+        the default leaves `agent.model_tier` exactly as it is.
+        """
+        try:
+            self._write_profiles(profiles, model_tier=model_tier)
+        except Exception as exc:  # applied already; disk is what failed
+            self._ui.notify(
+                f"Profile applied, but save failed: {exc} — will revert on restart",
+                severity="warning",
+                markup=False,
+            )
+            return False
+        self._profiles = profiles
+        return True
+
+    def _write_profiles(
+        self, profiles: ModelConnectionsConfig, *, model_tier: ModelTierWrite = KEEP_MODEL_TIER
+    ) -> None:
+        """Hand the set to the injected writer, or say there is none.
+
+        Adopting the written value is the caller's: only a caller knows
+        whether a failure should be reported or raised at its own caller.
+        """
+        save = self._save_profiles
+        if save is None:
+            raise RuntimeError("no configuration path is wired")
+        save(profiles, model_tier=model_tier)
 
     def handle_model_command(self, args: list[str]) -> None:
         """`:model` shows the current model; `:model <name>` switches and persists it."""
@@ -766,32 +1011,76 @@ class AgentUiController:
             else:
                 self._ui.notify("Agent not configured — run :ai first", severity="warning")
             return
-        settings = self._settings
-        configurator = self._configurator
-        if settings is None or configurator is None:
+        if self._refuse_rejected_active_profile():
+            return
+        placed = self._model_change(args[0])
+        if placed is None:
             self._ui.notify("Agent not configured — run :ai first", severity="warning")
             return
-        new_settings = dataclasses.replace(settings, model=args[0])
+        name, profiles = placed
+        profile = profiles.profiles[name]
+        # Apply first: persistence must be conditional on a successful
+        # swap, or a refused change would silently take effect on restart.
+        if not self.apply_profile(profile, self._configured_tier):
+            return  # apply_profile already notified the reason
+        if self._persist_profiles(profiles):
+            self._ui.notify(f"Agent model set to {profile.model}", markup=False)
 
-        async def _switch() -> None:
-            # Apply first: persistence must be conditional on a successful
-            # swap, or a refused change would silently take effect on restart.
-            if not self.apply_settings(new_settings):
-                return  # apply_settings already notified the reason
-            try:
-                await configurator.save(new_settings)
-            except Exception as exc:  # session is live but disk is stale
-                # Do not name a revert target: after a previous failed save
-                # the in-memory snapshot may itself never have been persisted.
-                self._ui.notify(
-                    f"Model applied, but save failed: {exc} — will revert to "
-                    "the last saved model on restart",
-                    severity="warning",
-                )
-                return
-            self._ui.notify(f"Agent model set to {new_settings.model}")
+    def _refuse_rejected_active_profile(self) -> bool:
+        """Refuse `:model` while the active profile is one korvid rejected.
 
-        self._ui.run_worker(_switch(), exclusive=False)
+        A rejected profile is held in two halves: the modelled one with the
+        refused block *emptied* and the reason on `config_error`, and the
+        operator's raw text under the same name in `unparsed`, which the
+        writer writes in preference to the modelled half.
+
+        `dataclasses.replace` re-validates that emptied block — an empty
+        mapping passes — so a `:model` swap on such a profile cleared
+        `options_error`, connected, reported success and persisted a set
+        whose raw twin still won the write: the next start read the
+        rejected block again and reverted the swap. Refusing here is the
+        same fail-closed rule activation already applies, and it keeps the
+        repair explicit: the block is fixed in `:ai`'s profile manager, not
+        silently dropped by a model change.
+
+        Returns:
+            True when the command was refused (and the operator told).
+        """
+        name = self._profiles.active
+        profile = self._profiles.active_profile
+        if name is None or profile is None or profile.config_error is None:
+            return False
+        self._ui.notify(
+            f"Profile {name!r} is invalid: {profile.config_error}"
+            " — repair it in :ai before changing its model",
+            severity="warning",
+            markup=False,
+        )
+        return True
+
+    def _model_change(self, reference: str) -> tuple[str, ModelConnectionsConfig] | None:
+        """Place `:model <reference>` in the profile set, or None if there
+        is nothing configured to place it on.
+
+        `:model` edits the *active profile*, in the set this controller
+        round-trips: a second writer that reloaded config.yaml and rewrote
+        a profile of its own choosing would silently reactivate a stale
+        file, drop the `unparsed` entries this set is holding, and file a
+        duplicate beside the profile the operator is actually on.
+
+        Returns:
+            The active profile's name and the whole set with that one
+            profile's model replaced, or None when nothing is configured.
+        """
+        name = self._profiles.active or LEGACY_PROFILE_NAME
+        profile = self._profiles.active_profile
+        if profile is None:
+            return None
+        profiles = dict(self._profiles.profiles)
+        profiles[name] = dataclasses.replace(
+            profile, model=_model_reference(reference, profile.model)
+        )
+        return name, dataclasses.replace(self._profiles, active=name, profiles=profiles)
 
     def _handle_follow_command(self, args: list[str]) -> None:
         """`:ai follow [on|off]`: toggle mirroring of the built-in agent's
@@ -806,11 +1095,17 @@ class AgentUiController:
             f"{'mirrored on screen' if self._follow else 'no longer mirrored'}"
         )
 
-    def apply_settings(self, settings: AgentSettings) -> bool:
-        """Swap in a fresh session built from the wizard's settings.
+    def apply_profile(self, profile: ModelConnectionConfig, model_tier: str | None) -> bool:
+        """Swap in a fresh session built from a connection profile.
 
-        Transactional: on any failure the previous session/settings are kept
-        and False is returned; the swap is also refused while a turn is live.
+        Transactional: on any failure the previous session is kept and
+        False is returned; the swap is also refused while a turn is live.
+
+        The profile goes to the injected rebuild hook unchanged. Whatever
+        the factory refuses it refuses with a logged reason, and a `None`
+        session is reported here as "check configuration" rather than
+        guessed at — a specific reason korvid invented would send the
+        operator to fix something that is not broken.
         """
         if self._rebuild is None:
             self._ui.notify(
@@ -825,24 +1120,25 @@ class AgentUiController:
             )
             return False
         try:
-            session = self._rebuild(settings)
+            session = self._rebuild(profile, model_tier)
         except Exception as exc:
             self._ui.notify(f"Agent rebuild failed: {exc}", severity="error", markup=False)
             return False
         if session is None:
             self._ui.notify(
-                "Agent rebuild failed — check configuration; keeping previous agent",
+                f"Cannot connect to {profile.model} — check the configuration"
+                " (see the log for the reason); keeping previous agent",
                 severity="error",
+                markup=False,
             )
             return False
         self._session = session
         self._session_closed = False  # a fresh session, not the closed one
         self._disconnected = False  # reconnected (issue #167)
         self._model_name = session.policy.model.model
-        self._settings = settings
         # Once applied (and persisted by the wizard) the tier is an explicit
         # choice — reopening :ai must preserve it.
-        self._configured_tier = settings.model_tier
+        self._configured_tier = model_tier
         self._refresh_status()
         # Always re-enable: the hint may have disabled the input while the
         # panel was open earlier; only focus/header rendering depends on

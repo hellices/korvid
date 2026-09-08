@@ -9,10 +9,11 @@ from typing import Any, cast
 from textual.widgets import Input
 
 from korvid.agent.events import TextDelta, TurnComplete
+from korvid.core.config import ModelConnectionConfig
 from korvid.ui.messages import BuiltinCommand, BuiltinOperation
 from korvid.ui.widgets.agent_panel import AgentPanel, ChatEntry
 from korvid.ui.widgets.status_bar import StatusBar
-from tests.ui.test_agent_wiring import StubSession, make_app
+from tests.ui.test_agent_wiring import StubSession, _profile_config, make_app
 
 from .waits import until
 
@@ -92,23 +93,19 @@ async def test_ai_off_refuses_while_a_turn_is_running() -> None:
 
 
 async def test_reconnect_after_off_restores_the_agent() -> None:
-    from korvid.agent.setup import AgentSettings
-
     session = StubSession([TurnComplete(input_tokens=0, output_tokens=0, estimated=False)])
     fresh = cast("Any", StubSession([]))
-    app = make_app(session, rebuild_agent=lambda s: fresh)
+    app = make_app(session, rebuild_agent=lambda profile, tier: fresh)
     async with app.run_test() as pilot:
         await pilot.press("ctrl+a")
         app.on_builtin_command(BuiltinCommand(BuiltinOperation.AI, ("off",)))
         await pilot.pause()
         assert "AI off" in _status(app)
-        settings = AgentSettings(
-            provider="ollama",
-            auth_method="none",
-            base_url="http://localhost:11434/v1",
-            model="llama3",
+        profile = ModelConnectionConfig(
+            model="ollama/llama3",
+            endpoint="http://localhost:11434/v1",
         )
-        assert app._agent_ui.apply_settings(settings) is True
+        assert app._agent_ui.apply_profile(profile, None) is True
         await pilot.pause()
         assert app._agent_ui.session is fresh
         assert "AI on" in _status(app)
@@ -153,54 +150,50 @@ async def test_ctrl_a_after_off_keeps_the_transcript() -> None:
         assert _panel_text(app).count("run :ai to reconnect") == 1  # no hint spam
 
 
-async def test_bare_ai_after_off_prefills_the_wizard() -> None:
-    """The wizard opened after :ai off starts from the kept settings —
-    the user reconnects by confirming, not re-entering (review on #180)."""
-    from typing import Any as _Any
+async def test_bare_ai_after_off_reopens_the_kept_profile() -> None:
+    """`:ai` after `:ai off` starts from the connection that was live —
+    the user reconnects by picking it, not by re-entering it (#180).
 
-    from korvid.agent.setup import AgentSettings
-    from korvid.ui.widgets.agent_setup_screen import AgentSetupScreen
+    The kept connection is a profile now, so the entry point is the
+    profile manager listing it rather than a prefilled wizard.
+    """
 
-    class NoopConfigurator:
-        async def begin_device_login(self) -> _Any:
-            raise NotImplementedError
-
-        async def finish_device_login(self) -> None:
-            raise NotImplementedError
-
-        async def test(self, settings: _Any) -> str:
-            return "ok"
-
-        async def list_models(self, settings: _Any) -> list[str]:
-            return []
-
-        async def save(self, settings: _Any) -> None:
-            pass
+    from korvid.ui.widgets.profile_manager_screen import ProfileManagerScreen
+    from tests.ui.test_agent_ui_controller_profiles import _StubCatalog
 
     session = StubSession([TurnComplete(input_tokens=0, output_tokens=0, estimated=False)])
-    app = make_app(session, agent_configurator=NoopConfigurator())
-    settings = AgentSettings(
-        provider="ollama",
-        auth_method="none",
-        base_url="http://my-ollama:11434/v1",
-        model="qwen3:8b",
+    app = make_app(
+        session,
+        agent_catalog=_StubCatalog(),
+        config=_profile_config(
+            ModelConnectionConfig(
+                model="ollama/qwen3:8b",
+                endpoint="http://my-ollama:11434/v1",
+            )
+        ),
     )
-    app._agent_ui._settings = settings
     async with app.run_test() as pilot:
         app.on_builtin_command(BuiltinCommand(BuiltinOperation.AI, ("off",)))
         await pilot.pause()
         app.on_builtin_command(BuiltinCommand(BuiltinOperation.AI))
-        await pilot.pause()
-        assert isinstance(app.screen, AgentSetupScreen)
-        screen = app.screen
-        from textual.widgets import OptionList
-
-        provider_list = screen.query_one("#setup-provider", OptionList)
-        highlighted = provider_list.highlighted
-        assert highlighted is not None
-        assert provider_list.get_option_at_index(highlighted).id == "ollama"
-        # accept the highlighted provider: the endpoint step starts from the
-        # kept base URL, not the provider default
-        await pilot.press("enter")
-        base = screen.query_one("#setup-base-url", Input)
-        assert base.value == "http://my-ollama:11434/v1"
+        await until(
+            pilot,
+            lambda: any(isinstance(screen, ProfileManagerScreen) for screen in app.screen_stack),
+            label="profile manager opened",
+        )
+        manager = next(
+            screen for screen in app.screen_stack if isinstance(screen, ProfileManagerScreen)
+        )
+        kept = manager._profiles.active_profile
+        assert kept is not None
+        assert kept.model == "ollama/qwen3:8b"
+        assert kept.endpoint == "http://my-ollama:11434/v1"
+        assert kept.auth.method == "none"
+        await pilot.press("escape")
+        await until(
+            pilot,
+            lambda: (
+                not any(isinstance(screen, ProfileManagerScreen) for screen in app.screen_stack)
+            ),
+            label="profile manager closed",
+        )
