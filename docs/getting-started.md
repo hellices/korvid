@@ -18,10 +18,10 @@ environment rather than whatever Python happens to be active. `uv` and
 
 ## Current release
 
-**`0.3.0`** is the current published release on PyPI — use it for pinned
-installs with the commands below. See the
-[v0.3.0 release notes](release-notes/v0.3.0.md) for its destructive-operation
-preview, audit, and release-pipeline improvements.
+**`0.4.0`** is the release described by this checkout. Once it is published on
+PyPI, use the pinned installs below. Read the
+[v0.4.0 release notes](release-notes/v0.4.0.md) for named profiles, model search,
+local MCP stdio, and the configuration and plugin migration steps.
 
 For unreleased `main` development, install the reviewed source instead:
 
@@ -39,14 +39,14 @@ The live Homebrew tap needs no system Python:
 brew install hellices/korvid/korvid
 ```
 
-The tap currently packages **`0.2.0`**. For the current **`0.3.0`** release,
+The tap currently packages **`0.2.0`**. For the **`0.4.0`** release,
 use `uv tool` or `pipx` below. The formula builds against Homebrew's Python and
 deliberately excludes the MCP HTTP server.
 
 ### `uv tool` (recommended cross-platform)
 
 ```sh
-uv tool install 'korvid[all]==0.3.0'
+uv tool install 'korvid[all]==0.4.0'
 korvid
 ```
 
@@ -56,7 +56,7 @@ macOS and most enterprise Linux where the system Python predates 3.11.
 ### `pipx`
 
 ```sh
-pipx install 'korvid[all]==0.3.0'
+pipx install 'korvid[all]==0.4.0'
 korvid
 ```
 
@@ -67,13 +67,13 @@ or both:
 
 | Install | Adds |
 | --- | --- |
-| `korvid==0.3.0` | The keyboard-first TUI only — no agent, no MCP server |
-| `korvid[agent]==0.3.0` | The embedded agent (`Ctrl-A`, `:ai`, `:model`) |
-| `korvid[mcp]==0.3.0` | The MCP server (`korvid --mcp`) |
-| `korvid[agent,observability]==0.3.0` | Embedded agent plus Prometheus/Loki investigation tools |
-| `korvid[mcp,observability]==0.3.0` | MCP server plus Prometheus/Loki investigation tools |
-| `korvid[all]==0.3.0` | Agent, MCP, and observability connectors — the recommended first install |
-| `korvid[all,entra]==0.3.0` | Everything above, plus Entra ID auth for Azure OpenAI |
+| `korvid==0.4.0` | The keyboard-first TUI only — no agent, no MCP server |
+| `korvid[agent]==0.4.0` | The embedded agent (`Ctrl-A`, `:ai`, `:model`) |
+| `korvid[mcp]==0.4.0` | The MCP server (`korvid --mcp`) and local adapter (`korvid mcp stdio`) |
+| `korvid[agent,observability]==0.4.0` | Embedded agent plus Prometheus/Loki investigation tools |
+| `korvid[mcp,observability]==0.4.0` | MCP server plus Prometheus/Loki investigation tools |
+| `korvid[all]==0.4.0` | Agent, MCP, and observability connectors — the recommended first install |
+| `korvid[all,entra]==0.4.0` | Everything above, plus Entra ID auth for Azure OpenAI |
 
 Extras do not expand in place: if you installed `korvid` alone and later want
 the agent, reinstall with the full extra set you want rather than layering

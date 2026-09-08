@@ -893,7 +893,7 @@ def test_agent_guide_tells_a_self_hosted_operator_how_to_diagnose_a_refused_stre
 def test_the_release_note_sends_a_broken_gateway_to_that_section() -> None:
     """A behaviour change an operator can hit needs its recovery linked
     from the note that announces it, not only from the guide."""
-    notes = _source("release-notes/unreleased.md")
+    notes = _source("release-notes/v0.4.0.md")
 
     assert "#self-hosted-endpoints-and-proxies" in notes, (
         "the release note must link the agent guide's troubleshooting anchor"

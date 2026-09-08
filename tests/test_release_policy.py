@@ -335,6 +335,12 @@ def test_getting_started_current_release_banner_and_pins_follow_project_version(
     assert pinned_versions == {version}
 
 
+def test_homepage_install_pin_follows_project_version() -> None:
+    homepage = (_ROOT / "docs" / "index.md").read_text(encoding="utf-8")
+    pinned_versions = set(re.findall(r"korvid\[all\]==([^\s'\"<]+)", homepage))
+    assert pinned_versions == {_project_version()}
+
+
 def test_upgrade_source_version_is_rejected_outside_its_documented_context() -> None:
     version = _project_version()
     stale_install = f"\nuv tool install 'korvid[all]=={UPGRADE_SOURCE_VERSION}'\n"

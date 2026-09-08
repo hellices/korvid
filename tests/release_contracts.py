@@ -6,7 +6,7 @@ from typing import Any
 
 import yaml
 
-UPGRADE_SOURCE_VERSION = "0.2.0"
+UPGRADE_SOURCE_VERSION = "0.3.0"
 
 
 def _markdown_fence(line: str) -> tuple[str, int] | None:

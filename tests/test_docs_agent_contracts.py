@@ -75,6 +75,7 @@ def test_the_scan_really_covers_the_operator_facing_pages() -> None:
         "docs/evals/methodology.md",
         "docs/provider-plugins.md",
         "docs/release-notes/unreleased.md",
+        "docs/release-notes/v0.4.0.md",
         "docs/dev/ui-controllers.md",
     } <= scanned
     assert not any(path.startswith(_HISTORICAL_DOC_PREFIXES) for path in scanned)
@@ -121,7 +122,7 @@ def test_no_current_page_claims_a_shell_tool_validation(path: Path) -> None:
     assert "run_kubectl" not in path.read_text(encoding="utf-8")
 
 
-@pytest.mark.parametrize("page", ["docs/ops.md", "docs/release-notes/unreleased.md"])
+@pytest.mark.parametrize("page", ["docs/ops.md", "docs/release-notes/v0.4.0.md"])
 def test_the_perimeter_pages_state_the_boundary_that_really_runs(page: str) -> None:
     """What replaces the fabricated claim has to be the real perimeter.
 
@@ -194,7 +195,7 @@ def test_no_current_page_claims_every_surface_describes_tools_identically(
     assert not _IDENTICAL_TOOL_WORDING_OVERCLAIM.search(normalized), _relative(path)
 
 
-@pytest.mark.parametrize("page", ["docs/release-notes/unreleased.md"])
+@pytest.mark.parametrize("page", ["docs/release-notes/v0.4.0.md"])
 def test_the_tool_description_removal_note_names_which_arm_uses_which_wording(
     page: str,
 ) -> None:
@@ -221,7 +222,7 @@ def test_the_agent_page_links_the_migration_note_instead_of_restating_it() -> No
     The keys the startup error retires (read out of `core/config.py` rather
     than spelled here, so this test cannot name a key as if it were
     supported) were replaced a release ago. The table mapping them onto
-    today's settings is release history: `docs/release-notes/unreleased.md`
+    today's settings is release history: `docs/release-notes/v0.4.0.md`
     owns it, the startup error itself names the replacement, and the guide
     describes what an operator configures today.
     """
@@ -237,12 +238,12 @@ def test_the_agent_page_links_the_migration_note_instead_of_restating_it() -> No
     assert [key for key in removed_keys if names_key(agent, key)] == []
     assert "model_tier" in agent, "the supported key still has to be on the page"
     assert re.search(
-        r"\[[^\]]*(?:migration|upgrade)[^\]]*\]\(release-notes/unreleased\.md\)",
+        r"\[[^\]]*(?:migration|upgrade)[^\]]*\]\(release-notes/v0\.4\.0\.md\)",
         agent,
         re.IGNORECASE,
     ), "the current guide must send upgrades to the release note that owns migration history"
 
-    notes = _text("docs/release-notes/unreleased.md")
+    notes = _text("docs/release-notes/v0.4.0.md")
     assert [key for key in removed_keys if key in notes] == removed_keys, (
         "the release note is where a reader with an old config.yaml is sent"
     )
@@ -462,12 +463,12 @@ def test_the_low_pack_documentation_publishes_no_score() -> None:
 _RETIRED_ARM_PROSE = re.compile(r"`?(small|full)`?[- ]profile", re.IGNORECASE)
 
 #: A published release note records what *that* release shipped and is not
-#: rewritten; only `unreleased.md` describes the program being built.
+#: rewritten; include the current release alongside the development notes.
 _CURRENT_PAGES = [
     path
     for path in _MARKDOWN_FILES
     if not _relative(path).startswith("docs/release-notes/")
-    or _relative(path) == "docs/release-notes/unreleased.md"
+    or _relative(path) in {"docs/release-notes/unreleased.md", "docs/release-notes/v0.4.0.md"}
 ]
 
 
@@ -496,8 +497,10 @@ def test_the_release_note_scan_still_covers_the_pages_it_should() -> None:
     assert "README.md" in scanned
     assert "docs/overview.md" in scanned
     assert "docs/release-notes/unreleased.md" in scanned
+    assert "docs/release-notes/v0.4.0.md" in scanned
     assert not any(
-        page.startswith("docs/release-notes/") and page != "docs/release-notes/unreleased.md"
+        page.startswith("docs/release-notes/")
+        and page not in {"docs/release-notes/unreleased.md", "docs/release-notes/v0.4.0.md"}
         for page in scanned
     )
 
@@ -541,10 +544,10 @@ def test_the_release_notes_record_the_truncation_marker_the_model_reads() -> Non
     """
     from korvid.tools.executor import _MIDDLE_TRUNCATION_MARKER
 
-    notes = _text("docs/release-notes/unreleased.md")
+    notes = _text("docs/release-notes/v0.4.0.md")
     marker = _MIDDLE_TRUNCATION_MARKER.strip()
 
-    assert marker in notes, f"the unreleased notes do not record {marker!r}"
+    assert marker in notes, f"the release notes do not record {marker!r}"
     assert "tier result budget" in marker
 
 
@@ -664,9 +667,20 @@ def test_the_migration_docs_name_the_profile_the_migration_really_creates() -> N
     assert f"`{LEGACY_PROFILE_NAME}`" in _text("docs/agent.md")
     # The release note shows the file korvid writes back, so the name has to
     # appear as the key it really writes, not only in prose around it.
-    notes = _text("docs/release-notes/unreleased.md")
+    notes = _text("docs/release-notes/v0.4.0.md")
     assert f"active: {LEGACY_PROFILE_NAME}" in notes
     assert f"\n    {LEGACY_PROFILE_NAME}:\n" in notes
+
+
+def test_the_release_notes_describe_the_current_plugin_entry_point() -> None:
+    notes_path = _REPO_ROOT / "docs/release-notes/v0.4.0.md"
+    assert notes_path.is_file(), "the plugin migration must ship in versioned release notes"
+    notes = notes_path.read_text(encoding="utf-8")
+    assert "`SpecialFlow`" in notes
+    assert "`korvid.provider`" in notes
+    assert "`korvid.credential`" in notes
+    assert "descriptor.provider` must equal" not in notes
+    assert "no longer loads" in notes
 
 
 # ---------------------------------------------------------------------------

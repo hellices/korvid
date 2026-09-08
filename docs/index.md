@@ -17,7 +17,7 @@ hide:
       <a class="md-button md-button--primary" href="getting-started/">Start flying</a>
       <a class="md-button" href="https://github.com/hellices/korvid">View on GitHub</a>
     </div>
-    <div class="install-command" tabindex="0" role="group" aria-label="Install the current korvid release with uv"><span class="install-command__prompt" aria-hidden="true">$</span><code>uv tool install 'korvid[all]==0.3.0'</code></div>
+    <div class="install-command" tabindex="0" role="group" aria-label="Install the current korvid release with uv"><span class="install-command__prompt" aria-hidden="true">$</span><code>uv tool install 'korvid[all]==0.4.0'</code></div>
   </div>
   <figure class="hero-demo hero-driver-stage">
     <div class="scene-tabs" role="tablist" aria-label="Choose who drives korvid">
