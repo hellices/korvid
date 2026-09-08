@@ -23,7 +23,6 @@ import yaml
 
 from tests.platforms import assert_pinned_action_version
 from tests.release_contracts import (
-    UPGRADE_SOURCE_VERSION,
     markdown_section,
     run_scripts,
     workflow_jobs,
@@ -1588,11 +1587,12 @@ def test_draft_release_is_staged_before_irreversible_pypi_publication() -> None:
 
 
 def test_release_docs_require_immutable_protected_tags() -> None:
-    readme = _readme()
-    assert "immutable `v*` tag ruleset" in readme
-    assert "restrict tag creation" in readme
-    assert "update and deletion" in readme
-    assert "protected tags only" in readme
+    runbook = " ".join(_release_runbook().split())
+    assert "immutable rule" in runbook
+    assert "trusted release maintainers may create tags" in runbook
+    assert "tag update/deletion is prohibited" in runbook
+    assert "protected tags only" in runbook
+    assert "https://github.com/hellices/korvid/blob/main/docs/release.md" in _readme()
 
 
 def _release_notes() -> str:
@@ -1762,22 +1762,21 @@ def test_readme_recommends_an_isolated_install_for_an_application() -> None:
     prohibited and installs must stay in isolated `uv tool` or `pipx`
     environments.
     """
-    version = _project_version()
     readme = _readme()
     quick_start = markdown_section(readme, "Quick start")
     normalized_quick_start = " ".join(quick_start.split())
-    pip_fallback = f"python -m pip install 'korvid[all]=={version}'"
-    assert f"uv tool install 'korvid[all]=={version}'" in quick_start
+    pip_fallback = "python -m pip install 'korvid[all]'"
+    assert "uv tool install 'korvid[all]'" in quick_start
     assert pip_fallback in quick_start
     assert "inside an activated virtual environment" in normalized_quick_start
     assert "including one created inside a container" in normalized_quick_start
     assert quick_start.index("uv tool install") < quick_start.index(pip_fallback)
-    assert f"pipx install 'korvid[all]=={version}'" in quick_start
+    assert "pipx install 'korvid[all]'" in quick_start
     install = readme[readme.index("## Installation") : readme.index("### Development")]
-    assert f"uv tool install 'korvid[all]=={version}'" in install
-    assert f"uv tool install --force 'korvid[all]=={version}'" in install
-    assert f"pipx install --force 'korvid[all]=={version}'" in install
-    assert f"python -m pip install 'korvid[all]=={version}'        # recommended" not in install
+    assert "uv tool install 'korvid[all]'" in install
+    assert "uv tool install --force 'korvid[all]'" in install
+    assert "pipx install --force 'korvid[all]'" in install
+    assert "python -m pip install 'korvid[all]'        # recommended" not in install
     assert "Use `python -m pip` only inside" not in install
     assert "activated virtual environment, including one created inside a container" in " ".join(
         readme.split()
@@ -1796,16 +1795,15 @@ def test_readme_describes_pep_668_without_an_inaccurate_fedora_claim() -> None:
     assert "Fedora 38" not in quick_start
 
 
-def test_optional_feature_docs_follow_the_project_version() -> None:
-    version = _project_version()
+def test_optional_feature_docs_use_evergreen_isolated_installs() -> None:
     root = Path(__file__).parents[1]
     agent = (root / "docs" / "agent.md").read_text(encoding="utf-8")
     observability = (root / "docs" / "observability.md").read_text(encoding="utf-8")
 
-    assert f"uv tool install --force 'korvid[all,entra]=={version}'" in agent
-    assert f"pipx install --force 'korvid[all,entra]=={version}'" in agent
-    assert f"uv tool install 'korvid[agent,observability]=={version}'" in observability
-    assert f"uv tool install 'korvid[mcp,observability]=={version}'" in observability
+    assert "uv tool install --force 'korvid[all,entra]'" in agent
+    assert "pipx install --force 'korvid[all,entra]'" in agent
+    assert "uv tool install 'korvid[agent,observability]'" in observability
+    assert "uv tool install 'korvid[mcp,observability]'" in observability
     assert "pip install korvid" not in agent
     assert "pip install " not in observability
 
@@ -1960,19 +1958,12 @@ def test_release_docs_runbook_gives_the_five_trusted_publisher_claims() -> None:
     assert "No API token is created" in runbook
 
 
-def test_security_policy_supports_only_the_current_minor_line() -> None:
-    version = _project_version()
+def test_security_policy_supports_only_the_latest_published_minor_line() -> None:
     policy = " ".join(_security_policy().split())
-    major, minor, _patch = version.split(".")
-    previous_major, previous_minor, _previous_patch = UPGRADE_SOURCE_VERSION.split(".")
-    assert previous_major == major
-    previous_minor_line = f"{previous_major}.{previous_minor}.x"
-    assert (
-        f"Until `v{version}` is published, that is the latest `{previous_minor_line}` version"
-        in policy
-    )
-    assert f"latest `{major}.{minor}.x` version" in policy
-    assert "After publication" in policy
+    assert "latest patch in the current published minor line" in policy
+    assert "https://github.com/hellices/korvid/releases/latest" in policy
+    assert "supersedes the previous minor line" in policy
+    assert "`main` is development-only" in policy
 
 
 def test_workflow_exports_source_commit_without_logging_it_from_python() -> None:
@@ -2280,7 +2271,6 @@ def test_release_docs_correct_the_xdg_config_claim() -> None:
 def test_release_docs_keep_a_source_install_fallback_for_unreleased_main() -> None:
     runbook = _release_runbook()
     readme = _readme()
-    version = _project_version()
     source_install = "uv tool install 'korvid[all] @ git+https://github.com/hellices/korvid'"
     pipx_source_install = "pipx install 'korvid[all] @ git+https://github.com/hellices/korvid'"
     assert source_install in runbook
@@ -2296,7 +2286,7 @@ def test_release_docs_keep_a_source_install_fallback_for_unreleased_main() -> No
     assert "appearing on PyPI" not in runbook
     assert "For unreleased `main` development" in runbook
     quick_start = readme[readme.index("## Quick start") : readme.index("## Features")]
-    assert f"Until `{version}` is published on PyPI" not in quick_start
+    assert "latest published package" in quick_start
     assert "For unreleased `main` development" in quick_start
     assert "uv tool install 'korvid[all] @ git+https://github.com/hellices/korvid'" in quick_start
 
@@ -2308,12 +2298,11 @@ def test_release_docs_describe_fresh_installs_and_extra_expansion_separately() -
 
 
 def test_release_docs_hand_the_tap_merge_to_the_maintainer() -> None:
-    version = _project_version()
     runbook = _release_runbook()
     normalized = " ".join(runbook.split())
     assert "HOMEBREW_TAP_TOKEN" in runbook
-    assert f"gh release download v{version} --pattern korvid.rb" in runbook
-    assert f'formula_path="$PWD/dist/v{version}/korvid.rb"' in runbook
+    assert 'gh release download "$TAG" --pattern korvid.rb' in runbook
+    assert 'formula_path="$PWD/dist/$TAG/korvid.rb"' in runbook
     assert 'if [ ! -f "$formula_path" ]' in runbook
     assert 'cp "$formula_path" Formula/korvid.rb' in runbook
     assert 'if cmp -s "$formula_path" Formula/korvid.rb' in runbook
@@ -2337,35 +2326,113 @@ def test_release_docs_hand_the_tap_merge_to_the_maintainer() -> None:
         assert preceding != -1, "a path claims review without showing the diff"
         assert "reviewed and green" not in runbook[preceding:claim]
     assert "--json number,title,baseRefName,headRefName,headRepositoryOwner" in runbook
-    assert '.baseRefName == "main"' in runbook
-    assert f'.headRefName == "bump-korvid-{version}"' in runbook
-    assert '.headRepositoryOwner.login == "hellices"' in runbook
-    assert f"trusted bump-korvid-{version} tap PR not found" in runbook
-    assert "branch=bump-korvid-" in runbook
+    assert r".baseRefName == \"main\"" in runbook
+    assert r".headRefName == \"bump-korvid-${VERSION}\"" in runbook
+    assert r".headRepositoryOwner.login == \"hellices\"" in runbook
+    assert "trusted bump-korvid-${VERSION} tap PR not found" in runbook
+    assert 'branch="bump-korvid-${VERSION}"' in runbook
     assert 'git show-ref --verify --quiet "refs/remotes/origin/$branch"' in runbook
     assert 'git switch --track -c "$branch" "origin/$branch"' in runbook
     assert "git diff --cached --quiet" in runbook
     assert "TAP_PR_URL=$(gh pr create" in runbook
     assert "could not identify created tap PR" in runbook
-    assert f"korvid --version | grep -Fx 'korvid {version}'" in runbook
+    assert 'korvid --version | grep -Fx "korvid ${VERSION}"' in runbook
     assert "tag-revalidated `uv.lock`" in normalized
     assert "not separately attested or listed in `SHA256SUMS`" in normalized
     assert "attested release asset" not in runbook
     verify = runbook[runbook.index("Finally verify the tap") : runbook.index("## Install")]
-    assert "```sh\nset -eu" in verify
+    assert "set -eu" in verify
+    assert ': "${VERSION:?' in verify
 
 
-def test_release_docs_upgrade_from_previous_minor_candidate() -> None:
-    version = _project_version()
+def test_release_docs_upgrade_from_metadata_selected_source_to_exact_candidate() -> None:
     runbook = _release_runbook()
     readme = _readme()
     upgrade = markdown_section(runbook, "Required cross-version upgrade gate")
-    assert f"korvid[all]=={UPGRADE_SOURCE_VERSION}" in upgrade
-    assert f"korvid-{version}-py3-none-any.whl" in upgrade
-    assert f"\"$upgrade_korvid\" --version | grep -Fx 'korvid {UPGRADE_SOURCE_VERSION}'" in upgrade
-    assert f"\"$upgrade_korvid\" --version | grep -Fx 'korvid {version}'" in upgrade
-    assert f"published `{UPGRADE_SOURCE_VERSION}` installation to the candidate wheel" in readme
-    assert f"`v{version}` is the feature release described by this checkout" in readme
+    assert "korvid[all]==${UPGRADE_SOURCE}" in upgrade
+    assert "korvid-${VERSION}-py3-none-any.whl" in upgrade
+    assert '"$upgrade_korvid" --version | grep -Fx "korvid ${UPGRADE_SOURCE}"' in upgrade
+    assert '"$upgrade_korvid" --version | grep -Fx "korvid ${VERSION}"' in upgrade
+    assert "scripts/release/release_config.py upgrade-source" in runbook
+    assert "scripts/release/release_config.py version" in runbook
+    assert "https://github.com/hellices/korvid/releases/latest" in readme
+    assert "https://github.com/hellices/korvid/blob/main/docs/release.md" in readme
+
+
+def test_release_runbook_shell_blocks_have_valid_syntax() -> None:
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("Bash is needed to validate the POSIX release runbook")
+    scripts = re.findall(r"^```sh\n(.*?)^```", _release_runbook(), re.MULTILINE | re.DOTALL)
+    assert scripts, "the runbook must retain executable shell examples"
+    for script in scripts:
+        result = subprocess.run(
+            [bash, "--noprofile", "--norc", "-n"], input=script, capture_output=True, text=True
+        )
+        assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    ("state", "message"),
+    [
+        ("clean", ""),
+        ("unstaged", "tracked working tree has local modifications"),
+        ("staged", "index has staged tracked changes"),
+        ("stale", "does not match reviewed origin/main"),
+    ],
+)
+def test_release_runbook_checks_local_source_before_reading_metadata(
+    tmp_path: Path, state: str, message: str
+) -> None:
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("Bash is needed to execute the POSIX release preflight")
+    repo = _release_repo(tmp_path)
+    _git(repo, "remote", "add", "origin", str(repo))
+    reviewed = _git(repo, "rev-parse", "HEAD")
+    if state != "clean":
+        (repo / "tracked.txt").write_text("modified\n")
+    if state == "staged":
+        _git(repo, "add", "tracked.txt")
+    if state == "stale":
+        _git(repo, "commit", "-am", "new main")
+        _git(repo, "checkout", "--detach", reviewed)
+
+    section = markdown_section(_release_runbook(), "Dry run on `main` before tagging")
+    script = re.findall(r"^```sh\n(.*?)^```", section, re.MULTILINE | re.DOTALL)[0]
+    preflight, separator, _remainder = script.partition("VERSION=$(python")
+    assert separator, "metadata must be read only after the local source preflight"
+    result = subprocess.run(
+        [bash, "--noprofile", "--norc"],
+        input=preflight,
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == (0 if state == "clean" else 1), result.stderr
+    if message:
+        assert message in result.stderr
+
+
+@pytest.mark.parametrize(("tag", "exit_code"), [("v7.4.0", 0), ("v7.3.0", 1)])
+def test_release_runbook_rejects_a_stale_tag_before_touching_git(tag: str, exit_code: int) -> None:
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("Bash is needed to execute the POSIX release preflight")
+    section = markdown_section(_release_runbook(), "Publish `$TAG`")
+    script = re.findall(r"^```sh\n(.*?)^```", section, re.MULTILINE | re.DOTALL)[0]
+    preflight, separator, _remainder = script.partition("if git rev-parse")
+    assert separator, "the tag guard must precede Git operations"
+    result = subprocess.run(
+        [bash, "--noprofile", "--norc"],
+        input=preflight,
+        env={**os.environ, "COMMIT": "reviewed", "VERSION": "7.4.0", "TAG": tag},
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == exit_code
+    if exit_code:
+        assert "does not match expected release tag v7.4.0; refusing to publish" in result.stderr
 
 
 # --- metadata ---------------------------------------------------------------

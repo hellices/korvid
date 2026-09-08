@@ -1,6 +1,7 @@
 # Unreleased
 
-No changes recorded after [korvid v0.4.0](v0.4.0.md).
+No additional changes are recorded here.
 
-For the named-profile, provider-extension, and local MCP changes, see the
-[v0.4.0 migration notes](v0.4.0.md).
+See the [release history](https://github.com/hellices/korvid/releases) for
+published versions and their migration notes. Candidate release notes can
+appear in the navigation before publication.

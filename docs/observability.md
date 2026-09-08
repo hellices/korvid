@@ -16,8 +16,8 @@ offered to the agent or to MCP hosts at all.
 Install the complete application variant in its own tool environment:
 
 ```bash
-uv tool install 'korvid[agent,observability]==0.4.0'  # embedded agent tools
-uv tool install 'korvid[mcp,observability]==0.4.0'    # external MCP tools
+uv tool install 'korvid[agent,observability]'  # embedded agent tools
+uv tool install 'korvid[mcp,observability]'    # external MCP tools
 ```
 
 `pipx install` accepts the same requirement strings. Observability is a tool

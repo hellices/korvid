@@ -89,12 +89,8 @@ def _heading_slugs(name: str) -> set[str]:
 def test_agent_offers_an_installable_entra_command_for_tool_users() -> None:
     """Finding 4: `uv sync --extra entra` only works in a source checkout."""
     source = _source("agent.md")
-    version = re.search(
-        r'^version = "([^"]+)"', (ROOT / "pyproject.toml").read_text(encoding="utf-8"), re.MULTILINE
-    )
-    assert version is not None
-    assert f"uv tool install --force 'korvid[all,entra]=={version.group(1)}'" in source
-    assert f"pipx install --force 'korvid[all,entra]=={version.group(1)}'" in source
+    assert "uv tool install --force 'korvid[all,entra]'" in source
+    assert "pipx install --force 'korvid[all,entra]'" in source
     assert "uv sync --extra entra" in source
 
 

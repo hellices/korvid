@@ -26,10 +26,10 @@ best-effort basis.
 
 ## Supported versions
 
-Only the latest patch in the current published minor line is supported. Until
-`v0.4.0` is published, that is the latest `0.3.x` version. After publication,
-the latest `0.4.x` version is supported and `0.3.x` is superseded. `v0.1.0`
-and `v0.1.1` remain immutable unpublished audit history. `main` is
+Only the latest patch in the current published minor line is supported.
+The [latest release](https://github.com/hellices/korvid/releases/latest)
+identifies that line; publishing a new minor line supersedes the previous minor line.
+Unpublished tags are audit history, not supported releases. `main` is
 development-only and is not a supported target for security fixes.
 
 ## Coordinated disclosure

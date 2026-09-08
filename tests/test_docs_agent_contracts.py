@@ -29,13 +29,14 @@ from pathlib import Path
 
 import pytest
 
+from korvid import __version__
 from korvid.agent.model_profiles import MetadataRefresh
-from korvid.agent.provider_plugin import PROVIDER_PLUGIN_API_VERSION
 from korvid.tools.registry import TOOLS_BY_NAME
 from korvid.ui.widgets.model_search_screen import _REFRESH_MESSAGES
 from tests.config_keys import names_key
 
 _REPO_ROOT = Path(__file__).parents[1]
+_CURRENT_RELEASE_NOTE = f"docs/release-notes/v{__version__}.md"
 
 _HISTORICAL_DOC_PREFIXES = (
     "docs/dev/specs/",
@@ -75,6 +76,7 @@ def test_the_scan_really_covers_the_operator_facing_pages() -> None:
         "docs/evals/methodology.md",
         "docs/provider-plugins.md",
         "docs/release-notes/unreleased.md",
+        _CURRENT_RELEASE_NOTE,
         "docs/release-notes/v0.4.0.md",
         "docs/dev/ui-controllers.md",
     } <= scanned
@@ -347,9 +349,25 @@ def test_no_current_page_sends_a_plugin_author_to_api_1(path: Path) -> None:
 
 
 @pytest.mark.parametrize("page", ["docs/agent.md", "README.md"])
-def test_the_plugin_pointers_name_the_shipped_api_version(page: str) -> None:
-    assert PROVIDER_PLUGIN_API_VERSION == 2
-    assert f"API {PROVIDER_PLUGIN_API_VERSION}" in _text(page)
+def test_the_plugin_pointers_name_the_current_extension_points(page: str) -> None:
+    text = _text(page)
+    assert "SpecialFlow" in text
+    assert "korvid.credential" in text
+
+
+def test_the_readme_explains_the_current_agent_and_mcp_starting_points() -> None:
+    readme = " ".join(_text("README.md").split())
+    assert "named profiles" in readme.lower()
+    assert "model catalog" in readme.lower()
+    assert "`:ai`" in readme
+    assert "`:model" in readme
+    assert "korvid --mcp" in readme
+    assert '"command": "korvid"' in readme
+    assert '"args": ["mcp", "stdio"]' in readme
+    assert "running TUI" in readme
+    assert "same user" in readme
+    assert "OAuth" in readme
+    assert "headless" in readme
 
 
 # ---------------------------------------------------------------------------
@@ -468,7 +486,7 @@ _CURRENT_PAGES = [
     path
     for path in _MARKDOWN_FILES
     if not _relative(path).startswith("docs/release-notes/")
-    or _relative(path) in {"docs/release-notes/unreleased.md", "docs/release-notes/v0.4.0.md"}
+    or _relative(path) in {"docs/release-notes/unreleased.md", _CURRENT_RELEASE_NOTE}
 ]
 
 
@@ -497,10 +515,10 @@ def test_the_release_note_scan_still_covers_the_pages_it_should() -> None:
     assert "README.md" in scanned
     assert "docs/overview.md" in scanned
     assert "docs/release-notes/unreleased.md" in scanned
-    assert "docs/release-notes/v0.4.0.md" in scanned
+    assert _CURRENT_RELEASE_NOTE in scanned
     assert not any(
         page.startswith("docs/release-notes/")
-        and page not in {"docs/release-notes/unreleased.md", "docs/release-notes/v0.4.0.md"}
+        and page not in {"docs/release-notes/unreleased.md", _CURRENT_RELEASE_NOTE}
         for page in scanned
     )
 

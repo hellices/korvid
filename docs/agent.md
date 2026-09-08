@@ -239,15 +239,16 @@ Entra ID ships in its own extra; a tool-managed install reinstalls the complete
 set:
 
 ```sh
-uv tool install --force 'korvid[all,entra]==0.4.0'
+uv tool install --force 'korvid[all,entra]'
 # or
-pipx install --force 'korvid[all,entra]==0.4.0'
+pipx install --force 'korvid[all,entra]'
 ```
 
 In a source checkout, `uv sync --extra entra` does the same job.
 
-A non-standard backend registers a flow on the `korvid.provider` entry point;
-[Provider plugins](provider-plugins.md) has the API 2 contract.
+A non-standard transport registers a `SpecialFlow` on the `korvid.provider`
+entry point; custom authentication can use a `korvid.credential` chain instead.
+[Provider plugins](provider-plugins.md) describes both extension points.
 
 ## Model search
 

@@ -1,7 +1,8 @@
-# korvid v0.4.0 release runbook
+# korvid release runbook
 
-This runbook covers the `v0.4.0` feature release. `v0.1.2` is the first public
-PyPI release; `v0.3.0` is the supported upgrade source. `v0.1.0` remains immutable,
+This runbook covers feature releases. `v0.1.2` is the first public PyPI
+release. The current release version and supported upgrade source are read from
+`pyproject.toml` by `scripts/release/release_config.py`. `v0.1.0` remains immutable,
 unpublished audit history after its protected tag workflow failed before build,
 attestation, staging, PyPI publication, or GitHub Release creation. `v0.1.1`
 is unpublished audit history for a different reason: it built and staged, then
@@ -12,7 +13,7 @@ and which recovery paths are safe to retry.
 
 ## One-time repository and publisher bindings
 
-Before anyone publishes `v0.4.0`, confirm these external trust boundaries:
+Before anyone publishes a feature release, confirm these external trust boundaries:
 
 - GitHub tag protection covers `refs/tags/v*` with an immutable rule: only
   trusted release maintainers may create tags, and tag update/deletion is
@@ -89,13 +90,33 @@ set -eu
 git fetch origin main
 COMMIT=$(git rev-parse origin/main)
 test -n "$COMMIT"
+LOCAL_HEAD=$(git rev-parse HEAD)
+if [ -z "$LOCAL_HEAD" ] || [ "$LOCAL_HEAD" != "$COMMIT" ]; then
+  echo "checked-out HEAD $LOCAL_HEAD does not match reviewed origin/main commit $COMMIT; check out the reviewed commit before reading release metadata" >&2
+  exit 1
+fi
+git update-index -q --refresh
+if ! git diff --quiet --ignore-submodules --; then
+  echo "tracked working tree has local modifications; commit, stash, or discard them before reading release metadata" >&2
+  exit 1
+fi
+if ! git diff --cached --quiet --ignore-submodules --; then
+  echo "index has staged tracked changes; commit, stash, or discard them before reading release metadata" >&2
+  exit 1
+fi
+VERSION=$(python scripts/release/release_config.py version)
+UPGRADE_SOURCE=$(python scripts/release/release_config.py upgrade-source)
+TAG="v$VERSION"
+: "${VERSION:?release version is required}"
+: "${UPGRADE_SOURCE:?release upgrade source is required}"
+: "${TAG:?release tag is required}"
 gh workflow run Release --ref main
 RUN_ID=$(gh run list --workflow Release --limit 1 --json databaseId --jq '.[0].databaseId')
 test -n "$RUN_ID"
 gh run watch "$RUN_ID" --exit-status
 ```
 
-The second command retrieves the run that was just queued. Confirm it is the
+The gh run list command retrieves the run that was just queued. Confirm it is the
 run you started (`gh run view "$RUN_ID"`) before relying on its result. Do not
 tag anything until that dry run succeeds and you have recorded the exact
 reviewed commit you intend to publish as `COMMIT`.
@@ -128,6 +149,8 @@ substitute a local build or an artifact from another run:
 ```sh
 : "${RUN_ID:?set RUN_ID to the confirmed dry-run workflow ID}"
 : "${COMMIT:?set COMMIT to the reviewed origin/main SHA}"
+: "${VERSION:?set VERSION via scripts/release/release_config.py version}"
+: "${UPGRADE_SOURCE:?set UPGRADE_SOURCE via scripts/release/release_config.py upgrade-source}"
 set -eu
 DRY_RUN_COMMIT=$(gh run view "$RUN_ID" --json headSha --jq '.headSha') || exit 1
 if [ -z "$DRY_RUN_COMMIT" ] || [ "$DRY_RUN_COMMIT" != "$COMMIT" ]; then
@@ -136,26 +159,19 @@ if [ -z "$DRY_RUN_COMMIT" ] || [ "$DRY_RUN_COMMIT" != "$COMMIT" ]; then
 fi
 candidate_dir="dist/dry-run-$RUN_ID"
 gh run download "$RUN_ID" --name dist --dir "$candidate_dir"
-CANDIDATE="$PWD/$candidate_dir/korvid-0.4.0-py3-none-any.whl"
+CANDIDATE="$PWD/$candidate_dir/korvid-${VERSION}-py3-none-any.whl"
 test -f "$CANDIDATE"
-```
-
-Install published `korvid[all]==0.3.0` in a clean environment, then upgrade that
-same environment from the downloaded candidate:
-
-```sh
-set -eu
 upgrade_root=$(mktemp -d)
 uv venv --python 3.12 "$upgrade_root/venv"
 upgrade_python="$upgrade_root/venv/bin/python"
 upgrade_korvid="$upgrade_root/venv/bin/korvid"
-uv pip install --python "$upgrade_python" 'korvid[all]==0.3.0'
-"$upgrade_korvid" --version | grep -Fx 'korvid 0.3.0'
+uv pip install --python "$upgrade_python" "korvid[all]==${UPGRADE_SOURCE}"
+"$upgrade_korvid" --version | grep -Fx "korvid ${UPGRADE_SOURCE}"
 candidate_url=$("$upgrade_python" -c \
   'import pathlib, sys; print(pathlib.Path(sys.argv[1]).as_uri())' "$CANDIDATE")
 uv pip install --python "$upgrade_python" --upgrade \
   "korvid[all] @ $candidate_url"
-"$upgrade_korvid" --version | grep -Fx 'korvid 0.4.0'
+"$upgrade_korvid" --version | grep -Fx "korvid ${VERSION}"
 "$upgrade_korvid" --help >/dev/null
 "$upgrade_python" -c \
   'import korvid.mcp.server, korvid.obs.prometheus, korvid.providers.litellm_factory'
@@ -171,24 +187,31 @@ test ! -e "$runtime_root"
 Record the run ID, exact commit, and command result with the release evidence.
 Do not create or push the release tag until this gate passes.
 
-## Publish `v0.4.0`
+## Publish `$TAG`
 
 Create the annotated tag from the reviewed commit, then push only that tag:
 
 ```sh
+: "${COMMIT:?set COMMIT to the reviewed origin/main SHA}"
+: "${VERSION:?set VERSION via scripts/release/release_config.py version}"
+: "${TAG:?set TAG to v$VERSION}"
 set -eu
-if git rev-parse --quiet --verify refs/tags/v0.4.0 >/dev/null; then
-  echo "local tag v0.4.0 already exists; refusing to push it" >&2
+if [ "$TAG" != "v$VERSION" ]; then
+  echo "TAG $TAG does not match expected release tag v$VERSION; refusing to publish" >&2
   exit 1
 fi
-git tag -a v0.4.0 "$COMMIT" -m "korvid v0.4.0"
-test "$(git rev-list -n 1 refs/tags/v0.4.0)" = "$COMMIT"
-git push origin refs/tags/v0.4.0
+if git rev-parse --quiet --verify "refs/tags/$TAG" >/dev/null; then
+  echo "local tag $TAG already exists; refusing to push it" >&2
+  exit 1
+fi
+git tag -a "$TAG" "$COMMIT" -m "korvid $TAG"
+test "$(git rev-list -n 1 "refs/tags/$TAG")" = "$COMMIT"
+git push origin "refs/tags/$TAG"
 TAG_RUN_ID=
 attempt=0
 while [ -z "$TAG_RUN_ID" ] && [ "$attempt" -lt 30 ]; do
   TAG_RUN_ID=$(gh run list --workflow Release --event push \
-    --branch v0.4.0 --commit "$COMMIT" --limit 1 \
+    --branch "$TAG" --commit "$COMMIT" --limit 1 \
     --json databaseId --jq '.[0].databaseId // empty') || exit 1
   attempt=$((attempt + 1))
   [ -n "$TAG_RUN_ID" ] || sleep 2
@@ -208,7 +231,7 @@ publishing the final GitHub Release.
 The workflow is intentionally idempotent only inside a narrow boundary:
 
 - If the staged draft release already exists **and** the rerun proves the staged assets are byte-identical, it is safe to resume the idempotent workflow only when the staged assets match.
-- If PyPI already has `0.4.0` but the matching draft release is missing, or if
+- If PyPI already has the selected release version but the matching draft release is missing, or if
   the staged assets differ, stop and diagnose.
 - Do **not** attempt recovery by deleting or moving a published tag/version.
 
@@ -218,11 +241,13 @@ After the workflow succeeds, download the release artifacts and verify the wheel
 attestation from GitHub:
 
 ```sh
+: "${VERSION:?set VERSION via scripts/release/release_config.py version}"
+: "${TAG:?set TAG to v$VERSION}"
 set -eu
-gh release download v0.4.0 --dir dist/v0.4.0
-gh attestation verify dist/v0.4.0/korvid-0.4.0-py3-none-any.whl --repo hellices/korvid
-gh attestation verify dist/v0.4.0/SHA256SUMS --repo hellices/korvid
-(cd dist/v0.4.0 && shasum --algorithm 256 --check SHA256SUMS)
+gh release download "$TAG" --dir "dist/$TAG"
+gh attestation verify "dist/$TAG/korvid-${VERSION}-py3-none-any.whl" --repo hellices/korvid
+gh attestation verify "dist/$TAG/SHA256SUMS" --repo hellices/korvid
+(cd "dist/$TAG" && shasum --algorithm 256 --check SHA256SUMS)
 ```
 
 The attestation check establishes the provenance of `SHA256SUMS`; the final
@@ -243,18 +268,19 @@ for its checks. **The merge itself is the maintainer's**, by hand — this is th
 formula every `brew install korvid` resolves, and an agent must never merge it.
 
 ```sh
+: "${VERSION:?set VERSION via scripts/release/release_config.py version}"
 set -eu
 TAP_PR=$(gh pr list --repo hellices/homebrew-korvid \
   --state open \
   --json number,title,baseRefName,headRefName,headRepositoryOwner \
-  --jq '[.[] | select(
-    .title == "korvid 0.4.0" and
-    .baseRefName == "main" and
-    .headRefName == "bump-korvid-0.4.0" and
-    .headRepositoryOwner.login == "hellices"
-  )] | if length == 1 then .[0].number else empty end')
+  --jq "[.[] | select(
+    .title == \"korvid ${VERSION}\" and
+    .baseRefName == \"main\" and
+    .headRefName == \"bump-korvid-${VERSION}\" and
+    .headRepositoryOwner.login == \"hellices\"
+  )] | if length == 1 then .[0].number else empty end")
 if [ -z "$TAP_PR" ]; then
-  echo "trusted bump-korvid-0.4.0 tap PR not found; use the manual path below" >&2
+  echo "trusted bump-korvid-${VERSION} tap PR not found; use the manual path below" >&2
   exit 1
 fi
 gh pr diff "$TAP_PR" --repo hellices/homebrew-korvid
@@ -268,18 +294,20 @@ trust basis is the release workflow: it is generated from the tag-revalidated
 `SHA256SUMS`.
 
 ```sh
+: "${VERSION:?set VERSION via scripts/release/release_config.py version}"
+: "${TAG:?set TAG to v$VERSION}"
 set -eu
-formula_path="$PWD/dist/v0.4.0/korvid.rb"
+formula_path="$PWD/dist/$TAG/korvid.rb"
 if [ ! -f "$formula_path" ]; then
-  gh release download v0.4.0 --pattern korvid.rb --dir dist/v0.4.0
+  gh release download "$TAG" --pattern korvid.rb --dir "dist/$TAG"
 fi
 test -f "$formula_path"
 gh repo clone hellices/homebrew-korvid dist/homebrew-korvid
 cd dist/homebrew-korvid
 if cmp -s "$formula_path" Formula/korvid.rb; then
-  echo "korvid 0.4.0 formula is already present on tap main"
+  echo "korvid ${VERSION} formula is already present on tap main"
 else
-  branch=bump-korvid-0.4.0
+  branch="bump-korvid-${VERSION}"
   if git show-ref --verify --quiet "refs/remotes/origin/$branch"; then
     git switch --track -c "$branch" "origin/$branch"
   else
@@ -290,11 +318,11 @@ else
   if git diff --cached --quiet; then
     echo "verified formula is already present on $branch"
   else
-    git commit -m "korvid 0.4.0"
+    git commit -m "korvid ${VERSION}"
     git push -u origin "$branch"
   fi
-  TAP_PR_URL=$(gh pr create --title "korvid 0.4.0" \
-    --body "Generated by the korvid v0.4.0 release workflow from its tag-revalidated uv.lock.")
+  TAP_PR_URL=$(gh pr create --title "korvid ${VERSION}" \
+    --body "Generated by the korvid ${TAG} release workflow from its tag-revalidated uv.lock.")
   TAP_PR=${TAP_PR_URL##*/}
   case "$TAP_PR" in
     ""|*[!0-9]*) echo "could not identify created tap PR: $TAP_PR_URL" >&2; exit 1 ;;
@@ -308,10 +336,11 @@ fi
 Finally verify the tap, not merely the formula attached to the source release:
 
 ```sh
+: "${VERSION:?set VERSION via scripts/release/release_config.py version}"
 set -eu
 brew update
 brew upgrade hellices/korvid/korvid || brew install hellices/korvid/korvid
-korvid --version | grep -Fx 'korvid 0.4.0'
+korvid --version | grep -Fx "korvid ${VERSION}"
 brew test hellices/korvid/korvid
 ```
 
@@ -324,9 +353,9 @@ uninstall all target the same application.
 The simplest install is the full feature set:
 
 ```sh
-uv tool install 'korvid[all]==0.4.0'
+uv tool install 'korvid[all]'
 # or
-pipx install 'korvid[all]==0.4.0'
+pipx install 'korvid[all]'
 ```
 
 For unreleased `main` development, install from source instead:
@@ -344,9 +373,9 @@ If you already installed any narrower korvid requirement, reinstall the full
 desired extra set:
 
 ```sh
-uv tool install --force 'korvid[all]==0.4.0'
+uv tool install --force 'korvid[all]'
 # or
-pipx install --force 'korvid[all]==0.4.0'
+pipx install --force 'korvid[all]'
 ```
 
 To remove the package itself:
@@ -452,5 +481,5 @@ The package uninstall command does not run that cleanup for you.
 No dry run can prove the publication path itself. Attestation, staging, PyPI
 upload, finalization, compare-assets recovery, and pre-publication tag
 revalidation remain tag-only boundaries. `v0.1.2` proved that path once;
-`v0.4.0` must still be supervised by a maintainer because its publication is
+each new release must still be supervised by a maintainer because its publication is
 irreversible.

@@ -11,7 +11,12 @@ from tests.release_contracts import UPGRADE_SOURCE_VERSION, markdown_section
 _ROOT = Path(__file__).parents[1]
 _AGENTS = _ROOT / "AGENTS.md"
 _README = _ROOT / "README.md"
+_AGENT_DOC = _ROOT / "docs" / "agent.md"
+_GETTING_STARTED = _ROOT / "docs" / "getting-started.md"
+_HOMEPAGE = _ROOT / "docs" / "index.md"
+_OBSERVABILITY = _ROOT / "docs" / "observability.md"
 _RUNBOOK = _ROOT / "docs" / "release.md"
+_SECURITY = _ROOT / "SECURITY.md"
 _ALLOWED_RELEASE_DOC_HISTORY = frozenset({"0.1.0", "0.1.1", "0.1.2"})
 
 
@@ -117,13 +122,13 @@ def _assert_agent_policy_contracts(agents: str) -> None:
     assert "Testing Gotchas" not in review_loop
 
 
-def _assert_release_runbook_contracts(runbook: str, version: str) -> None:
+def _assert_release_runbook_contracts(runbook: str) -> None:
     headings = (
         "## One-time repository and publisher bindings",
         "## Irreversible boundaries",
         "## Dry run on `main` before tagging",
         "## Required cross-version upgrade gate",
-        f"## Publish `v{version}`",
+        "## Publish `$TAG`",
         "## Safe recovery boundaries",
         "## Verify the published artifacts",
         "## Publish and verify the Homebrew tap",
@@ -135,9 +140,10 @@ def _assert_release_runbook_contracts(runbook: str, version: str) -> None:
     irreversible = markdown_section(runbook, "Irreversible boundaries")
     dry_run = markdown_section(runbook, "Dry run on `main` before tagging")
     upgrade = markdown_section(runbook, "Required cross-version upgrade gate")
-    publish = markdown_section(runbook, f"Publish `v{version}`")
+    publish = markdown_section(runbook, "Publish `$TAG`")
     recovery = markdown_section(runbook, "Safe recovery boundaries")
     verify = markdown_section(runbook, "Verify the published artifacts")
+    tap = markdown_section(runbook, "Publish and verify the Homebrew tap")
     for binding in (
         "refs/tags/v*",
         "`release`",
@@ -152,47 +158,149 @@ def _assert_release_runbook_contracts(runbook: str, version: str) -> None:
     for command in (
         "git fetch origin main",
         "COMMIT=$(git rev-parse origin/main)",
+        "LOCAL_HEAD=$(git rev-parse HEAD)",
+        "git update-index -q --refresh",
+        "git diff --quiet --ignore-submodules --",
+        "git diff --cached --quiet --ignore-submodules --",
+        "VERSION=$(python scripts/release/release_config.py version)",
+        "UPGRADE_SOURCE=$(python scripts/release/release_config.py upgrade-source)",
+        'TAG="v$VERSION"',
+        ': "${VERSION:?release version is required}"',
+        ': "${UPGRADE_SOURCE:?release upgrade source is required}"',
+        ': "${TAG:?release tag is required}"',
         "gh workflow run Release --ref main",
         "gh run list --workflow Release --limit 1",
         'gh run watch "$RUN_ID" --exit-status',
         'gh run view "$RUN_ID"',
     ):
         assert command in dry_run
+    assert "check out the reviewed commit before reading release metadata" in dry_run
+    assert "tracked working tree has local modifications" in dry_run
+    assert "index has staged tracked changes" in dry_run
+    assert dry_run.index("LOCAL_HEAD=$(git rev-parse HEAD)") < dry_run.index(
+        "VERSION=$(python scripts/release/release_config.py version)"
+    )
+    assert dry_run.index("git diff --cached --quiet --ignore-submodules --") < dry_run.index(
+        "VERSION=$(python scripts/release/release_config.py version)"
+    )
+    assert dry_run.index(
+        "VERSION=$(python scripts/release/release_config.py version)"
+    ) < dry_run.index("gh workflow run Release --ref main")
+    assert "The gh run list command retrieves" in dry_run
+    assert "The second command retrieves" not in dry_run
 
     for command in (
         ': "${RUN_ID:?set RUN_ID to the confirmed dry-run workflow ID}"',
         ': "${COMMIT:?set COMMIT to the reviewed origin/main SHA}"',
+        ': "${VERSION:?set VERSION via scripts/release/release_config.py version}"',
+        ': "${UPGRADE_SOURCE:?set UPGRADE_SOURCE via scripts/release/release_config.py upgrade-source}"',
         "DRY_RUN_COMMIT=$(gh run view \"$RUN_ID\" --json headSha --jq '.headSha') || exit 1",
         '[ "$DRY_RUN_COMMIT" != "$COMMIT" ]',
         'gh run download "$RUN_ID" --name dist --dir "$candidate_dir"',
-        f'CANDIDATE="$PWD/$candidate_dir/korvid-{version}-py3-none-any.whl"',
-        f"uv pip install --python \"$upgrade_python\" 'korvid[all]=={UPGRADE_SOURCE_VERSION}'",
-        f"\"$upgrade_korvid\" --version | grep -Fx 'korvid {version}'",
+        'CANDIDATE="$PWD/$candidate_dir/korvid-${VERSION}-py3-none-any.whl"',
+        'uv pip install --python "$upgrade_python" "korvid[all]==${UPGRADE_SOURCE}"',
+        '"$upgrade_korvid" --version | grep -Fx "korvid ${UPGRADE_SOURCE}"',
+        '"$upgrade_korvid" --version | grep -Fx "korvid ${VERSION}"',
+        'test ! -e "$runtime_root"',
     ):
         assert command in upgrade
 
     for command in (
-        f'git tag -a v{version} "$COMMIT" -m "korvid v{version}"',
-        f'test "$(git rev-list -n 1 refs/tags/v{version})" = "$COMMIT"',
-        f"git push origin refs/tags/v{version}",
+        ': "${COMMIT:?set COMMIT to the reviewed origin/main SHA}"',
+        ': "${VERSION:?set VERSION via scripts/release/release_config.py version}"',
+        ': "${TAG:?set TAG to v$VERSION}"',
+        '[ "$TAG" != "v$VERSION" ]',
+        'echo "TAG $TAG does not match expected release tag v$VERSION; refusing to publish" >&2',
+        'git tag -a "$TAG" "$COMMIT" -m "korvid $TAG"',
+        'test "$(git rev-list -n 1 "refs/tags/$TAG")" = "$COMMIT"',
+        'git push origin "refs/tags/$TAG"',
         "TAG_RUN_ID=$(gh run list --workflow Release --event push \\",
-        f'--branch v{version} --commit "$COMMIT" --limit 1 \\',
+        '--branch "$TAG" --commit "$COMMIT" --limit 1 \\',
         "TAG_RUN_COMMIT=$(gh run view \"$TAG_RUN_ID\" --json headSha --jq '.headSha')",
         'test "$TAG_RUN_COMMIT" = "$COMMIT"',
         'gh run watch "$TAG_RUN_ID" --exit-status',
     ):
         assert command in publish
+    assert publish.index('[ "$TAG" != "v$VERSION" ]') < publish.index(
+        'git tag -a "$TAG" "$COMMIT" -m "korvid $TAG"'
+    )
 
     _assert_safe_recovery_contracts(recovery)
 
-    assert "```sh\nset -eu" in verify
+    assert "```sh\n" in verify
+    assert "set -eu" in verify
     for command in (
-        f"gh release download v{version} --dir dist/v{version}",
-        f"gh attestation verify dist/v{version}/korvid-{version}-py3-none-any.whl --repo hellices/korvid",
-        f"gh attestation verify dist/v{version}/SHA256SUMS --repo hellices/korvid",
-        f"(cd dist/v{version} && shasum --algorithm 256 --check SHA256SUMS)",
+        ': "${VERSION:?set VERSION via scripts/release/release_config.py version}"',
+        ': "${TAG:?set TAG to v$VERSION}"',
+        'gh release download "$TAG" --dir "dist/$TAG"',
+        'gh attestation verify "dist/$TAG/korvid-${VERSION}-py3-none-any.whl" --repo hellices/korvid',
+        'gh attestation verify "dist/$TAG/SHA256SUMS" --repo hellices/korvid',
+        '(cd "dist/$TAG" && shasum --algorithm 256 --check SHA256SUMS)',
     ):
         assert command in verify
+
+    for command in (
+        ': "${VERSION:?set VERSION via scripts/release/release_config.py version}"',
+        ': "${TAG:?set TAG to v$VERSION}"',
+        "gh pr list --repo hellices/homebrew-korvid \\",
+        "korvid ${VERSION}",
+        "bump-korvid-${VERSION}",
+        'echo "trusted bump-korvid-${VERSION} tap PR not found; use the manual path below" >&2',
+        'formula_path="$PWD/dist/$TAG/korvid.rb"',
+        'gh release download "$TAG" --pattern korvid.rb --dir "dist/$TAG"',
+        'branch="bump-korvid-${VERSION}"',
+        'git commit -m "korvid ${VERSION}"',
+        '--title "korvid ${VERSION}" \\',
+        '--body "Generated by the korvid ${TAG} release workflow from its tag-revalidated uv.lock."',
+        'korvid --version | grep -Fx "korvid ${VERSION}"',
+    ):
+        assert command in tap
+
+
+def _assert_no_pinned_korvid_requirement(text: str, *, label: str) -> None:
+    match = re.search(r"korvid(?:\[[^\]]+\])?==([^\s'\"`)\],]+)", text)
+    assert match is None, (
+        f"{label} pins korvid requirement {match.group(0)!r}; latest-install docs must be unpinned"
+    )
+
+
+def _assert_evergreen_installation_contracts(
+    readme: str, agent: str, getting_started: str, homepage: str, observability: str
+) -> None:
+    quick_start = markdown_section(readme, "Quick start")
+    installation = markdown_section(readme, "Installation")
+    agent_install = markdown_section(agent, "Installing the agent")
+    current_release = markdown_section(getting_started, "Current release")
+    install = markdown_section(getting_started, "Install")
+    observability_install = markdown_section(observability, "Install")
+
+    for text, label in (
+        (quick_start, "README quick start"),
+        (installation, "README installation"),
+        (agent_install, "docs/agent.md installing the agent"),
+        (current_release, "docs/getting-started.md current release"),
+        (install, "docs/getting-started.md install"),
+        (homepage, "docs/index.md"),
+        (observability_install, "docs/observability.md install"),
+    ):
+        _assert_no_pinned_korvid_requirement(text, label=label)
+
+    assert "uv tool install 'korvid[all]'" in quick_start
+    assert "pipx install 'korvid[all]'" in quick_start
+    assert "python -m pip install 'korvid[all]'" in quick_start
+    assert "uv tool install 'korvid[all]'" in installation
+    assert "uv tool install --force 'korvid[all]'" in installation
+    assert "pipx install --force 'korvid[all]'" in installation
+    assert 'uv tool install "korvid[agent]"' in agent_install
+    assert 'pipx install "korvid[agent]"' in agent_install
+    assert 'uv tool install "korvid[all]"' in agent_install
+    assert "https://github.com/hellices/korvid/releases/latest" in current_release
+    assert "uv tool install 'korvid[all]'" in install
+    assert "pipx install 'korvid[all]'" in install
+    assert "uv tool install 'korvid[all]'" in homepage
+    assert "uv tool install 'korvid[agent,observability]'" in observability_install
+    assert "uv tool install 'korvid[mcp,observability]'" in observability_install
+    assert "pipx install" in observability_install
 
 
 def _assert_cleanup_contracts(readme: str, runbook: str) -> None:
@@ -233,52 +341,35 @@ def _assert_cleanup_contracts(readme: str, runbook: str) -> None:
     assert "--force" not in cleanup
 
 
-def _assert_allowed_release_doc_versions(name: str, text: str, version: str) -> set[str]:
+def _assert_allowed_release_doc_versions(
+    name: str, text: str, *, version: str, allow_current: bool
+) -> set[str]:
     found = _named_versions(text)
-    stale = found - (_ALLOWED_RELEASE_DOC_HISTORY | {version})
+    if allow_current:
+        assert version in found, f"{name} never names the version being shipped ({version})"
+    else:
+        assert version not in found, f"{name} hardcodes the version being shipped ({version})"
+    allowed = _ALLOWED_RELEASE_DOC_HISTORY | ({version} if allow_current else set())
+    stale = found - allowed
     assert not stale, (
-        f"{name} names {sorted(stale)}; the project version is {version} and the only "
-        "other versions release docs may name are the explicit historical set "
-        f"{sorted(_ALLOWED_RELEASE_DOC_HISTORY)}"
+        f"{name} names {sorted(stale)}; the only other versions release docs may name are "
+        f"the explicit historical set {sorted(_ALLOWED_RELEASE_DOC_HISTORY)}"
     )
-    assert version in found, f"{name} never names the version being shipped ({version})"
     return found
 
 
-def _strip_scoped_upgrade_source(text: str, approved_contexts: tuple[str, ...]) -> str:
-    for context in approved_contexts:
-        assert text.count(context) == 1, f"upgrade-source context drifted: {context!r}"
-        sanitized = context.replace(UPGRADE_SOURCE_VERSION, "upgrade-source")
-        text = text.replace(context, sanitized)
-    return text
-
-
-def test_scoped_upgrade_source_stripping_keeps_unapproved_mentions() -> None:
-    approved = f"published `{UPGRADE_SOURCE_VERSION}` installation to the candidate wheel"
-    stale = f"uv tool install 'korvid[all]=={UPGRADE_SOURCE_VERSION}'"
-    cleaned = _strip_scoped_upgrade_source(f"{approved}\n{stale}", (approved,))
-    assert UPGRADE_SOURCE_VERSION in cleaned
-    assert stale in cleaned
-
-
-def _assert_release_versions_contracts(version: str, readme: str, runbook: str, notes: str) -> None:
-    readme_upgrade = f"published `{UPGRADE_SOURCE_VERSION}` installation to the candidate wheel"
-    runbook_upgrade_contexts = (
-        f"`v{UPGRADE_SOURCE_VERSION}` is the supported upgrade source",
-        f"Install published `korvid[all]=={UPGRADE_SOURCE_VERSION}` in a clean environment",
-        f"uv pip install --python \"$upgrade_python\" 'korvid[all]=={UPGRADE_SOURCE_VERSION}'",
-        f"\"$upgrade_korvid\" --version | grep -Fx 'korvid {UPGRADE_SOURCE_VERSION}'",
+def _assert_release_versions_contracts(version: str, runbook: str, notes: str) -> None:
+    runbook_versions = _named_versions(runbook)
+    assert version not in runbook_versions, (
+        f"docs/release.md hardcodes the version being shipped ({version})"
+    )
+    assert UPGRADE_SOURCE_VERSION not in runbook_versions, (
+        f"docs/release.md hardcodes the upgrade source ({UPGRADE_SOURCE_VERSION})"
     )
     _assert_allowed_release_doc_versions(
-        "README.md",
-        _strip_scoped_upgrade_source(readme, (readme_upgrade,)),
-        version,
+        "docs/release.md", runbook, version=version, allow_current=False
     )
-    _assert_allowed_release_doc_versions(
-        "docs/release.md",
-        _strip_scoped_upgrade_source(runbook, runbook_upgrade_contexts),
-        version,
-    )
+
     notes_versions = _named_versions(notes)
     assert version in notes_versions, (
         f"docs/release-notes must name the version being shipped ({version})"
@@ -288,9 +379,6 @@ def _assert_release_versions_contracts(version: str, readme: str, runbook: str, 
         f"({version}); found {sorted(notes_versions)}"
     )
 
-    assert f"uv tool install 'korvid[all]=={version}'" in readme
-    install = markdown_section(runbook, "Install, reinstall, and uninstall from PyPI")
-    assert f"uv tool install 'korvid[all]=={version}'" in install
     assert "## Install or upgrade" in notes
     assert f"uv tool install 'korvid[all]=={version}'" in notes
     assert f"pipx install --force 'korvid[all]=={version}'" in notes
@@ -305,8 +393,8 @@ def test_agent_policy_forbids_agent_controlled_merge_paths() -> None:
     _assert_agent_policy_contracts(_AGENTS.read_text(encoding="utf-8"))
 
 
-def test_release_runbook_preserves_release_order_and_exact_source_binding() -> None:
-    _assert_release_runbook_contracts(_RUNBOOK.read_text(encoding="utf-8"), _project_version())
+def test_release_runbook_preserves_release_order_and_variable_source_binding() -> None:
+    _assert_release_runbook_contracts(_RUNBOOK.read_text(encoding="utf-8"))
 
 
 def test_release_docs_preserve_retained_state_and_explicit_cleanup_controls() -> None:
@@ -319,55 +407,63 @@ def test_current_release_docs_only_name_allowed_versions() -> None:
     version = _project_version()
     _assert_release_versions_contracts(
         version,
-        _README.read_text(encoding="utf-8"),
         _RUNBOOK.read_text(encoding="utf-8"),
         _release_notes(version),
     )
 
 
-def test_getting_started_current_release_banner_and_pins_follow_project_version() -> None:
-    version = _project_version()
-    getting_started = (_ROOT / "docs" / "getting-started.md").read_text(encoding="utf-8")
-    current_release = markdown_section(getting_started, "Current release")
-    banner = next(line for line in current_release.splitlines() if line.strip())
-    assert re.match(rf"^\*\*`{re.escape(version)}`\*\*", banner)
-    pinned_versions = set(re.findall(r"korvid(?:\[[^\]]+\])?==([^\s'\"`)\],]+)", getting_started))
-    assert pinned_versions == {version}
-
-
-def test_homepage_install_pin_follows_project_version() -> None:
-    homepage = (_ROOT / "docs" / "index.md").read_text(encoding="utf-8")
-    pinned_versions = set(re.findall(r"korvid\[all\]==([^\s'\"<]+)", homepage))
-    assert pinned_versions == {_project_version()}
-
-
-def test_upgrade_source_version_is_rejected_outside_its_documented_context() -> None:
-    version = _project_version()
-    stale_install = f"\nuv tool install 'korvid[all]=={UPGRADE_SOURCE_VERSION}'\n"
-    with pytest.raises(AssertionError, match=r"README\.md names"):
-        _assert_release_versions_contracts(
-            version,
-            _README.read_text(encoding="utf-8") + stale_install,
-            _RUNBOOK.read_text(encoding="utf-8"),
-            _release_notes(version),
-        )
-
-
-def test_upgrade_source_version_is_rejected_in_extra_runbook_context() -> None:
-    version = _project_version()
-    runbook = _RUNBOOK.read_text(encoding="utf-8")
-    approved = (
-        f"uv pip install --python \"$upgrade_python\" 'korvid[all]=={UPGRADE_SOURCE_VERSION}'"
+def test_installation_docs_use_evergreen_latest_release_guidance() -> None:
+    _assert_evergreen_installation_contracts(
+        _README.read_text(encoding="utf-8"),
+        _AGENT_DOC.read_text(encoding="utf-8"),
+        _GETTING_STARTED.read_text(encoding="utf-8"),
+        _HOMEPAGE.read_text(encoding="utf-8"),
+        _OBSERVABILITY.read_text(encoding="utf-8"),
     )
-    stale_install = f"uv tool install 'korvid[all]=={UPGRADE_SOURCE_VERSION}'"
-    mutated = runbook.replace(approved, f"{approved}\n{stale_install}")
-    with pytest.raises(AssertionError, match=r"docs/release\.md names"):
-        _assert_release_versions_contracts(
-            version,
-            _README.read_text(encoding="utf-8"),
-            mutated,
-            _release_notes(version),
+
+
+def test_security_policy_uses_evergreen_supported_version_language() -> None:
+    security = _SECURITY.read_text(encoding="utf-8")
+    assert _named_versions(security) == set()
+    assert "https://github.com/hellices/korvid/releases/latest" in security
+    assert "current published minor line" in security
+    assert "publishing a new minor line supersedes the previous minor line" in security
+
+
+def test_pinned_requirement_is_rejected_in_evergreen_install_docs() -> None:
+    with pytest.raises(AssertionError, match=r"README quick start pins korvid requirement"):
+        _assert_no_pinned_korvid_requirement(
+            "uv tool install 'korvid[all]==0.4.0'", label="README quick start"
         )
+
+
+def test_hardcoded_upgrade_source_is_rejected_in_runbook() -> None:
+    version = _project_version()
+    mutated = _RUNBOOK.read_text(encoding="utf-8") + (
+        f"\nuv tool install 'korvid[all]=={UPGRADE_SOURCE_VERSION}'\n"
+    )
+    with pytest.raises(AssertionError, match=r"docs/release\.md hardcodes the upgrade source"):
+        _assert_release_versions_contracts(version, mutated, _release_notes(version))
+
+
+def test_hardcoded_project_version_is_rejected_in_runbook() -> None:
+    version = _project_version()
+    mutated = _RUNBOOK.read_text(encoding="utf-8") + f"\nkorvid {version}\n"
+    with pytest.raises(
+        AssertionError, match=r"docs/release\.md hardcodes the version being shipped"
+    ):
+        _assert_release_versions_contracts(version, mutated, _release_notes(version))
+
+
+def test_publish_step_requires_tag_to_match_version() -> None:
+    runbook = _RUNBOOK.read_text(encoding="utf-8")
+    publish = markdown_section(runbook, "Publish `$TAG`")
+    mutated = publish.replace(
+        '[ "$TAG" != "v$VERSION" ]',
+        '[ "$TAG" != "$TAG" ]',
+    )
+    with pytest.raises(AssertionError, match=r'\[ "\$TAG" != "v\$VERSION" \]'):
+        _assert_release_runbook_contracts(runbook.replace(publish, mutated))
 
 
 def test_upgrade_source_is_the_previous_minor_release() -> None:

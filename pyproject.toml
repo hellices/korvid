@@ -66,6 +66,9 @@ Issues = "https://github.com/hellices/korvid/issues"
 Documentation = "https://hellices.github.io/korvid/"
 Security = "https://github.com/hellices/korvid/blob/main/SECURITY.md"
 
+[tool.korvid.release]
+upgrade-from = "0.3.0"
+
 [project.optional-dependencies]
 # Embedded AI agent: provider HTTP adapters + OS-keychain credential storage.
 agent = [
