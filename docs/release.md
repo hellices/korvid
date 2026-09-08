@@ -204,6 +204,22 @@ if git rev-parse --quiet --verify "refs/tags/$TAG" >/dev/null; then
   echo "local tag $TAG already exists; refusing to push it" >&2
   exit 1
 fi
+if ! REVIEWED_VERSION="$(
+  set -eu
+  metadata=$(mktemp)
+  trap 'rm -f "$metadata"' EXIT
+  if ! git show "$COMMIT:pyproject.toml" >"$metadata" 2>/dev/null; then
+    echo "could not read pyproject.toml from reviewed commit $COMMIT" >&2
+    exit 1
+  fi
+  python scripts/release/release_config.py version --pyproject "$metadata"
+)"; then
+  exit 1
+fi
+if [ -z "$REVIEWED_VERSION" ] || [ "$REVIEWED_VERSION" != "$VERSION" ]; then
+  echo "reviewed commit $COMMIT declares version $REVIEWED_VERSION, not requested VERSION $VERSION; refusing to publish" >&2
+  exit 1
+fi
 git tag -a "$TAG" "$COMMIT" -m "korvid $TAG"
 test "$(git rev-list -n 1 "refs/tags/$TAG")" = "$COMMIT"
 git push origin "refs/tags/$TAG"
@@ -221,6 +237,10 @@ TAG_RUN_COMMIT=$(gh run view "$TAG_RUN_ID" --json headSha --jq '.headSha')
 test "$TAG_RUN_COMMIT" = "$COMMIT"
 gh run watch "$TAG_RUN_ID" --exit-status
 ```
+
+This guard rereads only the reviewed commit's `pyproject.toml` to confirm the
+operator's frozen `COMMIT` still declares the requested `VERSION`; it does not
+replace the exact-main dry-run review or the cross-version upgrade gate above.
 
 The push starts `.github/workflows/release.yml`, which revalidates the tag
 before staging the draft GitHub Release, before PyPI publication, and before

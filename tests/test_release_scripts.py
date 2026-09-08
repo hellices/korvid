@@ -45,9 +45,12 @@ import smoke_install  # type: ignore[import-not-found]  # noqa: E402  # scripts/
 import version_format  # type: ignore[import-not-found]  # noqa: E402  # scripts/release via sys.path
 
 
-def _pyproject(tmp_path: Path, version: str) -> Path:
+def _pyproject(tmp_path: Path, version: str, *, upgrade_from: str | None = None) -> Path:
     path = tmp_path / "pyproject.toml"
-    path.write_text(f'[project]\nname = "korvid"\nversion = "{version}"\n')
+    contents = f'[project]\nname = "korvid"\nversion = "{version}"\n'
+    if upgrade_from is not None:
+        contents += f'\n[tool.korvid.release]\nupgrade-from = "{upgrade_from}"\n'
+    path.write_text(contents)
     return path
 
 
@@ -2430,6 +2433,86 @@ def test_release_runbook_rejects_a_stale_tag_before_touching_git(tag: str, exit_
     assert result.returncode == exit_code
     if exit_code:
         assert "does not match expected release tag v7.4.0; refusing to publish" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("commit", "version", "tag", "expected_code", "message"),
+    [
+        ("reviewed", "7.4.0", "v7.4.0", 0, ""),
+        (
+            "reviewed",
+            "7.3.9",
+            "v7.3.9",
+            1,
+            "reviewed commit {commit} declares version 7.4.0, not requested VERSION 7.3.9; refusing to publish",
+        ),
+        (
+            "missing",
+            "7.4.0",
+            "v7.4.0",
+            1,
+            "could not read pyproject.toml from reviewed commit missing",
+        ),
+    ],
+)
+def test_release_runbook_checks_reviewed_commit_version_before_creating_tag(
+    tmp_path: Path, commit: str, version: str, tag: str, expected_code: int, message: str
+) -> None:
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("Bash is needed to execute the POSIX release preflight")
+
+    repo = _release_repo(tmp_path)
+    scripts_dir = repo / "scripts" / "release"
+    scripts_dir.mkdir(parents=True)
+    shutil.copy(SCRIPTS / "release_config.py", scripts_dir / "release_config.py")
+    shutil.copy(SCRIPTS / "version_format.py", scripts_dir / "version_format.py")
+    _pyproject(repo, "7.4.0", upgrade_from="7.3.0")
+    _git(
+        repo,
+        "add",
+        "pyproject.toml",
+        "scripts/release/release_config.py",
+        "scripts/release/version_format.py",
+    )
+    _git(repo, "commit", "-m", "release metadata")
+    reviewed = _git(repo, "rev-parse", "HEAD")
+    _pyproject(repo, "99.0.0", upgrade_from="98.0.0")
+
+    temp_root = tmp_path / "mktemp-root"
+    temp_root.mkdir()
+    python_dir = Path(sys.executable).parent
+    path_env = f"{python_dir}{os.pathsep}{os.environ.get('PATH', '')}"
+    assert shutil.which("python", path=path_env) is not None
+
+    section = markdown_section(_release_runbook(), "Publish `$TAG`")
+    script = re.findall(r"^```sh\n(.*?)^```", section, re.MULTILINE | re.DOTALL)[0]
+    preflight, separator, _remainder = script.partition(
+        'git tag -a "$TAG" "$COMMIT" -m "korvid $TAG"'
+    )
+    assert separator, "the committed-version guard must run before tag creation"
+    commit_ref = reviewed if commit == "reviewed" else commit
+    result = subprocess.run(
+        [bash, "--noprofile", "--norc"],
+        input=preflight,
+        cwd=repo,
+        env={
+            **os.environ,
+            "PATH": path_env,
+            "COMMIT": commit_ref,
+            "VERSION": version,
+            "TAG": tag,
+            "TMPDIR": str(temp_root),
+        },
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == expected_code, result.stderr
+    assert not _git(repo, "tag")
+    if message:
+        assert message.format(commit=reviewed) in result.stderr
+    assert list(temp_root.iterdir()) == []
 
 
 # --- metadata ---------------------------------------------------------------

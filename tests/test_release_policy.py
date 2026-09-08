@@ -211,6 +211,9 @@ def _assert_release_runbook_contracts(runbook: str) -> None:
         ': "${TAG:?set TAG to v$VERSION}"',
         '[ "$TAG" != "v$VERSION" ]',
         'echo "TAG $TAG does not match expected release tag v$VERSION; refusing to publish" >&2',
+        'git show "$COMMIT:pyproject.toml" >"$metadata" 2>/dev/null',
+        'python scripts/release/release_config.py version --pyproject "$metadata"',
+        "reviewed commit $COMMIT declares version $REVIEWED_VERSION, not requested VERSION $VERSION; refusing to publish",
         'git tag -a "$TAG" "$COMMIT" -m "korvid $TAG"',
         'test "$(git rev-list -n 1 "refs/tags/$TAG")" = "$COMMIT"',
         'git push origin "refs/tags/$TAG"',
@@ -222,8 +225,14 @@ def _assert_release_runbook_contracts(runbook: str) -> None:
     ):
         assert command in publish
     assert publish.index('[ "$TAG" != "v$VERSION" ]') < publish.index(
-        'git tag -a "$TAG" "$COMMIT" -m "korvid $TAG"'
+        'if git rev-parse --quiet --verify "refs/tags/$TAG" >/dev/null; then'
     )
+    assert publish.index(
+        'if git rev-parse --quiet --verify "refs/tags/$TAG" >/dev/null; then'
+    ) < publish.index('git show "$COMMIT:pyproject.toml" >"$metadata" 2>/dev/null')
+    assert publish.index(
+        'git show "$COMMIT:pyproject.toml" >"$metadata" 2>/dev/null'
+    ) < publish.index('git tag -a "$TAG" "$COMMIT" -m "korvid $TAG"')
 
     _assert_safe_recovery_contracts(recovery)
 
@@ -463,6 +472,19 @@ def test_publish_step_requires_tag_to_match_version() -> None:
         '[ "$TAG" != "$TAG" ]',
     )
     with pytest.raises(AssertionError, match=r'\[ "\$TAG" != "v\$VERSION" \]'):
+        _assert_release_runbook_contracts(runbook.replace(publish, mutated))
+
+
+def test_publish_step_requires_reviewed_commit_version_guard() -> None:
+    runbook = _RUNBOOK.read_text(encoding="utf-8")
+    publish = markdown_section(runbook, "Publish `$TAG`")
+    mutated = publish.replace(
+        'git show "$COMMIT:pyproject.toml" >"$metadata" 2>/dev/null',
+        'cat pyproject.toml >"$metadata"',
+    )
+    with pytest.raises(
+        AssertionError, match=r'git show "\$COMMIT:pyproject\.toml" >"\$metadata" 2>/dev/null'
+    ):
         _assert_release_runbook_contracts(runbook.replace(publish, mutated))
 
 
