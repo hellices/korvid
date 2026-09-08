@@ -111,7 +111,7 @@ TAG="v$VERSION"
 : "${UPGRADE_SOURCE:?release upgrade source is required}"
 : "${TAG:?release tag is required}"
 gh workflow run Release --ref main
-RUN_ID=$(gh run list --workflow Release --limit 1 --json databaseId --jq '.[0].databaseId')
+RUN_ID=$(gh run list --workflow Release --limit 1 --json databaseId --jq '.[0].databaseId // empty')
 test -n "$RUN_ID"
 gh run watch "$RUN_ID" --exit-status
 ```

@@ -170,6 +170,8 @@ def _assert_release_runbook_contracts(runbook: str) -> None:
         ': "${TAG:?release tag is required}"',
         "gh workflow run Release --ref main",
         "gh run list --workflow Release --limit 1",
+        "RUN_ID=$(gh run list --workflow Release --limit 1 --json databaseId "
+        "--jq '.[0].databaseId // empty')",
         'gh run watch "$RUN_ID" --exit-status',
         'gh run view "$RUN_ID"',
     ):

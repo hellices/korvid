@@ -39,8 +39,8 @@ The live Homebrew tap needs no system Python:
 brew install hellices/korvid/korvid
 ```
 
-The tap follows its own reviewed update schedule; `brew info
-hellices/korvid/korvid` shows the available version. The formula builds against
+The tap follows its own reviewed update schedule;
+`brew info hellices/korvid/korvid` shows the available version. The formula builds against
 Homebrew's Python and deliberately excludes MCP. Use `uv tool` or `pipx`
 below for the MCP server and stdio adapter.
 
