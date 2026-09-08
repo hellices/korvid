@@ -33,13 +33,17 @@ from korvid.agent.provider import (
     REQUEST_SENT,
     STREAM_MALFORMED,
     STREAM_TRUNCATED,
+    OperatorSafeProviderError,
     ProviderStreamError,
     ProviderStreamLimitError,
     ProviderStreamTruncatedError,
 )
+from korvid.providers import flow_copilot
 from korvid.providers.flow_copilot import (
     COPILOT_CHAT_BASE_URL,
     CREDENTIAL_KEY,
+    DEVICE_LOGIN_NOT_STARTED,
+    DEVICE_LOGIN_TIMED_OUT,
     CopilotChatProvider,
     CopilotCredentialSource,
     CopilotDeviceLogin,
@@ -368,6 +372,43 @@ async def test_finishing_without_beginning_is_refused(
     login = _login(_store(tmp_path, monkeypatch), _FakeDeviceFlow())
     with pytest.raises(DeviceLoginError, match="begin"):
         await login.finish_auth(_profile())
+
+
+# ---------------------------------------------------------------------------
+# Which of this flow's sentences the wizard may repeat
+# ---------------------------------------------------------------------------
+#
+# The setup wizard withholds every failure's own text unless the adapter
+# declared it safe, because a sign-in failure can quote the token being
+# minted. Two of this flow's refusals are korvid's own written sentences,
+# and they are the only part of an unanswered or unstarted login an
+# operator can act on — so they are declared, and nothing else is.
+
+
+@pytest.mark.parametrize(
+    "message",
+    [DEVICE_LOGIN_TIMED_OUT, DEVICE_LOGIN_NOT_STARTED],
+    ids=["timed out", "never started"],
+)
+def test_the_flows_written_refusals_are_declared_operator_safe(message: str) -> None:
+    assert issubclass(DeviceLoginError, OperatorSafeProviderError)
+    assert DeviceLoginError(message).operator_message() == message
+
+
+def test_a_refusal_quoting_githubs_own_answer_is_not_declared_safe() -> None:
+    """`poll` names the error code GitHub returned, and the token exchange
+    quotes an HTTP status — neither is a sentence this repository wrote,
+    so neither inherits the exemption."""
+    assert DeviceLoginError(f"device login failed: {_SECRET_ISH}").operator_message() is None
+    assert DeviceLoginError("Copilot token exchange failed (HTTP 403)").operator_message() is None
+
+
+def test_every_declared_message_is_one_this_module_raises() -> None:
+    """A declaration that names a string nothing raises is an audit that
+    has stopped tracking the code."""
+    source = Path(flow_copilot.__file__).read_text(encoding="utf-8")
+    for message in DeviceLoginError.safe_messages:
+        assert repr(message) in source or message in source
 
 
 async def test_a_profile_that_does_not_ask_for_device_login_starts_none(

@@ -288,7 +288,10 @@ are composed *after* the immutable safety contract and cannot widen it.
   refuses, a request the outbound policy blocks — which used to be printed
   in the wizard exactly as the library phrased them, quoting the key and
   the endpoint. The wizard now shows one written sentence and the real
-  reason goes to the log.
+  reason goes to the log. Its interactive sign-in answers the same way:
+  a device login that cannot start, or that never completes, says which
+  of the two halves failed and nothing else, because an authorization
+  exchange quotes the very token it is minting.
 
 ## Dependency note: `[agent]` grew
 

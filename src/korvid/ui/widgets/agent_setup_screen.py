@@ -15,11 +15,12 @@ handed a non-empty endpoint; asking for the method first would ask with
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
-from typing import ClassVar
+from typing import ClassVar, Final
 
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -41,9 +42,32 @@ from korvid.agent.model_profiles import (
 )
 from korvid.ui.widgets.model_search_screen import ModelSearchScreen
 
+logger = logging.getLogger(__name__)
+
 #: A secret field collects the *name* of an environment variable, never a
 #: value: this is the shape a name has, and the screen never resolves it.
 _ENV_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
+
+#: What the wizard says when a failed sign-in's own text is not one this
+#: repository wrote. Starting a device login opens a credential store and
+#: puts a request on the wire, so its failures routinely carry a keyring
+#: path, an endpoint, or the response body of a refusal — and a refusal
+#: during an authorization exchange quotes the very token being minted.
+#: The real reason goes to the log instead (same rule as the connection
+#: probe's `PROBE_REFUSED`).
+AUTHORIZATION_WITHHELD: Final = (
+    "the sign-in could not be started — the provider's own message is withheld "
+    "because it can quote a credential; see the log for the reason"
+)
+
+#: The same answer for the second half of the sign-in. Deliberately a
+#: different sentence: withholding the reason must not also withhold
+#: *where* it happened, because starting a login and waiting for one to be
+#: approved fail for unrelated causes and are retried differently.
+LOGIN_WITHHELD: Final = (
+    "the sign-in never completed — the provider's own message is withheld "
+    "because it can quote a credential; see the log for the reason"
+)
 
 #: The capability tier is not a profile field — it is the agent's routing
 #: override, persisted separately — but it is asked here so one pass
@@ -495,8 +519,12 @@ class AgentSetupScreen(ModalScreen["SetupResult | None"]):
         device = self.query_one("#setup-device-code", Static)
         try:
             prompt = await self._catalog.begin_auth(profile)
+        except asyncio.CancelledError:
+            # A cancelled sign-in is not a verdict about the profile, so it
+            # is never converted into one: the wizard is going away.
+            raise
         except Exception as exc:  # sign-in errors must not crash the app
-            self._status(f"Authorization failed: {exc} — press Ctrl+R to retry, Esc to cancel")
+            self._report_failure("Authorization failed", exc, AUTHORIZATION_WITHHELD)
             return await self._await_nav()
         if prompt is None:
             return _Nav.NEXT
@@ -505,13 +533,42 @@ class AgentSetupScreen(ModalScreen["SetupResult | None"]):
         self._status("Waiting for authorization…")
         try:
             await self._catalog.finish_auth(profile)
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:  # keep the wizard open on a failed login
-            self._status(f"Login failed: {exc} — press Ctrl+R to retry, Esc to cancel")
+            self._report_failure("Login failed", exc, LOGIN_WITHHELD)
             return await self._await_nav()
         device.display = False
         self._mark_done("authorize", "Signed in")
         self._status("")
         return _Nav.NEXT
+
+    def _report_failure(self, headline: str, exc: BaseException, withheld: str) -> None:
+        """Show *headline* with text the failure is allowed to contribute.
+
+        The default is to contribute nothing: a sign-in resolves a
+        credential store and reads a provider's response body, so the
+        exception's own message can carry a token, a keyring path or the
+        endpoint it was refused at. The one exception is a message an
+        adapter *declared* safe — per message, not per class, so a
+        translated sentence reaches the operator while
+        `ProviderStatusError(str(sdk_exc))` does not.
+
+        Args:
+            headline: Which half of the sign-in failed.
+            exc: The failure. Logged in full whenever it is withheld.
+            withheld: The sentence to show in its place.
+        """
+        # Imported here, not at module scope: the base TUI must not load
+        # the embedded-agent provider ABC at startup (issue #73). A sign-in
+        # that has already failed is well past that point.
+        from korvid.agent.provider import OperatorSafeProviderError
+
+        safe = exc.operator_message() if isinstance(exc, OperatorSafeProviderError) else None
+        if safe is None:
+            logger.warning("model setup sign-in failed", exc_info=exc)
+        detail = safe if safe is not None else withheld
+        self._status(f"{headline}: {detail} — press Ctrl+R to retry, Esc to cancel")
 
     async def _stage_options(self, direction: _Nav) -> _Nav:
         fields = self._catalog.option_fields(self._reference)

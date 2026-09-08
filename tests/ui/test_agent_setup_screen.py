@@ -22,6 +22,7 @@ import pytest
 from textual.app import App
 from textual.binding import Binding
 from textual.widgets import Checkbox, Input, OptionList, Static
+from textual.worker import Worker, WorkerState
 
 from korvid.agent.model_profiles import (
     AuthMethodDescriptor,
@@ -35,13 +36,22 @@ from korvid.agent.model_profiles import (
     SetupFieldKind,
 )
 from korvid.agent.provider import (
+    CREDENTIAL_REFUSED,
     STREAM_LIMIT,
     STREAM_TRUNCATED,
+    UNREACHABLE,
     OperatorSafeProviderError,
+    ProviderStatusError,
     ProviderStreamLimitError,
     ProviderStreamTruncatedError,
+    ProviderTransportError,
 )
-from korvid.ui.widgets.agent_setup_screen import AgentSetupScreen, SetupResult
+from korvid.ui.widgets.agent_setup_screen import (
+    AUTHORIZATION_WITHHELD,
+    LOGIN_WITHHELD,
+    AgentSetupScreen,
+    SetupResult,
+)
 from korvid.ui.widgets.model_search_screen import ModelSearchScreen
 
 from .waits import until
@@ -63,6 +73,15 @@ _ENVIRONMENT = AuthMethodDescriptor(
 )
 
 _NONE_METHOD = AuthMethodDescriptor(id="none", display_name="No authentication")
+
+#: The interactive sign-in stage, and the prompt a started device login
+#: hands back. Shared so every sign-in test drives the same two turns.
+_DEVICE_LOGIN = AuthMethodDescriptor(id="device-login", display_name="Sign in")
+_PROMPT = DeviceLoginPrompt(
+    verification_uri="https://example.test/device",
+    user_code="ABCD-1234",
+    expires_in_seconds=600,
+)
 
 #: Short local aliases: these tests name field kinds constantly.
 BOOLEAN = SetupFieldKind.BOOLEAN
@@ -88,7 +107,8 @@ class _FakeCatalog(ModelCatalog):
         discover_error: Exception | None = None,
         test_error: Exception | None = None,
         device_prompt: DeviceLoginPrompt | None = None,
-        finish_error: Exception | None = None,
+        begin_error: BaseException | None = None,
+        finish_error: BaseException | None = None,
     ) -> None:
         self._auth = auth
         self._options = options
@@ -98,6 +118,7 @@ class _FakeCatalog(ModelCatalog):
         self._discover_error = discover_error
         self._test_error = test_error
         self._device_prompt = device_prompt
+        self._begin_error = begin_error
         self._finish_error = finish_error
         self.tested: list[ModelConnectionConfig] = []
         #: Explicit metadata refreshes the wizard asked for. The
@@ -138,6 +159,8 @@ class _FakeCatalog(ModelCatalog):
         return "ok"
 
     async def begin_auth(self, profile: ModelConnectionConfig) -> DeviceLoginPrompt | None:
+        if self._begin_error is not None:
+            raise self._begin_error
         return self._device_prompt
 
     async def refresh_metadata(self, *, force: bool = False) -> MetadataRefresh:
@@ -629,14 +652,7 @@ async def test_a_raising_discovery_still_reaches_the_search_screen() -> None:
 
 
 async def test_a_device_login_prompt_renders_the_uri_and_code() -> None:
-    catalog = _FakeCatalog(
-        auth=(AuthMethodDescriptor(id="device-login", display_name="Sign in"),),
-        device_prompt=DeviceLoginPrompt(
-            verification_uri="https://example.test/device",
-            user_code="ABCD-1234",
-            expires_in_seconds=600,
-        ),
-    )
+    catalog = _FakeCatalog(auth=(_DEVICE_LOGIN,), device_prompt=_PROMPT)
     app = _Host(catalog)
     async with app.run_test() as pilot:
         await _advance_to_auth_method(pilot)
@@ -655,12 +671,8 @@ async def test_a_device_login_prompt_renders_the_uri_and_code() -> None:
 
 async def test_a_failed_device_login_keeps_the_wizard_open() -> None:
     catalog = _FakeCatalog(
-        auth=(AuthMethodDescriptor(id="device-login", display_name="Sign in"),),
-        device_prompt=DeviceLoginPrompt(
-            verification_uri="https://example.test/device",
-            user_code="ABCD-1234",
-            expires_in_seconds=600,
-        ),
+        auth=(_DEVICE_LOGIN,),
+        device_prompt=_PROMPT,
         finish_error=RuntimeError("authorization expired"),
     )
     app = _Host(catalog)
@@ -669,11 +681,224 @@ async def test_a_failed_device_login_keeps_the_wizard_open() -> None:
         await _choose_auth_method(pilot, "device-login")
         await until(
             pilot,
-            lambda: "authorization expired" in _status_text(app),
+            lambda: LOGIN_WITHHELD in _status_text(app),
             label="login failure reported",
         )
         assert app.result == "unset"
         assert _setup_screen(app).is_running
+
+
+# ---------------------------------------------------------------------------
+# What a failed sign-in may say
+# ---------------------------------------------------------------------------
+#
+# `begin_auth` opens a device-code request and `finish_auth` polls it, and
+# both resolve a credential store on the way: their failures carry keyring
+# paths, endpoints and — on a refusal — the response body that quotes the
+# very token being minted. The wizard rendered `str(exc)`, so all of it
+# reached the operator's scrollback. Same contract as the probe's: only a
+# message an adapter *declared* safe is shown.
+
+#: A failure that quotes everything a sign-in touches, in one string.
+_LEAKY_LOGIN = (
+    "device login failed: 401 for https://login.internal.test/oauth/token "
+    "(token gho_9f3c2aSECRET) — keyring at /home/op/.local/share/korvid/tokens.json"
+)
+
+_LEAK_FRAGMENTS = (
+    "gho_9f3c2aSECRET",
+    "login.internal.test",
+    "/home/op/.local/share/korvid/tokens.json",
+)
+
+
+def _assert_withheld(status: str, expected: str) -> None:
+    """The sentence is korvid's, nothing of the failure's own text is."""
+    assert expected in status
+    for fragment in _LEAK_FRAGMENTS:
+        assert fragment not in status
+    assert "RuntimeError" not in status
+    assert "Ctrl+R to retry" in status
+
+
+async def test_a_secret_bearing_authorization_failure_is_withheld_from_the_wizard() -> None:
+    """`begin_auth` raising something korvid did not write.
+
+    The first half of the sign-in is where the credential store is opened
+    and the device-code request goes out, so its failure is the one most
+    likely to quote a path or a host. None of it may be the sentence on
+    the operator's screen.
+    """
+    catalog = _FakeCatalog(auth=(_DEVICE_LOGIN,), begin_error=RuntimeError(_LEAKY_LOGIN))
+    app = _Host(catalog)
+    async with app.run_test() as pilot:
+        await _advance_to_auth_method(pilot)
+        await _choose_auth_method(pilot, "device-login")
+        await until(
+            pilot,
+            lambda: "Authorization failed" in _status_text(app),
+            label="authorization failure reported",
+        )
+        _assert_withheld(_status_text(app), AUTHORIZATION_WITHHELD)
+        assert app.result == "unset"
+        assert _setup_screen(app).is_running
+
+
+async def test_a_secret_bearing_login_failure_is_withheld_from_the_wizard() -> None:
+    """And the second half, which polls until the token is minted."""
+    catalog = _FakeCatalog(
+        auth=(_DEVICE_LOGIN,),
+        device_prompt=_PROMPT,
+        finish_error=RuntimeError(_LEAKY_LOGIN),
+    )
+    app = _Host(catalog)
+    async with app.run_test() as pilot:
+        await _advance_to_auth_method(pilot)
+        await _choose_auth_method(pilot, "device-login")
+        await until(
+            pilot,
+            lambda: "Login failed" in _status_text(app),
+            label="login failure reported",
+        )
+        _assert_withheld(_status_text(app), LOGIN_WITHHELD)
+        assert app.result == "unset"
+
+
+def test_the_two_withheld_sentences_say_which_half_of_the_sign_in_failed() -> None:
+    """Withholding the reason must not also withhold *where* it happened.
+
+    "Start a login" and "wait for the operator to approve one" fail for
+    unrelated reasons and are retried differently, so the one thing the
+    generic sentence still has to carry is which of the two it was.
+    """
+    assert AUTHORIZATION_WITHHELD != LOGIN_WITHHELD
+    for sentence in (AUTHORIZATION_WITHHELD, LOGIN_WITHHELD):
+        assert "withheld" in sentence
+        assert "log" in sentence
+
+
+async def test_a_declared_safe_authorization_refusal_reaches_the_operator() -> None:
+    """The one narrow exemption: a message the adapter vouched for.
+
+    A flow that translates its own failures — "the provider refused the
+    credential", "korvid could not reach the provider" — has written a
+    sentence that interpolates nothing, and it is the only part of a
+    failed sign-in an operator can act on. Those are shown verbatim,
+    which is the whole reason the contract is per-message.
+    """
+    refusal = ProviderTransportError(UNREACHABLE)
+    catalog = _FakeCatalog(auth=(_DEVICE_LOGIN,), begin_error=refusal)
+    app = _Host(catalog)
+    async with app.run_test() as pilot:
+        await _advance_to_auth_method(pilot)
+        await _choose_auth_method(pilot, "device-login")
+        await until(
+            pilot,
+            lambda: UNREACHABLE in _status_text(app),
+            label="declared refusal reported",
+        )
+        status = _status_text(app)
+        assert refusal.operator_message() == UNREACHABLE
+        assert AUTHORIZATION_WITHHELD not in status
+        assert "ProviderTransportError" not in status
+        assert "Ctrl+R to retry" in status
+
+
+async def test_a_declared_safe_login_refusal_reaches_the_operator() -> None:
+    catalog = _FakeCatalog(
+        auth=(_DEVICE_LOGIN,),
+        device_prompt=_PROMPT,
+        finish_error=ProviderStatusError(CREDENTIAL_REFUSED),
+    )
+    app = _Host(catalog)
+    async with app.run_test() as pilot:
+        await _advance_to_auth_method(pilot)
+        await _choose_auth_method(pilot, "device-login")
+        await until(
+            pilot,
+            lambda: CREDENTIAL_REFUSED in _status_text(app),
+            label="declared refusal reported",
+        )
+        assert LOGIN_WITHHELD not in _status_text(app)
+
+
+@pytest.mark.parametrize(
+    "half",
+    ["begin", "finish"],
+    ids=["starting the login", "finishing the login"],
+)
+async def test_an_undeclared_message_on_a_safe_class_is_still_withheld(half: str) -> None:
+    """Per-message, not per-class.
+
+    The type only vouches for the texts its class declared, so
+    `ProviderStatusError(str(sdk_exc))` — which any flow is free to raise
+    — is withheld exactly like an untyped failure. Otherwise the audit
+    rots into a blanket exemption the first time somebody raises one of
+    these classes with a provider's own string.
+    """
+    leaky = ProviderStatusError(_LEAKY_LOGIN)
+    expected = AUTHORIZATION_WITHHELD if half == "begin" else LOGIN_WITHHELD
+    catalog = _FakeCatalog(
+        auth=(_DEVICE_LOGIN,),
+        device_prompt=_PROMPT,
+        begin_error=leaky if half == "begin" else None,
+        finish_error=leaky if half == "finish" else None,
+    )
+    app = _Host(catalog)
+    async with app.run_test() as pilot:
+        await _advance_to_auth_method(pilot)
+        await _choose_auth_method(pilot, "device-login")
+        await until(pilot, lambda: expected in _status_text(app), label="undeclared withheld")
+        assert leaky.operator_message() is None
+        _assert_withheld(_status_text(app), expected)
+
+
+def _wizard_worker(app: App[None]) -> Worker[object]:
+    """The worker running the stage machine, held before it can finish.
+
+    `WorkerManager` drops a worker the moment it reaches a terminal
+    state, so a cancellation can only be observed through a reference
+    taken while the wizard is still parked on an earlier stage.
+    """
+    screen = _setup_screen(app)
+    return next(worker for worker in app.workers if worker.node is screen)
+
+
+@pytest.mark.parametrize(
+    "half",
+    ["begin", "finish"],
+    ids=["starting the login", "finishing the login"],
+)
+async def test_a_cancelled_sign_in_is_never_converted_into_a_failure(half: str) -> None:
+    """Cancellation is not a verdict about the profile.
+
+    Withholding must not swallow it: a wizard closed underneath a
+    running sign-in would otherwise report "authorization failed" and sit
+    waiting for a retry that nobody asked for.
+    """
+    cancelled = asyncio.CancelledError()
+    catalog = _FakeCatalog(
+        auth=(_DEVICE_LOGIN,),
+        device_prompt=_PROMPT,
+        begin_error=cancelled if half == "begin" else None,
+        finish_error=cancelled if half == "finish" else None,
+    )
+    app = _Host(catalog)
+    async with app.run_test() as pilot:
+        await _advance_to_auth_method(pilot)
+        worker = _wizard_worker(app)
+        await _choose_auth_method(pilot, "device-login")
+        await until(
+            pilot,
+            lambda: worker.state is WorkerState.CANCELLED,
+            label="stage machine cancelled",
+        )
+        status = _status_text(app)
+        assert "Authorization failed" not in status
+        assert "Login failed" not in status
+        assert AUTHORIZATION_WITHHELD not in status
+        assert LOGIN_WITHHELD not in status
+        assert app.result == "unset"
 
 
 # ---------------------------------------------------------------------------

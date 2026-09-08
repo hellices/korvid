@@ -42,6 +42,7 @@ from korvid.agent.provider import (
     TIMED_OUT,
     UNREACHABLE,
     LLMProvider,
+    OperatorSafeProviderError,
     ProviderProtocolError,
     ProviderStreamTruncatedError,
     ProviderTransportError,
@@ -79,9 +80,27 @@ _EDITOR_HEADERS = {
     "User-Agent": "GitHubCopilotChat/0.22.4",
 }
 
+#: An unanswered login ended on its own deadline. Written here, so the
+#: wizard may repeat it (see `DeviceLoginError`).
+DEVICE_LOGIN_TIMED_OUT = "device login timed out"
 
-class DeviceLoginError(Exception):
-    """Device login failed, expired, or the token exchange was rejected."""
+#: The wizard asked to finish a login it never started. Same guarantee.
+DEVICE_LOGIN_NOT_STARTED = "no device login to finish — begin the login first"
+
+
+class DeviceLoginError(OperatorSafeProviderError):
+    """Device login failed, expired, or the token exchange was rejected.
+
+    The setup wizard withholds a failed sign-in's own text — an
+    authorization exchange quotes the token it is minting — so the two
+    sentences below are declared safe: they are written here, interpolate
+    nothing, and are the only part of an unanswered or unstarted login an
+    operator can act on. Every other message this class carries names
+    GitHub's own answer and stays withheld, per
+    `agent/provider.py: OperatorSafeProviderError`.
+    """
+
+    safe_messages = frozenset({DEVICE_LOGIN_TIMED_OUT, DEVICE_LOGIN_NOT_STARTED})
 
 
 @dataclass(frozen=True)
@@ -145,7 +164,7 @@ class GitHubDeviceFlow:
                     interval += 5
                 continue
             raise DeviceLoginError(f"device login failed: {error}")
-        raise DeviceLoginError("device login timed out")
+        raise DeviceLoginError(DEVICE_LOGIN_TIMED_OUT)
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -495,7 +514,7 @@ class CopilotDeviceLogin:
             return None
         device, prompt = self._pending, self._prompt
         if device is None or prompt is None:
-            raise DeviceLoginError("no device login to finish — begin the login first")
+            raise DeviceLoginError(DEVICE_LOGIN_NOT_STARTED)
         try:
             token = await device.poll(prompt)
         finally:
