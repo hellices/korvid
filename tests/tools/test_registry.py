@@ -302,8 +302,8 @@ def test_validate_dispatch_targets_rejects_ui_tool_naming_executor_method() -> N
 def test_validate_dispatch_targets_rejects_non_proposal_tool_on_proposal_entrypoint() -> None:
     """Reserved proposal entrypoints require effect == write_proposal: a
     ui_only tool routed at `agent_submit_write_proposal` would expose
-    proposal submission on the ordinary MCP surface, skipping the separate
-    proposal capability check keyed off PROPOSAL_TOOL_NAMES."""
+    proposal submission on the ordinary MCP surface, skipping the proposal
+    opt-in and caller metadata handling keyed off PROPOSAL_TOOL_NAMES."""
     bad = _tool("a", effect="ui_only", dispatch="agent_submit_write_proposal")
     with pytest.raises(ValueError, match="proposal entrypoint"):
         validate_dispatch_targets([bad], executor_cls=ToolExecutor, bridge_cls=UIBridge)
@@ -536,14 +536,13 @@ def test_validate_dispatch_targets_rejects_proposal_tool_naming_the_write_entryp
         validate_dispatch_targets([bad], executor_cls=ToolExecutor, bridge_cls=UIBridge)
 
 
-def test_proposal_tool_schemas_advertise_the_required_capability() -> None:
-    """MCP hosts derive tool arguments from the advertised inputSchema; the
-    capability token the server enforces must be discoverable there."""
+def test_proposal_tool_schemas_never_expose_transport_credentials() -> None:
+    """Models submit proposals, not the stdio adapter's transport credential."""
     schemas = {s["function"]["name"]: s for s in mcp_tool_schemas(write_proposals=True)}
     for name in ("propose_write", "get_write_proposal", "cancel_write_proposal"):
         params = schemas[name]["function"]["parameters"]
-        assert params["properties"]["capability"]["type"] == "string"
-        assert "capability" in params["required"]
+        assert "capability" not in params["properties"]
+        assert "capability" not in params["required"]
 
 
 def test_propose_write_schema_encodes_action_specific_requirements() -> None:

@@ -862,8 +862,8 @@ async def test_propose_write_rejects_unknown_arguments() -> None:
     propagation policy) must fail loudly: silently dropping it would queue
     a proposal that is not the operation the caller submitted — the same
     silent-mismatch already prevented for stray replicas/resources.
-    Server-reserved keys (transport metadata, capability token) stay
-    accepted."""
+    Server-reserved transport metadata stays accepted; credentials are
+    never tool arguments."""
     executor = make_ui_executor(FakeBridge())
     result = await executor.execute(
         "propose_write",
@@ -879,7 +879,6 @@ async def test_propose_write_rejects_unknown_arguments() -> None:
             "kind": "pods",
             "name": "web",
             "_session_id": "sess-1",
-            "capability": "tok",
         },
     )
     assert not reserved.startswith("ERROR:")

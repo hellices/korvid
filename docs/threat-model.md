@@ -55,9 +55,13 @@ AI data boundary.
   [`docs/provider-plugins.md`](provider-plugins.md)), built from a profile and
   never from conversation data. What they return receives the same sanitized
   payload; nothing past that handoff is policed.
-- **MCP loopback and capability tokens** — the MCP server
-  ([`docs/mcp.md`](mcp.md)) is a *separate* surface on `127.0.0.1` with its own
-  read/write-proposal contract and token, reaching no embedded provider.
+- **MCP stdio and internal loopback authentication** — `korvid mcp stdio`
+  ([`docs/mcp.md`](mcp.md)) connects to the running TUI's separate
+  `127.0.0.1` endpoint. Every read, UI action, and opt-in write proposal
+  requires a per-run capability in an HTTP header, never tool arguments.
+  The adapter reads a private registry, refuses redirects, and bypasses
+  environment HTTP proxies. It does not call through `OutboundPolicy` or
+  any embedded provider at all.
 - **Observability connectors** — a second outbound boundary. Queries come from
   a closed catalogue: the model supplies label values and one log substring,
   never a query. TLS verification cannot be disabled, and a token is read at
@@ -67,7 +71,8 @@ AI data boundary.
   [`docs/observability.md`](observability.md)).
 - **Filesystem exports** — payload and log exports are written `0600` under
   `$XDG_DATA_HOME/korvid/`; `$XDG_STATE_HOME/korvid/` holds `audit.jsonl` and
-  the MCP endpoint registry, which are not sanitized the way payloads are.
+  the MCP endpoint registry. These are not sanitized provider payloads:
+  the registry is a private credential file and must not be shared.
 
 ## Attackers and abuse scenarios
 
@@ -200,6 +205,11 @@ the agent component makes that carries no provider payload.
   prompts on [protected contexts](ops.md#protected-contexts), and
   `network.ca_bundle` makes internal TLS verify rather than be disabled
   ([`docs/airgap.md`](airgap.md)).
+- **Private MCP registry** — the endpoint credential is protected before
+  writing, with POSIX owner-only permissions (and an atomically supplied
+  non-inheriting ACL on macOS) or a protected Windows DACL
+  restricted to the current user, SYSTEM, and Administrators. Failed
+  private publication prevents MCP startup; unsafe discovery fails closed.
 - **Write approval gate** — every cluster mutation waits for a user keystroke
   in a [confirmation dialog](ops.md#one-write-path-three-drivers); the agent
   and MCP write-proposal flows can only *request* a write. Private exports are
@@ -230,14 +240,21 @@ Explicit, current limitations — not aspirational future work.
 - **MCP callers own their own AI boundary.** The MCP server hands cluster reads
   (and, opt-in, write proposals) to external clients without routing them
   through `OutboundPolicy`. Structured manifests are still redacted
-  producer-side; diagnoses, logs and events are credential-pattern masked
-  before their result caps (see [`docs/mcp.md`](mcp.md#mcp-server)).
+  producer-side; compound workload diagnoses, logs, and events are
+  credential-pattern masked before their result caps (see
+  [`docs/mcp.md`](mcp.md#mcp-server)). Lists, single-pod diagnoses, and Helm
+  status carry only their tool-specific shaping.
+- **Same-user processes and administrators remain trusted locally.** MCP
+  transport authentication separates other unprivileged local accounts;
+  it cannot isolate a malicious process running as the TUI's user or an
+  administrator. OAuth, remote MCP, and headless operation are not provided.
 - **Raw logs and the audit trail** are not provider payloads and are not
   sanitized like one.
 - **`0600` does not prove exclusive access on every platform.** On Windows the
   `os.open` mode argument does not map onto NTFS ACLs, so a private export's
   confidentiality depends on the enclosing directory's inherited permissions,
-  not the mode korvid requested.
+  not the mode korvid requested. The MCP credential registry is separate:
+  it explicitly creates and checks a protected Windows DACL.
 
 ## What the inspector proves — and what it does not prove
 

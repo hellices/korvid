@@ -58,6 +58,27 @@ korvid now ships a **named-profile** configuration model and a searchable
   that endpoint only: no redirect is followed, and it is never logged or
   stored. Failures stay best-effort: an empty listing, never an error dialog.
 
+## Local MCP: stdio with internal transport authentication
+
+Configure external hosts to run `korvid mcp stdio` after starting the TUI
+with MCP enabled. The adapter discovers the running TUI, or requires
+`--instance PID` when more than one is available. It shares that TUI's
+cluster context, UI, proposal queue, and approval/audit boundary rather
+than creating a headless Kubernetes client.
+
+**Migration required for direct HTTP clients:** every MCP request now
+requires the per-run capability in an HTTP authorization header, including
+reads and UI actions. The stdio adapter handles this credential privately;
+do not copy it into host configuration or prompts. The old `capability`
+tool argument is rejected. Restart the host's MCP connection after a
+kube-context switch or an MCP/TUI restart; existing connections do not
+silently follow a new server run. OAuth and remote/headless MCP remain deferred.
+
+Kubernetes JSON request failures are also normalized into actionable
+errors, so connectivity, TLS, and malformed-response failures do not
+escape describe and hierarchy workflows as raw transport exceptions.
+See [MCP setup and migration](../mcp.md) for host configuration examples.
+
 ## Breaking: the agent's configuration and plugin APIs
 
 The embedded agent was rebuilt as one interaction harness — a single

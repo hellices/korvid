@@ -25,7 +25,7 @@ from korvid.core.relationships import (
 )
 from korvid.core.relationships import build_relationship_graph as _original_build_relationship_graph
 from korvid.k8s.discovery import ResourceMeta, build_alias_map
-from korvid.k8s.errors import ApiStatusError
+from korvid.k8s.errors import ApiStatusError, KubeClientError
 from korvid.k8s.models import GenericSummary, PodSummary
 from korvid.k8s.relationship_facts import (
     GATEWAY_GROUP as GATEWAY,
@@ -335,8 +335,20 @@ async def test_all_namespaces_cap_record_keeps_cluster_wide_scope() -> None:
     assert [record.scope for record in capped] == [""]
 
 
-async def test_unexpected_api_failure_is_flattened_as_failed() -> None:
-    lister = _Lister(errors={("", "pods"): OSError("connection reset")})
+@pytest.mark.parametrize(
+    "error",
+    [
+        pytest.param(OSError("connection reset"), id="legacy-os-error"),
+        pytest.param(
+            KubeClientError(
+                "Kubernetes API connection failed; check cluster connectivity and retry"
+            ),
+            id="typed-client-error",
+        ),
+    ],
+)
+async def test_expected_client_failure_is_flattened_as_failed(error: Exception) -> None:
+    lister = _Lister(errors={("", "pods"): error})
     graph = await RelationshipSnapshotLoader(lister).load(
         _root("Pod", "prod"), "prod", _aliases(PODS_META)
     )

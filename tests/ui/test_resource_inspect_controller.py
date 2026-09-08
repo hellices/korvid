@@ -19,9 +19,11 @@ import asyncio
 from collections.abc import AsyncIterator, Callable
 from typing import Any, get_type_hints
 
+import pytest
+
 from korvid.core.audit import AuditLog
 from korvid.k8s.discovery import ResourceMeta
-from korvid.k8s.errors import ApiStatusError
+from korvid.k8s.errors import ApiStatusError, KubeClientError
 from korvid.k8s.logs import LogLine
 from korvid.k8s.models import ContainerTrouble, PodSummary
 from korvid.ui.hints import EventsFetcher
@@ -279,6 +281,33 @@ async def test_describe_reports_an_api_error_without_a_screen() -> None:
     assert any(severity == "error" for _message, severity in h.ui.notifications)
 
 
+async def test_describe_reports_a_client_error_without_a_screen() -> None:
+    message = "Kubernetes API connection failed; check cluster connectivity and retry"
+    h = Harness(manifest_error=KubeClientError(message))
+
+    await h.controller.describe_selected()
+
+    assert h.ui.screens == []
+    assert (message, "error") in h.ui.notifications
+
+
+async def test_describe_reports_an_events_client_error_but_still_opens() -> None:
+    message = "Kubernetes API returned malformed JSON; retry, then check the API server"
+    h = Harness(events=FakeEvents(error=KubeClientError(message)))
+
+    await h.controller.describe_selected()
+
+    assert isinstance(h.screen(), DescribeScreen)
+    assert (message, "warning") in h.ui.notifications
+
+
+async def test_describe_propagates_cancellation() -> None:
+    h = Harness(manifest_error=asyncio.CancelledError())
+
+    with pytest.raises(asyncio.CancelledError, match=r"^$"):
+        await h.controller.describe_selected()
+
+
 async def test_describe_is_cancelled_by_a_context_switch_during_the_fetch() -> None:
     h = Harness(cross_on_fetch=True)
     await h.controller.describe_selected()
@@ -510,6 +539,19 @@ async def test_pod_uid_unchanged_refuses_a_vanished_pod() -> None:
     h = Harness(uid_error=ApiStatusError(404, "NotFound", "gone"))
     assert not await h.controller.pod_uid_unchanged("default", "api-1", "uid-1", action="Transfer")
     assert any("no longer exists" in message for message in h.ui.messages())
+
+
+async def test_pod_uid_unchanged_fails_closed_on_a_client_error() -> None:
+    h = Harness(
+        uid_error=KubeClientError(
+            "Kubernetes API connection failed; check cluster connectivity and retry"
+        )
+    )
+
+    assert not await h.controller.pod_uid_unchanged("default", "api-1", "uid-1", action="Transfer")
+    assert any(
+        "could not be verified" in message and "Retry" in message for message in h.ui.messages()
+    )
 
 
 async def test_pod_uid_unchanged_refuses_an_unverifiable_pod() -> None:

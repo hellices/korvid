@@ -24,7 +24,7 @@ from tests.fixtures.provider_plugin.site_helpers import FIXTURES_DIR
 #: them: four copies of the agent list had already drifted apart, and the
 #: one that mattered — `openai`, which `providers/litellm_runtime.py`
 #: imports directly for `ProviderSDKError` — was in none of them.
-_MCP_MODULES = ("mcp", "anyio", "starlette", "uvicorn")
+_MCP_MODULES = ("mcp", "httpx2", "anyio", "starlette", "uvicorn")
 _AGENT_MODULES = ("httpx", "keyring", "litellm", "openai")
 
 #: Distribution names in an extra that are not top-level import names.

@@ -4,23 +4,37 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import socket
 import stat
+import threading
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
+import anyio
+import httpx2
 import pytest
 import yaml
 from mcp import types
+from mcp.client.streamable_http import streamable_http_client
 
+import korvid.mcp.registry as endpoint_registry
 from korvid.core.secrets import MASK_PLACEHOLDER
 from korvid.k8s.discovery import PODS_META
 from korvid.k8s.logs import LogLine
+from korvid.mcp.registry import (
+    EndpointRegistryError,
+    TUIEndpoint,
+    open_private_file,
+    read_endpoints,
+)
 from korvid.mcp.server import (
     KorvidMCPServer,
     MCPController,
+    _await_owned_task,
     _replace_atomically,
     default_endpoint_path,
 )
@@ -45,6 +59,32 @@ from tests.tools.executor_fakes import (
     identity_last_crd,
     oversized_crd_with_nested_credentials,
 )
+
+_TEST_CAPABILITY = "test-capability-token-0123456789AB"
+
+
+@pytest.fixture(autouse=True)
+def isolate_registry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+
+
+def _write_private_registry(path: Path, document: object) -> None:
+    fd = open_private_file(path)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(document, handle, separators=(",", ":"))
+
+
+@asynccontextmanager
+async def authenticated_transport(url: str) -> AsyncIterator[Any]:
+    async with (
+        httpx2.AsyncClient(
+            headers={"Authorization": f"Bearer {_TEST_CAPABILITY}"},
+            trust_env=False,
+            follow_redirects=True,
+        ) as client,
+        streamable_http_client(url, http_client=client) as streams,
+    ):
+        yield streams
 
 
 class RecordingExecutor(ToolExecutor):
@@ -77,6 +117,7 @@ def make_server(
         READ_TOOLS + UI_TOOLS,
         port=port,
         endpoint_path=endpoint_path,
+        capability_token=_TEST_CAPABILITY,
     )
 
 
@@ -97,6 +138,447 @@ def test_default_endpoint_path_falls_back_to_local_state(
     assert (
         default_endpoint_path() == Path.home() / ".local" / "state" / "korvid" / "mcp-endpoint.json"
     )
+
+
+def test_publication_normalizes_registry_and_preserves_valid_instances(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    path = tmp_path / "mcp-endpoint.json"
+    other_pid = 2_000_000_000
+    other_capability = "other-capability-token-0123456789AB"
+    other = {
+        "pid": other_pid,
+        "port": 7999,
+        "url": "http://127.0.0.1:7999/mcp",
+        "capability": other_capability,
+    }
+    _write_private_registry(
+        path,
+        {
+            "servers": {
+                str(other_pid): other,
+                "broken": {"pid": "broken", "capability": "not-valid"},
+            },
+            "extra": True,
+        },
+    )
+    monkeypatch.setattr(
+        endpoint_registry,
+        "_pid_alive",
+        lambda pid: pid in {os.getpid(), other_pid},
+    )
+
+    server = make_server(endpoint_path=path)
+    server._write_endpoint(7888)
+
+    document = json.loads(path.read_text())
+    assert set(document) == {"servers"}
+    assert document["servers"][str(other_pid)] == other
+    assert "broken" not in document["servers"]
+    warnings = [record.message for record in caplog.records if record.levelno >= logging.WARNING]
+    assert len(warnings) == 1
+    assert "ignored" in warnings[0]
+    assert other_capability not in warnings[0]
+    assert read_endpoints(path) == [
+        TUIEndpoint(other_pid, 7999, "http://127.0.0.1:7999/mcp", other_capability),
+        TUIEndpoint(
+            os.getpid(),
+            7888,
+            "http://127.0.0.1:7888/mcp",
+            _TEST_CAPABILITY,
+        ),
+    ]
+
+
+def test_publication_fails_closed_when_registry_cannot_be_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "mcp-endpoint.json"
+    original: dict[str, object] = {"servers": {}}
+    _write_private_registry(path, original)
+    original_open = os.open
+
+    def deny_registry_open(file: Any, flags: int, mode: int = 0o600) -> int:
+        if Path(os.fsdecode(file)) == path:
+            raise PermissionError("registry read denied")
+        return original_open(file, flags, mode)
+
+    monkeypatch.setattr(os, "open", deny_registry_open)
+    server = make_server(endpoint_path=path)
+    with pytest.raises(EndpointRegistryError, match="registry"):
+        server._write_endpoint(7888)
+    assert json.loads(path.read_text()) == original
+
+
+@pytest.mark.parametrize(
+    "contents",
+    [
+        b"{invalid JSON",
+        b'{"servers":[]}',
+        b'["foreign"]',
+        b'{"not_servers":{}}',
+    ],
+)
+def test_publication_rebuilds_invalid_private_registry(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    contents: bytes,
+) -> None:
+    path = tmp_path / "mcp-endpoint.json"
+    fd = open_private_file(path)
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(contents)
+
+    server = make_server(endpoint_path=path)
+    server._write_endpoint(7888)
+
+    assert read_endpoints(path) == [
+        TUIEndpoint(
+            os.getpid(),
+            7888,
+            "http://127.0.0.1:7888/mcp",
+            _TEST_CAPABILITY,
+        )
+    ]
+    warnings = [record.message for record in caplog.records if record.levelno >= logging.WARNING]
+    assert len(warnings) == 1
+    assert "rebuilding" in warnings[0]
+    assert _TEST_CAPABILITY not in warnings[0]
+
+
+def test_publication_round_trips_through_strict_reader(tmp_path: Path) -> None:
+    path = tmp_path / "mcp-endpoint.json"
+    server = make_server(endpoint_path=path)
+    server._write_endpoint(7888)
+    assert read_endpoints(path) == [
+        TUIEndpoint(
+            os.getpid(),
+            7888,
+            "http://127.0.0.1:7888/mcp",
+            _TEST_CAPABILITY,
+        )
+    ]
+
+
+def test_server_rejects_a_capability_too_weak_for_registry_discovery() -> None:
+    with pytest.raises(ValueError, match="32 printable ASCII"):
+        KorvidMCPServer(
+            RecordingExecutor(),
+            READ_TOOLS + UI_TOOLS,
+            capability_token="cap-tok",
+        )
+
+
+def test_server_rejects_an_explicit_empty_capability() -> None:
+    with pytest.raises(ValueError, match="32 printable ASCII"):
+        KorvidMCPServer(
+            RecordingExecutor(),
+            READ_TOOLS + UI_TOOLS,
+            capability_token="",
+        )
+
+
+def test_atomic_replacement_rejects_oversized_registry(tmp_path: Path) -> None:
+    path = tmp_path / "mcp-endpoint.json"
+    with pytest.raises(EndpointRegistryError, match="too large"):
+        _replace_atomically(path, {"servers": {}, "padding": "x" * (256 * 1024)})
+    assert not path.exists()
+
+
+def test_publication_prunes_dead_records_before_the_size_limit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "mcp-endpoint.json"
+    dead_capability = "dead-capability-token-0123456789ABCDEF"
+    dead_servers = {
+        str(pid): {
+            "pid": pid,
+            "port": 7999,
+            "url": "http://127.0.0.1:7999/mcp",
+            "capability": dead_capability,
+        }
+        for pid in range(1_000_000, 1_002_080)
+    }
+    _write_private_registry(path, {"servers": dead_servers})
+    assert path.stat().st_size <= 256 * 1024
+    monkeypatch.setattr(endpoint_registry, "_pid_alive", lambda pid: pid == os.getpid())
+
+    server = make_server(endpoint_path=path)
+    server._write_endpoint(7888)
+
+    assert read_endpoints(path) == [
+        TUIEndpoint(
+            os.getpid(),
+            7888,
+            "http://127.0.0.1:7888/mcp",
+            _TEST_CAPABILITY,
+        )
+    ]
+
+
+async def test_run_reports_unsafe_registry_as_failed_startup(tmp_path: Path) -> None:
+    path = tmp_path / "mcp-endpoint.json"
+    path.mkdir()
+    server = make_server(port=0, endpoint_path=path)
+    task = asyncio.create_task(server.run())
+
+    try:
+        with pytest.raises(RuntimeError, match="registry could not be published"):
+            await asyncio.wait_for(server.wait_started(), timeout=10)
+    finally:
+        server.request_shutdown()
+        await asyncio.wait_for(task, timeout=10)
+
+    assert task.done()
+    assert path.is_dir()
+
+
+async def _cancel_at_checkpoint(task: asyncio.Task[None]) -> None:
+    checkpoint = asyncio.Event()
+    task.cancel()
+    # Cancellation queues the waiter's wakeup before this callback. Resuming
+    # after the callback observes cancellation delivery, not elapsed time.
+    asyncio.get_running_loop().call_soon(checkpoint.set)
+    await checkpoint.wait()
+
+
+@pytest.mark.parametrize("fail", [False, True])
+async def test_owned_task_repeated_cancellation_preserves_worker_outcome(fail: bool) -> None:
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def work() -> None:
+        entered.set()
+        await release.wait()
+        if fail:
+            raise RuntimeError("owned worker failed")
+
+    worker = asyncio.create_task(work())
+    waiter = asyncio.create_task(_await_owned_task(worker))
+    try:
+        await entered.wait()
+        for _ in range(3):
+            await _cancel_at_checkpoint(waiter)
+            assert not worker.done(), "cancellation reached the owned worker"
+            assert not waiter.done(), "cancellation abandoned the owned worker"
+    finally:
+        release.set()
+        outcomes = await asyncio.gather(worker, waiter, return_exceptions=True)
+
+    if fail:
+        assert isinstance(outcomes[0], RuntimeError)
+        assert outcomes[1] is outcomes[0]
+        # An already-finished task takes task.result(): failure still wins
+        # over cancellation rather than being silently discarded.
+        with pytest.raises(RuntimeError, match="owned worker failed"):
+            await _await_owned_task(worker)
+    else:
+        assert outcomes[0] is None
+        assert isinstance(outcomes[1], asyncio.CancelledError)
+
+
+@pytest.mark.parametrize("shutdown", ["request", "cancel", "repeated-cancel", "anyio-cancel"])
+async def test_run_owns_blocked_publication_until_registry_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    shutdown: str,
+) -> None:
+    path = tmp_path / "mcp-endpoint.json"
+    other = {
+        "pid": 999999,
+        "port": 7999,
+        "url": "http://127.0.0.1:7999/mcp",
+        "capability": "other-live-capability-token-0123456789",
+    }
+    _write_private_registry(path, {"servers": {"999999": other}})
+    monkeypatch.setattr(endpoint_registry, "_pid_alive", lambda pid: pid in {os.getpid(), 999999})
+    server = make_server(endpoint_path=path)
+    entered, finished = asyncio.Event(), asyncio.Event()
+    release = threading.Event()
+    loop = asyncio.get_running_loop()
+    write_endpoint = server._write_endpoint
+    remove_endpoint = server._remove_endpoint
+    completion_order: list[str] = []
+
+    def gated_write_endpoint(port: int) -> None:
+        loop.call_soon_threadsafe(entered.set)
+        try:
+            assert release.wait(10), "publication was never released"
+            write_endpoint(port)
+        finally:
+            loop.call_soon_threadsafe(completion_order.append, "published")
+            loop.call_soon_threadsafe(finished.set)
+
+    def observed_remove_endpoint() -> None:
+        loop.call_soon_threadsafe(completion_order.append, "removing")
+        remove_endpoint()
+
+    monkeypatch.setattr(server, "_write_endpoint", gated_write_endpoint)
+    monkeypatch.setattr(server, "_remove_endpoint", observed_remove_endpoint)
+    cancel_scope = anyio.CancelScope()
+
+    async def run() -> None:
+        with cancel_scope:
+            try:
+                await server.run()
+            finally:
+                completion_order.append("returned")
+
+    task = asyncio.create_task(run())
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=10)
+        assert server.bound_port is None
+        assert not server._started.is_set()
+        assert server._uvicorn is not None
+        port = server._actual_port(server._uvicorn)
+        async with httpx2.AsyncClient(trust_env=False) as client:
+            response = await client.post(
+                f"http://127.0.0.1:{port}/mcp/",
+                headers={"Authorization": f"Bearer {_TEST_CAPABILITY}"},
+                json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+            )
+        assert response.status_code == 503
+        if shutdown == "request":
+            server.request_shutdown()
+        elif shutdown == "anyio-cancel":
+            cancel_scope.cancel()
+        else:
+            task.cancel()
+        await asyncio.wait_for(server._started.wait(), timeout=10)
+        if shutdown == "repeated-cancel":
+            await _cancel_at_checkpoint(task)
+            await _cancel_at_checkpoint(task)
+    finally:
+        release.set()
+        await asyncio.wait_for(finished.wait(), timeout=10)
+        server.request_shutdown()
+        if shutdown in {"request", "anyio-cancel"}:
+            await asyncio.wait_for(task, timeout=10)
+        else:
+            with pytest.raises(asyncio.CancelledError, match=r"^$"):
+                await asyncio.wait_for(task, timeout=10)
+        # Reap uvicorn even on RED, where hard cancellation abandons its lifespan.
+        assert server._uvicorn is not None
+        lifespan_stopped = server._uvicorn.lifespan.shutdown_event.is_set()
+        if not lifespan_stopped:
+            await server._uvicorn.shutdown()
+
+    assert completion_order == ["published", "removing", "returned"]
+    assert server.bound_port is None
+    with pytest.raises(RuntimeError, match="failed to start"):
+        await server.wait_started()
+    assert json.loads(path.read_text()) == {"servers": {"999999": other}}
+    assert lifespan_stopped
+    assert server._publication_task is not None
+    assert server._publication_task.done()
+
+
+@pytest.mark.parametrize("published", [False, True])
+async def test_cancelled_publication_failure_is_reported_without_credentials(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    published: bool,
+) -> None:
+    server = make_server(endpoint_path=tmp_path / "mcp-endpoint.json")
+    entered, finished = asyncio.Event(), asyncio.Event()
+    release = threading.Event()
+    loop = asyncio.get_running_loop()
+    write_endpoint = server._write_endpoint
+
+    def fail_publication(port: int) -> None:
+        loop.call_soon_threadsafe(entered.set)
+        try:
+            assert release.wait(10), "publication was never released"
+            if published:
+                write_endpoint(port)
+            raise OSError(f"registry failed with {_TEST_CAPABILITY}")
+        finally:
+            loop.call_soon_threadsafe(finished.set)
+
+    monkeypatch.setattr(server, "_write_endpoint", fail_publication)
+    task = asyncio.create_task(server.run())
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=10)
+        task.cancel()
+        await asyncio.wait_for(server._started.wait(), timeout=10)
+    finally:
+        release.set()
+        await asyncio.wait_for(finished.wait(), timeout=10)
+        with pytest.raises(asyncio.CancelledError, match=r"^$"):
+            await asyncio.wait_for(task, timeout=10)
+        assert server._uvicorn is not None
+        if not server._uvicorn.lifespan.shutdown_event.is_set():
+            await server._uvicorn.shutdown()
+
+    warnings = [record for record in caplog.records if record.levelno >= logging.WARNING]
+    assert len(warnings) == 1
+    assert "registry could not be published" in warnings[0].getMessage()
+    assert warnings[0].exc_info is None
+    assert _TEST_CAPABILITY not in caplog.text
+    assert not server._endpoint_path.exists()
+
+
+@pytest.mark.parametrize("replacement", ["none", "port", "capability"])
+async def test_repeated_cancellation_owns_endpoint_removal_and_preserves_replacements(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    replacement: str,
+) -> None:
+    path = tmp_path / "mcp-endpoint.json"
+    server = make_server(endpoint_path=path)
+    entered, finished = asyncio.Event(), asyncio.Event()
+    release = threading.Event()
+    loop = asyncio.get_running_loop()
+    remove_endpoint = server._remove_endpoint
+    completion_order: list[str] = []
+
+    def gated_remove_endpoint() -> None:
+        loop.call_soon_threadsafe(entered.set)
+        try:
+            assert release.wait(10), "removal was never released"
+            remove_endpoint()
+        finally:
+            loop.call_soon_threadsafe(completion_order.append, "removed")
+            loop.call_soon_threadsafe(finished.set)
+
+    async def run() -> None:
+        try:
+            await server.run()
+        finally:
+            completion_order.append("returned")
+
+    monkeypatch.setattr(server, "_remove_endpoint", gated_remove_endpoint)
+    task = asyncio.create_task(run())
+    try:
+        await asyncio.wait_for(server.wait_started(), timeout=10)
+        document = json.loads(path.read_text())
+        server.request_shutdown()
+        await asyncio.wait_for(entered.wait(), timeout=10)
+        if replacement == "port":
+            document["servers"][str(os.getpid())]["port"] = 7999
+            document["servers"][str(os.getpid())]["url"] = "http://127.0.0.1:7999/mcp"
+        elif replacement == "capability":
+            document["servers"][str(os.getpid())]["capability"] = (
+                "replacement-token-0123456789ABCDEF"
+            )
+        _replace_atomically(path, document)
+        await _cancel_at_checkpoint(task)
+        await _cancel_at_checkpoint(task)
+    finally:
+        release.set()
+        await asyncio.wait_for(finished.wait(), timeout=10)
+        with pytest.raises(asyncio.CancelledError, match=r"^$"):
+            await asyncio.wait_for(task, timeout=10)
+
+    assert completion_order == ["removed", "returned"]
+    if replacement == "none":
+        assert not path.exists()
+    else:
+        assert json.loads(path.read_text()) == document
 
 
 # ---------------------------------------------------------------------------
@@ -488,7 +970,6 @@ async def test_streamable_http_roundtrip(tmp_path: Path) -> None:
     """End-to-end: serve on an ephemeral loopback port inside the running
     loop, connect with the MCP SDK client, list tools and call one."""
     from mcp import ClientSession
-    from mcp.client.streamable_http import streamable_http_client
 
     executor = RecordingExecutor()
     endpoint_file = tmp_path / "mcp-endpoint.json"
@@ -500,7 +981,7 @@ async def test_streamable_http_roundtrip(tmp_path: Path) -> None:
         assert entry["port"] == port
         assert entry["url"] == f"http://127.0.0.1:{port}/mcp"
         async with (
-            streamable_http_client(f"http://127.0.0.1:{port}/mcp") as (read, write),
+            authenticated_transport(f"http://127.0.0.1:{port}/mcp") as (read, write),
             ClientSession(read, write) as session,
         ):
             await session.initialize()
@@ -535,7 +1016,9 @@ async def test_get_is_refused_with_405_instead_of_an_sse_stream() -> None:
     task = asyncio.create_task(server.run())
     try:
         port = await asyncio.wait_for(server.wait_started(), timeout=10)
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(
+            headers={"Authorization": f"Bearer {_TEST_CAPABILITY}"}
+        ) as client:
             resp = await client.get(
                 f"http://127.0.0.1:{port}/mcp/",
                 headers={"Accept": "text/event-stream"},
@@ -567,7 +1050,9 @@ async def test_shutdown_completes_while_a_client_holds_a_get_connection() -> Non
 
     async def issue_get() -> None:
         async with (
-            httpx.AsyncClient(timeout=30) as client,
+            httpx.AsyncClient(
+                timeout=30, headers={"Authorization": f"Bearer {_TEST_CAPABILITY}"}
+            ) as client,
             client.stream(
                 "GET",
                 f"http://127.0.0.1:{port}/mcp/",
@@ -604,7 +1089,9 @@ async def test_hostile_origin_get_is_rejected_not_answered_405() -> None:
     task = asyncio.create_task(server.run())
     try:
         port = await asyncio.wait_for(server.wait_started(), timeout=10)
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(
+            headers={"Authorization": f"Bearer {_TEST_CAPABILITY}"}
+        ) as client:
             resp = await client.get(
                 f"http://127.0.0.1:{port}/mcp/",
                 headers={
@@ -639,7 +1126,9 @@ async def test_hostile_origin_is_rejected() -> None:
             "Origin": "http://evil.example",
             "Accept": "application/json, text/event-stream",
         }
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(
+            headers={"Authorization": f"Bearer {_TEST_CAPABILITY}"}
+        ) as client:
             # POST to /mcp/ directly: Starlette's Mount answers bare /mcp
             # with a 307 to the slash form, and a browser-driven attack
             # would follow it (307 preserves method and body).
@@ -863,12 +1352,25 @@ async def test_controller_pending_task_reports_the_live_run() -> None:
         task.cancel()
 
 
-async def test_remove_endpoint_preserves_other_live_instances(tmp_path: Path) -> None:
+async def test_remove_endpoint_preserves_other_live_instances(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The discovery file is a pid-keyed registry: instance B exiting must
     drop only its own entry, leaving instance A's record discoverable."""
     endpoint_file = tmp_path / "mcp-endpoint.json"
-    other = {"url": "http://127.0.0.1:9999/mcp", "port": 9999, "pid": 999999}
-    endpoint_file.write_text(json.dumps({"servers": {"999999": other}}))
+    other = {
+        "url": "http://127.0.0.1:9999/mcp",
+        "port": 9999,
+        "pid": 999999,
+        "capability": "other-live-capability-token-0123456789",
+    }
+    _write_private_registry(endpoint_file, {"servers": {"999999": other}})
+    monkeypatch.setattr(
+        endpoint_registry,
+        "_pid_alive",
+        lambda pid: pid in {os.getpid(), 999999},
+    )
     server = make_server(port=0, endpoint_path=endpoint_file)
     task = asyncio.create_task(server.run())
     try:
@@ -893,7 +1395,7 @@ _PROPOSE_ARGS = {"action": "delete", "kind": "pods", "name": "web-1", "namespace
 def make_proposal_server(
     executor: ToolExecutor | None = None,
     *,
-    capability_token: str | None = "cap-tok",
+    capability_token: str | None = _TEST_CAPABILITY,
     port: int = 0,
     endpoint_path: Path | None = None,
 ) -> KorvidMCPServer:
@@ -912,13 +1414,13 @@ async def test_proposal_tools_are_listed_when_configured() -> None:
     assert {"propose_write", "get_write_proposal", "cancel_write_proposal"} <= tools
 
 
-async def test_propose_write_without_capability_is_rejected() -> None:
+async def test_trusted_proposal_dispatch_does_not_require_a_tool_credential() -> None:
     executor = RecordingExecutor()
     server = make_proposal_server(executor)
     result = await server.call_tool("propose_write", dict(_PROPOSE_ARGS))
-    assert result[0].text.startswith("ERROR:")
-    assert "capability" in result[0].text
-    assert executor.calls == []
+    assert result[0].text == "ok"
+    assert executor.calls[0][0] == "propose_write"
+    assert "capability" not in executor.calls[0][1]
 
 
 async def test_propose_write_with_wrong_capability_is_rejected() -> None:
@@ -936,7 +1438,7 @@ async def test_non_ascii_capability_is_rejected_not_a_crash() -> None:
     executor = RecordingExecutor()
     server = make_proposal_server(executor)
     result = await server.call_tool("propose_write", {**_PROPOSE_ARGS, "capability": "é" * 8})
-    assert result[0].text == "ERROR: invalid or missing capability token"
+    assert result[0].text == "ERROR: capability is transport-only; use korvid mcp stdio"
     assert executor.calls == []
 
 
@@ -947,14 +1449,14 @@ async def test_lone_surrogate_capability_is_rejected_not_a_crash() -> None:
     executor = RecordingExecutor()
     server = make_proposal_server(executor)
     result = await server.call_tool("propose_write", {**_PROPOSE_ARGS, "capability": "\ud800"})
-    assert result[0].text == "ERROR: invalid or missing capability token"
+    assert result[0].text == "ERROR: capability is transport-only; use korvid mcp stdio"
     assert executor.calls == []
 
 
-async def test_propose_write_with_capability_dispatches_with_identity() -> None:
+async def test_propose_write_dispatches_with_transport_identity() -> None:
     executor = RecordingExecutor()
     server = make_proposal_server(executor)
-    result = await server.call_tool("propose_write", {**_PROPOSE_ARGS, "capability": "cap-tok"})
+    result = await server.call_tool("propose_write", dict(_PROPOSE_ARGS))
     assert result[0].text == "ok"
     assert len(executor.calls) == 1
     name, args = executor.calls[0]
@@ -972,7 +1474,7 @@ async def test_caller_supplied_reserved_args_are_overridden() -> None:
     server = make_proposal_server(executor)
     await server.call_tool(
         "propose_write",
-        {**_PROPOSE_ARGS, "capability": "cap-tok", "_session_id": "spoofed"},
+        {**_PROPOSE_ARGS, "_session_id": "spoofed"},
     )
     _, args = executor.calls[0]
     assert args["_session_id"] != "spoofed"
@@ -985,25 +1487,22 @@ async def test_reserved_args_are_stripped_from_plain_tools() -> None:
     assert executor.calls == [("list_resources", {"kind": "pods"})]
 
 
-async def test_capability_is_required_for_status_and_cancel() -> None:
+async def test_proposal_status_and_cancel_use_transport_identity() -> None:
     executor = RecordingExecutor()
     server = make_proposal_server(executor)
     for tool in ("get_write_proposal", "cancel_write_proposal"):
         result = await server.call_tool(tool, {"proposal_id": "p1"})
-        assert result[0].text.startswith("ERROR:")
-    assert executor.calls == []
-    result = await server.call_tool(
-        "cancel_write_proposal", {"proposal_id": "p1", "capability": "cap-tok"}
-    )
-    assert result[0].text == "ok"
+        assert result[0].text == "ok"
+    assert len(executor.calls) == 2
+    assert all(args["_session_id"] for _, args in executor.calls)
 
 
-async def test_proposal_tools_without_a_configured_token_are_rejected() -> None:
+async def test_proposals_without_matching_generated_token_are_rejected() -> None:
     executor = RecordingExecutor()
     server = make_proposal_server(executor, capability_token=None)
     result = await server.call_tool("propose_write", {**_PROPOSE_ARGS, "capability": ""})
     assert result[0].text.startswith("ERROR:")
-    assert "not enabled" in result[0].text
+    assert "capability" in result[0].text
     assert executor.calls == []
 
 
@@ -1013,7 +1512,6 @@ async def test_streamable_http_proposal_roundtrip(tmp_path: Path) -> None:
     capability, and the only dispatch is to the proposal bridge — no
     mutation tool is ever reached."""
     from mcp import ClientSession
-    from mcp.client.streamable_http import streamable_http_client
 
     executor = RecordingExecutor()
     endpoint_file = tmp_path / "mcp-endpoint.json"
@@ -1024,17 +1522,15 @@ async def test_streamable_http_proposal_roundtrip(tmp_path: Path) -> None:
         # The capability travels via the discovery file, exactly as a local
         # agent would learn it.
         entry = json.loads(endpoint_file.read_text())["servers"][str(os.getpid())]
-        capability = entry["capability"]
+        assert entry["capability"] == _TEST_CAPABILITY
         async with (
-            streamable_http_client(f"http://127.0.0.1:{port}/mcp") as (read, write),
+            authenticated_transport(f"http://127.0.0.1:{port}/mcp") as (read, write),
             ClientSession(read, write) as session,
         ):
             await session.initialize()
             listed = await session.list_tools()
             assert "propose_write" in {t.name for t in listed.tools}
-            result = await session.call_tool(
-                "propose_write", {**_PROPOSE_ARGS, "capability": capability}
-            )
+            result = await session.call_tool("propose_write", dict(_PROPOSE_ARGS))
             assert result.content[0].type == "text"
             assert getattr(result.content[0], "text", None) == "ok"
             assert result.is_error is False, "an accepted proposal must not be flagged as an error"
@@ -1062,7 +1558,7 @@ async def test_endpoint_file_publishes_capability_with_owner_only_mode(tmp_path:
     try:
         await asyncio.wait_for(server.wait_started(), timeout=10)
         entry = json.loads(endpoint_file.read_text())["servers"][str(os.getpid())]
-        assert entry["capability"] == "cap-tok"
+        assert entry["capability"] == _TEST_CAPABILITY
         if POSIX:
             assert (endpoint_file.stat().st_mode & 0o777) == 0o600
         else:
@@ -1074,14 +1570,14 @@ async def test_endpoint_file_publishes_capability_with_owner_only_mode(tmp_path:
         await asyncio.wait_for(task, timeout=10)
 
 
-async def test_endpoint_file_omits_capability_when_proposals_are_off(tmp_path: Path) -> None:
+async def test_endpoint_file_authenticates_reads_when_proposals_are_off(tmp_path: Path) -> None:
     endpoint_file = tmp_path / "mcp-endpoint.json"
     server = make_server(port=0, endpoint_path=endpoint_file)
     task = asyncio.create_task(server.run())
     try:
         await asyncio.wait_for(server.wait_started(), timeout=10)
         entry = json.loads(endpoint_file.read_text())["servers"][str(os.getpid())]
-        assert "capability" not in entry
+        assert entry["capability"] == _TEST_CAPABILITY
     finally:
         server.request_shutdown()
         await asyncio.wait_for(task, timeout=10)
@@ -1286,7 +1782,6 @@ async def test_a_wrong_capability_is_refused_over_the_real_transport(tmp_path: P
     entirely. This drives a real client over Streamable HTTP.
     """
     from mcp import ClientSession
-    from mcp.client.streamable_http import streamable_http_client
 
     executor = RecordingExecutor()
     server = make_proposal_server(executor, port=0, endpoint_path=tmp_path / "e.json")
@@ -1294,7 +1789,7 @@ async def test_a_wrong_capability_is_refused_over_the_real_transport(tmp_path: P
     try:
         port = await asyncio.wait_for(server.wait_started(), timeout=10)
         async with (
-            streamable_http_client(f"http://127.0.0.1:{port}/mcp") as (read, write),
+            authenticated_transport(f"http://127.0.0.1:{port}/mcp") as (read, write),
             ClientSession(read, write) as session,
         ):
             await session.initialize()
@@ -1342,9 +1837,7 @@ async def test_client_identity_is_threaded_from_the_request_context() -> None:
     )
     await server._on_call_tool(
         ctx,  # type: ignore[arg-type]  # boundary stub
-        mcp_types.CallToolRequestParams(
-            name="propose_write", arguments={**_PROPOSE_ARGS, "capability": "cap-tok"}
-        ),
+        mcp_types.CallToolRequestParams(name="propose_write", arguments=dict(_PROPOSE_ARGS)),
     )
     assert len(executor.calls) == 1
     args = executor.calls[0][1]
@@ -1361,7 +1854,6 @@ async def test_a_log_line_beginning_with_error_is_not_a_failed_call(tmp_path: Pa
     MCP host as a failed tool call.
     """
     from mcp import ClientSession
-    from mcp.client.streamable_http import streamable_http_client
 
     executor = RecordingExecutor()
     executor.result = "ERROR: connection refused\nERROR: retrying"
@@ -1370,7 +1862,7 @@ async def test_a_log_line_beginning_with_error_is_not_a_failed_call(tmp_path: Pa
     try:
         port = await asyncio.wait_for(server.wait_started(), timeout=10)
         async with (
-            streamable_http_client(f"http://127.0.0.1:{port}/mcp") as (read, write),
+            authenticated_transport(f"http://127.0.0.1:{port}/mcp") as (read, write),
             ClientSession(read, write) as session,
         ):
             await session.initialize()
@@ -1387,7 +1879,7 @@ async def test_a_refusal_before_dispatch_is_flagged_as_an_error() -> None:
     """Refusals never reach a producer, so nothing else can supply the bit.
 
     Both pre-dispatch exits — a name outside the configured surface and a
-    failed capability check — have to mark themselves.
+    legacy credential argument — have to mark themselves.
     """
     from mcp import types as mcp_types
 
@@ -1419,7 +1911,6 @@ async def test_a_failed_proposal_is_flagged_even_though_its_producer_says_nothin
     judgement is made per effect and not globally.
     """
     from mcp import ClientSession
-    from mcp.client.streamable_http import streamable_http_client
 
     executor = RecordingExecutor()
     executor.result = "ERROR: unknown proposal id"
@@ -1429,17 +1920,13 @@ async def test_a_failed_proposal_is_flagged_even_though_its_producer_says_nothin
     task = asyncio.create_task(server.run())
     try:
         port = await asyncio.wait_for(server.wait_started(), timeout=10)
-        capability = json.loads(endpoint_file.read_text())["servers"][str(os.getpid())][
-            "capability"
-        ]
+        assert json.loads(endpoint_file.read_text())["servers"][str(os.getpid())]["capability"]
         async with (
-            streamable_http_client(f"http://127.0.0.1:{port}/mcp") as (read, write),
+            authenticated_transport(f"http://127.0.0.1:{port}/mcp") as (read, write),
             ClientSession(read, write) as session,
         ):
             await session.initialize()
-            result = await session.call_tool(
-                "get_write_proposal", {"proposal_id": "nope", "capability": capability}
-            )
+            result = await session.call_tool("get_write_proposal", {"proposal_id": "nope"})
             assert getattr(result.content[0], "text", "") == "ERROR: unknown proposal id"
             assert result.is_error is True, "a failed proposal was reported as successful"
     finally:

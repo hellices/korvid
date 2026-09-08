@@ -586,56 +586,30 @@ def test_ops_approval_claim_matches_what_the_confirm_dialog_can_check() -> None:
     )
 
 
-def test_mcp_capability_registry_permission_claim_is_scoped_to_posix() -> None:
-    """Round-8 review: `0600` is a POSIX request, not a cross-platform promise.
+def test_mcp_documents_private_transport_not_tool_credentials() -> None:
+    """Document the actual stdio/header boundary and each platform's file protection."""
+    auth = " ".join(_section("mcp.md", "Local transport authentication").split()).lower()
+    proposals = " ".join(_section("mcp.md", "Propose a write").split()).lower()
+    connection = _section("mcp.md", "Connect a client")
 
-    `korvid.mcp.server._replace_atomically` creates the registry with
-    `os.open(..., os.O_CREAT | os.O_EXCL, 0o600)`. On Windows — a supported
-    platform — that mode argument does not map onto NTFS ACLs, so the
-    capability token's confidentiality there rests on the enclosing
-    directory's inherited permissions, exactly as `docs/threat-model.md`
-    already records for private exports. Calling the registry
-    "owner-readable" with no qualification promised more than the code
-    delivers. The per-run high-entropy capability and the untrusted local
-    caller warning must survive the correction.
-    """
-    section = _section("mcp.md", "Propose a write")
-    flat = " ".join(section.split())
-    lowered = flat.lower()
-
-    assert "local callers are untrusted" in lowered, (
-        "the same-user trust warning must survive the rewrite"
-    )
-    assert "read access alone does not grant proposal access" in lowered, (
-        "read access must still be distinguished from proposal access"
-    )
-    assert re.search(r"each server run.{0,80}high-entropy capability token", lowered), (
-        "the per-run, high-entropy capability token must stay described"
-    )
-    assert "`capability` argument" in flat, "callers must still echo the token per call"
-    assert "clientinfo" in lowered, "clientInfo must stay unauthenticated metadata"
-
-    assert "owner-readable" not in lowered, (
-        "the registry is not owner-readable on every supported platform; the claim "
-        "must be scoped to the mode korvid actually requests"
-    )
-    for match in re.finditer(r"0600", lowered):
-        window = lowered[max(0, match.start() - 200) : match.end() + 200]
-        assert "posix" in window, (
-            "every mention of the 0600 mode must name POSIX, because that is the "
-            f"only platform where the request is a guarantee; found {window!r}"
-        )
-    assert re.search(r"windows.{0,200}(ntfs|acl)", lowered), (
-        "the page must say the mode argument does not map onto NTFS ACLs on Windows"
-    )
-    assert re.search(r"(inherit|enclosing|parent)\w*.{0,120}director", lowered), (
-        "on Windows confidentiality depends on the enclosing directory's inherited "
-        "permissions; that dependency must be stated"
-    )
-    assert "threat-model.md" in section, (
-        "the platform limit is already recorded in the threat model; link it rather "
-        "than restating a second, drifting version of it"
-    )
+    assert "local callers are untrusted" in proposals
+    assert "authentication alone does not enable write proposals" in proposals
+    assert "clientinfo" in proposals
+    assert re.search(r"each server run.{0,80}high-entropy capability token", auth)
+    assert "authorization" in auth
+    assert "bearer" in auth
+    assert "tool arguments" in auth
+    assert "never" in auth
+    assert "posix" in auth
+    assert "0600" in auth
+    assert "windows" in auth
+    assert "protected" in auth
+    assert "dacl" in auth
+    assert "same user" in auth
+    assert "administrator" in auth
+    assert "threat-model.md" in auth
+    assert '"args": ["mcp", "stdio"]' in connection
+    assert "--instance" in connection
 
 
 def _section(name: str, heading: str) -> str:
