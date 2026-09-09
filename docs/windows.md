@@ -26,6 +26,10 @@ input rather than using Textual's headless `run_test()` driver. It checks
 startup, help/filter input, terminal handoff through the production shell
 controller to a fixture `kubectl.exe`, shell input, return to a responsive TUI,
 and clean exit. It also checks driver threads and owned process/handle cleanup.
+Process-wide handle totals are retained as diagnostic samples, not a leak
+budget: UI state and runtime allocations also change those totals. The hard
+checks require successful closure of every owned ConPTY/process/job handle,
+stopped driver/reader threads, and exit of the launcher, TUI, and shell processes.
 Failure blocks the Windows check; missing ConPTY on the Windows runner is not
 silently skipped.
 

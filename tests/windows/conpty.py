@@ -542,22 +542,23 @@ def _spawn_process(
 
 
 def _close_pseudoconsole(api: _WindowsApi, pseudo: _PseudoConsole) -> None:
-    api.close_handle(pseudo.input_handle)
-    api.kernel32.ClosePseudoConsole(pseudo.hpc)
-    api.close_handle(pseudo.output_handle)
+    errors = _CleanupErrors()
+    errors.attempt(lambda: api.close_handle(pseudo.input_handle))
+    errors.attempt(lambda: api.kernel32.ClosePseudoConsole(pseudo.hpc))
+    errors.attempt(lambda: api.close_handle(pseudo.output_handle))
+    errors.raise_first()
 
 
 def _discard_spawned_process(api: _WindowsApi, spawned: _SpawnedProcess) -> None:
-    error: OSError | None = None
+    errors = _CleanupErrors()
     if api.kernel32.WaitForSingleObject(
         spawned.process_handle, 0
     ) == _WAIT_TIMEOUT and not api.kernel32.TerminateJobObject(spawned.job_handle, 1):
-        error = _api_error("TerminateJobObject")
+        errors.add(_api_error("TerminateJobObject"))
     api.kernel32.WaitForSingleObject(spawned.process_handle, 5_000)
-    api.close_handle(spawned.process_handle)
-    api.close_handle(spawned.job_handle)
-    if error is not None:
-        raise error
+    errors.attempt(lambda: api.close_handle(spawned.process_handle))
+    errors.attempt(lambda: api.close_handle(spawned.job_handle))
+    errors.raise_first()
 
 
 class ConPtyProcess:
@@ -619,9 +620,11 @@ class ConPtyProcess:
                 capture_limit=capture_limit,
                 artifact_path=artifact_path,
             )
-        except RuntimeError:
-            _discard_spawned_process(api, spawned)
-            _close_pseudoconsole(api, pseudo)
+        except RuntimeError as error:
+            errors = _CleanupErrors()
+            errors.add(error)
+            errors.attempt(lambda: _discard_spawned_process(api, spawned))
+            errors.attempt(lambda: _close_pseudoconsole(api, pseudo))
             raise
 
     @property

@@ -591,6 +591,86 @@ def test_initial_render_may_arrive_before_mount_observation(
         test_korvid_operates_through_native_windows_conpty(tmp_path)
 
 
+@pytest.mark.parametrize("leak_owned_handle", [False, True])
+def test_native_cleanup_checks_ownership_not_process_wide_totals(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, leak_owned_handle: bool
+) -> None:
+    session, _, _, _, _ = _cleanup_process(tmp_path, reader_alive=False)
+    witness_root = tmp_path / "witness"
+    witness_root.mkdir()
+    (witness_root / "app-exited.json").write_text(
+        json.dumps({"return_code": 0, "textual_threads": {}}), encoding="utf-8"
+    )
+    common: dict[str, Any] = {
+        "pid": session.pid,
+        "parent_pid": 100,
+        "driver": "textual.drivers.windows_driver.WindowsDriver",
+        "stdin_tty": True,
+        "stdout_tty": True,
+        "headless": False,
+        "can_suspend": True,
+        "rows": 2,
+        "table_visible": True,
+        "workspace_visible": True,
+        "textual_threads": {"textual-input": 1, "textual-output": 1},
+        "filter": "",
+        "filter_open": False,
+        "filter_focused": True,
+        "process_handles": 212,
+    }
+    overrides: dict[str, dict[str, Any]] = {
+        "help-open": {"body": "korvid"},
+        "filter-applied": {"filter": "api", "rows": 1, "process_handles": 208},
+        "shell-child-started": {
+            "pid": 2456,
+            "parent_pid": session.pid,
+            "executable": "kubectl.exe",
+            "argv": ["exec", "api-1"],
+        },
+        "shell-input": {"text": "native-shell-input"},
+        "post-resume-filter-applied": {"filter": "worker", "rows": 1},
+    }
+
+    def phase(
+        witnesses: WitnessDirectory, name: str, process: ConPtyProcess, deadline: float
+    ) -> dict[str, Any]:
+        return common | overrides.get(name, {})
+
+    close = session.close
+
+    def close_with_optional_leak() -> None:
+        close()
+        if leak_owned_handle:
+            session._process_handle = 99
+
+    module = sys.modules[__name__]
+    host_counts = iter((90, 100))
+    monkeypatch.setattr(module, "_smoke_root", lambda root: (root, False))
+    monkeypatch.setattr(
+        module, "_prepare_native_fixture", lambda root: (WitnessDirectory(witness_root), {})
+    )
+    monkeypatch.setattr(module, "process_handle_count", lambda: next(host_counts))
+    monkeypatch.setattr(module, "wait_for_process_exit", lambda pid, timeout: True)
+    monkeypatch.setattr(module, "_phase", phase)
+    monkeypatch.setattr(ConPtyProcess, "start", lambda *args, **kwargs: session)
+    monkeypatch.setattr(session, "diagnostics", lambda: "native cleanup evidence")
+    monkeypatch.setattr(session, "send", lambda data: None)
+    monkeypatch.setattr(session, "wait_for_output", lambda *args, **kwargs: True)
+    monkeypatch.setattr(session, "wait", lambda timeout: 0)
+    monkeypatch.setattr(session, "_terminate_if_running", lambda: None)
+    monkeypatch.setattr(session, "close", close_with_optional_leak)
+
+    if leak_owned_handle:
+        with pytest.raises(AssertionError, match="owns native resources"):
+            test_korvid_operates_through_native_windows_conpty(tmp_path)
+    else:
+        test_korvid_operates_through_native_windows_conpty(tmp_path)
+        assert session.owned_resource_count == 0
+        evidence = json.loads((witness_root / "host-cleanup.json").read_text(encoding="utf-8"))
+        assert evidence["app_handles"] == {"filtered": 208, "after_input": 212}
+        assert evidence["host_handles"] == {"before": 90, "after": 100}
+
+
 def test_isolated_environment_does_not_inherit_user_kubernetes_paths(tmp_path: Path) -> None:
     python = tmp_path / "venv" / "Scripts" / "python.exe"
 
@@ -841,9 +921,6 @@ def test_korvid_operates_through_native_windows_conpty(tmp_path: Path) -> None:
         post_resume = _phase(witnesses, "post-resume-input", session, deadline)
         assert post_resume["filter"] == "", session.diagnostics()
         assert post_resume["rows"] == 2, session.diagnostics()
-        assert int(post_resume["process_handles"]) <= int(filtered["process_handles"]) + 2, (
-            session.diagnostics()
-        )
 
         session.send(b"q")
         assert session.wait(timeout=_remaining(deadline, _PHASE_TIMEOUT)) == 0, (
@@ -857,6 +934,21 @@ def test_korvid_operates_through_native_windows_conpty(tmp_path: Path) -> None:
     assert wait_for_process_exit(launcher_pid, timeout=_remaining(deadline, 2.0))
     assert wait_for_process_exit(app_pid, timeout=_remaining(deadline, 2.0))
     assert wait_for_process_exit(shell_pid, timeout=_remaining(deadline, 2.0))
-    assert session.owned_resource_count == 0
+    assert session.owned_resource_count == 0, "ConPTY still owns native resources"
     assert session.reader_alive is False
-    assert process_handle_count() <= handles_before + 1
+    # Process-wide totals vary with UI state; exact ownership checks above are the gate.
+    (root / "witness" / "host-cleanup.json").write_text(
+        json.dumps(
+            {
+                "owned_resources": session.owned_resource_count,
+                "reader_alive": session.reader_alive,
+                "host_handles": {"before": handles_before, "after": process_handle_count()},
+                "app_handles": {
+                    "filtered": filtered["process_handles"],
+                    "after_input": post_resume["process_handles"],
+                },
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
