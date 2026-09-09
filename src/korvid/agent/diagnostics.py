@@ -502,7 +502,7 @@ def _format_provider_metrics(rounds: tuple[ProviderRoundDiagnostics, ...]) -> li
     ]
     if metered_pairs:
         # Only compare metered rounds; transport/adapter overhead is not pure queue time.
-        other_wait = max(0.0, sum(local - provider for local, provider in metered_pairs))
+        other_wait = sum(max(0.0, local - provider) for local, provider in metered_pairs)
         parts.append(f"other wait {other_wait:.1f}s")
     return parts
 

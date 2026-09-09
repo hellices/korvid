@@ -591,6 +591,20 @@ def test_format_diagnostics_metrics_without_total_seconds_excluded_from_other_wa
     )
 
 
+def test_other_wait_clamps_each_round_before_aggregating() -> None:
+    summary = _turn(
+        rounds=(
+            ProviderRoundDiagnostics(
+                1, 0.0, 0.0, 0.0, 5.0, ProviderRuntimeMetrics(total_seconds=10.0)
+            ),
+            ProviderRoundDiagnostics(
+                2, 0.0, 0.0, 0.0, 20.0, ProviderRuntimeMetrics(total_seconds=10.0)
+            ),
+        )
+    )
+    assert format_diagnostics(summary) == "2 model rounds · model 25.0s · other wait 10.0s"
+
+
 @pytest.mark.parametrize(
     ("metrics", "expected"),
     [
