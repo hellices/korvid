@@ -138,10 +138,29 @@ the matrix.
 The landing-page JavaScript behavior tests keep a 10-second harness deadline.
 Historical Windows failures stopped before the first `imports-complete`
 milestone (runs 34231801365, 34238827627, 34252667381, and 34257752860;
-see [issue #371](https://github.com/hellices/korvid/issues/371)). The failure
-has not recurred since the startup probes were added, so its root cause remains
-unproven. A timeout records bounded harness output, then runs separately
-bounded controls in this order:
+see [issue #371](https://github.com/hellices/korvid/issues/371)). Those
+historical failures remain unexplained.
+
+A later probe-enabled recurrence
+([run 34339098708, job 102425430426](https://github.com/hellices/korvid/actions/runs/34339098708/job/102425430426))
+was different: all 22 scenarios printed `ok`, stderr reached
+`scene-switcher stage=complete`, and all three post-timeout controls passed
+under Node 22.23.2. CPython raised from `subprocess.py:1630`, the Windows
+stdout-reader-thread join, before its process wait. This establishes that this
+recurrence was not a JavaScript, V8, harness-file, or ESM-loader failure and
+that Python was waiting for captured-pipe EOF. It does **not** prove whether
+Node had already exited: Windows `communicate()` joins the pipe readers before
+checking the process handle, so the log cannot distinguish a still-exiting
+process from delayed EOF or another inherited writer handle.
+
+The harness therefore captures stdout and stderr in separate temporary files
+under the repository instead of `PIPE`s. The same 10-second deadline now waits
+for the actual Node process; its real exit code and UTF-8 output remain the test
+inputs. A true timeout still kills the process, preserves the original
+exception, and reads only bounded head-and-tail diagnostics from the files.
+No completion marker is accepted as a substitute for process exit.
+
+After a timeout, separately bounded controls run in this order:
 
 1. an isolated Python child process, to test generic child-process launch and
    captured-pipe progress independently of Node;
@@ -152,9 +171,10 @@ bounded controls in this order:
 
 The diagnostics record only the presence of selected Node environment
 variables, never their values. Preserve the original exception and deadline:
-do not turn a recurrence green by retrying, skipping, or extending the timeout.
-If every post-timeout probe succeeds, report the result as inconclusive because
-the transient interference may already have cleared.
+do not turn a recurrence green by retrying, skipping, extending the timeout, or
+treating parsed output as success. If every post-timeout probe succeeds, it
+only describes the state after the failure; it does not retroactively identify
+the transient cause.
 
 ## 4. Release — `.github/workflows/release.yml`, on tag
 

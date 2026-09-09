@@ -4,16 +4,20 @@ from __future__ import annotations
 
 import os
 import shutil
+import signal
 import subprocess
 import sys
+import tempfile
 from html.parser import HTMLParser
 from pathlib import Path
+from typing import BinaryIO, cast
 
 import pytest
 
 ROOT = Path(__file__).parent.parent
 JS_TESTS = ROOT / "tests" / "js"
 _DIAGNOSTIC_LIMIT = 4096
+_HARNESS_TIMEOUT = 10
 _STARTUP_PROBE_TIMEOUT = 5
 _NODE_ENV_NAMES = ("NODE_OPTIONS", "NODE_PATH", "NODE_EXTRA_CA_CERTS")
 _PYTHON_PROCESS_PROBE = 'import os; os.write(2, b"probe:python-child-started\\n")'
@@ -94,6 +98,31 @@ def _bounded_timeout_output(output: bytes | str | None) -> str:
     return f"{text[:head]}\n... <{omitted} characters truncated from middle> ...\n{text[-tail:]}"
 
 
+def _read_capture(stream: BinaryIO, *, limit: int | None = None) -> str:
+    stream.flush()
+    size = stream.seek(0, os.SEEK_END)
+    if limit is None or size <= limit:
+        stream.seek(0)
+        return stream.read().decode("utf-8", errors="replace")
+
+    marker = ""
+    while True:
+        captured = limit - len(marker)
+        omitted = size - captured
+        updated = f"\n... <{omitted} bytes truncated from middle> ...\n"
+        if len(updated) == len(marker):
+            marker = updated
+            break
+        marker = updated
+    head = captured // 2
+    tail = captured - head
+    stream.seek(0)
+    start = stream.read(head).decode("utf-8", errors="replace")
+    stream.seek(-tail, os.SEEK_END)
+    end = stream.read(tail).decode("utf-8", errors="replace")
+    return f"{start}{marker}{end}"
+
+
 def _run_startup_probe(label: str, command: list[str]) -> str:
     stdout: bytes | str | None
     stderr: bytes | str | None
@@ -133,50 +162,65 @@ def _run_harness(name: str) -> subprocess.CompletedProcess[str]:
     if found is None:
         raise RuntimeError("node is not installed")
     node = str(Path(found).resolve())
-    try:
-        return subprocess.run(
-            [node, str(JS_TESTS / name)],
-            capture_output=True,
-            text=True,
-            check=False,
-            cwd=ROOT,
-            stdin=subprocess.DEVNULL,
-            timeout=10,
-        )
-    except subprocess.TimeoutExpired as error:
-        harness = str(JS_TESTS / name)
-        present = ", ".join(name for name in _NODE_ENV_NAMES if name in os.environ) or "<none>"
-        process_probe = _run_startup_probe(
-            "Python child process control",
-            [
-                str(Path(sys.executable).resolve()),
-                "-I",
-                "-S",
-                "-c",
-                _PYTHON_PROCESS_PROBE,
-            ],
-        )
-        version_probe = _run_startup_probe("node --version", [node, "--version"])
-        loader_probe = _run_startup_probe(
-            "CJS file and ESM loader",
-            [node, "--eval", _CJS_STARTUP_PROBE, harness],
-        )
-        error.add_note(
-            "\n".join(
-                (
-                    f"Node harness: {name}",
-                    f"Node executable: {node}",
-                    "Node stdin: subprocess.DEVNULL (noninteractive harness)",
-                    f"Node environment present: {present}",
-                    f"Captured stdout:\n{_bounded_timeout_output(error.stdout)}",
-                    f"Captured stderr:\n{_bounded_timeout_output(error.stderr)}",
-                    process_probe,
-                    version_probe,
-                    loader_probe,
+    command = [node, str(JS_TESTS / name)]
+    with (
+        tempfile.TemporaryFile(mode="w+b", dir=ROOT) as stdout_capture,
+        tempfile.TemporaryFile(mode="w+b", dir=ROOT) as stderr_capture,
+    ):
+        try:
+            result = subprocess.run(
+                command,
+                stdout=stdout_capture,
+                stderr=stderr_capture,
+                check=False,
+                cwd=ROOT,
+                stdin=subprocess.DEVNULL,
+                timeout=_HARNESS_TIMEOUT,
+            )
+        except subprocess.TimeoutExpired as error:
+            stdout_text = _read_capture(stdout_capture, limit=_DIAGNOSTIC_LIMIT)
+            stderr_text = _read_capture(stderr_capture, limit=_DIAGNOSTIC_LIMIT)
+            error.stdout = stdout_text.encode("utf-8")
+            error.stderr = stderr_text.encode("utf-8")
+            harness = str(JS_TESTS / name)
+            present = ", ".join(name for name in _NODE_ENV_NAMES if name in os.environ) or "<none>"
+            process_probe = _run_startup_probe(
+                "Python child process control",
+                [
+                    str(Path(sys.executable).resolve()),
+                    "-I",
+                    "-S",
+                    "-c",
+                    _PYTHON_PROCESS_PROBE,
+                ],
+            )
+            version_probe = _run_startup_probe("node --version", [node, "--version"])
+            loader_probe = _run_startup_probe(
+                "CJS file and ESM loader",
+                [node, "--eval", _CJS_STARTUP_PROBE, harness],
+            )
+            error.add_note(
+                "\n".join(
+                    (
+                        f"Node harness: {name}",
+                        f"Node executable: {node}",
+                        "Node stdin: subprocess.DEVNULL (noninteractive harness)",
+                        f"Node environment present: {present}",
+                        f"Captured stdout:\n{stdout_text}",
+                        f"Captured stderr:\n{stderr_text}",
+                        process_probe,
+                        version_probe,
+                        loader_probe,
+                    )
                 )
             )
+            raise
+        return subprocess.CompletedProcess(
+            result.args,
+            result.returncode,
+            _read_capture(stdout_capture),
+            _read_capture(stderr_capture),
         )
-        raise
 
 
 def test_harness_timeout_preserves_bounded_diagnostics(
@@ -192,15 +236,15 @@ def test_harness_timeout_preserves_bounded_diagnostics(
         'import os; os.write(2, b"probe:python-child-started\\n")',
     ]
     calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+    stdout_output = (
+        b"stdout-start\n" + b"x" * 10_000 + b"stdout-middle" + b"x" * 10_000 + b"stdout-tail"
+    )
+    stderr_output = (
+        b"stderr-start\n" + b"y" * 10_000 + b"stderr-middle" + b"y" * 10_000 + b"stderr-tail"
+    )
     original_timeout = subprocess.TimeoutExpired(
         [resolved, str(JS_TESTS / "scene_fallback_harness.mjs")],
         10,
-        output=(
-            b"stdout-start\n" + b"x" * 10_000 + b"stdout-middle" + b"x" * 10_000 + b"stdout-tail"
-        ),
-        stderr=(
-            b"stderr-start\n" + b"y" * 10_000 + b"stderr-middle" + b"y" * 10_000 + b"stderr-tail"
-        ),
     )
 
     def run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -208,6 +252,12 @@ def test_harness_timeout_preserves_bounded_diagnostics(
         command = args[0]
         assert isinstance(command, list)
         if len(calls) == 1:
+            stdout = cast(BinaryIO, kwargs["stdout"])
+            stderr = cast(BinaryIO, kwargs["stderr"])
+            stdout.write(stdout_output)
+            stderr.write(stderr_output)
+            stdout.flush()
+            stderr.flush()
             raise original_timeout
         if command == process_control:
             return subprocess.CompletedProcess(
@@ -241,6 +291,9 @@ def test_harness_timeout_preserves_bounded_diagnostics(
     assert command == [resolved, str(JS_TESTS / "scene_fallback_harness.mjs")]
     assert options["timeout"] == 10
     assert options["stdin"] is subprocess.DEVNULL
+    assert "capture_output" not in options
+    assert options["stdout"] is not subprocess.PIPE
+    assert options["stderr"] is not subprocess.PIPE
     assert calls[1][0][0] == process_control
     assert calls[1][1]["timeout"] == 5
     assert calls[1][1]["stdin"] is subprocess.DEVNULL
@@ -276,6 +329,55 @@ def test_harness_timeout_preserves_bounded_diagnostics(
     assert "truncated" in note
     assert _bounded_timeout_output(None) == "<none>"
     assert _bounded_timeout_output("complete string") == "complete string"
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+def test_harness_waits_for_node_exit_not_inherited_output_eof(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pid_file = ROOT / f".docs-harness-descendant-{os.getpid()}.pid"
+    pid_file.unlink(missing_ok=True)
+    monkeypatch.setenv("KORVID_HARNESS_DESCENDANT_PID_FILE", str(pid_file))
+    try:
+        result = _run_harness("harness_inherited_output_handle.mjs")
+
+        assert result.returncode == 0
+        assert "parent-complete" in result.stderr
+    finally:
+        if pid_file.exists():
+            descendant_pid = int(pid_file.read_text())
+            os.kill(descendant_pid, signal.SIGTERM)
+            pid_file.unlink()
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+def test_harness_true_hang_preserves_bounded_file_diagnostics() -> None:
+    with pytest.raises(subprocess.TimeoutExpired, match="timed out") as raised:
+        _run_harness("harness_true_hang.mjs")
+
+    assert 0 < raised.value.timeout <= 10
+    assert raised.value.cmd[-1] == str(JS_TESTS / "harness_true_hang.mjs")
+    assert isinstance(raised.value.stdout, bytes)
+    assert isinstance(raised.value.stderr, bytes)
+    assert len(raised.value.stdout) <= _DIAGNOSTIC_LIMIT
+    assert len(raised.value.stderr) <= _DIAGNOSTIC_LIMIT
+    note = "\n".join(raised.value.__notes__)
+    assert "stdout-start" in note
+    assert "stderr-start" in note
+    assert "stdout-tail" in note
+    assert "stderr-tail" in note
+    assert "stdout-middle" not in note
+    assert "stderr-middle" not in note
+    assert "truncated" in note
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+def test_harness_nonzero_exit_preserves_captured_output() -> None:
+    result = _run_harness("harness_nonzero_exit.mjs")
+
+    assert result.returncode == 7
+    assert result.stdout == "contract stdout\n"
+    assert result.stderr == "contract stderr\n"
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")

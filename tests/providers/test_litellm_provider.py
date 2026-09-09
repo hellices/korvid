@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
 from contextlib import aclosing, suppress
 from typing import Any, cast
@@ -1767,6 +1768,70 @@ async def test_concurrent_real_ollama_requests_keep_metrics_isolated() -> None:
     assert second_metrics[0]["generation_tokens"] == 9
 
 
+def test_cleanup_finishes_sdk_dispatch_before_logging_worker_rebind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pending SDK dispatcher must enqueue before cleanup drains its callback."""
+    import litellm
+    from litellm.litellm_core_utils.litellm_logging import Logging
+    from litellm.litellm_core_utils.logging_worker import GLOBAL_LOGGING_WORKER
+
+    completed: list[None] = []
+    original_handler = Logging.async_success_handler
+
+    async def tracked_handler(self: Any, *args: Any, **kwargs: Any) -> None:
+        await original_handler(self, *args, **kwargs)
+        completed.append(None)
+
+    def dispatchers() -> list[asyncio.Task[Any]]:
+        current = asyncio.current_task()
+        return [
+            task
+            for task in asyncio.all_tasks()
+            if task is not current
+            and getattr(task.get_coro(), "__qualname__", "") == "_client_async_logging_helper"
+        ]
+
+    monkeypatch.setattr(Logging, "async_success_handler", tracked_handler)
+
+    async def prime_worker_on_prior_loop() -> None:
+        primed = asyncio.Event()
+
+        async def callback() -> None:
+            primed.set()
+
+        GLOBAL_LOGGING_WORKER.ensure_initialized_and_enqueue(callback())
+        await asyncio.wait_for(GLOBAL_LOGGING_WORKER.flush(), timeout=5)
+        await GLOBAL_LOGGING_WORKER.stop()
+        assert primed.is_set()
+
+    asyncio.run(prime_worker_on_prior_loop())
+    prior_loop = GLOBAL_LOGGING_WORKER._bound_loop
+
+    async def exercise() -> None:
+        provider, client = _real_ollama_provider(_ollama_answer(stream=False))
+        try:
+            await _events(provider, stream=False)
+            assert len(dispatchers()) == 1
+            assert GLOBAL_LOGGING_WORKER._bound_loop is prior_loop
+            assert GLOBAL_LOGGING_WORKER._bound_loop is not asyncio.get_running_loop()
+
+            await drop_cached_clients()
+
+            assert completed == [None]
+        finally:
+            await asyncio.gather(*dispatchers())
+            await GLOBAL_LOGGING_WORKER.clear_queue()  # type: ignore[no-untyped-call]  # SDK method lacks a return annotation.
+            await asyncio.wait_for(GLOBAL_LOGGING_WORKER.flush(), timeout=5)
+            await GLOBAL_LOGGING_WORKER.stop()
+            await client.client.aclose()
+
+    assert litellm.callbacks == []
+    assert litellm.success_callback == []
+    assert litellm.failure_callback == []
+    asyncio.run(exercise())
+
+
 async def test_production_ollama_rounds_reuse_one_pool_with_fresh_capture(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1893,9 +1958,12 @@ async def test_owned_pool_close_failure_propagates_after_credential_cleanup(
 async def test_cancelling_ollama_request_closes_response_but_keeps_pool(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    import litellm.main
+
     class _BlockingNDJSONStream(httpx.AsyncByteStream):
         def __init__(self) -> None:
             self.closed = False
+            self.blocked = asyncio.Event()
 
         async def __aiter__(self) -> AsyncIterator[bytes]:
             yield (
@@ -1909,6 +1977,7 @@ async def test_cancelling_ollama_request_closes_response_but_keeps_pool(
                 )
                 + "\n"
             ).encode()
+            self.blocked.set()
             await asyncio.Event().wait()
 
         async def aclose(self) -> None:
@@ -1927,16 +1996,30 @@ async def test_cancelling_ollama_request_closes_response_but_keeps_pool(
 
     clients = _track_production_ollama_clients(monkeypatch, handler)
     provider = _production_ollama_provider()
-    streaming = asyncio.Event()
+    startup_entered = asyncio.Event()
+    release_startup = threading.Event()
+    loop = asyncio.get_running_loop()
+    original_completion = litellm.main.completion
 
-    async def consume() -> None:
-        async for event in provider.complete(_MESSAGES, []):
-            if event["type"] == "text_delta":
-                streaming.set()
+    def delayed_completion(*args: Any, **kwargs: Any) -> Any:
+        loop.call_soon_threadsafe(startup_entered.set)
+        release_startup.wait()
+        return original_completion(*args, **kwargs)
 
-    task = asyncio.create_task(consume())
+    monkeypatch.setattr(litellm.main, "completion", delayed_completion)
+
+    stream_events = _as_generator(provider.complete(_MESSAGES, []))
+    startup = asyncio.create_task(anext(stream_events))
+    task: asyncio.Task[dict[str, Any]] | None = None
     try:
-        await asyncio.wait_for(streaming.wait(), timeout=5)
+        await startup_entered.wait()
+        assert not startup.done()
+        release_startup.set()
+        assert await startup == {"type": REQUEST_SENT}
+        assert await anext(stream_events) == {"type": "text_delta", "text": "healthy"}
+
+        task = asyncio.create_task(anext(stream_events))
+        await raw_stream.blocked.wait()
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
@@ -1945,16 +2028,20 @@ async def test_cancelling_ollama_request_closes_response_but_keeps_pool(
         assert len(clients) == 1
         assert clients[0].close_calls == 0
 
-        events = await _events(provider)
-        metrics = [event for event in events if event["type"] == PROVIDER_METRICS_EVENT]
+        healthy_events = await _events(provider)
+        metrics = [event for event in healthy_events if event["type"] == PROVIDER_METRICS_EVENT]
         assert metrics[0]["total_seconds"] == 9.0
         assert metrics[0]["generation_tokens"] == 9
         assert len(clients) == 1
         assert clients[0].close_calls == 0
     finally:
-        task.cancel()
-        with suppress(asyncio.CancelledError):
-            await task
+        release_startup.set()
+        await asyncio.gather(startup, return_exceptions=True)
+        if task is not None:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+        await stream_events.aclose()
         await _cleanup_production_provider(provider, clients)
 
 

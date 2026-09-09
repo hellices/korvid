@@ -21,14 +21,30 @@ from contextlib import suppress
 import litellm
 
 
-async def drain_logging() -> None:
-    """Finish queued and in-flight callbacks before their event loop is closed."""
+async def _drain_logging_worker() -> None:
+    """Finish callbacks that have already reached LiteLLM's worker."""
     from litellm.litellm_core_utils.logging_worker import GLOBAL_LOGGING_WORKER
 
-    # Drain queued callbacks even if their old worker stopped with its loop;
-    # flush also waits for callbacks already dequeued by a running worker.
     await GLOBAL_LOGGING_WORKER.clear_queue()  # type: ignore[no-untyped-call]  # SDK has no return annotation.
     await asyncio.wait_for(GLOBAL_LOGGING_WORKER.flush(), timeout=5)
+
+
+async def drain_logging() -> None:
+    """Finish dispatched and queued callbacks before their event loop closes."""
+    await _drain_logging_worker()
+
+    current = asyncio.current_task()
+    dispatchers = [
+        task
+        for task in asyncio.all_tasks()
+        if task is not current
+        and getattr(task.get_coro(), "__qualname__", "") == "_client_async_logging_helper"
+    ]
+    await asyncio.gather(*dispatchers)
+
+    # Dispatchers create the callback coroutine and initialize the global
+    # worker, so drain again after they have handed their work to its queue.
+    await _drain_logging_worker()
 
 
 async def drop_cached_clients() -> None:

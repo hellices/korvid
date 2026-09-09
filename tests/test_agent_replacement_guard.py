@@ -444,6 +444,7 @@ _PUBLIC_SURFACE = {
     # events
     "AgentError",
     "AgentEvent",
+    "AgentPhaseChanged",
     "TextDelta",
     "ToolCallFinished",
     "ToolCallStarted",
