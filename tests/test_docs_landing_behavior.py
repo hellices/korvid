@@ -369,6 +369,11 @@ def test_harness_true_hang_preserves_bounded_file_diagnostics() -> None:
     assert "stdout-middle" not in note
     assert "stderr-middle" not in note
     assert "truncated" in note
+    assert "harness-hang stage=complete exit-code=0" in note
+    assert "active-resources=" in note
+    assert "Timeout" in note
+    assert "harness-hang stage=before-exit" not in note
+    assert "harness-hang stage=exit " not in note
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
@@ -377,7 +382,9 @@ def test_harness_nonzero_exit_preserves_captured_output() -> None:
 
     assert result.returncode == 7
     assert result.stdout == "contract stdout\n"
-    assert result.stderr == "contract stderr\n"
+    assert result.stderr.startswith("contract stderr\n")
+    assert "harness-contract stage=before-exit exit-code=7" in result.stderr
+    assert "harness-contract stage=exit exit-code=7" in result.stderr
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
@@ -387,6 +394,11 @@ def test_scene_switcher_behavior() -> None:
     assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
     assert "not ok" not in result.stdout
     assert "scene-switcher stage=complete" in result.stderr
+    assert "scene-switcher stage=before-exit exit-code=0" in result.stderr
+    assert "scene-switcher stage=exit exit-code=0" in result.stderr
+    assert "active-resources=" in result.stderr
+    assert "active-handles=" in result.stderr
+    assert "active-requests=" in result.stderr
 
 
 def test_landing_markup_connects_scene_controls_to_fallback_content() -> None:
@@ -406,3 +418,5 @@ def test_scene_fallback_behavior() -> None:
     assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
     assert "not ok" not in result.stdout
     assert "scene-fallback stage=complete" in result.stderr
+    assert "scene-fallback stage=before-exit exit-code=0" in result.stderr
+    assert "scene-fallback stage=exit exit-code=0" in result.stderr
