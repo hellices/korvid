@@ -104,6 +104,21 @@ jobs:
           python-version: "3.12"
           enable-cache: true
       - run: uv sync --locked --dev --all-extras
+      - name: Exercise the native Windows terminal
+        if: needs.changes.outputs.code == 'true'
+        timeout-minutes: 5
+        env:
+          KORVID_WINDOWS_SMOKE_ARTIFACT_DIR: ${{ runner.temp }}/korvid-native-terminal
+        run: uv run pytest -p no:tach tests/windows/test_native_terminal.py -q
+      - name: Upload native Windows terminal evidence
+        if: ${{ !cancelled() && needs.changes.outputs.code == 'true' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: windows-native-terminal
+          path: |
+            ${{ runner.temp }}/korvid-native-terminal/**/witness/*.json
+            ${{ runner.temp }}/korvid-native-terminal/**/conpty-output.bin
+          retention-days: 7
       # Windows verifies OS-specific behaviour; docs contracts are not that.
       - if: needs.changes.outputs.code == 'true'
         run: uv run pytest -q

@@ -232,6 +232,37 @@ def test_ci_workflow_defines_the_required_windows_test_job() -> None:
     assert setup_uv["with"]["python-version"] == "3.12"
     assert "uv sync --locked --dev --all-extras" in runs
     assert "uv run pytest -q" in runs
+    native_smoke = "uv run pytest -p no:tach tests/windows/test_native_terminal.py -q"
+    assert native_smoke in runs
+    assert runs.index(native_smoke) < runs.index("uv run pytest -q")
+    native_step = next(step for step in steps if step.get("run") == native_smoke)
+    assert native_step.get("continue-on-error", False) is False
+    assert native_step.get("if") == "needs.changes.outputs.code == 'true'"
+    assert native_step.get("timeout-minutes") == 5
+    assert native_step.get("env") == {
+        "KORVID_WINDOWS_SMOKE_ARTIFACT_DIR": "${{ runner.temp }}/korvid-native-terminal"
+    }
+
+
+def test_ci_windows_native_smoke_keeps_bounded_failure_evidence() -> None:
+    windows_job = _workflow_job(_ci_workflow(), "windows-test")
+    steps = windows_job["steps"]
+    assert isinstance(steps, list)
+    uploads = [
+        step
+        for step in steps
+        if isinstance(step, dict)
+        and str(step.get("uses", "")).partition("@")[0] == "actions/upload-artifact"
+    ]
+    assert len(uploads) == 1
+    upload = uploads[0]
+    assert_pinned_action_ref(yaml.safe_dump(upload), "actions/upload-artifact")
+    assert upload["if"] == "${{ !cancelled() && needs.changes.outputs.code == 'true' }}"
+    assert upload["with"]["retention-days"] == 7
+    assert upload["with"]["path"].splitlines() == [
+        "${{ runner.temp }}/korvid-native-terminal/**/witness/*.json",
+        "${{ runner.temp }}/korvid-native-terminal/**/conpty-output.bin",
+    ]
 
 
 def test_workflow_job_lookup_is_order_independent() -> None:
