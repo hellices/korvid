@@ -187,6 +187,51 @@ def test_spawn_deletes_attribute_list_when_job_creation_fails(
     assert kernel32.deleted == 1
 
 
+def test_spawn_replaces_redirected_parent_standard_handles(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    class Kernel(_AttributeKernel):
+        def __init__(self) -> None:
+            super().__init__()
+            self.flags = 0
+            self.standard_handles: tuple[int | None, ...] = ()
+
+        def CreateProcessW(self, *args: Any) -> bool:
+            startup = ctypes.cast(args[8], ctypes.POINTER(conpty._StartupInfoEx)).contents
+            self.flags = startup.StartupInfo.dwFlags
+            self.standard_handles = (
+                startup.StartupInfo.hStdInput,
+                startup.StartupInfo.hStdOutput,
+                startup.StartupInfo.hStdError,
+            )
+            process = ctypes.cast(args[9], ctypes.POINTER(conpty._ProcessInformation)).contents
+            process.hProcess = 10
+            process.hThread = 11
+            process.dwProcessId = 12
+            return True
+
+        def AssignProcessToJobObject(self, job: int, process: int) -> bool:
+            return True
+
+        def ResumeThread(self, thread: object) -> int:
+            return 1
+
+    kernel = Kernel()
+    monkeypatch.setattr(conpty, "_create_kill_job", lambda api: 20)
+
+    spawned = conpty._spawn_process(
+        cast(Any, _FakeApi(kernel)),
+        conpty._PseudoConsole(hpc=1, input_handle=2, output_handle=3),
+        ["child.exe"],
+        tmp_path,
+        {},
+    )
+
+    assert spawned.pid == 12
+    assert kernel.flags & 0x00000100  # STARTF_USESTDHANDLES
+    assert kernel.standard_handles == (None, None, None)
+
+
 def test_bounded_transcript_keeps_only_the_latest_complete_tail() -> None:
     transcript = BoundedTranscript(limit=8)
 

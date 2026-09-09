@@ -170,6 +170,7 @@ class _ExtendedLimitInformation(ctypes.Structure):
 _CREATE_SUSPENDED = 0x00000004
 _CREATE_UNICODE_ENVIRONMENT = 0x00000400
 _EXTENDED_STARTUPINFO_PRESENT = 0x00080000
+_STARTF_USESTDHANDLES = 0x00000100
 _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
 _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
 _PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE = 0x00020016
@@ -467,6 +468,8 @@ def _spawn_process(
     try:
         startup = _StartupInfoEx()
         startup.StartupInfo.cb = ctypes.sizeof(startup)
+        # Null standard handles let ConPTY replace the parent's redirected streams.
+        startup.StartupInfo.dwFlags = _STARTF_USESTDHANDLES
         startup.lpAttributeList = attribute_pointer
         command_line = ctypes.create_unicode_buffer(subprocess.list2cmdline(list(argv)))
         environment = _environment_block(env)
