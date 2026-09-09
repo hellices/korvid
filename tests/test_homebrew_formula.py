@@ -292,6 +292,35 @@ def test_a_formula_without_pyyaml_does_not_declare_libyaml() -> None:
     assert "rust" not in ruby
 
 
+def test_hf_xet_builds_with_scoped_unoptimized_c_without_disabling_entropy() -> None:
+    ruby = render_formula(
+        version="1.2.3",
+        url="https://files.pythonhosted.org/packages/aa/korvid-1.2.3.tar.gz",
+        sha256="a" * 64,
+        resources=[
+            Resource(name="hf-xet", url="https://files.pythonhosted.org/x", sha256="b" * 64)
+        ],
+    )
+    normal_install = 'venv = virtualenv_install_with_resources(without: ["hf-xet"])'
+    entropy_safe_install = 'ENV.O0 { venv.pip_install resource("hf-xet") }'
+    assert normal_install in ruby
+    assert entropy_safe_install in ruby
+    assert ruby.index(normal_install) < ruby.index(entropy_safe_install)
+    assert "AWS_LC_SYS_NO_JITTER_ENTROPY" not in ruby
+
+
+def test_a_formula_without_hf_xet_keeps_standard_resource_installation() -> None:
+    ruby = render_formula(
+        version="1.2.3",
+        url="https://files.pythonhosted.org/packages/aa/korvid-1.2.3.tar.gz",
+        sha256="a" * 64,
+        resources=[],
+    )
+    assert "    virtualenv_install_with_resources\n" in ruby
+    assert "ENV.O0" not in ruby
+    assert "without:" not in ruby
+
+
 def test_the_version_travels_into_the_test_block() -> None:
     """`brew test` asserting the wrong version passes on a stale install."""
     ruby = render_formula(

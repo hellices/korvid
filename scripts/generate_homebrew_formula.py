@@ -247,6 +247,13 @@ def render_formula(
         f"  end\n"
         for resource in resources
     )
+    install = "    virtualenv_install_with_resources"
+    if any(resource.name == "hf-xet" for resource in resources):
+        install = (
+            '    venv = virtualenv_install_with_resources(without: ["hf-xet"])\n'
+            "    # aws-lc's jitter entropy collector rejects optimized C.\n"
+            '    ENV.O0 { venv.pip_install resource("hf-xet") }'
+        )
     return f'''# typed: false
 # frozen_string_literal: true
 
@@ -265,7 +272,7 @@ class Korvid < Formula
 {depends_on}
 {stanzas}
   def install
-    virtualenv_install_with_resources
+{install}
   end
 
   test do
