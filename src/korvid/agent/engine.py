@@ -51,6 +51,7 @@ from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
+from korvid.agent.diagnostics import TurnDiagnosticsRecorder
 from korvid.agent.events import AgentEvent
 from korvid.agent.interaction import InteractionContext
 from korvid.agent.model_policy import ResolvedAgentPolicy
@@ -76,11 +77,19 @@ class AgentTurnRequest:
         interaction: The workspace snapshot this turn was asked in. The
             engine reads its context epoch to scope evidence; the screen
             content itself is the prompt harness's business.
+        diagnostics: The turn-scoped latency recorder (issue #319), created
+            by the session from an injected factory, or `None` when the
+            session is not recording diagnostics. When present the engine
+            marks provider-round and tool boundaries on it, emits
+            `AgentPhaseChanged` events, and attaches the terminal
+            `TurnDiagnostics` snapshot to the turn's terminal event; the
+            session finalizes it for an interrupted turn.
     """
 
     prompt: ComposedPrompt
     policy: ResolvedAgentPolicy
     interaction: InteractionContext
+    diagnostics: TurnDiagnosticsRecorder | None = None
 
 
 class AgentEngine(ABC):

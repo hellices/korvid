@@ -874,6 +874,7 @@ def _build_session(
     which is what makes rebuild a transaction.
     """
     from korvid.agent.conversation import ConversationState
+    from korvid.agent.diagnostics import TurnDiagnosticsFactory
     from korvid.agent.evidence import EvidenceLedger
     from korvid.agent.native_engine import NativeAgentEngine
     from korvid.agent.prompt_harness import PromptHarness
@@ -911,6 +912,7 @@ def _build_session(
         policy=policy,
         cluster=cluster,
         user_rules=config.agent_rules,
+        diagnostics_factory=TurnDiagnosticsFactory(),
     )
 
 

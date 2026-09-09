@@ -16,11 +16,9 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { createContext, runInContext } from "node:vm";
 
-function milestone(stage, scenario = null) {
-  const detail = scenario === null ? "" : ` scenario=${JSON.stringify(scenario)}`;
-  console.error(`scene-switcher stage=${stage}${detail}`);
-}
+import { createHarnessLifecycle } from "./harness_lifecycle.mjs";
 
+const { finish, milestone } = createHarnessLifecycle("scene-switcher");
 milestone("imports-complete");
 
 const CONTROLLER = new URL(
@@ -1018,5 +1016,4 @@ for (const [name, scenario] of Object.entries(scenarios)) {
     milestone("scenario-end", name);
   }
 }
-milestone("complete");
-process.exit(failed === 0 ? 0 : 1);
+finish(failed === 0 ? 0 : 1);

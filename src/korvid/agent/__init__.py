@@ -57,6 +57,9 @@ if TYPE_CHECKING:
         AgentEvent as AgentEvent,
     )
     from .events import (
+        AgentPhaseChanged as AgentPhaseChanged,
+    )
+    from .events import (
         TextDelta as TextDelta,
     )
     from .events import (
@@ -209,6 +212,7 @@ _EXPORTS: Final[dict[str, str]] = {
     "AgentEngine": "engine",
     "AgentError": "events",
     "AgentEvent": "events",
+    "AgentPhaseChanged": "events",
     "AgentSession": "session",
     "AgentTurnRequest": "engine",
     "AgentUiBridge": "interaction",

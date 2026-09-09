@@ -17,6 +17,8 @@ The normalized events are korvid's own, not LiteLLM's:
   names `conversation.commit_usage` reads, and only ever the counts the
   provider itself reported. The provider's own `total_tokens` rides along
   when it reported one, because a total is not always the sum of the two.
+- `{"type": "provider_metrics", ...}` — optional provider-native durations
+  and counts, normalized before they cross the adapter boundary.
 - `{"type": "done"}` — the terminal event, as both replaced adapters emit.
 
 Everything LiteLLM-shaped is imported from `litellm_runtime`, so this
@@ -63,10 +65,16 @@ from korvid.agent.provider import (
     append_bounded,
     guard_tool_call_count,
 )
+from korvid.providers.flow_ollama_thinking import PREFIX as _OLLAMA_PROVIDER
 from korvid.providers.litellm_request import RequestPlan
 from korvid.providers.litellm_runtime import ProviderSDKError, acompletion, exceptions
+from korvid.providers.ollama_metrics_transport import (
+    OllamaMetricsHTTPClient,
+    OllamaMetricsHTTPPool,
+)
 
 logger = logging.getLogger(__name__)
+_OLLAMA_METRICS_PROVIDERS: Final = frozenset({_OLLAMA_PROVIDER, f"{_OLLAMA_PROVIDER}_chat"})
 
 # ---------------------------------------------------------------------------
 # Written messages — evidence-free by construction
@@ -400,7 +408,11 @@ def _finished(response: Any) -> bool:
     return bool(getattr(response, "received_finish_reason", None))
 
 
-async def _stream_events(response: Any) -> AsyncGenerator[dict[str, Any], None]:
+async def _stream_events(
+    response: Any,
+    *,
+    metrics_source: Callable[[], dict[str, Any] | None] | None = None,
+) -> AsyncGenerator[dict[str, Any], None]:
     """Normalize a LiteLLM stream into korvid's events.
 
     Completed tool calls are emitted at stream end so the harness always
@@ -418,9 +430,17 @@ async def _stream_events(response: Any) -> AsyncGenerator[dict[str, Any], None]:
     Nothing after the wire's own `[DONE]` reaches this loop — the SDK
     stops there, pinned by
     `test_nothing_after_the_wire_terminal_marker_is_delivered`.
+
+    Args:
+        response: The LiteLLM stream wrapper.
+        metrics_source: An optional request-local capture that returns a
+            normalized `provider_metrics` event (issue #319). Read inside
+            the `try` so its provenance belongs to the response the
+            `finally` is about to close.
     """
     calls: dict[int, _PartialToolCall] = {}
     usage: dict[str, Any] | None = None
+    metrics: dict[str, Any] | None = None
     try:
         async for chunk in response:
             for event in _chunk_events(chunk, calls):
@@ -430,6 +450,8 @@ async def _stream_events(response: Any) -> AsyncGenerator[dict[str, Any], None]:
         # Read here, inside the `try`: the provenance record belongs to the
         # wrapper, which the `finally` below is about to close.
         usage = _provider_usage(response)
+        if metrics_source is not None:
+            metrics = metrics_source()
     except asyncio.CancelledError:
         raise
     except ProviderSDKError as exc:
@@ -441,10 +463,16 @@ async def _stream_events(response: Any) -> AsyncGenerator[dict[str, Any], None]:
         yield event
     if usage is not None:
         yield usage
+    if metrics is not None:
+        yield metrics
     yield {"type": "done"}
 
 
-def _response_events(response: Any) -> Iterator[dict[str, Any]]:
+def _response_events(
+    response: Any,
+    *,
+    metrics_source: Callable[[], dict[str, Any] | None] | None = None,
+) -> Iterator[dict[str, Any]]:
     """Normalize a non-streaming `ModelResponse` into the same events."""
     for choice in getattr(response, "choices", None) or ():
         message = getattr(choice, "message", None)
@@ -465,7 +493,23 @@ def _response_events(response: Any) -> Iterator[dict[str, Any]]:
     usage = _usage_event(response)
     if usage is not None:
         yield usage
+    if metrics_source is not None:
+        metrics = metrics_source()
+        if metrics is not None:
+            yield metrics
     yield {"type": "done"}
+
+
+def _metrics_source(
+    response: Any,
+    client: OllamaMetricsHTTPClient | None,
+) -> Callable[[], dict[str, Any] | None] | None:
+    """Attach streaming capture, then return the request-local event reader."""
+    if client is None:
+        return None
+    if hasattr(response, "__aiter__"):
+        client.attach_stream(response)
+    return client.metrics_event
 
 
 # ---------------------------------------------------------------------------
@@ -510,20 +554,30 @@ class LiteLLMProvider(LLMProvider):
         )
         self._client = client
         self._on_close = on_close
+        self._ollama_metrics_pool: OllamaMetricsHTTPPool | None = None
+        self._closed = False
 
     async def aclose(self) -> None:
-        """Release the declared credential chain, if there is one.
+        """Release provider-owned HTTP and credential resources once.
 
-        A chain that fails to close is logged and swallowed: this runs on
-        the rebuild and shutdown paths, where raising would take down a
-        `:model` switch over a credential library's teardown.
+        HTTP failures propagate after credential cleanup. Credential-chain
+        failures retain their existing logged behavior.
         """
-        if self._on_close is None:
+        if self._closed:
             return
+        self._closed = True
         try:
-            await self._on_close()
-        except Exception:  # credential library teardown, in any state
-            logger.warning("the provider-default credential failed to close")
+            if self._ollama_metrics_pool is not None:
+                await self._ollama_metrics_pool.aclose()
+        finally:
+            await self._close_credentials()
+
+    async def _close_credentials(self) -> None:
+        if self._on_close is not None:
+            try:
+                await self._on_close()
+            except Exception:  # credential library teardown, in any state
+                logger.warning("the provider-default credential failed to close")
 
     @property
     def descriptor(self) -> ModelDescriptor:
@@ -569,7 +623,13 @@ class LiteLLMProvider(LLMProvider):
                 SDK's base class, so a `TypeError` propagates unchanged.
         """
         kwargs = self._plan.call_kwargs(messages, tools, stream=stream)
-        if self._client is not None:
+        metrics_client: OllamaMetricsHTTPClient | None = None
+        if self._descriptor.provider in _OLLAMA_METRICS_PROVIDERS:
+            if self._ollama_metrics_pool is None:
+                self._ollama_metrics_pool = OllamaMetricsHTTPPool(self._client)
+            metrics_client = self._ollama_metrics_pool.request_client()
+            kwargs["client"] = metrics_client
+        elif self._client is not None:
             kwargs["client"] = self._client  # kwargs-only in 1.98.0
         try:
             response = await acompletion(**kwargs)
@@ -581,13 +641,14 @@ class LiteLLMProvider(LLMProvider):
             raise _translate(exc) from exc
         yield {"type": REQUEST_SENT}
 
+        metrics_source = _metrics_source(response, metrics_client)
         if not hasattr(response, "__aiter__"):
-            for event in _response_events(response):
+            for event in _response_events(response, metrics_source=metrics_source):
                 yield event
             return
         # aclosing, not a bare `async for`: when the consumer abandons this
         # generator the inner one has to be closed then and there, or the
         # HTTP response stays open until the collector gets to it.
-        async with aclosing(_stream_events(response)) as events:
+        async with aclosing(_stream_events(response, metrics_source=metrics_source)) as events:
             async for event in events:
                 yield event

@@ -114,6 +114,10 @@ views:
         label: team
 ```
 
+Custom-column values support Rich markup. Malformed markup, such as an
+unmatched `[/]`, is displayed literally instead of stopping the TUI, including
+when a watch updates the value.
+
 The pods table's `%CPU/R` / `%MEM/R` columns are always relative to the
 declared request (`CPU` and `MEM` show absolute usage), but their colour
 keys off the most severe **limit** the usage approaches across every

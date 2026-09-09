@@ -11,12 +11,14 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import itertools
 import json
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 from korvid.agent.conversation import ConversationState
+from korvid.agent.diagnostics import TurnDiagnosticsFactory, TurnDiagnosticsRecorder
 from korvid.agent.engine import AgentEngine, AgentTurnRequest
 from korvid.agent.events import AgentEvent
 from korvid.agent.evidence import EvidenceLedger
@@ -70,6 +72,50 @@ def tool_call(call_id: str, name: str, arguments: str = "{}") -> dict[str, Any]:
 def usage(input_tokens: int, output_tokens: int) -> dict[str, Any]:
     """One provider-reported usage event."""
     return {"type": "usage", "input_tokens": input_tokens, "output_tokens": output_tokens}
+
+
+def provider_metrics(
+    *,
+    total_seconds: float | None = None,
+    load_seconds: float | None = None,
+    prompt_eval_seconds: float | None = None,
+    prompt_tokens: int | None = None,
+    generation_seconds: float | None = None,
+    generation_tokens: int | None = None,
+) -> dict[str, Any]:
+    """One optional normalized provider-runtime-metrics event (issue #319)."""
+    event: dict[str, Any] = {"type": "provider_metrics"}
+    for key, value in (
+        ("total_seconds", total_seconds),
+        ("load_seconds", load_seconds),
+        ("prompt_eval_seconds", prompt_eval_seconds),
+        ("prompt_tokens", prompt_tokens),
+        ("generation_seconds", generation_seconds),
+        ("generation_tokens", generation_tokens),
+    ):
+        if value is not None:
+            event[key] = value
+    return event
+
+
+def ticking_clock(*, start: float = 0.0, step: float = 1.0) -> Callable[[], float]:
+    """A deterministic monotonic-style clock: start, start+step, start+2*step, ..."""
+    counter = itertools.count(0)
+
+    def clock() -> float:
+        return start + step * next(counter)
+
+    return clock
+
+
+def deterministic_recorder(
+    correlation_id: str = "corr", *, start: float = 0.0, step: float = 1.0
+) -> TurnDiagnosticsRecorder:
+    """A turn recorder over a deterministic clock, for engine-level diagnostics."""
+    factory = TurnDiagnosticsFactory(
+        clock=ticking_clock(start=start, step=step), id_factory=lambda: correlation_id
+    )
+    return factory.create()
 
 
 def text_turn(answer: str = "the pod is healthy") -> list[Any]:
@@ -299,12 +345,14 @@ class Harness:
         user_text: str = USER_TEXT,
         *,
         system_message: str = TURN_SYSTEM_MESSAGE,
+        recorder: TurnDiagnosticsRecorder | None = None,
     ) -> AgentTurnRequest:
         """One turn request carrying an already composed prompt."""
         return AgentTurnRequest(
             prompt=ComposedPrompt(system_message=system_message, user_message=user_text),
             policy=self.policy,
             interaction=self.interaction,
+            diagnostics=recorder,
         )
 
     async def run(
@@ -312,9 +360,10 @@ class Harness:
         user_text: str = USER_TEXT,
         *,
         system_message: str = TURN_SYSTEM_MESSAGE,
+        recorder: TurnDiagnosticsRecorder | None = None,
     ) -> list[AgentEvent]:
         """Drive one whole turn and collect its events."""
-        request = self.request(user_text, system_message=system_message)
+        request = self.request(user_text, system_message=system_message, recorder=recorder)
         return [event async for event in self.engine.run(request)]
 
 

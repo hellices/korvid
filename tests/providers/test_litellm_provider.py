@@ -13,8 +13,9 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncGenerator, AsyncIterator, Callable
-from contextlib import aclosing
+import threading
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
+from contextlib import aclosing, suppress
 from typing import Any, cast
 
 import pytest
@@ -22,6 +23,7 @@ import pytest
 pytest.importorskip("litellm")
 
 import httpx
+from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler
 
 from korvid.agent.model_policy import (
     CapabilitySource,
@@ -41,6 +43,7 @@ from korvid.providers import litellm_provider
 from korvid.providers.litellm_provider import LiteLLMProvider, ProviderRequestError
 from korvid.providers.litellm_request import RequestPlan, build_plan
 from korvid.providers.litellm_runtime import ProviderSDKError, acompletion, exceptions
+from tests.providers.litellm_clients import drop_cached_clients
 
 _MODEL = "openai/gpt-4o"
 _SECRET = "sk-secret-value"
@@ -242,13 +245,11 @@ async def _drain_litellm_logging() -> None:
     to no test and moves with the random order.
 
     Draining it inside the test that queued it keeps that bookkeeping
-    where it belongs. `clear_queue` is LiteLLM's own API for this and is
-    bounded in both iterations and time.
+    where it belongs, including callbacks already dequeued by the worker.
     """
-    from litellm.litellm_core_utils.logging_worker import GLOBAL_LOGGING_WORKER
+    from tests.providers.litellm_clients import drain_logging
 
-    # The ignore below: `clear_queue` carries no return annotation upstream.
-    await GLOBAL_LOGGING_WORKER.clear_queue()  # type: ignore[no-untyped-call]
+    await drain_logging()
 
 
 def _returning(value: Any) -> Callable[..., Any]:
@@ -1459,3 +1460,707 @@ async def test_a_stream_iterator_is_returned_not_a_coroutine() -> None:
     async with aclosing(_as_generator(stream)) as events:
         async for _ in events:
             break
+
+
+# ---------------------------------------------------------------------------
+# Ollama native terminal timings (issue #319)
+# ---------------------------------------------------------------------------
+
+
+from korvid.agent.diagnostics import PROVIDER_METRICS_EVENT  # noqa: E402
+
+
+class _TrackingAsyncClient(httpx.AsyncClient):
+    def __init__(self, handler: Handler) -> None:
+        super().__init__(transport=httpx.MockTransport(handler))
+        self.close_calls = 0
+
+    async def aclose(self) -> None:
+        self.close_calls += 1
+        await super().aclose()
+
+
+def _track_production_ollama_clients(
+    monkeypatch: pytest.MonkeyPatch,
+    handler: Handler,
+) -> list[_TrackingAsyncClient]:
+    clients: list[_TrackingAsyncClient] = []
+
+    def create_client(_handler: Any, *_args: Any, **_kwargs: Any) -> httpx.AsyncClient:
+        client = _TrackingAsyncClient(handler)
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr(AsyncHTTPHandler, "create_client", create_client)
+    return clients
+
+
+def _production_ollama_provider(
+    *,
+    on_close: Callable[[], Awaitable[None]] | None = None,
+) -> LiteLLMProvider:
+    return LiteLLMProvider(
+        plan=_plan(model="ollama/qwen3:8b", base_url="http://ollama.invalid"),
+        descriptor=ModelDescriptor(provider="ollama", model="qwen3:8b"),
+        capabilities=ModelCapabilities.unknown(),
+        on_close=on_close,
+    )
+
+
+async def _cleanup_production_provider(
+    provider: LiteLLMProvider,
+    clients: list[_TrackingAsyncClient],
+) -> None:
+    await drop_cached_clients()
+    await provider.aclose()
+    for client in clients:
+        if not client.is_closed:
+            await client.aclose()
+
+
+def _real_ollama_provider(
+    handler: Handler,
+    *,
+    provider_name: str = "ollama",
+) -> tuple[LiteLLMProvider, Any]:
+    """A korvid provider over LiteLLM's real Ollama HTTP transformation."""
+    from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler
+
+    client = AsyncHTTPHandler()
+    client.client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    return LiteLLMProvider(
+        plan=_plan(model=f"{provider_name}/qwen3:8b", base_url="http://ollama.invalid"),
+        descriptor=ModelDescriptor(provider=provider_name, model="qwen3:8b"),
+        capabilities=ModelCapabilities.unknown(),
+        client=client,
+    ), client
+
+
+def _ollama_terminal(*, total_duration: int, eval_count: int) -> dict[str, Any]:
+    return {
+        "model": "qwen3:8b",
+        "created_at": "2026-09-09T00:00:00Z",
+        "done": True,
+        "done_reason": "stop",
+        "total_duration": total_duration,
+        "load_duration": 1_000_000_000,
+        "prompt_eval_count": 1800,
+        "prompt_eval_duration": 4_000_000_000,
+        "eval_count": eval_count,
+        "eval_duration": 2_000_000_000,
+        # Representative sensitive/free-form fields must never reach events.
+        "prompt": "secret prompt",
+        "context": [1, 2, 3],
+    }
+
+
+def _ollama_answer(
+    *,
+    stream: bool,
+    chat: bool = False,
+    total_duration: int = 6_000_000_000,
+    eval_count: int = 20,
+    include_metrics: bool = True,
+    context_size: int = 3,
+    spoof_metrics: bool = False,
+) -> Handler:
+    terminal = _ollama_terminal(total_duration=total_duration, eval_count=eval_count)
+    terminal["context"] = list(range(context_size))
+    terminal["message" if chat else "response"] = (
+        {"role": "assistant", "content": ""} if chat else ""
+    )
+    if not include_metrics:
+        for key in (
+            "total_duration",
+            "load_duration",
+            "prompt_eval_count",
+            "prompt_eval_duration",
+            "eval_count",
+            "eval_duration",
+        ):
+            terminal.pop(key)
+    if spoof_metrics:
+        terminal["metadata"] = {
+            "total_duration": 99_000_000_000,
+            "eval_count": 99,
+        }
+        terminal["lookalike"] = '"prompt_eval_count": 99, "eval_duration": 99000000000'
+
+    class _NDJSONStream(httpx.AsyncByteStream):
+        async def __aiter__(self) -> AsyncIterator[bytes]:
+            payload = "".join(f"{json.dumps(frame)}\n" for frame in frames).encode()
+            for start in range(0, len(payload), 17):
+                yield payload[start : start + 17]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if not stream:
+            answer = (
+                {"message": {"role": "assistant", "content": "healthy"}}
+                if chat
+                else {"response": "healthy"}
+            )
+            return httpx.Response(200, json={**terminal, **answer}, request=request)
+        return httpx.Response(
+            200,
+            stream=_NDJSONStream(),
+            headers={"content-type": "application/x-ndjson"},
+            request=request,
+        )
+
+    frames = [
+        {
+            "model": "qwen3:8b",
+            "created_at": "2026-09-09T00:00:00Z",
+            **(
+                {"message": {"role": "assistant", "content": "healthy"}}
+                if chat
+                else {"response": "healthy"}
+            ),
+            "done": False,
+        },
+        terminal,
+    ]
+    return handler
+
+
+async def _real_ollama_events(
+    *,
+    stream: bool,
+    total_duration: int = 6_000_000_000,
+    eval_count: int = 20,
+    include_metrics: bool = True,
+    provider_name: str = "ollama",
+    context_size: int = 3,
+    spoof_metrics: bool = False,
+) -> list[dict[str, Any]]:
+    provider, client = _real_ollama_provider(
+        _ollama_answer(
+            stream=stream,
+            chat=provider_name == "ollama_chat",
+            total_duration=total_duration,
+            eval_count=eval_count,
+            include_metrics=include_metrics,
+            context_size=context_size,
+            spoof_metrics=spoof_metrics,
+        ),
+        provider_name=provider_name,
+    )
+    try:
+        return await _events(provider, stream=stream)
+    finally:
+        if not stream:
+            await _drain_litellm_logging()
+        await client.client.aclose()
+
+
+@pytest.mark.parametrize("provider_name", ["ollama", "ollama_chat"])
+@pytest.mark.parametrize("stream", [True, False], ids=["streaming", "non-streaming"])
+async def test_real_ollama_terminal_metrics_survive_litellm_transformation(
+    stream: bool,
+    provider_name: str,
+) -> None:
+    """Capture the raw terminal frame before LiteLLM drops its durations."""
+    events = await _real_ollama_events(stream=stream, provider_name=provider_name)
+
+    assert events[0] == {"type": REQUEST_SENT}
+    metrics = [e for e in events if e["type"] == PROVIDER_METRICS_EVENT]
+    assert metrics == [
+        {
+            "type": PROVIDER_METRICS_EVENT,
+            "total_seconds": 6.0,
+            "load_seconds": 1.0,
+            "prompt_eval_seconds": 4.0,
+            "prompt_tokens": 1800,
+            "generation_seconds": 2.0,
+            "generation_tokens": 20,
+        }
+    ]
+    assert events[-1] == {"type": "done"}
+    assert events.index(metrics[0]) < events.index({"type": "done"})
+    assert "secret prompt" not in json.dumps(events)
+
+
+@pytest.mark.parametrize("stream", [True, False], ids=["streaming", "non-streaming"])
+async def test_real_ollama_response_without_native_metrics_adds_no_event(stream: bool) -> None:
+    events = await _real_ollama_events(stream=stream, include_metrics=False)
+
+    assert [event for event in events if event["type"] == PROVIDER_METRICS_EVENT] == []
+
+
+async def test_large_real_ollama_terminal_frame_keeps_native_metrics() -> None:
+    terminal = _ollama_terminal(total_duration=6_000_000_000, eval_count=20)
+    terminal["context"] = list(range(20_000))
+    assert len(json.dumps(terminal).encode()) > 64 * 1024
+
+    events = await _real_ollama_events(stream=True, context_size=20_000)
+
+    metrics = [event for event in events if event["type"] == PROVIDER_METRICS_EVENT]
+    assert metrics == [
+        {
+            "type": PROVIDER_METRICS_EVENT,
+            "total_seconds": 6.0,
+            "load_seconds": 1.0,
+            "prompt_eval_seconds": 4.0,
+            "prompt_tokens": 1800,
+            "generation_seconds": 2.0,
+            "generation_tokens": 20,
+        }
+    ]
+
+
+async def test_non_streaming_capture_reuses_litellms_single_json_decode() -> None:
+    class _CountingResponse(httpx.Response):
+        json_calls = 0
+
+        def json(self, **kwargs: Any) -> Any:
+            self.json_calls += 1
+            return super().json(**kwargs)
+
+    terminal = _ollama_terminal(total_duration=6_000_000_000, eval_count=20)
+    terminal["context"] = list(range(20_000))
+    assert len(json.dumps(terminal).encode()) > 64 * 1024
+    response: _CountingResponse | None = None
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal response
+        response = _CountingResponse(
+            200,
+            json={**terminal, "response": "healthy"},
+            request=request,
+        )
+        return response
+
+    provider, client = _real_ollama_provider(handler)
+    try:
+        events = await _events(provider, stream=False)
+        await _drain_litellm_logging()
+    finally:
+        await client.client.aclose()
+
+    assert response is not None
+    assert response.json_calls == 1
+    assert [event for event in events if event["type"] == PROVIDER_METRICS_EVENT]
+
+
+async def test_nested_and_string_metric_names_cannot_spoof_metrics() -> None:
+    events = await _real_ollama_events(
+        stream=True,
+        include_metrics=False,
+        context_size=20_000,
+        spoof_metrics=True,
+    )
+
+    assert [event for event in events if event["type"] == PROVIDER_METRICS_EVENT] == []
+
+
+async def test_concurrent_real_ollama_requests_keep_metrics_isolated() -> None:
+    """Each request owns its capture; terminal frames cannot cross streams."""
+    first, second = await asyncio.gather(
+        _real_ollama_events(stream=True, total_duration=3_000_000_000, eval_count=3),
+        _real_ollama_events(stream=True, total_duration=9_000_000_000, eval_count=9),
+    )
+
+    first_metrics = [event for event in first if event["type"] == PROVIDER_METRICS_EVENT]
+    second_metrics = [event for event in second if event["type"] == PROVIDER_METRICS_EVENT]
+    assert first_metrics[0]["total_seconds"] == 3.0
+    assert first_metrics[0]["generation_tokens"] == 3
+    assert second_metrics[0]["total_seconds"] == 9.0
+    assert second_metrics[0]["generation_tokens"] == 9
+
+
+def test_cleanup_finishes_sdk_dispatch_before_logging_worker_rebind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pending SDK dispatcher must enqueue before cleanup drains its callback."""
+    import litellm
+    from litellm.litellm_core_utils.litellm_logging import Logging
+    from litellm.litellm_core_utils.logging_worker import GLOBAL_LOGGING_WORKER
+
+    completed: list[None] = []
+    original_handler = Logging.async_success_handler
+
+    async def tracked_handler(self: Any, *args: Any, **kwargs: Any) -> None:
+        await original_handler(self, *args, **kwargs)
+        completed.append(None)
+
+    def dispatchers() -> list[asyncio.Task[Any]]:
+        current = asyncio.current_task()
+        return [
+            task
+            for task in asyncio.all_tasks()
+            if task is not current
+            and getattr(task.get_coro(), "__qualname__", "") == "_client_async_logging_helper"
+        ]
+
+    monkeypatch.setattr(Logging, "async_success_handler", tracked_handler)
+
+    async def prime_worker_on_prior_loop() -> None:
+        primed = asyncio.Event()
+
+        async def callback() -> None:
+            primed.set()
+
+        GLOBAL_LOGGING_WORKER.ensure_initialized_and_enqueue(callback())
+        await asyncio.wait_for(GLOBAL_LOGGING_WORKER.flush(), timeout=5)
+        await GLOBAL_LOGGING_WORKER.stop()
+        assert primed.is_set()
+
+    asyncio.run(prime_worker_on_prior_loop())
+    prior_loop = GLOBAL_LOGGING_WORKER._bound_loop
+
+    async def exercise() -> None:
+        provider, client = _real_ollama_provider(_ollama_answer(stream=False))
+        try:
+            await _events(provider, stream=False)
+            assert len(dispatchers()) == 1
+            assert GLOBAL_LOGGING_WORKER._bound_loop is prior_loop
+            assert GLOBAL_LOGGING_WORKER._bound_loop is not asyncio.get_running_loop()
+
+            await drop_cached_clients()
+
+            assert completed == [None]
+        finally:
+            await asyncio.gather(*dispatchers())
+            await GLOBAL_LOGGING_WORKER.clear_queue()  # type: ignore[no-untyped-call]  # SDK method lacks a return annotation.
+            await asyncio.wait_for(GLOBAL_LOGGING_WORKER.flush(), timeout=5)
+            await GLOBAL_LOGGING_WORKER.stop()
+            await client.client.aclose()
+
+    assert litellm.callbacks == []
+    assert litellm.success_callback == []
+    assert litellm.failure_callback == []
+    asyncio.run(exercise())
+
+
+async def test_production_ollama_rounds_reuse_one_pool_with_fresh_capture(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    answers = iter(
+        [
+            _ollama_answer(stream=False, total_duration=3_000_000_000, eval_count=3),
+            _ollama_answer(stream=False, total_duration=9_000_000_000, eval_count=9),
+        ]
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return next(answers)(request)
+
+    clients = _track_production_ollama_clients(monkeypatch, handler)
+    provider = _production_ollama_provider()
+    try:
+        first = await _events(provider, stream=False)
+        second = await _events(provider, stream=False)
+
+        assert len(clients) == 1
+        assert clients[0].close_calls == 0
+        first_metrics = [event for event in first if event["type"] == PROVIDER_METRICS_EVENT]
+        second_metrics = [event for event in second if event["type"] == PROVIDER_METRICS_EVENT]
+        assert first_metrics[0]["total_seconds"] == 3.0
+        assert first_metrics[0]["generation_tokens"] == 3
+        assert second_metrics[0]["total_seconds"] == 9.0
+        assert second_metrics[0]["generation_tokens"] == 9
+    finally:
+        await _cleanup_production_provider(provider, clients)
+
+
+async def test_provider_closes_owned_ollama_pool_and_credentials_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clients = _track_production_ollama_clients(
+        monkeypatch,
+        _ollama_answer(stream=False),
+    )
+    credential_close_calls = 0
+
+    async def close_credentials() -> None:
+        nonlocal credential_close_calls
+        credential_close_calls += 1
+
+    provider = _production_ollama_provider(on_close=close_credentials)
+    logging_drained = False
+    try:
+        await _events(provider, stream=False)
+        await drop_cached_clients()
+        logging_drained = True
+        assert len(clients) == 1
+        assert clients[0].close_calls == 0
+
+        await provider.aclose()
+        await provider.aclose()
+
+        assert clients[0].close_calls == 1
+        assert credential_close_calls == 1
+    finally:
+        if not logging_drained:
+            await drop_cached_clients()
+        for client in clients:
+            if not client.is_closed:
+                await client.aclose()
+
+
+async def test_provider_never_closes_injected_ollama_delegate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clients = _track_production_ollama_clients(
+        monkeypatch,
+        _ollama_answer(stream=False),
+    )
+    delegate = AsyncHTTPHandler()
+    provider = LiteLLMProvider(
+        plan=_plan(model="ollama/qwen3:8b", base_url="http://ollama.invalid"),
+        descriptor=ModelDescriptor(provider="ollama", model="qwen3:8b"),
+        capabilities=ModelCapabilities.unknown(),
+        client=delegate,
+    )
+    logging_drained = False
+    try:
+        await _events(provider, stream=False)
+        await drop_cached_clients()
+        logging_drained = True
+        await provider.aclose()
+        await provider.aclose()
+
+        assert len(clients) == 1
+        assert clients[0].close_calls == 0
+    finally:
+        await delegate.client.aclose()
+        if not logging_drained:
+            await drop_cached_clients()
+
+
+async def test_owned_pool_close_failure_propagates_after_credential_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from korvid.providers.ollama_metrics_transport import OllamaMetricsHTTPPool
+
+    clients = _track_production_ollama_clients(monkeypatch, _ollama_answer(stream=False))
+    credentials_closed = asyncio.Event()
+    close_pool = OllamaMetricsHTTPPool.aclose
+
+    async def fail_close(pool: OllamaMetricsHTTPPool) -> None:
+        await close_pool(pool)
+        raise RuntimeError("pool close failed")
+
+    async def close_credentials() -> None:
+        credentials_closed.set()
+
+    provider = _production_ollama_provider(on_close=close_credentials)
+    try:
+        await _events(provider, stream=False)
+        monkeypatch.setattr(OllamaMetricsHTTPPool, "aclose", fail_close)
+        with pytest.raises(RuntimeError, match="pool close failed"):
+            await provider.aclose()
+        assert credentials_closed.is_set()
+    finally:
+        await _cleanup_production_provider(provider, clients)
+
+
+async def test_cancelling_ollama_request_closes_response_but_keeps_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import litellm.main
+
+    class _BlockingNDJSONStream(httpx.AsyncByteStream):
+        def __init__(self) -> None:
+            self.closed = False
+            self.blocked = asyncio.Event()
+
+        async def __aiter__(self) -> AsyncIterator[bytes]:
+            yield (
+                json.dumps(
+                    {
+                        "model": "qwen3:8b",
+                        "created_at": "2026-09-09T00:00:00Z",
+                        "response": "healthy",
+                        "done": False,
+                    }
+                )
+                + "\n"
+            ).encode()
+            self.blocked.set()
+            await asyncio.Event().wait()
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    raw_stream = _BlockingNDJSONStream()
+    healthy = _ollama_answer(stream=True, total_duration=9_000_000_000, eval_count=9)
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(200, stream=raw_stream, request=request)
+        return healthy(request)
+
+    clients = _track_production_ollama_clients(monkeypatch, handler)
+    provider = _production_ollama_provider()
+    startup_entered = asyncio.Event()
+    release_startup = threading.Event()
+    loop = asyncio.get_running_loop()
+    original_completion = litellm.main.completion
+
+    def delayed_completion(*args: Any, **kwargs: Any) -> Any:
+        loop.call_soon_threadsafe(startup_entered.set)
+        release_startup.wait()
+        return original_completion(*args, **kwargs)
+
+    monkeypatch.setattr(litellm.main, "completion", delayed_completion)
+
+    stream_events = _as_generator(provider.complete(_MESSAGES, []))
+    startup = asyncio.create_task(anext(stream_events))
+    task: asyncio.Task[dict[str, Any]] | None = None
+    try:
+        await startup_entered.wait()
+        assert not startup.done()
+        release_startup.set()
+        assert await startup == {"type": REQUEST_SENT}
+        assert await anext(stream_events) == {"type": "text_delta", "text": "healthy"}
+
+        task = asyncio.create_task(anext(stream_events))
+        await raw_stream.blocked.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert raw_stream.closed is True
+        assert len(clients) == 1
+        assert clients[0].close_calls == 0
+
+        healthy_events = await _events(provider)
+        metrics = [event for event in healthy_events if event["type"] == PROVIDER_METRICS_EVENT]
+        assert metrics[0]["total_seconds"] == 9.0
+        assert metrics[0]["generation_tokens"] == 9
+        assert len(clients) == 1
+        assert clients[0].close_calls == 0
+    finally:
+        release_startup.set()
+        await asyncio.gather(startup, return_exceptions=True)
+        if task is not None:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+        await stream_events.aclose()
+        await _cleanup_production_provider(provider, clients)
+
+
+async def test_ollama_transport_error_closes_response_but_keeps_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FailingNDJSONStream(httpx.AsyncByteStream):
+        def __init__(self, request: httpx.Request) -> None:
+            self._request = request
+            self.closed = False
+
+        async def __aiter__(self) -> AsyncIterator[bytes]:
+            yield (
+                json.dumps(
+                    {
+                        "model": "qwen3:8b",
+                        "created_at": "2026-09-09T00:00:00Z",
+                        "response": "partial",
+                        "done": False,
+                    }
+                )
+                + "\n"
+            ).encode()
+            raise httpx.ReadError("connection reset mid-stream", request=self._request)
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    failed_stream: _FailingNDJSONStream | None = None
+    healthy = _ollama_answer(stream=True, total_duration=9_000_000_000, eval_count=9)
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls, failed_stream
+        calls += 1
+        if calls == 1:
+            failed_stream = _FailingNDJSONStream(request)
+            return httpx.Response(200, stream=failed_stream, request=request)
+        return healthy(request)
+
+    clients = _track_production_ollama_clients(monkeypatch, handler)
+    provider = _production_ollama_provider()
+    try:
+        with pytest.raises(ProviderRequestError, match="reach"):
+            await _events(provider)
+
+        assert failed_stream is not None
+        assert failed_stream.closed is True
+        assert len(clients) == 1
+        assert clients[0].close_calls == 0
+
+        events = await _events(provider)
+        metrics = [event for event in events if event["type"] == PROVIDER_METRICS_EVENT]
+        assert metrics[0]["total_seconds"] == 9.0
+        assert metrics[0]["generation_tokens"] == 9
+        assert len(clients) == 1
+        assert clients[0].close_calls == 0
+    finally:
+        await _cleanup_production_provider(provider, clients)
+
+
+async def test_stopping_an_ollama_stream_closes_the_raw_response() -> None:
+    class _BlockingNDJSONStream(httpx.AsyncByteStream):
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def __aiter__(self) -> AsyncIterator[bytes]:
+            yield (
+                json.dumps(
+                    {
+                        "model": "qwen3:8b",
+                        "created_at": "2026-09-09T00:00:00Z",
+                        "response": "healthy",
+                        "done": False,
+                    }
+                )
+                + "\n"
+            ).encode()
+            await asyncio.Event().wait()
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    raw_stream = _BlockingNDJSONStream()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, stream=raw_stream, request=request)
+
+    provider, client = _real_ollama_provider(handler)
+    try:
+        async with aclosing(_as_generator(provider.complete(_MESSAGES, []))) as events:
+            async for event in events:
+                if event["type"] == "text_delta":
+                    break
+    finally:
+        await client.client.aclose()
+
+    assert raw_stream.closed is True
+
+
+async def test_a_non_ollama_provider_ignores_lookalike_raw_fields() -> None:
+    """The per-request capture is not installed on another provider."""
+    body = {
+        "id": "chatcmpl-1",
+        "object": "chat.completion",
+        "created": 1,
+        "model": "gpt-4o",
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": "healthy"},
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3},
+        "total_duration": 6_000_000_000,
+        "eval_count": 20,
+    }
+    events = await _events(_provider(_answering(200, body)), stream=False)
+
+    assert [e for e in events if e["type"] == PROVIDER_METRICS_EVENT] == []
+    await _drain_litellm_logging()

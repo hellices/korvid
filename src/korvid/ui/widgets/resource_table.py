@@ -9,6 +9,7 @@ from types import MappingProxyType
 from typing import Final, NamedTuple, Protocol, Self, cast
 
 from rich.cells import cell_len
+from rich.errors import MarkupError
 from rich.text import Text
 from textual import __version__ as _textual_version
 from textual.coordinate import Coordinate
@@ -125,6 +126,17 @@ def _pod_sort_key(pod: PodSummary) -> tuple[int, str]:
 
 def _phase_cell(phase: str) -> Text:
     return Text(phase, style=phase_style(phase))
+
+
+def _custom_cell(value: str) -> str | Text:
+    """Keep valid markup, but display malformed custom values literally."""
+    if "[" in value:
+        try:
+            Text.from_markup(value)
+        except MarkupError:
+            return Text(value)
+    # Keep DataTable's existing string formatting, including newline handling.
+    return value
 
 
 def _render_pod_rows(
@@ -1095,7 +1107,8 @@ class ResourceTable(DataTable[str | Text]):
         if view is not None:
             values: tuple[str, ...] = getattr(obj, "custom", ())
             extras: list[str | Text] = [
-                values[index] if index < len(values) else MISSING for index in view.value_indices
+                _custom_cell(values[index]) if index < len(values) else MISSING
+                for index in view.value_indices
             ]
             cells = [cells[0], *extras] if view.config.replace else [*cells, *extras]
         if all_namespaces:

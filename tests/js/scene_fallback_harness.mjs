@@ -2,11 +2,9 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
 
-function milestone(stage, scenario = null) {
-  const detail = scenario === null ? "" : ` scenario=${JSON.stringify(scenario)}`;
-  console.error(`scene-fallback stage=${stage}${detail}`);
-}
+import { createHarnessLifecycle } from "./harness_lifecycle.mjs";
 
+const { finish, milestone } = createHarnessLifecycle("scene-fallback");
 milestone("imports-complete");
 
 const source = readFileSync(
@@ -125,4 +123,4 @@ for (const [name, scenario] of Object.entries(scenarios)) {
     milestone("scenario-end", name);
   }
 }
-milestone("complete");
+finish(0);

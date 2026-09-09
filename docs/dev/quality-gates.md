@@ -133,6 +133,75 @@ change runs the suite once, on 3.12, and Windows starts and syncs before
 skipping its pytest step. What is saved is three redundant suite runs, not
 the matrix.
 
+### Windows documentation harness lifecycle diagnostics
+
+The landing-page JavaScript behavior tests keep a 10-second harness deadline.
+Historical Windows failures stopped before the first `imports-complete`
+milestone (runs 34231801365, 34238827627, 34252667381, and 34257752860;
+see [issue #371](https://github.com/hellices/korvid/issues/371)). Those
+historical failures remain unexplained.
+
+A probe-enabled recurrence
+([run 34339098708, job 102425430426](https://github.com/hellices/korvid/actions/runs/34339098708/job/102425430426))
+was different: all 22 scenarios printed `ok`, stderr reached
+`scene-switcher stage=complete`, and all three post-timeout controls passed
+under Node 22.23.2. CPython raised from `subprocess.py:1630`, the Windows
+stdout-reader-thread join, before its process wait. This establishes that this
+recurrence was not a JavaScript, V8, harness-file, or ESM-loader failure and
+that Python was waiting for captured-pipe EOF. It did **not** establish that
+the pipe was the only problem or that Node had already exited.
+
+A second recurrence with file-backed output
+([run 34346429728, job 102449123886](https://github.com/hellices/korvid/actions/runs/34346429728/job/102449123886))
+again printed all 22 successful scenarios and `stage=complete`, while CPython
+timed out in `WaitForSingleObject` on the actual Node process handle. All three
+post-timeout controls passed. File-backed capture therefore removes a real
+Windows `communicate()` reader-thread dependency, but is not sufficient to
+explain or prevent the completed harness from lingering.
+
+The switcher previously called `process.exit()` immediately after
+`stage=complete`. That forced path bypasses Node's `beforeExit` phase and can
+discard pending output; it also left no evidence about an orderly shutdown.
+The harness now sets `process.exitCode` from the real scenario result and lets
+Node exit naturally. This does not accept parsed output as success: Python
+still requires the process handle to exit inside the same 10-second deadline
+and returns the real exit code.
+
+The shared harness lifecycle reporter writes bounded, value-free summaries of
+active resource, handle, and request type names at `stage=complete` and
+`stage=before-exit`, followed by a `stage=exit` marker from Node's synchronous
+exit event. The sequence helps distinguish an active-resource leak from a stall
+after the event loop empties or after Node begins final process teardown.
+On macOS/Node 22.22.1, intercepting the old forced exit produced empty resource,
+handle, and request sets; 100 consecutive natural-exit runs completed. That
+rules out a deterministic harness-owned leak there, not a Windows-specific
+shutdown or runner stall. The new Windows evidence is required before claiming
+a root cause or fix.
+
+Stdout and stderr remain in separate temporary files under the repository
+instead of `PIPE`s. A true timeout still kills the process, preserves the
+original exception, and reads only bounded head-and-tail diagnostics from the
+files. A regression harness deliberately reports completion while retaining a
+timer: Python still raises the original timeout, and the bounded diagnostics
+retain the `Timeout` resource type. No completion marker is accepted as a
+substitute for process exit.
+
+After a timeout, separately bounded controls run in this order:
+
+1. an isolated Python child process, to test generic child-process launch and
+   captured-pipe progress independently of Node;
+2. `node --version`, to establish that the Node executable starts and exits;
+3. a CJS probe whose first milestone confirms JavaScript/V8 execution and
+   whose later milestones distinguish harness-file access and an ESM loader
+   import.
+
+The diagnostics record only the presence of selected Node environment
+variables, never their values. Preserve the original exception and deadline:
+do not turn a recurrence green by retrying, skipping, extending the timeout, or
+treating parsed output as success. If every post-timeout probe succeeds, it
+only describes the state after the failure; it does not retroactively identify
+the transient cause.
+
 ## 4. Release — `.github/workflows/release.yml`, on tag
 
 `verify` → `build` → `smoke` → `sbom` → `offline` → `collect` → `attest` →

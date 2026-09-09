@@ -110,6 +110,78 @@ them.
 labels still appear in it. Press `e` to export it to a private, `0o600` file.
 [The threat model](threat-model.md) has the boundary and residual risks.
 
+## Turn latency diagnostics
+
+Every turn is timed against a single monotonic clock, so you can see *where* a
+slow turn spent its time without guessing. The measurement is
+provider-neutral — the same for OpenAI, a local Ollama model, or the offline
+test provider — and it never reads a prompt, a tool argument, a tool result,
+or any provider payload.
+
+**Live phase in the status line.** While a turn runs, the status line names
+the phase it is in rather than a generic spinner:
+
+- *waiting for model* — preparing or running the first provider round.
+- *running `<tool>`* — a tool call is executing. Its human-readable label can
+  include arguments such as pod or namespace; diagnostic logs retain only
+  the registry tool name.
+- *composing answer* — a later provider round is streaming the answer after a
+  tool result went back.
+
+**Compact summary on the finished turn.** When a turn ends, one dim line is
+added to the transcript, for example:
+
+```
+2 model rounds · model 3.4s · tools 1.1s · ↑1.8k ↓200 tok · prompt 2.0s · generate 1.0s · other wait 0.4s
+```
+
+It reports the number of provider rounds and the wall time spent in the model
+and in tools. Token counts and the prompt evaluation, generation, and other-wait
+split appear only when native provider metrics include those measurements.
+Other wait includes transport and queueing. A **failed or interrupted** turn is never shown as a clean success:
+its summary is prefixed with `failed ·` or `interrupted ·` so the timings are
+never mistaken for a completed answer's.
+
+**Structured logs.** The same snapshot is emitted once per turn to the
+`korvid.agent.diagnostics` logger at `INFO`, keyed by a locally generated,
+non-sensitive correlation ID. To record JSON lines without disturbing the
+TUI, launch it with a file handler attached only to this logger:
+
+```bash
+python -c 'import logging, runpy; log = logging.getLogger("korvid.agent.diagnostics"); log.setLevel(logging.INFO); log.addHandler(logging.FileHandler("korvid-agent-timing.log", encoding="utf-8")); log.propagate = False; runpy.run_module("korvid", run_name="__main__")'
+```
+
+Each record includes the turn outcome and total duration, plus per-round
+`request_started_at_seconds`, `request_acknowledged_at_seconds`,
+`first_event_at_seconds`, and `first_content_at_seconds`. These are monotonic
+offsets from that round's start. Dispatch is only an attempt; acknowledgement
+records when transport acceptance was proven, not a socket-write timestamp.
+The first event may be reasoning or usage; first content is a nonempty text
+or tool-call event. Missing boundaries and optional metrics remain unknown,
+not measured zeroes. `other wait` is shown only for rounds with provider totals
+and includes local preparation/transport overhead as well as possible queueing.
+
+Only an explicit allowlist reaches the log record — durations, token counts,
+round numbers, registry tool names, the per-tool success flag, the correlation
+ID, and the turn outcome. There is no generic object serialization, so a
+prompt, a reasoning trace, a tool argument or result, a Kubernetes object, a
+credential, or a raw provider payload can never ride along.
+
+**Provider-reported timings (Ollama).** korvid always reports its own monotonic
+round and tool timings. The panel header tracks ordinary token usage separately;
+token counts in the diagnostic summary require optional native metrics.
+Ollama additionally reports native total, load, prompt-evaluation, and generation
+durations. There is no native queue-duration counter: `other wait` is inferred
+from local round time minus provider total and can include transport or adapter
+overhead. The LiteLLM adapter would
+otherwise discard these durations, so korvid captures each request's terminal
+HTTP frame immediately before LiteLLM transforms it, reusing LiteLLM's own JSON
+decode for streaming and non-streaming responses rather than buffering a second
+copy. Only the six allowlisted numeric counters are retained; the model, prompt,
+response text, context, and every other raw field are discarded. If an
+Ollama-compatible endpoint omits a counter, that metric is simply absent while
+korvid's local monotonic timings remain available.
+
 ## What counts as a finished answer
 
 A streamed answer is accepted only when the provider's own protocol says it

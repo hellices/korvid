@@ -31,15 +31,18 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import copy
-from collections.abc import AsyncIterator, Mapping, Sequence
+import logging
+from collections.abc import AsyncGenerator, AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Any
 
 import pytest
 
 from korvid.agent.conversation import INTERRUPT_MARKER, ConversationState
+from korvid.agent.diagnostics import TurnDiagnosticsFactory, TurnOutcome
 from korvid.agent.engine import AgentEngine, AgentTurnRequest
 from korvid.agent.events import (
+    AgentError,
     AgentEvent,
     TextDelta,
     ToolCallFinished,
@@ -71,6 +74,7 @@ from .engine_fakes import (
     system_message,
     text_delta,
     text_turn,
+    ticking_clock,
     tool_turn,
     usage,
 )
@@ -262,6 +266,7 @@ def build_session(
     cluster: ClusterFacts = UNKNOWN_CLUSTER,
     user_rules: tuple[str, ...] = (),
     max_request_chars: int | None = None,
+    diagnostics_factory: TurnDiagnosticsFactory | None = None,
 ) -> SessionHarness:
     """Wire a live session over a native engine and scripted edges."""
     resolved = policy if policy is not None else session_policy()
@@ -287,6 +292,7 @@ def build_session(
         policy=resolved,
         cluster=cluster,
         user_rules=user_rules,
+        diagnostics_factory=diagnostics_factory,
     )
     return SessionHarness(
         session=session,
@@ -1437,3 +1443,199 @@ def test_the_default_session_implements_the_abc() -> None:
     harness = build_session([text_turn("first")])
 
     assert isinstance(harness.session, AgentSession)
+
+
+# -- diagnostics (issue #319) ------------------------------------------------
+
+
+def _diagnostics_factory() -> TurnDiagnosticsFactory:
+    """A fully deterministic factory: a ticking clock and a fixed local ID."""
+    return TurnDiagnosticsFactory(clock=ticking_clock(), id_factory=lambda: "corr")
+
+
+def _diagnostic_records(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    return [record for record in caplog.records if record.name == "korvid.agent.diagnostics"]
+
+
+async def test_a_completed_turn_carries_and_logs_one_snapshot(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    harness = build_session(
+        [text_turn("the pod is healthy")], diagnostics_factory=_diagnostics_factory()
+    )
+
+    with caplog.at_level(logging.INFO, logger="korvid.agent.diagnostics"):
+        events = await harness.run("why is the api pod failing?")
+
+    complete = events[-1]
+    assert isinstance(complete, TurnComplete)
+    assert complete.diagnostics is not None
+    assert complete.diagnostics.outcome is TurnOutcome.SUCCESS
+    assert complete.diagnostics.correlation_id == "corr"
+    # Logged exactly once, no matter how many events streamed by.
+    assert len(_diagnostic_records(caplog)) == 1
+
+
+async def test_the_diagnostic_log_record_never_carries_prompt_or_tool_content(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A tool turn: the arguments carry a pod name and namespace the record
+    # must never leak, even though the tool's *name* is allowlisted.
+    harness = build_session(
+        [tool_turn(), text_turn("done")], diagnostics_factory=_diagnostics_factory()
+    )
+
+    with caplog.at_level(logging.INFO, logger="korvid.agent.diagnostics"):
+        await harness.run("why is the api pod failing?")
+
+    record = _diagnostic_records(caplog)[0]
+    assert vars(record)["correlation_id"] == "corr"
+    assert vars(record)["tool_1_name"] == "get_logs"
+    # No prompt text, tool argument, or result reaches any string field.
+    leaks = ("api-0", "prod", "why is the api", "healthy", "done")
+    strings = [value for value in vars(record).values() if isinstance(value, str)]
+    strings.append(record.getMessage())
+    for blob in strings:
+        assert not any(secret in blob for secret in leaks), blob
+
+
+async def test_an_interrupted_turn_finalizes_and_logs_an_interrupted_snapshot(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    stall = asyncio.Event()
+    provider = ScriptedProvider([[text_delta("thinking about"), stall]])
+    harness = build_session(provider=provider, diagnostics_factory=_diagnostics_factory())
+
+    task = asyncio.create_task(harness.run("first"))
+    await asyncio.wait_for(provider.stalled.wait(), timeout=5)
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+    with caplog.at_level(logging.INFO, logger="korvid.agent.diagnostics"):
+        interrupted = harness.session.finalize_interrupt()
+
+    assert isinstance(interrupted, TurnInterrupted)
+    assert interrupted.diagnostics is not None
+    assert interrupted.diagnostics.outcome is TurnOutcome.INTERRUPTED
+    assert interrupted.diagnostics.correlation_id == "corr"
+    assert len(_diagnostic_records(caplog)) == 1
+
+
+async def test_without_a_factory_no_snapshot_and_no_diagnostic_log(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    harness = build_session([text_turn("healthy")])  # no diagnostics_factory
+
+    with caplog.at_level(logging.INFO, logger="korvid.agent.diagnostics"):
+        events = await harness.run("why?")
+
+    complete = events[-1]
+    assert isinstance(complete, TurnComplete)
+    assert complete.diagnostics is None
+    assert _diagnostic_records(caplog) == []
+
+
+async def test_a_factoryless_interrupt_still_finalizes_without_a_snapshot() -> None:
+    stall = asyncio.Event()
+    provider = ScriptedProvider([[text_delta("thinking"), stall]])
+    harness = build_session(provider=provider)  # no diagnostics_factory
+
+    task = asyncio.create_task(harness.run("first"))
+    await asyncio.wait_for(provider.stalled.wait(), timeout=5)
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+    interrupted = harness.session.finalize_interrupt()
+
+    assert isinstance(interrupted, TurnInterrupted)
+    assert interrupted.diagnostics is None
+
+
+async def test_prompt_failure_emits_terminal_diagnostics_and_next_turn_still_runs(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    prompts = FlakyPrompts()
+    prompts.fail_next = True
+    harness = build_session(
+        [text_turn("recovered")], prompts=prompts, diagnostics_factory=_diagnostics_factory()
+    )
+    with caplog.at_level(logging.INFO, logger="korvid.agent.diagnostics"):
+        with pytest.raises(PromptCompositionError, match="cannot be composed"):
+            await harness.run("private prompt")
+        await harness.run("retry")
+
+    records = _diagnostic_records(caplog)
+    assert [vars(record)["outcome"] for record in records] == ["failed", "success"]
+    assert vars(records[0])["round_count"] == 0
+    assert "private prompt" not in records[0].getMessage()
+
+
+async def test_workspace_snapshot_failure_emits_terminal_diagnostics(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    bridge = SessionBridge()
+    bridge.fail_snapshot = True
+    harness = build_session(bridge=bridge, diagnostics_factory=_diagnostics_factory())
+    with (
+        caplog.at_level(logging.INFO, logger="korvid.agent.diagnostics"),
+        pytest.raises(RuntimeError, match="workspace must not be read"),
+    ):
+        await harness.run("private prompt")
+
+    records = _diagnostic_records(caplog)
+    assert len(records) == 1
+    assert vars(records[0])["outcome"] == "failed"
+    assert vars(records[0])["round_count"] == 0
+
+
+async def test_closing_after_error_preserves_already_finalized_failed_diagnostics(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    harness = build_session([tool_turn(call_id="")], diagnostics_factory=_diagnostics_factory())
+    turn = harness.session.run_turn("stop early")
+    assert isinstance(turn, AsyncGenerator)
+    with caplog.at_level(logging.INFO, logger="korvid.agent.diagnostics"):
+        async with contextlib.aclosing(turn):
+            async for event in turn:
+                if isinstance(event, AgentError):
+                    break
+
+    records = _diagnostic_records(caplog)
+    assert len(records) == 1
+    assert vars(records[0])["outcome"] == "failed"
+
+
+async def test_session_close_logs_interrupted_diagnostics_once(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    provider = ScriptedProvider([[text_delta("partial"), asyncio.Event()]])
+    harness = build_session(provider=provider, diagnostics_factory=_diagnostics_factory())
+    task = asyncio.create_task(harness.run("question"))
+    await asyncio.wait_for(provider.stalled.wait(), timeout=5)
+
+    with caplog.at_level(logging.INFO, logger="korvid.agent.diagnostics"):
+        await harness.session.aclose()
+        await harness.session.aclose()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+    records = _diagnostic_records(caplog)
+    assert len(records) == 1
+    assert vars(records[0])["outcome"] == "interrupted"
+    assert vars(records[0])["round_count"] == 1
+    assert not harness.session.finalization_pending
+
+
+async def test_driver_closing_its_session_logs_interrupted_diagnostics(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    harness = build_session([text_turn("partial")], diagnostics_factory=_diagnostics_factory())
+    with caplog.at_level(logging.INFO, logger="korvid.agent.diagnostics"):
+        async for event in harness.session.run_turn("question"):
+            if isinstance(event, TextDelta):
+                await harness.session.aclose()
+
+    records = _diagnostic_records(caplog)
+    assert len(records) == 1
+    assert vars(records[0])["outcome"] == "interrupted"

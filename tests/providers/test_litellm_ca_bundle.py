@@ -140,12 +140,7 @@ async def _answer(provider: Any) -> list[dict[str, Any]]:
         async for event in provider.complete([{"role": "user", "content": "hi"}], [], stream=False):
             events.append(event)
 
-    try:
-        await asyncio.wait_for(_drain(), timeout=30)
-    finally:
-        # LiteLLM schedules its own post-call logging work; give it the
-        # loop back so nothing is still pending when the loop closes.
-        await asyncio.sleep(0)
+    await asyncio.wait_for(_drain(), timeout=30)
     return events
 
 

@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+import pytest
+from rich.text import Text
+
 from korvid.core.config import KorvidConfig, ViewConfig
 from korvid.core.store import Summary
 from korvid.k8s.columns import CustomColumn
@@ -72,6 +75,67 @@ async def test_pod_view_appends_custom_cells() -> None:
         await until(pilot, lambda: table.row_count == 1, label="pod rendered")
         assert _header_labels(table)[-1] == "TEAM"
         assert _row(table, 0)[-1] == "payments"
+
+
+@pytest.mark.parametrize("value", ["[/]", "unmatched closing tag [/red]"])
+@pytest.mark.parametrize("replace_columns", [False, True])
+async def test_malformed_custom_markup_is_literal_on_initial_list(
+    value: str, replace_columns: bool
+) -> None:
+    view = ViewConfig(columns=(_TEAM,), replace=replace_columns)
+    app = make_app([replace(_pod("api-1"), custom=(value,))], config=_views_config("pods", view))
+    async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 1, label="literal custom cell rendered")
+        rendered = table._get_row_renderables(0).cells[-1]
+        assert isinstance(rendered, Text)
+        assert rendered.plain == value
+        assert not rendered.spans
+        assert table.ordered_columns[-1].content_width >= len(value)
+
+
+@pytest.mark.parametrize("value", ["[/]", "unmatched closing tag [/red]"])
+@pytest.mark.parametrize("replace_columns", [False, True])
+async def test_malformed_custom_markup_is_literal_on_watch_update(
+    value: str, replace_columns: bool
+) -> None:
+    view = ViewConfig(columns=(_TEAM,), replace=replace_columns)
+    pod = replace(_pod("api-1"), custom=("[green]payments[/green]",))
+    app = make_app([pod], config=_views_config("pods", view))
+    async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 1, label="initial custom cell rendered")
+        app.store.apply_event("pods", "default", "MODIFIED", replace(pod, custom=(value,)))
+        await until(
+            pilot, lambda: _row(table, 0)[-1] == value, label="literal watch update rendered"
+        )
+        rendered = table._get_row_renderables(0).cells[-1]
+        assert isinstance(rendered, Text)
+        assert rendered.plain == value
+        assert not rendered.spans
+        assert table.ordered_columns[-1].content_width >= len(value)
+
+
+async def test_valid_custom_markup_preserves_style_on_list_and_watch_update() -> None:
+    view = ViewConfig(columns=(_TEAM,), replace=True)
+    pod = replace(_pod("api-1"), custom=("[green]payments[/green]",))
+    app = make_app([pod], config=_views_config("pods", view))
+    async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 1, label="styled custom cell rendered")
+        initial = table._get_row_renderables(0).cells[-1]
+        assert isinstance(initial, Text)
+        assert initial.plain == "payments"
+        assert initial.spans == Text.from_markup(pod.custom[0]).spans
+        updated = "[red]payments[/red]"
+        app.store.apply_event("pods", "default", "MODIFIED", replace(pod, custom=(updated,)))
+        await until(
+            pilot, lambda: _row(table, 0)[-1] == updated, label="custom style update rendered"
+        )
+        rendered = table._get_row_renderables(0).cells[-1]
+        assert isinstance(rendered, Text)
+        assert rendered.plain == "payments"
+        assert rendered.spans == Text.from_markup(updated).spans
 
 
 async def test_generic_view_replace_renders_name_plus_custom() -> None:
