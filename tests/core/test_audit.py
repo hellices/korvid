@@ -1,5 +1,6 @@
 """Audit log for cluster write operations (spec §6.2)."""
 
+import errno
 import json
 import os
 from pathlib import Path
@@ -9,6 +10,107 @@ import pytest
 import korvid.core.audit as audit_module
 from korvid.core.audit import AuditLog
 from tests.platforms import POSIX, posix_only
+
+
+class _LockClock:
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.sleeps: list[float] = []
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
+class _WindowsLocks:
+    LK_LOCK = 1
+    LK_NBLCK = 2
+    LK_UNLCK = 0
+
+    def __init__(self, *, busy_attempts: int = 0, error: OSError | None = None) -> None:
+        self.busy_attempts = busy_attempts
+        self.error = error
+        self.modes: list[int] = []
+        self.positions: list[int] = []
+
+    def locking(self, fd: int, mode: int, size: int) -> None:
+        assert size == 1
+        self.modes.append(mode)
+        self.positions.append(os.lseek(fd, 0, os.SEEK_CUR))
+        if self.error is not None:
+            raise self.error
+        if self.busy_attempts:
+            self.busy_attempts -= 1
+            raise OSError(errno.EACCES, "audit lock is busy")
+
+
+def _use_windows_locks(
+    monkeypatch: pytest.MonkeyPatch, locks: _WindowsLocks, clock: _LockClock
+) -> None:
+    monkeypatch.setattr(audit_module, "fcntl", None)
+    monkeypatch.setattr(audit_module, "msvcrt", locks)
+    monkeypatch.setattr(audit_module, "monotonic", clock.monotonic, raising=False)
+    monkeypatch.setattr(audit_module, "sleep", clock.sleep, raising=False)
+
+
+def test_windows_lock_retries_contention_without_crt_second_long_polling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    locks = _WindowsLocks(busy_attempts=2)
+    clock = _LockClock()
+    _use_windows_locks(monkeypatch, locks, clock)
+
+    with (tmp_path / "sidecar.lock").open("w+b") as sidecar:
+        sidecar.write(b"existing")
+        sidecar.flush()
+        audit_module._lock_file(sidecar.fileno())
+
+    assert locks.modes == [locks.LK_NBLCK] * 3
+    assert locks.positions == [0, 0, 0]
+    assert clock.sleeps == [0.01, 0.01]
+
+
+def test_windows_lock_contention_deadline_still_blocks_audit_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    locks = _WindowsLocks(busy_attempts=10_000)
+    clock = _LockClock()
+    _use_windows_locks(monkeypatch, locks, clock)
+    path = tmp_path / "audit.jsonl"
+
+    with pytest.raises(TimeoutError, match="Windows audit lock") as error:
+        AuditLog(path).append(action="delete", kind="pods", namespace="default", name="web")
+
+    assert error.value.errno == errno.ETIMEDOUT
+    assert isinstance(error.value.__cause__, OSError)
+    assert error.value.__cause__.errno == errno.EACCES
+    assert clock.now == pytest.approx(10.0)
+    assert max(clock.sleeps) <= 0.01
+    assert all(mode == locks.LK_NBLCK for mode in locks.modes)
+    assert not path.exists()
+
+
+@pytest.mark.parametrize("error_number", [errno.EBADF, errno.EIO, errno.EDEADLK])
+def test_windows_lock_propagates_non_contention_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error_number: int
+) -> None:
+    failure = OSError(error_number, "lock operation failed")
+    locks = _WindowsLocks(error=failure)
+    clock = _LockClock()
+    _use_windows_locks(monkeypatch, locks, clock)
+
+    with (
+        (tmp_path / "sidecar.lock").open("w+b") as sidecar,
+        pytest.raises(OSError, match="lock operation failed") as error,
+    ):
+        audit_module._lock_file(sidecar.fileno())
+
+    assert error.value is failure
+    assert locks.modes == [locks.LK_NBLCK]
+    assert clock.sleeps == []
 
 
 def test_append_writes_jsonl_entry(tmp_path: Path) -> None:

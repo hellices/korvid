@@ -11,14 +11,16 @@ be written, the write is blocked) and an outcome record
 from __future__ import annotations
 
 import contextlib
+import errno
 import getpass
 import json
 import logging
 import os
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import datetime
 from pathlib import Path
+from time import monotonic, sleep
 
 try:  # POSIX interprocess lock
     import fcntl
@@ -32,6 +34,9 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+_WINDOWS_LOCK_TIMEOUT = 10.0
+_WINDOWS_LOCK_POLL = 0.01
+
 
 def _lock_file(fd: int) -> None:
     """Take an exclusive interprocess lock on ``fd``.
@@ -41,11 +46,28 @@ def _lock_file(fd: int) -> None:
     """
     if fcntl is not None:
         fcntl.flock(fd, fcntl.LOCK_EX)
-    elif msvcrt is not None:  # pragma: no cover - Windows-only branch; CI runs on POSIX
-        # LK_LOCK retries once a second for ~10s, then raises OSError:
-        # under pathological contention the audit write fails closed
-        # instead of interleaving.
-        msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+    elif msvcrt is not None:
+        _lock_windows_file(fd, msvcrt.locking, msvcrt.LK_NBLCK)
+
+
+def _lock_windows_file(fd: int, locking: Callable[[int, int, int], None], mode: int) -> None:
+    """Poll briefly for contention without extending the CRT's ten-second budget."""
+    os.lseek(fd, 0, os.SEEK_SET)
+    deadline = monotonic() + _WINDOWS_LOCK_TIMEOUT
+    while True:
+        try:
+            locking(fd, mode, 1)
+            return
+        except OSError as exc:
+            if exc.errno != errno.EACCES:
+                raise
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                raise TimeoutError(
+                    errno.ETIMEDOUT, "Timed out acquiring Windows audit lock after 10s"
+                ) from exc
+            # LK_LOCK's one-second retries can miss short gaps between active writers.
+            sleep(min(_WINDOWS_LOCK_POLL, remaining))
 
 
 def _unlock_file(fd: int) -> None:
