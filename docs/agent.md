@@ -294,12 +294,10 @@ credential-shaped key and LiteLLM's controls (`mock_*`, `fallbacks`, callbacks,
 `litellm_*`) are korvid's, and are dropped from a profile: none can re-route a
 request, mute the agent's tools or fabricate an answer.
 
-A config still using the retired flat scalars is migrated on load into one
-profile named `default`, which `agent.active` then selects; the scalars are
-dropped on the next save. The `agent.ollama.*` block is read **only** by that
-migration — once `agent.profiles` exists it is ignored and removed on save, so
-those knobs belong in a profile's `options`. See the
-[migration notes](release-notes/v0.4.1.md).
+Provider connections are configured only through `agent.profiles`; `agent.active`
+selects one, and `active: null` disables the agent. Model tuning belongs in the
+selected profile's `options`. Unsupported root or `agent` settings are
+configuration errors rather than alternate input formats.
 
 !!! warning "GitHub Copilot"
 

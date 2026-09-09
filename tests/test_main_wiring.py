@@ -939,26 +939,23 @@ def test_startup_preserves_qualified_custom_column_keys(
     assert _custom_column_names(loaded) == {key: ("TEAM",)}
 
 
-def test_load_startup_config_wraps_config_migration_error_as_system_exit(
+def test_load_startup_config_wraps_config_error_as_system_exit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A removed `agent.profile`/`agent.prompts` key must fail startup with
+    """An unsupported config key must fail startup with
     one clear, actionable line — not an unfiltered traceback."""
     import korvid.__main__ as main_mod
-    from korvid.core.config import ConfigMigrationError
+    from korvid.core.config import ConfigError
 
     def _raise() -> Any:
-        raise ConfigMigrationError(
-            "agent.profile was removed; use agent.model_tier instead (absent/low/high)."
-        )
+        raise ConfigError("unsupported config key: 'agent.profile'")
 
     monkeypatch.setattr(main_mod, "load_config", _raise)
     with pytest.raises(SystemExit) as exc_info:
         main_mod._load_startup_config(False)
     message = str(exc_info.value)
     assert "\n" not in message  # one-line, actionable
-    assert "agent.profile" in message
-    assert "agent.model_tier" in message
+    assert "unsupported" in message
 
 
 def test_the_profile_writer_updates_only_the_active_profile(
@@ -1062,20 +1059,22 @@ def test_the_profile_writer_never_writes_a_secret_value(
     assert "sk-secret-value" not in config_path.read_text(encoding="utf-8")
 
 
-def test_load_startup_config_wraps_migration_error_even_when_agent_disabled(
+def test_load_startup_config_wraps_config_error_unconditionally(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """The removed-key check is unconditional: startup must not silently
-    ignore a leftover `agent.profile` just because `agent.enabled: false`."""
+    """The unsupported-key check is unconditional: startup must not silently
+    ignore a leftover `agent.profile` just because no profile is active."""
     import korvid.__main__ as main_mod
     from korvid.core.config import load_config as real_load_config
 
     config_path = tmp_path / "config.yaml"
-    config_path.write_text("agent:\n  enabled: false\n  profile: full\n")
+    config_path.write_text("agent:\n  active: null\n  profile: full\n")
     monkeypatch.setattr(main_mod, "load_config", lambda: real_load_config(config_path))
     with pytest.raises(SystemExit) as exc_info:
         main_mod._load_startup_config(False)
-    assert "agent.profile" in str(exc_info.value)
+    message = str(exc_info.value)
+    assert "unsupported" in message
+    assert "'profile'" in message
 
 
 def test_cli_namespace_flag_parsed(monkeypatch: pytest.MonkeyPatch) -> None:

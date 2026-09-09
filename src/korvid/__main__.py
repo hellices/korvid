@@ -33,8 +33,8 @@ from korvid.agent.interaction import (
 from korvid.core.audit import AuditLog, default_audit_path
 from korvid.core.config import (
     DEFAULT_CONFIG_PATH,
+    ConfigError,
     ConfigFileModelConnectionsWriter,
-    ConfigMigrationError,
     KorvidConfig,
     ModelConnectionConfig,
     ModelConnectionsWriter,
@@ -1261,7 +1261,7 @@ def _load_startup_config(
 ) -> KorvidConfig:
     try:
         config = load_config()
-    except ConfigMigrationError as exc:
+    except ConfigError as exc:
         # One clear, actionable line — never an unfiltered traceback — and
         # unconditional: a stale removed key must fail startup even when
         # the agent block would otherwise be disabled.

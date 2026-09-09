@@ -10,7 +10,7 @@ import yaml
 
 from korvid.agent.model_profiles import ModelConnectionConfig, ModelConnectionsConfig
 from korvid.core.config import (
-    ConfigMigrationError,
+    ConfigError,
     KorvidConfig,
     load_config,
     save_model_connections,
@@ -77,13 +77,13 @@ def test_load_from_yaml(tmp_path: Path) -> None:
     f.write_text(
         "kube_context: prod\n"
         "namespace: default\n"
-        "agent:\n  provider: anthropic\n  model: claude-sonnet-4-5\n"
+        "agent:\n  active: main\n  profiles:\n    main:\n      model: anthropic/claude-sonnet-4-5\n"
         "keybindings:\n  quit: q\n"
     )
     cfg = load_config(f)
     assert cfg.kube_context == "prod"
     assert cfg.namespace == "default"
-    assert cfg.agent_enabled is True  # migrated profile present -> auto-enabled
+    assert cfg.agent_enabled is True  # an active profile -> enabled
     assert cfg.keybindings == {"quit": "q"}
 
 
@@ -111,7 +111,9 @@ def test_timeline_config_invalid_values_warn_and_fallback(tmp_path: Path) -> Non
 
 def test_explicit_agent_off_wins(tmp_path: Path) -> None:
     f = tmp_path / "config.yaml"
-    f.write_text("agent:\n  provider: anthropic\n  enabled: false\n")
+    f.write_text(
+        "agent:\n  active: null\n  profiles:\n    main:\n      model: anthropic/claude-sonnet-4-5\n"
+    )
     cfg = load_config(f)
     assert cfg.agent_enabled is False  # explicit off switch (design doc §6.3-4)
 
@@ -122,9 +124,9 @@ def test_agent_follow_defaults_on_and_only_explicit_false_disables(tmp_path: Pat
     literal `false` disables it."""
     assert KorvidConfig().agent_follow is True
     f = tmp_path / "config.yaml"
-    f.write_text("agent:\n  provider: anthropic\n  follow: false\n")
+    f.write_text("agent:\n  follow: false\n")
     assert load_config(f).agent_follow is False
-    f.write_text("agent:\n  provider: anthropic\n  follow: banana\n")
+    f.write_text("agent:\n  follow: banana\n")
     assert load_config(f).agent_follow is True
 
 
@@ -160,68 +162,20 @@ def test_log_buffer_lines_invalid_falls_back(tmp_path: Path) -> None:
         assert load_config(cfg_file).log_buffer_lines == 5000
 
 
-def test_agent_provider_settings_parsed(tmp_path: Path) -> None:
-    """Every legacy scalar lands on the migrated profile, none is dropped."""
-    p = tmp_path / "config.yaml"
-    p.write_text(
-        "agent:\n  provider: openai-compat\n  base_url: http://localhost:11434/v1\n"
-        "  model: llama3\n  api_key_env: MY_KEY\n"
-    )
-    profile = load_config(p).model_connections.active_profile
-    assert profile is not None
-    assert profile.model == "openai/llama3"
-    assert profile.endpoint == "http://localhost:11434/v1"
-    assert profile.auth.method == "environment"
-    assert profile.auth.settings["key"] == "MY_KEY"
-
-
 def test_auth_method_parsed(tmp_path: Path) -> None:
     p = tmp_path / "c.yaml"
     p.write_text(
-        "agent:\n  provider: github-copilot\n  model: gpt-4o\n  auth:\n    method: device-login\n"
+        "agent:\n"
+        "  active: main\n"
+        "  profiles:\n"
+        "    main:\n"
+        "      model: github-copilot/gpt-4o\n"
+        "      auth:\n"
+        "        method: device-login\n"
     )
     profile = load_config(p).model_connections.active_profile
     assert profile is not None
     assert profile.auth.method == "device-login"
-
-
-def test_auth_method_backcompat_api_key(tmp_path: Path) -> None:
-    p = tmp_path / "c.yaml"
-    p.write_text("agent:\n  provider: openai-compat\n  model: llama3\n  api_key_env: K\n")
-    profile = load_config(p).model_connections.active_profile
-    assert profile is not None
-    assert profile.auth.method == "environment"
-    assert profile.auth.settings["key"] == "K"
-
-
-def test_auth_method_backcompat_none(tmp_path: Path) -> None:
-    p = tmp_path / "c.yaml"
-    p.write_text("agent:\n  provider: ollama\n  model: llama3\n")
-    profile = load_config(p).model_connections.active_profile
-    assert profile is not None
-    assert profile.auth.method == "none"
-
-
-def test_legacy_copilot_config_still_infers_device_login(tmp_path: Path) -> None:
-    p = tmp_path / "c.yaml"
-    p.write_text("agent:\n  provider: github-copilot\n  model: gpt-4o\n")
-    cfg = load_config(p)
-    profile = cfg.model_connections.active_profile
-    assert profile is not None
-    assert profile.model == "github-copilot/gpt-4o"
-    assert profile.auth.method == "device-login"
-
-
-def test_legacy_ollama_options_survive_the_move_out_of_load_config(
-    tmp_path: Path,
-) -> None:
-    p = tmp_path / "c.yaml"
-    p.write_text("agent:\n  provider: ollama\n  model: qwen3:8b\n  ollama:\n    think: true\n")
-    profile = load_config(p).model_connections.active_profile
-    assert profile is not None
-    assert profile.model == "ollama/qwen3:8b"
-    assert profile.options["think"] is True
-    assert profile.options["native_api"] is True
 
 
 def test_agent_options_parses_valid_nested_data(tmp_path: Path) -> None:
@@ -538,14 +492,6 @@ def test_agent_options_non_ascii_values_accepted(tmp_path: Path) -> None:
     assert cfg.agent_options == {"greeting": "こんにちは"}
 
 
-def test_scalar_auth_value_does_not_crash(tmp_path: Path) -> None:
-    p = tmp_path / "c.yaml"
-    p.write_text("agent:\n  provider: ollama\n  model: llama3\n  auth: none\n")
-    profile = load_config(p).model_connections.active_profile  # must not raise AttributeError
-    assert profile is not None
-    assert profile.auth.method == "none"
-
-
 def test_saving_profiles_after_an_interrupted_write_preserves_existing_config(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -824,14 +770,6 @@ def test_node_shell_non_string_values_ignored(tmp_path: Path) -> None:
 # namespace scope (issue #108): legacy `namespaces:` is a migration warning;
 # `favorite_namespaces:` is a UI-only shortcut list bound to keys 1-9.
 # ---------------------------------------------------------------------------
-
-
-def test_legacy_namespaces_key_emits_migration_warning(tmp_path: Path) -> None:
-    p = tmp_path / "config.yaml"
-    p.write_text("namespaces:\n  - team-a\n  - team-b\n")
-    cfg = load_config(p)
-    assert not hasattr(cfg, "namespaces")
-    assert any("namespaces" in w and "favorite_namespaces" in w for w in cfg.warnings)
 
 
 def test_favorite_namespaces_parsed(tmp_path: Path) -> None:
@@ -1146,32 +1084,6 @@ def write_config(tmp_path: Path, text: str) -> Path:
     return path
 
 
-def test_the_removed_profile_key_is_actionable(tmp_path: Path) -> None:
-    """`agent.profile` was replaced by `agent.model_tier`: reloading an old
-    config must fail with a one-line, actionable message rather than
-    silently reinterpreting or ignoring the key."""
-    path = write_config(tmp_path, "agent:\n  profile: small\n")
-
-    with pytest.raises(
-        ConfigMigrationError,
-        match=r"agent\.profile was removed.*agent\.model_tier",
-    ):
-        load_config(path)
-
-
-def test_removed_agent_prompts_is_actionable(tmp_path: Path) -> None:
-    """`agent.prompts` (system/append/tool_descriptions replacement) was
-    removed entirely in favor of `agent.rules`; it must not be silently
-    ignored."""
-    path = write_config(tmp_path, "agent:\n  prompts:\n    system: You are terse.\n")
-
-    with pytest.raises(
-        ConfigMigrationError,
-        match=r"agent\.prompts was removed.*agent\.rules",
-    ):
-        load_config(path)
-
-
 def test_model_tier_and_additive_rules_load(tmp_path: Path) -> None:
     path = write_config(
         tmp_path,
@@ -1193,7 +1105,7 @@ def test_model_tier_normalizes_case_and_whitespace(
 ) -> None:
     path = write_config(
         tmp_path,
-        f"agent:\n  provider: ollama\n  model_tier: {value!r}\n",
+        f"agent:\n  model_tier: {value!r}\n",
     )
 
     assert load_config(path).agent_model_tier == expected
@@ -1202,26 +1114,27 @@ def test_model_tier_normalizes_case_and_whitespace(
 def test_model_tier_unset_is_none(tmp_path: Path) -> None:
     """Omitting `model_tier` means automatic routing — distinguishable from
     an explicit choice."""
-    path = write_config(tmp_path, "agent:\n  provider: ollama\n")
+    path = write_config(
+        tmp_path, "agent:\n  active: main\n  profiles:\n    main:\n      model: ollama/llama3\n"
+    )
     assert load_config(path).agent_model_tier is None
 
 
 def test_model_tier_null_is_treated_as_unset(tmp_path: Path) -> None:
     """`model_tier: null` is the YAML idiom for "not set", so it must mean
     automatic routing rather than an error."""
-    path = write_config(tmp_path, "agent:\n  provider: ollama\n  model_tier: null\n")
+    path = write_config(tmp_path, "agent:\n  model_tier: null\n")
     assert load_config(path).agent_model_tier is None
 
 
 @pytest.mark.parametrize("bad_value", ["full", "small", "auto", "medium"])
 def test_model_tier_rejects_legacy_and_unknown_values(tmp_path: Path, bad_value: str) -> None:
     """Only `low`/`high` (or absent) are accepted — legacy `full`/`small`,
-    `auto`, and typos must fail actionably instead of silently falling back
-    (unlike the old `agent.profile` behavior)."""
-    path = write_config(tmp_path, f"agent:\n  provider: ollama\n  model_tier: {bad_value!r}\n")
+    `auto`, and typos must fail actionably instead of silently falling back."""
+    path = write_config(tmp_path, f"agent:\n  model_tier: {bad_value!r}\n")
 
     with pytest.raises(
-        ConfigMigrationError,
+        ConfigError,
         match=r"agent\.model_tier must be .*low.*high",
     ):
         load_config(path)
@@ -1297,7 +1210,7 @@ def test_protected_contexts_non_string_entries_dropped(tmp_path: Path) -> None:
 
 def test_agent_disable_in_protected_parsed(tmp_path: Path) -> None:
     cfg_file = tmp_path / "config.yaml"
-    cfg_file.write_text("agent:\n  provider: ollama\n  disable_in_protected: true\n")
+    cfg_file.write_text("agent:\n  disable_in_protected: true\n")
     config = load_config(cfg_file)
     assert config.agent_disable_in_protected is True
 
@@ -1342,23 +1255,6 @@ def test_network_section_tolerates_non_mapping(tmp_path: Path) -> None:
     cfg_path = tmp_path / "config.yaml"
     cfg_path.write_text("network: nonsense\n")
     assert load_config(cfg_path).network_ca_bundle is None
-
-
-# ---------------------------------------------------------------------------
-# Finding #5: Provider name canonicalization at config load
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("provider", ["github_copilot", "GitHub.Copilot"])
-def test_provider_name_canonicalized_at_load(tmp_path: Path, provider: str) -> None:
-    """Migration canonicalizes the documented legacy spellings, so the profile
-    it writes carries the reference prefix the flow registry claims."""
-    f = tmp_path / "config.yaml"
-    f.write_text(f"agent:\n  provider: {provider}\n  model: gpt-4o\n")
-    profile = load_config(f).model_connections.active_profile
-    assert profile is not None
-    assert profile.model == "github-copilot/gpt-4o"
-    assert profile.auth.method == "device-login"
 
 
 def test_bounded_options_accept_a_previously_frozen_tuple_value() -> None:
@@ -1483,3 +1379,22 @@ def test_saving_profiles_preserves_the_model_search_block(tmp_path: Path) -> Non
     raw = yaml.safe_load(path.read_text())
     assert raw["agent"]["model_search"] == {"models_dev": False}
     assert load_config(path).agent_model_search_models_dev is False
+
+
+# ---------------------------------------------------------------------------
+# Unknown key rejection (current schema enforcement)
+# ---------------------------------------------------------------------------
+
+
+def test_unknown_root_key_is_rejected(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text("unexpected_root_key: true\n")
+    with pytest.raises(ConfigError, match="unsupported"):
+        load_config(path)
+
+
+def test_unknown_agent_setting_is_rejected(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text("agent:\n  unexpected_setting: true\n")
+    with pytest.raises(ConfigError, match=r"unsupported.*agent"):
+        load_config(path)

@@ -828,43 +828,6 @@ async def test_model_leaves_everything_alone_when_the_factory_refuses(tmp_path: 
     assert env.controller.profiles.profiles["default"].model == "acme/model-x"
 
 
-async def test_model_on_a_legacy_startup_creates_the_default_profile(tmp_path: Path) -> None:
-    """A config.yaml still holding the pre-profile scalars is migrated into
-    a profile by `load_config`, so `:model` is still the whole recovery:
-    it edits what korvid already knows instead of asking the operator to
-    re-run the wizard."""
-    from korvid.core.config import load_config
-
-    saver = _Saver()
-    legacy_path = tmp_path / "legacy.yaml"
-    legacy_path.write_text(
-        "agent:\n"
-        "  provider: ollama\n"
-        "  model: llama3\n"
-        "  base_url: http://localhost:11434/v1\n"
-        "  api_key_env: OLLAMA_KEY\n",
-        encoding="utf-8",
-    )
-    legacy = load_config(legacy_path)
-    env = _env(
-        tmp_path,
-        profiles=legacy.model_connections,
-        rebuild=_rebuilding(FakeSession()),
-        saver=saver,
-        config=legacy,
-    )
-    env.controller.handle_model_command(["llama3.2"])
-
-    written = saver.calls[-1]
-    assert written.active == "default"
-    created = written.profiles["default"]
-    assert created.model == "ollama/llama3.2"
-    assert created.endpoint == "http://localhost:11434/v1"
-    # The profile vocabulary, not the legacy transport's `api_key`.
-    assert created.auth.method == "environment"
-    assert dict(created.auth.settings) == {"key": "OLLAMA_KEY"}
-
-
 async def test_model_without_any_configuration_still_asks_for_the_wizard(tmp_path: Path) -> None:
     saver = _Saver()
     env = _env(tmp_path, profiles=ModelConnectionsConfig(), saver=saver)
