@@ -170,9 +170,10 @@ credential, or a raw provider payload can never ride along.
 **Provider-reported timings (Ollama).** korvid always reports its own monotonic
 round and tool timings. The panel header tracks ordinary token usage separately;
 token counts in the diagnostic summary require optional native metrics.
-Ollama additionally reports native
-nanosecond counters (queue vs. prompt-eval vs. generation), and korvid decodes
-those into the `prompt`/`generate`/`other wait` split. The LiteLLM adapter would
+Ollama additionally reports native total, load, prompt-evaluation, and generation
+durations. There is no native queue-duration counter: `other wait` is inferred
+from local round time minus provider total and can include transport or adapter
+overhead. The LiteLLM adapter would
 otherwise discard these durations, so korvid captures each request's terminal
 HTTP frame immediately before LiteLLM transforms it, reusing LiteLLM's own JSON
 decode for streaming and non-streaming responses rather than buffering a second
