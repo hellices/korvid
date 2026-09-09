@@ -61,8 +61,9 @@ class TurnComplete:
     #: citation look like a single clean one.
     duplicated: tuple[str, ...] = ()
     #: The terminal latency-diagnostics snapshot for this turn (issue #319),
-    #: or `None` when the turn was not recording diagnostics. A completed
-    #: turn's snapshot reports `TurnOutcome.SUCCESS`.
+    #: or `None` when the turn was not recording diagnostics. Early stops and
+    #: fail-closed rollbacks retain terminal accounting here with a FAILED
+    #: outcome; inspect the snapshot rather than assuming success.
     diagnostics: TurnDiagnostics | None = None
 
 

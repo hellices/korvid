@@ -13,8 +13,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncGenerator, AsyncIterator, Callable
-from contextlib import aclosing
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
+from contextlib import aclosing, suppress
 from typing import Any, cast
 
 import pytest
@@ -22,6 +22,7 @@ import pytest
 pytest.importorskip("litellm")
 
 import httpx
+from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler
 
 from korvid.agent.model_policy import (
     CapabilitySource,
@@ -41,6 +42,7 @@ from korvid.providers import litellm_provider
 from korvid.providers.litellm_provider import LiteLLMProvider, ProviderRequestError
 from korvid.providers.litellm_request import RequestPlan, build_plan
 from korvid.providers.litellm_runtime import ProviderSDKError, acompletion, exceptions
+from tests.providers.litellm_clients import drop_cached_clients
 
 _MODEL = "openai/gpt-4o"
 _SECRET = "sk-secret-value"
@@ -1467,6 +1469,54 @@ async def test_a_stream_iterator_is_returned_not_a_coroutine() -> None:
 from korvid.agent.diagnostics import PROVIDER_METRICS_EVENT  # noqa: E402
 
 
+class _TrackingAsyncClient(httpx.AsyncClient):
+    def __init__(self, handler: Handler) -> None:
+        super().__init__(transport=httpx.MockTransport(handler))
+        self.close_calls = 0
+
+    async def aclose(self) -> None:
+        self.close_calls += 1
+        await super().aclose()
+
+
+def _track_production_ollama_clients(
+    monkeypatch: pytest.MonkeyPatch,
+    handler: Handler,
+) -> list[_TrackingAsyncClient]:
+    clients: list[_TrackingAsyncClient] = []
+
+    def create_client(_handler: Any, *_args: Any, **_kwargs: Any) -> httpx.AsyncClient:
+        client = _TrackingAsyncClient(handler)
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr(AsyncHTTPHandler, "create_client", create_client)
+    return clients
+
+
+def _production_ollama_provider(
+    *,
+    on_close: Callable[[], Awaitable[None]] | None = None,
+) -> LiteLLMProvider:
+    return LiteLLMProvider(
+        plan=_plan(model="ollama/qwen3:8b", base_url="http://ollama.invalid"),
+        descriptor=ModelDescriptor(provider="ollama", model="qwen3:8b"),
+        capabilities=ModelCapabilities.unknown(),
+        on_close=on_close,
+    )
+
+
+async def _cleanup_production_provider(
+    provider: LiteLLMProvider,
+    clients: list[_TrackingAsyncClient],
+) -> None:
+    await drop_cached_clients()
+    await provider.aclose()
+    for client in clients:
+        if not client.is_closed:
+            await client.aclose()
+
+
 def _real_ollama_provider(
     handler: Handler,
     *,
@@ -1715,6 +1765,255 @@ async def test_concurrent_real_ollama_requests_keep_metrics_isolated() -> None:
     assert first_metrics[0]["generation_tokens"] == 3
     assert second_metrics[0]["total_seconds"] == 9.0
     assert second_metrics[0]["generation_tokens"] == 9
+
+
+async def test_production_ollama_rounds_reuse_one_pool_with_fresh_capture(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    answers = iter(
+        [
+            _ollama_answer(stream=False, total_duration=3_000_000_000, eval_count=3),
+            _ollama_answer(stream=False, total_duration=9_000_000_000, eval_count=9),
+        ]
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return next(answers)(request)
+
+    clients = _track_production_ollama_clients(monkeypatch, handler)
+    provider = _production_ollama_provider()
+    try:
+        first = await _events(provider, stream=False)
+        second = await _events(provider, stream=False)
+
+        assert len(clients) == 1
+        assert clients[0].close_calls == 0
+        first_metrics = [event for event in first if event["type"] == PROVIDER_METRICS_EVENT]
+        second_metrics = [event for event in second if event["type"] == PROVIDER_METRICS_EVENT]
+        assert first_metrics[0]["total_seconds"] == 3.0
+        assert first_metrics[0]["generation_tokens"] == 3
+        assert second_metrics[0]["total_seconds"] == 9.0
+        assert second_metrics[0]["generation_tokens"] == 9
+    finally:
+        await _cleanup_production_provider(provider, clients)
+
+
+async def test_provider_closes_owned_ollama_pool_and_credentials_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clients = _track_production_ollama_clients(
+        monkeypatch,
+        _ollama_answer(stream=False),
+    )
+    credential_close_calls = 0
+
+    async def close_credentials() -> None:
+        nonlocal credential_close_calls
+        credential_close_calls += 1
+
+    provider = _production_ollama_provider(on_close=close_credentials)
+    logging_drained = False
+    try:
+        await _events(provider, stream=False)
+        await drop_cached_clients()
+        logging_drained = True
+        assert len(clients) == 1
+        assert clients[0].close_calls == 0
+
+        await provider.aclose()
+        await provider.aclose()
+
+        assert clients[0].close_calls == 1
+        assert credential_close_calls == 1
+    finally:
+        if not logging_drained:
+            await drop_cached_clients()
+        for client in clients:
+            if not client.is_closed:
+                await client.aclose()
+
+
+async def test_provider_never_closes_injected_ollama_delegate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clients = _track_production_ollama_clients(
+        monkeypatch,
+        _ollama_answer(stream=False),
+    )
+    delegate = AsyncHTTPHandler()
+    provider = LiteLLMProvider(
+        plan=_plan(model="ollama/qwen3:8b", base_url="http://ollama.invalid"),
+        descriptor=ModelDescriptor(provider="ollama", model="qwen3:8b"),
+        capabilities=ModelCapabilities.unknown(),
+        client=delegate,
+    )
+    logging_drained = False
+    try:
+        await _events(provider, stream=False)
+        await drop_cached_clients()
+        logging_drained = True
+        await provider.aclose()
+        await provider.aclose()
+
+        assert len(clients) == 1
+        assert clients[0].close_calls == 0
+    finally:
+        await delegate.client.aclose()
+        if not logging_drained:
+            await drop_cached_clients()
+
+
+async def test_owned_pool_close_failure_propagates_after_credential_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from korvid.providers.ollama_metrics_transport import OllamaMetricsHTTPPool
+
+    clients = _track_production_ollama_clients(monkeypatch, _ollama_answer(stream=False))
+    credentials_closed = asyncio.Event()
+    close_pool = OllamaMetricsHTTPPool.aclose
+
+    async def fail_close(pool: OllamaMetricsHTTPPool) -> None:
+        await close_pool(pool)
+        raise RuntimeError("pool close failed")
+
+    async def close_credentials() -> None:
+        credentials_closed.set()
+
+    provider = _production_ollama_provider(on_close=close_credentials)
+    try:
+        await _events(provider, stream=False)
+        monkeypatch.setattr(OllamaMetricsHTTPPool, "aclose", fail_close)
+        with pytest.raises(RuntimeError, match="pool close failed"):
+            await provider.aclose()
+        assert credentials_closed.is_set()
+    finally:
+        await _cleanup_production_provider(provider, clients)
+
+
+async def test_cancelling_ollama_request_closes_response_but_keeps_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _BlockingNDJSONStream(httpx.AsyncByteStream):
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def __aiter__(self) -> AsyncIterator[bytes]:
+            yield (
+                json.dumps(
+                    {
+                        "model": "qwen3:8b",
+                        "created_at": "2026-09-09T00:00:00Z",
+                        "response": "healthy",
+                        "done": False,
+                    }
+                )
+                + "\n"
+            ).encode()
+            await asyncio.Event().wait()
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    raw_stream = _BlockingNDJSONStream()
+    healthy = _ollama_answer(stream=True, total_duration=9_000_000_000, eval_count=9)
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(200, stream=raw_stream, request=request)
+        return healthy(request)
+
+    clients = _track_production_ollama_clients(monkeypatch, handler)
+    provider = _production_ollama_provider()
+    streaming = asyncio.Event()
+
+    async def consume() -> None:
+        async for event in provider.complete(_MESSAGES, []):
+            if event["type"] == "text_delta":
+                streaming.set()
+
+    task = asyncio.create_task(consume())
+    try:
+        await asyncio.wait_for(streaming.wait(), timeout=5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert raw_stream.closed is True
+        assert len(clients) == 1
+        assert clients[0].close_calls == 0
+
+        events = await _events(provider)
+        metrics = [event for event in events if event["type"] == PROVIDER_METRICS_EVENT]
+        assert metrics[0]["total_seconds"] == 9.0
+        assert metrics[0]["generation_tokens"] == 9
+        assert len(clients) == 1
+        assert clients[0].close_calls == 0
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+        await _cleanup_production_provider(provider, clients)
+
+
+async def test_ollama_transport_error_closes_response_but_keeps_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FailingNDJSONStream(httpx.AsyncByteStream):
+        def __init__(self, request: httpx.Request) -> None:
+            self._request = request
+            self.closed = False
+
+        async def __aiter__(self) -> AsyncIterator[bytes]:
+            yield (
+                json.dumps(
+                    {
+                        "model": "qwen3:8b",
+                        "created_at": "2026-09-09T00:00:00Z",
+                        "response": "partial",
+                        "done": False,
+                    }
+                )
+                + "\n"
+            ).encode()
+            raise httpx.ReadError("connection reset mid-stream", request=self._request)
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    failed_stream: _FailingNDJSONStream | None = None
+    healthy = _ollama_answer(stream=True, total_duration=9_000_000_000, eval_count=9)
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls, failed_stream
+        calls += 1
+        if calls == 1:
+            failed_stream = _FailingNDJSONStream(request)
+            return httpx.Response(200, stream=failed_stream, request=request)
+        return healthy(request)
+
+    clients = _track_production_ollama_clients(monkeypatch, handler)
+    provider = _production_ollama_provider()
+    try:
+        with pytest.raises(ProviderRequestError, match="reach"):
+            await _events(provider)
+
+        assert failed_stream is not None
+        assert failed_stream.closed is True
+        assert len(clients) == 1
+        assert clients[0].close_calls == 0
+
+        events = await _events(provider)
+        metrics = [event for event in events if event["type"] == PROVIDER_METRICS_EVENT]
+        assert metrics[0]["total_seconds"] == 9.0
+        assert metrics[0]["generation_tokens"] == 9
+        assert len(clients) == 1
+        assert clients[0].close_calls == 0
+    finally:
+        await _cleanup_production_provider(provider, clients)
 
 
 async def test_stopping_an_ollama_stream_closes_the_raw_response() -> None:

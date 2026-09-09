@@ -120,3 +120,27 @@ class OllamaMetricsHTTPClient(
         if not self._owns_delegate:
             return
         await super().close()
+
+
+class OllamaMetricsHTTPPool:
+    """Provider-lifetime HTTP delegate with request-local capture wrappers."""
+
+    def __init__(self, delegate: Any | None = None) -> None:
+        if delegate is None or not isinstance(delegate, _AsyncHTTPHandler):
+            self._delegate = _AsyncHTTPHandler()
+            self._owns_delegate = True
+        else:
+            self._delegate = delegate
+            self._owns_delegate = False
+        self._closed = False
+
+    def request_client(self) -> OllamaMetricsHTTPClient:
+        """Return a fresh capture over the reusable HTTP connection pool."""
+        return OllamaMetricsHTTPClient(self._delegate)
+
+    async def aclose(self) -> None:
+        """Close a provider-owned delegate at most once."""
+        if not self._owns_delegate or self._closed:
+            return
+        self._closed = True
+        await self._delegate.close()

@@ -12,6 +12,8 @@ from tests.providers.litellm_clients import drop_cached_clients
 
 
 async def test_client_cleanup_drains_queued_logging() -> None:
+    # Starting the SDK worker resets its old loop's queue, so retire it first.
+    await drop_cached_clients()
     completed = asyncio.Event()
 
     async def callback() -> None:
@@ -30,6 +32,7 @@ async def test_client_cleanup_drains_queued_logging() -> None:
 
 
 async def test_client_cleanup_waits_for_already_dequeued_logging() -> None:
+    await drop_cached_clients()
     started = asyncio.Event()
     release = asyncio.Event()
 

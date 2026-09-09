@@ -9,14 +9,15 @@ result, a model or provider name, or a Kubernetes identifier. The terminal
 
 `TurnDiagnosticsFactory` owns the two injectable functions (clock and local
 correlation-ID factory) so tests can be fully deterministic and production
-code defaults to `time.monotonic` and a random local ID that never leaves this
-process's memory.
+code defaults to `time.monotonic` and a random locally generated ID. The ID
+is available to diagnostic log handlers but is never sent to providers.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import math
 import time
 import uuid
 from collections.abc import Callable, Mapping
@@ -79,8 +80,11 @@ def _metric_seconds(value: Any) -> float | None:
     """A non-negative float, or `None` for an unusable or absent value."""
     if isinstance(value, bool) or not isinstance(value, int | float):
         return None
-    number = float(value)
-    return number if number >= 0.0 else None
+    try:
+        number = float(value)
+    except OverflowError:
+        return None
+    return number if math.isfinite(number) and number >= 0.0 else None
 
 
 def _metric_count(value: Any) -> int | None:

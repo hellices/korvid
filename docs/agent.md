@@ -130,7 +130,7 @@ the phase it is in rather than a generic spinner:
 added to the transcript, for example:
 
 ```
-2 model rounds · model 3.4s · tools 1.1s · ↑1.8k ↓0.2k tok · prompt 2.0s · generate 1.0s · other wait 0.4s
+2 model rounds · model 3.4s · tools 1.1s · ↑1.8k ↓200 tok · prompt 2.0s · generate 1.0s · other wait 0.4s
 ```
 
 It reports the number of provider rounds, the wall time spent in the model and

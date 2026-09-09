@@ -735,6 +735,31 @@ def test_provider_metrics_from_event_rejects_negative_and_non_numeric() -> None:
     assert metrics == ProviderRuntimeMetrics(generation_seconds=2.0)
 
 
+@pytest.mark.parametrize(
+    "value",
+    [float("inf"), float("-inf"), float("nan"), 10**400],
+    ids=["infinity", "negative-infinity", "nan", "overflow"],
+)
+def test_provider_metrics_reject_nonfinite_seconds_and_keep_strict_json(value: float | int) -> None:
+    metrics = provider_metrics_from_event(
+        {
+            "total_seconds": value,
+            "load_seconds": value,
+            "prompt_eval_seconds": value,
+            "generation_seconds": value,
+            "generation_tokens": 20,
+        }
+    )
+    assert metrics == ProviderRuntimeMetrics(generation_tokens=20)
+    summary = _turn(rounds=(ProviderRoundDiagnostics(1, 0.0, 0.0, 0.0, 1.0, metrics),))
+    assert (
+        json.loads(json.dumps(diagnostic_log_fields(summary), allow_nan=False))[
+            "round_1_provider_total_seconds"
+        ]
+        is None
+    )
+
+
 def test_provider_metrics_are_empty_detects_all_none() -> None:
     assert provider_metrics_are_empty(ProviderRuntimeMetrics())
     assert provider_metrics_are_empty(provider_metrics_from_event({"type": "provider_metrics"}))

@@ -68,7 +68,10 @@ from korvid.agent.provider import (
 from korvid.providers.flow_ollama_thinking import PREFIX as _OLLAMA_PROVIDER
 from korvid.providers.litellm_request import RequestPlan
 from korvid.providers.litellm_runtime import ProviderSDKError, acompletion, exceptions
-from korvid.providers.ollama_metrics_transport import OllamaMetricsHTTPClient
+from korvid.providers.ollama_metrics_transport import (
+    OllamaMetricsHTTPClient,
+    OllamaMetricsHTTPPool,
+)
 
 logger = logging.getLogger(__name__)
 _OLLAMA_METRICS_PROVIDERS: Final = frozenset({_OLLAMA_PROVIDER, f"{_OLLAMA_PROVIDER}_chat"})
@@ -551,20 +554,30 @@ class LiteLLMProvider(LLMProvider):
         )
         self._client = client
         self._on_close = on_close
+        self._ollama_metrics_pool: OllamaMetricsHTTPPool | None = None
+        self._closed = False
 
     async def aclose(self) -> None:
-        """Release the declared credential chain, if there is one.
+        """Release provider-owned HTTP and credential resources once.
 
-        A chain that fails to close is logged and swallowed: this runs on
-        the rebuild and shutdown paths, where raising would take down a
-        `:model` switch over a credential library's teardown.
+        HTTP failures propagate after credential cleanup. Credential-chain
+        failures retain their existing logged behavior.
         """
-        if self._on_close is None:
+        if self._closed:
             return
+        self._closed = True
         try:
-            await self._on_close()
-        except Exception:  # credential library teardown, in any state
-            logger.warning("the provider-default credential failed to close")
+            if self._ollama_metrics_pool is not None:
+                await self._ollama_metrics_pool.aclose()
+        finally:
+            await self._close_credentials()
+
+    async def _close_credentials(self) -> None:
+        if self._on_close is not None:
+            try:
+                await self._on_close()
+            except Exception:  # credential library teardown, in any state
+                logger.warning("the provider-default credential failed to close")
 
     @property
     def descriptor(self) -> ModelDescriptor:
@@ -612,32 +625,30 @@ class LiteLLMProvider(LLMProvider):
         kwargs = self._plan.call_kwargs(messages, tools, stream=stream)
         metrics_client: OllamaMetricsHTTPClient | None = None
         if self._descriptor.provider in _OLLAMA_METRICS_PROVIDERS:
-            metrics_client = OllamaMetricsHTTPClient(self._client)
+            if self._ollama_metrics_pool is None:
+                self._ollama_metrics_pool = OllamaMetricsHTTPPool(self._client)
+            metrics_client = self._ollama_metrics_pool.request_client()
             kwargs["client"] = metrics_client
         elif self._client is not None:
             kwargs["client"] = self._client  # kwargs-only in 1.98.0
         try:
-            try:
-                response = await acompletion(**kwargs)
-            except asyncio.CancelledError:
-                raise
-            except ProviderSDKError as exc:
-                if _request_reached_the_provider(exc):
-                    yield {"type": REQUEST_SENT}
-                raise _translate(exc) from exc
-            yield {"type": REQUEST_SENT}
+            response = await acompletion(**kwargs)
+        except asyncio.CancelledError:
+            raise
+        except ProviderSDKError as exc:
+            if _request_reached_the_provider(exc):
+                yield {"type": REQUEST_SENT}
+            raise _translate(exc) from exc
+        yield {"type": REQUEST_SENT}
 
-            metrics_source = _metrics_source(response, metrics_client)
-            if not hasattr(response, "__aiter__"):
-                for event in _response_events(response, metrics_source=metrics_source):
-                    yield event
-                return
-            # aclosing, not a bare `async for`: when the consumer abandons this
-            # generator the inner one has to be closed then and there, or the
-            # HTTP response stays open until the collector gets to it.
-            async with aclosing(_stream_events(response, metrics_source=metrics_source)) as events:
-                async for event in events:
-                    yield event
-        finally:
-            if metrics_client is not None:
-                await metrics_client.aclose()
+        metrics_source = _metrics_source(response, metrics_client)
+        if not hasattr(response, "__aiter__"):
+            for event in _response_events(response, metrics_source=metrics_source):
+                yield event
+            return
+        # aclosing, not a bare `async for`: when the consumer abandons this
+        # generator the inner one has to be closed then and there, or the
+        # HTTP response stays open until the collector gets to it.
+        async with aclosing(_stream_events(response, metrics_source=metrics_source)) as events:
+            async for event in events:
+                yield event
