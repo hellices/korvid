@@ -344,8 +344,8 @@ class NativeAgentEngine(AgentEngine):
                 yield event
             return
         if recorder is not None:
-            recorder.begin_round()
             yield _round_phase(iteration)
+            recorder.begin_round()
         prepared = self._prepare_measured(request, iteration + 1, recorder)
         # Both counters are armed synchronously, before the first await, so
         # a cancellation on the very first event still finds them open.
@@ -655,18 +655,19 @@ class NativeAgentEngine(AgentEngine):
             yield AgentPhaseChanged(
                 phase=AgentPhase.RUNNING_TOOL, round_number=round_number, tool=name
             )
-            recorder.begin_tool(name)
         yield ToolCallStarted(call_id=call.call_id, name=call.name, arguments=call.arguments)
+        if recorder is not None:
+            recorder.begin_tool(name)
         try:
             execution = await self._execute(call)
         except OutboundPolicyError:
             # A blocked result cannot be shown to the model. Close the row
             # the UI is showing, then let the turn roll back.
+            if recorder is not None:
+                recorder.end_tool(ok=False)
             yield ToolCallFinished(
                 call_id=call.call_id, name=call.name, ok=False, summary="blocked"
             )
-            if recorder is not None:
-                recorder.end_tool(ok=False)
             raise
         except Exception as exc:  # executor, bridge or harness bug
             execution = self._contain(call, exc)

@@ -15,13 +15,21 @@ import contextlib
 
 import pytest
 
-from korvid.agent.diagnostics import AgentPhase, TurnOutcome, diagnostic_log_fields
+from korvid.agent.diagnostics import (
+    AgentPhase,
+    TurnDiagnosticsRecorder,
+    TurnOutcome,
+    diagnostic_log_fields,
+)
 from korvid.agent.events import (
     AgentError,
     AgentEvent,
     AgentPhaseChanged,
+    ToolCallFinished,
+    ToolCallStarted,
     TurnComplete,
 )
+from korvid.tools.executor import ToolResultBlocked
 
 from .engine_fakes import (
     DONE,
@@ -296,3 +304,48 @@ async def test_diagnostics_never_retain_a_model_invented_tool_name() -> None:
     assert unknown not in str(diagnostic_log_fields(complete.diagnostics))
     assert all(phase.tool != unknown for phase in _phases(events))
     assert complete.diagnostics.tools[0].ok is False
+
+
+@pytest.mark.parametrize("boundary", ["round", "tool"])
+async def test_pre_work_consumer_delay_is_not_attributed_to_model_or_tool(boundary: str) -> None:
+    now = 0.0
+    recorder = TurnDiagnosticsRecorder("backpressure", clock=lambda: now)
+    harness = build_harness([tool_turn(), text_turn("done")])
+    events: list[AgentEvent] = []
+    async for event in harness.engine.run(harness.request(recorder=recorder)):
+        events.append(event)
+        if (
+            boundary == "round"
+            and isinstance(event, AgentPhaseChanged)
+            and event.phase is not AgentPhase.RUNNING_TOOL
+        ) or (boundary == "tool" and isinstance(event, ToolCallStarted)):
+            now += 10.0
+
+    complete = events[-1]
+    assert isinstance(complete, TurnComplete)
+    assert complete.diagnostics is not None
+    snapshot = complete.diagnostics
+    assert snapshot.total_seconds == (20.0 if boundary == "round" else 10.0)
+    assert sum(round_.total_seconds for round_ in snapshot.rounds) == 0.0
+    assert sum(tool.seconds for tool in snapshot.tools) == 0.0
+
+
+async def test_blocked_tool_timer_ends_before_delivering_its_result() -> None:
+    now = 0.0
+    recorder = TurnDiagnosticsRecorder("blocked-backpressure", clock=lambda: now)
+    harness = build_harness(
+        [tool_turn()],
+        execution=RecordingExecution({"get_logs": ToolResultBlocked("unmaskable")}),
+    )
+    events: list[AgentEvent] = []
+    async for event in harness.engine.run(harness.request(recorder=recorder)):
+        events.append(event)
+        if isinstance(event, ToolCallFinished):
+            now += 10.0
+
+    complete = events[-1]
+    assert isinstance(complete, TurnComplete)
+    assert complete.diagnostics is not None
+    assert complete.diagnostics.outcome is TurnOutcome.FAILED
+    assert complete.diagnostics.total_seconds == 10.0
+    assert complete.diagnostics.tools[0].seconds == 0.0
