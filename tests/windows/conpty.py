@@ -181,6 +181,8 @@ _WAIT_FAILED = 0xFFFFFFFF
 _WAIT_TIMEOUT = 0x00000102
 _ERROR_BROKEN_PIPE = 109
 _ERROR_INVALID_PARAMETER = 87
+_ARTIFACT_LIMIT = 128 * 1024
+_ARTIFACT_FLUSH_SECONDS = 0.25
 
 
 def _handle_value(handle: object) -> int:
@@ -215,7 +217,7 @@ def _raise_unexpected_wait_result(operation: str, result: int) -> None:
 
 class _CleanupErrors:
     def __init__(self) -> None:
-        self._first: OSError | RuntimeError | None = None
+        self._first: OSError | RuntimeError | ValueError | None = None
 
     def attempt(self, operation: Callable[[], None]) -> None:
         try:
@@ -223,11 +225,15 @@ class _CleanupErrors:
         except (OSError, RuntimeError) as exc:
             self.add(exc)
 
-    def add(self, error: OSError | RuntimeError) -> None:
+    def add(self, error: OSError | RuntimeError | ValueError) -> None:
         if self._first is None:
             self._first = error
         else:
             self._first.add_note(f"Additional cleanup error: {error}")
+
+    @property
+    def failed(self) -> bool:
+        return self._first is not None
 
     def raise_first(self) -> None:
         if self._first is not None:
@@ -401,6 +407,8 @@ def _create_pseudoconsole(api: _WindowsApi, columns: int, rows: int) -> _PseudoC
     output_read: int | None = None
     output_write: int | None = None
     hpc = wintypes.HANDLE()
+    pseudo: _PseudoConsole | None = None
+    errors = _CleanupErrors()
     try:
         output_read, output_write = _create_pipe(api)
         result = int(
@@ -415,14 +423,20 @@ def _create_pseudoconsole(api: _WindowsApi, columns: int, rows: int) -> _PseudoC
         if result != 0:
             code = result & 0xFFFFFFFF
             raise OSError(code, f"CreatePseudoConsole failed with HRESULT 0x{code:08x}")
-    except OSError:
-        api.close_handle(input_write)
-        api.close_handle(output_read)
-        raise
+        pseudo = _PseudoConsole(_handle_value(hpc), input_write, output_read)
+    except (OSError, RuntimeError, ValueError) as error:
+        errors.add(error)
+        errors.attempt(lambda: api.close_handle(input_write))
+        errors.attempt(lambda: api.close_handle(output_read))
     finally:
-        api.close_handle(input_read)
-        api.close_handle(output_write)
-    return _PseudoConsole(_handle_value(hpc), input_write, output_read)
+        errors.attempt(lambda: api.close_handle(input_read))
+        errors.attempt(lambda: api.close_handle(output_write))
+    if errors.failed:
+        if pseudo is not None:
+            errors.attempt(lambda: _close_pseudoconsole(api, pseudo))
+        errors.raise_first()
+    assert pseudo is not None
+    return pseudo
 
 
 def _environment_block(env: Mapping[str, str]) -> ctypes.Array[Any]:
@@ -468,8 +482,10 @@ def _create_kill_job(api: _WindowsApi) -> int:
         ctypes.byref(limits),
         ctypes.sizeof(limits),
     ):
-        api.close_handle(handle)
-        _raise_api_error("SetInformationJobObject")
+        errors = _CleanupErrors()
+        errors.add(_api_error("SetInformationJobObject"))
+        errors.attempt(lambda: api.close_handle(handle))
+        errors.raise_first()
     return handle
 
 
@@ -477,6 +493,26 @@ def _terminate_created_process(api: _WindowsApi, process_handle: int) -> None:
     if not api.kernel32.TerminateProcess(process_handle, 1):
         _raise_api_error("TerminateProcess")
     api.kernel32.WaitForSingleObject(process_handle, 5_000)
+
+
+def _cleanup_unreturned_process(
+    api: _WindowsApi,
+    process_handle: int | None,
+    job_handle: int | None,
+    *,
+    assigned: bool,
+    errors: _CleanupErrors,
+) -> None:
+    if process_handle is None:
+        errors.attempt(lambda: api.close_handle(job_handle))
+        return
+    if assigned and job_handle is not None:
+        spawned = _SpawnedProcess(process_handle, job_handle, 0)
+        errors.attempt(lambda: _discard_spawned_process(api, spawned))
+        return
+    errors.attempt(lambda: _terminate_created_process(api, process_handle))
+    errors.attempt(lambda: api.close_handle(process_handle))
+    errors.attempt(lambda: api.close_handle(job_handle))
 
 
 def _spawn_process(
@@ -492,7 +528,9 @@ def _spawn_process(
     process = _ProcessInformation()
     job_handle: int | None = None
     created = False
-    handed_off = False
+    assigned = False
+    spawned: _SpawnedProcess | None = None
+    errors = _CleanupErrors()
     try:
         startup = _StartupInfoEx()
         startup.StartupInfo.cb = ctypes.sizeof(startup)
@@ -521,24 +559,30 @@ def _spawn_process(
         process_handle = _handle_value(process.hProcess)
         assert job_handle is not None
         if not api.kernel32.AssignProcessToJobObject(job_handle, process_handle):
-            error = _api_error("AssignProcessToJobObject")
-            _terminate_created_process(api, process_handle)
-            raise error
+            raise _api_error("AssignProcessToJobObject")
+        assigned = True
         if api.kernel32.ResumeThread(process.hThread) == 0xFFFFFFFF:
-            error = _api_error("ResumeThread")
-            _terminate_created_process(api, process_handle)
-            raise error
-        handed_off = True
-        return _SpawnedProcess(process_handle, job_handle, int(process.dwProcessId))
+            raise _api_error("ResumeThread")
+        spawned = _SpawnedProcess(process_handle, job_handle, int(process.dwProcessId))
+    except (OSError, RuntimeError, ValueError) as error:
+        errors.add(error)
     finally:
-        api.kernel32.DeleteProcThreadAttributeList(attribute_pointer)
+        errors.attempt(lambda: api.kernel32.DeleteProcThreadAttributeList(attribute_pointer))
         del attribute_storage
         if created:
-            api.close_handle(_handle_value(process.hThread))
-        if created and not handed_off:
-            api.close_handle(_handle_value(process.hProcess))
-        if not handed_off:
-            api.close_handle(job_handle)
+            errors.attempt(lambda: api.close_handle(_handle_value(process.hThread)))
+    if errors.failed:
+        cleanup_process_handle = _handle_value(process.hProcess) if created else None
+        _cleanup_unreturned_process(
+            api,
+            cleanup_process_handle,
+            job_handle,
+            assigned=assigned,
+            errors=errors,
+        )
+        errors.raise_first()
+    assert spawned is not None
+    return spawned
 
 
 def _close_pseudoconsole(api: _WindowsApi, pseudo: _PseudoConsole) -> None:
@@ -579,6 +623,10 @@ class ConPtyProcess:
         self._job_handle: int | None = spawned.job_handle
         self._pid = spawned.pid
         self._artifact_path = artifact_path
+        self._artifact_error: OSError | None = None
+        self._artifact_dirty = False
+        self._artifact_next_flush = 0.0
+        self._artifact_lock = threading.Lock()
         self._reader_error: str | None = None
         self._reader_stop = threading.Event()
         self.transcript = BoundedTranscript(limit=capture_limit)
@@ -609,8 +657,10 @@ class ConPtyProcess:
         pseudo = _create_pseudoconsole(api, columns, rows)
         try:
             spawned = _spawn_process(api, pseudo, argv, cwd, env)
-        except (OSError, ValueError):
-            _close_pseudoconsole(api, pseudo)
+        except (OSError, ValueError) as error:
+            errors = _CleanupErrors()
+            errors.add(error)
+            errors.attempt(lambda: _close_pseudoconsole(api, pseudo))
             raise
         try:
             return cls(
@@ -692,13 +742,32 @@ class ConPtyProcess:
             while not self._reader_stop.is_set():
                 data = self._read_available(pseudo.output_handle)
                 if data is None:
+                    self._snapshot_artifact_if_due(force=True)
                     return
                 if data:
                     self.transcript.append(data)
+                    self._artifact_dirty = True
+                    self._snapshot_artifact_if_due()
                 else:
+                    self._snapshot_artifact_if_due()
                     time.sleep(0.01)
         except OSError as exc:
             self._reader_error = str(exc)
+
+    def _snapshot_artifact_if_due(self, *, force: bool = False) -> None:
+        if self._artifact_path is None or not self._artifact_dirty:
+            return
+        now = time.monotonic()
+        if not force and now < self._artifact_next_flush:
+            return
+        self._artifact_next_flush = now + _ARTIFACT_FLUSH_SECONDS
+        try:
+            self._write_artifact()
+        except OSError as exc:
+            if self._artifact_error is None:
+                self._artifact_error = exc
+        else:
+            self._artifact_dirty = False
 
     def send(self, data: bytes) -> None:
         """Write actual terminal bytes to the pseudo console."""
@@ -833,8 +902,29 @@ class ConPtyProcess:
         self._job_handle = None
 
     def _write_artifact(self) -> None:
-        if self._artifact_path is not None:
-            self._artifact_path.write_bytes(self.transcript.tail())
+        path = self._artifact_path
+        if path is None:
+            return
+        temporary = path.with_name(f".{path.name}.{self._pid}.snapshot")
+        artifact_lock = getattr(self, "_artifact_lock", None)
+        if artifact_lock is None:
+            artifact_lock = self._artifact_lock = threading.Lock()
+        if not artifact_lock.acquire(timeout=1.0):
+            raise TimeoutError("ConPTY artifact writer did not release snapshot lock")
+        try:
+            snapshot = self.transcript.tail()[-_ARTIFACT_LIMIT:]
+            try:
+                temporary.write_bytes(snapshot)
+                os.replace(temporary, path)
+            except OSError as exc:
+                error = OSError(exc.errno, f"ConPTY artifact snapshot failed: {exc}")
+                try:
+                    temporary.unlink(missing_ok=True)
+                except OSError as cleanup_error:
+                    error.add_note(f"Additional cleanup error: {cleanup_error}")
+                raise error from exc
+        finally:
+            artifact_lock.release()
 
     def close(self) -> None:
         """Close the process, its job, the pseudo console, and all pipe handles."""
@@ -857,6 +947,9 @@ class ConPtyProcess:
             errors.add(OSError(f"ConPTY output reader failed: {self._reader_error}"))
         errors.attempt(self._close_process_handle)
         errors.attempt(self._close_job_handle)
+        artifact_error = getattr(self, "_artifact_error", None)
+        if artifact_error is not None:
+            errors.add(artifact_error)
         errors.attempt(self._write_artifact)
         errors.raise_first()
 
