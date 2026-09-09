@@ -109,7 +109,7 @@ jobs:
         timeout-minutes: 5
         env:
           KORVID_WINDOWS_SMOKE_ARTIFACT_DIR: ${{ runner.temp }}/korvid-native-terminal
-        run: uv run pytest -p no:tach tests/windows/test_native_terminal.py -q
+        run: uv run pytest -p no:tach tests/windows/test_native_terminal.py tests/core/test_audit.py::test_concurrent_appends_across_instances -q
       - name: Upload native Windows terminal evidence
         if: ${{ !cancelled() && needs.changes.outputs.code == 'true' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
@@ -121,7 +121,7 @@ jobs:
           retention-days: 7
       # Windows verifies OS-specific behaviour; docs contracts are not that.
       - if: needs.changes.outputs.code == 'true'
-        run: uv run pytest -q --ignore=tests/windows/test_native_terminal.py
+        run: uv run pytest -q --ignore=tests/windows/test_native_terminal.py --deselect=tests/core/test_audit.py::test_concurrent_appends_across_instances
 
   pre-commit:
     runs-on: korvid-runners

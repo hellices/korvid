@@ -18,7 +18,7 @@ job alone does not make it a required merge check.
 Before the full suite, the Windows job runs:
 
 ```sh
-uv run pytest -p no:tach tests/windows/test_native_terminal.py -q
+uv run pytest -p no:tach tests/windows/test_native_terminal.py tests/core/test_audit.py::test_concurrent_appends_across_instances -q
 ```
 
 This smoke test launches the real TUI in a Windows ConPTY and sends terminal
@@ -38,8 +38,9 @@ The `windows-native-terminal` CI artifact retains phase witnesses and the final
 128 KiB of terminal output for seven days, including failed runs. To retain the
 same evidence locally, set `KORVID_WINDOWS_SMOKE_ARTIFACT_DIR` to a writable
 directory before running the command above.
-The remaining Windows suite excludes this already-tested module, so the native
-scenario runs only once, under the dedicated step's timeout and artifact capture.
+The same bounded step runs the audit log's concurrent-writer regression.
+The remaining Windows suite excludes these already-tested cases, so the native
+scenario and audit regression each run only once.
 
 Cluster data and the child-shell command are isolated fixtures. This is
 native Windows terminal validation, **not a live-cluster verification** and
@@ -51,6 +52,15 @@ For a real deployment, also check the installed CLI (`korvid --help` and
 cluster. Verify navigation/filter input, logs, shell entry and return, resize,
 and exit using that deployment's terminal, kubectl, authentication, and network
 configuration. CI fixture success does not replace that check.
+
+## Audit locking under contention
+
+Windows audit locking uses short nonblocking attempts within a ten-second
+deadline. The CRT's blocking mode only retries once per second and can miss
+brief gaps between concurrent writers. The deadline has not been increased:
+exhausted contention and non-contention I/O errors still block the audit write,
+and therefore the requested cluster mutation. The shared sidecar mutex always
+locks byte zero, matching its unlock operation.
 
 ## Historical Windows baseline
 
