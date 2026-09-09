@@ -38,6 +38,35 @@ class _DiscardApi:
             raise OSError("job close failed")
 
 
+class _TerminationKernel:
+    def __init__(self, results: list[int]) -> None:
+        self.results = iter(results)
+        self.waits: list[int] = []
+        self.terminated_processes: list[int] = []
+        self.terminated_jobs: list[int] = []
+
+    def WaitForSingleObject(self, handle: int, timeout: int) -> int:
+        self.waits.append(timeout)
+        return next(self.results)
+
+    def TerminateProcess(self, handle: int, exit_code: int) -> bool:
+        self.terminated_processes.append(handle)
+        return True
+
+    def TerminateJobObject(self, handle: int, exit_code: int) -> bool:
+        self.terminated_jobs.append(handle)
+        return True
+
+
+class _TerminationApi:
+    def __init__(self, results: list[int]) -> None:
+        self.kernel32 = _TerminationKernel(results)
+        self.closed: list[int | None] = []
+
+    def close_handle(self, handle: int | None) -> None:
+        self.closed.append(handle)
+
+
 class _PseudoKernel:
     def __init__(self, events: list[tuple[str, int]]) -> None:
         self._events = events
@@ -242,6 +271,58 @@ def test_discard_closes_job_when_process_handle_close_fails() -> None:
     ]
 
 
+@pytest.mark.parametrize(
+    ("result", "error_type", "message"),
+    [
+        (conpty._WAIT_TIMEOUT, TimeoutError, "did not exit"),
+        (conpty._WAIT_FAILED, OSError, "WaitForSingleObject"),
+    ],
+)
+def test_terminate_created_process_requires_confirmed_exit(
+    monkeypatch: pytest.MonkeyPatch,
+    result: int,
+    error_type: type[OSError],
+    message: str,
+) -> None:
+    api = _TerminationApi([result])
+    monkeypatch.setattr(conpty, "_last_error", lambda: 4321)
+
+    with pytest.raises(error_type, match=message) as error:
+        conpty._terminate_created_process(cast(Any, api), 40)
+
+    assert api.kernel32.terminated_processes == [40]
+    assert api.kernel32.waits == [5_000]
+    assert error.value.errno == (4321 if result == conpty._WAIT_FAILED else None)
+
+
+@pytest.mark.parametrize(
+    ("initial", "final", "error_type", "message"),
+    [
+        (conpty._WAIT_TIMEOUT, conpty._WAIT_TIMEOUT, TimeoutError, "did not exit"),
+        (conpty._WAIT_TIMEOUT, conpty._WAIT_FAILED, OSError, "WaitForSingleObject"),
+        (conpty._WAIT_FAILED, conpty._WAIT_OBJECT_0, OSError, "WaitForSingleObject"),
+    ],
+)
+def test_discard_confirms_exit_while_always_closing_handles(
+    monkeypatch: pytest.MonkeyPatch,
+    initial: int,
+    final: int,
+    error_type: type[OSError],
+    message: str,
+) -> None:
+    api = _TerminationApi([initial, final])
+    monkeypatch.setattr(conpty, "_last_error", lambda: 4321)
+
+    with pytest.raises(error_type, match=message):
+        conpty._discard_spawned_process(
+            cast(Any, api), conpty._SpawnedProcess(process_handle=40, job_handle=50, pid=1234)
+        )
+
+    assert api.closed == [40, 50]
+    assert api.kernel32.waits == [0, 5_000]
+    assert api.kernel32.terminated_jobs == ([50] if initial == conpty._WAIT_TIMEOUT else [])
+
+
 def test_pseudoconsole_cleanup_continues_after_input_close_failure() -> None:
     api = _PseudoApi()
     pseudo = conpty._PseudoConsole(hpc=20, input_handle=10, output_handle=30)
@@ -367,6 +448,34 @@ def test_kill_job_creation_preserves_configuration_error_when_close_fails(
     assert getattr(exc_info.value, "__notes__", []) == [
         "Additional cleanup error: job close failed"
     ]
+
+
+@pytest.mark.parametrize("cleanup_fails", [False, True])
+def test_attribute_setup_preserves_error_across_list_cleanup(
+    monkeypatch: pytest.MonkeyPatch, cleanup_fails: bool
+) -> None:
+    class Kernel(_SpawnKernel):
+        def InitializeProcThreadAttributeList(self, *args: Any) -> bool:
+            ctypes.cast(args[-1], ctypes.POINTER(ctypes.c_size_t)).contents.value = 64
+            return args[0] is not None
+
+        def UpdateProcThreadAttribute(self, *args: object) -> bool:
+            return False
+
+        def DeleteProcThreadAttributeList(self, attribute_list: object) -> None:
+            monkeypatch.setattr(conpty, "_last_error", lambda: 5678)
+            if cleanup_fails:
+                raise OSError("attribute cleanup failed")
+
+    api = _SpawnApi()
+    api.kernel32 = Kernel()
+    monkeypatch.setattr(conpty, "_last_error", lambda: 1234)
+
+    with pytest.raises(OSError, match="UpdateProcThreadAttribute") as error:
+        conpty._attribute_list(cast(Any, api), 20)
+
+    assert error.value.errno == 1234
+    assert bool(getattr(error.value, "__notes__", [])) == cleanup_fails
 
 
 def test_reader_periodically_snapshots_dirty_output_before_close(

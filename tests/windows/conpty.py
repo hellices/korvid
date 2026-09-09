@@ -465,8 +465,10 @@ def _attribute_list(api: _WindowsApi, hpc: int) -> tuple[ctypes.Array[Any], wint
         None,
         None,
     ):
-        api.kernel32.DeleteProcThreadAttributeList(pointer)
-        _raise_api_error("UpdateProcThreadAttribute")
+        errors = _CleanupErrors()
+        errors.add(_api_error("UpdateProcThreadAttribute"))
+        errors.attempt(lambda: api.kernel32.DeleteProcThreadAttributeList(pointer))
+        errors.raise_first()
     return storage, pointer
 
 
@@ -492,7 +494,15 @@ def _create_kill_job(api: _WindowsApi) -> int:
 def _terminate_created_process(api: _WindowsApi, process_handle: int) -> None:
     if not api.kernel32.TerminateProcess(process_handle, 1):
         _raise_api_error("TerminateProcess")
-    api.kernel32.WaitForSingleObject(process_handle, 5_000)
+    _wait_for_terminated_process(api, process_handle)
+
+
+def _wait_for_terminated_process(api: _WindowsApi, process_handle: int) -> None:
+    result = int(api.kernel32.WaitForSingleObject(process_handle, 5_000))
+    if result == _WAIT_TIMEOUT:
+        raise TimeoutError("Windows process did not exit within 5.0s during cleanup")
+    if result != _WAIT_OBJECT_0:
+        _raise_unexpected_wait_result("WaitForSingleObject", result)
 
 
 def _cleanup_unreturned_process(
@@ -595,11 +605,13 @@ def _close_pseudoconsole(api: _WindowsApi, pseudo: _PseudoConsole) -> None:
 
 def _discard_spawned_process(api: _WindowsApi, spawned: _SpawnedProcess) -> None:
     errors = _CleanupErrors()
-    if api.kernel32.WaitForSingleObject(
-        spawned.process_handle, 0
-    ) == _WAIT_TIMEOUT and not api.kernel32.TerminateJobObject(spawned.job_handle, 1):
-        errors.add(_api_error("TerminateJobObject"))
-    api.kernel32.WaitForSingleObject(spawned.process_handle, 5_000)
+    result = int(api.kernel32.WaitForSingleObject(spawned.process_handle, 0))
+    if result == _WAIT_TIMEOUT:
+        if not api.kernel32.TerminateJobObject(spawned.job_handle, 1):
+            errors.add(_api_error("TerminateJobObject"))
+    elif result != _WAIT_OBJECT_0:
+        errors.attempt(lambda: _raise_unexpected_wait_result("WaitForSingleObject", result))
+    errors.attempt(lambda: _wait_for_terminated_process(api, spawned.process_handle))
     errors.attempt(lambda: api.close_handle(spawned.process_handle))
     errors.attempt(lambda: api.close_handle(spawned.job_handle))
     errors.raise_first()
