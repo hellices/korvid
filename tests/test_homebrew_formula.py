@@ -15,6 +15,7 @@ make the formula installable.
 from __future__ import annotations
 
 import importlib.util
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -126,6 +127,39 @@ def test_packages_for_platforms_homebrew_does_not_build_are_excluded() -> None:
     assert "pywin32-ctypes" not in names, "a Windows-only edge was followed onto a brew target"
 
 
+def test_linux_keyring_dependencies_survive_mixed_platform_markers() -> None:
+    names = {r.name for r in resolve_resources(_LOCK, extras=("agent",))}
+    assert {"secretstorage", "cryptography", "cffi", "pycparser", "jeepney"} <= names
+
+
+@pytest.mark.parametrize(
+    ("marker", "excluded"),
+    [
+        ("sys_platform == 'win32'", True),
+        ("python_version >= '3.13' and sys_platform == 'win32'", True),
+        (
+            "(python_version < '3.13' and sys_platform == 'win32') or "
+            "(python_version >= '3.13' and sys_platform == 'win32')",
+            True,
+        ),
+        ("sys_platform == 'win32' or sys_platform == 'linux'", False),
+        ("sys_platform == 'darwin' or sys_platform == 'win32'", False),
+        (
+            "(python_version >= '3.15' and sys_platform == 'win32') or "
+            "(sys_platform != 'emscripten' and sys_platform != 'win32')",
+            False,
+        ),
+        (None, False),
+    ],
+)
+def test_platform_exclusion_requires_every_alternative_to_exclude_homebrew(
+    marker: str | None, excluded: bool
+) -> None:
+    assert _GEN._marker_excludes(marker) is excluded
+    if marker is not None:
+        assert _GEN._is_excluded({"resolution-markers": [marker]}) is excluded
+
+
 def test_the_formula_advertises_the_project_license() -> None:
     """`brew audit` does not check this, and a wrong licence is a licence
     claim about someone else's software."""
@@ -213,8 +247,22 @@ def test_the_formula_passes_brew_audit_without_running_brew() -> None:
     )
 
 
-def test_a_rust_built_resource_declares_the_rust_toolchain() -> None:
-    """`cryptography` compiles a Rust extension when built from source.
+@pytest.mark.parametrize(
+    "name",
+    [
+        "cryptography",
+        "fastuuid",
+        "hf-xet",
+        "jiter",
+        "litellm",
+        "pydantic-core",
+        "rpds-py",
+        "tiktoken",
+        "tokenizers",
+    ],
+)
+def test_a_rust_built_resource_declares_the_rust_toolchain(name: str) -> None:
+    """Each Rust resource needs a toolchain independently of other resources.
 
     Homebrew builds every resource from source, so the toolchain has to be
     declared or the install dies with "can't find Rust compiler" — which
@@ -225,9 +273,7 @@ def test_a_rust_built_resource_declares_the_rust_toolchain() -> None:
         version="1.2.3",
         url="https://files.pythonhosted.org/packages/aa/korvid-1.2.3.tar.gz",
         sha256="a" * 64,
-        resources=[
-            Resource(name="cryptography", url="https://files.pythonhosted.org/x", sha256="b" * 64)
-        ],
+        resources=[Resource(name=name, url="https://files.pythonhosted.org/x", sha256="b" * 64)],
     )
     assert 'depends_on "rust" => :build' in ruby
     declared = [line.strip() for line in ruby.splitlines() if line.startswith("  depends_on ")]
@@ -246,6 +292,89 @@ def test_a_formula_without_pyyaml_does_not_declare_libyaml() -> None:
     )
     assert 'depends_on "libyaml"' not in ruby
     assert "rust" not in ruby
+    assert "append_to_rustflags" not in ruby
+
+
+def test_macos_python_extension_symbols_are_resolved_at_load_time() -> None:
+    ruby = render_formula(
+        version="1.2.3",
+        url="https://files.pythonhosted.org/packages/aa/korvid-1.2.3.tar.gz",
+        sha256="a" * 64,
+        resources=[
+            Resource(name="tokenizers", url="https://files.pythonhosted.org/x", sha256="b" * 64)
+        ],
+    )
+    linking = 'ENV.append_to_rustflags "-C link-arg=-Wl,-undefined,dynamic_lookup" if OS.mac?'
+    assert linking in ruby
+    assert ruby.index(linking) < ruby.index("virtualenv_install_with_resources")
+
+
+@pytest.mark.parametrize("names", [["hf-xet"], ["litellm"], ["litellm", "hf-xet"]])
+def test_entropy_resources_build_with_scoped_unoptimized_c(names: list[str]) -> None:
+    ruby = render_formula(
+        version="1.2.3",
+        url="https://files.pythonhosted.org/packages/aa/korvid-1.2.3.tar.gz",
+        sha256="a" * 64,
+        resources=[
+            Resource(name=name, url="https://files.pythonhosted.org/x", sha256="b" * 64)
+            for name in names
+        ],
+    )
+    normal_install = (
+        f"venv = virtualenv_install_with_resources(without: {json.dumps(sorted(names))})"
+    )
+    calls = ", ".join(f'resource("{name}")' for name in sorted(names))
+    entropy_safe_install = f"ENV.O0 {{ venv.pip_install [{calls}] }}"
+    assert normal_install in ruby
+    assert entropy_safe_install in ruby
+    assert ruby.index(normal_install) < ruby.index(entropy_safe_install)
+    assert "AWS_LC_SYS_NO_JITTER_ENTROPY" not in ruby
+
+
+def test_a_formula_without_entropy_resources_keeps_standard_resource_installation() -> None:
+    ruby = render_formula(
+        version="1.2.3",
+        url="https://files.pythonhosted.org/packages/aa/korvid-1.2.3.tar.gz",
+        sha256="a" * 64,
+        resources=[],
+    )
+    assert "    virtualenv_install_with_resources\n" in ruby
+    assert "ENV.O0" not in ruby
+    assert "without:" not in ruby
+    assert 'system libexec/"bin/python"' not in ruby
+
+
+@pytest.mark.parametrize(
+    ("names", "modules"),
+    [
+        (["hf-xet"], "hf_xet"),
+        (["litellm"], "litellm.rust_bridge._native"),
+        (["tokenizers"], "tokenizers.tokenizers"),
+        (
+            ["tokenizers", "litellm", "hf-xet"],
+            "hf_xet, litellm.rust_bridge._native, tokenizers.tokenizers",
+        ),
+    ],
+)
+def test_formula_smokes_native_imports_with_its_own_python(names: list[str], modules: str) -> None:
+    ruby = render_formula(
+        version="1.2.3",
+        url="https://files.pythonhosted.org/packages/aa/korvid-1.2.3.tar.gz",
+        sha256="a" * 64,
+        resources=[
+            Resource(name=name, url="https://files.pythonhosted.org/x", sha256="b" * 64)
+            for name in names
+        ],
+    )
+    test_block = " ".join(ruby.split("  test do\n", 1)[1].split())
+    smoke = f'system libexec/"bin/python", "-I", "-c", "import {modules}"'
+    offline = 'ENV["LITELLM_LOCAL_MODEL_COST_MAP"] = "true"'
+    assert smoke in test_block
+    if "litellm" in names:
+        assert offline in test_block
+        assert test_block.index(offline) < test_block.index(smoke)
+    else:
+        assert offline not in test_block
 
 
 def test_the_version_travels_into_the_test_block() -> None:

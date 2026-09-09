@@ -46,10 +46,24 @@ PYTHON_FORMULA = "python@3.13"
 SYSTEM_DEPENDENCIES: dict[str, dict[str, str]] = {
     # Compiles a Rust extension, and links against OpenSSL.
     "cryptography": {"rust": " => :build", "openssl@3": ""},
+    "fastuuid": {"rust": " => :build"},
+    "hf-xet": {"rust": " => :build"},
+    "jiter": {"rust": " => :build"},
+    "litellm": {"rust": " => :build"},
+    "pydantic-core": {"rust": " => :build"},
     # Compiles its C loader; without libyaml the build falls back to the
     # pure-Python parser, several times slower on every manifest korvid
     # reads.
     "pyyaml": {"libyaml": ""},
+    "rpds-py": {"rust": " => :build"},
+    "tiktoken": {"rust": " => :build"},
+    "tokenizers": {"rust": " => :build"},
+}
+UNOPTIMIZED_C_RESOURCES = frozenset({"hf-xet", "litellm"})
+NATIVE_SMOKE_IMPORTS = {
+    "hf-xet": "hf_xet",
+    "litellm": "litellm.rust_bridge._native",
+    "tokenizers": "tokenizers.tokenizers",
 }
 
 
@@ -132,7 +146,7 @@ def _reachable(edges: list[dict[str, Any]]) -> list[tuple[str, str]]:
     through that group. `--no-deps` cannot recover it at install time, so
     losing it here means an ImportError on a user's machine.
     """
-    reachable = []
+    reachable: list[tuple[str, str]] = []
     for edge in edges:
         if _marker_excludes(edge.get("marker")):
             continue
@@ -144,14 +158,19 @@ def _reachable(edges: list[dict[str, Any]]) -> list[tuple[str, str]]:
 def _marker_excludes(marker: object) -> bool:
     """Whether an environment marker rules out every Homebrew target.
 
-    Deliberately narrow: only an equality against an excluded platform
-    counts, so an unrecognised marker keeps the dependency. A resource
-    that is merely unnecessary costs build time; a missing one is an
-    ImportError on a user's machine.
+    Every alternative must require an excluded platform. An equality in
+    just one branch of an OR does not exclude the other branches.
+    Unrecognised markers conservatively keep the dependency: an extra
+    resource costs build time, but a missing one causes an ImportError.
     """
     if not isinstance(marker, str):
         return False
-    return any(f"sys_platform == '{platform}'" in marker for platform in EXCLUDED_MARKER_PLATFORMS)
+    return all(
+        any(
+            f"sys_platform == '{platform}'" in alternative for platform in EXCLUDED_MARKER_PLATFORMS
+        )
+        for alternative in marker.split(" or ")
+    )
 
 
 def _is_excluded(package: dict[str, object]) -> bool:
@@ -197,6 +216,48 @@ def project_license(pyproject: Path) -> str:
     if not isinstance(license_id, str):
         raise TypeError(f"expected an SPDX string in {pyproject}, got {license_id!r}")
     return license_id
+
+
+def _install_commands(resources: list[Resource]) -> str:
+    prefix = ""
+    if any("rust" in SYSTEM_DEPENDENCIES.get(resource.name, {}) for resource in resources):
+        prefix = (
+            "    # macOS extensions resolve CPython symbols when loaded.\n"
+            '    ENV.append_to_rustflags "-C link-arg=-Wl,-undefined,dynamic_lookup" if OS.mac?\n'
+        )
+    names = sorted(
+        resource.name for resource in resources if resource.name in UNOPTIMIZED_C_RESOURCES
+    )
+    if not names:
+        return prefix + "    virtualenv_install_with_resources"
+    calls = ", ".join(f'resource("{name}")' for name in names)
+    return prefix + (
+        f"    venv = virtualenv_install_with_resources(without: {json.dumps(names)})\n"
+        "    # aws-lc's jitter entropy collector rejects optimized C.\n"
+        f"    ENV.O0 {{ venv.pip_install [{calls}] }}"
+    )
+
+
+def _native_smoke_test(resources: list[Resource]) -> str:
+    names = sorted({resource.name for resource in resources} & NATIVE_SMOKE_IMPORTS.keys())
+    if not names:
+        return ""
+    lines: list[str] = []
+    if "litellm" in names:
+        lines.extend(
+            [
+                "    # Use bundled model metadata during the import smoke test.",
+                '    ENV["LITELLM_LOCAL_MODEL_COST_MAP"] = "true"',
+            ]
+        )
+    imports = "import " + ", ".join(NATIVE_SMOKE_IMPORTS[name] for name in names)
+    lines.extend(
+        [
+            '    system libexec/"bin/python", "-I", "-c",',
+            f"           {json.dumps(imports)}",
+        ]
+    )
+    return "\n" + "\n".join(lines)
 
 
 def render_formula(
@@ -253,11 +314,11 @@ class Korvid < Formula
 {depends_on}
 {stanzas}
   def install
-    virtualenv_install_with_resources
+{_install_commands(resources)}
   end
 
   test do
-    assert_match "{version}", shell_output("#{{bin}}/korvid --version")
+    assert_match "{version}", shell_output("#{{bin}}/korvid --version"){_native_smoke_test(resources)}
   end
 end
 '''
