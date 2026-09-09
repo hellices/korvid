@@ -60,6 +60,11 @@ SYSTEM_DEPENDENCIES: dict[str, dict[str, str]] = {
     "tokenizers": {"rust": " => :build"},
 }
 UNOPTIMIZED_C_RESOURCES = frozenset({"hf-xet", "litellm"})
+NATIVE_SMOKE_IMPORTS = {
+    "hf-xet": "hf_xet",
+    "litellm": "litellm.rust_bridge._native",
+    "tokenizers": "tokenizers.tokenizers",
+}
 
 
 @dataclass(frozen=True)
@@ -233,6 +238,28 @@ def _install_commands(resources: list[Resource]) -> str:
     )
 
 
+def _native_smoke_test(resources: list[Resource]) -> str:
+    names = sorted({resource.name for resource in resources} & NATIVE_SMOKE_IMPORTS.keys())
+    if not names:
+        return ""
+    lines: list[str] = []
+    if "litellm" in names:
+        lines.extend(
+            [
+                "    # Use bundled model metadata during the import smoke test.",
+                '    ENV["LITELLM_LOCAL_MODEL_COST_MAP"] = "true"',
+            ]
+        )
+    imports = "import " + ", ".join(NATIVE_SMOKE_IMPORTS[name] for name in names)
+    lines.extend(
+        [
+            '    system libexec/"bin/python", "-I", "-c",',
+            f"           {json.dumps(imports)}",
+        ]
+    )
+    return "\n" + "\n".join(lines)
+
+
 def render_formula(
     *,
     version: str,
@@ -291,7 +318,7 @@ class Korvid < Formula
   end
 
   test do
-    assert_match "{version}", shell_output("#{{bin}}/korvid --version")
+    assert_match "{version}", shell_output("#{{bin}}/korvid --version"){_native_smoke_test(resources)}
   end
 end
 '''

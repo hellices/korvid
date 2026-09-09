@@ -341,6 +341,40 @@ def test_a_formula_without_entropy_resources_keeps_standard_resource_installatio
     assert "    virtualenv_install_with_resources\n" in ruby
     assert "ENV.O0" not in ruby
     assert "without:" not in ruby
+    assert 'system libexec/"bin/python"' not in ruby
+
+
+@pytest.mark.parametrize(
+    ("names", "modules"),
+    [
+        (["hf-xet"], "hf_xet"),
+        (["litellm"], "litellm.rust_bridge._native"),
+        (["tokenizers"], "tokenizers.tokenizers"),
+        (
+            ["tokenizers", "litellm", "hf-xet"],
+            "hf_xet, litellm.rust_bridge._native, tokenizers.tokenizers",
+        ),
+    ],
+)
+def test_formula_smokes_native_imports_with_its_own_python(names: list[str], modules: str) -> None:
+    ruby = render_formula(
+        version="1.2.3",
+        url="https://files.pythonhosted.org/packages/aa/korvid-1.2.3.tar.gz",
+        sha256="a" * 64,
+        resources=[
+            Resource(name=name, url="https://files.pythonhosted.org/x", sha256="b" * 64)
+            for name in names
+        ],
+    )
+    test_block = " ".join(ruby.split("  test do\n", 1)[1].split())
+    smoke = f'system libexec/"bin/python", "-I", "-c", "import {modules}"'
+    offline = 'ENV["LITELLM_LOCAL_MODEL_COST_MAP"] = "true"'
+    assert smoke in test_block
+    if "litellm" in names:
+        assert offline in test_block
+        assert test_block.index(offline) < test_block.index(smoke)
+    else:
+        assert offline not in test_block
 
 
 def test_the_version_travels_into_the_test_block() -> None:
