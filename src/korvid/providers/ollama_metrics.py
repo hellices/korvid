@@ -36,9 +36,13 @@ def _seconds(value: Any) -> float | None:
     """Convert a non-negative nanosecond count to seconds, else `None`."""
     if isinstance(value, bool) or not isinstance(value, int | float):
         return None
-    if not math.isfinite(value) or value < 0:
+    try:
+        number = float(value)
+    except OverflowError:
         return None
-    return float(value) / NANOSECONDS_PER_SECOND
+    if not math.isfinite(number) or number < 0:
+        return None
+    return number / NANOSECONDS_PER_SECOND
 
 
 def _count(value: Any) -> int | None:

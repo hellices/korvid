@@ -136,3 +136,20 @@ def test_non_finite_durations_are_refused() -> None:
         "type": PROVIDER_METRICS_EVENT,
         "generation_seconds": 1.0,
     }
+
+
+def test_oversized_duration_integers_do_not_discard_valid_metrics() -> None:
+    event = decode_ollama_metrics(
+        {
+            "total_duration": 10**400,
+            "load_duration": -(10**400),
+            "prompt_eval_duration": 10**400,
+            "eval_duration": 1_000_000_000,
+            "eval_count": 7,
+        }
+    )
+    assert event == {
+        "type": PROVIDER_METRICS_EVENT,
+        "generation_seconds": 1.0,
+        "generation_tokens": 7,
+    }

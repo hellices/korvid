@@ -122,7 +122,9 @@ or any provider payload.
 the phase it is in rather than a generic spinner:
 
 - *waiting for model* — preparing or running the first provider round.
-- *running `<tool>`* — a tool call is executing (the registry tool name only).
+- *running `<tool>`* — a tool call is executing. Its human-readable label can
+  include arguments such as pod or namespace; diagnostic logs retain only
+  the registry tool name.
 - *composing answer* — a later provider round is streaming the answer after a
   tool result went back.
 
