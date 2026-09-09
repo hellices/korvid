@@ -91,6 +91,22 @@ def make_app(
     return app, calls
 
 
+def _hint_detail_body_ready(app: KorvidApp) -> bool:
+    """True once `#hint-detail-body` is mounted inside the active screen.
+
+    `isinstance(app.screen, HintDetailScreen)` becomes true before Textual
+    finishes mounting the screen's child widgets; querying `#hint-detail-body`
+    immediately after raises `NoMatches` on slow runners (issue #370).
+    """
+    from textual.css.query import NoMatches
+
+    try:
+        app.screen.query_one("#hint-detail-body")
+        return True
+    except NoMatches:
+        return False
+
+
 def _hint_detail_workers_done(app: KorvidApp) -> bool:
     """True once no hint-detail worker is pending or running - negative
     overlay assertions are meaningless while the worker could still push
@@ -615,6 +631,11 @@ async def test_i_on_troubled_row_opens_detail_overlay() -> None:
             lambda: isinstance(app.screen, HintDetailScreen),
             label="detail overlay open",
         )
+        await until(
+            pilot,
+            lambda: _hint_detail_body_ready(app),
+            label="hint-detail-body mounted",
+        )
         text = str(app.screen.query_one("#hint-detail-body").render())
         assert "CrashLoopBackOff" in text
         assert "restarting failed container app" in text
@@ -697,6 +718,11 @@ async def test_overlay_reports_unavailable_events_on_fetch_failure() -> None:
             lambda: isinstance(app.screen, HintDetailScreen),
             label="overlay open despite event failure",
         )
+        await until(
+            pilot,
+            lambda: _hint_detail_body_ready(app),
+            label="hint-detail-body mounted",
+        )
         text = str(app.screen.query_one("#hint-detail-body").render())
         assert "CrashLoopBackOff" in text
         assert "warning events unavailable" in text
@@ -765,7 +791,45 @@ async def test_overlay_opens_when_event_fetch_stalls(monkeypatch: Any) -> None:
             lambda: isinstance(app.screen, HintDetailScreen),
             label="overlay open despite stalled event fetch",
         )
+        await until(
+            pilot,
+            lambda: _hint_detail_body_ready(app),
+            label="hint-detail-body mounted",
+        )
         text = str(app.screen.query_one("#hint-detail-body").render())
         assert "CrashLoopBackOff" in text
         assert "warning events unavailable" in text
         stall.set()
+
+
+async def test_hint_detail_body_not_queryable_before_mount() -> None:
+    """Regression for issue #370: screen-active-before-child-mount race.
+
+    `push_screen` without `await` places the screen on the stack in the same
+    event-loop tick, so `isinstance(app.screen, HintDetailScreen)` is True
+    immediately, but `compose()` children are not yet mounted.
+    `_hint_detail_body_ready` must return False at that point; waiting with
+    `until` on the same helper is the correct fix.
+    """
+    from korvid.ui.widgets.hint_detail import HintDetailScreen
+
+    app, _calls = make_app([_pod("web-1", (_CRASH,))], events=[])
+    async with app.run_test() as pilot:
+        screen = HintDetailScreen(
+            title="web-1",
+            trouble=(_CRASH,),
+            events=[],
+            events_unavailable=True,
+        )
+        # Do NOT await: screen is active on the stack but children not mounted.
+        app.push_screen(screen)
+
+        # Same event-loop tick: screen is active but body is not yet mounted.
+        assert isinstance(app.screen, HintDetailScreen), "screen active on stack"
+        assert not _hint_detail_body_ready(app), "body must not be queryable before mount"
+
+        # GREEN: the fixed pattern — wait until body is actually mounted.
+        await until(pilot, lambda: _hint_detail_body_ready(app), label="hint-detail-body mounted")
+        text = str(app.screen.query_one("#hint-detail-body").render())
+        assert "CrashLoopBackOff" in text
+        assert "warning events unavailable" in text

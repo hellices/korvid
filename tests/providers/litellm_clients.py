@@ -13,6 +13,7 @@ closes what it cached, before and after, through this one helper.
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 from collections.abc import Callable
 from contextlib import suppress
@@ -20,8 +21,19 @@ from contextlib import suppress
 import litellm
 
 
+async def drain_logging() -> None:
+    """Finish queued and in-flight callbacks before their event loop is closed."""
+    from litellm.litellm_core_utils.logging_worker import GLOBAL_LOGGING_WORKER
+
+    # Drain queued callbacks even if their old worker stopped with its loop;
+    # flush also waits for callbacks already dequeued by a running worker.
+    await GLOBAL_LOGGING_WORKER.clear_queue()  # type: ignore[no-untyped-call]  # SDK has no return annotation.
+    await asyncio.wait_for(GLOBAL_LOGGING_WORKER.flush(), timeout=5)
+
+
 async def drop_cached_clients() -> None:
     """Close and forget every client LiteLLM cached, without leaking one."""
+    await drain_logging()
     cache = getattr(litellm.in_memory_llm_clients_cache, "cache_dict", {})
     for client in list(cache.values()):
         for name in ("aclose", "close"):

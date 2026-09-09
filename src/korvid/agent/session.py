@@ -60,10 +60,18 @@ import asyncio
 import contextlib
 from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator, AsyncIterator
+from dataclasses import replace
 
 from korvid.agent.conversation import ConversationState
+from korvid.agent.diagnostics import (
+    TurnDiagnostics,
+    TurnDiagnosticsFactory,
+    TurnDiagnosticsRecorder,
+    TurnOutcome,
+    log_diagnostics,
+)
 from korvid.agent.engine import AgentEngine, AgentTurnRequest
-from korvid.agent.events import AgentEvent, TurnInterrupted
+from korvid.agent.events import AgentEvent, TurnComplete, TurnInterrupted
 from korvid.agent.evidence import EvidenceLedger
 from korvid.agent.interaction import AgentUiBridge, ClusterFacts, InteractionContext
 from korvid.agent.model_policy import ResolvedAgentPolicy
@@ -262,6 +270,7 @@ class DefaultAgentSession(AgentSession):
         policy: ResolvedAgentPolicy,
         cluster: ClusterFacts,
         user_rules: tuple[str, ...] = (),
+        diagnostics_factory: TurnDiagnosticsFactory | None = None,
     ) -> None:
         self._engine = engine
         self._bridge = bridge
@@ -270,6 +279,7 @@ class DefaultAgentSession(AgentSession):
         self._gateway = gateway
         self._tools = tools
         self._user_rules = user_rules
+        self._diagnostics_factory = diagnostics_factory
         self._validate(policy)
         self._policy = policy
         self._cluster = cluster
@@ -297,6 +307,10 @@ class DefaultAgentSession(AgentSession):
         #: that never crossed the boundary cannot swallow a pending
         #: handoff note.
         self._last_started: InteractionContext | None = None
+        #: This turn's diagnostics recorder, held so an interruption the
+        #: engine never finalized can be finalized here (`finalize_interrupt`).
+        #: A terminal event the engine finalized clears it as it streams by.
+        self._recorder: TurnDiagnosticsRecorder | None = None
 
     # -- properties --------------------------------------------------------
 
@@ -367,6 +381,7 @@ class DefaultAgentSession(AgentSession):
         #: handoff is consumed against this, not against the attempt.
         delivered = self._gateway.latest_outbound_payload
         request: AgentTurnRequest | None = None
+        outcome = TurnOutcome.FAILED
         try:
             request = self._request(user_text)
             iterator = self._engine.run(request)
@@ -374,12 +389,21 @@ class DefaultAgentSession(AgentSession):
             try:
                 async for event in iterator:
                     self._commit_handoff(request, delivered)
+                    self._observe_diagnostics(event)
+                    if isinstance(event, TurnComplete):
+                        outcome = TurnOutcome.SUCCESS
+                    elif isinstance(event, TurnInterrupted):
+                        outcome = TurnOutcome.INTERRUPTED
                     yield event
             finally:
                 await self._release_iterator(iterator)
+        except asyncio.CancelledError:
+            outcome = TurnOutcome.INTERRUPTED
+            raise
         finally:
             self._commit_handoff(request, delivered)
             self._release_turn()
+            self._finalize_unobserved_diagnostics(outcome)
 
     def _request(self, user_text: str) -> AgentTurnRequest:
         """Snapshot the live workspace and compose this turn's request.
@@ -389,7 +413,14 @@ class DefaultAgentSession(AgentSession):
         pending handoff note is owed to a turn the *model actually saw* —
         so what was delivered is decided by `_commit_handoff`, after the
         boundary has spoken.
+
+        A fresh diagnostics recorder is minted here, one per started turn,
+        and carried on the request so the engine can time it. It is held on
+        the session too, so an interruption the engine never finalized can
+        be finalized in `finalize_interrupt`.
         """
+        recorder = self._diagnostics_factory.create() if self._diagnostics_factory else None
+        self._recorder = recorder
         interaction = self._bridge.snapshot()
         prompt = self._prompts.compose(
             user_text,
@@ -401,7 +432,36 @@ class DefaultAgentSession(AgentSession):
                 previous_interaction=self._last_started,
             ),
         )
-        return AgentTurnRequest(prompt=prompt, policy=self._policy, interaction=interaction)
+        return AgentTurnRequest(
+            prompt=prompt,
+            policy=self._policy,
+            interaction=interaction,
+            diagnostics=recorder,
+        )
+
+    def _observe_diagnostics(self, event: AgentEvent) -> None:
+        """Log the terminal diagnostic snapshot the engine attached, once.
+
+        Every engine-owned terminal path (`_complete`, `_stop`,
+        `_provider_error`, the fail-closed rollbacks) finalizes the recorder
+        and hangs the snapshot on its terminal event. The session logs it
+        the moment it streams by, and drops its hold on the recorder so a
+        later `finalize_interrupt` cannot finalize the same turn twice. A
+        user interruption reaches no such event, so the recorder survives
+        for `finalize_interrupt` to close.
+        """
+        snapshot = getattr(event, "diagnostics", None)
+        if isinstance(snapshot, TurnDiagnostics):
+            log_diagnostics(snapshot)
+            self._recorder = None
+
+    def _finalize_unobserved_diagnostics(self, outcome: TurnOutcome) -> None:
+        """Log failures before an engine terminal event; defer active interrupts."""
+        if self._recorder is None or self._awaiting_finalization:
+            return
+        recorder = self._recorder
+        self._recorder = None
+        log_diagnostics(recorder.snapshot or recorder.finalize(outcome))
 
     def _commit_handoff(
         self, request: AgentTurnRequest | None, delivered: OutboundSnapshot | None
@@ -469,7 +529,10 @@ class DefaultAgentSession(AgentSession):
         """Close the conversation the stopped turn left mid-flight.
 
         Returns:
-            The event describing what was retained.
+            The event describing what was retained, carrying the turn's
+            diagnostic snapshot (finalized as `INTERRUPTED`) when diagnostics
+            are enabled — an interruption the engine deliberately never
+            finalized, so it is closed here and never looks successful.
 
         Raises:
             RuntimeError: A turn is still running, or no turn awaits
@@ -480,7 +543,18 @@ class DefaultAgentSession(AgentSession):
         if not self._awaiting_finalization:
             raise RuntimeError("no interrupted turn to finalize")
         self._awaiting_finalization = False
-        return self._conversation.finalize_interrupt()
+        return self._finalize_interrupted_turn()
+
+    def _finalize_interrupted_turn(self) -> TurnInterrupted:
+        """Settle conversation and diagnostics for both UI stops and session close."""
+        interrupted = self._conversation.finalize_interrupt()
+        recorder = self._recorder
+        self._recorder = None
+        if recorder is None:
+            return interrupted
+        snapshot = recorder.snapshot or recorder.finalize(TurnOutcome.INTERRUPTED)
+        log_diagnostics(snapshot)
+        return replace(interrupted, diagnostics=snapshot)
 
     # -- retarget ----------------------------------------------------------
 
@@ -659,7 +733,7 @@ class DefaultAgentSession(AgentSession):
         await self._await_driver()
         await self._close_iterator()
         if self._conversation.turn_active:
-            self._conversation.finalize_interrupt()
+            self._finalize_interrupted_turn()
         self._awaiting_finalization = False
 
     async def _await_driver(self) -> None:

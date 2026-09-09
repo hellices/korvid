@@ -208,6 +208,7 @@ def test_the_agent_package_ships_exactly_the_harness_modules() -> None:
         "__init__.py",
         "conversation.py",
         "credentials.py",
+        "diagnostics.py",
         "engine.py",
         "events.py",
         "evidence.py",

@@ -41,15 +41,25 @@ import asyncio
 import contextlib
 import json
 import logging
-from collections.abc import AsyncGenerator, AsyncIterator, Mapping
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, cast
 
 from korvid.agent.conversation import ConversationBudgetError, ConversationState
+from korvid.agent.diagnostics import (
+    PROVIDER_METRICS_EVENT,
+    AgentPhase,
+    TurnDiagnostics,
+    TurnDiagnosticsRecorder,
+    TurnOutcome,
+    provider_metrics_are_empty,
+    provider_metrics_from_event,
+)
 from korvid.agent.engine import AgentEngine, AgentTurnRequest
 from korvid.agent.events import (
     AgentError,
     AgentEvent,
+    AgentPhaseChanged,
     TextDelta,
     ToolCallFinished,
     ToolCallStarted,
@@ -60,6 +70,7 @@ from korvid.agent.outbound import OutboundPolicyError, OutboundRequestTooLarge
 from korvid.agent.provider import OperatorSafeProviderError
 from korvid.agent.request_gateway import PreparedGatewayRequest, RequestGateway
 from korvid.agent.tool_harness import ToolExecution, ToolHarness
+from korvid.tools.registry import tool_def
 
 logger = logging.getLogger(__name__)
 
@@ -258,13 +269,16 @@ class NativeAgentEngine(AgentEngine):
             self._conversation.start_turn(request.prompt.user_message)
         except ConversationBudgetError:
             logger.warning("history budget: rejected a prompt that cannot fit (%d chars)", budget)
+            diagnostics = self._finalize(request.diagnostics, TurnOutcome.FAILED)
             yield AgentError(
                 message=(
                     f"request too large for the history budget ({budget} chars) "
                     "— shorten the question"
                 )
             )
-            yield TurnComplete(input_tokens=0, output_tokens=0, estimated=False)
+            yield TurnComplete(
+                input_tokens=0, output_tokens=0, estimated=False, diagnostics=diagnostics
+            )
             return
         try:
             async for event in self._iterate(request):
@@ -275,8 +289,14 @@ class NativeAgentEngine(AgentEngine):
             # last handoff that really happened.
             turn_in, turn_out, estimated = self._conversation.rollback_turn()
             logger.warning("turn rolled back: %s", exc.headline)
+            diagnostics = self._finalize(request.diagnostics, TurnOutcome.FAILED)
             yield AgentError(message=_bounded(f"{exc.headline}: {exc}"))
-            yield TurnComplete(input_tokens=turn_in, output_tokens=turn_out, estimated=estimated)
+            yield TurnComplete(
+                input_tokens=turn_in,
+                output_tokens=turn_out,
+                estimated=estimated,
+                diagnostics=diagnostics,
+            )
         except Exception as exc:
             # Nothing expected this: a collaborator outside the tool
             # boundary — the gateway, the conversation itself — raised
@@ -304,22 +324,29 @@ class NativeAgentEngine(AgentEngine):
             if round_.done or self._interrupted:
                 return
         limit = request.policy.max_iterations
-        for event in self._stop(f"iteration limit reached ({limit}) — refine the question"):
+        for event in self._stop(
+            f"iteration limit reached ({limit}) — refine the question", request.diagnostics
+        ):
             yield event
 
     async def _round(
         self, request: AgentTurnRequest, iteration: int, round_: _Round
     ) -> AsyncGenerator[AgentEvent, None]:
         """Send one request, then act on exactly what came back."""
+        recorder = request.diagnostics
         if self._over_history_budget(request.policy, iteration):
             round_.done = True
             budget = request.policy.max_history_chars
             for event in self._stop(
-                f"history budget exceeded mid-turn ({budget} chars) — turn ended early"
+                f"history budget exceeded mid-turn ({budget} chars) — turn ended early",
+                recorder,
             ):
                 yield event
             return
-        prepared = self._prepare(request, iteration + 1)
+        if recorder is not None:
+            recorder.begin_round()
+            yield _round_phase(iteration)
+        prepared = self._prepare_measured(request, iteration + 1, recorder)
         # Both counters are armed synchronously, before the first await, so
         # a cancellation on the very first event still finds them open.
         self._conversation.start_iteration(prepared.prompt_estimate)
@@ -328,27 +355,49 @@ class NativeAgentEngine(AgentEngine):
             async for event in self._consume(
                 prepared,
                 round_,
+                recorder,
                 response_limit=request.policy.max_history_chars,
             ):
                 yield event
         except Exception as exc:  # provider transport, adapter, or protocol
             round_.done = True
-            yield self._provider_error(exc)
+            yield self._provider_error(exc, recorder)
             return
+        async for event in self._finish_round(request, round_, iteration, recorder):
+            yield event
+
+    async def _finish_round(
+        self,
+        request: AgentTurnRequest,
+        round_: _Round,
+        iteration: int,
+        recorder: TurnDiagnosticsRecorder | None,
+    ) -> AsyncGenerator[AgentEvent, None]:
+        """Close a round that streamed cleanly: end timing, then act on it.
+
+        Split out of `_round` so the round's normal tail — closing the
+        diagnostics round, capping calls, and choosing between completing
+        and dispatching — is one named method rather than more of an
+        already-long one (ruff C901).
+        """
         if self._interrupted:
             return
+        if recorder is not None:
+            recorder.end_round()
         _apply_call_cap(round_, request.policy)
         self._conversation.append_assistant(round_.text, _stored_calls(round_.calls))
         if not round_.calls and not round_.discarded:
             round_.done = True
-            yield self._complete(round_.text)
+            yield self._complete(round_.text, recorder)
             return
-        async for event in self._dispatch(round_):
+        async for event in self._dispatch(round_, iteration + 1, recorder):
             yield event
-        async for event in self._after_dispatch(round_):
+        async for event in self._after_dispatch(round_, recorder):
             yield event
 
-    async def _after_dispatch(self, round_: _Round) -> AsyncGenerator[AgentEvent, None]:
+    async def _after_dispatch(
+        self, round_: _Round, recorder: TurnDiagnosticsRecorder | None
+    ) -> AsyncGenerator[AgentEvent, None]:
         """Decide how the round ends, now that every call has an answer.
 
         Split out of `_round` so each ending — interrupted, a direct-open
@@ -361,7 +410,7 @@ class NativeAgentEngine(AgentEngine):
             # A direct-open call's fixed acknowledgement ends the turn here:
             # no further provider round is needed or wanted.
             round_.done = True
-            for event in self._finish_terminal(round_.terminal_message):
+            for event in self._finish_terminal(round_.terminal_message, recorder):
                 yield event
             return
         if not round_.calls:
@@ -369,7 +418,9 @@ class NativeAgentEngine(AgentEngine):
             # replay the same failure with the same history, so stop here
             # rather than burn the iteration budget on it.
             round_.done = True
-            for event in self._stop("no usable tool call in the response — turn ended early"):
+            for event in self._stop(
+                "no usable tool call in the response — turn ended early", recorder
+            ):
                 yield event
 
     # -- one provider request ---------------------------------------------
@@ -406,6 +457,27 @@ class NativeAgentEngine(AgentEngine):
                     removed,
                 )
 
+    def _prepare_measured(
+        self,
+        request: AgentTurnRequest,
+        iteration: int,
+        recorder: TurnDiagnosticsRecorder | None,
+    ) -> PreparedGatewayRequest:
+        """Prepare the round's request, bracketing it with the prepare boundary.
+
+        The prepare timing is recorded around the whole shrink-to-fit loop:
+        every ceiling retry is real preparation latency this round paid. A
+        preparation that raises (`OutboundPolicyError`) leaves `prepare`
+        unfinished, so the round's `prepare_seconds` stays `None` — the
+        boundary honestly never completed.
+        """
+        if recorder is not None:
+            recorder.prepare_started()
+        prepared = self._prepare(request, iteration)
+        if recorder is not None:
+            recorder.prepare_finished()
+        return prepared
+
     def _system_prefix(self, request: AgentTurnRequest) -> list[dict[str, Any]]:
         """The ephemeral system message for this round.
 
@@ -424,6 +496,7 @@ class NativeAgentEngine(AgentEngine):
         self,
         prepared: PreparedGatewayRequest,
         round_: _Round,
+        recorder: TurnDiagnosticsRecorder | None,
         *,
         response_limit: int,
     ) -> AsyncGenerator[AgentEvent, None]:
@@ -432,6 +505,8 @@ class NativeAgentEngine(AgentEngine):
         # previous turn already spent is still unusable, because the call
         # that spent it is still stored and still has its own result.
         seen: set[str] = set(self._conversation.retained_tool_call_ids)
+        if recorder is not None:
+            recorder.request_started()
         # `RequestGateway.stream` is an async generator function; its
         # declared return type is the narrower `AsyncIterator`, so the cast
         # names what the object already is. Closing it matters: an early
@@ -439,13 +514,16 @@ class NativeAgentEngine(AgentEngine):
         # rather than leave it for the garbage collector to notice.
         stream = cast(
             "AsyncGenerator[dict[str, Any], None]",
-            self._gateway.stream(prepared, self._conversation.mark_transmitted),
+            self._gateway.stream(prepared, _handoff_callback(recorder, self._conversation)),
         )
         event_count = 0
         response_chars = 0
+        metrics_seen = False
+        content_seen = False
         async with contextlib.aclosing(stream) as events:
             async for event in events:
                 event_count += 1
+                content_seen = self._note_stream_event(event, event_count, recorder, content_seen)
                 response_chars += _stream_event_chars(event)
                 if event_count > response_limit or response_chars > response_limit:
                     raise ProviderResponseLimitError(
@@ -464,8 +542,51 @@ class NativeAgentEngine(AgentEngine):
                     self._conversation.commit_usage(
                         _as_int(event.get("input_tokens")), _as_int(event.get("output_tokens"))
                     )
+                elif kind == PROVIDER_METRICS_EVENT:
+                    metrics_seen = self._maybe_record_metrics(event, recorder, metrics_seen)
                 if self._interrupted:
                     return
+
+    @staticmethod
+    def _note_stream_event(
+        event: Mapping[str, Any],
+        event_count: int,
+        recorder: TurnDiagnosticsRecorder | None,
+        content_seen: bool,
+    ) -> bool:
+        """Distinguish provider progress from the first user-facing content."""
+        if recorder is None:
+            return content_seen
+        if event_count == 1:
+            recorder.first_model_event()
+        kind = event.get("type")
+        if not content_seen and (
+            kind == "tool_call" or (kind == "text_delta" and event.get("text"))
+        ):
+            recorder.first_content_event()
+            return True
+        return content_seen
+
+    @staticmethod
+    def _maybe_record_metrics(
+        event: Mapping[str, Any],
+        recorder: TurnDiagnosticsRecorder | None,
+        metrics_seen: bool,
+    ) -> bool:
+        """Record the round's first non-empty provider-metrics event.
+
+        A no-op without a recorder, once metrics were already recorded for
+        this round, or when the event decodes to nothing — so a round never
+        carries an empty metrics record. Returns whether metrics are now
+        recorded, to be threaded back as the loop's `metrics_seen`.
+        """
+        if recorder is None or metrics_seen:
+            return metrics_seen
+        metrics = provider_metrics_from_event(event)
+        if provider_metrics_are_empty(metrics):
+            return metrics_seen
+        recorder.record_provider_metrics(metrics)
+        return True
 
     def _collect_call(self, event: Mapping[str, Any], round_: _Round, seen: set[str]) -> None:
         """Validate one streamed call and file it as kept or discarded.
@@ -495,7 +616,9 @@ class NativeAgentEngine(AgentEngine):
 
     # -- tool calls --------------------------------------------------------
 
-    async def _dispatch(self, round_: _Round) -> AsyncGenerator[AgentEvent, None]:
+    async def _dispatch(
+        self, round_: _Round, round_number: int, recorder: TurnDiagnosticsRecorder | None
+    ) -> AsyncGenerator[AgentEvent, None]:
         """Run the kept calls in order, then report the discarded ones.
 
         Strictly sequential: a round may legitimately carry several calls,
@@ -504,46 +627,72 @@ class NativeAgentEngine(AgentEngine):
         """
         last = len(round_.calls) - 1
         for index, call in enumerate(round_.calls):
-            yield ToolCallStarted(call_id=call.call_id, name=call.name, arguments=call.arguments)
-            try:
-                execution = await self._execute(call)
-            except OutboundPolicyError:
-                # A blocked result cannot be shown to the model. Close the
-                # row the UI is showing, then let the turn roll back.
-                yield ToolCallFinished(
-                    call_id=call.call_id, name=call.name, ok=False, summary="blocked"
-                )
-                raise
-            except Exception as exc:  # executor, bridge or harness bug
-                execution = self._contain(call, exc)
-            if execution.terminal_message is not None:
-                # Recorded once we know dispatch went through; checked by
-                # the caller only after every call in the round is answered.
-                round_.terminal_message = execution.terminal_message
-            text = execution.outcome.text
-            if round_.excess and index == last:
-                text = self._tools.cap_text(
-                    text,
-                    suffix=_excess_notice(round_.excess),
-                )
-            yield ToolCallFinished(
-                call_id=call.call_id,
-                name=call.name,
-                # The producer's verdict, never the text's shape.
-                ok=not execution.outcome.error,
-                summary=text[:SUMMARY_CHARS],
-            )
-            self._conversation.append_tool_result(
-                call.call_id,
-                text,
-                execution.outcome.redactions,
-                error=execution.outcome.error,
-            )
+            async for event in self._run_call(round_, index, last, call, round_number, recorder):
+                yield event
             if self._interrupted:
                 return
         for call, reason in round_.discarded:
             yield ToolCallStarted(call_id=call.call_id, name=call.name, arguments=call.arguments)
             yield ToolCallFinished(call_id=call.call_id, name=call.name, ok=False, summary=reason)
+
+    async def _run_call(
+        self,
+        round_: _Round,
+        index: int,
+        last: int,
+        call: _Call,
+        round_number: int,
+        recorder: TurnDiagnosticsRecorder | None,
+    ) -> AsyncGenerator[AgentEvent, None]:
+        """Run exactly one kept call, timing it and announcing the tool phase.
+
+        The `RUNNING_TOOL` phase and the tool timing bracket the same
+        execution: a blocked result is still a tool that ran, so it is timed
+        and marked failed before the turn rolls back.
+        """
+        if recorder is not None:
+            name = call.name if tool_def(call.name) is not None else "unknown tool"
+            yield AgentPhaseChanged(
+                phase=AgentPhase.RUNNING_TOOL, round_number=round_number, tool=name
+            )
+            recorder.begin_tool(name)
+        yield ToolCallStarted(call_id=call.call_id, name=call.name, arguments=call.arguments)
+        try:
+            execution = await self._execute(call)
+        except OutboundPolicyError:
+            # A blocked result cannot be shown to the model. Close the row
+            # the UI is showing, then let the turn roll back.
+            yield ToolCallFinished(
+                call_id=call.call_id, name=call.name, ok=False, summary="blocked"
+            )
+            if recorder is not None:
+                recorder.end_tool(ok=False)
+            raise
+        except Exception as exc:  # executor, bridge or harness bug
+            execution = self._contain(call, exc)
+        ok = not execution.outcome.error
+        if recorder is not None:
+            recorder.end_tool(ok=ok)
+        if execution.terminal_message is not None:
+            # Recorded once we know dispatch went through; checked by the
+            # caller only after every call in the round is answered.
+            round_.terminal_message = execution.terminal_message
+        text = execution.outcome.text
+        if round_.excess and index == last:
+            text = self._tools.cap_text(text, suffix=_excess_notice(round_.excess))
+        yield ToolCallFinished(
+            call_id=call.call_id,
+            name=call.name,
+            # The producer's verdict, never the text's shape.
+            ok=ok,
+            summary=text[:SUMMARY_CHARS],
+        )
+        self._conversation.append_tool_result(
+            call.call_id,
+            text,
+            execution.outcome.redactions,
+            error=execution.outcome.error,
+        )
 
     async def _execute(self, call: _Call) -> ToolExecution:
         """Route one kept call, refusing arguments no tool could accept."""
@@ -592,7 +741,21 @@ class NativeAgentEngine(AgentEngine):
             return False
         return self._conversation.history_chars > policy.max_history_chars
 
-    def _complete(self, text: str) -> TurnComplete:
+    def _finalize(
+        self, recorder: TurnDiagnosticsRecorder | None, outcome: TurnOutcome
+    ) -> TurnDiagnostics | None:
+        """Close the turn's recorder, or report nothing when diagnostics are off.
+
+        The one place a terminal path turns a live recorder into the frozen
+        snapshot it attaches to its terminal event. Called at most once per
+        turn on every engine-owned terminal path (a user interruption is the
+        session's to finalize instead).
+        """
+        if recorder is None:
+            return None
+        return recorder.finalize(outcome)
+
+    def _complete(self, text: str, recorder: TurnDiagnosticsRecorder | None) -> TurnComplete:
         """Close a turn that answered, reporting how it cited its evidence."""
         turn_in, turn_out, estimated = self._conversation.complete_turn()
         cited, uncited, duplicated = self._tools.evidence.check_citations(text)
@@ -603,9 +766,12 @@ class NativeAgentEngine(AgentEngine):
             cited=cited,
             uncited=uncited,
             duplicated=duplicated,
+            diagnostics=self._finalize(recorder, TurnOutcome.SUCCESS),
         )
 
-    def _finish_terminal(self, message: str) -> list[AgentEvent]:
+    def _finish_terminal(
+        self, message: str, recorder: TurnDiagnosticsRecorder | None
+    ) -> list[AgentEvent]:
         """Close a turn a direct-open call ended, with no further round.
 
         The fixed acknowledgement becomes the turn's own final assistant
@@ -617,17 +783,28 @@ class NativeAgentEngine(AgentEngine):
         """
         self._conversation.start_iteration()
         self._conversation.append_assistant(message)
-        return [TextDelta(text=message), self._complete(message)]
+        return [TextDelta(text=message), self._complete(message, recorder)]
 
-    def _stop(self, message: str) -> list[AgentEvent]:
-        """End a turn early: one visible reason, then terminal accounting."""
+    def _stop(self, message: str, recorder: TurnDiagnosticsRecorder | None) -> list[AgentEvent]:
+        """End a turn early: one visible reason, then terminal accounting.
+
+        Keep the existing terminal usage accounting, but distinguish an
+        exhausted or unusable turn from one that actually answered.
+        """
         turn_in, turn_out, estimated = self._conversation.complete_turn()
         return [
             AgentError(message=message),
-            TurnComplete(input_tokens=turn_in, output_tokens=turn_out, estimated=estimated),
+            TurnComplete(
+                input_tokens=turn_in,
+                output_tokens=turn_out,
+                estimated=estimated,
+                diagnostics=self._finalize(recorder, TurnOutcome.FAILED),
+            ),
         ]
 
-    def _provider_error(self, exc: Exception) -> AgentError:
+    def _provider_error(
+        self, exc: Exception, recorder: TurnDiagnosticsRecorder | None
+    ) -> AgentError:
         """Unwind a failed round, keeping the cost the request really had.
 
         The round's own messages go — an assistant message whose calls can
@@ -636,17 +813,50 @@ class NativeAgentEngine(AgentEngine):
         provider lived long enough to report usage; one that never reached
         the provider is charged nothing. No `TurnComplete` follows: a turn
         that failed must never be reported in the shape of one that
-        succeeded.
+        succeeded, so the `FAILED` snapshot rides this terminal `AgentError`.
         """
         self._conversation.abandon_iteration()
         self._conversation.complete_turn()
         logger.warning("provider stream failed: %s", type(exc).__name__)
-        return AgentError(message=_failure_message(exc))
+        return AgentError(
+            message=_failure_message(exc),
+            diagnostics=self._finalize(recorder, TurnOutcome.FAILED),
+        )
 
 
 def _stored_calls(calls: list[_Call]) -> list[dict[str, str]]:
     """The kept calls in the shape durable history stores them."""
     return [{"id": call.call_id, "name": call.name, "arguments": call.arguments} for call in calls]
+
+
+def _round_phase(iteration: int) -> AgentPhaseChanged:
+    """The phase a round opens in: waiting on the first, composing after.
+
+    The first round of a turn is the model's first pass — the panel shows
+    "waiting for model". Every later round follows at least one tool result,
+    so the model is now composing an answer from what it learned.
+    """
+    phase = AgentPhase.WAITING_FOR_MODEL if iteration == 0 else AgentPhase.COMPOSING_ANSWER
+    return AgentPhaseChanged(phase=phase, round_number=iteration + 1)
+
+
+def _handoff_callback(
+    recorder: TurnDiagnosticsRecorder | None, conversation: ConversationState
+) -> Callable[[], None]:
+    """The gateway's one-shot handoff callback, timed when diagnostics are on.
+
+    The gateway calls this exactly once, the instant handoff is proven; it
+    must always mark the conversation transmitted, and — when a recorder is
+    present — record the round's handoff boundary in the same step.
+    """
+    if recorder is None:
+        return conversation.mark_transmitted
+
+    def on_transmitted() -> None:
+        recorder.request_handed_off()
+        conversation.mark_transmitted()
+
+    return on_transmitted
 
 
 def _honors_terminal(round_: _Round) -> bool:

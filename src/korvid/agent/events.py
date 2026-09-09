@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from korvid.agent.diagnostics import AgentPhase, TurnDiagnostics
+
 
 @dataclass(frozen=True)
 class TextDelta:
@@ -26,6 +28,24 @@ class ToolCallFinished:
 
 
 @dataclass(frozen=True)
+class AgentPhaseChanged:
+    """The engine crossed into a new observable phase of the turn (issue #319).
+
+    Carries only what the status line needs: the phase, the one-based
+    provider round it belongs to, and — for `RUNNING_TOOL` — the registry
+    tool name. It never carries a prompt, tool arguments, a tool result, or
+    any provider payload, so the panel can render it verbatim. Emitted only
+    when the turn is recording diagnostics; a turn without a recorder yields
+    none and the panel falls back to its plain spinner.
+    """
+
+    phase: AgentPhase
+    round_number: int
+    #: The registry tool name for `RUNNING_TOOL`; `None` for model phases.
+    tool: str | None = None
+
+
+@dataclass(frozen=True)
 class TurnComplete:
     input_tokens: int
     output_tokens: int
@@ -40,6 +60,10 @@ class TurnComplete:
     #: support, and collapsing it silently would make a duplicated
     #: citation look like a single clean one.
     duplicated: tuple[str, ...] = ()
+    #: The terminal latency-diagnostics snapshot for this turn (issue #319),
+    #: or `None` when the turn was not recording diagnostics. A completed
+    #: turn's snapshot reports `TurnOutcome.SUCCESS`.
+    diagnostics: TurnDiagnostics | None = None
 
 
 @dataclass(frozen=True)
@@ -54,13 +78,30 @@ class TurnInterrupted:
     input_tokens: int
     output_tokens: int
     estimated: bool
+    #: The terminal latency-diagnostics snapshot for this turn (issue #319),
+    #: or `None` when the turn was not recording diagnostics. An interrupted
+    #: turn's snapshot reports `TurnOutcome.INTERRUPTED` — never a
+    #: successful-looking outcome.
+    diagnostics: TurnDiagnostics | None = None
 
 
 @dataclass(frozen=True)
 class AgentError:
     message: str
+    #: The terminal latency-diagnostics snapshot when this error *ends* the
+    #: turn (a provider failure, issue #319), or `None` when the error is
+    #: recoverable and a `TurnComplete` follows it — a recoverable error
+    #: never carries a second snapshot. A terminal error's snapshot reports
+    #: `TurnOutcome.FAILED`.
+    diagnostics: TurnDiagnostics | None = None
 
 
 AgentEvent = (
-    TextDelta | ToolCallStarted | ToolCallFinished | TurnComplete | TurnInterrupted | AgentError
+    TextDelta
+    | ToolCallStarted
+    | ToolCallFinished
+    | AgentPhaseChanged
+    | TurnComplete
+    | TurnInterrupted
+    | AgentError
 )

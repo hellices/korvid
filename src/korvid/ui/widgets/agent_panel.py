@@ -18,9 +18,16 @@ from textual.containers import Vertical, VerticalScroll
 from textual.timer import Timer
 from textual.widgets import Input, Static
 
+from korvid.agent.diagnostics import (
+    AgentPhase,
+    TurnDiagnostics,
+    TurnOutcome,
+    format_diagnostics,
+)
 from korvid.agent.events import (
     AgentError,
     AgentEvent,
+    AgentPhaseChanged,
     TextDelta,
     ToolCallFinished,
     ToolCallStarted,
@@ -163,6 +170,10 @@ class AgentPanel(Vertical):
         padding: 0 1;
         color: $text-error;
     }
+    AgentPanel .diagnostics-line {
+        padding: 0 0 0 1;
+        color: $text-muted;
+    }
     """
 
     def __init__(self) -> None:
@@ -296,6 +307,8 @@ class AgentPanel(Vertical):
         match event:
             case TextDelta():
                 self._apply_text_delta(event)
+            case AgentPhaseChanged():
+                self._apply_phase_changed(event)
             case ToolCallStarted():
                 self._apply_tool_started(event)
             case ToolCallFinished():
@@ -309,6 +322,18 @@ class AgentPanel(Vertical):
 
     def _apply_text_delta(self, event: TextDelta) -> None:
         self._append_text(event.text)
+
+    def _apply_phase_changed(self, event: AgentPhaseChanged) -> None:
+        """Reflect the engine's observable phase in the status line (issue #319).
+
+        The three phases read differently so 'is it waiting on the model,
+        running a tool, or writing the answer?' is never ambiguous. Carries
+        no prompt or tool payload, so the phase text is rendered verbatim.
+        """
+        if event.phase is AgentPhase.RUNNING_TOOL and event.tool:
+            self._set_status(f"running {event.tool}")
+        else:
+            self._set_status(event.phase.value)
 
     def _apply_tool_started(self, event: ToolCallStarted) -> None:
         self._end_stream()
@@ -338,6 +363,7 @@ class AgentPanel(Vertical):
                 classes="error-msg",
             )
         )
+        self._render_diagnostics(event.diagnostics)
         self._clear_status()
         # AgentError may be terminal (provider failure) — let the user retry.
         self.query_one("#agent-input", Input).disabled = False
@@ -356,6 +382,32 @@ class AgentPanel(Vertical):
             tier=self._tier,
         )
 
+    def _render_diagnostics(self, snapshot: TurnDiagnostics | None) -> None:
+        """Mount one compact, dim latency summary for a terminal turn (issue #319).
+
+        Rendered only when the turn recorded diagnostics; a turn without a
+        recorder shows nothing extra. A failed or interrupted outcome is
+        never allowed to read like a clean success — its outcome word leads
+        the line so the timings are not mistaken for a completed answer's.
+        The text is `format_diagnostics`' numeric-only rendering; no prompt,
+        tool argument, or provider payload reaches it.
+        """
+        if snapshot is None:
+            return
+        summary = format_diagnostics(snapshot)
+        text = (
+            summary
+            if snapshot.outcome is TurnOutcome.SUCCESS
+            else f"{snapshot.outcome.value} · {summary}"
+        )
+        self._mount_entry(
+            ChatEntry(
+                Text(text, style="dim"),
+                raw=text,
+                classes="diagnostics-line",
+            )
+        )
+
     def _apply_turn_complete(self, event: TurnComplete) -> None:
         self._end_stream()
         self._note_citation_problems(event)
@@ -363,6 +415,7 @@ class AgentPanel(Vertical):
         self._clear_status()
         self.query_one("#agent-input", Input).disabled = False
         self._finish_turn_header(event.input_tokens, event.output_tokens, event.estimated)
+        self._render_diagnostics(event.diagnostics)
 
     def _apply_turn_interrupted(self, event: TurnInterrupted) -> None:
         # A stop is a normal outcome, not an error: the partial answer
@@ -381,6 +434,7 @@ class AgentPanel(Vertical):
         inp.disabled = False
         inp.focus()
         self._finish_turn_header(event.input_tokens, event.output_tokens, event.estimated)
+        self._render_diagnostics(event.diagnostics)
 
     # --- internals ----------------------------------------------------------
 

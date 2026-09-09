@@ -133,6 +133,29 @@ change runs the suite once, on 3.12, and Windows starts and syncs before
 skipping its pytest step. What is saved is three redundant suite runs, not
 the matrix.
 
+### Windows documentation harness startup diagnostics
+
+The landing-page JavaScript behavior tests keep a 10-second harness deadline.
+Historical Windows failures stopped before the first `imports-complete`
+milestone (runs 34231801365, 34238827627, 34252667381, and 34257752860;
+see [issue #371](https://github.com/hellices/korvid/issues/371)). The failure
+has not recurred since the startup probes were added, so its root cause remains
+unproven. A timeout records bounded harness output, then runs separately
+bounded controls in this order:
+
+1. an isolated Python child process, to test generic child-process launch and
+   captured-pipe progress independently of Node;
+2. `node --version`, to establish that the Node executable starts and exits;
+3. a CJS probe whose first milestone confirms JavaScript/V8 execution and
+   whose later milestones distinguish harness-file access and an ESM loader
+   import.
+
+The diagnostics record only the presence of selected Node environment
+variables, never their values. Preserve the original exception and deadline:
+do not turn a recurrence green by retrying, skipping, or extending the timeout.
+If every post-timeout probe succeeds, report the result as inconclusive because
+the transient interference may already have cleared.
+
 ## 4. Release — `.github/workflows/release.yml`, on tag
 
 `verify` → `build` → `smoke` → `sbom` → `offline` → `collect` → `attest` →

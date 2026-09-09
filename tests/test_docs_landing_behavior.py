@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 from html.parser import HTMLParser
 from pathlib import Path
 
@@ -15,6 +16,7 @@ JS_TESTS = ROOT / "tests" / "js"
 _DIAGNOSTIC_LIMIT = 4096
 _STARTUP_PROBE_TIMEOUT = 5
 _NODE_ENV_NAMES = ("NODE_OPTIONS", "NODE_PATH", "NODE_EXTRA_CA_CERTS")
+_PYTHON_PROCESS_PROBE = 'import os; os.write(2, b"probe:python-child-started\\n")'
 _CJS_STARTUP_PROBE = r"""
 const fs = require("node:fs");
 fs.writeSync(2, "probe:cjs-boot\n");
@@ -144,6 +146,16 @@ def _run_harness(name: str) -> subprocess.CompletedProcess[str]:
     except subprocess.TimeoutExpired as error:
         harness = str(JS_TESTS / name)
         present = ", ".join(name for name in _NODE_ENV_NAMES if name in os.environ) or "<none>"
+        process_probe = _run_startup_probe(
+            "Python child process control",
+            [
+                str(Path(sys.executable).resolve()),
+                "-I",
+                "-S",
+                "-c",
+                _PYTHON_PROCESS_PROBE,
+            ],
+        )
         version_probe = _run_startup_probe("node --version", [node, "--version"])
         loader_probe = _run_startup_probe(
             "CJS file and ESM loader",
@@ -158,6 +170,7 @@ def _run_harness(name: str) -> subprocess.CompletedProcess[str]:
                     f"Node environment present: {present}",
                     f"Captured stdout:\n{_bounded_timeout_output(error.stdout)}",
                     f"Captured stderr:\n{_bounded_timeout_output(error.stderr)}",
+                    process_probe,
                     version_probe,
                     loader_probe,
                 )
@@ -170,6 +183,14 @@ def test_harness_timeout_preserves_bounded_diagnostics(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     resolved = str(ROOT / "node-diagnostic.exe")
+    python = str(Path(sys.executable).resolve())
+    process_control = [
+        python,
+        "-I",
+        "-S",
+        "-c",
+        'import os; os.write(2, b"probe:python-child-started\\n")',
+    ]
     calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
     original_timeout = subprocess.TimeoutExpired(
         [resolved, str(JS_TESTS / "scene_fallback_harness.mjs")],
@@ -188,6 +209,13 @@ def test_harness_timeout_preserves_bounded_diagnostics(
         assert isinstance(command, list)
         if len(calls) == 1:
             raise original_timeout
+        if command == process_control:
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                "",
+                "probe:python-child-started\n",
+            )
         if command == [resolved, "--version"]:
             return subprocess.CompletedProcess(command, 0, "v22.23.2\n", "")
         raise subprocess.TimeoutExpired(
@@ -207,26 +235,31 @@ def test_harness_timeout_preserves_bounded_diagnostics(
         _run_harness("scene_fallback_harness.mjs")
 
     assert raised.value is original_timeout
-    assert len(calls) == 3
+    assert len(calls) == 4
     command = calls[0][0][0]
     options = calls[0][1]
     assert command == [resolved, str(JS_TESTS / "scene_fallback_harness.mjs")]
     assert options["timeout"] == 10
     assert options["stdin"] is subprocess.DEVNULL
-    assert calls[1][0][0] == [resolved, "--version"]
+    assert calls[1][0][0] == process_control
     assert calls[1][1]["timeout"] == 5
     assert calls[1][1]["stdin"] is subprocess.DEVNULL
-    cjs_command = calls[2][0][0]
+    assert calls[2][0][0] == [resolved, "--version"]
+    assert calls[2][1]["timeout"] == 5
+    assert calls[2][1]["stdin"] is subprocess.DEVNULL
+    cjs_command = calls[3][0][0]
     assert isinstance(cjs_command, list)
     assert cjs_command[:2] == [resolved, "--eval"]
     assert cjs_command[-1] == str(JS_TESTS / "scene_fallback_harness.mjs")
-    assert calls[2][1]["timeout"] == 5
-    assert calls[2][1]["stdin"] is subprocess.DEVNULL
+    assert calls[3][1]["timeout"] == 5
+    assert calls[3][1]["stdin"] is subprocess.DEVNULL
     note = "\n".join(raised.value.__notes__)
     assert f"Node executable: {resolved}" in note
     assert "Node stdin: subprocess.DEVNULL" in note
     assert "Node environment present: NODE_OPTIONS" in note
     assert "must-not-appear" not in note
+    assert "Startup probe: Python child process control" in note
+    assert "probe:python-child-started" in note
     assert "Startup probe: node --version" in note
     assert "status: exit 0" in note
     assert "v22.23.2" in note

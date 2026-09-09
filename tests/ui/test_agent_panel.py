@@ -5,9 +5,18 @@ from __future__ import annotations
 from textual.app import App, ComposeResult
 from textual.widgets import Input, Static
 
+from korvid.agent.diagnostics import (
+    AgentPhase,
+    ProviderRoundDiagnostics,
+    ToolDiagnostics,
+    TurnDiagnostics,
+    TurnOutcome,
+    format_diagnostics,
+)
 from korvid.agent.events import (
     AgentError,
     AgentEvent,
+    AgentPhaseChanged,
     TextDelta,
     ToolCallFinished,
     ToolCallStarted,
@@ -594,3 +603,144 @@ async def test_a_clean_answer_gets_no_citation_note() -> None:
         await pilot.pause()
 
         assert "unsupported" not in _log_text(app).lower()
+
+
+# --- latency diagnostics (issue #319) ---
+
+
+def _diag(
+    outcome: TurnOutcome, *, rounds: int = 1, tools: tuple[ToolDiagnostics, ...] = ()
+) -> TurnDiagnostics:
+    return TurnDiagnostics(
+        correlation_id="corr-1234",
+        outcome=outcome,
+        total_seconds=3.0,
+        rounds=tuple(
+            ProviderRoundDiagnostics(
+                round_number=n + 1,
+                prepare_seconds=0.1,
+                handoff_seconds=0.1,
+                first_event_seconds=0.5,
+                total_seconds=1.0,
+            )
+            for n in range(rounds)
+        ),
+        tools=tools,
+    )
+
+
+async def test_phase_waiting_for_model_updates_status() -> None:
+    """A turn that records diagnostics distinguishes waiting for the model
+    from running a tool or composing — the status line says which."""
+    app = PanelApp()
+    async with app.run_test() as pilot:
+        panel = app.query_one(AgentPanel)
+        panel.begin_turn("hi")
+        panel.apply_event(AgentPhaseChanged(phase=AgentPhase.WAITING_FOR_MODEL, round_number=1))
+        await pilot.pause()
+        assert "waiting for model" in _status_text(app)
+
+
+async def test_phase_running_tool_names_the_tool() -> None:
+    app = PanelApp()
+    async with app.run_test() as pilot:
+        panel = app.query_one(AgentPanel)
+        panel.begin_turn("hi")
+        panel.apply_event(
+            AgentPhaseChanged(phase=AgentPhase.RUNNING_TOOL, round_number=1, tool="get_logs")
+        )
+        await pilot.pause()
+        assert "get_logs" in _status_text(app)
+
+
+async def test_phase_composing_answer_updates_status() -> None:
+    app = PanelApp()
+    async with app.run_test() as pilot:
+        panel = app.query_one(AgentPanel)
+        panel.begin_turn("hi")
+        panel.apply_event(AgentPhaseChanged(phase=AgentPhase.COMPOSING_ANSWER, round_number=2))
+        await pilot.pause()
+        assert "composing answer" in _status_text(app)
+
+
+async def test_phase_change_dispatches_to_typed_handler() -> None:
+    class Probe(AgentPanel):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls: list[str] = []
+
+        def _apply_phase_changed(self, event: AgentPhaseChanged) -> None:
+            self.calls.append("phase")
+
+    app = PanelApp(Probe)
+    async with app.run_test():
+        panel = app.query_one(Probe)
+        panel.apply_event(AgentPhaseChanged(phase=AgentPhase.WAITING_FOR_MODEL, round_number=1))
+        assert panel.calls == ["phase"]
+
+
+async def test_turn_complete_renders_compact_diagnostics_summary() -> None:
+    """A completed turn shows a single dim timing summary line."""
+    app = PanelApp()
+    snapshot = _diag(TurnOutcome.SUCCESS)
+    async with app.run_test() as pilot:
+        panel = app.query_one(AgentPanel)
+        panel.begin_turn("hi")
+        panel.apply_event(TextDelta(text="done"))
+        panel.apply_event(
+            TurnComplete(input_tokens=1, output_tokens=1, estimated=False, diagnostics=snapshot)
+        )
+        await pilot.pause()
+        line = app.query_one(".diagnostics-line", ChatEntry)
+        assert line.raw == format_diagnostics(snapshot)
+
+
+async def test_turn_complete_without_diagnostics_shows_no_summary() -> None:
+    app = PanelApp()
+    async with app.run_test() as pilot:
+        panel = app.query_one(AgentPanel)
+        panel.begin_turn("hi")
+        panel.apply_event(TurnComplete(input_tokens=1, output_tokens=1, estimated=False))
+        await pilot.pause()
+        assert len(app.query(".diagnostics-line")) == 0
+
+
+async def test_failed_turn_summary_is_not_shown_as_success() -> None:
+    """A provider failure's timing summary must never read like a clean
+    success: the outcome is named on the line."""
+    app = PanelApp()
+    snapshot = _diag(TurnOutcome.FAILED)
+    async with app.run_test() as pilot:
+        panel = app.query_one(AgentPanel)
+        panel.begin_turn("hi")
+        panel.apply_event(AgentError(message="provider exploded", diagnostics=snapshot))
+        await pilot.pause()
+        line = app.query_one(".diagnostics-line", ChatEntry)
+        assert line.raw.startswith("failed · ")
+        assert format_diagnostics(snapshot) in line.raw
+
+
+async def test_interrupted_turn_summary_names_the_outcome() -> None:
+    app = PanelApp()
+    snapshot = _diag(TurnOutcome.INTERRUPTED)
+    async with app.run_test() as pilot:
+        panel = app.query_one(AgentPanel)
+        panel.begin_turn("hi")
+        panel.apply_event(
+            TurnInterrupted(input_tokens=1, output_tokens=1, estimated=False, diagnostics=snapshot)
+        )
+        await pilot.pause()
+        line = app.query_one(".diagnostics-line", ChatEntry)
+        assert line.raw.startswith("interrupted · ")
+
+
+async def test_recoverable_error_keeps_no_diagnostics_line() -> None:
+    """A recoverable AgentError (no snapshot) mounts no timing line — the
+    turn is not over."""
+    app = PanelApp()
+    async with app.run_test() as pilot:
+        panel = app.query_one(AgentPanel)
+        panel.begin_turn("hi")
+        panel.apply_event(AgentError(message="transient"))
+        await pilot.pause()
+        assert len(app.query(".diagnostics-line")) == 0
