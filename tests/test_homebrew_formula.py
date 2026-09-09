@@ -103,7 +103,7 @@ def test_the_selected_extras_and_nothing_else_are_installed() -> None:
 def test_development_dependencies_never_reach_the_formula() -> None:
     """`uv.lock` holds the dev group too; shipping it would be absurd."""
     names = {r.name for r in resolve_resources(_LOCK, extras=("agent",))}
-    for dev_only in ("pytest", "mypy", "ruff", "tach"):
+    for dev_only in ("pytest", "mypy", "ruff", "tach", "gitpython"):
         assert dev_only not in names, f"{dev_only} is a development tool"
 
 

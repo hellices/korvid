@@ -15,8 +15,12 @@ _AGENT_DOC = _ROOT / "docs" / "agent.md"
 _GETTING_STARTED = _ROOT / "docs" / "getting-started.md"
 _HOMEPAGE = _ROOT / "docs" / "index.md"
 _OBSERVABILITY = _ROOT / "docs" / "observability.md"
+_MKDOCS = _ROOT / "mkdocs.yml"
 _RUNBOOK = _ROOT / "docs" / "release.md"
 _SECURITY = _ROOT / "SECURITY.md"
+_UNPUBLISHED_RELEASE_NOTE = _ROOT / "docs" / "release-notes" / "v0.4.0.md"
+_FIRST_PUBLISHED_0_4_VERSION = "0.4.1"
+_FIRST_PUBLISHED_0_4_NOTE = _ROOT / "docs" / "release-notes" / f"v{_FIRST_PUBLISHED_0_4_VERSION}.md"
 _ALLOWED_RELEASE_DOC_HISTORY = frozenset({"0.1.0", "0.1.1", "0.1.2"})
 
 
@@ -26,6 +30,14 @@ def _project_version() -> str:
     assert isinstance(version, str)
     assert version
     return version
+
+
+def _optional_dependencies(extra: str) -> list[str]:
+    pyproject = tomllib.loads((_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    dependencies = pyproject["project"]["optional-dependencies"][extra]
+    assert isinstance(dependencies, list)
+    assert all(isinstance(dependency, str) for dependency in dependencies)
+    return dependencies
 
 
 def _release_notes(version: str) -> str:
@@ -65,6 +77,10 @@ def _section_bullets(section: str) -> list[str]:
     if current:
         bullets.append(_normalized(" ".join(current)))
     return bullets
+
+
+def _other_release_version(version: str) -> str:
+    return "0.4.0" if version != "0.4.0" else "0.3.0"
 
 
 def _assert_section_has_bullet(section: str, *terms: str) -> None:
@@ -369,6 +385,61 @@ def _assert_allowed_release_doc_versions(
     return found
 
 
+def _assert_current_release_note_contracts(version: str, notes: str) -> None:
+    assert notes.startswith(f"# korvid v{version}\n"), (
+        f"docs/release-notes heading must start with '# korvid v{version}'"
+    )
+    notes_versions = _named_versions(notes)
+    assert version in notes_versions, (
+        f"docs/release-notes must name the version being shipped ({version})"
+    )
+
+    assert "## Install or upgrade" in notes
+    assert f"uv tool install 'korvid[all]=={version}'" in notes, (
+        "docs/release-notes installs the current korvid version"
+    )
+    assert f"uv tool install --force 'korvid[all]=={version}'" in notes, (
+        "docs/release-notes reinstalls the current korvid version"
+    )
+    assert f"pipx install --force 'korvid[all]=={version}'" in notes, (
+        "docs/release-notes shows the current pipx reinstall version"
+    )
+    assert "uv tool install --upgrade" not in notes
+
+    pinned_requirements = set(re.findall(r"korvid(?:\[[^\]]+\])?==(\d+\.\d+\.\d+)", notes))
+    assert pinned_requirements == {version}, (
+        "docs/release-notes pins korvid installable versions "
+        f"{sorted(pinned_requirements)} instead of only {version}"
+    )
+
+    verify = markdown_section(notes, "Verify")
+    assert "```sh\nset -eu" in verify
+    assert f"gh release download v{version} --dir dist/v{version}" in verify, (
+        "docs/release-notes downloads the current tagged artifacts"
+    )
+    assert f"gh attestation verify dist/v{version}/korvid-{version}-py3-none-any.whl" in verify, (
+        "docs/release-notes verifies the current wheel filename"
+    )
+    assert f"gh attestation verify dist/v{version}/SHA256SUMS --repo hellices/korvid" in verify, (
+        "docs/release-notes verifies the current checksum file"
+    )
+    assert f"(cd dist/v{version} && shasum --algorithm 256 --check SHA256SUMS)" in verify, (
+        "docs/release-notes checks the current checksum directory"
+    )
+    assert "--repo hellices/korvid" in verify
+
+    attested_wheels = set(
+        re.findall(
+            r"gh attestation verify dist/v(\d+\.\d+\.\d+)/korvid-(\d+\.\d+\.\d+)-py3-none-any\.whl",
+            verify,
+        )
+    )
+    assert attested_wheels == {(version, version)}, (
+        "docs/release-notes verifies wheel artifacts "
+        f"{sorted(attested_wheels)} instead of only {(version, version)}"
+    )
+
+
 def _assert_release_versions_contracts(version: str, runbook: str, notes: str) -> None:
     runbook_versions = _named_versions(runbook)
     assert version not in runbook_versions, (
@@ -380,24 +451,7 @@ def _assert_release_versions_contracts(version: str, runbook: str, notes: str) -
     _assert_allowed_release_doc_versions(
         "docs/release.md", runbook, version=version, allow_current=False
     )
-
-    notes_versions = _named_versions(notes)
-    assert version in notes_versions, (
-        f"docs/release-notes must name the version being shipped ({version})"
-    )
-    assert notes_versions == {version}, (
-        "docs/release-notes may only name the version being shipped "
-        f"({version}); found {sorted(notes_versions)}"
-    )
-
-    assert "## Install or upgrade" in notes
-    assert f"uv tool install 'korvid[all]=={version}'" in notes
-    assert f"pipx install --force 'korvid[all]=={version}'" in notes
-    assert "uv tool install --upgrade" not in notes
-    verify = markdown_section(notes, "Verify")
-    assert "```sh\nset -eu" in verify
-    assert f"gh attestation verify dist/v{version}/korvid-{version}-py3-none-any.whl" in verify
-    assert "--repo hellices/korvid" in verify
+    _assert_current_release_note_contracts(version, notes)
 
 
 def test_agent_policy_forbids_agent_controlled_merge_paths() -> None:
@@ -423,6 +477,81 @@ def test_current_release_docs_only_name_allowed_versions() -> None:
     )
 
 
+def test_first_published_0_4_release_note_records_the_security_remediation() -> None:
+    notes = _FIRST_PUBLISHED_0_4_NOTE.read_text(encoding="utf-8")
+    security = markdown_section(notes, "Security fixes")
+    mcp_dependencies = _optional_dependencies("mcp")
+    agent_dependencies = _optional_dependencies("agent")
+
+    assert "httpx2>=2.12.0,<3" in mcp_dependencies
+    assert not any(dependency.startswith("httpx2") for dependency in agent_dependencies)
+    assert "[mcp]" in security
+    assert "[all]" in security
+    assert "`httpx2>=2.12.0,<3`" in security
+    normalized_security = _normalized(security.replace("`", ""))
+    assert "Locked httpx2 2.12.0 requires httpcore2 2.12.0 transitively." in normalized_security
+    assert "optional `[agent]` extra" not in security
+    assert re.search(r"httpx2[^.]{0,120}2\.11[^.]{0,120}CVE-2026-84379", security, re.S)
+    assert re.search(r"httpx2[^.]{0,120}2\.11[^.]{0,120}CVE-2026-84380", security, re.S)
+    assert re.search(r"httpx2[^.]{0,120}2\.12[^.]{0,120}CVE-2026-84382", security, re.S)
+    assert not re.search(r"httpcore2[^.]{0,120}CVE-2026-84382", security, re.S)
+    assert "v0.4.0 tag was blocked before publication" in notes
+    assert "immutable audit record" in notes
+    assert "not an installable release" in notes
+    assert "https://hellices.github.io/korvid/release-notes/v0.4.0/" in notes
+
+
+def test_first_published_0_4_release_note_distinguishes_development_security_fixes() -> None:
+    notes = _FIRST_PUBLISHED_0_4_NOTE.read_text(encoding="utf-8")
+    security = markdown_section(notes, "Security fixes")
+    project = tomllib.loads((_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    assert "GitPython>=3.1.59" in project["dependency-groups"]["dev"]
+    assert "GitPython" in security
+    assert "3.1.59" in security
+    assert "development-only" in security
+    for cve in ("CVE-2026-78675", "CVE-2026-78676", "CVE-2026-78677", "CVE-2026-78678"):
+        assert cve in security
+
+
+def test_release_history_marks_the_unpublished_audit_note() -> None:
+    unpublished = _UNPUBLISHED_RELEASE_NOTE.read_text(encoding="utf-8")
+
+    assert "Unpublished audit tag" in unpublished
+    assert "blocked before publication" in unpublished
+    assert "not an installable release" in unpublished
+    assert (
+        f"[korvid v{_FIRST_PUBLISHED_0_4_VERSION}](v{_FIRST_PUBLISHED_0_4_VERSION}.md)"
+        in unpublished
+    )
+
+
+def test_unpublished_release_commands_are_disabled_historical_examples() -> None:
+    unpublished = _UNPUBLISHED_RELEASE_NOTE.read_text(encoding="utf-8")
+    commands = re.findall(r"^```sh\n(.*?)^```", unpublished, re.MULTILINE | re.DOTALL)
+    assert commands, "the audit record must preserve the historical examples"
+    for block in commands:
+        assert all(
+            not line.strip() or line.lstrip().startswith("#") for line in block.splitlines()
+        ), "unpublished release commands must remain commented, not executable instructions"
+
+
+def test_release_history_navigation_keeps_the_current_release_note() -> None:
+    version = _project_version()
+    mkdocs = _MKDOCS.read_text(encoding="utf-8")
+
+    assert f"- v{version}: release-notes/v{version}.md" in mkdocs
+
+
+def test_release_history_navigation_keeps_the_first_published_0_4_and_audit_entries() -> None:
+    mkdocs = _MKDOCS.read_text(encoding="utf-8")
+
+    assert (
+        f"- v{_FIRST_PUBLISHED_0_4_VERSION}: release-notes/v{_FIRST_PUBLISHED_0_4_VERSION}.md"
+        in mkdocs
+    )
+    assert "- v0.4.0 (unpublished): release-notes/v0.4.0.md" in mkdocs
+
+
 def test_installation_docs_use_evergreen_latest_release_guidance() -> None:
     _assert_evergreen_installation_contracts(
         _README.read_text(encoding="utf-8"),
@@ -446,6 +575,44 @@ def test_pinned_requirement_is_rejected_in_evergreen_install_docs() -> None:
         _assert_no_pinned_korvid_requirement(
             "uv tool install 'korvid[all]==0.4.0'", label="README quick start"
         )
+
+
+def test_dependency_versions_are_allowed_in_current_release_notes() -> None:
+    version = _project_version()
+    augmented = _release_notes(version) + (
+        "\nSecurity fixes ship with httpx2>=2.12.0 and httpcore2==2.12.0.\n"
+    )
+    assert "2.12.0" in augmented
+    assert version in augmented
+    _assert_current_release_note_contracts(version, augmented)
+
+
+def test_stale_korvid_pin_is_rejected_in_current_release_notes() -> None:
+    version = _project_version()
+    stale = _other_release_version(version)
+    mutated = _release_notes(version).replace(
+        f"uv tool install 'korvid[all]=={version}'",
+        f"uv tool install 'korvid[all]=={stale}'",
+        1,
+    )
+    with pytest.raises(
+        AssertionError, match=r"docs/release-notes installs the current korvid version"
+    ):
+        _assert_current_release_note_contracts(version, mutated)
+
+
+def test_stale_artifact_filename_is_rejected_in_current_release_notes() -> None:
+    version = _project_version()
+    stale = _other_release_version(version)
+    mutated = _release_notes(version).replace(
+        f"gh attestation verify dist/v{version}/korvid-{version}-py3-none-any.whl",
+        f"gh attestation verify dist/v{version}/korvid-{stale}-py3-none-any.whl",
+        1,
+    )
+    with pytest.raises(
+        AssertionError, match=r"docs/release-notes verifies the current wheel filename"
+    ):
+        _assert_current_release_note_contracts(version, mutated)
 
 
 def test_hardcoded_upgrade_source_is_rejected_in_runbook() -> None:
