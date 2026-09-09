@@ -749,14 +749,11 @@ async def test_applying_a_profile_without_rebuild_agent_shows_literal_hint() -> 
 
 
 async def test_applying_a_profile_notifies_on_plugin_error() -> None:
-    """ProviderPluginError raised by rebuild_agent must surface via the
-    existing error notification path (rebuild failure), not crash the app."""
-    from korvid.providers.plugin_registry import ProviderPluginError
-
+    """A provider rebuild failure is reported without crashing the app."""
     profile = ModelConnectionConfig(model="corp-llm/m", endpoint="http://x/v1")
 
     def boom(profile: ModelConnectionConfig, tier: str | None) -> Any:
-        raise ProviderPluginError("plugin auth mismatch")
+        raise ValueError("plugin auth mismatch")
 
     app = make_app(session=None, model=None, rebuild_agent=boom)
     async with app.run_test() as pilot:

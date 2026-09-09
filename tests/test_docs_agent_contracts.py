@@ -188,7 +188,7 @@ def test_no_current_page_claims_every_surface_describes_tools_identically(
 ) -> None:
     """The low tier ships its own shipped, versioned tool wording.
 
-    `LOW_TOOL_DESCRIPTIONS` replaces the registry's wording, by exact tool
+    The low tier replaces the registry's wording, by exact tool
     name, on the low route only. The high tier and the MCP server still
     describe every tool with the registry's own text, so "every surface
     describes a tool identically" was never true once the low map shipped.
@@ -338,8 +338,7 @@ _API_V1_SPELLINGS = re.compile(r"\bAPI[-\s]v1\b", re.IGNORECASE)
 def test_no_current_page_sends_a_plugin_author_to_api_1(path: Path) -> None:
     """Only the API 1 → API 2 migration tables may name the retired version.
 
-    A reader who follows "the API-v1 contract" writes a plugin against a
-    contract `ValidatedPluginProvider` rejects.
+    A reader must not be directed to the removed construction contract.
     """
     text = path.read_text(encoding="utf-8")
     offenders = [
@@ -427,7 +426,7 @@ def test_the_controller_reference_describes_todays_seams() -> None:
 def test_the_eval_methodology_states_the_low_pack_constraints() -> None:
     """A grind that changes these silently invalidates every published row."""
     methodology = _text("docs/evals/methodology.md")
-    assert "LOW_TOOL_DESCRIPTIONS" in methodology
+    assert "agent/tiers/low.py: TOOL_DESCRIPTIONS" in methodology
     assert "250" in methodology
     assert "exact tool name" in methodology
     # The high tier keeps the registry wording — the two arms are not the same.
@@ -440,7 +439,7 @@ def test_the_eval_methodology_states_the_low_pack_constraints() -> None:
 def test_the_agent_page_sends_low_tier_wording_questions_to_the_methodology() -> None:
     """The low tier's shipped wording is an eval contract, not product copy.
 
-    `LOW_TOOL_DESCRIPTIONS`, its 250-character bound and its exact-tool-name
+    The tier's tool wording, its 250-character bound and its exact-tool-name
     application decide whether two campaigns are comparable — a question the
     eval methodology owns and
     `test_the_eval_methodology_states_the_low_pack_constraints` pins. The
@@ -451,7 +450,7 @@ def test_the_agent_page_sends_low_tier_wording_questions_to_the_methodology() ->
     agent = _text("docs/agent.md")
 
     assert "evals/methodology.md" in agent
-    assert "LOW_TOOL_DESCRIPTIONS" not in agent
+    assert "TOOL_DESCRIPTIONS" not in agent
     assert "prompt_packs.py" not in agent
     # The product-visible half of the tier stays: which tier, and the budgets.
     assert "model_tier" in agent
@@ -465,7 +464,7 @@ def test_the_low_pack_documentation_publishes_no_score() -> None:
     new campaign, so they state constraints and name cases — never a score.
     """
     methodology = _text("docs/evals/methodology.md")
-    start = methodology.index("LOW_TOOL_DESCRIPTIONS")
+    start = methodology.index("agent/tiers/low.py: TOOL_DESCRIPTIONS")
     end = methodology.find("\n## ", start)
     section = methodology[start:] if end == -1 else methodology[start:end]
     assert not re.search(r"\d+(\.\d+)?\s?%", section), section

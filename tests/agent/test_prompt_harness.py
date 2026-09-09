@@ -40,8 +40,6 @@ from korvid.agent.prompt_harness import (
     PromptHarness,
     PromptInputs,
     StaticPromptTooLargeError,
-    UnknownPromptOverlayError,
-    UnknownPromptPackError,
     cluster_context_note,
 )
 from korvid.core.secrets import MASK_PLACEHOLDER
@@ -57,18 +55,14 @@ def policy(
     tier: ModelTier = ModelTier.LOW,
     provider: str = "ollama",
     model: str = "qwen3:8b",
-    prompt_overlay_ids: tuple[str, ...] = (),
     tools: tuple[Mapping[str, Any], ...] = (),
     max_history_chars: int = 24_000,
 ) -> ResolvedAgentPolicy:
-    pack_id = "low-korvid-operator" if tier is ModelTier.LOW else "high-korvid-operator"
     return ResolvedAgentPolicy(
         model=ModelDescriptor(provider=provider, model=model),
         capabilities=ModelCapabilities.unknown(),
         tier=tier,
         route_source=CapabilitySource.FALLBACK,
-        prompt_pack_id=pack_id,
-        prompt_overlay_ids=prompt_overlay_ids,
         tools=tools,
         max_iterations=6,
         max_history_chars=max_history_chars,
@@ -172,13 +166,12 @@ def test_user_rules_cannot_replace_safety_contract() -> None:
 
 def test_every_layer_marker_appears_exactly_once_and_in_order() -> None:
     harness = PromptHarness(
-        provider_overlays={"acme": "ACME_PROVIDER_OVERLAY_MARKER"},
-        model_overlays={"quirk-1": "EXACT_MODEL_OVERLAY_MARKER"},
+        tier_prompt="TIER_PROMPT_MARKER",
+        extra_layers=("EVAL_EXTRA_LAYER_MARKER",),
     )
     turn_policy = policy(
         provider="acme",
         model="model-x",
-        prompt_overlay_ids=("quirk-1",),
         tools=_write_and_ui_tools(),
     )
 
@@ -197,12 +190,11 @@ def test_every_layer_marker_appears_exactly_once_and_in_order() -> None:
     markers = [
         "Korvid retains authority",  # 1: immutable safety contract
         "embedded in the live TUI session",  # 2: common role
-        "one tool at a time",  # 3: low-tier operating pack
-        "ACME_PROVIDER_OVERLAY_MARKER",  # 4: provider overlay
-        "EXACT_MODEL_OVERLAY_MARKER",  # 5: exact-model overlay
-        "USER_RULE_MARKER",  # 6: additive user rules
-        "resize_pod",  # 7: armed write/UI capability clauses
-        "HANDOFF_OLD_MARKER",  # 8: bounded cluster/handoff context
+        "TIER_PROMPT_MARKER",  # 3: tier operating prompt
+        "EVAL_EXTRA_LAYER_MARKER",  # 4: explicit eval layer
+        "USER_RULE_MARKER",  # 5: additive user rules
+        "resize_pod",  # 6: armed write/UI capability clauses
+        "HANDOFF_OLD_MARKER",  # 7: bounded cluster/handoff context
     ]
     for marker in markers:
         assert system.count(marker) == 1, f"{marker!r} did not appear exactly once"
@@ -232,75 +224,31 @@ def test_high_tier_pack_is_selected_for_a_high_policy() -> None:
     assert "one tool at a time" not in prompt.system_message
 
 
-def test_unknown_prompt_pack_id_is_rejected() -> None:
-    harness = PromptHarness()
-    bad = policy()
-    object.__setattr__(bad, "prompt_pack_id", "not-a-shipped-pack")
-
-    with pytest.raises(ValueError, match="not-a-shipped-pack"):
-        harness.compose("diagnose it", inputs(policy_=bad))
-
-
-# ---------------------------------------------------------------------------
-# Overlays
-# ---------------------------------------------------------------------------
-
-
-def test_sparse_exact_model_overlay_is_included_when_referenced() -> None:
-    harness = PromptHarness(model_overlays={"quirk-1": "EXACT_OVERLAY_TEXT"})
-    turn_policy = policy(prompt_overlay_ids=("quirk-1",))
-
-    prompt = harness.compose("diagnose it", inputs(policy_=turn_policy))
-
-    assert "EXACT_OVERLAY_TEXT" in prompt.system_message
-
-
-def test_unreferenced_overlay_ids_never_leak_into_an_unrelated_policy() -> None:
-    harness = PromptHarness(model_overlays={"quirk-1": "EXACT_OVERLAY_TEXT"})
-    turn_policy = policy(prompt_overlay_ids=())
-
-    prompt = harness.compose("diagnose it", inputs(policy_=turn_policy))
-
-    assert "EXACT_OVERLAY_TEXT" not in prompt.system_message
-
-
-def test_unknown_overlay_id_raises() -> None:
-    harness = PromptHarness()
-    turn_policy = policy(prompt_overlay_ids=("missing-overlay",))
-
-    with pytest.raises(UnknownPromptOverlayError, match="missing-overlay"):
-        harness.compose("diagnose it", inputs(policy_=turn_policy))
-
-
-def test_default_shipped_overlay_registry_is_empty() -> None:
-    from korvid.agent import prompt_packs
-
-    assert dict(prompt_packs.PROVIDER_PROMPT_OVERLAYS) == {}
-    assert dict(prompt_packs.MODEL_PROMPT_OVERLAYS) == {}
-
-
-def test_provider_overlay_is_matched_by_exact_normalized_provider_id() -> None:
-    harness = PromptHarness(provider_overlays={"openai": "OPENAI_OVERLAY_TEXT"})
-
-    matching = harness.compose(
-        "diagnose it", inputs(policy_=policy(provider="OpenAI", model="gpt-x"))
-    )
-    other = harness.compose(
-        "diagnose it", inputs(policy_=policy(provider="openai-compatible", model="gpt-x"))
+def test_eval_prompt_text_is_injected_directly_without_a_registry() -> None:
+    harness = PromptHarness(
+        tier_prompt="EVAL_TIER_PROMPT",
+        extra_layers=("EVAL_EXTRA_LAYER",),
     )
 
-    assert "OPENAI_OVERLAY_TEXT" in matching.system_message
-    assert "OPENAI_OVERLAY_TEXT" not in other.system_message
+    prompt = harness.compose("diagnose it", inputs(policy_=policy()))
 
-
-def test_missing_provider_overlay_is_not_an_error() -> None:
-    harness = PromptHarness()
-
-    prompt = harness.compose(
-        "diagnose it", inputs(policy_=policy(provider="some-unlisted-provider"))
+    assert "one tool at a time" not in prompt.system_message
+    assert prompt.system_message.index("EVAL_TIER_PROMPT") < prompt.system_message.index(
+        "EVAL_EXTRA_LAYER"
     )
 
-    assert prompt.system_message  # composed without raising
+
+def test_an_explicit_empty_eval_tier_prompt_does_not_restore_shipped_wording() -> None:
+    prompt = PromptHarness(tier_prompt="").compose("diagnose it", inputs(policy_=policy()))
+
+    assert "one tool at a time" not in prompt.system_message
+    assert prompt.system_message.startswith("Korvid retains authority")
+
+
+def test_default_prompt_harness_has_no_eval_extra_layer() -> None:
+    prompt = PromptHarness().compose("diagnose it", inputs(policy_=policy()))
+
+    assert "EVAL_EXTRA_LAYER" not in prompt.system_message
 
 
 # ---------------------------------------------------------------------------
@@ -557,22 +505,6 @@ def test_validate_accepts_a_shipped_policy_without_any_snapshot() -> None:
 
     composed = harness.compose("diagnose it", inputs(policy_=shipped, user_rules=("be careful",)))
     assert "be careful" in composed.system_message
-
-
-def test_validate_rejects_an_unknown_prompt_pack() -> None:
-    harness = PromptHarness()
-    bad = policy()
-    object.__setattr__(bad, "prompt_pack_id", "not-a-shipped-pack")
-
-    with pytest.raises(UnknownPromptPackError, match="not-a-shipped-pack"):
-        harness.validate(bad)
-
-
-def test_validate_rejects_an_unknown_overlay_id() -> None:
-    harness = PromptHarness()
-
-    with pytest.raises(UnknownPromptOverlayError, match="missing-overlay"):
-        harness.validate(policy(prompt_overlay_ids=("missing-overlay",)))
 
 
 def test_validate_rejects_a_static_prompt_over_the_history_share() -> None:

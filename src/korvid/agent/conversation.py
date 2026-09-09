@@ -18,10 +18,8 @@ history is never touched by them.
 
 *Transactional turns.* A turn is a sequence of iterations, each one a
 provider round that may append an assistant message and its paired tool
-results. `start_turn` and `start_iteration` return frozen checkpoints
-carrying the indices and usage baselines a rollback needs.
-`finalize_interrupt` uses the active iteration's checkpoint to unwind a
-cancelled turn to a protocol-valid state exactly once.
+results. The state keeps the active turn and iteration baselines it needs
+to unwind a cancelled turn to a protocol-valid state exactly once.
 """
 
 from __future__ import annotations
@@ -68,38 +66,6 @@ def _message_chars(message: Mapping[str, Any]) -> int:
     for call in message.get("tool_calls") or []:
         total += len(str((call.get("function") or {}).get("arguments") or ""))
     return total
-
-
-@dataclass(frozen=True, slots=True)
-class TurnCheckpoint:
-    """Immutable rollback baseline captured when a turn begins.
-
-    `base_index` is the position of the turn's user message; the usage
-    fields are the cumulative totals before the turn, so a caller can tell
-    exactly what this turn added.
-    """
-
-    base_index: int
-    total_in: int
-    total_out: int
-    estimated: bool
-
-
-@dataclass(frozen=True, slots=True)
-class IterationCheckpoint:
-    """Immutable rollback baseline captured when an iteration begins.
-
-    `base_index` is the position the iteration's first appended message
-    would take, so truncating there unwinds everything the iteration added.
-    The turn-usage fields are the running turn totals before the iteration,
-    kept so a rollback never loses cost already committed by earlier
-    iterations.
-    """
-
-    base_index: int
-    turn_in: int
-    turn_out: int
-    turn_estimated: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,9 +116,6 @@ class _LiveIteration:
     in_tok: int = 0
     out_tok: int = 0
     has_usage: bool = False
-    #: Set once the assistant message is appended: the streamed output is
-    #: now durable history, so an interrupt must not also mark it partial.
-    settled: bool = False
     #: Characters of tool calls this iteration streamed. Kept apart from
     #: `text`: they are generated output and must be charged, but they are
     #: not the assistant's partial answer and must never be replayed as
@@ -271,7 +234,7 @@ class ConversationState:
 
     # -- turn lifecycle ----------------------------------------------------
 
-    def start_turn(self, content: str, records: Sequence[RedactionRecord] = ()) -> TurnCheckpoint:
+    def start_turn(self, content: str, records: Sequence[RedactionRecord] = ()) -> None:
         """Begin a turn with the user's (already composed) message.
 
         Old turns are trimmed to make room, then the message is appended.
@@ -283,10 +246,6 @@ class ConversationState:
             content: The user message text, composed by the caller (screen
                 context wrapping, etc. are not this module's concern).
             records: Redactions applied to `content` before it arrived.
-
-        Returns:
-            A checkpoint carrying the turn's base index and the usage
-            totals before it.
 
         Raises:
             RuntimeError: A turn is already active.
@@ -318,12 +277,6 @@ class ConversationState:
         self._turn_estimated = False
         self._live = None
         self._iteration_base = len(self._messages)
-        return TurnCheckpoint(
-            base_index=self._turn_base,
-            total_in=self._total_in,
-            total_out=self._total_out,
-            estimated=self._estimated,
-        )
 
     def complete_turn(self) -> tuple[int, int, bool]:
         """Commit the active turn's usage to the totals and end the turn.
@@ -350,7 +303,7 @@ class ConversationState:
 
     # -- iteration lifecycle ----------------------------------------------
 
-    def start_iteration(self, prompt_estimate: int = 0) -> IterationCheckpoint:
+    def start_iteration(self, prompt_estimate: int = 0) -> None:
         """Begin a provider iteration within the active turn.
 
         Args:
@@ -359,10 +312,6 @@ class ConversationState:
                 exact prepared payload. Used only to charge a transmitted
                 request whose provider omitted usage, so a real request
                 never reads as zero input.
-
-        Returns:
-            A checkpoint whose base index unwinds everything this iteration
-            appends, carrying the turn-usage baseline.
 
         Raises:
             RuntimeError: No turn is active, or an iteration is already open.
@@ -374,12 +323,6 @@ class ConversationState:
         base = len(self._messages)
         self._iteration_base = base
         self._live = _LiveIteration(base_index=base, prompt_estimate=prompt_estimate)
-        return IterationCheckpoint(
-            base_index=base,
-            turn_in=self._turn_in,
-            turn_out=self._turn_out,
-            turn_estimated=self._turn_estimated,
-        )
 
     def request_messages(self, *, prefix: Sequence[Mapping[str, Any]] = ()) -> RequestView:
         """Build one request's payload: `prefix` prepended to a deep copy.
@@ -563,7 +506,6 @@ class ConversationState:
         self._turn_in += in_tok
         self._turn_out += out_tok
         self._turn_estimated = self._turn_estimated or estimated
-        live.settled = True
         self._live = None
 
     def rollback_turn(self) -> tuple[int, int, bool]:
@@ -674,7 +616,7 @@ class ConversationState:
 
     def _in_flight_usage(self, live: _LiveIteration | None) -> tuple[int, int, bool]:
         """The interrupted iteration's cost, and whether it was estimated."""
-        if live is None or live.settled:
+        if live is None:
             return (0, 0, self._turn_estimated)
         if live.has_usage:
             return (live.in_tok, live.out_tok, self._turn_estimated)
@@ -696,7 +638,6 @@ class ConversationState:
             self._turn_in += live.prompt_estimate
             self._turn_out += _output_estimate(live.text, stored_calls)
             self._turn_estimated = True
-        live.settled = True
         self._live = None
 
     def _end_turn(self) -> None:

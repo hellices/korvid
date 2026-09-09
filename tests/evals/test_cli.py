@@ -12,7 +12,8 @@ from typing import Any
 
 import pytest
 
-from korvid.agent import prompt_harness, prompt_packs
+from korvid.agent import prompt_harness
+from korvid.agent.tiers import low
 from korvid.evals.__main__ import (
     DEFAULT_EVAL_TIMEOUT_SECONDS,
     eval_api_key,
@@ -304,7 +305,6 @@ def test_run_payload_records_resolved_metadata() -> None:
         "tier": "low",
         "route_source": "fallback",
         "prompt_pack": "low-korvid-operator",
-        "overlays": [],
     }
     assert payload["meta"]["limits"] == {
         "max_iterations": 6,
@@ -367,7 +367,7 @@ def test_prompt_source_reflects_the_effective_prompt_not_the_flag() -> None:
     hard-coded `"default"`, or `"override"` whenever a grind was supplied —
     makes the published attribution wrong.
     """
-    reproduces_the_pack = PromptGrind(tier_pack=prompt_packs.LOW_KORVID_OPERATOR_PACK)
+    reproduces_the_pack = PromptGrind(tier_pack=low.PROMPT)
     differs = PromptGrind(tier_pack="You are terse.")
 
     assert prompt_fingerprint(_policy(), grind=reproduces_the_pack)["source"] == "default"
@@ -375,6 +375,25 @@ def test_prompt_source_reflects_the_effective_prompt_not_the_flag() -> None:
     payload = run_payload([_report()], policy=_policy(), grind=differs)
     assert payload["meta"]["prompts"]["source"] == "override"
     assert len(payload["meta"]["prompts"]["sha256"]) == 64
+
+
+def test_prompt_fingerprint_names_the_explicit_eval_layer() -> None:
+    fingerprint = prompt_fingerprint(_policy(), grind=PromptGrind(overlay="eval experiment"))
+
+    assert fingerprint["overlays"] == ["eval-overlay"]
+    assert fingerprint["source"] == "override"
+
+
+def test_overridden_artifact_records_effective_layers_only_under_prompts() -> None:
+    payload = run_payload(
+        [_report()],
+        policy=_policy(),
+        grind=PromptGrind(overlay="eval experiment"),
+    )
+
+    assert "overlays" not in payload["meta"]["policy"]
+    assert payload["meta"]["prompts"]["overlays"] == ["eval-overlay"]
+    assert payload["meta"]["prompts"]["source"] == "override"
 
 
 def test_prompt_fingerprint_covers_the_composed_prompt_not_just_the_pack(

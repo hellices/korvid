@@ -1,4 +1,4 @@
-"""Helpers for building discoverable provider-plugin fixture distributions."""
+"""Helpers for building discoverable SpecialFlow fixture distributions."""
 
 from __future__ import annotations
 

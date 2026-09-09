@@ -441,9 +441,7 @@ async def test_text_deltas_stream_through_in_order() -> None:
 
 
 async def test_text_is_normalized_to_korvids_own_event_name() -> None:
-    """`native_engine._stream` and `provider_plugin._normalize_event` both
-    know exactly one text event, `text_delta`. A provider that invented
-    another name would stream into a branch nothing reads."""
+    """The engine consumes `text_delta`, not an SDK-specific event name."""
     events = await _events(_provider(_streaming([_delta(content="Hello")])))
     assert {"type": "text_delta", "text": "Hello"} in events
 

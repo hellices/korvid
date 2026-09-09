@@ -26,15 +26,14 @@ part of it:
 - **The tier may be named.** `--model-tier` becomes the router's
   `explicit_tier`, recorded as route source `user`; omitting it is normal
   automatic routing, exactly as in the TUI.
-- **The tier pack and one overlay may be ground.** `PromptGrind` is the
-  eval-only prompt lever (issue #316 task 13). It replaces layer 3 and
-  adds a layer-5 overlay; it can never touch layer 1, because
+- **The tier prompt and one extra layer may be ground.** `PromptGrind` is
+  the eval-only prompt lever (issue #316 task 13). It replaces layer 3 and
+  adds one explicit layer after it; it can never touch layer 1, because
   `PromptHarness` always composes the immutable safety contract first.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from typing import Any, Final
 
@@ -53,9 +52,9 @@ from korvid.agent.model_policy import (
 from korvid.agent.native_engine import NativeAgentEngine
 from korvid.agent.outbound import OutboundPolicy
 from korvid.agent.prompt_harness import PromptHarness, PromptInputs
-from korvid.agent.prompt_packs import MODEL_PROMPT_OVERLAYS, PROMPT_PACKS
 from korvid.agent.request_gateway import RequestGateway
 from korvid.agent.session import DefaultAgentSession
+from korvid.agent.tiers import high, low
 from korvid.agent.tool_harness import ToolHarness
 from korvid.k8s.csp import UNKNOWN_PROVIDER
 from korvid.tools.executor import RecordedExecution, as_recorded
@@ -178,67 +177,25 @@ def armed_tool_names(policy: ResolvedAgentPolicy) -> tuple[str, ...]:
     return tuple(sorted(str(tool["function"]["name"]) for tool in policy.tools))
 
 
-def _ground_overlay_ids(policy: ResolvedAgentPolicy) -> tuple[str, ...]:
-    """`policy`'s overlay ids with the eval overlay named exactly once."""
-    if EVAL_OVERLAY_ID in policy.prompt_overlay_ids:
-        return policy.prompt_overlay_ids
-    return (*policy.prompt_overlay_ids, EVAL_OVERLAY_ID)
+def build_prompt_harness(grind: PromptGrind) -> PromptHarness:
+    """The production prompt harness with explicit eval text injected."""
+    extra_layers = () if grind.overlay is None else (grind.overlay,)
+    return PromptHarness(tier_prompt=grind.tier_pack, extra_layers=extra_layers)
 
 
-def ground_eval_policy(policy: ResolvedAgentPolicy, grind: PromptGrind) -> ResolvedAgentPolicy:
-    """The policy a ground run composes against (overlay ids only).
-
-    Idempotent on purpose. A campaign grounds once and hands the *same*
-    object to the session, to `meta.policy`, to `meta.prompts` and to the
-    report; the harness still grounds whatever it is given, so a policy
-    that arrives already ground must come back unchanged rather than
-    naming `eval-overlay` twice in a published list.
-
-    Args:
-        policy: The resolved policy, ground or not.
-        grind: The eval-only prompt levers. Only `overlay` adds an id;
-            replacing the tier pack changes the pack's *text*, not which
-            layers were composed.
-
-    Returns:
-        The policy every collaborator of a ground run must agree on.
-    """
-    if grind.overlay is None:
-        return policy
-    return replace(policy, prompt_overlay_ids=_ground_overlay_ids(policy))
+def tier_prompt_id(policy: ResolvedAgentPolicy) -> str:
+    """Return the shipped prompt identity for a resolved tier."""
+    behavior = low.BEHAVIOR if policy.tier is ModelTier.LOW else high.BEHAVIOR
+    return behavior.prompt_id
 
 
-def baseline_eval_policy(policy: ResolvedAgentPolicy) -> ResolvedAgentPolicy:
-    """The same policy without the eval overlay — the shipped-prompt baseline.
-
-    `meta.prompts.source` compares a run's digest against korvid's own
-    wording, and that comparison has to compose the shipped prompt: an
-    already-ground policy still names `eval-overlay`, for which the
-    shipped registry has no text at all.
-    """
-    if EVAL_OVERLAY_ID not in policy.prompt_overlay_ids:
-        return policy
-    return replace(
-        policy,
-        prompt_overlay_ids=tuple(
-            overlay for overlay in policy.prompt_overlay_ids if overlay != EVAL_OVERLAY_ID
-        ),
-    )
-
-
-def build_prompt_harness(policy: ResolvedAgentPolicy, grind: PromptGrind) -> PromptHarness:
-    """The production prompt harness, with the eval's ground layers injected."""
-    packs: Mapping[str, str] | None = None
-    if grind.tier_pack is not None:
-        packs = {**PROMPT_PACKS, policy.prompt_pack_id: grind.tier_pack}
-    overlays: Mapping[str, str] | None = None
-    if grind.overlay is not None:
-        overlays = {**MODEL_PROMPT_OVERLAYS, EVAL_OVERLAY_ID: grind.overlay}
-    return PromptHarness(packs=packs, model_overlays=overlays)
+def grind_layer_ids(grind: PromptGrind) -> tuple[str, ...]:
+    """Return metadata ids for explicit eval-only prompt layers."""
+    return () if grind.overlay is None else (EVAL_OVERLAY_ID,)
 
 
 def _compose_static(policy: ResolvedAgentPolicy, prompts: PromptHarness) -> str:
-    """Layers 1-7 for an already-ground policy.
+    """Static prompt layers for a resolved policy.
 
     Composed through the real harness against a fixed workspace and an
     unknown cluster, so no per-turn layer (cluster note, handoff note)
@@ -261,12 +218,10 @@ def static_prompt(policy: ResolvedAgentPolicy, grind: PromptGrind = NO_GRIND) ->
     """The system message layers 1-7 a resolved policy and grind produce.
 
     Args:
-        policy: The resolved policy. An already-ground one is accepted:
-            grounding is idempotent, so a campaign can fingerprint the
-            same object its session composes against.
+        policy: The resolved policy.
         grind: The eval-only prompt levers.
     """
-    return _compose_static(ground_eval_policy(policy, grind), build_prompt_harness(policy, grind))
+    return _compose_static(policy, build_prompt_harness(grind))
 
 
 @dataclass(frozen=True, slots=True)
@@ -300,7 +255,7 @@ class EvalHarness:
     @property
     def overlay_ids(self) -> tuple[str, ...]:
         """Prompt overlay ids composed into this run's system message."""
-        return self.policy.prompt_overlay_ids
+        return grind_layer_ids(self.grind)
 
     def static_prompt(self) -> str:
         """The system-prompt layers every turn of this run carries."""
@@ -353,9 +308,7 @@ def build_eval_harness(
             provider, model_tier=model_tier, environment=environment, omit_tools=omit_tools
         )
     )
-    # One policy from here on: the grind only ever *adds* an overlay id,
-    # and every collaborator must agree on which surface is armed.
-    resolved = ground_eval_policy(base, grind)
+    resolved = base
     recorded = as_recorded(execution)
     tools = ToolHarness(
         policy=resolved,
@@ -370,7 +323,7 @@ def build_eval_harness(
     outbound_policy = RequestGateway.prepare_policy(resolved)
     gateway = RequestGateway(provider, outbound_policy)
     engine = NativeAgentEngine(conversation=conversation, gateway=gateway, tools=tools)
-    prompts = build_prompt_harness(base, grind)
+    prompts = build_prompt_harness(grind)
     session = DefaultAgentSession(
         engine=engine,
         bridge=bridge,

@@ -56,7 +56,6 @@ from korvid.agent.prompt_harness import (
     PromptCompositionError,
     PromptHarness,
     PromptInputs,
-    UnknownPromptPackError,
 )
 from korvid.agent.request_gateway import RequestGateway
 from korvid.agent.session import AgentSession, DefaultAgentSession, SessionRetargetError
@@ -197,15 +196,14 @@ def session_policy(
     max_tool_calls: int | None = None,
     model: str = "qwen3:8b",
 ) -> ResolvedAgentPolicy:
-    """A resolved policy naming a *shipped* prompt pack, as the router does."""
-    pack = "low-korvid-operator" if tier is ModelTier.LOW else "high-korvid-operator"
+    """A resolved policy using the requested tier and model."""
     base = make_policy(
         tool_names=tool_names,
         tier=tier,
         max_history_chars=max_history_chars,
         max_tool_calls=max_tool_calls,
     )
-    return replace(base, prompt_pack_id=pack, model=ModelDescriptor("test", model))
+    return replace(base, model=ModelDescriptor("test", model))
 
 
 def unregistered_policy() -> ResolvedAgentPolicy:
@@ -783,23 +781,6 @@ async def test_the_turn_after_a_retarget_re_epochs_evidence_to_the_live_workspac
     assert harness.session.evidence.references() == ("E1",)
 
 
-async def test_retarget_refuses_an_unknown_prompt_pack_without_moving_anything() -> None:
-    harness = build_session([text_turn("first")])
-    previous = harness.session.policy
-    unusable = replace(
-        session_policy(tool_names=("get_logs", "get_events")),
-        prompt_pack_id="not-a-shipped-pack",
-    )
-
-    with pytest.raises(UnknownPromptPackError, match="not-a-shipped-pack"):
-        harness.session.retarget(unusable, AZURE_CLUSTER)
-    await harness.run("what is wrong?")
-
-    assert harness.session.policy is previous
-    assert "AKS" not in system_message(harness.provider.calls[0])
-    assert tool_surface(harness.provider.tool_surfaces[0]) == ["get_logs"]
-
-
 async def test_retarget_refuses_an_unregistered_armed_tool_without_moving_anything() -> None:
     harness = build_session([text_turn("first")])
     previous = harness.session.policy
@@ -1350,14 +1331,6 @@ def test_the_constructor_does_not_snapshot_the_bridge() -> None:
     harness = build_session([text_turn("first")])
 
     assert harness.bridge.snapshots == 0
-
-
-def test_the_constructor_refuses_an_unknown_prompt_pack() -> None:
-    harness = build_session([text_turn("first")])
-    unusable = replace(session_policy(), prompt_pack_id="not-a-shipped-pack")
-
-    with pytest.raises(UnknownPromptPackError, match="not-a-shipped-pack"):
-        harness.rebuild(unusable)
 
 
 def test_the_constructor_refuses_a_policy_arming_an_unregistered_tool() -> None:

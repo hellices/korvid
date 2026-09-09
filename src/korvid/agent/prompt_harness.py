@@ -8,12 +8,11 @@ order the design doc pins (§7):
 1. immutable korvid safety, evidence, and control-handoff contract;
 2. common role: operate the current korvid session, not an abstract
    cluster;
-3. low- or high-tier operating pack;
-4. optional provider overlay;
-5. optional exact-model overlay;
-6. validated additive user rules;
-7. armed tool and UI capability clauses;
-8. bounded cluster, handoff, and interaction context.
+3. low- or high-tier operating prompt;
+4. optional explicitly injected eval layers;
+5. validated additive user rules;
+6. armed tool and UI capability clauses;
+7. bounded cluster, handoff, and interaction context.
 
 The composed system message is *static for the whole turn*: the engine
 sends it on every round and appends the evidence table itself, so nothing
@@ -36,14 +35,9 @@ from types import MappingProxyType
 from typing import Any, Final
 
 from korvid.agent.interaction import ClusterFacts, InteractionContext, PaneContext, ResourceIdentity
-from korvid.agent.model_policy import ResolvedAgentPolicy
-from korvid.agent.prompt_packs import (
-    COMMON_ROLE,
-    MODEL_PROMPT_OVERLAYS,
-    PROMPT_PACKS,
-    PROVIDER_PROMPT_OVERLAYS,
-    SAFETY_CONTRACT,
-)
+from korvid.agent.model_policy import ModelTier, ResolvedAgentPolicy
+from korvid.agent.prompt_packs import COMMON_ROLE, SAFETY_CONTRACT
+from korvid.agent.tiers import high, low
 from korvid.core.redaction import RedactionRecord, redact_document
 from korvid.k8s.csp import UNKNOWN_PROVIDER
 from korvid.tools.executor import UI_TOOL_NAMES, WRITE_TOOL_NAMES
@@ -61,8 +55,8 @@ _FILTER_FIELD_BOUND: Final[int] = 2_048
 _HANDOFF_CONTEXT_BOUND: Final[int] = 200
 
 #: The static layers (1-7) must fit comfortably inside the model's own
-#: history budget before a single turn runs: a policy whose packs, rules,
-#: and overlays alone would eat most of the conversation budget is a
+#: history budget before a single turn runs: a policy whose tier prompt,
+#: eval layers, and rules alone would eat most of the conversation budget is a
 #: configuration error to catch before session creation, not mid-turn.
 _MAX_STATIC_PROMPT_FRACTION: Final[float] = 0.25
 
@@ -106,14 +100,6 @@ _NO_WRITE_CLAUSE: Final[str] = (
 
 class PromptCompositionError(ValueError):
     """Base class for every error `PromptHarness.compose` can raise."""
-
-
-class UnknownPromptPackError(PromptCompositionError):
-    """`policy.prompt_pack_id` names a pack absent from `PROMPT_PACKS`."""
-
-
-class UnknownPromptOverlayError(PromptCompositionError):
-    """`policy.prompt_overlay_ids` names an id absent from the shipped registry."""
 
 
 class StaticPromptTooLargeError(PromptCompositionError):
@@ -204,33 +190,20 @@ class PromptHarness:
     """Compose the deterministic layer order (design doc §7) into one prompt.
 
     Args:
-        packs: Layer-3 registry, keyed by prompt pack id. Defaults to the
-            shipped `PROMPT_PACKS`. Injectable for exactly one reason:
-            the eval harness grinds tier-pack wording to find better text
-            (issue #316 task 13). A ground pack still layers *after* the
-            immutable safety contract and never replaces it.
-        provider_overlays: Layer-4 registry, keyed by normalized provider
-            id. Defaults to the shipped `PROVIDER_PROMPT_OVERLAYS`
-            (empty); tests inject exact overlays here.
-        model_overlays: Layer-5 registry, keyed by overlay id. Defaults
-            to the shipped `MODEL_PROMPT_OVERLAYS` (empty); tests inject
-            exact overlays here.
+        tier_prompt: Explicit layer-3 replacement used by eval prompt
+            experiments. `None` selects the resolved tier's shipped prompt.
+        extra_layers: Explicit eval-only layers composed after the tier
+            prompt. Production passes none.
     """
 
     def __init__(
         self,
         *,
-        packs: Mapping[str, str] | None = None,
-        provider_overlays: Mapping[str, str] | None = None,
-        model_overlays: Mapping[str, str] | None = None,
+        tier_prompt: str | None = None,
+        extra_layers: Sequence[str] = (),
     ) -> None:
-        self._packs = packs if packs is not None else PROMPT_PACKS
-        self._provider_overlays = (
-            provider_overlays if provider_overlays is not None else PROVIDER_PROMPT_OVERLAYS
-        )
-        self._model_overlays = (
-            model_overlays if model_overlays is not None else MODEL_PROMPT_OVERLAYS
-        )
+        self._tier_prompt = tier_prompt
+        self._extra_layers = tuple(extra_layers)
 
     def validate(self, policy: ResolvedAgentPolicy, user_rules: tuple[str, ...] = ()) -> None:
         """Check that `policy` composes, without needing a live snapshot.
@@ -248,10 +221,6 @@ class PromptHarness:
             user_rules: `config.agent_rules` the same turn would compose.
 
         Raises:
-            UnknownPromptPackError: `policy.prompt_pack_id` is not a
-                shipped pack.
-            UnknownPromptOverlayError: `policy.prompt_overlay_ids` names
-                an id absent from the shipped/injected registry.
             StaticPromptTooLargeError: the static layers (1-7) exceed
                 `_MAX_STATIC_PROMPT_FRACTION` of
                 `policy.max_history_chars`.
@@ -262,10 +231,6 @@ class PromptHarness:
         """Compose one turn's system and user messages.
 
         Raises:
-            UnknownPromptPackError: `inputs.policy.prompt_pack_id` is not
-                a shipped pack.
-            UnknownPromptOverlayError: `inputs.policy.prompt_overlay_ids`
-                names an id absent from the shipped/injected registry.
             StaticPromptTooLargeError: the static layers (1-7) exceed
                 `_MAX_STATIC_PROMPT_FRACTION` of
                 `inputs.policy.max_history_chars`.
@@ -293,8 +258,8 @@ class PromptHarness:
         static_layers = [
             SAFETY_CONTRACT,
             COMMON_ROLE,
-            self._tier_pack(policy.prompt_pack_id),
-            *self._overlay_layers(policy),
+            (_shipped_tier_prompt(policy.tier) if self._tier_prompt is None else self._tier_prompt),
+            *self._extra_layers,
             *_user_rule_layer(user_rules),
             _capability_clauses(policy.tools),
         ]
@@ -302,28 +267,9 @@ class PromptHarness:
         _check_static_budget(static_prompt, policy.max_history_chars)
         return static_prompt
 
-    def _tier_pack(self, prompt_pack_id: str) -> str:
-        try:
-            return self._packs[prompt_pack_id]
-        except KeyError:
-            raise UnknownPromptPackError(
-                f"prompt pack {prompt_pack_id!r} is not a shipped pack"
-            ) from None
 
-    def _overlay_layers(self, policy: ResolvedAgentPolicy) -> list[str]:
-        layers: list[str] = []
-        provider_id = policy.model.provider.strip().casefold()
-        provider_overlay = self._provider_overlays.get(provider_id)
-        if provider_overlay:
-            layers.append(provider_overlay)
-        for overlay_id in policy.prompt_overlay_ids:
-            overlay_text = self._model_overlays.get(overlay_id)
-            if overlay_text is None:
-                raise UnknownPromptOverlayError(
-                    f"prompt overlay {overlay_id!r} is not in the shipped overlay registry"
-                )
-            layers.append(overlay_text)
-        return layers
+def _shipped_tier_prompt(tier: ModelTier) -> str:
+    return low.PROMPT if tier is ModelTier.LOW else high.PROMPT
 
 
 def _handoff_note(previous: InteractionContext | None, current: InteractionContext) -> str | None:

@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import json
 from collections.abc import Sequence
-from dataclasses import FrozenInstanceError
 
 import pytest
 
@@ -27,9 +26,7 @@ from korvid.agent.conversation import (
     MAX_HISTORY_TURNS,
     ConversationBudgetError,
     ConversationState,
-    IterationCheckpoint,
     RequestView,
-    TurnCheckpoint,
 )
 from korvid.agent.events import TurnInterrupted
 from korvid.core.redaction import RedactionRecord
@@ -225,8 +222,7 @@ def test_strict_preflight_rejects_a_prompt_that_cannot_fit() -> None:
         convo.start_turn("x" * (STRICT_BUDGET * 2))
     # The rejected prompt was dropped, so a normal follow-up starts cleanly.
     assert convo.messages == []
-    checkpoint = convo.start_turn("short")
-    assert isinstance(checkpoint, TurnCheckpoint)
+    convo.start_turn("short")
     assert any(m["content"] == "short" for m in convo.messages)
 
 
@@ -243,8 +239,7 @@ def test_loose_mode_keeps_an_oversized_newest_turn() -> None:
     convo = ConversationState(max_history_chars=LOOSE_BUDGET)
     # Loose mode never rejects: the newest turn is retained even when it is
     # larger than the budget; recovery is the caller's via drop_oldest_turn.
-    checkpoint = convo.start_turn("z" * (LOOSE_BUDGET * 2))
-    assert isinstance(checkpoint, TurnCheckpoint)
+    convo.start_turn("z" * (LOOSE_BUDGET * 2))
     assert any(len(str(m.get("content"))) > LOOSE_BUDGET for m in convo.messages)
 
 
@@ -401,16 +396,20 @@ def test_append_tool_result_requires_a_pending_call() -> None:
         convo.append_tool_result("c1", "ok")
 
 
-def test_checkpoints_are_frozen_values() -> None:
+def test_lifecycle_starters_return_none_while_state_remains_observable() -> None:
     convo = ConversationState(max_history_chars=LOOSE_BUDGET)
-    turn = convo.start_turn("q")
-    iteration = convo.start_iteration(prompt_estimate=12)
-    assert isinstance(turn, TurnCheckpoint)
-    assert isinstance(iteration, IterationCheckpoint)
-    with pytest.raises(FrozenInstanceError, match="cannot assign"):
-        turn.base_index = 5  # type: ignore[misc]
-    with pytest.raises(FrozenInstanceError, match="cannot assign"):
-        iteration.base_index = 5  # type: ignore[misc]
+
+    assert convo.start_turn("q") is None  # type: ignore[func-returns-value]  # Check the runtime no-return contract.
+    assert convo.turn_active is True
+    assert convo.messages == [{"role": "user", "content": "q"}]
+    assert convo.start_iteration(prompt_estimate=12) is None  # type: ignore[func-returns-value]  # Check the runtime no-return contract.
+
+    convo.record_stream_text("answer")
+    convo.commit_usage(3, 2)
+    convo.append_assistant("answer")
+    assert convo.complete_turn() == (3, 2, False)
+    assert convo.turn_active is False
+    assert convo.total_tokens == (3, 2)
 
 
 # --------------------------------------------------------------------------

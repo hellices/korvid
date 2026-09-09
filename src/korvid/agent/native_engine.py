@@ -157,7 +157,6 @@ class NativeAgentEngine(AgentEngine):
         self._tools = tools
         self._running = False
         self._closed = False
-        self._gateway_closed = False
         self._interrupted = False
         #: The task driving the live turn, recorded when iteration starts
         #: so `aclose` can stop a turn that is blocked in a provider await
@@ -209,14 +208,13 @@ class NativeAgentEngine(AgentEngine):
         from inside the turn's own loop, nothing is cancelled — the
         generator stops itself at the next resumption instead.
         """
+        if self._closed:
+            return
         self._closed = True
         self._interrupted = True
         driver = self._driver
         if driver is not None and driver is not asyncio.current_task() and not driver.done():
             driver.cancel()
-        if self._gateway_closed:
-            return
-        self._gateway_closed = True
         await self._gateway.aclose()
 
     # -- the turn ----------------------------------------------------------

@@ -42,7 +42,6 @@ MODEL_CATALOG: Final[tuple[ModelCatalogEntry, ...]] = (
             supports_tools=True,
             supports_parallel_tools=False,
         ),
-        prompt_overlay_ids=(),
     ),
 )
 

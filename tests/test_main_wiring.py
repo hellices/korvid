@@ -97,22 +97,19 @@ async def test_close_background_does_not_log_secret_payload(
 
 #: Model-facing prompt material the composition root must never touch. Wiring
 #: a `PromptHarness` is the whole job; reaching past it into the layer text,
-#: the pack registries, or the cluster-note formatter would make `__main__.py`
+#: tier definitions, or the cluster-note formatter would make `__main__.py`
 #: a second author of what the model reads — which is exactly the split
 #: `prompt_harness.py` exists to hold (issue #316 task 6).
 _FORBIDDEN_PROMPT_COMPOSITION = (
     "cluster_context_note",
     "SAFETY_CONTRACT",
     "COMMON_ROLE",
-    "PROMPT_PACKS",
-    "PROVIDER_PROMPT_OVERLAYS",
-    "MODEL_PROMPT_OVERLAYS",
-    "LOW_KORVID_OPERATOR_PACK",
-    "HIGH_KORVID_OPERATOR_PACK",
-    "LOW_TOOL_DESCRIPTIONS",
+    "BEHAVIOR",
+    "get_behavior",
+    "tier_prompt",
+    "extra_layers",
     "ComposedPrompt",
     "PromptInputs",
-    "prompt_pack_id",
 )
 
 
@@ -621,63 +618,31 @@ def test_an_over_budget_prompt_names_the_knob_the_operator_controls() -> None:
     assert ":ai" in warning
 
 
-@pytest.mark.parametrize(
-    "error_name",
-    ["UnknownPromptPackError", "UnknownPromptOverlayError", "PromptCompositionError"],
-)
-def test_a_missing_prompt_pack_is_not_blamed_on_the_operators_rules(error_name: str) -> None:
-    """A pack or overlay korvid ships is korvid's, not the operator's.
-
-    `UnknownPromptPackError`/`UnknownPromptOverlayError` mean the routed
-    policy named a prompt layer the *installed* korvid does not carry — a
-    broken or partial install, or a bug. Telling that operator to shorten
-    `agent.rules` sends them to edit configuration that is already
-    correct, and they can shorten it to nothing without the start
-    recovering. The hint has to name the install and where to report it.
-    """
+def test_a_non_budget_prompt_error_is_not_blamed_on_the_operators_rules() -> None:
     from korvid.__main__ import _warn_agent_disabled
-    from korvid.agent import prompt_harness
+    from korvid.agent.prompt_harness import PromptCompositionError
 
-    error_type = getattr(prompt_harness, error_name)
     warnings: list[str] = []
-    _warn_agent_disabled(error_type("prompt pack 'k' is not a shipped pack"), warnings)
+    _warn_agent_disabled(PromptCompositionError("prompt composition failed"), warnings)
 
-    assert len(warnings) == 1
-    warning = warnings[0]
-    assert warning.startswith("agent disabled:")
-    assert "agent.rules" not in warning
-    assert "reinstall" in warning
-    assert "report" in warning
+    assert warnings == ["agent disabled: prompt composition failed"]
 
 
-def test_the_two_prompt_hints_are_fixed_text_that_quotes_no_payload() -> None:
-    """Neither hint is assembled from anything a failure was carrying.
-
-    A startup warning is rendered in the TUI and written to the log, so
-    the hint half of it must be a constant. Only the exception's own
-    (korvid-authored, bounded) message varies, and the warning is exactly
-    that message followed by the constant.
-    """
-    from korvid.__main__ import _PROMPT_DEGRADE_HINT, _PROMPT_PACKAGING_HINT, _warn_agent_disabled
-    from korvid.agent.prompt_harness import StaticPromptTooLargeError, UnknownPromptPackError
+def test_the_prompt_budget_hint_is_fixed_text() -> None:
+    from korvid.__main__ import _PROMPT_DEGRADE_HINT, _warn_agent_disabled
+    from korvid.agent.prompt_harness import StaticPromptTooLargeError
 
     over_budget: list[str] = []
     _warn_agent_disabled(StaticPromptTooLargeError("static system prompt too large"), over_budget)
-    missing_pack: list[str] = []
-    _warn_agent_disabled(UnknownPromptPackError("prompt pack 'k' is not shipped"), missing_pack)
 
     assert over_budget == [
         f"agent disabled: static system prompt too large — {_PROMPT_DEGRADE_HINT}"
     ]
-    assert missing_pack == [
-        f"agent disabled: prompt pack 'k' is not shipped — {_PROMPT_PACKAGING_HINT}"
-    ]
-    assert _PROMPT_DEGRADE_HINT != _PROMPT_PACKAGING_HINT
 
 
 def test_a_model_that_cannot_call_tools_still_gets_no_prompt_advice() -> None:
-    """The other degrade arm is unchanged: neither prompt hint applies."""
-    from korvid.__main__ import _PROMPT_DEGRADE_HINT, _PROMPT_PACKAGING_HINT, _warn_agent_disabled
+    """Model incompatibility must not be blamed on the prompt budget."""
+    from korvid.__main__ import _PROMPT_DEGRADE_HINT, _warn_agent_disabled
     from korvid.agent.model_policy import ModelRoutingError
 
     warnings: list[str] = []
@@ -685,7 +650,6 @@ def test_a_model_that_cannot_call_tools_still_gets_no_prompt_advice() -> None:
 
     assert len(warnings) == 1
     assert _PROMPT_DEGRADE_HINT not in warnings[0]
-    assert _PROMPT_PACKAGING_HINT not in warnings[0]
 
 
 async def test_a_rebuild_that_cannot_compose_stays_transactional(

@@ -95,7 +95,6 @@ def test_journey_json_records_run_metadata() -> None:
         "tier": "low",
         "route_source": "fallback",
         "prompt_pack": "low-korvid-operator",
-        "overlays": [],
     }
     assert low_payload["meta"]["limits"]["max_tool_calls_per_iteration"] == 1
     assert low_payload["meta"]["prompts"]["source"] == "default"

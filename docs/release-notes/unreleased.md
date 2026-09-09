@@ -22,6 +22,23 @@ cancellation, and token accounting are unchanged. See
 [the agent guide](../agent.md#turn-latency-diagnostics) for how to read and
 enable it, including how native Ollama timings are retained.
 
+## Agent implementation cleanup
+
+- Low and high behavior now lives in separate tier files, with their prompts,
+  tool-surface selection and budgets visible together. Default routing and
+  user-facing behavior are unchanged; approval, audit, masking and execution
+  remain shared.
+- The unwired `ProviderPlugin` construction API and its old registry have been
+  removed without compatibility shims. Use the
+  [SpecialFlow provider contract](../provider-plugins.md) and import agent
+  contracts from their defining modules rather than package-level re-exports.
+- Unused checkpoint return objects, redundant state and empty production prompt
+  overlay registries have been removed. In-memory rollback and evaluation prompt
+  experimentation remain supported.
+
+See the [agent architecture guide (Korean)](../dev/agent-architecture.md) for
+the current file map and a low/high comparison diagram.
+
 See the [release history](https://github.com/hellices/korvid/releases) for
 published versions and their migration notes. Candidate release notes can
 appear in the navigation before publication.

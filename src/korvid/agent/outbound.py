@@ -233,22 +233,6 @@ def _copy_tool_list(
         active.remove(identity)
 
 
-def sanitize_screen_context(text: str, records: list[RedactionRecord] | None = None) -> str:
-    """Sanitize cluster-derived screen text before it enters a provider request.
-
-    Args:
-        text: The raw screen text.
-        records: Optional accumulator; the redactions applied here are
-            appended to it, rooted at `screen_context`. The caller keeps
-            them so the outbound inventory can report redactions whose
-            evidence this pass removed rather than masked.
-    """
-    if not isinstance(text, str):
-        raise _blocked("screen context must be text")
-    with _fail_closed():
-        return redact_text(text, "screen_context", records if records is not None else [])
-
-
 def _sanitize_structured_result(
     result: str,
     path: str,

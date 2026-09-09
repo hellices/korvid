@@ -52,9 +52,8 @@ _INVALID_LABEL = "\x00invalid"
 def _canonicalize_provider_name(name: str) -> str:
     """Canonicalize a provider name: lowercase, collapse [-_.] to hyphens, strip.
 
-    Pure-stdlib mirror of ``providers.plugin_registry.normalize_provider_name``
-    so ``core/`` can normalize before dispatch without importing ``providers/``
-    (tach layer rules: core must not import providers).
+    Legacy configuration migration normalizes names without importing
+    optional provider transports.
     """
     return _PROVIDER_SEPARATOR_RE.sub("-", name.strip().lower())
 

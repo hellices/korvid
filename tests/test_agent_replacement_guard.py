@@ -14,7 +14,7 @@ module is the structural gate:
 - nothing reintroduces a backend selector, transition flag, or `v1`/`v2`
   suffix that would let two implementations coexist again;
 - exactly one `AgentEngine` and one production `AgentSession` exist;
-- the agent package publishes one coherent public surface.
+- importing the agent namespace does not load the runtime.
 
 Historical records are deliberately out of scope: `docs/dev/specs/`,
 `docs/dev/plans/` and `docs/superpowers/` describe how korvid got here and
@@ -223,7 +223,6 @@ def test_the_agent_package_ships_exactly_the_harness_modules() -> None:
         "prompt_harness.py",
         "prompt_packs.py",
         "provider.py",
-        "provider_plugin.py",
         "request_gateway.py",
         "session.py",
         "tool_harness.py",
@@ -381,108 +380,21 @@ def test_exactly_one_production_agent_session_ships() -> None:
 
 
 # ---------------------------------------------------------------------------
-# One coherent public surface
+# A lightweight namespace with explicit module contracts
 # ---------------------------------------------------------------------------
 
-#: The contracts the agent layer publishes to the composition root, the UI,
-#: and provider plugins — grouped the way the layer is built.
-_PUBLIC_SURFACE = {
-    # interaction (task 1)
-    "AgentUiBridge",
-    "ClusterFacts",
-    "DrillDown",
-    "InteractionContext",
-    "Navigate",
-    "OpenDescribe",
-    "OpenLogs",
-    "PaneContext",
-    "ResourceIdentity",
-    "SetFilter",
-    "UiAction",
-    "UiActionResult",
-    # model routing (task 5)
-    "CapabilitySource",
-    "ModelCapabilities",
-    "ModelCatalogEntry",
-    "ModelDescriptor",
-    "ModelRouter",
-    "ModelRoutingError",
-    "ModelTier",
-    "PolicyEnvironment",
-    "ResolvedAgentPolicy",
-    # prompt harness (task 6)
-    "ComposedPrompt",
-    "PromptCompositionError",
-    "PromptHarness",
-    "PromptInputs",
-    "StaticPromptTooLargeError",
-    "UnknownPromptOverlayError",
-    "UnknownPromptPackError",
-    "cluster_context_note",
-    # request gateway (task 8)
-    "OutboundPolicy",
-    "OutboundSnapshot",
-    "PreparedGatewayRequest",
-    "RequestGateway",
-    # tool harness (task 9)
-    "ToolExecution",
-    "ToolHarness",
-    # engine (task 10)
-    "AgentEngine",
-    "AgentTurnRequest",
-    "NativeAgentEngine",
-    # session (task 11)
-    "AgentSession",
-    "DefaultAgentSession",
-    "SessionRetargetError",
-    # provider contract
-    "REQUEST_SENT",
-    "LLMProvider",
-    # evidence (task 12)
-    "Evidence",
-    "EvidenceLedger",
-    # events
-    "AgentError",
-    "AgentEvent",
-    "AgentPhaseChanged",
-    "TextDelta",
-    "ToolCallFinished",
-    "ToolCallStarted",
-    "TurnComplete",
-    "TurnInterrupted",
-    # model_profiles
-    "DeviceLoginPrompt",
-}
 
-
-def test_the_agent_package_publishes_the_final_public_surface() -> None:
-    import korvid.agent as agent_package
-
-    assert set(agent_package.__all__) == _PUBLIC_SURFACE
-    assert len(agent_package.__all__) == len(set(agent_package.__all__))
-    assert list(agent_package.__all__) == sorted(agent_package.__all__)
-
-
-@pytest.mark.parametrize("name", sorted(_PUBLIC_SURFACE))
-def test_every_published_agent_name_resolves(name: str) -> None:
-    import korvid.agent as agent_package
-
-    assert getattr(agent_package, name) is not None
-
-
-def test_an_unpublished_agent_name_raises_attribute_error() -> None:
-    import korvid.agent as agent_package
-
-    with pytest.raises(AttributeError, match="AgentRuntim"):
-        getattr(agent_package, "AgentRuntim" + "e")
-
-
-def test_no_published_name_carries_a_version_suffix() -> None:
-    """`v1`/`v2` existed only to tell two implementations apart."""
-    import korvid.agent as agent_package
-
-    suffixed = [name for name in agent_package.__all__ if name.lower().endswith(("v1", "v2"))]
-    assert suffixed == []
+def test_importing_the_agent_namespace_does_not_load_its_runtime() -> None:
+    probe = (
+        "import sys\n"
+        "import korvid.agent\n"
+        "loaded = [name for name in sys.modules if name.startswith('korvid.agent.')]\n"
+        "assert loaded == [], loaded\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", probe], capture_output=True, text=True, timeout=120
+    )
+    assert result.returncode == 0, result.stderr
 
 
 # ---------------------------------------------------------------------------
@@ -503,117 +415,6 @@ def test_the_guard_scans_the_files_it_claims_to() -> None:
     assert {"docs/agent.md", "docs/evals/methodology.md", "docs/threat-model.md"} <= docs
     assert not any(path.startswith("docs/dev/specs/") for path in docs)
     assert not any(path.startswith("docs/superpowers/") for path in docs)
-
-
-# ---------------------------------------------------------------------------
-# The package docstring describes the surface it actually publishes
-# ---------------------------------------------------------------------------
-
-#: Contracts a third party implements that are deliberately *not* in
-#: `__all__`: importing them eagerly would drag the plugin validator (and
-#: its `ModelCapabilities` import graph) into every start, which is the
-#: boundary `tests/test_optional_extras.py` pins. They stay reachable at
-#: their own submodule, and the docstring has to say so rather than imply
-#: `korvid.agent` publishes every contract a plugin needs.
-_SUBMODULE_ONLY_CONTRACTS = {
-    "korvid.agent.provider_plugin": (
-        "ProviderPlugin",
-        "ProviderPluginConfig",
-        "ProviderPluginMetadata",
-        "PROVIDER_PLUGIN_API_VERSION",
-    ),
-    "korvid.agent.credentials": ("CredentialSource",),
-}
-
-
-def test_the_provider_plugin_contracts_are_not_published_by_the_package() -> None:
-    """The premise of the docstring fix: these really are submodule-only."""
-    import korvid.agent as agent_package
-
-    published = set(agent_package.__all__)
-    for names in _SUBMODULE_ONLY_CONTRACTS.values():
-        assert published.isdisjoint(names), sorted(published & set(names))
-
-
-@pytest.mark.parametrize("module", sorted(_SUBMODULE_ONLY_CONTRACTS))
-def test_each_submodule_only_contract_resolves_where_the_docstring_sends_readers(
-    module: str,
-) -> None:
-    imported = importlib.import_module(module)
-    for name in _SUBMODULE_ONLY_CONTRACTS[module]:
-        assert getattr(imported, name) is not None
-
-
-def test_the_package_docstring_names_the_submodules_that_own_them() -> None:
-    """A plugin author reading `korvid.agent` must be sent somewhere real.
-
-    The docstring used to read as though `__all__` were every contract the
-    layer offers, which sends a plugin author looking for `ProviderPlugin`
-    in a surface that does not carry it.
-    """
-    import korvid.agent as agent_package
-
-    doc = agent_package.__doc__ or ""
-    assert "provider_plugin" in doc
-    assert "credentials" in doc
-    for names in _SUBMODULE_ONLY_CONTRACTS.values():
-        for name in names:
-            assert name in doc or name.lower() in doc.lower()
-
-
-def test_naming_the_submodules_does_not_make_the_package_import_them() -> None:
-    """Accuracy in prose, not an eager import: the docstring costs nothing."""
-    probe = (
-        "import sys\n"
-        "import korvid.agent  # noqa: F401\n"
-        "leaked = [m for m in "
-        "('korvid.agent.provider_plugin', 'korvid.agent.credentials', "
-        "'korvid.agent.provider') if m in sys.modules]\n"
-        "if leaked:\n"
-        "    raise SystemExit(f'eager import: {leaked}')\n"
-    )
-    result = subprocess.run(
-        [sys.executable, "-c", probe], capture_output=True, text=True, timeout=120
-    )
-    assert result.returncode == 0, result.stderr
-
-
-def test_the_package_docstring_counts_the_submodules_not_the_contracts() -> None:
-    """The docstring said "two contracts" over a list of five names.
-
-    A plugin author counting them finds `ProviderPlugin`,
-    `ProviderPluginMetadata`, `ProviderPluginConfig`,
-    `PROVIDER_PLUGIN_API_VERSION` and `CredentialSource` — five contracts
-    in two submodules. A prose count that disagrees with its own list
-    makes the reader wonder which three were left out.
-    """
-    import korvid.agent as agent_package
-
-    doc = agent_package.__doc__ or ""
-    named = sum(len(names) for names in _SUBMODULE_ONLY_CONTRACTS.values())
-
-    assert len(_SUBMODULE_ONLY_CONTRACTS) == 2
-    assert named == 5
-    assert "Two public contracts" not in doc
-    assert "two submodules" in doc
-
-
-def test_the_package_docstring_counts_the_contracts_it_lists() -> None:
-    """ "Some" leaves the same reader counting the bullets.
-
-    The count was wrong before ("two" over five names); replacing it with
-    a hedge fixes the falsehood without answering the question a plugin
-    author actually has — *is this list all of them?* The docstring names
-    both numbers, and this test fails the moment either one moves.
-    """
-    import korvid.agent as agent_package
-
-    doc = agent_package.__doc__ or ""
-    named = sum(len(names) for names in _SUBMODULE_ONLY_CONTRACTS.values())
-
-    assert named == 5
-    assert "Five public contracts" in doc
-    assert "Some public contracts" not in doc
 
 
 # ---------------------------------------------------------------------------

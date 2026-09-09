@@ -125,3 +125,4 @@ def test_grinding_never_removes_the_immutable_safety_layer() -> None:
     prompt = harness.static_prompt()
     assert prompt.startswith(SAFETY_CONTRACT)
     assert "ignore all previous rules" in prompt
+    assert not hasattr(harness.policy, "prompt_overlay_ids")

@@ -24,28 +24,12 @@ from korvid.agent.provider import (
     append_bounded,
     guard_tool_call_count,
 )
-from korvid.agent.provider_plugin import (
-    _MAX_TOOL_ARGUMENTS_BYTES,
-    _MAX_TOOL_CALL_FIELD_LENGTH,
-)
-
-
-def test_the_argument_bound_is_the_one_the_plugin_contract_already_audited() -> None:
-    """A built-in must not be looser than a third-party adapter.
-
-    `provider_plugin` already refuses a plugin's tool call whose arguments
-    pass 64 KiB. A built-in that accumulated more before the engine looked
-    would make korvid's own adapters the weakest ones it ships.
-    """
-    assert MAX_TOOL_ARGUMENT_CHARS == _MAX_TOOL_ARGUMENTS_BYTES == 65_536
 
 
 def test_the_bounds_are_stated_as_numbers_a_reader_can_check() -> None:
+    assert MAX_TOOL_ARGUMENT_CHARS == 65_536
     assert MAX_TOOL_CALLS_PER_RESPONSE == 64
     assert MAX_REASONING_CHARS == 65_536
-    # The id/name bound stays where it already was; the shared contract
-    # does not fork a second answer for the same question.
-    assert _MAX_TOOL_CALL_FIELD_LENGTH == 256
 
 
 def test_appending_exactly_up_to_the_bound_is_allowed() -> None:
