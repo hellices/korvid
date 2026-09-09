@@ -26,7 +26,7 @@ import math
 from collections.abc import Mapping
 from typing import Any, Final
 
-from korvid.agent.diagnostics import PROVIDER_METRICS_EVENT
+from korvid.agent.diagnostics import MAX_USAGE_TOKENS, PROVIDER_METRICS_EVENT
 
 #: Ollama reports every duration in nanoseconds.
 NANOSECONDS_PER_SECOND: Final = 1_000_000_000
@@ -49,7 +49,7 @@ def _count(value: Any) -> int | None:
     """A non-negative integer token count, else `None`."""
     if isinstance(value, bool) or not isinstance(value, int):
         return None
-    return value if value >= 0 else None
+    return value if 0 <= value <= MAX_USAGE_TOKENS else None
 
 
 def decode_ollama_metrics(raw: Mapping[str, Any] | None) -> dict[str, Any] | None:

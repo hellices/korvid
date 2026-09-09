@@ -25,6 +25,9 @@ from dataclasses import dataclass, fields
 from enum import Enum
 from typing import Any, Final
 
+MAX_USAGE_TOKENS: Final = 1_000_000_000
+"""Shared ceiling for plugin usage and optional provider token metrics."""
+
 
 class TurnOutcome(Enum):
     """How a started turn ended."""
@@ -91,7 +94,7 @@ def _metric_count(value: Any) -> int | None:
     """A non-negative int, or `None` for an unusable or absent value."""
     if isinstance(value, bool) or not isinstance(value, int):
         return None
-    return value if value >= 0 else None
+    return value if 0 <= value <= MAX_USAGE_TOKENS else None
 
 
 def provider_metrics_from_event(event: Mapping[str, Any]) -> ProviderRuntimeMetrics:

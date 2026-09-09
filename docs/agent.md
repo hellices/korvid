@@ -135,10 +135,10 @@ added to the transcript, for example:
 2 model rounds · model 3.4s · tools 1.1s · ↑1.8k ↓200 tok · prompt 2.0s · generate 1.0s · other wait 0.4s
 ```
 
-It reports the number of provider rounds, the wall time spent in the model and
-in tools, token counts, and — when the provider reported them — how that model
-time split between prompt evaluation, generation, and other wait (transport and
-queueing). A **failed or interrupted** turn is never shown as a clean success:
+It reports the number of provider rounds and the wall time spent in the model
+and in tools. Token counts and the prompt evaluation, generation, and other-wait
+split appear only when native provider metrics include those measurements.
+Other wait includes transport and queueing. A **failed or interrupted** turn is never shown as a clean success:
 its summary is prefixed with `failed ·` or `interrupted ·` so the timings are
 never mistaken for a completed answer's.
 
@@ -168,7 +168,9 @@ prompt, a reasoning trace, a tool argument or result, a Kubernetes object, a
 credential, or a raw provider payload can never ride along.
 
 **Provider-reported timings (Ollama).** korvid always reports its own monotonic
-round and tool timings and the token counts. Ollama additionally reports native
+round and tool timings. The panel header tracks ordinary token usage separately;
+token counts in the diagnostic summary require optional native metrics.
+Ollama additionally reports native
 nanosecond counters (queue vs. prompt-eval vs. generation), and korvid decodes
 those into the `prompt`/`generate`/`other wait` split. The LiteLLM adapter would
 otherwise discard these durations, so korvid captures each request's terminal

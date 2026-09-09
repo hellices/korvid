@@ -153,3 +153,10 @@ def test_oversized_duration_integers_do_not_discard_valid_metrics() -> None:
         "generation_seconds": 1.0,
         "generation_tokens": 7,
     }
+
+
+def test_oversized_counts_are_discarded_at_the_adapter_boundary() -> None:
+    event = decode_ollama_metrics(
+        {"prompt_eval_count": 1_000_000_001, "eval_count": 10**400, "eval_duration": 0}
+    )
+    assert event == {"type": PROVIDER_METRICS_EVENT, "generation_seconds": 0.0}

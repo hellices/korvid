@@ -7,8 +7,8 @@ the timing is provider-neutral (OpenAI, a local Ollama model, or the offline
 test provider are measured the same way). While a turn runs, the status line
 distinguishes *waiting for model*, *running `<tool>`*, and *composing answer*
 instead of a generic spinner. When a turn ends, one dim summary line reports
-the provider-round count, model and tool wall time, token counts, and — when
-the provider reports them — the prompt/generate/other-wait split; a failed or
+the provider-round count and model/tool wall time, plus token counts and the
+prompt/generate/other-wait split when native provider metrics include them. A failed or
 interrupted turn is prefixed with its outcome so it is never mistaken for a
 success.
 

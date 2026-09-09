@@ -764,3 +764,19 @@ def test_provider_metrics_are_empty_detects_all_none() -> None:
     assert provider_metrics_are_empty(ProviderRuntimeMetrics())
     assert provider_metrics_are_empty(provider_metrics_from_event({"type": "provider_metrics"}))
     assert not provider_metrics_are_empty(ProviderRuntimeMetrics(prompt_tokens=0))
+
+
+@pytest.mark.parametrize("count", [1_000_000_001, 10**400], ids=["over-limit", "huge-integer"])
+def test_oversized_metric_counts_cannot_break_terminal_summary(count: int) -> None:
+    metrics = provider_metrics_from_event(
+        {"prompt_tokens": count, "generation_tokens": count, "total_seconds": 1.0}
+    )
+    assert metrics == ProviderRuntimeMetrics(total_seconds=1.0)
+    summary = _turn(rounds=(ProviderRoundDiagnostics(1, 0.0, 0.0, 0.0, 1.0, metrics),))
+    assert format_diagnostics(summary) == "1 model round · model 1.0s · other wait 0.0s"
+
+
+def test_metric_counts_at_the_plugin_usage_ceiling_are_retained() -> None:
+    metrics = provider_metrics_from_event({"prompt_tokens": 1_000_000_000, "generation_tokens": 0})
+    assert metrics.prompt_tokens == 1_000_000_000
+    assert metrics.generation_tokens == 0

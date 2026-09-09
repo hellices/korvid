@@ -10,6 +10,7 @@ from types import MappingProxyType
 from typing import Any, Final
 
 from korvid.agent.credentials import CredentialSource
+from korvid.agent.diagnostics import MAX_USAGE_TOKENS
 from korvid.agent.model_policy import (
     CapabilitySource,
     ModelCapabilities,
@@ -22,7 +23,6 @@ PROVIDER_PLUGIN_API_VERSION: Final[int] = 2
 _MAX_TEXT_DELTA_BYTES: Final[int] = 65_536
 _MAX_TOOL_CALL_FIELD_LENGTH: Final[int] = 256
 _MAX_TOOL_ARGUMENTS_BYTES: Final[int] = 65_536
-_MAX_USAGE_TOKENS: Final[int] = 1_000_000_000
 _MAX_MODEL_ID_LENGTH: Final[int] = 256
 
 
@@ -378,13 +378,13 @@ def _normalize_event(event: object) -> dict[str, Any]:
                 event,
                 "usage.input_tokens",
                 "input_tokens",
-                max_value=_MAX_USAGE_TOKENS,
+                max_value=MAX_USAGE_TOKENS,
             ),
             "output_tokens": _require_non_negative_int(
                 event,
                 "usage.output_tokens",
                 "output_tokens",
-                max_value=_MAX_USAGE_TOKENS,
+                max_value=MAX_USAGE_TOKENS,
             ),
         }
     if event_type == "done":
