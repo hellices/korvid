@@ -231,10 +231,12 @@ def test_ci_workflow_defines_the_required_windows_test_job() -> None:
     assert isinstance(setup_uv.get("with"), dict)
     assert setup_uv["with"]["python-version"] == "3.12"
     assert "uv sync --locked --dev --all-extras" in runs
-    assert "uv run pytest -q" in runs
+    full_suite = "uv run pytest -q --ignore=tests/windows/test_native_terminal.py"
+    assert full_suite in runs
+    assert "uv run pytest -q" not in runs
     native_smoke = "uv run pytest -p no:tach tests/windows/test_native_terminal.py -q"
-    assert native_smoke in runs
-    assert runs.index(native_smoke) < runs.index("uv run pytest -q")
+    assert runs.count(native_smoke) == 1
+    assert runs.index(native_smoke) < runs.index(full_suite)
     native_step = next(step for step in steps if step.get("run") == native_smoke)
     assert native_step.get("continue-on-error", False) is False
     assert native_step.get("if") == "needs.changes.outputs.code == 'true'"

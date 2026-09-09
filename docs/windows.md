@@ -34,6 +34,8 @@ The `windows-native-terminal` CI artifact retains phase witnesses and the final
 128 KiB of terminal output for seven days, including failed runs. To retain the
 same evidence locally, set `KORVID_WINDOWS_SMOKE_ARTIFACT_DIR` to a writable
 directory before running the command above.
+The remaining Windows suite excludes this already-tested module, so the native
+scenario runs only once, under the dedicated step's timeout and artifact capture.
 
 Cluster data and the child-shell command are isolated fixtures. This is
 native Windows terminal validation, **not a live-cluster verification** and

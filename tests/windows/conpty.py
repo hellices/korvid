@@ -8,7 +8,7 @@ import os
 import subprocess
 import threading
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from ctypes import wintypes
 from dataclasses import dataclass
 from pathlib import Path
@@ -177,6 +177,7 @@ _PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE = 0x00020016
 _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 _SYNCHRONIZE = 0x00100000
 _WAIT_OBJECT_0 = 0
+_WAIT_FAILED = 0xFFFFFFFF
 _WAIT_TIMEOUT = 0x00000102
 _ERROR_BROKEN_PIPE = 109
 _ERROR_INVALID_PARAMETER = 87
@@ -204,6 +205,33 @@ def _raise_api_error(operation: str) -> None:
 def _api_error(operation: str) -> OSError:
     code = _last_error()
     return OSError(code, f"{operation} failed with Windows error {code}")
+
+
+def _raise_unexpected_wait_result(operation: str, result: int) -> None:
+    if result == _WAIT_FAILED:
+        _raise_api_error(operation)
+    raise OSError(result, f"{operation} returned unexpected wait result {result}")
+
+
+class _CleanupErrors:
+    def __init__(self) -> None:
+        self._first: OSError | RuntimeError | None = None
+
+    def attempt(self, operation: Callable[[], None]) -> None:
+        try:
+            operation()
+        except (OSError, RuntimeError) as exc:
+            self.add(exc)
+
+    def add(self, error: OSError | RuntimeError) -> None:
+        if self._first is None:
+            self._first = error
+        else:
+            self._first.add_note(f"Additional cleanup error: {error}")
+
+    def raise_first(self) -> None:
+        if self._first is not None:
+            raise self._first
 
 
 def _configure_api(kernel32: Any) -> None:
@@ -720,7 +748,7 @@ class ConPtyProcess:
         if result == _WAIT_TIMEOUT:
             return None
         if result != _WAIT_OBJECT_0:
-            raise OSError(result, f"WaitForSingleObject returned {result}")
+            _raise_unexpected_wait_result("WaitForSingleObject", result)
         exit_code = wintypes.DWORD()
         if not self._api.kernel32.GetExitCodeProcess(process_handle, ctypes.byref(exit_code)):
             _raise_api_error("GetExitCodeProcess")
@@ -736,7 +764,7 @@ class ConPtyProcess:
         if result == _WAIT_TIMEOUT:
             raise TimeoutError(f"ConPTY process {self._pid} did not exit within {timeout:.1f}s")
         if result != _WAIT_OBJECT_0:
-            raise OSError(result, f"WaitForSingleObject returned {result}")
+            _raise_unexpected_wait_result("WaitForSingleObject", result)
         exit_code = self.poll()
         assert exit_code is not None
         return exit_code
@@ -766,37 +794,68 @@ class ConPtyProcess:
             _raise_api_error("TerminateJobObject")
         self.wait(timeout=5.0)
 
+    def _close_pseudo_input(self) -> None:
+        pseudo = self._pseudo
+        if pseudo is None or pseudo.input_handle == 0:
+            return
+        self._api.close_handle(pseudo.input_handle)
+        pseudo.input_handle = 0
+
+    def _close_pseudoconsole(self) -> None:
+        pseudo = self._pseudo
+        if pseudo is None or pseudo.hpc == 0:
+            return
+        self._api.kernel32.ClosePseudoConsole(pseudo.hpc)
+        pseudo.hpc = 0
+
+    def _close_pseudo_output(self) -> None:
+        pseudo = self._pseudo
+        if pseudo is None or pseudo.output_handle == 0:
+            return
+        self._api.close_handle(pseudo.output_handle)
+        pseudo.output_handle = 0
+        if pseudo.input_handle == 0 and pseudo.hpc == 0:
+            self._pseudo = None
+
+    def _close_process_handle(self) -> None:
+        if self._process_handle is None:
+            return
+        self._api.close_handle(self._process_handle)
+        self._process_handle = None
+
+    def _close_job_handle(self) -> None:
+        if self._job_handle is None:
+            return
+        self._api.close_handle(self._job_handle)
+        self._job_handle = None
+
+    def _write_artifact(self) -> None:
+        if self._artifact_path is not None:
+            self._artifact_path.write_bytes(self.transcript.tail())
+
     def close(self) -> None:
         """Close the process, its job, the pseudo console, and all pipe handles."""
         if self.owned_resource_count == 0:
             return
-        self._terminate_if_running()
-        pseudo = self._pseudo
-        if pseudo is not None:
-            self._api.close_handle(pseudo.input_handle)
-            pseudo.input_handle = 0
-            self._api.kernel32.ClosePseudoConsole(pseudo.hpc)
-            pseudo.hpc = 0
-        self._reader.join(timeout=5.0)
+        errors = _CleanupErrors()
+        errors.attempt(self._terminate_if_running)
+        errors.attempt(self._close_pseudo_input)
+        errors.attempt(self._close_pseudoconsole)
+        errors.attempt(lambda: self._reader.join(timeout=5.0))
         if self._reader.is_alive():
-            self._reader_stop.set()
-            self._reader.join(timeout=1.0)
-        if pseudo is not None:
-            self._api.close_handle(pseudo.output_handle)
-            self._pseudo = None
+            errors.attempt(self._reader_stop.set)
+            errors.attempt(lambda: self._reader.join(timeout=1.0))
+        errors.attempt(self._close_pseudo_output)
         if self._reader.is_alive():
-            self._reader.join(timeout=1.0)
-        reader_stuck = self._reader.is_alive()
-        self._api.close_handle(self._process_handle)
-        self._process_handle = None
-        self._api.close_handle(self._job_handle)
-        self._job_handle = None
-        if self._artifact_path is not None:
-            self._artifact_path.write_bytes(self.transcript.tail())
-        if reader_stuck:
-            raise RuntimeError("ConPTY output reader did not stop")
+            errors.attempt(lambda: self._reader.join(timeout=1.0))
+        if self._reader.is_alive():
+            errors.add(RuntimeError("ConPTY output reader did not stop"))
         if self._reader_error is not None:
-            raise OSError(f"ConPTY output reader failed: {self._reader_error}")
+            errors.add(OSError(f"ConPTY output reader failed: {self._reader_error}"))
+        errors.attempt(self._close_process_handle)
+        errors.attempt(self._close_job_handle)
+        errors.attempt(self._write_artifact)
+        errors.raise_first()
 
     def __enter__(self) -> Self:
         return self
@@ -875,6 +934,11 @@ def wait_for_process_exit(pid: int, *, timeout: float) -> bool:
         _raise_api_error("OpenProcess")
     try:
         milliseconds = max(0, min(round(timeout * 1000), 0xFFFFFFFE))
-        return int(api.kernel32.WaitForSingleObject(handle, milliseconds)) == _WAIT_OBJECT_0
+        result = int(api.kernel32.WaitForSingleObject(handle, milliseconds))
+        if result == _WAIT_TIMEOUT:
+            return False
+        if result != _WAIT_OBJECT_0:
+            _raise_unexpected_wait_result("WaitForSingleObject", result)
+        return True
     finally:
         api.close_handle(handle)

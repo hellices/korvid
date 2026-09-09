@@ -121,7 +121,7 @@ jobs:
           retention-days: 7
       # Windows verifies OS-specific behaviour; docs contracts are not that.
       - if: needs.changes.outputs.code == 'true'
-        run: uv run pytest -q
+        run: uv run pytest -q --ignore=tests/windows/test_native_terminal.py
 
   pre-commit:
     runs-on: korvid-runners

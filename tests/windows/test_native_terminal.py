@@ -75,6 +75,134 @@ class _FakeApi:
         self.closed_handles.append(handle)
 
 
+class _WaitKernel:
+    def __init__(self, wait_result: int) -> None:
+        self.wait_result = wait_result
+        self.open_handle = 91
+
+    def WaitForSingleObject(self, handle: int, timeout: int) -> int:
+        return self.wait_result
+
+    def GetExitCodeProcess(self, handle: int, exit_code: Any) -> bool:
+        ctypes.cast(exit_code, ctypes.POINTER(ctypes.c_ulong)).contents.value = 0
+        return True
+
+    def OpenProcess(self, access: int, inherit: bool, pid: int) -> int:
+        return self.open_handle
+
+
+class _CleanupReader:
+    def __init__(self, *, alive: bool = True) -> None:
+        self.alive = alive
+        self.join_calls: list[float] = []
+
+    def join(self, timeout: float) -> None:
+        self.join_calls.append(timeout)
+
+    def is_alive(self) -> bool:
+        return self.alive
+
+
+class _CleanupStop:
+    def __init__(self) -> None:
+        self.set_called = False
+
+    def set(self) -> None:
+        self.set_called = True
+
+
+class _CleanupKernel:
+    def __init__(
+        self,
+        events: list[tuple[str, int]],
+        *,
+        wait_results: list[int] | None = None,
+    ) -> None:
+        self.events = events
+        self.wait_results = wait_results or []
+        self.wait_calls: list[tuple[int, int]] = []
+        self.terminated_jobs: list[int] = []
+
+    def ClosePseudoConsole(self, hpc: int) -> None:
+        self.events.append(("pseudo", hpc))
+
+    def WaitForSingleObject(self, handle: int, timeout: int) -> int:
+        self.wait_calls.append((handle, timeout))
+        return self.wait_results.pop(0)
+
+    def TerminateJobObject(self, job_handle: int, exit_code: int) -> bool:
+        self.terminated_jobs.append(job_handle)
+        return True
+
+
+class _CleanupApi:
+    def __init__(
+        self,
+        kernel32: _CleanupKernel,
+        reader: _CleanupReader,
+        events: list[tuple[str, int]],
+        *,
+        failing_handles: set[int] | None = None,
+        unblock_reader: bool = True,
+    ) -> None:
+        self.kernel32 = kernel32
+        self._reader = reader
+        self._events = events
+        self._failing_handles = failing_handles or set()
+        self._unblock_reader = unblock_reader
+
+    def close_handle(self, handle: int | None) -> None:
+        assert handle is not None
+        self._events.append(("handle", handle))
+        if handle == 30 and self._unblock_reader:
+            self._reader.alive = False
+        if handle in self._failing_handles:
+            raise OSError(f"close {handle} failed")
+
+
+def _bare_process(api: object) -> ConPtyProcess:
+    process = object.__new__(ConPtyProcess)
+    process._api = cast(Any, api)
+    process._process_handle = 40
+    process._pid = 1234
+    return process
+
+
+def _cleanup_process(
+    tmp_path: Path,
+    *,
+    failing_handles: set[int] | None = None,
+    reader_alive: bool = True,
+    unblock_reader: bool = True,
+    termination_timeout: bool = False,
+) -> tuple[ConPtyProcess, _CleanupReader, _CleanupStop, list[tuple[str, int]], Path]:
+    events: list[tuple[str, int]] = []
+    reader = _CleanupReader(alive=reader_alive)
+    stop = _CleanupStop()
+    kernel32 = _CleanupKernel(
+        events,
+        wait_results=[0x00000102, 0x00000102] if termination_timeout else None,
+    )
+    api = _CleanupApi(
+        kernel32,
+        reader,
+        events,
+        failing_handles=failing_handles,
+        unblock_reader=unblock_reader,
+    )
+    process = _bare_process(api)
+    process._pseudo = conpty._PseudoConsole(hpc=20, input_handle=10, output_handle=30)
+    process._job_handle = 50
+    process._reader = cast(Any, reader)
+    process._reader_stop = cast(Any, stop)
+    process._reader_error = None
+    process.transcript = BoundedTranscript(limit=32)
+    process.transcript.append(b"terminal tail")
+    artifact = tmp_path / "conpty-output.bin"
+    process._artifact_path = artifact
+    return process, reader, stop, events, artifact
+
+
 def _send_filter_pattern(
     send: Callable[[bytes], None],
     wait_for_focus: Callable[[], dict[str, Any]],
@@ -138,6 +266,58 @@ def test_run_app_instance_propagates_handled_textual_error_code() -> None:
     assert result == 1
     assert app.run_calls == [(False, False)]
     assert witnessed == [1]
+
+
+def test_native_snapshot_records_process_lineage(monkeypatch: pytest.MonkeyPatch) -> None:
+    app = cast(Any, type("SnapshotApp", (), {"_driver": None})())
+    monkeypatch.setattr(os, "getpid", lambda: 5152)
+    monkeypatch.setattr(os, "getppid", lambda: 7692)
+    monkeypatch.setattr(native_app, "_process_handle_count", lambda: 7)
+    monkeypatch.setattr(native_app, "_textual_threads", dict)
+
+    snapshot = native_app._snapshot(app)
+
+    assert snapshot["pid"] == 5152
+    assert snapshot["parent_pid"] == 7692
+
+
+@pytest.mark.parametrize(
+    ("rows", "table_visible", "workspace_visible", "expected"),
+    [
+        (2, False, True, False),
+        (2, True, False, False),
+        (2, True, True, True),
+        (0, True, True, False),
+        (1, True, True, False),
+    ],
+)
+def test_resources_ready_requires_rendered_visible_table(
+    rows: int,
+    table_visible: bool,
+    workspace_visible: bool,
+    expected: bool,
+) -> None:
+    assert native_app._resources_are_visible(rows, table_visible, workspace_visible) is expected
+
+
+@pytest.mark.parametrize(
+    ("mounted", "launcher_pid", "expected"),
+    [
+        ({"pid": 7692, "parent_pid": 100}, 7692, 7692),
+        ({"pid": 5152, "parent_pid": 7692}, 7692, 5152),
+    ],
+)
+def test_app_process_id_accepts_direct_or_venv_launcher_lineage(
+    mounted: dict[str, Any],
+    launcher_pid: int,
+    expected: int,
+) -> None:
+    assert _app_process_id(mounted, launcher_pid) == expected
+
+
+def test_app_process_id_rejects_unrelated_process() -> None:
+    with pytest.raises(AssertionError, match="not the ConPTY process or its child"):
+        _app_process_id({"pid": 5152, "parent_pid": 4000}, launcher_pid=7692)
 
 
 def test_attribute_list_passes_pseudoconsole_handle_value() -> None:
@@ -232,6 +412,127 @@ def test_spawn_replaces_redirected_parent_standard_handles(
     assert kernel.standard_handles == (None, None, None)
 
 
+def test_poll_reports_wait_failed_last_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    process = _bare_process(_FakeApi(_WaitKernel(0xFFFFFFFF)))
+    monkeypatch.setattr(conpty, "_last_error", lambda: 1234)
+
+    with pytest.raises(OSError, match="WaitForSingleObject") as error:
+        process.poll()
+
+    assert error.value.errno == 1234
+
+
+def test_wait_reports_wait_failed_last_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    process = _bare_process(_FakeApi(_WaitKernel(0xFFFFFFFF)))
+    monkeypatch.setattr(conpty, "_last_error", lambda: 2345)
+
+    with pytest.raises(OSError, match="WaitForSingleObject") as error:
+        process.wait(timeout=1.0)
+
+    assert error.value.errno == 2345
+
+
+def test_wait_for_process_exit_reports_wait_failed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = _FakeApi(_WaitKernel(0xFFFFFFFF))
+    monkeypatch.setattr(conpty, "_WindowsApi", lambda: cast(Any, api))
+    monkeypatch.setattr(conpty, "_last_error", lambda: 3456)
+
+    with pytest.raises(OSError, match="WaitForSingleObject") as error:
+        wait_for_process_exit(99, timeout=1.0)
+
+    assert error.value.errno == 3456
+    assert api.closed_handles == [91]
+
+
+def test_wait_for_process_exit_returns_false_only_for_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = _FakeApi(_WaitKernel(0x00000102))
+    monkeypatch.setattr(conpty, "_WindowsApi", lambda: cast(Any, api))
+
+    assert wait_for_process_exit(99, timeout=1.0) is False
+    assert api.closed_handles == [91]
+
+
+def test_close_preserves_termination_error_and_attempts_all_cleanup(
+    tmp_path: Path,
+) -> None:
+    process, reader, stop, events, artifact = _cleanup_process(
+        tmp_path,
+        failing_handles={40},
+        termination_timeout=True,
+    )
+    kernel32 = cast(_CleanupKernel, cast(Any, process._api).kernel32)
+
+    with pytest.raises(TimeoutError, match=r"did not exit within 5\.0s") as error:
+        process.close()
+
+    assert events == [
+        ("handle", 10),
+        ("pseudo", 20),
+        ("handle", 30),
+        ("handle", 40),
+        ("handle", 50),
+    ]
+    assert stop.set_called
+    assert reader.join_calls == [5.0, 1.0]
+    assert kernel32.wait_calls == [(40, 0), (40, 5_000)]
+    assert kernel32.terminated_jobs == [50]
+    assert artifact.read_bytes() == b"terminal tail"
+    assert any("close 40 failed" in note for note in getattr(error.value, "__notes__", []))
+
+
+def test_close_surfaces_handle_error_after_remaining_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    process, _, _, events, artifact = _cleanup_process(
+        tmp_path,
+        failing_handles={10},
+        reader_alive=False,
+    )
+    monkeypatch.setattr(process, "_terminate_if_running", lambda: None)
+
+    with pytest.raises(OSError, match="close 10 failed"):
+        process.close()
+
+    assert events == [
+        ("handle", 10),
+        ("pseudo", 20),
+        ("handle", 30),
+        ("handle", 40),
+        ("handle", 50),
+    ]
+    assert artifact.read_bytes() == b"terminal tail"
+
+
+def test_close_surfaces_stuck_reader_after_handles_and_artifact_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    process, reader, stop, events, artifact = _cleanup_process(
+        tmp_path,
+        unblock_reader=False,
+    )
+    monkeypatch.setattr(process, "_terminate_if_running", lambda: None)
+
+    with pytest.raises(RuntimeError, match="output reader did not stop"):
+        process.close()
+
+    assert events == [
+        ("handle", 10),
+        ("pseudo", 20),
+        ("handle", 30),
+        ("handle", 40),
+        ("handle", 50),
+    ]
+    assert stop.set_called
+    assert reader.join_calls == [5.0, 1.0, 1.0]
+    assert artifact.read_bytes() == b"terminal tail"
+
+
 def test_bounded_transcript_keeps_only_the_latest_complete_tail() -> None:
     transcript = BoundedTranscript(limit=8)
 
@@ -244,6 +545,50 @@ def test_bounded_transcript_keeps_only_the_latest_complete_tail() -> None:
     assert transcript.contains_after(b"678", checkpoint)
     assert not transcript.contains_after(b"345", checkpoint)
     assert transcript.count(b"34") == 1
+
+
+def test_initial_render_may_arrive_before_mount_observation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    session, _, _, _, _ = _cleanup_process(tmp_path, reader_alive=False)
+    session.transcript.append(b"api-1 worker-2")
+    mounted = {
+        "pid": session.pid,
+        "parent_pid": 100,
+        "driver": "textual.drivers.windows_driver.WindowsDriver",
+        "stdin_tty": True,
+        "stdout_tty": True,
+        "headless": False,
+        "can_suspend": True,
+    }
+    resources = {
+        "rows": 2,
+        "table_visible": True,
+        "workspace_visible": True,
+        "textual_threads": {"textual-input": 1, "textual-output": 1},
+    }
+
+    def phase(
+        witnesses: WitnessDirectory, name: str, process: ConPtyProcess, deadline: float
+    ) -> dict[str, Any]:
+        return mounted if name == "mounted" else resources
+
+    def stop_at_help(data: bytes) -> None:
+        assert data == b"?"
+        raise RuntimeError("reached help input after rendering")
+
+    module = sys.modules[__name__]
+    monkeypatch.setattr(module, "_prepare_native_fixture", lambda root: (None, {}))
+    monkeypatch.setattr(module, "process_handle_count", lambda: 1)
+    monkeypatch.setattr(module, "_phase", phase)
+    monkeypatch.setattr(module, "_remaining", lambda deadline, cap: 0.0)
+    monkeypatch.setattr(ConPtyProcess, "start", lambda *args, **kwargs: session)
+    monkeypatch.setattr(session, "diagnostics", lambda: "pre-observed startup output")
+    monkeypatch.setattr(session, "send", stop_at_help)
+    monkeypatch.setattr(session, "close", lambda: None)
+
+    with pytest.raises(RuntimeError, match="reached help input after rendering"):
+        test_korvid_operates_through_native_windows_conpty(tmp_path)
 
 
 def test_isolated_environment_does_not_inherit_user_kubernetes_paths(tmp_path: Path) -> None:
@@ -361,6 +706,17 @@ def _thread_count(payload: dict[str, Any], name: str) -> int:
     return value
 
 
+def _app_process_id(mounted: dict[str, Any], launcher_pid: int) -> int:
+    app_pid = int(mounted["pid"])
+    app_parent_pid = int(mounted["parent_pid"])
+    if app_pid != launcher_pid and app_parent_pid != launcher_pid:
+        raise AssertionError(
+            f"mounted app PID {app_pid} is not the ConPTY process or its child "
+            f"(launcher PID {launcher_pid}, app parent PID {app_parent_pid})"
+        )
+    return app_pid
+
+
 @pytest.mark.skipif(os.name != "nt", reason="requires native Windows ConPTY")
 def test_korvid_operates_through_native_windows_conpty(tmp_path: Path) -> None:
     """Exercise production app, WindowsDriver, keyboard input, and shell suspension."""
@@ -379,10 +735,12 @@ def test_korvid_operates_through_native_windows_conpty(tmp_path: Path) -> None:
         capture_limit=128 * 1024,
         artifact_path=artifact,
     )
-    app_pid = session.pid
+    launcher_pid = session.pid
+    app_pid = 0
     shell_pid = 0
     with session:
         mounted = _phase(witnesses, "mounted", session, deadline)
+        app_pid = _app_process_id(mounted, launcher_pid)
         resources = _phase(witnesses, "resources-ready", session, deadline)
         context = session.diagnostics()
         assert mounted["driver"] == "textual.drivers.windows_driver.WindowsDriver", context
@@ -391,8 +749,18 @@ def test_korvid_operates_through_native_windows_conpty(tmp_path: Path) -> None:
         assert mounted["headless"] is False, context
         assert mounted["can_suspend"] is True, context
         assert resources["rows"] == 2, context
+        assert resources["table_visible"] is True, context
+        assert resources["workspace_visible"] is True, context
         assert _thread_count(resources, "textual-input") == 1, context
         assert _thread_count(resources, "textual-output") == 1, context
+        assert session.wait_for_output(
+            b"api-1",
+            timeout=_remaining(deadline, 5.0),
+        ), context
+        assert session.wait_for_output(
+            b"worker-2",
+            timeout=_remaining(deadline, 5.0),
+        ), context
 
         session.send(b"?")
         help_open = _phase(witnesses, "help-open", session, deadline)
@@ -486,6 +854,7 @@ def test_korvid_operates_through_native_windows_conpty(tmp_path: Path) -> None:
     assert exited["return_code"] == 0
     assert _thread_count(exited, "textual-input") == 0
     assert _thread_count(exited, "textual-output") == 0
+    assert wait_for_process_exit(launcher_pid, timeout=_remaining(deadline, 2.0))
     assert wait_for_process_exit(app_pid, timeout=_remaining(deadline, 2.0))
     assert wait_for_process_exit(shell_pid, timeout=_remaining(deadline, 2.0))
     assert session.owned_resource_count == 0

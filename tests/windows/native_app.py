@@ -92,9 +92,15 @@ def _snapshot(app: KorvidApp) -> dict[str, Any]:
             if driver is None
             else f"{driver.__class__.__module__}.{driver.__class__.__qualname__}"
         ),
+        "parent_pid": os.getppid(),
+        "pid": os.getpid(),
         "process_handles": _process_handle_count(),
         "textual_threads": _textual_threads(),
     }
+
+
+def _resources_are_visible(rows: int, table_visible: bool, workspace_visible: bool) -> bool:
+    return rows == 2 and table_visible and workspace_visible
 
 
 class _ObservedKorvidApp(KorvidApp):
@@ -142,9 +148,12 @@ class _ObservedKorvidApp(KorvidApp):
 
     def _observe_state(self) -> None:
         table = self.query_one(ResourceTable)
+        workspace = self.query_one("#workspace")
         filter_bar = self.query_one(FilterBar)
         rows = table.row_count
         pattern = self.filter_pattern
+        table_visible = bool(table.display)
+        workspace_visible = bool(workspace.display)
         state = {
             **_snapshot(self),
             "filter": pattern,
@@ -152,8 +161,10 @@ class _ObservedKorvidApp(KorvidApp):
             "filter_open": bool(filter_bar.display),
             "rows": rows,
             "screen": self.screen.__class__.__qualname__,
+            "table_visible": table_visible,
+            "workspace_visible": workspace_visible,
         }
-        if rows == 2 and pattern == "":
+        if pattern == "" and _resources_are_visible(rows, table_visible, workspace_visible):
             self._emit_once("resources-ready", state)
         screen = self.screen
         if isinstance(screen, HelpScreen):
