@@ -214,13 +214,19 @@ def project_license(pyproject: Path) -> str:
 
 
 def _install_commands(resources: list[Resource]) -> str:
+    prefix = ""
+    if any("rust" in SYSTEM_DEPENDENCIES.get(resource.name, {}) for resource in resources):
+        prefix = (
+            "    # macOS extensions resolve CPython symbols when loaded.\n"
+            '    ENV.append_to_rustflags "-C link-arg=-Wl,-undefined,dynamic_lookup" if OS.mac?\n'
+        )
     names = sorted(
         resource.name for resource in resources if resource.name in UNOPTIMIZED_C_RESOURCES
     )
     if not names:
-        return "    virtualenv_install_with_resources"
+        return prefix + "    virtualenv_install_with_resources"
     calls = ", ".join(f'resource("{name}")' for name in names)
-    return (
+    return prefix + (
         f"    venv = virtualenv_install_with_resources(without: {json.dumps(names)})\n"
         "    # aws-lc's jitter entropy collector rejects optimized C.\n"
         f"    ENV.O0 {{ venv.pip_install [{calls}] }}"

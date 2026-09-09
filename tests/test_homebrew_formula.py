@@ -292,6 +292,21 @@ def test_a_formula_without_pyyaml_does_not_declare_libyaml() -> None:
     )
     assert 'depends_on "libyaml"' not in ruby
     assert "rust" not in ruby
+    assert "append_to_rustflags" not in ruby
+
+
+def test_macos_python_extension_symbols_are_resolved_at_load_time() -> None:
+    ruby = render_formula(
+        version="1.2.3",
+        url="https://files.pythonhosted.org/packages/aa/korvid-1.2.3.tar.gz",
+        sha256="a" * 64,
+        resources=[
+            Resource(name="tokenizers", url="https://files.pythonhosted.org/x", sha256="b" * 64)
+        ],
+    )
+    linking = 'ENV.append_to_rustflags "-C link-arg=-Wl,-undefined,dynamic_lookup" if OS.mac?'
+    assert linking in ruby
+    assert ruby.index(linking) < ruby.index("virtualenv_install_with_resources")
 
 
 @pytest.mark.parametrize("names", [["hf-xet"], ["litellm"], ["litellm", "hf-xet"]])
