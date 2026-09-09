@@ -15,6 +15,7 @@ make the formula installable.
 from __future__ import annotations
 
 import importlib.util
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -253,6 +254,7 @@ def test_the_formula_passes_brew_audit_without_running_brew() -> None:
         "fastuuid",
         "hf-xet",
         "jiter",
+        "litellm",
         "pydantic-core",
         "rpds-py",
         "tiktoken",
@@ -292,24 +294,29 @@ def test_a_formula_without_pyyaml_does_not_declare_libyaml() -> None:
     assert "rust" not in ruby
 
 
-def test_hf_xet_builds_with_scoped_unoptimized_c_without_disabling_entropy() -> None:
+@pytest.mark.parametrize("names", [["hf-xet"], ["litellm"], ["litellm", "hf-xet"]])
+def test_entropy_resources_build_with_scoped_unoptimized_c(names: list[str]) -> None:
     ruby = render_formula(
         version="1.2.3",
         url="https://files.pythonhosted.org/packages/aa/korvid-1.2.3.tar.gz",
         sha256="a" * 64,
         resources=[
-            Resource(name="hf-xet", url="https://files.pythonhosted.org/x", sha256="b" * 64)
+            Resource(name=name, url="https://files.pythonhosted.org/x", sha256="b" * 64)
+            for name in names
         ],
     )
-    normal_install = 'venv = virtualenv_install_with_resources(without: ["hf-xet"])'
-    entropy_safe_install = 'ENV.O0 { venv.pip_install resource("hf-xet") }'
+    normal_install = (
+        f"venv = virtualenv_install_with_resources(without: {json.dumps(sorted(names))})"
+    )
+    calls = ", ".join(f'resource("{name}")' for name in sorted(names))
+    entropy_safe_install = f"ENV.O0 {{ venv.pip_install [{calls}] }}"
     assert normal_install in ruby
     assert entropy_safe_install in ruby
     assert ruby.index(normal_install) < ruby.index(entropy_safe_install)
     assert "AWS_LC_SYS_NO_JITTER_ENTROPY" not in ruby
 
 
-def test_a_formula_without_hf_xet_keeps_standard_resource_installation() -> None:
+def test_a_formula_without_entropy_resources_keeps_standard_resource_installation() -> None:
     ruby = render_formula(
         version="1.2.3",
         url="https://files.pythonhosted.org/packages/aa/korvid-1.2.3.tar.gz",

@@ -49,6 +49,7 @@ SYSTEM_DEPENDENCIES: dict[str, dict[str, str]] = {
     "fastuuid": {"rust": " => :build"},
     "hf-xet": {"rust": " => :build"},
     "jiter": {"rust": " => :build"},
+    "litellm": {"rust": " => :build"},
     "pydantic-core": {"rust": " => :build"},
     # Compiles its C loader; without libyaml the build falls back to the
     # pure-Python parser, several times slower on every manifest korvid
@@ -58,6 +59,7 @@ SYSTEM_DEPENDENCIES: dict[str, dict[str, str]] = {
     "tiktoken": {"rust": " => :build"},
     "tokenizers": {"rust": " => :build"},
 }
+UNOPTIMIZED_C_RESOURCES = frozenset({"hf-xet", "litellm"})
 
 
 @dataclass(frozen=True)
@@ -211,6 +213,20 @@ def project_license(pyproject: Path) -> str:
     return license_id
 
 
+def _install_commands(resources: list[Resource]) -> str:
+    names = sorted(
+        resource.name for resource in resources if resource.name in UNOPTIMIZED_C_RESOURCES
+    )
+    if not names:
+        return "    virtualenv_install_with_resources"
+    calls = ", ".join(f'resource("{name}")' for name in names)
+    return (
+        f"    venv = virtualenv_install_with_resources(without: {json.dumps(names)})\n"
+        "    # aws-lc's jitter entropy collector rejects optimized C.\n"
+        f"    ENV.O0 {{ venv.pip_install [{calls}] }}"
+    )
+
+
 def render_formula(
     *,
     version: str,
@@ -247,13 +263,6 @@ def render_formula(
         f"  end\n"
         for resource in resources
     )
-    install = "    virtualenv_install_with_resources"
-    if any(resource.name == "hf-xet" for resource in resources):
-        install = (
-            '    venv = virtualenv_install_with_resources(without: ["hf-xet"])\n'
-            "    # aws-lc's jitter entropy collector rejects optimized C.\n"
-            '    ENV.O0 { venv.pip_install resource("hf-xet") }'
-        )
     return f'''# typed: false
 # frozen_string_literal: true
 
@@ -272,7 +281,7 @@ class Korvid < Formula
 {depends_on}
 {stanzas}
   def install
-{install}
+{_install_commands(resources)}
   end
 
   test do
