@@ -207,44 +207,6 @@ class RecordedExecution(ABC):
         return ToolOutcome(text=await self.execute(name, arguments))
 
 
-class _AdaptedExecution(RecordedExecution):
-    """A string-only executor seen through the recorded contract."""
-
-    def __init__(self, execute: Callable[[str, dict[str, Any]], Awaitable[str]]) -> None:
-        self._execute = execute
-
-    async def execute(self, name: str, arguments: dict[str, Any]) -> str:
-        return await self._execute(name, arguments)
-
-
-def as_recorded(executor: object) -> RecordedExecution:
-    """Adapt a string-only executor to `RecordedExecution`.
-
-    The explicit on-ramp for something that is not a `RecordedExecution` —
-    a test fake, a third-party integration — and it is the **caller's** to
-    invoke. Adapting silently inside an agent constructor would make a
-    structural shape the real boundary; composing the adapter is a
-    decision, and it belongs where the executor is chosen (PR #197 review).
-
-    Args:
-        executor: A `RecordedExecution`, returned as-is, or any object with
-            an `async execute(name, arguments) -> str`.
-
-    Returns:
-        The executor itself, or an adapter reporting no producer records.
-
-    Raises:
-        TypeError: The object has no callable `execute`, so nothing could
-            dispatch a tool call through it.
-    """
-    if isinstance(executor, RecordedExecution):
-        return executor
-    execute = getattr(executor, "execute", None)
-    if not callable(execute):
-        raise TypeError("a tool executor must define async execute(name, arguments) -> str")
-    return _AdaptedExecution(execute)
-
-
 def cap_result(result: str, limit: int = MAX_RESULT_CHARS) -> str:
     """Enforce the tool-result ingest cap; shared by every path that feeds
     a result into conversation history. A resolved policy may pass a

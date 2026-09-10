@@ -133,24 +133,6 @@ def _sanitize_client_meta(value: object, *, limit: int = 120) -> str:
     return text[:limit]
 
 
-def _failed(name: str, outcome: ToolOutcome) -> bool:
-    """Whether one dispatch failed, for the MCP ``isError`` flag.
-
-    A cluster read returns content korvid did not author, so only its
-    ``error`` bit can say - a pod logging ``ERROR: connection refused``
-    succeeded. ``ToolExecutor`` classifies UI and proposal bridge strings at
-    their typed boundary, so those failures normally arrive with
-    ``error=True``. The prefix check remains defensive compatibility for
-    other recorded executors returning korvid-authored non-read verdicts.
-    """
-    if outcome.error:
-        return True
-    tool = TOOLS_BY_NAME.get(name)
-    if tool is None or tool.effect in ("cluster_read", "external_read"):
-        return False
-    return outcome.text.startswith(ERROR_PREFIX)
-
-
 class KorvidMCPServer:
     """Streamable HTTP MCP server wrapping the agent tool surface.
 
@@ -317,7 +299,7 @@ class KorvidMCPServer:
         self._surface_read(name, args, outcome, ctx)
         return (
             [types.TextContent(type="text", text=outcome.text)],
-            _failed(name, outcome),
+            outcome.error,
         )
 
     def _surface_read(

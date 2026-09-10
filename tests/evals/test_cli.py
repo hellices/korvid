@@ -94,16 +94,6 @@ def test_resolve_policy_takes_exactly_two_arguments() -> None:
             {
                 "KORVID_EVAL_BASE_URL": "http://localhost/v1",
                 "KORVID_EVAL_MODEL": "m",
-                "KORVID_EVAL_PROVIDER": "unknown",
-            },
-            # The prefix is refused by routing the reference it composes,
-            # not by a vendor list korvid keeps.
-            "unknown/m",
-        ),
-        (
-            {
-                "KORVID_EVAL_BASE_URL": "http://localhost/v1",
-                "KORVID_EVAL_MODEL": "m",
                 "KORVID_EVAL_TIMEOUT_SECONDS": "nan",
             },
             "KORVID_EVAL_TIMEOUT_SECONDS",
@@ -116,6 +106,21 @@ def test_provider_factory_rejects_invalid_environment(
 ) -> None:
     with pytest.raises(SystemExit, match=message):
         provider_factory_from_env(env)
+
+
+def test_korvid_eval_provider_variable_has_no_effect() -> None:
+    """The compatibility prefix variable is retired.
+
+    `KORVID_EVAL_MODEL` is the whole reference now — `provider/model` — and
+    nothing is joined onto it. A leftover `KORVID_EVAL_PROVIDER` in an
+    operator's environment must be silently ignored rather than prepended.
+    """
+    from korvid.evals import __main__ as cli
+
+    assert (
+        cli._eval_reference({"KORVID_EVAL_MODEL": "qwen3:8b", "KORVID_EVAL_PROVIDER": "ollama"})
+        == "qwen3:8b"
+    )
 
 
 def _shipped_provider(env: dict[str, str]) -> LiteLLMProvider:
@@ -222,12 +227,11 @@ def test_both_timeout_spellings_are_refused_the_same_way() -> None:
     ("env", "expected"),
     [
         ({"KORVID_EVAL_MODEL": "ollama/qwen3:8b"}, "qwen3:8b"),
-        ({"KORVID_EVAL_PROVIDER": "ollama", "KORVID_EVAL_MODEL": "qwen3:8b"}, "qwen3:8b"),
         ({"KORVID_EVAL_MODEL": "openai/gpt-4o"}, "gpt-4o"),
         ({"KORVID_EVAL_MODEL": "qwen3:8b"}, "qwen3:8b"),
         ({"KORVID_EVAL_MODEL": "openrouter/qwen/qwen3-8b"}, "qwen/qwen3-8b"),
     ],
-    ids=["prefixed", "legacy-prefix-variable", "other-vendor", "bare", "nested"],
+    ids=["prefixed", "other-vendor", "bare", "nested"],
 )
 def test_the_probe_uses_the_tag_the_serving_endpoint_knows(
     env: dict[str, str], expected: str
@@ -280,8 +284,9 @@ def test_serving_probe_reads_the_named_credential_variable(
     assert eval_api_key({"KORVID_EVAL_API_KEY_ENV": "EVAL_TOKEN"}) == "sk-probe"
 
 
-def test_serving_probe_falls_back_to_the_deprecated_variable() -> None:
-    assert eval_api_key({"KORVID_EVAL_API_KEY": "sk-legacy"}) == "sk-legacy"
+def test_serving_probe_no_longer_falls_back_to_the_deprecated_variable() -> None:
+    """`KORVID_EVAL_API_KEY` is retired; only the named-variable form works."""
+    assert eval_api_key({"KORVID_EVAL_API_KEY": "sk-legacy"}) == ""
 
 
 def test_serving_probe_has_no_credential_when_none_is_configured() -> None:

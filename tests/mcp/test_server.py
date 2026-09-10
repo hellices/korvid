@@ -1898,23 +1898,25 @@ async def test_a_refusal_before_dispatch_is_flagged_as_an_error() -> None:
     assert executor.calls == []
 
 
-async def test_a_failed_proposal_is_flagged_even_though_its_producer_says_nothing(
+async def test_a_proposal_result_is_flagged_only_by_its_producers_error_bit(
     tmp_path: Path,
 ) -> None:
-    """The UI bridges answer with strings, not outcomes.
+    """`is_error` mirrors `outcome.error` alone, never the text it carries.
 
-    `agent_get_write_proposal` returns `ERROR: unknown proposal id` and
-    `ToolExecutor` wraps that plain string with the default `error=False`,
-    so a capability-valid but failed proposal would reach the host marked
-    successful. korvid authored that text, so its `ERROR:` prefix is a
-    contract rather than content — unlike a log line, which is why the
-    judgement is made per effect and not globally.
+    `ToolExecutor._dispatch_proposal` already runs every bridge string
+    through `_bridge_outcome`, so a real `ERROR: ...` proposal answer
+    already arrives with `error=True` before it reaches MCP. A second,
+    MCP-level classification that fell back to sniffing the `ERROR:`
+    prefix whenever a recorded executor said `error=False` duplicated
+    that judgement and could disagree with it — the producer's bit is
+    now the only signal, so an executor that reports `error=False` is
+    trusted even when its text reads like a failure.
     """
     from mcp import ClientSession
 
     executor = RecordingExecutor()
     executor.result = "ERROR: unknown proposal id"
-    executor.error = False  # exactly what the string-returning bridges produce
+    executor.error = False  # the producer's own verdict: not a failure
     endpoint_file = tmp_path / "mcp-endpoint.json"
     server = make_proposal_server(executor, port=0, endpoint_path=endpoint_file)
     task = asyncio.create_task(server.run())
@@ -1928,6 +1930,33 @@ async def test_a_failed_proposal_is_flagged_even_though_its_producer_says_nothin
             await session.initialize()
             result = await session.call_tool("get_write_proposal", {"proposal_id": "nope"})
             assert getattr(result.content[0], "text", "") == "ERROR: unknown proposal id"
+            assert result.is_error is False, "the producer's error=False was overridden"
+    finally:
+        server.request_shutdown()
+        await asyncio.wait_for(task, timeout=10)
+    assert executor.calls != []
+
+
+async def test_a_proposal_result_is_flagged_when_its_producer_says_so(
+    tmp_path: Path,
+) -> None:
+    """The mirror case: an explicit `error=True` is trusted just as directly."""
+    from mcp import ClientSession
+
+    executor = RecordingExecutor()
+    executor.result = "ERROR: unknown proposal id"
+    executor.error = True
+    endpoint_file = tmp_path / "mcp-endpoint.json"
+    server = make_proposal_server(executor, port=0, endpoint_path=endpoint_file)
+    task = asyncio.create_task(server.run())
+    try:
+        port = await asyncio.wait_for(server.wait_started(), timeout=10)
+        async with (
+            authenticated_transport(f"http://127.0.0.1:{port}/mcp") as (read, write),
+            ClientSession(read, write) as session,
+        ):
+            await session.initialize()
+            result = await session.call_tool("get_write_proposal", {"proposal_id": "nope"})
             assert result.is_error is True, "a failed proposal was reported as successful"
     finally:
         server.request_shutdown()
@@ -1965,15 +1994,42 @@ async def test_an_external_read_is_noted_rather_than_mirrored() -> None:
 
 
 async def test_an_external_read_result_beginning_with_error_is_not_a_failed_call() -> None:
-    """A log line is not korvid's text, so the prefix decides nothing."""
-    from korvid.mcp.server import _failed
+    """A metrics query result is not korvid's text, so its prefix decides
+    nothing — only the producer's own `error` bit does."""
+    from mcp import types as mcp_types
 
-    outcome = ToolOutcome(text="ERROR: connection refused", error=False)
-    assert _failed("search_logs", outcome) is False
+    executor = RecordingExecutor()
+    executor.result = "ERROR: connection refused"
+    executor.error = False
+    server = KorvidMCPServer(
+        executor,
+        READ_TOOLS + UI_TOOLS + mcp_tool_schemas(observability_backends=frozenset({"metrics"})),
+        port=0,
+    )
+    result = await server._on_call_tool(
+        None,  # type: ignore[arg-type]  # identity is not consulted on this path
+        mcp_types.CallToolRequestParams(
+            name="query_metrics", arguments={"signal": "cpu", "namespace": "prod"}
+        ),
+    )
+    assert result.is_error is False, "a successful read was reported as a failed call"
 
 
 async def test_a_failed_external_read_is_reported_as_a_failed_call() -> None:
-    from korvid.mcp.server import _failed
+    from mcp import types as mcp_types
 
-    outcome = ToolOutcome(text="ERROR: [network] prom is unreachable", error=True)
-    assert _failed("query_metrics", outcome) is True
+    executor = RecordingExecutor()
+    executor.result = "ERROR: [network] prom is unreachable"
+    executor.error = True
+    server = KorvidMCPServer(
+        executor,
+        READ_TOOLS + UI_TOOLS + mcp_tool_schemas(observability_backends=frozenset({"metrics"})),
+        port=0,
+    )
+    result = await server._on_call_tool(
+        None,  # type: ignore[arg-type]  # identity is not consulted on this path
+        mcp_types.CallToolRequestParams(
+            name="query_metrics", arguments={"signal": "cpu", "namespace": "prod"}
+        ),
+    )
+    assert result.is_error is True, "a failed read was reported as a successful call"

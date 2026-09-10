@@ -26,6 +26,7 @@ from korvid.evals.harness import (
 )
 from korvid.evals.interaction import EvalUiBridge, load_interaction
 from korvid.evals.scripted import ScriptedProvider
+from korvid.tools.executor import RecordedExecution
 
 _INTERACTION = {
     "kube_context": "eval-cluster",
@@ -34,8 +35,10 @@ _INTERACTION = {
 }
 
 
-class _Executor:
-    """A string-only executor, exactly what the eval packs hand over."""
+class _Executor(RecordedExecution):
+    """Exactly what the eval packs hand over: a `RecordedExecution` that
+    reports no producer redaction records (the ABC's default
+    `execute_recorded` answers in terms of `execute` alone)."""
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict[str, Any]]] = []

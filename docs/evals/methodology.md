@@ -164,7 +164,7 @@ evidence on screen.
 
 The eval builds its provider with the same
 `create_provider_from_profile` the TUI's composition root calls, from a
-`ModelConnectionConfig` assembled out of the eight variables below — the same
+`ModelConnectionConfig` assembled out of the six variables below — the same
 shape a configured connection parses into, over the same entry-point special
 flows and the same bundled model catalog. Routing, credential resolution,
 capability lookup, option filtering and TLS trust are the product's, so a score
@@ -176,9 +176,7 @@ holds a credential: `KORVID_EVAL_API_KEY_ENV` names one, and the production
 |---|---|
 | `KORVID_EVAL_BASE_URL` | The endpoint URL, carried as the profile's `endpoint` (profiles have no `base_url` key). Required. |
 | `KORVID_EVAL_MODEL` | Model reference, `provider/model`. Required. |
-| `KORVID_EVAL_PROVIDER` | Compatibility only: the prefix put in front of `KORVID_EVAL_MODEL` when that value contains no `/`. It is joined into a reference, never compared against a vendor list. |
-| `KORVID_EVAL_API_KEY_ENV` | The **name** of the variable holding the key. Preferred: the profile then stores a name, never a secret. |
-| `KORVID_EVAL_API_KEY` | **Deprecated.** The key itself. Still honoured — and still read by name, so the profile holds `KORVID_EVAL_API_KEY` rather than its value — but it puts a credential in the eval's own variable namespace. Prefer `KORVID_EVAL_API_KEY_ENV`. |
+| `KORVID_EVAL_API_KEY_ENV` | The **name** of the variable holding the key. The profile stores a name, never a secret. |
 | `KORVID_EVAL_OPTIONS_JSON` | A JSON object of profile options (`temperature`, `num_ctx`, …), exactly as a configured connection's own `options` block. Options the provider does not accept are dropped by the shared factory, not by the eval. |
 | `KORVID_EVAL_CA_BUNDLE` | The eval's `network.ca_bundle`. A bundle that will not load is refused rather than silently replaced by the default trust store. |
 | `KORVID_EVAL_TIMEOUT_SECONDS` | Request timeout for slow local models (default 60). Carried as the `timeout` profile option and sent as LiteLLM's named `timeout` parameter. |

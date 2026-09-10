@@ -54,7 +54,6 @@ from korvid.tools.executor import (
     WRITE_TOOL_NAMES,
     RecordedExecution,
     ToolOutcome,
-    as_recorded,
 )
 from korvid.tools.registry import tool_def
 
@@ -88,13 +87,13 @@ class _RecordingExecutor(RecordedExecution):
 
     def __init__(
         self,
-        executor: object,
+        executor: RecordedExecution,
         max_result_chars: int | None = None,
     ) -> None:
-        # Scenario and journey packs hand over whatever they built; this is
-        # the composition point that turns it into the contract the tool
-        # harness requires, so the harness itself never has to guess.
-        self._executor = as_recorded(executor)
+        # Scenario and journey packs hand over an executor that already
+        # implements the contract the tool harness requires, composed
+        # directly rather than adapted from a looser string-only shape.
+        self._executor = executor
         self._max_result_chars = max_result_chars
         self.records: list[ToolRecord] = []
 
