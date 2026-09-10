@@ -192,9 +192,6 @@ class FakeView(ViewState):
     def current_scope(self) -> str:
         return self.scope
 
-    def current_namespace(self) -> str:
-        return self.scope
-
     def canonical_kind(self, kind: str) -> str:
         meta = self._aliases.get(kind)
         return kind if meta is None else meta.plural

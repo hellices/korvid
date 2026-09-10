@@ -184,15 +184,6 @@ class WorkspaceState:
         self.focused.scope = value
 
     @property
-    def current_namespace(self) -> str:
-        """Alias of `current_scope`; both names are in use across the app."""
-        return self.focused.scope
-
-    @current_namespace.setter
-    def current_namespace(self, value: str) -> None:
-        self.focused.scope = value
-
-    @property
     def filter_pattern(self) -> str:
         return self.focused.filter_pattern
 

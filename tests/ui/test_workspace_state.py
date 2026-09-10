@@ -39,8 +39,8 @@ def test_initial_workspace_has_one_pane_on_the_default_scope() -> None:
 
 
 def test_focused_view_state_delegates_to_the_focused_pane() -> None:
-    """kind/scope/namespace/filter/resource_filter/sorts/drill all read and
-    write through the focused pane, so every action targets the current view."""
+    """kind/scope/filter/resource_filter/sorts/drill all read and write
+    through the focused pane, so every action targets the current view."""
     ws = WorkspaceState("pods", "default")
 
     ws.current_kind = "deployments"
@@ -50,7 +50,6 @@ def test_focused_view_state_delegates_to_the_focused_pane() -> None:
 
     assert ws.current_kind == ws.focused.kind == "deployments"
     assert ws.current_scope == ws.focused.scope == "web"
-    assert ws.current_namespace == "web"  # namespace aliases scope
     assert ws.filter_pattern == ws.focused.filter_pattern == "api"
     assert ws.resource_filter is ws.focused.resource_filter
     # sorts/drill are the pane's own mutable state, exposed live.
@@ -58,16 +57,6 @@ def test_focused_view_state_delegates_to_the_focused_pane() -> None:
     assert ws.drill is ws.focused.drill
     ws.sorts["deployments"] = toggle_sort(None, "name")
     assert ws.focused.sorts["deployments"].column == "name"
-
-
-def test_current_namespace_writes_through_to_scope() -> None:
-    """The namespace alias is a second name for the same scope field."""
-    ws = WorkspaceState("pods", "default")
-
-    ws.current_namespace = "prod"
-
-    assert ws.current_scope == "prod"
-    assert ws.focused.scope == "prod"
 
 
 def test_split_clones_the_focused_view_with_a_unique_table_id() -> None:

@@ -45,7 +45,7 @@ class _FakeProc:
         self.argv = argv
         self.returncode: int | None = None
         self.terminated = False
-        # None = no readiness channel; gated tests swap in a fed stream.
+        # None = no readiness channel; _registry() swaps in a gated stream.
         self.stdout: Any = None
 
     def poll(self) -> int | None:
@@ -64,9 +64,37 @@ class _FakeProc:
         return self.returncode
 
 
+class _GatedStream:
+    """File-like stdout whose lines are fed by the test (None ends the stream)."""
+
+    def __init__(self) -> None:
+        self._lines: queue.Queue[str | None] = queue.Queue()
+
+    def __iter__(self) -> _GatedStream:
+        return self
+
+    def __next__(self) -> str:
+        line = self._lines.get()
+        if line is None:
+            raise StopIteration
+        return line
+
+    def feed(self, line: str | None) -> None:
+        self._lines.put(line)
+
+
 def _registry(procs: list[_FakeProc]) -> ForwardRegistry:
+    """A registry whose fakes carry a real (gated) readiness stream.
+
+    A missing ``stdout`` is rejected outright by the registry (a real child
+    always has one — it is spawned with ``stdout=subprocess.PIPE``), so
+    every fake that means to reach ``alive``/``starting`` needs a genuine
+    stream — the test feeds its lines (and closes it with ``feed(None)``).
+    """
+
     def _popen(argv: list[str], **_kwargs: Any) -> _FakeProc:
         proc = _FakeProc(argv)
+        proc.stdout = _GatedStream()
         procs.append(proc)
         return proc
 
@@ -310,9 +338,11 @@ async def test_pf_command_lists_active_forwards() -> None:
     procs: list[_FakeProc] = []
     registry = _registry(procs)
     app = make_app([_pod("api-1")], forwards=registry)
-    registry.start(
+    record = registry.start(
         ForwardSpec(kind="pods", namespace="default", name="api-1", local_port=8080, remote_port=80)
     )
+    procs[0].stdout.feed("Forwarding from 127.0.0.1:8080 -> 80\n")
+    assert registry.wait_ready(record.id, timeout=2.0) == "alive"
     async with app.run_test() as pilot:
         await _wait_rows(app, pilot)
         await _open_pf(app, pilot)
@@ -321,6 +351,7 @@ async def test_pf_command_lists_active_forwards() -> None:
         assert "alive" in rows[0]
         assert "localhost:8080" in rows[0]
         assert "default/pod/api-1:80" in rows[0]
+    procs[0].stdout.feed(None)  # release the reader thread
 
 
 async def test_pf_ctrl_d_stops_forward_and_audits(tmp_path: Path) -> None:
@@ -354,8 +385,11 @@ async def test_pf_marks_broken_forward_and_reattaches() -> None:
         await until(pilot, lambda: any("broken" in row for row in _forward_rows(app)))
         await pilot.press("r")
         await until(pilot, lambda: len(procs) == 2)
+        procs[1].stdout.feed("Forwarding from 127.0.0.1:8080 -> 80\n")
         await until(pilot, lambda: any("alive" in row for row in _forward_rows(app)))
         assert registry.forwards()[0].status == "alive"
+    procs[0].stdout.feed(None)  # release the reader thread
+    procs[1].stdout.feed(None)  # release the reader thread
 
 
 async def test_pf_empty_registry_shows_placeholder() -> None:
@@ -476,7 +510,11 @@ async def test_pf_reattach_verifies_target_still_exists() -> None:
         await until(pilot, lambda: any("broken" in row for row in _forward_rows(app)))
         await pilot.press("r")
         await until(pilot, lambda: len(procs) == 2)
+        procs[1].stdout.feed("Forwarding from 127.0.0.1:8080 -> 80\n")
+        await until(pilot, lambda: registry.forwards()[0].status == "alive")
         assert registry.forwards()[0].status == "alive"
+    procs[0].stdout.feed(None)  # release the reader thread
+    procs[1].stdout.feed(None)  # release the reader thread
 
 
 def test_forward_row_includes_target_kind() -> None:
@@ -580,6 +618,8 @@ async def test_pf_reattach_follows_the_owning_workload_when_pod_gone(tmp_path: P
             await pilot.press("enter")
             await until(pilot, lambda: len(procs) == 1, label="forward started")
             record = registry.forwards()[0]
+            procs[0].stdout.feed("Forwarding from 127.0.0.1:8080 -> 8080\n")
+            await until(pilot, lambda: record.status == "alive", label="forward confirmed alive")
             # The pod dies and its Deployment replaces it under a new name.
             procs[0].returncode = 1
             pod_gone = True
@@ -588,6 +628,7 @@ async def test_pf_reattach_follows_the_owning_workload_when_pod_gone(tmp_path: P
             await pilot.press("r")
             await until(pilot, lambda: len(procs) == 2, label="workload re-attach spawned")
             assert "deployment/api" in procs[1].argv
+            procs[1].stdout.feed("Forwarding from 127.0.0.1:8080 -> 8080\n")
             await until(pilot, lambda: record.status == "alive", label="replacement confirmed")
             assert any("deployment/api" in row for row in _forward_rows(app))
             # The retargeted start is audited with the workload's full GVR —
@@ -605,6 +646,8 @@ async def test_pf_reattach_follows_the_owning_workload_when_pod_gone(tmp_path: P
             )
             assert '"kind": "deployments"' in reattached
             assert '"group": "apps"' in reattached
+    procs[0].stdout.feed(None)  # release the reader thread
+    procs[1].stdout.feed(None)  # release the reader thread
 
 
 async def test_workload_resolution_keeps_the_replicaset_when_the_parent_lookup_fails() -> None:
@@ -638,6 +681,7 @@ async def test_failed_retarget_audits_the_workload_it_targeted(tmp_path: Path) -
         if len(procs) == 1:
             raise OSError("kubectl vanished")
         proc = _FakeProc(argv)
+        proc.stdout = _GatedStream()
         procs.append(proc)
         return proc
 
@@ -677,6 +721,9 @@ async def test_failed_retarget_audits_the_workload_it_targeted(tmp_path: Path) -
             await until(pilot, lambda: isinstance(app.screen, PortForwardScreen))
             await pilot.press("enter")
             await until(pilot, lambda: len(procs) == 1, label="forward started")
+            record = registry.forwards()[0]
+            procs[0].stdout.feed("Forwarding from 127.0.0.1:8080 -> 8080\n")
+            await until(pilot, lambda: record.status == "alive", label="forward confirmed alive")
             procs[0].returncode = 1
             pod_gone = True
             await _open_pf(app, pilot)
@@ -695,6 +742,7 @@ async def test_failed_retarget_audits_the_workload_it_targeted(tmp_path: Path) -
             assert '"kind": "deployments"' in failed
             assert '"name": "api"' in failed
             assert '"group": "apps"' in failed
+    procs[0].stdout.feed(None)  # release the reader thread
 
 
 async def test_teardown_audit_failure_does_not_abort_shutdown(tmp_path: Path) -> None:
@@ -1069,7 +1117,11 @@ async def test_reattach_fails_open_on_transport_error() -> None:
         await until(pilot, lambda: any("broken" in row for row in _forward_rows(app)))
         await pilot.press("r")
         await until(pilot, lambda: len(procs) == 2)
+        procs[1].stdout.feed("Forwarding from 127.0.0.1:8080 -> 80\n")
+        await until(pilot, lambda: registry.forwards()[0].status == "alive")
         assert registry.forwards()[0].status == "alive"
+    procs[0].stdout.feed(None)  # release the reader thread
+    procs[1].stdout.feed(None)  # release the reader thread
 
 
 async def test_service_forward_rejects_undeclared_remote_port() -> None:
@@ -1362,25 +1414,6 @@ async def test_failed_start_reports_error_not_success(tmp_path: Path) -> None:
             assert not any(n.startswith("Forwarding") for n in notices)
             assert registry.forwards() == []
             await until(pilot, lambda: "unable to listen" in _audit_lines(tmp_path))
-
-
-class _GatedStream:
-    """File-like stdout whose lines are fed by the test (None ends the stream)."""
-
-    def __init__(self) -> None:
-        self._lines: queue.Queue[str | None] = queue.Queue()
-
-    def __iter__(self) -> _GatedStream:
-        return self
-
-    def __next__(self) -> str:
-        line = self._lines.get()
-        if line is None:
-            raise StopIteration
-        return line
-
-    def feed(self, line: str | None) -> None:
-        self._lines.put(line)
 
 
 async def test_stop_during_startup_keeps_audit_order(tmp_path: Path) -> None:

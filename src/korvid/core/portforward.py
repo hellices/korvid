@@ -40,7 +40,17 @@ _READY_PREFIX = "Forwarding from"
 
 
 class _ForwardProcess(Protocol):
-    """The slice of subprocess.Popen the registry needs (test seam)."""
+    """The slice of subprocess.Popen the registry needs (test seam).
+
+    ``stdout`` is part of the contract, not an optional extra: the readiness
+    handshake reads it, so a double that cannot supply a real stream can
+    never be confirmed and must not masquerade as a working forward.
+    """
+
+    #: The readiness channel. A real process always has this — it is spawned
+    #: with ``stdout=subprocess.PIPE`` — so ``None`` here only ever means an
+    #: injected test double that skipped it, and it is rejected accordingly.
+    stdout: Iterable[str] | None
 
     def poll(self) -> int | None: ...
 
@@ -233,16 +243,17 @@ class ForwardRegistry:
 
         Returns:
             The exact process/stream/event binding to hand to
-            `_start_watcher()`, or None when there is no readiness channel.
-            The caller must pass this binding on rather than re-reading the
-            record: by launch time a concurrent re-attach may already have
-            swapped a replacement in.
+            `_start_watcher()`, or None when there is no readiness channel to
+            watch — either the process was never adopted, or it exposed no
+            ``stdout`` (a real child always does; only a test double can
+            omit it, and it is rejected rather than trusted as alive).
         """
         proc = record._proc
-        stream = getattr(proc, "stdout", None)
+        stream = None if proc is None else proc.stdout
         if proc is None or stream is None:
-            # No readiness channel (injected test doubles) — trust the spawn.
-            record.status = "alive"
+            # No readiness channel: the handshake can never be confirmed, so
+            # the spawn is rejected outright instead of trusted as alive.
+            record.status = "broken"
             record._ready = None
             return None
         record.status = "starting"
