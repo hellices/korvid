@@ -1,5 +1,26 @@
 # Unreleased
 
+## Current configuration and extension contracts
+
+This pre-1.0 cleanup removes obsolete input formats rather than maintaining
+automatic conversion:
+
+- Configure connections with `agent.profiles` and select one with `agent.active`.
+  Use `active: null` to disable the agent and put model tuning in a profile's
+  `options`. Flat provider settings are no longer read or migrated.
+- Unsupported root and `agent` settings raise ordinary configuration errors.
+  There are no per-key upgrade handlers.
+- Provider extensions use `SpecialFlow` declarations and credential extensions
+  use `ProviderDefaultCredential`. The disconnected provider-factory registry
+  and its compatibility API are removed.
+- Eval runs use `KORVID_EVAL_MODEL=provider/model` and
+  `KORVID_EVAL_API_KEY_ENV` to name a credential variable. The separate provider
+  prefix and inline eval-key variables are no longer supported.
+
+These changes do not remove Kubernetes event-field support, OS support, or the
+write-approval, masking, and audit controls. See the current
+[agent configuration](../agent.md) and [extension contracts](../provider-plugins.md).
+
 ## Turn latency diagnostics
 
 Every agent turn is now timed against a single injected monotonic clock, and
