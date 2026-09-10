@@ -291,10 +291,16 @@ IDs/names and excess calls, refuses invalid arguments before dispatch, and
 applies the resolved policy's response budget. It is not a general-purpose
 validator for every field an adapter might yield.
 
-The response budget counts aggregate text/reasoning characters and tool-call
-ID/name/argument characters, plus the number of events: **24,000** for the
-shipped low tier and **120,000** for high. Exceeding either counter stops the
-response before dispatch with `ProviderResponseLimitError`. This is
+The response budget maintains two independent counters:
+
+- **Characters:** aggregate text/reasoning and tool-call ID/name/argument
+  characters.
+- **Events:** the number of completion events.
+
+Each counter is compared separately with the resolved policy's
+`max_history_chars`: **24,000** for the shipped low tier and **120,000** for
+high. They are not added together. Exceeding either limit stops the response
+before dispatch with `ProviderResponseLimitError`. This is
 **not a per-field UTF-8 byte limit**. There is no shared 256-character ID/name
 gate or 65,536-byte text-event gate; those belonged to the retired, unwired
 plugin validator. Adapters must bound fields and buffers before yielding them,
@@ -317,7 +323,8 @@ and reject a stream whose underlying protocol never confirmed completion;
 yielding `done` for a truncated stream would falsely report success.
 
 Custom adapters may emit `{"type": REQUEST_SENT}` too: the gateway does not
-restrict it to built-in transports. Emit it only once the transport has accepted
+restrict it to built-in transports. Import the event constant from
+`korvid.agent.provider.REQUEST_SENT`. Emit it only once the transport has accepted
 the request, normally when **response headers** arrive, and before checking the
 HTTP status; even an error response proves a handoff. Never emit it while only
 preparing a payload or before credential/connection setup succeeds.

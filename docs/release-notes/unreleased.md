@@ -32,6 +32,9 @@ enable it, including how native Ollama timings are retained.
   removed without compatibility shims. Use the
   [SpecialFlow provider contract](../provider-plugins.md) and import agent
   contracts from their defining modules rather than package-level re-exports.
+- **Breaking:** Evaluation artifacts no longer duplicate overlay provenance in
+  `meta.policy.overlays`. Read `meta.prompts.overlays` instead; it contains the
+  effective evaluation overlay IDs, or an empty array for a default run.
 - Unused checkpoint return objects, redundant state and empty production prompt
   overlay registries have been removed. In-memory rollback and evaluation prompt
   experimentation remain supported.

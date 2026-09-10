@@ -105,6 +105,8 @@ _FORBIDDEN_PROMPT_COMPOSITION = (
     "SAFETY_CONTRACT",
     "COMMON_ROLE",
     "BEHAVIOR",
+    "PROMPT",
+    "TOOL_DESCRIPTIONS",
     "get_behavior",
     "tier_prompt",
     "extra_layers",
@@ -148,6 +150,24 @@ def test_the_composition_root_composes_no_model_facing_prompt_text() -> None:
 
     found = sorted(name for name in _FORBIDDEN_PROMPT_COMPOSITION if name in referenced)
     assert found == [], f"__main__.py composes model-facing prompt text: {found}"
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        (
+            "from korvid.agent.tiers.low import TOOL_DESCRIPTIONS as descriptions",
+            {"TOOL_DESCRIPTIONS"},
+        ),
+        ("import korvid.agent.tiers.high as high; text = high.PROMPT", {"PROMPT"}),
+        ("# BEHAVIOR\nextra_layers_note = 'tier_prompt TOOL_DESCRIPTIONS'", set()),
+    ],
+    ids=["aliased-descriptions", "qualified-prompt", "unrelated-text"],
+)
+def test_prompt_composition_guard_recognizes_tier_symbols(source: str, expected: set[str]) -> None:
+    referenced = _referenced_names(ast.parse(source))
+
+    assert referenced.intersection(_FORBIDDEN_PROMPT_COMPOSITION) == expected
 
 
 def test_the_composition_root_never_imports_the_prompt_pack_registry() -> None:

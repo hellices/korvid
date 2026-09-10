@@ -30,7 +30,10 @@ from pathlib import Path
 import pytest
 
 from korvid import __version__
+from korvid.agent import request_gateway
+from korvid.agent.diagnostics import MAX_USAGE_TOKENS
 from korvid.agent.model_profiles import MetadataRefresh
+from korvid.agent.provider import LLMProvider
 from korvid.agent.tiers import high, low
 from korvid.tools.registry import TOOLS_BY_NAME
 from korvid.ui.widgets.model_search_screen import _REFRESH_MESSAGES
@@ -359,7 +362,7 @@ def test_provider_docs_distinguish_adapter_limits_from_engine_enforcement() -> N
     text = " ".join(_text("docs/provider-plugins.md").split())
 
     assert "non-bool" in text
-    assert "1,000,000,000" in text
+    assert f"{MAX_USAGE_TOKENS:,}" in text
     assert f"{low.BEHAVIOR.max_history_chars:,}" in text
     assert f"{high.BEHAVIOR.max_history_chars:,}" in text
     assert "not a per-field UTF-8 byte limit" in text
@@ -368,11 +371,24 @@ def test_provider_docs_distinguish_adapter_limits_from_engine_enforcement() -> N
     assert "does not independently verify network I/O" in text
 
 
+def test_provider_docs_describe_independent_response_counters() -> None:
+    text = " ".join(_text("docs/provider-plugins.md").split())
+
+    assert "two independent counters" in text
+    assert "**Characters:**" in text
+    assert "**Events:**" in text
+    assert "not added together" in text
+    assert "`korvid.agent.provider.REQUEST_SENT`" in text
+
+
 @pytest.mark.parametrize(
-    "path", ["src/korvid/agent/provider.py", "src/korvid/agent/request_gateway.py"]
+    "docstring",
+    [LLMProvider.complete.__doc__, request_gateway.__doc__],
+    ids=["LLMProvider.complete", "request_gateway"],
 )
-def test_provider_acknowledgement_docstrings_allow_custom_adapters(path: str) -> None:
-    text = " ".join(_text(path).casefold().split())
+def test_provider_acknowledgement_docstrings_allow_custom_adapters(docstring: str | None) -> None:
+    assert docstring is not None
+    text = " ".join(docstring.casefold().split())
 
     assert "including every plugin" not in text
     assert "forbids from emitting" not in text
@@ -385,6 +401,8 @@ def test_agent_api_removals_are_marked_as_breaking_in_release_notes() -> None:
 
     assert "**Breaking:**" in text
     assert "SpecialFlow provider contract" in text
+    assert "`meta.policy.overlays`" in text
+    assert "`meta.prompts.overlays`" in text
 
 
 def test_the_readme_explains_the_current_agent_and_mcp_starting_points() -> None:

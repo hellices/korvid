@@ -11,8 +11,8 @@ module is the structural gate:
 - the retired modules are absent from the tree and unimportable;
 - no source file, current test, or current documentation page names a
   retired symbol;
-- nothing reintroduces a backend selector, transition flag, or `v1`/`v2`
-  suffix that would let two implementations coexist again;
+- known backend selectors, transition flags and versioned engine/session
+  aliases stay absent;
 - exactly one `AgentEngine` and one production `AgentSession` exist;
 - importing the agent namespace does not load the runtime.
 
@@ -400,7 +400,8 @@ def test_importing_the_agent_namespace_does_not_load_its_runtime(eager_import: b
         [sys.executable, "-O", "-c", probe], capture_output=True, text=True, timeout=120
     )
     if eager_import:
-        assert result.returncode != 0
+        assert result.returncode == 1
+        assert result.stderr.startswith("eager agent imports: ")
         assert "korvid.agent.model_policy" in result.stderr
     else:
         assert result.returncode == 0, result.stderr

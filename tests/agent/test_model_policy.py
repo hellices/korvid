@@ -171,13 +171,25 @@ def test_tier_modules_define_their_complete_behavior(
     assert behavior.strict_history_budget is strict_history_budget
     schemas = behavior.tool_schemas(
         readonly=True,
-        resize_supported=False,
+        resize_supported=True,
         observability_backends=frozenset(),
     )
     names = {schema["function"]["name"] for schema in schemas}
     assert "diagnose_pod" in names
     assert "delete_resource" not in names
     assert ("navigate" in names) is (tier_only_tool == "navigate")
+    writable_schemas = behavior.tool_schemas(
+        readonly=False,
+        resize_supported=True,
+        observability_backends=frozenset(),
+    )
+    writable_names = {schema["function"]["name"] for schema in writable_schemas}
+    assert writable_names - names == {
+        "delete_resource",
+        "resize_pod",
+        "rollout_restart",
+        "scale_resource",
+    }
 
 
 def test_policy_and_catalog_do_not_carry_prompt_registry_routing_fields() -> None:
