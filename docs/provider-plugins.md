@@ -198,8 +198,12 @@ Declaration types come from `korvid.agent.model_profiles` (`SpecialFlow`,
 modules, not from package-level re-exports.
 
 `LLMProvider` has no `name` property. It has `descriptor` and `capabilities`
-properties, plus
-`async complete(messages, tools, *, stream=True)` and `async aclose()`.
+properties, plus `async complete(messages, tools, *, stream=True)` and
+`async aclose()`. The flow factory catches builder failures, but does not wrap
+the returned provider in a descriptor/capabilities validator. Adapters must
+validate these properties themselves. `ModelRouter` reads them when resolving
+a policy and enforces the routing rules below, not a complete property schema.
+
 `ModelCapabilities` carries `context_window_tokens`, `supports_tools`,
 `supports_parallel_tools`, `supports_reasoning`, `recommended_tier` and a
 `provenance` mapping, each fact independently unknown; reporting nothing is
@@ -323,8 +327,9 @@ and reject a stream whose underlying protocol never confirmed completion;
 yielding `done` for a truncated stream would falsely report success.
 
 Custom adapters may emit `{"type": REQUEST_SENT}` too: the gateway does not
-restrict it to built-in transports. Import the event constant from
-`korvid.agent.provider.REQUEST_SENT`. Emit it only once the transport has accepted
+restrict it to built-in transports. Import it with
+`from korvid.agent.provider import REQUEST_SENT` and use the constant, not the
+literal string `"REQUEST_SENT"`. Emit it only once the transport has accepted
 the request, normally when **response headers** arrive, and before checking the
 HTTP status; even an error response proves a handoff. Never emit it while only
 preparing a payload or before credential/connection setup succeeds.

@@ -36,7 +36,9 @@ class _CompanyLLMProvider(LLMProvider):
         del stream
         self.calls.append([dict(message) for message in messages])
         self.tools_seen.append([dict(tool) for tool in tools])
-        turn = self._turns.pop(0) if self._turns else [{"type": "done"}]
+        if not self._turns:
+            raise AssertionError(f"scripted turns exhausted on completion {len(self.calls)}")
+        turn = self._turns.pop(0)
         for event in turn:
             if event.get("type") == "__raise_contract_error__":
                 raise RuntimeError("SECRET_INTERNAL_TOKEN_xyz789" * 10)

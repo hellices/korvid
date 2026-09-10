@@ -369,6 +369,7 @@ def test_provider_docs_distinguish_adapter_limits_from_engine_enforcement() -> N
     assert "Custom adapters may emit" in text
     assert "response headers" in text
     assert "does not independently verify network I/O" in text
+    assert "Adapters must validate these properties themselves" in text
 
 
 def test_provider_docs_describe_independent_response_counters() -> None:
@@ -378,7 +379,7 @@ def test_provider_docs_describe_independent_response_counters() -> None:
     assert "**Characters:**" in text
     assert "**Events:**" in text
     assert "not added together" in text
-    assert "`korvid.agent.provider.REQUEST_SENT`" in text
+    assert "`from korvid.agent.provider import REQUEST_SENT`" in text
 
 
 @pytest.mark.parametrize(
@@ -477,7 +478,9 @@ def test_the_controller_reference_describes_todays_seams() -> None:
 def test_the_eval_methodology_states_the_low_pack_constraints() -> None:
     """A grind that changes these silently invalidates every published row."""
     methodology = _text("docs/evals/methodology.md")
-    assert "agent/tiers/low.py: TOOL_DESCRIPTIONS" in methodology
+    assert "`korvid.agent.tiers.low.PROMPT`" in methodology
+    assert "`korvid.agent.tiers.low.TOOL_DESCRIPTIONS`" in methodology
+    assert "`korvid.agent.tiers.low.TOOL_DESCRIPTIONS_VERSION`" in methodology
     assert "250" in methodology
     assert "exact tool name" in methodology
     # The high tier keeps the registry wording — the two arms are not the same.
@@ -515,7 +518,7 @@ def test_the_low_pack_documentation_publishes_no_score() -> None:
     new campaign, so they state constraints and name cases — never a score.
     """
     methodology = _text("docs/evals/methodology.md")
-    start = methodology.index("agent/tiers/low.py: TOOL_DESCRIPTIONS")
+    start = methodology.index("korvid.agent.tiers.low.TOOL_DESCRIPTIONS")
     end = methodology.find("\n## ", start)
     section = methodology[start:] if end == -1 else methodology[start:end]
     assert not re.search(r"\d+(\.\d+)?\s?%", section), section

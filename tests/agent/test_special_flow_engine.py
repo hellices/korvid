@@ -148,6 +148,20 @@ def _tool_then_text() -> list[list[object]]:
     ]
 
 
+async def test_a_packaged_provider_rejects_unscripted_completions(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    provider = _packaged_provider(monkeypatch, tmp_path, scripted_turns=[[{"type": "done"}]])
+
+    assert [event async for event in provider.complete([], [])] == [{"type": "done"}]
+    with pytest.raises(AssertionError, match="scripted turns exhausted on completion 2"):
+        await anext(provider.complete([], []))
+
+    assert isinstance(provider, _RecordingProvider)
+    assert len(provider.calls) == 2
+    await provider.aclose()
+
+
 async def test_a_packaged_plugin_drives_a_whole_engine_turn(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -170,6 +184,8 @@ async def test_a_packaged_plugin_drives_a_whole_engine_turn(
     assert events[2] == TextDelta(text="done")
     assert events[3] == TurnComplete(input_tokens=120, output_tokens=14, estimated=False)
     assert execution.names == ["get_logs"]
+    assert isinstance(provider, _RecordingProvider)
+    assert len(provider.calls) == 2
     await engine.aclose()
 
 
@@ -195,9 +211,12 @@ async def test_a_packaged_plugin_only_ever_sees_a_sanitized_tool_result(
     provider = _packaged_provider(monkeypatch, tmp_path, scripted_turns=_tool_then_text())
     engine, request = _engine(provider, _SecretExecution())
 
-    await _drive(engine, request)
+    events = await _drive(engine, request)
 
     assert isinstance(provider, _RecordingProvider)
+    assert len(provider.calls) == 2
+    assert isinstance(events[-1], TurnComplete)
+    assert not any(isinstance(event, AgentError) for event in events)
     sent = json.dumps(provider.calls, ensure_ascii=False)
     assert sentinel not in sent
     assert MASK_PLACEHOLDER in sent
@@ -221,6 +240,8 @@ async def test_a_plugin_failure_carrying_a_credential_reaches_the_panel_bounded(
     error = events[0]
     assert isinstance(error, AgentError)
     assert "SECRET_INTERNAL_TOKEN_xyz789" not in error.message
+    assert isinstance(provider, _RecordingProvider)
+    assert len(provider.calls) == 1
     await engine.aclose()
 
 
@@ -239,7 +260,18 @@ async def test_a_plugin_that_names_no_tool_dispatches_nothing(
     execution = RecordingExecution()
     engine, request = _engine(provider, execution)
 
-    await _drive(engine, request)
+    events = await _drive(engine, request)
 
     assert execution.calls == []
+    assert isinstance(provider, _RecordingProvider)
+    assert len(provider.calls) == 1
+    assert [type(event).__name__ for event in events] == [
+        "ToolCallStarted",
+        "ToolCallFinished",
+        "AgentError",
+        "TurnComplete",
+    ]
+    error = events[2]
+    assert isinstance(error, AgentError)
+    assert error.message == "no usable tool call in the response — turn ended early"
     await engine.aclose()
