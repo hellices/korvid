@@ -10,6 +10,7 @@ from enum import StrEnum
 from typing import Any, Literal
 
 from korvid.core.redaction import RedactionRecord, redact_text, strip_control_characters
+from korvid.k8s.events import select_event_timestamp
 
 _MAX_WARNING_REASON_CHARS = 128
 _MAX_WARNING_NOTE_CHARS = 240
@@ -189,8 +190,6 @@ class SessionTimeline:
     ) -> AppendResult:
         involved_value = event.get("involvedObject")
         involved = involved_value if isinstance(involved_value, dict) else {}
-        metadata_value = event.get("metadata")
-        metadata = metadata_value if isinstance(metadata_value, dict) else {}
         count_value = event.get("count")
         count = (
             count_value
@@ -225,11 +224,7 @@ class SessionTimeline:
             count=count,
         )
         occurred_at = _strip_controls(
-            event.get("lastTimestamp")
-            or event.get("eventTime")
-            or event.get("firstTimestamp")
-            or metadata.get("creationTimestamp")
-            or _utc_now(),
+            select_event_timestamp(event) or _utc_now(),
             "timeline.event.occurred_at",
         )[:_MAX_EVENT_TIMESTAMP_CHARS]
         return self._append(

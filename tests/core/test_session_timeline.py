@@ -202,6 +202,19 @@ def test_warning_projection_stores_only_normalized_text() -> None:
     assert "  " not in entry.payload.note
 
 
+def test_warning_projection_uses_latest_series_timestamp() -> None:
+    timeline = SessionTimeline(max_entries=4, max_bytes=4096)
+    event = _warning("container failed")
+    event["series"] = {"lastObservedTime": "2026-08-15T00:05:00Z"}
+    event["lastTimestamp"] = "2026-08-15T00:00:00Z"
+
+    result = timeline.append_warning_event(epoch=0, event=event, kind_alias="pods")
+
+    entry = timeline.snapshot(epoch=None, source=TimelineSource.EVENT, resource=None).entries[0]
+    assert result.accepted is True
+    assert entry.occurred_at == "2026-08-15T00:05:00Z"
+
+
 def test_warning_projection_strips_control_characters_from_structural_fields() -> None:
     timeline = SessionTimeline(max_entries=4, max_bytes=4096)
     event = _warning("container failed", uid="uid\x1b-1")
