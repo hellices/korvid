@@ -29,6 +29,22 @@ Before anyone publishes a feature release, confirm these external trust boundari
 Those bindings are required because the in-workflow checks are defense in depth,
 not a substitute for the external trust boundary.
 
+### Registering the Homebrew tap App
+
+The source repository's release workflow needs a one-time GitHub App binding so
+it can open the trusted Homebrew handoff PR without using a personal access
+token:
+
+- repository variable: `HOMEBREW_APP_ID`
+- repository secret: `HOMEBREW_APP_PRIVATE_KEY`
+- installation target: `hellices/homebrew-korvid`
+- installation permissions: repository contents **write** and pull requests
+  **write**
+
+The workflow uploads `korvid.rb` to the source release **before** it checks
+those values. If either binding is missing, the release keeps the formula asset
+and then fails visibly at the handoff boundary, which is safe to fix and rerun.
+
 ### Registering the PyPI Trusted Publisher
 
 This is the step `v0.1.1` died on, and it cannot be repaired from CI: it needs
@@ -277,81 +293,83 @@ not covered by that manifest or its attestation.
 
 ## Publish and verify the Homebrew tap
 
-The release workflow attaches `korvid.rb` to the GitHub Release and then opens
-a pull request against `hellices/homebrew-korvid`. A successful korvid release
-does not prove that tap PR was merged: if `HOMEBREW_TAP_TOKEN` is unavailable,
-the job prints a manual recovery command and exits successfully after preserving
-the formula as a release asset.
+The release workflow attaches `korvid.rb` to the GitHub Release with the source
+repository `GITHUB_TOKEN`. It then requires `HOMEBREW_APP_ID` and
+`HOMEBREW_APP_PRIVATE_KEY`, mints a short-lived GitHub App token scoped to
+`hellices/homebrew-korvid`, and runs `scripts/release/update_homebrew_tap.py`.
+The tap repository uses the same App identity for its trusted classifier and
+stores:
 
-After publication, find the generated tap PR, review the formula diff, and wait
-for its checks. **The merge itself is the maintainer's**, by hand — this is the
-formula every `brew install korvid` resolves, and an agent must never merge it.
+- repository variable: `HOMEBREW_APP_ID`
+- repository secret: `HOMEBREW_APP_PRIVATE_KEY`
+- repository variable: `HOMEBREW_APP_SLUG`
+
+The tap's trusted classifier uses `HOMEBREW_APP_SLUG`; the source workflow does
+not store that slug locally. When you run the source-side verification snippet
+below, export the tap repository's `HOMEBREW_APP_SLUG` value first. The source
+workflow itself can keep using `actions/create-github-app-token`'s `app-slug`
+output for the bot login it passes into `update_homebrew_tap.py`.
+
+That handoff is safe to retry:
+
+- if tap `main` already carries the same version, the source workflow exits
+  cleanly and leaves any bottle-enriched formula alone;
+- if tap `main` is newer, the handoff fails visibly rather than downgrade it;
+- if the trusted `bump-korvid-${VERSION}` branch already exists and still
+  changes only `Formula/korvid.rb`, the workflow reuses it;
+- if the branch carries unrelated content or the App binding is missing, the
+  job fails after preserving the formula release asset.
+
+The tap's **default-branch validator** is what finishes trusted post-release
+delivery there: it validates the PR, adds bottles, confirms the branch still
+matches the reviewed head commit, and then from a trusted `workflow_run` gate
+performs a one-shot `gh pr merge --squash --match-head-commit`. That avoids
+approval carrying across later branch changes. The source workflow never merges
+the tap pull request itself and never enables persistent PR merge enrollment.
+Ordinary human-authored pull
+requests remain manual in both repositories, and GitHub's persistent PR merge
+enrollment can stay disabled.
+
+After publication, find the trusted tap PR and wait for its checks:
 
 ```sh
 : "${VERSION:?set VERSION via scripts/release/release_config.py version}"
+: "${HOMEBREW_APP_SLUG:?set to the GitHub App slug bound to the tap}"
 set -eu
-TAP_PR=$(gh pr list --repo hellices/homebrew-korvid \
-  --state open \
-  --json number,title,baseRefName,headRefName,headRepositoryOwner \
-  --jq "[.[] | select(
+case "$HOMEBREW_APP_SLUG" in
+  *'[bot]') EXPECTED_BOT_LOGIN="$HOMEBREW_APP_SLUG" ;;
+  *) EXPECTED_BOT_LOGIN="${HOMEBREW_APP_SLUG}[bot]" ;;
+esac
+TAP_PR=$(gh api "repos/hellices/homebrew-korvid/pulls?state=open&head=hellices:bump-korvid-${VERSION}&base=main" \
+  --jq "map(select(
     .title == \"korvid ${VERSION}\" and
-    .baseRefName == \"main\" and
-    .headRefName == \"bump-korvid-${VERSION}\" and
-    .headRepositoryOwner.login == \"hellices\"
-  )] | if length == 1 then .[0].number else empty end")
+    .base.ref == \"main\" and
+    .head.ref == \"bump-korvid-${VERSION}\" and
+    .head.repo.owner.login == \"hellices\"
+  )) | if length == 1 then .[0].number else empty end")
 if [ -z "$TAP_PR" ]; then
-  echo "trusted bump-korvid-${VERSION} tap PR not found; use the manual path below" >&2
+  echo "trusted bump-korvid-${VERSION} tap PR not found" >&2
   exit 1
 fi
-gh pr diff "$TAP_PR" --repo hellices/homebrew-korvid
+AUTHOR_LOGIN=$(gh api "repos/hellices/homebrew-korvid/pulls?state=open&head=hellices:bump-korvid-${VERSION}&base=main" \
+  --jq "map(select(
+    .title == \"korvid ${VERSION}\" and
+    .base.ref == \"main\" and
+    .head.ref == \"bump-korvid-${VERSION}\" and
+    .head.repo.owner.login == \"hellices\"
+  )) | if length == 1 then .[0].user.login // empty else empty end")
+if [ -z "$AUTHOR_LOGIN" ] || [ "$AUTHOR_LOGIN" != "$EXPECTED_BOT_LOGIN" ]; then
+  echo "trusted bump-korvid-${VERSION} tap PR author $AUTHOR_LOGIN does not match expected $EXPECTED_BOT_LOGIN" >&2
+  exit 1
+fi
 gh pr checks "$TAP_PR" --repo hellices/homebrew-korvid --watch || exit 1
-echo "reviewed and green - now merge PR #$TAP_PR yourself"
+gh pr view "$TAP_PR" --repo hellices/homebrew-korvid --json \
+  number,title,headRefName,baseRefName,state,isDraft,mergedAt,statusCheckRollup
 ```
 
-If no PR exists, use the formula release asset to create one manually. Its
-trust basis is the release workflow: it is generated from the tag-revalidated
-`uv.lock` after publication, but it is not separately attested or listed in
-`SHA256SUMS`.
-
-```sh
-: "${VERSION:?set VERSION via scripts/release/release_config.py version}"
-: "${TAG:?set TAG to v$VERSION}"
-set -eu
-formula_path="$PWD/dist/$TAG/korvid.rb"
-if [ ! -f "$formula_path" ]; then
-  gh release download "$TAG" --pattern korvid.rb --dir "dist/$TAG"
-fi
-test -f "$formula_path"
-gh repo clone hellices/homebrew-korvid dist/homebrew-korvid
-cd dist/homebrew-korvid
-if cmp -s "$formula_path" Formula/korvid.rb; then
-  echo "korvid ${VERSION} formula is already present on tap main"
-else
-  branch="bump-korvid-${VERSION}"
-  if git show-ref --verify --quiet "refs/remotes/origin/$branch"; then
-    git switch --track -c "$branch" "origin/$branch"
-  else
-    git switch -c "$branch"
-  fi
-  cp "$formula_path" Formula/korvid.rb
-  git add Formula/korvid.rb
-  if git diff --cached --quiet; then
-    echo "verified formula is already present on $branch"
-  else
-    git commit -m "korvid ${VERSION}"
-    git push -u origin "$branch"
-  fi
-  TAP_PR_URL=$(gh pr create --title "korvid ${VERSION}" \
-    --body "Generated by the korvid ${TAG} release workflow from its tag-revalidated uv.lock.")
-  TAP_PR=${TAP_PR_URL##*/}
-  case "$TAP_PR" in
-    ""|*[!0-9]*) echo "could not identify created tap PR: $TAP_PR_URL" >&2; exit 1 ;;
-  esac
-  gh pr diff "$TAP_PR" --repo hellices/homebrew-korvid
-  gh pr checks "$TAP_PR" --repo hellices/homebrew-korvid --watch || exit 1
-  echo "reviewed and green - now merge PR #$TAP_PR yourself"
-fi
-```
+Its trust basis remains the same: the formula is generated from the
+tag-revalidated `uv.lock` after publication, but it is not separately attested
+or listed in `SHA256SUMS`.
 
 Finally verify the tap, not merely the formula attached to the source release:
 
