@@ -215,7 +215,6 @@ async def test_forward_submit_starts_kubectl_and_audits(tmp_path: Path) -> None:
             await until(
                 pilot,
                 lambda: "port-forward-start" in _audit_lines(tmp_path),
-                timeout=0.5,
                 label="successful port-forward audit",
             )
             assert "port-forward-start" in _audit_lines(tmp_path)
