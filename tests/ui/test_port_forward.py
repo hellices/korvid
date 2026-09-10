@@ -208,10 +208,16 @@ async def test_forward_submit_starts_kubectl_and_audits(tmp_path: Path) -> None:
             await until(pilot, lambda: isinstance(app.screen, PortForwardScreen))
             await pilot.press("enter")
             await until(pilot, lambda: len(procs) == 1)
+            procs[0].stdout.feed("Forwarding from 127.0.0.1:8080 -> 8080\n")
             assert procs[0].argv[:2] == ["kubectl", "port-forward"]
             assert "pod/api-1" in procs[0].argv
             assert "8080:8080" in procs[0].argv
-            await until(pilot, lambda: "port-forward-start" in _audit_lines(tmp_path))
+            await until(
+                pilot,
+                lambda: "port-forward-start" in _audit_lines(tmp_path),
+                timeout=0.5,
+                label="successful port-forward audit",
+            )
             assert "port-forward-start" in _audit_lines(tmp_path)
 
 
