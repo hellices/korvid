@@ -173,6 +173,12 @@ entry-point name, move the former factory body into `build_provider(profile)`,
 and point the entry point at its module. The returned object still implements
 `LLMProvider`; authentication and profile options use the current contracts below.
 
+## Configuring a third-party flow
+
+A `SpecialFlow.build_provider` function returns an `LLMProvider` satisfying the
+event and capability contracts below. Publish the flow with a `prefix` matching
+its entry-point name.
+
 Third-party prefixes are configured by hand; the `:ai` wizard does not discover
 them:
 

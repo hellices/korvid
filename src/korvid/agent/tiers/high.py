@@ -14,6 +14,7 @@ from types import MappingProxyType
 from typing import Final
 
 from korvid.agent.tiers._behavior import TierBehavior
+from korvid.tools.executor import MAX_RESULT_CHARS
 
 PROMPT: Final[str] = (
     "Gather evidence across as many steps as the question needs: follow a "
@@ -30,7 +31,7 @@ BEHAVIOR: Final[TierBehavior] = TierBehavior(
     tool_surface="high_agent",
     max_iterations=15,
     max_history_chars=120_000,
-    max_result_chars=8_000,
+    max_result_chars=MAX_RESULT_CHARS,
     max_tool_calls_per_iteration=None,
     strict_history_budget=False,
     tool_descriptions=MappingProxyType({}),

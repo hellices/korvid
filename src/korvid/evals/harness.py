@@ -99,7 +99,7 @@ class PromptGrind:
     Attributes:
         tier_pack: Replacement text for layer 3, the tier operating pack.
             `None` keeps the shipped pack.
-        overlay: Additional layer-5 text, published as `eval-overlay`.
+        overlay: Additional layer-4 text, published as `eval-overlay`.
             `None` adds nothing.
     """
 
@@ -215,7 +215,7 @@ def _compose_static(policy: ResolvedAgentPolicy, prompts: PromptHarness) -> str:
 
 
 def static_prompt(policy: ResolvedAgentPolicy, grind: PromptGrind = NO_GRIND) -> str:
-    """The system message layers 1-7 a resolved policy and grind produce.
+    """The system message layers 1-6 a resolved policy and grind produce.
 
     Args:
         policy: The resolved policy.
@@ -306,14 +306,13 @@ def build_eval_harness(
     Returns:
         The composed session plus every collaborator it owns.
     """
-    base = (
+    resolved = (
         policy
         if policy is not None
         else resolve_eval_policy(
             provider, model_tier=model_tier, environment=environment, omit_tools=omit_tools
         )
     )
-    resolved = base
     tools = ToolHarness(
         policy=resolved,
         execution=execution,

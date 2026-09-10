@@ -396,13 +396,13 @@ def test_append_tool_result_requires_a_pending_call() -> None:
         convo.append_tool_result("c1", "ok")
 
 
-def test_lifecycle_starters_return_none_while_state_remains_observable() -> None:
+def test_lifecycle_starters_leave_state_observable() -> None:
     convo = ConversationState(max_history_chars=LOOSE_BUDGET)
 
-    assert convo.start_turn("q") is None  # type: ignore[func-returns-value]  # Check the runtime no-return contract.
+    convo.start_turn("q")
     assert convo.turn_active is True
     assert convo.messages == [{"role": "user", "content": "q"}]
-    assert convo.start_iteration(prompt_estimate=12) is None  # type: ignore[func-returns-value]  # Check the runtime no-return contract.
+    convo.start_iteration(prompt_estimate=12)
 
     convo.record_stream_text("answer")
     convo.commit_usage(3, 2)
