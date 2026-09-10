@@ -426,6 +426,21 @@ def test_main_rejects_versions_outside_the_stable_release_format(
             ),
             "disagree",
         ),
+        (
+            _formula("1.2.3").replace(
+                "  sha256 ",
+                '  url "https://files.pythonhosted.org/packages/source/k/korvid/korvid-1.2.3.tar.gz"\n'
+                "  sha256 ",
+            ),
+            "single url version anchor",
+        ),
+        (
+            _formula("1.2.3").replace(
+                "  end\n",
+                '    assert_match "1.2.3", shell_output("#{bin}/korvid --version")\n  end\n',
+            ),
+            "single assert_match version anchor",
+        ),
     ],
 )
 def test_formula_version_requires_both_version_anchors_to_match(

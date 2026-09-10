@@ -83,14 +83,16 @@ def _version_key(version: str) -> tuple[int, int, int]:
 
 
 def _formula_version(formula_text: str) -> str:
-    url_match = _URL_VERSION.search(formula_text)
-    if url_match is None:
+    url_matches = _URL_VERSION.findall(formula_text)
+    if len(url_matches) != 1:
         raise HandoffError("formula must contain a single url version anchor")
-    test_match = _TEST_VERSION.search(formula_text)
-    if test_match is None:
+    test_matches = _TEST_VERSION.findall(formula_text)
+    if len(test_matches) != 1:
         raise HandoffError("formula must contain a single assert_match version anchor")
-    url_version = url_match.group(1)
-    test_version = test_match.group(1)
+    url_version = url_matches[0]
+    test_version = test_matches[0]
+    if not isinstance(url_version, str) or not isinstance(test_version, str):
+        raise HandoffError("formula version anchors must resolve to strings")
     _version_key(url_version)
     _version_key(test_version)
     if url_version != test_version:
