@@ -322,6 +322,7 @@ def _assert_release_runbook_contracts(runbook: str) -> None:
         in _normalized(tap)
     )
     lowered_tap = _normalized_lower(tap)
+    assert "source workflow never merges the tap pull request itself" in lowered_tap
     assert "ordinary human-authored pull" in lowered_tap
     assert "requests remain manual" in lowered_tap
     assert "gh pr merge --squash --match-head-commit" in tap

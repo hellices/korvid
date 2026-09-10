@@ -324,7 +324,9 @@ The tap's **default-branch validator** is what finishes trusted post-release
 delivery there: it validates the PR, adds bottles, confirms the branch still
 matches the reviewed head commit, and then from a trusted `workflow_run` gate
 performs a one-shot `gh pr merge --squash --match-head-commit`. That avoids
-approval carrying across later branch changes. Ordinary human-authored pull
+approval carrying across later branch changes. The source workflow never merges
+the tap pull request itself and never enables persistent PR merge enrollment.
+Ordinary human-authored pull
 requests remain manual in both repositories, and GitHub's persistent PR merge
 enrollment can stay disabled.
 

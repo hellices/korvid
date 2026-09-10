@@ -2401,6 +2401,7 @@ def test_release_docs_describe_the_trusted_tap_handoff_and_validator() -> None:
     assert "HOMEBREW_TAP_TOKEN" not in runbook
     assert 'gh release download "$TAG" --pattern korvid.rb' not in runbook
     assert "source workflow does not store that slug locally" in normalized.lower()
+    assert "source workflow never merges the tap pull request itself" in normalized.lower()
     assert "persistent pr merge enrollment can stay disabled" in normalized.lower()
     verify = runbook[runbook.index("Finally verify the tap") : runbook.index("## Install")]
     assert "set -eu" in verify
