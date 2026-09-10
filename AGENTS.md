@@ -112,9 +112,15 @@ This table is the readable copy of `tach.toml`, and
   auto-merge, do not add a workflow, action, script or scheduled job that
   merges. Do not use the REST/GraphQL merge endpoints. If a task seems to
   require automating a merge, stop and ask instead.
-- The same applies to the `hellices/homebrew-korvid` tap, including the release
-  PR the release workflow opens there. A release is not finished by merging it
-  for the maintainer.
+- Ordinary source pull requests and ordinary tap pull requests remain manual:
+  the maintainer still decides when to merge them.
+- Narrow release exception: after the source repository has opened the trusted
+  post-release `hellices/homebrew-korvid` PR for `bump-korvid-X.Y.Z`, the tap's
+  own default-branch validator may classify it via `HOMEBREW_APP_SLUG`, add
+  bottles, and — from a trusted `workflow_run` gate — run one-shot
+  `gh pr merge --squash --match-head-commit`. That exception does **not**
+  authorize source repository workflows, scripts, or agents to merge or enable
+  auto-merge themselves.
 - Never approve your own work (`gh pr review --approve`).
 - CI must be green: ruff, mypy, pytest (3.11/3.12/3.13), coverage ≥ 80%, tach, deptry.
 - `main` rejects direct pushes (branch ruleset) — always work on a branch and

@@ -70,21 +70,13 @@ def test_the_closure_is_transitive_not_just_the_direct_dependencies() -> None:
     assert "uc-micro-py" in names, "the extra's own dependency is missing"
 
 
-def test_a_resumed_branch_is_fetched_into_its_remote_tracking_ref() -> None:
-    """`git fetch origin <branch>` writes FETCH_HEAD, not `origin/<branch>`.
-
-    A `--depth 1` clone configures `remote.origin.fetch` for the default
-    branch alone, so the refspec has to be explicit or the `git switch`
-    that follows fails — on the rerun path this exists to support.
-    """
+def test_the_release_job_calls_the_dedicated_homebrew_handoff_script() -> None:
+    """The source workflow should orchestrate, not embed, tap-branch logic."""
     workflow = (_ROOT / ".github" / "workflows" / "release.yml").read_text()
-    bump = workflow.split("      - name: Open the formula bump on the tap")[1]
-    commands = "\n".join(
-        line for line in bump.splitlines() if line.strip() and not line.strip().startswith("#")
-    )
-    assert 'git fetch --depth 1 origin "$branch:refs/remotes/origin/$branch"' in commands, (
-        "the resumed branch never becomes origin/$branch"
-    )
+    homebrew_job = workflow.split("  homebrew-formula:")[1]
+    assert "python scripts/release/update_homebrew_tap.py" in homebrew_job
+    assert "https://x-access-token:" not in homebrew_job
+    assert "gh auth setup-git" not in homebrew_job
 
 
 def test_the_selected_extras_and_nothing_else_are_installed() -> None:
@@ -397,20 +389,21 @@ def _ruby_available() -> bool:
 
 
 def test_the_release_attaches_the_formula_before_it_needs_a_token() -> None:
-    """A missing cross-repository token must not cost the artifact.
-
-    `GITHUB_TOKEN` is scoped to this repository, so updating the tap needs
-    a separate secret. The formula is reproducible only from the tag's own
-    lock, so it is uploaded to the release first and the tap bump is the
-    step allowed to be unavailable — the same lesson as #272.
-    """
+    """A missing App binding must fail only after the formula is preserved."""
     workflow = (_ROOT / ".github" / "workflows" / "release.yml").read_text()
     steps = workflow.split("      - name: ")
     upload = next(i for i, step in enumerate(steps) if "Attach the formula" in step[:60])
-    bump = next(i for i, step in enumerate(steps) if "Open the formula bump" in step[:60])
-    assert upload < bump, "the tap is attempted before the artifact is safe"
-    assert 'if [ -z "${GH_TOKEN:-}" ]; then' in workflow, "a missing token aborts the run"
-    assert "HOMEBREW_TAP_TOKEN" in workflow
+    require_app = next(
+        i for i, step in enumerate(steps) if "Require Homebrew App credentials" in step[:60]
+    )
+    mint = next(i for i, step in enumerate(steps) if "Mint the Homebrew tap App token" in step[:60])
+    bump = next(i for i, step in enumerate(steps) if "Update the Homebrew tap" in step[:60])
+    assert upload < require_app < mint < bump, "the tap is attempted before the artifact is safe"
+    assert 'if [ -z "${HOMEBREW_APP_ID:-}" ]; then' in workflow
+    assert 'if [ -z "${HOMEBREW_APP_PRIVATE_KEY:-}" ]; then' in workflow
+    assert "handoff-ready=false" not in workflow
+    assert "::warning::Skipping Homebrew tap handoff" not in workflow
+    assert "HOMEBREW_TAP_TOKEN" not in workflow
 
 
 def test_the_formula_job_runs_only_after_the_release_is_published() -> None:
@@ -424,70 +417,48 @@ def test_the_formula_job_runs_only_after_the_release_is_published() -> None:
     assert "finalize-github-release" in job["needs"]
 
 
-def test_the_tap_bump_stages_before_it_compares() -> None:
-    """`git diff` and `commit -a` both ignore untracked files.
+def test_the_formula_job_mints_a_scoped_homebrew_app_token_late() -> None:
+    import yaml
 
-    A tap with no formula yet — a fresh tap, or one recovering from a
-    deletion — would report itself up to date and commit nothing, which is
-    the one case the automation exists for.
-    """
+    workflow = yaml.safe_load((_ROOT / ".github" / "workflows" / "release.yml").read_text())
+    steps = workflow["jobs"]["homebrew-formula"]["steps"]
+    mint = next(step for step in steps if step.get("id") == "homebrew-app-token")
+    assert "if" not in mint
+    assert (
+        mint["uses"] == "actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349"
+    )
+    assert mint["with"]["owner"] == "hellices"
+    assert mint["with"]["repositories"] == "homebrew-korvid"
+    assert mint["with"]["app-id"] == "${{ vars.HOMEBREW_APP_ID }}"
+    assert mint["with"]["private-key"] == "${{ secrets.HOMEBREW_APP_PRIVATE_KEY }}"
+    assert mint["with"]["permission-contents"] == "write"
+    assert mint["with"]["permission-pull-requests"] == "write"
+
+
+def test_the_handoff_step_uses_the_app_slug_bot_login() -> None:
+    import yaml
+
+    workflow = yaml.safe_load((_ROOT / ".github" / "workflows" / "release.yml").read_text())
+    step = next(
+        step
+        for step in workflow["jobs"]["homebrew-formula"]["steps"]
+        if "scripts/release/update_homebrew_tap.py" in str(step.get("run", ""))
+    )
+    assert "if" not in step
+    env = step["env"]
+    assert env["GH_TOKEN"] == "${{ steps.homebrew-app-token.outputs.token }}"
+    assert env["BOT_LOGIN"] == "${{ steps.homebrew-app-token.outputs.app-slug }}[bot]"
+    assert '--bot-login "$BOT_LOGIN"' in step["run"]
+    assert "uv run" not in step["run"]
+
+
+def test_the_release_workflow_has_no_manual_homebrew_pat_fallback_or_merge_logic() -> None:
     workflow = (_ROOT / ".github" / "workflows" / "release.yml").read_text()
-    bump = workflow.split("      - name: Open the formula bump on the tap")[1]
-    # Commands only: the rationale is written in a comment that mentions
-    # both, and matching prose would pass on any ordering.
-    commands = "\n".join(
-        line for line in bump.splitlines() if line.strip() and not line.strip().startswith("#")
-    )
-    assert "git add Formula/korvid.rb" in commands, "an untracked formula is never staged"
-    assert commands.index("git add Formula/korvid.rb") < commands.index("git diff"), (
-        "the comparison runs before the file is staged"
-    )
-    assert "git diff --cached --quiet" in commands, "the comparison ignores the index"
-    assert "commit -am" not in commands, "`commit -a` skips the untracked formula"
-
-
-def test_the_tap_bump_can_be_rerun_after_a_partial_failure() -> None:
-    """Push and pull-request creation are two steps that can split.
-
-    If the push lands and `gh pr create` does not — a PAT without
-    `pull_requests: write` is the obvious way — a rerun branches from
-    `main` again and the push is rejected as non-fast-forward, before it
-    ever reaches the retry that was the point. The release is already
-    published by then, so there is no third chance.
-    """
-    workflow = (_ROOT / ".github" / "workflows" / "release.yml").read_text()
-    bump = workflow.split("      - name: Open the formula bump on the tap")[1]
-    commands = "\n".join(
-        line for line in bump.splitlines() if line.strip() and not line.strip().startswith("#")
-    )
-    assert "--force-with-lease" in commands, "a rerun cannot update the branch it already pushed"
-    assert "gh pr list" in commands, "a rerun opens a second pull request or fails on the first"
-
-
-def test_an_unchanged_branch_still_reaches_the_pull_request() -> None:
-    """The early exit must mean "done", not "nothing to commit".
-
-    On the rerun that the resume path exists for, the branch already
-    carries the formula, so the staged diff is empty — and exiting there
-    skips the pull request that failed to open the first time, which is
-    the whole reason for the rerun. Only an unchanged `main` means the
-    work is actually finished.
-    """
-    workflow = (_ROOT / ".github" / "workflows" / "release.yml").read_text()
-    bump = workflow.split("      - name: Open the formula bump on the tap")[1]
-    commands = "\n".join(
-        line for line in bump.splitlines() if line.strip() and not line.strip().startswith("#")
-    )
-    # The exit that follows the staged-diff check is the dangerous one:
-    # it must be reached only through a comparison against main.
-    after_staged_check = commands.split("git diff --cached --quiet")[1]
-    before_first_exit = after_staged_check.split("exit 0")[0]
-    assert "origin/main" in before_first_exit, (
-        "the early exit does not distinguish a resumed branch from a finished one"
-    )
-    assert commands.index("git diff --cached --quiet") < commands.index("gh pr list"), (
-        "the diff check should precede the pull-request lookup"
-    )
+    homebrew_job = workflow.split("  homebrew-formula:")[1]
+    assert "The formula is attached to the release and is correct." not in homebrew_job
+    assert 'gh release download "$TAG" korvid.rb' not in homebrew_job
+    assert "gh pr merge" not in homebrew_job
+    assert "auto-merge" not in homebrew_job
 
 
 def test_an_extra_augments_a_package_rather_than_replacing_it(tmp_path: Path) -> None:

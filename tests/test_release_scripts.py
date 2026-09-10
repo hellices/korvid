@@ -2362,49 +2362,43 @@ def test_release_docs_describe_fresh_installs_and_extra_expansion_separately() -
     assert "separate base-to-extra expansion check" in runbook
 
 
-def test_release_docs_hand_the_tap_merge_to_the_maintainer() -> None:
+def test_release_docs_describe_the_trusted_tap_handoff_and_validator() -> None:
     runbook = _release_runbook()
     normalized = " ".join(runbook.split())
-    assert "HOMEBREW_TAP_TOKEN" in runbook
-    assert 'gh release download "$TAG" --pattern korvid.rb' in runbook
-    assert 'formula_path="$PWD/dist/$TAG/korvid.rb"' in runbook
-    assert 'if [ ! -f "$formula_path" ]' in runbook
-    assert 'cp "$formula_path" Formula/korvid.rb' in runbook
-    assert 'if cmp -s "$formula_path" Formula/korvid.rb' in runbook
-    assert "formula is already present on tap main" in runbook
+    bindings = markdown_section(runbook, "One-time repository and publisher bindings")
+    assert "HOMEBREW_APP_ID" in runbook
+    assert "HOMEBREW_APP_PRIVATE_KEY" in runbook
+    assert "HOMEBREW_APP_SLUG" in runbook
+    assert "repository variable: `HOMEBREW_APP_ID`" in bindings
+    assert "repository secret: `HOMEBREW_APP_PRIVATE_KEY`" in bindings
+    assert "repository variable: `HOMEBREW_APP_SLUG`" not in bindings
+    assert "safe to retry" in normalized
+    assert "same version" in normalized
+    assert "downgrade" in normalized
+    assert "fails visibly" in normalized
     assert (
-        runbook.count('gh pr checks "$TAP_PR" --repo hellices/homebrew-korvid --watch || exit 1')
-        == 2
+        "source workflow can keep using `actions/create-github-app-token`'s `app-slug` output"
+        in runbook
     )
-    # The formula every `brew install korvid` resolves is not merged by a
-    # script. Both paths stop at green and hand the merge back by name.
-    assert "gh pr merge" not in runbook
-    assert runbook.count("now merge PR #$TAP_PR yourself") == 2
-    # Claiming "reviewed" without showing the diff is the runbook lying to the
-    # maintainer it is handing the merge to. Both paths must show it, and show
-    # it *before* they make the claim - asserting it merely appears once let
-    # the manual path go without.
-    diff_cmd = 'gh pr diff "$TAP_PR" --repo hellices/homebrew-korvid'
-    assert runbook.count(diff_cmd) == 2
-    for claim in _offsets_of(runbook, "reviewed and green"):
-        preceding = runbook.rfind(diff_cmd, 0, claim)
-        assert preceding != -1, "a path claims review without showing the diff"
-        assert "reviewed and green" not in runbook[preceding:claim]
-    assert "--json number,title,baseRefName,headRefName,headRepositoryOwner" in runbook
-    assert r".baseRefName == \"main\"" in runbook
-    assert r".headRefName == \"bump-korvid-${VERSION}\"" in runbook
-    assert r".headRepositoryOwner.login == \"hellices\"" in runbook
-    assert "trusted bump-korvid-${VERSION} tap PR not found" in runbook
-    assert 'branch="bump-korvid-${VERSION}"' in runbook
-    assert 'git show-ref --verify --quiet "refs/remotes/origin/$branch"' in runbook
-    assert 'git switch --track -c "$branch" "origin/$branch"' in runbook
-    assert "git diff --cached --quiet" in runbook
-    assert "TAP_PR_URL=$(gh pr create" in runbook
-    assert "could not identify created tap PR" in runbook
+    assert "default-branch validator" in runbook
+    assert "workflow_run" in runbook
+    assert "gh pr merge --squash --match-head-commit" in runbook
+    assert "ordinary human-authored pull requests remain manual" in normalized.lower()
+    assert (
+        'gh api "repos/hellices/homebrew-korvid/pulls?state=open&head=hellices:bump-korvid-${VERSION}&base=main"'
+        in runbook
+    )
+    assert ".user.login ==" in runbook
+    assert "HOMEBREW_APP_SLUG}[bot]" in runbook
+    assert 'gh pr checks "$TAP_PR" --repo hellices/homebrew-korvid --watch || exit 1' in runbook
+    assert 'gh pr view "$TAP_PR" --repo hellices/homebrew-korvid --json' in runbook
     assert 'korvid --version | grep -Fx "korvid ${VERSION}"' in runbook
     assert "tag-revalidated `uv.lock`" in normalized
     assert "not separately attested or listed in `SHA256SUMS`" in normalized
-    assert "attested release asset" not in runbook
+    assert "auto-merge" not in runbook
+    assert "HOMEBREW_TAP_TOKEN" not in runbook
+    assert "gh pr list" not in runbook
+    assert 'gh release download "$TAG" --pattern korvid.rb' not in runbook
     verify = runbook[runbook.index("Finally verify the tap") : runbook.index("## Install")]
     assert "set -eu" in verify
     assert ': "${VERSION:?' in verify
