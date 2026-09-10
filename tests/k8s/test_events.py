@@ -60,7 +60,8 @@ def test_non_mapping_series_is_ignored_rather_than_raising() -> None:
     """Malformed payloads may carry a non-mapping `series` (e.g. `None`,
     a string, or a list). Selection must not raise — it should behave as
     if no series data were present and fall through to the next field."""
-    for malformed_series in (None, "not-a-mapping", [], 42):
+    malformed_values: tuple[Any, ...] = (None, "not-a-mapping", [], 42)
+    for malformed_series in malformed_values:
         event: dict[str, Any] = {
             "series": malformed_series,
             "lastTimestamp": "2026-07-26T09:00:00Z",
@@ -74,6 +75,7 @@ def test_non_mapping_series_with_no_other_fields_selects_nothing() -> None:
 
 def test_non_mapping_metadata_is_ignored_rather_than_raising() -> None:
     """Symmetrical guard for `metadata` — the last fallback in the chain."""
-    for malformed_metadata in (None, "not-a-mapping", [], 42):
+    malformed_values: tuple[Any, ...] = (None, "not-a-mapping", [], 42)
+    for malformed_metadata in malformed_values:
         event: dict[str, Any] = {"metadata": malformed_metadata}
         assert select_event_timestamp(event) == ""
