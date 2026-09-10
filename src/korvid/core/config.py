@@ -471,14 +471,14 @@ _SUPPORTED_AGENT_KEYS: frozenset[str] = frozenset(
 def _check_unknown_root_keys(raw: dict[str, Any]) -> None:
     """Raise `ConfigError` for any unsupported top-level key."""
     for key in raw:
-        if isinstance(key, str) and key not in _SUPPORTED_ROOT_KEYS:
+        if key not in _SUPPORTED_ROOT_KEYS:
             raise ConfigError(f"unsupported config key: {key!r}")
 
 
 def _check_unknown_agent_keys(agent_raw: dict[str, Any]) -> None:
     """Raise `ConfigError` for any unsupported `agent:` key."""
     for key in agent_raw:
-        if isinstance(key, str) and key not in _SUPPORTED_AGENT_KEYS:
+        if key not in _SUPPORTED_AGENT_KEYS:
             raise ConfigError(f"unsupported agent key: {key!r}")
 
 

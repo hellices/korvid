@@ -1398,3 +1398,17 @@ def test_unknown_agent_setting_is_rejected(tmp_path: Path) -> None:
     path.write_text("agent:\n  unexpected_setting: true\n")
     with pytest.raises(ConfigError, match=r"unsupported.*agent"):
         load_config(path)
+
+
+@pytest.mark.parametrize(
+    ("contents", "match"),
+    [
+        ("42: true\n", r"unsupported config key: 42"),
+        ("agent:\n  42: true\n", r"unsupported agent key: 42"),
+    ],
+)
+def test_non_string_config_keys_are_rejected(tmp_path: Path, contents: str, match: str) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(contents)
+    with pytest.raises(ConfigError, match=match):
+        load_config(path)

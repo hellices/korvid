@@ -439,6 +439,17 @@ def test_warning_events_are_red() -> None:
     assert "BackOff" in warning_line
 
 
+def test_describe_event_age_uses_latest_series_timestamp() -> None:
+    """Describe events use the shared latest-occurrence timestamp precedence."""
+    from korvid.ui.widgets.describe_screen import _format_age
+
+    event = {
+        "series": {"lastObservedTime": "2026-07-26T10:00:00Z"},
+        "lastTimestamp": "2026-07-26T09:00:00Z",
+    }
+    assert _format_age(event) == "2026-07-26T10:00:00Z"
+
+
 def test_describe_body_text_stays_plain_string() -> None:
     """describe_body_text keeps a plain-str body for the agent bridge."""
     from korvid.ui.widgets.describe_screen import describe_body_text

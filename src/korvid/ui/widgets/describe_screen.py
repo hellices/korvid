@@ -16,6 +16,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Footer, Header, Input, Static
 
 from korvid.agent.interaction import ResourceIdentity
+from korvid.k8s.events import select_event_timestamp
 
 
 def _manifest_identity(manifest: dict[str, Any]) -> ResourceIdentity | None:
@@ -38,11 +39,7 @@ def _manifest_identity(manifest: dict[str, Any]) -> ResourceIdentity | None:
 
 
 def _format_age(event: dict[str, Any]) -> str:
-    ts = event.get("lastTimestamp") or event.get("eventTime") or ""
-    if not ts:
-        return "-"
-    # Return just the raw timestamp string; keep it simple.
-    return str(ts)
+    return select_event_timestamp(event) or "-"
 
 
 def _render_events(events: list[dict[str, Any]]) -> Text:
