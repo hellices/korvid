@@ -54,9 +54,13 @@ class _FakeProc:
     def terminate(self) -> None:
         self.terminated = True
         self.returncode = -15
+        if self.stdout is not None:
+            self.stdout.close()
 
     def kill(self) -> None:
         self.returncode = -9
+        if self.stdout is not None:
+            self.stdout.close()
 
     def wait(self, timeout: float | None = None) -> int:
         if self.returncode is None:
@@ -69,6 +73,7 @@ class _GatedStream:
 
     def __init__(self) -> None:
         self._lines: queue.Queue[str | None] = queue.Queue()
+        self.closed = False
 
     def __iter__(self) -> _GatedStream:
         return self
@@ -80,7 +85,25 @@ class _GatedStream:
         return line
 
     def feed(self, line: str | None) -> None:
+        if line is None:
+            self.close()
+            return
         self._lines.put(line)
+
+    def close(self) -> None:
+        if not self.closed:
+            self.closed = True
+            self._lines.put(None)
+
+
+def test_fake_process_termination_closes_the_readiness_stream() -> None:
+    proc = _FakeProc(["kubectl", "port-forward"])
+    stream = _GatedStream()
+    proc.stdout = stream
+
+    proc.terminate()
+
+    assert stream.closed
 
 
 def _registry(procs: list[_FakeProc]) -> ForwardRegistry:

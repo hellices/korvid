@@ -46,9 +46,11 @@ enable it, including how native Ollama timings are retained.
 ## Agent implementation cleanup
 
 - Low and high behavior now lives in separate tier files, with their prompts,
-  tool-surface selection and budgets visible together. Default routing and
-  user-facing behavior are unchanged; approval, audit, masking and execution
-  remain shared.
+  tool-surface selection and budgets visible together. Default routing remains
+  unchanged; approval, audit, masking and execution remain shared. Low-tier
+  tool-description version 3 now distinguishes `open_describe` display requests
+  from `get_resource` reads, matching the existing prompt rule and changing the
+  corresponding eval prompt digest.
 - **Breaking:** The unwired `ProviderPlugin` construction API and its old registry have been
   removed without compatibility shims. Use the
   [SpecialFlow provider contract](../provider-plugins.md) and import agent
