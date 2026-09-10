@@ -28,7 +28,7 @@ enable it, including how native Ollama timings are retained.
   tool-surface selection and budgets visible together. Default routing and
   user-facing behavior are unchanged; approval, audit, masking and execution
   remain shared.
-- The unwired `ProviderPlugin` construction API and its old registry have been
+- **Breaking:** The unwired `ProviderPlugin` construction API and its old registry have been
   removed without compatibility shims. Use the
   [SpecialFlow provider contract](../provider-plugins.md) and import agent
   contracts from their defining modules rather than package-level re-exports.

@@ -54,7 +54,7 @@ _FILTER_FIELD_BOUND: Final[int] = 2_048
 #: at most a couple of lines of the system prompt.
 _HANDOFF_CONTEXT_BOUND: Final[int] = 200
 
-#: The static layers (1-7) must fit comfortably inside the model's own
+#: The static layers (1-6) must fit comfortably inside the model's own
 #: history budget before a single turn runs: a policy whose tier prompt,
 #: eval layers, and rules alone would eat most of the conversation budget is a
 #: configuration error to catch before session creation, not mid-turn.
@@ -208,7 +208,7 @@ class PromptHarness:
     def validate(self, policy: ResolvedAgentPolicy, user_rules: tuple[str, ...] = ()) -> None:
         """Check that `policy` composes, without needing a live snapshot.
 
-        Layers 1-7 depend only on the policy and the operator rules, so
+        Layers 1-6 depend only on the policy and the operator rules, so
         they can be checked before there is any workspace to snapshot —
         which is what lets `AgentSession` (issue #316 task 11) refuse a
         bad policy at construction time and refuse a bad *retarget*
@@ -221,7 +221,7 @@ class PromptHarness:
             user_rules: `config.agent_rules` the same turn would compose.
 
         Raises:
-            StaticPromptTooLargeError: the static layers (1-7) exceed
+            StaticPromptTooLargeError: the static layers (1-6) exceed
                 `_MAX_STATIC_PROMPT_FRACTION` of
                 `policy.max_history_chars`.
         """
@@ -231,7 +231,7 @@ class PromptHarness:
         """Compose one turn's system and user messages.
 
         Raises:
-            StaticPromptTooLargeError: the static layers (1-7) exceed
+            StaticPromptTooLargeError: the static layers (1-6) exceed
                 `_MAX_STATIC_PROMPT_FRACTION` of
                 `inputs.policy.max_history_chars`.
         """
@@ -252,7 +252,7 @@ class PromptHarness:
         return ComposedPrompt(system_message=system_message, user_message=user_message)
 
     def _static_prompt(self, policy: ResolvedAgentPolicy, user_rules: tuple[str, ...]) -> str:
-        """Build and budget-check layers 1-7. One builder, so `validate`
+        """Build and budget-check layers 1-6. One builder, so `validate`
         cannot accept what `compose` would refuse.
         """
         static_layers = [
@@ -273,7 +273,7 @@ def _shipped_tier_prompt(tier: ModelTier) -> str:
 
 
 def _handoff_note(previous: InteractionContext | None, current: InteractionContext) -> str | None:
-    """Layer 9: tell the model the workspace moved under it.
+    """Layer 7: tell the model the workspace moved under it.
 
     Driven by `context_epoch`, not by the context *name*: the epoch is
     the interaction layer's own "everything you knew is stale" counter
@@ -338,7 +338,7 @@ def _armed_tool_names(tools: Sequence[Mapping[str, Any]]) -> frozenset[str]:
 
 
 def _capability_clauses(tools: Sequence[Mapping[str, Any]]) -> str:
-    """Layer 7: derived from the armed policy tools, not a second tool list.
+    """Layer 6: derived from the armed policy tools, not a second tool list.
 
     `UI_TOOL_NAMES`/`WRITE_TOOL_NAMES` are the same registry-derived sets
     `korvid.tools.executor` exposes to every other caller — this harness

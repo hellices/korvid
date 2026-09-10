@@ -235,11 +235,11 @@ tier 우선순위는 **사용자 명시값 → provider 추천 → 내장 catalo
 | 같은 변경 | 화면 설명과 실행 준비가 UI·runtime에 걸쳐 있음 | typed `InteractionContext`와 frozen `AgentTurnRequest`로 턴 입력을 명시. 화면 snapshot과 중단 수명을 session이 소유 |
 | 같은 변경 | `agent.profile` / `agent.prompts` 방식 | low/high 정책과 정해진 prompt pack, 추가 규칙 `agent.rules`로 통합. 역할·안전 계약을 사용자 설정으로 통째로 교체하지 않음 |
 | [2026-08-27 · `596265fc` / #320](https://github.com/hellices/korvid/commit/596265fc36b408682e25bb85429702cf41d54f93) | 화면을 연 다음 설명만 하려고 모델을 다시 호출할 수 있음 | 단일 direct-open 성공 시 로컬 확인으로 턴 종료. `continue_analysis: true`이면 조사 계속 |
-| [2026-09-08 · `cd45c20a` / #364](https://github.com/hellices/korvid/commit/cd45c20a) | CSP/provider별 선택·설정 분기에 의존 | model reference 기반 연결 프로필, LiteLLM 라우팅, 선언형 auth·special flow로 전환 |
+| [2026-09-08 · `cd45c20a` / #364](https://github.com/hellices/korvid/commit/cd45c20a9aa6a43452f394330288c7a444106ba0) | CSP/provider별 선택·설정 분기에 의존 | model reference 기반 연결 프로필, LiteLLM 라우팅, 선언형 auth·special flow로 전환 |
 
 **안전장치가 모두 이때 새로 생긴 것은 아니다.** 종전 runtime에도 outbound
 마스킹, evidence, 사용량·중단 처리가 있었다. 특히 evidence는
-[8월 11일의 변경](https://github.com/hellices/korvid/commit/06c835f4) 등에서 이미
+[8월 11일의 변경](https://github.com/hellices/korvid/commit/06c835f4a1d61285217b687ce042d7fb3df110b3) 등에서 이미
 들어왔다. 이번 고도화의 핵심은 기존 기능을 없애고 다른 agent 프레임워크로
 옮긴 것이 아니라, **책임과 계약을 분리하면서 현재 화면·모델 정책과 일관되게
 묶은 것**이다. LiteLLM은 모델 통신을 맡지 agent loop를 대신하지 않는다.

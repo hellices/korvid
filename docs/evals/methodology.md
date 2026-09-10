@@ -457,6 +457,9 @@ used the prompts korvid ships, and `override` when `--tier-pack-file` or
 
 Effective experimental layers are recorded only in `meta.prompts.overlays`.
 `meta.policy` describes model/tier selection and does not duplicate that field.
+`meta.prompts.overlays` is a JSON array of string ids — empty (`[]`) for a
+default run, or `["eval-overlay"]` when `--prompt-overlay-file` was supplied
+(see the `meta.prompts` example in [Run Provenance](#run-provenance) above).
 
 Both flags are **eval-only prompt grinding** and both layer *after* the
 immutable safety contract, which is always the first text in the composed

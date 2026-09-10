@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1060" viewBox="0 0 1600 1060" role="img" aria-labelledby="title desc">
   <title id="title">Korvid agent: model connection and resolved policy</title>
-  <desc id="desc">One active model profile is resolved through the provider factory into a LiteLLM provider or a selected special flow. ModelRouter combines an explicit tier override, provider capability facts, shipped catalog facts and a conservative low fallback. Environment gates the tool surface. The resulting immutable policy supplies one engine, not a high/low multi-agent team.</desc>
+  <desc id="desc">One active model profile is resolved through the provider factory into a LiteLLM provider or a selected SpecialFlow. ModelRouter combines an explicit tier override, provider capability facts, shipped catalog facts and a conservative low fallback. Environment gates the tool surface. The resulting immutable policy supplies one engine, not a high/low multi-agent team.</desc>
   <defs>
     <style>
       text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #182b44; }
@@ -40,7 +40,7 @@
   <text x="84" y="660" class="body">LiteLLM routing</text>
   <text x="84" y="691" class="body">LiteLLMProvider</text>
   <rect x="337" y="589" width="249" height="136" rx="12" fill="#fff" stroke="#d0c8e8"/>
-  <text x="357" y="625" class="heading">Claimed flow</text>
+  <text x="357" y="625" class="heading">SpecialFlow</text>
   <text x="357" y="660" class="body">GitHub device login</text>
   <text x="357" y="691" class="body">Ollama thinking opt-in</text>
   <path d="M192 725V754H325V788" class="call"/>

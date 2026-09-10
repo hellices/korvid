@@ -384,17 +384,26 @@ def test_exactly_one_production_agent_session_ships() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_importing_the_agent_namespace_does_not_load_its_runtime() -> None:
+@pytest.mark.parametrize("eager_import", [False, True], ids=["namespace-only", "eager-control"])
+def test_importing_the_agent_namespace_does_not_load_its_runtime(eager_import: bool) -> None:
+    """The optimized child must reject an intentionally eager control too."""
+    extra_import = "import korvid.agent.model_policy\n" if eager_import else ""
     probe = (
         "import sys\n"
         "import korvid.agent\n"
+        f"{extra_import}"
         "loaded = [name for name in sys.modules if name.startswith('korvid.agent.')]\n"
-        "assert loaded == [], loaded\n"
+        "if loaded:\n"
+        "    raise SystemExit(f'eager agent imports: {loaded}')\n"
     )
     result = subprocess.run(
-        [sys.executable, "-c", probe], capture_output=True, text=True, timeout=120
+        [sys.executable, "-O", "-c", probe], capture_output=True, text=True, timeout=120
     )
-    assert result.returncode == 0, result.stderr
+    if eager_import:
+        assert result.returncode != 0
+        assert "korvid.agent.model_policy" in result.stderr
+    else:
+        assert result.returncode == 0, result.stderr
 
 
 # ---------------------------------------------------------------------------

@@ -6,6 +6,8 @@ report serialization. The live model round-trip is by definition manual.
 
 from __future__ import annotations
 
+import argparse
+import inspect
 import json
 from pathlib import Path
 from typing import Any
@@ -16,6 +18,7 @@ from korvid.agent import prompt_harness
 from korvid.agent.tiers import low
 from korvid.evals.__main__ import (
     DEFAULT_EVAL_TIMEOUT_SECONDS,
+    _resolve_policy,
     eval_api_key,
     eval_model_tag,
     exit_code,
@@ -73,6 +76,13 @@ def _report(error: str | None = None) -> ScenarioReport:
 
 def _policy(**kwargs: Any) -> Any:
     return resolve_eval_policy(ScriptedProvider([[{"type": "done"}]]), **kwargs)
+
+
+def test_resolve_policy_takes_exactly_two_arguments() -> None:
+    assert list(inspect.signature(_resolve_policy).parameters) == ["provider_factory", "args"]
+    args = argparse.Namespace(model_tier=None, without_tool=[])
+    result = _resolve_policy(lambda: ScriptedProvider([[{"type": "done"}]]), args)
+    assert result == _policy()
 
 
 @pytest.mark.parametrize(
@@ -249,7 +259,7 @@ def test_the_campaign_probes_with_the_tag_rather_than_the_reference(
     monkeypatch.setattr(cli, "capture_serving", fake_capture)
     monkeypatch.setattr(cli, "provider_factory_from_env", lambda env: lambda: None)
     monkeypatch.setattr(cli, "load_scenarios", lambda path: ["scenario"])
-    monkeypatch.setattr(cli, "_resolve_policy", lambda factory, args, grind: _policy())
+    monkeypatch.setattr(cli, "_resolve_policy", lambda factory, args: _policy())
 
     async def fake_run_all(*args: Any, **kwargs: Any) -> list[Any]:
         return []

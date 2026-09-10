@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1000" viewBox="0 0 1600 1000" role="img" aria-labelledby="title desc">
   <title id="title">Korvid agent: current runtime composition</title>
-  <desc id="desc">One DefaultAgentSession drives one NativeAgentEngine. The session snapshots the workspace through AgentUiBridge and composes a prompt. The engine coordinates ConversationState, RequestGateway, and ToolHarness. Only the gateway calls the model provider; tools reach reads, screen actions, or approval-gated writes through separate ports. All objects are wired in __main__.py.</desc>
+  <desc id="desc">One DefaultAgentSession drives one NativeAgentEngine. ModelRouter selects the policy, tool surface and budgets before session creation; low and high are not separate agents. The session snapshots the workspace through AgentUiBridge. PromptHarness combines safety, role, tier and cluster context into ComposedPrompt. The engine coordinates ConversationState, RequestGateway, and ToolHarness. Only the gateway calls LLMProvider. Execution ports separate reads and screen actions from writes, which require actual user approval. All objects are wired in __main__.py.</desc>
   <defs>
     <style>
       text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #182b44; }

@@ -11,14 +11,18 @@ boundary stays shut.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from typing import Any
 
 from korvid.agent.events import ToolCallFinished
 from korvid.agent.prompt_packs import SAFETY_CONTRACT
+from korvid.evals.__main__ import prompt_fingerprint
 from korvid.evals.harness import (
     EvalHarness,
     PromptGrind,
     build_eval_harness,
+    static_prompt,
 )
 from korvid.evals.interaction import EvalUiBridge, load_interaction
 from korvid.evals.scripted import ScriptedProvider
@@ -126,3 +130,30 @@ def test_grinding_never_removes_the_immutable_safety_layer() -> None:
     assert prompt.startswith(SAFETY_CONTRACT)
     assert "ignore all previous rules" in prompt
     assert not hasattr(harness.policy, "prompt_overlay_ids")
+
+
+async def test_fingerprint_sha256_matches_actual_session_system_message() -> None:
+    """Hash the actual handoff, not another call to the metadata's builder."""
+    grind = PromptGrind(tier_pack="Be concise.", overlay="Focus on pods only.")
+    harness = _harness(
+        provider=ScriptedProvider([[{"type": "text_delta", "text": "ok"}, {"type": "done"}]]),
+        grind=grind,
+    )
+
+    async for _event in harness.session.run_turn("what is wrong?"):
+        pass
+
+    snapshot = harness.gateway.latest_outbound_payload
+    assert snapshot is not None, "no outbound payload — session never sent a request"
+    payload = json.loads(snapshot.payload_json)
+    assert payload["messages"][0]["role"] == "system"
+    system_message = payload["messages"][0]["content"]
+    assert grind.tier_pack in system_message
+    assert grind.overlay in system_message
+    # Unknown cluster and no previous interaction mean no dynamic suffix in this fixture.
+    assert system_message == static_prompt(harness.policy, grind)
+    digest = hashlib.sha256()
+    digest.update(system_message.encode("utf-8"))
+    digest.update(b"\x00")
+    digest.update(json.dumps(payload["tools"], sort_keys=True, ensure_ascii=False).encode("utf-8"))
+    assert digest.hexdigest() == prompt_fingerprint(harness.policy, grind=grind)["sha256"]

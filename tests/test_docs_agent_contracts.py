@@ -26,11 +26,13 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from xml.etree import ElementTree
 
 import pytest
 
 from korvid import __version__
 from korvid.agent.model_profiles import MetadataRefresh
+from korvid.agent.tiers import high, low
 from korvid.tools.registry import TOOLS_BY_NAME
 from korvid.ui.widgets.model_search_screen import _REFRESH_MESSAGES
 from tests.config_keys import names_key
@@ -352,6 +354,60 @@ def test_the_plugin_pointers_name_the_current_extension_points(page: str) -> Non
     text = _text(page)
     assert "SpecialFlow" in text
     assert "korvid.credential" in text
+
+
+def test_provider_docs_distinguish_adapter_limits_from_engine_enforcement() -> None:
+    text = " ".join(_text("docs/provider-plugins.md").split())
+
+    assert "non-bool" in text
+    assert "1,000,000,000" in text
+    assert f"{low.BEHAVIOR.max_history_chars:,}" in text
+    assert f"{high.BEHAVIOR.max_history_chars:,}" in text
+    assert "not a per-field UTF-8 byte limit" in text
+    assert "Custom adapters may emit" in text
+    assert "response headers" in text
+    assert "does not independently verify network I/O" in text
+
+
+def test_agent_api_removals_are_marked_as_breaking_in_release_notes() -> None:
+    text = " ".join(_text("docs/release-notes/unreleased.md").split())
+
+    assert "**Breaking:**" in text
+    assert "SpecialFlow provider contract" in text
+
+
+def test_architecture_svg_descriptions_name_the_components_they_explain() -> None:
+    namespace = {"svg": "http://www.w3.org/2000/svg"}
+    overview = ElementTree.fromstring(_text("docs/assets/agent-architecture-overview.svg"))
+    description = overview.findtext("svg:desc", namespaces=namespace)
+    assert description is not None
+    for name in ("PromptHarness", "ComposedPrompt", "ModelRouter", "Execution ports"):
+        assert name in description
+    policy = ElementTree.fromstring(_text("docs/assets/agent-architecture-policy.svg"))
+    assert "SpecialFlow" in policy.findtext("svg:desc", default="", namespaces=namespace)
+    assert any(
+        node.text == "SpecialFlow" for node in policy.findall("svg:text", namespaces=namespace)
+    )
+
+
+def test_current_tier_svg_budgets_match_the_live_behavior_modules() -> None:
+    svg = ElementTree.fromstring(_text("docs/assets/agent-architecture-tiers.svg"))
+    text = " ".join(svg.itertext())
+
+    for behavior in (low.BEHAVIOR, high.BEHAVIOR):
+        assert (
+            f"{behavior.max_iterations} model rounds / "
+            f"{behavior.max_history_chars:,} history characters"
+        ) in text
+        assert f"{behavior.max_result_chars:,} result characters" in text
+
+
+def test_historical_architecture_commit_links_are_fully_pinned() -> None:
+    text = _text("docs/dev/specs/2026-09-09-agent-architecture.md")
+    commits = re.findall(r"https://github\.com/hellices/korvid/commit/([a-f0-9]+)", text)
+
+    assert commits
+    assert all(len(commit) == 40 for commit in commits)
 
 
 def test_the_readme_explains_the_current_agent_and_mcp_starting_points() -> None:

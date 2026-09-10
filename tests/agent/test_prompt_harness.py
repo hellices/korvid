@@ -246,9 +246,13 @@ def test_an_explicit_empty_eval_tier_prompt_does_not_restore_shipped_wording() -
 
 
 def test_default_prompt_harness_has_no_eval_extra_layer() -> None:
-    prompt = PromptHarness().compose("diagnose it", inputs(policy_=policy()))
+    turn_inputs = inputs(policy_=policy())
+    injected = PromptHarness(extra_layers=("EVAL_EXTRA_LAYER",)).compose("diagnose it", turn_inputs)
+    prompt = PromptHarness().compose("diagnose it", turn_inputs)
 
+    assert "EVAL_EXTRA_LAYER" in injected.system_message
     assert "EVAL_EXTRA_LAYER" not in prompt.system_message
+    assert prompt.system_message != injected.system_message
 
 
 # ---------------------------------------------------------------------------

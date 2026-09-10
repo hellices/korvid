@@ -82,6 +82,7 @@ def _packaged_provider(
         flows=SpecialFlowRegistry.from_entry_points(),
     )
     assert provider is not None
+    assert type(provider).__module__ == "company_provider"
     return provider
 
 

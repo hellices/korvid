@@ -849,7 +849,6 @@ def _prompt_grind(args: argparse.Namespace) -> PromptGrind:
 def _resolve_policy(
     provider_factory: Callable[[], Any],
     args: argparse.Namespace,
-    _grind: PromptGrind = NO_GRIND,
 ) -> ResolvedAgentPolicy:
     """Route once for the whole campaign."""
     provider = provider_factory()
@@ -893,7 +892,7 @@ def main(argv: list[str] | None = None) -> int:
     if not scenarios:
         raise SystemExit(f"no scenario YAML files found in {args.scenarios}")
     grind = _prompt_grind(args)
-    policy = _resolve_policy(provider_factory, args, grind)
+    policy = _resolve_policy(provider_factory, args)
     serving = asyncio.run(
         capture_serving(
             os.environ.get("KORVID_EVAL_BASE_URL", "").strip(),

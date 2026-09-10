@@ -254,7 +254,12 @@ class EvalHarness:
 
     @property
     def overlay_ids(self) -> tuple[str, ...]:
-        """Prompt overlay ids composed into this run's system message."""
+        """Eval-only prompt layer ids added by `grind.overlay` for this run.
+
+        Returns an empty tuple when no eval overlay was applied, or
+        `(EVAL_OVERLAY_ID,)` when one was. This does *not* include the tier
+        prompt identity — that is tracked separately via `tier_prompt_id`.
+        """
         return grind_layer_ids(self.grind)
 
     def static_prompt(self) -> str:

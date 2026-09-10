@@ -291,6 +291,23 @@ IDs/names and excess calls, refuses invalid arguments before dispatch, and
 applies the resolved policy's response budget. It is not a general-purpose
 validator for every field an adapter might yield.
 
+The response budget counts aggregate text/reasoning characters and tool-call
+ID/name/argument characters, plus the number of events: **24,000** for the
+shipped low tier and **120,000** for high. Exceeding either counter stops the
+response before dispatch with `ProviderResponseLimitError`. This is
+**not a per-field UTF-8 byte limit**. There is no shared 256-character ID/name
+gate or 65,536-byte text-event gate; those belonged to the retired, unwired
+plugin validator. Adapters must bound fields and buffers before yielding them,
+not rely on the engine to reclaim an allocation already made by their transport.
+
+Custom adapters must validate usage before yielding it: use **non-bool**
+integers between **0** and **1,000,000,000** inclusive for each token count.
+The ceiling is available as `korvid.agent.diagnostics.MAX_USAGE_TOKENS`.
+Native diagnostic metrics enforce it, but general engine usage accounting only
+coerces counts to non-negative integers: it does not enforce that ceiling or
+reject bools. Reject malformed/out-of-range usage in the adapter rather than
+reporting invented counts or relying on that coercion.
+
 Built-in transports enforce additional limits while assembling a response:
 one call's accumulated arguments stop at **65,536 characters**, one response
 may open at most **64 calls**, and retained reasoning is capped at **65,536
@@ -299,10 +316,17 @@ characters**. These constants and bounded-append helpers live in
 and reject a stream whose underlying protocol never confirmed completion;
 yielding `done` for a truncated stream would falsely report success.
 
-Built-in transports also yield `REQUEST_SENT` once the request has reached the
-transport. The gateway consumes that acknowledgement for payload inspection and
-usage accounting. For an adapter that emits no acknowledgement, its first
-completion event supplies that proof instead.
+Custom adapters may emit `{"type": REQUEST_SENT}` too: the gateway does not
+restrict it to built-in transports. Emit it only once the transport has accepted
+the request, normally when **response headers** arrive, and before checking the
+HTTP status; even an error response proves a handoff. Never emit it while only
+preparing a payload or before credential/connection setup succeeds.
+
+The gateway consumes this acknowledgement for payload inspection and usage
+accounting and never forwards it to the engine. It trusts the adapter's timing
+and **does not independently verify network I/O**. For an adapter that emits no
+acknowledgement, its first completion event supplies that proof instead. A
+failure before either event leaves the previous outbound snapshot unchanged.
 
 ## Options contract, immutability, and secret policy
 
