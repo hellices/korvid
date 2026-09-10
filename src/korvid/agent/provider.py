@@ -16,7 +16,7 @@ from typing import Any, ClassVar, Final
 from korvid.agent.model_policy import ModelCapabilities, ModelDescriptor
 
 REQUEST_SENT: Final = "request_sent"
-"""Event type a built-in adapter yields once its request is on the wire.
+"""Event type an adapter may yield once its request is on the wire.
 
 `complete` is an async generator, so obtaining it transmits nothing: the
 body only runs on the first `__anext__`. The runtime records the exact
@@ -349,11 +349,11 @@ class LLMProvider(ABC):
         Do NOT write a plain async function returning an iterator—that
         produces a coroutine and fails the override check.
 
-        A built-in adapter yields `{"type": REQUEST_SENT}` once the
+        Adapters may emit `{"type": REQUEST_SENT}` once the
         transport has accepted the request, so the runtime can tell a
         payload that was really handed over from one whose generator was
-        never started. Adapters that cannot say (including every plugin)
-        simply do not, and are taken at their first completion event.
+        never started. This includes custom SpecialFlow adapters. Without
+        an acknowledgement, the first completion event proves the handoff.
         """
 
     def prepare_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:

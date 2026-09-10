@@ -369,6 +369,18 @@ def test_provider_docs_distinguish_adapter_limits_from_engine_enforcement() -> N
     assert "does not independently verify network I/O" in text
 
 
+@pytest.mark.parametrize(
+    "path", ["src/korvid/agent/provider.py", "src/korvid/agent/request_gateway.py"]
+)
+def test_provider_acknowledgement_docstrings_allow_custom_adapters(path: str) -> None:
+    text = " ".join(_text(path).casefold().split())
+
+    assert "including every plugin" not in text
+    assert "forbids from emitting" not in text
+    assert "adapters may emit" in text
+    assert "first completion event" in text
+
+
 def test_agent_api_removals_are_marked_as_breaking_in_release_notes() -> None:
     text = " ".join(_text("docs/release-notes/unreleased.md").split())
 
