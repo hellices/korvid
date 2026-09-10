@@ -303,6 +303,76 @@ def test_run_command_redacts_credentials_from_failing_command_diagnostics(
     assert "attempted clone" in message
 
 
+@pytest.mark.parametrize(
+    ("endpoint", "payload"),
+    [
+        ("users/", ""),
+        ("users/", "{"),
+        ("users/", "null"),
+        ("users/", "[]"),
+        ("repos/", ""),
+        ("repos/", "{"),
+        ("repos/", "null"),
+        ("repos/", "[null]"),
+        ("repos/", "[1]"),
+    ],
+)
+def test_main_reports_invalid_api_json_without_publishing_a_branch(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], endpoint: str, payload: str
+) -> None:
+    handoff = _module()
+    remote, _ = _tap_remote(tmp_path, main_formula=_formula("1.0.0"))
+    formula = tmp_path / "korvid.rb"
+    formula.write_text(_formula("1.2.3"), encoding="utf-8")
+    runner = _FakeRunner(handoff)
+
+    def run(argv: list[str], *, cwd: Path | None = None) -> str:
+        if argv[:2] == ["gh", "api"] and argv[2].startswith(endpoint):
+            return payload
+        return runner(argv, cwd=cwd)
+
+    assert (
+        handoff.main(
+            [
+                "--version",
+                "1.2.3",
+                "--formula",
+                str(formula),
+                "--tap-clone-source",
+                str(remote),
+                "--clone-dir",
+                str(tmp_path / "clone"),
+                "--bot-login",
+                "homebrew-release[bot]",
+            ],
+            command_runner=run,
+        )
+        == 1
+    )
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err
+    assert "Traceback" not in captured.err
+    assert not _has_remote_branch(remote, "bump-korvid-1.2.3")
+
+
+@pytest.mark.parametrize("probe", ["existing", "absent", "transport-error"])
+def test_raw_remote_probe_distinguishes_absence_from_transport_failure(
+    tmp_path: Path, probe: str
+) -> None:
+    handoff = _module()
+    _, seed = _tap_remote(tmp_path, main_formula=_formula("1.0.0"))
+    remote_branch_exists = handoff._module._remote_branch_exists
+    assert callable(remote_branch_exists)
+    if probe == "transport-error":
+        _git(seed, "remote", "set-url", "origin", str(tmp_path / "missing.git"))
+        with pytest.raises(handoff.HandoffError, match="git ls-remote failed"):
+            remote_branch_exists(seed, "main")
+    else:
+        branch = "main" if probe == "existing" else "missing"
+        assert remote_branch_exists(seed, branch) is (probe == "existing")
+
+
 def test_main_rejects_versions_outside_the_stable_release_format(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

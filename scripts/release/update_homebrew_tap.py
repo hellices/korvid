@@ -106,7 +106,8 @@ def _git(run: CommandRunner, repo: Path, *args: str) -> str:
     return run(["git", *args], cwd=repo)
 
 
-def _remote_branch_exists(run: CommandRunner, repo: Path, branch: str) -> bool:
+def _remote_branch_exists(repo: Path, branch: str) -> bool:
+    # The stdout-only runner cannot distinguish no match (2) from transport errors.
     probe = subprocess.run(
         ["git", "ls-remote", "--exit-code", "--heads", "origin", branch],
         cwd=repo,
@@ -127,6 +128,8 @@ def _remote_branch_exists(run: CommandRunner, repo: Path, branch: str) -> bool:
 def _github_user_id(run: CommandRunner, bot_login: str) -> int:
     raw = run(["gh", "api", f"users/{bot_login}"])
     payload = json.loads(raw)
+    if not isinstance(payload, dict):
+        raise HandoffError("gh api users lookup did not return a JSON object")
     user_id = payload.get("id")
     if not isinstance(user_id, int) or user_id <= 0:
         raise HandoffError(f"gh api users/{bot_login} did not return a numeric id")
@@ -201,7 +204,7 @@ def _open_pr_number(
             (f"repos/{tap_repository}/pulls?state=open&head={owner}:{branch}&base={base_branch}"),
         ]
     )
-    payload = json.loads(raw or "[]")
+    payload = json.loads(raw)
     if not isinstance(payload, list):
         raise HandoffError("gh api pulls lookup did not return a JSON list")
     if not payload:
@@ -209,6 +212,8 @@ def _open_pr_number(
     if len(payload) != 1:
         raise HandoffError(f"expected exactly one open pull request for {branch}")
     pr = payload[0]
+    if not isinstance(pr, dict):
+        raise HandoffError("gh api pulls lookup did not return a JSON object in its list")
     number = pr.get("number")
     base = pr.get("base", {})
     head = pr.get("head", {})
@@ -379,7 +384,7 @@ def update_homebrew_tap(
     if main_result is not None:
         return main_result
 
-    if _remote_branch_exists(command_runner, repo, branch):
+    if _remote_branch_exists(repo, branch):
         _fetch_retry_history(
             command_runner,
             repo,
@@ -460,7 +465,7 @@ def main(argv: list[str] | None = None, *, command_runner: CommandRunner = _run_
             base_branch=args.base_branch,
             command_runner=command_runner,
         )
-    except (HandoffError, OSError, UnicodeDecodeError) as exc:
+    except (HandoffError, OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         print(str(exc), file=sys.stderr)
         return 1
 
