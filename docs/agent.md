@@ -43,10 +43,6 @@ rest of the no-egress story.
 
 ## From prompt to cited answer
 
-For the implementation view, see the
-[agent architecture guide (Korean)](dev/agent-architecture.md):
-separate low/high behavior files, the shared runtime, SVGs, and recent design changes.
-
 A turn sees your screen context — view, namespace, selected resource, active
 filter — and answers by calling bounded read-only tools: manifest, log, event
 and listing reads, plus compound diagnostics that return projected evidence

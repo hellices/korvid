@@ -36,9 +36,6 @@ enable it, including how native Ollama timings are retained.
   overlay registries have been removed. In-memory rollback and evaluation prompt
   experimentation remain supported.
 
-See the [agent architecture guide (Korean)](../dev/agent-architecture.md) for
-the current file map and a low/high comparison diagram.
-
 See the [release history](https://github.com/hellices/korvid/releases) for
 published versions and their migration notes. Candidate release notes can
 appear in the navigation before publication.

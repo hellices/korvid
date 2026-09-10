@@ -27,9 +27,6 @@ design document states the original intent.
   way it is: which capability directions were tried, measured, or
   rejected, and what evidence settled them. Read this before proposing new
   agent capabilities.
-- [Agent architecture (Korean)](agent-architecture.md) — the current low/high
-  behavior files, shared runtime and safety boundaries, with an SVG comparison
-  and a link to the earlier architecture snapshot.
 
 If you are looking for how to *use* korvid, start at the
 [project README](https://github.com/hellices/korvid/blob/main/README.md).
