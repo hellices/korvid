@@ -7,17 +7,16 @@ two invariants that were previously spread across the engine loop:
   thing a user can export and inspect — changes only once a request has
   demonstrably reached the provider, never when a payload was merely
   built. `LLMProvider.complete` is an async generator, so obtaining it
-  transmits nothing; the body runs on the first `__anext__`. A built-in
-  adapter proves the handoff explicitly with `REQUEST_SENT` (emitted once
-  the transport accepted the request, before the status code is judged);
-  a plugin, which the published contract forbids from emitting that
-  bookkeeping event, proves it with its first completion event. Either
+  transmits nothing; the body runs on the first `__anext__`. Adapters may emit
+  `REQUEST_SENT` once the transport accepts the request, before the status
+  code is judged. This includes custom SpecialFlow adapters. Without that
+  acknowledgement, the first completion event proves the handoff. Either
   way the gateway records the pending snapshot exactly once, before it
   awaits the provider again, and signals the caller through a synchronous
   callback so token accounting can settle a request that really ran.
 
 - **`REQUEST_SENT` never escapes.** The engine's stream contract knows
-  text, tool calls, usage and done; the gateway consumes the built-in
+  text, tool calls, usage and done; the gateway consumes the
   acknowledgement and never yields it onward.
 
 Preparation is synchronous and hermetic: caller-supplied tool schemas are
@@ -249,8 +248,8 @@ class RequestGateway:
 
         The provider is handed a payload reconstructed from the canonical
         snapshot, so no mutation of `prepared` between preparation and this
-        call can change what crosses the boundary. On the first event — a
-        built-in's `REQUEST_SENT` or a plugin's first completion event — the
+        call can change what crosses the boundary. On the first event — an
+        explicit `REQUEST_SENT` acknowledgement or a completion event — the
         snapshot becomes the session's latest outbound payload and
         `on_transmitted` is called, exactly once and before the next await.
         `REQUEST_SENT` is consumed; every other event is yielded onward. The

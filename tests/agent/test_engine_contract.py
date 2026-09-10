@@ -391,12 +391,42 @@ async def test_excess_calls_are_discarded_and_the_notice_rides_the_last_kept_res
     assert last.summary == "discarded: too many tool calls in one response"
 
 
+@pytest.mark.parametrize(
+    "provider_events",
+    [
+        pytest.param([text_delta("x" * 200), text_delta("y" * 200)], id="text"),
+        pytest.param(
+            [
+                tool_call("x" * 200, "get_logs", LOGS_ARGS),
+                tool_call("y" * 200, "get_logs", LOGS_ARGS),
+            ],
+            id="tool-id",
+        ),
+        pytest.param(
+            [
+                tool_call("c1", "x" * 200, LOGS_ARGS),
+                tool_call("c2", "y" * 200, LOGS_ARGS),
+            ],
+            id="tool-name",
+        ),
+        pytest.param(
+            [
+                tool_call("c1", "get_logs", json.dumps({"pod": "x" * 200, "namespace": "prod"})),
+                tool_call("c2", "get_logs", json.dumps({"pod": "y" * 200, "namespace": "prod"})),
+            ],
+            id="tool-arguments",
+        ),
+    ],
+)
 async def test_provider_response_is_bounded_by_the_history_policy(
     engine_factory: EngineFactory,
+    provider_events: list[dict[str, Any]],
 ) -> None:
+    execution = RecordingExecution()
     harness = engine_factory(
-        [[text_delta("x" * 200), text_delta("y" * 200), DONE]],
+        [[*provider_events, DONE]],
         policy=make_policy(max_history_chars=256),
+        execution=execution,
     )
 
     events = await harness.run()
@@ -405,6 +435,9 @@ async def test_provider_response_is_bounded_by_the_history_policy(
     assert errors
     assert "ProviderResponseLimitError" in errors[-1].message
     assert sum(len(event.text) for event in events if isinstance(event, TextDelta)) <= 256
+    assert execution.calls == []
+    assert not any(isinstance(event, ToolCallStarted) for event in events)
+    assert not harness.conversation.has_unmatched_tool_calls
 
 
 async def test_reasoning_counts_against_the_budget_by_its_real_length(

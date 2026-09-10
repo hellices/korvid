@@ -313,8 +313,6 @@ def make_policy(
         capabilities=ModelCapabilities.unknown(),
         tier=tier,
         route_source=CapabilitySource.FALLBACK,
-        prompt_pack_id="test-pack",
-        prompt_overlay_ids=(),
         tools=tuple(copy.deepcopy(TOOLS_BY_NAME[name].schema) for name in tool_names),
         max_iterations=max_iterations,
         max_history_chars=max_history_chars,

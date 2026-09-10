@@ -19,9 +19,7 @@ from enum import Enum
 from types import MappingProxyType
 from typing import Any
 
-from korvid.agent.prompt_packs import LOW_TOOL_DESCRIPTIONS
-from korvid.tools.executor import MAX_RESULT_CHARS
-from korvid.tools.registry import agent_tool_schemas
+from korvid.agent.tiers import high, low
 
 #: Version of the shipped exact-match model catalog (`model_catalog.py`).
 #: Persisted on every `ResolvedAgentPolicy` whose route used a catalog entry.
@@ -98,10 +96,6 @@ class ModelCatalogEntry:
     provider: str
     model: str
     capabilities: ModelCapabilities
-    #: Exact prompt overlay ids this model qualifies for (layer 5 of the
-    #: prompt harness). Empty for entries with no reproduced failing
-    #: scenario justifying an overlay yet.
-    prompt_overlay_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,8 +132,6 @@ class ResolvedAgentPolicy:
     capabilities: ModelCapabilities
     tier: ModelTier
     route_source: CapabilitySource
-    prompt_pack_id: str
-    prompt_overlay_ids: tuple[str, ...]
     tools: tuple[ToolSchema, ...]
     max_iterations: int
     max_history_chars: int
@@ -151,40 +143,6 @@ class ResolvedAgentPolicy:
     #: `None` when no catalog entry matched.
     catalog_version: int | None
 
-
-@dataclass(frozen=True, slots=True)
-class _TierBudget:
-    """Fixed budgets and prompt identity shared by every model of one tier."""
-
-    prompt_pack_id: str
-    max_iterations: int
-    max_history_chars: int
-    max_result_chars: int | None
-    max_tool_calls_per_iteration: int | None
-    strict_history_budget: bool
-
-
-#: Bounded operation phases, smallest tool surface, sequential calls,
-#: strict budgets (design doc #6, low tier).
-_LOW_TIER_BUDGET = _TierBudget(
-    prompt_pack_id="low-korvid-operator",
-    max_iterations=6,
-    max_history_chars=24_000,
-    max_result_chars=3_000,
-    max_tool_calls_per_iteration=1,
-    strict_history_budget=True,
-)
-
-#: Broader diagnostic surface, larger budgets, parallel calls gated on
-#: provider confirmation (design doc #6, high tier).
-_HIGH_TIER_BUDGET = _TierBudget(
-    prompt_pack_id="high-korvid-operator",
-    max_iterations=15,
-    max_history_chars=120_000,
-    max_result_chars=MAX_RESULT_CHARS,
-    max_tool_calls_per_iteration=None,
-    strict_history_budget=False,
-)
 
 _CAPABILITY_FACTS = (
     "context_window_tokens",
@@ -243,35 +201,6 @@ def _route_tier(
     return ModelTier.LOW, CapabilitySource.FALLBACK
 
 
-def apply_low_tool_descriptions(schemas: list[dict[str, Any]]) -> None:
-    """Swap in the shipped low-tier wording, in place, by exact tool name.
-
-    Called on the deep copies `agent_tool_schemas` already produced and
-    *before* they are deep-frozen, so the registry is never touched and no
-    consumer ever receives a mutable schema.
-
-    Only `function.description` is ever replaced. Names, parameters and
-    required fields are left exactly as the registry declared them, so a
-    rewording can shorten what the model reads but never widen what a tool
-    accepts or does. Matching is by exact name: a schema this map does not
-    name — an unmapped registry tool, or a tool a plugin contributed —
-    keeps the description it declared.
-
-    Args:
-        schemas: Mutable, caller-owned OpenAI function schemas.
-    """
-    for schema in schemas:
-        function = schema.get("function")
-        if not isinstance(function, dict):
-            continue
-        name = function.get("name")
-        if not isinstance(name, str):
-            continue
-        replacement = LOW_TOOL_DESCRIPTIONS.get(name)
-        if replacement is not None:
-            function["description"] = replacement
-
-
 class ModelRouter:
     """Resolve routing policies from capability evidence.
 
@@ -319,21 +248,12 @@ class ModelRouter:
             )
 
         tier, route_source = _route_tier(explicit_tier, merged)
-        budget = _LOW_TIER_BUDGET if tier is ModelTier.LOW else _HIGH_TIER_BUDGET
-
-        surface = "low_agent" if tier is ModelTier.LOW else "high_agent"
-        raw_schemas = agent_tool_schemas(
-            surface,
+        behavior = low.BEHAVIOR if tier is ModelTier.LOW else high.BEHAVIOR
+        raw_schemas = behavior.tool_schemas(
             readonly=environment.readonly,
             resize_supported=environment.resize_supported,
             observability_backends=environment.observability_backends,
         )
-        if tier is ModelTier.LOW:
-            # Model-facing wording only, and only for the low tier: the
-            # schema list rides on every request, and a small serving
-            # context pays for each character of it. Applied here, on the
-            # mutable copies, so what freezes below is already final.
-            apply_low_tool_descriptions(raw_schemas)
         tools: tuple[ToolSchema, ...] = tuple(_deep_freeze(schema) for schema in raw_schemas)
 
         # Parallel tool calls are gated on the provider's own confirmation,
@@ -346,7 +266,6 @@ class ModelRouter:
             tier is ModelTier.HIGH and provider_capabilities.supports_parallel_tools is True
         )
 
-        prompt_overlay_ids = catalog_entry.prompt_overlay_ids if catalog_entry is not None else ()
         catalog_version = MODEL_CATALOG_VERSION if catalog_entry is not None else None
 
         return ResolvedAgentPolicy(
@@ -354,14 +273,12 @@ class ModelRouter:
             capabilities=merged,
             tier=tier,
             route_source=route_source,
-            prompt_pack_id=budget.prompt_pack_id,
-            prompt_overlay_ids=prompt_overlay_ids,
             tools=tools,
-            max_iterations=budget.max_iterations,
-            max_history_chars=budget.max_history_chars,
-            max_result_chars=budget.max_result_chars,
-            max_tool_calls_per_iteration=budget.max_tool_calls_per_iteration,
+            max_iterations=behavior.max_iterations,
+            max_history_chars=behavior.max_history_chars,
+            max_result_chars=behavior.max_result_chars,
+            max_tool_calls_per_iteration=behavior.max_tool_calls_per_iteration,
             allow_parallel_tool_calls=allow_parallel,
-            strict_history_budget=budget.strict_history_budget,
+            strict_history_budget=behavior.strict_history_budget,
             catalog_version=catalog_version,
         )

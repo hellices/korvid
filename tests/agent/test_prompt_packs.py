@@ -29,22 +29,26 @@ import re
 
 import pytest
 
-from korvid.agent.prompt_packs import (
-    COMMON_ROLE,
-    HIGH_KORVID_OPERATOR_PACK,
-    LOW_KORVID_OPERATOR_PACK,
-    LOW_TOOL_DESCRIPTION_MAX_CHARS,
-    LOW_TOOL_DESCRIPTIONS,
-    LOW_TOOL_DESCRIPTIONS_VERSION,
-    PROMPT_PACKS,
-    SAFETY_CONTRACT,
+from korvid.agent.prompt_packs import COMMON_ROLE, SAFETY_CONTRACT
+from korvid.agent.tiers.high import PROMPT as HIGH_KORVID_OPERATOR_PACK
+from korvid.agent.tiers.low import (
+    PROMPT as LOW_KORVID_OPERATOR_PACK,
+)
+from korvid.agent.tiers.low import (
+    TOOL_DESCRIPTION_MAX_CHARS as LOW_TOOL_DESCRIPTION_MAX_CHARS,
+)
+from korvid.agent.tiers.low import (
+    TOOL_DESCRIPTIONS as LOW_TOOL_DESCRIPTIONS,
+)
+from korvid.agent.tiers.low import (
+    TOOL_DESCRIPTIONS_VERSION as LOW_TOOL_DESCRIPTIONS_VERSION,
 )
 from korvid.tools.registry import AGENT_SURFACES, TOOL_DEFS, agent_tool_schemas
 
 
 def _low_text() -> str:
     """Every immutable layer a low-tier turn always carries."""
-    return " ".join((SAFETY_CONTRACT, COMMON_ROLE, PROMPT_PACKS["low-korvid-operator"]))
+    return " ".join((SAFETY_CONTRACT, COMMON_ROLE, LOW_KORVID_OPERATOR_PACK))
 
 
 def _contains_all(text: str, *needles: str) -> list[str]:
@@ -166,7 +170,7 @@ def test_the_low_tier_maps_on_screen_requests_to_ui_tools() -> None:
 )
 def test_no_pack_reintroduces_retired_profile_or_framework_wording(obsolete: str) -> None:
     """Migrating the rules must not migrate the world they were written in."""
-    for pack in (SAFETY_CONTRACT, COMMON_ROLE, *PROMPT_PACKS.values()):
+    for pack in (SAFETY_CONTRACT, COMMON_ROLE, LOW_KORVID_OPERATOR_PACK, HIGH_KORVID_OPERATOR_PACK):
         assert obsolete.casefold() not in pack.casefold()
 
 
@@ -176,7 +180,7 @@ def test_no_pack_invents_a_resource_name_of_its_own() -> None:
     The pack now forbids inventing names; shipping a demonstration full of
     invented ones contradicts the rule it is meant to teach.
     """
-    for pack in PROMPT_PACKS.values():
+    for pack in (LOW_KORVID_OPERATOR_PACK, HIGH_KORVID_OPERATOR_PACK):
         assert "checkout-1" not in pack
         assert "namespace shop" not in pack
 

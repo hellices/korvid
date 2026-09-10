@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import ast
+import importlib
 import inspect
+from dataclasses import fields
 from types import MappingProxyType
 from typing import Any
 
@@ -20,11 +22,15 @@ from korvid.agent.model_policy import (
     ModelTier,
     PolicyEnvironment,
     ResolvedAgentPolicy,
-    apply_low_tool_descriptions,
 )
-from korvid.agent.prompt_packs import (
-    LOW_TOOL_DESCRIPTION_MAX_CHARS,
-    LOW_TOOL_DESCRIPTIONS,
+from korvid.agent.tiers.low import (
+    BEHAVIOR as LOW_BEHAVIOR,
+)
+from korvid.agent.tiers.low import (
+    TOOL_DESCRIPTION_MAX_CHARS as LOW_TOOL_DESCRIPTION_MAX_CHARS,
+)
+from korvid.agent.tiers.low import (
+    TOOL_DESCRIPTIONS as LOW_TOOL_DESCRIPTIONS,
 )
 from korvid.tools.executor import MAX_RESULT_CHARS
 from korvid.tools.registry import agent_tool_schemas
@@ -83,6 +89,114 @@ def router(
     else:
         entry = None
     return ModelRouter(catalog_entries=[entry] if entry else [])
+
+
+# ---------------------------------------------------------------------------
+# Explicit tier modules
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    (
+        "module_name",
+        "prompt_id",
+        "tool_surface",
+        "max_iterations",
+        "max_history_chars",
+        "max_result_chars",
+        "max_tool_calls_per_iteration",
+        "strict_history_budget",
+        "tier_only_tool",
+        "doc_fragments",
+    ),
+    [
+        (
+            "low",
+            "low-korvid-operator",
+            "low_agent",
+            6,
+            24_000,
+            3_000,
+            1,
+            True,
+            None,
+            ("10 cluster reads", "four approval-gated writes", "open_logs", "open_describe"),
+        ),
+        (
+            "high",
+            "high-korvid-operator",
+            "high_agent",
+            15,
+            120_000,
+            8_000,
+            None,
+            False,
+            "navigate",
+            (
+                "10 cluster reads",
+                "four approval-gated writes",
+                "navigate",
+                "set_filter",
+                "drill_down",
+                "query_metrics",
+                "search_logs",
+            ),
+        ),
+    ],
+)
+def test_tier_modules_define_their_complete_behavior(
+    module_name: str,
+    prompt_id: str,
+    tool_surface: str,
+    max_iterations: int,
+    max_history_chars: int,
+    max_result_chars: int,
+    max_tool_calls_per_iteration: int | None,
+    strict_history_budget: bool,
+    tier_only_tool: str | None,
+    doc_fragments: tuple[str, ...],
+) -> None:
+    module = importlib.import_module(f"korvid.agent.tiers.{module_name}")
+
+    assert module.__doc__ is not None
+    assert all(fragment in module.__doc__ for fragment in doc_fragments)
+    behavior = module.BEHAVIOR
+    assert behavior.prompt_id == prompt_id
+    assert behavior.prompt == module.PROMPT
+    assert behavior.tool_surface == tool_surface
+    assert behavior.max_iterations == max_iterations
+    assert behavior.max_history_chars == max_history_chars
+    assert behavior.max_result_chars == max_result_chars
+    assert behavior.max_tool_calls_per_iteration == max_tool_calls_per_iteration
+    assert behavior.strict_history_budget is strict_history_budget
+    schemas = behavior.tool_schemas(
+        readonly=True,
+        resize_supported=True,
+        observability_backends=frozenset(),
+    )
+    names = {schema["function"]["name"] for schema in schemas}
+    assert "diagnose_pod" in names
+    assert "delete_resource" not in names
+    assert ("navigate" in names) is (tier_only_tool == "navigate")
+    writable_schemas = behavior.tool_schemas(
+        readonly=False,
+        resize_supported=True,
+        observability_backends=frozenset(),
+    )
+    writable_names = {schema["function"]["name"] for schema in writable_schemas}
+    assert writable_names - names == {
+        "delete_resource",
+        "resize_pod",
+        "rollout_restart",
+        "scale_resource",
+    }
+
+
+def test_policy_and_catalog_do_not_carry_prompt_registry_routing_fields() -> None:
+    assert {field.name for field in fields(ResolvedAgentPolicy)}.isdisjoint(
+        {"prompt_pack_id", "prompt_overlay_ids"}
+    )
+    assert {field.name for field in fields(ModelCatalogEntry)}.isdisjoint({"prompt_overlay_ids"})
 
 
 # ---------------------------------------------------------------------------
@@ -378,7 +492,6 @@ def test_catalog_matches_exact_ollama_model() -> None:
     entry = get_catalog_entry("ollama", "qwen3:8b")
     assert entry is not None
     assert entry.capabilities.recommended_tier is ModelTier.LOW
-    assert entry.prompt_overlay_ids == ()
 
 
 def test_catalog_does_not_match_unknown_model() -> None:
@@ -575,14 +688,13 @@ def test_catalog_version_is_none_without_a_catalog_match() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_low_tier_budgets_and_prompt_pack_are_exact() -> None:
+def test_low_tier_budgets_are_exact() -> None:
     policy = router().resolve(
         descriptor=ModelDescriptor("ollama", "qwen3:8b-fresh"),
         provider_capabilities=capabilities(recommended_tier=ModelTier.LOW),
         explicit_tier=None,
         environment=environment(),
     )
-    assert policy.prompt_pack_id == "low-korvid-operator"
     assert policy.max_iterations == 6
     assert policy.max_history_chars == 24_000
     assert policy.max_result_chars == 3_000
@@ -591,7 +703,7 @@ def test_low_tier_budgets_and_prompt_pack_are_exact() -> None:
     assert policy.strict_history_budget is True
 
 
-def test_high_tier_budgets_and_prompt_pack_are_exact() -> None:
+def test_high_tier_budgets_are_exact() -> None:
     policy = router().resolve(
         descriptor=ModelDescriptor("test", "model"),
         provider_capabilities=capabilities(
@@ -600,7 +712,6 @@ def test_high_tier_budgets_and_prompt_pack_are_exact() -> None:
         explicit_tier=None,
         environment=environment(),
     )
-    assert policy.prompt_pack_id == "high-korvid-operator"
     assert policy.max_iterations == 15
     assert policy.max_history_chars == 120_000
     assert policy.max_result_chars == MAX_RESULT_CHARS
@@ -619,24 +730,6 @@ def test_resolved_policy_carries_the_descriptor_and_merged_capabilities() -> Non
     )
     assert policy.model == descriptor
     assert isinstance(policy.capabilities, ModelCapabilities)
-    assert policy.prompt_overlay_ids == ()
-
-
-def test_catalog_entry_prompt_overlay_ids_propagate() -> None:
-    entry = ModelCatalogEntry(
-        provider="test",
-        model="model",
-        capabilities=ModelCapabilities(recommended_tier=ModelTier.LOW),
-        prompt_overlay_ids=("test-overlay",),
-    )
-    r = ModelRouter(catalog_entries=[entry])
-    policy = r.resolve(
-        descriptor=ModelDescriptor("test", "model"),
-        provider_capabilities=capabilities(),
-        explicit_tier=None,
-        environment=environment(),
-    )
-    assert policy.prompt_overlay_ids == ("test-overlay",)
 
 
 # ---------------------------------------------------------------------------
@@ -789,7 +882,9 @@ def test_a_low_route_keeps_the_registry_wording_for_every_unmapped_tool() -> Non
         assert resolved[name] == registry[name]
 
 
-def test_an_unknown_tool_schema_keeps_the_description_it_declared() -> None:
+def test_an_unknown_tool_schema_keeps_the_description_it_declared(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A plugin tool the map never heard of must survive the low pass intact."""
     plugin: list[dict[str, Any]] = [
         {
@@ -810,10 +905,18 @@ def test_an_unknown_tool_schema_keeps_the_description_it_declared() -> None:
         },
     ]
 
-    apply_low_tool_descriptions(plugin)
+    monkeypatch.setattr(
+        "korvid.agent.tiers._behavior.agent_tool_schemas",
+        lambda *_args, **_kwargs: plugin,
+    )
+    projected = LOW_BEHAVIOR.tool_schemas(
+        readonly=False,
+        resize_supported=True,
+        observability_backends=frozenset(),
+    )
 
-    assert plugin[0]["function"]["description"] == "Vendor-declared description."
-    assert plugin[1]["function"]["description"] == "Not diagnose_pod; a prefix must not match."
+    assert projected[0]["function"]["description"] == "Vendor-declared description."
+    assert projected[1]["function"]["description"] == "Not diagnose_pod; a prefix must not match."
 
 
 @pytest.mark.parametrize("readonly", [False, True])

@@ -47,8 +47,6 @@ def fake_policy(
         capabilities=ModelCapabilities.unknown(),
         tier=tier,
         route_source=route_source,
-        prompt_pack_id="low-korvid-operator",
-        prompt_overlay_ids=(),
         tools=tuple(copy.deepcopy(TOOLS_BY_NAME[name].schema) for name in tool_names),
         max_iterations=6,
         max_history_chars=24_000,

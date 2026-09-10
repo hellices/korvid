@@ -269,7 +269,6 @@ async def test_the_catalogued_local_model_routes_low_without_asking_anyone(
     assert policy.tier is ModelTier.LOW
     assert policy.route_source is CapabilitySource.CATALOG
     assert policy.catalog_version == MODEL_CATALOG_VERSION
-    assert policy.prompt_pack_id == "low-korvid-operator"
 
 
 def test_the_offline_fixture_refuses_name_lookup_and_socket_creation(

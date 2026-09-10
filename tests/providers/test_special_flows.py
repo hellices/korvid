@@ -133,8 +133,7 @@ def test_only_the_resolved_entry_point_is_ever_loaded(
 ) -> None:
     """Loading every declared entry point at construction would execute
     arbitrary third-party module-level code on every korvid startup, and
-    one broken plugin would break TUI wiring. `plugin_registry.py`
-    already loads only the selected entry point; this must not be weaker.
+    one broken plugin would break TUI wiring.
     """
     loaded: list[str] = []
 

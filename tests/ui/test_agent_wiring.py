@@ -748,29 +748,23 @@ async def test_applying_a_profile_without_rebuild_agent_shows_literal_hint() -> 
         assert notification.markup is False
 
 
-async def test_applying_a_profile_notifies_on_plugin_error() -> None:
-    """ProviderPluginError raised by rebuild_agent must surface via the
-    existing error notification path (rebuild failure), not crash the app."""
-    from korvid.providers.plugin_registry import ProviderPluginError
-
+async def test_applying_a_profile_notifies_on_rebuild_error() -> None:
+    """A provider rebuild failure is reported without crashing the app."""
     profile = ModelConnectionConfig(model="corp-llm/m", endpoint="http://x/v1")
 
     def boom(profile: ModelConnectionConfig, tier: str | None) -> Any:
-        raise ProviderPluginError("plugin auth mismatch")
+        raise ValueError("profile cannot be rebuilt")
 
     app = make_app(session=None, model=None, rebuild_agent=boom)
     async with app.run_test() as pilot:
         app._agent_ui.apply_profile(profile, None)
         await until(
             pilot,
-            lambda: any(
-                "rebuild failed" in m.lower() or "plugin" in m.lower()
-                for m in (n.message for n in app._notifications)
-            ),
-            label="plugin error notification",
+            lambda: any("rebuild failed" in n.message.lower() for n in app._notifications),
+            label="rebuild error notification",
         )
         msgs = [n.message for n in app._notifications]
-        assert any("rebuild failed" in m.lower() or "plugin" in m.lower() for m in msgs)
+        assert any("rebuild failed" in m.lower() for m in msgs)
 
 
 async def test_applying_a_profile_notifies_on_install_hint_rebuild_error() -> None:

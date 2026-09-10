@@ -3,9 +3,9 @@ crosses.
 
 The gateway owns the exact handoff proof: the session's latest outbound
 payload changes only once a request has demonstrably reached the provider,
-never when a payload was merely built. A built-in adapter proves it with
-`REQUEST_SENT`; a plugin (which cannot emit that bookkeeping event) proves
-it with its first completion event. The gateway consumes `REQUEST_SENT`
+never when a payload was merely built. An adapter can prove it with
+`REQUEST_SENT`; without that bookkeeping event, it proves the handoff
+with its first completion event. The gateway consumes `REQUEST_SENT`
 and never exposes it to the engine.
 """
 

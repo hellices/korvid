@@ -62,11 +62,11 @@ from korvid.evals.harness import (
     PromptGrind,
     UnknownEvalToolError,
     armed_tool_names,
-    baseline_eval_policy,
     eval_surface_names,
-    ground_eval_policy,
+    grind_layer_ids,
     resolve_eval_policy,
     static_prompt,
+    tier_prompt_id,
 )
 from korvid.evals.interaction import interaction_payload
 from korvid.evals.runner import (
@@ -533,8 +533,7 @@ def policy_payload(policy: ResolvedAgentPolicy) -> dict[str, Any]:
         "model": policy.model.model,
         "tier": policy.tier.value,
         "route_source": policy.route_source.value,
-        "prompt_pack": policy.prompt_pack_id,
-        "overlays": list(policy.prompt_overlay_ids),
+        "prompt_pack": tier_prompt_id(policy),
     }
 
 
@@ -600,9 +599,7 @@ def prompt_fingerprint(
     different runs as comparable.
 
     Args:
-        policy: The resolved policy, exactly as the run was composed
-            against it. A campaign passes its already-ground policy, so
-            `overlays` here is the same list `meta.policy` publishes.
+        policy: The resolved policy used by the run.
         grind: The eval-only prompt levers this run applied.
 
     Returns:
@@ -611,15 +608,11 @@ def prompt_fingerprint(
         *effect* of the grind: text that reproduces korvid's own wording
         byte for byte still yields a comparable, publishable run.
     """
-    ground = ground_eval_policy(policy, grind)
-    # The baseline is korvid's own wording, which the shipped registry can
-    # only compose for a policy that does not name the eval overlay.
-    baseline_policy = baseline_eval_policy(policy)
-    digest = _prompt_digest(static_prompt(ground, grind), ground)
-    baseline = _prompt_digest(static_prompt(baseline_policy), baseline_policy)
+    digest = _prompt_digest(static_prompt(policy, grind), policy)
+    baseline = _prompt_digest(static_prompt(policy), policy)
     return {
-        "pack": ground.prompt_pack_id,
-        "overlays": list(ground.prompt_overlay_ids),
+        "pack": tier_prompt_id(policy),
+        "overlays": list(grind_layer_ids(grind)),
         "source": "default" if digest == baseline else "override",
         "sha256": digest,
     }
@@ -856,17 +849,8 @@ def _prompt_grind(args: argparse.Namespace) -> PromptGrind:
 def _resolve_policy(
     provider_factory: Callable[[], Any],
     args: argparse.Namespace,
-    grind: PromptGrind = NO_GRIND,
 ) -> ResolvedAgentPolicy:
-    """Route and ground once, for the whole campaign.
-
-    Every repetition of every scenario is composed against this one
-    policy, so the artifact's `meta.policy` describes the run rather than
-    whichever repetition happened to be inspected. The grind's overlay id
-    is applied here too: the session, `meta.policy`, `meta.prompts` and
-    the report then all read the same object, and grounding being
-    idempotent keeps the harness from naming the overlay twice.
-    """
+    """Route once for the whole campaign."""
     provider = provider_factory()
     try:
         policy = resolve_eval_policy(
@@ -880,7 +864,7 @@ def _resolve_policy(
         aclose = getattr(provider, "aclose", None)
         if callable(aclose):
             asyncio.run(aclose())
-    return ground_eval_policy(policy, grind)
+    return policy
 
 
 def _read_prompt_file(path: Path | None, flag: str) -> str | None:
@@ -908,7 +892,7 @@ def main(argv: list[str] | None = None) -> int:
     if not scenarios:
         raise SystemExit(f"no scenario YAML files found in {args.scenarios}")
     grind = _prompt_grind(args)
-    policy = _resolve_policy(provider_factory, args, grind)
+    policy = _resolve_policy(provider_factory, args)
     serving = asyncio.run(
         capture_serving(
             os.environ.get("KORVID_EVAL_BASE_URL", "").strip(),

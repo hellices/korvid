@@ -294,8 +294,7 @@ therefore writes a metadata envelope alongside the per-scenario results:
       "model": "qwen3:8b",
       "tier": "low",
       "route_source": "catalog",
-      "prompt_pack": "low-korvid-operator",
-      "overlays": []
+      "prompt_pack": "low-korvid-operator"
     },
     "limits": {
       "max_iterations": 6,
@@ -456,6 +455,12 @@ korvid's own (`source`), and the digest. `source` is `default` when the run
 used the prompts korvid ships, and `override` when `--tier-pack-file` or
 `--prompt-overlay-file` changed them.
 
+Effective experimental layers are recorded only in `meta.prompts.overlays`.
+`meta.policy` describes model/tier selection and does not duplicate that field.
+`meta.prompts.overlays` is a JSON array of string ids — empty (`[]`) for a
+default run, or `["eval-overlay"]` when `--prompt-overlay-file` was supplied
+(see the `meta.prompts` example in [Run Provenance](#run-provenance) above).
+
 Both flags are **eval-only prompt grinding** and both layer *after* the
 immutable safety contract, which is always the first text in the composed
 system message: grinding can change how the model operates, never what it
@@ -488,7 +493,7 @@ Rules that follow from this:
 The low tier carries two pieces of shipped wording that a campaign has to
 hold fixed, because both are inputs to every request the model answers.
 
-**The low operating pack** (`prompt_packs.LOW_KORVID_OPERATOR_PACK`,
+**The low operating pack** (`korvid.agent.tiers.low.PROMPT`,
 layer 3) carries the behavioural rules that were tuned against the retained
 scenario pack rather than written from taste. Each rule answers a failure
 class those cases reproduce:
@@ -502,10 +507,11 @@ class those cases reproduce:
 | ready is not healthy while warnings show probe failures; old restarts are history | `healthy-deployment`, `healthy-restart-history`, `readiness-probe-failing` |
 | one bounded tool call at a time | the low tier's `max_tool_calls_per_iteration: 1` |
 
-**The low tool descriptions** (`prompt_packs.LOW_TOOL_DESCRIPTIONS`,
-versioned by `LOW_TOOL_DESCRIPTIONS_VERSION`) replace the registry wording
+**The low tool descriptions** (`korvid.agent.tiers.low.TOOL_DESCRIPTIONS`,
+versioned by `korvid.agent.tiers.low.TOOL_DESCRIPTIONS_VERSION`) replace the registry wording
 for the tools whose shipped description is written for a frontier context
-window. `ModelRouter` applies them under these constraints:
+window. `ModelRouter` selects `korvid.agent.tiers.low.BEHAVIOR`; its
+`tool_schemas()` method replaces registry descriptions under these constraints:
 
 - **low routes only.** A high route sends the registry description
   unchanged, so the low tier and the high tier are not measuring the same

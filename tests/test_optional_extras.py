@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.fixtures.provider_plugin.site_helpers import FIXTURES_DIR
+from tests.fixtures.provider_flow.site_helpers import FIXTURES_DIR
 
 #: Top-level third-party modules that only the optional extras may pull in.
 #: Every probe below is built from these two tuples rather than repeating

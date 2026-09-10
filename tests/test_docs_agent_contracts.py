@@ -30,7 +30,11 @@ from pathlib import Path
 import pytest
 
 from korvid import __version__
+from korvid.agent import request_gateway
+from korvid.agent.diagnostics import MAX_USAGE_TOKENS
 from korvid.agent.model_profiles import MetadataRefresh
+from korvid.agent.provider import LLMProvider
+from korvid.agent.tiers import high, low
 from korvid.tools.registry import TOOLS_BY_NAME
 from korvid.ui.widgets.model_search_screen import _REFRESH_MESSAGES
 from tests.config_keys import names_key
@@ -188,7 +192,7 @@ def test_no_current_page_claims_every_surface_describes_tools_identically(
 ) -> None:
     """The low tier ships its own shipped, versioned tool wording.
 
-    `LOW_TOOL_DESCRIPTIONS` replaces the registry's wording, by exact tool
+    The low tier replaces the registry's wording, by exact tool
     name, on the low route only. The high tier and the MCP server still
     describe every tool with the registry's own text, so "every surface
     describes a tool identically" was never true once the low map shipped.
@@ -338,8 +342,7 @@ _API_V1_SPELLINGS = re.compile(r"\bAPI[-\s]v1\b", re.IGNORECASE)
 def test_no_current_page_sends_a_plugin_author_to_api_1(path: Path) -> None:
     """Only the API 1 → API 2 migration tables may name the retired version.
 
-    A reader who follows "the API-v1 contract" writes a plugin against a
-    contract `ValidatedPluginProvider` rejects.
+    A reader must not be directed to the removed construction contract.
     """
     text = path.read_text(encoding="utf-8")
     offenders = [
@@ -353,6 +356,54 @@ def test_the_plugin_pointers_name_the_current_extension_points(page: str) -> Non
     text = _text(page)
     assert "SpecialFlow" in text
     assert "korvid.credential" in text
+
+
+def test_provider_docs_distinguish_adapter_limits_from_engine_enforcement() -> None:
+    text = " ".join(_text("docs/provider-plugins.md").split())
+
+    assert "non-bool" in text
+    assert f"{MAX_USAGE_TOKENS:,}" in text
+    assert f"{low.BEHAVIOR.max_history_chars:,}" in text
+    assert f"{high.BEHAVIOR.max_history_chars:,}" in text
+    assert "not a per-field UTF-8 byte limit" in text
+    assert "Custom adapters may emit" in text
+    assert "response headers" in text
+    assert "does not independently verify network I/O" in text
+    assert "Adapters must validate these properties themselves" in text
+
+
+def test_provider_docs_describe_independent_response_counters() -> None:
+    text = " ".join(_text("docs/provider-plugins.md").split())
+
+    assert "two independent counters" in text
+    assert "**Characters:**" in text
+    assert "**Events:**" in text
+    assert "not added together" in text
+    assert "`from korvid.agent.provider import REQUEST_SENT`" in text
+
+
+@pytest.mark.parametrize(
+    "docstring",
+    [LLMProvider.complete.__doc__, request_gateway.__doc__],
+    ids=["LLMProvider.complete", "request_gateway"],
+)
+def test_provider_acknowledgement_docstrings_allow_custom_adapters(docstring: str | None) -> None:
+    assert docstring is not None
+    text = " ".join(docstring.casefold().split())
+
+    assert "including every plugin" not in text
+    assert "forbids from emitting" not in text
+    assert "adapters may emit" in text
+    assert "first completion event" in text
+
+
+def test_agent_api_removals_are_marked_as_breaking_in_release_notes() -> None:
+    text = " ".join(_text("docs/release-notes/unreleased.md").split())
+
+    assert "**Breaking:**" in text
+    assert "SpecialFlow provider contract" in text
+    assert "`meta.policy.overlays`" in text
+    assert "`meta.prompts.overlays`" in text
 
 
 def test_the_readme_explains_the_current_agent_and_mcp_starting_points() -> None:
@@ -427,7 +478,9 @@ def test_the_controller_reference_describes_todays_seams() -> None:
 def test_the_eval_methodology_states_the_low_pack_constraints() -> None:
     """A grind that changes these silently invalidates every published row."""
     methodology = _text("docs/evals/methodology.md")
-    assert "LOW_TOOL_DESCRIPTIONS" in methodology
+    assert "`korvid.agent.tiers.low.PROMPT`" in methodology
+    assert "`korvid.agent.tiers.low.TOOL_DESCRIPTIONS`" in methodology
+    assert "`korvid.agent.tiers.low.TOOL_DESCRIPTIONS_VERSION`" in methodology
     assert "250" in methodology
     assert "exact tool name" in methodology
     # The high tier keeps the registry wording — the two arms are not the same.
@@ -440,7 +493,7 @@ def test_the_eval_methodology_states_the_low_pack_constraints() -> None:
 def test_the_agent_page_sends_low_tier_wording_questions_to_the_methodology() -> None:
     """The low tier's shipped wording is an eval contract, not product copy.
 
-    `LOW_TOOL_DESCRIPTIONS`, its 250-character bound and its exact-tool-name
+    The tier's tool wording, its 250-character bound and its exact-tool-name
     application decide whether two campaigns are comparable — a question the
     eval methodology owns and
     `test_the_eval_methodology_states_the_low_pack_constraints` pins. The
@@ -451,7 +504,7 @@ def test_the_agent_page_sends_low_tier_wording_questions_to_the_methodology() ->
     agent = _text("docs/agent.md")
 
     assert "evals/methodology.md" in agent
-    assert "LOW_TOOL_DESCRIPTIONS" not in agent
+    assert "TOOL_DESCRIPTIONS" not in agent
     assert "prompt_packs.py" not in agent
     # The product-visible half of the tier stays: which tier, and the budgets.
     assert "model_tier" in agent
@@ -465,7 +518,7 @@ def test_the_low_pack_documentation_publishes_no_score() -> None:
     new campaign, so they state constraints and name cases — never a score.
     """
     methodology = _text("docs/evals/methodology.md")
-    start = methodology.index("LOW_TOOL_DESCRIPTIONS")
+    start = methodology.index("korvid.agent.tiers.low.TOOL_DESCRIPTIONS")
     end = methodology.find("\n## ", start)
     section = methodology[start:] if end == -1 else methodology[start:end]
     assert not re.search(r"\d+(\.\d+)?\s?%", section), section

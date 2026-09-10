@@ -298,7 +298,6 @@ class DefaultAgentSession(AgentSession):
         #: driver can still be recognized as the one being waited for.
         self._awaited_driver: asyncio.Task[object] | None = None
         self._turn_active = False
-        self._turn_started = False
         self._awaiting_finalization = False
         self._turn_iterator: AsyncIterator[AgentEvent] | None = None
         self._driver: asyncio.Task[object] | None = None
@@ -375,7 +374,6 @@ class DefaultAgentSession(AgentSession):
         """The turn itself, claimed only once someone actually drives it."""
         self._require_idle("start a turn")
         self._turn_active = True
-        self._turn_started = True
         self._driver = asyncio.current_task()
         #: What the boundary had delivered before this turn existed. The
         #: handoff is consumed against this, not against the attempt.
@@ -507,7 +505,6 @@ class DefaultAgentSession(AgentSession):
     def _release_turn(self) -> None:
         """Give the session back, and record any finalization the turn owes."""
         self._turn_active = False
-        self._turn_started = False
         self._turn_iterator = None
         self._driver = None
         if self._conversation.turn_active:
@@ -522,7 +519,7 @@ class DefaultAgentSession(AgentSession):
         between `run_turn` and the first event is discarded rather than
         inherited by the turn that is about to begin.
         """
-        if self._turn_started:
+        if self._turn_active:
             self._engine.interrupt()
 
     def finalize_interrupt(self) -> TurnInterrupted:

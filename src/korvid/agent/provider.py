@@ -2,9 +2,9 @@
 
 Concrete providers are built from a connection profile by
 `korvid.providers.litellm_factory.create_provider_from_profile`, which
-delegates routing rather than owning a name-to-class table. Third-party
-adapters target the public contract in korvid.agent.provider_plugin;
-their discovery/loading stays outside this ABC boundary.
+delegates routing rather than owning a name-to-class table. SpecialFlow
+builders return implementations of this contract; their discovery and loading
+stay outside this ABC boundary.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from typing import Any, ClassVar, Final
 from korvid.agent.model_policy import ModelCapabilities, ModelDescriptor
 
 REQUEST_SENT: Final = "request_sent"
-"""Event type a built-in adapter yields once its request is on the wire.
+"""Event type an adapter may yield once its request is on the wire.
 
 `complete` is an async generator, so obtaining it transmits nothing: the
 body only runs on the first `__anext__`. The runtime records the exact
@@ -28,10 +28,8 @@ Built-in adapters therefore yield `{"type": REQUEST_SENT}` as soon as the
 transport has accepted the request (response headers received), before
 the status code is judged: an HTTP 500 answer still means the provider
 has the payload. The runtime consumes it as bookkeeping and never renders
-it. It is internal to the built-ins — the plugin contract (API 2) knows
-four event types and rejects anything else, so a plugin's request is
-recorded on its first completion event instead, which is equally proof
-that the request ran.
+it. A provider that emits no acknowledgement is recorded on its first
+completion event instead, which also proves that the request ran.
 """
 
 
@@ -84,10 +82,8 @@ class OperatorSafeProviderError(Exception):
 MAX_TOOL_ARGUMENT_CHARS: Final = 65_536
 """Cumulative cap on one tool call's accumulated argument text.
 
-The same 64 KiB `provider_plugin` already refuses a *third-party* adapter's
-call at. A built-in that accumulated more before the engine's response
-budget saw any of it would make korvid's own adapters the loosest ones it
-ships, so the two answers are deliberately the same number.
+Adapters enforce this before the engine sees the completed call, so an
+unfinished argument stream cannot grow an unbounded transport buffer.
 """
 
 MAX_TOOL_CALLS_PER_RESPONSE: Final = 64
@@ -353,11 +349,11 @@ class LLMProvider(ABC):
         Do NOT write a plain async function returning an iterator—that
         produces a coroutine and fails the override check.
 
-        A built-in adapter yields `{"type": REQUEST_SENT}` once the
+        Adapters may emit `{"type": REQUEST_SENT}` once the
         transport has accepted the request, so the runtime can tell a
         payload that was really handed over from one whose generator was
-        never started. Adapters that cannot say (including every plugin)
-        simply do not, and are taken at their first completion event.
+        never started. This includes custom SpecialFlow adapters. Without
+        an acknowledgement, the first completion event proves the handoff.
         """
 
     def prepare_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:

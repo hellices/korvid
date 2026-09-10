@@ -9,9 +9,9 @@ auth alone needs a `korvid.credential` chain (below).
 
 > **Security warning:** these are trusted, in-process Python loaded into the
 > korvid process. Selected-only loading avoids importing *unused* plugins, but
-> it is **not** a sandbox — install only what you trust. A flow is constructed
-> from a profile and an optional `CredentialSource`, never from conversation
-> data, and what it returns is called with the same sanitized canonical
+> it is **not** a sandbox — install only what you trust. A flow's builder receives
+> only the connection profile, never conversation data or an injected credential
+> source, and what it returns is called with the same sanitized canonical
 > `messages`/`tools` payload `OutboundPolicy` builds for every other transport
 > (see [`docs/threat-model.md`](threat-model.md)). Once your `complete()` has
 > that payload it may mutate, retain, log or transmit it anywhere. See
@@ -164,17 +164,14 @@ and never on a name korvid ships. When `resolve` raises `CredentialUnavailable`,
 korvid refuses the profile at build time, quoting that message. korvid's own
 Entra ID chain for `azure` is declared this way.
 
-## The `ProviderPlugin` compatibility path
+## Migrating the removed construction API
 
-`ProviderPlugin` / `ProviderPluginConfig` (the pre-flow API) **is not wired in
-current builds**: korvid loads `korvid.provider` entry points as `SpecialFlow`
-declarations, and a `ProviderPlugin` class registered there is never
-instantiated. What the surface below describes — the event contract, the
-options limits and secret policy, `LLMProvider`, `ModelCapabilities` — is still
-what a provider object must satisfy, because `SpecialFlow.build_provider`
-returns one. Only construction changed: publish a `SpecialFlow` whose `prefix`
-is your entry-point name, move the body of `ProviderPlugin.create` into a
-`build_provider` function, and point the entry point at its module.
+The former `ProviderPlugin` construction API and its registry have been removed;
+there are no import compatibility shims. korvid loads `korvid.provider` entry
+points as `SpecialFlow` declarations. Publish a flow whose `prefix` is your
+entry-point name, move the former factory body into `build_provider(profile)`,
+and point the entry point at its module. The returned object still implements
+`LLMProvider`; authentication and profile options use the current contracts below.
 
 Third-party prefixes are configured by hand; the `:ai` wizard does not discover
 them:
@@ -190,22 +187,23 @@ agent:
       options: {tenant: platform}
 ```
 
-## API 2: exact public surface
+## Current extension contracts
 
 Declaration types come from `korvid.agent.model_profiles` (`SpecialFlow`,
 `AuthMethodDescriptor`, `SetupField`, `SetupFieldKind`, `EndpointRequirement`,
 `ModelConnectionConfig`, `DeviceLoginPrompt`); the provider contract from
 `korvid.agent.credentials`, `korvid.agent.model_policy` and
-`korvid.agent.provider`; a credential chain's from
-`korvid.providers.provider_default`; and the retired, unwired plugin contract
-from `korvid.agent.provider_plugin` — `ProviderPluginMetadata` (`api_version`
-must equal `PROVIDER_PLUGIN_API_VERSION`, exactly `2`), `ProviderPluginConfig`
-(whose `base_url` field is that API's own spelling, not a profile key) and
-`ProviderPlugin`.
+`korvid.agent.provider`; and a credential chain's from
+`korvid.providers.provider_default`. Import these contracts from their defining
+modules, not from package-level re-exports.
 
 `LLMProvider` has no `name` property. It has `descriptor` and `capabilities`
-properties — both validated the moment korvid wraps it — plus
-`async complete(messages, tools, *, stream=True)` and `async aclose()`.
+properties, plus `async complete(messages, tools, *, stream=True)` and
+`async aclose()`. The flow factory catches builder failures, but does not wrap
+the returned provider in a descriptor/capabilities validator. Adapters must
+validate these properties themselves. `ModelRouter` reads them when resolving
+a policy and enforces the routing rules below, not a complete property schema.
+
 `ModelCapabilities` carries `context_window_tokens`, `supports_tools`,
 `supports_parallel_tools`, `supports_reasoning`, `recommended_tier` and a
 `provenance` mapping, each fact independently unknown; reporting nothing is
@@ -216,18 +214,23 @@ agent rather than route a model that cannot call tools),
 to an explicit `agent.model_tier`, and `provenance` must map a known fact name
 to a `CapabilitySource`.
 
-Two shape traps: `complete()` must be an **async generator**, not a coroutine
-returning an iterator; and `prepare_messages()`, the built-in dialect hook, is
-**never** called on a provider korvid did not build. Adapt inside `complete()`,
-and treat what you add there as leaving korvid's inspected boundary.
+`complete()` must return an **async iterator** directly; an async generator is
+the usual implementation, while a coroutine that must first be awaited is not.
+`prepare_messages()` runs before outbound validation, including for a provider
+returned by a flow. It may add dialect fields but must preserve the count,
+order, roles and content of messages so redaction records still refer to the
+right positions. Changes made later inside `complete()` are outside the
+inspected request snapshot.
 
 ## The provider a flow returns
 
 `build_provider` returns an `LLMProvider` built from the profile it is handed:
 `profile.endpoint`, `profile.model` and `profile.options`. There is no
 `base_url` key — a profile names its host in `endpoint` — and one that does not
-carry what the backend needs is refused by returning `None` or by raising with
-an operator-facing message.
+carry what the backend needs is refused by returning `None` or raising.
+The factory reports a generic construction failure rather than forwarding the
+builder's exception text, which could contain a credential. A custom flow is
+responsible for constructing any credential source its provider needs.
 
 ```python
 import httpx
@@ -274,37 +277,68 @@ class CompanyProvider(LLMProvider):
                 await self._creds.aclose()
 ```
 
-## Event contract and exact limits
+## Event contract and transport limits
 
-korvid wraps a provider it did not build in `ValidatedPluginProvider`, which
-enforces and normalizes the event stream. Events must be mappings shaped like
-one of these:
+The flow returns its provider directly, without the removed plugin validator.
+Its adapter must translate its wire protocol into these events:
 
-| Event | Required keys | Exact bounds |
-|---|---|---|
-| `text_delta` | `{"type": "text_delta", "text": str}` | `text` max **65,536 UTF-8 bytes** |
-| `tool_call` | `{"type": "tool_call", "id": str, "name": str, "arguments": str}` | `id` and `name` non-empty, max **256** chars; `arguments` max **65,536 UTF-8 bytes** |
-| `usage` | `{"type": "usage", "input_tokens": int, "output_tokens": int}` | each count a non-bool int in **0..1,000,000,000** |
-| `done` | `{"type": "done"}` | no payload; exactly one terminal done |
+| Event | Shape |
+|---|---|
+| `text_delta` | `{"type": "text_delta", "text": str}` |
+| `tool_call` | `{"type": "tool_call", "id": str, "name": str, "arguments": str}` |
+| `usage` | `{"type": "usage", "input_tokens": int, "output_tokens": int}` |
+| `done` | `{"type": "done"}` |
 
-Extra keys are discarded. Unknown types, non-mapping payloads, missing fields,
-overlong strings or out-of-range token counts raise
-`ProviderPluginContractError`. `tool_call.arguments` is a **string**, typically
-JSON-encoded, not a nested mapping, and `ValidatedPluginProvider.aclose()`
-forwards to your provider once — duplicate closes are swallowed.
+Tool IDs and names must be non-empty, IDs must not repeat within retained
+history, and arguments must encode a JSON object. The engine discards unusable
+IDs/names and excess calls, refuses invalid arguments before dispatch, and
+applies the resolved policy's response budget. It is not a general-purpose
+validator for every field an adapter might yield.
 
-korvid's own built-in transports hold themselves to the same numbers while
-they assemble a response: one call's accumulated arguments stop at 65,536
-characters and one response may open at most 64 calls. A built-in also
-refuses a streamed answer whose protocol never said it finished, so a plugin
-that emits `done` for a truncated stream is claiming more than korvid's own
-adapters do.
+The response budget maintains two independent counters:
 
-These four are the whole contract. korvid's own transport yields one extra
-internal event so the `:ai payload` inspector can tell a request that reached
-the wire from one that never did; it is not part of API 2, and a third party
-yielding it is rejected like any unknown type. Your request is recorded when
-you yield your **first** event.
+- **Characters:** aggregate text/reasoning and tool-call ID/name/argument
+  characters.
+- **Events:** the number of completion events.
+
+Each counter is compared separately with the resolved policy's
+`max_history_chars`: **24,000** for the shipped low tier and **120,000** for
+high. They are not added together. Exceeding either limit stops the response
+before dispatch with `ProviderResponseLimitError`. This is
+**not a per-field UTF-8 byte limit**. There is no shared 256-character ID/name
+gate or 65,536-byte text-event gate; those belonged to the retired, unwired
+plugin validator. Adapters must bound fields and buffers before yielding them,
+not rely on the engine to reclaim an allocation already made by their transport.
+
+Custom adapters must validate usage before yielding it: use **non-bool**
+integers between **0** and **1,000,000,000** inclusive for each token count.
+The ceiling is available as `korvid.agent.diagnostics.MAX_USAGE_TOKENS`.
+Native diagnostic metrics enforce it, but general engine usage accounting only
+coerces counts to non-negative integers: it does not enforce that ceiling or
+reject bools. Reject malformed/out-of-range usage in the adapter rather than
+reporting invented counts or relying on that coercion.
+
+Built-in transports enforce additional limits while assembling a response:
+one call's accumulated arguments stop at **65,536 characters**, one response
+may open at most **64 calls**, and retained reasoning is capped at **65,536
+characters**. These constants and bounded-append helpers live in
+`korvid.agent.provider`. A custom adapter must bound its own transport buffers
+and reject a stream whose underlying protocol never confirmed completion;
+yielding `done` for a truncated stream would falsely report success.
+
+Custom adapters may emit `{"type": REQUEST_SENT}` too: the gateway does not
+restrict it to built-in transports. Import it with
+`from korvid.agent.provider import REQUEST_SENT` and use the constant, not the
+literal string `"REQUEST_SENT"`. Emit it only once the transport has accepted
+the request, normally when **response headers** arrive, and before checking the
+HTTP status; even an error response proves a handoff. Never emit it while only
+preparing a payload or before credential/connection setup succeeds.
+
+The gateway consumes this acknowledgement for payload inspection and usage
+accounting and never forwards it to the engine. It trusts the adapter's timing
+and **does not independently verify network I/O**. For an adapter that emits no
+acknowledgement, its first completion event supplies that proof instead. A
+failure before either event leaves the previous outbound snapshot unchanged.
 
 ## Options contract, immutability, and secret policy
 
@@ -320,9 +354,9 @@ are exactly `secret`, `password`, `token`, `api_key` (and `apikey`),
 first, so `apiKey`, `clientSecret` and `clientAPIKey` are all rejected. Keep
 secrets in environment variables and pass the name via `auth.key`.
 
-Treat `options` as read-only and accept both `list` and `tuple` for sequences:
-live wizard and reconnect flows deep-freeze nested mappings and convert lists to
-tuples; startup from `config.yaml` preserves YAML lists.
+`ModelConnectionConfig` deep-freezes options on construction: mappings are
+read-only and sequences are tuples, including profiles loaded from
+`config.yaml`. Build a private mutable copy if the adapter needs one.
 
 ## Lifecycle and compatibility
 
@@ -330,18 +364,22 @@ tuples; startup from `config.yaml` preserves YAML lists.
    module loads the first time a reference resolves to its name.
 2. A flow owns its `prefix` (or a named option on it), and a reference under a
    prefix it owns is never routed, so it cannot be silently bypassed.
-3. `build_provider(profile)` returns an `LLMProvider` or `None`, and receives no
-   kube client, UI handle, audit handle or write executor.
-4. Every call into a flow is guarded: a failure disables that flow, not
-   unrelated profiles, and the reason reaches the setup banner.
+3. `build_provider(profile)` returns an `LLMProvider` or `None`. Its sole input is
+   the connection profile; it receives no credential source, kube client, UI
+   handle, audit handle or write executor.
+4. Registry load and declaration-validation failures appear in setup diagnostics.
+   Builder failures are logged as generic construction refusals; the UI asks you
+   to check configuration rather than displaying the builder's exception reason.
 5. korvid calls `LLMProvider.aclose()` when the provider is replaced or at
-   shutdown. **Your provider owns the injected `CredentialSource`**: close it
-   in `aclose()` in a `finally` block, or you leak token-refresh sessions.
+   shutdown. Your provider owns the clients and credential sources its builder
+   created: close them in `aclose()`, including in failure paths.
 
-Failures stay bounded. An unbuildable profile disables the agent cleanly:
-startup keeps korvid running with the agent off and the reason logged, and a
-live rebuild keeps the previous provider. Load and construction errors become
-`ProviderPluginError` messages capped at 200 characters.
+An unbuildable profile disables the agent cleanly: startup keeps korvid running
+with the agent off and the reason logged, and a live rebuild keeps the previous
+provider. Construction failures are reported by the profile factory. During a
+turn, unexpected provider exception text is withheld because it can contain
+credentials or request data; only explicitly declared operator-safe messages
+are shown verbatim.
 
 ## Operator checklist
 

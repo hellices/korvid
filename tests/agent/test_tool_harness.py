@@ -85,8 +85,6 @@ def _policy(
         capabilities=ModelCapabilities.unknown(),
         tier=tier,
         route_source=CapabilitySource.FALLBACK,
-        prompt_pack_id="test",
-        prompt_overlay_ids=(),
         tools=tools,
         max_iterations=6,
         max_history_chars=24_000,

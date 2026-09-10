@@ -1,26 +1,10 @@
-"""A packaged provider plugin driven by the real agent engine (issue #316).
-
-`tests/agent/test_provider_plugin.py` proves the plugin boundary normalizes
-and bounds what a third party yields, and `tests/providers/test_plugin_registry.py`
-proves the entry-point discovery and `create()` path. Neither composes the
-two: this module loads a plugin the way a deployment does — an installed
-distribution, discovered by entry point, instantiated through
-`ProviderPluginRegistry` — and drives it with `NativeAgentEngine` over a real
-`ConversationState`, `RequestGateway` and `ToolHarness`.
-
-That composition is where the plugin's security perimeter is actually
-observable: the tool result the plugin receives is the sanitized one, and a
-plugin failure carrying a credential reaches the panel as a bounded error.
-
-Migrated from the retired plugin-loop suite, which asserted the same
-invariants against the agent loop this harness replaced.
-"""
+"""A packaged SpecialFlow driven through the real provider factory and engine."""
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Protocol, runtime_checkable
 
 import pytest
 
@@ -39,11 +23,12 @@ from korvid.agent.native_engine import NativeAgentEngine
 from korvid.agent.outbound import OutboundPolicy, request_char_budget
 from korvid.agent.prompt_harness import ComposedPrompt
 from korvid.agent.provider import LLMProvider
-from korvid.agent.provider_plugin import ProviderPluginConfig, ValidatedPluginProvider
 from korvid.agent.request_gateway import RequestGateway
 from korvid.agent.tool_harness import ToolHarness
+from korvid.core.config import ModelConnectionConfig
 from korvid.core.secrets import MASK_PLACEHOLDER
-from korvid.providers.plugin_registry import ProviderPluginRegistry
+from korvid.providers.litellm_factory import create_provider_from_profile
+from korvid.providers.special_flows import SpecialFlowRegistry
 from korvid.tools.executor import RecordedExecution, ToolOutcome
 from korvid.tools.registry import resolve_result_formats
 from tests.agent.engine_fakes import (
@@ -53,11 +38,16 @@ from tests.agent.engine_fakes import (
     interaction,
     make_policy,
 )
-from tests.fixtures.provider_plugin.site_helpers import (
+from tests.fixtures.provider_flow.site_helpers import (
     FIXTURES_DIR,
     build_dist_info,
     discover_provider_entry_points,
 )
+
+
+@runtime_checkable
+class _RecordingProvider(Protocol):
+    calls: list[list[dict[str, Any]]]
 
 
 def _install_plugin_site(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -66,12 +56,12 @@ def _install_plugin_site(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Non
         dist_name="company_provider",
         version="1.0",
         entry_point_name="company-llm",
-        entry_point_value="company_provider:CompanyProviderPlugin",
+        entry_point_value="company_provider",
     )
     monkeypatch.syspath_prepend(str(FIXTURES_DIR))
     monkeypatch.setattr(
-        "korvid.providers.plugin_registry._discover_entry_points",
-        lambda: discover_provider_entry_points(tmp_path),
+        "korvid.providers.special_flows._iter_entry_points",
+        lambda: [entry for entry, _dist in discover_provider_entry_points(tmp_path)],
     )
 
 
@@ -83,19 +73,17 @@ def _packaged_provider(
 ) -> LLMProvider:
     """The provider a deployment gets: discovered, loaded, then created."""
     _install_plugin_site(monkeypatch, tmp_path)
-    registry = ProviderPluginRegistry()
-    registry.load_selected("company-llm")
-    return registry.create(
-        "company-llm",
-        ProviderPluginConfig(
-            base_url="https://fixtures.example.test/v1",
-            model="fixture-model",
-            auth_method="api_key",
-            api_key_env=None,
+    provider = create_provider_from_profile(
+        ModelConnectionConfig(
+            model="company-llm/fixture-model",
+            endpoint="https://fixtures.example.test/v1",
             options={"scripted_turns": scripted_turns},
         ),
-        credentials=None,
+        flows=SpecialFlowRegistry.from_entry_points(),
     )
+    assert provider is not None
+    assert type(provider).__module__ == "company_provider"
+    return provider
 
 
 def _engine(
@@ -160,10 +148,24 @@ def _tool_then_text() -> list[list[object]]:
     ]
 
 
+async def test_a_packaged_provider_rejects_unscripted_completions(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    provider = _packaged_provider(monkeypatch, tmp_path, scripted_turns=[[{"type": "done"}]])
+
+    assert [event async for event in provider.complete([], [])] == [{"type": "done"}]
+    with pytest.raises(AssertionError, match="scripted turns exhausted on completion 2"):
+        await anext(provider.complete([], []))
+
+    assert isinstance(provider, _RecordingProvider)
+    assert len(provider.calls) == 2
+    await provider.aclose()
+
+
 async def test_a_packaged_plugin_drives_a_whole_engine_turn(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """The composed path: entry point -> registry -> plugin -> engine."""
+    """The composed path: entry point -> SpecialFlow -> factory -> engine."""
     provider = _packaged_provider(monkeypatch, tmp_path, scripted_turns=_tool_then_text())
     execution = RecordingExecution({"get_logs": "result-of-get_logs"})
     engine, request = _engine(provider, execution)
@@ -182,6 +184,8 @@ async def test_a_packaged_plugin_drives_a_whole_engine_turn(
     assert events[2] == TextDelta(text="done")
     assert events[3] == TurnComplete(input_tokens=120, output_tokens=14, estimated=False)
     assert execution.names == ["get_logs"]
+    assert isinstance(provider, _RecordingProvider)
+    assert len(provider.calls) == 2
     await engine.aclose()
 
 
@@ -207,14 +211,13 @@ async def test_a_packaged_plugin_only_ever_sees_a_sanitized_tool_result(
     provider = _packaged_provider(monkeypatch, tmp_path, scripted_turns=_tool_then_text())
     engine, request = _engine(provider, _SecretExecution())
 
-    await _drive(engine, request)
+    events = await _drive(engine, request)
 
-    # `ValidatedPluginProvider` wraps the plugin's own provider; the fixture
-    # records every request it was handed on that inner object, so this is
-    # what the third party literally received.
-    assert isinstance(provider, ValidatedPluginProvider)
-    inner = cast("Any", provider)._provider
-    sent = json.dumps(inner.calls, ensure_ascii=False)
+    assert isinstance(provider, _RecordingProvider)
+    assert len(provider.calls) == 2
+    assert isinstance(events[-1], TurnComplete)
+    assert not any(isinstance(event, AgentError) for event in events)
+    sent = json.dumps(provider.calls, ensure_ascii=False)
     assert sentinel not in sent
     assert MASK_PLACEHOLDER in sent
     await engine.aclose()
@@ -237,6 +240,8 @@ async def test_a_plugin_failure_carrying_a_credential_reaches_the_panel_bounded(
     error = events[0]
     assert isinstance(error, AgentError)
     assert "SECRET_INTERNAL_TOKEN_xyz789" not in error.message
+    assert isinstance(provider, _RecordingProvider)
+    assert len(provider.calls) == 1
     await engine.aclose()
 
 
@@ -255,7 +260,18 @@ async def test_a_plugin_that_names_no_tool_dispatches_nothing(
     execution = RecordingExecution()
     engine, request = _engine(provider, execution)
 
-    await _drive(engine, request)
+    events = await _drive(engine, request)
 
     assert execution.calls == []
+    assert isinstance(provider, _RecordingProvider)
+    assert len(provider.calls) == 1
+    assert [type(event).__name__ for event in events] == [
+        "ToolCallStarted",
+        "ToolCallFinished",
+        "AgentError",
+        "TurnComplete",
+    ]
+    error = events[2]
+    assert isinstance(error, AgentError)
+    assert error.message == "no usable tool call in the response — turn ended early"
     await engine.aclose()
