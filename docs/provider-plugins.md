@@ -204,7 +204,8 @@ Declaration types come from `korvid.agent.model_profiles` (`SpecialFlow`,
 modules, not from package-level re-exports.
 
 `LLMProvider` has no `name` property. It has `descriptor` and `capabilities`
-properties, plus `async complete(messages, tools, *, stream=True)` and
+properties, plus
+`complete(messages, tools, *, stream=True) -> AsyncIterator[Mapping]` and
 `async aclose()`. The flow factory catches builder failures, but does not wrap
 the returned provider in a descriptor/capabilities validator. Adapters must
 validate these properties themselves. `ModelRouter` reads them when resolving
@@ -221,7 +222,8 @@ to an explicit `agent.model_tier`, and `provenance` must map a known fact name
 to a `CapabilitySource`.
 
 `complete()` must return an **async iterator** directly; an async generator is
-the usual implementation, while a coroutine that must first be awaited is not.
+the usual implementation (`async def` with `yield`), while a coroutine that
+must first be awaited is not.
 `prepare_messages()` runs before outbound validation, including for a provider
 returned by a flow. It may add dialect fields but must preserve the count,
 order, roles and content of messages so redaction records still refer to the

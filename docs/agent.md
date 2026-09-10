@@ -299,6 +299,34 @@ selects one, and `active: null` disables the agent. Model tuning belongs in the
 selected profile's `options`. Unsupported root or `agent` settings are
 configuration errors rather than alternate input formats.
 
+Configurations from versions that accepted flat `agent.provider`,
+`agent.model`, `agent.base_url`, or `agent.ollama.*` settings must be moved
+manually; they are no longer migrated on load. For example:
+
+```yaml
+# before
+agent:
+  provider: ollama
+  model: qwen3:8b
+  base_url: http://localhost:11434
+  ollama:
+    num_ctx: 8192
+
+# after
+agent:
+  active: default
+  profiles:
+    default:
+      model: ollama/qwen3:8b
+      endpoint: http://localhost:11434
+      auth: {method: none}
+      options:
+        num_ctx: 8192
+```
+
+See the [unreleased migration notes](release-notes/unreleased.md#current-configuration-and-extension-contracts)
+for the complete set of removed compatibility inputs.
+
 !!! warning "GitHub Copilot"
 
     Copilot support uses an **unofficial internal API** that may change or

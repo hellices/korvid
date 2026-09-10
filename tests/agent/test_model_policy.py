@@ -128,7 +128,7 @@ def router(
             "high_agent",
             15,
             120_000,
-            8_000,
+            MAX_RESULT_CHARS,
             None,
             False,
             "navigate",

@@ -1393,6 +1393,14 @@ def test_unknown_root_key_is_rejected(tmp_path: Path) -> None:
         load_config(path)
 
 
+@pytest.mark.parametrize("contents", ["not-a-mapping\n", "- item\n", "[]\n"])
+def test_config_root_must_be_a_mapping(tmp_path: Path, contents: str) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(contents)
+    with pytest.raises(ConfigError, match="config root must be a mapping"):
+        load_config(path)
+
+
 def test_unknown_agent_setting_is_rejected(tmp_path: Path) -> None:
     path = tmp_path / "config.yaml"
     path.write_text("agent:\n  unexpected_setting: true\n")

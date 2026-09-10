@@ -57,7 +57,7 @@ PROMPT: Final[str] = (
     "showed, no filler text."
 )
 
-TOOL_DESCRIPTIONS_VERSION: Final[int] = 2
+TOOL_DESCRIPTIONS_VERSION: Final[int] = 3
 TOOL_DESCRIPTION_MAX_CHARS: Final[int] = 250
 TOOL_DESCRIPTIONS: Final[Mapping[str, str]] = MappingProxyType(
     {
@@ -78,6 +78,7 @@ TOOL_DESCRIPTIONS: Final[Mapping[str, str]] = MappingProxyType(
             "non-ready pods. Prefer this when a Deployment is not progressing."
         ),
         "get_logs": "Read only; no UI. Not for show/open.",
+        "get_resource": "Read only; no UI. Not for show/open.",
         "helm_list_releases": (
             "List installed Helm releases with revision, status, chart and app "
             "version. Read-only; parsed from cluster Secrets."
@@ -85,6 +86,7 @@ TOOL_DESCRIPTIONS: Final[Mapping[str, str]] = MappingProxyType(
         "list_operators": (
             "List OLM operator packages and installed subscriptions with their status. Read-only."
         ),
+        "open_describe": "Use for show/open/display: open TUI describe.",
         "open_logs": "Use for show/open/display: open TUI logs.",
         "resize_pod": (
             "Request an in-place CPU/memory resize of a running pod (Kubernetes "

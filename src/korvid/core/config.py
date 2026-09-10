@@ -487,7 +487,13 @@ def load_config(path: Path | None = None) -> KorvidConfig:
     cfg_path = path or DEFAULT_CONFIG_PATH
     if not cfg_path.is_file():
         return KorvidConfig()
-    raw: dict[str, Any] = yaml.safe_load(cfg_path.read_text()) or {}
+    loaded = yaml.safe_load(cfg_path.read_text())
+    if loaded is None:
+        raw: dict[str, Any] = {}
+    elif isinstance(loaded, dict):
+        raw = loaded
+    else:
+        raise ConfigError(f"config root must be a mapping (got {type(loaded).__name__})")
     _check_unknown_root_keys(raw)
     agent_value = raw.get("agent")
     # User-edited configs can hold scalars where mappings are expected;
