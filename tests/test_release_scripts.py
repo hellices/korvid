@@ -2366,19 +2366,20 @@ def test_release_docs_describe_the_trusted_tap_handoff_and_validator() -> None:
     runbook = _release_runbook()
     normalized = " ".join(runbook.split())
     bindings = markdown_section(runbook, "One-time repository and publisher bindings")
+    tap = markdown_section(runbook, "Publish and verify the Homebrew tap")
     assert "HOMEBREW_APP_ID" in runbook
     assert "HOMEBREW_APP_PRIVATE_KEY" in runbook
     assert "HOMEBREW_APP_SLUG" in runbook
     assert "repository variable: `HOMEBREW_APP_ID`" in bindings
     assert "repository secret: `HOMEBREW_APP_PRIVATE_KEY`" in bindings
-    assert "repository variable: `HOMEBREW_APP_SLUG`" not in bindings
+    assert "HOMEBREW_APP_SLUG" not in bindings
     assert "safe to retry" in normalized
     assert "same version" in normalized
     assert "downgrade" in normalized
     assert "fails visibly" in normalized
     assert (
-        "source workflow can keep using `actions/create-github-app-token`'s `app-slug` output"
-        in runbook
+        "source workflow itself can keep using `actions/create-github-app-token`'s `app-slug` output"
+        in normalized
     )
     assert "default-branch validator" in runbook
     assert "workflow_run" in runbook
@@ -2388,17 +2389,19 @@ def test_release_docs_describe_the_trusted_tap_handoff_and_validator() -> None:
         'gh api "repos/hellices/homebrew-korvid/pulls?state=open&head=hellices:bump-korvid-${VERSION}&base=main"'
         in runbook
     )
-    assert ".user.login ==" in runbook
-    assert "HOMEBREW_APP_SLUG}[bot]" in runbook
+    assert 'case "$HOMEBREW_APP_SLUG" in' in tap
+    assert 'EXPECTED_BOT_LOGIN="${HOMEBREW_APP_SLUG}[bot]"' in tap
+    assert ".user.login // empty" in tap
+    assert "does not match expected" in tap
     assert 'gh pr checks "$TAP_PR" --repo hellices/homebrew-korvid --watch || exit 1' in runbook
     assert 'gh pr view "$TAP_PR" --repo hellices/homebrew-korvid --json' in runbook
     assert 'korvid --version | grep -Fx "korvid ${VERSION}"' in runbook
     assert "tag-revalidated `uv.lock`" in normalized
     assert "not separately attested or listed in `SHA256SUMS`" in normalized
-    assert "auto-merge" not in runbook
     assert "HOMEBREW_TAP_TOKEN" not in runbook
-    assert "gh pr list" not in runbook
     assert 'gh release download "$TAG" --pattern korvid.rb' not in runbook
+    assert "source workflow does not store that slug locally" in normalized.lower()
+    assert "persistent pr merge enrollment can stay disabled" in normalized.lower()
     verify = runbook[runbook.index("Finally verify the tap") : runbook.index("## Install")]
     assert "set -eu" in verify
     assert ': "${VERSION:?' in verify

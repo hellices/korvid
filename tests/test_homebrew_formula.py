@@ -23,6 +23,8 @@ from typing import Any
 
 import pytest
 
+from tests.release_contracts import run_scripts, workflow_jobs
+
 _ROOT = Path(__file__).resolve().parents[1]
 _LOCK = _ROOT / "uv.lock"
 
@@ -52,6 +54,39 @@ render_formula = _GEN.render_formula
 resolve_resources = _GEN.resolve_resources
 
 
+def _release_workflow_text() -> str:
+    return (_ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+
+
+def _homebrew_job() -> dict[str, Any]:
+    jobs = workflow_jobs(_ROOT / ".github" / "workflows" / "release.yml")
+    job = jobs.get("homebrew-formula")
+    assert isinstance(job, dict), "release workflow must define the homebrew-formula job"
+    return job
+
+
+def _job_steps() -> list[dict[str, Any]]:
+    steps = _homebrew_job().get("steps")
+    assert isinstance(steps, list), "homebrew-formula job must declare an ordered steps list"
+    typed_steps = [step for step in steps if isinstance(step, dict)]
+    assert typed_steps, "homebrew-formula job must contain steps"
+    return typed_steps
+
+
+def _named_step(name: str) -> dict[str, Any]:
+    for step in _job_steps():
+        if step.get("name") == name:
+            return step
+    available = ", ".join(str(step.get("name", "<unnamed>")) for step in _job_steps())
+    raise AssertionError(f"missing homebrew-formula step {name!r}; available steps: {available}")
+
+
+def _step_run(step: dict[str, Any]) -> str:
+    run = step.get("run")
+    assert isinstance(run, str), f"{step.get('name', '<unnamed step>')} must define a run script"
+    return run
+
+
 def test_the_closure_is_transitive_not_just_the_direct_dependencies() -> None:
     """A formula that lists only direct dependencies does not install.
 
@@ -72,11 +107,10 @@ def test_the_closure_is_transitive_not_just_the_direct_dependencies() -> None:
 
 def test_the_release_job_calls_the_dedicated_homebrew_handoff_script() -> None:
     """The source workflow should orchestrate, not embed, tap-branch logic."""
-    workflow = (_ROOT / ".github" / "workflows" / "release.yml").read_text()
-    homebrew_job = workflow.split("  homebrew-formula:")[1]
-    assert "python scripts/release/update_homebrew_tap.py" in homebrew_job
-    assert "https://x-access-token:" not in homebrew_job
-    assert "gh auth setup-git" not in homebrew_job
+    scripts = "\n".join(run_scripts(_homebrew_job()))
+    assert "python3 scripts/release/update_homebrew_tap.py" in scripts
+    assert "https://x-access-token:" not in scripts
+    assert "gh auth setup-git" not in scripts
 
 
 def test_the_selected_extras_and_nothing_else_are_installed() -> None:
@@ -390,17 +424,19 @@ def _ruby_available() -> bool:
 
 def test_the_release_attaches_the_formula_before_it_needs_a_token() -> None:
     """A missing App binding must fail only after the formula is preserved."""
-    workflow = (_ROOT / ".github" / "workflows" / "release.yml").read_text()
-    steps = workflow.split("      - name: ")
-    upload = next(i for i, step in enumerate(steps) if "Attach the formula" in step[:60])
-    require_app = next(
-        i for i, step in enumerate(steps) if "Require Homebrew App credentials" in step[:60]
-    )
-    mint = next(i for i, step in enumerate(steps) if "Mint the Homebrew tap App token" in step[:60])
-    bump = next(i for i, step in enumerate(steps) if "Update the Homebrew tap" in step[:60])
+    workflow = _release_workflow_text()
+    names = [str(step.get("name", "")) for step in _job_steps()]
+    upload = names.index("Attach the formula to the release")
+    require_app = names.index("Require Homebrew App credentials")
+    mint = names.index("Mint the Homebrew tap App token")
+    bump = names.index("Update the Homebrew tap")
     assert upload < require_app < mint < bump, "the tap is attempted before the artifact is safe"
-    assert 'if [ -z "${HOMEBREW_APP_ID:-}" ]; then' in workflow
-    assert 'if [ -z "${HOMEBREW_APP_PRIVATE_KEY:-}" ]; then' in workflow
+
+    require_run = _step_run(_named_step("Require Homebrew App credentials"))
+    assert "set -euo pipefail" in require_run
+    assert 'if [ -z "${HOMEBREW_APP_ID:-}" ]; then' in require_run
+    assert 'if [ -z "${HOMEBREW_APP_PRIVATE_KEY:-}" ]; then' in require_run
+    assert "exit 1" in require_run
     assert "handoff-ready=false" not in workflow
     assert "::warning::Skipping Homebrew tap handoff" not in workflow
     assert "HOMEBREW_TAP_TOKEN" not in workflow
@@ -409,20 +445,13 @@ def test_the_release_attaches_the_formula_before_it_needs_a_token() -> None:
 def test_the_formula_job_runs_only_after_the_release_is_published() -> None:
     """The formula names a published sdist; generating it earlier would
     hash an artifact that does not exist yet."""
-    import yaml
-
-    workflow = yaml.safe_load((_ROOT / ".github" / "workflows" / "release.yml").read_text())
-    job = workflow["jobs"]["homebrew-formula"]
+    job = _homebrew_job()
     assert "publish-pypi" in job["needs"]
     assert "finalize-github-release" in job["needs"]
 
 
 def test_the_formula_job_mints_a_scoped_homebrew_app_token_late() -> None:
-    import yaml
-
-    workflow = yaml.safe_load((_ROOT / ".github" / "workflows" / "release.yml").read_text())
-    steps = workflow["jobs"]["homebrew-formula"]["steps"]
-    mint = next(step for step in steps if step.get("id") == "homebrew-app-token")
+    mint = next(step for step in _job_steps() if step.get("id") == "homebrew-app-token")
     assert "if" not in mint
     assert (
         mint["uses"] == "actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349"
@@ -436,29 +465,27 @@ def test_the_formula_job_mints_a_scoped_homebrew_app_token_late() -> None:
 
 
 def test_the_handoff_step_uses_the_app_slug_bot_login() -> None:
-    import yaml
-
-    workflow = yaml.safe_load((_ROOT / ".github" / "workflows" / "release.yml").read_text())
-    step = next(
-        step
-        for step in workflow["jobs"]["homebrew-formula"]["steps"]
-        if "scripts/release/update_homebrew_tap.py" in str(step.get("run", ""))
-    )
+    step = _named_step("Update the Homebrew tap")
     assert "if" not in step
     env = step["env"]
     assert env["GH_TOKEN"] == "${{ steps.homebrew-app-token.outputs.token }}"
-    assert env["BOT_LOGIN"] == "${{ steps.homebrew-app-token.outputs.app-slug }}[bot]"
-    assert '--bot-login "$BOT_LOGIN"' in step["run"]
-    assert "uv run" not in step["run"]
+    assert env["APP_SLUG"] == "${{ steps.homebrew-app-token.outputs.app-slug }}"
+    assert "BOT_LOGIN" not in env
+    run = _step_run(step)
+    assert "set -euo pipefail" in run
+    assert ': "${APP_SLUG:?steps.homebrew-app-token.outputs.app-slug is required}"' in run
+    assert 'BOT_LOGIN="${APP_SLUG}[bot]"' in run
+    assert "python3 scripts/release/update_homebrew_tap.py" in run
+    assert '--bot-login "$BOT_LOGIN"' in run
+    assert "uv run" not in run
 
 
 def test_the_release_workflow_has_no_manual_homebrew_pat_fallback_or_merge_logic() -> None:
-    workflow = (_ROOT / ".github" / "workflows" / "release.yml").read_text()
-    homebrew_job = workflow.split("  homebrew-formula:")[1]
-    assert "The formula is attached to the release and is correct." not in homebrew_job
-    assert 'gh release download "$TAG" korvid.rb' not in homebrew_job
-    assert "gh pr merge" not in homebrew_job
-    assert "auto-merge" not in homebrew_job
+    scripts = "\n".join(run_scripts(_homebrew_job()))
+    assert "The formula is attached to the release and is correct." not in scripts
+    assert 'gh release download "$TAG" korvid.rb' not in scripts
+    assert "gh pr merge" not in scripts
+    assert "auto-merge" not in scripts
 
 
 def test_an_extra_augments_a_package_rather_than_replacing_it(tmp_path: Path) -> None:

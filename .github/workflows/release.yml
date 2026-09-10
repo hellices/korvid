@@ -550,7 +550,7 @@ jobs:
         env:
           TAG: ${{ github.ref_name }}
         run: |
-          python scripts/generate_homebrew_formula.py \
+          python3 scripts/generate_homebrew_formula.py \
             --version "${TAG#v}" --lock uv.lock -o korvid.rb
           ruby -c korvid.rb
       - name: Attach the formula to the release
@@ -589,10 +589,13 @@ jobs:
       - name: Update the Homebrew tap
         env:
           GH_TOKEN: ${{ steps.homebrew-app-token.outputs.token }}
-          BOT_LOGIN: ${{ steps.homebrew-app-token.outputs.app-slug }}[bot]
+          APP_SLUG: ${{ steps.homebrew-app-token.outputs.app-slug }}
           TAG: ${{ github.ref_name }}
         run: |
-          python scripts/release/update_homebrew_tap.py \
+          set -euo pipefail
+          : "${APP_SLUG:?steps.homebrew-app-token.outputs.app-slug is required}"
+          BOT_LOGIN="${APP_SLUG}[bot]"
+          python3 scripts/release/update_homebrew_tap.py \
             --version "${TAG#v}" \
             --formula korvid.rb \
             --tap-repository hellices/homebrew-korvid \

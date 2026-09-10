@@ -282,9 +282,11 @@ def test_run_command_redacts_credentials_from_failing_command_diagnostics(
 ) -> None:
     handoff = _module()
     credentialed = f"https://{userinfo}@{host}/homebrew-korvid.git"
+    seen_kwargs: dict[str, object] = {}
 
     def _fake_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
-        del args, kwargs
+        del args
+        seen_kwargs.update(kwargs)
         return subprocess.CompletedProcess(
             args=["git", "clone", credentialed],
             returncode=1,
@@ -301,6 +303,7 @@ def test_run_command_redacts_credentials_from_failing_command_diagnostics(
     assert "synthetic-secret" not in message
     assert f"***@{host}" in message
     assert "attempted clone" in message
+    assert seen_kwargs == {"cwd": None, "capture_output": True, "text": True, "check": False}
 
 
 @pytest.mark.parametrize(
@@ -327,7 +330,7 @@ def test_main_reports_invalid_api_json_without_publishing_a_branch(
     runner = _FakeRunner(handoff)
 
     def run(argv: list[str], *, cwd: Path | None = None) -> str:
-        if argv[:2] == ["gh", "api"] and argv[2].startswith(endpoint):
+        if len(argv) >= 3 and argv[:2] == ["gh", "api"] and argv[2].startswith(endpoint):
             return payload
         return runner(argv, cwd=cwd)
 
@@ -398,6 +401,40 @@ def test_main_rejects_versions_outside_the_stable_release_format(
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "supported release version" in captured.err
+
+
+@pytest.mark.parametrize(
+    ("formula_text", "message"),
+    [
+        (
+            _formula("1.2.3").replace(
+                '  url "https://files.pythonhosted.org/packages/source/k/korvid/korvid-1.2.3.tar.gz"\n',
+                "",
+            ),
+            "url",
+        ),
+        (
+            _formula("1.2.3").replace(
+                '    assert_match "1.2.3", shell_output("#{bin}/korvid --version")\n', ""
+            ),
+            "assert_match",
+        ),
+        (
+            _formula("1.2.3").replace(
+                '    assert_match "1.2.3", shell_output("#{bin}/korvid --version")\n',
+                '    assert_match "9.9.9", shell_output("#{bin}/korvid --version")\n',
+            ),
+            "disagree",
+        ),
+    ],
+)
+def test_formula_version_requires_both_version_anchors_to_match(
+    formula_text: str, message: str
+) -> None:
+    handoff = _module()
+
+    with pytest.raises(handoff.HandoffError, match=message):
+        handoff._module._formula_version(formula_text)
 
 
 def test_equal_version_on_tap_main_is_a_no_op_even_when_the_formula_differs(
@@ -473,11 +510,9 @@ def test_an_existing_same_version_branch_without_a_pull_request_is_a_safe_retry(
     handoff = _module()
     remote, seed = _tap_remote(tmp_path, main_formula=_formula("0.4.0"))
     branch = "bump-korvid-0.4.1"
-    branch_head = _push_branch(
-        seed, branch=branch, formula=_formula("0.4.1", suffix="# prior run\n")
-    )
+    branch_head = _push_branch(seed, branch=branch, formula=_formula("0.4.1"))
     formula = tmp_path / "generated.rb"
-    formula.write_text(_formula("0.4.1", suffix="# regenerated later\n"), encoding="utf-8")
+    formula.write_text(_formula("0.4.1"), encoding="utf-8")
     runner = _FakeRunner(
         handoff, open_prs=[], created_pr_url="https://github.com/hellices/homebrew-korvid/pull/41"
     )
@@ -499,6 +534,39 @@ def test_an_existing_same_version_branch_without_a_pull_request_is_a_safe_retry(
         call[0][:3] == ("gh", "api", "users/homebrew-release[bot]") for call in runner.calls
     )
     assert any(call[0][:3] == ("gh", "pr", "create") for call in runner.calls)
+
+
+def test_a_safe_retry_refreshes_a_same_version_branch_when_the_formula_changed(
+    tmp_path: Path,
+) -> None:
+    handoff = _module()
+    remote, seed = _tap_remote(tmp_path, main_formula=_formula("0.4.0"))
+    branch = "bump-korvid-0.4.1"
+    branch_head = _push_branch(
+        seed, branch=branch, formula=_formula("0.4.1", suffix="# prior run\n")
+    )
+    formula = tmp_path / "generated.rb"
+    formula.write_text(_formula("0.4.1", suffix="# regenerated later\n"), encoding="utf-8")
+    runner = _FakeRunner(
+        handoff, open_prs=[], created_pr_url="https://github.com/hellices/homebrew-korvid/pull/44"
+    )
+
+    result = handoff.update_homebrew_tap(
+        version="0.4.1",
+        formula=formula,
+        tap_clone_source=remote.as_uri(),
+        tap_repository="hellices/homebrew-korvid",
+        clone_dir=tmp_path / "tap-clone",
+        bot_login="homebrew-release[bot]",
+        command_runner=runner,
+    )
+
+    assert result.status == "opened"
+    assert result.pr_number == 44
+    assert _remote_branch_commit(remote, branch) != branch_head
+    assert _git_dir(remote, "show", f"refs/heads/{branch}:Formula/korvid.rb").rstrip(
+        "\n"
+    ) == _formula("0.4.1", suffix="# regenerated later\n").rstrip("\n")
 
 
 def test_a_safe_retry_still_works_after_main_advances_past_the_branch_fork_point(
@@ -533,7 +601,10 @@ def test_a_safe_retry_still_works_after_main_advances_past_the_branch_fork_point
 
     assert result.status == "opened"
     assert result.pr_number == 43
-    assert _remote_branch_commit(remote, branch) == branch_head
+    assert _remote_branch_commit(remote, branch) != branch_head
+    assert _git_dir(remote, "show", f"refs/heads/{branch}:Formula/korvid.rb").rstrip(
+        "\n"
+    ) == _formula("0.4.1", suffix="# regenerated later\n").rstrip("\n")
     assert any(call[0][:3] == ("gh", "pr", "create") for call in runner.calls)
 
 
@@ -543,7 +614,9 @@ def test_an_existing_same_version_branch_with_a_matching_bot_owned_pull_request_
     handoff = _module()
     remote, seed = _tap_remote(tmp_path, main_formula=_formula("0.4.0"))
     branch = "bump-korvid-0.4.1"
-    branch_head = _push_branch(seed, branch=branch, formula=_formula("0.4.1"))
+    branch_head = _push_branch(
+        seed, branch=branch, formula=_formula("0.4.1", suffix="# prior run\n")
+    )
     formula = tmp_path / "generated.rb"
     formula.write_text(_formula("0.4.1", suffix="# regenerated later\n"), encoding="utf-8")
     runner = _FakeRunner(
@@ -571,11 +644,12 @@ def test_an_existing_same_version_branch_with_a_matching_bot_owned_pull_request_
 
     assert result.status == "reused"
     assert result.pr_number == 58
-    assert _remote_branch_commit(remote, branch) == branch_head
+    assert _remote_branch_commit(remote, branch) != branch_head
+    assert _git_dir(remote, "show", f"refs/heads/{branch}:Formula/korvid.rb").rstrip(
+        "\n"
+    ) == _formula("0.4.1", suffix="# regenerated later\n").rstrip("\n")
     assert not any(call[0][:3] == ("gh", "pr", "create") for call in runner.calls)
-    assert not any(
-        call[0][:3] == ("gh", "api", "users/homebrew-release[bot]") for call in runner.calls
-    )
+    assert any(call[0][:3] == ("gh", "api", "users/homebrew-release[bot]") for call in runner.calls)
 
 
 def test_an_existing_pull_request_owned_by_another_login_is_rejected(

@@ -83,17 +83,21 @@ def _version_key(version: str) -> tuple[int, int, int]:
 
 
 def _formula_version(formula_text: str) -> str:
-    versions = {
-        match.group(1)
-        for pattern in (_URL_VERSION, _TEST_VERSION)
-        for match in [pattern.search(formula_text)]
-        if match is not None
-    }
-    if len(versions) != 1:
-        raise HandoffError("could not determine a single stable korvid version from the formula")
-    version = next(iter(versions))
-    _version_key(version)
-    return version
+    url_match = _URL_VERSION.search(formula_text)
+    if url_match is None:
+        raise HandoffError("formula must contain a single url version anchor")
+    test_match = _TEST_VERSION.search(formula_text)
+    if test_match is None:
+        raise HandoffError("formula must contain a single assert_match version anchor")
+    url_version = url_match.group(1)
+    test_version = test_match.group(1)
+    _version_key(url_version)
+    _version_key(test_version)
+    if url_version != test_version:
+        raise HandoffError(
+            f"formula url version {url_version} and assert_match version {test_version} disagree"
+        )
+    return url_version
 
 
 def _read_formula_version(path: Path) -> str | None:
@@ -268,6 +272,8 @@ def _create_pr(
 def _existing_branch_result(
     *,
     branch_version: str | None,
+    branch_formula_text: str | None,
+    generated_formula_text: str,
     target_version: tuple[int, int, int],
     version: str,
     branch: str,
@@ -283,6 +289,8 @@ def _existing_branch_result(
             f"existing {branch} carries korvid {branch_version}; refusing to replace it with {version}"
         )
     if branch_version != version:
+        return None
+    if branch_formula_text != generated_formula_text:
         return None
     resolved_pr = (
         pr_number
@@ -414,6 +422,12 @@ def update_homebrew_tap(
 
     existing_result = _existing_branch_result(
         branch_version=_read_formula_version(repo / FORMULA_PATH),
+        branch_formula_text=(
+            (repo / FORMULA_PATH).read_text(encoding="utf-8")
+            if (repo / FORMULA_PATH).is_file()
+            else None
+        ),
+        generated_formula_text=formula_text,
         target_version=target_version,
         version=version,
         branch=branch,

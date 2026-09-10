@@ -137,6 +137,17 @@ def _assert_agent_policy_contracts(agents: str) -> None:
         "workflow_run",
         "match-head-commit",
     )
+    _assert_section_has_bullet(
+        pull_requests,
+        "opened by the app bot",
+        "HOMEBREW_APP_SLUG",
+    )
+    _assert_section_has_bullet(
+        pull_requests,
+        "workflow_run",
+        "head sha",
+        "match-head-commit",
+    )
     _assert_section_has_bullet(pull_requests, "approve", "own work")
     handoff_step = _numbered_step(review_loop, 10)
     for term in ("required check", "report", "stop", "merge"):
@@ -178,7 +189,7 @@ def _assert_release_runbook_contracts(runbook: str) -> None:
         assert binding in bindings
     assert "repository variable: `HOMEBREW_APP_ID`" in bindings
     assert "repository secret: `HOMEBREW_APP_PRIVATE_KEY`" in bindings
-    assert "repository variable: `HOMEBREW_APP_SLUG`" not in bindings
+    assert "HOMEBREW_APP_SLUG" not in bindings
 
     _assert_irreversible_boundary_contracts(irreversible)
 
@@ -281,36 +292,40 @@ def _assert_release_runbook_contracts(runbook: str) -> None:
     for command in (
         ': "${VERSION:?set VERSION via scripts/release/release_config.py version}"',
         ': "${HOMEBREW_APP_SLUG:?set to the GitHub App slug bound to the tap}"',
+        'case "$HOMEBREW_APP_SLUG" in',
+        'EXPECTED_BOT_LOGIN="${HOMEBREW_APP_SLUG}[bot]"',
         'gh api "repos/hellices/homebrew-korvid/pulls?state=open&head=hellices:bump-korvid-${VERSION}&base=main" \\',
         "bump-korvid-${VERSION}",
-        ".user.login ==",
-        "HOMEBREW_APP_SLUG}[bot]",
+        'AUTHOR_LOGIN=$(gh api "repos/hellices/homebrew-korvid/pulls?state=open&head=hellices:bump-korvid-${VERSION}&base=main" \\',
+        ".user.login // empty",
+        "does not match expected",
         'gh pr checks "$TAP_PR" --repo hellices/homebrew-korvid --watch || exit 1',
         'gh pr view "$TAP_PR" --repo hellices/homebrew-korvid --json',
         'korvid --version | grep -Fx "korvid ${VERSION}"',
     ):
         assert command in tap
+    assert "HOMEBREW_APP_ID" in bindings
+    assert "HOMEBREW_APP_ID" in tap
+    assert "HOMEBREW_APP_PRIVATE_KEY" in bindings
+    assert "HOMEBREW_APP_PRIVATE_KEY" in tap
+    assert "HOMEBREW_APP_SLUG" in tap
     for contract in (
-        "HOMEBREW_APP_ID",
-        "HOMEBREW_APP_PRIVATE_KEY",
-        "HOMEBREW_APP_SLUG",
         "default-branch validator",
         "safe to retry",
         "same version",
         "downgrade",
         "fails visibly",
     ):
-        assert contract in tap or contract in bindings
+        assert contract in tap
     assert (
-        "source workflow can keep using `actions/create-github-app-token`'s `app-slug` output"
-        in tap
+        "source workflow itself can keep using `actions/create-github-app-token`'s `app-slug` output"
+        in _normalized(tap)
     )
-    lowered_tap = tap.lower()
+    lowered_tap = _normalized_lower(tap)
     assert "ordinary human-authored pull" in lowered_tap
     assert "requests remain manual" in lowered_tap
-    assert "remain manual" in lowered_tap
     assert "gh pr merge --squash --match-head-commit" in tap
-    assert "auto-merge" not in tap
+    assert "merge enrollment can stay disabled" in lowered_tap
     assert 'gh release download "$TAG" --pattern korvid.rb --dir "dist/$TAG"' not in tap
     assert 'git commit -m "korvid ${VERSION}"' not in tap
 

@@ -305,7 +305,10 @@ stores:
 - repository variable: `HOMEBREW_APP_SLUG`
 
 The tap's trusted classifier uses `HOMEBREW_APP_SLUG`; the source workflow does
-not store that slug locally, and the source workflow can keep using `actions/create-github-app-token`'s `app-slug` output for the bot login it passes into `update_homebrew_tap.py`.
+not store that slug locally. When you run the source-side verification snippet
+below, export the tap repository's `HOMEBREW_APP_SLUG` value first. The source
+workflow itself can keep using `actions/create-github-app-token`'s `app-slug`
+output for the bot login it passes into `update_homebrew_tap.py`.
 
 That handoff is safe to retry:
 
@@ -331,16 +334,30 @@ After publication, find the trusted tap PR and wait for its checks:
 : "${VERSION:?set VERSION via scripts/release/release_config.py version}"
 : "${HOMEBREW_APP_SLUG:?set to the GitHub App slug bound to the tap}"
 set -eu
+case "$HOMEBREW_APP_SLUG" in
+  *'[bot]') EXPECTED_BOT_LOGIN="$HOMEBREW_APP_SLUG" ;;
+  *) EXPECTED_BOT_LOGIN="${HOMEBREW_APP_SLUG}[bot]" ;;
+esac
 TAP_PR=$(gh api "repos/hellices/homebrew-korvid/pulls?state=open&head=hellices:bump-korvid-${VERSION}&base=main" \
   --jq "map(select(
     .title == \"korvid ${VERSION}\" and
-    .user.login == \"${HOMEBREW_APP_SLUG}[bot]\" and
     .base.ref == \"main\" and
     .head.ref == \"bump-korvid-${VERSION}\" and
     .head.repo.owner.login == \"hellices\"
   )) | if length == 1 then .[0].number else empty end")
 if [ -z "$TAP_PR" ]; then
   echo "trusted bump-korvid-${VERSION} tap PR not found" >&2
+  exit 1
+fi
+AUTHOR_LOGIN=$(gh api "repos/hellices/homebrew-korvid/pulls?state=open&head=hellices:bump-korvid-${VERSION}&base=main" \
+  --jq "map(select(
+    .title == \"korvid ${VERSION}\" and
+    .base.ref == \"main\" and
+    .head.ref == \"bump-korvid-${VERSION}\" and
+    .head.repo.owner.login == \"hellices\"
+  )) | if length == 1 then .[0].user.login // empty else empty end")
+if [ -z "$AUTHOR_LOGIN" ] || [ "$AUTHOR_LOGIN" != "$EXPECTED_BOT_LOGIN" ]; then
+  echo "trusted bump-korvid-${VERSION} tap PR author $AUTHOR_LOGIN does not match expected $EXPECTED_BOT_LOGIN" >&2
   exit 1
 fi
 gh pr checks "$TAP_PR" --repo hellices/homebrew-korvid --watch || exit 1
