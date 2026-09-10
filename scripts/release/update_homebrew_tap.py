@@ -23,6 +23,7 @@ _URL_VERSION = re.compile(r'url "[^"]*/korvid-([0-9]+\.[0-9]+\.[0-9]+)\.tar\.gz"
 _TEST_VERSION = re.compile(
     r'assert_match "([0-9]+\.[0-9]+\.[0-9]+)", shell_output\("#\{bin\}/korvid --version"\)'
 )
+_URL_USERINFO = re.compile(r"([A-Za-z][A-Za-z0-9+.-]*://)[^\s/?#]*@")
 
 
 class CommandRunner(Protocol):
@@ -44,6 +45,19 @@ class UpdateResult:
     pr_number: int | None = None
 
 
+def _sanitize_text(text: str) -> str:
+    # Git tokens may occupy either userinfo field; do not parse untrusted error URLs.
+    return _URL_USERINFO.sub(r"\1***@", text)
+
+
+def _validate_clone_source(clone_source: str) -> None:
+    if _URL_USERINFO.search(clone_source) is None:
+        return
+    raise HandoffError(
+        f"tap clone source must not embed credentials: {_sanitize_text(clone_source)}"
+    )
+
+
 def _run_command(argv: list[str], *, cwd: Path | None = None) -> str:
     result = subprocess.run(
         argv,
@@ -53,18 +67,19 @@ def _run_command(argv: list[str], *, cwd: Path | None = None) -> str:
         check=False,
     )
     if result.returncode != 0:
-        details = (
+        details = _sanitize_text(
             "\n".join(line for line in (result.stdout.strip(), result.stderr.strip()) if line)
             or f"command exited with status {result.returncode}"
         )
-        raise HandoffError(f"{' '.join(argv)} failed:\n{details}")
+        raise HandoffError(f"{_sanitize_text(' '.join(argv))} failed:\n{details}")
     return result.stdout.strip()
 
 
 def _version_key(version: str) -> tuple[int, int, int]:
     if not is_supported_release_version(version):
         raise HandoffError(UNSUPPORTED_VERSION)
-    return tuple(int(part) for part in version.split("."))
+    major, minor, patch = version.split(".")
+    return int(major), int(minor), int(patch)
 
 
 def _formula_version(formula_text: str) -> str:
@@ -103,7 +118,9 @@ def _remote_branch_exists(run: CommandRunner, repo: Path, branch: str) -> bool:
         return True
     if probe.returncode == 2 and not probe.stdout.strip():
         return False
-    details = "\n".join(line for line in (probe.stdout.strip(), probe.stderr.strip()) if line)
+    details = _sanitize_text(
+        "\n".join(line for line in (probe.stdout.strip(), probe.stderr.strip()) if line)
+    )
     raise HandoffError(f"git ls-remote failed:\n{details or 'unknown error'}")
 
 
@@ -334,6 +351,7 @@ def update_homebrew_tap(
 
     branch = f"bump-korvid-{version}"
     clone_source = tap_clone_source or f"https://github.com/{tap_repository}.git"
+    _validate_clone_source(clone_source)
 
     command_runner(["gh", "auth", "setup-git"])
     command_runner(

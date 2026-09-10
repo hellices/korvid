@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import subprocess
 import sys
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
 import pytest
@@ -11,17 +13,74 @@ import pytest
 _ROOT = Path(__file__).resolve().parents[1]
 
 
-def _module() -> Any:
+class _LoadedUpdateResult:
+    def __init__(self, result: object) -> None:
+        status = getattr(result, "status", None)
+        branch = getattr(result, "branch", None)
+        pr_number = getattr(result, "pr_number", None)
+        assert isinstance(status, str)
+        assert isinstance(branch, str)
+        assert pr_number is None or isinstance(pr_number, int)
+        self.status = status
+        self.branch = branch
+        self.pr_number = pr_number
+
+
+class _LoadedHandoffModule:
+    def __init__(self, module: ModuleType) -> None:
+        self._module = module
+        error_type = getattr(module, "HandoffError", None)
+        assert isinstance(error_type, type)
+        assert issubclass(error_type, Exception)
+        self.HandoffError = error_type
+
+    def _run_command(self, argv: list[str], *, cwd: Path | None = None) -> str:
+        run_command = getattr(self._module, "_run_command", None)
+        assert callable(run_command)
+        result = run_command(argv, cwd=cwd)
+        assert isinstance(result, str)
+        return result
+
+    def main(self, argv: list[str] | None = None, *, command_runner: object = None) -> int:
+        main = getattr(self._module, "main", None)
+        assert callable(main)
+        result = main(argv, command_runner=command_runner)
+        assert isinstance(result, int)
+        return result
+
+    def update_homebrew_tap(self, **kwargs: object) -> _LoadedUpdateResult:
+        update_homebrew_tap = getattr(self._module, "update_homebrew_tap", None)
+        assert callable(update_homebrew_tap)
+        result = update_homebrew_tap(**kwargs)
+        return _LoadedUpdateResult(result)
+
+
+def _module() -> _LoadedHandoffModule:
     path = _ROOT / "scripts" / "release" / "update_homebrew_tap.py"
     assert path.is_file(), "missing scripts/release/update_homebrew_tap.py"
-    sys.path.insert(0, str(path.parent))
-    spec = importlib.util.spec_from_file_location("update_homebrew_tap", path)
-    assert spec is not None
-    assert spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
+    original_path = list(sys.path)
+    handoff_name = "update_homebrew_tap"
+    prior_handoff = sys.modules.get(handoff_name)
+    prior_version_format = sys.modules.get("version_format")
+    try:
+        sys.path.insert(0, str(path.parent))
+        spec = importlib.util.spec_from_file_location(handoff_name, path)
+        assert spec is not None
+        assert spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        return _LoadedHandoffModule(module)
+    finally:
+        sys.path[:] = original_path
+        if prior_handoff is None:
+            sys.modules.pop(handoff_name, None)
+        else:
+            sys.modules[handoff_name] = prior_handoff
+        if prior_version_format is None:
+            sys.modules.pop("version_format", None)
+        else:
+            sys.modules["version_format"] = prior_version_format
 
 
 def _git(cwd: Path, *args: str) -> str:
@@ -120,7 +179,7 @@ def _has_remote_branch(remote: Path, branch: str) -> bool:
 class _FakeRunner:
     def __init__(
         self,
-        module: Any,
+        module: _LoadedHandoffModule,
         *,
         open_prs: list[dict[str, Any]] | None = None,
         created_pr_url: str = "https://github.com/hellices/homebrew-korvid/pull/17",
@@ -144,7 +203,7 @@ class _FakeRunner:
             and argv[1] == "api"
             and argv[2].startswith("repos/hellices/homebrew-korvid/pulls?")
         ):
-            return self._module.json.dumps(self._open_prs)
+            return json.dumps(self._open_prs)
         if argv[:4] == [
             "gh",
             "pr",
@@ -153,6 +212,95 @@ class _FakeRunner:
         ]:
             return self._created_pr_url
         return self._module._run_command(argv, cwd=cwd)
+
+
+def test_module_loader_restores_sys_path_and_imported_modules() -> None:
+    original_path = list(sys.path)
+    prior_handoff = sys.modules.pop("update_homebrew_tap", None)
+    prior_version_format = sys.modules.pop("version_format", None)
+
+    try:
+        handoff = _module()
+
+        assert handoff.HandoffError.__name__ == "HandoffError"
+        assert sys.path == original_path
+        assert "update_homebrew_tap" not in sys.modules
+        assert "version_format" not in sys.modules
+    finally:
+        sys.path[:] = original_path
+        sys.modules.pop("update_homebrew_tap", None)
+        sys.modules.pop("version_format", None)
+        if prior_handoff is not None:
+            sys.modules["update_homebrew_tap"] = prior_handoff
+        if prior_version_format is not None:
+            sys.modules["version_format"] = prior_version_format
+
+
+@pytest.mark.parametrize(
+    "userinfo",
+    ["release-bot:synthetic-secret", "synthetic-secret:x-oauth-basic", "synthetic-secret"],
+)
+def test_main_rejects_credentialed_tap_clone_sources_without_running_commands(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], userinfo: str
+) -> None:
+    handoff = _module()
+    formula = tmp_path / "korvid.rb"
+    formula.write_text(_formula("1.2.3"), encoding="utf-8")
+    runner = _FakeRunner(handoff)
+    credentialed = f"https://{userinfo}@example.invalid/homebrew-korvid.git"
+
+    assert (
+        handoff.main(
+            [
+                "--version",
+                "1.2.3",
+                "--formula",
+                str(formula),
+                "--tap-clone-source",
+                credentialed,
+                "--bot-login",
+                "homebrew-release[bot]",
+            ],
+            command_runner=runner,
+        )
+        == 1
+    )
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "tap clone source must not embed credentials" in captured.err
+    assert "synthetic-secret" not in captured.err
+    assert runner.calls == []
+
+
+@pytest.mark.parametrize(
+    "userinfo",
+    ["release-bot:synthetic-secret", "synthetic-secret:x-oauth-basic", "synthetic-secret"],
+)
+@pytest.mark.parametrize("host", ["example.invalid", "[::1]:invalid-port"])
+def test_run_command_redacts_credentials_from_failing_command_diagnostics(
+    monkeypatch: pytest.MonkeyPatch, userinfo: str, host: str
+) -> None:
+    handoff = _module()
+    credentialed = f"https://{userinfo}@{host}/homebrew-korvid.git"
+
+    def _fake_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        del args, kwargs
+        return subprocess.CompletedProcess(
+            args=["git", "clone", credentialed],
+            returncode=1,
+            stdout=f"attempted clone {credentialed}\n",
+            stderr=f"fatal: could not read from {credentialed}\n",
+        )
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+
+    with pytest.raises(handoff.HandoffError, match=r"git clone .* failed") as exc_info:
+        handoff._run_command(["git", "clone", credentialed])
+
+    message = str(exc_info.value)
+    assert "synthetic-secret" not in message
+    assert f"***@{host}" in message
+    assert "attempted clone" in message
 
 
 def test_main_rejects_versions_outside_the_stable_release_format(
