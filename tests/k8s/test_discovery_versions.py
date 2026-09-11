@@ -6,7 +6,8 @@ import pytest
 
 from korvid.k8s import client as client_module
 from korvid.k8s.client import KubeClient
-from korvid.k8s.errors import ApiStatusError
+from korvid.k8s.discovery import build_alias_map
+from korvid.k8s.errors import ApiStatusError, KubeClientError
 
 
 def _resources(*plurals: str) -> dict[str, Any]:
@@ -187,3 +188,55 @@ async def test_an_unusable_version_document_does_not_break_discovery(broken_reso
         metas = await client.discover_resources()
 
     assert [meta.plural for meta in metas] == ["pods", "gadgets"]
+
+
+@pytest.mark.parametrize(
+    ("short_names", "expected"),
+    [(7, ()), ([7], ()), ("widget", ()), ([None, "widget", 7], ("widget",))],
+)
+async def test_malformed_short_names_do_not_break_discovery_or_aliases(
+    short_names: Any, expected: tuple[str, ...]
+) -> None:
+    client = KubeClient()
+    version_resources = _resources("widgets", "gadgets")
+    version_resources["resources"][0]["shortNames"] = short_names
+    responses = {
+        "/api/v1": _resources("pods"),
+        "/apis": {"groups": [_group("example.io", "v1")]},
+        "/apis/example.io/v1": version_resources,
+    }
+
+    with patch.object(client, "_request_json", AsyncMock(side_effect=responses.__getitem__)):
+        metas = await client.discover_resources()
+
+    aliases = build_alias_map(metas)
+    assert [meta.plural for meta in metas] == ["pods", "widgets", "gadgets"]
+    assert aliases["widgets"].shortnames == expected
+    assert aliases["gadgets"].plural == "gadgets"
+
+
+@pytest.mark.parametrize("stalled_path", ["/api/v1", "/apis"])
+async def test_bootstrap_discovery_requests_have_a_deadline(
+    stalled_path: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(client_module, "_DISCOVERY_TIMEOUT_SECONDS", 0.01)
+    client = KubeClient()
+    cancelled = asyncio.Event()
+
+    async def request(path: str) -> dict[str, Any]:
+        if path == stalled_path:
+            try:
+                await asyncio.Future[None]()
+            finally:
+                cancelled.set()
+        return _resources("pods") if path == "/api/v1" else {"groups": []}
+
+    with (
+        patch.object(client, "_request_json", AsyncMock(side_effect=request)) as fetch,
+        pytest.raises(KubeClientError, match="discovery timed out"),
+    ):
+        await asyncio.wait_for(client.discover_resources(), timeout=1)
+
+    assert cancelled.is_set()
+    assert fetch.await_args is not None
+    assert fetch.await_args.args == (stalled_path,)

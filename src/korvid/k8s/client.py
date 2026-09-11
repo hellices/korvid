@@ -593,7 +593,7 @@ class KubeClient(ReadOps, WriteOps):
             await asyncio.sleep(LIST_POLL_INTERVAL)
             _, items, current = await self._list_watch_snapshot(meta, path, query)
             for index in range(len(items)):
-                yield ("ADDED", items[index])
+                yield ("POLLED", items[index])
             items.clear()
             for key, old in known.items():
                 if key not in current:
@@ -640,41 +640,62 @@ class KubeClient(ReadOps, WriteOps):
                 async for event in self._poll_resource_events(meta, path, query, known):
                     yield event
 
+    def _project_watch_summary(
+        self, meta: ResourceMeta, item: dict[str, Any]
+    ) -> PodSummary | GenericSummary:
+        if meta.identity == HELM_RELEASES_META.identity:
+            return release_from_secret(item)
+        if meta.identity == HELM_REVISIONS_META.identity:
+            return revision_from_secret(item)
+        if meta.identity == PODS_META.identity:
+            return self._pod_summary(item)
+        return self._object_summary(meta, item)
+
+    def _project_watch_event(
+        self,
+        meta: ResourceMeta,
+        event: tuple[str, dict[str, Any]],
+        summaries: dict[str, PodSummary | GenericSummary],
+    ) -> tuple[str, PodSummary | GenericSummary] | None:
+        """Project once, release the raw manifest, then classify polling changes."""
+        event_type, item = event
+        key = self._raw_resource_key(item)
+        summary = self._project_watch_summary(meta, item)
+        item.clear()
+        del item
+        if event_type == "POLLED":
+            previous = summaries.get(key)
+            if previous == summary:
+                return None
+            event_type = "ADDED" if previous is None else "MODIFIED"
+        if event_type == "DELETED":
+            summaries.pop(key, None)
+        elif event_type in ("SNAPSHOT", "ADDED", "MODIFIED"):
+            summaries[key] = summary
+        return event_type, summary
+
     async def watch_resources(
         self, meta: ResourceMeta, namespace: str | None
     ) -> AsyncGenerator[WatchEvent[PodSummary | GenericSummary], None]:
-        """Yield projected summaries from one shared raw LIST/WATCH transport."""
-        if meta.identity == HELM_RELEASES_META.identity:
-            tracker = ReleaseTracker()
-            async for event in self._watch_resource_events(meta, namespace):
-                if isinstance(event, WatchProgress):
-                    yield event
-                    continue
-                event_type, item = event
-                tracker_event = "ADDED" if event_type == "SNAPSHOT" else event_type
-                projected = tracker.apply(tracker_event, release_from_secret(item))
-                item.clear()
-                del item
-                for projected_type, release in projected:
-                    if event_type == "SNAPSHOT":
-                        projected_type = "SNAPSHOT"
-                    yield (projected_type, release)
-            return
-
+        """Yield LIST/WATCH summaries, suppressing unchanged polling rows."""
+        summaries: dict[str, PodSummary | GenericSummary] = {}
+        tracker = ReleaseTracker() if meta.identity == HELM_RELEASES_META.identity else None
         async for event in self._watch_resource_events(meta, namespace):
             if isinstance(event, WatchProgress):
                 yield event
                 continue
-            event_type, item = event
-            if meta.identity == HELM_REVISIONS_META.identity:
-                summary: PodSummary | GenericSummary = revision_from_secret(item)
-            elif meta.identity == PODS_META.identity:
-                summary = self._pod_summary(item)
-            else:
-                summary = self._object_summary(meta, item)
-            item.clear()
-            del item
-            yield (event_type, summary)
+            projected = self._project_watch_event(meta, event, summaries)
+            if projected is None:
+                continue
+            if tracker is None:
+                yield projected
+                continue
+            event_type, summary = projected
+            tracker_event = "ADDED" if event_type == "SNAPSHOT" else event_type
+            for projected_type, release in tracker.apply(
+                tracker_event, cast(HelmReleaseSummary, summary)
+            ):
+                yield ("SNAPSHOT" if event_type == "SNAPSHOT" else projected_type, release)
 
     async def iter_objects(
         self, meta: ResourceMeta, namespace: str | None
@@ -1693,6 +1714,15 @@ class KubeClient(ReadOps, WriteOps):
             )
         )
 
+    async def _request_discovery_json(self, path: str) -> dict[str, Any]:
+        try:
+            async with asyncio.timeout(_DISCOVERY_TIMEOUT_SECONDS):
+                return await self._request_json(path)
+        except TimeoutError:
+            raise KubeClientError(
+                "Kubernetes API discovery timed out; check cluster connectivity and retry"
+            ) from None
+
     async def discover_resources(self) -> list[ResourceMeta]:
         """Return every LIST-able resource from /api/v1 and /apis.
 
@@ -1704,9 +1734,9 @@ class KubeClient(ReadOps, WriteOps):
         versions win per resource identity, regardless of response order.
         """
         metas: list[ResourceMeta] = []
-        core = await self._request_json("/api/v1")
+        core = await self._request_discovery_json("/api/v1")
         metas += _parse_resource_list(core, group="", version="v1")
-        groups = await self._request_json("/apis")
+        groups = await self._request_discovery_json("/apis")
         advertised = groups.get("groups", [])
         if not isinstance(advertised, list):
             raise KubeClientError("Kubernetes API discovery returned an invalid group list")
@@ -1719,10 +1749,9 @@ class KubeClient(ReadOps, WriteOps):
         async def _fetch(name: str, version: str) -> list[ResourceMeta]:
             path = f"/apis/{name}/{version}"
             try:
-                async with asyncio.timeout(_DISCOVERY_TIMEOUT_SECONDS):
-                    resource_list = await self._request_json(path)
+                resource_list = await self._request_discovery_json(path)
                 return _parse_resource_list(resource_list, group=name, version=version)
-            except (ApiStatusError, KubeClientError, TimeoutError) as exc:
+            except (ApiStatusError, KubeClientError) as exc:
                 logger.warning("API discovery skipped %s: %s", path, exc)
                 return []
 
@@ -1854,6 +1883,12 @@ def _group_versions(group: Any) -> list[tuple[str, str]]:
     ]
 
 
+def _resource_short_names(value: Any) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        return ()
+    return tuple(alias for alias in value if isinstance(alias, str) and alias)
+
+
 def _parse_resource_list(data: dict[str, Any], *, group: str, version: str) -> list[ResourceMeta]:
     out = []
     resources = data.get("resources", [])
@@ -1877,7 +1912,7 @@ def _parse_resource_list(data: dict[str, Any], *, group: str, version: str) -> l
                 group,
                 version,
                 bool(namespaced),
-                tuple(resource.get("shortNames") or ()),
+                _resource_short_names(resource.get("shortNames")),
                 # list-only aggregated APIs (OLM's packageserver) stay
                 # discoverable; the watch source polls them (issue #141).
                 watchable="watch" in verbs,
