@@ -316,10 +316,10 @@ def _rendered(
     """Header plus as many entries as `limit` allows, honest about the rest.
 
     The header is never dropped: provenance is what a citation needs, and
-    entries are what it can afford to lose. If any entry is dropped the
-    header says `truncated: yes`, so a result cut to fit can never read as
-    complete — which is what a downstream cap left behind (PR #280
-    review).
+    entries are what it can afford to lose. If any entry or explanatory
+    text is dropped the header says `truncated: yes`, so a result cut to
+    fit can never read as complete — which is what a downstream cap left
+    behind (PR #280 review).
     """
     kept: list[str] = []
     dropped = False
@@ -340,7 +340,13 @@ def _rendered(
             budget -= len(entry) + 1
     lines = _header(**header_fields, truncated=truncated or dropped)
     if not kept:
-        lines.append(empty_note if not entries else "every entry was dropped to fit the budget")
+        note = empty_note if not entries else "every entry was dropped to fit the budget"
+        if limit is not None and len("\n".join(lines)) + len(note) + 1 > limit:
+            lines = _header(**header_fields, truncated=True)
+            budget = limit - len("\n".join(lines)) - 1
+            note = f"{note[: budget - 1]}…" if budget > 0 else ""
+        if note:
+            lines.append(note)
         return "\n".join(lines)
     lines.append("")
     lines.extend(kept)

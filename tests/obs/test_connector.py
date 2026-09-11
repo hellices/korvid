@@ -167,6 +167,33 @@ class TestRenderMetrics:
         text = render_metrics(self._result(series=0))
         assert "no series matched" in text
 
+    @pytest.mark.parametrize("omitted_entries", [0, 2])
+    @pytest.mark.parametrize("remaining", [0, 1, 2, 30])
+    def test_empty_explanation_respects_the_render_budget(
+        self, omitted_entries: int, remaining: int
+    ) -> None:
+        result = replace(self._result(series=0), omitted_entries=omitted_entries)
+        header = render_metrics(replace(result, truncated=True)).rsplit("\n", 1)[0]
+        limit = len(header) + remaining
+
+        text = render_metrics(result, limit=limit)
+
+        assert len(text) <= limit
+        assert text == header or text.startswith(f"{header}\n")
+        assert "truncated: yes" in text.splitlines()
+        if omitted_entries:
+            assert "omitted unusable entries: 2" in text.splitlines()
+            assert "no series matched" not in text
+        if remaining == 30:
+            assert ("no usable series" if omitted_entries else "no series matched") in text
+
+    @pytest.mark.parametrize("omitted_entries", [0, 2])
+    def test_empty_explanation_at_the_exact_budget_is_unchanged(self, omitted_entries: int) -> None:
+        result = replace(self._result(series=0), omitted_entries=omitted_entries)
+        text = render_metrics(result)
+
+        assert render_metrics(result, limit=len(text)) == text
+
 
 class TestRenderLogs:
     def _result(self, *, truncated: bool = False, lines: int = 1) -> LogResult:
@@ -214,6 +241,33 @@ class TestRenderLogs:
 
     def test_an_empty_result_is_stated_not_implied(self) -> None:
         assert "no log lines matched" in render_logs(self._result(lines=0))
+
+    @pytest.mark.parametrize("omitted_entries", [0, 2])
+    @pytest.mark.parametrize("remaining", [0, 1, 2, 30])
+    def test_empty_explanation_respects_the_render_budget(
+        self, omitted_entries: int, remaining: int
+    ) -> None:
+        result = replace(self._result(lines=0), omitted_entries=omitted_entries)
+        header = render_logs(replace(result, truncated=True)).rsplit("\n", 1)[0]
+        limit = len(header) + remaining
+
+        text = render_logs(result, limit=limit)
+
+        assert len(text) <= limit
+        assert text == header or text.startswith(f"{header}\n")
+        assert "truncated: yes" in text.splitlines()
+        if omitted_entries:
+            assert "omitted unusable entries: 2" in text.splitlines()
+            assert "no log lines matched" not in text
+        if remaining == 30:
+            assert ("no usable log lines" if omitted_entries else "no log lines matched") in text
+
+    @pytest.mark.parametrize("omitted_entries", [0, 2])
+    def test_empty_explanation_at_the_exact_budget_is_unchanged(self, omitted_entries: int) -> None:
+        result = replace(self._result(lines=0), omitted_entries=omitted_entries)
+        text = render_logs(result)
+
+        assert render_logs(result, limit=len(text)) == text
 
 
 class TestTheHeaderCannotBeForged:
@@ -298,6 +352,21 @@ class TestTheRenderedResultFitsTheIngestBudget:
         text = render_logs(self._logs(1, 50_000), limit=2000)
         assert len(text) <= 2000
         assert "truncated: yes" in text.splitlines()
+
+    @pytest.mark.parametrize("remaining", [0, 1, 2, 30])
+    def test_all_dropped_explanation_respects_the_render_budget(self, remaining: int) -> None:
+        result = self._logs(1, 50_000)
+        header = render_logs(replace(result, truncated=True)).split("\n\n", 1)[0]
+        limit = len(header) + remaining
+
+        text = render_logs(result, limit=limit)
+
+        assert len(text) <= limit
+        assert text == header or text.startswith(f"{header}\n")
+        assert "truncated: yes" in text.splitlines()
+        assert "no log lines matched" not in text
+        if remaining == 30:
+            assert "every entry was dropped" in text
 
     def test_the_header_always_survives(self) -> None:
         """Provenance is what a citation needs; entries are what it can lose."""

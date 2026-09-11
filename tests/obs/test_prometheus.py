@@ -332,6 +332,37 @@ class TestErrorMapping:
 
 
 class TestParsing:
+    @pytest.mark.parametrize(
+        "overflow_value",
+        [pytest.param(10**400, id="positive"), pytest.param(-(10**400), id="negative")],
+    )
+    @pytest.mark.parametrize("include_valid", [False, True])
+    async def test_numeric_overflow_omits_only_the_unusable_sample(
+        self, overflow_value: int, include_valid: bool
+    ) -> None:
+        payload = _vector(*([("api-first", "1.5"), ("api-last", "2.5")] if include_valid else []))
+        payload["data"]["result"].insert(
+            1,
+            {"metric": {"pod": "api-overflow"}, "value": [1786_000_060, overflow_value]},
+        )
+        connector, _ = _connector(_ok(payload))
+
+        result = await connector.query(signal="cpu", scope=SCOPE)
+        rendered = render_metrics(result)
+
+        assert [(series.labels, series.value) for series in result.series] == (
+            [({"pod": "api-first"}, 1.5), ({"pod": "api-last"}, 2.5)] if include_valid else []
+        )
+        assert result.observed_at == ("2026-08-06T07:06:40Z" if include_valid else None)
+        assert result.omitted_entries == 1
+        assert result.truncated is True
+        assert "omitted unusable entries: 1" in rendered
+        assert "truncated: yes" in rendered
+        assert "api-overflow" not in rendered
+        assert "no series matched" not in rendered
+        if not include_valid:
+            assert "no usable series remained" in rendered
+
     @pytest.mark.parametrize("include_valid", [False, True])
     async def test_unusable_samples_are_reported_as_incomplete(self, include_valid: bool) -> None:
         payload = _vector(*([("api-good", "1.5")] if include_valid else []))

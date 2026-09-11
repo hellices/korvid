@@ -202,7 +202,7 @@ def _series(row: Any, mask: frozenset[str], answer: Answer) -> Series | None:
         # parses, so it drops out like any other unusable row (PR #280
         # review).
         value = float(answer.scrub(sample[1]) if isinstance(sample[1], str) else sample[1])
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
     if not isfinite(value):
         return None

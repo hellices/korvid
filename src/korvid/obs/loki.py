@@ -235,22 +235,20 @@ def _stream_lines(
 
     The raw count is returned separately because it, not the parsed
     count, is what the backend applied `limit` to. A malformed stream
-    container counts as one omission when its entries cannot be inspected.
+    container or label map counts as at least one omission, even when
+    its values list is empty.
     """
     if not isinstance(stream, Mapping):
         return 0, [], 1
-    raw_labels = stream.get("stream")
-    labels = answer.scrub_labels(
-        masked_labels(
-            {str(k): str(v) for k, v in raw_labels.items()}
-            if isinstance(raw_labels, Mapping)
-            else {},
-            mask,
-        )
-    )
     values = stream.get("values")
     if not isinstance(values, list):
         return 0, [], 1
+    raw_labels = stream.get("stream")
+    if not isinstance(raw_labels, Mapping) or not all(
+        isinstance(key, str) and isinstance(value, str) for key, value in raw_labels.items()
+    ):
+        return len(values), [], max(1, len(values))
+    labels = answer.scrub_labels(masked_labels(raw_labels, mask))
     lines: list[tuple[int, LogLine]] = []
     for entry in values:
         if not isinstance(entry, list) or len(entry) != 2:
