@@ -130,10 +130,10 @@ class ObservabilityBackend:
 class ConfigError(ValueError):
     """A configuration key or value is not accepted.
 
-    Raised for unknown top-level or `agent` keys, and for an invalid
-    `agent.model_tier` value. The message is always a single line so it
-    reads cleanly as a `SystemExit` at startup — never let it grow an
-    embedded newline.
+    Raised for a non-mapping config root, unknown top-level or `agent`
+    keys, and an invalid `agent.model_tier` value. The message is always a
+    single line so it reads cleanly as a `SystemExit` at startup — never
+    let it grow an embedded newline.
     """
 
 

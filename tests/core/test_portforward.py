@@ -119,6 +119,7 @@ def test_fake_process_exit_closes_the_readiness_stream(method: str, args: tuple[
     getattr(proc, method)(*args)
 
     assert stream.closed
+    assert stream._lines.get_nowait() is None
 
 
 def _registry(procs: list[_FakeProc], context: str | None = None) -> ForwardRegistry:
