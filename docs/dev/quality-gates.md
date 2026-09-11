@@ -148,6 +148,21 @@ change runs the suite once, on 3.12, and Windows starts and syncs before
 skipping its pytest step. What is saved is three redundant suite runs, not
 the matrix.
 
+Pull-request code never runs on `korvid-runners`. Linux test, pre-commit,
+security, experimental `ty`, and CodeQL jobs select `ubuntu-latest` for pull
+requests and retain `korvid-runners` only for trusted main pushes or the
+scheduled CodeQL scan. Change classification and dependency review always use
+`ubuntu-latest`; Windows always uses `windows-latest`. Every job also has an
+explicit 10–45 minute deadline so a wedged runner cannot consume capacity
+indefinitely.
+
+The Windows full-suite command prints and consumes `${{ github.run_id }}` as
+its single `pytest-randomly` seed, making a failed order reproducible without
+retrying the suite. The `ty-experimental` job syncs the locked development
+environment and runs `uv run --with ty ty check src/`; its job-level
+`continue-on-error` records a real failure while keeping this second type
+checker advisory.
+
 ### Windows documentation harness lifecycle diagnostics
 
 The landing-page JavaScript behavior tests keep a 10-second harness deadline.
