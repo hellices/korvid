@@ -1047,7 +1047,9 @@ def save_model_connections(
     """Write `agent.active`/`agent.profiles`, preserving everything else.
 
     Read-modify-write: unrelated top-level keys, unrelated `agent.*` keys
-    and every `unparsed` entry survive.
+    and every `unparsed` entry survive. Preservation does not make an
+    unsupported key valid: a later `load_config` still rejects unknown
+    top-level or `agent` keys with `ConfigError`.
 
     A name in `unparsed` is written from `unparsed`, even when a modelled
     profile of the same name exists — that pairing means the entry parsed
