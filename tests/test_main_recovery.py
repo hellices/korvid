@@ -150,6 +150,8 @@ def test_main_arms_and_disarms_runner_watchdog_on_every_exit(
 
     class Watchdog:
         def __init__(self, interval: float, function: Callable[[], None]) -> None:
+            assert interval == main_mod._RUNNER_SHUTDOWN_SECONDS == 5.0
+            assert function is main_mod._force_runner_exit
             self.daemon = False
 
         def start(self) -> None:
@@ -185,15 +187,16 @@ def test_main_sanitizes_loop_reports_before_runner_finalization(
 
     async def run(**kwargs: object) -> None:
         loop = asyncio.get_running_loop()
-        loop.call_soon(
-            loop.call_exception_handler,
+        loop.call_exception_handler(
             {"message": "SECRET_CLEANUP_PAYLOAD", "exception": RuntimeError("private data")},
         )
+        assert "Event loop operation failed" in caplog.text
 
     monkeypatch.setattr(main_mod, "_run", run)
     monkeypatch.setattr(sys, "argv", ["korvid", "--no-restart"])
     main_mod.main()
-    assert "Event loop cleanup failed" in caplog.text
+    assert "Event loop operation failed" in caplog.text
+    assert "cleanup" not in caplog.text.lower()
     assert "SECRET_CLEANUP_PAYLOAD" not in caplog.text
     assert all(record.exc_info is None for record in caplog.records)
 

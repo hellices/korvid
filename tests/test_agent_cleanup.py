@@ -469,6 +469,41 @@ async def test_final_sweep_does_not_cancel_tasks_from_before_the_run(
         await _join(unrelated_task)
 
 
+@pytest.mark.parametrize("finish_on_close", [False, True])
+async def test_runtime_tasks_are_not_cancelled_before_kubernetes_closes(
+    finish_on_close: bool, forced_exits: list[int], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    kube = _Kube()
+    started = asyncio.Event()
+    release = kube.closed if finish_on_close else asyncio.Event()
+    closed_when_finished: list[bool] = []
+    runtime_tasks: list[asyncio.Task[None]] = []
+
+    async def runtime() -> None:
+        started.set()
+        try:
+            await release.wait()
+        finally:
+            closed_when_finished.append(kube.closed.is_set())
+
+    async def wire(config: object, client: object, state: main_mod._RunState) -> None:
+        runtime_tasks.append(asyncio.create_task(runtime()))
+        await asyncio.wait_for(started.wait(), timeout=2)
+
+    fake_kube = SimpleNamespace(connect=AsyncMock(), close=kube.close)
+    monkeypatch.setattr(main_mod, "KubeClient", lambda **kwargs: fake_kube)
+    monkeypatch.setattr(main_mod, "_load_startup_config", lambda *args: KorvidConfig())
+    monkeypatch.setattr(main_mod, "_wire_and_run", wire)
+    try:
+        await _join(asyncio.create_task(main_mod._run()))
+        assert closed_when_finished == [True]
+        assert runtime_tasks[0].cancelled() is not finish_on_close
+        assert forced_exits == []
+    finally:
+        release.set()
+        await asyncio.wait_for(asyncio.gather(*runtime_tasks, return_exceptions=True), timeout=2)
+
+
 async def test_shielded_child_failure_during_kube_cleanup_is_consumed(
     forced_exits: list[int],
     monkeypatch: pytest.MonkeyPatch,
@@ -547,7 +582,7 @@ async def test_run_owns_children_and_restores_the_delegated_task_factory(
 
     async def wire(config: object, kube: object, state: main_mod._RunState) -> None:
         task = asyncio.create_task(child(), name="context probe", context=context)
-        assert task in state.close_tasks
+        assert task not in state.close_tasks
         assert task in delegated
         assert task.get_name() == "context probe"
         assert await task == "explicit"

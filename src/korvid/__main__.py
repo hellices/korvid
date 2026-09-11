@@ -438,22 +438,25 @@ def _track_cleanup_task(
 
 
 def _log_cleanup_loop_error(loop: asyncio.AbstractEventLoop, context: dict[str, Any]) -> None:
-    """Consume loop-reported cleanup failures without formatting untrusted context."""
+    """Consume loop-reported failures without formatting untrusted context."""
     future = context.get("future", context.get("task"))
     if isinstance(future, asyncio.Future) and future.done() and not future.cancelled():
         future.exception()
-    logger.warning("Event loop cleanup failed")
+    logger.warning("Event loop operation failed")
 
 
 @contextlib.contextmanager
-def _own_run_tasks(tasks: set[asyncio.Future[Any]]) -> Iterator[None]:
+def _own_run_tasks() -> Iterator[None]:
     """Own children at creation, including shielded tasks that finish before teardown.
 
+    Retain descendants locally, outside the explicit cleanup grace set. The
+    final sweep adopts remaining descendants only after clients have closed.
     The composition root owns this loop for one run. Delegate existing factory
     keywords unchanged, and restore both hooks for callers using an ambient loop.
     The exception handler also sanitizes explicit loop reports from shield and
     async-generator cleanup, which can occur even after a result was retrieved.
     """
+    tasks: set[asyncio.Future[Any]] = set()
     loop = asyncio.get_running_loop()
     previous_factory = loop.get_task_factory()
     previous_handler = loop.get_exception_handler()
@@ -1427,6 +1430,8 @@ def _adopt_run_tasks(state: _RunState) -> None:
 async def _finish_run_cleanup(state: _RunState) -> None:
     """Bound the last run-owned tasks before the stdlib runner can gather them.
 
+    Explicit close work has already received grace; cancel remaining descendants
+    without another grace wait after the client cleanup attempts.
     Only `_run` enables this sweep, excluding tasks that predate the run and
     the caller itself. Recheck after cancellation in case a finalizer spawned
     another task; those tasks must not escape the terminal decision either.
@@ -1434,7 +1439,7 @@ async def _finish_run_cleanup(state: _RunState) -> None:
     try:
         if state.preexisting_tasks is not None:
             _adopt_run_tasks(state)
-            await _drain_cleanup_tasks(state.close_tasks)
+            await _drain_cleanup_tasks(state.close_tasks, timeout=0.0)
     finally:
         _adopt_run_tasks(state)
         _exit_if_cleanup_pending(state.close_tasks)
@@ -1630,9 +1635,9 @@ class _RunState:
     """What `_run`'s teardown guard must release — filled progressively by
     `_wire_and_run` so a wiring failure releases exactly what was built.
 
-    The task factory retains descendants in `close_tasks` from creation, before
-    a shielding caller can drop them. `preexisting_tasks` excludes ambient work
-    from the final fallback sweep for tasks that bypassed the loop's factory.
+    `close_tasks` retains explicit cleanup work, including replaced agents.
+    The task factory retains other descendants until the final sweep.
+    `preexisting_tasks` excludes ambient work from that sweep.
     """
 
     mcp: MCPControllerBase | None = None
@@ -1662,7 +1667,7 @@ async def _run(readonly: bool = False, mcp: bool = False, namespace: str | None 
     # crash-recovery restart (issue #166). The state is filled as wiring
     # progresses, so teardown releases exactly what was built.
     state = _RunState(preexisting_tasks=preexisting_tasks)
-    with _own_run_tasks(state.close_tasks):
+    with _own_run_tasks():
         try:
             await _wire_and_run(config, kube, state)
         finally:
