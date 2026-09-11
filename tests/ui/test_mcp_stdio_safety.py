@@ -19,7 +19,8 @@ from korvid.mcp.server import KorvidMCPServer, MCPController
 from korvid.tools.executor import ToolExecutor
 from korvid.tools.proposals import ProposalState, ProposalStore
 from korvid.tools.registry import mcp_tool_schemas
-from korvid.ui.app import AppUIBridge, KorvidApp
+from korvid.ui.app import KorvidApp
+from korvid.ui.app_surfaces import AppUIBridge
 from korvid.ui.context_switch_coordinator import ContextSwitchResult
 from korvid.ui.widgets.confirm_screen import ConfirmScreen
 from korvid.ui.widgets.describe_screen import DescribeScreen

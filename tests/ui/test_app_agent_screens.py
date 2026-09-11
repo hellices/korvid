@@ -10,7 +10,8 @@ from textual.css.query import NoMatches
 
 from korvid.agent.interaction import ResourceIdentity
 from korvid.core.store import ALL_NAMESPACES
-from korvid.ui.app import AppAgentScreens, KorvidApp
+from korvid.ui.app import KorvidApp
+from korvid.ui.app_surfaces import AppAgentScreens
 from korvid.ui.widgets.describe_screen import DescribeScreen
 
 

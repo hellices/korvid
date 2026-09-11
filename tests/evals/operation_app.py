@@ -85,7 +85,8 @@ from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.models import manifest_uid
 from korvid.tools.executor import RecordedExecution, ToolExecutor, ToolOutcome, UIBridge
 from korvid.tools.registry import TOOLS_BY_NAME
-from korvid.ui.app import AppUIBridge, KorvidApp
+from korvid.ui.app import KorvidApp
+from korvid.ui.app_surfaces import AppUIBridge
 from korvid.ui.messages import AgentPromptSubmitted
 from korvid.ui.widgets.agent_panel import AgentPanel
 from korvid.ui.widgets.confirm_screen import ConfirmScreen

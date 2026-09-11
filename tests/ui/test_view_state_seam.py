@@ -23,7 +23,8 @@ from korvid.core.store import ResourceStore, Summary
 from korvid.core.watch import WatchManager
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.models import GenericSummary
-from korvid.ui.app import AppUiSurface, AppViewState, KorvidApp
+from korvid.ui.app import KorvidApp
+from korvid.ui.app_surfaces import AppUiSurface, AppViewState
 from korvid.ui.ui_surface import UiSurface
 from korvid.ui.view_state import ViewState
 from korvid.ui.widgets.command_bar import CommandBar

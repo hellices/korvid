@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 from textual._context import active_app
 
-from korvid.ui.app import AppUIBridge
+from korvid.ui.app_surfaces import AppUIBridge
 from korvid.ui.widgets.describe_screen import DescribeScreen
 from tests.ui.test_agent_ui_drive import make_app
 
