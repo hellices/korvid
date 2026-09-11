@@ -6,7 +6,7 @@ import asyncio
 import io
 import queue
 import threading
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -47,6 +47,7 @@ class _FakeProc:
         self.terminated = False
         # None = no readiness channel; _registry() swaps in a gated stream.
         self.stdout: Any = None
+        _TEST_PROCS.append(self)
 
     def poll(self) -> int | None:
         return self.returncode
@@ -94,6 +95,20 @@ class _GatedStream:
         if not self.closed:
             self.closed = True
             self._lines.put(None)
+
+
+_TEST_PROCS: list[_FakeProc] = []
+
+
+@pytest.fixture(autouse=True)
+def _close_fake_streams() -> Iterator[None]:
+    try:
+        yield
+    finally:
+        for proc in _TEST_PROCS:
+            if proc.stdout is not None:
+                proc.stdout.close()
+        _TEST_PROCS.clear()
 
 
 def test_fake_process_termination_closes_the_readiness_stream() -> None:
@@ -1081,6 +1096,7 @@ async def test_failed_reattach_is_audited_with_error_outcome(tmp_path: Path) -> 
         if procs:  # first spawn succeeds, the re-attach spawn fails
             raise OSError("kubectl vanished")
         proc = _FakeProc(argv)
+        proc.stdout = _GatedStream()
         procs.append(proc)
         return proc
 

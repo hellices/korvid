@@ -207,6 +207,48 @@ def test_reattach_reaps_a_replacement_with_no_readiness_stream() -> None:
     assert procs[1].waited
 
 
+def test_no_readiness_cleanup_does_not_hold_the_registry_lock() -> None:
+    wait_entered = threading.Event()
+    release_wait = threading.Event()
+
+    class _BlockingWaitProc(_FakeProc):
+        def wait(self, timeout: float | None = None) -> int:
+            wait_entered.set()
+            release_wait.wait()
+            self.waited = True
+            return self.returncode or 0
+
+    def _popen(argv: list[str], **_kwargs: Any) -> _BlockingWaitProc:
+        return _BlockingWaitProc(argv)
+
+    registry = ForwardRegistry(popen=_popen)
+    start_done = threading.Event()
+
+    def _start() -> None:
+        registry.start(_spec())
+        start_done.set()
+
+    start_thread = threading.Thread(target=_start, daemon=True)
+    start_thread.start()
+    assert wait_entered.wait(5.0), "rejected process never entered its reap wait"
+
+    read_done = threading.Event()
+
+    def _read() -> None:
+        registry.forwards()
+        read_done.set()
+
+    read_thread = threading.Thread(target=_read, daemon=True)
+    read_thread.start()
+    try:
+        assert read_done.wait(1.0), "registry lock was held during process reaping"
+    finally:
+        release_wait.set()
+    start_thread.join(timeout=5.0)
+    read_thread.join(timeout=5.0)
+    assert start_done.is_set()
+
+
 def test_start_pins_kube_context() -> None:
     procs: list[_FakeProc] = []
     registry = _registry(procs, context="staging")

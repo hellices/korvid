@@ -265,9 +265,10 @@ class KorvidMCPServer:
         tools, so anything outside this server's configured surface is
         rejected *before* dispatch.
 
-        ``ToolExecutor.execute`` never raises - failures come back as
-        ``"ERROR: ..."`` strings, which is exactly what the MCP host should
-        see (same contract as the built-in agent loop).
+        `execute_recorded()` returns a structured `ToolOutcome`; its `error`
+        bit is authoritative even when external text begins with ``ERROR:``.
+        A blocked structured result raises `ToolResultBlocked`, which this
+        boundary converts into a bounded failed outcome for the MCP host.
         """
         if name not in self._tool_names:
             text = f"ERROR: tool not available over MCP: {name}"

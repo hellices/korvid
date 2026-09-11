@@ -2013,6 +2013,8 @@ async def test_an_external_read_result_beginning_with_error_is_not_a_failed_call
         ),
     )
     assert result.is_error is False, "a successful read was reported as a failed call"
+    assert getattr(result.content[0], "text", None) == "ERROR: connection refused"
+    assert executor.calls == [("query_metrics", {"signal": "cpu", "namespace": "prod"})]
 
 
 async def test_a_failed_external_read_is_reported_as_a_failed_call() -> None:

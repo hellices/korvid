@@ -65,6 +65,7 @@ class _ForwardProcess(Protocol):
 # One generation's watcher inputs, captured by _prepare_handshake() while the
 # record cannot change: (process, its stdout stream, its readiness event).
 _WatcherBinding = tuple[_ForwardProcess, Iterable[str], threading.Event]
+_HandshakePreparation = tuple[_WatcherBinding | None, _ForwardProcess | None]
 
 
 @dataclass(frozen=True)
@@ -194,6 +195,8 @@ class ForwardRegistry:
         finally:
             if not spawned:
                 self._release_claim(spec.local_port)
+        binding: _WatcherBinding | None = None
+        rejected: _ForwardProcess | None = None
         with self._ops:
             self._claimed_ports.discard(spec.local_port)
             closed = self._closed or self._generation != generation
@@ -201,7 +204,9 @@ class ForwardRegistry:
                 record = ForwardRecord(id=self._next_id, spec=spec, _proc=proc)
                 # Prepared before publication: nothing may observe the
                 # dataclass default ``alive`` on an unconfirmed process.
-                binding = self._prepare_handshake(record)
+                binding, rejected = self._prepare_handshake(record)
+                if rejected is not None:
+                    self._claimed_ports.add(spec.local_port)
                 self._next_id += 1
                 self._records[record.id] = record
         if closed:
@@ -210,6 +215,11 @@ class ForwardRegistry:
             self._discard_spawn(proc)
             msg = "port-forward registry is shut down"
             raise ValueError(msg)
+        if rejected is not None:
+            try:
+                self._reject_unready_process(rejected)
+            finally:
+                self._release_claim(spec.local_port)
         self._start_watcher(record, binding)
         return record
 
@@ -234,7 +244,7 @@ class ForwardRegistry:
         )
         return proc
 
-    def _prepare_handshake(self, record: ForwardRecord) -> _WatcherBinding | None:
+    def _prepare_handshake(self, record: ForwardRecord) -> _HandshakePreparation:
         """Install the readiness state before the record becomes observable.
 
         Publishing first and downgrading to ``starting`` afterwards would
@@ -244,25 +254,23 @@ class ForwardRegistry:
 
         Returns:
             The exact process/stream/event binding to hand to
-            `_start_watcher()`, or None when there is no readiness channel to
-            watch — either the process was never adopted, or its ``stdout`` is
-            explicitly None. A real child always exposes the attribute; a test
-            double that omits it violates `_ForwardProcess` and raises.
+            `_start_watcher()`, plus a process to reject outside `_ops`.
+            A real child always exposes ``stdout``; a test double that omits
+            the attribute violates `_ForwardProcess` and raises.
         """
         proc = record._proc
         stream = None if proc is None else proc.stdout
         if proc is None or stream is None:
             # No readiness channel: the handshake can never be confirmed, so
             # the spawn is rejected outright instead of trusted as alive.
-            if proc is not None:
-                self._reject_unready_process(record, proc)
+            record._proc = None
             record.status = "broken"
             record._ready = None
-            return None
+            return None, proc
         record.status = "starting"
         ready = threading.Event()
         record._ready = ready
-        return (proc, stream, ready)
+        return (proc, stream, ready), None
 
     def _start_watcher(self, record: ForwardRecord, binding: _WatcherBinding | None) -> None:
         """Start the reader thread for a prepared generation (outside the locks).
@@ -468,6 +476,7 @@ class ForwardRegistry:
                 self._release_claim(spec.local_port)
         superseded: threading.Event | None = None
         binding: _WatcherBinding | None = None
+        rejected: _ForwardProcess | None = None
         # Adopt under the ops lock: a stop or teardown that won the race
         # while the spawn was in flight must not have its outcome undone by
         # this thread publishing a fresh process afterwards.
@@ -488,10 +497,17 @@ class ForwardRegistry:
                     # process: a record left ``broken`` here would be a
                     # reclaim target for a concurrent same-port start, which
                     # would signal the fresh replacement down.
-                    binding = self._prepare_handshake(record)
+                    binding, rejected = self._prepare_handshake(record)
+                    if rejected is not None:
+                        self._claimed_ports.add(spec.local_port)
         if not adopted:
             self._discard_spawn(replacement)
             return None
+        if rejected is not None:
+            try:
+                self._reject_unready_process(rejected)
+            finally:
+                self._release_claim(spec.local_port)
         if superseded is not None:
             # Resolve the previous generation's waiter right away — its
             # reader may never observe the swap (blocked on a silent
@@ -731,7 +747,7 @@ class ForwardRegistry:
             proc.wait(timeout=_STOP_GRACE_SECONDS)
 
     @staticmethod
-    def _reject_unready_process(record: ForwardRecord, proc: _ForwardProcess) -> None:
+    def _reject_unready_process(proc: _ForwardProcess) -> None:
         """Terminate and reap a child whose readiness stream is unavailable."""
         if proc.poll() is None:
             proc.terminate()
@@ -741,7 +757,6 @@ class ForwardRegistry:
                 proc.kill()
                 with suppress(subprocess.TimeoutExpired):
                     proc.wait(timeout=_STOP_GRACE_SECONDS)
-        record._proc = None
 
     @staticmethod
     def _release_waiters(ready: threading.Event | None) -> None:
