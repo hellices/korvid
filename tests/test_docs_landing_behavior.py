@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -10,8 +11,11 @@ import sys
 import tempfile
 from html.parser import HTMLParser
 from pathlib import Path
-from typing import BinaryIO, cast
+from time import monotonic
+from types import SimpleNamespace
+from typing import Any, BinaryIO, cast
 
+import psutil  # type: ignore[import-untyped]  # dependency ships without inline stubs
 import pytest
 
 ROOT = Path(__file__).parent.parent
@@ -157,32 +161,86 @@ def _run_startup_probe(label: str, command: list[str]) -> str:
     )
 
 
+def _process_snapshot(pid: int) -> str:
+    try:
+        snapshot = psutil.Process(pid).as_dict(
+            attrs=["status", "cpu_times", "num_threads", "memory_info"]
+        )
+        cpu_times = snapshot["cpu_times"]
+        memory_info = snapshot["memory_info"]
+        status = str(snapshot["status"])[:32]
+        cpu_user = float(cpu_times.user)
+        cpu_system = float(cpu_times.system)
+        threads = int(snapshot["num_threads"])
+        rss = int(memory_info.rss)
+        vms = int(memory_info.vms)
+    except (
+        psutil.Error,
+        OSError,
+        AttributeError,
+        KeyError,
+        TypeError,
+        ValueError,
+    ) as error:
+        return f"Process snapshot: diagnostic-error={type(error).__name__}"
+    return (
+        f"Process snapshot: status={status} cpu-user-seconds={cpu_user:g} "
+        f"cpu-system-seconds={cpu_system:g} threads={threads} "
+        f"rss-bytes={rss} vms-bytes={vms}"
+    )
+
+
+def _terminate_and_reap(process: subprocess.Popen[bytes], poll_state: int | None) -> str:
+    if poll_state is not None:
+        return f"already-exited={poll_state}"
+    try:
+        process.terminate()
+        process.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        try:
+            process.kill()
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            return "kill=timed-out"
+        except OSError as error:
+            return f"kill=error type={type(error).__name__}"
+        return "kill=reaped"
+    except OSError as error:
+        return f"terminate=error type={type(error).__name__}"
+    return "terminate=reaped"
+
+
 def _run_harness(name: str) -> subprocess.CompletedProcess[str]:
     found = shutil.which("node")
     if found is None:
         raise RuntimeError("node is not installed")
     node = str(Path(found).resolve())
-    command = [node, str(JS_TESTS / name)]
+    preload = str(JS_TESTS / "harness_preload.cjs")
+    harness = str(JS_TESTS / name)
+    command = [node, "--require", preload, harness]
     with (
         tempfile.TemporaryFile(mode="w+b", dir=ROOT) as stdout_capture,
         tempfile.TemporaryFile(mode="w+b", dir=ROOT) as stderr_capture,
     ):
+        started = monotonic()
+        process = subprocess.Popen(
+            command,
+            stdout=stdout_capture,
+            stderr=stderr_capture,
+            cwd=ROOT,
+            stdin=subprocess.DEVNULL,
+        )
         try:
-            result = subprocess.run(
-                command,
-                stdout=stdout_capture,
-                stderr=stderr_capture,
-                check=False,
-                cwd=ROOT,
-                stdin=subprocess.DEVNULL,
-                timeout=_HARNESS_TIMEOUT,
-            )
+            returncode = process.wait(timeout=_HARNESS_TIMEOUT)
         except subprocess.TimeoutExpired as error:
+            poll_state = process.poll()
+            elapsed_ms = max(0, int((monotonic() - started) * 1000))
+            snapshot = _process_snapshot(process.pid)
+            termination = _terminate_and_reap(process, poll_state)
             stdout_text = _read_capture(stdout_capture, limit=_DIAGNOSTIC_LIMIT)
             stderr_text = _read_capture(stderr_capture, limit=_DIAGNOSTIC_LIMIT)
             error.stdout = stdout_text.encode("utf-8")
             error.stderr = stderr_text.encode("utf-8")
-            harness = str(JS_TESTS / name)
             present = ", ".join(name for name in _NODE_ENV_NAMES if name in os.environ) or "<none>"
             process_probe = _run_startup_probe(
                 "Python child process control",
@@ -206,6 +264,9 @@ def _run_harness(name: str) -> subprocess.CompletedProcess[str]:
                         f"Node executable: {node}",
                         "Node stdin: subprocess.DEVNULL (noninteractive harness)",
                         f"Node environment present: {present}",
+                        f"Node process: pid={process.pid} poll={poll_state} elapsed-ms={elapsed_ms}",
+                        snapshot,
+                        f"Node termination: {termination}",
                         f"Captured stdout:\n{stdout_text}",
                         f"Captured stderr:\n{stderr_text}",
                         process_probe,
@@ -216,17 +277,136 @@ def _run_harness(name: str) -> subprocess.CompletedProcess[str]:
             )
             raise
         return subprocess.CompletedProcess(
-            result.args,
-            result.returncode,
+            process.args,
+            returncode,
             _read_capture(stdout_capture),
             _read_capture(stderr_capture),
         )
+
+
+class _HarnessTimeoutProcess:
+    pid = 4242
+
+    def __init__(
+        self,
+        command: list[str],
+        timeout_error: subprocess.TimeoutExpired,
+        events: list[str],
+    ) -> None:
+        self.args = command
+        self._timeout_error = timeout_error
+        self._events = events
+
+    def wait(self, timeout: float | None = None) -> int:
+        self._events.append(f"wait:{timeout}")
+        if timeout == _HARNESS_TIMEOUT:
+            raise self._timeout_error
+        return -15
+
+    def poll(self) -> int | None:
+        self._events.append("poll")
+        return None
+
+    def terminate(self) -> None:
+        self._events.append("terminate")
+
+    def kill(self) -> None:
+        raise AssertionError("a process reaped after terminate must not be killed")
+
+
+class _HarnessPopen:
+    def __init__(
+        self,
+        *,
+        command: list[str],
+        process: _HarnessTimeoutProcess,
+        stdout_output: bytes,
+        stderr_output: bytes,
+        spawn_options: dict[str, object],
+        events: list[str],
+    ) -> None:
+        self._command = command
+        self._process = process
+        self._stdout_output = stdout_output
+        self._stderr_output = stderr_output
+        self._spawn_options = spawn_options
+        self._events = events
+
+    def __call__(self, popen_command: list[str], **options: object) -> _HarnessTimeoutProcess:
+        assert popen_command == self._command
+        self._spawn_options.update(options)
+        stdout = cast(BinaryIO, options["stdout"])
+        stderr = cast(BinaryIO, options["stderr"])
+        stdout.write(self._stdout_output)
+        stderr.write(self._stderr_output)
+        stdout.flush()
+        stderr.flush()
+        self._events.append("spawn")
+        return self._process
+
+
+class _HarnessProbeRunner:
+    def __init__(
+        self,
+        *,
+        process_control: list[str],
+        node: str,
+        calls: list[tuple[list[str], dict[str, object]]],
+    ) -> None:
+        self._process_control = process_control
+        self._node = node
+        self._calls = calls
+
+    def __call__(
+        self, probe_command: list[str], **options: object
+    ) -> subprocess.CompletedProcess[str]:
+        self._calls.append((probe_command, options))
+        if probe_command == self._process_control:
+            return subprocess.CompletedProcess(
+                probe_command,
+                0,
+                "",
+                "probe:python-child-started\n",
+            )
+        if probe_command == [self._node, "--version"]:
+            return subprocess.CompletedProcess(probe_command, 0, "v22.23.2\n", "")
+        if probe_command[:2] == [self._node, "--eval"]:
+            raise subprocess.TimeoutExpired(
+                probe_command,
+                _STARTUP_PROBE_TIMEOUT,
+                output=b"probe stdout",
+                stderr=b"probe:cjs-boot\nprobe:file-read\n",
+            )
+        raise AssertionError(f"unexpected startup probe: {probe_command!r}")
+
+
+class _HarnessPsutilProcess:
+    def __init__(self, pid: int, *, events: list[str]) -> None:
+        assert pid == 4242
+        self._events = events
+
+    def as_dict(self, attrs: list[str]) -> dict[str, object]:
+        assert attrs == ["status", "cpu_times", "num_threads", "memory_info"]
+        self._events.append("snapshot")
+        return {
+            "status": "running",
+            "cpu_times": SimpleNamespace(user=1.25, system=0.5),
+            "num_threads": 3,
+            "memory_info": SimpleNamespace(rss=4096, vms=8192),
+            "cmdline": ["node", "--token=must-not-appear"],
+            "environ": {"TOKEN": "must-not-appear"},
+            "open_files": ["/secret/must-not-appear"],
+            "connections": ["https://must-not-appear.invalid"],
+        }
 
 
 def test_harness_timeout_preserves_bounded_diagnostics(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     resolved = str(ROOT / "node-diagnostic.exe")
+    preload = str(JS_TESTS / "harness_preload.cjs")
+    harness = str(JS_TESTS / "scene_fallback_harness.mjs")
+    command = [resolved, "--require", preload, harness]
     python = str(Path(sys.executable).resolve())
     process_control = [
         python,
@@ -235,49 +415,40 @@ def test_harness_timeout_preserves_bounded_diagnostics(
         "-c",
         'import os; os.write(2, b"probe:python-child-started\\n")',
     ]
-    calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+    probe_calls: list[tuple[list[str], dict[str, object]]] = []
+    spawn_options: dict[str, object] = {}
+    events: list[str] = []
     stdout_output = (
         b"stdout-start\n" + b"x" * 10_000 + b"stdout-middle" + b"x" * 10_000 + b"stdout-tail"
     )
     stderr_output = (
         b"stderr-start\n" + b"y" * 10_000 + b"stderr-middle" + b"y" * 10_000 + b"stderr-tail"
     )
-    original_timeout = subprocess.TimeoutExpired(
-        [resolved, str(JS_TESTS / "scene_fallback_harness.mjs")],
-        10,
+    original_timeout = subprocess.TimeoutExpired(command, 10)
+    process = _HarnessTimeoutProcess(command, original_timeout, events)
+    popen = _HarnessPopen(
+        command=command,
+        process=process,
+        stdout_output=stdout_output,
+        stderr_output=stderr_output,
+        spawn_options=spawn_options,
+        events=events,
+    )
+    run = _HarnessProbeRunner(
+        process_control=process_control,
+        node=resolved,
+        calls=probe_calls,
     )
 
-    def run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
-        calls.append((args, kwargs))
-        command = args[0]
-        assert isinstance(command, list)
-        if len(calls) == 1:
-            stdout = cast(BinaryIO, kwargs["stdout"])
-            stderr = cast(BinaryIO, kwargs["stderr"])
-            stdout.write(stdout_output)
-            stderr.write(stderr_output)
-            stdout.flush()
-            stderr.flush()
-            raise original_timeout
-        if command == process_control:
-            return subprocess.CompletedProcess(
-                command,
-                0,
-                "",
-                "probe:python-child-started\n",
-            )
-        if command == [resolved, "--version"]:
-            return subprocess.CompletedProcess(command, 0, "v22.23.2\n", "")
-        raise subprocess.TimeoutExpired(
-            command,
-            5,
-            output=b"probe stdout",
-            stderr=b"probe:cjs-boot\nprobe:file-read\n",
-        )
-
     monkeypatch.setattr(shutil, "which", lambda executable: resolved)
+    monkeypatch.setattr(subprocess, "Popen", popen)
     monkeypatch.setattr(subprocess, "run", run)
-    for name in ("NODE_OPTIONS", "NODE_PATH", "NODE_EXTRA_CA_CERTS"):
+    monkeypatch.setattr(
+        psutil,
+        "Process",
+        lambda pid: _HarnessPsutilProcess(pid, events=events),
+    )
+    for name in _NODE_ENV_NAMES:
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("NODE_OPTIONS", "must-not-appear")
 
@@ -285,31 +456,30 @@ def test_harness_timeout_preserves_bounded_diagnostics(
         _run_harness("scene_fallback_harness.mjs")
 
     assert raised.value is original_timeout
-    assert len(calls) == 4
-    command = calls[0][0][0]
-    options = calls[0][1]
-    assert command == [resolved, str(JS_TESTS / "scene_fallback_harness.mjs")]
-    assert options["timeout"] == 10
-    assert options["stdin"] is subprocess.DEVNULL
-    assert "capture_output" not in options
-    assert options["stdout"] is not subprocess.PIPE
-    assert options["stderr"] is not subprocess.PIPE
-    assert calls[1][0][0] == process_control
-    assert calls[1][1]["timeout"] == 5
-    assert calls[1][1]["stdin"] is subprocess.DEVNULL
-    assert calls[2][0][0] == [resolved, "--version"]
-    assert calls[2][1]["timeout"] == 5
-    assert calls[2][1]["stdin"] is subprocess.DEVNULL
-    cjs_command = calls[3][0][0]
-    assert isinstance(cjs_command, list)
-    assert cjs_command[:2] == [resolved, "--eval"]
-    assert cjs_command[-1] == str(JS_TESTS / "scene_fallback_harness.mjs")
-    assert calls[3][1]["timeout"] == 5
-    assert calls[3][1]["stdin"] is subprocess.DEVNULL
+    assert events == ["spawn", "wait:10", "poll", "snapshot", "terminate", "wait:2"]
+    assert spawn_options["stdin"] is subprocess.DEVNULL
+    assert spawn_options["stdout"] is not subprocess.PIPE
+    assert spawn_options["stderr"] is not subprocess.PIPE
+    assert spawn_options["cwd"] == ROOT
+    assert "timeout" not in spawn_options
+    assert "check" not in spawn_options
+    assert [call[0] for call in probe_calls] == [
+        process_control,
+        [resolved, "--version"],
+        [resolved, "--eval", _CJS_STARTUP_PROBE, harness],
+    ]
+    assert all(call[1]["timeout"] == 5 for call in probe_calls)
+    assert all(call[1]["stdin"] is subprocess.DEVNULL for call in probe_calls)
     note = "\n".join(raised.value.__notes__)
     assert f"Node executable: {resolved}" in note
     assert "Node stdin: subprocess.DEVNULL" in note
     assert "Node environment present: NODE_OPTIONS" in note
+    assert re.search(r"Node process: pid=4242 poll=None elapsed-ms=\d+", note)
+    assert (
+        "Process snapshot: status=running cpu-user-seconds=1.25 "
+        "cpu-system-seconds=0.5 threads=3 rss-bytes=4096 vms-bytes=8192"
+    ) in note
+    assert "Node termination: terminate=reaped" in note
     assert "must-not-appear" not in note
     assert "Startup probe: Python child process control" in note
     assert "probe:python-child-started" in note
@@ -329,6 +499,39 @@ def test_harness_timeout_preserves_bounded_diagnostics(
     assert "truncated" in note
     assert _bounded_timeout_output(None) == "<none>"
     assert _bounded_timeout_output("complete string") == "complete string"
+
+
+def test_harness_timeout_escalates_from_terminate_to_kill() -> None:
+    events: list[str] = []
+
+    class FakeProcess:
+        def __init__(self) -> None:
+            self.args = ["node", "harness.mjs"]
+            self.pid = 5252
+
+        def terminate(self) -> None:
+            events.append("terminate")
+
+        def kill(self) -> None:
+            events.append("kill")
+
+        def wait(self, timeout: float | None = None) -> int:
+            events.append(f"wait:{timeout}")
+            if events.count("wait:2") == 1:
+                raise subprocess.TimeoutExpired(self.args, timeout)
+            return -9
+
+    result = _terminate_and_reap(cast(Any, FakeProcess()), poll_state=None)
+
+    assert result == "kill=reaped"
+    assert events == ["terminate", "wait:2", "kill", "wait:2"]
+
+
+def _assert_elapsed_milestones(stderr: str) -> None:
+    milestones = [line for line in stderr.splitlines() if " stage=" in line]
+    assert milestones
+    assert milestones[0] == "korvid-harness stage=node-started elapsed-ms=0"
+    assert all(re.search(r" elapsed-ms=\d+$", line) for line in milestones)
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
@@ -374,6 +577,7 @@ def test_harness_true_hang_preserves_bounded_file_diagnostics() -> None:
     assert "Timeout" in note
     assert "harness-hang stage=before-exit" not in note
     assert "harness-hang stage=exit " not in note
+    _assert_elapsed_milestones(note)
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
@@ -382,9 +586,10 @@ def test_harness_nonzero_exit_preserves_captured_output() -> None:
 
     assert result.returncode == 7
     assert result.stdout == "contract stdout\n"
-    assert result.stderr.startswith("contract stderr\n")
+    assert "contract stderr\n" in result.stderr
     assert "harness-contract stage=before-exit exit-code=7" in result.stderr
     assert "harness-contract stage=exit exit-code=7" in result.stderr
+    _assert_elapsed_milestones(result.stderr)
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
@@ -399,6 +604,7 @@ def test_scene_switcher_behavior() -> None:
     assert "active-resources=" in result.stderr
     assert "active-handles=" in result.stderr
     assert "active-requests=" in result.stderr
+    _assert_elapsed_milestones(result.stderr)
 
 
 def test_landing_markup_connects_scene_controls_to_fallback_content() -> None:
@@ -420,3 +626,4 @@ def test_scene_fallback_behavior() -> None:
     assert "scene-fallback stage=complete" in result.stderr
     assert "scene-fallback stage=before-exit exit-code=0" in result.stderr
     assert "scene-fallback stage=exit exit-code=0" in result.stderr
+    _assert_elapsed_milestones(result.stderr)

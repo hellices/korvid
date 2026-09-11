@@ -182,11 +182,14 @@ Node exit naturally. This does not accept parsed output as success: Python
 still requires the process handle to exit inside the same 10-second deadline
 and returns the real exit code.
 
-The shared harness lifecycle reporter writes bounded, value-free summaries of
-active resource, handle, and request type names at `stage=complete` and
+Before the harness module loads, a CommonJS preload synchronously writes
+`korvid-harness stage=node-started elapsed-ms=0`. The shared harness lifecycle
+reporter reuses that monotonic origin and appends a non-negative `elapsed-ms`
+value to every later milestone. It also writes bounded, value-free summaries
+of active resource, handle, and request type names at `stage=complete` and
 `stage=before-exit`, followed by a `stage=exit` marker from Node's synchronous
-exit event. The sequence helps distinguish an active-resource leak from a stall
-after the event loop empties or after Node begins final process teardown.
+exit event. The sequence helps distinguish failure before Node startup from an
+active-resource leak, an empty-event-loop stall, or final process teardown.
 On macOS/Node 22.22.1, intercepting the old forced exit produced empty resource,
 handle, and request sets; 100 consecutive natural-exit runs completed. That
 rules out a deterministic harness-owned leak there, not a Windows-specific
@@ -194,12 +197,18 @@ shutdown or runner stall. The new Windows evidence is required before claiming
 a root cause or fix.
 
 Stdout and stderr remain in separate temporary files under the repository
-instead of `PIPE`s. A true timeout still kills the process, preserves the
-original exception, and reads only bounded head-and-tail diagnostics from the
-files. A regression harness deliberately reports completion while retaining a
-timer: Python still raises the original timeout, and the bounded diagnostics
-retain the `Timeout` resource type. No completion marker is accepted as a
-substitute for process exit.
+instead of `PIPE`s. Python waits on the process handle with `Popen.wait()` for
+the unchanged 10-second deadline. On a true timeout it polls the process and
+takes a bounded `psutil` snapshot before termination. The snapshot contains
+only status, CPU user/system seconds, thread count, and RSS/VMS bytes; it never
+reads command-line arguments, environment values, open files, connections,
+executables, usernames, or parents. The runner then sends terminate and waits
+two seconds, escalating to kill and one final two-second wait only when needed.
+After reaping it reads bounded head-and-tail diagnostics from the files and
+re-raises the original timeout object. A regression harness deliberately
+reports completion while retaining a timer: Python still raises that original
+timeout, and the bounded diagnostics retain the `Timeout` resource type. No
+completion marker is accepted as a substitute for process exit.
 
 After a timeout, separately bounded controls run in this order:
 
