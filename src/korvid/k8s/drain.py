@@ -199,6 +199,8 @@ class _BudgetTracker:
                 # status lags its spec (observedGeneration < generation),
                 # regardless of the stale disruptionsAllowed - fail safe.
                 return f"{pdb_name} (status not up to date)"
+            if not _pod_is_ready(pod) and _healthy_budget_allows_unhealthy(pdb):
+                return None
             if self._remaining[id(pdb)] <= 0:
                 return pdb_name
             self._remaining[id(pdb)] -= 1
@@ -226,6 +228,17 @@ def _status_is_stale(pdb: dict[str, Any]) -> bool:
 
 def _always_allows_unhealthy(pdb: dict[str, Any]) -> bool:
     return (pdb.get("spec") or {}).get("unhealthyPodEvictionPolicy") == "AlwaysAllow"
+
+
+def _healthy_budget_allows_unhealthy(pdb: dict[str, Any]) -> bool:
+    """Admit unready Pods under an initialized, non-disrupted IfHealthyBudget."""
+    policy = (pdb.get("spec") or {}).get("unhealthyPodEvictionPolicy")
+    if policy not in (None, "IfHealthyBudget"):
+        return False
+    status = pdb.get("status") or {}
+    current = status.get("currentHealthy")
+    desired = status.get("desiredHealthy")
+    return type(current) is int and type(desired) is int and desired > 0 and current >= desired
 
 
 def _pod_is_ready(pod: dict[str, Any]) -> bool:
