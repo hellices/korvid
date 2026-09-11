@@ -85,6 +85,48 @@ def test_overhead_does_not_turn_explicit_zero_limits_into_caps(pod_level: bool) 
     assert pod.mem_limit_bytes == (0 if pod_level else None)
 
 
+@pytest.mark.parametrize("bucket", ["requests", "limits"])
+@pytest.mark.parametrize("placement", ["containers", "initContainers", "sidecar", "pod-level"])
+def test_fractional_memory_receives_overhead_before_byte_conversion(
+    bucket: str, placement: str
+) -> None:
+    resources = {bucket: {"memory": "400m"}}
+    spec: dict[str, Any] = {"overhead": {"memory": "16Mi"}}
+    if placement == "pod-level":
+        spec["resources"] = resources
+    elif placement == "sidecar":
+        spec["initContainers"] = [
+            {"name": "sidecar", "restartPolicy": "Always", "resources": resources}
+        ]
+    else:
+        spec[placement] = [{"name": "app", "resources": resources}]
+
+    pod = _pod(spec)
+
+    if bucket == "requests":
+        assert pod.mem_request == "16Mi"
+        assert pod.mem_request_bytes == 16 * 2**20 + 1
+    else:
+        assert pod.mem_limit == "16Mi"
+        assert pod.mem_limit_bytes == (16 * 2**20 + 1 if placement == "pod-level" else None)
+
+
+def test_fractional_memory_rounds_once_after_aggregation_and_overhead() -> None:
+    resources = {"requests": {"memory": "400m"}}
+    pod = _pod(
+        {
+            "overhead": {"memory": "400m"},
+            "containers": [{"name": "app", "resources": resources}],
+            "initContainers": [
+                {"name": "sidecar", "restartPolicy": "Always", "resources": resources},
+                {"name": "init", "resources": resources},
+            ],
+        }
+    )
+
+    assert pod.mem_request_bytes == 2
+
+
 def test_overhead_is_added_after_pod_level_resource_precedence() -> None:
     pod = _pod(
         {

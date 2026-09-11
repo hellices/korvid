@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import ROUND_UP, Decimal
 from typing import Any, Final
 
 from korvid.k8s.olm import channel_names, package_description
@@ -213,7 +213,7 @@ def _quantities(containers: list[dict[str, Any]], bucket: str, key: str) -> list
 
 def _init_peak_and_sidecars(
     init_containers: list[dict[str, Any]], bucket: str, key: str
-) -> tuple[float, float, bool]:
+) -> tuple[Decimal, Decimal, bool]:
     """Walk initContainers in declaration order, per the scheduler.
 
     Sidecars (restartPolicy: Always) started before a classic init keep
@@ -221,54 +221,53 @@ def _init_peak_and_sidecars(
     the cumulative sidecar requests declared before it. Returns
     (init_peak, sidecar_total, declared).
     """
-    peak = 0.0
-    running = 0.0
+    peak = Decimal(0)
+    running = Decimal(0)
     declared = False
-    for c in init_containers:
-        q = ((c.get("resources") or {}).get(bucket) or {}).get(key)
-        value = 0.0
-        if q is not None:
-            value = float(parse_cpu(q) if key == "cpu" else parse_memory(q))
+    for container in init_containers:
+        quantity = ((container.get("resources") or {}).get(bucket) or {}).get(key)
+        value = Decimal(0)
+        if quantity is not None:
+            value = parse_quantity(quantity)
             declared = True
-        if c.get("restartPolicy") == "Always":
+        if container.get("restartPolicy") == "Always":
             running += value
         else:
             peak = max(peak, running + value)
     return peak, running, declared
 
 
-def _workload_resource_value(spec: dict[str, Any], bucket: str, key: str) -> float | int | None:
+def _workload_resource_value(spec: dict[str, Any], bucket: str, key: str) -> Decimal | None:
     """Effective workload resource before RuntimeClass overhead.
 
     max(init phase peak, sum(containers) + sum(sidecars)) where the init
     phase peak accounts for sidecars already running while later classic
     inits execute (see _init_peak_and_sidecars). Returns None when nothing
-    is declared. CPU is cores (float), memory is bytes (int). Pod-level
-    resources (spec.resources, K8s 1.34+) take precedence over the
-    container-derived calculation, per resource.
+    is declared. Keep decimal quantities through aggregation and overhead
+    accounting. Pod-level resources (spec.resources, K8s 1.34+) take
+    precedence over the container-derived calculation, per resource.
     """
     pod_level = ((spec.get("resources") or {}).get(bucket) or {}).get(key)
     if pod_level is not None:
-        return parse_cpu(pod_level) if key == "cpu" else parse_memory(pod_level)
+        return parse_quantity(pod_level)
     main = _quantities(spec.get("containers") or [], bucket, key)
     init_peak, sidecar_total, init_declared = _init_peak_and_sidecars(
         spec.get("initContainers") or [], bucket, key
     )
     if not main and not init_declared:
         return None
-    if key == "cpu":
-        return max(sum(parse_cpu(v) for v in main) + sidecar_total, init_peak)
-    return max(sum(parse_memory(v) for v in main) + int(sidecar_total), int(init_peak))
+    return max(sum((parse_quantity(value) for value in main), sidecar_total), init_peak)
 
 
 def _effective_value(spec: dict[str, Any], bucket: str, key: str) -> float | int | None:
-    """Add Pod overhead to requests and only to declared, nonzero limits."""
+    """Add eligible overhead, then round memory as Kubernetes Quantity.Value."""
     value = _workload_resource_value(spec, bucket, key)
     overhead = (spec.get("overhead") or {}).get(key)
-    if overhead is None or (bucket == "limits" and not value):
-        return value
-    total = Decimal(str(value or 0)) + parse_quantity(str(overhead))
-    return float(total) if key == "cpu" else int(total)
+    if overhead is not None and (bucket == "requests" or value):
+        value = (value or Decimal(0)) + parse_quantity(str(overhead))
+    if value is None:
+        return None
+    return float(value) if key == "cpu" else int(value.to_integral_value(rounding=ROUND_UP))
 
 
 @dataclass(frozen=True)
