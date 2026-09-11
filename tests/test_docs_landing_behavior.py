@@ -518,6 +518,7 @@ def test_harness_timeout_escalates_from_terminate_to_kill() -> None:
         def wait(self, timeout: float | None = None) -> int:
             events.append(f"wait:{timeout}")
             if events.count("wait:2") == 1:
+                assert timeout is not None
                 raise subprocess.TimeoutExpired(self.args, timeout)
             return -9
 
