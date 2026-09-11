@@ -16,6 +16,12 @@ repos:
       - id: validate-pyproject
   - repo: local
     hooks:
+      - id: source-size
+        name: Source size ratchet
+        entry: uv run --frozen python scripts/check_source_size.py
+        language: system
+        pass_filenames: false
+        always_run: true
       - id: mypy
         name: mypy
         entry: uv run mypy

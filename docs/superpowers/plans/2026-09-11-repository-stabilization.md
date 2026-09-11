@@ -501,6 +501,10 @@ CommonJS/ESM harnesses, GitHub Actions YAML, GitHub REST API, pre-commit.
   MODULE_LIMITS = (
       ModuleLimit("src/korvid/ui/app.py", 1_500, "Textual application shell"),
       ModuleLimit("src/korvid/__main__.py", 1_773, "composition root baseline"),
+      ModuleLimit("src/korvid/core/config.py", 1_684, "configuration baseline"),
+      ModuleLimit("src/korvid/k8s/client.py", 1_806, "client boundary baseline"),
+      ModuleLimit("src/korvid/tools/executor.py", 2_059, "executor baseline"),
+      ModuleLimit("src/korvid/tools/registry.py", 1_420, "registry baseline"),
       ModuleLimit(
           "src/korvid/ui/agent_ui_controller.py", 2_450,
           "agent UI controller baseline",
@@ -532,7 +536,7 @@ CommonJS/ESM harnesses, GitHub Actions YAML, GitHub REST API, pre-commit.
   ```yaml
   - id: source-size
     name: Source size ratchet
-    entry: uv run python scripts/check_source_size.py
+    entry: uv run --frozen python scripts/check_source_size.py
     language: system
     pass_filenames: false
     always_run: true

@@ -6,12 +6,27 @@ is repeated later only where trusting the earlier layer would be unsound.
 
 ## 1. Every commit — local, `pre-commit`
 
-`ruff`, `ruff-format`, `typos`, `validate-pyproject`, `mypy`, and two
-repository hooks: `no-bare-type-ignore` and `no-private-index-in-lock`.
+`ruff`, `ruff-format`, `typos`, `validate-pyproject`, `mypy`, and three
+repository hooks: `source-size`, `no-bare-type-ignore`, and
+`no-private-index-in-lock`.
 
 These are fast enough to run on staged files, so nothing slow lives here.
 The same hooks run again in CI over **all** files (`pre-commit` job), which
 is what makes `--no-verify` an unusable shortcut rather than a quiet one.
+
+### Source-size ratchet
+
+`scripts/check_source_size.py` checks every tracked Python module under
+`src/korvid` on every commit. New modules have a 1,200-physical-line ceiling.
+Existing modules already beyond that ceiling are listed with a fixed baseline
+and a non-empty rationale, so they may shrink but cannot grow. The Textual app
+shell has an explicit 1,500-line ceiling, and `KorvidApp.__init__` has a
+separate 160-line ceiling.
+
+If the hook fails, split the module by responsibility or reduce it below its
+reviewed cap. A genuinely necessary exception must be an explicit policy edit
+with a narrow rationale that reviewers can challenge. Never bypass the hook or
+raise a baseline merely to make a change pass.
 
 ### Working behind a corporate package mirror
 
@@ -108,7 +123,7 @@ else is worse than none.
 
 ## 2. Before pushing — local, `make check`
 
-`ruff` → `mypy` → `pytest -x -q` → `tach check`.
+source-size → `ruff` → `mypy` → `pytest -x -q` → `tach check`.
 
 The full test suite takes ~13 minutes locally. Run it before pushing, not
 between edits: CI runs the same checks, and iterating against a 13-minute

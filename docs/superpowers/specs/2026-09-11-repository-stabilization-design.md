@@ -185,10 +185,11 @@ Policy:
   UTF-8 fail closed.
 
 The initial grandfathered modules are `src/korvid/__main__.py`,
-`src/korvid/ui/agent_ui_controller.py`,
-`src/korvid/ui/workspace_controller.py`, and
-`src/korvid/ui/widgets/resource_table.py`. Their exact caps are recorded from
-the implementation branch immediately before the gate is introduced.
+`src/korvid/core/config.py`, `src/korvid/k8s/client.py`,
+`src/korvid/tools/executor.py`, `src/korvid/tools/registry.py`,
+`src/korvid/ui/agent_ui_controller.py`, `src/korvid/ui/workspace_controller.py`,
+and `src/korvid/ui/widgets/resource_table.py`. Their exact caps are recorded
+from `origin/main` immediately before the gate is introduced.
 
 The checker is wired as a local pre-commit hook with `pass_filenames: false`,
 and `make check` runs it explicitly. CI already runs both paths. Unit tests
