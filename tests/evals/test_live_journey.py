@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from typing import Any
 
 import pytest
@@ -89,6 +89,12 @@ class _ReadSpy(ReadOps):
         self.calls.append((meta.plural, namespace))
         return []
 
+    async def iter_objects(
+        self, meta: ResourceMeta, namespace: str | None
+    ) -> AsyncGenerator[GenericSummary, None]:
+        for summary in await self.list_objects(meta, namespace):
+            yield summary
+
     async def get_object(
         self, meta: ResourceMeta, namespace: str | None, name: str
     ) -> dict[str, Any]:
@@ -134,6 +140,23 @@ async def test_namespace_bound_reads_reject_cross_namespace_and_cluster_scope() 
     node_meta = ResourceMeta("Node", "nodes", "", "v1", False)
     with pytest.raises(ValueError, match="cluster-scoped"):
         await reads.list_objects(node_meta, None)
+
+
+async def test_namespace_bound_paged_reads_keep_the_same_boundary() -> None:
+    spy = _ReadSpy()
+    namespace = "korvid-agent-eval-run-123"
+    reads = NamespaceBoundReadOps(spy, namespace)
+
+    assert [summary async for summary in reads.iter_objects(PODS_META, namespace)] == []
+    assert spy.calls == [("pods", namespace)]
+    with pytest.raises(ValueError, match="outside live journey namespace"):
+        await anext(reads.iter_objects(PODS_META, "kube-system"))
+    with pytest.raises(ValueError, match="explicit namespace"):
+        await anext(reads.iter_objects(PODS_META, None))
+    node_meta = ResourceMeta("Node", "nodes", "", "v1", False)
+    with pytest.raises(ValueError, match="cluster-scoped"):
+        await anext(reads.iter_objects(node_meta, None))
+    assert spy.calls == [("pods", namespace)]
 
 
 # --- the live run's own context ---------------------------------------------

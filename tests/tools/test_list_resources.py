@@ -4,7 +4,9 @@ get_resource calls to learn what one LIST already knew."""
 
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import AsyncGenerator
+from typing import Any, cast
+from unittest.mock import patch
 
 from korvid.k8s.discovery import PODS_META, ResourceMeta
 from korvid.k8s.models import (
@@ -18,7 +20,8 @@ from korvid.k8s.models import (
     StorageClassSummary,
     summary_for,
 )
-from korvid.tools.executor import ToolExecutor, summary_facts
+from korvid.k8s.reads import ReadOps
+from korvid.tools.executor import MAX_RESULT_CHARS, ToolExecutor, summary_facts
 
 _RS_META = ResourceMeta("ReplicaSet", "replicasets", "apps", "v1", True)
 
@@ -26,9 +29,73 @@ _RS_META = ResourceMeta("ReplicaSet", "replicasets", "apps", "v1", True)
 class ListingKube:
     def __init__(self, summaries: list[GenericSummary]) -> None:
         self.summaries = summaries
+        self.whole_lists = 0
+        self.yielded = 0
+        self.closed = False
 
     async def list_objects(self, meta: Any, namespace: str | None) -> list[GenericSummary]:
+        self.whole_lists += 1
         return self.summaries
+
+    async def iter_objects(
+        self, meta: ResourceMeta, namespace: str | None
+    ) -> AsyncGenerator[GenericSummary, None]:
+        try:
+            for summary in self.summaries:
+                self.yielded += 1
+                yield summary
+        finally:
+            self.closed = True
+
+
+async def test_list_resources_stops_rendering_at_the_result_budget() -> None:
+    kube = ListingKube(
+        [
+            GenericSummary(name=f"pod-{number}", namespace="prod", kind="Pod", created="")
+            for number in range(50_000)
+        ]
+    )
+    executor = ToolExecutor(cast(ReadOps, kube), {"pods": PODS_META})
+
+    with patch("korvid.tools.executor.summary_facts", wraps=summary_facts) as render:
+        result = await executor.execute("list_resources", {"kind": "pods"})
+
+    assert len(result) <= MAX_RESULT_CHARS
+    assert "truncated" in result
+    assert "prod/pod-0" in result
+    assert 0 < render.call_count < 1000
+    assert kube.whole_lists == 0
+    assert kube.yielded < 1000
+    assert kube.closed
+
+
+async def test_list_resources_closes_a_complete_empty_iterator() -> None:
+    kube = ListingKube([])
+    executor = ToolExecutor(cast(ReadOps, kube), {"pods": PODS_META})
+
+    assert await executor.execute("list_resources", {"kind": "pods"}) == "(none)"
+    assert kube.closed
+    assert kube.whole_lists == 0
+
+
+async def test_list_resources_stops_inside_an_oversized_custom_row() -> None:
+    summary = GenericSummary(
+        name="pod", namespace="prod", kind="Pod", created="", custom=("x" * 80,) * 200
+    )
+    kube = ListingKube([summary, summary])
+    executor = ToolExecutor(
+        cast(ReadOps, kube),
+        {"pods": PODS_META},
+        custom_columns={"pods": tuple(f"column-{number}" for number in range(200))},
+    )
+
+    result = await executor.execute("list_resources", {"kind": "pods"})
+
+    assert len(result) <= MAX_RESULT_CHARS
+    assert "column-0=" in result
+    assert "truncated" in result
+    assert kube.yielded == 1
+    assert kube.closed
 
 
 def _pod_manifest(**status: Any) -> dict[str, Any]:

@@ -5,7 +5,8 @@ from __future__ import annotations
 import copy
 import re
 from abc import ABC, abstractmethod
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Iterator, Mapping
+from contextlib import aclosing
 from dataclasses import dataclass, field
 from typing import Any, ClassVar
 
@@ -352,6 +353,15 @@ def summary_facts(s: GenericSummary) -> str:
         if renderer is not None:
             return renderer(s)
     return _generic_facts(s)
+
+
+def _resource_parts(summary: GenericSummary, column_names: tuple[str, ...]) -> Iterator[str]:
+    yield f"{summary.namespace}/{summary.name}  -  age={summary.age()}"
+    facts = summary_facts(summary)
+    if facts:
+        yield f"  {facts}"
+    for column, value in zip(column_names, summary.custom, strict=False):
+        yield f"  {column}={_clamp(value)}"
 
 
 def compact_result(result: str, limit: int) -> str:
@@ -1020,25 +1030,22 @@ class ToolExecutor(RecordedExecution):
         kind = str(args["kind"]).strip().lower()
         namespace: str | None = args.get("namespace")
         meta = self._api_meta(kind)
-        summaries = await self._kube.list_objects(meta, namespace)
-        if not summaries:
-            return "(none)"
-        column_names = meta.configured_value(self._custom_columns)
-        if column_names is None:
-            column_names = ()
-        lines = []
-        for s in summaries:
-            line = f"{s.namespace}/{s.name}  -  age={s.age()}"
-            facts = summary_facts(s)
-            if facts:
-                line += f"  {facts}"
-            # User-configured columns (issue #45): the same extra facts the
-            # user asked their table to show reach the model, clamped so a
-            # hostile value cannot dominate the result budget.
-            for column, value in zip(column_names, s.custom, strict=False):
-                line += f"  {column}={_clamp(value)}"
-            lines.append(line)
-        return "\n".join(lines)
+        column_names = meta.configured_value(self._custom_columns) or ()
+        parts: list[str] = []
+        used = 0
+        async with aclosing(self._kube.iter_objects(meta, namespace)) as summaries:
+            async for summary in summaries:
+                if parts:
+                    parts.append("\n")
+                    used += 1
+                for part in _resource_parts(summary, column_names):
+                    remaining = MAX_RESULT_CHARS - used
+                    if len(part) > remaining:
+                        parts.append(part[: max(remaining + 1, 0)])
+                        return cap_result("".join(parts))
+                    parts.append(part)
+                    used += len(part)
+        return "".join(parts) or "(none)"
 
     async def _helm_list_releases(self, args: dict[str, Any]) -> str:
         """Installed helm releases with status (issue #161): parsed from the

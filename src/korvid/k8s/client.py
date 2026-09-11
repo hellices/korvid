@@ -59,6 +59,7 @@ _AIOHTTP_CLIENT_ERROR = (
 #: issue #141): catalog-ish content changes rarely, so a slow poll keeps the
 #: view fresh without hammering an aggregated API.
 LIST_POLL_INTERVAL = 30.0
+LIST_PAGE_SIZE = 100
 
 
 def _path_segment(value: str) -> str:
@@ -671,6 +672,36 @@ class KubeClient(ReadOps, WriteOps):
             item.clear()
             del item
             yield (event_type, summary)
+
+    async def iter_objects(
+        self, meta: ResourceMeta, namespace: str | None
+    ) -> AsyncGenerator[GenericSummary, None]:
+        """Read bounded LIST pages and project only summaries the caller consumes."""
+        if self._api is None:
+            raise RuntimeError("connect() first")
+        path = self._list_path(meta, namespace)
+        continuation = ""
+        while True:
+            query = [("limit", str(LIST_PAGE_SIZE))]
+            if continuation:
+                query.append(("continue", continuation))
+            try:
+                data = await self._request_json(path, query_params=query)
+            except ApiStatusError as exc:
+                self._observe_read_error(path, exc)
+                raise
+            items = data.get("items", [])
+            self._observe_read("list", path, payload=data, object_count=len(items))
+            for item in items:
+                yield self._object_summary(meta, item)
+            next_token = (data.get("metadata") or {}).get("continue", "")
+            if not next_token:
+                return
+            if not isinstance(next_token, str) or next_token == continuation:
+                raise KubeClientError("LIST continuation did not advance")
+            continuation = next_token
+            del data, items
+            await asyncio.sleep(0)
 
     async def list_objects(self, meta: ResourceMeta, namespace: str | None) -> list[GenericSummary]:
         """LIST any resource kind and return GenericSummary items.

@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
+from contextlib import aclosing
 from dataclasses import replace
 from typing import Any
 
@@ -215,6 +216,14 @@ class NamespaceBoundReadOps(ReadOps):
     async def list_objects(self, meta: ResourceMeta, namespace: str | None) -> list[GenericSummary]:
         self._guard(meta, namespace)
         return await self._delegate.list_objects(meta, namespace)
+
+    async def iter_objects(
+        self, meta: ResourceMeta, namespace: str | None
+    ) -> AsyncGenerator[GenericSummary, None]:
+        self._guard(meta, namespace)
+        async with aclosing(self._delegate.iter_objects(meta, namespace)) as summaries:
+            async for summary in summaries:
+                yield summary
 
     async def get_object(
         self, meta: ResourceMeta, namespace: str | None, name: str
