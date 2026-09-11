@@ -200,6 +200,16 @@ def _displayed_resource_context(
     )
 
 
+def _row_key_at_cursor(table: ResourceTable) -> str | None:
+    if table.row_count == 0:
+        return None
+    row_index = table.cursor_row
+    ordered = table.ordered_rows
+    if row_index < 0 or row_index >= len(ordered):
+        return None
+    return str(ordered[row_index].key.value)
+
+
 class AppAgentScreens(AgentScreens):
     """Nominal `AgentScreens` adapter over `KorvidApp`'s screen stack.
 
@@ -244,13 +254,7 @@ class AppAgentScreens(AgentScreens):
                 self._app.pop_screen()
 
     def selected_row_key(self) -> str | None:
-        table = self._app._focused_table()
-        if table.row_count == 0:
-            return None
-        ordered = table.ordered_rows
-        if table.cursor_row >= len(ordered):
-            return None
-        return str(ordered[table.cursor_row].key.value)
+        return _row_key_at_cursor(self._app._focused_table())
 
     def show_describe_pane(
         self,
@@ -275,12 +279,9 @@ class AppAgentScreens(AgentScreens):
             table = self._app.query_one(f"#{table_id}", ResourceTable)
         except NoMatches:
             return None
-        if table.row_count == 0:
+        row_key = _row_key_at_cursor(table)
+        if row_key is None:
             return None
-        ordered = table.ordered_rows
-        if table.cursor_row >= len(ordered):
-            return None
-        row_key = str(ordered[table.cursor_row].key.value)
         # Row keys use the 'namespace/name' composite when namespaced.
         if "/" in row_key:
             namespace, _, name = row_key.partition("/")
@@ -521,17 +522,10 @@ class AppViewState(ViewState):
 
     def selected_ns_name(self) -> tuple[str | None, str | None]:
         table = self._app._focused_table()
-        if table.row_count == 0:
+        row_key = _row_key_at_cursor(table)
+        if row_key is None:
             self._app.notify("No resource selected", severity="warning")
             return None, None
-
-        row_index = table.cursor_row
-        ordered = table.ordered_rows
-        if row_index >= len(ordered):
-            self._app.notify("No resource selected", severity="warning")
-            return None, None
-
-        row_key = str(ordered[row_index].key.value)
         parts = row_key.split("/", 1)
         if len(parts) != 2:
             self._app.notify("Cannot determine resource from selection", severity="warning")
@@ -800,13 +794,7 @@ class AppWorkspaceSurface(WorkspaceSurface):
         self._app._namespace_picker.open(names)
 
     def focused_row_key(self) -> str | None:
-        table = self._app._focused_table()
-        if table.row_count == 0:
-            return None
-        ordered = table.ordered_rows
-        if table.cursor_row >= len(ordered):
-            return None
-        return str(ordered[table.cursor_row].key.value)
+        return _row_key_at_cursor(self._app._focused_table())
 
     def refresh_status(self) -> None:
         self._app._refresh_status()
@@ -824,6 +812,9 @@ class AppWorkspaceSurface(WorkspaceSurface):
             return False
 
     def update_hierarchy_tree(self, root: Any) -> None:
-        screen = self._app.screen
+        try:
+            screen = self._app.screen
+        except ScreenStackError:
+            return
         if isinstance(screen, HierarchyScreen):
             screen.update_tree(root)

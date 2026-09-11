@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from textual.binding import Binding
 
-# Every binding carries an ``id`` so the `keybindings:` config section
-# can remap it via Textual's keymap (issue #35); uppercase duplicates
-# of shift+<letter> keys share the action under an ``--alt`` id.
+# Every remappable binding carries an ``id`` so the `keybindings:` config
+# section can remap it via Textual's keymap (issue #35); the intentionally
+# fixed favorite-namespace shortcuts are the sole exception. Uppercase
+# duplicates of shift+<letter> keys share the action under an ``--alt`` id.
 APP_BINDINGS: list[Binding | tuple[str, str] | tuple[str, str, str]] = [
     Binding("q", "quit", "Quit", id="quit"),
     Binding("question_mark", "help", "Help", id="help"),
@@ -16,8 +17,9 @@ APP_BINDINGS: list[Binding | tuple[str, str] | tuple[str, str, str]] = [
     Binding("slash", "open_filter", "Filter/Search", id="open_filter"),
     Binding("0", "toggle_all_namespaces", "All NS", id="toggle_all_namespaces"),
     # `favorite_namespaces` shortcuts (issue #108): UI-only jumps, bound
-    # in config order. Hidden from the footer; the help overlay merges
-    # the nine bindings into a single row.
+    # in config order. They deliberately have no keymap id because 1-9 are
+    # reserved for this feature. Hidden from the footer; the help overlay
+    # merges the nine bindings into a single row.
     *[
         Binding(
             str(i),

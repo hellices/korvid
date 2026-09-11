@@ -47,6 +47,32 @@ def test_selected_identity_propagates_unrelated_errors() -> None:
         screens.selected_identity("pane-0", "Pod")
 
 
+def _negative_cursor_table() -> SimpleNamespace:
+    return SimpleNamespace(
+        row_count=1,
+        cursor_row=-1,
+        ordered_rows=[SimpleNamespace(key=SimpleNamespace(value="prod/last"))],
+    )
+
+
+def test_selected_row_key_returns_none_for_a_negative_cursor() -> None:
+    table = _negative_cursor_table()
+    screens = _display_screens(_focused_table=lambda: table)
+
+    assert screens.selected_row_key() is None
+
+
+def test_selected_identity_returns_none_for_a_negative_cursor() -> None:
+    table = _negative_cursor_table()
+    screens = _display_screens(
+        query_one=lambda _selector, _widget_type: table,
+        _workspace=SimpleNamespace(panes=[]),
+        _view=SimpleNamespace(resources=lambda _kind, _scope: []),
+    )
+
+    assert screens.selected_identity("pane-0", "Pod") is None
+
+
 def _display_screens(**app_fields: Any) -> AppAgentScreens:
     return AppAgentScreens(cast("KorvidApp", SimpleNamespace(**app_fields)))
 

@@ -174,7 +174,12 @@ class _ObservedKorvidApp(KorvidApp):
             self._emit_once("help-closed", state)
         if not self._resume_seen and bool(filter_bar.display) and self.focused is filter_bar:
             self._emit_once("filter-focused", state)
-        if pattern == "api" and rows == 1 and not bool(filter_bar.display):
+        if (
+            pattern == "api"
+            and rows == 1
+            and not bool(filter_bar.display)
+            and self.focused is not filter_bar
+        ):
             self._emit_once("filter-applied", state)
         if (
             self._resume_seen
@@ -183,7 +188,13 @@ class _ObservedKorvidApp(KorvidApp):
             and self.focused is filter_bar
         ):
             self._emit_once("post-resume-filter-focused", state)
-        if self._resume_seen and pattern == "worker" and rows == 1 and not bool(filter_bar.display):
+        if (
+            self._resume_seen
+            and pattern == "worker"
+            and rows == 1
+            and not bool(filter_bar.display)
+            and self.focused is not filter_bar
+        ):
             self._post_resume_filter_applied = True
             self._emit_once("post-resume-filter-applied", state)
         if (

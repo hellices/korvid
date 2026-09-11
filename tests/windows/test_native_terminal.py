@@ -620,7 +620,12 @@ def test_native_cleanup_checks_ownership_not_process_wide_totals(
     }
     overrides: dict[str, dict[str, Any]] = {
         "help-open": {"body": "korvid"},
-        "filter-applied": {"filter": "api", "rows": 1, "process_handles": 208},
+        "filter-applied": {
+            "filter": "api",
+            "filter_focused": False,
+            "rows": 1,
+            "process_handles": 208,
+        },
         "shell-child-started": {
             "pid": 2456,
             "parent_pid": session.pid,
@@ -628,7 +633,11 @@ def test_native_cleanup_checks_ownership_not_process_wide_totals(
             "argv": ["exec", "api-1"],
         },
         "shell-input": {"text": "native-shell-input"},
-        "post-resume-filter-applied": {"filter": "worker", "rows": 1},
+        "post-resume-filter-applied": {
+            "filter": "worker",
+            "filter_focused": False,
+            "rows": 1,
+        },
     }
 
     def phase(
@@ -857,6 +866,7 @@ def test_korvid_operates_through_native_windows_conpty(tmp_path: Path) -> None:
         assert filtered["filter"] == "api", session.diagnostics()
         assert filtered["rows"] == 1, session.diagnostics()
         assert filtered["filter_open"] is False, session.diagnostics()
+        assert filtered["filter_focused"] is False, session.diagnostics()
 
         suspend_output_start = session.transcript.position()
         session.send(b"s")
@@ -914,6 +924,7 @@ def test_korvid_operates_through_native_windows_conpty(tmp_path: Path) -> None:
         assert post_filter["filter"] == "worker", session.diagnostics()
         assert post_filter["rows"] == 1, session.diagnostics()
         assert post_filter["filter_open"] is False, session.diagnostics()
+        assert post_filter["filter_focused"] is False, session.diagnostics()
         session.send(b"/")
         clear_focus = _phase(witnesses, "post-resume-filter-open", session, deadline)
         assert clear_focus["filter_focused"] is True, session.diagnostics()

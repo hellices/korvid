@@ -589,8 +589,8 @@ CommonJS/ESM harnesses, GitHub Actions YAML, GitHub REST API, pre-commit.
   Replace the first-call `subprocess.run` fake with a fake `Popen` object whose
   first `wait(timeout=10)` writes oversized capture data and raises one retained
   `TimeoutExpired`; assert the same exception object is raised, the snapshot is
-  taken before `terminate`, the child is terminated and reaped under a bounded
-  wait, and the three startup probes remain bounded `subprocess.run` calls.
+  taken before `terminate`, the child is terminated and confirmed reaped, and
+  the three startup probes remain bounded `subprocess.run` calls.
 
   Assert the note includes only these process fields:
   `pid`, `poll`, `elapsed-ms`, `status`, `cpu-user-seconds`,
@@ -635,8 +635,9 @@ CommonJS/ESM harnesses, GitHub Actions YAML, GitHub REST API, pre-commit.
   `process.poll()`, then call `psutil.Process(pid).as_dict` only for `status`,
   `cpu_times`, `num_threads`, and `memory_info`. Catch `psutil.Error` and
   `OSError` into a type-only diagnostic. Terminate and wait for two seconds;
-  if that wait times out, kill and wait for two more seconds. Never inspect
-  cmdline, environment, files, connections, parent, username, or executable.
+  if that wait times out, kill and wait without another process-level deadline
+  until the child is confirmed reaped. Never inspect cmdline, environment,
+  files, connections, parent, username, or executable.
 
   Read bounded capture head/tail only after reaping, attach the existing probes
   plus the new snapshot to the original timeout, then use bare `raise`.

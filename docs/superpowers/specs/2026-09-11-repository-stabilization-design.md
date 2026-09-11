@@ -217,8 +217,8 @@ lifecycle:
 2. wait for the existing ten-second deadline;
 3. on timeout, capture the child PID, `poll()` state, elapsed monotonic time,
    and a bounded `psutil` process snapshot before termination;
-4. terminate and reap the child under a second short bound, escalating to kill
-   only if necessary;
+4. terminate the child under a second short bound, escalating to kill only if
+   necessary and then waiting until the killed child is confirmed reaped;
 5. read bounded head/tail diagnostics and run the existing independently
    bounded Python, Node-version, and loader probes; and
 6. re-raise the original `TimeoutExpired` with no retry.

@@ -24,7 +24,7 @@ from korvid.core.watch import WatchManager
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.models import GenericSummary
 from korvid.ui.app import KorvidApp
-from korvid.ui.app_surfaces import AppUiSurface, AppViewState
+from korvid.ui.app_surfaces import AppUiSurface, AppViewState, AppWorkspaceSurface
 from korvid.ui.ui_surface import UiSurface
 from korvid.ui.view_state import ViewState
 from korvid.ui.widgets.command_bar import CommandBar
@@ -95,6 +95,33 @@ def test_resources_reads_the_live_store() -> None:
         GenericSummary(name="api-1", namespace="default", kind="Pod", created="", uid="u1"),
     )
     assert [obj.name for obj in view.resources("pods", "default")] == ["api-1"]
+
+
+def _negative_cursor_table() -> SimpleNamespace:
+    return SimpleNamespace(
+        row_count=1,
+        cursor_row=-1,
+        ordered_rows=[SimpleNamespace(key=SimpleNamespace(value="prod/last"))],
+    )
+
+
+def test_selected_ns_name_rejects_a_negative_cursor() -> None:
+    table = _negative_cursor_table()
+    notifications: list[tuple[str, str]] = []
+    app = SimpleNamespace(
+        _focused_table=lambda: table,
+        notify=lambda message, *, severity: notifications.append((message, severity)),
+    )
+
+    assert AppViewState(cast("KorvidApp", app)).selected_ns_name() == (None, None)
+    assert notifications == [("No resource selected", "warning")]
+
+
+def test_workspace_focused_row_key_rejects_a_negative_cursor() -> None:
+    table = _negative_cursor_table()
+    app = SimpleNamespace(_focused_table=lambda: table)
+
+    assert AppWorkspaceSurface(cast("KorvidApp", app)).focused_row_key() is None
 
 
 def test_config_is_not_handed_out_whole() -> None:

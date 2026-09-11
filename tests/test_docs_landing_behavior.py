@@ -223,9 +223,9 @@ def _terminate_and_reap(process: subprocess.Popen[bytes], poll_state: int | None
     except OSError as error:
         diagnostics.append(f"kill=error type={type(error).__name__}")
         kill_failed = True
-    reap_status = _bounded_process_wait(process)
-    prefix = "reap" if kill_failed or reap_status.startswith("error") else "kill"
-    diagnostics.append(f"{prefix}={reap_status}")
+    process.wait()
+    prefix = "reap" if kill_failed else "kill"
+    diagnostics.append(f"{prefix}=reaped")
     return "; ".join(diagnostics)
 
 
@@ -536,7 +536,7 @@ def test_harness_timeout_escalates_from_terminate_to_kill() -> None:
 
         def wait(self, timeout: float | None = None) -> int:
             events.append(f"wait:{timeout}")
-            if events.count("wait:2") == 1:
+            if sum(event.startswith("wait:") for event in events) == 1:
                 assert timeout is not None
                 raise subprocess.TimeoutExpired(self.args, timeout)
             return -9
@@ -544,7 +544,33 @@ def test_harness_timeout_escalates_from_terminate_to_kill() -> None:
     result = _terminate_and_reap(cast(Any, FakeProcess()), poll_state=None)
 
     assert result == "kill=reaped"
-    assert events == ["terminate", "wait:2", "kill", "wait:2"]
+    assert events == ["terminate", "wait:2", "kill", "wait:None"]
+
+
+def test_harness_timeout_waits_without_another_deadline_after_kill() -> None:
+    events: list[str] = []
+
+    class FakeProcess:
+        def __init__(self) -> None:
+            self.args = ["node", "harness.mjs"]
+            self.pid = 5253
+
+        def terminate(self) -> None:
+            events.append("terminate")
+
+        def kill(self) -> None:
+            events.append("kill")
+
+        def wait(self, timeout: float | None = None) -> int:
+            events.append(f"wait:{timeout}")
+            if timeout is not None:
+                raise subprocess.TimeoutExpired(self.args, timeout)
+            return -9
+
+    result = _terminate_and_reap(cast(Any, FakeProcess()), poll_state=None)
+
+    assert result == "kill=reaped"
+    assert events == ["terminate", "wait:2", "kill", "wait:None"]
 
 
 @pytest.mark.parametrize("failure_point", ["terminate", "wait"])
@@ -578,7 +604,7 @@ def test_harness_timeout_reaps_after_termination_os_error(failure_point: str) ->
     result = _terminate_and_reap(cast(Any, FakeProcess()), poll_state=None)
 
     assert result == f"{failure_point}=error type=OSError; kill=reaped"
-    assert events == ["terminate", "wait:2", "kill", "wait:2"]
+    assert events == ["terminate", "wait:2", "kill", "wait:None"]
 
 
 def _assert_elapsed_milestones(stderr: str) -> None:
