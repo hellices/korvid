@@ -5,6 +5,7 @@ from __future__ import annotations
 import queue
 import subprocess
 import threading
+from collections.abc import Iterator
 from time import monotonic
 from typing import Any
 from unittest.mock import patch
@@ -32,6 +33,7 @@ class _FakeProc:
         # a bare _FakeProc() only reaches this constructor's caller directly
         # when a test means to exercise the no-readiness-stream rejection.
         self.stdout: Any = None
+        _TEST_PROCS.append(self)
 
     def poll(self) -> int | None:
         return self.returncode
@@ -63,6 +65,9 @@ class _FakeProc:
             self.stdout.close()
 
 
+_TEST_PROCS: list[_FakeProc] = []
+
+
 class _GatedStream:
     """File-like stdout whose lines are fed by the test (None ends the stream)."""
 
@@ -89,6 +94,17 @@ class _GatedStream:
         if not self.closed:
             self.closed = True
             self._lines.put(None)
+
+
+@pytest.fixture(autouse=True)
+def _close_fake_streams() -> Iterator[None]:
+    try:
+        yield
+    finally:
+        for proc in _TEST_PROCS:
+            if proc.stdout is not None:
+                proc.stdout.close()
+        _TEST_PROCS.clear()
 
 
 @pytest.mark.parametrize(
@@ -164,6 +180,31 @@ def test_start_rejects_a_process_with_no_readiness_stream() -> None:
     record = registry.start(_spec())
     assert record.status == "broken"
     assert record._ready is None
+    assert record._proc is None
+    assert procs[0].terminated
+    assert procs[0].waited
+
+
+def test_reattach_reaps_a_replacement_with_no_readiness_stream() -> None:
+    procs: list[_FakeProc] = []
+
+    def _popen(argv: list[str], **_kwargs: Any) -> _FakeProc:
+        proc = _FakeProc(argv)
+        if not procs:
+            proc.stdout = _GatedStream()
+        procs.append(proc)
+        return proc
+
+    registry = ForwardRegistry(popen=_popen)
+    record = registry.start(_spec())
+    procs[0].exit(1)
+    registry.refresh()
+
+    assert registry.reattach(record.id) is record
+    assert record.status == "broken"
+    assert record._proc is None
+    assert procs[1].terminated
+    assert procs[1].waited
 
 
 def test_start_pins_kube_context() -> None:
@@ -406,6 +447,7 @@ def test_stop_does_not_block_on_slow_process() -> None:
 
     def _popen(argv: list[str], **_kwargs: Any) -> _FakeProc:
         proc = _StubbornProc(argv)
+        proc.stdout = _GatedStream()
         procs.append(proc)
         return proc
 
@@ -422,6 +464,7 @@ def test_refresh_kills_stopped_process_after_grace() -> None:
 
     def _popen(argv: list[str], **_kwargs: Any) -> _FakeProc:
         proc = _StubbornProc(argv)
+        proc.stdout = _GatedStream()
         procs.append(proc)
         return proc
 
@@ -440,6 +483,7 @@ def test_stop_all_kills_stragglers_after_shared_deadline() -> None:
 
     def _popen(argv: list[str], **_kwargs: Any) -> _FakeProc:
         proc = _StubbornProc(argv)
+        proc.stdout = _GatedStream()
         procs.append(proc)
         return proc
 
@@ -479,6 +523,7 @@ def test_stop_all_covers_previously_stopped_stragglers() -> None:
 
     def _popen(argv: list[str], **_kwargs: Any) -> _FakeProc:
         proc = _StubbornProc(argv)
+        proc.stdout = _GatedStream()
         procs.append(proc)
         return proc
 
@@ -528,6 +573,7 @@ def test_stop_all_does_not_hang_on_an_unreapable_straggler() -> None:
 
     def _popen(argv: list[str], **_kwargs: Any) -> _FakeProc:
         proc = _UnreapableProc(argv)
+        proc.stdout = _GatedStream()
         procs.append(proc)
         return proc
 
@@ -584,6 +630,7 @@ def test_stop_all_reaps_stragglers_under_one_shared_deadline() -> None:
 
     def _popen(argv: list[str], **_kwargs: Any) -> _SlowUnreapableProc:
         proc = _SlowUnreapableProc(argv)
+        proc.stdout = _GatedStream()
         procs.append(proc)
         return proc
 
@@ -1115,6 +1162,7 @@ def test_reattach_racing_teardown_never_leaks_a_child() -> None:
         if procs:  # the replacement spawn — teardown wins the race first
             registry.stop_all()
         proc = _FakeProc(argv)
+        proc.stdout = _GatedStream()
         procs.append(proc)
         return proc
 
@@ -1206,6 +1254,7 @@ def test_failed_reattach_spawn_releases_the_port_claim() -> None:
         if len(calls) == 2:
             raise RuntimeError("spawn exploded")
         proc = _FakeProc(argv)
+        proc.stdout = _GatedStream()
         procs.append(proc)
         return proc
 
@@ -1248,6 +1297,7 @@ def test_start_gives_up_on_port_holder_that_cannot_be_reaped() -> None:
 
     def _popen(argv: list[str], **_kwargs: Any) -> _FakeProc:
         proc = _WedgedProc(argv) if not procs else _FakeProc(argv)
+        proc.stdout = _GatedStream()
         procs.append(proc)
         return proc
 

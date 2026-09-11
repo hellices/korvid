@@ -254,6 +254,8 @@ class ForwardRegistry:
         if proc is None or stream is None:
             # No readiness channel: the handshake can never be confirmed, so
             # the spawn is rejected outright instead of trusted as alive.
+            if proc is not None:
+                self._reject_unready_process(record, proc)
             record.status = "broken"
             record._ready = None
             return None
@@ -727,6 +729,19 @@ class ForwardRegistry:
         proc.kill()
         with suppress(subprocess.TimeoutExpired):
             proc.wait(timeout=_STOP_GRACE_SECONDS)
+
+    @staticmethod
+    def _reject_unready_process(record: ForwardRecord, proc: _ForwardProcess) -> None:
+        """Terminate and reap a child whose readiness stream is unavailable."""
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=_STOP_GRACE_SECONDS)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                with suppress(subprocess.TimeoutExpired):
+                    proc.wait(timeout=_STOP_GRACE_SECONDS)
+        record._proc = None
 
     @staticmethod
     def _release_waiters(ready: threading.Event | None) -> None:
