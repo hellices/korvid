@@ -299,6 +299,76 @@ def test_runner_watchdog_never_waits_for_stderr() -> None:
     assert result.stdout == "terminal policy invoked\n"
 
 
+def test_standalone_shutdown_never_waits_for_terminal_diagnostics() -> None:
+    """Use full stderr on POSIX and a blocked handler for Windows pipe constraints."""
+    script = textwrap.dedent(
+        """
+        import asyncio
+        import logging
+        import os
+        import threading
+        from types import SimpleNamespace
+        import korvid.__main__ as main_mod
+
+        main_mod._CLEANUP_GRACE_SECONDS = 0.0
+        main_mod._CLEANUP_CANCEL_SECONDS = 0.0
+        main_mod._RUNNER_SHUTDOWN_SECONDS = 0.2
+
+        class BlockingHandler(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                threading.Event().wait()
+
+        async def close_provider() -> None:
+            while True:
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    continue
+
+        async def close_kube() -> None:
+            print("kube closed", flush=True)
+            if os.name == "nt":
+                main_mod.logger.addHandler(BlockingHandler(level=logging.CRITICAL))
+            else:
+                read_descriptor, write_descriptor = os.pipe()
+                os.set_blocking(write_descriptor, False)
+                for size in (4096, 1):
+                    try:
+                        while True:
+                            os.write(write_descriptor, b"x" * size)
+                    except BlockingIOError:
+                        pass
+                os.set_blocking(write_descriptor, True)
+                os.dup2(write_descriptor, 2)
+                os.close(write_descriptor)
+            print("terminal diagnostic ready", flush=True)
+
+        asyncio.run(main_mod._shutdown(
+            None,
+            SimpleNamespace(aclose=close_provider),
+            SimpleNamespace(close=close_kube),
+        ))
+        """
+    )
+
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as error:
+        pytest.fail(
+            f"Standalone cleanup waited for its terminal diagnostic; output: {error.stdout!r}",
+            pytrace=False,
+        )
+
+    assert result.returncode == 1
+    assert result.stdout == "kube closed\nterminal diagnostic ready\n"
+
+
 def test_restart_prompt_writes_to_stderr(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

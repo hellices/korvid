@@ -51,6 +51,8 @@ page, follow continuation tokens only on demand, and retain only the current pag
 - [x] Put every owned close task in run state; drain under explicit deadlines.
 - [x] Ensure provider failures cannot prevent `kube.close()` and consume/log task exceptions.
 - [x] Define and test the terminal policy for non-cooperative MCP tasks; never add an unbounded final await.
+- [x] Give finalizer-created descendants a second bounded cancellation pass;
+  cap respawn sweeps and keep diagnostic failures from bypassing terminal exit.
 - [x] Bound runner finalization, including executor threads and async generators, with subprocess regression tests.
 - [x] Run `uv run pytest -p no:tach tests/test_agent_cleanup.py tests/test_main_wiring.py tests/test_main_recovery.py tests/mcp/test_server.py`.
 
@@ -104,7 +106,7 @@ page, follow continuation tokens only on demand, and retain only the current pag
 ## Integration Evidence
 
 - [x] Run touched-file ruff checks, formatting, pre-commit, and `uv run tach check`.
-- [x] Run `make check` with coverage: **10,955 passed, 25 skipped; 92.35% coverage**.
+- [x] Run `make check` with coverage: **10,961 passed, 25 skipped; 92.35% coverage**.
 - [x] Run deptry and the strict documentation build.
 - [x] Complete independent task and integrated reviews, including encoded-response and subprocess lifecycle regressions.
 

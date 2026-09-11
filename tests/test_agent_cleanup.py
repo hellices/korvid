@@ -136,6 +136,28 @@ async def test_stuck_provider_cannot_prevent_kubernetes_cleanup(forced_exits: li
         await _join(cleanup)
 
 
+@pytest.mark.parametrize("failure", [ValueError, OSError])
+async def test_standalone_shutdown_stays_terminal_when_diagnostic_logging_fails(
+    failure: type[Exception], forced_exits: list[int], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provider = _GatedClose(resist_cancel=True)
+    kube = _Kube()
+
+    def broken_log(*args: object, **kwargs: object) -> None:
+        raise failure("diagnostic unavailable")
+
+    monkeypatch.setattr(main_mod.logger, "critical", broken_log)
+    try:
+        with pytest.raises(failure, match="diagnostic unavailable"):
+            await main_mod._shutdown(None, cast("Any", provider), cast("Any", kube))
+        assert provider.cancelled.is_set()
+        assert kube.closed.is_set()
+        assert forced_exits == [1]
+    finally:
+        provider.release.set()
+        await asyncio.wait_for(provider.finished.wait(), timeout=2)
+
+
 @pytest.mark.parametrize("component", ["provider", "mcp"])
 async def test_noncooperative_cleanup_exits_only_after_other_clients_close(
     component: str,
@@ -499,6 +521,81 @@ async def test_runtime_tasks_are_not_cancelled_before_kubernetes_closes(
         assert closed_when_finished == [True]
         assert runtime_tasks[0].cancelled() is not finish_on_close
         assert forced_exits == []
+    finally:
+        release.set()
+        await asyncio.wait_for(asyncio.gather(*runtime_tasks, return_exceptions=True), timeout=2)
+
+
+@pytest.mark.parametrize("resist_cancel", [False, True])
+async def test_final_sweep_cancels_new_descendants_before_terminal_decision(
+    resist_cancel: bool, forced_exits: list[int], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    kube = _Kube()
+    child = _GatedClose(resist_cancel=resist_cancel)
+    parent_started = asyncio.Event()
+    release_parent = asyncio.Event()
+    runtime_tasks: list[asyncio.Task[None]] = []
+
+    async def parent() -> None:
+        parent_started.set()
+        try:
+            await release_parent.wait()
+        finally:
+            runtime_tasks.append(asyncio.create_task(child.aclose()))
+
+    async def wire(config: object, client: object, state: main_mod._RunState) -> None:
+        runtime_tasks.append(asyncio.create_task(parent()))
+        await asyncio.wait_for(parent_started.wait(), timeout=2)
+
+    fake_kube = SimpleNamespace(connect=AsyncMock(), close=kube.close)
+    monkeypatch.setattr(main_mod, "KubeClient", lambda **kwargs: fake_kube)
+    monkeypatch.setattr(main_mod, "_load_startup_config", lambda *args: KorvidConfig())
+    monkeypatch.setattr(main_mod, "_wire_and_run", wire)
+    try:
+        await _join(asyncio.create_task(main_mod._run()))
+        assert kube.closed.is_set()
+        assert child.cancelled.is_set()
+        assert child.finished.is_set() is not resist_cancel
+        assert forced_exits == ([1] if resist_cancel else [])
+    finally:
+        release_parent.set()
+        child.release.set()
+        await asyncio.wait_for(asyncio.gather(*runtime_tasks, return_exceptions=True), timeout=2)
+
+
+async def test_final_sweep_bounds_repeated_descendant_respawns(
+    forced_exits: list[int], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    kube = _Kube()
+    started = asyncio.Event()
+    release = asyncio.Event()
+    cancelled_generations: list[int] = []
+    runtime_tasks: list[asyncio.Task[None]] = []
+
+    async def descendant(generation: int) -> None:
+        started.set()
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            cancelled_generations.append(generation)
+            if generation < 4:
+                runtime_tasks.append(asyncio.create_task(descendant(generation + 1)))
+            raise
+
+    async def wire(config: object, client: object, state: main_mod._RunState) -> None:
+        runtime_tasks.append(asyncio.create_task(descendant(0)))
+        await asyncio.wait_for(started.wait(), timeout=2)
+
+    fake_kube = SimpleNamespace(connect=AsyncMock(), close=kube.close)
+    monkeypatch.setattr(main_mod, "KubeClient", lambda **kwargs: fake_kube)
+    monkeypatch.setattr(main_mod, "_load_startup_config", lambda *args: KorvidConfig())
+    monkeypatch.setattr(main_mod, "_wire_and_run", wire)
+    try:
+        await _join(asyncio.create_task(main_mod._run()))
+        assert kube.closed.is_set()
+        assert cancelled_generations == [0, 1]
+        assert len(runtime_tasks) == 3
+        assert forced_exits == [1]
     finally:
         release.set()
         await asyncio.wait_for(asyncio.gather(*runtime_tasks, return_exceptions=True), timeout=2)

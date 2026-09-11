@@ -513,10 +513,24 @@ def _exit_if_cleanup_pending(tasks: Collection[asyncio.Future[Any]]) -> None:
     raising SystemExit would leave `Runner.close` to try cancelling it again.
     A nonzero process exit deliberately skips finalization and crash recovery,
     forfeiting remaining task finalizers only after the client cleanup budgets.
+    A separate watchdog also bounds blocked terminal diagnostics before the
+    runner begins finalization.
     """
     if any(not task.done() for task in tasks):
-        logger.critical("Cleanup tasks did not stop after cancellation; exiting without restart")
-        os._exit(1)
+        watchdog: threading.Timer | None = None
+        try:
+            watchdog = threading.Timer(_RUNNER_SHUTDOWN_SECONDS, _force_runner_exit)
+            watchdog.daemon = True
+            watchdog.start()
+            logger.critical(
+                "Cleanup tasks did not stop after cancellation; exiting without restart"
+            )
+        finally:
+            try:
+                os._exit(1)
+            finally:
+                if watchdog is not None:
+                    watchdog.cancel()
 
 
 async def _discover_in_background(
@@ -1433,16 +1447,21 @@ async def _finish_run_cleanup(state: _RunState) -> None:
     Explicit close work has already received grace; cancel remaining descendants
     without another grace wait after the client cleanup attempts.
     Only `_run` enables this sweep, excluding tasks that predate the run and
-    the caller itself. Recheck after cancellation in case a finalizer spawned
-    another task; those tasks must not escape the terminal decision either.
+    the caller itself. Two bounded cancellation sweeps let a finalizer's new
+    descendants stop, while repeated respawns remain subject to terminal exit.
     """
     try:
         if state.preexisting_tasks is not None:
             _adopt_run_tasks(state)
             await _drain_cleanup_tasks(state.close_tasks, timeout=0.0)
     finally:
-        _adopt_run_tasks(state)
-        _exit_if_cleanup_pending(state.close_tasks)
+        try:
+            if state.preexisting_tasks is not None:
+                _adopt_run_tasks(state)
+                await _drain_cleanup_tasks(state.close_tasks, timeout=0.0)
+        finally:
+            _adopt_run_tasks(state)
+            _exit_if_cleanup_pending(state.close_tasks)
 
 
 async def _teardown(state: _RunState, kube: KubeClient) -> None:
