@@ -277,6 +277,7 @@ def test_low_log_tools_distinguish_reading_evidence_from_changing_the_ui() -> No
 
 def test_low_describe_tools_distinguish_reading_evidence_from_changing_the_ui() -> None:
     assert "get_resource" in LOW_TOOL_DESCRIPTIONS
+    assert "open_describe" in LOW_TOOL_DESCRIPTIONS
     assert (
         _contains_all(
             LOW_TOOL_DESCRIPTIONS["get_resource"], "read", "no UI", "not for", "show", "open"

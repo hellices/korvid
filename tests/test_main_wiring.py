@@ -956,6 +956,7 @@ def test_load_startup_config_wraps_config_error_as_system_exit(
     message = str(exc_info.value)
     assert "\n" not in message  # one-line, actionable
     assert "unsupported" in message
+    assert "agent.profile" in message
 
 
 def test_the_profile_writer_updates_only_the_active_profile(
