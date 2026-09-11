@@ -72,7 +72,7 @@ upgrade-from = "0.3.0"
 [project.optional-dependencies]
 # Embedded AI agent: provider HTTP adapters + OS-keychain credential storage.
 agent = [
-    "litellm==1.98.0",
+    "litellm==1.100.0",
     # Imported directly by providers/litellm_runtime.py for ProviderSDKError,
     # so declared directly even though litellm already pulls it in.
     "openai>=2.20.0,<3.0.0",
