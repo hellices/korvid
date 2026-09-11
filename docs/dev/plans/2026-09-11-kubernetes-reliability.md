@@ -106,7 +106,7 @@ page, follow continuation tokens only on demand, and retain only the current pag
 ## Integration Evidence
 
 - [x] Run touched-file ruff checks, formatting, pre-commit, and `uv run tach check`.
-- [x] Run `make check` with coverage: **10,961 passed, 25 skipped; 92.35% coverage**.
+- [x] Run `make check` with coverage: **10,964 passed, 25 skipped; 92.35% coverage**.
 - [x] Run deptry and the strict documentation build.
 - [x] Complete independent task and integrated reviews, including encoded-response and subprocess lifecycle regressions.
 

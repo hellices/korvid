@@ -1798,10 +1798,6 @@ async def _request_dict(request: Awaitable[Any]) -> dict[str, Any]:
             str(exc.reason or ""),
             body=body_text,
         ) from exc
-    except (ValueError, RecursionError):
-        raise KubeClientError(
-            "Kubernetes API returned malformed JSON; retry, then check the API server"
-        ) from None
     except TimeoutError:
         raise KubeClientError(
             "Kubernetes API request timed out; check cluster connectivity and retry"
@@ -1818,6 +1814,10 @@ async def _request_dict(request: Awaitable[Any]) -> dict[str, Any]:
         raise KubeClientError(
             "Kubernetes API connection failed; check cluster connectivity and retry"
         ) from None
+    except (ValueError, RecursionError):
+        raise KubeClientError(
+            "Kubernetes API request failed; check client configuration and retry"
+        ) from None
 
 
 async def _response_dict(resp: Any) -> dict[str, Any]:
@@ -1831,7 +1831,12 @@ async def _response_dict(resp: Any) -> dict[str, Any]:
     if not isinstance(body, bytes):
         raise _malformed_response_error()
     _raise_for_status(resp, body)
-    result = json.loads(body)
+    try:
+        result = json.loads(body)
+    except (ValueError, RecursionError):
+        raise KubeClientError(
+            "Kubernetes API returned malformed JSON; retry, then check the API server"
+        ) from None
     if not isinstance(result, dict):
         raise _malformed_response_error()
     return result
