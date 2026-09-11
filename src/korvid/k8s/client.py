@@ -60,6 +60,8 @@ _AIOHTTP_CLIENT_ERROR = (
 #: view fresh without hammering an aggregated API.
 LIST_POLL_INTERVAL = 30.0
 LIST_PAGE_SIZE = 100
+_DISCOVERY_CONCURRENCY = 8
+_DISCOVERY_TIMEOUT_SECONDS = 10.0
 
 
 def _path_segment(value: str) -> str:
@@ -77,6 +79,7 @@ def _path_segment(value: str) -> str:
 
 
 _DNS1123_NAME = re.compile(r"^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$")
+_API_VERSION_NAME = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
 _UID_RE = re.compile(r"^[a-fA-F0-9-]+$")
 
 
@@ -1697,33 +1700,45 @@ class KubeClient(ReadOps, WriteOps):
         packageserver) are included with ``watchable=False`` — the watch
         source keeps them fresh by polling (issue #141).
 
-        Group version lists are fetched concurrently — sequential fetching adds
-        one RTT per API group and dominates startup on clusters with many CRDs.
+        Every served version is fetched by a bounded worker pool. Preferred
+        versions win per resource identity, regardless of response order.
         """
         metas: list[ResourceMeta] = []
         core = await self._request_json("/api/v1")
         metas += _parse_resource_list(core, group="", version="v1")
         groups = await self._request_json("/apis")
+        advertised = groups.get("groups", [])
+        if not isinstance(advertised, list):
+            raise KubeClientError("Kubernetes API discovery returned an invalid group list")
+        versions = list(
+            dict.fromkeys(version for group in advertised for version in _group_versions(group))
+        )
+        results: list[list[ResourceMeta]] = [[] for _ in versions]
+        jobs = iter(enumerate(versions))
 
         async def _fetch(name: str, version: str) -> list[ResourceMeta]:
+            path = f"/apis/{name}/{version}"
             try:
-                path = f"/apis/{name}/{version}"
-                rl = await self._request_json(path)
-            except (ApiStatusError, KubeClientError) as exc:
+                async with asyncio.timeout(_DISCOVERY_TIMEOUT_SECONDS):
+                    resource_list = await self._request_json(path)
+                return _parse_resource_list(resource_list, group=name, version=version)
+            except (ApiStatusError, KubeClientError, TimeoutError) as exc:
                 logger.warning("API discovery skipped %s: %s", path, exc)
-                return []  # a broken aggregated API must not kill discovery
-            return _parse_resource_list(rl, group=name, version=version)
+                return []
 
-        tasks = []
-        for g in groups.get("groups", []):
-            name = g.get("name")
-            version = (g.get("preferredVersion") or {}).get("version")
-            if not isinstance(name, str) or not isinstance(version, str) or not name or not version:
-                continue  # malformed group must not kill discovery
-            tasks.append(_fetch(name, version))
-        for group_metas in await asyncio.gather(*tasks):
+        async def _worker() -> None:
+            for index, (name, version) in jobs:
+                results[index] = await _fetch(name, version)
+
+        await asyncio.gather(
+            *(_worker() for _ in range(min(_DISCOVERY_CONCURRENCY, len(versions))))
+        )
+        for group_metas in results:
             metas += group_metas
-        return metas
+        unique: dict[tuple[str, str, bool], ResourceMeta] = {}
+        for meta in metas:
+            unique.setdefault(meta.identity, meta)
+        return list(unique.values())
 
     async def close(self) -> None:
         if self._api is not None:
@@ -1810,16 +1825,50 @@ def _raise_for_status(resp: Any, body: bytes) -> None:
         )
 
 
+def _discovery_version(name: str, candidate: Any) -> str | None:
+    if not isinstance(candidate, Mapping):
+        return None
+    version = candidate.get("version")
+    if not isinstance(version, str) or not _API_VERSION_NAME.fullmatch(version):
+        return None
+    expected = f"{name}/{version}"
+    if candidate.get("groupVersion", expected) != expected:
+        return None
+    return version
+
+
+def _group_versions(group: Any) -> list[tuple[str, str]]:
+    if not isinstance(group, Mapping):
+        return []
+    name = group.get("name")
+    if not isinstance(name, str) or not _DNS1123_NAME.fullmatch(name):
+        return []
+    candidates = [group.get("preferredVersion")]
+    advertised = group.get("versions")
+    if isinstance(advertised, list):
+        candidates.extend(advertised)
+    return [
+        (name, version)
+        for candidate in candidates
+        if (version := _discovery_version(name, candidate)) is not None
+    ]
+
+
 def _parse_resource_list(data: dict[str, Any], *, group: str, version: str) -> list[ResourceMeta]:
     out = []
-    for r in data.get("resources", []):
-        name = r.get("name")
-        kind = r.get("kind")
-        namespaced = r.get("namespaced")
-        verbs: list[str] = r.get("verbs", [])
+    resources = data.get("resources", [])
+    if not isinstance(resources, list):
+        raise KubeClientError("Kubernetes API discovery returned an invalid resource list")
+    for resource in resources:
+        if not isinstance(resource, Mapping):
+            continue
+        name = resource.get("name")
+        kind = resource.get("kind")
+        namespaced = resource.get("namespaced")
+        verbs = resource.get("verbs", [])
         if not isinstance(name, str) or not isinstance(kind, str) or namespaced is None:
             continue  # malformed entry must not kill discovery
-        if "/" in name or "list" not in verbs:
+        if "/" in name or not isinstance(verbs, list) or "list" not in verbs:
             continue
         out.append(
             ResourceMeta(
@@ -1828,7 +1877,7 @@ def _parse_resource_list(data: dict[str, Any], *, group: str, version: str) -> l
                 group,
                 version,
                 bool(namespaced),
-                tuple(r.get("shortNames") or ()),
+                tuple(resource.get("shortNames") or ()),
                 # list-only aggregated APIs (OLM's packageserver) stay
                 # discoverable; the watch source polls them (issue #141).
                 watchable="watch" in verbs,
