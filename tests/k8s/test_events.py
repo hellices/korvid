@@ -56,6 +56,15 @@ def test_absent_series_falls_through_to_non_series_fields() -> None:
     assert select_event_timestamp(event) == "2026-07-26T09:00:00Z"
 
 
+def test_series_without_last_observed_time_falls_through() -> None:
+    event: dict[str, Any] = {
+        "series": {"count": 3},
+        "lastTimestamp": "2026-07-26T09:00:00Z",
+    }
+    assert select_event_timestamp(event) == "2026-07-26T09:00:00Z"
+    assert select_event_timestamp({"series": {"count": 3}}) == ""
+
+
 def test_non_mapping_series_is_ignored_rather_than_raising() -> None:
     """Malformed payloads may carry a non-mapping `series` (e.g. `None`,
     a string, or a list). Selection must not raise — it should behave as
