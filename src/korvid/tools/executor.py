@@ -1027,6 +1027,7 @@ class ToolExecutor(RecordedExecution):
         return meta
 
     async def _list_resources(self, args: dict[str, Any]) -> str:
+        """Stream rows, stopping before only a separator could fit."""
         kind = str(args["kind"]).strip().lower()
         namespace: str | None = args.get("namespace")
         meta = self._api_meta(kind)
@@ -1042,7 +1043,7 @@ class ToolExecutor(RecordedExecution):
                     return cap_result("".join(parts) + _TRUNCATION_SUFFIX)
                 for part in _resource_parts(summary, column_names):
                     remaining = MAX_RESULT_CHARS - used
-                    if len(part) >= remaining:
+                    if len(part) + 1 >= remaining:
                         parts.append(part[: max(remaining, 0)])
                         return cap_result("".join(parts) + _TRUNCATION_SUFFIX)
                     parts.append(part)

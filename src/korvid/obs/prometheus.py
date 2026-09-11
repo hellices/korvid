@@ -145,7 +145,7 @@ class PrometheusConnector(MetricsConnector):
                 continue
             if len(parsed) == cap:
                 truncated = True
-                break
+                continue
             parsed.append(entry)
             # Only from a row that survived: dating the result by a row
             # that was discarded would claim the kept series was observed

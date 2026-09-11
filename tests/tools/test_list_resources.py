@@ -9,6 +9,8 @@ from dataclasses import replace
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 from korvid.k8s.client import KubeClient
 from korvid.k8s.discovery import PODS_META, ResourceMeta
 from korvid.k8s.errors import ApiStatusError
@@ -115,10 +117,13 @@ def _exact_budget_summaries() -> list[GenericSummary]:
     ]
 
 
-async def test_list_resources_does_not_fetch_past_an_exact_budget_page() -> None:
+@pytest.mark.parametrize("spare_chars", [0, 1], ids=["row-fills-budget", "only-separator-fits"])
+async def test_list_resources_does_not_fetch_past_an_exact_budget_page(spare_chars: int) -> None:
     summaries = _exact_budget_summaries()
+    if spare_chars:
+        summaries[-1] = replace(summaries[-1], name=summaries[-1].name[:-spare_chars])
     lines = [f"{summary.namespace}/{summary.name}  -  age={summary.age()}" for summary in summaries]
-    assert len("\n".join(lines)) == MAX_RESULT_CHARS
+    assert len("\n".join(lines)) == MAX_RESULT_CHARS - spare_chars
     request = AsyncMock(
         side_effect=[
             {
@@ -144,8 +149,14 @@ async def test_list_resources_does_not_fetch_past_an_exact_budget_page() -> None
     assert not result.startswith("ERROR:")
 
 
-async def test_list_resources_does_not_render_facts_after_exact_budget_exhaustion() -> None:
-    kube = ListingKube(_exact_budget_summaries())
+@pytest.mark.parametrize("spare_chars", [0, 1], ids=["row-fills-budget", "only-separator-fits"])
+async def test_list_resources_does_not_render_facts_after_exact_budget_exhaustion(
+    spare_chars: int,
+) -> None:
+    summaries = _exact_budget_summaries()
+    if spare_chars:
+        summaries[-1] = replace(summaries[-1], name=summaries[-1].name[:-spare_chars])
+    kube = ListingKube(summaries)
     meta = ResourceMeta("ConfigMap", "configmaps", "", "v1", True)
     executor = ToolExecutor(cast(ReadOps, kube), {"configmaps": meta})
 
@@ -172,6 +183,7 @@ async def test_list_resources_stops_when_a_separator_exhausts_the_budget() -> No
         result = await executor.execute("list_resources", {"kind": "configmaps"})
 
     assert render_age.call_count == 100
+    assert kube.yielded == 100
     assert len(result) == MAX_RESULT_CHARS
     assert "truncated" in result
     assert kube.closed

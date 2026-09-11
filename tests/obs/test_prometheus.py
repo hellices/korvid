@@ -205,6 +205,22 @@ class TestLimitsAreEnforcedBeforeTheRequest:
 
 
 class TestResponseBounds:
+    async def test_malformed_samples_after_the_series_cap_are_counted(self) -> None:
+        payload = _vector(("kept", "1.5"), ("over-cap", "2"))
+        payload["data"]["result"][0]["value"][0] = "not-a-timestamp"
+        payload["data"]["result"].extend(
+            ["junk", {"metric": {}}, {"metric": {}, "value": [1786_000_000, "NaN"]}]
+        )
+        connector, _ = _connector(_ok(payload), limits=QueryLimits(max_series=1))
+
+        result = await connector.query(signal="cpu", scope=SCOPE)
+
+        assert [(series.labels["pod"], series.value) for series in result.series] == [("kept", 1.5)]
+        assert result.truncated is True
+        assert result.omitted_entries == 3
+        assert result.observed_at is None
+        assert "omitted unusable entries: 3" in render_metrics(result)
+
     async def test_series_beyond_the_cap_are_dropped_and_reported(self) -> None:
         payload = _vector(*[(f"api-{i}", "1") for i in range(10)])
         connector, _ = _connector(_ok(payload), limits=QueryLimits(max_series=3))
