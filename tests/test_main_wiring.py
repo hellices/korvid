@@ -948,15 +948,14 @@ def test_load_startup_config_wraps_config_error_as_system_exit(
     from korvid.core.config import ConfigError
 
     def _raise() -> Any:
-        raise ConfigError("unsupported config key: 'agent.profile'")
+        raise ConfigError("unsupported agent key: 'profile'")
 
     monkeypatch.setattr(main_mod, "load_config", _raise)
     with pytest.raises(SystemExit) as exc_info:
         main_mod._load_startup_config(False)
     message = str(exc_info.value)
     assert "\n" not in message  # one-line, actionable
-    assert "unsupported" in message
-    assert "agent.profile" in message
+    assert message == "korvid: unsupported agent key: 'profile'"
 
 
 def test_the_profile_writer_updates_only_the_active_profile(
