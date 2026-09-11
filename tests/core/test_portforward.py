@@ -39,10 +39,12 @@ class _FakeProc:
     def terminate(self) -> None:
         self.terminated = True
         self.returncode = -15
+        self._close_stdout()
 
     def kill(self) -> None:
         self.killed = True
         self.returncode = -9
+        self._close_stdout()
 
     def wait(self, timeout: float | None = None) -> int:
         if self.returncode is None:
@@ -50,9 +52,15 @@ class _FakeProc:
         self.waited = True
         return self.returncode
 
-    def exit(self, code: int) -> None:
+    def exit(self, code: int, *, close_stdout: bool = True) -> None:
         """Test hook: simulate the subprocess dying on its own."""
         self.returncode = code
+        if close_stdout:
+            self._close_stdout()
+
+    def _close_stdout(self) -> None:
+        if self.stdout is not None:
+            self.stdout.close()
 
 
 class _GatedStream:
@@ -60,6 +68,7 @@ class _GatedStream:
 
     def __init__(self) -> None:
         self._lines: queue.Queue[str | None] = queue.Queue()
+        self.closed = False
 
     def __iter__(self) -> _GatedStream:
         return self
@@ -71,7 +80,29 @@ class _GatedStream:
         return line
 
     def feed(self, line: str | None) -> None:
+        if line is None:
+            self.close()
+            return
         self._lines.put(line)
+
+    def close(self) -> None:
+        if not self.closed:
+            self.closed = True
+            self._lines.put(None)
+
+
+@pytest.mark.parametrize(
+    ("method", "args"),
+    [("terminate", ()), ("kill", ()), ("exit", (1,))],
+)
+def test_fake_process_exit_closes_the_readiness_stream(method: str, args: tuple[int, ...]) -> None:
+    proc = _FakeProc(["kubectl", "port-forward"])
+    stream = _GatedStream()
+    proc.stdout = stream
+
+    getattr(proc, method)(*args)
+
+    assert stream.closed
 
 
 def _registry(procs: list[_FakeProc], context: str | None = None) -> ForwardRegistry:
@@ -835,7 +866,7 @@ def test_reattach_ignores_late_output_from_the_dead_process() -> None:
     record = registry.start(_spec())
     procs[0].stdout.feed("Forwarding from 127.0.0.1:8080 -> 80\n")
     assert registry.wait_ready(record.id, timeout=2.0) == "alive"
-    procs[0].exit(1)
+    procs[0].exit(1, close_stdout=False)
     registry.refresh()
     assert record.status == "broken"
     registry.reattach(record.id)
@@ -1275,7 +1306,7 @@ def test_refresh_releases_waiter_when_a_starting_child_dies_silently() -> None:
     waiter, results = _blocked_waiter(registry, record)
     # The child dies without flushing EOF — its reader thread stays blocked,
     # so only the poll can notice and must release the stranded waiter.
-    procs[0].exit(1)
+    procs[0].exit(1, close_stdout=False)
     registry.refresh()
     waiter.join(timeout=5.0)
     assert not waiter.is_alive(), "waiter still blocked after refresh marked it broken"
@@ -1289,7 +1320,7 @@ def test_reattach_releases_the_previous_generations_waiter() -> None:
     registry = _registry(procs)
     record = registry.start(_spec())
     waiter, results = _blocked_waiter(registry, record)
-    procs[0].exit(1)
+    procs[0].exit(1, close_stdout=False)
     # Mark the record broken without waking the waiter — the swap itself must
     # be sufficient to release it, whatever path flipped the status.
     record.status = "broken"
