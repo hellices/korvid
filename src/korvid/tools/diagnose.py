@@ -13,6 +13,8 @@ import re
 from datetime import UTC, datetime
 from typing import Any
 
+from korvid.k8s.events import select_event_timestamp
+
 #: Warning events shown before the report elides the rest.
 MAX_WARNING_EVENTS = 10
 
@@ -218,15 +220,7 @@ def _event_count(ev: dict[str, Any]) -> int:
 def _event_last_seen(ev: dict[str, Any]) -> str:
     """Raw timestamp of the latest occurrence: `series.lastObservedTime`
     for repeating events, then the non-series fallbacks."""
-    raw = (
-        _dict(ev.get("series")).get("lastObservedTime")
-        or ev.get("lastTimestamp")
-        or ev.get("eventTime")
-        or ev.get("firstTimestamp")
-        or _dict(ev.get("metadata")).get("creationTimestamp")
-        or ""
-    )
-    return str(raw)
+    return select_event_timestamp(ev)
 
 
 def _event_instant(ev: dict[str, Any]) -> datetime:

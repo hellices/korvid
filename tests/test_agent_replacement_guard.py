@@ -18,9 +18,7 @@ module is the structural gate:
 
 Historical records are deliberately out of scope: `docs/dev/specs/`,
 `docs/dev/plans/` and `docs/superpowers/` describe how korvid got here and
-must keep naming what they retired. The removed configuration keys
-(`agent.profile`, `agent.prompts`) are likewise allowed — but only on the
-migration surfaces that tell an operator what to do about them.
+must keep naming what they retired.
 """
 
 from __future__ import annotations
@@ -38,7 +36,6 @@ import pytest
 from korvid.agent.engine import AgentEngine
 from korvid.agent.native_engine import NativeAgentEngine
 from korvid.agent.session import AgentSession, DefaultAgentSession
-from tests.config_keys import named_keys
 
 _REPO_ROOT = Path(__file__).parents[1]
 _SRC = _REPO_ROOT / "src" / "korvid"
@@ -110,27 +107,6 @@ _FORBIDDEN_SELECTORS = (
     "native_backend_enabled",
 )
 
-#: The removed config keys. They are still spoken about, but only where an
-#: operator is told what replaced them.
-_REMOVED_CONFIG_KEYS = ("agent.profile", "agent.prompts")
-
-#: Files allowed to name a removed config key: the startup migration error,
-#: the tests that pin it, this guard, and the operator-facing migration
-#: records that explain the supersession. Kept exact — a surface that has
-#: stopped naming a removed key is a hole in the guard, not a spare seat,
-#: so `test_every_migration_surface_still_names_a_removed_key` fails on it.
-_MIGRATION_SURFACES = frozenset(
-    {
-        "src/korvid/core/config.py",
-        "tests/core/test_config.py",
-        "tests/test_main_wiring.py",
-        "tests/test_agent_replacement_guard.py",
-        "docs/dev/agent-decisions.md",
-        "docs/release-notes/v0.4.0.md",
-        "docs/release-notes/v0.4.1.md",
-    }
-)
-
 #: Documentation that describes today's program. Historical specs, plans and
 #: superpowers records are excluded by design — they are the audit trail of
 #: the migration and must keep naming what it removed.
@@ -160,17 +136,6 @@ def _current_docs() -> list[Path]:
 
 def _found(text: str, needles: Iterable[str]) -> list[str]:
     return [needle for needle in needles if needle in text]
-
-
-def _removed_config_keys(text: str) -> list[str]:
-    """Removed config keys named in *text*, as whole keys.
-
-    Key matching lives in `tests/config_keys.py` because
-    `tests/test_docs_agent_contracts.py` asks the same question about the
-    same keys, and the two had already drifted into two regexes that
-    disagreed about a trailing dot.
-    """
-    return named_keys(text, _REMOVED_CONFIG_KEYS)
 
 
 _SRC_FILES = _python_sources(_SRC)
@@ -256,89 +221,6 @@ def test_no_current_doc_names_a_retired_agent_symbol(path: Path) -> None:
     """
     found = _found(path.read_text(encoding="utf-8"), _RETIRED_SYMBOLS)
     assert found == [], f"{_relative(path)} still names {found}"
-
-
-def test_removed_config_keys_appear_only_on_migration_surfaces() -> None:
-    """`agent.profile`/`agent.prompts` survive only as migration advice.
-
-    The startup error that names them is the whole point of keeping the
-    strings: an operator with an old `config.yaml` must be told what to
-    write instead. Anywhere else, the key reads as a supported option.
-    """
-    offenders = sorted(
-        _relative(path)
-        for path in (*_SRC_FILES, *_TEST_FILES, *_MARKDOWN_FILES)
-        if _removed_config_keys(path.read_text(encoding="utf-8"))
-    )
-    assert set(offenders) <= _MIGRATION_SURFACES, (
-        f"removed config keys named outside the migration surfaces: "
-        f"{sorted(set(offenders) - _MIGRATION_SURFACES)}"
-    )
-
-
-def test_the_surviving_profiles_key_is_not_read_as_the_removed_one() -> None:
-    """`agent.profiles` is the key korvid reads *today*.
-
-    It contains `agent.profile` as a prefix, so a substring test reports
-    every module that names the current key as if it were advertising the
-    removed one. The distinction is the whole difference between a guard
-    that protects the deletion and a guard that fails on correct code, so
-    it gets its own test rather than being an implementation detail of
-    the scan above.
-
-    The boundary is symmetric and excludes `.` on both sides, because a
-    dotted name is ambiguous between a config key and a module path.
-    `korvid.agent.prompts` is a plausible import and must not be read as
-    the retired `agent.prompts` setting; `agent.profile.model` is a
-    longer path, and if a child key ever has to be guarded it gets its
-    own entry in `_REMOVED_CONFIG_KEYS` rather than a looser regex.
-    """
-    assert _removed_config_keys("writes `agent.active`/`agent.profiles`") == []
-    assert _removed_config_keys("agent.profile_manager rewrites nothing") == []
-    assert _removed_config_keys("korvid.agent.prompts is a module path") == []
-    assert _removed_config_keys("agent.profile.model is a longer path") == []
-    assert _removed_config_keys("agent.profile was removed") == ["agent.profile"]
-    assert _removed_config_keys("use `agent.profile:` no more") == ["agent.profile"]
-    assert _removed_config_keys("agent.prompts was removed") == ["agent.prompts"]
-
-
-def test_both_key_guards_ask_the_same_matcher() -> None:
-    """The two guards that match config keys must not own two regexes.
-
-    They did, and the two disagreed about a trailing dot: this module
-    used `\\b`, which matches `agent.profile` inside `agent.profile.model`,
-    while `tests/test_docs_agent_contracts.py` used a lookahead that does
-    not. A guard whose meaning depends on which file you read it in is
-    not a guard, so both import `tests/config_keys.py`.
-    """
-    contracts = (_TESTS / "test_docs_agent_contracts.py").read_text(encoding="utf-8")
-    here = Path(__file__).read_text(encoding="utf-8")
-    for source in (contracts, here):
-        assert "from tests.config_keys import" in source
-    assert "(?![\\w.])" not in contracts, "the docs guard grew its own matcher again"
-
-
-def test_every_migration_surface_still_names_a_removed_key() -> None:
-    """A surface that stopped naming one is a hole, not a spare seat.
-
-    The allow-list is what keeps the scan above meaningful; an entry that
-    no longer corresponds to anything silently re-permits a whole file.
-    """
-    stale = sorted(
-        name
-        for name in _MIGRATION_SURFACES
-        if not _removed_config_keys((_REPO_ROOT / name).read_text(encoding="utf-8"))
-    )
-    assert stale == []
-
-
-def test_the_startup_migration_error_still_names_both_removed_keys() -> None:
-    """The allowance above is only safe while the advice actually exists."""
-    config = (_SRC / "core" / "config.py").read_text(encoding="utf-8")
-    assert "agent.profile was removed" in config
-    assert "agent.model_tier" in config
-    assert "agent.prompts was removed" in config
-    assert "agent.rules" in config
 
 
 # ---------------------------------------------------------------------------

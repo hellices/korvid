@@ -48,11 +48,12 @@ async def drain_logging() -> None:
 
 
 async def _wait_for_transport_closures() -> None:
-    """Cross the ready-queue boundary after cached transports start closing."""
+    """Drain chained TLS and Proactor close callbacks from the ready queue."""
     loop = asyncio.get_running_loop()
-    barrier = asyncio.Event()
-    loop.call_soon(barrier.set)
-    await barrier.wait()
+    for _ in range(2):
+        barrier = asyncio.Event()
+        loop.call_soon(barrier.set)
+        await barrier.wait()
 
 
 async def drop_cached_clients() -> None:

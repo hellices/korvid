@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 from time import monotonic
 from typing import Any, Protocol
 
+from korvid.k8s.events import select_event_timestamp
 from korvid.k8s.models import ContainerTrouble, PodSummary
 from korvid.ui.widgets.hint_strip import parse_rfc3339
 
@@ -110,16 +111,7 @@ def event_timestamp(event: dict[str, Any]) -> datetime | None:
     and finally `metadata.creationTimestamp` — a valid event may carry
     only those, and treating it as undated would misorder or suppress it.
     """
-    series = event.get("series") or {}
-    raw = (
-        series.get("lastObservedTime")
-        or event.get("lastTimestamp")
-        or event.get("eventTime")
-        or event.get("firstTimestamp")
-        or (event.get("metadata") or {}).get("creationTimestamp")
-        or ""
-    )
-    return parse_rfc3339(str(raw))
+    return parse_rfc3339(select_event_timestamp(event))
 
 
 def newest_warning(events: list[dict[str, Any]]) -> tuple[str, datetime | None] | None:

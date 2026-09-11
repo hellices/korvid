@@ -61,8 +61,8 @@ from korvid.agent.model_profiles import (
 from korvid.agent.navigation import EvidenceTarget, target_for
 from korvid.core.audit import AuditLog
 from korvid.core.config import (
+    DEFAULT_PROFILE_NAME,
     KEEP_MODEL_TIER,
-    LEGACY_PROFILE_NAME,
     MODEL_REFERENCE_SEPARATOR,
     KorvidConfig,
     ModelConnectionsWriter,
@@ -1072,7 +1072,7 @@ class AgentUiController:
             The active profile's name and the whole set with that one
             profile's model replaced, or None when nothing is configured.
         """
-        name = self._profiles.active or LEGACY_PROFILE_NAME
+        name = self._profiles.active or DEFAULT_PROFILE_NAME
         profile = self._profiles.active_profile
         if profile is None:
             return None

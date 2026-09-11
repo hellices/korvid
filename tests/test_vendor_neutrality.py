@@ -58,7 +58,7 @@ SCANNED_FILES: tuple[str, ...] = ("src/korvid/core/config.py",)
 #: tuple nor `SCANNED_ROOTS` fails the scan-surface test, so a new
 #: routing package cannot arrive unscanned by accident.
 UNSCANNED_PACKAGES: tuple[str, ...] = (
-    # Only `core/config.py` is on the surface, and it is region-scoped.
+    # Only `core/config.py` is on the routing surface.
     "src/korvid/core",
     # Local benchmark harnesses: their CLI defaults and base URLs name
     # `ollama` and `openai` because that is what they benchmark.
@@ -99,69 +99,6 @@ ALLOWED: frozenset[str] = frozenset(
         "src/korvid/providers/litellm_settings.py",
     }
 )
-
-#: `core/config.py` is *not* whole-file allowed. Only the legacy-migration
-#: region may name a vendor, and the region is computed from the module's
-#: AST rather than by line or by a "legacy" substring - a migration
-#: function's body and a migration-only alias table name providers on
-#: lines that do not themselves say "legacy". Nested definitions count,
-#: because `ast.walk` reaches them.
-#:
-#: Every name here must exist in the module **at the commit this guard
-#: lands in**, which is what `test_every_migration_region_name_still_exists`
-#: enforces in both directions.
-_MIGRATION_MODULE = "src/korvid/core/config.py"
-_MIGRATION_REGION_NAMES: frozenset[str] = frozenset(
-    {
-        "_migrate_legacy_agent",
-        "_migrate_azure_endpoint",
-        "_legacy_model_reference",
-        "_legacy_auth",
-        "_legacy_options",
-        # One legacy knob validated the way its own pre-profile parser was.
-        # Its warnings quote the `agent.ollama.<key>` line the operator has
-        # to fix, so the key has to survive in the text.
-        "_legacy_ollama_value",
-        "_legacy_ollama_number",
-        "_LEGACY_OPENAI_COMPAT_NAMES",
-        # Migration-only: names whose credential handling changed, warned on
-        # load. Measured offender at the pre-plan tree.
-        "_LEGACY_REVIEW_NAMES",
-        # The agent-level keys the legacy shape owned, which the first
-        # successful save strips. `ollama` is one of them.
-        "LEGACY_AGENT_KEYS",
-    }
-)
-
-
-def _named_line_span(tree: ast.Module, name: str) -> set[int]:
-    """Every line belonging to the function or assignment called *name*."""
-    lines: set[int] = set()
-    for node in ast.walk(tree):
-        defined: str | None = None
-        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
-            defined = node.name
-        elif isinstance(node, ast.Assign):
-            targets = [t.id for t in node.targets if isinstance(t, ast.Name)]
-            defined = targets[0] if targets else None
-        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
-            defined = node.target.id
-        else:
-            # Nothing that can define *name*, so nothing that can contribute
-            # lines. Skipping here is also what leaves `node` narrowed to the
-            # statement types below, which are the ones carrying positions.
-            continue
-        if defined == name and node.end_lineno is not None:
-            lines.update(range(node.lineno, node.end_lineno + 1))
-    return lines
-
-
-def _migration_line_span(tree: ast.Module) -> set[int]:
-    """Every line belonging to a named migration function or assignment."""
-    lines: set[int] = set()
-    for name in _MIGRATION_REGION_NAMES:
-        lines |= _named_line_span(tree, name)
-    return lines
 
 
 def _repo(name: str) -> Path:
@@ -206,92 +143,11 @@ def test_no_module_branches_on_a_vendor_name() -> None:
         if posix in ALLOWED:
             continue
         tree = ast.parse(_repo(posix).read_text(encoding="utf-8"))
-        exempt = _migration_line_span(tree) if posix == _MIGRATION_MODULE else set()
         for lineno, value in _executable_strings(tree):
-            if lineno in exempt:
-                continue
             lowered = value.lower()
             if any(token in lowered for token in VENDOR_TOKENS):
                 offenders.append(f"{posix}:{lineno}: {value!r}")
     assert offenders == []
-
-
-def test_load_config_itself_names_no_vendor() -> None:
-    """The pre-plan tree names two vendors inline in `load_config`.
-
-    It inferred `device-login` from `provider == "github-copilot"`, and it
-    read the legacy `agent.ollama` sub-mapping by key. Both moved into
-    `_legacy_auth` and `_legacy_options`, where the migration exemption
-    covers them. Exempting `load_config` instead would exempt the
-    module's largest function - which is not a region, it is a hole.
-    """
-    tree = ast.parse(_repo(_MIGRATION_MODULE).read_text(encoding="utf-8"))
-    target = next(
-        node
-        for node in tree.body
-        if isinstance(node, ast.FunctionDef) and node.name == "load_config"
-    )
-    offenders = [
-        f"{lineno}: {value!r}"
-        for lineno, value in _executable_strings(target)
-        if any(token in value.lower() for token in VENDOR_TOKENS)
-    ]
-    assert offenders == []
-
-
-def test_the_migration_exemption_is_a_region_not_the_whole_file() -> None:
-    """A vendor name added anywhere in core/config.py outside the named
-    migration functions must still fail. Whole-file allowance would make
-    the largest module in the change a permanent blind spot."""
-    tree = ast.parse(_repo(_MIGRATION_MODULE).read_text(encoding="utf-8"))
-    exempt = _migration_line_span(tree)
-    total = {lineno for lineno, _ in _executable_strings(tree)}
-    assert exempt, "the migration region resolved to nothing - names drifted"
-    assert not total <= exempt, "the exemption swallowed the whole module"
-
-
-def test_every_migration_region_name_still_exists() -> None:
-    """If a migration helper is renamed, the exemption must move with it
-    rather than silently covering nothing. This also catches the reverse
-    mistake: naming a helper that *this* task deletes, which would fail
-    the guard on the commit that introduces it."""
-    tree = ast.parse(_repo(_MIGRATION_MODULE).read_text(encoding="utf-8"))
-    defined = {
-        node.name
-        for node in ast.walk(tree)
-        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
-    }
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Assign):
-            defined.update(t.id for t in node.targets if isinstance(t, ast.Name))
-        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
-            defined.add(node.target.id)
-    assert defined >= _MIGRATION_REGION_NAMES
-
-
-def test_every_migration_region_name_exempts_a_vendor_name() -> None:
-    """The exemption runs in both directions: named, and load-bearing.
-
-    A region that exempts no vendor token is not covering anything. It
-    reads like a deliberate carve-out, so nobody removes it, and the day
-    a function of that name is rewritten into something that is not a
-    migration it silently becomes a hole in the middle of the largest
-    module on the surface. The list has to shrink when the migration
-    does.
-    """
-    tree = ast.parse(_repo(_MIGRATION_MODULE).read_text(encoding="utf-8"))
-    strings = _executable_strings(tree)
-    inert: list[str] = []
-    for name in sorted(_MIGRATION_REGION_NAMES):
-        span = _named_line_span(tree, name)
-        if not span:
-            inert.append(f"{name}: covers no line")
-        elif not any(
-            lineno in span and any(token in value.lower() for token in VENDOR_TOKENS)
-            for lineno, value in strings
-        ):
-            inert.append(f"{name}: exempts no vendor name")
-    assert inert == []
 
 
 def test_every_allowance_names_a_file_that_exists() -> None:

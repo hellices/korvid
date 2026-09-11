@@ -159,9 +159,6 @@ class FakeViewState(ViewState):
     def current_scope(self) -> str:
         return ""  # pragma: no cover
 
-    def current_namespace(self) -> str:
-        return ""  # pragma: no cover
-
     def resources(self, kind: str, scope: str) -> list[Any]:
         return []  # pragma: no cover
 

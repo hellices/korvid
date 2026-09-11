@@ -149,8 +149,8 @@ async def test_colon_opens_command_bar_and_ns_switch() -> None:
         for ch in "ns prod":
             await pilot.press(ch if ch != " " else "space")
         await pilot.press("enter")
-        await until(pilot, lambda: app.current_namespace == "prod", label="namespace switched")
-        assert app.current_namespace == "prod"
+        await until(pilot, lambda: app.current_scope == "prod", label="namespace switched")
+        assert app.current_scope == "prod"
 
 
 async def test_slash_filter_narrows_rows() -> None:
@@ -289,11 +289,11 @@ async def test_bare_ns_opens_picker_and_selection_switches() -> None:
         await pilot.press("enter")
         await until(
             pilot,
-            lambda: picker.display is False and app.current_namespace == "kube-system",
+            lambda: picker.display is False and app.current_scope == "kube-system",
             label="namespace switched from picker",
         )
         assert picker.display is False
-        assert app.current_namespace == "kube-system"
+        assert app.current_scope == "kube-system"
 
 
 async def test_picker_escape_dismisses_without_switch() -> None:
@@ -322,7 +322,7 @@ async def test_picker_escape_dismisses_without_switch() -> None:
             label="namespace picker closed",
         )
         assert app.query_one(NamespacePicker).display is False
-        assert app.current_namespace == "default"
+        assert app.current_scope == "default"
 
 
 async def test_rows_sorted_by_eviction_order_reversed() -> None:

@@ -233,9 +233,10 @@ def test_eval_prompt_text_is_injected_directly_without_a_registry() -> None:
     prompt = harness.compose("diagnose it", inputs(policy_=policy()))
 
     assert "one tool at a time" not in prompt.system_message
-    assert prompt.system_message.index("EVAL_TIER_PROMPT") < prompt.system_message.index(
-        "EVAL_EXTRA_LAYER"
-    )
+    system_message = prompt.system_message
+    assert "EVAL_TIER_PROMPT" in system_message
+    assert "EVAL_EXTRA_LAYER" in system_message
+    assert system_message.index("EVAL_TIER_PROMPT") < system_message.index("EVAL_EXTRA_LAYER")
 
 
 def test_an_explicit_empty_eval_tier_prompt_does_not_restore_shipped_wording() -> None:
@@ -248,10 +249,12 @@ def test_an_explicit_empty_eval_tier_prompt_does_not_restore_shipped_wording() -
 def test_default_prompt_harness_has_no_eval_extra_layer() -> None:
     turn_inputs = inputs(policy_=policy())
     injected = PromptHarness(extra_layers=("EVAL_EXTRA_LAYER",)).compose("diagnose it", turn_inputs)
+    explicit_empty = PromptHarness(extra_layers=()).compose("diagnose it", turn_inputs)
     prompt = PromptHarness().compose("diagnose it", turn_inputs)
 
     assert "EVAL_EXTRA_LAYER" in injected.system_message
     assert "EVAL_EXTRA_LAYER" not in prompt.system_message
+    assert prompt.system_message == explicit_empty.system_message
     assert prompt.system_message != injected.system_message
 
 

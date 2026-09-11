@@ -212,7 +212,7 @@ class HelmController:
         """Namespace a fresh install targets by default: the active view
         namespace, or the configured workload namespace on the
         all-namespaces view (same fallback as the operator install wizard)."""
-        view_ns = self._view.current_namespace()
+        view_ns = self._view.current_scope()
         return (
             view_ns if view_ns != ALL_NAMESPACES else (self._view.default_namespace() or "default")
         )

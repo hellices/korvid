@@ -36,10 +36,6 @@ class ViewState(ABC):
         """Namespace the focused pane is scoped to, or the all-namespaces marker."""
 
     @abstractmethod
-    def current_namespace(self) -> str:
-        """Alias of `current_scope`, kept because both names are in use."""
-
-    @abstractmethod
     def canonical_kind(self, kind: str) -> str:
         """Resolve an alias to the view kind that watching and writes agree on.
 

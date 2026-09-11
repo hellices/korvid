@@ -173,6 +173,12 @@ entry-point name, move the former factory body into `build_provider(profile)`,
 and point the entry point at its module. The returned object still implements
 `LLMProvider`; authentication and profile options use the current contracts below.
 
+## Configuring a third-party flow
+
+A `SpecialFlow.build_provider` function returns an `LLMProvider` satisfying the
+event and capability contracts below. Publish the flow with a `prefix` matching
+its entry-point name.
+
 Third-party prefixes are configured by hand; the `:ai` wizard does not discover
 them:
 
@@ -198,7 +204,8 @@ Declaration types come from `korvid.agent.model_profiles` (`SpecialFlow`,
 modules, not from package-level re-exports.
 
 `LLMProvider` has no `name` property. It has `descriptor` and `capabilities`
-properties, plus `async complete(messages, tools, *, stream=True)` and
+properties, plus
+`complete(messages, tools, *, stream=True) -> AsyncIterator[Mapping]` and
 `async aclose()`. The flow factory catches builder failures, but does not wrap
 the returned provider in a descriptor/capabilities validator. Adapters must
 validate these properties themselves. `ModelRouter` reads them when resolving
@@ -215,7 +222,8 @@ to an explicit `agent.model_tier`, and `provenance` must map a known fact name
 to a `CapabilitySource`.
 
 `complete()` must return an **async iterator** directly; an async generator is
-the usual implementation, while a coroutine that must first be awaited is not.
+the usual implementation (`async def` with `yield`), while a coroutine that
+must first be awaited is not.
 `prepare_messages()` runs before outbound validation, including for a provider
 returned by a flow. It may add dialect fields but must preserve the count,
 order, roles and content of messages so redaction records still refer to the

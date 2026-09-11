@@ -294,12 +294,38 @@ credential-shaped key and LiteLLM's controls (`mock_*`, `fallbacks`, callbacks,
 `litellm_*`) are korvid's, and are dropped from a profile: none can re-route a
 request, mute the agent's tools or fabricate an answer.
 
-A config still using the retired flat scalars is migrated on load into one
-profile named `default`, which `agent.active` then selects; the scalars are
-dropped on the next save. The `agent.ollama.*` block is read **only** by that
-migration — once `agent.profiles` exists it is ignored and removed on save, so
-those knobs belong in a profile's `options`. See the
-[migration notes](release-notes/v0.4.1.md).
+Provider connections are configured only through `agent.profiles`; `agent.active`
+selects one, and `active: null` disables the agent. Model tuning belongs in the
+selected profile's `options`. Unsupported root or `agent` settings are
+configuration errors rather than alternate input formats.
+
+Configurations from versions that accepted flat `agent.provider`,
+`agent.model`, `agent.base_url`, or `agent.ollama.*` settings must be moved
+manually; they are no longer migrated on load. For example:
+
+```yaml
+# before
+agent:
+  provider: ollama
+  model: qwen3:8b
+  base_url: http://localhost:11434
+  ollama:
+    num_ctx: 8192
+
+# after
+agent:
+  active: default
+  profiles:
+    default:
+      model: ollama/qwen3:8b
+      endpoint: http://localhost:11434
+      auth: {method: none}
+      options:
+        num_ctx: 8192
+```
+
+See the [unreleased migration notes](release-notes/unreleased.md#current-configuration-and-extension-contracts)
+for the complete set of removed compatibility inputs.
 
 !!! warning "GitHub Copilot"
 

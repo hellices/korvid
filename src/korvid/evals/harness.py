@@ -57,7 +57,7 @@ from korvid.agent.session import DefaultAgentSession
 from korvid.agent.tiers import high, low
 from korvid.agent.tool_harness import ToolHarness
 from korvid.k8s.csp import UNKNOWN_PROVIDER
-from korvid.tools.executor import RecordedExecution, as_recorded
+from korvid.tools.executor import RecordedExecution
 
 #: The capability facts every eval is resolved against. Writes are
 #: disabled: an eval runs unattended, and only a user keystroke may ever
@@ -99,7 +99,7 @@ class PromptGrind:
     Attributes:
         tier_pack: Replacement text for layer 3, the tier operating pack.
             `None` keeps the shipped pack.
-        overlay: Additional layer-5 text, published as `eval-overlay`.
+        overlay: Additional layer-4 text, published as `eval-overlay`.
             `None` adds nothing.
     """
 
@@ -215,7 +215,7 @@ def _compose_static(policy: ResolvedAgentPolicy, prompts: PromptHarness) -> str:
 
 
 def static_prompt(policy: ResolvedAgentPolicy, grind: PromptGrind = NO_GRIND) -> str:
-    """The system message layers 1-7 a resolved policy and grind produce.
+    """The system message layers 1-6 a resolved policy and grind produce.
 
     Args:
         policy: The resolved policy.
@@ -270,7 +270,7 @@ class EvalHarness:
 def build_eval_harness(
     *,
     provider: Any,
-    execution: Any,
+    execution: RecordedExecution,
     bridge: AgentUiBridge,
     policy: ResolvedAgentPolicy | None = None,
     model_tier: str | None = None,
@@ -288,9 +288,9 @@ def build_eval_harness(
 
     Args:
         provider: The `LLMProvider` this run talks to (live, or scripted).
-        execution: The tool executor. A plain string-only executor is
-            adapted with `as_recorded`, so a pack may hand over whatever
-            it built.
+        execution: The tool executor, already implementing
+            `RecordedExecution` — a pack composes it directly rather than
+            handing over a string-only shape to be adapted.
         bridge: The typed workspace bridge, normally an `EvalUiBridge`
             built from the fixture's authored interaction.
         policy: An already-resolved policy. When `None`, one is resolved
@@ -306,18 +306,16 @@ def build_eval_harness(
     Returns:
         The composed session plus every collaborator it owns.
     """
-    base = (
+    resolved = (
         policy
         if policy is not None
         else resolve_eval_policy(
             provider, model_tier=model_tier, environment=environment, omit_tools=omit_tools
         )
     )
-    resolved = base
-    recorded = as_recorded(execution)
     tools = ToolHarness(
         policy=resolved,
-        execution=recorded,
+        execution=execution,
         bridge=bridge,
         evidence=EvidenceLedger(),
     )
@@ -350,7 +348,7 @@ def build_eval_harness(
         prompts=prompts,
         policy=resolved,
         bridge=bridge,
-        execution=recorded,
+        execution=execution,
         cluster=cluster,
         user_rules=user_rules,
         grind=grind,

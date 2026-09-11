@@ -173,7 +173,7 @@ class OperatorController:
         # namespace, or the configured workload namespace on the
         # all-namespaces view (the catalog default since `:operators`
         # opens cluster-wide).
-        view_ns = self._view.current_namespace()
+        view_ns = self._view.current_scope()
         # Same fallback as current_scope's initialization: with zero config,
         # config.namespace is None while the effective workload namespace is
         # "default" - an empty prefill would fail validation on submit.

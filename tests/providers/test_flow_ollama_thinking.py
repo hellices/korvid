@@ -434,21 +434,23 @@ def test_the_legacy_thinking_toggle_still_decides_thinking() -> None:
     assert off._options == OllamaOptions(think=False)
 
 
-def test_a_migrated_native_install_keeps_the_native_transport(tmp_path: Path) -> None:
-    """The migration promises an existing install keeps the wire protocol
-    it was already running. That promise is only kept if the option the
-    migration writes is the option this flow claims."""
+def test_a_native_install_keeps_the_native_transport(tmp_path: Path) -> None:
+    """A profile with native_thinking claims the flow and produces a
+    provider with the expected transport options."""
     from korvid.core.config import load_config
 
     path = tmp_path / "korvid.yaml"
     path.write_text(
         "agent:\n"
-        "  provider: ollama\n"
-        "  base_url: http://localhost:11434\n"
-        "  model: qwen3:8b\n"
-        "  ollama:\n"
-        "    think: true\n"
-        "    num_ctx: 8192\n"
+        "  active: local\n"
+        "  profiles:\n"
+        "    local:\n"
+        "      model: ollama/qwen3:8b\n"
+        "      endpoint: http://localhost:11434\n"
+        "      options:\n"
+        "        native_thinking: true\n"
+        "        think: true\n"
+        "        num_ctx: 8192\n"
     )
     profile = load_config(path).model_connections.active_profile
     assert profile is not None
@@ -465,33 +467,34 @@ def test_a_migrated_native_install_keeps_the_native_transport(tmp_path: Path) ->
 @pytest.mark.parametrize(
     ("block", "expected"),
     [
-        pytest.param("    think: true\n", True, id="on-stays-on"),
-        pytest.param("    think: false\n", False, id="off-stays-off"),
+        pytest.param("        think: true\n", True, id="on-stays-on"),
+        pytest.param("        think: false\n", False, id="off-stays-off"),
         pytest.param("", False, id="unset-stays-off"),
-        pytest.param('    think: "false"\n', False, id="unusable-lands-on-the-old-default"),
+        pytest.param('        think: "false"\n', False, id="unusable-lands-on-the-old-default"),
     ],
 )
-async def test_a_migrated_install_puts_the_old_think_value_on_the_wire(
+async def test_a_profile_puts_the_think_value_on_the_wire(
     tmp_path: Path, block: str, expected: bool
 ) -> None:
-    """End to end from the legacy file to the request body.
+    """End to end from a profile file to the request body.
 
-    `agent.ollama.think` was read as `raw.get("think") is True`, so an
-    install that never wrote the key — or wrote something that is not a
-    boolean — was running with thinking *off*. Migration plus this flow
-    has to reproduce that value, not a new one, because the operator did
-    not ask for anything to change.
+    The `think` option controls whether the model reasons out loud.
+    A profile that never sets the key — or sets something that is not a
+    boolean — runs with thinking *off*.
     """
     from korvid.core.config import load_config
 
     path = tmp_path / "korvid.yaml"
     path.write_text(
         "agent:\n"
-        "  provider: ollama\n"
-        "  base_url: http://localhost:11434\n"
-        "  model: qwen3:8b\n"
-        "  ollama:\n"
-        "    num_ctx: 8192\n" + block
+        "  active: local\n"
+        "  profiles:\n"
+        "    local:\n"
+        "      model: ollama/qwen3:8b\n"
+        "      endpoint: http://localhost:11434\n"
+        "      options:\n"
+        "        native_thinking: true\n"
+        "        num_ctx: 8192\n" + block
     )
     profile = load_config(path).model_connections.active_profile
     assert profile is not None

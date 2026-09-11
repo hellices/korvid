@@ -22,6 +22,13 @@ def test_agent_package_has_no_symbol_reexport_facade() -> None:
     assert "__all__" not in vars(korvid.agent)
 
 
+def test_model_profile_vocabulary_has_no_disconnected_flow_registry() -> None:
+    from korvid.agent import model_profiles
+
+    assert not hasattr(model_profiles, "SpecialFlowRegistry")
+    assert "SpecialFlowRegistry" not in model_profiles.__all__
+
+
 def test_unconsumed_screen_string_adapter_is_absent() -> None:
     from korvid.agent import outbound
 

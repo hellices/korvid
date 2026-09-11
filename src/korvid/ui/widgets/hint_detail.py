@@ -18,6 +18,7 @@ from textual.containers import VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Static
 
+from korvid.k8s.events import select_event_timestamp
 from korvid.ui.theme import phase_style
 from korvid.ui.widgets.hint_strip import relative_age
 
@@ -35,16 +36,7 @@ def _event_count(event: dict[str, Any]) -> int | None:
 
 
 def _event_age(event: dict[str, Any], *, now: datetime | None) -> str | None:
-    series = event.get("series") or {}
-    raw = (
-        series.get("lastObservedTime")
-        or event.get("lastTimestamp")
-        or event.get("eventTime")
-        or event.get("firstTimestamp")
-        or (event.get("metadata") or {}).get("creationTimestamp")
-        or ""
-    )
-    return relative_age(str(raw), now=now)
+    return relative_age(select_event_timestamp(event), now=now)
 
 
 def _append_trouble_block(body: Text, entry: Any, *, now: datetime | None) -> None:

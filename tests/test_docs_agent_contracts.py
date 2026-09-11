@@ -37,7 +37,6 @@ from korvid.agent.provider import LLMProvider
 from korvid.agent.tiers import high, low
 from korvid.tools.registry import TOOLS_BY_NAME
 from korvid.ui.widgets.model_search_screen import _REFRESH_MESSAGES
-from tests.config_keys import names_key
 
 _REPO_ROOT = Path(__file__).parents[1]
 _CURRENT_RELEASE_NOTE = f"docs/release-notes/v{__version__}.md"
@@ -220,39 +219,6 @@ def test_the_tool_description_removal_note_names_which_arm_uses_which_wording(
     assert "low" in text.casefold()
     assert "registry" in text
     assert "MCP" in text
-
-
-def test_the_agent_page_links_the_migration_note_instead_of_restating_it() -> None:
-    """A product guide is not a migration manual.
-
-    The keys the startup error retires (read out of `core/config.py` rather
-    than spelled here, so this test cannot name a key as if it were
-    supported) were replaced a release ago. The table mapping them onto
-    today's settings is release history: the current release note owns it,
-    the startup error itself names the replacement, and the guide describes
-    what an operator configures today.
-    """
-    config = (_REPO_ROOT / "src" / "korvid" / "core" / "config.py").read_text(encoding="utf-8")
-    removed_keys = re.findall(r"\"(agent\.\w+) was removed", config)
-    assert removed_keys, "the startup migration error must still name the retired keys"
-
-    agent = _text("docs/agent.md")
-    assert "Upgrading from the profile-based agent" not in agent
-    # Matched as whole keys: today's supported `agent.profiles` merely
-    # *contains* the retired singular spelling, so a substring test would
-    # read the replacement as the thing it replaced.
-    assert [key for key in removed_keys if names_key(agent, key)] == []
-    assert "model_tier" in agent, "the supported key still has to be on the page"
-    assert re.search(
-        rf"\[[^\]]*(?:migration|upgrade)[^\]]*\]\(release-notes/{re.escape(Path(_CURRENT_RELEASE_NOTE).name)}\)",
-        agent,
-        re.IGNORECASE,
-    ), "the current guide must send upgrades to the release note that owns migration history"
-
-    notes = _text(_CURRENT_RELEASE_NOTE)
-    assert [key for key in removed_keys if key in notes] == removed_keys, (
-        "the release note is where a reader with an old config.yaml is sent"
-    )
 
 
 def test_the_agent_page_states_the_eval_harness_packaging_boundary() -> None:
@@ -724,23 +690,6 @@ def test_the_threat_model_lists_every_litellm_lockdown_flag() -> None:
     words = {6: "six", 7: "seven", 8: "eight", 9: "nine", 10: "ten"}
     spelled = words.get(len(LOCKDOWN_FLAGS), str(len(LOCKDOWN_FLAGS)))
     assert f"{spelled} attributes" in threat_model
-
-
-def test_the_migration_docs_name_the_profile_the_migration_really_creates() -> None:
-    """The legacy profile name is read out of `core/config.py`, not guessed.
-
-    An operator whose `config.yaml` still has the flat scalars looks for the
-    profile korvid wrote. A doc naming a different one sends them to a key
-    that is not in the file.
-    """
-    from korvid.core.config import LEGACY_PROFILE_NAME
-
-    assert f"`{LEGACY_PROFILE_NAME}`" in _text("docs/agent.md")
-    # The release note shows the file korvid writes back, so the name has to
-    # appear as the key it really writes, not only in prose around it.
-    notes = _text(_CURRENT_RELEASE_NOTE)
-    assert f"active: {LEGACY_PROFILE_NAME}" in notes
-    assert f"\n    {LEGACY_PROFILE_NAME}:\n" in notes
 
 
 def test_the_release_notes_describe_the_current_plugin_entry_point() -> None:

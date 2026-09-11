@@ -15,15 +15,9 @@ option filtering and TLS trust.
 Configuration comes from the environment:
 
 - `KORVID_EVAL_BASE_URL` — endpoint base URL (required)
-- `KORVID_EVAL_MODEL` — model reference, `provider/model` (required)
-- `KORVID_EVAL_PROVIDER` — compatibility only: the prefix to put in front
-  of `KORVID_EVAL_MODEL` when that value has no `/`. Never a transport
-  choice; korvid takes no branch on its value.
+- `KORVID_EVAL_MODEL` — `provider/model` or a LiteLLM-resolvable bare tag
+  (required)
 - `KORVID_EVAL_API_KEY_ENV` — the *name* of the variable holding the key
-- `KORVID_EVAL_API_KEY` — **deprecated**: the key itself. Still honoured,
-  and still read by name (the profile stores `KORVID_EVAL_API_KEY`, never
-  its value), but it puts a credential in the eval's own environment
-  namespace. Prefer `KORVID_EVAL_API_KEY_ENV`.
 - `KORVID_EVAL_OPTIONS_JSON` — a JSON object of profile options
   (`temperature`, `num_ctx`, …), exactly as a connection profile's
   own `options` block
@@ -83,20 +77,9 @@ from korvid.providers.litellm_runtime import models_by_provider
 from korvid.providers.special_flows import SpecialFlowRegistry
 from korvid.tools.executor import ToolExecutor
 
-#: The reference separator, spelled once. `provider/model` is the shape
-#: every korvid profile uses; the eval's legacy two-variable form is
-#: joined into it rather than interpreted.
-_REFERENCE_SEPARATOR: Final = "/"
-
 #: Seconds a live eval waits for a model that has not answered yet. Local
 #: 30B-class models on cold weights routinely exceed any SDK default.
 DEFAULT_EVAL_TIMEOUT_SECONDS: Final = 60.0
-
-#: The deprecated variable that holds the credential *value*. Kept working,
-#: but the profile only ever stores this name — the value is read by the
-#: production `environment` auth method, from the process environment,
-#: exactly as it would be for a TUI profile.
-_LEGACY_API_KEY_VAR: Final = "KORVID_EVAL_API_KEY"
 
 #: What `litellm_factory._refuse` appends to every refusal. Trimmed off the
 #: text the CLI prints because "the agent is disabled" describes the TUI,
@@ -108,48 +91,23 @@ _FACTORY_LOGGER: Final = "korvid.providers.litellm_factory"
 
 
 def _eval_reference(env: Mapping[str, str]) -> str:
-    """The model reference, canonical if given, joined if not.
+    """The model reference, as the operator wrote it.
 
-    `KORVID_EVAL_PROVIDER` predates canonical references. It survives as a
-    *prefix*, never as a choice: whatever the operator wrote is joined to
-    the model with a separator and handed to the same routing the TUI
-    uses, so no vendor name is ever compared here.
+    `KORVID_EVAL_MODEL` accepts an explicit `provider/model` reference or
+    a bare tag LiteLLM can resolve. Malformed or unroutable references are
+    refused downstream by `create_provider_from_profile`.
     """
-    model = env.get("KORVID_EVAL_MODEL", "").strip()
-    if _REFERENCE_SEPARATOR in model:
-        return model
-    prefix = env.get("KORVID_EVAL_PROVIDER", "").strip()
-    if not prefix or not model:
-        return model
-    return f"{prefix}{_REFERENCE_SEPARATOR}{model}"
+    return env.get("KORVID_EVAL_MODEL", "").strip()
 
 
 def _eval_auth(env: Mapping[str, str]) -> ConnectionAuthConfig:
     """The auth the eval profile declares — a variable *name*, or nothing.
 
-    Both supported forms resolve to the `environment` method, so the
-    profile carries no secret and the credential is read by the same code
-    path a TUI profile uses.
+    Resolves to the `environment` method, so the profile carries no
+    secret and the credential is read by the same code path a TUI
+    profile uses.
     """
     named = env.get("KORVID_EVAL_API_KEY_ENV", "").strip()
-    if not named and env.get(_LEGACY_API_KEY_VAR, "").strip():
-        # One string literal, read from nothing. This warning fires only
-        # when an inline credential is in scope, and CodeQL reports any
-        # credential-shaped expression at an output sink as clear-text
-        # logging of the credential itself (alert #12,
-        # `py/clear-text-logging-sensitive-data`) — interpolating the
-        # legacy variable's *name* here did exactly that. Naming the
-        # replacement keeps the notice actionable; the deprecated
-        # spelling is named in this module's docstring and in
-        # `docs/evals/methodology.md`, neither of which is an output
-        # stream.
-        print(
-            "warning: an inline eval API key variable is set; that form is"
-            " deprecated and will be removed. Set KORVID_EVAL_API_KEY_ENV to"
-            " the name of the variable holding the key instead.",
-            file=sys.stderr,
-        )
-        named = _LEGACY_API_KEY_VAR
     if not named:
         return ConnectionAuthConfig(method="none")
     return ConnectionAuthConfig(method="environment", settings={"key": named})
@@ -230,13 +188,10 @@ def _timeout_refusal(source: str, value: object) -> str:
 def eval_model_tag(env: Mapping[str, str]) -> str:
     """The model as the *serving endpoint* names it.
 
-    The routing prefix in `provider/model` is korvid's own vocabulary: an
-    endpoint's metadata API knows `qwen3:8b`, not `ollama/qwen3:8b`, and
-    answers nothing for the prefixed form — so digest, quantization and
-    context length go silently unpinned. The reference is split by the
-    shared `split_reference`, which takes no vendor branch: whatever
-    precedes the first separator is dropped for the probe, whoever the
-    provider is.
+    When present, the routing prefix in `provider/model` is korvid's own
+    vocabulary: an endpoint's metadata API knows `qwen3:8b`, not
+    `ollama/qwen3:8b`. The shared `split_reference` drops that prefix for
+    the probe and leaves a bare tag unchanged.
     """
     return split_reference(_eval_reference(env))[1]
 
@@ -245,12 +200,12 @@ def eval_api_key(env: Mapping[str, str]) -> str:
     """The credential the *serving probe* presents, resolved like the profile's.
 
     The probe is metadata collection, not the eval itself, so it reads the
-    same two variables rather than growing its own convention.
+    same variable rather than growing its own convention.
     """
     named = env.get("KORVID_EVAL_API_KEY_ENV", "").strip()
-    if named:
-        return os.environ.get(named, "").strip()
-    return env.get(_LEGACY_API_KEY_VAR, "").strip()
+    if not named:
+        return ""
+    return os.environ.get(named, "").strip()
 
 
 class _RefusalCollector(logging.Handler):

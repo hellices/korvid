@@ -959,15 +959,6 @@ class KorvidApp(App[None]):
         """
         return self._agent_ui
 
-    @property
-    def current_namespace(self) -> str:
-        """Alias for current_scope; kept for backward-compatible test access."""
-        return self.current_scope
-
-    @current_namespace.setter
-    def current_namespace(self, value: str) -> None:
-        self.current_scope = value
-
     def _focused_table(self) -> ResourceTable:
         return self.query_one(f"#{self._pane.table_id}", ResourceTable)
 
@@ -2504,9 +2495,6 @@ class AppViewState(ViewState):
 
     def current_scope(self) -> str:
         return self._app._workspace.current_scope
-
-    def current_namespace(self) -> str:
-        return self._app._workspace.current_namespace
 
     def canonical_kind(self, kind: str) -> str:
         return self._app._canonical_kind(kind)

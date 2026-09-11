@@ -275,6 +275,23 @@ def test_low_log_tools_distinguish_reading_evidence_from_changing_the_ui() -> No
     )
 
 
+def test_low_describe_tools_distinguish_reading_evidence_from_changing_the_ui() -> None:
+    assert "get_resource" in LOW_TOOL_DESCRIPTIONS
+    assert "open_describe" in LOW_TOOL_DESCRIPTIONS
+    assert (
+        _contains_all(
+            LOW_TOOL_DESCRIPTIONS["get_resource"], "read", "no UI", "not for", "show", "open"
+        )
+        == []
+    )
+    assert (
+        _contains_all(
+            LOW_TOOL_DESCRIPTIONS["open_describe"], "use for", "show", "open", "display", "TUI"
+        )
+        == []
+    )
+
+
 @pytest.mark.parametrize("name", sorted(LOW_TOOL_DESCRIPTIONS))
 def test_every_low_description_is_nonempty_and_bounded(name: str) -> None:
     description = LOW_TOOL_DESCRIPTIONS[name]
@@ -314,7 +331,7 @@ def test_every_low_description_is_shorter_than_the_registry_wording() -> None:
 #: eval artifact recorded under the old version unable to tell it apart from
 #: one recorded after a silent rewording. Bump both together when the
 #: wording changes on purpose.
-_LOW_TOOL_DESCRIPTIONS_DIGEST = "09343be750bb7d43fb45f6bcd723fa76ec2f7321bea088ceca0791d544a42005"
+_LOW_TOOL_DESCRIPTIONS_DIGEST = "d13d87757b33c0d92fb5b09da37dac84c48c2903d42bbbe5ccfaa4c4f9c0d6e8"
 
 
 def _low_tool_descriptions_digest() -> str:
@@ -335,4 +352,4 @@ def test_the_low_description_digest_is_pinned_to_its_shipped_version() -> None:
     on to tell old and new artifacts apart.
     """
     assert _low_tool_descriptions_digest() == _LOW_TOOL_DESCRIPTIONS_DIGEST
-    assert LOW_TOOL_DESCRIPTIONS_VERSION == 2
+    assert LOW_TOOL_DESCRIPTIONS_VERSION == 3

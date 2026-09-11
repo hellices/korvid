@@ -122,8 +122,8 @@ this controller-to-controller flow.
 the split workspace: the pane collection (`PaneState` objects), the focused-pane
 index, the monotonic table-id counter that names each `ResourceTable`, the
 `ctrl+w` chord-pending flag, and — through the focused pane — the view state the
-whole app reads (`current_kind`, `current_scope`, `current_namespace`,
-`filter_pattern`, the `ResourceFilter`, per-kind `sorts`, and the `drill`
+whole app reads (`current_kind`, `current_scope`, `filter_pattern`, the
+`ResourceFilter`, per-kind `sorts`, and the `drill`
 `NavigationStack`). It also owns the *pure transitions* over that state:
 `split`, `focus_other`/`focus_index`/`focus_by_table_id`, `close_focused`, and
 `collapse`, each returning the panes affected so the app can mount or unmount the

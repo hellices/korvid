@@ -5,6 +5,7 @@ from __future__ import annotations
 import queue
 import subprocess
 import threading
+from collections.abc import Iterator
 from time import monotonic
 from typing import Any
 from unittest.mock import patch
@@ -28,8 +29,11 @@ class _FakeProc:
         self.terminated = False
         self.killed = False
         self.waited = False
-        # None = no readiness channel; _piped_registry swaps in _GatedStream.
+        # None = no readiness channel; _registry() swaps in _GatedStream, so
+        # a bare _FakeProc() only reaches this constructor's caller directly
+        # when a test means to exercise the no-readiness-stream rejection.
         self.stdout: Any = None
+        _TEST_PROCS.append(self)
 
     def poll(self) -> int | None:
         return self.returncode
@@ -37,10 +41,12 @@ class _FakeProc:
     def terminate(self) -> None:
         self.terminated = True
         self.returncode = -15
+        self._close_stdout()
 
     def kill(self) -> None:
         self.killed = True
         self.returncode = -9
+        self._close_stdout()
 
     def wait(self, timeout: float | None = None) -> int:
         if self.returncode is None:
@@ -48,14 +54,86 @@ class _FakeProc:
         self.waited = True
         return self.returncode
 
-    def exit(self, code: int) -> None:
+    def exit(self, code: int, *, close_stdout: bool = True) -> None:
         """Test hook: simulate the subprocess dying on its own."""
         self.returncode = code
+        if close_stdout:
+            self._close_stdout()
+
+    def _close_stdout(self) -> None:
+        if self.stdout is not None:
+            self.stdout.close()
+
+
+_TEST_PROCS: list[_FakeProc] = []
+
+
+class _GatedStream:
+    """File-like stdout whose lines are fed by the test (None ends the stream)."""
+
+    def __init__(self) -> None:
+        self._lines: queue.Queue[str | None] = queue.Queue()
+        self.closed = False
+
+    def __iter__(self) -> _GatedStream:
+        return self
+
+    def __next__(self) -> str:
+        line = self._lines.get()
+        if line is None:
+            raise StopIteration
+        return line
+
+    def feed(self, line: str | None) -> None:
+        if line is None:
+            self.close()
+            return
+        self._lines.put(line)
+
+    def close(self) -> None:
+        if not self.closed:
+            self.closed = True
+            self._lines.put(None)
+
+
+@pytest.fixture(autouse=True)
+def _close_fake_streams() -> Iterator[None]:
+    try:
+        yield
+    finally:
+        for proc in _TEST_PROCS:
+            if proc.stdout is not None:
+                proc.stdout.close()
+        _TEST_PROCS.clear()
+
+
+@pytest.mark.parametrize(
+    ("method", "args"),
+    [("terminate", ()), ("kill", ()), ("exit", (1,))],
+)
+def test_fake_process_exit_closes_the_readiness_stream(method: str, args: tuple[int, ...]) -> None:
+    proc = _FakeProc(["kubectl", "port-forward"])
+    stream = _GatedStream()
+    proc.stdout = stream
+
+    getattr(proc, method)(*args)
+
+    assert stream.closed
+    assert stream._lines.get_nowait() is None
 
 
 def _registry(procs: list[_FakeProc], context: str | None = None) -> ForwardRegistry:
+    """A registry whose fakes carry a real (gated) readiness stream.
+
+    A missing ``stdout`` is now rejected outright (see
+    `test_start_rejects_a_process_with_no_readiness_stream`), so every fake
+    that means to reach ``alive``/``starting`` needs a genuine stream — the
+    test feeds its lines (and closes it with ``feed(None)``) explicitly.
+    """
+
     def _popen(argv: list[str], **_kwargs: Any) -> _FakeProc:
         proc = _FakeProc(argv)
+        proc.stdout = _GatedStream()
         procs.append(proc)
         return proc
 
@@ -81,9 +159,95 @@ def test_start_spawns_kubectl_and_registers_alive_forward() -> None:
     assert len(procs) == 1
     assert procs[0].argv[:2] == ["kubectl", "port-forward"]
     assert "8080:80" in procs[0].argv
+    procs[0].stdout.feed("Forwarding from 127.0.0.1:8080 -> 80\n")
+    assert registry.wait_ready(record.id, timeout=2.0) == "alive"
     assert record.status == "alive"
     assert record.spec.name == "api-1"
     assert registry.forwards() == [record]
+    procs[0].stdout.feed(None)  # release the reader thread
+
+
+def test_start_rejects_a_process_with_no_readiness_stream() -> None:
+    """A spawned process that exposes no stdout can never confirm its
+    listener — it must be rejected explicitly, never trusted as ``alive``."""
+    procs: list[_FakeProc] = []
+
+    def _popen(argv: list[str], **_kwargs: Any) -> _FakeProc:
+        proc = _FakeProc(argv)  # stdout stays None: no readiness channel
+        procs.append(proc)
+        return proc
+
+    registry = ForwardRegistry(popen=_popen)
+    record = registry.start(_spec())
+    assert record.status == "broken"
+    assert record._ready is None
+    assert record._proc is None
+    assert procs[0].terminated
+    assert procs[0].waited
+
+
+def test_reattach_reaps_a_replacement_with_no_readiness_stream() -> None:
+    procs: list[_FakeProc] = []
+
+    def _popen(argv: list[str], **_kwargs: Any) -> _FakeProc:
+        proc = _FakeProc(argv)
+        if not procs:
+            proc.stdout = _GatedStream()
+        procs.append(proc)
+        return proc
+
+    registry = ForwardRegistry(popen=_popen)
+    record = registry.start(_spec())
+    procs[0].exit(1)
+    registry.refresh()
+
+    assert registry.reattach(record.id) is record
+    assert record.status == "broken"
+    assert record._proc is None
+    assert procs[1].terminated
+    assert procs[1].waited
+
+
+def test_no_readiness_cleanup_does_not_hold_the_registry_lock() -> None:
+    wait_entered = threading.Event()
+    release_wait = threading.Event()
+
+    class _BlockingWaitProc(_FakeProc):
+        def wait(self, timeout: float | None = None) -> int:
+            wait_entered.set()
+            release_wait.wait()
+            self.waited = True
+            return self.returncode or 0
+
+    def _popen(argv: list[str], **_kwargs: Any) -> _BlockingWaitProc:
+        return _BlockingWaitProc(argv)
+
+    registry = ForwardRegistry(popen=_popen)
+    start_done = threading.Event()
+
+    def _start() -> None:
+        registry.start(_spec())
+        start_done.set()
+
+    start_thread = threading.Thread(target=_start, daemon=True)
+    start_thread.start()
+    assert wait_entered.wait(5.0), "rejected process never entered its reap wait"
+
+    read_done = threading.Event()
+
+    def _read() -> None:
+        registry.forwards()
+        read_done.set()
+
+    read_thread = threading.Thread(target=_read, daemon=True)
+    read_thread.start()
+    try:
+        assert read_done.wait(1.0), "registry lock was held during process reaping"
+    finally:
+        release_wait.set()
+    start_thread.join(timeout=5.0)
+    read_thread.join(timeout=5.0)
+    assert start_done.is_set()
 
 
 def test_start_pins_kube_context() -> None:
@@ -147,9 +311,12 @@ def test_refresh_marks_dead_process_broken() -> None:
 def test_refresh_keeps_live_forward_alive() -> None:
     procs: list[_FakeProc] = []
     registry = _registry(procs)
-    registry.start(_spec())
+    record = registry.start(_spec())
+    procs[0].stdout.feed("Forwarding from 127.0.0.1:8080 -> 80\n")
+    assert registry.wait_ready(record.id, timeout=2.0) == "alive"
     registry.refresh()
     assert registry.forwards()[0].status == "alive"
+    procs[0].stdout.feed(None)  # release the reader thread
 
 
 def test_stop_terminates_and_removes_forward() -> None:
@@ -189,9 +356,13 @@ def test_reattach_restarts_broken_forward_in_place() -> None:
     revived = registry.reattach(record.id)
     assert revived is not None
     assert revived.id == record.id
+    procs[1].stdout.feed("Forwarding from 127.0.0.1:8080 -> 80\n")
+    assert registry.wait_ready(revived.id, timeout=2.0) == "alive"
     assert revived.status == "alive"
     assert len(procs) == 2
     assert registry.forwards() == [revived]
+    procs[0].stdout.feed(None)  # release the dead generation's reader thread
+    procs[1].stdout.feed(None)
 
 
 def test_reattach_alive_forward_is_a_noop() -> None:
@@ -222,7 +393,11 @@ def test_reattach_can_retarget_at_the_owning_workload() -> None:
     assert record.spec.kind == "deployments"
     assert record.spec.name == "api"
     assert record.spec.local_port == 8080  # port mapping is untouched
+    procs[1].stdout.feed("Forwarding from 127.0.0.1:8080 -> 80\n")
+    assert registry.wait_ready(record.id, timeout=2.0) == "alive"
     assert record.status == "alive"
+    procs[0].stdout.feed(None)  # release the dead generation's reader thread
+    procs[1].stdout.feed(None)
 
 
 def test_reattach_retarget_without_a_workload_is_refused() -> None:
@@ -315,6 +490,7 @@ def test_stop_does_not_block_on_slow_process() -> None:
 
     def _popen(argv: list[str], **_kwargs: Any) -> _FakeProc:
         proc = _StubbornProc(argv)
+        proc.stdout = _GatedStream()
         procs.append(proc)
         return proc
 
@@ -331,6 +507,7 @@ def test_refresh_kills_stopped_process_after_grace() -> None:
 
     def _popen(argv: list[str], **_kwargs: Any) -> _FakeProc:
         proc = _StubbornProc(argv)
+        proc.stdout = _GatedStream()
         procs.append(proc)
         return proc
 
@@ -349,6 +526,7 @@ def test_stop_all_kills_stragglers_after_shared_deadline() -> None:
 
     def _popen(argv: list[str], **_kwargs: Any) -> _FakeProc:
         proc = _StubbornProc(argv)
+        proc.stdout = _GatedStream()
         procs.append(proc)
         return proc
 
@@ -388,6 +566,7 @@ def test_stop_all_covers_previously_stopped_stragglers() -> None:
 
     def _popen(argv: list[str], **_kwargs: Any) -> _FakeProc:
         proc = _StubbornProc(argv)
+        proc.stdout = _GatedStream()
         procs.append(proc)
         return proc
 
@@ -411,7 +590,7 @@ def test_stop_all_covers_previously_stopped_stragglers() -> None:
 def test_reattach_stops_a_lingering_child_before_respawning() -> None:
     """An EOF-broken record may still have a running child holding the port."""
     procs: list[_FakeProc] = []
-    registry = _piped_registry(procs)
+    registry = _registry(procs)
     record = registry.start(_spec())
     procs[0].stdout.feed("error: unable to listen\n")
     # Stream closes while poll() still reports the child as running.
@@ -437,6 +616,7 @@ def test_stop_all_does_not_hang_on_an_unreapable_straggler() -> None:
 
     def _popen(argv: list[str], **_kwargs: Any) -> _FakeProc:
         proc = _UnreapableProc(argv)
+        proc.stdout = _GatedStream()
         procs.append(proc)
         return proc
 
@@ -460,7 +640,7 @@ def test_stop_all_does_not_hang_on_an_unreapable_straggler() -> None:
 def test_start_reaps_a_broken_but_running_child_on_the_same_port() -> None:
     """A broken record's still-running child must not win the new bind race."""
     procs: list[_FakeProc] = []
-    registry = _piped_registry(procs)
+    registry = _registry(procs)
     record = registry.start(_spec())
     procs[0].stdout.feed("error: unable to listen\n")
     # Stream closes while poll() still reports the child as running.
@@ -493,6 +673,7 @@ def test_stop_all_reaps_stragglers_under_one_shared_deadline() -> None:
 
     def _popen(argv: list[str], **_kwargs: Any) -> _SlowUnreapableProc:
         proc = _SlowUnreapableProc(argv)
+        proc.stdout = _GatedStream()
         procs.append(proc)
         return proc
 
@@ -539,8 +720,12 @@ def test_start_reuses_local_port_of_exited_forward() -> None:
     registry.start(_spec())
     procs[0].exit(1)
     record = registry.start(_spec(name="api-2"))
+    procs[1].stdout.feed("Forwarding from 127.0.0.1:8080 -> 80\n")
+    assert registry.wait_ready(record.id, timeout=2.0) == "alive"
     assert record.status == "alive"
     assert len(procs) == 2
+    procs[0].stdout.feed(None)  # release the dead generation's reader thread
+    procs[1].stdout.feed(None)
 
 
 def test_start_forces_down_stopping_process_holding_port() -> None:
@@ -549,6 +734,7 @@ def test_start_forces_down_stopping_process_holding_port() -> None:
 
     def _popen(argv: list[str], **_kwargs: Any) -> _FakeProc:
         proc = _StubbornProc(argv) if not procs else _FakeProc(argv)
+        proc.stdout = _GatedStream()
         procs.append(proc)
         return proc
 
@@ -559,8 +745,12 @@ def test_start_forces_down_stopping_process_holding_port() -> None:
     record = registry.start(_spec(name="api-2"))
     assert procs[0].killed
     assert procs[0].waited
+    procs[1].stdout.feed("Forwarding from 127.0.0.1:8080 -> 80\n")
+    assert registry.wait_ready(record.id, timeout=2.0) == "alive"
     assert record.status == "alive"
     assert len(procs) == 2
+    procs[0].stdout.feed(None)  # release the stopped generation's reader thread
+    procs[1].stdout.feed(None)
 
 
 def test_reattach_rejects_port_claimed_by_live_forward() -> None:
@@ -571,45 +761,19 @@ def test_reattach_rejects_port_claimed_by_live_forward() -> None:
     procs[0].exit(1)
     registry.refresh()
     claimer = registry.start(_spec(name="api-2"))
+    procs[1].stdout.feed("Forwarding from 127.0.0.1:8080 -> 80\n")
+    assert registry.wait_ready(claimer.id, timeout=2.0) == "alive"
     with pytest.raises(ValueError, match=f"local port 8080 already forwarded by #{claimer.id}"):
         registry.reattach(broken.id)
     assert broken.status == "broken"
     assert len(procs) == 2
-
-
-class _GatedStream:
-    """File-like stdout whose lines are fed by the test (None ends the stream)."""
-
-    def __init__(self) -> None:
-        self._lines: queue.Queue[str | None] = queue.Queue()
-
-    def __iter__(self) -> _GatedStream:
-        return self
-
-    def __next__(self) -> str:
-        line = self._lines.get()
-        if line is None:
-            raise StopIteration
-        return line
-
-    def feed(self, line: str | None) -> None:
-        self._lines.put(line)
-
-
-def _piped_registry(procs: list[_FakeProc]) -> ForwardRegistry:
-    def _popen(argv: list[str], **_kwargs: Any) -> _FakeProc:
-        proc = _FakeProc(argv)
-        proc.stdout = _GatedStream()
-        procs.append(proc)
-        return proc
-
-    return ForwardRegistry(popen=_popen)
+    procs[1].stdout.feed(None)  # release the claimer's reader thread
 
 
 def test_start_is_not_alive_until_kubectl_reports_ready() -> None:
     """Popen returning only proves the child exists — not a working forward."""
     procs: list[_FakeProc] = []
-    registry = _piped_registry(procs)
+    registry = _registry(procs)
     record = registry.start(_spec())
     assert record.status == "starting"
     registry.refresh()
@@ -626,7 +790,7 @@ def test_record_is_never_published_as_alive_before_its_handshake() -> None:
     unconfirmed kubectl as a success.
     """
     procs: list[_FakeProc] = []
-    registry = _piped_registry(procs)
+    registry = _registry(procs)
     published: list[str] = []
 
     class _SpyRecords(dict[int, ForwardRecord]):
@@ -648,7 +812,7 @@ def test_reattach_publishes_the_replacement_already_starting() -> None:
     the fresh process down.
     """
     procs: list[_FakeProc] = []
-    registry = _piped_registry(procs)
+    registry = _registry(procs)
     record = registry.start(_spec())
     procs[0].stdout.feed(None)
     procs[0].exit(1)
@@ -672,7 +836,7 @@ def test_refresh_wakes_only_the_generation_it_marked_broken() -> None:
     transition — a re-attach landing in between installs the replacement's
     fresh event, and waking that one fails a valid replacement early."""
     procs: list[_FakeProc] = []
-    registry = _piped_registry(procs)
+    registry = _registry(procs)
     record = registry.start(_spec())
     procs[0].returncode = 1  # died silently — refresh() will mark it broken
     original = registry._release_waiters
@@ -697,7 +861,7 @@ def test_delayed_initial_watcher_stays_bound_to_its_own_generation() -> None:
     own (dead) child's stream — a second reader on the replacement's stream
     could split its readiness line and EOF, breaking a valid forward."""
     procs: list[_FakeProc] = []
-    registry = _piped_registry(procs)
+    registry = _registry(procs)
     watched: list[Any] = []
     both_watching = threading.Event()
     original_watch = registry._watch_output
@@ -737,7 +901,7 @@ def test_delayed_initial_watcher_stays_bound_to_its_own_generation() -> None:
 def test_wait_ready_reports_failed_start_with_kubectl_detail() -> None:
     """An exit before the ready line is a failed start, with kubectl's words."""
     procs: list[_FakeProc] = []
-    registry = _piped_registry(procs)
+    registry = _registry(procs)
     record = registry.start(_spec())
     procs[0].stdout.feed("error: address already in use\n")
     procs[0].stdout.feed(None)
@@ -751,7 +915,7 @@ def test_wait_ready_reports_failed_start_with_kubectl_detail() -> None:
 def test_wait_ready_times_out_while_kubectl_stays_silent() -> None:
     """A silent child that has not exited is still starting, not broken."""
     procs: list[_FakeProc] = []
-    registry = _piped_registry(procs)
+    registry = _registry(procs)
     record = registry.start(_spec())
     assert registry.wait_ready(record.id, timeout=0.1) == "starting"
     assert record.status == "starting"
@@ -760,7 +924,7 @@ def test_wait_ready_times_out_while_kubectl_stays_silent() -> None:
 def test_reattach_goes_through_readiness_again() -> None:
     """The replacement kubectl gets the same handshake as a fresh start."""
     procs: list[_FakeProc] = []
-    registry = _piped_registry(procs)
+    registry = _registry(procs)
     record = registry.start(_spec())
     procs[0].stdout.feed("Forwarding from 127.0.0.1:8080 -> 80\n")
     assert registry.wait_ready(record.id, timeout=2.0) == "alive"
@@ -790,11 +954,11 @@ def test_reattach_port_check_ignores_peer_that_just_died() -> None:
 def test_reattach_ignores_late_output_from_the_dead_process() -> None:
     """A dead process's buffered chatter must not mark its replacement alive."""
     procs: list[_FakeProc] = []
-    registry = _piped_registry(procs)
+    registry = _registry(procs)
     record = registry.start(_spec())
     procs[0].stdout.feed("Forwarding from 127.0.0.1:8080 -> 80\n")
     assert registry.wait_ready(record.id, timeout=2.0) == "alive"
-    procs[0].exit(1)
+    procs[0].exit(1, close_stdout=False)
     registry.refresh()
     assert record.status == "broken"
     registry.reattach(record.id)
@@ -842,7 +1006,7 @@ def test_candidate_ports_skip_non_tcp_protocols() -> None:
 def test_fail_start_aborts_silent_child_but_keeps_it_listed() -> None:
     """A handshake that never resolves is failed explicitly, not guessed ready."""
     procs: list[_FakeProc] = []
-    registry = _piped_registry(procs)
+    registry = _registry(procs)
     record = registry.start(_spec())
     assert registry.wait_ready(record.id, timeout=0.05) == "starting"
     failed = registry.fail_start(record.id)
@@ -861,7 +1025,7 @@ def test_fail_start_aborts_silent_child_but_keeps_it_listed() -> None:
 def test_fail_start_leaves_resolved_forwards_alone() -> None:
     """A confirmed (``alive``) forward can never be aborted by fail_start()."""
     procs: list[_FakeProc] = []
-    registry = _piped_registry(procs)
+    registry = _registry(procs)
     record = registry.start(_spec())
     procs[0].stdout.feed("Forwarding from 127.0.0.1:8080 -> 80\n")
     assert registry.wait_ready(record.id, timeout=2.0) == "alive"
@@ -875,7 +1039,7 @@ def test_fail_start_leaves_resolved_forwards_alone() -> None:
 def test_fail_start_stops_a_child_that_eofed_but_still_runs() -> None:
     """EOF fails the start while the child may still run and hold the port."""
     procs: list[_FakeProc] = []
-    registry = _piped_registry(procs)
+    registry = _registry(procs)
     record = registry.start(_spec())
     procs[0].stdout.feed("error: unable to listen\n")
     # Stream closes while poll() still reports the child as running.
@@ -891,7 +1055,7 @@ def test_fail_start_stops_a_child_that_eofed_but_still_runs() -> None:
 def test_fail_start_can_drop_a_start_that_never_worked() -> None:
     """`keep=False` aborts the handshake and unlists the forward atomically."""
     procs: list[_FakeProc] = []
-    registry = _piped_registry(procs)
+    registry = _registry(procs)
     record = registry.start(_spec())
     assert registry.wait_ready(record.id, timeout=0.05) == "starting"
     failed = registry.fail_start(record.id, keep=False)
@@ -905,7 +1069,7 @@ def test_fail_start_can_drop_a_start_that_never_worked() -> None:
 def test_fail_start_keep_false_yields_to_a_confirmed_forward() -> None:
     """Even with `keep=False` a last-instant confirmation wins: no teardown."""
     procs: list[_FakeProc] = []
-    registry = _piped_registry(procs)
+    registry = _registry(procs)
     record = registry.start(_spec())
     procs[0].stdout.feed("Forwarding from 127.0.0.1:8080 -> 80\n")
     assert registry.wait_ready(record.id, timeout=2.0) == "alive"
@@ -925,16 +1089,20 @@ def test_fail_start_from_a_superseded_generation_leaves_the_replacement_alone() 
     registry.refresh()
     assert record.status == "broken"
     assert registry.reattach(record.id) is record  # bumps the generation
+    procs[1].stdout.feed("Forwarding from 127.0.0.1:8080 -> 80\n")
+    assert registry.wait_ready(record.id, timeout=2.0) == "alive"
     assert record.status == "alive"
     assert registry.fail_start(record.id, generation=stale_generation) == "superseded"
     assert record.status == "alive"  # the replacement was left untouched
     assert not procs[1].terminated
+    procs[0].stdout.feed(None)  # release the dead generation's reader thread
+    procs[1].stdout.feed(None)
 
 
 def test_fail_start_with_the_current_generation_still_aborts() -> None:
     """The generation guard rejects only stale callers, not the real timeout."""
     procs: list[_FakeProc] = []
-    registry = _piped_registry(procs)
+    registry = _registry(procs)
     record = registry.start(_spec())
     assert registry.wait_ready(record.id, timeout=0.05) == "starting"
     generation = registry.generation(record.id)
@@ -947,7 +1115,7 @@ def test_fail_start_with_the_current_generation_still_aborts() -> None:
 def test_fail_start_racing_a_reattach_spares_the_replacement() -> None:
     """The abort signals the generation it validated, never a just-adopted replacement."""
     procs: list[_FakeProc] = []
-    registry = _piped_registry(procs)
+    registry = _registry(procs)
     record = registry.start(_spec())
     procs[0].stdout.feed(None)  # EOF: broken while the child still runs
     assert registry.wait_ready(record.id, timeout=2.0) == "broken"
@@ -978,7 +1146,7 @@ def test_fail_start_racing_a_stop_defers_to_the_stop() -> None:
     lock acquisition must report nothing — the deliberate stop's outcome
     stands, not a spurious failed-start report."""
     procs: list[_FakeProc] = []
-    registry = _piped_registry(procs)
+    registry = _registry(procs)
     record = registry.start(_spec())
     stops: list[int] = []
 
@@ -1037,6 +1205,7 @@ def test_reattach_racing_teardown_never_leaks_a_child() -> None:
         if procs:  # the replacement spawn — teardown wins the race first
             registry.stop_all()
         proc = _FakeProc(argv)
+        proc.stdout = _GatedStream()
         procs.append(proc)
         return proc
 
@@ -1057,6 +1226,7 @@ def test_concurrent_starts_cannot_claim_the_same_port() -> None:
 
     def _popen(argv: list[str], **_kwargs: Any) -> _FakeProc:
         proc = _FakeProc(argv)
+        proc.stdout = _GatedStream()
         procs.append(proc)
         if len(procs) == 1:
             # A second start on the same port interleaves while this spawn
@@ -1070,10 +1240,13 @@ def test_concurrent_starts_cannot_claim_the_same_port() -> None:
 
     registry = ForwardRegistry(popen=_popen)
     record = registry.start(_spec())
+    procs[0].stdout.feed("Forwarding from 127.0.0.1:8080 -> 80\n")
+    assert registry.wait_ready(record.id, timeout=2.0) == "alive"
     assert record.status == "alive"
     assert len(procs) == 1, "the losing start spawned a child anyway"
     assert loser, "the losing start did not fail fast"
     assert "8080" in str(loser[0])
+    procs[0].stdout.feed(None)  # release the reader thread
 
 
 def test_failed_spawn_releases_the_port_claim() -> None:
@@ -1089,11 +1262,16 @@ def test_failed_spawn_releases_the_port_claim() -> None:
 
     def _popen_ok(argv: list[str], **_kwargs: Any) -> _FakeProc:
         proc = _FakeProc(argv)
+        proc.stdout = _GatedStream()
         procs.append(proc)
         return proc
 
     registry._popen = _popen_ok
-    assert registry.start(_spec()).status == "alive"  # port claim was released
+    record = registry.start(_spec())
+    procs[0].stdout.feed("Forwarding from 127.0.0.1:8080 -> 80\n")
+    assert registry.wait_ready(record.id, timeout=2.0) == "alive"
+    assert record.status == "alive"  # port claim was released
+    procs[0].stdout.feed(None)  # release the reader thread
 
 
 def test_non_oserror_spawn_failure_releases_the_port_claim() -> None:
@@ -1102,7 +1280,11 @@ def test_non_oserror_spawn_failure_releases_the_port_claim() -> None:
     registry = _registry(procs)
     with pytest.raises(ValueError, match="pods, services, and workloads only"):
         registry.start(_spec(kind="configmaps"))
-    assert registry.start(_spec()).status == "alive"  # port claim was released
+    record = registry.start(_spec())
+    procs[0].stdout.feed("Forwarding from 127.0.0.1:8080 -> 80\n")
+    assert registry.wait_ready(record.id, timeout=2.0) == "alive"
+    assert record.status == "alive"  # port claim was released
+    procs[0].stdout.feed(None)  # release the reader thread
 
 
 def test_failed_reattach_spawn_releases_the_port_claim() -> None:
@@ -1115,6 +1297,7 @@ def test_failed_reattach_spawn_releases_the_port_claim() -> None:
         if len(calls) == 2:
             raise RuntimeError("spawn exploded")
         proc = _FakeProc(argv)
+        proc.stdout = _GatedStream()
         procs.append(proc)
         return proc
 
@@ -1157,6 +1340,7 @@ def test_start_gives_up_on_port_holder_that_cannot_be_reaped() -> None:
 
     def _popen(argv: list[str], **_kwargs: Any) -> _FakeProc:
         proc = _WedgedProc(argv) if not procs else _FakeProc(argv)
+        proc.stdout = _GatedStream()
         procs.append(proc)
         return proc
 
@@ -1200,7 +1384,7 @@ def _blocked_waiter(
 def test_eof_before_exit_is_a_failed_start() -> None:
     """kubectl closing stdout fails the handshake before poll() sees the exit."""
     procs: list[_FakeProc] = []
-    registry = _piped_registry(procs)
+    registry = _registry(procs)
     record = registry.start(_spec())
     procs[0].stdout.feed("error: pod not found\n")
     # EOF arrives while poll() still reports the child as running.
@@ -1212,12 +1396,12 @@ def test_eof_before_exit_is_a_failed_start() -> None:
 def test_refresh_releases_waiter_when_a_starting_child_dies_silently() -> None:
     """Liveness polling must fail a blocked handshake, not leave it to time out."""
     procs: list[_FakeProc] = []
-    registry = _piped_registry(procs)
+    registry = _registry(procs)
     record = registry.start(_spec())
     waiter, results = _blocked_waiter(registry, record)
     # The child dies without flushing EOF — its reader thread stays blocked,
     # so only the poll can notice and must release the stranded waiter.
-    procs[0].exit(1)
+    procs[0].exit(1, close_stdout=False)
     registry.refresh()
     waiter.join(timeout=5.0)
     assert not waiter.is_alive(), "waiter still blocked after refresh marked it broken"
@@ -1228,10 +1412,10 @@ def test_refresh_releases_waiter_when_a_starting_child_dies_silently() -> None:
 def test_reattach_releases_the_previous_generations_waiter() -> None:
     """A superseded readiness waiter must not sit out its full timeout."""
     procs: list[_FakeProc] = []
-    registry = _piped_registry(procs)
+    registry = _registry(procs)
     record = registry.start(_spec())
     waiter, results = _blocked_waiter(registry, record)
-    procs[0].exit(1)
+    procs[0].exit(1, close_stdout=False)
     # Mark the record broken without waking the waiter — the swap itself must
     # be sufficient to release it, whatever path flipped the status.
     record.status = "broken"

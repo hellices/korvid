@@ -330,7 +330,7 @@ async def test_graph_goto_reuses_normal_navigation() -> None:
         table.move_cursor(row=1)
         await pilot.press("enter")
         await until(pilot, lambda: app.current_kind == "configmaps", label="navigated")
-        assert app.current_namespace == "prod"
+        assert app.current_scope == "prod"
         namespace, name = app._view.selected_ns_name()
         assert (namespace, name) == ("prod", "cm-a")
 

@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 
 from korvid.k8s.errors import ApiStatusError
-from korvid.tools.executor import RecordedExecution, ToolOutcome, as_recorded
+from korvid.tools.executor import RecordedExecution, ToolOutcome
 from korvid.tools.registry import TOOLS_BY_NAME, ToolDef
 from korvid.tools.structured import ERROR_PREFIX
 from tests.tools.executor_fakes import (
@@ -251,36 +251,6 @@ async def test_a_string_only_executor_reports_no_producer_records() -> None:
     outcome = await Plain().execute_recorded("get_resource", {})
 
     assert outcome == ToolOutcome(text="ok")
-
-
-async def test_as_recorded_adapts_an_executor_that_only_has_execute() -> None:
-    """Duck-typed executors keep working without subclassing anything."""
-
-    class Duck:
-        async def execute(self, name: str, arguments: dict[str, Any]) -> str:
-            return "ok"
-
-    adapted = as_recorded(Duck())
-
-    assert isinstance(adapted, RecordedExecution)
-    assert await adapted.execute("get_resource", {}) == "ok"
-    assert (await adapted.execute_recorded("get_resource", {})).redactions == ()
-
-
-def test_as_recorded_does_not_wrap_what_already_satisfies_the_contract() -> None:
-    executor = make_executor(FakeKube())
-
-    assert as_recorded(executor) is executor
-
-
-def test_as_recorded_refuses_something_that_cannot_execute_a_tool() -> None:
-    """Fail at composition, not at the first tool call of a live session."""
-
-    class NotAnExecutor:
-        pass
-
-    with pytest.raises(TypeError, match="async execute"):
-        as_recorded(NotAnExecutor())
 
 
 async def test_get_events_reports_the_incarnation_it_scoped_to() -> None:

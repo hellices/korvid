@@ -20,7 +20,7 @@ from stat import S_IMODE
 from tempfile import mkstemp
 from types import MappingProxyType
 from typing import Any, Final, Literal, cast
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urlsplit
 
 import yaml
 
@@ -36,8 +36,6 @@ _MAX_AGENT_OPTIONS_STRING_BYTES = 2048
 _MAX_AGENT_OPTIONS_SERIALIZED_BYTES = 16 * 1024
 _MAX_AGENT_OPTIONS_PATH_CHARS = 120
 
-_PROVIDER_SEPARATOR_RE = re.compile(r"[-_.]+")
-
 #: The Prometheus/LogQL label-name grammar. A mapped name is interpolated
 #: into a selector as an identifier, so it cannot be escaped the way a
 #: value is — it has to match the grammar or be refused.
@@ -47,15 +45,6 @@ _LABEL_NAME_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
 #: rather than quietly falling back to a default that would query the
 #: wrong label.
 _INVALID_LABEL = "\x00invalid"
-
-
-def _canonicalize_provider_name(name: str) -> str:
-    """Canonicalize a provider name: lowercase, collapse [-_.] to hyphens, strip.
-
-    Legacy configuration migration normalizes names without importing
-    optional provider transports.
-    """
-    return _PROVIDER_SEPARATOR_RE.sub("-", name.strip().lower())
 
 
 @dataclass(frozen=True)
@@ -138,13 +127,13 @@ class ObservabilityBackend:
     mask_labels: tuple[str, ...] = ()
 
 
-class ConfigMigrationError(ValueError):
-    """A config key was removed and the file needs a one-time hand edit.
+class ConfigError(ValueError):
+    """A configuration key or value is not accepted.
 
-    Raised for `agent.profile`/`agent.prompts` (replaced by
-    `agent.model_tier`/`agent.rules`) and for an invalid `agent.model_tier`
-    value. The message is always a single line so it reads cleanly as a
-    `SystemExit` at startup — never let it grow an embedded newline.
+    Raised for a non-mapping config root, unknown top-level or `agent`
+    keys, and an invalid `agent.model_tier` value. The message is always a
+    single line so it reads cleanly as a `SystemExit` at startup — never
+    let it grow an embedded newline.
     """
 
 
@@ -344,25 +333,20 @@ class KorvidConfig:
     #: order. Purely local navigation state — never an authorization list.
     favorite_namespaces: tuple[str, ...] = ()
     #: Named model connection profiles (`agent.active` / `agent.profiles`).
-    #: The single source of truth for provider configuration. A legacy
-    #: `agent.provider`/`agent.model`/... block is migrated into a profile
-    #: on load, so nothing downstream reads the old scalars.
+    #: The single source of truth for provider configuration.
     model_connections: ModelConnectionsConfig = field(default_factory=ModelConnectionsConfig)
     #: Whether an agent can be built at all: exactly "a profile is active".
-    #: `agent.enabled: false` and `agent.active: null` are the same state,
-    #: which is why the migration expresses the former as the latter.
+    #: `agent.active: null` is the off state.
     agent_enabled: bool = False
     #: Explicit model-capability tier override (`agent.model_tier`): `low` or
-    #: `high`, or `None` for automatic routing. Replaces the removed
-    #: `agent.profile` key — see `ConfigMigrationError`. It is consumed by
+    #: `high`, or `None` for automatic routing. It is consumed by
     #: `korvid.agent.model_policy.ModelRouter`, which resolves it (together
     #: with provider-reported and shipped-catalog capabilities) into the
     #: `ResolvedAgentPolicy` that carries the session's tool surface,
     #: budgets, and prompt pack.
     agent_model_tier: str | None = None
     #: Additive house rules (`agent.rules`): short, plain-language
-    #: instructions appended to the agent's system context (replaces the
-    #: removed `agent.prompts` system/append/tool_descriptions overrides).
+    #: instructions appended to the agent's system context.
     #: Each entry is a non-blank string of at most 1000 characters; at most
     #: 16 entries are kept (excess and invalid entries are dropped with a
     #: warning, never a hard failure). Composed as an additive layer by
@@ -446,18 +430,78 @@ class KorvidConfig:
     warnings: tuple[str, ...] = ()
 
 
+#: Top-level keys `load_config` reads. Any key not in this set is unsupported.
+_SUPPORTED_ROOT_KEYS: frozenset[str] = frozenset(
+    {
+        "agent",
+        "mcp",
+        "logs",
+        "debug",
+        "node_shell",
+        "ui",
+        "integrations",
+        "network",
+        "timeline",
+        "views",
+        "favorite_namespaces",
+        "kube_context",
+        "namespace",
+        "readonly",
+        "protected_contexts",
+        "keybindings",
+        "log_buffer_lines",
+        "observability",
+    }
+)
+
+#: `agent:` sub-keys `load_config` reads. Any key not in this set is unsupported.
+_SUPPORTED_AGENT_KEYS: frozenset[str] = frozenset(
+    {
+        "active",
+        "profiles",
+        "model_tier",
+        "rules",
+        "model_search",
+        "disable_in_protected",
+        "follow",
+    }
+)
+
+
+def _check_unknown_root_keys(raw: dict[str, Any]) -> None:
+    """Raise `ConfigError` for any unsupported top-level key."""
+    for key in raw:
+        if key not in _SUPPORTED_ROOT_KEYS:
+            raise ConfigError(f"unsupported config key: {key!r}")
+
+
+def _check_unknown_agent_keys(agent_raw: dict[str, Any]) -> None:
+    """Raise `ConfigError` for any unsupported `agent:` key."""
+    for key in agent_raw:
+        if key not in _SUPPORTED_AGENT_KEYS:
+            raise ConfigError(f"unsupported agent key: {key!r}")
+
+
 def load_config(path: Path | None = None) -> KorvidConfig:
     """Load config; missing file means zero-config defaults."""
     cfg_path = path or DEFAULT_CONFIG_PATH
     if not cfg_path.is_file():
         return KorvidConfig()
-    raw: dict[str, Any] = yaml.safe_load(cfg_path.read_text()) or {}
+    loaded = yaml.safe_load(cfg_path.read_text())
+    if loaded is None:
+        raw: dict[str, Any] = {}
+    elif isinstance(loaded, dict):
+        raw = loaded
+    else:
+        raise ConfigError(f"config root must be a mapping (got {type(loaded).__name__})")
+    _check_unknown_root_keys(raw)
     agent_value = raw.get("agent")
     # User-edited configs can hold scalars where mappings are expected;
     # treat anything that is not a mapping as absent instead of crashing.
     agent_raw: dict[str, Any] = agent_value if isinstance(agent_value, dict) else {}
+    _check_unknown_agent_keys(agent_raw)
     warnings: list[str] = []
-    model_connections = _resolve_model_connections(agent_raw, warnings)
+    model_connections = _parse_model_connections(agent_raw, warnings)
     mcp_value = raw.get("mcp")
     mcp_raw: dict[str, Any] = mcp_value if isinstance(mcp_value, dict) else {}
     logs_value = raw.get("logs")
@@ -491,14 +535,6 @@ def load_config(path: Path | None = None) -> KorvidConfig:
         # fail closed to an empty restricted mapping rather than silently
         # re-enabling public zero-config images.
         debug_images = {}
-    if "profile" in agent_raw:
-        raise ConfigMigrationError(
-            "agent.profile was removed; use agent.model_tier instead (absent/low/high)."
-        )
-    if "prompts" in agent_raw:
-        raise ConfigMigrationError(
-            "agent.prompts was removed; use agent.rules instead (a list of short house rules)."
-        )
     views, view_warnings = _parse_views(raw.get("views"))
     warnings.extend(view_warnings)
     model_tier = (
@@ -507,13 +543,6 @@ def load_config(path: Path | None = None) -> KorvidConfig:
     agent_rules, rules_warnings = _parse_agent_rules(agent_raw.get("rules"))
     warnings.extend(rules_warnings)
     models_dev = _parse_models_dev(agent_raw, warnings)
-    if "namespaces" in raw:
-        warnings.append(
-            "namespaces: no longer controls the namespace picker or watches"
-            " (issue #108) — Kubernetes authorization is owned by the API"
-            " server. Use `namespace:` for the startup namespace and"
-            " `favorite_namespaces:` for UI-only shortcuts on keys 1-9."
-        )
     favorites, favorite_warnings = _parse_favorite_namespaces(raw.get("favorite_namespaces"))
     warnings.extend(favorite_warnings)
     observability_value = raw.get("observability")
@@ -883,21 +912,6 @@ def _parse_observability_backend(
     )
 
 
-#: Agent-level keys the legacy shape owned. `save_model_connections` removes
-#: them once it has written the new shape, so the first successful save
-#: upgrades the file rather than leaving two shapes to disagree.
-#: `enabled` is included: `active: null` is the new off switch.
-LEGACY_AGENT_KEYS: tuple[str, ...] = (
-    "provider",
-    "model",
-    "base_url",
-    "api_key_env",
-    "auth",
-    "ollama",
-    "options",
-    "enabled",
-)
-
 #: The whole `agent.model_tier` vocabulary. Absent/null means automatic.
 _MODEL_TIERS: frozenset[str] = frozenset({"low", "high"})
 
@@ -1033,9 +1047,9 @@ def save_model_connections(
     """Write `agent.active`/`agent.profiles`, preserving everything else.
 
     Read-modify-write: unrelated top-level keys, unrelated `agent.*` keys
-    and every `unparsed` entry survive. Only the keys in
-    `LEGACY_AGENT_KEYS` are removed, and only after the new shape is in
-    place.
+    and every `unparsed` entry survive. Preservation does not make an
+    unsupported key valid: a later `load_config` still rejects unknown
+    top-level or `agent` keys with `ConfigError`.
 
     A name in `unparsed` is written from `unparsed`, even when a modelled
     profile of the same name exists — that pairing means the entry parsed
@@ -1088,8 +1102,6 @@ def save_model_connections(
             agent["model_tier"] = tier
         else:
             agent.pop("model_tier", None)
-    for key in LEGACY_AGENT_KEYS:
-        agent.pop(key, None)
     raw["agent"] = agent
     path.parent.mkdir(parents=True, exist_ok=True)
     _atomic_write_text(path, yaml.safe_dump(raw, sort_keys=False))
@@ -1186,9 +1198,7 @@ def _parse_model_tier(value: Any) -> str | None:
         normalized = value.strip().lower()
         if normalized in _MODEL_TIERS:
             return normalized
-    raise ConfigMigrationError(
-        f"agent.model_tier must be absent, null, 'low', or 'high' (got {value!r})."
-    )
+    raise ConfigError(f"agent.model_tier must be absent, null, 'low', or 'high' (got {value!r}).")
 
 
 def _opt_str(value: Any) -> str | None:
@@ -1382,8 +1392,10 @@ def _parse_model_connections(
 ) -> ModelConnectionsConfig:
     """Parse the `agent.active`/`agent.profiles` shape."""
     raw_profiles = agent_raw.get("profiles")
-    if not isinstance(raw_profiles, dict):
+    if raw_profiles is not None and not isinstance(raw_profiles, dict):
         warnings.append("agent.profiles is not a mapping; no agent profile was loaded")
+        return ModelConnectionsConfig()
+    if not isinstance(raw_profiles, dict):
         return ModelConnectionsConfig()
     profiles: dict[str, ModelConnectionConfig] = {}
     unparsed: dict[object, object] = {}
@@ -1420,334 +1432,11 @@ def _parse_model_connections(
     return ModelConnectionsConfig(active=active, profiles=profiles, unparsed=unparsed)
 
 
-#: The in-memory profile name a legacy `agent.provider` config migrates into.
-LEGACY_PROFILE_NAME: str = "default"
+#: The default profile name used when creating a new named connection profile.
+DEFAULT_PROFILE_NAME: str = "default"
 
 #: The separator between a profile's provider name and model identifier.
 MODEL_REFERENCE_SEPARATOR: str = "/"
-
-#: Legacy provider names that meant "an OpenAI-compatible endpoint".
-#: `azure` is deliberately absent: Azure OpenAI authenticates with the raw
-#: `api-key` header (or an Entra token) rather than a bearer token, so it
-#: keeps its own `azure/` adapter instead of collapsing into `openai/`.
-_LEGACY_OPENAI_COMPAT_NAMES: frozenset[str] = frozenset(
-    {"openai-compat", "openai", "vllm", "github", "anthropic", "claude"}
-)
-
-#: Legacy provider names whose credential handling changed with the
-#: migration and therefore warrant a one-line warning on load.
-_LEGACY_REVIEW_NAMES: frozenset[str] = frozenset({"azure"})
-
-#: Legacy `agent.ollama.*` keys carried into the migrated profile's options
-#: so the writer's new shape preserves the operator's tuning.
-_LEGACY_OLLAMA_KEYS: tuple[str, ...] = (
-    "num_ctx",
-    "temperature",
-    "seed",
-    "think",
-    "keep_alive",
-    "num_predict",
-)
-
-#: The legacy `agent.ollama.*` knobs whose pre-profile parser coerced a
-#: numeric *string* to a number, mapped to the type it produced.
-#: `OllamaOptions` is a plain dataclass with no validation, so a `"8192"`
-#: that survived migration would be sent as a JSON string and would land
-#: in `context_window_tokens` as a `str`.
-_LEGACY_OLLAMA_NUMERIC_KEYS: Mapping[str, type[int] | type[float]] = MappingProxyType(
-    {"num_ctx": int, "seed": int, "temperature": float}
-)
-
-#: `num_predict` is deliberately absent from the coercion table above.
-#: Its pre-profile parser was the *strict* one: it refused a numeric
-#: string, a fractional float, a `bool` and a non-positive value outright
-#: instead of coercing them (`tests/core/test_config.py` pins all four).
-#: Migration keeps that contract by dropping the key, which lands on
-#: `OllamaOptions.num_predict = None` — the same effective value the old
-#: fallback produced.
-_LEGACY_OLLAMA_STRICT_INT_KEYS: frozenset[str] = frozenset({"num_predict"})
-
-#: `think` was read as `raw.get("think") is True`, so only a real boolean
-#: ever turned it on and `think: yes please` meant *off*. Carrying a
-#: non-boolean through would hand the adapter a value it has to guess at,
-#: and a guess that read `"false"` as on would invert the line the
-#: operator wrote. Dropping it lands on `OllamaOptions.think = False` —
-#: exactly what the old parser produced.
-_LEGACY_OLLAMA_STRICT_BOOL_KEYS: frozenset[str] = frozenset({"think"})
-
-#: Legacy auth methods → the five common method ids.
-_LEGACY_AUTH_METHODS: Mapping[str, str] = MappingProxyType(
-    {
-        "api_key": "environment",
-        "entra": "provider-default",
-        "device-login": "device-login",
-        "none": "none",
-    }
-)
-
-
-def common_auth_method(method: str) -> str:
-    """The common auth id a legacy transport method corresponds to.
-
-    The inverse of `_project_legacy_auth`, and the only place the mapping
-    is spelled in that direction. Anything building a *profile* out of the
-    legacy transport scalars (the migration on load, the wizard's prefill
-    on a degraded startup, `:model`) goes through here, or it writes a
-    profile whose auth method the projection would then refuse.
-
-    Args:
-        method: A legacy transport method (`api_key`, `entra`,
-            `device-login`, `none`), or anything else.
-
-    Returns:
-        The common id, or *method* unchanged when it is not a legacy one
-        (it is then already a common id, or an unknown the projection
-        refuses by name).
-    """
-    return _LEGACY_AUTH_METHODS.get(method, method)
-
-
-def _legacy_model_reference(provider: str, model: str) -> str:
-    """`provider/model` for a legacy provider name.
-
-    Translated at this one parser boundary: nothing downstream branches on
-    a legacy provider name again.
-    """
-    if provider in _LEGACY_OPENAI_COMPAT_NAMES:
-        return f"openai{MODEL_REFERENCE_SEPARATOR}{model}"
-    return f"{provider}{MODEL_REFERENCE_SEPARATOR}{model}"
-
-
-def _legacy_auth(agent_raw: dict[str, Any], provider: str) -> ConnectionAuthConfig:
-    """The legacy `agent.auth`/`agent.api_key_env` pair as profile auth.
-
-    Configs written before `agent.auth` existed carry no method at all,
-    so one is inferred: GitHub Copilot only ever had a device login, and
-    everything else is keyed exactly when it names an environment
-    variable. The inference lives here, in the migration, rather than in
-    `load_config` — a provider name compared inline in the loader is a
-    routing decision the rest of korvid no longer makes.
-    """
-    auth_value = agent_raw.get("auth")
-    auth_map: dict[str, Any] = auth_value if isinstance(auth_value, dict) else {}
-    api_key_env = _opt_str(agent_raw.get("api_key_env"))
-    legacy_method = _opt_str(auth_map.get("method"))
-    if legacy_method is None:
-        if provider == "github-copilot":
-            legacy_method = "device-login"
-        else:
-            legacy_method = "api_key" if api_key_env else "none"
-    method = common_auth_method(legacy_method)
-    settings: dict[str, object] = {}
-    if method == "environment" and api_key_env:
-        settings[_AUTH_ENV_KEY_SETTING] = api_key_env
-    return ConnectionAuthConfig(method=method, settings=settings)
-
-
-def _legacy_options(
-    agent_raw: dict[str, Any], provider: str, warnings: list[str]
-) -> dict[str, object]:
-    """Options carried into the migrated profile.
-
-    Only `provider: ollama` had a legacy tuning block, so only `ollama`
-    reads `agent.ollama.*`. Copying those keys into, say, an `openai`
-    profile would invent settings the operator never wrote and that the
-    adapter would then have to ignore.
-
-    Migrated `ollama` profiles also get `native_api: True` and
-    `native_thinking: True`. The legacy transport was the `/api/chat`
-    route, which returns per-tool-call reasoning the shared dialect
-    cannot carry, and `native_thinking` is the option the shipped flow
-    claims (Task 17). A *new* `ollama:` profile defaults to the shared
-    route; an *existing* install keeps the transport it was already
-    running, because a migration that silently changes the wire protocol
-    is not "read without changes".
-
-    Values are copied verbatim with one exception: the numeric knobs are
-    coerced (`num_ctx`, `seed`, `temperature`) or strictly validated
-    (`num_predict`, `think`), because the pre-profile parser did that and
-    Task 17 deletes it. Anything that will not coerce is **dropped with a
-    warning** rather than replaced by an invented default — the default
-    the old parser substituted is `OllamaOptions`' own field default,
-    which a migrated profile still reaches through `native_api: True`, so
-    dropping restores exactly the old effective value while also telling
-    the operator which line to fix.
-    """
-    options: dict[str, object] = {}
-    if provider == "ollama":
-        ollama_value = agent_raw.get("ollama")
-        ollama_raw: dict[str, Any] = ollama_value if isinstance(ollama_value, dict) else {}
-        options.update(_legacy_ollama_options(ollama_raw, warnings))
-        options["native_api"] = True
-        # The key the shipped flow claims. `native_api` stays for the
-        # profiles written before the flow existed; both spellings mean
-        # the same transport, so a migrated install cannot end up naming
-        # one and running the other.
-        options["native_thinking"] = True
-    extra = agent_raw.get("options")
-    if isinstance(extra, dict):
-        options.update(extra)
-    return options
-
-
-def _legacy_ollama_options(ollama_raw: dict[str, Any], warnings: list[str]) -> dict[str, object]:
-    """The `agent.ollama.*` block as profile options. See `_legacy_options`."""
-    options: dict[str, object] = {}
-    for key in _LEGACY_OLLAMA_KEYS:
-        if key not in ollama_raw:
-            continue
-        keep, value = _legacy_ollama_value(key, ollama_raw[key], warnings)
-        if keep:
-            options[key] = value
-    return options
-
-
-def _legacy_ollama_value(key: str, value: object, warnings: list[str]) -> tuple[bool, object]:
-    """One legacy knob, validated the way its own pre-profile parser was.
-
-    Returns `(keep, value)` rather than an optional value, because `False`
-    and `0` are both legitimate answers here and a sentinel would have to
-    be told apart from them anyway.
-    """
-    if key in _LEGACY_OLLAMA_STRICT_BOOL_KEYS:
-        if not isinstance(value, bool):
-            warnings.append(f"agent.ollama.{key}: must be true or false — the value was dropped")
-            return False, None
-        return True, value
-    if key in _LEGACY_OLLAMA_STRICT_INT_KEYS:
-        # `bool` is an `int` subclass, so YAML `true` must not pass here.
-        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-            warnings.append(
-                f"agent.ollama.{key}: must be a positive integer — the value was dropped"
-            )
-            return False, None
-        return True, value
-    cast_to = _LEGACY_OLLAMA_NUMERIC_KEYS.get(key)
-    if cast_to is None:
-        return True, value
-    coerced = _legacy_ollama_number(key, value, cast_to, warnings)
-    return coerced is not None, coerced
-
-
-def _legacy_ollama_number(
-    key: str, value: object, cast_to: type[int] | type[float], warnings: list[str]
-) -> int | float | None:
-    """One permissive numeric knob, coerced the way the old parser was.
-
-    Returns `None` for "drop it" — the caller tests `is not None` rather
-    than truthiness, because `seed: 0` and `temperature: 0.0` are both
-    valid values that a truthiness test would silently discard.
-    """
-    # `bool` is an `int` subclass, so YAML `true` would coerce to 1.
-    if isinstance(value, bool) or not isinstance(value, int | float | str):
-        warnings.append(f"agent.ollama.{key}: must be a number — the value was dropped")
-        return None
-    try:
-        coerced = cast_to(value)
-    except (TypeError, ValueError, OverflowError):
-        # `.inf` reaches `int()` as OverflowError, `.nan` as ValueError.
-        warnings.append(f"agent.ollama.{key}: must be a number — the value was dropped")
-        return None
-    if isinstance(coerced, float) and not isfinite(coerced):
-        # `.inf`/`.nan` survive `float()`, and the bounded validator
-        # refuses them — which would reject the whole migrated profile
-        # over one tuning knob the old parser quietly replaced.
-        warnings.append(f"agent.ollama.{key}: must be finite — the value was dropped")
-        return None
-    return coerced
-
-
-def _migrate_azure_endpoint(base_url: str) -> tuple[str, str | None, str | None]:
-    """Reduce a legacy Azure `base_url` to the resource URL it was built from.
-
-    The legacy transport posted to `f"{base_url}/chat/completions"`, so a
-    working legacy value was already deployment- or version-scoped —
-    `https://x.openai.azure.com/openai/deployments/<name>` or
-    `https://x.openai.azure.com/openai/v1`. `AzureProvider` takes the
-    *resource* URL and builds the `/openai/...` path itself; given the old
-    value it appends rather than replaces, producing
-    `.../openai/deployments/<name>/openai/chat/completions` or
-    `.../openai/v1/openai/deployments/<model>/chat/completions`. Both 404.
-
-    Everything from the first `/openai` segment onward is therefore
-    dropped, and any deployment name it encoded is returned so the caller
-    can preserve it rather than lose it.
-
-    Returns:
-        The resource URL, the deployment name the old URL encoded (or
-        None), and a warning naming both the old and the new value (or
-        None when nothing was rewritten).
-    """
-    split = urlsplit(base_url)
-    segments = [segment for segment in split.path.split("/") if segment]
-    resource = urlunsplit((split.scheme, split.netloc, "", "", ""))
-    if "openai" not in segments:
-        if not segments and not split.query and not split.fragment:
-            return resource, None, None
-        # A path korvid does not recognise: leave the value alone rather
-        # than guess. The adapter will surface the failure with the real
-        # URL in it, which is more useful than a silent rewrite.
-        return base_url, None, None
-    tail = segments[segments.index("openai") + 1 :]
-    deployment = tail[1] if len(tail) >= 2 and tail[0] == "deployments" else None
-    warning = (
-        f"agent.base_url {base_url!r} was rewritten to {resource!r} for the azure "
-        "adapter, which builds the /openai/deployments path itself"
-    )
-    if deployment is not None:
-        warning += f"; the deployment name {deployment!r} was kept as options.azure_deployment"
-    return resource, deployment, warning
-
-
-def _migrate_legacy_agent(agent_raw: dict[str, Any], warnings: list[str]) -> ModelConnectionsConfig:
-    """Normalize a legacy `agent.provider` config into one `default` profile."""
-    provider_raw = agent_raw.get("provider")
-    if not isinstance(provider_raw, str) or not provider_raw.strip():
-        return ModelConnectionsConfig()
-    provider = _canonicalize_provider_name(provider_raw)
-    model = _opt_str(agent_raw.get("model"))
-    if model is None:
-        warnings.append("agent.provider is set but agent.model is missing; the agent is disabled")
-        return ModelConnectionsConfig()
-    endpoint = _opt_str(agent_raw.get("base_url"))
-    options = _legacy_options(agent_raw, provider, warnings)
-    if provider == "azure" and endpoint is not None:
-        endpoint, deployment, endpoint_warning = _migrate_azure_endpoint(endpoint)
-        if deployment is not None:
-            options.setdefault("azure_deployment", deployment)
-        if endpoint_warning is not None:
-            warnings.append(endpoint_warning)
-    profile = ModelConnectionConfig(
-        model=_legacy_model_reference(provider, model),
-        endpoint=endpoint,
-        auth=_legacy_auth(agent_raw, provider),
-        options=options,
-    )
-    if provider in _LEGACY_REVIEW_NAMES:
-        # The credential *reference* survives, but where Entra was implicit
-        # the method is now spelled out. Saying so beats a silent 401.
-        warnings.append(
-            f"agent.provider {provider!r} migrated to an {provider} profile; "
-            "check auth.method (provider-default for Entra ID) in :ai"
-        )
-    enabled = agent_raw.get("enabled", True) is not False
-    return ModelConnectionsConfig(
-        active=LEGACY_PROFILE_NAME if enabled else None,
-        profiles={LEGACY_PROFILE_NAME: profile},
-    )
-
-
-def _resolve_model_connections(
-    agent_raw: dict[str, Any], warnings: list[str]
-) -> ModelConnectionsConfig:
-    """Route agent config to new-shape parser or legacy migration."""
-    if "profiles" in agent_raw:
-        if "provider" in agent_raw:
-            warnings.append(
-                "agent.profiles is present; the legacy agent.provider fields were ignored"
-            )
-        return _parse_model_connections(agent_raw, warnings)
-    return _migrate_legacy_agent(agent_raw, warnings)
 
 
 def _parse_agent_option_mapping(

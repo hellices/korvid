@@ -84,3 +84,30 @@ async def test_client_cleanup_waits_for_transport_connection_lost_callback() -> 
 
     assert transport.closing
     assert transport.closed
+
+
+async def test_client_cleanup_waits_for_nested_transport_close_callbacks() -> None:
+    await drop_cached_clients()
+    closed = asyncio.Event()
+
+    class ProactorTlsLikeTransport:
+        def close(self) -> None:
+            asyncio.get_running_loop().call_soon(self._begin_tls_shutdown)
+
+        def _begin_tls_shutdown(self) -> None:
+            asyncio.get_running_loop().call_soon(self._close_socket)
+
+        def _close_socket(self) -> None:
+            asyncio.get_running_loop().call_soon(closed.set)
+
+    transport = ProactorTlsLikeTransport()
+
+    class CachedClient:
+        async def aclose(self) -> None:
+            transport.close()
+
+    litellm.in_memory_llm_clients_cache.cache_dict["closing-tls-transport"] = CachedClient()
+
+    await drop_cached_clients()
+
+    assert closed.is_set()

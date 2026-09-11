@@ -53,7 +53,6 @@ __all__ = [
     "SetupField",
     "SetupFieldKind",
     "SpecialFlow",
-    "SpecialFlowRegistry",
     "split_reference",
     "suggest_profile_name",
 ]
@@ -304,23 +303,3 @@ class ModelCatalog(ABC):
 
     @abstractmethod
     async def finish_auth(self, profile: ModelConnectionConfig) -> str | None: ...
-
-
-class SpecialFlowRegistry:
-    """An ordered collection of `SpecialFlow` declarations.
-
-    The registry answers "does any flow claim this reference?" at setup
-    time. It carries no routing or transport logic — those live in the
-    flow's handler (Task 8).
-    """
-
-    def __init__(self, flows: tuple[SpecialFlow, ...] = ()) -> None:
-        self._flows = flows
-
-    def claim(self, reference: str) -> SpecialFlow | None:
-        """Return the first flow whose prefix is a prefix of *reference*, or None."""
-        reference = reference.replace("_", "-")
-        return next(
-            (f for f in self._flows if reference.startswith(f.prefix)),
-            None,
-        )

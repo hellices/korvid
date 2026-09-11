@@ -1,5 +1,27 @@
 # Unreleased
 
+## Current configuration and extension contracts
+
+This pre-1.0 cleanup removes obsolete input formats rather than maintaining
+automatic conversion:
+
+- Configure connections with `agent.profiles` and select one with `agent.active`.
+  Use `active: null` to disable the agent and put model tuning in a profile's
+  `options`. Flat provider settings are no longer read or migrated.
+- Unsupported root and `agent` settings raise ordinary configuration errors.
+  There are no per-key upgrade handlers.
+- Provider extensions use `SpecialFlow` declarations and credential extensions
+  use `ProviderDefaultCredential`. The disconnected provider-factory registry
+  and its compatibility API are removed.
+- Eval runs put any required provider prefix directly in
+  `KORVID_EVAL_MODEL` and use `KORVID_EVAL_API_KEY_ENV` to name a credential
+  variable. LiteLLM-resolvable bare model tags remain valid; the separate
+  provider-prefix and inline eval-key variables are no longer supported.
+
+These changes do not remove Kubernetes event-field support, OS support, or the
+write-approval, masking, and audit controls. See the current
+[agent configuration](../agent.md) and [extension contracts](../provider-plugins.md).
+
 ## Turn latency diagnostics
 
 Every agent turn is now timed against a single injected monotonic clock, and
@@ -25,9 +47,11 @@ enable it, including how native Ollama timings are retained.
 ## Agent implementation cleanup
 
 - Low and high behavior now lives in separate tier files, with their prompts,
-  tool-surface selection and budgets visible together. Default routing and
-  user-facing behavior are unchanged; approval, audit, masking and execution
-  remain shared.
+  tool-surface selection and budgets visible together. Default routing remains
+  unchanged; approval, audit, masking and execution remain shared. Low-tier
+  tool-description version 3 now distinguishes `open_describe` display requests
+  from `get_resource` reads, matching the existing prompt rule and changing the
+  corresponding eval prompt digest.
 - **Breaking:** The unwired `ProviderPlugin` construction API and its old registry have been
   removed without compatibility shims. Use the
   [SpecialFlow provider contract](../provider-plugins.md) and import agent
