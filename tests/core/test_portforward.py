@@ -671,6 +671,8 @@ def test_reattach_rejects_port_claimed_by_live_forward() -> None:
     procs[0].exit(1)
     registry.refresh()
     claimer = registry.start(_spec(name="api-2"))
+    procs[1].stdout.feed("Forwarding from 127.0.0.1:8080 -> 80\n")
+    assert registry.wait_ready(claimer.id, timeout=2.0) == "alive"
     with pytest.raises(ValueError, match=f"local port 8080 already forwarded by #{claimer.id}"):
         registry.reattach(broken.id)
     assert broken.status == "broken"

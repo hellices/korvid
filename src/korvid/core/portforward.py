@@ -47,9 +47,10 @@ class _ForwardProcess(Protocol):
     never be confirmed and must not masquerade as a working forward.
     """
 
-    #: The readiness channel. A real process always has this — it is spawned
-    #: with ``stdout=subprocess.PIPE`` — so ``None`` here only ever means an
-    #: injected test double that skipped it, and it is rejected accordingly.
+    #: The readiness channel. A real process always has this attribute — it is
+    #: spawned with ``stdout=subprocess.PIPE``. A double without the attribute
+    #: violates the protocol and raises ``AttributeError``; ``None`` is an
+    #: explicit unavailable channel and is rejected as a broken start.
     stdout: Iterable[str] | None
 
     def poll(self) -> int | None: ...
@@ -244,9 +245,9 @@ class ForwardRegistry:
         Returns:
             The exact process/stream/event binding to hand to
             `_start_watcher()`, or None when there is no readiness channel to
-            watch — either the process was never adopted, or it exposed no
-            ``stdout`` (a real child always does; only a test double can
-            omit it, and it is rejected rather than trusted as alive).
+            watch — either the process was never adopted, or its ``stdout`` is
+            explicitly None. A real child always exposes the attribute; a test
+            double that omits it violates `_ForwardProcess` and raises.
         """
         proc = record._proc
         stream = None if proc is None else proc.stdout

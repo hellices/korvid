@@ -2033,3 +2033,6 @@ async def test_a_failed_external_read_is_reported_as_a_failed_call() -> None:
         ),
     )
     assert result.is_error is True, "a failed read was reported as a successful call"
+    assert executor.calls == [("query_metrics", {"signal": "cpu", "namespace": "prod"})], (
+        "the failed read was rejected before dispatch"
+    )
