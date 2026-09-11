@@ -16,7 +16,8 @@ import httpx
 import pytest
 
 from korvid.obs.connector import ConnectorError, QueryLimits, QueryScope, render_metrics
-from korvid.obs.prometheus import PrometheusConnector
+from korvid.obs.http import Answer
+from korvid.obs.prometheus import PrometheusConnector, _series
 
 
 def _vector(*pairs: tuple[str, str]) -> dict[str, Any]:
@@ -332,6 +333,61 @@ class TestErrorMapping:
 
 
 class TestParsing:
+    @pytest.mark.parametrize(
+        "label_fields",
+        [
+            pytest.param({}, id="missing"),
+            pytest.param({"metric": None}, id="null-container"),
+            pytest.param({"metric": []}, id="list-container"),
+            pytest.param({"metric": "invalid"}, id="string-container"),
+            pytest.param({"metric": 42}, id="numeric-container"),
+            pytest.param({"metric": {"pod": None}}, id="null-value"),
+            pytest.param({"metric": {"pod": 42}}, id="numeric-value"),
+            pytest.param({"metric": {"pod": True}}, id="boolean-value"),
+            pytest.param({"metric": {"pod": []}}, id="list-value"),
+            pytest.param({"metric": {"pod": {}}}, id="mapping-value"),
+        ],
+    )
+    @pytest.mark.parametrize("include_valid", [False, True])
+    async def test_invalid_metric_labels_are_omitted_without_losing_valid_siblings(
+        self, label_fields: dict[str, Any], include_valid: bool
+    ) -> None:
+        payload = _vector(*([("api-first", "1.5"), ("api-last", "2.5")] if include_valid else []))
+        payload["data"]["result"].insert(1, {"value": [1786_000_060, "2.0"], **label_fields})
+        connector, _ = _connector(_ok(payload))
+
+        result = await connector.query(signal="cpu", scope=SCOPE)
+        rendered = render_metrics(result)
+
+        assert [(series.labels, series.value) for series in result.series] == (
+            [({"pod": "api-first"}, 1.5), ({"pod": "api-last"}, 2.5)] if include_valid else []
+        )
+        assert result.observed_at == ("2026-08-06T07:06:40Z" if include_valid else None)
+        assert result.omitted_entries == 1
+        assert result.truncated is True
+        assert "omitted unusable entries: 1" in rendered
+        assert "truncated: yes" in rendered
+        assert "no series matched" not in rendered
+        if not include_valid:
+            assert "no usable series remained" in rendered
+
+    @pytest.mark.parametrize("key", [7, False, None])
+    def test_non_string_metric_keys_are_rejected(self, key: Any) -> None:
+        row = {"metric": {key: "api"}, "value": [1786_000_000, "1.5"]}
+
+        assert _series(row, frozenset(), Answer(payload={})) is None
+
+    async def test_an_unlabelled_series_with_an_empty_metric_is_complete(self) -> None:
+        payload = _vector(("api", "1.5"))
+        payload["data"]["result"][0]["metric"] = {}
+        connector, _ = _connector(_ok(payload))
+
+        result = await connector.query(signal="cpu", scope=SCOPE)
+
+        assert [(series.labels, series.value) for series in result.series] == [({}, 1.5)]
+        assert result.omitted_entries == 0
+        assert result.truncated is False
+
     @pytest.mark.parametrize(
         "overflow_value",
         [pytest.param(10**400, id="positive"), pytest.param(-(10**400), id="negative")],

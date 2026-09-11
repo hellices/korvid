@@ -198,16 +198,16 @@ class TestPrometheusParsingEdges:
         assert caught.value.kind == "backend"
 
     @pytest.mark.parametrize(
-        ("row", "labels"),
+        "row",
         [
-            ({"value": [1, "1.0"]}, {}),
-            ({"metric": "not a mapping", "value": [1, "1.0"]}, {}),
+            {"value": [1, "1.0"]},
+            {"metric": "not a mapping", "value": [1, "1.0"]},
         ],
     )
-    async def test_a_sample_without_usable_labels_still_reports_its_value(
-        self, row: dict[str, Any], labels: dict[str, str]
+    async def test_a_sample_with_malformed_labels_is_reported_as_an_omission(
+        self, row: dict[str, Any]
     ) -> None:
-        """A value with no labels is still a true answer about the scope."""
+        """Malformed labels must not look like a complete unlabelled sample."""
         from korvid.obs.prometheus import PrometheusConnector
 
         connector = PrometheusConnector(
@@ -226,8 +226,10 @@ class TestPrometheusParsingEdges:
             limits=QueryLimits(),
         )
         result = await connector.query(signal="cpu", scope=QueryScope(namespace="prod"))
-        assert result.series[0].labels == labels
-        assert result.series[0].value == pytest.approx(1.0)
+        assert result.series == ()
+        assert result.omitted_entries == 1
+        assert result.observed_at is None
+        assert result.truncated is True
 
 
 class TestTokenHygiene:

@@ -207,5 +207,8 @@ def _series(row: Any, mask: frozenset[str], answer: Answer) -> Series | None:
     if not isfinite(value):
         return None
     metric = row.get("metric")
-    labels = {str(k): str(v) for k, v in metric.items()} if isinstance(metric, Mapping) else {}
-    return Series(labels=answer.scrub_labels(masked_labels(labels, mask)), value=value)
+    if not isinstance(metric, Mapping) or not all(
+        isinstance(key, str) and isinstance(label, str) for key, label in metric.items()
+    ):
+        return None
+    return Series(labels=answer.scrub_labels(masked_labels(metric, mask)), value=value)
