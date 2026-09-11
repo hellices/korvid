@@ -237,8 +237,8 @@ def _init_peak_and_sidecars(
     return peak, running, declared
 
 
-def _effective_value(spec: dict[str, Any], bucket: str, key: str) -> float | int | None:
-    """Effective pod resource per the scheduler, as an exact numeric value.
+def _workload_resource_value(spec: dict[str, Any], bucket: str, key: str) -> float | int | None:
+    """Effective workload resource before RuntimeClass overhead.
 
     max(init phase peak, sum(containers) + sum(sidecars)) where the init
     phase peak accounts for sidecars already running while later classic
@@ -259,6 +259,16 @@ def _effective_value(spec: dict[str, Any], bucket: str, key: str) -> float | int
     if key == "cpu":
         return max(sum(parse_cpu(v) for v in main) + sidecar_total, init_peak)
     return max(sum(parse_memory(v) for v in main) + int(sidecar_total), int(init_peak))
+
+
+def _effective_value(spec: dict[str, Any], bucket: str, key: str) -> float | int | None:
+    """Add Pod overhead to requests and only to declared, nonzero limits."""
+    value = _workload_resource_value(spec, bucket, key)
+    overhead = (spec.get("overhead") or {}).get(key)
+    if overhead is None or (bucket == "limits" and not value):
+        return value
+    total = Decimal(str(value or 0)) + parse_quantity(str(overhead))
+    return float(total) if key == "cpu" else int(total)
 
 
 @dataclass(frozen=True)
@@ -289,12 +299,12 @@ def _container_limits(spec: dict[str, Any]) -> tuple[ContainerLimits, ...]:
 
 
 def _pod_level_limit(spec: dict[str, Any], key: str) -> float | int | None:
-    """spec.resources.limits (K8s 1.34+): the only true whole-pod ceiling.
+    """Pod-level limits plus overhead: the only true whole-pod ceiling.
     Summed container limits are never one - each is enforced independently."""
     value = ((spec.get("resources") or {}).get("limits") or {}).get(key)
     if value is None:
         return None
-    return parse_cpu(value) if key == "cpu" else parse_memory(value)
+    return _effective_value(spec, "limits", key)
 
 
 def _format_effective(value: float | int | None, key: str) -> str:
