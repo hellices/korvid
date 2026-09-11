@@ -1,4 +1,6 @@
 import asyncio
+import json
+import sys
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
@@ -240,3 +242,44 @@ async def test_bootstrap_discovery_requests_have_a_deadline(
     assert cancelled.is_set()
     assert fetch.await_args is not None
     assert fetch.await_args.args == (stalled_path,)
+
+
+async def test_oversized_json_integer_in_one_version_preserves_healthy_discovery(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    responses = {
+        path: json.dumps(document).encode()
+        for path, document in {
+            "/api/v1": _resources("pods"),
+            "/apis": {"groups": [_group("example.io", "v1", "v1beta1")]},
+            "/apis/example.io/v1": _resources("widgets"),
+        }.items()
+    }
+    responses["/apis/example.io/v1beta1"] = (
+        b'{"resources":[{"name":"gadgets","kind":"Gadget","namespaced":true,'
+        b'"verbs":["list"],"shortNames":[' + b"1" * 641 + b"]}]}"
+    )
+
+    async def request(path: str, *args: Any, **kwargs: Any) -> AsyncMock:
+        response = AsyncMock()
+        response.status = 200
+        response.reason = "OK"
+        response.read.return_value = responses[path]
+        return response
+
+    client = KubeClient()
+    transport = AsyncMock()
+    transport.call_api.side_effect = request
+    client._api = transport
+    original_limit = sys.get_int_max_str_digits()
+    try:
+        sys.set_int_max_str_digits(640)
+        metas = await client.discover_resources()
+    finally:
+        sys.set_int_max_str_digits(original_limit)
+
+    assert [(meta.plural, meta.version) for meta in metas] == [("pods", "v1"), ("widgets", "v1")]
+    assert transport.call_api.await_count == 4
+    assert "API discovery skipped /apis/example.io/v1beta1" in caplog.text
+    assert "malformed JSON" in caplog.text
+    assert "1" * 641 not in caplog.text

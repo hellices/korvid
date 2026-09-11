@@ -1793,7 +1793,7 @@ async def _request_dict(request: Awaitable[Any]) -> dict[str, Any]:
             str(exc.reason or ""),
             body=body_text,
         ) from exc
-    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError):
+    except (ValueError, RecursionError):
         raise KubeClientError(
             "Kubernetes API returned malformed JSON; retry, then check the API server"
         ) from None

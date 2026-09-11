@@ -442,6 +442,11 @@ async def test_normalized_transport_error_tracebacks_do_not_leak_context(
             "SENSITIVE_RECURSION_DETAIL",
             id="recursion",
         ),
+        pytest.param(
+            ValueError("SENSITIVE_INTEGER_DECODE_DETAIL"),
+            "SENSITIVE_INTEGER_DECODE_DETAIL",
+            id="integer-decode",
+        ),
     ],
 )
 async def test_normalized_decode_error_tracebacks_do_not_leak_context(
