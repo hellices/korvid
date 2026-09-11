@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+import pytest
 import yaml
 
 ROOT = Path(__file__).parent.parent
@@ -15,6 +16,16 @@ TRUSTED_LINUX_RUNNER = (
     "${{ github.event_name == 'pull_request' && 'ubuntu-latest' || 'korvid-runners' }}"
 )
 WINDOWS_SEED = "${{ github.run_id }}"
+CI_JOB_TIMEOUTS = {
+    "changes": 10,
+    "test": 45,
+    "windows-test": 45,
+    "pre-commit": 20,
+    "security": 15,
+    "dependency-review": 10,
+    "ty-experimental": 15,
+}
+CODEQL_JOB_TIMEOUTS = {"analyze": 20}
 
 
 def _jobs(path: Path) -> dict[str, Any]:
@@ -31,20 +42,40 @@ def _run_steps(job: Mapping[str, Any]) -> list[str]:
     return [str(step["run"]) for step in steps if isinstance(step, dict) and "run" in step]
 
 
+def _assert_job_timeouts(
+    label: str,
+    jobs: Mapping[str, Any],
+    expected: Mapping[str, int],
+) -> None:
+    assert set(jobs) == set(expected), f"unreviewed {label} job set: {sorted(jobs)}"
+    assert {name: jobs[name].get("timeout-minutes") for name in expected} == expected
+
+
 def test_ci_jobs_have_explicit_bounded_timeouts() -> None:
-    jobs = _jobs(CI_WORKFLOW)
-    expected = {
-        "changes": 10,
-        "test": 45,
-        "windows-test": 45,
-        "pre-commit": 20,
-        "security": 15,
-        "dependency-review": 10,
-        "ty-experimental": 15,
+    _assert_job_timeouts("CI", _jobs(CI_WORKFLOW), CI_JOB_TIMEOUTS)
+    _assert_job_timeouts("CodeQL", _jobs(CODEQL_WORKFLOW), CODEQL_JOB_TIMEOUTS)
+
+
+@pytest.mark.parametrize(
+    ("label", "workflow", "expected"),
+    [
+        ("CI", CI_WORKFLOW, CI_JOB_TIMEOUTS),
+        ("CodeQL", CODEQL_WORKFLOW, CODEQL_JOB_TIMEOUTS),
+    ],
+)
+def test_timeout_contract_rejects_an_unreviewed_unsafe_job(
+    label: str,
+    workflow: Path,
+    expected: Mapping[str, int],
+) -> None:
+    jobs = _jobs(workflow)
+    jobs["unsafe-extra-job"] = {
+        "runs-on": "korvid-runners",
+        "steps": [{"run": "python -m untrusted_source"}],
     }
 
-    assert {name: jobs[name].get("timeout-minutes") for name in expected} == expected
-    assert _jobs(CODEQL_WORKFLOW)["analyze"].get("timeout-minutes") == 20
+    with pytest.raises(AssertionError, match=r"unreviewed .* job"):
+        _assert_job_timeouts(label, jobs, expected)
 
 
 def test_pull_request_jobs_never_use_self_hosted_runners() -> None:
