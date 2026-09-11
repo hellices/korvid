@@ -5,10 +5,13 @@ get_resource calls to learn what one LIST already knew."""
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator
+from dataclasses import replace
 from typing import Any, cast
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
+from korvid.k8s.client import KubeClient
 from korvid.k8s.discovery import PODS_META, ResourceMeta
+from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.models import (
     CSVSummary,
     EndpointSliceSummary,
@@ -95,6 +98,82 @@ async def test_list_resources_stops_inside_an_oversized_custom_row() -> None:
     assert "column-0=" in result
     assert "truncated" in result
     assert kube.yielded == 1
+    assert kube.closed
+
+
+def _exact_budget_summaries() -> list[GenericSummary]:
+    sample = GenericSummary(name="", namespace="prod", kind="ConfigMap", created="")
+    header_size = len(f"prod/  -  age={sample.age()}")
+    return [
+        GenericSummary(
+            name=f"object-{number}".ljust(79 + (number == 99) - header_size, "x"),
+            namespace="prod",
+            kind="ConfigMap",
+            created="",
+        )
+        for number in range(100)
+    ]
+
+
+async def test_list_resources_does_not_fetch_past_an_exact_budget_page() -> None:
+    summaries = _exact_budget_summaries()
+    lines = [f"{summary.namespace}/{summary.name}  -  age={summary.age()}" for summary in summaries]
+    assert len("\n".join(lines)) == MAX_RESULT_CHARS
+    request = AsyncMock(
+        side_effect=[
+            {
+                "metadata": {"continue": "unneeded"},
+                "items": [
+                    {"metadata": {"name": summary.name, "namespace": summary.namespace}}
+                    for summary in summaries
+                ],
+            },
+            ApiStatusError(500, "unneeded page failed"),
+        ]
+    )
+    client = KubeClient()
+    meta = ResourceMeta("ConfigMap", "configmaps", "", "v1", True)
+    executor = ToolExecutor(client, {"configmaps": meta})
+
+    with patch.object(client, "_api", MagicMock()), patch.object(client, "_request_json", request):
+        result = await executor.execute("list_resources", {"kind": "configmaps"})
+
+    assert request.await_count == 1
+    assert len(result) == MAX_RESULT_CHARS
+    assert "truncated" in result
+    assert not result.startswith("ERROR:")
+
+
+async def test_list_resources_does_not_render_facts_after_exact_budget_exhaustion() -> None:
+    kube = ListingKube(_exact_budget_summaries())
+    meta = ResourceMeta("ConfigMap", "configmaps", "", "v1", True)
+    executor = ToolExecutor(cast(ReadOps, kube), {"configmaps": meta})
+
+    with patch("korvid.tools.executor.summary_facts", wraps=summary_facts) as render:
+        result = await executor.execute("list_resources", {"kind": "configmaps"})
+
+    assert render.call_count == 99
+    assert len(result) == MAX_RESULT_CHARS
+    assert "truncated" in result
+    assert kube.closed
+
+
+async def test_list_resources_stops_when_a_separator_exhausts_the_budget() -> None:
+    summaries = _exact_budget_summaries()
+    summaries[-1] = replace(summaries[-1], name=summaries[-1].name[:-1])
+    lines = [f"{summary.namespace}/{summary.name}  -  age={summary.age()}" for summary in summaries]
+    assert len("\n".join(lines)) == MAX_RESULT_CHARS - 1
+    summaries.append(GenericSummary(name="unused", namespace="prod", kind="ConfigMap", created=""))
+    kube = ListingKube(summaries)
+    meta = ResourceMeta("ConfigMap", "configmaps", "", "v1", True)
+    executor = ToolExecutor(cast(ReadOps, kube), {"configmaps": meta})
+
+    with patch.object(GenericSummary, "age", autospec=True, return_value="-") as render_age:
+        result = await executor.execute("list_resources", {"kind": "configmaps"})
+
+    assert render_age.call_count == 100
+    assert len(result) == MAX_RESULT_CHARS
+    assert "truncated" in result
     assert kube.closed
 
 

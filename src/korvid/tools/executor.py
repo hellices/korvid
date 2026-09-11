@@ -1038,11 +1038,13 @@ class ToolExecutor(RecordedExecution):
                 if parts:
                     parts.append("\n")
                     used += 1
+                if used >= MAX_RESULT_CHARS:
+                    return cap_result("".join(parts) + _TRUNCATION_SUFFIX)
                 for part in _resource_parts(summary, column_names):
                     remaining = MAX_RESULT_CHARS - used
-                    if len(part) > remaining:
-                        parts.append(part[: max(remaining + 1, 0)])
-                        return cap_result("".join(parts))
+                    if len(part) >= remaining:
+                        parts.append(part[: max(remaining, 0)])
+                        return cap_result("".join(parts) + _TRUNCATION_SUFFIX)
                     parts.append(part)
                     used += len(part)
         return "".join(parts) or "(none)"
