@@ -175,17 +175,18 @@ holds a credential: `KORVID_EVAL_API_KEY_ENV` names one, and the production
 | Variable | Meaning |
 |---|---|
 | `KORVID_EVAL_BASE_URL` | The endpoint URL, carried as the profile's `endpoint` (profiles have no `base_url` key). Required. |
-| `KORVID_EVAL_MODEL` | Model reference, `provider/model`. Required. |
+| `KORVID_EVAL_MODEL` | Model reference: explicit `provider/model`, or a bare tag LiteLLM resolves. Required. |
 | `KORVID_EVAL_API_KEY_ENV` | The **name** of the variable holding the key. The profile stores a name, never a secret. |
 | `KORVID_EVAL_OPTIONS_JSON` | A JSON object of profile options (`temperature`, `num_ctx`, …), exactly as a configured connection's own `options` block. Options the provider does not accept are dropped by the shared factory, not by the eval. |
 | `KORVID_EVAL_CA_BUNDLE` | The eval's `network.ca_bundle`. A bundle that will not load is refused rather than silently replaced by the default trust store. |
 | `KORVID_EVAL_TIMEOUT_SECONDS` | Request timeout for slow local models (default 60). Carried as the `timeout` profile option and sent as LiteLLM's named `timeout` parameter. |
 
-For existing eval environments, put the former `KORVID_EVAL_PROVIDER` prefix
-directly in `KORVID_EVAL_MODEL` (for example, `ollama/qwen3:8b`). The former
-inline `KORVID_EVAL_API_KEY` value is no longer read: store the secret in an
-environment variable and set `KORVID_EVAL_API_KEY_ENV` to that variable's
-name. See the
+For existing eval environments that relied on `KORVID_EVAL_PROVIDER`, put
+that prefix directly in `KORVID_EVAL_MODEL` (for example,
+`ollama/qwen3:8b`); a bare tag remains valid when LiteLLM resolves it without
+the separate variable. The former inline `KORVID_EVAL_API_KEY` value is no
+longer read: store the secret in an environment variable and set
+`KORVID_EVAL_API_KEY_ENV` to that variable's name. See the
 [unreleased migration notes](../release-notes/unreleased.md#current-configuration-and-extension-contracts).
 
 The timeout can be spelled twice, so its precedence is fixed:

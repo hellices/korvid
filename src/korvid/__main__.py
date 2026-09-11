@@ -746,9 +746,8 @@ def _create_initial_provider(
 
     One factory, one input. A config with no active profile has the agent
     off, which is a `None` provider rather than a fallback path: the
-    legacy scalars a second factory used to read no longer exist, because
-    `load_config` migrates that shape into a profile before anything here
-    sees it.
+    legacy scalars a second factory used to read are rejected by
+    `load_config` and must be converted to a named profile before startup.
     """
     profile = config.model_connections.active_profile
     if profile is None:

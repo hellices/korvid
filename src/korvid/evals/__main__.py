@@ -15,7 +15,8 @@ option filtering and TLS trust.
 Configuration comes from the environment:
 
 - `KORVID_EVAL_BASE_URL` — endpoint base URL (required)
-- `KORVID_EVAL_MODEL` — model reference, `provider/model` (required)
+- `KORVID_EVAL_MODEL` — `provider/model` or a LiteLLM-resolvable bare tag
+  (required)
 - `KORVID_EVAL_API_KEY_ENV` — the *name* of the variable holding the key
 - `KORVID_EVAL_OPTIONS_JSON` — a JSON object of profile options
   (`temperature`, `num_ctx`, …), exactly as a connection profile's
@@ -92,10 +93,9 @@ _FACTORY_LOGGER: Final = "korvid.providers.litellm_factory"
 def _eval_reference(env: Mapping[str, str]) -> str:
     """The model reference, as the operator wrote it.
 
-    `KORVID_EVAL_MODEL` is the canonical `provider/model` form every
-    korvid profile uses; malformed or unroutable references are refused
-    downstream by `create_provider_from_profile`, which already applies
-    `split_reference` to whatever this function returns.
+    `KORVID_EVAL_MODEL` accepts an explicit `provider/model` reference or
+    a bare tag LiteLLM can resolve. Malformed or unroutable references are
+    refused downstream by `create_provider_from_profile`.
     """
     return env.get("KORVID_EVAL_MODEL", "").strip()
 
@@ -188,13 +188,10 @@ def _timeout_refusal(source: str, value: object) -> str:
 def eval_model_tag(env: Mapping[str, str]) -> str:
     """The model as the *serving endpoint* names it.
 
-    The routing prefix in `provider/model` is korvid's own vocabulary: an
-    endpoint's metadata API knows `qwen3:8b`, not `ollama/qwen3:8b`, and
-    answers nothing for the prefixed form — so digest, quantization and
-    context length go silently unpinned. The reference is split by the
-    shared `split_reference`, which takes no vendor branch: whatever
-    precedes the first separator is dropped for the probe, whoever the
-    provider is.
+    When present, the routing prefix in `provider/model` is korvid's own
+    vocabulary: an endpoint's metadata API knows `qwen3:8b`, not
+    `ollama/qwen3:8b`. The shared `split_reference` drops that prefix for
+    the probe and leaves a bare tag unchanged.
     """
     return split_reference(_eval_reference(env))[1]
 

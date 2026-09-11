@@ -13,9 +13,10 @@ automatic conversion:
 - Provider extensions use `SpecialFlow` declarations and credential extensions
   use `ProviderDefaultCredential`. The disconnected provider-factory registry
   and its compatibility API are removed.
-- Eval runs use `KORVID_EVAL_MODEL=provider/model` and
-  `KORVID_EVAL_API_KEY_ENV` to name a credential variable. The separate provider
-  prefix and inline eval-key variables are no longer supported.
+- Eval runs put any required provider prefix directly in
+  `KORVID_EVAL_MODEL` and use `KORVID_EVAL_API_KEY_ENV` to name a credential
+  variable. LiteLLM-resolvable bare model tags remain valid; the separate
+  provider-prefix and inline eval-key variables are no longer supported.
 
 These changes do not remove Kubernetes event-field support, OS support, or the
 write-approval, masking, and audit controls. See the current
