@@ -706,10 +706,10 @@ class MCPController(MCPControllerBase):
         Cancellation-safe: ownership is cleared only once the task is
         *observed* done, so a ``:mcp off`` worker cancelled mid-wait (or a
         timed-out earlier attempt) leaves the references in place for the
-        next shutdown to find.  Returns the still-pending task if even
-        cancellation did not land within its deadline, so the caller can
-        await it after more urgent cleanup - abandoning it would leave
-        asyncio.run()'s final task-gathering to block on it invisibly.
+        next shutdown to find. Returns the still-pending task if even
+        cancellation did not land within its deadline. The composition root
+        retains it while closing other clients, then enforces a terminal
+        deadline instead of allowing runner finalization to wait forever.
         """
         server, task = self._server, self._task
         if server is None or task is None:
@@ -741,4 +741,4 @@ class MCPController(MCPControllerBase):
             return
         exc = task.exception()
         if exc is not None:
-            logger.error("MCP server task failed", exc_info=exc)
+            logger.error("MCP server task failed")

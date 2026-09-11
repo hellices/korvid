@@ -5,7 +5,13 @@ non-interactive or explicitly disabled."""
 
 from __future__ import annotations
 
+import asyncio
+import os
+import subprocess
 import sys
+import textwrap
+import threading
+from collections.abc import Callable
 from typing import Any
 
 import pytest
@@ -131,6 +137,163 @@ def test_system_exit_propagates_without_prompting() -> None:
 
     with pytest.raises(SystemExit, match="2"):
         _run_with_recovery(runner, allow_restart=True, prompt=prompt, clock=lambda: 0.0)
+
+
+@pytest.mark.parametrize("failure", [None, RuntimeError, KeyboardInterrupt, SystemExit])
+def test_main_arms_and_disarms_runner_watchdog_on_every_exit(
+    failure: type[BaseException] | None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import korvid.__main__ as main_mod
+
+    events: list[str] = []
+    loops: list[asyncio.AbstractEventLoop] = []
+
+    class Watchdog:
+        def __init__(self, interval: float, function: Callable[[], None]) -> None:
+            self.daemon = False
+
+        def start(self) -> None:
+            assert self.daemon
+            events.append("watchdog armed")
+
+        def cancel(self) -> None:
+            events.append("watchdog disarmed")
+
+    async def run(**kwargs: object) -> None:
+        loops.append(asyncio.get_running_loop())
+        events.append("run returned")
+        if failure is not None:
+            raise failure("primary failure")
+
+    monkeypatch.setattr(threading, "Timer", Watchdog)
+    monkeypatch.setattr(main_mod, "_run", run)
+    monkeypatch.setattr(sys, "argv", ["korvid", "--no-restart"])
+    if failure is None:
+        main_mod.main()
+    else:
+        with pytest.raises(failure, match="primary failure"):
+            main_mod.main()
+    assert events == ["run returned", "watchdog armed", "watchdog disarmed"]
+    assert len(loops) == 1
+    assert loops[0].is_closed()
+
+
+def test_main_sanitizes_loop_reports_before_runner_finalization(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    import korvid.__main__ as main_mod
+
+    async def run(**kwargs: object) -> None:
+        loop = asyncio.get_running_loop()
+        loop.call_soon(
+            loop.call_exception_handler,
+            {"message": "SECRET_CLEANUP_PAYLOAD", "exception": RuntimeError("private data")},
+        )
+
+    monkeypatch.setattr(main_mod, "_run", run)
+    monkeypatch.setattr(sys, "argv", ["korvid", "--no-restart"])
+    main_mod.main()
+    assert "Event loop cleanup failed" in caplog.text
+    assert "SECRET_CLEANUP_PAYLOAD" not in caplog.text
+    assert all(record.exc_info is None for record in caplog.records)
+
+
+@pytest.mark.parametrize("failure", [RuntimeError, KeyboardInterrupt, SystemExit])
+def test_runner_close_failure_is_terminal_without_secret_disclosure(
+    failure: type[BaseException],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    import korvid.__main__ as main_mod
+
+    runner = asyncio.Runner()
+    original_close = runner.close
+    exits: list[int] = []
+
+    async def run(**kwargs: object) -> None:
+        return None
+
+    def broken_close() -> None:
+        raise failure("SECRET_CLEANUP_PAYLOAD")
+
+    monkeypatch.setattr(asyncio, "Runner", lambda: runner)
+    monkeypatch.setattr(runner, "close", broken_close)
+    monkeypatch.setattr(main_mod, "_run", run)
+    monkeypatch.setattr(os, "_exit", exits.append)
+    monkeypatch.setattr(sys, "argv", ["korvid", "--no-restart"])
+    try:
+        main_mod.main()
+        assert exits == [1]
+        stderr = capfd.readouterr().err
+        assert "Event loop finalization failed; exiting without restart" in caplog.text
+        assert "SECRET_CLEANUP_PAYLOAD" not in stderr + caplog.text
+        assert all(record.exc_info is None for record in caplog.records)
+    finally:
+        original_close()
+
+
+def test_runner_failure_stays_terminal_when_diagnostic_logging_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import korvid.__main__ as main_mod
+
+    runner = asyncio.Runner()
+    original_close = runner.close
+    exits: list[int] = []
+
+    def broken_close() -> None:
+        raise RuntimeError("finalization failed")
+
+    def broken_log(*args: object, **kwargs: object) -> None:
+        raise ValueError("stderr is closed")
+
+    monkeypatch.setattr(runner, "close", broken_close)
+    monkeypatch.setattr(main_mod.logger, "critical", broken_log)
+    monkeypatch.setattr(os, "_exit", exits.append)
+    try:
+        with pytest.raises(ValueError, match="stderr is closed"):
+            main_mod._close_runner(runner)
+        assert exits == [1]
+    finally:
+        original_close()
+
+
+def test_runner_watchdog_never_waits_for_stderr() -> None:
+    script = textwrap.dedent(
+        """
+        import os
+        import korvid.__main__ as main_mod
+
+        read_descriptor, write_descriptor = os.pipe()
+        os.set_blocking(write_descriptor, False)
+        for size in (4096, 1):
+            try:
+                while True:
+                    os.write(write_descriptor, b"x" * size)
+            except BlockingIOError:
+                pass
+        os.set_blocking(write_descriptor, True)
+        os.dup2(write_descriptor, 2)
+        os.close(write_descriptor)
+        print("terminal policy invoked", flush=True)
+        main_mod._force_runner_exit()
+        """
+    )
+
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        pytest.fail("Shutdown watchdog waited for stderr to be drained", pytrace=False)
+
+    assert result.returncode == 1
+    assert result.stdout == "terminal policy invoked\n"
 
 
 def test_restart_prompt_writes_to_stderr(

@@ -58,7 +58,7 @@ class _OkProvider:
 
 async def test_close_task_reference_is_retained_until_done() -> None:
     provider = _OkProvider()
-    tasks: set[asyncio.Task[None]] = set()
+    tasks: set[asyncio.Future[Any]] = set()
     _close_provider_in_background(cast("LLMProvider", provider), tasks)
     assert len(tasks) == 1  # strong reference held while pending
     for _ in range(3):
@@ -68,7 +68,7 @@ async def test_close_task_reference_is_retained_until_done() -> None:
 
 
 async def test_close_errors_are_consumed() -> None:
-    tasks: set[asyncio.Task[None]] = set()
+    tasks: set[asyncio.Future[Any]] = set()
     _close_provider_in_background(cast("LLMProvider", _BoomProvider()), tasks)
     for _ in range(3):
         await asyncio.sleep(0)
@@ -87,7 +87,7 @@ async def test_close_background_does_not_log_secret_payload(
         async def aclose(self) -> None:
             raise RuntimeError("SUPER_SECRET_API_KEY_leak_attempt" * 5)
 
-    tasks: set[asyncio.Task[None]] = set()
+    tasks: set[asyncio.Future[Any]] = set()
     _close_provider_in_background(cast("LLMProvider", _SecretBoomProvider()), tasks)
     for _ in range(10):
         await asyncio.sleep(0)
@@ -1083,21 +1083,14 @@ def test_cli_namespace_flag_parsed(monkeypatch: pytest.MonkeyPatch) -> None:
     import korvid.__main__ as main_mod
 
     calls: list[str | None] = []
+    loops: list[asyncio.AbstractEventLoop] = []
 
-    def fake_run(coro: Any) -> None:
-        coro.close()
-
-    def fake_run_app(
+    async def fake_run_app(
         readonly: bool = False, mcp: bool = False, namespace: str | None = None
-    ) -> Any:
+    ) -> None:
         calls.append(namespace)
+        loops.append(asyncio.get_running_loop())
 
-        async def noop() -> None:
-            pass
-
-        return noop()
-
-    monkeypatch.setattr("asyncio.run", fake_run)
     monkeypatch.setattr(main_mod, "_run", fake_run_app)
     monkeypatch.setattr("sys.argv", ["korvid", "-n", "team-a"])
     main_mod.main()
@@ -1106,6 +1099,8 @@ def test_cli_namespace_flag_parsed(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("sys.argv", ["korvid"])
     main_mod.main()
     assert calls == ["team-a", "team-b", None]
+    assert len(set(loops)) == 3
+    assert all(loop.is_closed() for loop in loops)
 
 
 def test_main_module_version_exits_before_startup(
