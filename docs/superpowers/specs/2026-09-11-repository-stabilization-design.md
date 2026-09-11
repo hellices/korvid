@@ -175,7 +175,7 @@ library. It checks every tracked Python module under `src/korvid` on every run.
 Policy:
 
 - the default maximum is 1,200 physical lines;
-- `ui/app.py` has the stricter post-refactor maximum of 1,500 lines plus the
+- `ui/app.py` has an explicit post-refactor maximum of 1,500 lines plus the
   160-line constructor maximum;
 - existing modules already above 1,200 lines are grandfathered at no more than
   their 2026-09-11 baseline and therefore may shrink but may not grow;
