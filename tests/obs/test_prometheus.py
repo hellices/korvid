@@ -15,7 +15,7 @@ from typing import Any
 import httpx
 import pytest
 
-from korvid.obs.connector import ConnectorError, QueryLimits, QueryScope
+from korvid.obs.connector import ConnectorError, QueryLimits, QueryScope, render_metrics
 from korvid.obs.prometheus import PrometheusConnector
 
 
@@ -332,6 +332,37 @@ class TestErrorMapping:
 
 
 class TestParsing:
+    @pytest.mark.parametrize("include_valid", [False, True])
+    async def test_unusable_samples_are_reported_as_incomplete(self, include_valid: bool) -> None:
+        payload = _vector(*([("api-good", "1.5")] if include_valid else []))
+        payload["data"]["result"].extend(
+            ["junk", {"metric": {}}, {"metric": {}, "value": [1786_000_000, "NaN"]}]
+        )
+        connector, _ = _connector(_ok(payload))
+
+        result = await connector.query(signal="cpu", scope=SCOPE)
+        rendered = render_metrics(result)
+
+        assert [series.value for series in result.series] == ([1.5] if include_valid else [])
+        assert result.truncated is True
+        assert result.omitted_entries == 3
+        assert "omitted unusable entries: 3" in rendered
+        assert "truncated: yes" in rendered
+        assert "no series matched" not in rendered
+        if not include_valid:
+            assert "no usable series remained" in rendered
+            assert result.observed_at is None
+
+    async def test_a_genuinely_empty_vector_is_complete(self) -> None:
+        connector, _ = _connector(_ok(_vector()))
+
+        result = await connector.query(signal="cpu", scope=SCOPE)
+
+        assert result.series == ()
+        assert result.omitted_entries == 0
+        assert result.truncated is False
+        assert "no series matched" in render_metrics(result)
+
     async def test_labels_and_values_are_carried_through(self) -> None:
         connector, _ = _connector(_ok(_vector(("api-1", "0.25"))))
         result = await connector.query(signal="cpu", scope=SCOPE)

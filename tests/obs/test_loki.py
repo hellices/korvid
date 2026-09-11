@@ -11,7 +11,7 @@ from typing import Any
 import httpx
 import pytest
 
-from korvid.obs.connector import ConnectorError, QueryLimits, QueryScope
+from korvid.obs.connector import ConnectorError, QueryLimits, QueryScope, render_logs
 from korvid.obs.loki import LokiConnector
 from tests.obs import skeleton
 
@@ -281,7 +281,7 @@ class TestRoundOneReviewFindings:
         assert len(result.lines) == 2
         assert result.truncated is True
 
-    async def test_a_partial_raw_page_is_still_not_truncated(self) -> None:
+    async def test_a_partial_raw_page_with_omissions_is_incomplete(self) -> None:
         payload = {
             "status": "success",
             "data": {
@@ -293,4 +293,57 @@ class TestRoundOneReviewFindings:
         }
         connector, _ = _connector(_ok(payload), limits=QueryLimits(max_lines=3))
         result = await connector.search(scope=SCOPE)
-        assert result.truncated is False
+        assert result.truncated is True
+        assert result.omitted_entries == 1
+        assert "no log lines matched" not in render_logs(result)
+
+
+@pytest.mark.parametrize("include_valid", [False, True])
+async def test_malformed_log_entries_are_reported_as_incomplete(include_valid: bool) -> None:
+    values: list[Any] = [[str(NS), "kept"]] if include_valid else []
+    values.extend([["bad timestamp", "dropped"], [str(NS), None], "junk"])
+    payload = _streams()
+    payload["data"]["result"] = [{"stream": {"pod": "api-1"}, "values": values}]
+    connector, _ = _connector(_ok(payload))
+
+    result = await connector.search(scope=SCOPE)
+    rendered = render_logs(result)
+
+    assert [line.line for line in result.lines] == (["kept"] if include_valid else [])
+    assert result.truncated is True
+    assert result.omitted_entries == 3
+    assert "omitted unusable entries: 3" in rendered
+    assert "truncated: yes" in rendered
+    assert "no log lines matched" not in rendered
+    if not include_valid:
+        assert "no usable log lines remained" in rendered
+
+
+@pytest.mark.parametrize("bad_stream", [None, "junk", {}, {"values": "not a list"}])
+@pytest.mark.parametrize("include_valid", [False, True])
+async def test_malformed_streams_cannot_become_complete_empty_results(
+    bad_stream: Any, include_valid: bool
+) -> None:
+    payload = _streams(*([("api-1", NS, "kept")] if include_valid else []))
+    payload["data"]["result"].append(bad_stream)
+    connector, _ = _connector(_ok(payload))
+
+    result = await connector.search(scope=SCOPE)
+
+    assert [line.line for line in result.lines] == (["kept"] if include_valid else [])
+    assert result.truncated is True
+    assert result.omitted_entries == 1
+    assert "no log lines matched" not in render_logs(result)
+
+
+async def test_a_genuinely_empty_log_result_is_complete() -> None:
+    payload = _streams()
+    payload["data"]["result"] = [{"stream": {}, "values": []}]
+    connector, _ = _connector(_ok(payload))
+
+    result = await connector.search(scope=SCOPE)
+
+    assert result.lines == ()
+    assert result.omitted_entries == 0
+    assert result.truncated is False
+    assert "no log lines matched" in render_logs(result)

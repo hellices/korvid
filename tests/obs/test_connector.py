@@ -7,6 +7,8 @@ rendered answer is required to say about itself.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from korvid.obs.connector import (
@@ -141,6 +143,14 @@ class TestRenderMetrics:
     def test_a_complete_result_says_so(self) -> None:
         assert "truncated: no" in render_metrics(self._result())
 
+    def test_omissions_cannot_be_rendered_as_a_complete_empty_result(self) -> None:
+        result = replace(self._result(series=0), omitted_entries=2)
+        text = render_metrics(result, limit=600)
+        assert "truncated: yes" in text
+        assert "omitted unusable entries: 2" in text
+        assert "no series matched" not in text
+        assert len(text) <= 600
+
     def test_a_truncated_result_says_so(self) -> None:
         """A capped answer that reads as complete is a wrong answer."""
         text = render_metrics(self._result(truncated=True, series=3))
@@ -187,6 +197,14 @@ class TestRenderLogs:
 
     def test_a_truncated_result_says_so(self) -> None:
         assert "truncated: yes" in render_logs(self._result(truncated=True, lines=2))
+
+    def test_omissions_cannot_be_rendered_as_a_complete_empty_result(self) -> None:
+        result = replace(self._result(lines=0), omitted_entries=2)
+        text = render_logs(result, limit=600)
+        assert "truncated: yes" in text
+        assert "omitted unusable entries: 2" in text
+        assert "no log lines matched" not in text
+        assert len(text) <= 600
 
     def test_each_line_keeps_its_timestamp_and_pod(self) -> None:
         text = render_logs(self._result(lines=2))

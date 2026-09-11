@@ -162,6 +162,7 @@ class MetricResult:
     #: When the backend says the samples were taken, in UTC. A window is
     #: relative; without this a citation cannot be rechecked later.
     observed_at: str | None = None
+    omitted_entries: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,6 +183,7 @@ class LogResult:
     query: str
     lines: tuple[LogLine, ...] = ()
     truncated: bool = False
+    omitted_entries: int = 0
 
 
 def resolve_window(minutes: object, limits: QueryLimits) -> int:
@@ -363,14 +365,21 @@ def render_metrics(result: MetricResult, *, limit: int | None = None) -> str:
                 f"signal: {result.signal}",
                 f"unit: {result.unit}",
                 *((f"observed at: {result.observed_at}",) if result.observed_at else ()),
+                *(
+                    (f"omitted unusable entries: {result.omitted_entries}",)
+                    if result.omitted_entries
+                    else ()
+                ),
             ),
         },
         [
             f"{_labels(series.labels) or '(no labels)'}  {series.value:g} {result.unit}"
             for series in result.series
         ],
-        "no series matched this scope and window",
-        truncated=result.truncated,
+        "no usable series remained after omitting backend data"
+        if result.omitted_entries
+        else "no series matched this scope and window",
+        truncated=result.truncated or bool(result.omitted_entries),
         limit=limit,
     )
 
@@ -384,14 +393,23 @@ def render_logs(result: LogResult, *, limit: int | None = None) -> str:
             "scope": result.scope,
             "window_minutes": result.window_minutes,
             "query": result.query,
-            "extra": (f"lines: {len(result.lines)}",),
+            "extra": (
+                f"lines: {len(result.lines)}",
+                *(
+                    (f"omitted unusable entries: {result.omitted_entries}",)
+                    if result.omitted_entries
+                    else ()
+                ),
+            ),
         },
         [
             f"{f'{entry.timestamp} {_labels(entry.labels)}'.rstrip()}  {entry.line}"
             for entry in result.lines
         ],
-        "no log lines matched this scope and window",
-        truncated=result.truncated,
+        "no usable log lines remained after omitting backend data"
+        if result.omitted_entries
+        else "no log lines matched this scope and window",
+        truncated=result.truncated or bool(result.omitted_entries),
         limit=limit,
     )
 

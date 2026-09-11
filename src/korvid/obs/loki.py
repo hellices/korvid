@@ -121,7 +121,7 @@ class LokiConnector(LogsConnector):
         )
         data = self._http.require_success(answer)
         self._http.require_result_type(data, "streams")
-        lines, truncated = self._parse(data, line_limit, answer)
+        lines, truncated, omitted_entries = self._parse(data, line_limit, answer)
         return LogResult(
             source=SOURCE,
             endpoint=self._http.endpoint,
@@ -130,6 +130,7 @@ class LokiConnector(LogsConnector):
             query=mask_in(query, secrets),
             lines=lines,
             truncated=truncated,
+            omitted_entries=omitted_entries,
         )
 
     def _masked_scope_values(self, scope: QueryScope) -> tuple[str, ...]:
@@ -143,7 +144,7 @@ class LokiConnector(LogsConnector):
 
     def _parse(
         self, data: Mapping[str, Any], line_limit: int, answer: Answer
-    ) -> tuple[tuple[LogLine, ...], bool]:
+    ) -> tuple[tuple[LogLine, ...], bool, int]:
         streams = data.get("result")
         if not isinstance(streams, list):
             raise ConnectorError(
@@ -151,20 +152,22 @@ class LokiConnector(LogsConnector):
             )
         collected: list[tuple[int, LogLine]] = []
         raw_entries = 0
+        omitted_entries = 0
         for stream in streams:
-            entries, parsed = _stream_lines(stream, self._mask, answer)
+            entries, parsed, omitted = _stream_lines(stream, self._mask, answer)
             raw_entries += entries
+            omitted_entries += omitted
             collected.extend(parsed)
         # Truncation is judged on the *raw* page, not on what parsed:
         # Loki applies `limit` before korvid drops anything, so a full page
         # means later lines were omitted even if one entry was unusable.
-        truncated = raw_entries >= line_limit
+        truncated = raw_entries >= line_limit or bool(omitted_entries)
         # Sorted then cut from the *newest* end: `direction=backward` asked
         # for the most recent page, so dropping the oldest overflow keeps
         # the lines the caller asked about.
         collected.sort(key=lambda item: item[0])
         kept = collected[-line_limit:] if len(collected) > line_limit else collected
-        return tuple(line for _, line in kept), truncated
+        return tuple(line for _, line in kept), truncated, omitted_entries
 
 
 def _masked_scope(scope: QueryScope, secrets: tuple[str, ...]) -> QueryScope:
@@ -227,14 +230,15 @@ def _validated_mappings(label_mappings: Mapping[str, str] | None) -> dict[str, s
 
 def _stream_lines(
     stream: Any, mask: frozenset[str], answer: Answer
-) -> tuple[int, list[tuple[int, LogLine]]]:
-    """(`raw entry count`, parsed lines) for one stream.
+) -> tuple[int, list[tuple[int, LogLine]], int]:
+    """Return raw count, parsed lines, and unusable entry count for one stream.
 
     The raw count is returned separately because it, not the parsed
-    count, is what the backend applied `limit` to.
+    count, is what the backend applied `limit` to. A malformed stream
+    container counts as one omission when its entries cannot be inspected.
     """
     if not isinstance(stream, Mapping):
-        return 0, []
+        return 0, [], 1
     raw_labels = stream.get("stream")
     labels = answer.scrub_labels(
         masked_labels(
@@ -246,7 +250,7 @@ def _stream_lines(
     )
     values = stream.get("values")
     if not isinstance(values, list):
-        return 0, []
+        return 0, [], 1
     lines: list[tuple[int, LogLine]] = []
     for entry in values:
         if not isinstance(entry, list) or len(entry) != 2:
@@ -263,7 +267,7 @@ def _stream_lines(
             # like any other unusable entry, not end the whole search.
             continue
         lines.append((nanos, LogLine(timestamp=timestamp, labels=labels, line=answer.scrub(text))))
-    return len(values), lines
+    return len(values), lines, len(values) - len(lines)
 
 
 def _iso(nanos: int) -> str:
