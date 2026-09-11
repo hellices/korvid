@@ -263,22 +263,32 @@ def test_runner_failure_stays_terminal_when_diagnostic_logging_fails(
 
 
 def test_runner_watchdog_never_waits_for_stderr() -> None:
+    """Use full stderr on POSIX and a blocked handler for Windows pipe constraints."""
     script = textwrap.dedent(
         """
+        import logging
         import os
+        import threading
         import korvid.__main__ as main_mod
 
-        read_descriptor, write_descriptor = os.pipe()
-        os.set_blocking(write_descriptor, False)
-        for size in (4096, 1):
-            try:
-                while True:
-                    os.write(write_descriptor, b"x" * size)
-            except BlockingIOError:
-                pass
-        os.set_blocking(write_descriptor, True)
-        os.dup2(write_descriptor, 2)
-        os.close(write_descriptor)
+        class BlockingHandler(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                threading.Event().wait()
+
+        if os.name == "nt":
+            main_mod.logger.addHandler(BlockingHandler(level=logging.CRITICAL))
+        else:
+            read_descriptor, write_descriptor = os.pipe()
+            os.set_blocking(write_descriptor, False)
+            for size in (4096, 1):
+                try:
+                    while True:
+                        os.write(write_descriptor, b"x" * size)
+                except BlockingIOError:
+                    pass
+            os.set_blocking(write_descriptor, True)
+            os.dup2(write_descriptor, 2)
+            os.close(write_descriptor)
         print("terminal policy invoked", flush=True)
         main_mod._force_runner_exit()
         """
