@@ -137,6 +137,39 @@ class _CallTargetVisitor(ast.NodeVisitor):
             return self._reference_targets(value.body) | self._reference_targets(value.orelse)
         return frozenset()
 
+    def _default_argument_targets(self, arguments: ast.arguments) -> dict[str, frozenset[str]]:
+        targets: dict[str, frozenset[str]] = {}
+        positional = (*arguments.posonlyargs, *arguments.args)
+        first_default = len(positional) - len(arguments.defaults)
+        for argument, positional_default in zip(
+            positional[first_default:], arguments.defaults, strict=True
+        ):
+            self.visit(positional_default)
+            targets[argument.arg] = self._reference_targets(positional_default)
+        for argument, keyword_default in zip(
+            arguments.kwonlyargs, arguments.kw_defaults, strict=True
+        ):
+            if keyword_default is not None:
+                self.visit(keyword_default)
+                targets[argument.arg] = self._reference_targets(keyword_default)
+        return targets
+
+    def _bind_arguments(
+        self,
+        arguments: ast.arguments,
+        default_targets: dict[str, frozenset[str]],
+    ) -> None:
+        for argument in (
+            *arguments.posonlyargs,
+            *arguments.args,
+            *arguments.kwonlyargs,
+        ):
+            self._bind_aliases(argument.arg, default_targets.get(argument.arg, frozenset()))
+        if arguments.vararg is not None:
+            self._bind_unknown(arguments.vararg.arg)
+        if arguments.kwarg is not None:
+            self._bind_unknown(arguments.kwarg.arg)
+
     def _bind_target(self, target: ast.expr) -> None:
         if isinstance(target, ast.Name):
             self._bind_unknown(target.id)
@@ -176,9 +209,7 @@ class _CallTargetVisitor(ast.NodeVisitor):
     def _visit_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
         for decorator in node.decorator_list:
             self.visit(decorator)
-        for default in (*node.args.defaults, *node.args.kw_defaults):
-            if default is not None:
-                self.visit(default)
+        default_targets = self._default_argument_targets(node.args)
         if node.returns is not None:
             self.visit(node.returns)
         self._bind_unknown(node.name)
@@ -186,16 +217,7 @@ class _CallTargetVisitor(ast.NodeVisitor):
         self._scope_kinds.append("function")
         self._global_names.append(set())
         self._nonlocal_names.append(set())
-        for argument in (
-            *node.args.posonlyargs,
-            *node.args.args,
-            *node.args.kwonlyargs,
-        ):
-            self._bind_unknown(argument.arg)
-        if node.args.vararg is not None:
-            self._bind_unknown(node.args.vararg.arg)
-        if node.args.kwarg is not None:
-            self._bind_unknown(node.args.kwarg.arg)
+        self._bind_arguments(node.args, default_targets)
         for statement in node.body:
             self.visit(statement)
         self._nonlocal_names.pop()
@@ -249,23 +271,12 @@ class _CallTargetVisitor(ast.NodeVisitor):
         self._visit_function(node)
 
     def visit_Lambda(self, node: ast.Lambda) -> None:
-        for default in (*node.args.defaults, *node.args.kw_defaults):
-            if default is not None:
-                self.visit(default)
+        default_targets = self._default_argument_targets(node.args)
         self._scopes.append({})
         self._scope_kinds.append("lambda")
         self._global_names.append(set())
         self._nonlocal_names.append(set())
-        for argument in (
-            *node.args.posonlyargs,
-            *node.args.args,
-            *node.args.kwonlyargs,
-        ):
-            self._bind_unknown(argument.arg)
-        if node.args.vararg is not None:
-            self._bind_unknown(node.args.vararg.arg)
-        if node.args.kwarg is not None:
-            self._bind_unknown(node.args.kwarg.arg)
+        self._bind_arguments(node.args, default_targets)
         self.visit(node.body)
         self._nonlocal_names.pop()
         self._global_names.pop()
@@ -637,6 +648,26 @@ def test_composition_root_contract_rejects_runtime_component_in_support_module(
             "build()\n",
             "WriteCoordinator",
         ),
+        (
+            "from korvid.ui.workspace_controller import WriteCoordinator\n"
+            "def build(required, factory=WriteCoordinator):\n"
+            "    factory()\n"
+            "build(None)\n",
+            "WriteCoordinator",
+        ),
+        (
+            "from korvid.ui.workspace_controller import WriteCoordinator\n"
+            "def build(*, required, factory=WriteCoordinator):\n"
+            "    factory()\n"
+            "build(required=None)\n",
+            "WriteCoordinator",
+        ),
+        (
+            "from korvid.ui.workspace_controller import WriteCoordinator\n"
+            "build = lambda required, factory=WriteCoordinator: factory()\n"
+            "build(None)\n",
+            "WriteCoordinator",
+        ),
     ],
     ids=[
         "qualified",
@@ -657,6 +688,9 @@ def test_composition_root_contract_rejects_runtime_component_in_support_module(
         "late-global-rebind",
         "global-rebind",
         "nonlocal-rebind",
+        "positional-default",
+        "keyword-default",
+        "lambda-default",
     ],
 )
 def test_composition_root_contract_rejects_indirect_runtime_construction(
@@ -756,6 +790,17 @@ def test_tests_construct_apps_only_through_the_factory() -> None:
         "    rebind()\n"
         "    Factory()\n"
         "build()\n",
+        "from korvid.ui.app import KorvidApp\n"
+        "def build(required, factory=KorvidApp):\n"
+        "    factory()\n"
+        "build(None)\n",
+        "from korvid.ui.app import KorvidApp\n"
+        "def build(*, required, factory=KorvidApp):\n"
+        "    factory()\n"
+        "build(required=None)\n",
+        "from korvid.ui.app import KorvidApp\n"
+        "build = lambda required, factory=KorvidApp: factory()\n"
+        "build(None)\n",
     ],
     ids=[
         "qualified",
@@ -771,6 +816,9 @@ def test_tests_construct_apps_only_through_the_factory() -> None:
         "late-global-rebind",
         "global-rebind",
         "nonlocal-rebind",
+        "positional-default",
+        "keyword-default",
+        "lambda-default",
     ],
 )
 def test_factory_contract_rejects_indirect_app_construction(
