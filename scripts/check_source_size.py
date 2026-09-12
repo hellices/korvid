@@ -51,13 +51,13 @@ MODULE_LIMITS: tuple[ModuleLimit, ...] = (
     ),
     ModuleLimit(
         "src/korvid/k8s/client.py",
-        1_806,
-        "Kubernetes client boundary baseline before repository stabilization",
+        1_944,
+        "Kubernetes reliability hardening baseline after PR #381",
     ),
     ModuleLimit(
         "src/korvid/tools/executor.py",
-        2_059,
-        "tool execution boundary baseline before repository stabilization",
+        2_069,
+        "bounded LIST execution baseline after PR #381",
     ),
     ModuleLimit(
         "src/korvid/tools/registry.py",
