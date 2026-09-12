@@ -510,8 +510,16 @@ CommonJS/ESM harnesses, GitHub Actions YAML, GitHub REST API, pre-commit.
       ModuleLimit("src/korvid/ui/app.py", 1_500, "Textual application shell"),
       ModuleLimit("src/korvid/__main__.py", 1_773, "composition root baseline"),
       ModuleLimit("src/korvid/core/config.py", 1_684, "configuration baseline"),
-      ModuleLimit("src/korvid/k8s/client.py", 1_806, "client boundary baseline"),
-      ModuleLimit("src/korvid/tools/executor.py", 2_059, "executor baseline"),
+      ModuleLimit(
+          "src/korvid/k8s/client.py",
+          1_944,
+          "Kubernetes reliability hardening baseline after PR #381",
+      ),
+      ModuleLimit(
+          "src/korvid/tools/executor.py",
+          2_069,
+          "bounded LIST execution baseline after PR #381",
+      ),
       ModuleLimit("src/korvid/tools/registry.py", 1_420, "registry baseline"),
       ModuleLimit(
           "src/korvid/ui/agent_ui_controller.py", 2_450,

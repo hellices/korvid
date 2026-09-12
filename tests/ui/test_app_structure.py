@@ -185,6 +185,21 @@ class _CallTargetVisitor(ast.NodeVisitor):
             )
         return frozenset()
 
+    def _callable_targets(self, value: ast.expr) -> frozenset[str]:
+        if isinstance(value, ast.Name):
+            return self._resolve_name(value.id)
+        if isinstance(value, ast.Attribute):
+            return frozenset((value.attr,))
+        if isinstance(value, ast.IfExp):
+            return self._callable_targets(value.body) | self._callable_targets(value.orelse)
+        if isinstance(value, ast.BoolOp):
+            return frozenset(
+                target for operand in value.values for target in self._callable_targets(operand)
+            )
+        if isinstance(value, ast.NamedExpr):
+            return self._callable_targets(value.value)
+        return frozenset()
+
     def _default_argument_targets(self, arguments: ast.arguments) -> dict[str, frozenset[str]]:
         targets: dict[str, frozenset[str]] = {}
         positional = (*arguments.posonlyargs, *arguments.args)
@@ -279,10 +294,7 @@ class _CallTargetVisitor(ast.NodeVisitor):
         self._scopes.pop()
 
     def visit_Call(self, node: ast.Call) -> None:
-        if isinstance(node.func, ast.Name):
-            self.targets.extend((node.lineno, name) for name in self._resolve_name(node.func.id))
-        elif isinstance(node.func, ast.Attribute):
-            self.targets.append((node.lineno, node.func.attr))
+        self.targets.extend((node.lineno, name) for name in self._callable_targets(node.func))
         self.generic_visit(node)
 
     def visit_Import(self, node: ast.Import) -> None:
@@ -755,6 +767,24 @@ def test_composition_root_contract_rejects_runtime_component_in_support_module(
             "WriteCoordinator",
         ),
         (
+            "from decoy import Other\n"
+            "from korvid.ui.workspace_controller import WriteCoordinator\n"
+            "enabled = True\n"
+            "(WriteCoordinator if enabled else Other)()\n",
+            "WriteCoordinator",
+        ),
+        (
+            "from decoy import Other\n"
+            "from korvid.ui.workspace_controller import WriteCoordinator\n"
+            "(WriteCoordinator or Other)()\n",
+            "WriteCoordinator",
+        ),
+        (
+            "from korvid.ui.workspace_controller import WriteCoordinator\n"
+            "(factory := WriteCoordinator)()\n",
+            "WriteCoordinator",
+        ),
+        (
             "from korvid.ui.workspace_controller import WriteCoordinator\n"
             "from decoy import Other\n"
             "Factory = WriteCoordinator\n"
@@ -867,6 +897,9 @@ def test_composition_root_contract_rejects_runtime_component_in_support_module(
         "except-star-handler-shadow",
         "conditional-alias",
         "boolean-alias",
+        "direct-conditional-call",
+        "direct-boolean-call",
+        "direct-named-expression-call",
         "zero-iteration-while",
         "zero-iteration-for",
         "no-match-case",
@@ -957,6 +990,12 @@ def test_tests_construct_apps_only_through_the_factory() -> None:
         "Factory()\n",
         "from korvid.ui.app import KorvidApp\n"
         "from decoy import Other\n"
+        "enabled = True\n"
+        "(KorvidApp if enabled else Other)()\n",
+        "from korvid.ui.app import KorvidApp\nfrom decoy import Other\n(KorvidApp or Other)()\n",
+        "from korvid.ui.app import KorvidApp\n(factory := KorvidApp)()\n",
+        "from korvid.ui.app import KorvidApp\n"
+        "from decoy import Other\n"
         "Factory = KorvidApp\n"
         "while False:\n"
         "    Factory = Other\n"
@@ -1037,6 +1076,9 @@ def test_tests_construct_apps_only_through_the_factory() -> None:
         "except-star-handler-shadow",
         "conditional-alias",
         "boolean-alias",
+        "direct-conditional-call",
+        "direct-boolean-call",
+        "direct-named-expression-call",
         "zero-iteration-while",
         "zero-iteration-for",
         "no-match-case",
