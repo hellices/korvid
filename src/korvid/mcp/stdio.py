@@ -135,6 +135,7 @@ async def _serve(endpoint: TUIEndpoint) -> None:
         headers={"Authorization": f"Bearer {endpoint.capability}"},
         timeout=httpx2.Timeout(_CALL_TIMEOUT, connect=_CONNECT_TIMEOUT),
         follow_redirects=False,
+        max_redirects=0,
         trust_env=False,
         event_hooks={"response": [_drain_http_response]},
     ) as http:
