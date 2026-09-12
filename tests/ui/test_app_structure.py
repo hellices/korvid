@@ -88,6 +88,8 @@ class _CallTargetVisitor(ast.NodeVisitor):
             return self._resolve_name(value.id)
         if isinstance(value, ast.Attribute):
             return frozenset((value.attr,))
+        if isinstance(value, ast.IfExp):
+            return self._reference_targets(value.body) | self._reference_targets(value.orelse)
         return frozenset()
 
     def _bind_target(self, target: ast.expr) -> None:
@@ -444,6 +446,14 @@ def test_composition_root_contract_rejects_runtime_component_in_support_module(
             "WriteCoordinator()\n",
             "WriteCoordinator",
         ),
+        (
+            "from korvid.ui.workspace_controller import WriteCoordinator\n"
+            "from decoy import Other\n"
+            "enabled = True\n"
+            "Factory = WriteCoordinator if enabled else Other\n"
+            "Factory()\n",
+            "WriteCoordinator",
+        ),
     ],
     ids=[
         "qualified",
@@ -456,6 +466,7 @@ def test_composition_root_contract_rejects_runtime_component_in_support_module(
         "class-scope-shadow",
         "except-handler-shadow",
         "except-star-handler-shadow",
+        "conditional-alias",
     ],
 )
 def test_composition_root_contract_rejects_indirect_runtime_construction(
@@ -509,6 +520,11 @@ def test_tests_construct_apps_only_through_the_factory() -> None:
         "except* Exception:\n"
         "    KorvidApp = object()\n"
         "KorvidApp()\n",
+        "from korvid.ui.app import KorvidApp\n"
+        "from decoy import Other\n"
+        "enabled = True\n"
+        "Factory = KorvidApp if enabled else Other\n"
+        "Factory()\n",
     ],
     ids=[
         "qualified",
@@ -517,6 +533,7 @@ def test_tests_construct_apps_only_through_the_factory() -> None:
         "class-scope-shadow",
         "except-handler-shadow",
         "except-star-handler-shadow",
+        "conditional-alias",
     ],
 )
 def test_factory_contract_rejects_indirect_app_construction(
