@@ -21,6 +21,7 @@ from korvid.k8s.helm import (
 )
 from korvid.ui.app import KorvidApp
 from korvid.ui.widgets.resource_table import ResourceTable
+from tests.app_factory import build_test_app
 
 from .waits import until
 
@@ -97,7 +98,7 @@ def make_app(
     async def list_namespaces() -> list[str]:
         return ["default"]
 
-    app = KorvidApp(
+    app = build_test_app(
         config=KorvidConfig(namespace="default"),
         store=store,
         watch_manager=WatchManager(store, source),

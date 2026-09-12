@@ -15,6 +15,7 @@ from korvid.ui.app import KorvidApp
 from korvid.ui.command import command_help
 from korvid.ui.widgets.filter_bar import FilterBar
 from korvid.ui.widgets.help_screen import HelpScreen, collect_help, key_label
+from tests.app_factory import build_test_app
 
 from .waits import until
 
@@ -204,7 +205,7 @@ def make_app(pods: list[PodSummary]) -> KorvidApp:
         while True:
             await asyncio.sleep(0.01)
 
-    return KorvidApp(
+    return build_test_app(
         config=KorvidConfig(namespace="default"),
         store=store,
         watch_manager=WatchManager(store, source),
@@ -320,7 +321,7 @@ async def test_help_hides_agent_binding_when_agent_unavailable() -> None:
         while True:
             await asyncio.sleep(0.01)
 
-    app = KorvidApp(
+    app = build_test_app(
         config=KorvidConfig(namespace="default"),
         store=store,
         watch_manager=WatchManager(store, source),

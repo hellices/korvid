@@ -25,6 +25,7 @@ from korvid.k8s.models import GenericSummary, PodSummary
 from korvid.ui.app import KorvidApp
 from korvid.ui.messages import NavigateCommand
 from korvid.ui.widgets.port_forward_screen import ForwardListScreen, PortForwardScreen
+from tests.app_factory import build_test_app
 
 from .waits import until
 
@@ -181,7 +182,7 @@ def make_app(
         while True:
             await asyncio.sleep(0.01)
 
-    return KorvidApp(
+    return build_test_app(
         config=KorvidConfig(namespace="default"),
         store=store,
         watch_manager=WatchManager(store, source),

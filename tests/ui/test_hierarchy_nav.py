@@ -28,6 +28,7 @@ from korvid.ui.app import KorvidApp
 from korvid.ui.app_surfaces import AppWorkspaceSurface
 from korvid.ui.widgets.hierarchy_screen import HierarchyScreen
 from korvid.ui.widgets.resource_table import ResourceTable
+from tests.app_factory import build_test_app
 
 from .waits import until
 
@@ -139,7 +140,7 @@ def make_app(
     async def list_namespaces() -> list[str]:
         return [namespace]
 
-    app = KorvidApp(
+    app = build_test_app(
         config=KorvidConfig(namespace=namespace),
         store=store,
         watch_manager=WatchManager(store, source),

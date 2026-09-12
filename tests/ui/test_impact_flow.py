@@ -51,6 +51,7 @@ from korvid.k8s.writes import WriteOps
 from korvid.ui.app import KorvidApp
 from korvid.ui.widgets.confirm_screen import ConfirmScreen, ReplicasPrompt
 from korvid.ui.widgets.resource_table import ResourceTable
+from tests.app_factory import build_test_app
 
 from .waits import until
 
@@ -569,7 +570,7 @@ class ImpactEnv:
             # flow before the prompt, the snapshot fan-out and the dialog.
             return permission
 
-        self.app = KorvidApp(
+        self.app = build_test_app(
             config=KorvidConfig(namespace="prod"),
             store=store,
             watch_manager=WatchManager(store, source),

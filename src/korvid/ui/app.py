@@ -14,9 +14,6 @@ from time import monotonic
 from typing import TYPE_CHECKING, Any, ClassVar
 
 if TYPE_CHECKING:
-    # Annotation-only: the base TUI must not import the embedded-agent
-    # runtime at startup (issue #73) — the composition root injects it
-    # only when the [agent] extra is installed and wired.
     from korvid.agent.session import AgentSession
 
 from rich.text import Text
@@ -69,7 +66,7 @@ from korvid.ui.agent_ui_controller import (
     AgentUiController,
 )
 from korvid.ui.app_bindings import APP_BINDINGS, APP_CSS, APP_HANDLER_KEY_HELP
-from korvid.ui.app_runtime import AppRuntimeInputs, build_app_runtime
+from korvid.ui.app_runtime import AppRuntime, AppRuntimeInputs
 from korvid.ui.command import command_help, command_words
 from korvid.ui.context_switch_coordinator import (
     ContextSwitchResult,
@@ -127,7 +124,6 @@ _DEFAULT_ALIASES: dict[str, ResourceMeta] = {
     "pod": PODS_META,
 }
 
-#: How often the app polls the forward registry for dead kubectl processes.
 _FORWARD_POLL_SECONDS = 2.0
 
 
@@ -152,11 +148,7 @@ class KorvidApp(App[None]):
         stream_logs: Callable[..., AsyncIterator[LogLine]] | None = None,
         agent_session: AgentSession | None = None,
         agent_model_name: str | None = None,
-        #: Answers every question the profile screens ask; None without the
-        #: [agent] extra, which degrades `:ai` to an install hint.
         agent_catalog: ModelCatalog | None = None,
-        #: Writes `agent.active`/`agent.profiles` — and the first-run model
-        #: tier that belongs with them — back to config.yaml.
         agent_save_profiles: ModelConnectionsWriter | None = None,
         rebuild_agent: (
             Callable[[ModelConnectionConfig, str | None], AgentSession | None] | None
@@ -240,8 +232,19 @@ class KorvidApp(App[None]):
             watch_warning_events=watch_warning_events,
             approval_timeout_seconds=approval_timeout_seconds,
         )
+        self._runtime_bound = False
+        self._runtime_inputs = runtime_inputs
         self._bind_runtime_inputs(runtime_inputs)
-        runtime = build_app_runtime(self, runtime_inputs)
+
+    @property
+    def runtime_inputs(self) -> AppRuntimeInputs:
+        return self._runtime_inputs
+
+    def bind_runtime(self, runtime: AppRuntime) -> None:
+        if self._runtime_bound:
+            raise RuntimeError("app runtime already bound")
+        self._runtime_bound = True
+        self._runtime = runtime
         self._view = runtime.view
         self._relationship_loader = runtime.relationship_loader
         self._ctx = runtime.context

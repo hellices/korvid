@@ -38,6 +38,7 @@ from korvid.ui.context_switch_coordinator import ContextSwitchResult
 from korvid.ui.messages import NavigateCommand, SwitchContextCommand
 from korvid.ui.widgets.relationship_screen import RelationshipScreen
 from korvid.ui.widgets.resource_table import ResourceTable
+from tests.app_factory import build_test_app
 
 from .waits import until
 
@@ -165,7 +166,7 @@ class _RelEnv:
                 pod_resize_supported=False, provider_hint=None, context_namespace="prod"
             )
 
-        self.app = KorvidApp(
+        self.app = build_test_app(
             config=KorvidConfig(namespace="prod", kube_context="ctx-a"),
             store=store,
             watch_manager=WatchManager(store, source),

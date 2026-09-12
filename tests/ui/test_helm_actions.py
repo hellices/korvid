@@ -34,6 +34,7 @@ from korvid.ui.widgets.helm_install import HelmInstallPrompt
 from korvid.ui.widgets.helm_repos import HelmRepoScreen
 from korvid.ui.widgets.pick_screen import PickScreen
 from korvid.ui.widgets.resource_table import ResourceTable
+from tests.app_factory import build_test_app
 
 from .waits import until
 
@@ -275,7 +276,7 @@ def make_app(
         if get_helm_release_identity is _DEFAULT_IDENTITY_READER
         else get_helm_release_identity
     )
-    return KorvidApp(
+    return build_test_app(
         config=KorvidConfig(namespace="default", readonly=readonly),
         store=store,
         watch_manager=WatchManager(store, source),

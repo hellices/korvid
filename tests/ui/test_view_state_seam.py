@@ -30,6 +30,7 @@ from korvid.ui.view_state import ViewState
 from korvid.ui.widgets.command_bar import CommandBar
 from korvid.ui.widgets.filter_bar import FilterBar
 from korvid.ui.widgets.namespace_picker import NamespacePicker
+from tests.app_factory import build_test_app
 
 _ALIASES = {
     "pods": ResourceMeta("", "v1", "pods", "Pod", True),
@@ -51,7 +52,7 @@ def _app() -> KorvidApp:
     async def list_namespaces() -> list[str]:
         return ["default"]
 
-    return KorvidApp(
+    return build_test_app(
         config=KorvidConfig(namespace="default"),
         store=store,
         watch_manager=WatchManager(store, source),

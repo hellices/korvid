@@ -18,6 +18,7 @@ from korvid.k8s.metrics import MetricsPoller, PodMetrics
 from korvid.k8s.models import PodSummary
 from korvid.ui.app import KorvidApp
 from korvid.ui.widgets.resource_table import ResourceTable
+from tests.app_factory import build_test_app
 
 from .test_app import _DEFAULT_TEST_ALIASES, _pod
 from .waits import until
@@ -51,7 +52,7 @@ def make_app_with_metrics(
         return result
 
     store = ResourceStore()
-    app = KorvidApp(
+    app = build_test_app(
         config=KorvidConfig(namespace="default"),
         store=store,
         watch_manager=WatchManager(store, _source(pods)),
@@ -282,7 +283,7 @@ def make_app_plain(pods: list[PodSummary]) -> KorvidApp:
     from korvid.core.watch import WatchManager
 
     store = ResourceStore()
-    return KorvidApp(
+    return build_test_app(
         config=KorvidConfig(namespace="default"),
         store=store,
         watch_manager=WatchManager(store, _source(pods)),

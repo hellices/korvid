@@ -25,6 +25,7 @@ from korvid.ui.widgets.agent_panel import AgentPanel
 from korvid.ui.widgets.confirm_screen import ConfirmScreen
 from korvid.ui.widgets.resource_table import ResourceTable
 from korvid.ui.widgets.status_bar import StatusBar
+from tests.app_factory import build_test_app
 
 from .agent_session_fakes import FakeSession
 from .waits import until
@@ -96,7 +97,7 @@ def make_app(
         while True:
             await asyncio.sleep(0.01)
 
-    return KorvidApp(
+    return build_test_app(
         config=KorvidConfig(
             namespace="default",
             kube_context=protected_context or "dev",

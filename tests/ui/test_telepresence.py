@@ -18,6 +18,7 @@ from korvid.ui.widgets.telepresence_screen import (
     intercept_lines,
     status_lines,
 )
+from tests.app_factory import build_test_app
 
 from .waits import until
 
@@ -63,14 +64,14 @@ def make_app(
     async def list_namespaces() -> list[str]:
         return ["default"]
 
-    return KorvidApp(
+    return build_test_app(
         config=KorvidConfig(namespace="default"),
         store=store,
         watch_manager=WatchManager(store, source),
         list_namespaces=list_namespaces,
         aliases=dict(_ALIASES),
-        telepresence=telepresence,  # type: ignore[arg-type]  # test seam
-        probe_traffic_manager=probe,  # type: ignore[arg-type]  # test seam
+        telepresence=telepresence,
+        probe_traffic_manager=probe,
     )
 
 

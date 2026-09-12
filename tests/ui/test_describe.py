@@ -16,6 +16,7 @@ from korvid.k8s.models import PodSummary
 from korvid.ui.app import KorvidApp
 from korvid.ui.hints import EventsFetcher
 from korvid.ui.widgets.resource_table import ResourceTable
+from tests.app_factory import build_test_app
 
 from .waits import until
 
@@ -93,7 +94,7 @@ def make_describe_app(
     store = ResourceStore()
     if get_events is not None and not isinstance(get_events, EventsFetcher):
         get_events = _FnEvents(get_events)
-    return KorvidApp(
+    return build_test_app(
         config=KorvidConfig(namespace="default"),
         store=store,
         watch_manager=WatchManager(store, fake_source(pods)),

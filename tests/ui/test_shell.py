@@ -33,6 +33,7 @@ from korvid.ui.shell import (
 from korvid.ui.widgets.confirm_screen import ConfirmScreen, ImagePrompt
 from korvid.ui.widgets.pick_screen import PickScreen
 from korvid.ui.widgets.resource_table import ResourceTable
+from tests.app_factory import build_test_app
 
 from .waits import until
 
@@ -340,7 +341,7 @@ def make_app(
     else:
         manifest_source = get_manifest
 
-    return KorvidApp(
+    return build_test_app(
         config=KorvidConfig(
             namespace="default",
             kube_context=kube_context,

@@ -138,6 +138,20 @@ def _main_tree() -> ast.Module:
     )
 
 
+def test_composition_support_defines_the_ca_validator_once() -> None:
+    """Merge conflict cleanup must not silently shadow a hardened helper."""
+    path = Path(korvid.__main__.__file__).with_name("composition_support.py")
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=path.name)
+    definitions = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+        and node.name == "_validate_ca_bundle"
+    ]
+
+    assert len(definitions) == 1
+
+
 def test_the_composition_root_composes_no_model_facing_prompt_text() -> None:
     """Structural, not textual: the AST must not *reference* the prompt layers.
 
@@ -1747,6 +1761,7 @@ async def test_wire_and_run_wires_relationship_lister_from_kube(
     from korvid.core.config import KorvidConfig
 
     monkeypatch.setattr(main_mod, "KorvidApp", _FakeAppCapturesKwargs)
+    monkeypatch.setattr(main_mod, "assemble_app_runtime", lambda app: app)
     _FakeAppCapturesKwargs.instances.clear()
 
     kube = _FakeKubeForWiring()
@@ -1776,6 +1791,7 @@ async def test_wire_and_run_wires_helm_release_identity_reader_from_kube(
     from korvid.core.config import KorvidConfig
 
     monkeypatch.setattr(main_mod, "KorvidApp", _FakeAppCapturesKwargs)
+    monkeypatch.setattr(main_mod, "assemble_app_runtime", lambda app: app)
     _FakeAppCapturesKwargs.instances.clear()
 
     kube = _FakeKubeForWiring()
@@ -1799,6 +1815,7 @@ async def test_wire_and_run_passes_session_timeline_and_warning_watch(
     from korvid.core.session_timeline import SessionTimeline
 
     monkeypatch.setattr(main_mod, "KorvidApp", _FakeAppCapturesKwargs)
+    monkeypatch.setattr(main_mod, "assemble_app_runtime", lambda app: app)
     _FakeAppCapturesKwargs.instances.clear()
 
     kube = _FakeKubeForWiring()
@@ -2514,6 +2531,7 @@ async def test_wire_and_run_hands_the_ui_a_declared_profile_writer(
     _profiles_config(path, tier="high")
     monkeypatch.setattr(main_mod, "DEFAULT_CONFIG_PATH", path)
     monkeypatch.setattr(main_mod, "KorvidApp", _FakeAppCapturesKwargs)
+    monkeypatch.setattr(main_mod, "assemble_app_runtime", lambda app: app)
     _FakeAppCapturesKwargs.instances.clear()
 
     kube = _FakeKubeForWiring()

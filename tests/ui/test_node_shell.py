@@ -27,6 +27,7 @@ from korvid.ui.app import KorvidApp
 from korvid.ui.shell import DEBUG_IMAGE, build_node_debug_create_argv, build_pod_attach_argv
 from korvid.ui.widgets.confirm_screen import ConfirmScreen
 from korvid.ui.widgets.resource_table import ResourceTable
+from tests.app_factory import build_test_app
 
 from .waits import until
 
@@ -103,7 +104,7 @@ def make_app(
         assert permitted is not None
         return permitted
 
-    return KorvidApp(
+    return build_test_app(
         config=KorvidConfig(
             namespace="default",
             readonly=readonly,

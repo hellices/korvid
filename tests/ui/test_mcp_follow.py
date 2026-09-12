@@ -12,6 +12,7 @@ from korvid.core.watch import WatchManager
 from korvid.k8s.discovery import PODS_META
 from korvid.ui.app import KorvidApp
 from korvid.ui.widgets.confirm_screen import ConfirmScreen
+from tests.app_factory import build_test_app
 
 from .test_proposals_ui import FakeMCP
 from .waits import until
@@ -35,7 +36,7 @@ def make_app(
     async def list_namespaces() -> list[str]:
         return ["default"]
 
-    return KorvidApp(
+    return build_test_app(
         config=config or KorvidConfig(namespace="default"),
         store=store,
         watch_manager=WatchManager(store, source),

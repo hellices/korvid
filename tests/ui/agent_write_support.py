@@ -15,6 +15,7 @@ from korvid.k8s.models import GenericSummary
 from korvid.k8s.writes import WriteOps
 from korvid.ui.app import KorvidApp
 from korvid.ui.widgets.agent_panel import AgentPanel
+from tests.app_factory import build_test_app
 
 _DEPLOY_META = ResourceMeta("Deployment", "deployments", "apps", "v1", True, ("deploy",))
 _ALIASES = {"deployments": _DEPLOY_META, "deploy": _DEPLOY_META}
@@ -106,7 +107,7 @@ def make_app(
             },
         }
 
-    return KorvidApp(
+    return build_test_app(
         config=KorvidConfig(namespace="default", readonly=readonly),
         store=store,
         watch_manager=WatchManager(store, source),

@@ -20,6 +20,7 @@ from korvid.k8s.models import PodSummary
 from korvid.ui.app import KorvidApp
 from korvid.ui.widgets.log_pane import LogPane
 from korvid.ui.widgets.resource_table import ResourceTable
+from tests.app_factory import build_test_app
 
 from .rendering import painted_text
 from .waits import until
@@ -147,11 +148,11 @@ def make_app(
         while True:
             await asyncio.sleep(0.01)
 
-    return KorvidApp(
+    return build_test_app(
         config=KorvidConfig(namespace="default"),
         store=store,
-        watch_manager=WatchManager(store, source),  # type: ignore[arg-type]
-        stream_logs=stream_logs,  # type: ignore[arg-type]
+        watch_manager=WatchManager(store, source),  # type: ignore[arg-type]  # rows are duck-typed
+        stream_logs=stream_logs,
     )
 
 
@@ -1491,7 +1492,7 @@ async def test_config_seeds_wrap_and_timestamp_defaults() -> None:
         while True:
             await asyncio.sleep(0.01)
 
-    app = KorvidApp(
+    app = build_test_app(
         config=KorvidConfig(namespace="default", log_wrap=True, log_timestamps=True),
         store=store,
         watch_manager=WatchManager(store, source),  # type: ignore[arg-type]
@@ -1542,7 +1543,7 @@ async def test_timestamp_toggle_preserves_overflow_banner() -> None:
         while True:
             await asyncio.sleep(0.01)
 
-    app = KorvidApp(
+    app = build_test_app(
         config=KorvidConfig(namespace="default", log_buffer_lines=1),
         store=store,
         watch_manager=WatchManager(store, source),  # type: ignore[arg-type]

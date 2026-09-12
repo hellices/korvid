@@ -36,6 +36,7 @@ from korvid.k8s.telemetry import ReadTelemetryEvent
 from korvid.ui.app import KorvidApp
 from korvid.ui.messages import ResourcesUpdated
 from korvid.ui.widgets.resource_table import ResourceTable
+from tests.app_factory import build_test_app
 from tests.performance.metrics import (
     ApiSummary,
     BenchmarkRecorder,
@@ -912,7 +913,8 @@ async def run_replay(profile: WorkloadProfile, options: ReplayOptions) -> Replay
     watch_manager = WatchManager(store, source, retry_delay=0.0)
     manifest = build_manifest(profile)
 
-    app = MeasuredKorvidApp(
+    app = build_test_app(
+        MeasuredKorvidApp,
         config=KorvidConfig(namespace=ALL_NAMESPACES),
         store=store,
         watch_manager=watch_manager,

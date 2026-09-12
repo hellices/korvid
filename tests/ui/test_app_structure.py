@@ -5,15 +5,67 @@ from __future__ import annotations
 import ast
 from collections.abc import Callable
 from pathlib import Path
+from types import SimpleNamespace
+from typing import cast
 
 import pytest
 
-UI = Path(__file__).parents[2] / "src" / "korvid" / "ui"
+ROOT = Path(__file__).parents[2]
+UI = ROOT / "src" / "korvid" / "ui"
+MAIN = ROOT / "src" / "korvid" / "__main__.py"
+TESTS = ROOT / "tests"
+TEST_APP_FACTORY = TESTS / "app_factory.py"
 UI_PACKAGE = ("korvid", "ui")
+
+RUNTIME_COMPONENTS = {
+    "AgentUiController",
+    "AppAgentPanel",
+    "AppAgentScreens",
+    "AppContextSurface",
+    "AppContextDispatch",
+    "AppInspectSurface",
+    "AppProposalEvents",
+    "AppProposalScreens",
+    "AppReviewTasks",
+    "AppRuntime",
+    "AppSessionConfiguration",
+    "AppTransferScreens",
+    "AppUiSurface",
+    "AppViewState",
+    "AppWorkspaceSurface",
+    "CommandRouter",
+    "ContextSwitchCoordinator",
+    "DebugController",
+    "DrainController",
+    "ForwardController",
+    "HelmController",
+    "HintController",
+    "IntegrationController",
+    "LogController",
+    "OperatorController",
+    "ProposalController",
+    "RelationshipSnapshotLoader",
+    "ResourceInspectController",
+    "ResourceWriteController",
+    "SessionTimelineController",
+    "ShellController",
+    "TransferController",
+    "WorkspaceController",
+    "WorkspaceState",
+    "WriteCoordinator",
+}
 
 
 def _tree(name: str) -> ast.Module:
     return ast.parse((UI / name).read_text(encoding="utf-8"), filename=name)
+
+
+def _called_names(tree: ast.AST) -> set[str]:
+    return {
+        node.func.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
 
 
 def _is_type_checking_guard(node: ast.expr) -> bool:
@@ -85,6 +137,70 @@ def test_app_runtime_does_not_import_the_app_at_runtime() -> None:
     assert not _app_runtime_imports("app_runtime.py"), (
         "runtime import of korvid.ui.app in app_runtime.py"
     )
+
+
+def test_only_the_composition_root_constructs_the_app_runtime() -> None:
+    ui_calls = set().union(
+        *(_called_names(ast.parse(path.read_text(encoding="utf-8"))) for path in UI.rglob("*.py"))
+    )
+    assert not ui_calls.intersection(RUNTIME_COMPONENTS)
+    assert _called_names(ast.parse(MAIN.read_text(encoding="utf-8"))) >= RUNTIME_COMPONENTS
+
+
+def test_tests_construct_apps_only_through_the_factory() -> None:
+    direct_constructions = {
+        f"{path.relative_to(ROOT)}:{node.lineno}: {node.func.id}"
+        for path in TESTS.rglob("*.py")
+        if path != TEST_APP_FACTORY
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id.endswith("KorvidApp")
+    }
+    assert not direct_constructions, "\n".join(sorted(direct_constructions))
+
+
+def test_app_runtime_can_be_bound_only_once() -> None:
+    from korvid.ui.app import KorvidApp
+    from korvid.ui.app_runtime import AppRuntime
+
+    app = object.__new__(KorvidApp)
+    app._runtime_bound = False
+    value = object()
+    runtime = cast(
+        "AppRuntime",
+        SimpleNamespace(
+            view=value,
+            relationship_loader=value,
+            context=value,
+            timeline=value,
+            writes=value,
+            bridge_dispatch=value,
+            inspect_surface=value,
+            inspect=value,
+            shell=value,
+            forward=value,
+            transfer=value,
+            operators=value,
+            helm=value,
+            debug=value,
+            drain=value,
+            resource_writes=value,
+            workspace=value,
+            hints=value,
+            logs=value,
+            workspace_controller=value,
+            proposals=value,
+            integrations=value,
+            agent_ui=value,
+            commands=value,
+        ),
+    )
+
+    app.bind_runtime(runtime)
+
+    with pytest.raises(RuntimeError, match="app runtime already bound"):
+        app.bind_runtime(runtime)
 
 
 @pytest.mark.parametrize(

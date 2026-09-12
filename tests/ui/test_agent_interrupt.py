@@ -15,6 +15,7 @@ from korvid.agent.events import AgentEvent, TextDelta, ToolCallStarted, TurnComp
 from korvid.ui.app import KorvidApp
 from korvid.ui.messages import AgentPromptSubmitted
 from korvid.ui.widgets.agent_panel import AgentPanel, ChatEntry
+from tests.app_factory import build_test_app
 from tests.ui.agent_session_fakes import FakeSession
 from tests.ui.test_agent_wiring import StubSession, make_app
 
@@ -152,7 +153,7 @@ async def test_stop_hint_tracks_a_remapped_interrupt_key() -> None:
         while True:
             await asyncio.sleep(0.01)
 
-    app = KorvidApp(
+    app = build_test_app(
         config=KorvidConfig(namespace="default", keybindings={"interrupt_agent": "ctrl+g"}),
         store=store,
         watch_manager=WatchManager(store, source),

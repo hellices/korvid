@@ -23,6 +23,7 @@ from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.models import GenericSummary
 from korvid.ui.app import KorvidApp
 from korvid.ui.widgets.secret_screen import SecretScreen
+from tests.app_factory import build_test_app
 
 from .rendering import painted_text
 from .waits import until
@@ -81,7 +82,7 @@ def make_secret_app(
         )
         return copied
 
-    return KorvidApp(
+    return build_test_app(
         config=KorvidConfig(namespace="default"),
         store=store,
         watch_manager=WatchManager(store, source),

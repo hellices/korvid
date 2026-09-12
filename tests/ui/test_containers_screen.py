@@ -18,6 +18,7 @@ from korvid.k8s.models import PodSummary
 from korvid.ui.app import KorvidApp
 from korvid.ui.widgets.containers_screen import ContainersScreen, build_container_rows
 from korvid.ui.widgets.resource_table import ResourceTable
+from tests.app_factory import build_test_app
 
 from .waits import until
 
@@ -104,7 +105,7 @@ def make_app(pods: list[PodSummary], **kwargs: Any) -> KorvidApp:
         while True:
             await asyncio.sleep(0.01)
 
-    return KorvidApp(
+    return build_test_app(
         config=KorvidConfig(namespace="default"),
         store=store,
         watch_manager=WatchManager(store, source),

@@ -26,12 +26,12 @@ from korvid.core.store import ResourceStore, Summary
 from korvid.core.watch import WatchManager
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.models import PodSummary
-from korvid.ui.app import KorvidApp
 from korvid.ui.context_switch_coordinator import ContextSwitchResult
 from korvid.ui.messages import ShowContextPicker, SwitchContextCommand
 from korvid.ui.widgets.pick_screen import PickScreen
 from korvid.ui.widgets.resource_table import ResourceTable
 from korvid.ui.widgets.status_bar import StatusBar
+from tests.app_factory import build_test_app
 
 from .agent_session_fakes import FakeSession
 from .waits import until
@@ -114,7 +114,7 @@ class _CtxEnv:
             return self.result
 
         self.audit = AuditLog(audit_path, context="ctx-a") if audit_path else None
-        self.app = KorvidApp(
+        self.app = build_test_app(
             config=KorvidConfig(namespace=namespace, kube_context="ctx-a"),
             store=store,
             watch_manager=WatchManager(store, source),

@@ -18,6 +18,7 @@ from korvid.ui.app import KorvidApp
 from korvid.ui.hints import EventsFetcher
 from korvid.ui.widgets.hint_strip import HintStrip
 from korvid.ui.widgets.resource_table import ResourceTable
+from tests.app_factory import build_test_app
 
 from .test_app import _DEFAULT_TEST_ALIASES
 from .waits import until
@@ -81,7 +82,7 @@ def make_app(
         return events or []
 
     store = ResourceStore()
-    app = KorvidApp(
+    app = build_test_app(
         config=KorvidConfig(namespace="default"),
         store=store,
         watch_manager=WatchManager(store, _source(pods)),
@@ -300,7 +301,7 @@ async def test_event_fetch_failure_still_shows_status_trouble() -> None:
         raise RuntimeError("events unavailable")
 
     store = ResourceStore()
-    app = KorvidApp(
+    app = build_test_app(
         config=KorvidConfig(namespace="default"),
         store=store,
         watch_manager=WatchManager(store, _source([_pod("web-1", (_CRASH,))])),
@@ -409,7 +410,7 @@ async def test_recovered_pod_is_not_rendered_with_stale_trouble() -> None:
         ]
 
     store = ResourceStore()
-    app = KorvidApp(
+    app = build_test_app(
         config=KorvidConfig(namespace="default"),
         store=store,
         watch_manager=WatchManager(store, _source([_pod("web-1", (_CRASH,))])),
@@ -492,7 +493,7 @@ async def test_recreated_pod_uid_change_mid_fetch_does_not_render_old_hint() -> 
         ]
 
     store = ResourceStore()
-    app = KorvidApp(
+    app = build_test_app(
         config=KorvidConfig(namespace="default"),
         store=store,
         watch_manager=WatchManager(store, _source([_pod("web-1", (_CRASH,))])),
@@ -545,7 +546,7 @@ async def test_failed_fetch_is_retried_after_ttl_while_parked() -> None:
         raise RuntimeError("transient")
 
     store = ResourceStore()
-    app = KorvidApp(
+    app = build_test_app(
         config=KorvidConfig(namespace="default"),
         store=store,
         watch_manager=WatchManager(store, _source([_pod("web-1", (_CRASH,))])),
@@ -678,7 +679,7 @@ async def test_overlay_aborts_when_cursor_moves_during_event_fetch() -> None:
 
     store = ResourceStore()
     pods = [_pod("aaa-1", (_CRASH,)), _pod("zzz-1")]
-    app = KorvidApp(
+    app = build_test_app(
         config=KorvidConfig(namespace="default"),
         store=store,
         watch_manager=WatchManager(store, _source(pods)),
@@ -701,7 +702,7 @@ async def test_overlay_reports_unavailable_events_on_fetch_failure() -> None:
         raise RuntimeError("events API down")
 
     store = ResourceStore()
-    app = KorvidApp(
+    app = build_test_app(
         config=KorvidConfig(namespace="default"),
         store=store,
         watch_manager=WatchManager(store, _source([_pod("web-1", (_CRASH,))])),
@@ -742,7 +743,7 @@ async def test_overlay_aborts_when_pod_recovers_during_event_fetch() -> None:
         return []
 
     store = ResourceStore()
-    app = KorvidApp(
+    app = build_test_app(
         config=KorvidConfig(namespace="default"),
         store=store,
         watch_manager=WatchManager(store, _source([_pod("web-1", (_CRASH,))])),
@@ -776,7 +777,7 @@ async def test_overlay_opens_when_event_fetch_stalls(monkeypatch: Any) -> None:
         return []
 
     store = ResourceStore()
-    app = KorvidApp(
+    app = build_test_app(
         config=KorvidConfig(namespace="default"),
         store=store,
         watch_manager=WatchManager(store, _source([_pod("web-1", (_CRASH,))])),

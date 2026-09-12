@@ -28,6 +28,7 @@ from korvid.k8s.models import PodSummary
 from korvid.ui.app import KorvidApp
 from korvid.ui.messages import AgentPromptSubmitted, BuiltinCommand, BuiltinOperation
 from korvid.ui.widgets.agent_panel import AgentPanel
+from tests.app_factory import build_test_app
 from tests.ui.agent_session_fakes import FakeSession, fake_policy
 from tests.ui.test_agent_ui_controller_profiles import _Saver, _StubCatalog
 from tests.ui.waits import until
@@ -87,7 +88,7 @@ def make_app(
             await asyncio.sleep(0.01)
 
     kwargs.setdefault("config", KorvidConfig(namespace="default"))
-    return KorvidApp(
+    return build_test_app(
         store=store,
         watch_manager=WatchManager(store, source),
         agent_session=session,
@@ -570,7 +571,7 @@ async def test_model_command_works_after_configured_startup() -> None:
         while True:
             await asyncio.sleep(0.01)
 
-    app = KorvidApp(
+    app = build_test_app(
         config=_profile_config(
             ModelConnectionConfig(
                 model="ollama/llama3",
@@ -629,7 +630,7 @@ async def test_model_command_recovers_a_startup_that_built_no_session() -> None:
         applied.append((profile, tier))
         return rebuilt
 
-    app = KorvidApp(
+    app = build_test_app(
         config=_profile_config(
             ModelConnectionConfig(
                 model="ollama/text-only-model",
@@ -682,7 +683,7 @@ async def test_a_degraded_startup_shows_a_usable_panel_after_recovery() -> None:
         model="ollama/text-only-model",
         endpoint="http://localhost:11434/v1",
     )
-    app = KorvidApp(
+    app = build_test_app(
         config=_profile_config(configured),
         store=store,
         watch_manager=WatchManager(store, source),
@@ -815,7 +816,7 @@ async def test_options_preserved_across_model_change() -> None:
         while True:
             await asyncio.sleep(0.01)
 
-    app = KorvidApp(
+    app = build_test_app(
         config=_profile_config(
             ModelConnectionConfig(
                 model="corp-llm/m",
@@ -859,7 +860,7 @@ async def test_rebuild_failure_keeps_the_previous_runtime_and_profile() -> None:
         while True:
             await asyncio.sleep(0.01)
 
-    app = KorvidApp(
+    app = build_test_app(
         config=_profile_config(
             ModelConnectionConfig(model="ollama/llama3", endpoint="http://localhost:11434/v1")
         ),

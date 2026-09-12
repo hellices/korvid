@@ -25,6 +25,7 @@ from korvid.k8s.writes import WriteOps
 from korvid.tools.proposals import ProposalClosedError, ProposalStore, WriteProposal
 from korvid.ui.app import KorvidApp
 from korvid.ui.widgets.confirm_screen import ConfirmScreen
+from tests.app_factory import build_test_app
 
 from .waits import until
 
@@ -102,7 +103,7 @@ def make_app(
     async def get_manifest(kind: str, ns: str | None, name: str) -> dict[str, Any]:
         return {"metadata": {"uid": uid}}
 
-    return KorvidApp(
+    return build_test_app(
         config=KorvidConfig(namespace="default", readonly=readonly, kube_context="ctx-a"),
         store=resource_store,
         watch_manager=WatchManager(resource_store, source),
