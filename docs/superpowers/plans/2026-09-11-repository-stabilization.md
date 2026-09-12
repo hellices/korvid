@@ -9,12 +9,14 @@
 to miss, turn Windows documentation-harness hangs into useful evidence, and
 harden pull-request execution and repository policy before later product work.
 
-**Architecture:** Keep `KorvidApp` as the Textual shell while moving static app
-metadata, app-backed controller ports, and controller construction into three
-acyclic UI modules. Enforce that boundary with a standard-library size ratchet,
-then improve the existing file-backed Node harness runner and make untrusted CI
-use GitHub-hosted runners. Repository settings and stale issues are changed only
-after source verification and are read back from GitHub.
+**Architecture:** Keep `KorvidApp` as the Textual shell, move static metadata and
+app-backed ports into acyclic UI modules, keep only typed runtime records in
+`app_runtime.py`, and construct the controller graph in the sole composition
+root, `__main__.py`. Enforce those boundaries with AST contracts and a
+standard-library size ratchet, improve the file-backed Node harness runner, and
+make untrusted CI use GitHub-hosted runners. Repository settings and stale
+issues are changed only after source verification and are read back from
+GitHub.
 
 **Tech Stack:** Python 3.11+, Textual, pytest, Ruff, mypy strict, tach, Node.js
 CommonJS/ESM harnesses, GitHub Actions YAML, GitHub REST API, pre-commit.
@@ -34,11 +36,12 @@ CommonJS/ESM harnesses, GitHub Actions YAML, GitHub REST API, pre-commit.
 - Pull-request source must not execute on `korvid-runners`; trusted push and
   schedule executions may retain that pool.
 - Add no dependency and keep `uv.lock` byte-identical to `origin/main`.
-- Do not open a pull request, merge, push `main`, bypass hooks, change existing
+- Update only the already-authorized PR #385; do not merge, enable auto-merge,
+  approve the agent's own work, push `main`, bypass hooks, change existing
   stashes, or remove unrelated worktrees.
-- Use the reusable environment
-  `/Users/hwang-inhwan/workspace/kube/.worktrees/main-review/.venv` with
-  `PYTHONPATH=src` for local checks when a fresh frozen sync remains unavailable.
+- Use the worktree's proxy-resolved `.venv` with `UV_NO_SYNC=1 uv run ...` for
+  local checks. Never run `uv lock`; keep `uv.lock` byte-identical to
+  `origin/main`.
 
 ---
 
@@ -190,6 +193,11 @@ CommonJS/ESM harnesses, GitHub Actions YAML, GitHub REST API, pre-commit.
   ```
 
 ### Task 2: Extract typed controller-runtime assembly
+
+> **PR-review correction:** Steps 4-5 recorded the implementation that first
+> landed, but they conflict with the repository's sole-composition-root rule.
+> Task 9 supersedes only the location and invocation of that construction graph;
+> the typed records and behavior-preserving extraction remain valid.
 
 **Files:**
 - Create: `src/korvid/ui/app_runtime.py`
@@ -570,6 +578,10 @@ CommonJS/ESM harnesses, GitHub Actions YAML, GitHub REST API, pre-commit.
 
 ### Task 4: Add bounded Windows Node-process evidence
 
+> **PR-review correction:** Step 5 correctly requires an unbounded final wait
+> after a successful `kill()`, but did not distinguish a `kill()` call that
+> itself raises. Task 8 adds the missing bounded failure branch.
+
 **Files:**
 - Create: `tests/js/harness_preload.cjs`
 - Modify: `tests/js/harness_lifecycle.mjs`
@@ -801,6 +813,10 @@ CommonJS/ESM harnesses, GitHub Actions YAML, GitHub REST API, pre-commit.
 
 ### Task 7: Apply and read back GitHub issue and policy decisions
 
+> This task predates the maintainer's later authorization of PR #385. Its
+> external mutations and read-back checks are complete; the current delivery
+> and no-merge contract is Task 10.
+
 **Files:**
 - No repository files.
 
@@ -862,10 +878,361 @@ CommonJS/ESM harnesses, GitHub Actions YAML, GitHub REST API, pre-commit.
   `allowed_actions=all`, changing only `sha_pinning_required=true`. GET the
   setting back and require the exact three values.
 
-- [ ] **Step 6: Verify external end state and hand back without a PR**
+- [ ] **Step 6: Verify external end state**
 
   Confirm #195/#307 are closed as not planned, #371 is open, alert #16 is
   dismissed as used in tests, the ruleset is active/strict with all eight
   required contexts and the CodeQL high-or-higher rule, and SHA pinning is true.
-  Report the branch name, commits, local checks, fresh-sync limitation, and that
-  Windows recurrence evidence remains pending. Do not push, open a PR, or merge.
+  Confirm the branch name, commits, local checks, and that Windows recurrence
+  evidence remains pending. Do not merge.
+
+### Task 8: Bound the cleanup path when `kill()` itself fails
+
+**Files:**
+- Modify: `tests/test_docs_landing_behavior.py`
+- Modify: `docs/superpowers/specs/2026-09-11-repository-stabilization-design.md`
+
+**Interfaces:**
+- Consumes: `_bounded_process_wait()` and `_terminate_and_reap()`.
+- Produces: a cleanup state string that never reports a failed kill as reaped
+  unless the final bounded wait actually reaps it.
+
+- [ ] **Step 1: Add the failing kill-error regression**
+
+  Add a fake whose first bounded wait times out, whose `kill()` raises
+  `PermissionError`, and whose second bounded wait also times out. Assert the
+  exact call order and diagnostic:
+
+  ```python
+  def test_harness_timeout_bounds_reap_when_kill_itself_fails() -> None:
+      class FakeProcess:
+          def __init__(self) -> None:
+              self.calls: list[str] = []
+
+          def terminate(self) -> None:
+              self.calls.append("terminate")
+
+          def kill(self) -> None:
+              self.calls.append("kill")
+              raise PermissionError("denied")
+
+          def wait(self, timeout: float | None = None) -> int:
+              self.calls.append(f"wait:{timeout}")
+              raise subprocess.TimeoutExpired("node", timeout or 0)
+
+      process = FakeProcess()
+      result = _terminate_and_reap(cast(Any, process), poll_state=None)
+
+      assert process.calls == ["terminate", "wait:2", "kill", "wait:2"]
+      assert result == "kill=error type=PermissionError; reap=timed-out"
+  ```
+
+- [ ] **Step 2: Run the regression and verify RED**
+
+  ```bash
+  UV_NO_SYNC=1 uv run pytest -p no:tach \
+    tests/test_docs_landing_behavior.py::test_harness_timeout_bounds_reap_when_kill_itself_fails -q
+  ```
+
+  Expected: failure because the current implementation calls `wait(None)`
+  after `kill()` raises.
+
+- [ ] **Step 3: Split successful-kill and failed-kill reaping**
+
+  Preserve the unbounded confirming wait only when `process.kill()` returns.
+  When it raises, call `_bounded_process_wait(process)` and append its real
+  result:
+
+  ```python
+  try:
+      process.kill()
+  except OSError as error:
+      diagnostics.append(f"kill=error type={type(error).__name__}")
+      diagnostics.append(f"reap={_bounded_process_wait(process)}")
+      return "; ".join(diagnostics)
+  process.wait()
+  diagnostics.append("kill=reaped")
+  return "; ".join(diagnostics)
+  ```
+
+- [ ] **Step 4: Run the focused harness tests and verify GREEN**
+
+  ```bash
+  UV_NO_SYNC=1 uv run pytest -p no:tach tests/test_docs_landing_behavior.py -q
+  UV_NO_SYNC=1 uv run ruff check tests/test_docs_landing_behavior.py
+  UV_NO_SYNC=1 uv run ruff format --check tests/test_docs_landing_behavior.py
+  ```
+
+  Expected: all commands exit zero and the successful-kill tests still end in
+  `wait:None`/`kill=reaped`.
+
+### Task 9: Restore root-owned UI runtime assembly
+
+**Files:**
+- Create: `src/korvid/composition_support.py`
+- Create: `tests/app_factory.py`
+- Modify: `src/korvid/__main__.py`
+- Modify: `src/korvid/ui/app.py`
+- Modify: `src/korvid/ui/app_runtime.py`
+- Modify: `tests/ui/test_app_structure.py`
+- Modify: every test module that directly constructs `KorvidApp` or one of its
+  test subclasses.
+
+**Interfaces:**
+- Consumes: the existing `AppRuntimeInputs`, `AppRuntime`, `_LateReference`, and
+  current controller constructor arguments without behavior changes.
+- Produces: `assemble_app_runtime(app: AppT) -> AppT` in `korvid.__main__`,
+  `KorvidApp.runtime_inputs`, one-time `KorvidApp.bind_runtime(runtime)`, and
+  `build_test_app(app_type: type[AppT] = KorvidApp, /, **kwargs: Any) -> AppT`.
+
+- [ ] **Step 1: Add failing architecture and construction-path tests**
+
+  In `tests/ui/test_app_structure.py`, collect calls by AST name and require the
+  controller graph in the root, not either UI assembly file:
+
+  ```python
+  RUNTIME_COMPONENTS = {
+      "AgentUiController",
+      "AppAgentPanel",
+      "AppAgentScreens",
+      "AppContextSurface",
+      "AppContextDispatch",
+      "AppInspectSurface",
+      "AppProposalEvents",
+      "AppProposalScreens",
+      "AppReviewTasks",
+      "AppRuntime",
+      "AppSessionConfiguration",
+      "AppTransferScreens",
+      "AppUiSurface",
+      "AppViewState",
+      "AppWorkspaceSurface",
+      "CommandRouter",
+      "ContextSwitchCoordinator",
+      "DebugController",
+      "DrainController",
+      "ForwardController",
+      "HelmController",
+      "HintController",
+      "IntegrationController",
+      "LogController",
+      "OperatorController",
+      "ProposalController",
+      "RelationshipSnapshotLoader",
+      "ResourceInspectController",
+      "ResourceWriteController",
+      "SessionTimelineController",
+      "ShellController",
+      "TransferController",
+      "WorkspaceController",
+      "WorkspaceState",
+      "WriteCoordinator",
+  }
+
+
+  def _called_names(tree: ast.AST) -> set[str]:
+      return {
+          node.func.id
+          for node in ast.walk(tree)
+          if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+      }
+
+
+  def test_only_the_composition_root_constructs_the_app_runtime() -> None:
+      ui_calls = set().union(
+          *(_called_names(ast.parse(path.read_text(encoding="utf-8"))) for path in UI.rglob("*.py"))
+      )
+      assert not ui_calls.intersection(RUNTIME_COMPONENTS)
+      assert RUNTIME_COMPONENTS <= _called_names(ast.parse(MAIN.read_text(encoding="utf-8")))
+  ```
+
+  Add a second AST contract that walks `tests/**/*.py`, excludes
+  `tests/app_factory.py`, and reports every direct call whose function name
+  ends in `KorvidApp` (including `MeasuredKorvidApp` and
+  `_ObservedKorvidApp`). Add a focused behavior test that a second
+  `bind_runtime()` raises
+  `RuntimeError("app runtime already bound")`.
+
+- [ ] **Step 2: Run the structure tests and verify RED**
+
+  ```bash
+  UV_NO_SYNC=1 uv run pytest -p no:tach tests/ui/test_app_structure.py -q
+  ```
+
+  Expected: the graph constructors are found in `app_runtime.py`, absent from
+  `__main__.py`, and direct test construction paths are reported.
+
+- [ ] **Step 3: Make `app_runtime.py` a data/type module**
+
+  Keep `AppRuntimeInputs`, `AppRuntime`, and `_LateReference`; remove
+  `build_app_runtime` and every controller/surface constructor call. Put
+  annotation-only controller imports behind `TYPE_CHECKING` where runtime
+  lookup is unnecessary.
+
+- [ ] **Step 4: Make the Textual shell explicitly bindable once**
+
+  Preserve the current `KorvidApp` keyword signature and input validation.
+  Store the immutable input record, bind only shell-owned fields in
+  `__init__`, and add:
+
+  ```python
+  @property
+  def runtime_inputs(self) -> AppRuntimeInputs:
+      return self._runtime_inputs
+
+  def bind_runtime(self, runtime: AppRuntime) -> None:
+      if self._runtime_bound:
+          raise RuntimeError("app runtime already bound")
+      self._runtime_bound = True
+      self._runtime = runtime
+      self._view = runtime.view
+      self._relationship_loader = runtime.relationship_loader
+      self._ctx = runtime.context
+      self._timeline = runtime.timeline
+      self._writes = runtime.writes
+      self._bridge_dispatch = runtime.bridge_dispatch
+      self._inspect_surface = runtime.inspect_surface
+      self._inspect = runtime.inspect
+      self._shell = runtime.shell
+      self._forward = runtime.forward
+      self._transfer = runtime.transfer
+      self._olm = runtime.operators
+      self._helm_ctl = runtime.helm
+      self._debug = runtime.debug
+      self._drain = runtime.drain
+      self._resource_writes = runtime.resource_writes
+      self._workspace = runtime.workspace
+      self._hints = runtime.hints
+      self._logs = runtime.logs
+      self._workspace_ctl = runtime.workspace_controller
+      self._proposals = runtime.proposals
+      self._integrations = runtime.integrations
+      self._agent_ui = runtime.agent_ui
+      self._commands = runtime.commands
+  ```
+
+  Set `_runtime_bound = False` before any external assembly and do not invoke a
+  builder from the UI package.
+
+- [ ] **Step 5: Move only support definitions out of the size-bounded root**
+
+  Move behavior-preserving records/adapters and non-construction lifecycle
+  helpers from `__main__.py` into `composition_support.py`: at minimum
+  `ObservabilityWiring`, `_MCPAppHooks`, `_AgentToolUIBridgeProxy`,
+  `AgentWiring`, `_AgentUiBridgeProxy`, `_RunState`,
+  `_missing_extra_packages`, `_custom_column_names`, `_shutdown`,
+  `_discover_in_background`, `_close_provider_in_background`,
+  `_close_agent_in_background`, `_cluster_facts`, `_agent_environment`,
+  `_warn_agent_disabled`, `_active_model_name`, `_validate_ca_bundle`,
+  `_start_mcp_if_enabled`, `_teardown`, and `_protected_context_name`.
+  Re-export the private names from `__main__.py` so existing focused tests and
+  monkeypatch seams keep their contracts. Do not move provider, MCP,
+  observability, agent-session, or UI-controller constructor calls into the
+  support module.
+
+- [ ] **Step 6: Construct and bind the complete graph in `__main__.py`**
+
+  Move the existing `build_app_runtime` body into the root without changing
+  constructor arguments or callback late-binding. Define:
+
+  ```python
+  AppT = TypeVar("AppT", bound=KorvidApp)
+
+
+  def assemble_app_runtime(app: AppT) -> AppT:
+      runtime = _construct_app_runtime(app, app.runtime_inputs)
+      app.bind_runtime(runtime)
+      return app
+  ```
+
+  `_construct_app_runtime` is the existing `build_app_runtime` implementation
+  moved into `__main__.py` and renamed; every constructor call and callback
+  argument remains in that function. In `_wire_and_run`, construct the shell
+  first and immediately replace it with `app = assemble_app_runtime(app)`.
+  Keep the `__main__.py` source-size cap at 1,773; reduce or move only pure
+  support definitions if more room is needed.
+
+- [ ] **Step 7: Add and migrate the explicit test factory**
+
+  Create:
+
+  ```python
+  AppT = TypeVar("AppT", bound=KorvidApp)
+
+
+  def build_test_app(
+      app_type: type[AppT] = KorvidApp,
+      /,
+      **kwargs: Any,
+  ) -> AppT:
+      return assemble_app_runtime(app_type(**kwargs))
+  ```
+
+  Replace direct `KorvidApp(...)` test calls with `build_test_app(...)`. For
+  `_ObservedKorvidApp` and `MeasuredKorvidApp`, pass the subclass as the first
+  positional argument. Leave subclass `super().__init__(...)` calls intact.
+  Update the composition-root fakes so they either capture the runtime bind or
+  explicitly stub `assemble_app_runtime`; do not weaken the production path.
+
+- [ ] **Step 8: Run focused architecture, UI, optional-extra, and size checks**
+
+  ```bash
+  UV_NO_SYNC=1 uv run pytest -p no:tach tests/ui/test_app_structure.py \
+    tests/ui tests/test_main_wiring.py tests/test_main_recovery.py \
+    tests/test_optional_extras.py tests/evals tests/performance \
+    tests/windows/test_native_terminal.py -q
+  UV_NO_SYNC=1 uv run ruff check src/korvid/__main__.py \
+    src/korvid/composition_support.py src/korvid/ui/app.py \
+    src/korvid/ui/app_runtime.py tests/app_factory.py tests/
+  UV_NO_SYNC=1 uv run ruff format --check src/korvid/__main__.py \
+    src/korvid/composition_support.py src/korvid/ui/app.py \
+    src/korvid/ui/app_runtime.py tests/app_factory.py tests/
+  UV_NO_SYNC=1 uv run mypy src/ tests/
+  UV_NO_SYNC=1 uv run tach check
+  UV_NO_SYNC=1 uv run python scripts/check_source_size.py
+  ```
+
+  Expected: every command exits zero; `app.py <= 1500`,
+  `__main__.py <= 1773`, and no direct test construction remains.
+
+### Task 10: Verify, update PR #385, and continue the review loop
+
+**Files:**
+- Modify only files needed for credible review findings or required-check
+  failures.
+
+- [ ] **Step 1: Run the complete local gate and pre-commit**
+
+  ```bash
+  UV_NO_SYNC=1 make check
+  UV_NO_SYNC=1 uv run pre-commit run --all-files
+  git diff --check
+  test "$(git hash-object uv.lock)" = \
+    "$(git show origin/main:uv.lock | git hash-object --stdin)"
+  ```
+
+- [ ] **Step 2: Commit, push, and update the PR description**
+
+  Use a new commit (never amend and never bypass hooks), push the topic branch,
+  and add the two review corrections and their regression tests to PR #385's
+  body.
+
+- [ ] **Step 3: Reply, resolve, and request another review**
+
+  Reply individually to inline comment `3991377906` with the commit and test,
+  resolve its GraphQL thread, and request
+  `copilot-pull-request-reviewer[bot]`. Read every new review body, including
+  `<details>`/suppressed findings, and every unresolved thread.
+
+- [ ] **Step 4: Repeat only for credible findings**
+
+  Apply RED→GREEN for correctness, security, architecture, data-loss, or
+  required-check findings. Count low-confidence-only rounds as specified in
+  `AGENTS.md`; after two consecutive such rounds, stop speculative changes and
+  do not request another Copilot review.
+
+- [ ] **Step 5: Hand back without merging**
+
+  Require every entry in `gh pr view 385 --json statusCheckRollup` to be
+  `SUCCESS`, report the final commit and review state, and stop. Never merge,
+  enable auto-merge, or approve the PR.

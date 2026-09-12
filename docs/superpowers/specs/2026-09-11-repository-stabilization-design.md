@@ -1,7 +1,7 @@
 # Repository Stabilization Design
 
 **Date:** 2026-09-11
-**Status:** Approved in maintainer discussion
+**Status:** Approved in maintainer discussion; amended during PR #385 review
 
 ## Purpose
 
@@ -68,8 +68,8 @@ The design is based on the following state observed on 2026-09-11:
 - No retry, skip, or longer timeout is used to hide Windows harness failures.
 - No runner infrastructure is provisioned or modified from this repository.
 - No dependency is added and `uv.lock` remains byte-identical.
-- No pull request is opened and no branch is merged without a later explicit
-  maintainer instruction.
+- PR #385 is the authorized delivery path. It is reviewed and updated in place;
+  no branch is merged, auto-merged, or approved by the agent.
 - No existing stash or unrelated worktree is removed.
 
 ## Issue disposition
@@ -123,8 +123,9 @@ The following responsibilities move out:
 1. `app_bindings.py` owns `APP_BINDINGS`, handler-key help, and app CSS.
 2. `app_surfaces.py` owns `_RelationshipLister` and every `App*` adapter that
    implements a controller boundary over the live Textual app.
-3. `app_runtime.py` owns the typed construction of the session-scoped UI
-   controller graph.
+3. `app_runtime.py` owns only the typed input/runtime records and the typed
+   one-use references needed to describe the session-scoped UI controller
+   graph. It does not construct that graph.
 
 `app_surfaces.py` and `app_runtime.py` may refer to `KorvidApp` only under
 `TYPE_CHECKING`; neither imports `app.py` at runtime. Controllers continue to
@@ -139,19 +140,31 @@ depend on named ABCs and protocols and do not import the app.
 - `AppRuntime`: the constructed controllers, surfaces, and shared UI state that
   the Textual shell delegates to.
 
-`KorvidApp.__init__` keeps its existing keyword interface for this refactor so
-the change does not combine architecture work with a public constructor
-migration. It validates the approval timeout, stores the small set of fields
-owned by the shell, packs the remaining arguments into `AppRuntimeInputs`, and
-calls the one internal assembly function.
+`KorvidApp.__init__` keeps its existing keyword interface. It validates the
+approval timeout, stores the small set of fields owned by the shell, and packs
+the remaining arguments into an immutable `AppRuntimeInputs` record. It does
+not call controller constructors. A one-time `bind_runtime(AppRuntime)` method
+injects the completed graph and rejects a second bind.
 
-The assembly function resolves the existing controller cycles with a private,
-typed late-reference object. It is available only during construction and
-raises if a reference is read before binding. It is not exposed as a service
-locator. Once assembly returns, `KorvidApp` binds the same private controller
-names used by existing behavior and tests. There is still one outer composition
-root: `src/korvid/__main__.py` creates every external dependency and supplies
-the complete input set exactly once.
+`src/korvid/__main__.py` creates the Textual shell, constructs every controller
+against that real shell, resolves the existing cycles with the typed one-use
+references, and then binds the completed `AppRuntime`. This makes the file the
+actual and structurally enforced composition root rather than merely the
+caller of a second root in `ui/`.
+
+Direct repository tests use `tests/app_factory.py`, which constructs the chosen
+`KorvidApp` subclass and invokes the production root's assembly entry point.
+This keeps test setup explicit and prevents an unbound shell from becoming a
+quiet alternate construction path. An AST contract rejects controller-graph
+constructor calls in `app.py` and `app_runtime.py`, requires those calls in
+`__main__.py`, and rejects direct `KorvidApp(...)` calls elsewhere under
+`tests/`.
+
+Moving the graph does not justify growing another monolith. Pure records,
+adapters, and lifecycle helpers used by the root move to
+`src/korvid/composition_support.py`; that module may define behavior-neutral
+adapters but may not construct the UI controller graph. The existing
+`src/korvid/__main__.py` 1,773-line ratchet remains unchanged.
 
 No controller workflow is rewritten during this move. Any behavior change
 discovered while extracting is split into a separate failing test and commit.
@@ -218,7 +231,10 @@ lifecycle:
 3. on timeout, capture the child PID, `poll()` state, elapsed monotonic time,
    and a bounded `psutil` process snapshot before termination;
 4. terminate the child under a second short bound, escalating to kill only if
-   necessary and then waiting until the killed child is confirmed reaped;
+   necessary; after a successful `kill()` wait until the child is confirmed
+   reaped, but if `kill()` itself fails, perform one final bounded wait and
+   report `reap=timed-out` or the concrete wait error instead of hanging the
+   entire test process;
 5. read bounded head/tail diagnostics and run the existing independently
    bounded Python, Node-version, and loader probes; and
 6. re-raise the original `TimeoutExpired` with no retry.
@@ -340,11 +356,11 @@ include:
 - clean `git diff --check`; and
 - read-back evidence for every GitHub issue, alert, Actions, and ruleset update.
 
-The current environment cannot download all locked wheels. A previously
-completed repository virtual environment may be used with `PYTHONPATH` for
-targeted local checks, but final verification must clearly distinguish that
-from a fresh `uv sync --frozen --dev --all-extras`. The latest green Linux CI
-on the exact base commit is baseline evidence, not evidence for new changes.
+Local development uses the worktree's proxy-resolved `.venv` through
+`UV_NO_SYNC=1 uv run ...`; this avoids an implicit sync or re-lock while still
+using uv's configured corporate package-feed proxy. `uv.lock` remains
+byte-identical to `origin/main`. CI on the exact pushed commit is the
+cross-platform evidence.
 
 ## Delivery and later sessions
 
@@ -355,9 +371,13 @@ This session produces small commits in this order:
 3. source-size ratchet and documentation;
 4. Windows evidence runner;
 5. CI and workflow hardening;
-6. issue and repository-setting disposition with read-back evidence.
+6. issue and repository-setting disposition with read-back evidence;
+7. bounded kill-failure cleanup after review; and
+8. restoration of root-owned UI runtime assembly after review.
 
-No pull request or merge is part of this design.
+PR #385 is updated and re-reviewed until every credible finding is addressed
+and every required check is successful. The maintainer alone decides whether
+to merge it.
 
 Suggested later product sessions are:
 
