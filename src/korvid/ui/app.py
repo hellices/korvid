@@ -269,10 +269,10 @@ class KorvidApp(App[None]):
         self._integrations = runtime.integrations
         self._agent_ui = runtime.agent_ui
         self._commands = runtime.commands
+        self.__dict__.pop("_runtime_inputs", None)
 
     def _bind_runtime_inputs(self, inputs: AppRuntimeInputs) -> None:
         """Bind collaborators and mutable state owned by the Textual shell."""
-
         self.config = inputs.config
         self._reported_view_warnings: set[str] = set()
         self.store = inputs.store

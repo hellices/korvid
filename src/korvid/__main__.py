@@ -1304,6 +1304,7 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
         follow_enabled=config.mcp_follow,
         refresh_status=lambda: app._refresh_status(),
     )
+    agent_follow_bridge = inputs.agent_follow_bridge
     agent_ui = AgentUiController(
         panel=AppAgentPanel(app),
         screens=AppAgentScreens(app),
@@ -1327,7 +1328,7 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
         provider_hint=lambda: app._provider_hint,
         approval_timeout_seconds=inputs.approval_timeout_seconds,
         refresh_status=lambda: app._refresh_status(),
-        follow_bridge=lambda: inputs.agent_follow_bridge,
+        follow_bridge=lambda: agent_follow_bridge,
         session=inputs.agent_session,
         model_name=inputs.agent_model_name,
         catalog=inputs.agent_catalog,

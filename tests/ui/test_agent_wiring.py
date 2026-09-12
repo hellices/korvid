@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import gc
+import weakref
 from collections.abc import AsyncIterator
 from dataclasses import replace
 from typing import Any
@@ -328,6 +330,24 @@ async def test_ai_command_without_configurator_notifies() -> None:
         assert f"pipx install --force '{requirement}'" in text
         assert notification.markup is False
         assert not isinstance(app.screen, AgentSetupScreen)
+
+
+async def test_ai_off_releases_the_initial_session() -> None:
+    session = StubSession([])
+    session_ref = weakref.ref(session)
+    app = make_app(session)
+
+    async with app.run_test() as pilot:
+        app.on_builtin_command(BuiltinCommand(BuiltinOperation.AI, ("off",)))
+        await until(
+            pilot,
+            lambda: app._agent_ui.session is None,
+            label="initial agent session disconnected",
+        )
+
+    del session
+    gc.collect()
+    assert session_ref() is None
 
 
 async def test_ai_payload_without_a_session_notifies_agent_is_off() -> None:
