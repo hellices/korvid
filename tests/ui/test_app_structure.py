@@ -70,31 +70,63 @@ class _CallTargetVisitor(ast.NodeVisitor):
         self.targets: list[tuple[int, str]] = []
         self._scopes: list[dict[str, frozenset[str] | None]] = [{}]
         self._scope_kinds = ["module"]
+        self._global_names: list[set[str]] = [set()]
+        self._nonlocal_names: list[set[str]] = [set()]
         self._runtime_module_targets = runtime_module_targets or {}
         self._module_target_history: dict[str, set[str]] = {}
 
+    def _resolve_module_name(self, name: str) -> frozenset[str]:
+        has_binding = name in self._scopes[0]
+        current = self._scopes[0].get(name)
+        resolved = frozenset() if current is None else current
+        resolved |= self._runtime_module_targets.get(name, frozenset())
+        if resolved or has_binding:
+            return resolved
+        return frozenset((name,))
+
     def _resolve_name(self, name: str) -> frozenset[str]:
+        if name in self._global_names[-1]:
+            return self._resolve_module_name(name)
         runtime_global_lookup = self._scope_kinds[-1] in {"function", "lambda"}
-        for kind, scope in reversed(tuple(zip(self._scope_kinds, self._scopes, strict=True))):
+        start = len(self._scopes) - (2 if name in self._nonlocal_names[-1] else 1)
+        for index in range(start, -1, -1):
+            kind = self._scope_kinds[index]
+            scope = self._scopes[index]
             if runtime_global_lookup and kind == "class":
                 continue
             if name in scope:
                 targets = scope[name]
                 resolved = frozenset() if targets is None else targets
                 if runtime_global_lookup and kind == "module":
-                    return resolved | self._runtime_module_targets.get(name, frozenset())
+                    return self._resolve_module_name(name)
                 return resolved
         if runtime_global_lookup and name in self._runtime_module_targets:
             return self._runtime_module_targets[name]
         return frozenset((name,))
 
+    def _binding_scope_index(self, name: str) -> int:
+        if name in self._global_names[-1]:
+            return 0
+        if name in self._nonlocal_names[-1]:
+            for index in range(len(self._scopes) - 2, -1, -1):
+                if (
+                    self._scope_kinds[index] in {"function", "lambda"}
+                    and name in self._scopes[index]
+                ):
+                    return index
+            for index in range(len(self._scopes) - 2, -1, -1):
+                if self._scope_kinds[index] in {"function", "lambda"}:
+                    return index
+        return len(self._scopes) - 1
+
     def _bind_aliases(self, name: str, aliases: frozenset[str]) -> None:
-        self._scopes[-1][name] = aliases or None
-        if aliases and self._scope_kinds[-1] == "module":
+        index = self._binding_scope_index(name)
+        self._scopes[index][name] = aliases or None
+        if aliases and index == 0:
             self._module_target_history.setdefault(name, set()).update(aliases)
 
     def _bind_unknown(self, name: str) -> None:
-        self._scopes[-1][name] = None
+        self._scopes[self._binding_scope_index(name)][name] = None
 
     def _reference_targets(self, value: ast.expr) -> frozenset[str]:
         if isinstance(value, ast.Name):
@@ -152,6 +184,8 @@ class _CallTargetVisitor(ast.NodeVisitor):
         self._bind_unknown(node.name)
         self._scopes.append({})
         self._scope_kinds.append("function")
+        self._global_names.append(set())
+        self._nonlocal_names.append(set())
         for argument in (
             *node.args.posonlyargs,
             *node.args.args,
@@ -164,6 +198,8 @@ class _CallTargetVisitor(ast.NodeVisitor):
             self._bind_unknown(node.args.kwarg.arg)
         for statement in node.body:
             self.visit(statement)
+        self._nonlocal_names.pop()
+        self._global_names.pop()
         self._scope_kinds.pop()
         self._scopes.pop()
 
@@ -181,6 +217,12 @@ class _CallTargetVisitor(ast.NodeVisitor):
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
         for alias in node.names:
             self._bind_aliases(alias.asname or alias.name, frozenset((alias.name,)))
+
+    def visit_Global(self, node: ast.Global) -> None:
+        self._global_names[-1].update(node.names)
+
+    def visit_Nonlocal(self, node: ast.Nonlocal) -> None:
+        self._nonlocal_names[-1].update(node.names)
 
     def visit_Assign(self, node: ast.Assign) -> None:
         self.visit(node.value)
@@ -212,6 +254,8 @@ class _CallTargetVisitor(ast.NodeVisitor):
                 self.visit(default)
         self._scopes.append({})
         self._scope_kinds.append("lambda")
+        self._global_names.append(set())
+        self._nonlocal_names.append(set())
         for argument in (
             *node.args.posonlyargs,
             *node.args.args,
@@ -223,6 +267,8 @@ class _CallTargetVisitor(ast.NodeVisitor):
         if node.args.kwarg is not None:
             self._bind_unknown(node.args.kwarg.arg)
         self.visit(node.body)
+        self._nonlocal_names.pop()
+        self._global_names.pop()
         self._scope_kinds.pop()
         self._scopes.pop()
 
@@ -236,8 +282,12 @@ class _CallTargetVisitor(ast.NodeVisitor):
         self._bind_unknown(node.name)
         self._scopes.append({})
         self._scope_kinds.append("class")
+        self._global_names.append(set())
+        self._nonlocal_names.append(set())
         for statement in node.body:
             self.visit(statement)
+        self._nonlocal_names.pop()
+        self._global_names.pop()
         self._scope_kinds.pop()
         self._scopes.pop()
 
@@ -564,6 +614,29 @@ def test_composition_root_contract_rejects_runtime_component_in_support_module(
             "build()\n",
             "WriteCoordinator",
         ),
+        (
+            "from decoy import Other as Factory\n"
+            "from korvid.ui.workspace_controller import WriteCoordinator\n"
+            "def rebind():\n"
+            "    global Factory\n"
+            "    Factory = WriteCoordinator\n"
+            "rebind()\n"
+            "Factory()\n",
+            "WriteCoordinator",
+        ),
+        (
+            "from decoy import Other\n"
+            "from korvid.ui.workspace_controller import WriteCoordinator\n"
+            "def build():\n"
+            "    Factory = Other\n"
+            "    def rebind():\n"
+            "        nonlocal Factory\n"
+            "        Factory = WriteCoordinator\n"
+            "    rebind()\n"
+            "    Factory()\n"
+            "build()\n",
+            "WriteCoordinator",
+        ),
     ],
     ids=[
         "qualified",
@@ -582,6 +655,8 @@ def test_composition_root_contract_rejects_runtime_component_in_support_module(
         "zero-iteration-for",
         "no-match-case",
         "late-global-rebind",
+        "global-rebind",
+        "nonlocal-rebind",
     ],
 )
 def test_composition_root_contract_rejects_indirect_runtime_construction(
@@ -664,6 +739,23 @@ def test_tests_construct_apps_only_through_the_factory() -> None:
         "    Factory()\n"
         "from korvid.ui.app import KorvidApp as Factory\n"
         "build()\n",
+        "from decoy import Other as Factory\n"
+        "from korvid.ui.app import KorvidApp\n"
+        "def rebind():\n"
+        "    global Factory\n"
+        "    Factory = KorvidApp\n"
+        "rebind()\n"
+        "Factory()\n",
+        "from decoy import Other\n"
+        "from korvid.ui.app import KorvidApp\n"
+        "def build():\n"
+        "    Factory = Other\n"
+        "    def rebind():\n"
+        "        nonlocal Factory\n"
+        "        Factory = KorvidApp\n"
+        "    rebind()\n"
+        "    Factory()\n"
+        "build()\n",
     ],
     ids=[
         "qualified",
@@ -677,6 +769,8 @@ def test_tests_construct_apps_only_through_the_factory() -> None:
         "zero-iteration-for",
         "no-match-case",
         "late-global-rebind",
+        "global-rebind",
+        "nonlocal-rebind",
     ],
 )
 def test_factory_contract_rejects_indirect_app_construction(
