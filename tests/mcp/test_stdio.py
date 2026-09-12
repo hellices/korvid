@@ -414,7 +414,19 @@ async def test_http_response_cleanup_drains_finite_bodies_but_preserves_sse(
         await response.aclose()
 
 
-def test_authenticated_bridge_never_follows_redirects(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("status_code", [307, 308])
+@pytest.mark.parametrize(
+    "location",
+    [
+        "http://127.0.0.1:34568/stolen",
+        "http://127.0.0.1:34567/stolen",
+        "/stolen",
+    ],
+    ids=["cross-origin", "same-origin-absolute", "same-origin-relative"],
+)
+def test_authenticated_bridge_never_follows_redirects(
+    monkeypatch: pytest.MonkeyPatch, status_code: int, location: str
+) -> None:
     from korvid.mcp import stdio
     from korvid.mcp.registry import TUIEndpoint
 
@@ -425,11 +437,13 @@ def test_authenticated_bridge_never_follows_redirects(monkeypatch: pytest.Monkey
         capability="test-transport-credential-" * 3,
     )
     requested: list[str] = []
+    redirect_budgets: list[int] = []
     original_client = httpx2.AsyncClient
 
     def redirect(request: httpx2.Request) -> httpx2.Response:
+        assert request.headers["Authorization"] == f"Bearer {endpoint.capability}"
         requested.append(str(request.url))
-        return httpx2.Response(307, headers={"Location": "http://127.0.0.1:34568/stolen"})
+        return httpx2.Response(status_code, headers={"Location": location})
 
     def http_client(
         *,
@@ -438,21 +452,26 @@ def test_authenticated_bridge_never_follows_redirects(monkeypatch: pytest.Monkey
         follow_redirects: bool,
         trust_env: bool,
         event_hooks: dict[str, list[Any]],
+        max_redirects: int = 20,
     ) -> httpx2.AsyncClient:
-        return original_client(
+        client = original_client(
             headers=headers,
             timeout=timeout,
             follow_redirects=follow_redirects,
+            max_redirects=max_redirects,
             trust_env=trust_env,
             event_hooks=event_hooks,
             transport=httpx2.MockTransport(redirect),
         )
+        redirect_budgets.append(client.max_redirects)
+        return client
 
     monkeypatch.setattr(httpx2, "AsyncClient", http_client)
     monkeypatch.setattr(stdio, "read_endpoints", lambda: [endpoint])
     with pytest.raises(stdio.StdioBridgeError, match="selected Korvid TUI"):
         stdio.run_stdio()
     assert requested == [endpoint.url + "/"]
+    assert redirect_budgets == [0]
 
 
 class _BlockedExecutor(RecordingExecutor):
