@@ -218,11 +218,14 @@ takes a bounded `psutil` snapshot before termination. The snapshot contains
 only status, CPU user/system seconds, thread count, and RSS/VMS bytes; it never
 reads command-line arguments, environment values, open files, connections,
 executables, usernames, or parents. The runner then sends terminate and waits
-two seconds, escalating to kill only when needed. After the non-catchable kill,
-it waits without another process-level deadline so it cannot return while the
-Node child is still alive or unreaped.
-After reaping it reads bounded head-and-tail diagnostics from the files and
-re-raises the original timeout object. A regression harness deliberately
+two seconds, escalating to kill only when needed. After successfully sending
+the non-catchable kill, it waits without another process-level deadline for
+confirmed reaping. If that final wait instead raises `OSError`, the runner
+records the type-only `reap=error` outcome and preserves the original harness
+timeout; that exceptional path does not claim confirmed reaping.
+After confirmed reaping, or after recording that final wait error, it reads
+bounded head-and-tail diagnostics from the files and re-raises the original
+timeout object. A regression harness deliberately
 reports completion while retaining a timer: Python still raises that original
 timeout, and the bounded diagnostics retain the `Timeout` resource type. No
 completion marker is accepted as a substitute for process exit.

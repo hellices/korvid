@@ -232,9 +232,10 @@ lifecycle:
    and a bounded `psutil` process snapshot before termination;
 4. terminate the child under a second short bound, escalating to kill only if
    necessary; after a successful `kill()` wait until the child is confirmed
-   reaped, but if `kill()` itself fails, perform one final bounded wait and
-   report `reap=timed-out` or the concrete wait error instead of hanging the
-   entire test process;
+   reaped, or record a type-only `reap=error` and continue without claiming
+   confirmation if that final wait raises `OSError`. If `kill()` itself fails,
+   perform one final bounded wait and report `reap=timed-out` or the concrete
+   wait error instead of hanging the entire test process;
 5. read bounded head/tail diagnostics and run the existing independently
    bounded Python, Node-version, and loader probes; and
 6. re-raise the original `TimeoutExpired` with no retry.

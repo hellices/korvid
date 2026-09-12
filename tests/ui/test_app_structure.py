@@ -68,9 +68,13 @@ class _CallTargetVisitor(ast.NodeVisitor):
     def __init__(self) -> None:
         self.targets: list[tuple[int, str]] = []
         self._scopes: list[dict[str, frozenset[str] | None]] = [{}]
+        self._scope_kinds = ["module"]
 
     def _resolve_name(self, name: str) -> frozenset[str]:
-        for scope in reversed(self._scopes):
+        skip_class_scopes = self._scope_kinds[-1] in {"function", "lambda"}
+        for kind, scope in reversed(tuple(zip(self._scope_kinds, self._scopes, strict=True))):
+            if skip_class_scopes and kind == "class":
+                continue
             if name in scope:
                 targets = scope[name]
                 return frozenset() if targets is None else targets
@@ -99,6 +103,29 @@ class _CallTargetVisitor(ast.NodeVisitor):
         else:
             self._bind_target(target)
 
+    def _visit_branch(
+        self,
+        statements: list[ast.stmt],
+        initial: dict[str, frozenset[str] | None],
+    ) -> dict[str, frozenset[str] | None]:
+        self._scopes[-1] = initial.copy()
+        for statement in statements:
+            self.visit(statement)
+        return self._scopes[-1].copy()
+
+    def _merge_branches(
+        self,
+        original: dict[str, frozenset[str] | None],
+        branches: list[dict[str, frozenset[str] | None]],
+    ) -> None:
+        merged = original.copy()
+        for name in set().union(*(scope.keys() for scope in branches)):
+            known = frozenset(
+                target for scope in branches for target in (scope.get(name) or frozenset())
+            )
+            merged[name] = known or None
+        self._scopes[-1] = merged
+
     def _visit_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
         for decorator in node.decorator_list:
             self.visit(decorator)
@@ -109,6 +136,7 @@ class _CallTargetVisitor(ast.NodeVisitor):
             self.visit(node.returns)
         self._bind_unknown(node.name)
         self._scopes.append({})
+        self._scope_kinds.append("function")
         for argument in (
             *node.args.posonlyargs,
             *node.args.args,
@@ -121,6 +149,7 @@ class _CallTargetVisitor(ast.NodeVisitor):
             self._bind_unknown(node.args.kwarg.arg)
         for statement in node.body:
             self.visit(statement)
+        self._scope_kinds.pop()
         self._scopes.pop()
 
     def visit_Call(self, node: ast.Call) -> None:
@@ -167,6 +196,7 @@ class _CallTargetVisitor(ast.NodeVisitor):
             if default is not None:
                 self.visit(default)
         self._scopes.append({})
+        self._scope_kinds.append("lambda")
         for argument in (
             *node.args.posonlyargs,
             *node.args.args,
@@ -178,6 +208,7 @@ class _CallTargetVisitor(ast.NodeVisitor):
         if node.args.kwarg is not None:
             self._bind_unknown(node.args.kwarg.arg)
         self.visit(node.body)
+        self._scope_kinds.pop()
         self._scopes.pop()
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
@@ -189,8 +220,10 @@ class _CallTargetVisitor(ast.NodeVisitor):
             self.visit(keyword.value)
         self._bind_unknown(node.name)
         self._scopes.append({})
+        self._scope_kinds.append("class")
         for statement in node.body:
             self.visit(statement)
+        self._scope_kinds.pop()
         self._scopes.pop()
 
     def visit_If(self, node: ast.If) -> None:
@@ -200,19 +233,33 @@ class _CallTargetVisitor(ast.NodeVisitor):
                 self.visit(statement)
             return
         original = self._scopes[-1].copy()
-        branch_scopes: list[dict[str, frozenset[str] | None]] = []
-        for branch in (node.body, node.orelse):
+        branches = [self._visit_branch(branch, original) for branch in (node.body, node.orelse)]
+        self._merge_branches(original, branches)
+
+    def _visit_try(self, node: ast.Try | ast.TryStar) -> None:
+        original = self._scopes[-1].copy()
+        normal = self._visit_branch([*node.body, *node.orelse], original)
+        branches = [normal]
+        if node.handlers:
+            branches.append(original)
+        for handler in node.handlers:
             self._scopes[-1] = original.copy()
-            for statement in branch:
+            if handler.type is not None:
+                self.visit(handler.type)
+            if handler.name is not None:
+                self._bind_unknown(handler.name)
+            for statement in handler.body:
                 self.visit(statement)
-            branch_scopes.append(self._scopes[-1])
-        merged = original.copy()
-        for name in set().union(*(scope.keys() for scope in branch_scopes)):
-            known = frozenset(
-                target for scope in branch_scopes for target in (scope.get(name) or frozenset())
-            )
-            merged[name] = known or None
-        self._scopes[-1] = merged
+            branches.append(self._scopes[-1].copy())
+        self._merge_branches(original, branches)
+        for statement in node.finalbody:
+            self.visit(statement)
+
+    def visit_Try(self, node: ast.Try) -> None:
+        self._visit_try(node)
+
+    def visit_TryStar(self, node: ast.TryStar) -> None:
+        self._visit_try(node)
 
 
 def _call_targets(tree: ast.AST) -> list[tuple[int, str]]:
@@ -371,6 +418,32 @@ def test_composition_root_contract_rejects_runtime_component_in_support_module(
             "Factory()\n",
             "WriteCoordinator",
         ),
+        (
+            "from korvid.ui.workspace_controller import WriteCoordinator\n"
+            "class Shadow:\n"
+            "    WriteCoordinator = object()\n"
+            "    def build(self):\n"
+            "        WriteCoordinator()\n",
+            "WriteCoordinator",
+        ),
+        (
+            "from korvid.ui.workspace_controller import WriteCoordinator\n"
+            "try:\n"
+            "    pass\n"
+            "except Exception:\n"
+            "    WriteCoordinator = object()\n"
+            "WriteCoordinator()\n",
+            "WriteCoordinator",
+        ),
+        (
+            "from korvid.ui.workspace_controller import WriteCoordinator\n"
+            "try:\n"
+            "    pass\n"
+            "except* Exception:\n"
+            "    WriteCoordinator = object()\n"
+            "WriteCoordinator()\n",
+            "WriteCoordinator",
+        ),
     ],
     ids=[
         "qualified",
@@ -380,6 +453,9 @@ def test_composition_root_contract_rejects_runtime_component_in_support_module(
         "nested-shadow",
         "later-shadow",
         "assigned-alias",
+        "class-scope-shadow",
+        "except-handler-shadow",
+        "except-star-handler-shadow",
     ],
 )
 def test_composition_root_contract_rejects_indirect_runtime_construction(
@@ -416,8 +492,32 @@ def test_tests_construct_apps_only_through_the_factory() -> None:
         "import korvid.ui.app as app\napp.KorvidApp()\n",
         "from korvid.ui.app import KorvidApp as App\nApp()\n",
         "from korvid.ui.app import KorvidApp\nFactory = KorvidApp\nFactory()\n",
+        "from korvid.ui.app import KorvidApp\n"
+        "class Shadow:\n"
+        "    KorvidApp = object()\n"
+        "    def build(self):\n"
+        "        KorvidApp()\n",
+        "from korvid.ui.app import KorvidApp\n"
+        "try:\n"
+        "    pass\n"
+        "except Exception:\n"
+        "    KorvidApp = object()\n"
+        "KorvidApp()\n",
+        "from korvid.ui.app import KorvidApp\n"
+        "try:\n"
+        "    pass\n"
+        "except* Exception:\n"
+        "    KorvidApp = object()\n"
+        "KorvidApp()\n",
     ],
-    ids=["qualified", "imported-alias", "assigned-alias"],
+    ids=[
+        "qualified",
+        "imported-alias",
+        "assigned-alias",
+        "class-scope-shadow",
+        "except-handler-shadow",
+        "except-star-handler-shadow",
+    ],
 )
 def test_factory_contract_rejects_indirect_app_construction(
     monkeypatch: pytest.MonkeyPatch,

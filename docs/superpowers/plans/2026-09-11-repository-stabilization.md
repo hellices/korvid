@@ -648,11 +648,14 @@ CommonJS/ESM harnesses, GitHub Actions YAML, GitHub REST API, pre-commit.
   `cpu_times`, `num_threads`, and `memory_info`. Catch `psutil.Error` and
   `OSError` into a type-only diagnostic. Terminate and wait for two seconds;
   if that wait times out, kill and wait without another process-level deadline
-  until the child is confirmed reaped. Never inspect cmdline, environment,
-  files, connections, parent, username, or executable.
+  until the child is confirmed reaped. If that final wait raises `OSError`,
+  record a type-only `reap=error` outcome and continue with the original
+  timeout without claiming confirmed reaping. Never inspect cmdline,
+  environment, files, connections, parent, username, or executable.
 
-  Read bounded capture head/tail only after reaping, attach the existing probes
-  plus the new snapshot to the original timeout, then use bare `raise`.
+  Read bounded capture head/tail after confirmed reaping or after recording the
+  final wait error, attach the existing probes plus the new snapshot to the
+  original timeout, then use bare `raise`.
 
 - [ ] **Step 6: Verify real and synthetic timeout behavior**
 
