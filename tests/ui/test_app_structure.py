@@ -171,6 +171,10 @@ class _CallTargetVisitor(ast.NodeVisitor):
             return frozenset(
                 target for operand in value.values for target in self._reference_targets(operand)
             )
+        if isinstance(value, (ast.List, ast.Tuple)):
+            return frozenset(
+                target for element in value.elts for target in self._reference_targets(element)
+            )
         return frozenset()
 
     def _default_argument_targets(self, arguments: ast.arguments) -> dict[str, frozenset[str]]:
@@ -216,6 +220,9 @@ class _CallTargetVisitor(ast.NodeVisitor):
     def _bind_assignment(self, target: ast.expr, aliases: frozenset[str]) -> None:
         if isinstance(target, ast.Name):
             self._bind_aliases(target.id, aliases)
+        elif isinstance(target, (ast.List, ast.Tuple)):
+            for element in target.elts:
+                self._bind_assignment(element, aliases)
         else:
             self._bind_target(target)
 
@@ -612,6 +619,12 @@ def test_composition_root_contract_rejects_runtime_component_in_support_module(
         ),
         (
             "from korvid.ui.workspace_controller import WriteCoordinator\n"
+            "Factory, _ = WriteCoordinator, object\n"
+            "Factory()\n",
+            "WriteCoordinator",
+        ),
+        (
+            "from korvid.ui.workspace_controller import WriteCoordinator\n"
             "class Shadow:\n"
             "    WriteCoordinator = object()\n"
             "    def build(self):\n"
@@ -764,6 +777,7 @@ def test_composition_root_contract_rejects_runtime_component_in_support_module(
         "nested-shadow",
         "later-shadow",
         "assigned-alias",
+        "destructured-alias",
         "class-scope-shadow",
         "except-handler-shadow",
         "try-prefix-handler",
@@ -816,6 +830,7 @@ def test_tests_construct_apps_only_through_the_factory() -> None:
         "import korvid.ui.app as app\napp.KorvidApp()\n",
         "from korvid.ui.app import KorvidApp as App\nApp()\n",
         "from korvid.ui.app import KorvidApp\nFactory = KorvidApp\nFactory()\n",
+        "from korvid.ui.app import KorvidApp\nFactory, _ = KorvidApp, object\nFactory()\n",
         "from korvid.ui.app import KorvidApp\n"
         "class Shadow:\n"
         "    KorvidApp = object()\n"
@@ -921,6 +936,7 @@ def test_tests_construct_apps_only_through_the_factory() -> None:
         "qualified",
         "imported-alias",
         "assigned-alias",
+        "destructured-alias",
         "class-scope-shadow",
         "except-handler-shadow",
         "try-prefix-handler",
