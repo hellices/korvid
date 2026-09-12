@@ -79,12 +79,25 @@ class _CallTargetVisitor(ast.NodeVisitor):
     def _bind_unknown(self, name: str) -> None:
         self._scopes[-1][name] = None
 
+    def _reference_targets(self, value: ast.expr) -> frozenset[str]:
+        if isinstance(value, ast.Name):
+            return self._resolve_name(value.id)
+        if isinstance(value, ast.Attribute):
+            return frozenset((value.attr,))
+        return frozenset()
+
     def _bind_target(self, target: ast.expr) -> None:
         if isinstance(target, ast.Name):
             self._bind_unknown(target.id)
         elif isinstance(target, (ast.List, ast.Tuple)):
             for element in target.elts:
                 self._bind_target(element)
+
+    def _bind_assignment(self, target: ast.expr, aliases: frozenset[str]) -> None:
+        if isinstance(target, ast.Name):
+            self._scopes[-1][target.id] = aliases or None
+        else:
+            self._bind_target(target)
 
     def _visit_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
         for decorator in node.decorator_list:
@@ -127,18 +140,21 @@ class _CallTargetVisitor(ast.NodeVisitor):
 
     def visit_Assign(self, node: ast.Assign) -> None:
         self.visit(node.value)
+        aliases = self._reference_targets(node.value)
         for target in node.targets:
-            self._bind_target(target)
+            self._bind_assignment(target, aliases)
 
     def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
         self.visit(node.annotation)
         if node.value is not None:
             self.visit(node.value)
-        self._bind_target(node.target)
+            self._bind_assignment(node.target, self._reference_targets(node.value))
+        else:
+            self._bind_target(node.target)
 
     def visit_NamedExpr(self, node: ast.NamedExpr) -> None:
         self.visit(node.value)
-        self._bind_target(node.target)
+        self._bind_assignment(node.target, self._reference_targets(node.value))
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
         self._visit_function(node)
@@ -349,6 +365,12 @@ def test_composition_root_contract_rejects_runtime_component_in_support_module(
             "from decoy import Other as Coordinator\n",
             "WriteCoordinator",
         ),
+        (
+            "from korvid.ui.workspace_controller import WriteCoordinator\n"
+            "Factory = WriteCoordinator\n"
+            "Factory()\n",
+            "WriteCoordinator",
+        ),
     ],
     ids=[
         "qualified",
@@ -357,6 +379,7 @@ def test_composition_root_contract_rejects_runtime_component_in_support_module(
         "type-checking-shadow",
         "nested-shadow",
         "later-shadow",
+        "assigned-alias",
     ],
 )
 def test_composition_root_contract_rejects_indirect_runtime_construction(
@@ -392,8 +415,9 @@ def test_tests_construct_apps_only_through_the_factory() -> None:
     [
         "import korvid.ui.app as app\napp.KorvidApp()\n",
         "from korvid.ui.app import KorvidApp as App\nApp()\n",
+        "from korvid.ui.app import KorvidApp\nFactory = KorvidApp\nFactory()\n",
     ],
-    ids=["qualified", "imported-alias"],
+    ids=["qualified", "imported-alias", "assigned-alias"],
 )
 def test_factory_contract_rejects_indirect_app_construction(
     monkeypatch: pytest.MonkeyPatch,
