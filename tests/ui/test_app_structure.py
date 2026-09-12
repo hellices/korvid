@@ -94,7 +94,11 @@ class _CallTargetVisitor(ast.NodeVisitor):
     def _resolve_name(self, name: str) -> frozenset[str]:
         if name in self._global_names[-1]:
             return self._resolve_module_name(name)
-        runtime_global_lookup = self._scope_kinds[-1] in {"function", "lambda"}
+        runtime_global_lookup = self._scope_kinds[-1] in {
+            "function",
+            "lambda",
+            "comprehension",
+        }
         start = len(self._scopes) - (2 if name in self._nonlocal_names[-1] else 1)
         for index in range(start, -1, -1):
             kind = self._scope_kinds[index]
@@ -106,7 +110,7 @@ class _CallTargetVisitor(ast.NodeVisitor):
             if (
                 runtime_global_lookup
                 and index < len(self._scopes) - 1
-                and kind in {"function", "lambda"}
+                and kind in {"function", "lambda", "comprehension"}
             ):
                 scope_node = self._scope_nodes[index]
                 if scope_node is not None:
@@ -141,7 +145,11 @@ class _CallTargetVisitor(ast.NodeVisitor):
         return len(self._scopes) - 1
 
     def _record_scope_binding(self, index: int, name: str, aliases: frozenset[str]) -> None:
-        if index == 0 or self._scope_kinds[index] not in {"function", "lambda"}:
+        if index == 0 or self._scope_kinds[index] not in {
+            "function",
+            "lambda",
+            "comprehension",
+        }:
             return
         scope_node = self._scope_nodes[index]
         if scope_node is not None:
@@ -314,6 +322,49 @@ class _CallTargetVisitor(ast.NodeVisitor):
 
     def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
         self._visit_function(node)
+
+    def _visit_comprehension(
+        self,
+        node: ast.ListComp | ast.SetComp | ast.DictComp | ast.GeneratorExp,
+    ) -> None:
+        first_generator = node.generators[0]
+        self.visit(first_generator.iter)
+        first_targets = self._reference_targets(first_generator.iter)
+        self._scopes.append({})
+        self._scope_kinds.append("comprehension")
+        self._scope_nodes.append(node)
+        self._global_names.append(set())
+        self._nonlocal_names.append(set())
+        self._bind_assignment(first_generator.target, first_targets)
+        for condition in first_generator.ifs:
+            self.visit(condition)
+        for generator in node.generators[1:]:
+            self.visit(generator.iter)
+            self._bind_assignment(generator.target, self._reference_targets(generator.iter))
+            for condition in generator.ifs:
+                self.visit(condition)
+        if isinstance(node, ast.DictComp):
+            self.visit(node.key)
+            self.visit(node.value)
+        else:
+            self.visit(node.elt)
+        self._nonlocal_names.pop()
+        self._global_names.pop()
+        self._scope_nodes.pop()
+        self._scope_kinds.pop()
+        self._scopes.pop()
+
+    def visit_ListComp(self, node: ast.ListComp) -> None:
+        self._visit_comprehension(node)
+
+    def visit_SetComp(self, node: ast.SetComp) -> None:
+        self._visit_comprehension(node)
+
+    def visit_DictComp(self, node: ast.DictComp) -> None:
+        self._visit_comprehension(node)
+
+    def visit_GeneratorExp(self, node: ast.GeneratorExp) -> None:
+        self._visit_comprehension(node)
 
     def visit_Lambda(self, node: ast.Lambda) -> None:
         default_targets = self._default_argument_targets(node.args)
@@ -625,6 +676,26 @@ def test_composition_root_contract_rejects_runtime_component_in_support_module(
         ),
         (
             "from korvid.ui.workspace_controller import WriteCoordinator\n"
+            "[factory() for factory in (WriteCoordinator,)]\n",
+            "WriteCoordinator",
+        ),
+        (
+            "from korvid.ui.workspace_controller import WriteCoordinator\n"
+            "{factory() for factory in (WriteCoordinator,)}\n",
+            "WriteCoordinator",
+        ),
+        (
+            "from korvid.ui.workspace_controller import WriteCoordinator\n"
+            '{key: factory() for key, factory in (("key", WriteCoordinator),)}\n',
+            "WriteCoordinator",
+        ),
+        (
+            "from korvid.ui.workspace_controller import WriteCoordinator\n"
+            "tuple(factory() for factory in (WriteCoordinator,))\n",
+            "WriteCoordinator",
+        ),
+        (
+            "from korvid.ui.workspace_controller import WriteCoordinator\n"
             "class Shadow:\n"
             "    WriteCoordinator = object()\n"
             "    def build(self):\n"
@@ -778,6 +849,10 @@ def test_composition_root_contract_rejects_runtime_component_in_support_module(
         "later-shadow",
         "assigned-alias",
         "destructured-alias",
+        "list-comprehension-target",
+        "set-comprehension-target",
+        "dict-comprehension-target",
+        "generator-comprehension-target",
         "class-scope-shadow",
         "except-handler-shadow",
         "try-prefix-handler",
@@ -831,6 +906,11 @@ def test_tests_construct_apps_only_through_the_factory() -> None:
         "from korvid.ui.app import KorvidApp as App\nApp()\n",
         "from korvid.ui.app import KorvidApp\nFactory = KorvidApp\nFactory()\n",
         "from korvid.ui.app import KorvidApp\nFactory, _ = KorvidApp, object\nFactory()\n",
+        "from korvid.ui.app import KorvidApp\n[factory() for factory in (KorvidApp,)]\n",
+        "from korvid.ui.app import KorvidApp\n{factory() for factory in (KorvidApp,)}\n",
+        "from korvid.ui.app import KorvidApp\n"
+        '{key: factory() for key, factory in (("key", KorvidApp),)}\n',
+        "from korvid.ui.app import KorvidApp\ntuple(factory() for factory in (KorvidApp,))\n",
         "from korvid.ui.app import KorvidApp\n"
         "class Shadow:\n"
         "    KorvidApp = object()\n"
@@ -937,6 +1017,10 @@ def test_tests_construct_apps_only_through_the_factory() -> None:
         "imported-alias",
         "assigned-alias",
         "destructured-alias",
+        "list-comprehension-target",
+        "set-comprehension-target",
+        "dict-comprehension-target",
+        "generator-comprehension-target",
         "class-scope-shadow",
         "except-handler-shadow",
         "try-prefix-handler",
