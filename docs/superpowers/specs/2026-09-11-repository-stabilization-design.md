@@ -16,9 +16,9 @@ bounded pieces of work:
 4. harden pull-request CI, default-branch rules, and the boundary around the
    self-hosted runner pool.
 
-The work is deliberately separate from Kubernetes and agent product fixes.
-Issues such as #343 and #340 will be handled in later sessions so their test,
-review, and rollback boundaries remain small.
+The Kubernetes work tracked by #343 and #340 was already delivered by PR #381
+and remains outside this stabilization change; this branch only integrates that
+mainline result.
 
 ## Verified baseline
 
