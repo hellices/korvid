@@ -62,34 +62,147 @@ def _tree(name: str) -> ast.Module:
     return ast.parse((UI / name).read_text(encoding="utf-8"), filename=name)
 
 
-def _imported_symbol_aliases(tree: ast.AST) -> dict[str, str]:
-    """Map local names created by from-imports to their declared symbols."""
-    return {
-        alias.asname or alias.name: alias.name
-        for node in ast.walk(tree)
-        if isinstance(node, ast.ImportFrom)
-        for alias in node.names
-    }
+class _CallTargetVisitor(ast.NodeVisitor):
+    """Resolve call targets without leaking aliases across runtime scopes."""
 
+    def __init__(self) -> None:
+        self.targets: list[tuple[int, str]] = []
+        self._scopes: list[dict[str, frozenset[str] | None]] = [{}]
 
-def _call_target_name(target: ast.expr, aliases: dict[str, str]) -> str | None:
-    """Return the declared terminal symbol for a direct or qualified call."""
-    if isinstance(target, ast.Name):
-        return aliases.get(target.id, target.id)
-    if isinstance(target, ast.Attribute):
-        return target.attr
-    return None
+    def _resolve_name(self, name: str) -> frozenset[str]:
+        for scope in reversed(self._scopes):
+            if name in scope:
+                targets = scope[name]
+                return frozenset() if targets is None else targets
+        return frozenset((name,))
+
+    def _bind_unknown(self, name: str) -> None:
+        self._scopes[-1][name] = None
+
+    def _bind_target(self, target: ast.expr) -> None:
+        if isinstance(target, ast.Name):
+            self._bind_unknown(target.id)
+        elif isinstance(target, (ast.List, ast.Tuple)):
+            for element in target.elts:
+                self._bind_target(element)
+
+    def _visit_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        for decorator in node.decorator_list:
+            self.visit(decorator)
+        for default in (*node.args.defaults, *node.args.kw_defaults):
+            if default is not None:
+                self.visit(default)
+        if node.returns is not None:
+            self.visit(node.returns)
+        self._bind_unknown(node.name)
+        self._scopes.append({})
+        for argument in (
+            *node.args.posonlyargs,
+            *node.args.args,
+            *node.args.kwonlyargs,
+        ):
+            self._bind_unknown(argument.arg)
+        if node.args.vararg is not None:
+            self._bind_unknown(node.args.vararg.arg)
+        if node.args.kwarg is not None:
+            self._bind_unknown(node.args.kwarg.arg)
+        for statement in node.body:
+            self.visit(statement)
+        self._scopes.pop()
+
+    def visit_Call(self, node: ast.Call) -> None:
+        if isinstance(node.func, ast.Name):
+            self.targets.extend((node.lineno, name) for name in self._resolve_name(node.func.id))
+        elif isinstance(node.func, ast.Attribute):
+            self.targets.append((node.lineno, node.func.attr))
+        self.generic_visit(node)
+
+    def visit_Import(self, node: ast.Import) -> None:
+        for alias in node.names:
+            self._bind_unknown(alias.asname or alias.name.partition(".")[0])
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        for alias in node.names:
+            self._scopes[-1][alias.asname or alias.name] = frozenset((alias.name,))
+
+    def visit_Assign(self, node: ast.Assign) -> None:
+        self.visit(node.value)
+        for target in node.targets:
+            self._bind_target(target)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        self.visit(node.annotation)
+        if node.value is not None:
+            self.visit(node.value)
+        self._bind_target(node.target)
+
+    def visit_NamedExpr(self, node: ast.NamedExpr) -> None:
+        self.visit(node.value)
+        self._bind_target(node.target)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self._visit_function(node)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self._visit_function(node)
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        for default in (*node.args.defaults, *node.args.kw_defaults):
+            if default is not None:
+                self.visit(default)
+        self._scopes.append({})
+        for argument in (
+            *node.args.posonlyargs,
+            *node.args.args,
+            *node.args.kwonlyargs,
+        ):
+            self._bind_unknown(argument.arg)
+        if node.args.vararg is not None:
+            self._bind_unknown(node.args.vararg.arg)
+        if node.args.kwarg is not None:
+            self._bind_unknown(node.args.kwarg.arg)
+        self.visit(node.body)
+        self._scopes.pop()
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        for decorator in node.decorator_list:
+            self.visit(decorator)
+        for base in node.bases:
+            self.visit(base)
+        for keyword in node.keywords:
+            self.visit(keyword.value)
+        self._bind_unknown(node.name)
+        self._scopes.append({})
+        for statement in node.body:
+            self.visit(statement)
+        self._scopes.pop()
+
+    def visit_If(self, node: ast.If) -> None:
+        self.visit(node.test)
+        if _is_type_checking_guard(node.test):
+            for statement in node.orelse:
+                self.visit(statement)
+            return
+        original = self._scopes[-1].copy()
+        branch_scopes: list[dict[str, frozenset[str] | None]] = []
+        for branch in (node.body, node.orelse):
+            self._scopes[-1] = original.copy()
+            for statement in branch:
+                self.visit(statement)
+            branch_scopes.append(self._scopes[-1])
+        merged = original.copy()
+        for name in set().union(*(scope.keys() for scope in branch_scopes)):
+            known = frozenset(
+                target for scope in branch_scopes for target in (scope.get(name) or frozenset())
+            )
+            merged[name] = known or None
+        self._scopes[-1] = merged
 
 
 def _call_targets(tree: ast.AST) -> list[tuple[int, str]]:
-    aliases = _imported_symbol_aliases(tree)
-    targets: list[tuple[int, str]] = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Call):
-            target = _call_target_name(node.func, aliases)
-            if target is not None:
-                targets.append((node.lineno, target))
-    return targets
+    visitor = _CallTargetVisitor()
+    visitor.visit(tree)
+    return visitor.targets
 
 
 def _called_names(tree: ast.AST) -> set[str]:
@@ -216,8 +329,35 @@ def test_composition_root_contract_rejects_runtime_component_in_support_module(
             "from korvid.ui.app_surfaces import AppUIBridge as Bridge\nBridge(None)\n",
             "AppUIBridge",
         ),
+        (
+            "from korvid.ui.workspace_controller import WriteCoordinator\n"
+            "if TYPE_CHECKING:\n"
+            "    from decoy import Other as WriteCoordinator\n"
+            "WriteCoordinator()\n",
+            "WriteCoordinator",
+        ),
+        (
+            "from korvid.ui.workspace_controller import WriteCoordinator as Coordinator\n"
+            "def shadow():\n"
+            "    from decoy import Other as Coordinator\n"
+            "Coordinator()\n",
+            "WriteCoordinator",
+        ),
+        (
+            "from korvid.ui.workspace_controller import WriteCoordinator as Coordinator\n"
+            "Coordinator()\n"
+            "from decoy import Other as Coordinator\n",
+            "WriteCoordinator",
+        ),
     ],
-    ids=["qualified", "imported-alias", "app-ui-bridge"],
+    ids=[
+        "qualified",
+        "imported-alias",
+        "app-ui-bridge",
+        "type-checking-shadow",
+        "nested-shadow",
+        "later-shadow",
+    ],
 )
 def test_composition_root_contract_rejects_indirect_runtime_construction(
     monkeypatch: pytest.MonkeyPatch,

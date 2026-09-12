@@ -972,6 +972,7 @@ CommonJS/ESM harnesses, GitHub Actions YAML, GitHub REST API, pre-commit.
 **Files:**
 - Create: `src/korvid/composition_support.py`
 - Create: `tests/app_factory.py`
+- Create: `tests/app_factory_typing.py`
 - Modify: `src/korvid/__main__.py`
 - Modify: `src/korvid/ui/app.py`
 - Modify: `src/korvid/ui/app_runtime.py`
@@ -984,7 +985,8 @@ CommonJS/ESM harnesses, GitHub Actions YAML, GitHub REST API, pre-commit.
   current controller constructor arguments without behavior changes.
 - Produces: `assemble_app_runtime(app: AppT) -> AppT` in `korvid.__main__`,
   `KorvidApp.runtime_inputs`, one-time `KorvidApp.bind_runtime(runtime)`, and
-  `build_test_app(app_type: type[AppT] = KorvidApp, /, **kwargs: Any) -> AppT`.
+  a `ParamSpec`-bound `build_test_app` for `KorvidApp` plus the explicit typed
+  `build_test_subclass` path.
 
 - [ ] **Step 1: Add failing architecture and construction-path tests**
 
@@ -1005,6 +1007,7 @@ CommonJS/ESM harnesses, GitHub Actions YAML, GitHub REST API, pre-commit.
       "AppRuntime",
       "AppSessionConfiguration",
       "AppTransferScreens",
+      "AppUIBridge",
       "AppUiSurface",
       "AppViewState",
       "AppWorkspaceSurface",
@@ -1158,20 +1161,41 @@ CommonJS/ESM harnesses, GitHub Actions YAML, GitHub REST API, pre-commit.
   Create:
 
   ```python
+  from collections.abc import Callable
+  from typing import ParamSpec, TypeVar
+
+
   AppT = TypeVar("AppT", bound=KorvidApp)
+  AppP = ParamSpec("AppP")
 
 
-  def build_test_app(
-      app_type: type[AppT] = KorvidApp,
+  def _bind_test_app_factory(
+      app_type: Callable[AppP, AppT],
       /,
-      **kwargs: Any,
+  ) -> Callable[AppP, AppT]:
+      def build(*args: AppP.args, **kwargs: AppP.kwargs) -> AppT:
+          return assemble_app_runtime(app_type(*args, **kwargs))
+
+      return build
+
+
+  build_test_app = _bind_test_app_factory(KorvidApp)
+
+
+  def build_test_subclass(
+      app_type: Callable[AppP, AppT],
+      /,
+      *args: AppP.args,
+      **kwargs: AppP.kwargs,
   ) -> AppT:
-      return assemble_app_runtime(app_type(**kwargs))
+      return assemble_app_runtime(app_type(*args, **kwargs))
   ```
 
   Replace direct `KorvidApp(...)` test calls with `build_test_app(...)`. For
-  `_ObservedKorvidApp` and `MeasuredKorvidApp`, pass the subclass as the first
-  positional argument. Leave subclass `super().__init__(...)` calls intact.
+  `_ObservedKorvidApp` and `MeasuredKorvidApp`, use
+  `build_test_subclass(Subclass, ...)`. Add a compile-time negative regression
+  that makes mypy's unused-ignore check fail if the base factory accepts an
+  unknown `KorvidApp` keyword. Leave subclass `super().__init__(...)` calls intact.
   Update the composition-root fakes so they either capture the runtime bind or
   explicitly stub `assemble_app_runtime`; do not weaken the production path.
 
