@@ -66,14 +66,21 @@ def _tree(name: str) -> ast.Module:
 class _CallTargetVisitor(ast.NodeVisitor):
     """Resolve call targets without leaking aliases across runtime scopes."""
 
-    def __init__(self, runtime_module_targets: dict[str, frozenset[str]] | None = None) -> None:
+    def __init__(
+        self,
+        runtime_module_targets: dict[str, frozenset[str]] | None = None,
+        runtime_scope_targets: dict[ast.AST, dict[str, frozenset[str]]] | None = None,
+    ) -> None:
         self.targets: list[tuple[int, str]] = []
         self._scopes: list[dict[str, frozenset[str] | None]] = [{}]
         self._scope_kinds = ["module"]
+        self._scope_nodes: list[ast.AST | None] = [None]
         self._global_names: list[set[str]] = [set()]
         self._nonlocal_names: list[set[str]] = [set()]
         self._runtime_module_targets = runtime_module_targets or {}
+        self._runtime_scope_targets = runtime_scope_targets or {}
         self._module_target_history: dict[str, set[str]] = {}
+        self._scope_target_history: dict[ast.AST, dict[str, set[str]]] = {}
 
     def _resolve_module_name(self, name: str) -> frozenset[str]:
         has_binding = name in self._scopes[0]
@@ -94,12 +101,26 @@ class _CallTargetVisitor(ast.NodeVisitor):
             scope = self._scopes[index]
             if runtime_global_lookup and kind == "class":
                 continue
+            closure_targets = frozenset[str]()
+            has_closure_binding = False
+            if (
+                runtime_global_lookup
+                and index < len(self._scopes) - 1
+                and kind in {"function", "lambda"}
+            ):
+                scope_node = self._scope_nodes[index]
+                if scope_node is not None:
+                    history = self._runtime_scope_targets.get(scope_node, {})
+                    has_closure_binding = name in history
+                    closure_targets = history.get(name, frozenset())
             if name in scope:
                 targets = scope[name]
                 resolved = frozenset() if targets is None else targets
                 if runtime_global_lookup and kind == "module":
                     return self._resolve_module_name(name)
-                return resolved
+                return resolved | closure_targets
+            if has_closure_binding:
+                return closure_targets
         if runtime_global_lookup and name in self._runtime_module_targets:
             return self._runtime_module_targets[name]
         return frozenset((name,))
@@ -119,14 +140,25 @@ class _CallTargetVisitor(ast.NodeVisitor):
                     return index
         return len(self._scopes) - 1
 
+    def _record_scope_binding(self, index: int, name: str, aliases: frozenset[str]) -> None:
+        if index == 0 or self._scope_kinds[index] not in {"function", "lambda"}:
+            return
+        scope_node = self._scope_nodes[index]
+        if scope_node is not None:
+            history = self._scope_target_history.setdefault(scope_node, {})
+            history.setdefault(name, set()).update(aliases)
+
     def _bind_aliases(self, name: str, aliases: frozenset[str]) -> None:
         index = self._binding_scope_index(name)
         self._scopes[index][name] = aliases or None
+        self._record_scope_binding(index, name, aliases)
         if aliases and index == 0:
             self._module_target_history.setdefault(name, set()).update(aliases)
 
     def _bind_unknown(self, name: str) -> None:
-        self._scopes[self._binding_scope_index(name)][name] = None
+        index = self._binding_scope_index(name)
+        self._scopes[index][name] = None
+        self._record_scope_binding(index, name, frozenset())
 
     def _reference_targets(self, value: ast.expr) -> frozenset[str]:
         if isinstance(value, ast.Name):
@@ -219,6 +251,7 @@ class _CallTargetVisitor(ast.NodeVisitor):
         self._bind_unknown(node.name)
         self._scopes.append({})
         self._scope_kinds.append("function")
+        self._scope_nodes.append(node)
         self._global_names.append(set())
         self._nonlocal_names.append(set())
         self._bind_arguments(node.args, default_targets)
@@ -226,6 +259,7 @@ class _CallTargetVisitor(ast.NodeVisitor):
             self.visit(statement)
         self._nonlocal_names.pop()
         self._global_names.pop()
+        self._scope_nodes.pop()
         self._scope_kinds.pop()
         self._scopes.pop()
 
@@ -278,12 +312,14 @@ class _CallTargetVisitor(ast.NodeVisitor):
         default_targets = self._default_argument_targets(node.args)
         self._scopes.append({})
         self._scope_kinds.append("lambda")
+        self._scope_nodes.append(node)
         self._global_names.append(set())
         self._nonlocal_names.append(set())
         self._bind_arguments(node.args, default_targets)
         self.visit(node.body)
         self._nonlocal_names.pop()
         self._global_names.pop()
+        self._scope_nodes.pop()
         self._scope_kinds.pop()
         self._scopes.pop()
 
@@ -299,12 +335,14 @@ class _CallTargetVisitor(ast.NodeVisitor):
         self._bind_aliases(node.name, base_targets)
         self._scopes.append({})
         self._scope_kinds.append("class")
+        self._scope_nodes.append(node)
         self._global_names.append(set())
         self._nonlocal_names.append(set())
         for statement in node.body:
             self.visit(statement)
         self._nonlocal_names.pop()
         self._global_names.pop()
+        self._scope_nodes.pop()
         self._scope_kinds.pop()
         self._scopes.pop()
 
@@ -409,7 +447,11 @@ def _call_targets(tree: ast.AST) -> list[tuple[int, str]]:
     runtime_module_targets = {
         name: frozenset(targets) for name, targets in collector._module_target_history.items()
     }
-    visitor = _CallTargetVisitor(runtime_module_targets)
+    runtime_scope_targets = {
+        node: {name: frozenset(targets) for name, targets in scope.items()}
+        for node, scope in collector._scope_target_history.items()
+    }
+    visitor = _CallTargetVisitor(runtime_module_targets, runtime_scope_targets)
     visitor.visit(tree)
     return visitor.targets
 
@@ -658,6 +700,18 @@ def test_composition_root_contract_rejects_runtime_component_in_support_module(
             "WriteCoordinator",
         ),
         (
+            "from decoy import Other\n"
+            "from korvid.ui.workspace_controller import WriteCoordinator\n"
+            "def outer():\n"
+            "    Factory = Other\n"
+            "    def build():\n"
+            "        Factory()\n"
+            "    Factory = WriteCoordinator\n"
+            "    build()\n"
+            "outer()\n",
+            "WriteCoordinator",
+        ),
+        (
             "from decoy import Other as Factory\n"
             "from korvid.ui.workspace_controller import WriteCoordinator\n"
             "def rebind():\n"
@@ -720,6 +774,7 @@ def test_composition_root_contract_rejects_runtime_component_in_support_module(
         "zero-iteration-for",
         "no-match-case",
         "late-global-rebind",
+        "late-closure-rebind",
         "global-rebind",
         "nonlocal-rebind",
         "positional-default",
@@ -820,6 +875,13 @@ def test_tests_construct_apps_only_through_the_factory() -> None:
         "    Factory()\n"
         "from korvid.ui.app import KorvidApp as Factory\n"
         "build()\n",
+        "from korvid.ui.app import KorvidApp\n"
+        "def outer():\n"
+        "    def build():\n"
+        "        Factory()\n"
+        "    Factory = KorvidApp\n"
+        "    build()\n"
+        "outer()\n",
         "from decoy import Other as Factory\n"
         "from korvid.ui.app import KorvidApp\n"
         "def rebind():\n"
@@ -869,6 +931,7 @@ def test_tests_construct_apps_only_through_the_factory() -> None:
         "zero-iteration-for",
         "no-match-case",
         "late-global-rebind",
+        "late-closure-rebind",
         "global-rebind",
         "nonlocal-rebind",
         "positional-default",
