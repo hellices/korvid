@@ -47,6 +47,7 @@ RUNTIME_COMPONENTS = {
     "OperatorController",
     "ProposalController",
     "RelationshipSnapshotLoader",
+    "_RelationshipLister",
     "ResourceInspectController",
     "ResourceWriteController",
     "SessionTimelineController",
@@ -447,6 +448,10 @@ def test_composition_root_contract_rejects_runtime_component_in_support_module(
             "AppUIBridge",
         ),
         (
+            "from korvid.ui.app_surfaces import _RelationshipLister as Lister\nLister(None)\n",
+            "_RelationshipLister",
+        ),
+        (
             "from korvid.ui.workspace_controller import WriteCoordinator\n"
             "if TYPE_CHECKING:\n"
             "    from decoy import Other as WriteCoordinator\n"
@@ -539,6 +544,7 @@ def test_composition_root_contract_rejects_runtime_component_in_support_module(
         "qualified",
         "imported-alias",
         "app-ui-bridge",
+        "relationship-lister",
         "type-checking-shadow",
         "nested-shadow",
         "later-shadow",
