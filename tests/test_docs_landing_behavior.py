@@ -223,7 +223,12 @@ def _terminate_and_reap(process: subprocess.Popen[bytes], poll_state: int | None
         diagnostics.append(f"kill=error type={type(error).__name__}")
         diagnostics.append(f"reap={_bounded_process_wait(process)}")
         return "; ".join(diagnostics)
-    process.wait()
+    try:
+        process.wait()
+    except OSError as error:
+        diagnostics.append("kill=sent")
+        diagnostics.append(f"reap=error type={type(error).__name__}")
+        return "; ".join(diagnostics)
     diagnostics.append("kill=reaped")
     return "; ".join(diagnostics)
 
@@ -250,6 +255,9 @@ def _run_harness(name: str) -> subprocess.CompletedProcess[str]:
         )
         try:
             returncode = process.wait(timeout=_HARNESS_TIMEOUT)
+        except OSError:
+            _terminate_and_reap(process, None)
+            raise
         except subprocess.TimeoutExpired as error:
             poll_state = process.poll()
             elapsed_ms = max(0, int((monotonic() - started) * 1000))
@@ -519,6 +527,47 @@ def test_harness_timeout_preserves_bounded_diagnostics(
     assert _bounded_timeout_output("complete string") == "complete string"
 
 
+def test_harness_reaps_child_before_reraising_initial_wait_os_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    resolved = str(ROOT / "node-wait-error.exe")
+    initial_error = PermissionError("initial wait failed")
+
+    class FakeProcess:
+        pid = 5151
+
+        def wait(self, timeout: float | None = None) -> int:
+            events.append(f"wait:{timeout}")
+            if timeout == _HARNESS_TIMEOUT:
+                raise initial_error
+            return -15
+
+        def poll(self) -> int | None:
+            raise AssertionError("wait-error cleanup must not trust the failed process handle")
+
+        def terminate(self) -> None:
+            events.append("terminate")
+
+        def kill(self) -> None:
+            raise AssertionError("a process reaped after terminate must not be killed")
+
+    def popen(command: list[str], **options: object) -> FakeProcess:
+        assert command[-1] == str(JS_TESTS / "harness_wait_error.mjs")
+        assert options["stdin"] is subprocess.DEVNULL
+        events.append("spawn")
+        return FakeProcess()
+
+    monkeypatch.setattr(shutil, "which", lambda executable: resolved)
+    monkeypatch.setattr(subprocess, "Popen", popen)
+
+    with pytest.raises(PermissionError, match="initial wait failed") as raised:
+        _run_harness("harness_wait_error.mjs")
+
+    assert raised.value is initial_error
+    assert events == ["spawn", "wait:10", "terminate", "wait:2"]
+
+
 def test_harness_timeout_escalates_from_terminate_to_kill() -> None:
     events: list[str] = []
 
@@ -593,6 +642,30 @@ def test_harness_timeout_bounds_reap_when_kill_itself_fails() -> None:
 
     assert process.calls == ["terminate", "wait:2", "kill", "wait:2"]
     assert result == "kill=error type=PermissionError; reap=timed-out"
+
+
+def test_harness_timeout_preserves_diagnostics_when_final_reap_wait_fails() -> None:
+    class FakeProcess:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def terminate(self) -> None:
+            self.calls.append("terminate")
+
+        def kill(self) -> None:
+            self.calls.append("kill")
+
+        def wait(self, timeout: float | None = None) -> int:
+            self.calls.append(f"wait:{timeout}")
+            if timeout is not None:
+                raise subprocess.TimeoutExpired("node", timeout)
+            raise ChildProcessError("wait failed")
+
+    process = FakeProcess()
+    result = _terminate_and_reap(cast(Any, process), poll_state=None)
+
+    assert process.calls == ["terminate", "wait:2", "kill", "wait:None"]
+    assert result == "kill=sent; reap=error type=ChildProcessError"
 
 
 @pytest.mark.parametrize("failure_point", ["terminate", "wait"])

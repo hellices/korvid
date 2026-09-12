@@ -61,24 +61,48 @@ def _tree(name: str) -> ast.Module:
     return ast.parse((UI / name).read_text(encoding="utf-8"), filename=name)
 
 
-def _called_names(tree: ast.AST) -> set[str]:
+def _imported_symbol_aliases(tree: ast.AST) -> dict[str, str]:
+    """Map local names created by from-imports to their declared symbols."""
     return {
-        node.func.id
+        alias.asname or alias.name: alias.name
         for node in ast.walk(tree)
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        if isinstance(node, ast.ImportFrom)
+        for alias in node.names
     }
+
+
+def _call_target_name(target: ast.expr, aliases: dict[str, str]) -> str | None:
+    """Return the declared terminal symbol for a direct or qualified call."""
+    if isinstance(target, ast.Name):
+        return aliases.get(target.id, target.id)
+    if isinstance(target, ast.Attribute):
+        return target.attr
+    return None
+
+
+def _call_targets(tree: ast.AST) -> list[tuple[int, str]]:
+    aliases = _imported_symbol_aliases(tree)
+    targets: list[tuple[int, str]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            target = _call_target_name(node.func, aliases)
+            if target is not None:
+                targets.append((node.lineno, target))
+    return targets
+
+
+def _called_names(tree: ast.AST) -> set[str]:
+    return {name for _, name in _call_targets(tree)}
 
 
 def _runtime_component_constructions() -> set[str]:
     """Return runtime-component constructions outside the composition root."""
     return {
-        f"{path.relative_to(KORVID)}:{node.lineno}: {node.func.id}"
+        f"{path.relative_to(KORVID)}:{line}: {name}"
         for path in KORVID.rglob("*.py")
         if path != KORVID / "__main__.py"
-        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name)
-        and node.func.id in RUNTIME_COMPONENTS
+        for line, name in _call_targets(ast.parse(path.read_text(encoding="utf-8")))
+        if name in RUNTIME_COMPONENTS
     }
 
 
@@ -174,17 +198,75 @@ def test_composition_root_contract_rejects_runtime_component_in_support_module(
         test_only_the_composition_root_constructs_the_app_runtime()
 
 
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        (
+            "import korvid.ui.workspace_controller as controllers\n"
+            "controllers.WriteCoordinator()\n",
+            "WriteCoordinator",
+        ),
+        (
+            "from korvid.ui.workspace_controller import "
+            "WorkspaceController as Coordinator\nCoordinator()\n",
+            "WorkspaceController",
+        ),
+    ],
+    ids=["qualified", "imported-alias"],
+)
+def test_composition_root_contract_rejects_indirect_runtime_construction(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    source: str,
+    expected: str,
+) -> None:
+    support_module = tmp_path / "composition_support.py"
+    support_module.write_text(source, encoding="utf-8")
+    monkeypatch.setitem(globals(), "KORVID", tmp_path)
+
+    with pytest.raises(
+        AssertionError,
+        match=rf"composition_support\.py:\d+: {expected}",
+    ):
+        test_only_the_composition_root_constructs_the_app_runtime()
+
+
 def test_tests_construct_apps_only_through_the_factory() -> None:
     direct_constructions = {
-        f"{path.relative_to(ROOT)}:{node.lineno}: {node.func.id}"
+        f"{path.relative_to(ROOT)}:{line}: {name}"
         for path in TESTS.rglob("*.py")
         if path != TEST_APP_FACTORY
-        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name)
-        and node.func.id.endswith("KorvidApp")
+        for line, name in _call_targets(ast.parse(path.read_text(encoding="utf-8")))
+        if name.endswith("KorvidApp")
     }
     assert not direct_constructions, "\n".join(sorted(direct_constructions))
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "import korvid.ui.app as app\napp.KorvidApp()\n",
+        "from korvid.ui.app import KorvidApp as App\nApp()\n",
+    ],
+    ids=["qualified", "imported-alias"],
+)
+def test_factory_contract_rejects_indirect_app_construction(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    source: str,
+) -> None:
+    factory = tmp_path / "app_factory.py"
+    factory.write_text("# approved factory\n", encoding="utf-8")
+    (tmp_path / "test_direct.py").write_text(source, encoding="utf-8")
+    monkeypatch.setitem(globals(), "ROOT", tmp_path)
+    monkeypatch.setitem(globals(), "TESTS", tmp_path)
+    monkeypatch.setitem(globals(), "TEST_APP_FACTORY", factory)
+
+    with pytest.raises(
+        AssertionError,
+        match=r"test_direct\.py:\d+: KorvidApp",
+    ):
+        test_tests_construct_apps_only_through_the_factory()
 
 
 def test_app_runtime_can_be_bound_only_once() -> None:

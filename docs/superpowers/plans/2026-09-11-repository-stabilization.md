@@ -711,8 +711,9 @@ CommonJS/ESM harnesses, GitHub Actions YAML, GitHub REST API, pre-commit.
   Assert the Windows job prints `${{ github.run_id }}` and passes it once as
   `--randomly-seed=${{ github.run_id }}` to the non-retried full-suite command.
   Assert `ty-experimental` syncs `--locked --dev --all-extras`, then runs
-  `uv run --with ty ty check src/`, contains no `|| true`, and retains
-  job-level `continue-on-error: true`.
+  `uv run --with ty ty check src/`, contains no `|| true`, leaves setup
+  failures blocking, and sets `continue-on-error: true` only on the analyzer
+  step.
 
 - [ ] **Step 2: Run workflow tests and verify RED**
 

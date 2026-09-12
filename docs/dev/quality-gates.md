@@ -159,9 +159,9 @@ indefinitely.
 The Windows full-suite command prints and consumes `${{ github.run_id }}` as
 its single `pytest-randomly` seed, making a failed order reproducible without
 retrying the suite. The `ty-experimental` job syncs the locked development
-environment and runs `uv run --with ty ty check src/`; its job-level
-`continue-on-error` records a real failure while keeping this second type
-checker advisory.
+environment and runs `uv run --with ty ty check src/`; only that analyzer
+step has `continue-on-error`, so checkout and setup failures remain blocking
+while this second type checker stays advisory.
 
 ### Windows documentation harness lifecycle diagnostics
 
