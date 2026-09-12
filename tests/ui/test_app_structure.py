@@ -31,6 +31,7 @@ RUNTIME_COMPONENTS = {
     "AppRuntime",
     "AppSessionConfiguration",
     "AppTransferScreens",
+    "AppUIBridge",
     "AppUiSurface",
     "AppViewState",
     "AppWorkspaceSurface",
@@ -211,8 +212,12 @@ def test_composition_root_contract_rejects_runtime_component_in_support_module(
             "WorkspaceController as Coordinator\nCoordinator()\n",
             "WorkspaceController",
         ),
+        (
+            "from korvid.ui.app_surfaces import AppUIBridge as Bridge\nBridge(None)\n",
+            "AppUIBridge",
+        ),
     ],
-    ids=["qualified", "imported-alias"],
+    ids=["qualified", "imported-alias", "app-ui-bridge"],
 )
 def test_composition_root_contract_rejects_indirect_runtime_construction(
     monkeypatch: pytest.MonkeyPatch,

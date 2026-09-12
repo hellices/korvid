@@ -1750,6 +1750,43 @@ class _FakeKubeForWiring:
         return None
 
 
+async def test_wire_and_run_assembles_app_before_ui_publication(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The shell must be fully assembled before any live port can publish it."""
+    import korvid.__main__ as main_mod
+    from korvid.core.config import KorvidConfig
+
+    events: list[tuple[str, object]] = []
+
+    class RecordingApp(_FakeAppCapturesKwargs):
+        async def run_async(self) -> None:
+            events.append(("run", self))
+
+    class RecordingBridge:
+        def __init__(self, app: object) -> None:
+            events.append(("publish", app))
+
+    def assemble(app: RecordingApp) -> RecordingApp:
+        events.append(("assemble", app))
+        return app
+
+    monkeypatch.setattr(main_mod, "KorvidApp", RecordingApp)
+    monkeypatch.setattr(main_mod, "assemble_app_runtime", assemble)
+    monkeypatch.setattr(main_mod, "AppUIBridge", RecordingBridge)
+    _FakeAppCapturesKwargs.instances.clear()
+
+    state = main_mod._RunState()
+    await main_mod._wire_and_run(
+        KorvidConfig(readonly=True), cast("Any", _FakeKubeForWiring()), state
+    )
+    if state.discovery_box:
+        await state.discovery_box[0]
+
+    app = _FakeAppCapturesKwargs.instances[0]
+    assert events == [("assemble", app), ("publish", app), ("run", app)]
+
+
 async def test_wire_and_run_wires_relationship_lister_from_kube(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -113,7 +113,7 @@ def make_app(
     readonly: bool = False,
     permitted: bool | None = None,
     check_calls: list[tuple[str, str, str, str | None, str, str]] | None = None,
-    get_manifest: object = None,
+    get_manifest: (Callable[[str, str | None, str], Awaitable[dict[str, Any]]] | None) = None,
     pod_uid: str | None = "pod-uid-1",
     relationship_calls: list[tuple[str, str | None]] | None = None,
     relationship_lister: (

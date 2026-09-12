@@ -2,22 +2,33 @@
 
 from __future__ import annotations
 
-from typing import Any, TypeVar, overload
+from collections.abc import Callable
+from typing import ParamSpec, TypeVar
 
 from korvid.__main__ import assemble_app_runtime
 from korvid.ui.app import KorvidApp
 
 AppT = TypeVar("AppT", bound=KorvidApp)
+AppP = ParamSpec("AppP")
 
 
-@overload
-def build_test_app(**kwargs: Any) -> KorvidApp: ...
+def _bind_test_app_factory(app_type: Callable[AppP, AppT], /) -> Callable[AppP, AppT]:
+    """Bind a fully typed constructor to the runtime assembler."""
+
+    def build(*args: AppP.args, **kwargs: AppP.kwargs) -> AppT:
+        return assemble_app_runtime(app_type(*args, **kwargs))
+
+    return build
 
 
-@overload
-def build_test_app(app_type: type[AppT], /, **kwargs: Any) -> AppT: ...
+build_test_app = _bind_test_app_factory(KorvidApp)
 
 
-def build_test_app(app_type: type[KorvidApp] = KorvidApp, /, **kwargs: Any) -> KorvidApp:
-    """Construct an app shell and bind its production runtime graph."""
-    return assemble_app_runtime(app_type(**kwargs))
+def build_test_subclass(
+    app_type: Callable[AppP, AppT],
+    /,
+    *args: AppP.args,
+    **kwargs: AppP.kwargs,
+) -> AppT:
+    """Construct and fully wire an explicitly selected app subclass."""
+    return assemble_app_runtime(app_type(*args, **kwargs))

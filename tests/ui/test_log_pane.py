@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json as _json
-from collections.abc import AsyncGenerator, AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from datetime import UTC, datetime
 from typing import Any
 
@@ -138,7 +138,7 @@ class FakeStream:
 
 def make_app(
     pods: list[PodSummary],
-    stream_logs: object = None,
+    stream_logs: Callable[..., AsyncIterator[LogLine]] | None = None,
 ) -> KorvidApp:
     store = ResourceStore()
 

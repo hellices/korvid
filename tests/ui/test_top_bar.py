@@ -5,7 +5,7 @@ degradation, and config persistence."""
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 
 import yaml
@@ -185,7 +185,7 @@ def _pod(name: str) -> PodSummary:
 def make_app(
     *,
     config: KorvidConfig | None = None,
-    save_topbar: object = None,
+    save_topbar: Callable[[bool], None] | None = None,
 ) -> KorvidApp:
     store = ResourceStore()
 

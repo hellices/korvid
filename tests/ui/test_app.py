@@ -1,5 +1,5 @@
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +17,7 @@ from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
 from korvid.core.watch import WatchManager, WatchSource
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.errors import ApiStatusError
+from korvid.k8s.logs import LogLine
 from korvid.k8s.models import GenericSummary, PodSummary
 from korvid.ui.app import KorvidApp
 from korvid.ui.widgets.resource_table import ResourceTable
@@ -590,7 +591,7 @@ def _pod_with_container(name: str, ns: str = "default") -> PodSummary:
     )
 
 
-def _make_log_app(stream_logs: object) -> KorvidApp:
+def _make_log_app(stream_logs: Callable[..., AsyncIterator[LogLine]]) -> KorvidApp:
     """App with one pod and an injected stream_logs callable."""
     pod = _pod_with_container("my-pod")
     store = ResourceStore()

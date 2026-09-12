@@ -97,7 +97,7 @@ from korvid.k8s.telemetry import ReadTelemetry
 from korvid.k8s.watch_events import WatchEvent, WatchProgress
 from korvid.ui.widgets.describe_screen import DescribeScreen
 from korvid.ui.widgets.resource_table import ResourceTable
-from tests.app_factory import build_test_app
+from tests.app_factory import build_test_subclass
 from tests.performance import manifests
 from tests.performance.metrics import (
     BenchmarkRecorder,
@@ -1704,7 +1704,7 @@ async def run_live_replay(
                     node_pools=facts.node_pools,
                 )
 
-                app = build_test_app(
+                app = build_test_subclass(
                     MeasuredKorvidApp,
                     config=KorvidConfig(
                         namespace=ALL_NAMESPACES,

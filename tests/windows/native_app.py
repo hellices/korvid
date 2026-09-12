@@ -26,7 +26,7 @@ from korvid.ui.app import KorvidApp
 from korvid.ui.widgets.filter_bar import FilterBar
 from korvid.ui.widgets.help_screen import HelpScreen
 from korvid.ui.widgets.resource_table import ResourceTable
-from tests.app_factory import build_test_app
+from tests.app_factory import build_test_subclass
 
 _PODS_META = ResourceMeta("Pod", "pods", "", "v1", True, ("po",))
 _ALIASES = {"pods": _PODS_META, "po": _PODS_META, "pod": _PODS_META}
@@ -242,7 +242,7 @@ def _make_app() -> _ObservedKorvidApp:
     async def list_namespaces() -> list[str]:
         return ["default"]
 
-    return build_test_app(
+    return build_test_subclass(
         _ObservedKorvidApp,
         config=KorvidConfig(namespace="default"),
         store=store,

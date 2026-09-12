@@ -21,7 +21,7 @@ from korvid.core.watch import WatchManager
 from korvid.k8s.models import PodSummary
 from korvid.ui.messages import ResourcesUpdated
 from korvid.ui.widgets.resource_table import ResourceTable, _cells_equal
-from tests.app_factory import build_test_app
+from tests.app_factory import build_test_subclass
 from tests.performance import replay as replay_module
 from tests.performance.manifests import TICK_LABEL
 from tests.performance.metrics import BenchmarkRecorder, RunManifest, UpdateLatencyKind
@@ -458,7 +458,7 @@ async def test_measured_app_counts_only_resource_update_renders() -> None:
     Counting those inflates `render_passes` and lets an unrelated repaint flush
     the pending-event backlog, so only store-driven renders may be recorded."""
     recorder = BenchmarkRecorder()
-    app = build_test_app(
+    app = build_test_subclass(
         MeasuredKorvidApp,
         config=KorvidConfig(namespace=ALL_NAMESPACES),
         store=ResourceStore(),
@@ -500,7 +500,7 @@ async def test_metadata_only_event_records_a_render_sample_without_changing_cell
             yield ("ADDED", pod)
         await asyncio.Event().wait()
 
-    app = build_test_app(
+    app = build_test_subclass(
         MeasuredKorvidApp,
         config=KorvidConfig(namespace="default"),
         store=store,

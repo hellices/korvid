@@ -8,8 +8,9 @@ mid-drain cancellation (the node stays cordoned).
 
 import asyncio
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
+from typing import cast
 
 import pytest
 from textual.css.query import NoMatches
@@ -1141,7 +1142,7 @@ class _BlockingGraphLister:
 def _make_app_with_custom_lister(
     recorder: NodeRecorder,
     audit_path: Path,
-    lister: object,
+    lister: Callable[[ResourceMeta, str | None], Awaitable[list[Summary]]],
 ) -> KorvidApp:
     """Minimal KorvidApp fixture wired with an arbitrary list_relationship_objects."""
     store = ResourceStore()
@@ -1178,8 +1179,11 @@ def _make_app_with_custom_lister(
         write_ops=recorder,
         audit=AuditLog(audit_path),
         check_permission=None,
-        # Race fakes return the broader Summary union used by relationship loading.
-        list_relationship_objects=lister,
+        # Runtime summaries are a wider union than the client's legacy annotation.
+        list_relationship_objects=cast(
+            Callable[[ResourceMeta, str | None], Awaitable[list[GenericSummary]]],
+            lister,
+        ),
     )
 
 

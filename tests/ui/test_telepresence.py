@@ -5,13 +5,13 @@ and the one-shot install hint."""
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 
 from korvid.core.config import KorvidConfig
 from korvid.core.store import ResourceStore, Summary
 from korvid.core.watch import WatchManager
 from korvid.k8s.discovery import PODS_META
-from korvid.k8s.telepresence import ActiveIntercept, TelepresenceStatus
+from korvid.k8s.telepresence import ActiveIntercept, TelepresenceCLI, TelepresenceStatus
 from korvid.ui.app import KorvidApp
 from korvid.ui.widgets.telepresence_screen import (
     TelepresenceScreen,
@@ -25,7 +25,7 @@ from .waits import until
 _ALIASES = {"pods": PODS_META}
 
 
-class FakeTelepresence:
+class FakeTelepresence(TelepresenceCLI):
     """CLI double: canned status/intercepts, call recording."""
 
     def __init__(
@@ -33,6 +33,7 @@ class FakeTelepresence:
         status: TelepresenceStatus | None = None,
         intercepts: list[ActiveIntercept] | None = None,
     ) -> None:
+        super().__init__("telepresence-test-double")
         self.status_result = status or TelepresenceStatus(
             connected=False, user_running=False, root_running=False
         )
@@ -51,7 +52,7 @@ class FakeTelepresence:
 def make_app(
     *,
     telepresence: FakeTelepresence | None = None,
-    probe: object = None,
+    probe: Callable[[], Awaitable[bool]] | None = None,
 ) -> KorvidApp:
     store = ResourceStore()
 
