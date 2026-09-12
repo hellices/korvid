@@ -217,15 +217,14 @@ def _terminate_and_reap(process: subprocess.Popen[bytes], poll_state: int | None
     if wait_status != "timed-out":
         diagnostics.append(f"wait={wait_status}")
 
-    kill_failed = False
     try:
         process.kill()
     except OSError as error:
         diagnostics.append(f"kill=error type={type(error).__name__}")
-        kill_failed = True
+        diagnostics.append(f"reap={_bounded_process_wait(process)}")
+        return "; ".join(diagnostics)
     process.wait()
-    prefix = "reap" if kill_failed else "kill"
-    diagnostics.append(f"{prefix}=reaped")
+    diagnostics.append("kill=reaped")
     return "; ".join(diagnostics)
 
 
@@ -571,6 +570,29 @@ def test_harness_timeout_waits_without_another_deadline_after_kill() -> None:
 
     assert result == "kill=reaped"
     assert events == ["terminate", "wait:2", "kill", "wait:None"]
+
+
+def test_harness_timeout_bounds_reap_when_kill_itself_fails() -> None:
+    class FakeProcess:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def terminate(self) -> None:
+            self.calls.append("terminate")
+
+        def kill(self) -> None:
+            self.calls.append("kill")
+            raise PermissionError("denied")
+
+        def wait(self, timeout: float | None = None) -> int:
+            self.calls.append(f"wait:{timeout}")
+            raise subprocess.TimeoutExpired("node", timeout or 0)
+
+    process = FakeProcess()
+    result = _terminate_and_reap(cast(Any, process), poll_state=None)
+
+    assert process.calls == ["terminate", "wait:2", "kill", "wait:2"]
+    assert result == "kill=error type=PermissionError; reap=timed-out"
 
 
 @pytest.mark.parametrize("failure_point", ["terminate", "wait"])
