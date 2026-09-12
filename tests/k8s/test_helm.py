@@ -11,6 +11,7 @@ import base64
 import gzip
 import json
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from typing import Any, TypeVar
 
 import pytest
@@ -346,7 +347,7 @@ from unittest.mock import AsyncMock, MagicMock, patch  # noqa: E402
 from korvid.k8s.client import KubeClient  # noqa: E402
 from korvid.k8s.errors import ApiStatusError  # noqa: E402
 
-from .test_client import _FakeWatch  # noqa: E402
+from .test_client import _FakeWatch, _take_polls  # noqa: E402
 
 
 class TestWatchHelmReleases:
@@ -447,6 +448,33 @@ class TestWatchHelmReleases:
                 assert isinstance(row, HelmReleaseSummary)
                 collected.append((ev, row.name, row.revision))
         assert collected == [("SNAPSHOT", "web", 1), ("SNAPSHOT", "web", 2)]
+
+    @pytest.mark.parametrize("revisions", [False, True], ids=["releases", "revisions"])
+    async def test_unchanged_helm_poll_emits_only_progress(self, revisions: bool) -> None:
+        client = KubeClient()
+        meta = replace(HELM_REVISIONS_META if revisions else HELM_RELEASES_META, watchable=False)
+        snapshots = [
+            {"items": [_secret("web", 1), _secret("web", 2)]},
+            {"items": [_secret("web", 2), _secret("web", 1)]},
+            {"items": [_secret("web", 1), _secret("web", 2)]},
+        ]
+        projector = revision_from_secret if revisions else release_from_secret
+        with (
+            patch.object(client, "_api", MagicMock()),
+            patch.object(client, "_request_json", AsyncMock(side_effect=snapshots)),
+            patch("korvid.k8s.client.LIST_POLL_INTERVAL", 0.0),
+            patch(f"korvid.k8s.client.{projector.__name__}", wraps=projector) as project,
+        ):
+            events = await _take_polls(client.watch_resources(meta, "default"), 2)
+
+        rows = [event for event in events if not isinstance(event, WatchProgress)]
+        expected_names = ["web.v1", "web.v2"] if revisions else ["web", "web"]
+        assert [(event_type, summary.name) for event_type, summary in rows] == [
+            ("SNAPSHOT", name) for name in expected_names
+        ]
+        assert events[2:] == [WatchProgress.POLL, WatchProgress.POLL]
+        assert project.call_count == 6
+        assert all(not item for snapshot in snapshots for item in snapshot["items"])
 
     async def test_watch_events_flow_through_tracker(self) -> None:
         client = KubeClient()

@@ -4,6 +4,8 @@ pods are flagged, and PDB-violating evictions are called out up front."""
 
 from typing import Any
 
+import pytest
+
 from korvid.k8s.drain import DrainPlan, build_drain_plan, is_pdb_denial
 from korvid.k8s.errors import ApiStatusError
 
@@ -299,6 +301,69 @@ def test_stale_pdb_status_blocks_fail_safe() -> None:
     pdb["status"]["observedGeneration"] = 2
     plan = build_drain_plan([_pod("web-1", labels={"app": "web"})], [pdb])
     assert plan.targets[0].pdb_blocked == "web-pdb (status not up to date)"
+
+
+@pytest.mark.parametrize("policy", [None, "IfHealthyBudget"])
+@pytest.mark.parametrize(
+    ("current", "desired", "blocked"),
+    [(1, 2, True), (2, 2, False), (3, 2, False), (0, 0, True), (1, 0, True)],
+)
+def test_unready_pod_if_healthy_budget_boundary(
+    policy: str | None, current: int, desired: int, blocked: bool
+) -> None:
+    pdb = _pdb("web-pdb", match_labels={"app": "web"})
+    if policy is not None:
+        pdb["spec"]["unhealthyPodEvictionPolicy"] = policy
+    pdb["metadata"]["generation"] = 1
+    pdb["status"].update(observedGeneration=1, currentHealthy=current, desiredHealthy=desired)
+
+    plan = build_drain_plan([_pod("web-1", labels={"app": "web"})], [pdb])
+
+    assert (plan.targets[0].pdb_blocked is not None) is blocked
+
+
+def test_if_healthy_budget_exemption_preserves_the_ready_pod_allowance() -> None:
+    pdb = _pdb("web-pdb", match_labels={"app": "web"}, disruptions_allowed=1)
+    pdb["status"].update(currentHealthy=3, desiredHealthy=2)
+    unready = _pod("web-1", labels={"app": "web"})
+    ready = _pod("web-2", labels={"app": "web"})
+    ready["status"]["conditions"] = [{"type": "Ready", "status": "True"}]
+    another_ready = _pod("web-3", labels={"app": "web"})
+    another_ready["status"]["conditions"] = [{"type": "Ready", "status": "True"}]
+
+    plan = build_drain_plan([unready, ready, another_ready], [pdb])
+
+    assert [target.pdb_blocked for target in plan.targets] == [None, None, "web-pdb"]
+
+
+def test_stale_if_healthy_budget_status_still_blocks_an_unready_pod() -> None:
+    pdb = _pdb("web-pdb", match_labels={"app": "web"})
+    pdb["metadata"]["generation"] = 3
+    pdb["status"].update(observedGeneration=2, currentHealthy=3, desiredHealthy=2)
+
+    plan = build_drain_plan([_pod("web-1", labels={"app": "web"})], [pdb])
+
+    assert plan.targets[0].pdb_blocked == "web-pdb (status not up to date)"
+
+
+def test_multiple_matching_healthy_budgets_still_block_an_unready_pod() -> None:
+    budgets = [_pdb("pdb-a"), _pdb("pdb-b")]
+    for budget in budgets:
+        budget["status"].update(currentHealthy=3, desiredHealthy=2)
+
+    plan = build_drain_plan([_pod("web-1")], budgets)
+
+    assert "multiple PDBs match" in (plan.targets[0].pdb_blocked or "")
+
+
+@pytest.mark.parametrize(("current", "desired"), [(None, 2), (3, None), ("3", 2), (True, 1)])
+def test_unusable_healthy_counts_do_not_exempt_an_unready_pod(current: Any, desired: Any) -> None:
+    pdb = _pdb("web-pdb")
+    pdb["status"].update(currentHealthy=current, desiredHealthy=desired)
+
+    plan = build_drain_plan([_pod("web-1")], [pdb])
+
+    assert plan.targets[0].pdb_blocked == "web-pdb"
 
 
 def test_stale_pdb_status_does_not_override_always_allow_unhealthy() -> None:

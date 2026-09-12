@@ -11,8 +11,9 @@ from typing import Any
 import httpx
 import pytest
 
-from korvid.obs.connector import ConnectorError, QueryLimits, QueryScope
-from korvid.obs.loki import LokiConnector
+from korvid.obs.connector import ConnectorError, QueryLimits, QueryScope, render_logs
+from korvid.obs.http import Answer
+from korvid.obs.loki import LokiConnector, _stream_lines
 from tests.obs import skeleton
 
 SCOPE = QueryScope(namespace="prod", workload="api")
@@ -281,7 +282,7 @@ class TestRoundOneReviewFindings:
         assert len(result.lines) == 2
         assert result.truncated is True
 
-    async def test_a_partial_raw_page_is_still_not_truncated(self) -> None:
+    async def test_a_partial_raw_page_with_omissions_is_incomplete(self) -> None:
         payload = {
             "status": "success",
             "data": {
@@ -293,4 +294,175 @@ class TestRoundOneReviewFindings:
         }
         connector, _ = _connector(_ok(payload), limits=QueryLimits(max_lines=3))
         result = await connector.search(scope=SCOPE)
-        assert result.truncated is False
+        assert result.truncated is True
+        assert result.omitted_entries == 1
+        assert "no log lines matched" not in render_logs(result)
+
+
+@pytest.mark.parametrize("include_valid", [False, True])
+async def test_malformed_log_entries_are_reported_as_incomplete(include_valid: bool) -> None:
+    values: list[Any] = [[str(NS), "kept"]] if include_valid else []
+    values.extend([["bad timestamp", "dropped"], [str(NS), None], "junk"])
+    payload = _streams()
+    payload["data"]["result"] = [{"stream": {"pod": "api-1"}, "values": values}]
+    connector, _ = _connector(_ok(payload))
+
+    result = await connector.search(scope=SCOPE)
+    rendered = render_logs(result)
+
+    assert [line.line for line in result.lines] == (["kept"] if include_valid else [])
+    assert result.truncated is True
+    assert result.omitted_entries == 3
+    assert "omitted unusable entries: 3" in rendered
+    assert "truncated: yes" in rendered
+    assert "no log lines matched" not in rendered
+    if not include_valid:
+        assert "no usable log lines remained" in rendered
+
+
+@pytest.mark.parametrize("bad_stream", [None, "junk", {}, {"values": "not a list"}])
+@pytest.mark.parametrize("include_valid", [False, True])
+async def test_malformed_streams_cannot_become_complete_empty_results(
+    bad_stream: Any, include_valid: bool
+) -> None:
+    payload = _streams(*([("api-1", NS, "kept")] if include_valid else []))
+    payload["data"]["result"].append(bad_stream)
+    connector, _ = _connector(_ok(payload))
+
+    result = await connector.search(scope=SCOPE)
+
+    assert [line.line for line in result.lines] == (["kept"] if include_valid else [])
+    assert result.truncated is True
+    assert result.omitted_entries == 1
+    assert "no log lines matched" not in render_logs(result)
+
+
+@pytest.mark.parametrize(
+    "bad_stream",
+    [
+        pytest.param({"values": []}, id="missing-labels"),
+        pytest.param({"stream": None, "values": []}, id="null-labels"),
+        pytest.param({"stream": "bad-labels", "values": []}, id="string-labels"),
+        pytest.param({"stream": [], "values": []}, id="list-labels"),
+    ],
+)
+@pytest.mark.parametrize("include_valid", [False, True])
+async def test_malformed_label_containers_cannot_become_complete_empty_results(
+    bad_stream: Any, include_valid: bool
+) -> None:
+    payload = _streams(*([("api-1", NS, "kept")] if include_valid else []))
+    payload["data"]["result"].insert(0, bad_stream)
+    connector, _ = _connector(_ok(payload))
+
+    result = await connector.search(scope=SCOPE)
+    rendered = render_logs(result)
+
+    assert [(entry.line, entry.labels) for entry in result.lines] == (
+        [("kept", {"pod": "api-1"})] if include_valid else []
+    )
+    assert result.truncated is True
+    assert result.omitted_entries == 1
+    assert result.scope == SCOPE
+    assert "omitted unusable entries: 1" in rendered
+    assert "truncated: yes" in rendered
+    assert "no log lines matched" not in rendered
+    if not include_valid:
+        assert "no usable log lines remained" in rendered
+
+
+async def test_malformed_stream_labels_omit_entries_without_losing_sibling_streams() -> None:
+    payload = _streams(("api-1", NS, "first"), ("api-2", NS + 3, "last"))
+    payload["data"]["result"].insert(
+        1,
+        {
+            "stream": "bad-labels",
+            "values": [[str(NS + 1), "dropped first"], [str(NS + 2), "dropped second"]],
+        },
+    )
+    connector, _ = _connector(_ok(payload))
+
+    result = await connector.search(scope=SCOPE)
+    rendered = render_logs(result)
+
+    assert [(entry.line, entry.labels) for entry in result.lines] == [
+        ("first", {"pod": "api-1"}),
+        ("last", {"pod": "api-2"}),
+    ]
+    assert result.omitted_entries == 2
+    assert result.truncated is True
+    assert "omitted unusable entries: 2" in rendered
+    assert "truncated: yes" in rendered
+    assert "dropped first" not in rendered
+    assert "dropped second" not in rendered
+
+
+@pytest.mark.parametrize(
+    "label_value",
+    [
+        pytest.param(None, id="null"),
+        pytest.param(42, id="integer"),
+        pytest.param(1.5, id="float"),
+        pytest.param(True, id="boolean"),
+        pytest.param([], id="list"),
+        pytest.param({}, id="object"),
+    ],
+)
+@pytest.mark.parametrize("entry_count", [0, 2])
+@pytest.mark.parametrize("include_valid", [False, True])
+async def test_non_string_label_values_are_reported_as_incomplete(
+    label_value: Any, entry_count: int, include_valid: bool
+) -> None:
+    payload = _streams(
+        *([("api-1", NS, "first"), ("api-2", NS + 3, "last")] if include_valid else [])
+    )
+    payload["data"]["result"].insert(
+        1,
+        {
+            "stream": {"app": "api", "pod": label_value},
+            "values": [[str(NS + offset + 1), "unusable"] for offset in range(entry_count)],
+        },
+    )
+    connector, _ = _connector(_ok(payload))
+
+    result = await connector.search(scope=SCOPE)
+    rendered = render_logs(result)
+
+    assert [(entry.line, entry.labels) for entry in result.lines] == (
+        [("first", {"pod": "api-1"}), ("last", {"pod": "api-2"})] if include_valid else []
+    )
+    assert result.omitted_entries == max(1, entry_count)
+    assert result.truncated is True
+    assert result.scope == SCOPE
+    assert f"omitted unusable entries: {max(1, entry_count)}" in rendered
+    assert "truncated: yes" in rendered
+    assert "no log lines matched" not in rendered
+    if not include_valid:
+        assert "no usable log lines remained" in rendered
+
+
+@pytest.mark.parametrize("label_key", [None, 42])
+@pytest.mark.parametrize("entry_count", [0, 2])
+def test_non_string_label_keys_are_omitted(label_key: Any, entry_count: int) -> None:
+    stream = {
+        "stream": {"pod": "api-1", label_key: "label"},
+        "values": [[str(NS), "unusable"] for _ in range(entry_count)],
+    }
+
+    raw_count, lines, omitted = _stream_lines(stream, frozenset(), Answer(payload={}))
+
+    assert raw_count == entry_count
+    assert lines == []
+    assert omitted == max(1, entry_count)
+
+
+async def test_a_genuinely_empty_log_result_is_complete() -> None:
+    payload = _streams()
+    payload["data"]["result"] = [{"stream": {}, "values": []}]
+    connector, _ = _connector(_ok(payload))
+
+    result = await connector.search(scope=SCOPE)
+
+    assert result.lines == ()
+    assert result.omitted_entries == 0
+    assert result.truncated is False
+    assert "no log lines matched" in render_logs(result)

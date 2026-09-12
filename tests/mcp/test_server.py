@@ -12,7 +12,7 @@ import threading
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import anyio
 import httpx2
@@ -1273,6 +1273,46 @@ async def test_controller_stop_without_start_is_noop() -> None:
     controller = MCPController(lambda: make_server(port=0))
     assert await asyncio.wait_for(controller.stop(), timeout=5) == "MCP off"
     assert await controller.shutdown() is None
+
+
+@pytest.mark.parametrize("already_done", [False, True])
+async def test_controller_shutdown_consumes_failures_without_secret_payloads(
+    already_done: bool, caplog: pytest.LogCaptureFixture
+) -> None:
+    from types import SimpleNamespace
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+    finished = asyncio.Event()
+
+    async def run() -> None:
+        started.set()
+        try:
+            await release.wait()
+            raise RuntimeError("SECRET_CLEANUP_PAYLOAD")
+        finally:
+            finished.set()
+
+    async def wait_started() -> int:
+        await started.wait()
+        return 12345
+
+    server = SimpleNamespace(run=run, wait_started=wait_started, request_shutdown=release.set)
+    controller = MCPController(lambda: cast("KorvidMCPServer", server))
+    assert await controller.start() == "MCP on :12345"
+    task = controller.pending_task()
+    assert task is not None
+    if already_done:
+        release.set()
+        await finished.wait()
+        assert controller.pending_task() is None
+    with caplog.at_level("ERROR", logger="korvid.mcp.server"):
+        assert await controller.shutdown() is None
+    assert task.done()
+    assert not controller.running
+    assert "MCP server task failed" in caplog.text
+    assert "SECRET_CLEANUP_PAYLOAD" not in caplog.text
+    assert all(record.exc_info is None for record in caplog.records)
 
 
 async def test_controller_shutdown_survives_cancellation(tmp_path: Path) -> None:

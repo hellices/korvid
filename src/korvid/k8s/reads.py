@@ -10,7 +10,7 @@ a type error instead of a silent desynchronization.
 from __future__ import annotations
 
 import abc
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from typing import Any
 
 from korvid.k8s.discovery import ResourceMeta
@@ -21,6 +21,12 @@ from korvid.k8s.models import GenericSummary
 
 class ReadOps(abc.ABC):
     """Read-only cluster operations the agent read tools touch."""
+
+    @abc.abstractmethod
+    def iter_objects(
+        self, meta: ResourceMeta, namespace: str | None
+    ) -> AsyncGenerator[GenericSummary, None]:
+        """Yield summaries from bounded LIST pages; callers close on early exit."""
 
     @abc.abstractmethod
     async def list_objects(self, meta: ResourceMeta, namespace: str | None) -> list[GenericSummary]:

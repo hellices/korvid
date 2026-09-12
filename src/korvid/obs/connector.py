@@ -162,6 +162,7 @@ class MetricResult:
     #: When the backend says the samples were taken, in UTC. A window is
     #: relative; without this a citation cannot be rechecked later.
     observed_at: str | None = None
+    omitted_entries: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,6 +183,7 @@ class LogResult:
     query: str
     lines: tuple[LogLine, ...] = ()
     truncated: bool = False
+    omitted_entries: int = 0
 
 
 def resolve_window(minutes: object, limits: QueryLimits) -> int:
@@ -314,10 +316,10 @@ def _rendered(
     """Header plus as many entries as `limit` allows, honest about the rest.
 
     The header is never dropped: provenance is what a citation needs, and
-    entries are what it can afford to lose. If any entry is dropped the
-    header says `truncated: yes`, so a result cut to fit can never read as
-    complete — which is what a downstream cap left behind (PR #280
-    review).
+    entries are what it can afford to lose. If any entry or explanatory
+    text is dropped the header says `truncated: yes`, so a result cut to
+    fit can never read as complete — which is what a downstream cap left
+    behind (PR #280 review).
     """
     kept: list[str] = []
     dropped = False
@@ -338,7 +340,13 @@ def _rendered(
             budget -= len(entry) + 1
     lines = _header(**header_fields, truncated=truncated or dropped)
     if not kept:
-        lines.append(empty_note if not entries else "every entry was dropped to fit the budget")
+        note = empty_note if not entries else "every entry was dropped to fit the budget"
+        if limit is not None and len("\n".join(lines)) + len(note) + 1 > limit:
+            lines = _header(**header_fields, truncated=True)
+            budget = limit - len("\n".join(lines)) - 1
+            note = f"{note[: budget - 1]}…" if budget > 0 else ""
+        if note:
+            lines.append(note)
         return "\n".join(lines)
     lines.append("")
     lines.extend(kept)
@@ -363,14 +371,21 @@ def render_metrics(result: MetricResult, *, limit: int | None = None) -> str:
                 f"signal: {result.signal}",
                 f"unit: {result.unit}",
                 *((f"observed at: {result.observed_at}",) if result.observed_at else ()),
+                *(
+                    (f"omitted unusable entries: {result.omitted_entries}",)
+                    if result.omitted_entries
+                    else ()
+                ),
             ),
         },
         [
             f"{_labels(series.labels) or '(no labels)'}  {series.value:g} {result.unit}"
             for series in result.series
         ],
-        "no series matched this scope and window",
-        truncated=result.truncated,
+        "no usable series remained after omitting backend data"
+        if result.omitted_entries
+        else "no series matched this scope and window",
+        truncated=result.truncated or bool(result.omitted_entries),
         limit=limit,
     )
 
@@ -384,14 +399,23 @@ def render_logs(result: LogResult, *, limit: int | None = None) -> str:
             "scope": result.scope,
             "window_minutes": result.window_minutes,
             "query": result.query,
-            "extra": (f"lines: {len(result.lines)}",),
+            "extra": (
+                f"lines: {len(result.lines)}",
+                *(
+                    (f"omitted unusable entries: {result.omitted_entries}",)
+                    if result.omitted_entries
+                    else ()
+                ),
+            ),
         },
         [
             f"{f'{entry.timestamp} {_labels(entry.labels)}'.rstrip()}  {entry.line}"
             for entry in result.lines
         ],
-        "no log lines matched this scope and window",
-        truncated=result.truncated,
+        "no usable log lines remained after omitting backend data"
+        if result.omitted_entries
+        else "no log lines matched this scope and window",
+        truncated=result.truncated or bool(result.omitted_entries),
         limit=limit,
     )
 

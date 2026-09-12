@@ -11,7 +11,7 @@ from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from aiohttp import ClientConnectionError
+from aiohttp import ClientConnectionError, InvalidURL
 
 from korvid.k8s import errors as errors_mod
 from korvid.k8s.client import KubeClient
@@ -372,6 +372,43 @@ async def test_request_json_normalizes_transport_failures_without_leaking_detail
 
 
 @pytest.mark.parametrize(
+    ("error", "message"),
+    [
+        pytest.param(
+            InvalidURL("https://SENSITIVE_REQUEST_DETAIL/private"),
+            "Kubernetes API connection failed; check cluster connectivity and retry",
+            id="invalid-url",
+        ),
+        pytest.param(
+            ValueError("SENSITIVE_REQUEST_DETAIL"),
+            "Kubernetes API request failed; check client configuration and retry",
+            id="client-value",
+        ),
+        pytest.param(
+            RecursionError("SENSITIVE_REQUEST_DETAIL"),
+            "Kubernetes API request failed; check client configuration and retry",
+            id="client-recursion",
+        ),
+    ],
+)
+async def test_request_errors_are_not_misclassified_as_json_errors(
+    error: Exception, message: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    client = KubeClient()
+    fake_api = AsyncMock()
+    fake_api.call_api.side_effect = error
+    client._api = fake_api
+
+    normalized, formatted, logged = await _normalized_failure_diagnostics(client, caplog)
+
+    assert str(normalized) == message
+    assert normalized.__cause__ is None
+    assert normalized.__suppress_context__
+    assert "SENSITIVE_REQUEST_DETAIL" not in formatted + logged
+    assert "malformed JSON" not in formatted + logged
+
+
+@pytest.mark.parametrize(
     ("error", "sensitive_marker"),
     [
         pytest.param(
@@ -441,6 +478,11 @@ async def test_normalized_transport_error_tracebacks_do_not_leak_context(
             RecursionError("SENSITIVE_RECURSION_DETAIL"),
             "SENSITIVE_RECURSION_DETAIL",
             id="recursion",
+        ),
+        pytest.param(
+            ValueError("SENSITIVE_INTEGER_DECODE_DETAIL"),
+            "SENSITIVE_INTEGER_DECODE_DETAIL",
+            id="integer-decode",
         ),
     ],
 )

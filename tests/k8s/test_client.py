@@ -2,7 +2,7 @@ import asyncio
 import contextlib
 import gc
 import weakref
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from copy import deepcopy
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -20,7 +20,7 @@ from korvid.k8s.client import KubeClient
 from korvid.k8s.discovery import PODS_META, ResourceMeta
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.helm import HELM_RELEASES_META
-from korvid.k8s.models import ReplicaSetSummary
+from korvid.k8s.models import GenericSummary, ReplicaSetSummary
 from korvid.k8s.telemetry import ReadTelemetryEvent
 from korvid.k8s.watch_events import WatchEvent, WatchProgress
 
@@ -906,17 +906,19 @@ def _pkg_meta() -> ResourceMeta:
     )
 
 
-async def _take(gen: Any, n: int) -> list[tuple[str, str]]:
-    """First *n* (event, name) pairs from an endless watch generator."""
-    out: list[tuple[str, str]] = []
-    async for event in gen:
-        if isinstance(event, WatchProgress):
-            continue
-        ev, s = event
-        out.append((ev, s.name))
-        if len(out) >= n:
-            break
-    return out
+async def _take_polls(
+    stream: AsyncGenerator[WatchEvent[_T], None], poll_count: int = 1
+) -> list[WatchEvent[_T]]:
+    """Collect complete polling rounds, including progress from row-less polls."""
+    events: list[WatchEvent[_T]] = []
+    async with contextlib.aclosing(stream):
+        async for event in stream:
+            events.append(event)
+            if event is WatchProgress.POLL:
+                poll_count -= 1
+                if poll_count == 0:
+                    break
+    return events
 
 
 async def test_successful_empty_poll_emits_explicit_progress() -> None:
@@ -941,7 +943,7 @@ async def test_successful_empty_poll_emits_explicit_progress() -> None:
 
 async def test_unwatchable_kind_polls_lists_and_diffs_instead_of_watching() -> None:
     """A kind discovered without the watch verb (OLM packageserver) must be
-    kept fresh by periodic re-LIST diffing: upserts for present rows, a
+    kept fresh by periodic re-LIST diffing: events for changed rows, a
     DELETED for vanished ones - and the Watch API is never touched."""
     client = KubeClient()
     meta = _pkg_meta()
@@ -958,12 +960,16 @@ async def test_unwatchable_kind_polls_lists_and_diffs_instead_of_watching() -> N
         patch.object(client_mod, "LIST_POLL_INTERVAL", 0.0),
         patch("korvid.k8s.client.k8s_watch.Watch", watch_factory),
     ):
-        events = await _take(client.watch_resources(meta, "olm"), 5)
+        events = await _take_polls(client.watch_resources(meta, "olm"))
 
-    assert events[:2] == [("SNAPSHOT", "etcd"), ("SNAPSHOT", "kafka")]
-    # Second LIST round: upserts for present rows, DELETED for the vanished one.
-    assert ("ADDED", "postgres") in events[2:]
-    assert ("DELETED", "kafka") in events[2:]
+    rows = [event for event in events if not isinstance(event, WatchProgress)]
+    assert [(event_type, summary.name) for event_type, summary in rows] == [
+        ("SNAPSHOT", "etcd"),
+        ("SNAPSHOT", "kafka"),
+        ("ADDED", "postgres"),
+        ("DELETED", "kafka"),
+    ]
+    assert events[-1] is WatchProgress.POLL
     watch_factory.assert_not_called()
 
 
@@ -987,10 +993,14 @@ async def test_watch_405_falls_back_to_list_polling() -> None:
         patch.object(client_mod, "LIST_POLL_INTERVAL", 0.0),
         patch("korvid.k8s.client.k8s_watch.Watch", return_value=fake_watch),
     ):
-        events = await _take(client.watch_resources(meta, "default"), 3)
+        events = await _take_polls(client.watch_resources(meta, "default"))
 
-    assert events[0] == ("SNAPSHOT", "dep-a")
-    assert ("ADDED", "dep-b") in events[1:]
+    rows = [event for event in events if not isinstance(event, WatchProgress)]
+    assert [(event_type, summary.name) for event_type, summary in rows] == [
+        ("SNAPSHOT", "dep-a"),
+        ("ADDED", "dep-b"),
+    ]
+    assert events[-1] is WatchProgress.POLL
 
 
 async def test_watch_405_api_exception_also_falls_back_to_polling() -> None:
@@ -1013,10 +1023,14 @@ async def test_watch_405_api_exception_also_falls_back_to_polling() -> None:
         patch.object(client_mod, "LIST_POLL_INTERVAL", 0.0),
         patch("korvid.k8s.client.k8s_watch.Watch", return_value=fake_watch),
     ):
-        events = await _take(client.watch_resources(meta, "default"), 3)
+        events = await _take_polls(client.watch_resources(meta, "default"))
 
-    assert events[0] == ("SNAPSHOT", "dep-a")
-    assert ("ADDED", "dep-b") in events[1:]
+    rows = [event for event in events if not isinstance(event, WatchProgress)]
+    assert [(event_type, summary.name) for event_type, summary in rows] == [
+        ("SNAPSHOT", "dep-a"),
+        ("ADDED", "dep-b"),
+    ]
+    assert events[-1] is WatchProgress.POLL
 
 
 async def test_405_poll_fallback_deletes_live_additions_missing_from_relist() -> None:
@@ -1038,14 +1052,262 @@ async def test_405_poll_fallback_deletes_live_additions_missing_from_relist() ->
         patch.object(client_mod, "LIST_POLL_INTERVAL", 0.0),
         patch("korvid.k8s.client.k8s_watch.Watch", return_value=fake_watch),
     ):
-        events = await _take(client.watch_resources(meta, "default"), 4)
+        events = await _take_polls(client.watch_resources(meta, "default"))
 
-    assert events == [
+    rows = [event for event in events if not isinstance(event, WatchProgress)]
+    assert [(event_type, summary.name) for event_type, summary in rows] == [
         ("SNAPSHOT", "dep-a"),
         ("ADDED", "dep-b"),
-        ("ADDED", "dep-a"),
         ("DELETED", "dep-b"),
     ]
+    assert events[-1] is WatchProgress.POLL
+
+
+@pytest.mark.parametrize("kind", ["deployments", "pods"])
+async def test_poll_resource_version_only_changes_emit_only_progress(kind: str) -> None:
+    client = KubeClient()
+    meta = replace(PODS_META if kind == "pods" else _deploy_meta(), watchable=False)
+    initial = _pod("steady") if kind == "pods" else _generic("steady")
+    initial["metadata"]["resourceVersion"] = "1"
+    polled = deepcopy(initial)
+    polled["metadata"]["resourceVersion"] = "2"
+    snapshots = [
+        {"metadata": {}, "items": [initial]},
+        {"metadata": {}, "items": [polled]},
+        {"metadata": {}, "items": [deepcopy(polled)]},
+    ]
+    projector = "_pod_summary" if kind == "pods" else "_object_summary"
+
+    with (
+        patch.object(client, "_api", MagicMock()),
+        patch.object(client, "_request_json", AsyncMock(side_effect=snapshots)),
+        patch.object(client_mod, "LIST_POLL_INTERVAL", 0.0),
+        patch.object(client, projector, wraps=getattr(client, projector)) as project,
+    ):
+        events = await _take_polls(client.watch_resources(meta, "default"), 2)
+
+    assert project.call_count == 3
+    assert not isinstance(events[0], WatchProgress)
+    assert events[0][0] == "SNAPSHOT"
+    assert events[1:] == [WatchProgress.POLL, WatchProgress.POLL]
+    assert all(not item for snapshot in snapshots for item in snapshot["items"])
+
+
+async def test_poll_emits_add_modify_delete_only_for_changed_summaries() -> None:
+    client = KubeClient()
+    meta = replace(_deploy_meta(), watchable=False)
+    initial = _generic("changed")
+    initial["spec"] = {"replicas": 1}
+    modified = deepcopy(initial)
+    modified["spec"]["replicas"] = 2
+    current = [_generic("steady"), modified, _generic("added")]
+    snapshots = [
+        {"items": [_generic("steady"), initial, _generic("removed")]},
+        {"items": current},
+        {"items": deepcopy(current)},
+    ]
+
+    with (
+        patch.object(client, "_api", MagicMock()),
+        patch.object(client, "_request_json", AsyncMock(side_effect=snapshots)),
+        patch.object(client_mod, "LIST_POLL_INTERVAL", 0.0),
+    ):
+        events = await _take_polls(client.watch_resources(meta, "default"), 2)
+
+    rows = [event for event in events if not isinstance(event, WatchProgress)]
+    assert [(event_type, summary.name) for event_type, summary in rows] == [
+        ("SNAPSHOT", "steady"),
+        ("SNAPSHOT", "changed"),
+        ("SNAPSHOT", "removed"),
+        ("MODIFIED", "changed"),
+        ("ADDED", "added"),
+        ("DELETED", "removed"),
+    ]
+    assert isinstance(rows[3][1], GenericSummary)
+    assert rows[3][1].desired == 2
+    assert events[-2:] == [WatchProgress.POLL, WatchProgress.POLL]
+
+
+async def test_poll_same_name_new_uid_is_modified_before_deletion() -> None:
+    client = KubeClient()
+    meta = replace(_deploy_meta(), watchable=False)
+    initial = _generic("replaced")
+    initial["metadata"]["uid"] = "old-uid"
+    replacement = deepcopy(initial)
+    replacement["metadata"]["uid"] = "new-uid"
+    snapshots = [{"items": [initial]}, {"items": [replacement]}, {"items": []}]
+
+    with (
+        patch.object(client, "_api", MagicMock()),
+        patch.object(client, "_request_json", AsyncMock(side_effect=snapshots)),
+        patch.object(client_mod, "LIST_POLL_INTERVAL", 0.0),
+    ):
+        events = await _take_polls(client.watch_resources(meta, "default"), 2)
+
+    rows = [event for event in events if not isinstance(event, WatchProgress)]
+    assert [(event_type, summary.name, summary.uid) for event_type, summary in rows] == [
+        ("SNAPSHOT", "replaced", "old-uid"),
+        ("MODIFIED", "replaced", "new-uid"),
+        ("DELETED", "replaced", "new-uid"),
+    ]
+    assert events.count(WatchProgress.POLL) == 2
+
+
+async def test_poll_same_name_in_different_namespace_is_a_new_row() -> None:
+    client = KubeClient()
+    meta = replace(_deploy_meta(), watchable=False)
+    snapshots = [
+        {"items": [_generic("same-name", "first")]},
+        {"items": [_generic("same-name", "first"), _generic("same-name", "second")]},
+    ]
+
+    with (
+        patch.object(client, "_api", MagicMock()),
+        patch.object(client, "_request_json", AsyncMock(side_effect=snapshots)),
+        patch.object(client_mod, "LIST_POLL_INTERVAL", 0.0),
+    ):
+        events = await _take_polls(client.watch_resources(meta, None))
+
+    rows = [event for event in events if not isinstance(event, WatchProgress)]
+    assert [(event_type, summary.namespace) for event_type, summary in rows] == [
+        ("SNAPSHOT", "first"),
+        ("ADDED", "second"),
+    ]
+
+
+@pytest.mark.parametrize("kind", ["deployments", "pods"])
+async def test_poll_custom_column_changes_are_meaningful(kind: str) -> None:
+    from korvid.k8s.columns import CustomColumn
+
+    client = KubeClient(custom_columns={kind: (CustomColumn("OWNER", "annotation", "owner"),)})
+    meta = replace(PODS_META if kind == "pods" else _deploy_meta(), watchable=False)
+    initial = _pod("custom") if kind == "pods" else _generic("custom")
+    initial["metadata"]["annotations"] = {"owner": "old-team"}
+    modified = deepcopy(initial)
+    modified["metadata"]["annotations"]["owner"] = "new-team"
+    snapshots = [
+        {"items": [initial]},
+        {"items": [modified]},
+        {"items": [deepcopy(modified)]},
+    ]
+
+    with (
+        patch.object(client, "_api", MagicMock()),
+        patch.object(client, "_request_json", AsyncMock(side_effect=snapshots)),
+        patch.object(client_mod, "LIST_POLL_INTERVAL", 0.0),
+    ):
+        events = await _take_polls(client.watch_resources(meta, "default"), 2)
+
+    rows = [event for event in events if not isinstance(event, WatchProgress)]
+    assert [(event_type, summary.custom) for event_type, summary in rows] == [
+        ("SNAPSHOT", ("old-team",)),
+        ("MODIFIED", ("new-team",)),
+    ]
+    assert events[-2:] == [WatchProgress.POLL, WatchProgress.POLL]
+
+
+@pytest.mark.parametrize("matches_live", [True, False], ids=["live", "initial"])
+async def test_405_poll_fallback_compares_latest_live_summaries(matches_live: bool) -> None:
+    client = KubeClient()
+    meta = _deploy_meta()
+    initial = _generic("dep-a")
+    initial["spec"] = {"replicas": 1}
+    modified = deepcopy(initial)
+    modified["spec"]["replicas"] = 2
+    polled = deepcopy(modified if matches_live else initial)
+    snapshots = [
+        {"metadata": {"resourceVersion": "1"}, "items": [initial]},
+        {"items": [polled, _generic("dep-b")]},
+    ]
+    live_events = [
+        {"type": "ADDED", "raw_object": _generic("dep-b")},
+        {"type": "MODIFIED", "raw_object": modified},
+        {"type": "MODIFIED", "raw_object": deepcopy(modified)},
+    ]
+    fake_watch = _FakeWatch(
+        live_events, raise_at=len(live_events), raise_exc=ApiStatusError(405, "Method Not Allowed")
+    )
+
+    with (
+        patch.object(client, "_api", MagicMock()),
+        patch.object(client, "_request_json", AsyncMock(side_effect=snapshots)),
+        patch.object(client_mod, "LIST_POLL_INTERVAL", 0.0),
+        patch("korvid.k8s.client.k8s_watch.Watch", return_value=fake_watch),
+    ):
+        events = await _take_polls(client.watch_resources(meta, "default"))
+
+    rows = [event for event in events if not isinstance(event, WatchProgress)]
+    expected = [
+        ("SNAPSHOT", "dep-a"),
+        ("ADDED", "dep-b"),
+        ("MODIFIED", "dep-a"),
+        ("MODIFIED", "dep-a"),
+    ]
+    if not matches_live:
+        expected.append(("MODIFIED", "dep-a"))
+    assert [(event_type, summary.name) for event_type, summary in rows] == expected
+    assert events.count(WatchProgress.LIVE_EVENT) == len(live_events)
+    assert events[-1] is WatchProgress.POLL
+
+
+async def test_405_poll_fallback_readds_a_live_deleted_summary() -> None:
+    client = KubeClient()
+    meta = _deploy_meta()
+    snapshots = [
+        {"metadata": {"resourceVersion": "1"}, "items": [_generic("dep-a")]},
+        {"items": [_generic("dep-a")]},
+    ]
+    fake_watch = _FakeWatch(
+        [{"type": "DELETED", "raw_object": _generic("dep-a")}],
+        raise_at=1,
+        raise_exc=ApiStatusError(405, "Method Not Allowed"),
+    )
+
+    with (
+        patch.object(client, "_api", MagicMock()),
+        patch.object(client, "_request_json", AsyncMock(side_effect=snapshots)),
+        patch.object(client_mod, "LIST_POLL_INTERVAL", 0.0),
+        patch("korvid.k8s.client.k8s_watch.Watch", return_value=fake_watch),
+    ):
+        events = await _take_polls(client.watch_resources(meta, "default"))
+
+    rows = [event for event in events if not isinstance(event, WatchProgress)]
+    assert [(event_type, summary.name) for event_type, summary in rows] == [
+        ("SNAPSHOT", "dep-a"),
+        ("DELETED", "dep-a"),
+        ("ADDED", "dep-a"),
+    ]
+    assert events[-1] is WatchProgress.POLL
+
+
+async def test_poll_unchanged_secret_releases_raw_payload_before_progress() -> None:
+    class Payload(dict[str, str]):
+        pass
+
+    client = KubeClient()
+    meta = ResourceMeta("Secret", "secrets", "", "v1", True, watchable=False)
+    initial_payload = Payload(token="sensitive")
+    polled_payload = Payload(token="updated-sensitive")
+    payload_refs = [weakref.ref(initial_payload), weakref.ref(polled_payload)]
+    snapshots = [
+        {"items": [{"metadata": {"name": "credentials"}, "data": initial_payload}]},
+        {"items": [{"metadata": {"name": "credentials"}, "data": polled_payload}]},
+    ]
+    del initial_payload, polled_payload
+
+    with (
+        patch.object(client, "_api", MagicMock()),
+        patch.object(client, "_request_json", AsyncMock(side_effect=snapshots)),
+        patch.object(client_mod, "LIST_POLL_INTERVAL", 0.0),
+    ):
+        async with contextlib.aclosing(client.watch_resources(meta, "default")) as stream:
+            initial_event = await stream.__anext__()
+            assert not isinstance(initial_event, WatchProgress)
+            assert initial_event[0] == "SNAPSHOT"
+            progress = await stream.__anext__()
+            gc.collect()
+            assert all(payload_ref() is None for payload_ref in payload_refs)
+            assert progress is WatchProgress.POLL
 
 
 async def test_poll_delete_preserves_uid_from_retained_tombstone() -> None:

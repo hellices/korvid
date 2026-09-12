@@ -59,6 +59,9 @@ _AIOHTTP_CLIENT_ERROR = (
 #: issue #141): catalog-ish content changes rarely, so a slow poll keeps the
 #: view fresh without hammering an aggregated API.
 LIST_POLL_INTERVAL = 30.0
+LIST_PAGE_SIZE = 100
+_DISCOVERY_CONCURRENCY = 8
+_DISCOVERY_TIMEOUT_SECONDS = 10.0
 
 
 def _path_segment(value: str) -> str:
@@ -76,6 +79,7 @@ def _path_segment(value: str) -> str:
 
 
 _DNS1123_NAME = re.compile(r"^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$")
+_API_VERSION_NAME = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
 _UID_RE = re.compile(r"^[a-fA-F0-9-]+$")
 
 
@@ -589,7 +593,7 @@ class KubeClient(ReadOps, WriteOps):
             await asyncio.sleep(LIST_POLL_INTERVAL)
             _, items, current = await self._list_watch_snapshot(meta, path, query)
             for index in range(len(items)):
-                yield ("ADDED", items[index])
+                yield ("POLLED", items[index])
             items.clear()
             for key, old in known.items():
                 if key not in current:
@@ -636,41 +640,97 @@ class KubeClient(ReadOps, WriteOps):
                 async for event in self._poll_resource_events(meta, path, query, known):
                     yield event
 
+    def _project_watch_summary(
+        self, meta: ResourceMeta, item: dict[str, Any]
+    ) -> PodSummary | GenericSummary:
+        if meta.identity == HELM_RELEASES_META.identity:
+            return release_from_secret(item)
+        if meta.identity == HELM_REVISIONS_META.identity:
+            return revision_from_secret(item)
+        if meta.identity == PODS_META.identity:
+            return self._pod_summary(item)
+        return self._object_summary(meta, item)
+
+    def _project_watch_event(
+        self,
+        meta: ResourceMeta,
+        event: tuple[str, dict[str, Any]],
+        summaries: dict[str, PodSummary | GenericSummary],
+    ) -> tuple[str, PodSummary | GenericSummary] | None:
+        """Project once, release the raw manifest, then classify polling changes."""
+        event_type, item = event
+        key = self._raw_resource_key(item)
+        summary = self._project_watch_summary(meta, item)
+        item.clear()
+        del item
+        if event_type == "POLLED":
+            previous = summaries.get(key)
+            if previous == summary:
+                return None
+            event_type = "ADDED" if previous is None else "MODIFIED"
+        if event_type == "DELETED":
+            summaries.pop(key, None)
+        elif event_type in ("SNAPSHOT", "ADDED", "MODIFIED"):
+            summaries[key] = summary
+        return event_type, summary
+
     async def watch_resources(
         self, meta: ResourceMeta, namespace: str | None
     ) -> AsyncGenerator[WatchEvent[PodSummary | GenericSummary], None]:
-        """Yield projected summaries from one shared raw LIST/WATCH transport."""
-        if meta.identity == HELM_RELEASES_META.identity:
-            tracker = ReleaseTracker()
-            async for event in self._watch_resource_events(meta, namespace):
-                if isinstance(event, WatchProgress):
-                    yield event
-                    continue
-                event_type, item = event
-                tracker_event = "ADDED" if event_type == "SNAPSHOT" else event_type
-                projected = tracker.apply(tracker_event, release_from_secret(item))
-                item.clear()
-                del item
-                for projected_type, release in projected:
-                    if event_type == "SNAPSHOT":
-                        projected_type = "SNAPSHOT"
-                    yield (projected_type, release)
-            return
-
+        """Yield LIST/WATCH summaries, suppressing unchanged polling rows."""
+        summaries: dict[str, PodSummary | GenericSummary] = {}
+        tracker = ReleaseTracker() if meta.identity == HELM_RELEASES_META.identity else None
         async for event in self._watch_resource_events(meta, namespace):
             if isinstance(event, WatchProgress):
                 yield event
                 continue
-            event_type, item = event
-            if meta.identity == HELM_REVISIONS_META.identity:
-                summary: PodSummary | GenericSummary = revision_from_secret(item)
-            elif meta.identity == PODS_META.identity:
-                summary = self._pod_summary(item)
-            else:
-                summary = self._object_summary(meta, item)
-            item.clear()
-            del item
-            yield (event_type, summary)
+            projected = self._project_watch_event(meta, event, summaries)
+            if projected is None:
+                continue
+            if tracker is None:
+                yield projected
+                continue
+            event_type, summary = projected
+            tracker_event = "ADDED" if event_type == "SNAPSHOT" else event_type
+            for projected_type, release in tracker.apply(
+                tracker_event, cast(HelmReleaseSummary, summary)
+            ):
+                yield ("SNAPSHOT" if event_type == "SNAPSHOT" else projected_type, release)
+
+    async def iter_objects(
+        self, meta: ResourceMeta, namespace: str | None
+    ) -> AsyncGenerator[GenericSummary, None]:
+        """Read bounded LIST pages and project only summaries the caller consumes."""
+        if self._api is None:
+            raise RuntimeError("connect() first")
+        path = self._list_path(meta, namespace)
+        continuation = ""
+        seen_continuations: set[str] = set()
+        while True:
+            query = [("limit", str(LIST_PAGE_SIZE))]
+            if continuation:
+                query.append(("continue", continuation))
+            try:
+                data = await self._request_json(path, query_params=query)
+                items, next_token = _parse_list_page(data)
+            except ApiStatusError as exc:
+                self._observe_read_error(path, exc)
+                raise
+            except KubeClientError:
+                self._observe_read("error", path)
+                raise
+            self._observe_read("list", path, payload=data, object_count=len(items))
+            for item in items:
+                yield self._object_summary(meta, item)
+            if not next_token:
+                return
+            if next_token in seen_continuations:
+                self._observe_read("error", path)
+                raise KubeClientError("LIST continuation did not advance")
+            seen_continuations.add(next_token)
+            continuation = next_token
+            del data, items
+            await asyncio.sleep(0)
 
     async def list_objects(self, meta: ResourceMeta, namespace: str | None) -> list[GenericSummary]:
         """LIST any resource kind and return GenericSummary items.
@@ -1659,6 +1719,15 @@ class KubeClient(ReadOps, WriteOps):
             )
         )
 
+    async def _request_discovery_json(self, path: str) -> dict[str, Any]:
+        try:
+            async with asyncio.timeout(_DISCOVERY_TIMEOUT_SECONDS):
+                return await self._request_json(path)
+        except TimeoutError:
+            raise KubeClientError(
+                "Kubernetes API discovery timed out; check cluster connectivity and retry"
+            ) from None
+
     async def discover_resources(self) -> list[ResourceMeta]:
         """Return every LIST-able resource from /api/v1 and /apis.
 
@@ -1666,33 +1735,44 @@ class KubeClient(ReadOps, WriteOps):
         packageserver) are included with ``watchable=False`` — the watch
         source keeps them fresh by polling (issue #141).
 
-        Group version lists are fetched concurrently — sequential fetching adds
-        one RTT per API group and dominates startup on clusters with many CRDs.
+        Every served version is fetched by a bounded worker pool. Preferred
+        versions win per resource identity, regardless of response order.
         """
         metas: list[ResourceMeta] = []
-        core = await self._request_json("/api/v1")
+        core = await self._request_discovery_json("/api/v1")
         metas += _parse_resource_list(core, group="", version="v1")
-        groups = await self._request_json("/apis")
+        groups = await self._request_discovery_json("/apis")
+        advertised = groups.get("groups", [])
+        if not isinstance(advertised, list):
+            raise KubeClientError("Kubernetes API discovery returned an invalid group list")
+        versions = list(
+            dict.fromkeys(version for group in advertised for version in _group_versions(group))
+        )
+        results: list[list[ResourceMeta]] = [[] for _ in versions]
+        jobs = iter(enumerate(versions))
 
         async def _fetch(name: str, version: str) -> list[ResourceMeta]:
+            path = f"/apis/{name}/{version}"
             try:
-                path = f"/apis/{name}/{version}"
-                rl = await self._request_json(path)
+                resource_list = await self._request_discovery_json(path)
+                return _parse_resource_list(resource_list, group=name, version=version)
             except (ApiStatusError, KubeClientError) as exc:
                 logger.warning("API discovery skipped %s: %s", path, exc)
-                return []  # a broken aggregated API must not kill discovery
-            return _parse_resource_list(rl, group=name, version=version)
+                return []
 
-        tasks = []
-        for g in groups.get("groups", []):
-            name = g.get("name")
-            version = (g.get("preferredVersion") or {}).get("version")
-            if not isinstance(name, str) or not isinstance(version, str) or not name or not version:
-                continue  # malformed group must not kill discovery
-            tasks.append(_fetch(name, version))
-        for group_metas in await asyncio.gather(*tasks):
+        async def _worker() -> None:
+            for index, (name, version) in jobs:
+                results[index] = await _fetch(name, version)
+
+        await asyncio.gather(
+            *(_worker() for _ in range(min(_DISCOVERY_CONCURRENCY, len(versions))))
+        )
+        for group_metas in results:
             metas += group_metas
-        return metas
+        unique: dict[tuple[str, str, bool], ResourceMeta] = {}
+        for meta in metas:
+            unique.setdefault(meta.identity, meta)
+        return list(unique.values())
 
     async def close(self) -> None:
         if self._api is not None:
@@ -1718,10 +1798,6 @@ async def _request_dict(request: Awaitable[Any]) -> dict[str, Any]:
             str(exc.reason or ""),
             body=body_text,
         ) from exc
-    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError):
-        raise KubeClientError(
-            "Kubernetes API returned malformed JSON; retry, then check the API server"
-        ) from None
     except TimeoutError:
         raise KubeClientError(
             "Kubernetes API request timed out; check cluster connectivity and retry"
@@ -1738,6 +1814,10 @@ async def _request_dict(request: Awaitable[Any]) -> dict[str, Any]:
         raise KubeClientError(
             "Kubernetes API connection failed; check cluster connectivity and retry"
         ) from None
+    except (ValueError, RecursionError):
+        raise KubeClientError(
+            "Kubernetes API request failed; check client configuration and retry"
+        ) from None
 
 
 async def _response_dict(resp: Any) -> dict[str, Any]:
@@ -1751,7 +1831,12 @@ async def _response_dict(resp: Any) -> dict[str, Any]:
     if not isinstance(body, bytes):
         raise _malformed_response_error()
     _raise_for_status(resp, body)
-    result = json.loads(body)
+    try:
+        result = json.loads(body)
+    except (ValueError, RecursionError):
+        raise KubeClientError(
+            "Kubernetes API returned malformed JSON; retry, then check the API server"
+        ) from None
     if not isinstance(result, dict):
         raise _malformed_response_error()
     return result
@@ -1779,16 +1864,69 @@ def _raise_for_status(resp: Any, body: bytes) -> None:
         )
 
 
+def _discovery_version(name: str, candidate: Any) -> str | None:
+    if not isinstance(candidate, Mapping):
+        return None
+    version = candidate.get("version")
+    if not isinstance(version, str) or not _API_VERSION_NAME.fullmatch(version):
+        return None
+    expected = f"{name}/{version}"
+    if candidate.get("groupVersion", expected) != expected:
+        return None
+    return version
+
+
+def _group_versions(group: Any) -> list[tuple[str, str]]:
+    if not isinstance(group, Mapping):
+        return []
+    name = group.get("name")
+    if not isinstance(name, str) or not _DNS1123_NAME.fullmatch(name):
+        return []
+    candidates = [group.get("preferredVersion")]
+    advertised = group.get("versions")
+    if isinstance(advertised, list):
+        candidates.extend(advertised)
+    return [
+        (name, version)
+        for candidate in candidates
+        if (version := _discovery_version(name, candidate)) is not None
+    ]
+
+
+def _resource_short_names(value: Any) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        return ()
+    return tuple(alias for alias in value if isinstance(alias, str) and alias)
+
+
+def _parse_list_page(data: dict[str, Any]) -> tuple[list[dict[str, Any]], str]:
+    items = data.get("items")
+    if not isinstance(items, list) or any(not isinstance(item, dict) for item in items):
+        raise _malformed_response_error()
+    metadata = data.get("metadata", {})
+    if not isinstance(metadata, Mapping):
+        raise _malformed_response_error()
+    continuation = metadata.get("continue", "")
+    if not isinstance(continuation, str):
+        raise _malformed_response_error()
+    return items, continuation
+
+
 def _parse_resource_list(data: dict[str, Any], *, group: str, version: str) -> list[ResourceMeta]:
     out = []
-    for r in data.get("resources", []):
-        name = r.get("name")
-        kind = r.get("kind")
-        namespaced = r.get("namespaced")
-        verbs: list[str] = r.get("verbs", [])
+    resources = data.get("resources", [])
+    if not isinstance(resources, list):
+        raise KubeClientError("Kubernetes API discovery returned an invalid resource list")
+    for resource in resources:
+        if not isinstance(resource, Mapping):
+            continue
+        name = resource.get("name")
+        kind = resource.get("kind")
+        namespaced = resource.get("namespaced")
+        verbs = resource.get("verbs", [])
         if not isinstance(name, str) or not isinstance(kind, str) or namespaced is None:
             continue  # malformed entry must not kill discovery
-        if "/" in name or "list" not in verbs:
+        if "/" in name or not isinstance(verbs, list) or "list" not in verbs:
             continue
         out.append(
             ResourceMeta(
@@ -1797,7 +1935,7 @@ def _parse_resource_list(data: dict[str, Any], *, group: str, version: str) -> l
                 group,
                 version,
                 bool(namespaced),
-                tuple(r.get("shortNames") or ()),
+                _resource_short_names(resource.get("shortNames")),
                 # list-only aggregated APIs (OLM's packageserver) stay
                 # discoverable; the watch source polls them (issue #141).
                 watchable="watch" in verbs,

@@ -12,7 +12,7 @@ runs — repeated runs of the same scenario see the same cluster.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
@@ -152,6 +152,14 @@ class FakeKubeClient(ReadOps):
             metadata = manifest.get("metadata") or {}
             return str(metadata.get("namespace") or "") == namespace
         return True
+
+    async def iter_objects(
+        self, meta: ResourceMeta, namespace: str | None
+    ) -> AsyncGenerator[GenericSummary, None]:
+        self._deny(meta.plural, namespace)
+        for manifest in self._objects:
+            if self._matches(manifest, meta, namespace):
+                yield summary_for(meta.kind, manifest, group=meta.group, version=meta.version)
 
     async def list_objects(self, meta: ResourceMeta, namespace: str | None) -> list[GenericSummary]:
         self._deny(meta.plural, namespace)

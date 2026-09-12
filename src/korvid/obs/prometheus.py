@@ -102,7 +102,7 @@ class PrometheusConnector(MetricsConnector):
         answer = await self._http.get_json("/api/v1/query", {"query": query}, secrets=secrets)
         data = self._http.require_success(answer)
         self._http.require_result_type(data, "vector")
-        series, truncated, observed_at = self._parse(data, answer)
+        series, truncated, observed_at, omitted_entries = self._parse(data, answer)
         # The scope and the query name the values that were *asked about*,
         # which for a masked label is exactly the value the operator
         # declared sensitive.
@@ -117,6 +117,7 @@ class PrometheusConnector(MetricsConnector):
             series=series,
             truncated=truncated,
             observed_at=observed_at,
+            omitted_entries=omitted_entries,
         )
 
     def _masked_scope_values(self, scope: QueryScope) -> tuple[str, ...]:
@@ -126,7 +127,7 @@ class PrometheusConnector(MetricsConnector):
 
     def _parse(
         self, data: Mapping[str, Any], answer: Answer
-    ) -> tuple[tuple[Series, ...], bool, str | None]:
+    ) -> tuple[tuple[Series, ...], bool, str | None, int]:
         rows = data.get("result")
         if not isinstance(rows, list):
             raise ConnectorError(
@@ -136,19 +137,21 @@ class PrometheusConnector(MetricsConnector):
         parsed: list[Series] = []
         observed_at: str | None = None
         truncated = False
+        omitted_entries = 0
         for row in rows:
             entry = _series(row, self._mask, answer)
             if entry is None:
+                omitted_entries += 1
                 continue
             if len(parsed) == cap:
                 truncated = True
-                break
+                continue
             parsed.append(entry)
             # Only from a row that survived: dating the result by a row
             # that was discarded would claim the kept series was observed
             # at a time nothing reported (PR #280 review).
             observed_at = observed_at or _observed_at(row)
-        return tuple(parsed), truncated, observed_at
+        return tuple(parsed), truncated or bool(omitted_entries), observed_at, omitted_entries
 
 
 def _observed_at(row: Any) -> str | None:
@@ -199,10 +202,13 @@ def _series(row: Any, mask: frozenset[str], answer: Answer) -> Series | None:
         # parses, so it drops out like any other unusable row (PR #280
         # review).
         value = float(answer.scrub(sample[1]) if isinstance(sample[1], str) else sample[1])
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
     if not isfinite(value):
         return None
     metric = row.get("metric")
-    labels = {str(k): str(v) for k, v in metric.items()} if isinstance(metric, Mapping) else {}
-    return Series(labels=answer.scrub_labels(masked_labels(labels, mask)), value=value)
+    if not isinstance(metric, Mapping) or not all(
+        isinstance(key, str) and isinstance(label, str) for key, label in metric.items()
+    ):
+        return None
+    return Series(labels=answer.scrub_labels(masked_labels(metric, mask)), value=value)

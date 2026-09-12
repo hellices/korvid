@@ -14,11 +14,13 @@ import contextlib
 import dataclasses
 import importlib.util
 import logging
+import os
 import secrets
 import ssl
 import sys
+import threading
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Iterator
 from typing import TYPE_CHECKING, Any, Final
 
 from korvid import __version__
@@ -93,6 +95,11 @@ if TYPE_CHECKING:
     from korvid.providers.litellm_factory import CredentialStore
 
 logger = logging.getLogger(__name__)
+
+_CLEANUP_GRACE_SECONDS = 5.0
+_CLEANUP_CANCEL_SECONDS = 1.0
+_MCP_SHUTDOWN_GRACE_SECONDS = 11.0
+_RUNNER_SHUTDOWN_SECONDS = 5.0
 
 #: Actionable install hints (issue #73): an explicitly requested feature
 #: whose extra is missing must fail with instructions, never degrade
@@ -384,22 +391,146 @@ def _build_proposal_store(config: KorvidConfig) -> ProposalStore | None:
 
 
 async def _shutdown(
-    discovery_task: asyncio.Task[None] | None, provider: LLMProvider | None, kube: KubeClient
+    discovery_task: asyncio.Task[None] | None,
+    provider: LLMProvider | None,
+    kube: KubeClient,
+    *,
+    session: AgentSession | None = None,
+    close_tasks: set[asyncio.Future[Any]] | None = None,
 ) -> None:
-    """Tear down background work and owned clients; each step is attempted
-    even if an earlier one raises. *discovery_task* is None when startup
-    wiring failed before discovery began (issue #166)."""
+    """Drain agent cleanup without letting it hold the Kubernetes client hostage.
+
+    A standalone caller owns the terminal policy; `_teardown` instead supplies
+    its task set so observability clients are also attempted before that policy.
+    """
+    tasks = close_tasks if close_tasks is not None else set()
+    if discovery_task is not None:
+        discovery_task.cancel()
+        _track_cleanup_task(discovery_task, tasks, "resource discovery task")
+    if session is not None or provider is not None:
+        _close_agent_in_background(session, provider, tasks)
     try:
-        if discovery_task is not None:
-            discovery_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await discovery_task
+        await _drain_cleanup_tasks(tasks)
     finally:
+        kube_task = asyncio.create_task(kube.close())
+        _track_cleanup_task(kube_task, tasks, "Kubernetes client close")
         try:
-            if provider is not None:
-                await provider.aclose()
+            await _drain_cleanup_tasks({kube_task})
         finally:
-            await kube.close()
+            if close_tasks is None:
+                _exit_if_cleanup_pending(tasks)
+
+
+def _track_cleanup_task(
+    task: asyncio.Future[Any] | None, tasks: set[asyncio.Future[Any]], label: str
+) -> None:
+    """Retain owned work and consume failures without logging plugin payloads."""
+    if task is None or task in tasks:
+        return
+    tasks.add(task)
+
+    def reap(finished: asyncio.Future[Any]) -> None:
+        tasks.discard(finished)
+        if not finished.cancelled() and finished.exception() is not None:
+            logger.warning("%s failed during cleanup", label)
+
+    task.add_done_callback(reap)
+
+
+def _log_cleanup_loop_error(loop: asyncio.AbstractEventLoop, context: dict[str, Any]) -> None:
+    """Consume loop-reported failures without formatting untrusted context."""
+    future = context.get("future", context.get("task"))
+    if isinstance(future, asyncio.Future) and future.done() and not future.cancelled():
+        future.exception()
+    logger.warning("Event loop operation failed")
+
+
+@contextlib.contextmanager
+def _own_run_tasks() -> Iterator[None]:
+    """Own children at creation, including shielded tasks that finish before teardown.
+
+    Retain descendants locally, outside the explicit cleanup grace set. The
+    final sweep adopts remaining descendants only after clients have closed.
+    The composition root owns this loop for one run. Delegate existing factory
+    keywords unchanged, and restore both hooks for callers using an ambient loop.
+    The exception handler also sanitizes explicit loop reports from shield and
+    async-generator cleanup, which can occur even after a result was retrieved.
+    """
+    tasks: set[asyncio.Future[Any]] = set()
+    loop = asyncio.get_running_loop()
+    previous_factory = loop.get_task_factory()
+    previous_handler = loop.get_exception_handler()
+
+    def create_task(
+        owner_loop: asyncio.AbstractEventLoop, coroutine: Any, **kwargs: Any
+    ) -> asyncio.Future[Any]:
+        task = (
+            previous_factory(owner_loop, coroutine, **kwargs)
+            if previous_factory is not None
+            else asyncio.Task(coroutine, loop=owner_loop, **kwargs)
+        )
+        _track_cleanup_task(task, tasks, "run background task")
+        return task
+
+    loop.set_task_factory(create_task)
+    loop.set_exception_handler(_log_cleanup_loop_error)
+    try:
+        yield
+    finally:
+        loop.set_task_factory(previous_factory)
+        loop.set_exception_handler(previous_handler)
+
+
+async def _drain_cleanup_tasks(
+    tasks: Collection[asyncio.Future[Any]], *, timeout: float | None = None
+) -> None:
+    """Wait once for grace, then once for cancellation, never joining indefinitely.
+
+    Unlike `wait_for`, `wait` does not wait out a task that suppresses
+    cancellation. Such tasks remain owned for the final terminal decision.
+    Caller cancellation still cancels the owned work before propagating.
+    """
+    pending = set(tasks)
+    if not pending:
+        return
+    try:
+        _, pending = await asyncio.wait(
+            pending, timeout=_CLEANUP_GRACE_SECONDS if timeout is None else timeout
+        )
+    finally:
+        pending = {task for task in pending if not task.done()}
+        if pending:
+            logger.warning("Cleanup incomplete; cancelling pending tasks")
+            for task in pending:
+                task.cancel()
+            await asyncio.wait(pending, timeout=_CLEANUP_CANCEL_SECONDS)
+
+
+def _exit_if_cleanup_pending(tasks: Collection[asyncio.Future[Any]]) -> None:
+    """Fail terminally after client cleanup if an owned task will not stop.
+
+    Python cannot forcibly stop a cancellation-resistant task. Returning or
+    raising SystemExit would leave `Runner.close` to try cancelling it again.
+    A nonzero process exit deliberately skips finalization and crash recovery,
+    forfeiting remaining task finalizers only after the client cleanup budgets.
+    A separate watchdog also bounds blocked terminal diagnostics before the
+    runner begins finalization.
+    """
+    if any(not task.done() for task in tasks):
+        watchdog: threading.Timer | None = None
+        try:
+            watchdog = threading.Timer(_RUNNER_SHUTDOWN_SECONDS, _force_runner_exit)
+            watchdog.daemon = True
+            watchdog.start()
+            logger.critical(
+                "Cleanup tasks did not stop after cancellation; exiting without restart"
+            )
+        finally:
+            try:
+                os._exit(1)
+            finally:
+                if watchdog is not None:
+                    watchdog.cancel()
 
 
 async def _discover_in_background(
@@ -421,7 +552,7 @@ async def _discover_in_background(
     app.on_aliases_updated()
 
 
-def _close_provider_in_background(provider: LLMProvider, tasks: set[asyncio.Task[None]]) -> None:
+def _close_provider_in_background(provider: LLMProvider, tasks: set[asyncio.Future[Any]]) -> None:
     """Close an old provider without blocking, keeping a strong task reference.
 
     asyncio only holds weak references to tasks, so fire-and-forget tasks can
@@ -429,17 +560,7 @@ def _close_provider_in_background(provider: LLMProvider, tasks: set[asyncio.Task
     any close error to avoid 'Task exception was never retrieved' warnings.
     """
     task = asyncio.get_running_loop().create_task(provider.aclose())
-    tasks.add(task)
-
-    def _reap(t: asyncio.Task[None]) -> None:
-        tasks.discard(t)
-        if not t.cancelled() and t.exception() is not None:
-            # Consume the exception with a fixed message only — never log
-            # exc_info or the exception message (plugin payloads may contain
-            # secrets or unbounded text).
-            logger.debug("old provider close failed")
-
-    task.add_done_callback(_reap)
+    _track_cleanup_task(task, tasks, "provider close")
 
 
 class _AgentToolUIBridgeProxy(UIBridge):
@@ -891,7 +1012,7 @@ def _build_session(
 def _close_agent_in_background(
     session: AgentSession | None,
     provider: LLMProvider | None,
-    tasks: set[asyncio.Task[None]],
+    tasks: set[asyncio.Future[Any]],
 ) -> None:
     """Release a replaced session and its provider, in that order.
 
@@ -902,25 +1023,17 @@ def _close_agent_in_background(
     """
 
     async def _close() -> None:
-        if session is not None:
-            try:
+        try:
+            if session is not None:
                 await session.aclose()
-            except Exception:
-                # Fixed message only — never the payload, which may carry
-                # secrets or unbounded text from a third-party plugin.
-                logger.debug("old agent session close failed")
-        if provider is not None:
-            await provider.aclose()
+        except Exception:
+            logger.warning("agent session close failed during cleanup")
+        finally:
+            if provider is not None:
+                await provider.aclose()
 
     task = asyncio.get_running_loop().create_task(_close())
-    tasks.add(task)
-
-    def _reap(finished: asyncio.Task[None]) -> None:
-        tasks.discard(finished)
-        if not finished.cancelled() and finished.exception() is not None:
-            logger.debug("old provider close failed")
-
-    task.add_done_callback(_reap)
+    _track_cleanup_task(task, tasks, "provider close")
 
 
 def _build_model_catalog(
@@ -1008,6 +1121,7 @@ def _build_agent_wiring(
     cluster: ClusterFacts | None = None,
     provider_box: list[LLMProvider | None] | None = None,
     session_box: list[AgentSession | None] | None = None,
+    close_tasks: set[asyncio.Future[Any]] | None = None,
     startup_warnings: list[str] | None = None,
     observability: ObservabilityWiring | None = None,
 ) -> AgentWiring:
@@ -1089,7 +1203,8 @@ def _build_agent_wiring(
             # in the box, so teardown still releases it.
             _warn_agent_disabled(error, startup_warnings)
 
-    close_tasks: set[asyncio.Task[None]] = set()
+    if close_tasks is None:
+        close_tasks = set()
 
     def build_provider(profile: ModelConnectionConfig) -> LLMProvider | None:
         return _create_provider_from_active_profile(profile, token_store, config.network_ca_bundle)
@@ -1134,7 +1249,7 @@ def _make_rebuild_agent(
     provider_box: list[LLMProvider | None],
     session_box: list[AgentSession | None],
     tier_box: list[str | None],
-    close_tasks: set[asyncio.Task[None]],
+    close_tasks: set[asyncio.Future[Any]],
 ) -> Callable[[ModelConnectionConfig, str | None], AgentSession | None]:
     """The `:ai` wizard's swap, as one transaction.
 
@@ -1219,7 +1334,7 @@ def _make_retarget_agent(
 def _make_disconnect_agent(
     provider_box: list[LLMProvider | None],
     session_box: list[AgentSession | None],
-    close_tasks: set[asyncio.Task[None]],
+    close_tasks: set[asyncio.Future[Any]],
 ) -> Callable[[], None]:
     """`:ai off` (issue #167): release the live session and provider.
 
@@ -1294,39 +1409,93 @@ async def _start_mcp_if_enabled(config: KorvidConfig, controller: MCPControllerB
         logger.error("%s", startup_msg)
 
 
-async def _teardown(state: _RunState, kube: KubeClient) -> None:
-    """Bounded graceful MCP stop first; anything still pending is awaited
-    only *after* the critical session/provider/kube cleanup, matching what
-    asyncio.run()'s final task-gathering would do anyway - but explicitly,
-    with the exception consumed instead of swallowed.
+async def _stop_mcp(state: _RunState) -> None:
+    """Bound the controller's stop, retaining any server task it cannot finish.
 
-    Takes the whole state so the session is released before the provider
-    it speaks through, however far wiring got: an app that never got
-    constructed never had the chance to close its own session.
+    Allow its two five-second phases before cancelling the controller itself.
     """
     controller = state.mcp
-    leftover = await controller.shutdown() if controller is not None else None
+    if controller is None:
+        return
+    _track_cleanup_task(controller.pending_task(), state.close_tasks, "MCP server task")
+
+    async def stop() -> None:
+        try:
+            leftover = await controller.shutdown()
+            _track_cleanup_task(leftover, state.close_tasks, "MCP server task")
+        finally:
+            _track_cleanup_task(controller.pending_task(), state.close_tasks, "MCP server task")
+
+    task = asyncio.create_task(stop())
+    _track_cleanup_task(task, state.close_tasks, "MCP shutdown")
+    await _drain_cleanup_tasks({task}, timeout=_MCP_SHUTDOWN_GRACE_SECONDS)
+
+
+def _adopt_run_tasks(state: _RunState) -> None:
+    """Retain descendants that survived cancellation of a shielding close wrapper."""
+    if state.preexisting_tasks is None:
+        return
+    current = asyncio.current_task()
+    for task in asyncio.all_tasks() - state.preexisting_tasks:
+        if task is not current:
+            _track_cleanup_task(task, state.close_tasks, "run background task")
+
+
+async def _finish_run_cleanup(state: _RunState) -> None:
+    """Bound the last run-owned tasks before the stdlib runner can gather them.
+
+    Explicit close work has already received grace; cancel remaining descendants
+    without another grace wait after the client cleanup attempts.
+    Only `_run` enables this sweep, excluding tasks that predate the run and
+    the caller itself. Two bounded cancellation sweeps let a finalizer's new
+    descendants stop, while repeated respawns remain subject to terminal exit.
+    """
     try:
-        session = state.session_box[0] if state.session_box else None
-        # Idempotent by contract, so a normal shutdown that already closed
-        # the session and this guard can both run without a double-close.
-        state.session_box[0] = None
-        if session is not None:
-            try:
-                await session.aclose()
-            except Exception:
-                logger.debug("agent session close failed during teardown")
-        await _shutdown(
-            state.discovery_box[0] if state.discovery_box else None,
-            state.provider_box[0] if state.provider_box else None,
-            kube,
-        )
+        if state.preexisting_tasks is not None:
+            _adopt_run_tasks(state)
+            await _drain_cleanup_tasks(state.close_tasks, timeout=0.0)
     finally:
-        if state.observability is not None:
-            await state.observability.aclose()
-    if leftover is not None:
-        with contextlib.suppress(BaseException):
-            await leftover
+        try:
+            if state.preexisting_tasks is not None:
+                _adopt_run_tasks(state)
+                await _drain_cleanup_tasks(state.close_tasks, timeout=0.0)
+        finally:
+            _adopt_run_tasks(state)
+            _exit_if_cleanup_pending(state.close_tasks)
+
+
+async def _teardown(state: _RunState, kube: KubeClient) -> None:
+    """Attempt every owned cleanup under deadlines, then enforce terminal policy.
+
+    MCP stops accepting work first. Live and replaced agents drain together,
+    with sessions preceding their providers. Kubernetes and observability each
+    get an independent cleanup budget even when earlier tasks refuse to stop.
+    """
+    try:
+        await _stop_mcp(state)
+    finally:
+        session = state.session_box[0] if state.session_box else None
+        provider = state.provider_box[0] if state.provider_box else None
+        state.session_box[:] = [None]
+        state.provider_box[:] = [None]
+        try:
+            await _shutdown(
+                state.discovery_box[0] if state.discovery_box else None,
+                provider,
+                kube,
+                session=session,
+                close_tasks=state.close_tasks,
+            )
+        finally:
+            try:
+                observability = state.observability
+                state.observability = None
+                if observability is not None:
+                    task = asyncio.create_task(observability.aclose())
+                    _track_cleanup_task(task, state.close_tasks, "observability client close")
+                    await _drain_cleanup_tasks({task})
+            finally:
+                await _finish_run_cleanup(state)
 
 
 def _build_helm(config: KorvidConfig) -> HelmCLI | None:
@@ -1483,7 +1652,12 @@ def _make_get_manifest(
 @dataclasses.dataclass
 class _RunState:
     """What `_run`'s teardown guard must release — filled progressively by
-    `_wire_and_run` so a wiring failure releases exactly what was built."""
+    `_wire_and_run` so a wiring failure releases exactly what was built.
+
+    `close_tasks` retains explicit cleanup work, including replaced agents.
+    The task factory retains other descendants until the final sweep.
+    `preexisting_tasks` excludes ambient work from that sweep.
+    """
 
     mcp: MCPControllerBase | None = None
     provider_box: list[LLMProvider | None] = dataclasses.field(default_factory=lambda: [None])
@@ -1491,6 +1665,8 @@ class _RunState:
     #: before the provider it speaks through, so a partially-wired startup
     #: never tears the transport out from under a session.
     session_box: list[AgentSession | None] = dataclasses.field(default_factory=lambda: [None])
+    close_tasks: set[asyncio.Future[Any]] = dataclasses.field(default_factory=set)
+    preexisting_tasks: set[asyncio.Task[Any]] | None = None
     discovery_box: list[asyncio.Task[None]] = dataclasses.field(default_factory=list)
     #: Observability connectors (issue #193): each owns an HTTP client
     #: that teardown must close, however far wiring got.
@@ -1498,6 +1674,7 @@ class _RunState:
 
 
 async def _run(readonly: bool = False, mcp: bool = False, namespace: str | None = None) -> None:
+    preexisting_tasks = asyncio.all_tasks()
     config = _load_startup_config(readonly, mcp, namespace)
     # Custom columns (issue #45) are extracted from raw manifests inside the
     # client — the manifests are discarded once summaries are built.
@@ -1508,11 +1685,12 @@ async def _run(readonly: bool = False, mcp: bool = False, namespace: str | None 
     # connected client (or a built provider/MCP controller) into a
     # crash-recovery restart (issue #166). The state is filled as wiring
     # progresses, so teardown releases exactly what was built.
-    state = _RunState()
-    try:
-        await _wire_and_run(config, kube, state)
-    finally:
-        await _teardown(state, kube)
+    state = _RunState(preexisting_tasks=preexisting_tasks)
+    with _own_run_tasks():
+        try:
+            await _wire_and_run(config, kube, state)
+        finally:
+            await _teardown(state, kube)
 
 
 async def _wire_and_run(config: KorvidConfig, kube: KubeClient, state: _RunState) -> None:
@@ -1571,6 +1749,7 @@ async def _wire_and_run(config: KorvidConfig, kube: KubeClient, state: _RunState
         # and session exist, so partial agent wiring is also cleaned up.
         provider_box=state.provider_box,
         session_box=state.session_box,
+        close_tasks=state.close_tasks,
         startup_warnings=agent_warnings,
         observability=observability,
     )
@@ -1722,6 +1901,44 @@ def _restart_prompt() -> str:
     return input()
 
 
+def _force_runner_exit() -> None:
+    """Exit without blocking I/O or logging locks on the watchdog thread."""
+    os._exit(1)
+
+
+def _close_runner(runner: asyncio.Runner) -> None:
+    """Bound stdlib finalization without cancelling executor shutdown.
+
+    A daemon watchdog covers task gathering, asynchronous generators, and
+    executor threads even if Python 3.11 blocks the loop in thread.join().
+    It is armed only after run-owned client cleanup. Expiry or failure is
+    terminal, forfeiting remaining finalizers rather than offering recovery.
+    """
+    runner.get_loop().set_exception_handler(_log_cleanup_loop_error)
+    watchdog = threading.Timer(_RUNNER_SHUTDOWN_SECONDS, _force_runner_exit)
+    watchdog.daemon = True
+    watchdog.start()
+    try:
+        runner.close()
+    except (Exception, KeyboardInterrupt, SystemExit):
+        try:
+            logger.critical("Event loop finalization failed; exiting without restart")
+        finally:
+            _force_runner_exit()
+    finally:
+        watchdog.cancel()
+
+
+def _run_once(readonly: bool = False, mcp: bool = False, namespace: str | None = None) -> None:
+    """Give each recovery attempt a fresh loop with bounded finalization."""
+    runner = asyncio.Runner()
+    try:
+        runner.get_loop().set_exception_handler(_log_cleanup_loop_error)
+        runner.run(_run(readonly=readonly, mcp=mcp, namespace=namespace))
+    finally:
+        _close_runner(runner)
+
+
 def main() -> None:
     if sys.argv[1:2] == ["mcp"]:
         from korvid.cli import main as cli_main
@@ -1760,9 +1977,7 @@ def main() -> None:
     args = parser.parse_args()
     interactive = sys.stdin.isatty() and sys.stderr.isatty()
     _run_with_recovery(
-        # Each attempt is a fresh asyncio.run: new event loop, new wiring,
-        # new clients — nothing survives from a crashed run.
-        lambda: asyncio.run(_run(readonly=args.readonly, mcp=args.mcp, namespace=args.namespace)),
+        lambda: _run_once(readonly=args.readonly, mcp=args.mcp, namespace=args.namespace),
         allow_restart=interactive and not args.no_restart,
         prompt=_restart_prompt,
         clock=time.monotonic,

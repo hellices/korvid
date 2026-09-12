@@ -4,9 +4,16 @@ get_resource calls to learn what one LIST already knew."""
 
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import AsyncGenerator
+from dataclasses import replace
+from typing import Any, cast
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
+from korvid.k8s.client import KubeClient
 from korvid.k8s.discovery import PODS_META, ResourceMeta
+from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.models import (
     CSVSummary,
     EndpointSliceSummary,
@@ -18,7 +25,8 @@ from korvid.k8s.models import (
     StorageClassSummary,
     summary_for,
 )
-from korvid.tools.executor import ToolExecutor, summary_facts
+from korvid.k8s.reads import ReadOps
+from korvid.tools.executor import MAX_RESULT_CHARS, ToolExecutor, summary_facts
 
 _RS_META = ResourceMeta("ReplicaSet", "replicasets", "apps", "v1", True)
 
@@ -26,9 +34,159 @@ _RS_META = ResourceMeta("ReplicaSet", "replicasets", "apps", "v1", True)
 class ListingKube:
     def __init__(self, summaries: list[GenericSummary]) -> None:
         self.summaries = summaries
+        self.whole_lists = 0
+        self.yielded = 0
+        self.closed = False
 
     async def list_objects(self, meta: Any, namespace: str | None) -> list[GenericSummary]:
+        self.whole_lists += 1
         return self.summaries
+
+    async def iter_objects(
+        self, meta: ResourceMeta, namespace: str | None
+    ) -> AsyncGenerator[GenericSummary, None]:
+        try:
+            for summary in self.summaries:
+                self.yielded += 1
+                yield summary
+        finally:
+            self.closed = True
+
+
+async def test_list_resources_stops_rendering_at_the_result_budget() -> None:
+    kube = ListingKube(
+        [
+            GenericSummary(name=f"pod-{number}", namespace="prod", kind="Pod", created="")
+            for number in range(50_000)
+        ]
+    )
+    executor = ToolExecutor(cast(ReadOps, kube), {"pods": PODS_META})
+
+    with patch("korvid.tools.executor.summary_facts", wraps=summary_facts) as render:
+        result = await executor.execute("list_resources", {"kind": "pods"})
+
+    assert len(result) <= MAX_RESULT_CHARS
+    assert "truncated" in result
+    assert "prod/pod-0" in result
+    assert 0 < render.call_count < 1000
+    assert kube.whole_lists == 0
+    assert kube.yielded < 1000
+    assert kube.closed
+
+
+async def test_list_resources_closes_a_complete_empty_iterator() -> None:
+    kube = ListingKube([])
+    executor = ToolExecutor(cast(ReadOps, kube), {"pods": PODS_META})
+
+    assert await executor.execute("list_resources", {"kind": "pods"}) == "(none)"
+    assert kube.closed
+    assert kube.whole_lists == 0
+
+
+async def test_list_resources_stops_inside_an_oversized_custom_row() -> None:
+    summary = GenericSummary(
+        name="pod", namespace="prod", kind="Pod", created="", custom=("x" * 80,) * 200
+    )
+    kube = ListingKube([summary, summary])
+    executor = ToolExecutor(
+        cast(ReadOps, kube),
+        {"pods": PODS_META},
+        custom_columns={"pods": tuple(f"column-{number}" for number in range(200))},
+    )
+
+    result = await executor.execute("list_resources", {"kind": "pods"})
+
+    assert len(result) <= MAX_RESULT_CHARS
+    assert "column-0=" in result
+    assert "truncated" in result
+    assert kube.yielded == 1
+    assert kube.closed
+
+
+def _exact_budget_summaries() -> list[GenericSummary]:
+    sample = GenericSummary(name="", namespace="prod", kind="ConfigMap", created="")
+    header_size = len(f"prod/  -  age={sample.age()}")
+    return [
+        GenericSummary(
+            name=f"object-{number}".ljust(79 + (number == 99) - header_size, "x"),
+            namespace="prod",
+            kind="ConfigMap",
+            created="",
+        )
+        for number in range(100)
+    ]
+
+
+@pytest.mark.parametrize("spare_chars", [0, 1], ids=["row-fills-budget", "only-separator-fits"])
+async def test_list_resources_does_not_fetch_past_an_exact_budget_page(spare_chars: int) -> None:
+    summaries = _exact_budget_summaries()
+    if spare_chars:
+        summaries[-1] = replace(summaries[-1], name=summaries[-1].name[:-spare_chars])
+    lines = [f"{summary.namespace}/{summary.name}  -  age={summary.age()}" for summary in summaries]
+    assert len("\n".join(lines)) == MAX_RESULT_CHARS - spare_chars
+    request = AsyncMock(
+        side_effect=[
+            {
+                "metadata": {"continue": "unneeded"},
+                "items": [
+                    {"metadata": {"name": summary.name, "namespace": summary.namespace}}
+                    for summary in summaries
+                ],
+            },
+            ApiStatusError(500, "unneeded page failed"),
+        ]
+    )
+    client = KubeClient()
+    meta = ResourceMeta("ConfigMap", "configmaps", "", "v1", True)
+    executor = ToolExecutor(client, {"configmaps": meta})
+
+    with patch.object(client, "_api", MagicMock()), patch.object(client, "_request_json", request):
+        result = await executor.execute("list_resources", {"kind": "configmaps"})
+
+    assert request.await_count == 1
+    assert len(result) == MAX_RESULT_CHARS
+    assert "truncated" in result
+    assert not result.startswith("ERROR:")
+
+
+@pytest.mark.parametrize("spare_chars", [0, 1], ids=["row-fills-budget", "only-separator-fits"])
+async def test_list_resources_does_not_render_facts_after_exact_budget_exhaustion(
+    spare_chars: int,
+) -> None:
+    summaries = _exact_budget_summaries()
+    if spare_chars:
+        summaries[-1] = replace(summaries[-1], name=summaries[-1].name[:-spare_chars])
+    kube = ListingKube(summaries)
+    meta = ResourceMeta("ConfigMap", "configmaps", "", "v1", True)
+    executor = ToolExecutor(cast(ReadOps, kube), {"configmaps": meta})
+
+    with patch("korvid.tools.executor.summary_facts", wraps=summary_facts) as render:
+        result = await executor.execute("list_resources", {"kind": "configmaps"})
+
+    assert render.call_count == 99
+    assert len(result) == MAX_RESULT_CHARS
+    assert "truncated" in result
+    assert kube.closed
+
+
+async def test_list_resources_stops_when_a_separator_exhausts_the_budget() -> None:
+    summaries = _exact_budget_summaries()
+    summaries[-1] = replace(summaries[-1], name=summaries[-1].name[:-1])
+    lines = [f"{summary.namespace}/{summary.name}  -  age={summary.age()}" for summary in summaries]
+    assert len("\n".join(lines)) == MAX_RESULT_CHARS - 1
+    summaries.append(GenericSummary(name="unused", namespace="prod", kind="ConfigMap", created=""))
+    kube = ListingKube(summaries)
+    meta = ResourceMeta("ConfigMap", "configmaps", "", "v1", True)
+    executor = ToolExecutor(cast(ReadOps, kube), {"configmaps": meta})
+
+    with patch.object(GenericSummary, "age", autospec=True, return_value="-") as render_age:
+        result = await executor.execute("list_resources", {"kind": "configmaps"})
+
+    assert render_age.call_count == 100
+    assert kube.yielded == 100
+    assert len(result) == MAX_RESULT_CHARS
+    assert "truncated" in result
+    assert kube.closed
 
 
 def _pod_manifest(**status: Any) -> dict[str, Any]:
