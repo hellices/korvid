@@ -454,7 +454,7 @@ def test_the_formula_job_mints_a_scoped_homebrew_app_token_late() -> None:
     mint = next(step for step in _job_steps() if step.get("id") == "homebrew-app-token")
     assert "if" not in mint
     assert (
-        mint["uses"] == "actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349"
+        mint["uses"] == "actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1"
     )
     assert mint["with"]["owner"] == "hellices"
     assert mint["with"]["repositories"] == "homebrew-korvid"
