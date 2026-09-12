@@ -954,7 +954,12 @@ CommonJS/ESM harnesses, GitHub Actions YAML, GitHub REST API, pre-commit.
       diagnostics.append(f"kill=error type={type(error).__name__}")
       diagnostics.append(f"reap={_bounded_process_wait(process)}")
       return "; ".join(diagnostics)
-  process.wait()
+  try:
+      process.wait()
+  except OSError as error:
+      diagnostics.append("kill=sent")
+      diagnostics.append(f"reap=error type={type(error).__name__}")
+      return "; ".join(diagnostics)
   diagnostics.append("kill=reaped")
   return "; ".join(diagnostics)
   ```

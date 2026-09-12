@@ -135,6 +135,10 @@ class _CallTargetVisitor(ast.NodeVisitor):
             return frozenset((value.attr,))
         if isinstance(value, ast.IfExp):
             return self._reference_targets(value.body) | self._reference_targets(value.orelse)
+        if isinstance(value, ast.BoolOp):
+            return frozenset(
+                target for operand in value.values for target in self._reference_targets(operand)
+            )
         return frozenset()
 
     def _default_argument_targets(self, arguments: ast.arguments) -> dict[str, frozenset[str]]:
@@ -286,11 +290,13 @@ class _CallTargetVisitor(ast.NodeVisitor):
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
         for decorator in node.decorator_list:
             self.visit(decorator)
+        base_targets = frozenset[str]()
         for base in node.bases:
             self.visit(base)
+            base_targets |= self._reference_targets(base)
         for keyword in node.keywords:
             self.visit(keyword.value)
-        self._bind_unknown(node.name)
+        self._bind_aliases(node.name, base_targets)
         self._scopes.append({})
         self._scope_kinds.append("class")
         self._global_names.append(set())
@@ -314,19 +320,26 @@ class _CallTargetVisitor(ast.NodeVisitor):
 
     def _visit_try(self, node: ast.Try | ast.TryStar) -> None:
         original = self._scopes[-1].copy()
-        normal = self._visit_branch([*node.body, *node.orelse], original)
-        branches = [normal]
+        self._scopes[-1] = original.copy()
+        handler_entries = [original]
+        for statement in node.body:
+            self.visit(statement)
+            handler_entries.append(self._scopes[-1].copy())
+        for statement in node.orelse:
+            self.visit(statement)
+        branches = [self._scopes[-1].copy()]
         if node.handlers:
             branches.append(original)
         for handler in node.handlers:
-            self._scopes[-1] = original.copy()
-            if handler.type is not None:
-                self.visit(handler.type)
-            if handler.name is not None:
-                self._bind_unknown(handler.name)
-            for statement in handler.body:
-                self.visit(statement)
-            branches.append(self._scopes[-1].copy())
+            for entry in handler_entries:
+                self._scopes[-1] = entry.copy()
+                if handler.type is not None:
+                    self.visit(handler.type)
+                if handler.name is not None:
+                    self._bind_unknown(handler.name)
+                for statement in handler.body:
+                    self.visit(statement)
+                branches.append(self._scopes[-1].copy())
         self._merge_branches(original, branches)
         for statement in node.finalbody:
             self.visit(statement)
@@ -573,6 +586,18 @@ def test_composition_root_contract_rejects_runtime_component_in_support_module(
             "WriteCoordinator",
         ),
         (
+            "from decoy import Other\n"
+            "from korvid.ui.workspace_controller import WriteCoordinator\n"
+            "Factory = Other\n"
+            "try:\n"
+            "    Factory = WriteCoordinator\n"
+            "    raise RuntimeError\n"
+            "    Factory = Other\n"
+            "except RuntimeError:\n"
+            "    Factory()\n",
+            "WriteCoordinator",
+        ),
+        (
             "from korvid.ui.workspace_controller import WriteCoordinator\n"
             "try:\n"
             "    pass\n"
@@ -586,6 +611,13 @@ def test_composition_root_contract_rejects_runtime_component_in_support_module(
             "from decoy import Other\n"
             "enabled = True\n"
             "Factory = WriteCoordinator if enabled else Other\n"
+            "Factory()\n",
+            "WriteCoordinator",
+        ),
+        (
+            "from decoy import Other\n"
+            "from korvid.ui.workspace_controller import WriteCoordinator\n"
+            "Factory = Other and WriteCoordinator\n"
             "Factory()\n",
             "WriteCoordinator",
         ),
@@ -680,8 +712,10 @@ def test_composition_root_contract_rejects_runtime_component_in_support_module(
         "assigned-alias",
         "class-scope-shadow",
         "except-handler-shadow",
+        "try-prefix-handler",
         "except-star-handler-shadow",
         "conditional-alias",
+        "boolean-alias",
         "zero-iteration-while",
         "zero-iteration-for",
         "no-match-case",
@@ -738,6 +772,15 @@ def test_tests_construct_apps_only_through_the_factory() -> None:
         "except Exception:\n"
         "    KorvidApp = object()\n"
         "KorvidApp()\n",
+        "from decoy import Other\n"
+        "from korvid.ui.app import KorvidApp\n"
+        "Factory = Other\n"
+        "try:\n"
+        "    Factory = KorvidApp\n"
+        "    raise RuntimeError\n"
+        "    Factory = Other\n"
+        "except RuntimeError:\n"
+        "    Factory()\n",
         "from korvid.ui.app import KorvidApp\n"
         "try:\n"
         "    pass\n"
@@ -748,6 +791,10 @@ def test_tests_construct_apps_only_through_the_factory() -> None:
         "from decoy import Other\n"
         "enabled = True\n"
         "Factory = KorvidApp if enabled else Other\n"
+        "Factory()\n",
+        "from korvid.ui.app import KorvidApp\n"
+        "from decoy import Other\n"
+        "Factory = KorvidApp or Other\n"
         "Factory()\n",
         "from korvid.ui.app import KorvidApp\n"
         "from decoy import Other\n"
@@ -801,6 +848,12 @@ def test_tests_construct_apps_only_through_the_factory() -> None:
         "from korvid.ui.app import KorvidApp\n"
         "build = lambda required, factory=KorvidApp: factory()\n"
         "build(None)\n",
+        "from korvid.ui.app import KorvidApp\nclass _Host(KorvidApp):\n    pass\n_Host()\n",
+        "from korvid.ui.app import KorvidApp as BaseApp\n"
+        "class _Host(BaseApp):\n"
+        "    pass\n"
+        "App = _Host\n"
+        "App()\n",
     ],
     ids=[
         "qualified",
@@ -808,8 +861,10 @@ def test_tests_construct_apps_only_through_the_factory() -> None:
         "assigned-alias",
         "class-scope-shadow",
         "except-handler-shadow",
+        "try-prefix-handler",
         "except-star-handler-shadow",
         "conditional-alias",
+        "boolean-alias",
         "zero-iteration-while",
         "zero-iteration-for",
         "no-match-case",
@@ -819,6 +874,8 @@ def test_tests_construct_apps_only_through_the_factory() -> None:
         "positional-default",
         "keyword-default",
         "lambda-default",
+        "subclass",
+        "subclass-alias",
     ],
 )
 def test_factory_contract_rejects_indirect_app_construction(
