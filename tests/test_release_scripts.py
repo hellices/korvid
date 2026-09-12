@@ -861,7 +861,7 @@ def _metadata_text(
         "Provides-Extra: all\n"
         'Requires-Dist: httpx>=0.27; extra == "agent"\n'
         f"{keyring}"
-        'Requires-Dist: litellm==1.98.0; extra == "agent"\n'
+        'Requires-Dist: litellm==1.100.0; extra == "agent"\n'
         'Requires-Dist: openai<3.0.0,>=2.20.0; extra == "agent"\n'
         'Requires-Dist: mcp<3,>=2.0.0; extra == "mcp"\n'
         'Requires-Dist: httpx2<3,>=2.12.0; extra == "mcp"\n'
@@ -871,7 +871,7 @@ def _metadata_text(
         'Requires-Dist: httpx>=0.27; extra == "observability"\n'
         'Requires-Dist: httpx>=0.27; extra == "all"\n'
         'Requires-Dist: keyring>=25.7.0; extra == "all"\n'
-        'Requires-Dist: litellm==1.98.0; extra == "all"\n'
+        'Requires-Dist: litellm==1.100.0; extra == "all"\n'
         'Requires-Dist: openai<3.0.0,>=2.20.0; extra == "all"\n'
         'Requires-Dist: mcp<3,>=2.0.0; extra == "all"\n'
         'Requires-Dist: httpx2<3,>=2.12.0; extra == "all"\n'

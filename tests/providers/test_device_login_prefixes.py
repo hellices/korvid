@@ -46,7 +46,7 @@ from korvid.providers.special_flows import SpecialFlowRegistry, normalize_prefix
 #: the one `pyproject.toml` pins. A bump has to re-measure: the discovery
 #: below reads an upstream layout convention, and the claimed set is only
 #: as good as the release it was checked against.
-MEASURED_LITELLM_VERSION: Final = "1.98.0"
+MEASURED_LITELLM_VERSION: Final = "1.100.0"
 
 #: The device-code providers measured on that release, as LiteLLM spells
 #: them. Discovery must keep finding *at least* these: a restructure that
