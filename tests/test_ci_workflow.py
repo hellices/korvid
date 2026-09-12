@@ -107,11 +107,15 @@ def test_windows_suite_prints_and_uses_one_deterministic_seed() -> None:
 def test_experimental_ty_job_is_honestly_advisory() -> None:
     job = _jobs(CI_WORKFLOW)["ty-experimental"]
     runs = _run_steps(job)
+    steps = job.get("steps")
+    assert isinstance(steps, list)
+    run_steps = [step for step in steps if isinstance(step, dict) and "run" in step]
 
-    assert job.get("continue-on-error") is True
+    assert "continue-on-error" not in job
     assert "uv sync --locked --dev --all-extras" in runs
     assert "uv run --with ty ty check src/" in runs
     assert runs.index("uv sync --locked --dev --all-extras") < runs.index(
         "uv run --with ty ty check src/"
     )
+    assert [step.get("continue-on-error") for step in run_steps] == [None, True]
     assert all("|| true" not in run for run in runs)
