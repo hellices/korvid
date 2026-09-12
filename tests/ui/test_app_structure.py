@@ -458,9 +458,10 @@ class _CallTargetVisitor(ast.NodeVisitor):
 
     def _visit_for(self, node: ast.For | ast.AsyncFor) -> None:
         self.visit(node.iter)
+        iterable_targets = self._reference_targets(node.iter)
         original = self._scopes[-1].copy()
         self._scopes[-1] = original.copy()
-        self._bind_target(node.target)
+        self._bind_assignment(node.target, iterable_targets)
         for statement in node.body:
             self.visit(statement)
         self._merge_loop_paths(original, self._scopes[-1].copy(), node.orelse)
@@ -696,6 +697,12 @@ def test_composition_root_contract_rejects_runtime_component_in_support_module(
         ),
         (
             "from korvid.ui.workspace_controller import WriteCoordinator\n"
+            "for factory in (WriteCoordinator,):\n"
+            "    factory()\n",
+            "WriteCoordinator",
+        ),
+        (
+            "from korvid.ui.workspace_controller import WriteCoordinator\n"
             "class Shadow:\n"
             "    WriteCoordinator = object()\n"
             "    def build(self):\n"
@@ -853,6 +860,7 @@ def test_composition_root_contract_rejects_runtime_component_in_support_module(
         "set-comprehension-target",
         "dict-comprehension-target",
         "generator-comprehension-target",
+        "for-target-alias",
         "class-scope-shadow",
         "except-handler-shadow",
         "try-prefix-handler",
@@ -911,6 +919,7 @@ def test_tests_construct_apps_only_through_the_factory() -> None:
         "from korvid.ui.app import KorvidApp\n"
         '{key: factory() for key, factory in (("key", KorvidApp),)}\n',
         "from korvid.ui.app import KorvidApp\ntuple(factory() for factory in (KorvidApp,))\n",
+        "from korvid.ui.app import KorvidApp\nfor factory in (KorvidApp,):\n    factory()\n",
         "from korvid.ui.app import KorvidApp\n"
         "class Shadow:\n"
         "    KorvidApp = object()\n"
@@ -1021,6 +1030,7 @@ def test_tests_construct_apps_only_through_the_factory() -> None:
         "set-comprehension-target",
         "dict-comprehension-target",
         "generator-comprehension-target",
+        "for-target-alias",
         "class-scope-shadow",
         "except-handler-shadow",
         "try-prefix-handler",
