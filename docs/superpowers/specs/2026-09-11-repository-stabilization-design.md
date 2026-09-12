@@ -380,10 +380,8 @@ PR #385 is updated and re-reviewed until every credible finding is addressed
 and every required check is successful. The maintainer alone decides whether
 to merge it.
 
-Suggested later product sessions are:
-
-1. #343 alone: bounded Kubernetes LIST paging and memory behavior;
-2. #340 alone: provider/MCP teardown ownership and deadlines;
-3. #341 and #345 as separate integration/discovery correctness sessions; and
-4. #337, #338, and #339 as independently testable Kubernetes semantics work,
-   not one bulk patch.
+The seven Kubernetes follow-ups previously proposed here (#337, #338, #339,
+#340, #341, #343, and #345) were completed and closed by PR #381. This branch
+integrates that mainline work at `fbca06ae`, so none of them remains a suggested
+later session. Reopen or replace one only if new regression evidence establishes
+work beyond PR #381's delivered scope.

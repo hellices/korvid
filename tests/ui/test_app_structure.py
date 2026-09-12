@@ -263,6 +263,58 @@ class _CallTargetVisitor(ast.NodeVisitor):
     def visit_TryStar(self, node: ast.TryStar) -> None:
         self._visit_try(node)
 
+    def _merge_loop_paths(
+        self,
+        original: dict[str, frozenset[str] | None],
+        iteration: dict[str, frozenset[str] | None],
+        orelse: list[ast.stmt],
+    ) -> None:
+        self._merge_branches(original, [original, iteration])
+        completed = self._visit_branch(orelse, self._scopes[-1])
+        self._merge_branches(original, [original, iteration, completed])
+
+    def _visit_for(self, node: ast.For | ast.AsyncFor) -> None:
+        self.visit(node.iter)
+        original = self._scopes[-1].copy()
+        self._scopes[-1] = original.copy()
+        self._bind_target(node.target)
+        for statement in node.body:
+            self.visit(statement)
+        self._merge_loop_paths(original, self._scopes[-1].copy(), node.orelse)
+
+    def visit_For(self, node: ast.For) -> None:
+        self._visit_for(node)
+
+    def visit_AsyncFor(self, node: ast.AsyncFor) -> None:
+        self._visit_for(node)
+
+    def visit_While(self, node: ast.While) -> None:
+        self.visit(node.test)
+        original = self._scopes[-1].copy()
+        iteration = self._visit_branch(node.body, original)
+        self._merge_loop_paths(original, iteration, node.orelse)
+
+    def _bind_match_pattern(self, pattern: ast.pattern) -> None:
+        for node in ast.walk(pattern):
+            if isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name is not None:
+                self._bind_unknown(node.name)
+            elif isinstance(node, ast.MatchMapping) and node.rest is not None:
+                self._bind_unknown(node.rest)
+
+    def visit_Match(self, node: ast.Match) -> None:
+        self.visit(node.subject)
+        original = self._scopes[-1].copy()
+        branches = [original]
+        for case in node.cases:
+            self._scopes[-1] = original.copy()
+            self._bind_match_pattern(case.pattern)
+            if case.guard is not None:
+                self.visit(case.guard)
+            for statement in case.body:
+                self.visit(statement)
+            branches.append(self._scopes[-1].copy())
+        self._merge_branches(original, branches)
+
 
 def _call_targets(tree: ast.AST) -> list[tuple[int, str]]:
     visitor = _CallTargetVisitor()
@@ -454,6 +506,34 @@ def test_composition_root_contract_rejects_runtime_component_in_support_module(
             "Factory()\n",
             "WriteCoordinator",
         ),
+        (
+            "from korvid.ui.workspace_controller import WriteCoordinator\n"
+            "from decoy import Other\n"
+            "Factory = WriteCoordinator\n"
+            "while False:\n"
+            "    Factory = Other\n"
+            "Factory()\n",
+            "WriteCoordinator",
+        ),
+        (
+            "from korvid.ui.workspace_controller import WriteCoordinator\n"
+            "from decoy import Other\n"
+            "Factory = WriteCoordinator\n"
+            "for _ in ():\n"
+            "    Factory = Other\n"
+            "Factory()\n",
+            "WriteCoordinator",
+        ),
+        (
+            "from korvid.ui.workspace_controller import WriteCoordinator\n"
+            "from decoy import Other\n"
+            "Factory = WriteCoordinator\n"
+            "match 0:\n"
+            "    case 1:\n"
+            "        Factory = Other\n"
+            "Factory()\n",
+            "WriteCoordinator",
+        ),
     ],
     ids=[
         "qualified",
@@ -467,6 +547,9 @@ def test_composition_root_contract_rejects_runtime_component_in_support_module(
         "except-handler-shadow",
         "except-star-handler-shadow",
         "conditional-alias",
+        "zero-iteration-while",
+        "zero-iteration-for",
+        "no-match-case",
     ],
 )
 def test_composition_root_contract_rejects_indirect_runtime_construction(
@@ -525,6 +608,25 @@ def test_tests_construct_apps_only_through_the_factory() -> None:
         "enabled = True\n"
         "Factory = KorvidApp if enabled else Other\n"
         "Factory()\n",
+        "from korvid.ui.app import KorvidApp\n"
+        "from decoy import Other\n"
+        "Factory = KorvidApp\n"
+        "while False:\n"
+        "    Factory = Other\n"
+        "Factory()\n",
+        "from korvid.ui.app import KorvidApp\n"
+        "from decoy import Other\n"
+        "Factory = KorvidApp\n"
+        "for _ in ():\n"
+        "    Factory = Other\n"
+        "Factory()\n",
+        "from korvid.ui.app import KorvidApp\n"
+        "from decoy import Other\n"
+        "Factory = KorvidApp\n"
+        "match 0:\n"
+        "    case 1:\n"
+        "        Factory = Other\n"
+        "Factory()\n",
     ],
     ids=[
         "qualified",
@@ -534,6 +636,9 @@ def test_tests_construct_apps_only_through_the_factory() -> None:
         "except-handler-shadow",
         "except-star-handler-shadow",
         "conditional-alias",
+        "zero-iteration-while",
+        "zero-iteration-for",
+        "no-match-case",
     ],
 )
 def test_factory_contract_rejects_indirect_app_construction(
