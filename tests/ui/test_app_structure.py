@@ -11,6 +11,7 @@ from typing import cast
 import pytest
 
 ROOT = Path(__file__).parents[2]
+KORVID = ROOT / "src" / "korvid"
 UI = ROOT / "src" / "korvid" / "ui"
 MAIN = ROOT / "src" / "korvid" / "__main__.py"
 TESTS = ROOT / "tests"
@@ -65,6 +66,19 @@ def _called_names(tree: ast.AST) -> set[str]:
         node.func.id
         for node in ast.walk(tree)
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+
+
+def _runtime_component_constructions() -> set[str]:
+    """Return runtime-component constructions outside the composition root."""
+    return {
+        f"{path.relative_to(KORVID)}:{node.lineno}: {node.func.id}"
+        for path in KORVID.rglob("*.py")
+        if path != KORVID / "__main__.py"
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id in RUNTIME_COMPONENTS
     }
 
 
@@ -140,11 +154,24 @@ def test_app_runtime_does_not_import_the_app_at_runtime() -> None:
 
 
 def test_only_the_composition_root_constructs_the_app_runtime() -> None:
-    ui_calls = set().union(
-        *(_called_names(ast.parse(path.read_text(encoding="utf-8"))) for path in UI.rglob("*.py"))
-    )
-    assert not ui_calls.intersection(RUNTIME_COMPONENTS)
+    offenders = _runtime_component_constructions()
+    assert not offenders, "\n".join(sorted(offenders))
     assert _called_names(ast.parse(MAIN.read_text(encoding="utf-8"))) >= RUNTIME_COMPONENTS
+
+
+def test_composition_root_contract_rejects_runtime_component_in_support_module(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A non-UI module must not construct composition-root components."""
+    support_module = tmp_path / "composition_support.py"
+    support_module.write_text("WriteCoordinator()\n", encoding="utf-8")
+    monkeypatch.setitem(globals(), "KORVID", tmp_path)
+
+    with pytest.raises(
+        AssertionError,
+        match=r"composition_support\.py:1: WriteCoordinator",
+    ):
+        test_only_the_composition_root_constructs_the_app_runtime()
 
 
 def test_tests_construct_apps_only_through_the_factory() -> None:
