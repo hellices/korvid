@@ -211,6 +211,22 @@ rules out a deterministic harness-owned leak there, not a Windows-specific
 shutdown or runner stall. The new Windows evidence is required before claiming
 a root cause or fix.
 
+[Run 34706111509, job 103586389583](https://github.com/hellices/korvid/actions/runs/34706111509/job/103586389583)
+on commit `dcfcc62b` supplied a different Windows recurrence.
+`harness_nonzero_exit.mjs` emitted the preload milestone and both contract
+writes, but no `stage=complete`, `stage=before-exit`, or `stage=exit` marker.
+At the ten-second deadline the Node process was still running with only
+0.015625 user CPU seconds and 0.0625 system CPU seconds across 12 threads;
+termination reaped it, and the independently bounded Python, Node-version, and
+CJS/file/ESM probes all exited successfully. The relevant harness sources were
+byte-identical to successful run 34700214127. This localizes the new symptom to
+the synchronous `finish()` path or runner suspension after the contract write,
+but the absent `stage=complete` line cannot distinguish resource enumeration
+from the final synchronous write. It therefore remains evidence, not proof of
+a Node defect or a repository-side runtime fix; issue #371 tracks the remaining
+investigation. The failed run was not retried, skipped, or given a longer
+deadline.
+
 Stdout and stderr remain in separate temporary files under the repository
 instead of `PIPE`s. Python waits on the process handle with `Popen.wait()` for
 the unchanged 10-second deadline. On a true timeout it polls the process and
