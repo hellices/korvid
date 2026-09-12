@@ -66,20 +66,32 @@ def _tree(name: str) -> ast.Module:
 class _CallTargetVisitor(ast.NodeVisitor):
     """Resolve call targets without leaking aliases across runtime scopes."""
 
-    def __init__(self) -> None:
+    def __init__(self, runtime_module_targets: dict[str, frozenset[str]] | None = None) -> None:
         self.targets: list[tuple[int, str]] = []
         self._scopes: list[dict[str, frozenset[str] | None]] = [{}]
         self._scope_kinds = ["module"]
+        self._runtime_module_targets = runtime_module_targets or {}
+        self._module_target_history: dict[str, set[str]] = {}
 
     def _resolve_name(self, name: str) -> frozenset[str]:
-        skip_class_scopes = self._scope_kinds[-1] in {"function", "lambda"}
+        runtime_global_lookup = self._scope_kinds[-1] in {"function", "lambda"}
         for kind, scope in reversed(tuple(zip(self._scope_kinds, self._scopes, strict=True))):
-            if skip_class_scopes and kind == "class":
+            if runtime_global_lookup and kind == "class":
                 continue
             if name in scope:
                 targets = scope[name]
-                return frozenset() if targets is None else targets
+                resolved = frozenset() if targets is None else targets
+                if runtime_global_lookup and kind == "module":
+                    return resolved | self._runtime_module_targets.get(name, frozenset())
+                return resolved
+        if runtime_global_lookup and name in self._runtime_module_targets:
+            return self._runtime_module_targets[name]
         return frozenset((name,))
+
+    def _bind_aliases(self, name: str, aliases: frozenset[str]) -> None:
+        self._scopes[-1][name] = aliases or None
+        if aliases and self._scope_kinds[-1] == "module":
+            self._module_target_history.setdefault(name, set()).update(aliases)
 
     def _bind_unknown(self, name: str) -> None:
         self._scopes[-1][name] = None
@@ -102,7 +114,7 @@ class _CallTargetVisitor(ast.NodeVisitor):
 
     def _bind_assignment(self, target: ast.expr, aliases: frozenset[str]) -> None:
         if isinstance(target, ast.Name):
-            self._scopes[-1][target.id] = aliases or None
+            self._bind_aliases(target.id, aliases)
         else:
             self._bind_target(target)
 
@@ -168,7 +180,7 @@ class _CallTargetVisitor(ast.NodeVisitor):
 
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
         for alias in node.names:
-            self._scopes[-1][alias.asname or alias.name] = frozenset((alias.name,))
+            self._bind_aliases(alias.asname or alias.name, frozenset((alias.name,)))
 
     def visit_Assign(self, node: ast.Assign) -> None:
         self.visit(node.value)
@@ -318,7 +330,12 @@ class _CallTargetVisitor(ast.NodeVisitor):
 
 
 def _call_targets(tree: ast.AST) -> list[tuple[int, str]]:
-    visitor = _CallTargetVisitor()
+    collector = _CallTargetVisitor()
+    collector.visit(tree)
+    runtime_module_targets = {
+        name: frozenset(targets) for name, targets in collector._module_target_history.items()
+    }
+    visitor = _CallTargetVisitor(runtime_module_targets)
     visitor.visit(tree)
     return visitor.targets
 
@@ -539,6 +556,14 @@ def test_composition_root_contract_rejects_runtime_component_in_support_module(
             "Factory()\n",
             "WriteCoordinator",
         ),
+        (
+            "from decoy import Other as Factory\n"
+            "def build():\n"
+            "    Factory()\n"
+            "from korvid.ui.workspace_controller import WriteCoordinator as Factory\n"
+            "build()\n",
+            "WriteCoordinator",
+        ),
     ],
     ids=[
         "qualified",
@@ -556,6 +581,7 @@ def test_composition_root_contract_rejects_runtime_component_in_support_module(
         "zero-iteration-while",
         "zero-iteration-for",
         "no-match-case",
+        "late-global-rebind",
     ],
 )
 def test_composition_root_contract_rejects_indirect_runtime_construction(
@@ -633,6 +659,11 @@ def test_tests_construct_apps_only_through_the_factory() -> None:
         "    case 1:\n"
         "        Factory = Other\n"
         "Factory()\n",
+        "from decoy import Other as Factory\n"
+        "def build():\n"
+        "    Factory()\n"
+        "from korvid.ui.app import KorvidApp as Factory\n"
+        "build()\n",
     ],
     ids=[
         "qualified",
@@ -645,6 +676,7 @@ def test_tests_construct_apps_only_through_the_factory() -> None:
         "zero-iteration-while",
         "zero-iteration-for",
         "no-match-case",
+        "late-global-rebind",
     ],
 )
 def test_factory_contract_rejects_indirect_app_construction(
