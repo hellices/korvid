@@ -255,7 +255,7 @@ def _run_harness(name: str) -> subprocess.CompletedProcess[str]:
         )
         try:
             returncode = process.wait(timeout=_HARNESS_TIMEOUT)
-        except OSError:
+        except (OSError, KeyboardInterrupt, SystemExit):
             _terminate_and_reap(process, None)
             raise
         except subprocess.TimeoutExpired as error:
@@ -563,6 +563,56 @@ def test_harness_reaps_child_before_reraising_initial_wait_os_error(
 
     with pytest.raises(PermissionError, match="initial wait failed") as raised:
         _run_harness("harness_wait_error.mjs")
+
+    assert raised.value is initial_error
+    assert events == ["spawn", "wait:10", "terminate", "wait:2"]
+
+
+@pytest.mark.parametrize(
+    ("initial_error", "error_type"),
+    [
+        (KeyboardInterrupt("initial wait interrupted"), KeyboardInterrupt),
+        (SystemExit("initial wait interrupted"), SystemExit),
+    ],
+    ids=["keyboard-interrupt", "system-exit"],
+)
+def test_harness_reaps_child_before_reraising_initial_wait_interruption(
+    monkeypatch: pytest.MonkeyPatch,
+    initial_error: BaseException,
+    error_type: type[BaseException],
+) -> None:
+    events: list[str] = []
+    resolved = str(ROOT / "node-wait-interrupted.exe")
+
+    class FakeProcess:
+        pid = 5252
+
+        def wait(self, timeout: float | None = None) -> int:
+            events.append(f"wait:{timeout}")
+            if timeout == _HARNESS_TIMEOUT:
+                raise initial_error
+            return -15
+
+        def poll(self) -> int | None:
+            raise AssertionError("interruption cleanup must not query the waiting process")
+
+        def terminate(self) -> None:
+            events.append("terminate")
+
+        def kill(self) -> None:
+            raise AssertionError("a process reaped after terminate must not be killed")
+
+    def popen(command: list[str], **options: object) -> FakeProcess:
+        assert command[-1] == str(JS_TESTS / "harness_wait_interrupted.mjs")
+        assert options["stdin"] is subprocess.DEVNULL
+        events.append("spawn")
+        return FakeProcess()
+
+    monkeypatch.setattr(shutil, "which", lambda executable: resolved)
+    monkeypatch.setattr(subprocess, "Popen", popen)
+
+    with pytest.raises(error_type, match="initial wait interrupted") as raised:
+        _run_harness("harness_wait_interrupted.mjs")
 
     assert raised.value is initial_error
     assert events == ["spawn", "wait:10", "terminate", "wait:2"]
