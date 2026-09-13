@@ -1,3 +1,8 @@
+---
+search:
+  exclude: false
+---
+
 # Development documents
 
 Internal documents for people (and agents) working **on** korvid, as
