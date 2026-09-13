@@ -969,6 +969,7 @@ def test_smoke_publication_checker_fails_when_canonical_homepage_is_missing_from
             "search/search_index.json",
             "search index scope",
             _search_index_body(
+                PUBLIC_HOME_SEARCH_PATH,
                 *PUBLIC_NAV_ROUTES,
                 PUBLIC_EVAL_PATH,
                 PUBLIC_SCENARIOS_PATH,
@@ -981,6 +982,7 @@ def test_smoke_publication_checker_fails_when_canonical_homepage_is_missing_from
             "search/search_index.json",
             "search index scope",
             _search_index_body(
+                PUBLIC_HOME_SEARCH_PATH,
                 *PUBLIC_NAV_ROUTES,
                 PUBLIC_EVAL_PATH,
                 PUBLIC_SCENARIOS_PATH,
@@ -1040,6 +1042,7 @@ def test_smoke_publication_checker_fails_when_canonical_homepage_is_missing_from
             "sitemap.xml",
             "sitemap scope",
             _sitemap_body(
+                PUBLIC_HOME_SEARCH_PATH,
                 *PUBLIC_NAV_ROUTES,
                 PUBLIC_EVAL_PATH,
                 PUBLIC_SCENARIOS_PATH,
@@ -1052,6 +1055,7 @@ def test_smoke_publication_checker_fails_when_canonical_homepage_is_missing_from
             "sitemap.xml",
             "sitemap scope",
             _sitemap_body(
+                PUBLIC_HOME_SEARCH_PATH,
                 *PUBLIC_NAV_ROUTES,
                 PUBLIC_EVAL_PATH,
                 PUBLIC_SCENARIOS_PATH,
