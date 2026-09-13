@@ -1,0 +1,37 @@
+name: Frequent failed retries cannot keep a never-successful source fresh
+now: "2026-09-13T12:00:00Z"
+scope: production
+steps:
+  - sources:
+      pods: {state: failed, detail: Connection refused}
+    expect:
+      current_count: 0
+      coverage: {pods: failed}
+  - after_seconds: 10
+    sources:
+      pods: {state: failed, detail: Connection refused}
+    expect:
+      coverage: {pods: failed}
+  - after_seconds: 20
+    sources:
+      pods: {state: forbidden, detail: Access denied}
+    expect:
+      coverage: {pods: forbidden}
+  - after_seconds: 30
+    sources:
+      pods: {state: unavailable, detail: Source unavailable}
+    expect:
+      coverage: {pods: unavailable}
+  - after_seconds: 40
+    sources:
+      pods: {state: loading, detail: Retrying source observation}
+    expect:
+      coverage: {pods: stale}
+  - after_seconds: 45
+    sources:
+      pods: {objects: []}
+    expect:
+      coverage: {pods: complete}
+  - after_seconds: 76
+    expect:
+      coverage: {pods: stale}

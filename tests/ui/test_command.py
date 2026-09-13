@@ -33,6 +33,17 @@ def _known(alias: str) -> str | None:
     return _KNOWN.get(alias)
 
 
+@pytest.mark.parametrize("text", ["pulse", "problems"])
+def test_pulse_aliases_share_one_typed_zero_argument_operation(text: str) -> None:
+    message = parse_command(text, lambda _alias: "custom-resources")
+    assert isinstance(message, messages.BuiltinCommand)
+    assert message.operation.value == "pulse"
+    assert isinstance(parse_command(f"{text} extra", _known), UnknownCommand)
+    descriptors = [descriptor for descriptor in command.COMMANDS if text in descriptor.aliases]
+    assert len(descriptors) == 1
+    assert descriptors[0].maximum_arguments == 0
+
+
 # ---------------------------------------------------------------------------
 # Legacy grammar (must still work with the new two-arg signature)
 # ---------------------------------------------------------------------------

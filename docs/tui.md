@@ -44,6 +44,12 @@ drill-down.
 
 ## Follow one signal
 
+Not sure which resource to inspect? The one-line [Pulse summary](pulse.md)
+continuously exposes current findings, recent Warning observations, and gaps
+without moving the workspace. `:pulse` / `:problems` open the detail; Enter
+verifies the selected resource's UID before using normal navigation. Recent
+events are not a claim that the problem is still active.
+
 A typical investigation starts at a troubled row and ends at its cause:
 
 1. `/` filters the table down to the workload you care about (name,

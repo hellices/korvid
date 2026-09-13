@@ -1,0 +1,26 @@
+name: Unknown controller reasons and custom resources stay visible without a target UID
+now: "2026-09-13T12:00:00Z"
+scope: production
+steps:
+  - sources:
+      events:
+        objects:
+          - apiVersion: events.k8s.io/v1
+            kind: Event
+            metadata: {namespace: production, name: lease-failed, uid: lease-event-uid}
+            type: Warning
+            reason: NovelLeaseControllerFailure
+            note: "Controller reports token=event-secret"
+            eventTime: "2026-09-13T11:50:00Z"
+            series: {lastObservedTime: "2026-09-13T11:59:50Z", count: 7}
+            regarding:
+              apiVersion: leases.example.io/v1alpha1
+              kind: TenantLease
+              namespace: production
+              name: shared-lease
+    expect:
+      current_count: 0
+      recent_count: 1
+      recent_reasons: [NovelLeaseControllerFailure]
+      forbidden_text: [event-secret]
+      coverage: {events: complete, pods: loading, deployments: loading}

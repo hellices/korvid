@@ -25,6 +25,7 @@ import pytest
 from korvid.core.audit import AuditLog
 from korvid.core.mcp import MCPControllerBase
 from korvid.core.portforward import ForwardRecord, ForwardRegistry
+from korvid.core.session_timeline import SessionTimeline
 from korvid.ui.context_switch_coordinator import (
     HINT_EVENTS_GROUP,
     ContextSurface,
@@ -33,8 +34,11 @@ from korvid.ui.context_switch_coordinator import (
     SessionConfiguration,
     SwitchAgent,
 )
+from korvid.ui.session_timeline_controller import SessionTimelineController
 from korvid.ui.widgets.pick_screen import PickScreen
 
+from .test_pulse_controller import Harness as PulseHarness
+from .test_session_timeline_controller import _FakeWatchManager
 from .test_write_coordinator import FakeUi, FakeView
 
 # ---------------------------------------------------------------------------
@@ -553,6 +557,64 @@ async def test_a_successful_switch_increments_the_epoch_exactly_once(tmp_path: P
     env = Env(tmp_path)
     await env.switch()
     assert env.coordinator.epoch() == 1
+
+
+async def test_pulse_reads_stop_before_connection_retarget_and_resume_after(tmp_path: Path) -> None:
+    env = Env(tmp_path)
+    observed: list[str] = []
+
+    class Observer:
+        async def suspend(self) -> None:
+            observed.append("suspend")
+
+        def resume(self) -> None:
+            observed.append("resume")
+
+    observer = Observer()
+    env.coordinator._pulse = lambda: observer
+    switch = env.coordinator._switch_context
+    assert switch is not None
+
+    async def retarget(name: str | None) -> ContextSwitchResult:
+        assert observed == ["suspend"]
+        return await switch(name)
+
+    env.coordinator._switch_context = retarget
+    await env.switch()
+    assert observed == ["suspend", "resume"]
+
+
+async def test_unavailable_warning_feed_remains_visible_after_context_restart(
+    tmp_path: Path,
+) -> None:
+    env = Env(tmp_path)
+    harness = PulseHarness()
+    harness.controller._context = env.coordinator
+    harness.controller._view = env.view
+    timeline = SessionTimelineController(
+        ui=harness.ui,
+        view=env.view,
+        watch_manager=_FakeWatchManager(),
+        timeline=SessionTimeline(100, 131072),
+        get_epoch=env.coordinator.epoch,
+        epoch_crossed=lambda epoch: epoch != env.coordinator.epoch(),
+        navigate=harness.navigate,
+        warning_coverage=harness.controller.warning_status,
+    )
+    env.coordinator._pulse = lambda: harness.controller
+    env.coordinator._timeline = lambda: timeline
+    harness.controller.start()
+    try:
+        await harness.ui.settled()
+        await env.switch()
+        harness.controller.tick()
+        await harness.ui.settled()
+        coverage = {entry.source: entry for entry in harness.controller.snapshot().coverage}
+        assert coverage["pods"].state == "complete"
+        assert "warning-watch" in coverage
+        assert coverage["warning-watch"].state == "unavailable"
+    finally:
+        await harness.controller.stop()
 
 
 async def test_the_epoch_is_unchanged_when_the_probe_fails(tmp_path: Path) -> None:

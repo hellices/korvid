@@ -45,6 +45,7 @@ nav:
       - Keybindings: keybindings.md
   - Operate:
       - TUI: tui.md
+      - Pulse / Problems: pulse.md
       - Operations and safety: ops.md
       - Resource relationships: resource-relationships.md
       - Helm and operators: helm-operators.md

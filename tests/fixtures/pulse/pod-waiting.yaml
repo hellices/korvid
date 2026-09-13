@@ -1,0 +1,27 @@
+name: A current waiting state is independent of Warning events
+now: "2026-09-13T12:00:00Z"
+scope: production
+steps:
+  - sources:
+      pods:
+        objects:
+          - apiVersion: v1
+            kind: Pod
+            metadata: {namespace: production, name: api, uid: pod-api}
+            spec: {containers: [{name: api}]}
+            status:
+              phase: Running
+              conditions: [{type: Ready, status: "False"}]
+              containerStatuses:
+                - name: api
+                  state:
+                    waiting: {reason: CrashLoopBackOff, message: The current container is backing off}
+      deployments: {objects: []}
+      events: {objects: []}
+    expect:
+      current_count: 1
+      recent_count: 0
+      current_reasons: [CrashLoopBackOff]
+      current_rule_ids: [pulse.pod.container-waiting]
+      forbidden_current_reasons: [Pending, Unschedulable]
+      coverage: {pods: complete, deployments: complete, events: complete}

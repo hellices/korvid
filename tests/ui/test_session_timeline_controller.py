@@ -236,6 +236,37 @@ async def _default_navigate(kind_alias: str, namespace: str, name: str, epoch: i
     return None
 
 
+async def test_warning_observer_shares_existing_feed_without_replacing_timeline() -> None:
+    timeline = SessionTimeline(100, 100000)
+    received: list[tuple[dict[str, Any], int]] = []
+    states: list[str] = []
+    epoch = [0]
+    event = {"type": "Warning", "reason": "NewReason", "metadata": {"uid": "event-1"}}
+
+    async def warnings(namespace: str | None) -> AsyncIterator[dict[str, Any]]:
+        assert namespace is None
+        yield event
+        epoch[0] = 1
+
+    controller = SessionTimelineController(
+        ui=FakeUiSurface(),
+        view=FakeViewState(dict(_PODS_ALIASES)),
+        watch_manager=_FakeWatchManager(),
+        timeline=timeline,
+        get_epoch=lambda: epoch[0],
+        epoch_crossed=lambda previous: previous != epoch[0],
+        watch_warning_events=warnings,
+        navigate=_default_navigate,
+        warning_observer=lambda payload, observed_epoch: received.append((payload, observed_epoch)),
+        warning_coverage=lambda _epoch, state, _detail: states.append(state),
+    )
+    controller.TIMELINE_EVENT_RETRY_SECONDS = 0
+    await controller._run_warning_watch()
+    assert received == [(event, 0)]
+    assert len(timeline.snapshot(epoch=None, source=None, resource=None).entries) == 1
+    assert "partial" in states
+
+
 def make_controller(
     *,
     timeline: SessionTimeline | None,

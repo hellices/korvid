@@ -1,5 +1,17 @@
 # Unreleased
 
+## Ambient Pulse / Problems
+
+The base TUI now keeps a one-line attention summary visible while you browse.
+Open `:pulse` or `:problems` for current Pod/Deployment findings, recent Warning
+Events (including unfamiliar controller reasons), and explicit observation gaps.
+Enter follows a verified resource identity through the existing navigation path.
+
+Reads, retention, and refresh frequency are bounded; Pulse shares the existing
+Warning stream rather than adding watches. Updates do not move selections or
+interfere with approval dialogs. “No matched problems” is not a cluster-health
+guarantee. See [Pulse / Problems](../pulse.md) for coverage, limits, and keyboard use.
+
 ## Current configuration and extension contracts
 
 This pre-1.0 cleanup removes obsolete input formats rather than maintaining

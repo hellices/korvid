@@ -9,6 +9,7 @@ Korvid shows only the keys that act on the current view. Press `?` for the compl
 | Key | What it does |
 |---|---|
 | `:` | Open the command bar |
+| `:pulse` / `:problems` | Inspect [current problems, recent warnings, and coverage](pulse.md) |
 | `?` | Show the effective keys for every view |
 | `~` | Expand or collapse the top-bar legend |
 | `/` | Filter a table or search the log pane |

@@ -423,7 +423,7 @@ async def test_rapid_double_reveal_ends_masked(tmp_path: Path) -> None:
         # is true *before* they run, so it can't serve as the wait condition.
         await until(
             pilot,
-            lambda: all(w.is_finished for w in screen.workers),
+            lambda: all(worker.is_finished for worker in screen.workers if worker.node is screen),
             label="both toggle workers finished",
         )
         text = _screen_text(screen)

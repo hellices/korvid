@@ -274,6 +274,14 @@ class SwitchTimeline(Protocol):
     async def stop(self) -> None: ...
 
 
+class SwitchPulse(Protocol):
+    """Ambient reads must quiesce before the shared connection changes."""
+
+    async def suspend(self) -> None: ...
+
+    def resume(self) -> None: ...
+
+
 class SwitchProposals(Protocol):
     """The external write-proposal inbox, invalidated by a committed switch."""
 
@@ -349,6 +357,7 @@ class ContextSwitchCoordinator(ContextGuard):
         list_contexts: Callable[[], tuple[list[str], str | None]] | None = None,
         probe_context: Callable[[str], Awaitable[None]] | None = None,
         switch_context: Callable[[str | None], Awaitable[ContextSwitchResult]] | None = None,
+        pulse: Callable[[], SwitchPulse] | None = None,
     ) -> None:
         self._ui = ui
         self._surface = surface
@@ -370,6 +379,7 @@ class ContextSwitchCoordinator(ContextGuard):
         self._list_contexts = list_contexts
         self._probe_context = probe_context
         self._switch_context = switch_context
+        self._pulse = pulse
         #: True while a switch is probing, tearing down or retargeting;
         #: refuses concurrent switches and marks every captured epoch stale.
         self._switching = False
@@ -633,6 +643,8 @@ class ContextSwitchCoordinator(ContextGuard):
                 to_context=name,
                 note="all cluster state was reset",
             )
+        if self._pulse is not None:
+            self._pulse().resume()
         self._timeline().start_warning_watch()
 
     async def _quiesce_mcp(self) -> bool | None:
@@ -705,6 +717,8 @@ class ContextSwitchCoordinator(ContextGuard):
         connection), then session state that would otherwise leak old-cluster
         rows, breadcrumbs, or hints into the new one.
         """
+        if self._pulse is not None:
+            await self._pulse().suspend()
         await self._logs().close()
         self._surface.hide_describe()
         # The workspace controller folds the split back to one pane, stops and

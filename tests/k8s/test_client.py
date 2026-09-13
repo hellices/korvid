@@ -2027,13 +2027,13 @@ async def test_rollout_restart_sends_uid_precondition() -> None:
 def test_path_segment_rejects_traversal_segments() -> None:
     """quote() leaves '.' intact, so empty and dot segments must be rejected
     before they can survive as literal traversal segments in an object URL."""
-    from korvid.k8s.client import _path_segment
+    from korvid.k8s.pulse import path_segment
 
     for bad in ("", ".", ".."):
         with pytest.raises(ValueError, match="invalid URL path segment"):
-            _path_segment(bad)
-    assert _path_segment("web-1") == "web-1"
-    assert _path_segment("a/b") == "a%2Fb"
+            path_segment(bad)
+    assert path_segment("web-1") == "web-1"
+    assert path_segment("a/b") == "a%2Fb"
 
 
 async def test_delete_object_rejects_dot_name() -> None:
