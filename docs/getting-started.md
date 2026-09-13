@@ -18,9 +18,13 @@ environment rather than whatever Python happens to be active. `uv` and
 
 ## Current release
 
-Homebrew installs the latest published release from the live tap. The `uv tool` and `pipx` commands below install the latest published package from PyPI.
-Check the [latest release](https://github.com/hellices/korvid/releases/latest) for its version, pinned installation commands, and migration notes.
-Most users should stop at **Install**; use **Development build** only when you need an unreleased change from `main`.
+Homebrew installs the latest published release from the live tap. The
+`uv tool` and `pipx` commands below install the latest published package
+from PyPI. Check the
+[latest release](https://github.com/hellices/korvid/releases/latest) for
+its version, pinned installation commands, and migration notes. Most
+users should stop at **Install**; use **Development build** only when you
+need an unreleased change from `main`.
 
 ## Install
 
@@ -33,9 +37,9 @@ brew install hellices/korvid/korvid
 ```
 
 The tap follows its own reviewed update schedule;
-`brew info hellices/korvid/korvid` shows the available version. The formula builds against
-Homebrew's Python and deliberately excludes MCP. Use `uv tool` or `pipx`
-below for the MCP server and stdio adapter.
+`brew info hellices/korvid/korvid` shows the available version. The
+formula builds against Homebrew's Python and deliberately excludes MCP.
+Use `uv tool` or `pipx` below for the MCP server and stdio adapter.
 
 ### `uv tool` (recommended cross-platform)
 

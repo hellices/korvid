@@ -18,6 +18,15 @@ import yaml
 
 ROOT = Path(__file__).parent.parent
 WORKFLOW = ROOT / ".github" / "workflows" / "docs.yml"
+GETTING_STARTED_HOMEBREW_COMMAND = "brew install hellices/korvid/korvid"
+GETTING_STARTED_HOMEBREW_TOKEN = "hellices/korvid/korvid"
+PUBLIC_ARCHITECTURE_PATH = "dev/specs/2026-08-12-korvid-architecture/"
+PUBLIC_EVAL_PATH = "evals/methodology/"
+INTERNAL_CONTROLLER_PATH = "dev/ui-controllers/"
+INTERNAL_RELEASE_PATH = "release/"
+CLEANUP_PLAN_DOC = (
+    ROOT / "docs" / "superpowers" / "plans" / "2026-09-13-github-pages-v0-5-cleanup.md"
+)
 
 PATH_FILTERS = {
     "docs/**",
@@ -218,12 +227,30 @@ def test_deploy_job_exposes_the_page_url_for_post_deploy_smoke_checks() -> None:
 
 
 def _smoke_script(config: dict[str, Any]) -> str:
-    smoke = config["jobs"]["smoke"]
-    steps = smoke["steps"]
+    steps = _smoke_steps(config)
     assert len(steps) == 1, "smoke job must keep its post-deploy probe in one bounded step"
     script = steps[0].get("run")
     assert isinstance(script, str), "smoke job must execute a shell probe"
     return script
+
+
+def _smoke_steps(config: dict[str, Any]) -> list[dict[str, Any]]:
+    smoke = config["jobs"]["smoke"]
+    steps = smoke["steps"]
+    assert isinstance(steps, list), "smoke job must declare its steps as a list"
+    return steps
+
+
+def _smoke_step(config: dict[str, Any]) -> dict[str, Any]:
+    steps = _smoke_steps(config)
+    assert len(steps) == 1, "smoke job must keep its post-deploy probe in one bounded step"
+    return steps[0]
+
+
+def _shell_assignment(script: str, name: str) -> int:
+    match = re.search(rf"^{name}=(\d+)$", script, flags=re.MULTILINE)
+    assert match is not None, f"smoke script must assign {name}"
+    return int(match.group(1))
 
 
 def test_smoke_job_is_main_only_after_deploy_and_least_privilege() -> None:
@@ -240,15 +267,81 @@ def test_smoke_job_is_main_only_after_deploy_and_least_privilege() -> None:
     assert needs == "deploy" or needs == ["deploy"]
 
     assert smoke["runs-on"] == "ubuntu-latest"
-    assert smoke["timeout-minutes"] == 5
+    assert smoke["timeout-minutes"] >= 8
     assert smoke.get("permissions", config.get("permissions")) == {"contents": "read"}
 
+    step = _smoke_step(config)
+    assert step.get("env") == {"SITE_URL": "${{ needs.deploy.outputs.page_url }}"}
+
     script = _smoke_script(config)
-    assert "${{ needs.deploy.outputs.page_url }}" in script
-    assert "for attempt in 1 2 3 4 5" in script
-    assert "sleep 5" in script
+    assert "${{ needs.deploy.outputs.page_url }}" not in script
+    assert 'if [ -z "${SITE_URL:-}" ]; then' in script
+    assert 'base_url="${SITE_URL%/}"' in script
+    assert "retry_until_contains()" in script
+    assert "retry_until_body_checks()" in script
+    assert "retry_until_ok()" in script
+    assert 'if [ "$attempt" -lt "$CONTENT_ATTEMPTS" ]; then' in script
+    assert 'if [ "$attempt" -lt "$MEDIA_ATTEMPTS" ]; then' in script
+    assert 'sleep "$CONTENT_SLEEP_SECONDS"' in script
+    assert 'sleep "$MEDIA_SLEEP_SECONDS"' in script
     assert "--connect-timeout 10" in script
-    assert "--max-time 20" in script
+    assert "CONTENT_CURL_MAX_TIME=10" in script
+    assert '--max-time "$MEDIA_CURL_MAX_TIME"' in script
+
+    content_budget = _shell_assignment(script, "CONTENT_ATTEMPTS") * _shell_assignment(
+        script, "CONTENT_CURL_MAX_TIME"
+    ) + (_shell_assignment(script, "CONTENT_ATTEMPTS") - 1) * _shell_assignment(
+        script, "CONTENT_SLEEP_SECONDS"
+    )
+    media_budget = _shell_assignment(script, "MEDIA_ATTEMPTS") * _shell_assignment(
+        script, "MEDIA_CURL_MAX_TIME"
+    ) + (_shell_assignment(script, "MEDIA_ATTEMPTS") - 1) * _shell_assignment(
+        script, "MEDIA_SLEEP_SECONDS"
+    )
+    worst_case_seconds = 5 * content_budget + 3 * media_budget
+    assert smoke["timeout-minutes"] * 60 > worst_case_seconds, (
+        "smoke timeout must exceed the probe's bounded worst case"
+    )
+
+
+def test_smoke_job_anchors_the_getting_started_probe_to_a_build_safe_token() -> None:
+    """The workflow must probe the HTML-safe token, while the docs keep the full command."""
+
+    source = (ROOT / "docs" / "getting-started.md").read_text(encoding="utf-8")
+    assert GETTING_STARTED_HOMEBREW_COMMAND in source
+    assert GETTING_STARTED_HOMEBREW_TOKEN in source
+
+    script = _smoke_script(_load())
+    assert f'retry_until_contains "getting-started/" "{GETTING_STARTED_HOMEBREW_TOKEN}"' in script
+    assert GETTING_STARTED_HOMEBREW_COMMAND not in script
+
+
+def test_smoke_retry_helpers_retry_the_content_predicate_not_only_transport() -> None:
+    """A stale CDN response must be retried until the expected body state appears."""
+
+    script = _smoke_script(_load())
+    contains_helper = re.search(
+        r"retry_until_contains\(\)\s*\{(?P<body>.*?)^\}",
+        script,
+        flags=re.MULTILINE | re.DOTALL,
+    )
+    assert contains_helper is not None, "smoke job must define retry_until_contains()"
+    helper_body = contains_helper.group("body")
+    assert 'body="$(fetch_body "$path" "$CONTENT_CURL_MAX_TIME")"' in helper_body
+    assert 'grep -Fq "$expected" <<<"$body"' in helper_body
+    assert 'if [ "$attempt" -lt "$CONTENT_ATTEMPTS" ]; then' in helper_body
+    assert 'sleep "$CONTENT_SLEEP_SECONDS"' in helper_body
+
+    body_checks_helper = re.search(
+        r"retry_until_body_checks\(\)\s*\{(?P<body>.*?)^\}",
+        script,
+        flags=re.MULTILINE | re.DOTALL,
+    )
+    assert body_checks_helper is not None, "smoke job must define retry_until_body_checks()"
+    helper_body = body_checks_helper.group("body")
+    assert '"$checker" "$body"' in helper_body
+    assert 'if [ "$attempt" -lt "$CONTENT_ATTEMPTS" ]; then' in helper_body
+    assert 'sleep "$CONTENT_SLEEP_SECONDS"' in helper_body
 
 
 def test_smoke_job_checks_public_pages_search_and_media_entrypoints() -> None:
@@ -256,16 +349,29 @@ def test_smoke_job_checks_public_pages_search_and_media_entrypoints() -> None:
 
     script = _smoke_script(_load())
     for path in (
-        'check_contains "" "AI-NATIVE KUBERNETES TUI"',
-        'check_contains "getting-started/" "brew install hellices/korvid/korvid"',
-        'check_contains "release-notes/unreleased/" "Unreleased (main)"',
-        'check_ok "search/search_index.json"',
-        'check_ok "sitemap.xml"',
-        'check_ok "assets/demo.mp4"',
-        'check_ok "assets/scenes/agent-demo.mp4"',
-        'check_ok "assets/scenes/mcp-follow-demo.mp4"',
+        'retry_until_contains "" "AI-NATIVE KUBERNETES TUI"',
+        f'retry_until_contains "getting-started/" "{GETTING_STARTED_HOMEBREW_TOKEN}"',
+        'retry_until_contains "release-notes/unreleased/" "Unreleased (main)"',
+        'retry_until_body_checks "search/search_index.json" "search index scope" check_search_index',
+        'retry_until_body_checks "sitemap.xml" "sitemap scope" check_sitemap',
+        'retry_until_ok "assets/demo.mp4"',
+        'retry_until_ok "assets/scenes/agent-demo.mp4"',
+        'retry_until_ok "assets/scenes/mcp-follow-demo.mp4"',
     ):
         assert path in script
+
+    for token in (
+        f'"location":"{PUBLIC_ARCHITECTURE_PATH}"',
+        f'"location":"{PUBLIC_EVAL_PATH}"',
+        f'"location":"{INTERNAL_CONTROLLER_PATH}"',
+        f'"location":"{INTERNAL_RELEASE_PATH}"',
+        f"https://hellices.github.io/korvid/{PUBLIC_ARCHITECTURE_PATH}",
+        f"https://hellices.github.io/korvid/{PUBLIC_EVAL_PATH}",
+        f"https://hellices.github.io/korvid/{INTERNAL_CONTROLLER_PATH}",
+        f"https://hellices.github.io/korvid/{INTERNAL_RELEASE_PATH}",
+    ):
+        assert token in script
+    assert "assert_body_not_contains" in script
 
 
 def test_workflow_level_permissions_are_read_only() -> None:
@@ -413,6 +519,14 @@ def test_plan_places_configure_pages_first_in_the_privileged_deploy_job() -> Non
         "Task 3 must say configure-pages runs first in deploy, where pages: write "
         "exists; an action pin alone does not preserve that ordering"
     )
+
+
+def test_cleanup_plan_uses_findall_for_sitemap_locations() -> None:
+    """The committed cleanup plan must use the descendant loc lookup."""
+
+    plan = CLEANUP_PLAN_DOC.read_text(encoding="utf-8")
+    assert 'root.findall(".//{*}loc")' in plan
+    assert 'root.iter("{*}loc")' not in plan
 
 
 def test_plan_reproduces_the_ephemeral_direct_docs_build() -> None:
