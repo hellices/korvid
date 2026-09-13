@@ -29,8 +29,12 @@ WORKFLOW = ROOT / ".github" / "workflows" / "docs.yml"
 GETTING_STARTED_HOMEBREW_COMMAND = "brew install hellices/korvid/korvid"
 GETTING_STARTED_HOMEBREW_TOKEN = "hellices/korvid/korvid"
 CANONICAL_SITE_URL = "https://hellices.github.io/korvid/"
+PUBLIC_OVERVIEW_PATH = "overview/"
+PUBLIC_GETTING_STARTED_PATH = "getting-started/"
 PUBLIC_CONTRIBUTOR_PATH = "dev/"
 PUBLIC_ARCHITECTURE_PATH = "dev/specs/2026-08-12-korvid-architecture/"
+PUBLIC_UNRELEASED_PATH = "release-notes/unreleased/"
+PUBLIC_VERSIONED_RELEASE_PATH = "release-notes/v0.4.1/"
 PUBLIC_EVAL_PATH = "evals/methodology/"
 PUBLIC_SCENARIOS_PATH = "evals/scenarios/"
 PUBLIC_SCOREBOARD_PATH = "evals/scoreboard/"
@@ -57,6 +61,15 @@ PINNED_ACTIONS = {
     "actions/upload-pages-artifact": "fc324d3547104276b827a68afc52ff2a11cc49c9",
     "actions/deploy-pages": "368f82528645a54fb793d4d04e342629a3f51346",
 }
+
+PUBLIC_NAV_ROUTES = (
+    PUBLIC_OVERVIEW_PATH,
+    PUBLIC_GETTING_STARTED_PATH,
+    PUBLIC_CONTRIBUTOR_PATH,
+    PUBLIC_ARCHITECTURE_PATH,
+    PUBLIC_UNRELEASED_PATH,
+    PUBLIC_VERSIONED_RELEASE_PATH,
+)
 
 
 def _load() -> dict[str, Any]:
@@ -329,6 +342,7 @@ def _run_smoke_checker(
             "assert_body_contains",
             "assert_body_not_contains",
             "assert_body_matches",
+            "public_nav_routes",
             "search_locations",
             "sitemap_urls",
             "lines_with_prefix",
@@ -355,6 +369,7 @@ def _run_smoke_checker(
         PUBLIC_SCENARIOS_PATH={shlex.quote(PUBLIC_SCENARIOS_PATH)}
         PUBLIC_SCOREBOARD_PATH={shlex.quote(PUBLIC_SCOREBOARD_PATH)}
         INTERNAL_RELEASE_PATH={shlex.quote(INTERNAL_RELEASE_PATH)}
+        PUBLIC_NAV_ROUTES={shlex.quote(chr(10).join(PUBLIC_NAV_ROUTES))}
         CONTENT_ATTEMPTS=1
         CONTENT_CURL_MAX_TIME=1
         CONTENT_SLEEP_SECONDS=0
@@ -381,14 +396,144 @@ def _run_smoke_checker(
     return result.returncode
 
 
+def _run_smoke_publication_checker(
+    home_body: str,
+    search_body: str,
+    sitemap_body: str,
+    *,
+    env: dict[str, str] | None = None,
+) -> int:
+    script = _smoke_script(_load())
+    functions = "\n\n".join(
+        _smoke_function(script, name)
+        for name in (
+            "url_for",
+            "canonical_url_for",
+            "assert_body_contains",
+            "assert_body_not_contains",
+            "assert_body_matches",
+            "public_nav_routes",
+            "search_locations",
+            "sitemap_urls",
+            "lines_with_prefix",
+            "lines_in_set",
+            "assert_exact_line_set",
+            "assert_line_present",
+            "assert_line_absent",
+            "check_home_page",
+            "check_search_index",
+            "check_sitemap",
+            "retry_until_publication_artifacts",
+        )
+    )
+    probe = textwrap.dedent(
+        f"""\
+        set -euo pipefail
+
+        base_url="https://example.invalid"
+        CANONICAL_SITE_URL={shlex.quote(CANONICAL_SITE_URL)}
+        PUBLIC_CONTRIBUTOR_PATH={shlex.quote(PUBLIC_CONTRIBUTOR_PATH)}
+        PUBLIC_ARCHITECTURE_PATH={shlex.quote(PUBLIC_ARCHITECTURE_PATH)}
+        PUBLIC_EVAL_PATH={shlex.quote(PUBLIC_EVAL_PATH)}
+        PUBLIC_SCENARIOS_PATH={shlex.quote(PUBLIC_SCENARIOS_PATH)}
+        PUBLIC_SCOREBOARD_PATH={shlex.quote(PUBLIC_SCOREBOARD_PATH)}
+        INTERNAL_RELEASE_PATH={shlex.quote(INTERNAL_RELEASE_PATH)}
+        PUBLIC_NAV_ROUTES=""
+        CONTENT_ATTEMPTS=1
+        CONTENT_CURL_MAX_TIME=1
+        CONTENT_SLEEP_SECONDS=0
+
+        {functions}
+
+        fetch_body() {{
+          local path="$1"
+          case "$path" in
+            "")
+              printf '%s' "${{HOME_BODY:-}}"
+              ;;
+            "search/search_index.json")
+              printf '%s' "${{SEARCH_BODY:-}}"
+              ;;
+            "sitemap.xml")
+              printf '%s' "${{SITEMAP_BODY:-}}"
+              ;;
+            *)
+              echo "unexpected smoke path: $path" >&2
+              return 1
+              ;;
+          esac
+        }}
+
+        retry_until_publication_artifacts
+        """
+    )
+    process_env = {
+        **os.environ,
+        "HOME_BODY": home_body,
+        "SEARCH_BODY": search_body,
+        "SITEMAP_BODY": sitemap_body,
+        **(env or {}),
+    }
+    result = subprocess.run(
+        [_bash_executable(), "--noprofile", "--norc", "-c", probe],
+        check=False,
+        cwd=ROOT,
+        capture_output=True,
+        env=process_env,
+        input="",
+        text=True,
+    )
+    return result.returncode
+
+
+def _smoke_home_body(*, nav_routes: tuple[str, ...] = PUBLIC_NAV_ROUTES) -> str:
+    links = "\n".join(f'<a class="md-nav__link" href="{path}">{path}</a>' for path in nav_routes)
+    return textwrap.dedent(
+        f"""\
+        <section data-scene-switcher>
+          <p>AI-NATIVE KUBERNETES TUI</p>
+          <button id="scene-tab-direct" aria-controls="scene-direct">Direct</button>
+          <button id="scene-tab-agent" aria-controls="scene-agent">Agent</button>
+          <button id="scene-tab-mcp" aria-controls="scene-mcp">MCP</button>
+          <article id="scene-direct" aria-labelledby="scene-tab-direct">
+            <video src="assets/demo.mp4"></video>
+            <img class="scene-panel__fallback" src="assets/scenes/cockpit-poster.png">
+          </article>
+          <article id="scene-agent" aria-labelledby="scene-tab-agent">
+            <video src="assets/scenes/agent-demo.mp4" data-poster="assets/scenes/agent-poster.png"></video>
+            <img class="scene-panel__fallback" src="assets/scenes/agent-poster.png">
+          </article>
+          <article id="scene-mcp" aria-labelledby="scene-tab-mcp">
+            <video src="assets/scenes/mcp-follow-demo.mp4" data-poster="assets/scenes/mcp-poster.png"></video>
+            <img class="scene-panel__fallback" src="assets/scenes/mcp-poster.png">
+          </article>
+        </section>
+        <nav>
+          {links}
+        </nav>
+        """
+    )
+
+
+def _search_index_body(*locations: str) -> str:
+    return json.dumps({"docs": [{"location": location} for location in locations]})
+
+
+def _sitemap_body(*paths: str) -> str:
+    urls = "".join(f"<url><loc>{CANONICAL_SITE_URL}{path}</loc></url>" for path in paths)
+    return f"<urlset>{urls}</urlset>"
+
+
 def _large_search_index_body() -> str:
-    docs = [
-        {"location": PUBLIC_CONTRIBUTOR_PATH},
-        {"location": PUBLIC_ARCHITECTURE_PATH},
-        {"location": PUBLIC_EVAL_PATH},
-        {"location": PUBLIC_SCENARIOS_PATH},
-        {"location": PUBLIC_SCOREBOARD_PATH},
-    ]
+    docs = [{"location": location} for location in (*PUBLIC_NAV_ROUTES,)]
+    docs.extend(
+        {"location": location}
+        for location in (
+            PUBLIC_EVAL_PATH,
+            PUBLIC_SCENARIOS_PATH,
+            PUBLIC_SCOREBOARD_PATH,
+        )
+    )
     body = json.dumps({"docs": docs})
     while len(body.encode("utf-8")) <= 131072:
         docs.append({"location": f"guides/generated-{len(docs):05d}/"})
@@ -545,17 +690,79 @@ def test_smoke_scope_checker_succeeds_when_search_index_matches_contract() -> No
             "check_search_index",
             "search/search_index.json",
             "search index scope",
-            (
-                '{"docs":['
-                '{"location":"dev/"},'
-                '{"location":"dev/specs/2026-08-12-korvid-architecture/"},'
-                '{"location":"evals/methodology/"},'
-                '{"location":"evals/scenarios/"},'
-                '{"location":"evals/scoreboard/"}'
-                "]}"
+            _search_index_body(
+                *PUBLIC_NAV_ROUTES,
+                PUBLIC_EVAL_PATH,
+                PUBLIC_SCENARIOS_PATH,
+                PUBLIC_SCOREBOARD_PATH,
             ),
         )
         == 0
+    )
+
+
+def test_smoke_publication_checker_succeeds_when_home_search_and_sitemap_match_contract() -> None:
+    assert (
+        _run_smoke_publication_checker(
+            _smoke_home_body(),
+            _search_index_body(
+                *PUBLIC_NAV_ROUTES,
+                PUBLIC_EVAL_PATH,
+                PUBLIC_SCENARIOS_PATH,
+                PUBLIC_SCOREBOARD_PATH,
+            ),
+            _sitemap_body(
+                *PUBLIC_NAV_ROUTES,
+                PUBLIC_EVAL_PATH,
+                PUBLIC_SCENARIOS_PATH,
+                PUBLIC_SCOREBOARD_PATH,
+            ),
+        )
+        == 0
+    )
+
+
+def test_smoke_publication_checker_fails_when_a_primary_guide_is_missing_from_search() -> None:
+    assert (
+        _run_smoke_publication_checker(
+            _smoke_home_body(),
+            _search_index_body(
+                *tuple(path for path in PUBLIC_NAV_ROUTES if path != PUBLIC_GETTING_STARTED_PATH),
+                PUBLIC_EVAL_PATH,
+                PUBLIC_SCENARIOS_PATH,
+                PUBLIC_SCOREBOARD_PATH,
+            ),
+            _sitemap_body(
+                *PUBLIC_NAV_ROUTES,
+                PUBLIC_EVAL_PATH,
+                PUBLIC_SCENARIOS_PATH,
+                PUBLIC_SCOREBOARD_PATH,
+            ),
+        )
+        != 0
+    )
+
+
+def test_smoke_publication_checker_fails_when_a_versioned_release_note_is_missing_from_sitemap() -> (
+    None
+):
+    assert (
+        _run_smoke_publication_checker(
+            _smoke_home_body(),
+            _search_index_body(
+                *PUBLIC_NAV_ROUTES,
+                PUBLIC_EVAL_PATH,
+                PUBLIC_SCENARIOS_PATH,
+                PUBLIC_SCOREBOARD_PATH,
+            ),
+            _sitemap_body(
+                *tuple(path for path in PUBLIC_NAV_ROUTES if path != PUBLIC_VERSIONED_RELEASE_PATH),
+                PUBLIC_EVAL_PATH,
+                PUBLIC_SCENARIOS_PATH,
+                PUBLIC_SCOREBOARD_PATH,
+            ),
+        )
+        != 0
     )
 
 
@@ -572,87 +779,112 @@ def test_smoke_scope_checker_succeeds_when_search_index_matches_contract() -> No
             "check_search_index",
             "search/search_index.json",
             "search index scope",
-            '{"docs":[{"location":"dev/specs/2026-08-12-korvid-architecture/"},'
-            '{"location":"evals/methodology/"}]}',
+            _search_index_body(
+                PUBLIC_OVERVIEW_PATH,
+                PUBLIC_GETTING_STARTED_PATH,
+                PUBLIC_ARCHITECTURE_PATH,
+                PUBLIC_UNRELEASED_PATH,
+                PUBLIC_VERSIONED_RELEASE_PATH,
+                PUBLIC_EVAL_PATH,
+            ),
         ),
         (
             "check_search_index",
             "search/search_index.json",
             "search index scope",
-            '{"docs":[{"location":"dev/"},'
-            '{"location":"dev/specs/2026-08-12-korvid-architecture/"},'
-            '{"location":"evals/methodology/"}]}',
+            _search_index_body(
+                PUBLIC_OVERVIEW_PATH,
+                PUBLIC_GETTING_STARTED_PATH,
+                PUBLIC_CONTRIBUTOR_PATH,
+                PUBLIC_ARCHITECTURE_PATH,
+                PUBLIC_UNRELEASED_PATH,
+                PUBLIC_VERSIONED_RELEASE_PATH,
+                PUBLIC_EVAL_PATH,
+            ),
         ),
         (
             "check_search_index",
             "search/search_index.json",
             "search index scope",
-            '{"docs":[{"location":"dev/specs/2026-08-12-korvid-architecture/"},'
-            '{"location":"evals/methodology/"},{"location":"dev/ui-controllers/"}]}',
+            _search_index_body(
+                PUBLIC_OVERVIEW_PATH,
+                PUBLIC_GETTING_STARTED_PATH,
+                PUBLIC_ARCHITECTURE_PATH,
+                PUBLIC_UNRELEASED_PATH,
+                PUBLIC_VERSIONED_RELEASE_PATH,
+                PUBLIC_EVAL_PATH,
+                "dev/ui-controllers/",
+            ),
         ),
         (
             "check_search_index",
             "search/search_index.json",
             "search index scope",
-            '{"docs":[{"location":"dev/"},'
-            '{"location":"dev/specs/2026-08-12-korvid-architecture/"},'
-            '{"location":"evals/methodology/"},{"location":"evals/scenarios/"},'
-            '{"location":"evals/scoreboard/"},{"location":"dev/contract-tests/"}]}',
-        ),
-        (
-            "check_sitemap",
-            "sitemap.xml",
-            "sitemap scope",
-            (f"<urlset><url><loc>{CANONICAL_SITE_URL}{PUBLIC_EVAL_PATH}</loc></url></urlset>"),
-        ),
-        (
-            "check_sitemap",
-            "sitemap.xml",
-            "sitemap scope",
-            (
-                "<urlset>"
-                f"<url><loc>{CANONICAL_SITE_URL}{PUBLIC_ARCHITECTURE_PATH}</loc></url>"
-                f"<url><loc>{CANONICAL_SITE_URL}{PUBLIC_EVAL_PATH}</loc></url>"
-                "</urlset>"
+            _search_index_body(
+                *PUBLIC_NAV_ROUTES,
+                PUBLIC_EVAL_PATH,
+                PUBLIC_SCENARIOS_PATH,
+                PUBLIC_SCOREBOARD_PATH,
+                INTERNAL_CONTRACT_TESTS_PATH,
             ),
         ),
         (
             "check_sitemap",
             "sitemap.xml",
             "sitemap scope",
-            (
-                "<urlset>"
-                f"<url><loc>{CANONICAL_SITE_URL}{PUBLIC_CONTRIBUTOR_PATH}</loc></url>"
-                f"<url><loc>{CANONICAL_SITE_URL}{PUBLIC_ARCHITECTURE_PATH}</loc></url>"
-                f"<url><loc>{CANONICAL_SITE_URL}{PUBLIC_EVAL_PATH}</loc></url>"
-                "</urlset>"
+            _sitemap_body(PUBLIC_EVAL_PATH),
+        ),
+        (
+            "check_sitemap",
+            "sitemap.xml",
+            "sitemap scope",
+            _sitemap_body(
+                PUBLIC_OVERVIEW_PATH,
+                PUBLIC_GETTING_STARTED_PATH,
+                PUBLIC_ARCHITECTURE_PATH,
+                PUBLIC_UNRELEASED_PATH,
+                PUBLIC_VERSIONED_RELEASE_PATH,
+                PUBLIC_EVAL_PATH,
             ),
         ),
         (
             "check_sitemap",
             "sitemap.xml",
             "sitemap scope",
-            (
-                "<urlset>"
-                f"<url><loc>{CANONICAL_SITE_URL}{PUBLIC_ARCHITECTURE_PATH}</loc></url>"
-                f"<url><loc>{CANONICAL_SITE_URL}{PUBLIC_EVAL_PATH}</loc></url>"
-                f"<url><loc>{CANONICAL_SITE_URL}dev/ui-controllers/</loc></url>"
-                "</urlset>"
+            _sitemap_body(
+                PUBLIC_OVERVIEW_PATH,
+                PUBLIC_GETTING_STARTED_PATH,
+                PUBLIC_CONTRIBUTOR_PATH,
+                PUBLIC_ARCHITECTURE_PATH,
+                PUBLIC_UNRELEASED_PATH,
+                PUBLIC_VERSIONED_RELEASE_PATH,
+                PUBLIC_EVAL_PATH,
             ),
         ),
         (
             "check_sitemap",
             "sitemap.xml",
             "sitemap scope",
-            (
-                "<urlset>"
-                f"<url><loc>{CANONICAL_SITE_URL}{PUBLIC_CONTRIBUTOR_PATH}</loc></url>"
-                f"<url><loc>{CANONICAL_SITE_URL}{PUBLIC_ARCHITECTURE_PATH}</loc></url>"
-                f"<url><loc>{CANONICAL_SITE_URL}{PUBLIC_EVAL_PATH}</loc></url>"
-                f"<url><loc>{CANONICAL_SITE_URL}{PUBLIC_SCENARIOS_PATH}</loc></url>"
-                f"<url><loc>{CANONICAL_SITE_URL}{PUBLIC_SCOREBOARD_PATH}</loc></url>"
-                f"<url><loc>{CANONICAL_SITE_URL}{INTERNAL_CONTRACT_TESTS_PATH}</loc></url>"
-                "</urlset>"
+            _sitemap_body(
+                PUBLIC_OVERVIEW_PATH,
+                PUBLIC_GETTING_STARTED_PATH,
+                PUBLIC_ARCHITECTURE_PATH,
+                PUBLIC_UNRELEASED_PATH,
+                PUBLIC_VERSIONED_RELEASE_PATH,
+                PUBLIC_EVAL_PATH,
+                "dev/ui-controllers/",
+            ),
+        ),
+        (
+            "check_sitemap",
+            "sitemap.xml",
+            "sitemap scope",
+            _sitemap_body(
+                *PUBLIC_NAV_ROUTES,
+                PUBLIC_EVAL_PATH,
+                PUBLIC_SCENARIOS_PATH,
+                PUBLIC_SCOREBOARD_PATH,
+                INTERNAL_CONTRACT_TESTS_PATH,
             ),
         ),
     ],
@@ -776,6 +1008,31 @@ def test_smoke_retry_helpers_retry_the_content_predicate_not_only_transport() ->
     assert 'sleep "$CONTENT_SLEEP_SECONDS"' in helper_body
 
 
+def test_smoke_publication_artifact_retry_fetches_home_search_and_sitemap_as_one_attempt() -> None:
+    """Search/sitemap checks must share one home snapshot per retry attempt."""
+
+    script = _smoke_script(_load())
+    helper = re.search(
+        r"retry_until_publication_artifacts\(\)\s*\{(?P<body>.*?)^\}",
+        script,
+        flags=re.MULTILINE | re.DOTALL,
+    )
+    assert helper is not None, "smoke job must define retry_until_publication_artifacts()"
+    helper_body = helper.group("body")
+    assert 'home_body="$(fetch_body "" "$CONTENT_CURL_MAX_TIME")"' in helper_body
+    assert (
+        'search_body="$(fetch_body "search/search_index.json" "$CONTENT_CURL_MAX_TIME")"'
+        in helper_body
+    )
+    assert 'sitemap_body="$(fetch_body "sitemap.xml" "$CONTENT_CURL_MAX_TIME")"' in helper_body
+    assert 'PUBLIC_NAV_ROUTES="$(public_nav_routes "$home_body")"' in helper_body
+    assert 'check_home_page "$home_body"' in helper_body
+    assert 'check_search_index "$search_body"' in helper_body
+    assert 'check_sitemap "$sitemap_body"' in helper_body
+    assert 'if [ "$attempt" -lt "$CONTENT_ATTEMPTS" ]; then' in helper_body
+    assert 'sleep "$CONTENT_SLEEP_SECONDS"' in helper_body
+
+
 def test_smoke_scope_checker_accepts_a_large_search_index_body_without_body_env(
     tmp_path: Path,
 ) -> None:
@@ -800,12 +1057,10 @@ def test_smoke_job_checks_public_pages_search_and_media_entrypoints() -> None:
 
     script = _smoke_script(_load())
     for path in (
-        'retry_until_body_checks "" "home page structure" check_home_page',
         f'retry_until_contains "getting-started/" "{GETTING_STARTED_HOMEBREW_TOKEN}"',
         'retry_until_contains "release-notes/unreleased/" "Unreleased (main)"',
         'retry_until_body_checks "release-notes/unreleased/" "release-notes navigation" check_release_notes_nav',
-        'retry_until_body_checks "search/search_index.json" "search index scope" check_search_index',
-        'retry_until_body_checks "sitemap.xml" "sitemap scope" check_sitemap',
+        "retry_until_publication_artifacts",
         'retry_until_ok "assets/demo.mp4"',
         'retry_until_ok "assets/scenes/agent-demo.mp4"',
         'retry_until_ok "assets/scenes/mcp-follow-demo.mp4"',
@@ -820,9 +1075,11 @@ def test_smoke_job_checks_public_pages_search_and_media_entrypoints() -> None:
         f'PUBLIC_SCENARIOS_PATH="{PUBLIC_SCENARIOS_PATH}"',
         f'PUBLIC_SCOREBOARD_PATH="{PUBLIC_SCOREBOARD_PATH}"',
         f'INTERNAL_RELEASE_PATH="{INTERNAL_RELEASE_PATH}"',
+        'PUBLIC_NAV_ROUTES=""',
     ):
         assert assignment in script
 
+    assert "public_nav_routes()" in script
     assert "search_locations()" in script
     assert "sitemap_urls()" in script
     assert "canonical_url_for()" in script
@@ -836,8 +1093,12 @@ def test_smoke_job_checks_public_pages_search_and_media_entrypoints() -> None:
 def test_smoke_scope_paths_map_to_repository_sources() -> None:
     """Each smoke-checked public or internal route must still point at a real source page."""
 
+    assert _site_page_source(PUBLIC_OVERVIEW_PATH).exists()
+    assert _site_page_source(PUBLIC_GETTING_STARTED_PATH).exists()
     assert _site_page_source(PUBLIC_CONTRIBUTOR_PATH).exists()
     assert _site_page_source(PUBLIC_ARCHITECTURE_PATH).exists()
+    assert _site_page_source(PUBLIC_UNRELEASED_PATH).exists()
+    assert _site_page_source(PUBLIC_VERSIONED_RELEASE_PATH).exists()
     assert _site_page_source(PUBLIC_EVAL_PATH).exists()
 
 

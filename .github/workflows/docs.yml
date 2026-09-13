@@ -97,6 +97,7 @@ jobs:
           PUBLIC_SCENARIOS_PATH="evals/scenarios/"
           PUBLIC_SCOREBOARD_PATH="evals/scoreboard/"
           INTERNAL_RELEASE_PATH="release/"
+          PUBLIC_NAV_ROUTES=""
 
           CONTENT_ATTEMPTS=4
           CONTENT_SLEEP_SECONDS=5
@@ -182,6 +183,60 @@ jobs:
               echo "Expected body to match /$expression/" >&2
               return 1
             fi
+          }
+
+          public_nav_routes() {
+            local body="$1"
+            printf '%s' "$body" | python3 -c '
+          from html.parser import HTMLParser
+          from urllib.parse import unquote, urljoin, urlsplit
+          import sys
+
+          SITE_URL = "https://hellices.github.io/korvid/"
+          SITE = urlsplit(SITE_URL)
+
+          def normalize(href):
+              href = href.strip()
+              if not href or href.startswith("#"):
+                  return None
+              parsed = urlsplit(urljoin(SITE_URL, href))
+              if (parsed.scheme, parsed.netloc) != (SITE.scheme, SITE.netloc):
+                  return None
+              if not parsed.path.startswith(SITE.path):
+                  return None
+              relative = parsed.path.removeprefix(SITE.path).lstrip("/")
+              if relative.endswith("index.html"):
+                  relative = relative[: -len("index.html")]
+              if not relative:
+                  return None
+              if not relative.endswith("/"):
+                  relative = f"{relative}/"
+              return unquote(relative)
+
+          class Parser(HTMLParser):
+              def __init__(self):
+                  super().__init__(convert_charrefs=True)
+                  self.routes = set()
+
+              def handle_starttag(self, tag, attrs):
+                  if tag != "a":
+                      return
+                  attributes = dict(attrs)
+                  css_classes = attributes.get("class")
+                  href = attributes.get("href")
+                  if not isinstance(css_classes, str) or "md-nav__link" not in css_classes.split():
+                      return
+                  if not isinstance(href, str):
+                      return
+                  route = normalize(href)
+                  if route is not None:
+                      self.routes.add(route)
+
+          parser = Parser()
+          parser.feed(sys.stdin.read())
+          for route in sorted(parser.routes):
+              print(route)
+          '
           }
 
           search_locations() {
@@ -332,7 +387,12 @@ jobs:
             local locations
             local dev_locations
             local cited_eval_locations
+            local route
             locations="$(search_locations "$body")" || return 1
+            if [ -z "${PUBLIC_NAV_ROUTES:-}" ]; then
+              echo "PUBLIC_NAV_ROUTES is not initialized" >&2
+              return 1
+            fi
             dev_locations="$(lines_with_prefix "dev/" "$locations")"
             cited_eval_locations="$(lines_in_set \
               "$locations" \
@@ -350,6 +410,11 @@ jobs:
               "$PUBLIC_EVAL_PATH" \
               "$PUBLIC_SCENARIOS_PATH" \
               "$PUBLIC_SCOREBOARD_PATH" || return 1
+            while IFS= read -r route; do
+              if [ -n "$route" ]; then
+                assert_line_present "$route" "$locations" || return 1
+              fi
+            done <<<"$PUBLIC_NAV_ROUTES"
             assert_line_absent "$INTERNAL_RELEASE_PATH" "$locations" || return 1
           }
 
@@ -359,7 +424,12 @@ jobs:
             local dev_urls
             local dev_prefix
             local cited_eval_urls
+            local route
             urls="$(sitemap_urls "$body")" || return 1
+            if [ -z "${PUBLIC_NAV_ROUTES:-}" ]; then
+              echo "PUBLIC_NAV_ROUTES is not initialized" >&2
+              return 1
+            fi
             dev_prefix="$(canonical_url_for "$PUBLIC_CONTRIBUTOR_PATH")"
             dev_urls="$(lines_with_prefix "$dev_prefix" "$urls")"
             cited_eval_urls="$(lines_in_set \
@@ -378,6 +448,11 @@ jobs:
               "$(canonical_url_for "$PUBLIC_EVAL_PATH")" \
               "$(canonical_url_for "$PUBLIC_SCENARIOS_PATH")" \
               "$(canonical_url_for "$PUBLIC_SCOREBOARD_PATH")" || return 1
+            while IFS= read -r route; do
+              if [ -n "$route" ]; then
+                assert_line_present "$(canonical_url_for "$route")" "$urls" || return 1
+              fi
+            done <<<"$PUBLIC_NAV_ROUTES"
             assert_line_absent "$(canonical_url_for "$INTERNAL_RELEASE_PATH")" "$urls" || return 1
           }
 
@@ -399,6 +474,31 @@ jobs:
             return 1
           }
 
+          retry_until_publication_artifacts() {
+            local home_body
+            local search_body
+            local sitemap_body
+            local attempt
+            for attempt in $(seq 1 "$CONTENT_ATTEMPTS"); do
+              if home_body="$(fetch_body "" "$CONTENT_CURL_MAX_TIME")" \
+                && search_body="$(fetch_body "search/search_index.json" "$CONTENT_CURL_MAX_TIME")" \
+                && sitemap_body="$(fetch_body "sitemap.xml" "$CONTENT_CURL_MAX_TIME")"; then
+                if PUBLIC_NAV_ROUTES="$(public_nav_routes "$home_body")" \
+                  && [ -n "$PUBLIC_NAV_ROUTES" ] \
+                  && check_home_page "$home_body" \
+                  && check_search_index "$search_body" \
+                  && check_sitemap "$sitemap_body"; then
+                  return 0
+                fi
+              fi
+              if [ "$attempt" -lt "$CONTENT_ATTEMPTS" ]; then
+                sleep "$CONTENT_SLEEP_SECONDS"
+              fi
+            done
+            echo "Failed to observe publication artifacts at $(url_for "") after $CONTENT_ATTEMPTS attempts" >&2
+            return 1
+          }
+
           retry_until_ok() {
             local path="$1"
             local attempt
@@ -417,12 +517,10 @@ jobs:
             return 1
           }
 
-          retry_until_body_checks "" "home page structure" check_home_page
           retry_until_contains "getting-started/" "hellices/korvid/korvid"
           retry_until_contains "release-notes/unreleased/" "Unreleased (main)"
           retry_until_body_checks "release-notes/unreleased/" "release-notes navigation" check_release_notes_nav
-          retry_until_body_checks "search/search_index.json" "search index scope" check_search_index
-          retry_until_body_checks "sitemap.xml" "sitemap scope" check_sitemap
+          retry_until_publication_artifacts
           retry_until_ok "assets/demo.mp4"
           retry_until_ok "assets/scenes/agent-demo.mp4"
           retry_until_ok "assets/scenes/mcp-follow-demo.mp4"
