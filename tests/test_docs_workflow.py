@@ -11,9 +11,13 @@ Pages-deploy permissions it never uses as excessive).
 from __future__ import annotations
 
 import re
+import shlex
+import subprocess
+import textwrap
 from pathlib import Path
 from typing import Any, cast
 
+import pytest
 import yaml
 
 ROOT = Path(__file__).parent.parent
@@ -253,6 +257,117 @@ def _shell_assignment(script: str, name: str) -> int:
     return int(match.group(1))
 
 
+def _site_page_source(site_path: str) -> Path:
+    return ROOT / "docs" / f"{site_path.removesuffix('/')}.md"
+
+
+def _frontmatter(text: str) -> str:
+    match = re.match(r"\A---\n(?P<frontmatter>.*?)\n---\n", text, flags=re.DOTALL)
+    return match.group("frontmatter") if match is not None else ""
+
+
+def _smoke_function(script: str, name: str) -> str:
+    match = re.search(
+        rf"^{re.escape(name)}\(\)\s*\{{.*?^\}}",
+        script,
+        flags=re.MULTILINE | re.DOTALL,
+    )
+    assert match is not None, f"smoke job must define {name}()"
+    return match.group(0)
+
+
+def _run_smoke_checker(checker: str, path: str, description: str, body: str) -> int:
+    script = _smoke_script(_load())
+    functions = "\n\n".join(
+        _smoke_function(script, name)
+        for name in (
+            "url_for",
+            "assert_body_contains",
+            "assert_body_not_contains",
+            "check_search_index",
+            "check_sitemap",
+            "retry_until_body_checks",
+        )
+    )
+    probe = textwrap.dedent(
+        f"""\
+        set -euo pipefail
+
+        base_url="https://example.invalid"
+        CONTENT_ATTEMPTS=1
+        CONTENT_CURL_MAX_TIME=1
+        CONTENT_SLEEP_SECONDS=0
+
+        {functions}
+
+        fetch_body() {{
+          printf '%s' "$STUB_BODY"
+        }}
+
+        STUB_BODY={shlex.quote(body)}
+        retry_until_body_checks {shlex.quote(path)} {shlex.quote(description)} {shlex.quote(checker)}
+        """
+    )
+    result = subprocess.run(
+        ["bash", "-lc", probe],
+        check=False,
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    return result.returncode
+
+
+def _smoke_invocation_count(script: str, helper_name: str) -> int:
+    return sum(1 for line in script.splitlines() if line.lstrip().startswith(f"{helper_name} "))
+
+
+@pytest.mark.parametrize(
+    ("checker", "path", "description", "body"),
+    [
+        (
+            "check_search_index",
+            "search/search_index.json",
+            "search index scope",
+            '{"docs":[{"location":"evals/methodology/"}]}',
+        ),
+        (
+            "check_search_index",
+            "search/search_index.json",
+            "search index scope",
+            '{"docs":[{"location":"dev/specs/2026-08-12-korvid-architecture/"},'
+            '{"location":"evals/methodology/"},{"location":"dev/ui-controllers/"}]}',
+        ),
+        (
+            "check_sitemap",
+            "sitemap.xml",
+            "sitemap scope",
+            ("<urlset><url><loc>https://example.invalid/evals/methodology/</loc></url></urlset>"),
+        ),
+        (
+            "check_sitemap",
+            "sitemap.xml",
+            "sitemap scope",
+            (
+                "<urlset>"
+                "<url><loc>https://example.invalid/dev/specs/2026-08-12-korvid-architecture/"
+                "</loc></url>"
+                "<url><loc>https://example.invalid/evals/methodology/</loc></url>"
+                "<url><loc>https://example.invalid/dev/ui-controllers/</loc></url>"
+                "</urlset>"
+            ),
+        ),
+    ],
+)
+def test_smoke_scope_checkers_fail_when_a_required_or_forbidden_entry_is_wrong(
+    checker: str,
+    path: str,
+    description: str,
+    body: str,
+) -> None:
+    assert _run_smoke_checker(checker, path, description, body) != 0
+
+
 def test_smoke_job_is_main_only_after_deploy_and_least_privilege() -> None:
     """The post-deploy smoke job must stay isolated from build/deploy privileges."""
 
@@ -268,7 +383,7 @@ def test_smoke_job_is_main_only_after_deploy_and_least_privilege() -> None:
 
     assert smoke["runs-on"] == "ubuntu-latest"
     assert smoke["timeout-minutes"] >= 8
-    assert smoke.get("permissions", config.get("permissions")) == {"contents": "read"}
+    assert smoke["permissions"] == {}
 
     step = _smoke_step(config)
     assert step.get("env") == {"SITE_URL": "${{ needs.deploy.outputs.page_url }}"}
@@ -298,7 +413,11 @@ def test_smoke_job_is_main_only_after_deploy_and_least_privilege() -> None:
     ) + (_shell_assignment(script, "MEDIA_ATTEMPTS") - 1) * _shell_assignment(
         script, "MEDIA_SLEEP_SECONDS"
     )
-    worst_case_seconds = 5 * content_budget + 3 * media_budget
+    content_probes = _smoke_invocation_count(
+        script, "retry_until_contains"
+    ) + _smoke_invocation_count(script, "retry_until_body_checks")
+    media_probes = _smoke_invocation_count(script, "retry_until_ok")
+    worst_case_seconds = content_probes * content_budget + media_probes * media_budget
     assert smoke["timeout-minutes"] * 60 > worst_case_seconds, (
         "smoke timeout must exceed the probe's bounded worst case"
     )
@@ -360,18 +479,48 @@ def test_smoke_job_checks_public_pages_search_and_media_entrypoints() -> None:
     ):
         assert path in script
 
-    for token in (
-        f'"location":"{PUBLIC_ARCHITECTURE_PATH}"',
-        f'"location":"{PUBLIC_EVAL_PATH}"',
-        f'"location":"{INTERNAL_CONTROLLER_PATH}"',
-        f'"location":"{INTERNAL_RELEASE_PATH}"',
-        f"https://hellices.github.io/korvid/{PUBLIC_ARCHITECTURE_PATH}",
-        f"https://hellices.github.io/korvid/{PUBLIC_EVAL_PATH}",
-        f"https://hellices.github.io/korvid/{INTERNAL_CONTROLLER_PATH}",
-        f"https://hellices.github.io/korvid/{INTERNAL_RELEASE_PATH}",
+    for assignment in (
+        f'PUBLIC_ARCHITECTURE_PATH="{PUBLIC_ARCHITECTURE_PATH}"',
+        f'PUBLIC_EVAL_PATH="{PUBLIC_EVAL_PATH}"',
+        f'INTERNAL_CONTROLLER_PATH="{INTERNAL_CONTROLLER_PATH}"',
+        f'INTERNAL_RELEASE_PATH="{INTERNAL_RELEASE_PATH}"',
     ):
-        assert token in script
+        assert assignment in script
+
+    for assertion in (
+        'assert_body_contains "\\"location\\":\\"$PUBLIC_ARCHITECTURE_PATH\\"" "$body" || return 1',
+        'assert_body_contains "\\"location\\":\\"$PUBLIC_EVAL_PATH\\"" "$body" || return 1',
+        'assert_body_not_contains "\\"location\\":\\"$INTERNAL_CONTROLLER_PATH\\"" "$body" || return 1',
+        'assert_body_not_contains "\\"location\\":\\"$INTERNAL_RELEASE_PATH\\"" "$body" || return 1',
+    ):
+        assert assertion in script
+    for assertion in (
+        'assert_body_contains "$(url_for "$PUBLIC_ARCHITECTURE_PATH")" "$body" || return 1',
+        'assert_body_contains "$(url_for "$PUBLIC_EVAL_PATH")" "$body" || return 1',
+        'assert_body_not_contains "$(url_for "$INTERNAL_CONTROLLER_PATH")" "$body" || return 1',
+        'assert_body_not_contains "$(url_for "$INTERNAL_RELEASE_PATH")" "$body" || return 1',
+    ):
+        assert assertion in script
+    for hard_coded_url in (
+        f"{SITE_URL}{PUBLIC_ARCHITECTURE_PATH}",
+        f"{SITE_URL}{PUBLIC_EVAL_PATH}",
+        f"{SITE_URL}{INTERNAL_CONTROLLER_PATH}",
+        f"{SITE_URL}{INTERNAL_RELEASE_PATH}",
+    ):
+        assert hard_coded_url not in script
     assert "assert_body_not_contains" in script
+
+
+def test_smoke_scope_paths_map_to_repository_sources() -> None:
+    """Each smoke-checked public or internal route must still point at a real source page."""
+
+    assert _site_page_source(PUBLIC_ARCHITECTURE_PATH).exists()
+    assert _site_page_source(PUBLIC_EVAL_PATH).exists()
+    internal_controller_source = _site_page_source(INTERNAL_CONTROLLER_PATH)
+    assert internal_controller_source.exists()
+    assert "exclude: false" not in _frontmatter(
+        internal_controller_source.read_text(encoding="utf-8")
+    )
 
 
 def test_workflow_level_permissions_are_read_only() -> None:

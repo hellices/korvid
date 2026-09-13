@@ -79,14 +79,18 @@ jobs:
     needs: deploy
     runs-on: ubuntu-latest
     timeout-minutes: 8
-    permissions:
-      contents: read
+    permissions: {}
     steps:
       - name: Probe released pages and media
         env:
           SITE_URL: ${{ needs.deploy.outputs.page_url }}
         run: |
           set -euo pipefail
+
+          PUBLIC_ARCHITECTURE_PATH="dev/specs/2026-08-12-korvid-architecture/"
+          PUBLIC_EVAL_PATH="evals/methodology/"
+          INTERNAL_CONTROLLER_PATH="dev/ui-controllers/"
+          INTERNAL_RELEASE_PATH="release/"
 
           CONTENT_ATTEMPTS=4
           CONTENT_SLEEP_SECONDS=5
@@ -158,18 +162,18 @@ jobs:
 
           check_search_index() {
             local body="$1"
-            assert_body_contains '"location":"dev/specs/2026-08-12-korvid-architecture/"' "$body"
-            assert_body_contains '"location":"evals/methodology/"' "$body"
-            assert_body_not_contains '"location":"dev/ui-controllers/"' "$body"
-            assert_body_not_contains '"location":"release/"' "$body"
+            assert_body_contains "\"location\":\"$PUBLIC_ARCHITECTURE_PATH\"" "$body" || return 1
+            assert_body_contains "\"location\":\"$PUBLIC_EVAL_PATH\"" "$body" || return 1
+            assert_body_not_contains "\"location\":\"$INTERNAL_CONTROLLER_PATH\"" "$body" || return 1
+            assert_body_not_contains "\"location\":\"$INTERNAL_RELEASE_PATH\"" "$body" || return 1
           }
 
           check_sitemap() {
             local body="$1"
-            assert_body_contains "https://hellices.github.io/korvid/dev/specs/2026-08-12-korvid-architecture/" "$body"
-            assert_body_contains "https://hellices.github.io/korvid/evals/methodology/" "$body"
-            assert_body_not_contains "https://hellices.github.io/korvid/dev/ui-controllers/" "$body"
-            assert_body_not_contains "https://hellices.github.io/korvid/release/" "$body"
+            assert_body_contains "$(url_for "$PUBLIC_ARCHITECTURE_PATH")" "$body" || return 1
+            assert_body_contains "$(url_for "$PUBLIC_EVAL_PATH")" "$body" || return 1
+            assert_body_not_contains "$(url_for "$INTERNAL_CONTROLLER_PATH")" "$body" || return 1
+            assert_body_not_contains "$(url_for "$INTERNAL_RELEASE_PATH")" "$body" || return 1
           }
 
           retry_until_body_checks() {
