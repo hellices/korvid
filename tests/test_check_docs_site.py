@@ -27,6 +27,7 @@ PUBLIC_EVAL_PATHS = (
 )
 INTERNAL_CONTRACT_TESTS_PATH = "dev/contract-tests/"
 INTERNAL_RELEASE_PATH = "release/"
+PUBLIC_WINDOWS_PATH = "windows/"
 PUBLIC_NAV_PATHS = (
     PUBLIC_OVERVIEW_PATH,
     PUBLIC_GETTING_STARTED_PATH,
@@ -242,6 +243,32 @@ def test_check_site_reports_release_artifacts_as_forbidden(tmp_path: Path) -> No
     assert (
         "sitemap.xml unexpectedly includes forbidden URL "
         "'https://hellices.github.io/korvid/release/'" in errors
+    )
+
+
+def test_check_site_reports_windows_artifacts_as_forbidden(tmp_path: Path) -> None:
+    module = _module()
+    site = _write_site(
+        tmp_path,
+        search_locations=[
+            PUBLIC_HOME_SEARCH_PATH,
+            *PUBLIC_NAV_PATHS,
+            *PUBLIC_EVAL_PATHS,
+            PUBLIC_WINDOWS_PATH,
+        ],
+        sitemap_locations=[
+            SITE_URL,
+            *_public_nav_urls(),
+            *_public_eval_urls(),
+            f"{SITE_URL}{PUBLIC_WINDOWS_PATH}",
+        ],
+    )
+
+    errors = module.check_site(site)
+    assert "search/search_index.json unexpectedly includes forbidden location 'windows/'" in errors
+    assert (
+        "sitemap.xml unexpectedly includes forbidden URL "
+        "'https://hellices.github.io/korvid/windows/'" in errors
     )
 
 

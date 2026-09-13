@@ -97,6 +97,7 @@ jobs:
           PUBLIC_SCENARIOS_PATH="evals/scenarios/"
           PUBLIC_SCOREBOARD_PATH="evals/scoreboard/"
           INTERNAL_RELEASE_PATH="release/"
+          INTERNAL_WINDOWS_PATH="windows/"
           PUBLIC_NAV_ROUTES=""
           ROOT_ROUTE_SENTINEL="."
 
@@ -419,6 +420,7 @@ jobs:
               fi
             done <<<"$PUBLIC_NAV_ROUTES"
             assert_line_absent "$INTERNAL_RELEASE_PATH" "$locations" || return 1
+            assert_line_absent "$INTERNAL_WINDOWS_PATH" "$locations" || return 1
           }
 
           check_sitemap() {
@@ -458,6 +460,7 @@ jobs:
               fi
             done <<<"$PUBLIC_NAV_ROUTES"
             assert_line_absent "$(canonical_url_for "$INTERNAL_RELEASE_PATH")" "$urls" || return 1
+            assert_line_absent "$(canonical_url_for "$INTERNAL_WINDOWS_PATH")" "$urls" || return 1
           }
 
           retry_until_body_checks() {

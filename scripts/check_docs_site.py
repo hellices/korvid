@@ -41,6 +41,7 @@ REQUIRED_SEARCH_LOCATIONS = frozenset(
 FORBIDDEN_SEARCH_LOCATIONS = frozenset(
     {
         "release/",
+        "windows/",
     }
 )
 REQUIRED_SITEMAP_URLS = frozenset(
@@ -53,6 +54,7 @@ REQUIRED_SITEMAP_URLS = frozenset(
 FORBIDDEN_SITEMAP_URLS = frozenset(
     {
         f"{SITE_URL}release/",
+        f"{SITE_URL}windows/",
     }
 )
 
