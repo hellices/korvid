@@ -732,13 +732,30 @@ def test_smoke_home_page_checker_fails_when_expected_markup_is_missing(body: str
     assert _run_smoke_checker("check_home_page", "", "home page structure", body) != 0
 
 
-def test_smoke_release_notes_nav_checker_matches_any_versioned_release_link() -> None:
-    body = """
-    <nav aria-label="Release notes">
-      <a data-track="nav" href="../v0.5.0/" class="md-nav__link">v0.5.0</a>
-      <a href="../v0.4.1/" class="md-nav__link md-nav__link--active">v0.4.1</a>
-    </nav>
-    """
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param(
+            """
+            <nav aria-label="Release notes">
+              <a href="../v0.5.0/" class="md-nav__link" data-track="nav">v0.5.0</a>
+              <a class="md-nav__link md-nav__link--active" href="../v0.4.1/">v0.4.1</a>
+            </nav>
+            """,
+            id="href-before-class",
+        ),
+        pytest.param(
+            """
+            <nav aria-label="Release notes">
+              <a class="md-nav__link" href="../v0.5.0/" data-track="nav">v0.5.0</a>
+              <a href="../v0.4.1/" class="md-nav__link md-nav__link--active">v0.4.1</a>
+            </nav>
+            """,
+            id="class-before-href",
+        ),
+    ],
+)
+def test_smoke_release_notes_nav_checker_matches_any_versioned_release_link(body: str) -> None:
     assert (
         _run_smoke_checker(
             "check_release_notes_nav",
