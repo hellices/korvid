@@ -365,6 +365,7 @@ uv run pytest -p no:tach \
   tests/test_docs_landing_behavior.py \
   tests/test_docs_links.py \
   tests/test_docs_media_assets.py \
+  tests/test_check_docs_site.py \
   tests/test_docs_public_site.py \
   tests/test_docs_readability.py \
   tests/test_docs_site_entrypoints.py \
@@ -377,9 +378,10 @@ Expected: PASS.
 
 ```bash
 uv run --frozen --group docs mkdocs build --strict
+python scripts/check_docs_site.py site
 ```
 
-Expected: PASS.
+Expected: strict build passes; publication-artifact checker succeeds.
 
 - [ ] **Step 4: Inspect artifacts and replay the post-deploy smoke locally**
 

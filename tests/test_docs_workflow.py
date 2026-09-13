@@ -1402,8 +1402,17 @@ def test_cleanup_plan_task3_names_the_workflow_test_and_local_smoke_replay() -> 
     normalized = " ".join(task.lower().replace("`", "").split())
     assert ".github/workflows/docs.yml" in task
     assert "tests/test_docs_workflow.py" in task
+    assert "tests/test_check_docs_site.py" in task
     assert "extract the smoke step" in normalized
     assert "site_url" in normalized
+    assert "python scripts/check_docs_site.py site" in normalized
+    assert "publication-artifact checker succeeds" in normalized
+    assert re.search(
+        r"uv run --frozen --group docs mkdocs build --strict.*?"
+        r"python scripts/check_docs_site\.py site",
+        " ".join(task.replace("`", "").split()),
+        flags=re.DOTALL,
+    )
 
 
 def test_cleanup_plan_task3_preserves_human_pr_authorization_gate() -> None:
