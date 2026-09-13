@@ -76,6 +76,9 @@ effective observation clock. Future timestamps have no skew allowance and are
 omitted before retention/version updates rather than clamped to the present.
 Missing, invalid, timezone-naive, UTC-overflowing, and future timestamps expose
 coverage gaps without aborting ingestion of subsequent valid Events.
+Missing, empty, or non-string Event types are likewise unassessable observations
+and leave coverage gaps. Valid non-Warning records remain excluded, and epoch
+and namespace guards run before reporting any event gap.
 Repeated updates of one Event UID replace the
 same entry and use the cumulative Event count rather than adding it again.
 Unknown reasons are not filtered out by a catalogue. Capacity loss is visible.

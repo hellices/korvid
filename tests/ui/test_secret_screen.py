@@ -407,28 +407,53 @@ async def test_reveal_audit_records_actor(tmp_path: Path) -> None:
         assert entries[0]["actor"] == getpass.getuser()
 
 
-async def test_rapid_double_reveal_ends_masked(tmp_path: Path) -> None:
+async def test_rapid_double_reveal_ends_masked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Two quick `x` presses toggle reveal→hide even while the first press's
     audit append is still pending: disclosure operations are serialized, so
     a double press can never leave the value exposed by accident."""
-    app = make_secret_app(audit=AuditLog(tmp_path / "audit.jsonl"))
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_secret_app(audit=AuditLog(audit_path))
+    intent_started = asyncio.Event()
+    release_intent = asyncio.Event()
     async with app.run_test() as pilot:
         screen = await _open_secret_screen(pilot, app)
         keys = screen.row_keys()
         for _ in range(keys.index(("password", "data"))):
             await pilot.press("down")
-        await pilot.press("x")
-        await pilot.press("x")  # no wait: races the first press's audit write
-        # Wait for both toggle workers to actually finish — the masked state
-        # is true *before* they run, so it can't serve as the wait condition.
+        append_audit = screen._append_audit
+
+        async def gated_append(action: str, key: str, section: str, outcome: str) -> None:
+            if outcome == "intent":
+                intent_started.set()
+                await release_intent.wait()
+            await append_audit(action, key, section, outcome)
+
+        monkeypatch.setattr(screen, "_append_audit", gated_append)
+        prior_workers = set(screen.workers)
+        try:
+            await pilot.press("x")
+            await until(pilot, intent_started.is_set, label="first reveal waiting on audit")
+            await pilot.press("x")
+            toggle_workers = tuple(
+                worker for worker in set(screen.workers) - prior_workers if worker.node is screen
+            )
+            assert len(toggle_workers) == 2
+        finally:
+            release_intent.set()
         await until(
             pilot,
-            lambda: all(worker.is_finished for worker in screen.workers if worker.node is screen),
+            lambda: all(worker.is_finished for worker in toggle_workers),
             label="both toggle workers finished",
         )
         text = _screen_text(screen)
         assert "hunter2" not in text
         assert MASK_PLACEHOLDER in text
+        assert [(entry["action"], entry["outcome"]) for entry in _audit_entries(audit_path)] == [
+            ("secret-reveal", "intent"),
+            ("secret-reveal", "success"),
+        ]
 
 
 async def test_copy_blocked_message_names_copy() -> None:

@@ -50,6 +50,9 @@ coverage gap, without a clock-skew allowance or clamping them to the present;
 they cannot evict valid recent evidence. Missing, invalid, timezone-naive,
 or UTC-overflowing timestamps likewise produce a gap rather than invented
 freshness, without preventing later valid Events from being ingested.
+Missing, empty, or non-string Event types also leave an explicit coverage gap,
+while valid non-Warning records are ignored. Epoch and namespace filters apply
+before reporting these gaps, so a different scope cannot pollute this view.
 
 ## Keyboard workflow
 

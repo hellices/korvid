@@ -499,20 +499,27 @@ class PulseModel:
         observed_at: datetime,
     ) -> None:
         """Merge a Warning by Event UID and monotonic event-time/count evidence."""
-        if epoch != self._epoch or event.get("type") != "Warning":
+        if epoch != self._epoch or not self._in_scope(_event_namespace(event)):
             return
-        if not self._in_scope(_event_namespace(event)):
+        event_type = event.get("type")
+        if not isinstance(event_type, str) or not event_type:
+            self._mark_event_gap(
+                self._advance_time(observed_at),
+                "Warning omitted because its event type is missing or invalid.",
+            )
+            return
+        if event_type != "Warning":
             return
         now = self._advance_time(observed_at)
         occurred_at = _event_time(event)
         if occurred_at is None:
-            self._mark_timestamp_gap(
+            self._mark_event_gap(
                 now,
                 "Warning omitted because its event timestamp is missing, invalid, or timezone-naive.",
             )
             return
         if occurred_at > now:
-            self._mark_timestamp_gap(
+            self._mark_event_gap(
                 now, "Warning omitted because its event timestamp is in the future."
             )
             return
@@ -570,7 +577,7 @@ class PulseModel:
             detail += " Warning text exceeded field limits and was truncated."
         self.set_coverage(PulseCoverage("event-buffer", "capped", now, detail))
 
-    def _mark_timestamp_gap(self, now: datetime, omission: str) -> None:
+    def _mark_event_gap(self, now: datetime, omission: str) -> None:
         previous = self._coverage["events"]
         state: PulseCoverageState = "partial"
         if previous.state in {"failed", "forbidden", "unavailable", "capped"}:

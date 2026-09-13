@@ -404,6 +404,83 @@ def test_warning_scope_and_epoch_filter_precede_retention() -> None:
     assert len(model.snapshot(NOW).recent) == 1
 
 
+@pytest.mark.parametrize(
+    "fields",
+    [{}, {"type": None}, {"type": ""}, {"type": False}, {"type": 1}, {"type": []}, {"type": {}}],
+)
+@pytest.mark.parametrize("snapshot_read", [False, True])
+def test_malformed_warning_type_exposes_gap_without_aborting_valid_evidence(
+    fields: dict[str, Any], snapshot_read: bool
+) -> None:
+    model = PulseModel()
+    coverage = PulseCoverage("events", "complete", NOW)
+    model.set_coverage(coverage)
+    malformed = _event("malformed")
+    malformed.pop("type")
+    malformed.update(fields)
+    valid = _event("valid")
+    valid["reason"] = "ValidAfterMalformedType"
+
+    if snapshot_read:
+        model.replace_source("events", [malformed, valid], coverage)
+    else:
+        for event in (malformed, valid):
+            model.record_warning(event, 0, NOW)
+
+    snapshot = model.snapshot(NOW)
+    assert [item.reason for item in snapshot.recent] == ["ValidAfterMalformedType"]
+    assert snapshot.dropped == 0
+    observed = _coverage(snapshot, "events")
+    assert observed.state == "partial"
+    assert "event type" in observed.detail
+
+
+@pytest.mark.parametrize("state", ["partial", "capped", "forbidden", "failed", "unavailable"])
+def test_malformed_warning_type_preserves_existing_failure(state: PulseCoverageState) -> None:
+    model = PulseModel()
+    model.set_coverage(PulseCoverage("events", state, NOW, "API 503: source unavailable"))
+    malformed = _event()
+    malformed["type"] = None
+
+    model.record_warning(malformed, 0, NOW + timedelta(seconds=1))
+
+    coverage = _coverage(model.snapshot(NOW + timedelta(seconds=1)), "events")
+    assert coverage.state == state
+    assert coverage.observed_at == NOW
+    assert "API 503: source unavailable" in coverage.detail
+    assert "event type" in coverage.detail
+    model.record_warning(malformed, 0, NOW + timedelta(seconds=1))
+    assert _coverage(model.snapshot(NOW + timedelta(seconds=1)), "events") == coverage
+
+
+@pytest.mark.parametrize(("epoch", "namespace"), [(1, "production"), (2, "development")])
+def test_malformed_warning_type_cannot_pollute_another_epoch_or_scope(
+    epoch: int, namespace: str
+) -> None:
+    model = PulseModel()
+    model.reset(2, "production")
+    model.set_coverage(PulseCoverage("events", "complete", NOW))
+    before = model.snapshot(NOW)
+    malformed = _event(namespace=namespace)
+    malformed["type"] = []
+
+    model.record_warning(malformed, epoch, NOW)
+
+    assert model.snapshot(NOW) == before
+
+
+def test_valid_non_warning_does_not_change_event_coverage() -> None:
+    model = PulseModel()
+    model.set_coverage(PulseCoverage("events", "complete", NOW))
+    before = model.snapshot(NOW)
+    normal = _event()
+    normal["type"] = "Normal"
+
+    model.record_warning(normal, 0, NOW)
+
+    assert model.snapshot(NOW) == before
+
+
 def test_complete_event_reads_do_not_erase_retained_warning_history() -> None:
     model = PulseModel()
     model.record_warning(_event(), 0, NOW)
