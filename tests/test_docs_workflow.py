@@ -10,6 +10,8 @@ Pages-deploy permissions it never uses as excessive).
 
 from __future__ import annotations
 
+import json
+import os
 import re
 import shlex
 import shutil
@@ -301,7 +303,14 @@ def _bash_executable() -> str:
     return str(git_bash)
 
 
-def _run_smoke_checker(checker: str, path: str, description: str, body: str) -> int:
+def _run_smoke_checker(
+    checker: str,
+    path: str,
+    description: str,
+    body: str,
+    *,
+    env: dict[str, str] | None = None,
+) -> int:
     script = _smoke_script(_load())
     functions = "\n\n".join(
         _smoke_function(script, name)
@@ -341,21 +350,59 @@ def _run_smoke_checker(checker: str, path: str, description: str, body: str) -> 
         {functions}
 
         fetch_body() {{
-          printf '%s' "$STUB_BODY"
+          cat
         }}
 
-        STUB_BODY={shlex.quote(body)}
         retry_until_body_checks {shlex.quote(path)} {shlex.quote(description)} {shlex.quote(checker)}
         """
     )
+    process_env = None if env is None else {**os.environ, **env}
     result = subprocess.run(
         [_bash_executable(), "--noprofile", "--norc", "-c", probe],
         check=False,
         cwd=ROOT,
         capture_output=True,
+        env=process_env,
+        input=body,
         text=True,
     )
     return result.returncode
+
+
+def _large_search_index_body() -> str:
+    docs = [
+        {"location": PUBLIC_CONTRIBUTOR_PATH},
+        {"location": PUBLIC_ARCHITECTURE_PATH},
+        {"location": PUBLIC_EVAL_PATH},
+    ]
+    body = json.dumps({"docs": docs})
+    while len(body.encode("utf-8")) <= 131072:
+        docs.append({"location": f"guides/generated-{len(docs):05d}/"})
+        body = json.dumps({"docs": docs})
+    return body
+
+
+def _linux_max_arg_strlen_python_path(tmp_path: Path) -> str:
+    wrapper = tmp_path / "bin" / "python3"
+    wrapper.parent.mkdir(parents=True, exist_ok=True)
+    wrapper.write_text(
+        textwrap.dedent(
+            f"""\
+            #!{sys.executable}
+            import os
+            import sys
+
+            if len(os.environ.get("BODY", "").encode("utf-8")) > 131072:
+                print("simulated Linux MAX_ARG_STRLEN breach", file=sys.stderr)
+                raise SystemExit(1)
+
+            os.execv({sys.executable!r}, [{sys.executable!r}, *sys.argv[1:]])
+            """
+        ),
+        encoding="utf-8",
+    )
+    wrapper.chmod(0o755)
+    return str(wrapper.parent)
 
 
 def test_run_smoke_checker_uses_a_portable_noninteractive_bash_invocation(
@@ -647,6 +694,21 @@ def test_smoke_job_anchors_the_getting_started_probe_to_a_build_safe_token() -> 
     assert GETTING_STARTED_HOMEBREW_COMMAND not in script
 
 
+def test_smoke_json_and_xml_helpers_pipe_body_to_python_stdin() -> None:
+    script = _smoke_script(_load())
+    search_helper = _smoke_function(script, "search_locations")
+    sitemap_helper = _smoke_function(script, "sitemap_urls")
+
+    assert "printf '%s' \"$body\" | python3 -c " in search_helper
+    assert "printf '%s' \"$body\" | python3 -c " in sitemap_helper
+    assert 'BODY="$body" python3' not in search_helper
+    assert 'BODY="$body" python3' not in sitemap_helper
+    assert 'os.environ["BODY"]' not in search_helper
+    assert 'os.environ["BODY"]' not in sitemap_helper
+    assert "sys.stdin" in search_helper
+    assert "sys.stdin" in sitemap_helper
+
+
 def test_smoke_retry_helpers_retry_the_content_predicate_not_only_transport() -> None:
     """A stale CDN response must be retried until the expected body state appears."""
 
@@ -673,6 +735,25 @@ def test_smoke_retry_helpers_retry_the_content_predicate_not_only_transport() ->
     assert '"$checker" "$body"' in helper_body
     assert 'if [ "$attempt" -lt "$CONTENT_ATTEMPTS" ]; then' in helper_body
     assert 'sleep "$CONTENT_SLEEP_SECONDS"' in helper_body
+
+
+def test_smoke_scope_checker_accepts_a_large_search_index_body_without_body_env(
+    tmp_path: Path,
+) -> None:
+    body = _large_search_index_body()
+    assert len(body.encode("utf-8")) > 131072
+    python_path = _linux_max_arg_strlen_python_path(tmp_path)
+
+    assert (
+        _run_smoke_checker(
+            "check_search_index",
+            "search/search_index.json",
+            "search index scope",
+            body,
+            env={"PATH": f"{python_path}{os.pathsep}{os.environ['PATH']}"},
+        )
+        == 0
+    )
 
 
 def test_smoke_job_checks_public_pages_search_and_media_entrypoints() -> None:

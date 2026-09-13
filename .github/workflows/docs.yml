@@ -184,13 +184,12 @@ jobs:
 
           search_locations() {
             local body="$1"
-            BODY="$body" python3 - <<'PY'
+            printf '%s' "$body" | python3 -c '
           import json
-          import os
           import sys
 
           try:
-              payload = json.loads(os.environ["BODY"])
+              payload = json.load(sys.stdin)
           except json.JSONDecodeError as exc:
               print(f"search index is not valid JSON: {exc}", file=sys.stderr)
               raise SystemExit(1)
@@ -206,18 +205,17 @@ jobs:
               location = entry.get("location")
               if isinstance(location, str):
                   print(location.split("#", 1)[0])
-          PY
+          '
           }
 
           sitemap_urls() {
             local body="$1"
-            BODY="$body" python3 - <<'PY'
-          import os
+            printf '%s' "$body" | python3 -c '
           import sys
           import xml.etree.ElementTree as ET
 
           try:
-              root = ET.fromstring(os.environ["BODY"])
+              root = ET.fromstring(sys.stdin.read())
           except ET.ParseError as exc:
               print(f"sitemap is not valid XML: {exc}", file=sys.stderr)
               raise SystemExit(1)
@@ -227,7 +225,7 @@ jobs:
                   location = element.text.strip()
                   if location:
                       print(location)
-          PY
+          '
           }
 
           lines_with_prefix() {
@@ -267,7 +265,7 @@ jobs:
           assert_line_present() {
             local expected="$1"
             local lines="$2"
-            if ! printf '%s\n' "$lines" | grep -Fxq "$expected"; then
+            if ! grep -Fxq "$expected" <<<"$lines"; then
               echo "Expected line '$expected'" >&2
               return 1
             fi
@@ -276,7 +274,7 @@ jobs:
           assert_line_absent() {
             local forbidden="$1"
             local lines="$2"
-            if printf '%s\n' "$lines" | grep -Fxq "$forbidden"; then
+            if grep -Fxq "$forbidden" <<<"$lines"; then
               echo "Did not expect line '$forbidden'" >&2
               return 1
             fi
