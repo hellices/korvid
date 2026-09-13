@@ -365,7 +365,7 @@ def _run_smoke_checker(
         f"""\
         set -euo pipefail
 
-        base_url={shlex.quote(CANONICAL_SITE_URL.removesuffix("/"))}
+        base_url="https://example.invalid"
         CANONICAL_SITE_URL={shlex.quote(CANONICAL_SITE_URL)}
         PUBLIC_CONTRIBUTOR_PATH={shlex.quote(PUBLIC_CONTRIBUTOR_PATH)}
         PUBLIC_ARCHITECTURE_PATH={shlex.quote(PUBLIC_ARCHITECTURE_PATH)}
@@ -435,7 +435,7 @@ def _run_smoke_publication_checker(
         f"""\
         set -euo pipefail
 
-        base_url={shlex.quote(CANONICAL_SITE_URL.removesuffix("/"))}
+        base_url="https://example.invalid"
         CANONICAL_SITE_URL={shlex.quote(CANONICAL_SITE_URL)}
         PUBLIC_CONTRIBUTOR_PATH={shlex.quote(PUBLIC_CONTRIBUTOR_PATH)}
         PUBLIC_ARCHITECTURE_PATH={shlex.quote(PUBLIC_ARCHITECTURE_PATH)}
@@ -764,6 +764,24 @@ def test_smoke_scope_checker_succeeds_when_search_index_matches_contract() -> No
     )
 
 
+def test_smoke_scope_checker_succeeds_when_sitemap_uses_canonical_homepage_url() -> None:
+    assert (
+        _run_smoke_checker(
+            "check_sitemap",
+            "sitemap.xml",
+            "sitemap scope",
+            _sitemap_body(
+                PUBLIC_HOME_SEARCH_PATH,
+                *PUBLIC_NAV_ROUTES,
+                PUBLIC_EVAL_PATH,
+                PUBLIC_SCENARIOS_PATH,
+                PUBLIC_SCOREBOARD_PATH,
+            ),
+        )
+        == 0
+    )
+
+
 def test_smoke_publication_checker_succeeds_when_home_search_and_sitemap_match_contract() -> None:
     assert (
         _run_smoke_publication_checker(
@@ -857,7 +875,7 @@ def test_smoke_publication_checker_fails_when_a_versioned_release_note_is_missin
     )
 
 
-def test_smoke_publication_checker_fails_when_homepage_is_missing_from_sitemap() -> None:
+def test_smoke_publication_checker_fails_when_canonical_homepage_is_missing_from_sitemap() -> None:
     assert (
         _run_smoke_publication_checker(
             _smoke_home_body(),

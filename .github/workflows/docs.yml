@@ -451,7 +451,7 @@ jobs:
               "$(canonical_url_for "$PUBLIC_EVAL_PATH")" \
               "$(canonical_url_for "$PUBLIC_SCENARIOS_PATH")" \
               "$(canonical_url_for "$PUBLIC_SCOREBOARD_PATH")" || return 1
-            assert_line_present "$base_url/" "$urls" || return 1
+            assert_line_present "$(canonical_url_for "")" "$urls" || return 1
             while IFS= read -r route; do
               if [ -n "$route" ] && [ "$route" != "$ROOT_ROUTE_SENTINEL" ]; then
                 assert_line_present "$(canonical_url_for "$route")" "$urls" || return 1
