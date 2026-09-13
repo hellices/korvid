@@ -60,9 +60,10 @@ from korvid.k8s.components import (
 from korvid.k8s.discovery import ResourceMeta, canonical_resource_alias, resolve_resource
 from korvid.k8s.errors import ApiStatusError, KubeClientError
 from korvid.k8s.helm import HELM_RELEASES_META
-from korvid.k8s.olm import OPERATORS_GROUP, PACKAGES_GROUP
+from korvid.k8s.olm import OPERATORS_GROUP
 from korvid.k8s.relations import drill_child, owned_by
 from korvid.ui.navigation import DrillLevel
+from korvid.ui.object_navigation import NavigationOrigin, default_scope_for, jump_to_object
 from korvid.ui.ui_surface import UiSurface
 from korvid.ui.view_state import ViewState
 from korvid.ui.widgets.hierarchy_screen import HierarchyScreen, build_hierarchy
@@ -425,6 +426,7 @@ class WorkspaceController:
         namespace: str | None,
         *,
         drill_op: Callable[[], None] | None = None,
+        navigation_guard: Callable[[], bool] | None = None,
     ) -> None:
         """Serialize a kind/scope transition on the focused pane under the lock.
 
@@ -433,28 +435,19 @@ class WorkspaceController:
         kind/scope across awaits. `drill_op` mutates the drill stack inside
         the same critical section so stack and view transition as one
         transaction. The pane identity is captured before waiting on the lock
-        so the transition lands in the pane that initiated it.
+        so the transition lands in the pane that initiated it. An optional
+        navigation guard is revalidated under the lock before any mutation.
         """
         pane = self._state.focused
         async with self._nav_lock:
             if not self._state.contains(pane):
                 return  # the initiating pane was closed while queued
+            if navigation_guard is not None and not navigation_guard():
+                return
             if drill_op is not None:
                 drill_op()
-            await self._navigate_locked(pane, view, self._default_scope_for(view, namespace))
+            await self._navigate_locked(pane, view, default_scope_for(self._view, view, namespace))
         self._surface.refresh_status()
-
-    def _default_scope_for(self, view: str | None, namespace: str | None) -> str | None:
-        """Catalog entries live in catalog namespaces, not the user's workload
-        namespace: any packagemanifests view without an explicit namespace
-        defaults to the cluster-wide scope or the table would commonly come up
-        empty. Applied inside `navigate` so every entry path behaves alike."""
-        if namespace is not None or view is None:
-            return namespace
-        meta = self._view.aliases().get(view)
-        if meta is not None and (meta.group, meta.plural) == (PACKAGES_GROUP, "packagemanifests"):
-            return ALL_NAMESPACES
-        return None
 
     async def _navigate_locked(
         self, pane: PaneState, view: str | None, namespace: str | None
@@ -1352,31 +1345,32 @@ class WorkspaceController:
     # ------------------------------------------------------------------
 
     async def jump_to_object(
-        self, kind: str, namespace: str, name: str, *, epoch: int | None = None
+        self,
+        kind: str,
+        namespace: str,
+        name: str,
+        *,
+        epoch: int | None = None,
+        expected_uid: str | None = None,
+        origin: NavigationOrigin | None = None,
     ) -> None:
-        """Navigate to *kind*'s view and put the cursor on the object. A
-        context switch crossing *epoch* aborts: the same-named object in the
-        new cluster is not what the user picked."""
-        if epoch is not None and self._context.crossed(epoch):
-            return
-        meta = self._view.aliases().get(kind)
-        if meta is None:
-            self._ui.notify(f"{kind} is not a discovered view", severity="warning", markup=False)
-            return
-        await self.navigate(kind, namespace if meta.namespaced and namespace else None)
-        row_key = f"{namespace}/{name}"
-        for _ in range(self._jump_poll_attempts):
-            if epoch is not None and self._context.crossed(epoch):
-                return
-            if self._state.current_kind != kind:
-                return  # the user moved on - stop quietly
-            if self._surface.focus_row(row_key):
-                return
-            await asyncio.sleep(0.05)
-        self._ui.notify(
-            f"{name} is not visible in {kind} - it may be gone or outside the current scope",
-            severity="warning",
-            markup=False,
+        """Use the shared navigation route with optional epoch and UID guards."""
+        await jump_to_object(
+            kind,
+            namespace,
+            name,
+            epoch=epoch,
+            expected_uid=expected_uid,
+            origin=origin,
+            ui=self._ui,
+            view=self._view,
+            context=self._context,
+            state=self._state,
+            surface=self._surface,
+            navigate=lambda view, namespace, guard: self.navigate(
+                view, namespace, navigation_guard=guard
+            ),
+            poll_attempts=self._jump_poll_attempts,
         )
 
     # ------------------------------------------------------------------

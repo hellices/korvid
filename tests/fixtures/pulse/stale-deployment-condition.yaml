@@ -1,0 +1,18 @@
+name: Conditions from an older generation do not diagnose the current rollout
+now: "2026-09-13T12:00:00Z"
+scope: production
+steps:
+  - sources:
+      deployments:
+        objects:
+          - metadata: {namespace: production, name: rollout, uid: rollout-uid, generation: 5}
+            spec: {replicas: 3}
+            status:
+              observedGeneration: 4
+              conditions:
+                - {type: ReplicaFailure, status: "True", reason: FailedCreate}
+                - {type: Progressing, status: "False", reason: ProgressDeadlineExceeded}
+    expect:
+      current_count: 0
+      forbidden_current_reasons: [FailedCreate, ProgressDeadlineExceeded]
+      coverage: {deployments: partial}

@@ -1,0 +1,36 @@
+name: Event eviction and expiry never imply that a current failure recovered
+now: "2026-09-13T12:00:00Z"
+scope: production
+limits: {max_events: 1}
+steps:
+  - sources:
+      pods:
+        objects:
+          - metadata: {namespace: production, name: api, uid: api-uid}
+            status: {phase: Failed}
+      events:
+        objects:
+          - metadata: {namespace: production, uid: older-event}
+            type: Warning
+            reason: EarlierWarning
+            lastTimestamp: "2026-09-13T11:59:00Z"
+            involvedObject: {kind: Pod, namespace: production, name: api, uid: api-uid}
+          - metadata: {namespace: production, uid: newer-event}
+            type: Warning
+            reason: NewerWarning
+            lastTimestamp: "2026-09-13T12:00:00Z"
+            involvedObject: {kind: Pod, namespace: production, name: api, uid: api-uid}
+    expect:
+      current_count: 1
+      recent_count: 1
+      dropped: 1
+      recent_reasons: [NewerWarning]
+      forbidden_recent_reasons: [EarlierWarning]
+      coverage: {pods: partial, events: complete, event-buffer: capped}
+  - after_seconds: 901
+    expect:
+      current_count: 1
+      recent_count: 0
+      dropped: 1
+      current_reasons: [Failed]
+      coverage: {pods: stale, events: stale, event-buffer: stale}

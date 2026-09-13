@@ -1,0 +1,16 @@
+name: An undated Warning is an evidence gap rather than a fresh occurrence
+now: "2026-09-13T12:00:00Z"
+scope: production
+steps:
+  - sources:
+      events:
+        objects:
+          - metadata: {namespace: production, uid: undated-event}
+            type: Warning
+            reason: NovelControllerFailure
+            lastTimestamp: invalid
+            involvedObject: {kind: Pod, namespace: production, name: api, uid: api-uid}
+    expect:
+      recent_count: 0
+      current_count: 0
+      coverage: {events: partial}

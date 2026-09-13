@@ -78,6 +78,9 @@ from korvid.core.config import (
 )
 from korvid.core.mcp import MCPControllerBase
 from korvid.core.portforward import ForwardRegistry
+from korvid.core.pulse import PulseModel
+from korvid.core.pulse_collector import PulseCollector
+from korvid.core.pulse_rules import DeploymentPulseRule, PodPulseRule
 from korvid.core.session_timeline import SessionTimeline
 from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
 from korvid.core.watch import WatchManager
@@ -94,6 +97,7 @@ from korvid.k8s.helm import HELM_RELEASES_META, HELM_REVISIONS_META
 from korvid.k8s.helmcli import HelmCLI, find_helm
 from korvid.k8s.metrics import MetricsPoller
 from korvid.k8s.models import reset_age_memo
+from korvid.k8s.pulse import PulseSource
 from korvid.k8s.telepresence import (
     TRAFFIC_MANAGER_NAME,
     TRAFFIC_MANAGER_NAMESPACE,
@@ -136,14 +140,17 @@ from korvid.ui.helm_controller import HelmController
 from korvid.ui.hints import EventsFetcher, HintController
 from korvid.ui.integration_controller import IntegrationController
 from korvid.ui.log_controller import LogController
+from korvid.ui.object_navigation import capture_navigation_origin
 from korvid.ui.operator_controller import OperatorController
 from korvid.ui.proposal_controller import ProposalController
+from korvid.ui.pulse_controller import PulseController
 from korvid.ui.relationship_controller import RelationshipSnapshotLoader
 from korvid.ui.resource_inspect_controller import ResourceInspectController
 from korvid.ui.resource_write_controller import ResourceWriteController
 from korvid.ui.session_timeline_controller import SessionTimelineController
 from korvid.ui.shell_controller import ShellController, ShellSettings
 from korvid.ui.transfer import TransferController
+from korvid.ui.widgets.pulse import PulseSummary
 from korvid.ui.workspace_controller import WorkspaceController
 from korvid.ui.workspace_state import WorkspaceState
 from korvid.ui.write_coordinator import WriteCoordinator
@@ -1050,6 +1057,7 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
     logs_ref = _LateReference[LogController]()
     hints_ref = _LateReference[HintController]()
     timeline_ref = _LateReference[SessionTimelineController]()
+    pulse_ref = _LateReference[PulseController]()
     proposals_ref = _LateReference[ProposalController]()
     forward_ref = _LateReference[ForwardController]()
     writes_ref = _LateReference[WriteCoordinator]()
@@ -1084,7 +1092,34 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
         list_contexts=inputs.list_contexts,
         probe_context=inputs.probe_context,
         switch_context=inputs.switch_context,
+        pulse=pulse_ref.get,
     )
+    workspace = WorkspaceState("pods", config.namespace or "default")
+    pulse = PulseController(
+        ui=AppUiSurface(app),
+        view=view,
+        context=context,
+        model=PulseModel((PodPulseRule(), DeploymentPulseRule())),
+        collector=PulseCollector(
+            inputs.pulse_reader,
+            (
+                PulseSource("pods", "", "v1", "pods"),
+                PulseSource("deployments", "apps", "v1", "deployments"),
+                PulseSource("events", "", "v1", "events", "type=Warning"),
+            ),
+        )
+        if inputs.pulse_reader is not None
+        else None,
+        present=lambda snapshot: app.query_one(PulseSummary).show_snapshot(snapshot),
+        capture_navigation_origin=lambda: capture_navigation_origin(workspace),
+        navigate=lambda kind, namespace, name, epoch, uid, origin: (
+            workspace_ref.get().jump_to_object(
+                kind, namespace, name, epoch=epoch, expected_uid=uid, origin=origin
+            )
+        ),
+        get_manifest=inputs.get_manifest,
+    )
+    pulse_ref.bind(pulse)
     timeline = SessionTimelineController(
         ui=AppUiSurface(app),
         view=view,
@@ -1093,6 +1128,8 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
         get_epoch=context.epoch,
         epoch_crossed=context.crossed,
         watch_warning_events=inputs.watch_warning_events,
+        warning_observer=pulse.record_warning,
+        warning_coverage=pulse.warning_status,
         selected_resource=lambda: workspace_ref.get().selected_timeline_resource(),
         navigate=lambda kind, namespace, name, epoch: workspace_ref.get().jump_to_object(
             kind, namespace, name, epoch=epoch
@@ -1225,7 +1262,6 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
         helm_uninstall=lambda: helm_controller.uninstall_selected(),
         operators=operators,
     )
-    workspace = WorkspaceState("pods", config.namespace or "default")
     hints = HintController(
         find_pod_summary=inspect_controller.find_pod_summary,
         cursor_row_key=inspect_surface.cursor_row_key,
@@ -1345,12 +1381,14 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
         proposals=proposals,
         forwards=forward_controller,
         operators=operators,
+        pulse=pulse,
     )
     return AppRuntime(
         view=view,
         relationship_loader=relationship_loader,
         context=context,
         timeline=timeline,
+        pulse=pulse,
         writes=writes,
         bridge_dispatch=bridge_dispatch,
         inspect_surface=inspect_surface,
@@ -1534,6 +1572,7 @@ async def _wire_and_run(config: KorvidConfig, kube: KubeClient, state: _RunState
         # The only timeline producer the store does not already feed: a live
         # Warning-Event stream, read-only and filtered server-side.
         watch_warning_events=kube.watch_warning_events,
+        pulse_reader=kube,
     )
     app = assemble_app_runtime(app)
     app_box.append(app)

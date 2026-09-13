@@ -1,0 +1,51 @@
+name: Only assessable current-generation Deployment conditions can resolve prior failure
+now: "2026-09-13T12:00:00Z"
+scope: production
+steps:
+  - sources:
+      pods: {objects: []}
+      deployments:
+        objects:
+          - metadata: {namespace: production, name: api, uid: api-uid, generation: 3}
+            status:
+              observedGeneration: 3
+              conditions: [{type: ReplicaFailure, status: "True", reason: FailedCreate}]
+    expect:
+      current_count: 1
+      current_reasons: [FailedCreate]
+      coverage: {pods: complete, deployments: complete}
+  - after_seconds: 10
+    sources:
+      deployments:
+        objects:
+          - metadata: {namespace: production, name: api, uid: api-uid, generation: 4}
+            status:
+              observedGeneration: 3
+              conditions: [{type: Progressing, status: "True"}]
+    expect:
+      current_count: 1
+      current_reasons: [FailedCreate]
+      coverage: {deployments: partial}
+  - after_seconds: 11
+    sources:
+      deployments:
+        objects:
+          - metadata: {namespace: production, name: api, uid: api-uid, generation: 4}
+            status:
+              observedGeneration: 4
+              conditions: [{type: ReplicaFailure, status: {malformed: "False"}}]
+    expect:
+      current_count: 1
+      current_reasons: [FailedCreate]
+      coverage: {deployments: partial}
+  - after_seconds: 12
+    sources:
+      deployments:
+        objects:
+          - metadata: {namespace: production, name: api, uid: api-uid, generation: 4}
+            status:
+              observedGeneration: 4
+              conditions: [{type: Progressing, status: "True"}]
+    expect:
+      current_count: 0
+      coverage: {deployments: complete}

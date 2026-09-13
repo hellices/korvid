@@ -57,6 +57,7 @@ from korvid.k8s.olm import (
     PACKAGES_GROUP,
 )
 from korvid.k8s.portforward import FORWARDABLE_KINDS
+from korvid.k8s.pulse import PulseReader
 from korvid.k8s.relations import owned_by
 from korvid.k8s.telepresence import TelepresenceCLI
 from korvid.k8s.writes import WriteOps
@@ -110,6 +111,7 @@ from korvid.ui.widgets.log_pane import LogPane
 from korvid.ui.widgets.logo import SplashLogo
 from korvid.ui.widgets.namespace_picker import NamespacePicker
 from korvid.ui.widgets.pick_screen import PickScreen
+from korvid.ui.widgets.pulse import PulseSummary
 from korvid.ui.widgets.resource_table import ResourceTable, validate_selected_view
 from korvid.ui.widgets.status_bar import StatusBar
 from korvid.ui.widgets.top_bar import KeyEntry, TopBar
@@ -181,6 +183,7 @@ class KorvidApp(App[None]):
         ) = None,
         session_timeline: SessionTimeline | None = None,
         watch_warning_events: (Callable[[str | None], AsyncIterator[dict[str, Any]]] | None) = None,
+        pulse_reader: PulseReader | None = None,
         approval_timeout_seconds: float | None = None,
     ) -> None:
         super().__init__()
@@ -230,6 +233,7 @@ class KorvidApp(App[None]):
             list_relationship_objects=list_relationship_objects,
             session_timeline=session_timeline,
             watch_warning_events=watch_warning_events,
+            pulse_reader=pulse_reader,
             approval_timeout_seconds=approval_timeout_seconds,
         )
         self._runtime_bound = False
@@ -249,6 +253,7 @@ class KorvidApp(App[None]):
         self._relationship_loader = runtime.relationship_loader
         self._ctx = runtime.context
         self._timeline = runtime.timeline
+        self._pulse = runtime.pulse
         self._writes = runtime.writes
         self._bridge_dispatch = runtime.bridge_dispatch
         self._inspect_surface = runtime.inspect_surface
@@ -411,13 +416,8 @@ class KorvidApp(App[None]):
         return self.query_one(AgentPanel)
 
     def compose(self) -> ComposeResult:
-        # The grouped top bar (issue #142) replaces the stock Footer at the
-        # top: the key legend lives where users look first, grouped and
-        # collapsible instead of one flat run of uniform keys.
         yield TopBar()
         yield SplashLogo()
-        # The workspace hosts one or two side-by-side panes (issue #48);
-        # pane 1 is composed here, pane 2 mounts on `ctrl+w v`.
         table = ResourceTable(id="pane-0")
         table.display = False  # hidden behind the splash until first data
         workspace = Horizontal(table, id="workspace")
@@ -436,6 +436,7 @@ class KorvidApp(App[None]):
         yield FilterBar()
         yield NamespacePicker()
         yield HintStrip()
+        yield PulseSummary()
         yield StatusBar()
 
     @classmethod
@@ -545,6 +546,7 @@ class KorvidApp(App[None]):
 
         self.store.subscribe(_on_store_update)
         self.watch_manager.on_error = _on_watch_error
+        self._pulse.start()
         self._timeline.start()
         if self._metrics is not None:
             # Metrics updates reuse the pods render path; the pending guard in
@@ -1201,13 +1203,9 @@ class KorvidApp(App[None]):
             )
 
     def _refresh_status(self) -> None:
-        # The top bar shows the view name: keep it in step with every
-        # status refresh (navigation always lands here).
+        """Reflect actual runtime availability rather than configuration flags."""
         self._refresh_top_bar()
-        # Availability comes from the actual runtime, not the config flag —
-        # the provider factory refuses an unusable profile (no endpoint for
-        # keyless auth, a reference it cannot resolve) and returns None while
-        # a profile is still active in config.
+        self._pulse.sync_scope()
         label = "AI on" if self._agent_ui.session is not None else "AI off"
         if self._agent_ui.session is not None and self._agent_ui.blocked_in_protected():
             label = "AI blocked"
@@ -1477,7 +1475,7 @@ class KorvidApp(App[None]):
         # (log streams) after the unmount sweeps and leave it alive against
         # an unmounted app.
         await self._bridge_dispatch.shutdown()
-        # Cancel any active log stream tasks before the event loop shuts down.
+        await self._pulse.stop()
         # A proposal must never outlive the session that previewed it: the
         # controller closes the store first so an in-flight submission cannot
         # land after its final audited sweep.

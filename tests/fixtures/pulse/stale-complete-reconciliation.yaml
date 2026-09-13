@@ -1,0 +1,30 @@
+name: An old complete LIST cannot erase current findings after the model clock advances
+now: "2026-09-13T12:00:00Z"
+scope: production
+steps:
+  - sources:
+      pods:
+        objects:
+          - metadata: {namespace: production, name: api, uid: api-uid}
+            status: {phase: Pending}
+    expect:
+      current_count: 1
+      current_reasons: [Pending]
+      coverage: {pods: partial}
+  - after_seconds: 60
+    expect:
+      current_count: 1
+      coverage: {pods: stale}
+  - after_seconds: 60
+    sources:
+      pods: {observed_at: "2026-09-13T12:00:10Z", objects: []}
+    expect:
+      current_count: 1
+      current_reasons: [Pending]
+      coverage: {pods: stale}
+  - after_seconds: 61
+    sources:
+      pods: {objects: []}
+    expect:
+      current_count: 0
+      coverage: {pods: complete}

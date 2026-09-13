@@ -1,0 +1,57 @@
+name: Partial identity churn is bounded per source and loss never implies recovery
+now: "2026-09-13T12:00:00Z"
+scope: production
+limits: {max_current_findings: 1}
+steps:
+  - sources:
+      pods:
+        objects:
+          - metadata: {namespace: production, name: first, uid: first-uid}
+            status: {phase: Pending}
+      deployments:
+        objects:
+          - metadata: {namespace: production, name: rollout, uid: rollout-uid, generation: 1}
+            status:
+              observedGeneration: 1
+              conditions: [{type: ReplicaFailure, status: "True", reason: FailedCreate}]
+    expect:
+      current_count: 2
+      current_names: [first, rollout]
+      current_dropped: 0
+      dropped: 0
+  - after_seconds: 1
+    sources:
+      pods:
+        state: capped
+        objects:
+          - metadata: {namespace: production, name: second, uid: second-uid}
+            status: {phase: Pending}
+    expect:
+      current_count: 2
+      current_names: [second, rollout]
+      forbidden_current_names: [first]
+      current_dropped: 1
+      dropped: 0
+      coverage: {pods: capped, deployments: complete, "current-buffer:pods": capped}
+  - after_seconds: 2
+    sources:
+      pods:
+        state: partial
+        objects:
+          - metadata: {namespace: production, name: third, uid: third-uid}
+            status: {phase: Pending}
+    expect:
+      current_count: 2
+      current_names: [third, rollout]
+      current_dropped: 2
+      dropped: 0
+      coverage: {pods: partial, deployments: complete, "current-buffer:pods": capped}
+  - after_seconds: 3
+    sources:
+      pods: {objects: []}
+    expect:
+      current_count: 1
+      current_names: [rollout]
+      current_dropped: 2
+      dropped: 0
+      coverage: {pods: complete, "current-buffer:pods": capped}

@@ -1,0 +1,30 @@
+name: UTC timestamp overflow is an explicit gap without aborting subsequent valid evidence
+now: "2026-09-13T12:00:00Z"
+scope: production
+steps:
+  - sources:
+      events:
+        state: partial
+        detail: "API 503: a later page is unavailable"
+        objects:
+          - metadata: {namespace: production, uid: underflow-event}
+            type: Warning
+            reason: UnderflowWarning
+            lastTimestamp: "0001-01-01T00:00:00+01:00"
+            involvedObject: {kind: Pod, namespace: production, name: api, uid: api-uid}
+          - metadata: {namespace: production, uid: overflow-event}
+            type: Warning
+            reason: OverflowWarning
+            lastTimestamp: "9999-12-31T23:59:59-01:00"
+            involvedObject: {kind: Pod, namespace: production, name: api, uid: api-uid}
+          - metadata: {namespace: production, uid: valid-event}
+            type: Warning
+            reason: ValidAfterOverflow
+            lastTimestamp: "2026-09-13T11:59:50Z"
+            involvedObject: {kind: Pod, namespace: production, name: api, uid: api-uid}
+    expect:
+      recent_count: 1
+      recent_reasons: [ValidAfterOverflow]
+      forbidden_recent_reasons: [UnderflowWarning, OverflowWarning]
+      dropped: 0
+      coverage: {events: partial}

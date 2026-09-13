@@ -68,6 +68,12 @@ class CatalogCommands(Protocol):
     def explain_missing_catalog(self) -> bool: ...
 
 
+class PulseCommands(Protocol):
+    """The ambient attention detail owner."""
+
+    def open_detail(self) -> None: ...
+
+
 class CommandRouter:
     """Dispatches typed commands to the owner that implements them."""
 
@@ -80,6 +86,7 @@ class CommandRouter:
         proposals: ProposalCommands,
         forwards: ForwardCommands,
         operators: CatalogCommands,
+        pulse: PulseCommands,
     ) -> None:
         self._ui = ui
         self._agent = agent
@@ -87,6 +94,7 @@ class CommandRouter:
         self._proposals = proposals
         self._forwards = forwards
         self._operators = operators
+        self._pulse = pulse
 
     def route_builtin(self, command: BuiltinCommand) -> None:
         """Dispatch an app-owned command by canonical operation identity."""
@@ -115,6 +123,9 @@ class CommandRouter:
             return
         if operation is BuiltinOperation.PORT_FORWARDS:
             self._forwards.open_list()
+            return
+        if operation is BuiltinOperation.PULSE:
+            self._pulse.open_detail()
             return
         assert_never(operation)
 

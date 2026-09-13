@@ -1126,6 +1126,7 @@ def test_app_runtime_can_be_bound_only_once() -> None:
             relationship_loader=value,
             context=value,
             timeline=value,
+            pulse=value,
             writes=value,
             bridge_dispatch=value,
             inspect_surface=value,

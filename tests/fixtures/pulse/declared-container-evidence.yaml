@@ -1,0 +1,114 @@
+name: Whole-Pod recovery requires declared application and ephemeral status identities
+now: "2026-09-13T12:00:00Z"
+scope: production
+steps:
+  - sources:
+      pods:
+        objects:
+          - metadata: {namespace: production, name: api, uid: same-pod-uid}
+            spec:
+              containers: [{name: api}, {name: worker}]
+              ephemeralContainers: [{name: debugger}]
+            status:
+              phase: Running
+              conditions: [{type: Ready, status: "False"}]
+              containerStatuses:
+                - {name: api, ready: true, state: {running: {}}}
+                - {name: worker, state: {waiting: {reason: CrashLoopBackOff}}}
+              ephemeralContainerStatuses:
+                - {name: debugger, state: {terminated: {exitCode: 1, reason: Error}}}
+    expect:
+      current_count: 2
+      current_reasons: [CrashLoopBackOff, Error]
+      coverage: {pods: complete}
+  - after_seconds: 1
+    sources:
+      pods:
+        objects:
+          - metadata: {namespace: production, name: api, uid: same-pod-uid}
+            spec:
+              containers: [{name: api}, {name: worker}]
+              ephemeralContainers: [{name: debugger}]
+            status:
+              phase: Running
+              conditions: [{type: Ready, status: "True"}]
+              containerStatuses:
+                - {name: api, ready: true, state: {running: {}}}
+    expect:
+      current_count: 2
+      current_reasons: [CrashLoopBackOff, Error]
+      current_dropped: 0
+      coverage: {pods: partial}
+  - after_seconds: 2
+    sources:
+      pods:
+        state: capped
+        objects:
+          - metadata: {namespace: production, name: api, uid: same-pod-uid}
+            spec:
+              containers: [{name: api}, {name: worker}]
+              ephemeralContainers: [{name: debugger}]
+            status:
+              phase: Running
+              conditions: [{type: Ready, status: "True"}]
+              containerStatuses:
+                - {name: worker, ready: true, state: {running: {}}}
+                - {name: api, ready: true, state: {running: {}}}
+    expect:
+      current_count: 2
+      current_reasons: [CrashLoopBackOff, Error]
+      current_dropped: 0
+      coverage: {pods: capped}
+  - after_seconds: 3
+    sources:
+      pods:
+        state: partial
+        objects:
+          - metadata: {namespace: production, name: api, uid: same-pod-uid}
+            spec:
+              containers: [{name: api}, {name: worker}]
+              ephemeralContainers: [{name: debugger}]
+            status:
+              phase: Running
+              conditions: [{type: Ready, status: "True"}]
+              containerStatuses:
+                - {name: worker, ready: true, state: {running: {}}}
+                - {name: api, ready: true, state: {running: {}}}
+              ephemeralContainerStatuses:
+                - {name: debugger, state: {terminated: {exitCode: 0, reason: Completed}}}
+    expect:
+      current_count: 0
+      current_dropped: 0
+      coverage: {pods: partial}
+  - after_seconds: 4
+    sources:
+      pods:
+        objects:
+          - metadata: {namespace: production, name: api, uid: same-pod-uid}
+            spec:
+              containers: [{name: api}, {name: worker}]
+              ephemeralContainers: [{name: debugger}]
+            status:
+              phase: Running
+              conditions: [{type: Ready, status: "False"}]
+              containerStatuses:
+                - {name: api, ready: true, state: {running: {}}}
+                - {name: worker, state: {waiting: {reason: CrashLoopBackOff}}}
+              ephemeralContainerStatuses:
+                - {name: debugger, state: {terminated: {exitCode: 1, reason: Error}}}
+    expect:
+      current_count: 2
+      coverage: {pods: complete}
+  - after_seconds: 5
+    sources:
+      pods:
+        objects:
+          - metadata: {namespace: production, name: api, uid: same-pod-uid}
+            spec:
+              containers: [{name: api}, {name: worker}]
+              ephemeralContainers: [{name: debugger}]
+            status: {phase: Succeeded}
+    expect:
+      current_count: 0
+      current_dropped: 0
+      coverage: {pods: complete}

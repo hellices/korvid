@@ -25,6 +25,10 @@ import pytest
 from korvid.core.audit import AuditLog
 from korvid.core.mcp import MCPControllerBase
 from korvid.core.portforward import ForwardRecord, ForwardRegistry
+from korvid.core.pulse import PulseCoverage, PulseModel
+from korvid.core.pulse_rules import PodPulseRule
+from korvid.core.session_timeline import SessionTimeline
+from korvid.k8s.errors import KubeClientError
 from korvid.ui.context_switch_coordinator import (
     HINT_EVENTS_GROUP,
     ContextSurface,
@@ -33,8 +37,11 @@ from korvid.ui.context_switch_coordinator import (
     SessionConfiguration,
     SwitchAgent,
 )
+from korvid.ui.session_timeline_controller import SessionTimelineController
 from korvid.ui.widgets.pick_screen import PickScreen
 
+from .test_pulse_controller import Harness as PulseHarness
+from .test_session_timeline_controller import _FakeWatchManager
 from .test_write_coordinator import FakeUi, FakeView
 
 # ---------------------------------------------------------------------------
@@ -553,6 +560,313 @@ async def test_a_successful_switch_increments_the_epoch_exactly_once(tmp_path: P
     env = Env(tmp_path)
     await env.switch()
     assert env.coordinator.epoch() == 1
+
+
+async def test_pulse_reads_stop_before_connection_retarget_and_resume_after(tmp_path: Path) -> None:
+    env = Env(tmp_path)
+    observed: list[str] = []
+
+    class Observer:
+        suspended = False
+
+        async def suspend(self) -> None:
+            self.suspended = True
+            observed.append("suspend")
+
+        def resume(self) -> None:
+            self.suspended = False
+            observed.append("resume")
+
+        def resume_unchanged(self) -> None:
+            self.suspended = False
+            observed.append("resume-unchanged")
+
+    observer = Observer()
+    env.coordinator._pulse = lambda: observer
+    switch = env.coordinator._switch_context
+    assert switch is not None
+
+    async def retarget(name: str | None) -> ContextSwitchResult:
+        assert observed == ["suspend"]
+        return await switch(name)
+
+    env.coordinator._switch_context = retarget
+    await env.switch()
+    assert observed == ["suspend", "resume"]
+
+
+async def test_unavailable_warning_feed_remains_visible_after_context_restart(
+    tmp_path: Path,
+) -> None:
+    env = Env(tmp_path)
+    harness = PulseHarness()
+    harness.controller._context = env.coordinator
+    harness.controller._view = env.view
+    timeline = SessionTimelineController(
+        ui=harness.ui,
+        view=env.view,
+        watch_manager=_FakeWatchManager(),
+        timeline=SessionTimeline(100, 131072),
+        get_epoch=env.coordinator.epoch,
+        epoch_crossed=lambda epoch: epoch != env.coordinator.epoch(),
+        navigate=harness.navigate,
+        warning_coverage=harness.controller.warning_status,
+    )
+    env.coordinator._pulse = lambda: harness.controller
+    env.coordinator._timeline = lambda: timeline
+    harness.controller.start()
+    try:
+        await harness.ui.settled()
+        await env.switch()
+        harness.controller.tick()
+        await harness.ui.settled()
+        coverage = {entry.source: entry for entry in harness.controller.snapshot().coverage}
+        assert coverage["pods"].state == "complete"
+        assert "warning-watch" in coverage
+        assert coverage["warning-watch"].state == "unavailable"
+    finally:
+        await harness.controller.stop()
+
+
+@pytest.mark.parametrize("stage", ["logs", "workspace", "timeline"])
+@pytest.mark.parametrize("failure_type", [RuntimeError, asyncio.CancelledError])
+async def test_pre_retarget_teardown_abort_resumes_pulse_on_the_old_context(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stage: str,
+    failure_type: type[BaseException],
+) -> None:
+    env = Env(tmp_path)
+    harness = PulseHarness()
+    harness.model = PulseModel((PodPulseRule(),), max_events=1)
+    harness.controller._model = harness.model
+    harness.controller._context = env.coordinator
+    harness.controller._view = env.view
+    env.coordinator._pulse = lambda: harness.controller
+
+    async def abort_teardown() -> None:
+        raise failure_type("teardown aborted before retarget")
+
+    participant, method = {
+        "logs": (env.logs, "close"),
+        "workspace": (env.workspace, "quiesce_for_context_switch"),
+        "timeline": (env.timeline, "stop"),
+    }[stage]
+    monkeypatch.setattr(participant, method, abort_teardown)
+    old_scope = env.view.current_scope()
+    harness.controller.start()
+    try:
+        await harness.ui.settled()
+        assert harness.reader.scopes == [old_scope]
+        harness.model.replace_source(
+            "pods",
+            (
+                {
+                    "kind": "Pod",
+                    "metadata": {"namespace": old_scope, "name": "web", "uid": "pod-1"},
+                    "status": {
+                        "phase": "Running",
+                        "conditions": [{"type": "Ready", "status": "False"}],
+                    },
+                },
+            ),
+            PulseCoverage("pods", "complete", harness.now),
+        )
+        for index in range(2):
+            harness.controller.record_warning(
+                {
+                    "type": "Warning",
+                    "reason": "RetainedWarning",
+                    "metadata": {"uid": f"event-{index}", "namespace": old_scope},
+                    "lastTimestamp": harness.now.isoformat(),
+                    "involvedObject": {
+                        "kind": "Pod",
+                        "namespace": old_scope,
+                        "name": "web",
+                        "uid": "pod-1",
+                    },
+                },
+                0,
+            )
+        retained = harness.controller.snapshot()
+        assert [item.reason for item in retained.current] == ["NotReady"]
+        assert len(retained.recent) == 1
+        assert retained.dropped == 1
+        harness.reader.failure = KubeClientError("snapshot refresh unavailable")
+        env.coordinator.switch("ctx-b")
+        with pytest.raises(failure_type, match="teardown aborted before retarget"):
+            await env.ui.workers[-1]
+        assert env.coordinator.switching() is False
+        assert env.coordinator.epoch() == 0
+        assert env.swaps == []
+        harness.controller.tick()
+        await harness.ui.settled()
+        assert harness.reader.scopes == [old_scope, old_scope]
+        refreshed = harness.controller.snapshot()
+        assert refreshed.current == retained.current
+        assert refreshed.recent == retained.recent
+        assert refreshed.dropped == retained.dropped
+        assert (refreshed.epoch, refreshed.scope) == (retained.epoch, retained.scope)
+        coverage = {entry.source: entry for entry in refreshed.coverage}
+        assert coverage["pods"].state == "failed"
+        assert coverage["event-buffer"].state == "capped"
+        harness.controller.request_refresh()
+        await harness.ui.settled()
+        assert harness.reader.scopes == [old_scope, old_scope, old_scope]
+    finally:
+        await harness.controller.stop()
+
+
+@pytest.mark.parametrize("failure_type", [RuntimeError, asyncio.CancelledError])
+async def test_teardown_abort_does_not_resume_a_previously_disconnected_pulse(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure_type: type[BaseException]
+) -> None:
+    env = Env(
+        tmp_path,
+        switch_error=RuntimeError("target unavailable"),
+        restore_error=RuntimeError("old connection unavailable"),
+    )
+    harness = PulseHarness()
+    harness.controller._context = env.coordinator
+    harness.controller._view = env.view
+    env.coordinator._pulse = lambda: harness.controller
+    old_scope = env.view.current_scope()
+    harness.controller.start()
+    try:
+        await harness.ui.settled()
+        await env.switch()
+        assert env.swaps == ["ctx-b", "ctx-a"]
+        harness.controller.tick()
+        await harness.ui.settled()
+        assert harness.reader.scopes == [old_scope]
+
+        async def abort_teardown() -> None:
+            raise failure_type("retry aborted before retarget")
+
+        monkeypatch.setattr(env.logs, "close", abort_teardown)
+        env.coordinator.switch("ctx-b")
+        with pytest.raises(failure_type, match="retry aborted before retarget"):
+            await env.ui.workers[-1]
+        assert env.coordinator.switching() is False
+        assert env.coordinator.epoch() == 0
+        assert env.swaps == ["ctx-b", "ctx-a"]
+        harness.controller.tick()
+        harness.controller.request_refresh()
+        await harness.ui.settled()
+        assert harness.reader.scopes == [old_scope]
+    finally:
+        await harness.controller.stop()
+
+
+@pytest.mark.parametrize("was_suspended", [False, True])
+@pytest.mark.parametrize("failure_type", [RuntimeError, asyncio.CancelledError])
+async def test_pulse_suspension_abort_restores_prior_suspension_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    was_suspended: bool,
+    failure_type: type[BaseException],
+) -> None:
+    env = Env(tmp_path)
+    harness = PulseHarness()
+    harness.controller._context = env.coordinator
+    harness.controller._view = env.view
+    env.coordinator._pulse = lambda: harness.controller
+    old_scope = env.view.current_scope()
+    harness.controller.start()
+    try:
+        await harness.ui.settled()
+        if was_suspended:
+            await harness.controller.suspend()
+        cancel_workers = harness.ui.cancel_workers
+
+        async def abort_suspension(group: str) -> None:
+            await cancel_workers(group)
+            raise failure_type("Pulse suspension aborted")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(harness.ui, "cancel_workers", abort_suspension)
+            env.coordinator.switch("ctx-b")
+            with pytest.raises(failure_type, match="Pulse suspension aborted"):
+                await env.ui.workers[-1]
+        assert env.coordinator.switching() is False
+        assert env.coordinator.epoch() == 0
+        assert env.swaps == []
+        harness.controller.tick()
+        await harness.ui.settled()
+        assert harness.reader.scopes == [old_scope] * (1 if was_suspended else 2)
+    finally:
+        await harness.controller.stop()
+
+
+@pytest.mark.parametrize("restore_fails", [False, True])
+async def test_pulse_resumes_after_fallback_only_with_a_usable_connection(
+    tmp_path: Path, restore_fails: bool
+) -> None:
+    env = Env(
+        tmp_path,
+        switch_error=RuntimeError("target unavailable"),
+        restore_error=RuntimeError("old connection unavailable") if restore_fails else None,
+    )
+    harness = PulseHarness()
+    harness.controller._context = env.coordinator
+    harness.controller._view = env.view
+    env.coordinator._pulse = lambda: harness.controller
+    old_scope = env.view.current_scope()
+    harness.controller.start()
+    try:
+        await harness.ui.settled()
+        await env.switch()
+        assert env.swaps == ["ctx-b", "ctx-a"]
+        assert env.coordinator.switching() is False
+        harness.controller.tick()
+        await harness.ui.settled()
+        assert harness.reader.scopes == [old_scope] * (1 if restore_fails else 2)
+        harness.controller.request_refresh()
+        await harness.ui.settled()
+        assert harness.reader.scopes == [old_scope] * (1 if restore_fails else 3)
+    finally:
+        await harness.controller.stop()
+
+
+@pytest.mark.parametrize("failure_type", [RuntimeError, asyncio.CancelledError])
+async def test_suspension_abort_releases_a_never_started_refresh(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure_type: type[BaseException]
+) -> None:
+    env = Env(tmp_path)
+    harness = PulseHarness()
+    harness.controller._context = env.coordinator
+    harness.controller._view = env.view
+    env.coordinator._pulse = lambda: harness.controller
+    old_scope = env.view.current_scope()
+    harness.controller.start()
+    try:
+        await harness.ui.settled()
+        harness.controller.request_refresh()
+        queued = harness.ui.tasks["pulse-refresh"][-1]
+        cancel_workers = harness.ui.cancel_workers
+
+        async def abort_suspension(group: str) -> None:
+            await cancel_workers(group)
+            raise failure_type("refresh cancelled before starting")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(harness.ui, "cancel_workers", abort_suspension)
+            with pytest.raises(failure_type, match="refresh cancelled before starting"):
+                await env.coordinator._teardown_before_retarget()
+        assert queued.cancelled()
+        assert harness.reader.scopes == [old_scope]
+        assert env.swaps == []
+        for trigger in ("timer", "manual", "timer"):
+            if trigger == "timer":
+                harness.monotonic += 15.0
+                harness.controller.tick()
+            else:
+                harness.controller.request_refresh()
+            await harness.ui.settled()
+        assert harness.reader.scopes == [old_scope] * 4
+        assert len(harness.ui.tasks["pulse-refresh"]) == 5
+    finally:
+        await harness.controller.stop()
 
 
 async def test_the_epoch_is_unchanged_when_the_probe_fails(tmp_path: Path) -> None:

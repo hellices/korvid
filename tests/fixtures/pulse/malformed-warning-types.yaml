@@ -1,0 +1,45 @@
+name: Malformed Warning types leave visible gaps without losing valid later observations
+now: "2026-09-13T12:00:00Z"
+scope: production
+steps:
+  - sources:
+      events:
+        objects:
+          - metadata: {namespace: production, uid: missing-type}
+            reason: MissingType
+            lastTimestamp: "2026-09-13T11:59:50Z"
+            involvedObject: {kind: Pod, namespace: production, name: api, uid: api-uid}
+          - metadata: {namespace: production, uid: invalid-type}
+            type: [Warning]
+            reason: InvalidType
+            lastTimestamp: "2026-09-13T11:59:50Z"
+            involvedObject: {kind: Pod, namespace: production, name: api, uid: api-uid}
+          - metadata: {namespace: production, uid: valid-type}
+            type: Warning
+            reason: NewValidReason
+            lastTimestamp: "2026-09-13T11:59:50Z"
+            involvedObject: {kind: Pod, namespace: production, name: api, uid: api-uid}
+    expect:
+      recent_count: 1
+      recent_reasons: [NewValidReason]
+      forbidden_recent_reasons: [MissingType, InvalidType]
+      dropped: 0
+      coverage: {events: partial}
+  - after_seconds: 1
+    sources:
+      events: {objects: []}
+    expect:
+      recent_count: 1
+      coverage: {events: complete}
+  - after_seconds: 2
+    warnings:
+      - metadata: {namespace: production, uid: malformed-live-type}
+        type: null
+        reason: MalformedLiveType
+        lastTimestamp: "2026-09-13T12:00:02Z"
+        involvedObject: {kind: Pod, namespace: production, name: api, uid: api-uid}
+    expect:
+      recent_count: 1
+      recent_reasons: [NewValidReason]
+      forbidden_recent_reasons: [MalformedLiveType]
+      coverage: {events: partial}

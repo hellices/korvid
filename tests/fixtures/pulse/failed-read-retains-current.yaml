@@ -1,0 +1,26 @@
+name: Failed collection preserves current evidence and does not refresh its age
+now: "2026-09-13T12:00:00Z"
+scope: production
+steps:
+  - sources:
+      pods:
+        objects:
+          - metadata: {namespace: production, name: pending, uid: pending-uid}
+            status:
+              phase: Pending
+              conditions: [{type: PodScheduled, status: "False", reason: Unschedulable}]
+    expect:
+      current_count: 1
+      current_reasons: [Unschedulable]
+      coverage: {pods: partial}
+  - after_seconds: 10
+    sources:
+      pods: {state: failed, objects: [], detail: Source request failed}
+    expect:
+      current_count: 1
+      coverage: {pods: failed}
+  - after_seconds: 41
+    expect:
+      current_count: 1
+      current_reasons: [Unschedulable]
+      coverage: {pods: stale}

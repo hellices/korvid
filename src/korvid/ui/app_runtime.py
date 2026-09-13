@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from korvid.k8s.logs import LogLine
     from korvid.k8s.metrics import MetricsPoller
     from korvid.k8s.models import GenericSummary
+    from korvid.k8s.pulse import PulseReader
     from korvid.k8s.telepresence import TelepresenceCLI
     from korvid.k8s.writes import WriteOps
     from korvid.tools.executor import UIBridge
@@ -43,6 +44,7 @@ if TYPE_CHECKING:
     from korvid.ui.log_controller import LogController
     from korvid.ui.operator_controller import OperatorController
     from korvid.ui.proposal_controller import ProposalController
+    from korvid.ui.pulse_controller import PulseController
     from korvid.ui.relationship_controller import RelationshipSnapshotLoader
     from korvid.ui.resource_inspect_controller import ResourceInspectController
     from korvid.ui.resource_write_controller import ResourceWriteController
@@ -122,6 +124,7 @@ class AppRuntimeInputs:
     )
     session_timeline: SessionTimeline | None
     watch_warning_events: Callable[[str | None], AsyncIterator[dict[str, Any]]] | None
+    pulse_reader: PulseReader | None
     approval_timeout_seconds: float | None
 
 
@@ -133,6 +136,7 @@ class AppRuntime:
     relationship_loader: RelationshipSnapshotLoader | None
     context: ContextSwitchCoordinator
     timeline: SessionTimelineController
+    pulse: PulseController
     writes: WriteCoordinator
     bridge_dispatch: AppContextDispatch
     inspect_surface: AppInspectSurface

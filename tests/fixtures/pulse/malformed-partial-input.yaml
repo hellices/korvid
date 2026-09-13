@@ -1,0 +1,28 @@
+name: Malformed optional evidence in a partial response does not crash or invent failures
+now: "2026-09-13T12:00:00Z"
+scope: production
+steps:
+  - sources:
+      pods:
+        state: partial
+        objects:
+          - metadata: {namespace: production, name: api, uid: api-uid}
+            status:
+              phase: Running
+              conditions:
+                - null
+                - {type: Ready, status: {unexpected: shape}}
+              containerStatuses: null
+      deployments:
+        state: partial
+        objects:
+          - metadata: {namespace: production, name: api, uid: deployment-uid, generation: 3}
+            status:
+              observedGeneration: 3
+              conditions:
+                - {type: [ReplicaFailure], status: "True"}
+                - {type: Progressing, status: {unexpected: "False"}}
+    expect:
+      current_count: 0
+      recent_count: 0
+      coverage: {pods: partial, deployments: partial, events: loading}

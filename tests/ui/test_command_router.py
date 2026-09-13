@@ -66,6 +66,14 @@ class FakeOperators:
         return True
 
 
+class FakePulse:
+    def __init__(self) -> None:
+        self.opens = 0
+
+    def open_detail(self) -> None:
+        self.opens += 1
+
+
 class Harness:
     def __init__(self, *, agent_available: bool = True, catalog_missing: bool = False) -> None:
         self.ui = FakeUi()
@@ -74,6 +82,7 @@ class Harness:
         self.proposals = FakeProposals()
         self.forwards = FakeForwards()
         self.operators = FakeOperators(catalog_missing=catalog_missing)
+        self.pulse = FakePulse()
         self.router = CommandRouter(
             ui=self.ui,
             agent=self.agent,
@@ -81,11 +90,19 @@ class Harness:
             proposals=self.proposals,
             forwards=self.forwards,
             operators=self.operators,
+            pulse=self.pulse,
         )
 
 
 def _builtin(operation: BuiltinOperation, *arguments: str) -> BuiltinCommand:
     return BuiltinCommand(operation, arguments)
+
+
+def test_pulse_reaches_its_owner_once() -> None:
+    harness = Harness()
+    harness.router.route_builtin(_builtin(BuiltinOperation.PULSE))
+    assert harness.pulse.opens == 1
+    assert harness.ui.notifications == []
 
 
 def test_ai_and_agent_reach_the_agent_owner() -> None:

@@ -1,0 +1,49 @@
+name: Future timestamps cannot evict valid history or poison later corrected Event updates
+now: "2026-09-13T12:00:00Z"
+scope: production
+limits: {max_events: 1}
+steps:
+  - sources:
+      events:
+        objects:
+          - metadata: {namespace: production, uid: valid-event}
+            type: Warning
+            reason: ValidWarning
+            lastTimestamp: "2026-09-13T11:59:50Z"
+            involvedObject: {kind: Pod, namespace: production, name: api, uid: api-uid}
+          - metadata: {namespace: production, uid: future-event}
+            type: Warning
+            reason: FutureWarning
+            lastTimestamp: "2036-09-13T12:00:00Z"
+            involvedObject: {kind: Pod, namespace: production, name: api, uid: api-uid}
+    expect:
+      recent_count: 1
+      recent_reasons: [ValidWarning]
+      forbidden_recent_reasons: [FutureWarning]
+      dropped: 0
+      coverage: {events: partial}
+  - after_seconds: 2
+    sources:
+      events:
+        objects:
+          - metadata: {namespace: production, uid: future-event}
+            type: Warning
+            reason: ClockCorrected
+            lastTimestamp: "2026-09-13T12:00:02Z"
+            involvedObject: {kind: Pod, namespace: production, name: api, uid: api-uid}
+    expect:
+      recent_count: 1
+      recent_reasons: [ClockCorrected]
+      forbidden_recent_reasons: [ValidWarning, FutureWarning]
+      dropped: 1
+      coverage: {events: complete, event-buffer: capped}
+  - after_seconds: 902
+    expect:
+      recent_count: 1
+      recent_reasons: [ClockCorrected]
+      coverage: {events: stale}
+  - after_seconds: 903
+    expect:
+      recent_count: 0
+      dropped: 1
+      coverage: {events: stale}

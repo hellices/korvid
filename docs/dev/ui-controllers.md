@@ -26,6 +26,7 @@ KorvidApp  (ui/app.py)
 ├── DebugController     (ui/debug.py)                gated kubectl debug runs and the pull-retry offer
 ├── SessionTimelineController
 │                       (ui/session_timeline_controller.py)  timeline producers and modal navigation
+├── PulseController      (ui/pulse_controller.py)       bounded ambient reads, coalesced summary, stable detail and UID-safe navigation
 ├── RelationshipSnapshotLoader
 │                       (ui/relationship_controller.py)  bounded read-only graph LISTs
 ├── LogController        (ui/log_controller.py)          log stream tasks, buffer, pane lifecycle
@@ -46,6 +47,29 @@ KorvidApp  (ui/app.py)
 Controllers do **not** import `app.py`. Dependencies arrive in the
 constructor, and the load-bearing ones arrive as *named interfaces* rather
 than anonymous callables.
+
+### Pulse owns ambient observation, not workspace selection
+
+`PulseController` receives its pure model/rules, bounded collector, presentation
+callback, context guard, and existing navigation route from `__main__.py`.
+`KorvidApp` only mounts the summary and forwards mount/scope/unmount lifecycle.
+`ContextSwitchCoordinator` suspends and awaits Pulse reads before retargeting
+the shared Kubernetes client, and resumes them for the applied context.
+
+`SessionTimelineController` remains the owner of the context-wide Warning
+watch and the single `WatchManager.on_event` sink. Optional event and coverage
+callbacks share observations without adding a watch or replacing its producers.
+Pulse events cause no network reads, immediate table repaints, or popups.
+
+The detail screen holds immutable rows and typed `PulseGoto` identities; updates
+only indicate newer data. The controller verifies the live UID before calling
+`WorkspaceController.jump_to_object(expected_uid=...)`. Its focused navigation
+helper in `ui/object_navigation.py` rechecks epoch/scope and the watch-backed UID
+after awaited transitions, before selecting a row. The pre-UID pane/navigation
+origin survives the callback and lock-time check, including a newer command's
+in-progress watch teardown before its new scope is committed. The ordinary route remains
+compatible for callers without a pinned UID. See [Pulse](../pulse.md) for budgets
+and scenario authoring.
 
 ### The relationship snapshot loader is a read-only outlier
 
