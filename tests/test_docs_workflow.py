@@ -209,6 +209,65 @@ def test_deploy_job_is_main_only_needs_build_and_is_least_privilege() -> None:
     assert deploy_steps[1]["id"] == "deployment"
 
 
+def test_deploy_job_exposes_the_page_url_for_post_deploy_smoke_checks() -> None:
+    """The deployed Pages URL must be available to a later smoke job."""
+
+    config = _load()
+    deploy = config["jobs"]["deploy"]
+    assert deploy.get("outputs") == {"page_url": "${{ steps.deployment.outputs.page_url }}"}
+
+
+def _smoke_script(config: dict[str, Any]) -> str:
+    smoke = config["jobs"]["smoke"]
+    steps = smoke["steps"]
+    assert len(steps) == 1, "smoke job must keep its post-deploy probe in one bounded step"
+    script = steps[0].get("run")
+    assert isinstance(script, str), "smoke job must execute a shell probe"
+    return script
+
+
+def test_smoke_job_is_main_only_after_deploy_and_least_privilege() -> None:
+    """The post-deploy smoke job must stay isolated from build/deploy privileges."""
+
+    config = _load()
+    smoke = config["jobs"]["smoke"]
+
+    condition = smoke.get("if", "")
+    assert "github.event_name == 'push'" in condition
+    assert "github.ref == 'refs/heads/main'" in condition
+
+    needs = smoke["needs"]
+    assert needs == "deploy" or needs == ["deploy"]
+
+    assert smoke["runs-on"] == "ubuntu-latest"
+    assert smoke["timeout-minutes"] == 5
+    assert smoke.get("permissions", config.get("permissions")) == {"contents": "read"}
+
+    script = _smoke_script(config)
+    assert "${{ needs.deploy.outputs.page_url }}" in script
+    assert "for attempt in 1 2 3 4 5" in script
+    assert "sleep 5" in script
+    assert "--connect-timeout 10" in script
+    assert "--max-time 20" in script
+
+
+def test_smoke_job_checks_public_pages_search_and_media_entrypoints() -> None:
+    """The smoke probe must cover release-facing pages, artifacts, and hero media URLs."""
+
+    script = _smoke_script(_load())
+    for path in (
+        'check_contains "" "AI-NATIVE KUBERNETES TUI"',
+        'check_contains "getting-started/" "brew install hellices/korvid/korvid"',
+        'check_contains "release-notes/unreleased/" "Unreleased (main)"',
+        'check_ok "search/search_index.json"',
+        'check_ok "sitemap.xml"',
+        'check_ok "assets/demo.mp4"',
+        'check_ok "assets/scenes/agent-demo.mp4"',
+        'check_ok "assets/scenes/mcp-follow-demo.mp4"',
+    ):
+        assert path in script
+
+
 def test_workflow_level_permissions_are_read_only() -> None:
     config = _load()
     assert config.get("permissions") == {"contents": "read"}
