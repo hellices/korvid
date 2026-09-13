@@ -481,6 +481,20 @@ def test_valid_non_warning_does_not_change_event_coverage() -> None:
     assert model.snapshot(NOW) == before
 
 
+def test_registered_snapshot_sources_exclude_independent_status_entries() -> None:
+    model = PulseModel([_WidgetRule()])
+    model.set_coverage(PulseCoverage("warning-watch", "forbidden", NOW, "API 403"))
+    model.set_coverage(PulseCoverage("event-buffer", "capped", NOW, "Warning retention loss"))
+    model.set_coverage(
+        PulseCoverage("current-buffer:widgets", "capped", NOW, "Current retention loss")
+    )
+    model.set_coverage(PulseCoverage("custom-observer", "failed", NOW, "Observer failure"))
+
+    assert model.registered_sources == ("events", "widgets")
+    model.reset(1, "production")
+    assert model.registered_sources == ("events", "widgets")
+
+
 def test_complete_event_reads_do_not_erase_retained_warning_history() -> None:
     model = PulseModel()
     model.record_warning(_event(), 0, NOW)

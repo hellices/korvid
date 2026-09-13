@@ -83,6 +83,13 @@ when the workspace selects that scope. Overlapping refresh requests coalesce.
 Context teardown cancels and awaits both snapshot and navigation identity reads
 before retargeting the shared client; old epoch/scope results and errors cannot
 publish into the new frame.
+If teardown aborts before the client is retargeted, an active Pulse resumes
+without clearing the unchanged frame's findings, Warning evidence, or loss
+counters. An already-suspended Pulse stays suspended, including after a failed
+target and fallback connection. Only a successfully applied context starts a
+new observation frame. A missing snapshot reader marks only registered snapshot
+sources unavailable; live-watch denials and retention-loss coverage remain
+independent.
 
 | Budget | Limit |
 |---|---|

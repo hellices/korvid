@@ -57,6 +57,7 @@ class Reader(PulseReader):
         self.entered = asyncio.Event()
         self.release = asyncio.Event()
         self.block = False
+        self.failure: KubeClientError | None = None
 
     async def read_pulse_page(
         self,
@@ -70,6 +71,8 @@ class Reader(PulseReader):
         self.entered.set()
         if self.block:
             await self.release.wait()
+        if self.failure is not None:
+            raise self.failure
         return PulsePage(())
 
 
@@ -169,6 +172,88 @@ async def test_suspension_cancels_reads_before_context_swap() -> None:
     assert harness.controller.snapshot().epoch == 1
     assert len(harness.reader.scopes) == 2
     await harness.controller.stop()
+
+
+@pytest.mark.parametrize("failure_type", [RuntimeError, asyncio.CancelledError])
+async def test_surviving_refresh_cannot_clear_the_resumed_worker_ownership(
+    monkeypatch: pytest.MonkeyPatch, failure_type: type[BaseException]
+) -> None:
+    records = importlib.import_module("korvid.core.pulse")
+    rules = importlib.import_module("korvid.core.pulse_rules")
+    harness = Harness()
+    harness.model = records.PulseModel((rules.PodPulseRule(),))
+    harness.controller._model = harness.model
+    old_entered = asyncio.Event()
+    old_release = asyncio.Event()
+    new_entered = asyncio.Event()
+    new_release = asyncio.Event()
+    read_count = 0
+    active_reads = 0
+    peak_reads = 0
+
+    async def read_page(*_args: Any) -> PulsePage:
+        nonlocal read_count, active_reads, peak_reads
+        read_count += 1
+        active_reads += 1
+        peak_reads = max(peak_reads, active_reads)
+        try:
+            if read_count == 1:
+                old_entered.set()
+                await old_release.wait()
+                return PulsePage(
+                    (
+                        {
+                            "kind": "Pod",
+                            "metadata": {
+                                "namespace": "default",
+                                "name": "web-1",
+                                "uid": "uid-1",
+                            },
+                            "status": {
+                                "phase": "Running",
+                                "conditions": [{"type": "Ready", "status": "False"}],
+                            },
+                        },
+                    )
+                )
+            new_entered.set()
+            await new_release.wait()
+            return PulsePage(())
+        finally:
+            active_reads -= 1
+
+    async def abort_suspension(_group: str) -> None:
+        raise failure_type("worker drain interrupted")
+
+    monkeypatch.setattr(harness.reader, "read_pulse_page", read_page)
+    harness.controller.start()
+    try:
+        await old_entered.wait()
+        old_worker = harness.ui.tasks["pulse-refresh"][-1]
+        with monkeypatch.context() as patch:
+            patch.setattr(harness.ui, "cancel_workers", abort_suspension)
+            with pytest.raises(failure_type, match="worker drain interrupted"):
+                await harness.controller.suspend()
+        harness.controller.resume_unchanged()
+        harness.controller.tick()
+        assert len(harness.ui.tasks["pulse-refresh"]) == 2
+        assert read_count == 1
+        old_release.set()
+        await new_entered.wait()
+        await old_worker
+        assert harness.controller.snapshot().current == ()
+        for _attempt in range(20):
+            harness.controller.request_refresh()
+        assert len(harness.ui.tasks["pulse-refresh"]) == 2
+        new_release.set()
+        await harness.ui.settled()
+        assert read_count == 3
+        assert peak_reads == 1
+        assert active_reads == 0
+    finally:
+        old_release.set()
+        new_release.set()
+        await harness.controller.stop()
 
 
 async def test_event_burst_is_coalesced_without_reads_or_popups() -> None:
@@ -325,6 +410,40 @@ async def test_namespace_change_preserves_same_context_watch_failure() -> None:
         coverage = {entry.source: entry for entry in harness.controller.snapshot().coverage}
         assert coverage["warning-watch"].state == "forbidden"
         await harness.ui.settled()
+    finally:
+        await harness.controller.stop()
+
+
+@pytest.mark.parametrize("refresh", ["manual", "timer"])
+async def test_no_reader_refresh_preserves_independent_coverage(refresh: str) -> None:
+    records = importlib.import_module("korvid.core.pulse")
+    rules = importlib.import_module("korvid.core.pulse_rules")
+    harness = Harness()
+    harness.model = records.PulseModel((rules.PodPulseRule(),))
+    harness.controller._model = harness.model
+    harness.controller._collector = None
+    harness.controller.start()
+    try:
+        independent = (
+            records.PulseCoverage("warning-watch", "forbidden", NOW, "Live feed denied"),
+            records.PulseCoverage("event-buffer", "capped", NOW, "Warning retention loss"),
+            records.PulseCoverage("current-buffer:pods", "capped", NOW, "Current retention loss"),
+            records.PulseCoverage("custom-observer", "failed", NOW, "Observer unavailable"),
+        )
+        for coverage in independent:
+            harness.model.set_coverage(coverage)
+        for source in ("pods", "events"):
+            harness.model.set_coverage(records.PulseCoverage(source, "complete", NOW))
+        if refresh == "timer":
+            harness.monotonic = 15.0
+            harness.controller.tick()
+        else:
+            harness.controller.request_refresh()
+        observed = {entry.source: entry for entry in harness.controller.snapshot().coverage}
+        assert all(observed[coverage.source] == coverage for coverage in independent)
+        assert observed["pods"].state == "unavailable"
+        assert observed["events"].state == "unavailable"
+        assert harness.reader.scopes == []
     finally:
         await harness.controller.stop()
 

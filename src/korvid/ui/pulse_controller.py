@@ -66,7 +66,7 @@ class PulseController:
         self._monotonic = monotonic
         self._started = False
         self._suspended = False
-        self._refreshing = False
+        self._refresh_owner: object | None = None
         self._pending = False
         self._identity: tuple[int, str | None] | None = None
         self._generation = 0
@@ -85,6 +85,11 @@ class PulseController:
     def snapshot(self) -> PulseSnapshot:
         """Return a fresh immutable view of retained, already-sanitized facts."""
         return self._model.snapshot(self._clock())
+
+    @property
+    def suspended(self) -> bool:
+        """Whether connection-bound reads are currently quiesced."""
+        return self._suspended
 
     def start(self) -> None:
         """Start after mount; neither initial reads nor the timer block startup."""
@@ -143,29 +148,34 @@ class PulseController:
             return
         self._next_refresh = self._monotonic() + REFRESH_SECONDS
         if self._collector is None:
-            for coverage in self.snapshot().coverage:
+            for source in self._model.registered_sources:
                 self._model.set_coverage(
-                    PulseCoverage(
-                        coverage.source, "unavailable", None, "Snapshot reader unavailable"
-                    )
+                    PulseCoverage(source, "unavailable", None, "Snapshot reader unavailable")
                 )
             return
         self._pending = True
-        if self._refreshing:
+        if self._refresh_owner is not None:
             return
-        self._refreshing = True
-        self._ui.run_worker(self._refresh(), group=REFRESH_GROUP, exit_on_error=False)
+        owner = object()
+        self._refresh_owner = owner
+        self._ui.run_worker(self._refresh(owner), group=REFRESH_GROUP, exit_on_error=False)
 
-    async def _refresh(self) -> None:
+    async def _refresh(self, owner: object) -> None:
         try:
-            while self._pending and self._started and not self._suspended:
+            while (
+                self._refresh_owner is owner
+                and self._pending
+                and self._started
+                and not self._suspended
+            ):
                 self._pending = False
                 identity, generation = self._identity, self._generation
                 if identity is None or self._collector is None:
                     return
                 await self._collect_frame(identity, generation)
         finally:
-            self._refreshing = False
+            if self._refresh_owner is owner:
+                self._refresh_owner = None
 
     def _frame_current(self, identity: tuple[int, str | None], generation: int) -> bool:
         return (
@@ -205,17 +215,22 @@ class PulseController:
         """Quiesce reads before the shared Kubernetes connection is retargeted."""
         self._suspended = True
         self._pending = False
+        self._refresh_owner = None
         self._generation += 1
         self._navigation_generation += 1
         await self._ui.cancel_workers(REFRESH_GROUP)
         await self._ui.cancel_workers(NAVIGATION_GROUP)
-        self._refreshing = False
 
     def resume(self) -> None:
         """Allow the next tick to bind to the context that actually took effect."""
         self._suspended = False
         self._identity = None
         self._navigation_identity = None
+        self._next_refresh = 0.0
+
+    def resume_unchanged(self) -> None:
+        """Retry the untouched frame without discarding retained observations."""
+        self._suspended = False
         self._next_refresh = 0.0
 
     async def stop(self) -> None:

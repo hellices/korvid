@@ -43,6 +43,17 @@ after mounting without delaying startup. Reconciliation runs every 15 seconds
 and on explicit refresh or scope change. Only one refresh can run at a time;
 overlapping triggers coalesce. Reads are suspended during context teardown.
 In-flight old-context/scope results cannot publish into the new view.
+An exception or cancellation during pre-retarget teardown restores Pulse's
+prior suspension state and preserves the unchanged frame's findings, Warning
+evidence, and loss counters. The aborted work's read and navigation generations
+remain invalidated. Once retargeting starts, only a successfully applied target
+or fallback resumes it; a disconnected session stays suspended across retries.
+Suspension releases refresh ownership before awaiting worker cancellation, so
+a cancelled-before-start worker cannot wedge retries and a late old worker
+cannot release its replacement's ownership. The collector still serializes
+requests if a teardown abort leaves an old worker settling.
+Registered snapshot source keys are distinct from dynamic live-watch and
+retention-loss coverage, so a missing reader cannot overwrite those signals.
 
 Each source permits at most two pages of 100 objects, 256 KiB decoded response
 bytes per page, and a five-second total deadline. There are three initial

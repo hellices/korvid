@@ -349,6 +349,11 @@ class PulseModel:
         self._max_current_bytes = max_current_bytes
         self.reset(epoch=0, scope=None)
 
+    @property
+    def registered_sources(self) -> tuple[str, ...]:
+        """Registered snapshot sources, excluding independent status entries."""
+        return tuple(sorted({"events", *(_text(rule.source, 128) for rule in self._rules)}))
+
     def reset(self, epoch: int, scope: str | None) -> None:
         """Start an empty epoch, with all registered sources loading."""
         self._epoch = epoch
@@ -360,8 +365,7 @@ class PulseModel:
         self._recent_versions: dict[str, tuple[datetime, int]] = {}
         self._event_bytes = 0
         self._coverage = {
-            source: PulseCoverage(source, "loading", None)
-            for source in {"events", *(_text(rule.source, 128) for rule in self._rules)}
+            source: PulseCoverage(source, "loading", None) for source in self.registered_sources
         }
         self._successful_at: dict[str, datetime] = {}
         self._started_at: datetime | None = None
