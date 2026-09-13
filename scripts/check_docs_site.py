@@ -9,10 +9,13 @@ from __future__ import annotations
 import json
 import sys
 import xml.etree.ElementTree as ET
+from html.parser import HTMLParser
 from pathlib import Path
+from urllib.parse import unquote, urljoin, urlsplit
 
 SEARCH_INDEX = "search/search_index.json"
 SITEMAP = "sitemap.xml"
+HOME_PAGE = "index.html"
 SITE_URL = "https://hellices.github.io/korvid/"
 CANONICAL_DEV_PREFIX = f"{SITE_URL}dev/"
 PUBLIC_DEV_SEARCH_LOCATIONS = frozenset(
@@ -54,6 +57,28 @@ FORBIDDEN_SITEMAP_URLS = frozenset(
 )
 
 
+class _PrimaryNavRouteParser(HTMLParser):
+    """Collect normalized MkDocs primary-navigation routes from the home page."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.routes: set[str] = set()
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag != "a":
+            return
+        attributes = dict(attrs)
+        css_classes = attributes.get("class")
+        href = attributes.get("href")
+        if not isinstance(css_classes, str) or "md-nav__link" not in css_classes.split():
+            return
+        if not isinstance(href, str):
+            return
+        route = _normalized_public_route(href)
+        if route is not None:
+            self.routes.add(route)
+
+
 def _read_text(path: Path, label: str) -> tuple[str | None, list[str]]:
     try:
         return path.read_text(encoding="utf-8"), []
@@ -90,6 +115,39 @@ def _search_locations(site_dir: Path) -> tuple[set[str], list[str]]:
     return locations, malformed
 
 
+def _normalized_public_route(href: str) -> str | None:
+    href = href.strip()
+    if not href or href.startswith("#"):
+        return None
+    parsed = urlsplit(urljoin(SITE_URL, href))
+    site = urlsplit(SITE_URL)
+    if (parsed.scheme, parsed.netloc) != (site.scheme, site.netloc):
+        return None
+    if not parsed.path.startswith(site.path):
+        return None
+    relative = parsed.path.removeprefix(site.path).lstrip("/")
+    if relative.endswith("index.html"):
+        relative = relative[: -len("index.html")]
+    if not relative:
+        return None
+    if not relative.endswith("/"):
+        relative = f"{relative}/"
+    return unquote(relative)
+
+
+def _public_nav_routes(site_dir: Path) -> tuple[set[str], list[str]]:
+    path = site_dir / HOME_PAGE
+    text, errors = _read_text(path, HOME_PAGE)
+    if text is None:
+        return set(), errors
+    parser = _PrimaryNavRouteParser()
+    parser.feed(text)
+    parser.close()
+    if not parser.routes:
+        return set(), [f"{HOME_PAGE} does not contain any primary navigation links"]
+    return parser.routes, []
+
+
 def _sitemap_locations(site_dir: Path) -> tuple[set[str], list[str]]:
     path = site_dir / SITEMAP
     text, errors = _read_text(path, SITEMAP)
@@ -111,8 +169,8 @@ def _membership_errors(
     actual: set[str],
     *,
     label: str,
-    required: frozenset[str],
-    forbidden: frozenset[str],
+    required: set[str] | frozenset[str],
+    forbidden: set[str] | frozenset[str],
 ) -> list[str]:
     errors: list[str] = []
     for entry in sorted(required - actual):
@@ -124,6 +182,10 @@ def _membership_errors(
             f"{label} unexpectedly includes forbidden {'URL' if 'http' in entry else 'location'} {entry!r}"
         )
     return errors
+
+
+def _canonical_url_for(route: str) -> str:
+    return f"{SITE_URL}{route}"
 
 
 def _dev_scope_errors(
@@ -144,9 +206,14 @@ def _dev_scope_errors(
 def check_site(site_dir: Path) -> list[str]:
     """Return actionable publication-artifact errors for a built `site/` tree."""
 
+    nav_routes, nav_errors = _public_nav_routes(site_dir)
     search_locations, search_errors = _search_locations(site_dir)
     sitemap_locations, sitemap_errors = _sitemap_locations(site_dir)
-    errors = [*search_errors, *sitemap_errors]
+    errors = [*nav_errors, *search_errors, *sitemap_errors]
+    required_search_locations = set(REQUIRED_SEARCH_LOCATIONS) | nav_routes
+    required_sitemap_urls = set(REQUIRED_SITEMAP_URLS) | {
+        _canonical_url_for(route) for route in nav_routes
+    }
     errors.extend(
         _dev_scope_errors(
             {location for location in search_locations if location.startswith("dev/")},
@@ -159,7 +226,7 @@ def check_site(site_dir: Path) -> list[str]:
         _membership_errors(
             search_locations,
             label=SEARCH_INDEX,
-            required=REQUIRED_SEARCH_LOCATIONS,
+            required=required_search_locations,
             forbidden=FORBIDDEN_SEARCH_LOCATIONS,
         )
     )
@@ -179,7 +246,7 @@ def check_site(site_dir: Path) -> list[str]:
         _membership_errors(
             sitemap_locations,
             label=SITEMAP,
-            required=REQUIRED_SITEMAP_URLS,
+            required=required_sitemap_urls,
             forbidden=FORBIDDEN_SITEMAP_URLS,
         )
     )
