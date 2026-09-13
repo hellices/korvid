@@ -275,7 +275,7 @@ Expected: the temporary workflow disappears from the pull-request diff while its
 Use exactly one conclusion:
 
 - Any trial failed: report the first failing trial and last captured lifecycle milestone; treat clean-process instability as reproduced and choose the next process-boundary experiment from that evidence.
-- All 300 trials passed while ordinary Windows CI failed at the same head SHA: report that full-suite state is required by the paired observation and design a permanent isolation fix.
+- All 300 trials passed while ordinary Windows CI failed at the same head SHA: report stronger evidence that long-running full-suite state materially contributes, without claiming necessity or an exclusive cause, and design a permanent process-isolation mitigation.
 - Both targeted and ordinary Windows jobs passed: record 300 clean-process passes as negative evidence only; do not close #371 or claim isolation is proven.
 
 In all cases, report the Actions run URL and exact head SHA to the maintainer. Do not merge, auto-merge, or approve the draft pull request.

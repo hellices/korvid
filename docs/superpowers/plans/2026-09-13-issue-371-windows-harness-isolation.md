@@ -194,7 +194,7 @@ Run:
 git push origin fix/371-windows-node-harness-exit
 gh pr edit 386 \
   --title "ci: isolate Windows docs harness for #371" \
-  --body $'Closes #371\n\n## Evidence\n\n- The isolated Windows run passed 300/300 fresh pytest processes at the same SHA.\n- Ordinary Windows CI failed after roughly 17 minutes in its shared pytest process.\n- The paired result identifies the long-lived pytest process as the necessary observed condition.\n\n## Fix\n\n- Run `tests/test_docs_landing_behavior.py` once in an early fresh Windows pytest process.\n- Exclude only that already-executed file from the later full Windows suite.\n- Keep the same random seed and fail normally; no retry, skip, timeout increase, or assertion weakening.\n\n## Validation\n\n- Workflow contract: RED then GREEN\n- Targeted platform tests, Ruff, and zizmor\n- `make check`'
+  --body $'Closes #371\n\n## Evidence\n\n- The isolated Windows run passed 300/300 fresh pytest processes at the same SHA.\n- Ordinary Windows CI failed after roughly 17 minutes in its shared pytest process.\n- The pair is strong evidence that the long-lived pytest process materially contributes; it is not proof of necessity or an exclusive cause.\n\n## Fix\n\n- Run `tests/test_docs_landing_behavior.py` once in an early fresh Windows pytest process.\n- Exclude only that already-executed file from the later full Windows suite.\n- Keep the same random seed and fail normally; no retry, skip, timeout increase, or assertion weakening.\n\n## Validation\n\n- Workflow contract: RED then GREEN\n- Targeted platform tests, Ruff, and zizmor\n- `make check`'
 gh pr ready 386
 ```
 

@@ -5,9 +5,9 @@
 
 ## Goal
 
-Keep the Windows documentation-harness regression fully enforced while
-removing the long-lived shared pytest process that is necessary for its
-intermittent timeout.
+Keep the Windows documentation-harness regression fully enforced while moving
+it out of the long-lived shared pytest process implicated in its intermittent
+timeout.
 
 ## Evidence
 
@@ -25,10 +25,10 @@ Two Windows jobs ran against commit
   passed. A post-timeout Node probe still succeeded.
 
 The same source, runner image, Node version, and Python version therefore
-behaved differently across process boundaries. This establishes the
-long-running shared pytest process as a necessary observed condition. It does
-not identify a defective JavaScript statement or justify weakening the
-harness assertions.
+behaved differently across process boundaries. This is strong evidence that
+the long-running shared pytest process is a material contributing condition.
+It does not prove that condition is necessary or exclusive, identify a
+defective JavaScript statement, or justify weakening the harness assertions.
 
 ## Selected approach
 
@@ -54,8 +54,8 @@ exactly once on Windows.
 
 A separate job would provide even stronger process and machine isolation, but
 it would add runner startup, dependency installation, required-check surface,
-and cache contention. The experiment only establishes a pytest-process
-boundary as necessary, so a second machine is not warranted.
+and cache contention. The experiment supports a pytest-process boundary as the
+smallest evidence-backed mitigation, so a second machine is not warranted.
 
 ### Rewrite the Node lifecycle boundary
 

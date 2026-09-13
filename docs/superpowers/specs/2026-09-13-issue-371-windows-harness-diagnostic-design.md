@@ -23,8 +23,8 @@ controls succeeded immediately; in another recurrence every control timed out.
 Unchanged-source Windows runs also passed.
 
 That evidence does not identify one defective JavaScript statement. It supports
-testing the narrower hypothesis that a clean Windows process is stable and that
-the long-running full-suite environment is a necessary contributor.
+testing the narrower hypothesis that a clean Windows process is more stable and
+that the long-running full-suite environment materially contributes.
 
 ## Experiment
 
@@ -62,7 +62,8 @@ is never proposed for merge as the permanent fix.
 - **All 300 trials pass:** clean-process isolation is supported, but not proved,
   as the relevant boundary. Compare this result with the ordinary Windows CI
   job from the same pull-request SHA. If that job recurs, the paired result is
-  direct evidence that full-suite state is required.
+  stronger evidence that long-running full-suite state materially contributes;
+  it is not proof that the state is necessary or the exclusive cause.
 - **Both targeted and ordinary jobs pass:** record the clean 300-trial result
   as negative evidence. Do not close #371 from that result alone; use it to
   design the next discriminating experiment.
