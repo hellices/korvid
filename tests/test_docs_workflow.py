@@ -274,6 +274,20 @@ def _cleanup_plan_task3_section() -> str:
     return match.group(0)
 
 
+def _cleanup_plan_task3_strict_build_block(task: str) -> str:
+    match = re.search(
+        r"```bash\n"
+        r"(?P<commands>uv run --frozen --group docs mkdocs build --strict\n"
+        r"python scripts/check_docs_site\.py site)\n"
+        r"```",
+        task,
+    )
+    assert match is not None, (
+        "Task 3 must keep the strict build and checker as one adjacent bash block"
+    )
+    return match.group("commands")
+
+
 def _smoke_steps(config: dict[str, Any]) -> list[dict[str, Any]]:
     smoke = config["jobs"]["smoke"]
     steps = smoke["steps"]
@@ -1407,12 +1421,27 @@ def test_cleanup_plan_task3_names_the_workflow_test_and_local_smoke_replay() -> 
     assert "site_url" in normalized
     assert "python scripts/check_docs_site.py site" in normalized
     assert "publication-artifact checker succeeds" in normalized
-    assert re.search(
-        r"uv run --frozen --group docs mkdocs build --strict.*?"
-        r"python scripts/check_docs_site\.py site",
-        " ".join(task.replace("`", "").split()),
-        flags=re.DOTALL,
+    assert _cleanup_plan_task3_strict_build_block(task) == (
+        "uv run --frozen --group docs mkdocs build --strict\npython scripts/check_docs_site.py site"
     )
+
+
+def test_cleanup_plan_task3_strict_build_block_rejects_intervening_commands() -> None:
+    mutated = textwrap.dedent(
+        """\
+        ### Task 3: Run the full documentation gate and prepare the pull request
+
+        - [ ] **Step 3: Run strict site build**
+
+        ```bash
+        uv run --frozen --group docs mkdocs build --strict
+        echo mutated
+        python scripts/check_docs_site.py site
+        ```
+        """
+    )
+    with pytest.raises(AssertionError, match="adjacent bash block"):
+        _cleanup_plan_task3_strict_build_block(mutated)
 
 
 def test_cleanup_plan_task3_preserves_human_pr_authorization_gate() -> None:
