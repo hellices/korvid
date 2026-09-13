@@ -9,6 +9,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
 
+import pytest
 import yaml
 
 from korvid import __version__
@@ -33,6 +34,16 @@ def _release_notes_nav() -> list[dict[str, str]]:
     release_notes = config["nav"][-1]["Project"][-1]["Release notes"]
     assert isinstance(release_notes, list), "Release notes nav must stay an ordered list"
     return release_notes
+
+
+def _assert_release_label_matches_path_version(label: str, path: str) -> None:
+    match = re.fullmatch(r"release-notes/(v\d+\.\d+\.\d+)\.md", path)
+    assert match is not None, f"unexpected release-notes path {path!r}"
+    version = match.group(1)
+    assert RELEASE_LABEL_RE.fullmatch(label), f"unexpected release-notes label {label!r}"
+    assert label in {version, f"{version} (unpublished)"}, (
+        f"release-notes label {label!r} must match the version encoded in {path!r}"
+    )
 
 
 def _highlight_shell(command: str) -> str:
@@ -143,12 +154,18 @@ def test_release_navigation_tracks_the_live_release_without_hard_coding_versions
     for entry in release_notes[1:]:
         assert len(entry) == 1, "each release-notes nav entry must stay a single label/path mapping"
         label, path = next(iter(entry.items()))
-        match = re.fullmatch(r"release-notes/(v\d+\.\d+\.\d+)\.md", path)
-        assert match is not None, f"unexpected release-notes path {path!r}"
-        version = match.group(1)
-        assert RELEASE_LABEL_RE.fullmatch(label), f"unexpected release-notes label {label!r}"
-        assert label.startswith(version), (
-            f"release-notes label {label!r} must match the version encoded in {path!r}"
+        _assert_release_label_matches_path_version(label, path)
+
+
+def test_release_label_contract_rejects_numeric_prefix_mismatches() -> None:
+    with pytest.raises(
+        AssertionError,
+        match=r"release-notes label 'v0\.5\.10' must match the version encoded in "
+        r"'release-notes/v0\.5\.1\.md'",
+    ):
+        _assert_release_label_matches_path_version(
+            "v0.5.10",
+            "release-notes/v0.5.1.md",
         )
 
 

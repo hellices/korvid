@@ -13,29 +13,39 @@ from pathlib import Path
 
 SEARCH_INDEX = "search/search_index.json"
 SITEMAP = "sitemap.xml"
+SITE_URL = "https://hellices.github.io/korvid/"
+CANONICAL_DEV_PREFIX = f"{SITE_URL}dev/"
+PUBLIC_DEV_SEARCH_LOCATIONS = frozenset(
+    {
+        "dev/",
+        "dev/specs/2026-08-12-korvid-architecture/",
+    }
+)
+PUBLIC_DEV_SITEMAP_URLS = frozenset(
+    {
+        f"{SITE_URL}dev/",
+        f"{SITE_URL}dev/specs/2026-08-12-korvid-architecture/",
+    }
+)
 
 REQUIRED_SEARCH_LOCATIONS = frozenset(
     {
-        "dev/specs/2026-08-12-korvid-architecture/",
         "evals/methodology/",
     }
 )
 FORBIDDEN_SEARCH_LOCATIONS = frozenset(
     {
-        "dev/ui-controllers/",
         "release/",
     }
 )
 REQUIRED_SITEMAP_URLS = frozenset(
     {
-        "https://hellices.github.io/korvid/dev/specs/2026-08-12-korvid-architecture/",
-        "https://hellices.github.io/korvid/evals/methodology/",
+        f"{SITE_URL}evals/methodology/",
     }
 )
 FORBIDDEN_SITEMAP_URLS = frozenset(
     {
-        "https://hellices.github.io/korvid/dev/ui-controllers/",
-        "https://hellices.github.io/korvid/release/",
+        f"{SITE_URL}release/",
     }
 )
 
@@ -112,6 +122,21 @@ def _membership_errors(
     return errors
 
 
+def _dev_scope_errors(
+    actual: set[str],
+    *,
+    label: str,
+    required: frozenset[str],
+    item_name: str,
+) -> list[str]:
+    errors: list[str] = []
+    for entry in sorted(required - actual):
+        errors.append(f"{label} is missing required dev {item_name} {entry!r}")
+    for entry in sorted(actual - required):
+        errors.append(f"{label} unexpectedly includes non-public dev {item_name} {entry!r}")
+    return errors
+
+
 def check_site(site_dir: Path) -> list[str]:
     """Return actionable publication-artifact errors for a built `site/` tree."""
 
@@ -119,11 +144,31 @@ def check_site(site_dir: Path) -> list[str]:
     sitemap_locations, sitemap_errors = _sitemap_locations(site_dir)
     errors = [*search_errors, *sitemap_errors]
     errors.extend(
+        _dev_scope_errors(
+            {location for location in search_locations if location.startswith("dev/")},
+            label=SEARCH_INDEX,
+            required=PUBLIC_DEV_SEARCH_LOCATIONS,
+            item_name="location",
+        )
+    )
+    errors.extend(
         _membership_errors(
             search_locations,
             label=SEARCH_INDEX,
             required=REQUIRED_SEARCH_LOCATIONS,
             forbidden=FORBIDDEN_SEARCH_LOCATIONS,
+        )
+    )
+    errors.extend(
+        _dev_scope_errors(
+            {
+                location
+                for location in sitemap_locations
+                if location.startswith(CANONICAL_DEV_PREFIX)
+            },
+            label=SITEMAP,
+            required=PUBLIC_DEV_SITEMAP_URLS,
+            item_name="URL",
         )
     )
     errors.extend(
