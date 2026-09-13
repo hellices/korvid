@@ -1,5 +1,10 @@
 # Unreleased
 
+This page tracks changes merged to `main` that are not part of the
+[latest published release](https://github.com/hellices/korvid/releases/latest).
+The [v0.5.0 milestone](https://github.com/hellices/korvid/milestone/6)
+tracks the current release scope.
+
 ## Current configuration and extension contracts
 
 This pre-1.0 cleanup removes obsolete input formats rather than maintaining
