@@ -35,19 +35,37 @@
 - [ ] **Step 1: Write failing release-path tests**
 
 ```python
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any, cast
 
 import yaml
 
 ROOT = Path(__file__).parent.parent
 
 
+def _load_mkdocs_config() -> dict[str, Any]:
+    class _TolerantLoader(yaml.SafeLoader):
+        pass
+
+    add_multi_constructor = cast(
+        "Callable[[str, Callable[[Any, str, Any], object]], None]",
+        _TolerantLoader.add_multi_constructor,
+    )
+    add_multi_constructor("tag:yaml.org,2002:python/name:", lambda loader, suffix, node: suffix)
+    config = yaml.load((ROOT / "mkdocs.yml").read_text(encoding="utf-8"), Loader=_TolerantLoader)
+    assert isinstance(config, dict)
+    return config
+
+
 def test_stable_install_precedes_development_source() -> None:
     source = (ROOT / "docs" / "getting-started.md").read_text(encoding="utf-8")
     stable = source.index("## Install")
+    extras = source.index("## Choose your extras")
+    first_run = source.index("## First run")
     development = source.index("## Development build")
     git_source = source.index("git+https://github.com/hellices/korvid")
-    assert stable < development < git_source
+    assert stable < extras < first_run < development < git_source
 
 
 def test_unreleased_page_identifies_main_and_stable_release() -> None:
@@ -59,7 +77,7 @@ def test_unreleased_page_identifies_main_and_stable_release() -> None:
 
 
 def test_release_navigation_labels_unreleased_main() -> None:
-    config = yaml.safe_load((ROOT / "mkdocs.yml").read_text(encoding="utf-8"))
+    config = _load_mkdocs_config()
     release_notes = config["nav"][-1]["Project"][-1]["Release notes"]
     assert release_notes[0] == {
         "Unreleased (main)": "release-notes/unreleased.md"
@@ -148,8 +166,26 @@ git commit -m "docs: clarify stable and unreleased site paths"
 Append tests that require:
 
 ```python
+from collections.abc import Callable
+from typing import Any, cast
+
+
+def _load_mkdocs_config() -> dict[str, Any]:
+    class _TolerantLoader(yaml.SafeLoader):
+        pass
+
+    add_multi_constructor = cast(
+        "Callable[[str, Callable[[Any, str, Any], object]], None]",
+        _TolerantLoader.add_multi_constructor,
+    )
+    add_multi_constructor("tag:yaml.org,2002:python/name:", lambda loader, suffix, node: suffix)
+    config = yaml.load((ROOT / "mkdocs.yml").read_text(encoding="utf-8"), Loader=_TolerantLoader)
+    assert isinstance(config, dict)
+    return config
+
+
 def test_internal_docs_use_one_inherited_search_policy() -> None:
-    config = yaml.safe_load((ROOT / "mkdocs.yml").read_text(encoding="utf-8"))
+    config = _load_mkdocs_config()
     plugins = [
         item if isinstance(item, str) else next(iter(item))
         for item in config["plugins"]

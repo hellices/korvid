@@ -75,9 +75,11 @@ def test_stable_install_precedes_development_source() -> None:
 
     source = _source("getting-started.md")
     stable = source.index("## Install")
+    extras = source.index("## Choose your extras")
+    first_run = source.index("## First run")
     development = source.index("## Development build")
     git_source = source.index("git+https://github.com/hellices/korvid")
-    assert stable < development < git_source
+    assert stable < extras < first_run < development < git_source
 
 
 def test_getting_started_current_release_copy_distinguishes_stable_and_dev_paths() -> None:

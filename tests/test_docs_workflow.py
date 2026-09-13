@@ -40,6 +40,7 @@ PATH_FILTERS = {
     "pyproject.toml",
     "uv.lock",
     "Makefile",
+    "scripts/check_docs_site.py",
     ".github/workflows/docs.yml",
 }
 
@@ -130,6 +131,9 @@ def test_build_job_has_only_read_permissions_and_runs_the_docs_build() -> None:
         "the runner image does not guarantee make; build docs directly with the "
         "same frozen strict MkDocs command as the Makefile target"
     )
+    assert any(
+        run.strip() == "uv run --frozen python scripts/check_docs_site.py" for run in run_steps
+    ), "build job must validate the generated publication artifacts before upload"
     assert all("make " not in run for run in run_steps), (
         "the docs workflow must not depend on make being installed on the runner"
     )
@@ -299,6 +303,9 @@ def _run_smoke_checker(checker: str, path: str, description: str, body: str) -> 
             "url_for",
             "assert_body_contains",
             "assert_body_not_contains",
+            "assert_body_matches",
+            "check_home_page",
+            "check_release_notes_nav",
             "check_search_index",
             "check_sitemap",
             "retry_until_body_checks",
@@ -376,6 +383,85 @@ def test_run_smoke_checker_uses_a_portable_noninteractive_bash_invocation(
 
 def _smoke_invocation_count(script: str, helper_name: str) -> int:
     return sum(1 for line in script.splitlines() if line.lstrip().startswith(f"{helper_name} "))
+
+
+def test_smoke_home_page_checker_succeeds_when_markup_matches_contract() -> None:
+    body = """
+    <section data-scene-switcher>
+      <p>AI-NATIVE KUBERNETES TUI</p>
+      <button id="scene-tab-direct" aria-controls="scene-direct">Direct</button>
+      <button id="scene-tab-agent" aria-controls="scene-agent">Agent</button>
+      <button id="scene-tab-mcp" aria-controls="scene-mcp">MCP</button>
+      <article id="scene-direct" aria-labelledby="scene-tab-direct">
+        <video src="assets/demo.mp4"></video>
+        <img class="scene-panel__fallback" src="assets/scenes/cockpit-poster.png">
+      </article>
+      <article id="scene-agent" aria-labelledby="scene-tab-agent">
+        <video src="assets/scenes/agent-demo.mp4" data-poster="assets/scenes/agent-poster.png"></video>
+        <img class="scene-panel__fallback" src="assets/scenes/agent-poster.png">
+      </article>
+      <article id="scene-mcp" aria-labelledby="scene-tab-mcp">
+        <video src="assets/scenes/mcp-follow-demo.mp4" data-poster="assets/scenes/mcp-poster.png"></video>
+        <img class="scene-panel__fallback" src="assets/scenes/mcp-poster.png">
+      </article>
+    </section>
+    """
+    assert _run_smoke_checker("check_home_page", "", "home page structure", body) == 0
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "<section data-scene-switcher><p>AI-NATIVE KUBERNETES TUI</p></section>",
+        """
+        <section data-scene-switcher>
+          <button id="scene-tab-direct" aria-controls="scene-direct">Direct</button>
+          <button id="scene-tab-agent" aria-controls="scene-agent">Agent</button>
+          <article id="scene-direct" aria-labelledby="scene-tab-direct">
+            <video src="assets/demo.mp4"></video>
+            <img class="scene-panel__fallback" src="assets/scenes/cockpit-poster.png">
+          </article>
+          <article id="scene-agent" aria-labelledby="scene-tab-agent">
+            <video src="assets/scenes/agent-demo.mp4" data-poster="assets/scenes/agent-poster.png"></video>
+            <img class="scene-panel__fallback" src="assets/scenes/agent-poster.png">
+          </article>
+        </section>
+        """,
+    ],
+)
+def test_smoke_home_page_checker_fails_when_expected_markup_is_missing(body: str) -> None:
+    assert _run_smoke_checker("check_home_page", "", "home page structure", body) != 0
+
+
+def test_smoke_release_notes_nav_checker_matches_any_versioned_release_link() -> None:
+    body = """
+    <nav aria-label="Release notes">
+      <a href="../v0.5.0/">v0.5.0</a>
+      <a href="../v0.4.1/">v0.4.1</a>
+    </nav>
+    """
+    assert (
+        _run_smoke_checker(
+            "check_release_notes_nav",
+            "release-notes/unreleased/",
+            "release-notes navigation",
+            body,
+        )
+        == 0
+    )
+
+
+def test_smoke_release_notes_nav_checker_fails_without_a_versioned_release_link() -> None:
+    body = '<nav aria-label="Release notes"><a href="../latest/">Latest</a></nav>'
+    assert (
+        _run_smoke_checker(
+            "check_release_notes_nav",
+            "release-notes/unreleased/",
+            "release-notes navigation",
+            body,
+        )
+        != 0
+    )
 
 
 def test_smoke_scope_checker_succeeds_when_search_index_matches_contract() -> None:
@@ -541,9 +627,10 @@ def test_smoke_job_checks_public_pages_search_and_media_entrypoints() -> None:
 
     script = _smoke_script(_load())
     for path in (
-        'retry_until_contains "" "AI-NATIVE KUBERNETES TUI"',
+        'retry_until_body_checks "" "home page structure" check_home_page',
         f'retry_until_contains "getting-started/" "{GETTING_STARTED_HOMEBREW_TOKEN}"',
         'retry_until_contains "release-notes/unreleased/" "Unreleased (main)"',
+        'retry_until_body_checks "release-notes/unreleased/" "release-notes navigation" check_release_notes_nav',
         'retry_until_body_checks "search/search_index.json" "search index scope" check_search_index',
         'retry_until_body_checks "sitemap.xml" "sitemap scope" check_sitemap',
         'retry_until_ok "assets/demo.mp4"',
@@ -582,6 +669,9 @@ def test_smoke_job_checks_public_pages_search_and_media_entrypoints() -> None:
     ):
         assert hard_coded_url not in script
     assert "assert_body_not_contains" in script
+    assert "playwright" not in script.lower()
+    assert "npm " not in script.lower()
+    assert "node " not in script.lower()
 
 
 def test_smoke_scope_paths_map_to_repository_sources() -> None:
@@ -769,6 +859,18 @@ def test_cleanup_plan_task3_names_the_workflow_test_and_local_smoke_replay() -> 
     assert "tests/test_docs_workflow.py" in task
     assert "extract the smoke step" in normalized
     assert "site_url" in normalized
+
+
+def test_cleanup_plan_uses_tolerant_mkdocs_loader_examples() -> None:
+    plan = CLEANUP_PLAN_DOC.read_text(encoding="utf-8")
+    assert 'yaml.safe_load((ROOT / "mkdocs.yml").read_text(encoding="utf-8"))' not in plan
+    assert plan.count("class _TolerantLoader(yaml.SafeLoader):") >= 2
+    assert (
+        plan.count(
+            'yaml.load((ROOT / "mkdocs.yml").read_text(encoding="utf-8"), Loader=_TolerantLoader)'
+        )
+        >= 2
+    )
 
 
 def test_plan_reproduces_the_ephemeral_direct_docs_build() -> None:

@@ -8,6 +8,7 @@ on:
       - "pyproject.toml"
       - "uv.lock"
       - "Makefile"
+      - "scripts/check_docs_site.py"
       - ".github/workflows/docs.yml"
   push:
     branches: [main]
@@ -17,6 +18,7 @@ on:
       - "pyproject.toml"
       - "uv.lock"
       - "Makefile"
+      - "scripts/check_docs_site.py"
       - ".github/workflows/docs.yml"
 
 permissions:
@@ -45,6 +47,7 @@ jobs:
           enable-cache: true
       - run: uv sync --locked --group docs
       - run: uv run --frozen --group docs mkdocs build --strict
+      - run: uv run --frozen python scripts/check_docs_site.py
       # Only main's build is ever deployed; a PR build exists to prove the
       # site still builds `--strict`, not to produce a Pages artifact.
       - if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -160,6 +163,45 @@ jobs:
             fi
           }
 
+          assert_body_matches() {
+            local expression="$1"
+            local body="$2"
+            if ! grep -Eq "$expression" <<<"$body"; then
+              echo "Expected body to match /$expression/" >&2
+              return 1
+            fi
+          }
+
+          check_home_page() {
+            local body="$1"
+            assert_body_contains "AI-NATIVE KUBERNETES TUI" "$body" || return 1
+            assert_body_contains "data-scene-switcher" "$body" || return 1
+            assert_body_contains 'id="scene-tab-direct"' "$body" || return 1
+            assert_body_contains 'id="scene-tab-agent"' "$body" || return 1
+            assert_body_contains 'id="scene-tab-mcp"' "$body" || return 1
+            assert_body_contains 'aria-controls="scene-direct"' "$body" || return 1
+            assert_body_contains 'aria-controls="scene-agent"' "$body" || return 1
+            assert_body_contains 'aria-controls="scene-mcp"' "$body" || return 1
+            assert_body_contains 'id="scene-direct"' "$body" || return 1
+            assert_body_contains 'id="scene-agent"' "$body" || return 1
+            assert_body_contains 'id="scene-mcp"' "$body" || return 1
+            assert_body_contains 'aria-labelledby="scene-tab-direct"' "$body" || return 1
+            assert_body_contains 'aria-labelledby="scene-tab-agent"' "$body" || return 1
+            assert_body_contains 'aria-labelledby="scene-tab-mcp"' "$body" || return 1
+            assert_body_contains 'src="assets/demo.mp4"' "$body" || return 1
+            assert_body_contains 'src="assets/scenes/agent-demo.mp4"' "$body" || return 1
+            assert_body_contains 'src="assets/scenes/mcp-follow-demo.mp4"' "$body" || return 1
+            assert_body_contains "scene-panel__fallback" "$body" || return 1
+            assert_body_contains 'src="assets/scenes/cockpit-poster.png"' "$body" || return 1
+            assert_body_contains 'src="assets/scenes/agent-poster.png"' "$body" || return 1
+            assert_body_contains 'src="assets/scenes/mcp-poster.png"' "$body" || return 1
+          }
+
+          check_release_notes_nav() {
+            local body="$1"
+            assert_body_matches 'href="(\.\./)?v[0-9]+\.[0-9]+\.[0-9]+/' "$body" || return 1
+          }
+
           check_search_index() {
             local body="$1"
             assert_body_contains "\"location\":\"$PUBLIC_ARCHITECTURE_PATH\"" "$body" || return 1
@@ -212,9 +254,10 @@ jobs:
             return 1
           }
 
-          retry_until_contains "" "AI-NATIVE KUBERNETES TUI"
+          retry_until_body_checks "" "home page structure" check_home_page
           retry_until_contains "getting-started/" "hellices/korvid/korvid"
           retry_until_contains "release-notes/unreleased/" "Unreleased (main)"
+          retry_until_body_checks "release-notes/unreleased/" "release-notes navigation" check_release_notes_nav
           retry_until_body_checks "search/search_index.json" "search index scope" check_search_index
           retry_until_body_checks "sitemap.xml" "sitemap scope" check_sitemap
           retry_until_ok "assets/demo.mp4"
