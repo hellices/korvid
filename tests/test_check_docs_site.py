@@ -14,7 +14,11 @@ SCRIPT = Path(__file__).parent.parent / "scripts" / "check_docs_site.py"
 SITE_URL = "https://hellices.github.io/korvid/"
 PUBLIC_CONTRIBUTOR_PATH = "dev/"
 PUBLIC_ARCHITECTURE_PATH = "dev/specs/2026-08-12-korvid-architecture/"
-PUBLIC_EVAL_PATH = "evals/methodology/"
+PUBLIC_EVAL_PATHS = (
+    "evals/methodology/",
+    "evals/scenarios/",
+    "evals/scoreboard/",
+)
 INTERNAL_CONTRACT_TESTS_PATH = "dev/contract-tests/"
 INTERNAL_RELEASE_PATH = "release/"
 
@@ -53,6 +57,10 @@ def _write_site(
     return site
 
 
+def _public_eval_urls() -> list[str]:
+    return [f"{SITE_URL}{path}" for path in PUBLIC_EVAL_PATHS]
+
+
 def test_check_site_accepts_expected_publication_artifacts(tmp_path: Path) -> None:
     module = _module()
     site = _write_site(
@@ -60,12 +68,12 @@ def test_check_site_accepts_expected_publication_artifacts(tmp_path: Path) -> No
         search_locations=[
             PUBLIC_CONTRIBUTOR_PATH,
             PUBLIC_ARCHITECTURE_PATH,
-            PUBLIC_EVAL_PATH,
+            *PUBLIC_EVAL_PATHS,
         ],
         sitemap_locations=[
             f"{SITE_URL}{PUBLIC_CONTRIBUTOR_PATH}",
             f"{SITE_URL}{PUBLIC_ARCHITECTURE_PATH}",
-            f"{SITE_URL}{PUBLIC_EVAL_PATH}",
+            *_public_eval_urls(),
         ],
     )
 
@@ -78,11 +86,11 @@ def test_check_site_requires_the_public_dev_index_in_search_and_sitemap(tmp_path
         tmp_path,
         search_locations=[
             PUBLIC_ARCHITECTURE_PATH,
-            PUBLIC_EVAL_PATH,
+            *PUBLIC_EVAL_PATHS,
         ],
         sitemap_locations=[
             f"{SITE_URL}{PUBLIC_ARCHITECTURE_PATH}",
-            f"{SITE_URL}{PUBLIC_EVAL_PATH}",
+            *_public_eval_urls(),
         ],
     )
 
@@ -93,6 +101,35 @@ def test_check_site_requires_the_public_dev_index_in_search_and_sitemap(tmp_path
     )
 
 
+def test_check_site_requires_all_cited_eval_pages_in_search_and_sitemap(tmp_path: Path) -> None:
+    module = _module()
+    site = _write_site(
+        tmp_path,
+        search_locations=[
+            PUBLIC_CONTRIBUTOR_PATH,
+            PUBLIC_ARCHITECTURE_PATH,
+            PUBLIC_EVAL_PATHS[0],
+        ],
+        sitemap_locations=[
+            f"{SITE_URL}{PUBLIC_CONTRIBUTOR_PATH}",
+            f"{SITE_URL}{PUBLIC_ARCHITECTURE_PATH}",
+            f"{SITE_URL}{PUBLIC_EVAL_PATHS[0]}",
+        ],
+    )
+
+    errors = module.check_site(site)
+    assert "search/search_index.json is missing required location 'evals/scenarios/'" in errors
+    assert "search/search_index.json is missing required location 'evals/scoreboard/'" in errors
+    assert (
+        "sitemap.xml is missing required URL 'https://hellices.github.io/korvid/evals/scenarios/'"
+        in errors
+    )
+    assert (
+        "sitemap.xml is missing required URL 'https://hellices.github.io/korvid/evals/scoreboard/'"
+        in errors
+    )
+
+
 def test_check_site_rejects_extra_internal_dev_pages_in_search_and_sitemap(tmp_path: Path) -> None:
     module = _module()
     site = _write_site(
@@ -100,13 +137,13 @@ def test_check_site_rejects_extra_internal_dev_pages_in_search_and_sitemap(tmp_p
         search_locations=[
             PUBLIC_CONTRIBUTOR_PATH,
             PUBLIC_ARCHITECTURE_PATH,
-            PUBLIC_EVAL_PATH,
+            *PUBLIC_EVAL_PATHS,
             INTERNAL_CONTRACT_TESTS_PATH,
         ],
         sitemap_locations=[
             f"{SITE_URL}{PUBLIC_CONTRIBUTOR_PATH}",
             f"{SITE_URL}{PUBLIC_ARCHITECTURE_PATH}",
-            f"{SITE_URL}{PUBLIC_EVAL_PATH}",
+            *_public_eval_urls(),
             f"{SITE_URL}{INTERNAL_CONTRACT_TESTS_PATH}",
         ],
     )
@@ -129,13 +166,13 @@ def test_check_site_reports_release_artifacts_as_forbidden(tmp_path: Path) -> No
         search_locations=[
             PUBLIC_CONTRIBUTOR_PATH,
             PUBLIC_ARCHITECTURE_PATH,
-            PUBLIC_EVAL_PATH,
+            *PUBLIC_EVAL_PATHS,
             INTERNAL_RELEASE_PATH,
         ],
         sitemap_locations=[
             f"{SITE_URL}{PUBLIC_CONTRIBUTOR_PATH}",
             f"{SITE_URL}{PUBLIC_ARCHITECTURE_PATH}",
-            f"{SITE_URL}{PUBLIC_EVAL_PATH}",
+            *_public_eval_urls(),
             f"{SITE_URL}{INTERNAL_RELEASE_PATH}",
         ],
     )

@@ -94,6 +94,8 @@ jobs:
           PUBLIC_CONTRIBUTOR_PATH="dev/"
           PUBLIC_ARCHITECTURE_PATH="dev/specs/2026-08-12-korvid-architecture/"
           PUBLIC_EVAL_PATH="evals/methodology/"
+          PUBLIC_SCENARIOS_PATH="evals/scenarios/"
+          PUBLIC_SCOREBOARD_PATH="evals/scoreboard/"
           INTERNAL_RELEASE_PATH="release/"
 
           CONTENT_ATTEMPTS=4
@@ -241,6 +243,21 @@ jobs:
             done <<<"$lines"
           }
 
+          lines_in_set() {
+            local lines="$1"
+            shift
+            local line
+            local expected
+            while IFS= read -r line; do
+              for expected in "$@"; do
+                if [ "$line" = "$expected" ]; then
+                  printf '%s\n' "$line"
+                  break
+                fi
+              done
+            done <<<"$lines"
+          }
+
           assert_exact_line_set() {
             local description="$1"
             local actual="$2"
@@ -314,14 +331,25 @@ jobs:
             local body="$1"
             local locations
             local dev_locations
+            local cited_eval_locations
             locations="$(search_locations "$body")" || return 1
             dev_locations="$(lines_with_prefix "dev/" "$locations")"
+            cited_eval_locations="$(lines_in_set \
+              "$locations" \
+              "$PUBLIC_EVAL_PATH" \
+              "$PUBLIC_SCENARIOS_PATH" \
+              "$PUBLIC_SCOREBOARD_PATH")"
             assert_exact_line_set \
               "search index dev/ locations" \
               "$dev_locations" \
               "$PUBLIC_CONTRIBUTOR_PATH" \
               "$PUBLIC_ARCHITECTURE_PATH" || return 1
-            assert_line_present "$PUBLIC_EVAL_PATH" "$locations" || return 1
+            assert_exact_line_set \
+              "search index cited eval locations" \
+              "$cited_eval_locations" \
+              "$PUBLIC_EVAL_PATH" \
+              "$PUBLIC_SCENARIOS_PATH" \
+              "$PUBLIC_SCOREBOARD_PATH" || return 1
             assert_line_absent "$INTERNAL_RELEASE_PATH" "$locations" || return 1
           }
 
@@ -330,15 +358,26 @@ jobs:
             local urls
             local dev_urls
             local dev_prefix
+            local cited_eval_urls
             urls="$(sitemap_urls "$body")" || return 1
             dev_prefix="$(canonical_url_for "$PUBLIC_CONTRIBUTOR_PATH")"
             dev_urls="$(lines_with_prefix "$dev_prefix" "$urls")"
+            cited_eval_urls="$(lines_in_set \
+              "$urls" \
+              "$(canonical_url_for "$PUBLIC_EVAL_PATH")" \
+              "$(canonical_url_for "$PUBLIC_SCENARIOS_PATH")" \
+              "$(canonical_url_for "$PUBLIC_SCOREBOARD_PATH")")"
             assert_exact_line_set \
               "sitemap dev URLs" \
               "$dev_urls" \
               "$(canonical_url_for "$PUBLIC_CONTRIBUTOR_PATH")" \
               "$(canonical_url_for "$PUBLIC_ARCHITECTURE_PATH")" || return 1
-            assert_line_present "$(canonical_url_for "$PUBLIC_EVAL_PATH")" "$urls" || return 1
+            assert_exact_line_set \
+              "sitemap cited eval URLs" \
+              "$cited_eval_urls" \
+              "$(canonical_url_for "$PUBLIC_EVAL_PATH")" \
+              "$(canonical_url_for "$PUBLIC_SCENARIOS_PATH")" \
+              "$(canonical_url_for "$PUBLIC_SCOREBOARD_PATH")" || return 1
             assert_line_absent "$(canonical_url_for "$INTERNAL_RELEASE_PATH")" "$urls" || return 1
           }
 

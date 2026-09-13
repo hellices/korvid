@@ -402,12 +402,17 @@ git commit -m "test: verify public documentation scope"
 
 Skip this commit when validation required no corrections.
 
-- [ ] **Step 6: Request review and open the PR**
+- [ ] **Step 6: Hand off the verified branch without bypassing PR authorization**
 
-Run the repository's review workflow, publish the branch, and open a pull request with:
+Only after explicit human instruction, publish the branch, request review, and
+open a pull request with:
 
 - a summary of the stable-install and release-state cleanup;
 - the before/after search-index scope;
 - exact test and strict-build evidence;
 - desktop/mobile browser validation;
 - `Closes #391`.
+
+Otherwise keep the branch as-is, do not request review, do not open a pull
+request, and hand the verified commit hash plus the validation evidence back to
+the maintainer for the next explicit instruction.

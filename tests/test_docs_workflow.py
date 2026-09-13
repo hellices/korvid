@@ -32,6 +32,8 @@ CANONICAL_SITE_URL = "https://hellices.github.io/korvid/"
 PUBLIC_CONTRIBUTOR_PATH = "dev/"
 PUBLIC_ARCHITECTURE_PATH = "dev/specs/2026-08-12-korvid-architecture/"
 PUBLIC_EVAL_PATH = "evals/methodology/"
+PUBLIC_SCENARIOS_PATH = "evals/scenarios/"
+PUBLIC_SCOREBOARD_PATH = "evals/scoreboard/"
 INTERNAL_CONTRACT_TESTS_PATH = "dev/contract-tests/"
 INTERNAL_RELEASE_PATH = "release/"
 CLEANUP_PLAN_DOC = (
@@ -248,6 +250,13 @@ def _smoke_script(config: dict[str, Any]) -> str:
     return script
 
 
+def _cleanup_plan_task3_section() -> str:
+    plan = CLEANUP_PLAN_DOC.read_text(encoding="utf-8")
+    match = re.search(r"^### Task 3: .*?(?=^### Task 4:|\Z)", plan, flags=re.MULTILINE | re.DOTALL)
+    assert match is not None, "cleanup plan must define Task 3"
+    return match.group(0)
+
+
 def _smoke_steps(config: dict[str, Any]) -> list[dict[str, Any]]:
     smoke = config["jobs"]["smoke"]
     steps = smoke["steps"]
@@ -323,6 +332,7 @@ def _run_smoke_checker(
             "search_locations",
             "sitemap_urls",
             "lines_with_prefix",
+            "lines_in_set",
             "assert_exact_line_set",
             "assert_line_present",
             "assert_line_absent",
@@ -342,6 +352,8 @@ def _run_smoke_checker(
         PUBLIC_CONTRIBUTOR_PATH={shlex.quote(PUBLIC_CONTRIBUTOR_PATH)}
         PUBLIC_ARCHITECTURE_PATH={shlex.quote(PUBLIC_ARCHITECTURE_PATH)}
         PUBLIC_EVAL_PATH={shlex.quote(PUBLIC_EVAL_PATH)}
+        PUBLIC_SCENARIOS_PATH={shlex.quote(PUBLIC_SCENARIOS_PATH)}
+        PUBLIC_SCOREBOARD_PATH={shlex.quote(PUBLIC_SCOREBOARD_PATH)}
         INTERNAL_RELEASE_PATH={shlex.quote(INTERNAL_RELEASE_PATH)}
         CONTENT_ATTEMPTS=1
         CONTENT_CURL_MAX_TIME=1
@@ -374,6 +386,8 @@ def _large_search_index_body() -> str:
         {"location": PUBLIC_CONTRIBUTOR_PATH},
         {"location": PUBLIC_ARCHITECTURE_PATH},
         {"location": PUBLIC_EVAL_PATH},
+        {"location": PUBLIC_SCENARIOS_PATH},
+        {"location": PUBLIC_SCOREBOARD_PATH},
     ]
     body = json.dumps({"docs": docs})
     while len(body.encode("utf-8")) <= 131072:
@@ -535,7 +549,9 @@ def test_smoke_scope_checker_succeeds_when_search_index_matches_contract() -> No
                 '{"docs":['
                 '{"location":"dev/"},'
                 '{"location":"dev/specs/2026-08-12-korvid-architecture/"},'
-                '{"location":"evals/methodology/"}'
+                '{"location":"evals/methodology/"},'
+                '{"location":"evals/scenarios/"},'
+                '{"location":"evals/scoreboard/"}'
                 "]}"
             ),
         )
@@ -565,7 +581,7 @@ def test_smoke_scope_checker_succeeds_when_search_index_matches_contract() -> No
             "search index scope",
             '{"docs":[{"location":"dev/"},'
             '{"location":"dev/specs/2026-08-12-korvid-architecture/"},'
-            '{"location":"evals/methodology/"},{"location":"dev/contract-tests/"}]}',
+            '{"location":"evals/methodology/"}]}',
         ),
         (
             "check_search_index",
@@ -573,6 +589,15 @@ def test_smoke_scope_checker_succeeds_when_search_index_matches_contract() -> No
             "search index scope",
             '{"docs":[{"location":"dev/specs/2026-08-12-korvid-architecture/"},'
             '{"location":"evals/methodology/"},{"location":"dev/ui-controllers/"}]}',
+        ),
+        (
+            "check_search_index",
+            "search/search_index.json",
+            "search index scope",
+            '{"docs":[{"location":"dev/"},'
+            '{"location":"dev/specs/2026-08-12-korvid-architecture/"},'
+            '{"location":"evals/methodology/"},{"location":"evals/scenarios/"},'
+            '{"location":"evals/scoreboard/"},{"location":"dev/contract-tests/"}]}',
         ),
         (
             "check_sitemap",
@@ -600,7 +625,6 @@ def test_smoke_scope_checker_succeeds_when_search_index_matches_contract() -> No
                 f"<url><loc>{CANONICAL_SITE_URL}{PUBLIC_CONTRIBUTOR_PATH}</loc></url>"
                 f"<url><loc>{CANONICAL_SITE_URL}{PUBLIC_ARCHITECTURE_PATH}</loc></url>"
                 f"<url><loc>{CANONICAL_SITE_URL}{PUBLIC_EVAL_PATH}</loc></url>"
-                f"<url><loc>{CANONICAL_SITE_URL}{INTERNAL_CONTRACT_TESTS_PATH}</loc></url>"
                 "</urlset>"
             ),
         ),
@@ -613,6 +637,21 @@ def test_smoke_scope_checker_succeeds_when_search_index_matches_contract() -> No
                 f"<url><loc>{CANONICAL_SITE_URL}{PUBLIC_ARCHITECTURE_PATH}</loc></url>"
                 f"<url><loc>{CANONICAL_SITE_URL}{PUBLIC_EVAL_PATH}</loc></url>"
                 f"<url><loc>{CANONICAL_SITE_URL}dev/ui-controllers/</loc></url>"
+                "</urlset>"
+            ),
+        ),
+        (
+            "check_sitemap",
+            "sitemap.xml",
+            "sitemap scope",
+            (
+                "<urlset>"
+                f"<url><loc>{CANONICAL_SITE_URL}{PUBLIC_CONTRIBUTOR_PATH}</loc></url>"
+                f"<url><loc>{CANONICAL_SITE_URL}{PUBLIC_ARCHITECTURE_PATH}</loc></url>"
+                f"<url><loc>{CANONICAL_SITE_URL}{PUBLIC_EVAL_PATH}</loc></url>"
+                f"<url><loc>{CANONICAL_SITE_URL}{PUBLIC_SCENARIOS_PATH}</loc></url>"
+                f"<url><loc>{CANONICAL_SITE_URL}{PUBLIC_SCOREBOARD_PATH}</loc></url>"
+                f"<url><loc>{CANONICAL_SITE_URL}{INTERNAL_CONTRACT_TESTS_PATH}</loc></url>"
                 "</urlset>"
             ),
         ),
@@ -778,6 +817,8 @@ def test_smoke_job_checks_public_pages_search_and_media_entrypoints() -> None:
         f'PUBLIC_CONTRIBUTOR_PATH="{PUBLIC_CONTRIBUTOR_PATH}"',
         f'PUBLIC_ARCHITECTURE_PATH="{PUBLIC_ARCHITECTURE_PATH}"',
         f'PUBLIC_EVAL_PATH="{PUBLIC_EVAL_PATH}"',
+        f'PUBLIC_SCENARIOS_PATH="{PUBLIC_SCENARIOS_PATH}"',
+        f'PUBLIC_SCOREBOARD_PATH="{PUBLIC_SCOREBOARD_PATH}"',
         f'INTERNAL_RELEASE_PATH="{INTERNAL_RELEASE_PATH}"',
     ):
         assert assignment in script
@@ -785,6 +826,7 @@ def test_smoke_job_checks_public_pages_search_and_media_entrypoints() -> None:
     assert "search_locations()" in script
     assert "sitemap_urls()" in script
     assert "canonical_url_for()" in script
+    assert "lines_in_set()" in script
     assert "assert_exact_line_set()" in script
     assert "playwright" not in script.lower()
     assert "npm " not in script.lower()
@@ -964,14 +1006,25 @@ def test_cleanup_plan_uses_findall_for_sitemap_locations() -> None:
 
 
 def test_cleanup_plan_task3_names_the_workflow_test_and_local_smoke_replay() -> None:
-    task = CLEANUP_PLAN_DOC.read_text(encoding="utf-8").split(
-        "### Task 3: Run the full documentation gate and prepare the pull request", 1
-    )[1]
+    task = _cleanup_plan_task3_section()
     normalized = " ".join(task.lower().replace("`", "").split())
     assert ".github/workflows/docs.yml" in task
     assert "tests/test_docs_workflow.py" in task
     assert "extract the smoke step" in normalized
     assert "site_url" in normalized
+
+
+def test_cleanup_plan_task3_preserves_human_pr_authorization_gate() -> None:
+    normalized = " ".join(_cleanup_plan_task3_section().lower().replace("`", "").split())
+    assert "explicit human instruction" in normalized
+    assert re.search(
+        r"only after explicit human instruction[^.]*"
+        r"(push|publish)[^.]*branch[^.]*"
+        r"(open|request)[^.]*pull request",
+        normalized,
+    )
+    assert "otherwise keep the branch" in normalized
+    assert "request review and open the pr" not in normalized
 
 
 def test_cleanup_plan_uses_tolerant_mkdocs_loader_examples() -> None:
