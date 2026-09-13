@@ -199,7 +199,7 @@ def _event_time(event: dict[str, Any]) -> datetime | None:
         return None
     try:
         return _aware(datetime.fromisoformat(raw))
-    except ValueError:
+    except (ValueError, OverflowError):
         return None
 
 
@@ -288,6 +288,8 @@ def _was_observed(
 def _clearable_location(resource: dict[str, Any]) -> bool:
     metadata = _mapping(resource.get("metadata"))
     if not isinstance(metadata.get("name"), str) or not metadata["name"]:
+        return False
+    if not isinstance(metadata.get("uid"), str) or not metadata["uid"]:
         return False
     fields = [
         (metadata[field], _TARGET_LIMITS[field])
@@ -504,7 +506,15 @@ class PulseModel:
         now = self._advance_time(observed_at)
         occurred_at = _event_time(event)
         if occurred_at is None:
-            self._mark_undated(now)
+            self._mark_timestamp_gap(
+                now,
+                "Warning omitted because its event timestamp is missing, invalid, or timezone-naive.",
+            )
+            return
+        if occurred_at > now:
+            self._mark_timestamp_gap(
+                now, "Warning omitted because its event timestamp is in the future."
+            )
             return
         if occurred_at < now - self._retention:
             return
@@ -560,15 +570,12 @@ class PulseModel:
             detail += " Warning text exceeded field limits and was truncated."
         self.set_coverage(PulseCoverage("event-buffer", "capped", now, detail))
 
-    def _mark_undated(self, now: datetime) -> None:
+    def _mark_timestamp_gap(self, now: datetime, omission: str) -> None:
         previous = self._coverage["events"]
         state: PulseCoverageState = "partial"
         if previous.state in {"failed", "forbidden", "unavailable", "capped"}:
             state = previous.state
         detail = previous.detail
-        omission = (
-            "Warning omitted because its event timestamp is missing, invalid, or timezone-naive."
-        )
         if omission not in detail:
             detail = f"{detail} {omission}".strip()
         self.set_coverage(

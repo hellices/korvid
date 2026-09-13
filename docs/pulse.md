@@ -33,7 +33,9 @@ and previous failure details remain available.
 
 Complete fresh resource snapshots can remove recovered current findings.
 Incomplete reads do not resolve unobserved findings, and malformed resource
-status cannot clear prior evidence. Older snapshots cannot roll back newer
+status or a missing/empty/non-string UID cannot clear prior evidence. Such
+objects can still contribute fresh findings, with partial assessment coverage.
+Older snapshots cannot roll back newer
 observations. If a later page fails, valid earlier pages still contribute
 findings, observed recoveries, and Warning history; partial coverage retains
 the failure explanation without clearing unobserved findings.
@@ -41,8 +43,13 @@ Current-finding retention loss is disclosed, never presented as
 recovery. Old Warning Events can
 remain after recovery, and reading, expiring, or evicting an Event never
 resolves a current finding. Event updates are deduplicated by Event UID and
-keep the cumulative count rather than adding it repeatedly. Undated/invalid
-Event timestamps produce a coverage gap instead of invented freshness.
+keep the cumulative count rather than adding it repeatedly. The event-time
+window includes both endpoints: from 15 minutes before the model's effective
+observation time through that time. Future timestamps are omitted with a
+coverage gap, without a clock-skew allowance or clamping them to the present;
+they cannot evict valid recent evidence. Missing, invalid, timezone-naive,
+or UTC-overflowing timestamps likewise produce a gap rather than invented
+freshness, without preventing later valid Events from being ingested.
 
 ## Keyboard workflow
 

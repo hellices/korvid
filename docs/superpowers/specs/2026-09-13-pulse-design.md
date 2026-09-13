@@ -71,7 +71,12 @@ the failure detail, accepts observed findings/recoveries and Warning history,
 and never clears unobserved identities.
 
 Recent Warning storage is independently bounded to 100 entries / 128 KiB and
-a 15-minute event-time window. Repeated updates of one Event UID replace the
+a 15-minute event-time window, inclusive at both endpoints against the model's
+effective observation clock. Future timestamps have no skew allowance and are
+omitted before retention/version updates rather than clamped to the present.
+Missing, invalid, timezone-naive, UTC-overflowing, and future timestamps expose
+coverage gaps without aborting ingestion of subsequent valid Events.
+Repeated updates of one Event UID replace the
 same entry and use the cumulative Event count rather than adding it again.
 Unknown reasons are not filtered out by a catalogue. Capacity loss is visible.
 Current findings have a separate per-rule-source retention cap of 200 entries /
@@ -79,6 +84,9 @@ Current findings have a separate per-rule-source retention cap of 200 entries /
 across two sources. Per-source loss coverage and cumulative discard counters
 persist until reset; eviction is not recovery. Stale snapshots and malformed
 unassessable resources cannot clear newer or previously established findings.
+An observed object needs a non-empty string UID before it can clear retained
+evidence; an unverified identity may still contribute a fresh finding but
+makes assessment incomplete.
 Rendering is coalesced to at most four updates per second. Event ingestion
 does not trigger network reads, table reordering, focus changes, or popups.
 

@@ -199,6 +199,92 @@ def test_partial_read_recognizes_recreated_resource_without_kind_metadata() -> N
     assert model.snapshot(NOW).current == ()
 
 
+@pytest.mark.parametrize("identity", [{}, {"uid": ""}, {"uid": None}, {"uid": False}])
+@pytest.mark.parametrize("state", ["complete", "partial", "capped"])
+def test_missing_uid_evidence_cannot_clear_verified_incarnation(
+    identity: dict[str, Any], state: PulseCoverageState
+) -> None:
+    model = PulseModel([_WidgetRule()])
+    _replace(model, [_object()])
+    original = model.snapshot(NOW).current
+    healthy = _object(broken=False)
+    healthy["metadata"].pop("uid")
+    healthy["metadata"].update(identity)
+
+    _replace(model, [healthy], state=state, observed_at=NOW + timedelta(seconds=1))
+
+    snapshot = model.snapshot(NOW + timedelta(seconds=1))
+    assert snapshot.current == original
+    coverage = _coverage(snapshot, "widgets")
+    assert coverage.state == ("capped" if state == "capped" else "partial")
+    assert "Assessment incomplete" in coverage.detail
+
+
+def test_missing_uid_still_admits_fresh_finding_without_clearing_evidence() -> None:
+    model = PulseModel([_WidgetRule()])
+    resource = _object()
+    resource["metadata"].pop("uid")
+
+    _replace(model, [resource])
+
+    snapshot = model.snapshot(NOW)
+    assert len(snapshot.current) == 1
+    assert snapshot.current[0].reason == "WidgetBroken"
+    assert snapshot.current[0].target.uid is None
+    assert _coverage(snapshot, "widgets").state == "partial"
+
+
+@pytest.mark.parametrize(
+    "offset", [timedelta(microseconds=1), timedelta(seconds=1), timedelta(days=3650)]
+)
+def test_future_warning_cannot_replace_valid_recent_evidence(offset: timedelta) -> None:
+    model = PulseModel(max_events=1)
+    model.record_warning(_event("valid", occurred_at=NOW - timedelta(seconds=1)), 0, NOW)
+    original = model.snapshot(NOW).recent
+    future = _event("future", occurred_at=NOW + offset)
+
+    model.record_warning(future, 0, NOW)
+
+    snapshot = model.snapshot(NOW)
+    assert snapshot.recent == original
+    assert snapshot.dropped == 0
+    coverage = _coverage(snapshot, "events")
+    assert coverage.state == "partial"
+    assert "future" in coverage.detail.lower()
+    model.record_warning(future, 0, NOW)
+    assert _coverage(model.snapshot(NOW), "events") == coverage
+
+
+@pytest.mark.parametrize("offset", [timedelta(0), -timedelta(minutes=15)])
+def test_recent_warning_window_includes_both_endpoints(offset: timedelta) -> None:
+    model = PulseModel()
+
+    model.record_warning(_event(occurred_at=NOW + offset), 0, NOW)
+
+    assert len(model.snapshot(NOW).recent) == 1
+
+
+@pytest.mark.parametrize("timestamp", ["0001-01-01T00:00:00+01:00", "9999-12-31T23:59:59-01:00"])
+def test_utc_overflow_is_a_gap_without_aborting_following_warning(timestamp: str) -> None:
+    model = PulseModel()
+    invalid = _event("invalid")
+    invalid["lastTimestamp"] = timestamp
+    valid = _event("valid")
+    valid["reason"] = "ValidAfterOverflow"
+
+    model.replace_source(
+        "events", [invalid, valid], PulseCoverage("events", "partial", NOW, "API 503: unavailable")
+    )
+
+    snapshot = model.snapshot(NOW)
+    assert len(snapshot.recent) == 1
+    assert snapshot.recent[0].reason == "ValidAfterOverflow"
+    coverage = _coverage(snapshot, "events")
+    assert coverage.state == "partial"
+    assert "timestamp" in coverage.detail.lower()
+    assert "API 503: unavailable" in coverage.detail
+
+
 def test_older_success_cannot_replace_newer_findings_or_coverage() -> None:
     model = PulseModel([_WidgetRule()])
     _replace(model, [_object()])
