@@ -1178,6 +1178,13 @@ def test_smoke_publication_artifact_retry_fetches_home_search_and_sitemap_as_one
     assert 'sleep "$CONTENT_SLEEP_SECONDS"' in helper_body
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason=(
+        "regression models Linux execve's per-env-string limit, and the "
+        "POSIX shebang wrapper is Linux-only"
+    ),
+)
 def test_smoke_scope_checker_accepts_a_large_search_index_body_without_body_env(
     tmp_path: Path,
 ) -> None:
