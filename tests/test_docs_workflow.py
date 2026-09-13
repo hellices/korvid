@@ -354,10 +354,10 @@ def _git_bash_python_executable() -> str:
     return shlex.quote(executable)
 
 
-def _rewrite_python3_for_git_bash(functions: str) -> str:
+def _git_bash_python3_shim() -> str:
     if sys.platform != "win32":
-        return functions
-    return functions.replace("python3 -c", f"{_git_bash_python_executable()} -c")
+        return ""
+    return f'python3() {{ {_git_bash_python_executable()} "$@"; }}\n\n'
 
 
 def _git_bash_drive_path(executable: str) -> str:
@@ -395,13 +395,63 @@ def test_git_bash_python_executable_normalizes_drive_letter_and_spaces(
     assert _git_bash_python_executable() == expected
 
 
-def test_rewrite_python3_for_git_bash_keeps_non_windows_python3_literal(
+def test_git_bash_python3_shim_is_syntactically_valid_for_spaced_windows_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(sys, "platform", "linux")
-    functions = "python3 -c 'print(1)'\npython3 -c 'print(2)'"
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(sys, "executable", r"E:\Users\Agent Smith\my venv\Scripts\python.exe")
 
-    assert _rewrite_python3_for_git_bash(functions) == functions
+    result = subprocess.run(
+        ["bash", "-n", "-c", f"{_git_bash_python3_shim()}\npython3 -c 'print(1)'"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    assert result.stderr == ""
+
+
+def test_git_bash_python3_shim_invokes_target_with_forwarded_arguments(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    fake_python = tmp_path / "fake venv" / "python3"
+    fake_python.parent.mkdir(parents=True)
+    fake_python.write_text(
+        textwrap.dedent(
+            """\
+            #!/usr/bin/env python3
+            import json
+            import sys
+
+            print(json.dumps(sys.argv[1:]))
+            """
+        ),
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(
+        sys.modules[__name__],
+        "_git_bash_python_executable",
+        lambda: shlex.quote(str(fake_python)),
+    )
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f"{_git_bash_python3_shim()}\npython3 -c 'print(1)' sample-arg",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout.strip() == json.dumps(["-c", "print(1)", "sample-arg"])
 
 
 def _report_smoke_subprocess_failure(
@@ -451,7 +501,6 @@ def _run_smoke_checker(
             "retry_until_body_checks",
         )
     )
-    functions = _rewrite_python3_for_git_bash(functions)
     probe = textwrap.dedent(
         f"""\
         set -euo pipefail
@@ -472,7 +521,7 @@ def _run_smoke_checker(
         CONTENT_CURL_MAX_TIME=1
         CONTENT_SLEEP_SECONDS=0
 
-        {functions}
+        {_git_bash_python3_shim()}{functions}
 
         fetch_body() {{
           cat
@@ -559,7 +608,6 @@ def _run_smoke_publication_checker(
             "retry_until_publication_artifacts",
         )
     )
-    functions = _rewrite_python3_for_git_bash(functions)
     probe = textwrap.dedent(
         f"""\
         set -euo pipefail
@@ -580,7 +628,7 @@ def _run_smoke_publication_checker(
         CONTENT_CURL_MAX_TIME=1
         CONTENT_SLEEP_SECONDS=0
 
-        {functions}
+        {_git_bash_python3_shim()}{functions}
 
         fetch_body() {{
           local path="$1"
@@ -771,8 +819,9 @@ def test_run_smoke_checker_uses_a_portable_noninteractive_bash_invocation(
         == 0
     )
     assert captured["command"][:4] == [str(git_bash), "--noprofile", "--norc", "-c"]
-    expected_python = f"{_git_bash_python_executable()} -c"
-    assert captured["command"][4].count(expected_python) == _python3_invocation_count(
+    shim = f'python3() {{ {_git_bash_python_executable()} "$@"; }}'
+    assert shim in captured["command"][4]
+    assert captured["command"][4].count("python3 -c") == _python3_invocation_count(
         _smoke_script(_load()),
         (
             "url_for",
@@ -797,7 +846,7 @@ def test_run_smoke_checker_uses_a_portable_noninteractive_bash_invocation(
     )
 
 
-def test_run_smoke_publication_checker_rewrites_python3_for_windows_git_bash(
+def test_run_smoke_publication_checker_injects_windows_python3_shim(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     git_root = tmp_path / "Git"
@@ -839,8 +888,9 @@ def test_run_smoke_publication_checker_rewrites_python3_for_windows_git_bash(
 
     assert _run_smoke_publication_checker(home_body, search_body, sitemap_body) == 0
     assert captured["command"][:4] == [str(git_bash), "--noprofile", "--norc", "-c"]
-    expected_python = f"{_git_bash_python_executable()} -c"
-    assert captured["command"][4].count(expected_python) == _python3_invocation_count(
+    shim = f'python3() {{ {_git_bash_python_executable()} "$@"; }}'
+    assert shim in captured["command"][4]
+    assert captured["command"][4].count("python3 -c") == _python3_invocation_count(
         _smoke_script(_load()),
         (
             "url_for",
@@ -862,6 +912,32 @@ def test_run_smoke_publication_checker_rewrites_python3_for_windows_git_bash(
             "retry_until_publication_artifacts",
         ),
     )
+
+
+def test_posix_smoke_probes_do_not_inject_a_windows_python3_shim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[list[str]] = []
+
+    def fake_run(command: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+        captured.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert _run_smoke_checker("check_home_page", "", "home page structure", _smoke_home_body()) == 0
+    assert (
+        _run_smoke_publication_checker(
+            _smoke_home_body(),
+            _search_index_body(PUBLIC_HOME_SEARCH_PATH),
+            _sitemap_body(PUBLIC_HOME_SEARCH_PATH),
+        )
+        == 0
+    )
+
+    for command in captured:
+        assert "python3() {" not in command[4]
 
 
 def _smoke_invocation_count(script: str, helper_name: str) -> int:
