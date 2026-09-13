@@ -25,6 +25,7 @@
 
 **Files:**
 - Modify: `tests/test_platforms.py`
+- Modify: `tests/test_ci_workflow.py`
 - Modify: `.github/workflows/ci.yml`
 
 **Interfaces:**
@@ -78,6 +79,21 @@ def test_ci_windows_docs_harness_runs_once_in_fresh_process() -> None:
     assert docs_step.get("continue-on-error", False) is False
 ```
 
+Replace the existing seed contract in `tests/test_ci_workflow.py` with:
+
+```python
+def test_windows_pytest_processes_print_and_share_one_deterministic_seed() -> None:
+    windows_job = _jobs(CI_WORKFLOW)["windows-test"]
+    runs = _run_steps(windows_job)
+    seed_messages = [run for run in runs if "pytest-randomly seed:" in run]
+    seeded_runs = [run for run in runs if "--randomly-seed=" in run]
+
+    assert seed_messages == [f'Write-Output "pytest-randomly seed: {WINDOWS_SEED}"']
+    assert len(seeded_runs) == 2
+    assert all(run.endswith(f" --randomly-seed={WINDOWS_SEED}") for run in seeded_runs)
+    assert sum(run.count("--randomly-seed=") for run in runs) == 2
+```
+
 - [ ] **Step 2: Run the contract and observe RED**
 
 Run:
@@ -88,11 +104,12 @@ UV_PROJECT_ENVIRONMENT=/Users/hwang-inhwan/workspace/kube/.worktrees/repository-
 PYTHONPATH="$PWD/src:$PWD" \
 uv run pytest -p no:tach \
   tests/test_platforms.py::test_ci_workflow_defines_the_required_windows_test_job \
-  tests/test_platforms.py::test_ci_windows_docs_harness_runs_once_in_fresh_process -q
+  tests/test_platforms.py::test_ci_windows_docs_harness_runs_once_in_fresh_process \
+  tests/test_ci_workflow.py::test_windows_pytest_processes_print_and_share_one_deterministic_seed -q
 ```
 
-Expected: both tests fail because the dedicated command and the new full-suite
-exclusion do not yet exist.
+Expected: all three tests fail because the dedicated command, the new
+full-suite exclusion, and the second seeded pytest process do not yet exist.
 
 - [ ] **Step 3: Add the minimal workflow isolation**
 
@@ -119,7 +136,7 @@ Replace the final Windows suite step with:
 
 Run the Step 2 command again.
 
-Expected: `2 passed`.
+Expected: `3 passed`.
 
 - [ ] **Step 5: Verify the affected workflow surface**
 
@@ -129,19 +146,19 @@ Run:
 UV_NO_SYNC=1 \
 UV_PROJECT_ENVIRONMENT=/Users/hwang-inhwan/workspace/kube/.worktrees/repository-stabilization-20260911/.venv \
 PYTHONPATH="$PWD/src:$PWD" \
-uv run pytest -p no:tach tests/test_platforms.py -q
+uv run pytest -p no:tach tests/test_platforms.py tests/test_ci_workflow.py -q
 UV_NO_SYNC=1 \
 UV_PROJECT_ENVIRONMENT=/Users/hwang-inhwan/workspace/kube/.worktrees/repository-stabilization-20260911/.venv \
 PYTHONPATH="$PWD/src:$PWD" \
-uv run ruff check tests/test_platforms.py
+uv run ruff check tests/test_platforms.py tests/test_ci_workflow.py
 UV_NO_SYNC=1 \
 UV_PROJECT_ENVIRONMENT=/Users/hwang-inhwan/workspace/kube/.worktrees/repository-stabilization-20260911/.venv \
 PYTHONPATH="$PWD/src:$PWD" \
-uv run ruff format --check tests/test_platforms.py
+uv run ruff format --check tests/test_platforms.py tests/test_ci_workflow.py
 uvx zizmor --min-severity medium .github/workflows/ci.yml
 ```
 
-Expected: `25 passed`, Ruff reports no errors or formatting changes, and
+Expected: `31 passed`, Ruff reports no errors or formatting changes, and
 zizmor reports no medium-or-higher findings.
 
 - [ ] **Step 6: Run the complete gate and commit**
@@ -153,12 +170,12 @@ UV_NO_SYNC=1 \
 UV_PROJECT_ENVIRONMENT=/Users/hwang-inhwan/workspace/kube/.worktrees/repository-stabilization-20260911/.venv \
 PYTHONPATH="$PWD/src:$PWD" \
 make check
-git add tests/test_platforms.py .github/workflows/ci.yml
+git add tests/test_platforms.py tests/test_ci_workflow.py .github/workflows/ci.yml
 git commit -m "ci: isolate Windows docs harness for #371"
 ```
 
 Expected: all repository checks and commit hooks pass; the commit contains
-only the workflow and its contract test.
+only the workflow and its contract tests.
 
 ### Task 2: Publish and review the permanent fix
 
