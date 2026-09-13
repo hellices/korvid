@@ -735,8 +735,8 @@ def test_smoke_home_page_checker_fails_when_expected_markup_is_missing(body: str
 def test_smoke_release_notes_nav_checker_matches_any_versioned_release_link() -> None:
     body = """
     <nav aria-label="Release notes">
-      <a href="../v0.5.0/">v0.5.0</a>
-      <a href="../v0.4.1/">v0.4.1</a>
+      <a data-track="nav" href="../v0.5.0/" class="md-nav__link">v0.5.0</a>
+      <a href="../v0.4.1/" class="md-nav__link md-nav__link--active">v0.4.1</a>
     </nav>
     """
     assert (
@@ -750,8 +750,30 @@ def test_smoke_release_notes_nav_checker_matches_any_versioned_release_link() ->
     )
 
 
+def test_smoke_release_notes_nav_checker_fails_on_footer_only_versioned_release_link() -> None:
+    body = """
+    <footer class="md-footer">
+      <a class="md-footer__link md-footer__link--next" href="../v0.5.0/">v0.5.0</a>
+    </footer>
+    """
+    assert (
+        _run_smoke_checker(
+            "check_release_notes_nav",
+            "release-notes/unreleased/",
+            "release-notes navigation",
+            body,
+        )
+        != 0
+    )
+
+
 def test_smoke_release_notes_nav_checker_fails_without_a_versioned_release_link() -> None:
-    body = '<nav aria-label="Release notes"><a href="../latest/">Latest</a></nav>'
+    body = """
+    <nav aria-label="Release notes">
+      <a class="md-nav__link" href="../latest/">Latest</a>
+      <a class="md-nav__link" href="../next/">Next</a>
+    </nav>
+    """
     assert (
         _run_smoke_checker(
             "check_release_notes_nav",
