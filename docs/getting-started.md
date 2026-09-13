@@ -77,15 +77,6 @@ Extras do not expand in place: if you installed `korvid` alone and later want
 the agent, reinstall with the full extra set you want rather than layering
 extras on top of an existing install.
 
-## Development build
-
-The guides describe `main`, which can include changes not yet published.
-To test the reviewed source instead of the latest PyPI release:
-
-```sh
-uv tool install 'korvid[all] @ git+https://github.com/hellices/korvid'
-```
-
 ## First run
 
 ```sh
@@ -100,6 +91,15 @@ Kubernetes API happen unless you ask for them.
   navigate.
 - Press `?` any time for the full in-app help overlay.
 - Press `q` or `Ctrl-C` to quit.
+
+## Development build
+
+The guides describe `main`, which can include changes not yet published.
+To test the reviewed source instead of the latest PyPI release:
+
+```sh
+uv tool install 'korvid[all] @ git+https://github.com/hellices/korvid'
+```
 
 ## Ten keys to get moving
 

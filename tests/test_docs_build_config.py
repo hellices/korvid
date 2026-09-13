@@ -42,6 +42,15 @@ def test_makefile_docs_build_uses_frozen() -> None:
     )
 
 
+def test_makefile_docs_build_validates_publication_artifacts() -> None:
+    """docs-build must validate generated search/sitemap artifacts before success."""
+    makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+    assert "uv run --frozen python scripts/check_docs_site.py" in makefile, (
+        "docs-build must run the stdlib-only publication-artifact checker after "
+        "mkdocs build --strict"
+    )
+
+
 def test_makefile_docs_serve_uses_frozen() -> None:
     """docs-serve target must pass --frozen to prevent lock rewrites."""
     makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
