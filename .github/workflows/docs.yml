@@ -78,71 +78,141 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: deploy
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 8
     permissions:
       contents: read
     steps:
       - name: Probe released pages and media
+        env:
+          SITE_URL: ${{ needs.deploy.outputs.page_url }}
         run: |
           set -euo pipefail
 
-          base_url="${{ needs.deploy.outputs.page_url }}"
+          CONTENT_ATTEMPTS=4
+          CONTENT_SLEEP_SECONDS=5
+          CONTENT_CURL_MAX_TIME=10
+          MEDIA_ATTEMPTS=3
+          MEDIA_SLEEP_SECONDS=5
+          MEDIA_CURL_MAX_TIME=10
+
+          if [ -z "${SITE_URL:-}" ]; then
+            echo "Missing SITE_URL from deploy job" >&2
+            exit 1
+          fi
+
+          base_url="${SITE_URL%/}"
 
           url_for() {
             local path="$1"
             if [ -z "$path" ]; then
-              printf '%s/\n' "${base_url%/}"
+              printf '%s/\n' "$base_url"
               return 0
             fi
-            printf '%s/%s\n' "${base_url%/}" "$path"
+            printf '%s/%s\n' "$base_url" "$path"
           }
 
-          fetch() {
+          fetch_body() {
             local path="$1"
-            local url
-            local body
-            url="$(url_for "$path")"
-            for attempt in 1 2 3 4 5; do
-              if body="$(curl --fail --silent --show-error --location --connect-timeout 10 --max-time 20 "$url")"; then
-                printf '%s' "$body"
-                return 0
-              fi
-              sleep 5
-            done
-            echo "Failed to fetch $url after 5 attempts" >&2
-            return 1
+            local max_time="$2"
+            curl --fail --silent --show-error --location \
+              --connect-timeout 10 --max-time "$max_time" \
+              "$(url_for "$path")"
           }
 
-          check_contains() {
+          retry_until_contains() {
             local path="$1"
             local expected="$2"
             local body
-            body="$(fetch "$path")"
+            local attempt
+            for attempt in $(seq 1 "$CONTENT_ATTEMPTS"); do
+              if body="$(fetch_body "$path" "$CONTENT_CURL_MAX_TIME")"; then
+                if grep -Fq "$expected" <<<"$body"; then
+                  return 0
+                fi
+              fi
+              if [ "$attempt" -lt "$CONTENT_ATTEMPTS" ]; then
+                sleep "$CONTENT_SLEEP_SECONDS"
+              fi
+            done
+            echo "Expected '$expected' in $(url_for "$path") after $CONTENT_ATTEMPTS attempts" >&2
+            return 1
+          }
+
+          assert_body_contains() {
+            local expected="$1"
+            local body="$2"
             if ! grep -Fq "$expected" <<<"$body"; then
-              echo "Expected '$expected' in $(url_for "$path")" >&2
+              echo "Expected '$expected' in response body" >&2
               return 1
             fi
           }
 
-          check_ok() {
+          assert_body_not_contains() {
+            local forbidden="$1"
+            local body="$2"
+            if grep -Fq "$forbidden" <<<"$body"; then
+              echo "Did not expect '$forbidden' in response body" >&2
+              return 1
+            fi
+          }
+
+          check_search_index() {
+            local body="$1"
+            assert_body_contains '"location":"dev/specs/2026-08-12-korvid-architecture/"' "$body"
+            assert_body_contains '"location":"evals/methodology/"' "$body"
+            assert_body_not_contains '"location":"dev/ui-controllers/"' "$body"
+            assert_body_not_contains '"location":"release/"' "$body"
+          }
+
+          check_sitemap() {
+            local body="$1"
+            assert_body_contains "https://hellices.github.io/korvid/dev/specs/2026-08-12-korvid-architecture/" "$body"
+            assert_body_contains "https://hellices.github.io/korvid/evals/methodology/" "$body"
+            assert_body_not_contains "https://hellices.github.io/korvid/dev/ui-controllers/" "$body"
+            assert_body_not_contains "https://hellices.github.io/korvid/release/" "$body"
+          }
+
+          retry_until_body_checks() {
             local path="$1"
-            local url
-            url="$(url_for "$path")"
-            for attempt in 1 2 3 4 5; do
-              if curl --fail --silent --show-error --location --connect-timeout 10 --max-time 20 --range 0-0 --output /dev/null "$url"; then
+            local description="$2"
+            local checker="$3"
+            local body
+            local attempt
+            for attempt in $(seq 1 "$CONTENT_ATTEMPTS"); do
+              if body="$(fetch_body "$path" "$CONTENT_CURL_MAX_TIME")" && "$checker" "$body"; then
                 return 0
               fi
-              sleep 5
+              if [ "$attempt" -lt "$CONTENT_ATTEMPTS" ]; then
+                sleep "$CONTENT_SLEEP_SECONDS"
+              fi
             done
-            echo "Failed to verify $url after 5 attempts" >&2
+            echo "Failed to observe $description at $(url_for "$path") after $CONTENT_ATTEMPTS attempts" >&2
             return 1
           }
 
-          check_contains "" "AI-NATIVE KUBERNETES TUI"
-          check_contains "getting-started/" "brew install hellices/korvid/korvid"
-          check_contains "release-notes/unreleased/" "Unreleased (main)"
-          check_ok "search/search_index.json"
-          check_ok "sitemap.xml"
-          check_ok "assets/demo.mp4"
-          check_ok "assets/scenes/agent-demo.mp4"
-          check_ok "assets/scenes/mcp-follow-demo.mp4"
+          retry_until_ok() {
+            local path="$1"
+            local attempt
+            for attempt in $(seq 1 "$MEDIA_ATTEMPTS"); do
+              if curl --fail --silent --show-error --location \
+                --connect-timeout 10 --max-time "$MEDIA_CURL_MAX_TIME" \
+                --range 0-0 --output /dev/null \
+                "$(url_for "$path")"; then
+                return 0
+              fi
+              if [ "$attempt" -lt "$MEDIA_ATTEMPTS" ]; then
+                sleep "$MEDIA_SLEEP_SECONDS"
+              fi
+            done
+            echo "Failed to verify $(url_for "$path") after $MEDIA_ATTEMPTS attempts" >&2
+            return 1
+          }
+
+          retry_until_contains "" "AI-NATIVE KUBERNETES TUI"
+          retry_until_contains "getting-started/" "hellices/korvid/korvid"
+          retry_until_contains "release-notes/unreleased/" "Unreleased (main)"
+          retry_until_body_checks "search/search_index.json" "search index scope" check_search_index
+          retry_until_body_checks "sitemap.xml" "sitemap scope" check_sitemap
+          retry_until_ok "assets/demo.mp4"
+          retry_until_ok "assets/scenes/agent-demo.mp4"
+          retry_until_ok "assets/scenes/mcp-follow-demo.mp4"

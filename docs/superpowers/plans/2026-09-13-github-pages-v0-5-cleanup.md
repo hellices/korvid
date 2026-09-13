@@ -276,7 +276,7 @@ dev_pages = {
 assert dev_pages == {"dev/", "dev/specs/2026-08-12-korvid-architecture/"}
 
 root = ET.parse("site/sitemap.xml").getroot()
-locations = {element.text for element in root.iter("{*}loc")}
+locations = {element.text for element in root.findall(".//{*}loc")}
 assert "https://hellices.github.io/korvid/dev/" in locations
 assert (
     "https://hellices.github.io/korvid/dev/specs/"
