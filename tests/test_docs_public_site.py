@@ -84,12 +84,12 @@ def test_getting_started_current_release_copy_distinguishes_stable_and_dev_paths
     """Getting Started must separate Homebrew/PyPI installs from unreleased `main` builds."""
 
     source = _normalized(_source("getting-started.md"))
-    assert "Homebrew installs the latest published release" in source
-    assert "live tap" in source
+    assert "Homebrew installs the version currently published by the live tap." in source
     assert (
         "`uv tool` and `pipx` commands below install the latest published package from PyPI"
         in source
     )
+    assert "Homebrew installs the latest published release" not in source
     assert "Most users should stop at **Install**" in source
     assert "unreleased change from `main`" in source
 

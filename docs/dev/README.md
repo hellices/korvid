@@ -52,9 +52,13 @@ Until that one-time setting is made, the workflow's build job still
 succeeds but the deploy job fails.
 
 After that one-time setup, merging documentation-site changes to `main`
-triggers the workflow and publishes <https://hellices.github.io/korvid/>.
-Pull request builds validate the site (strict build, link checks) but do
-not deploy it — only a push to `main` runs the deploy job.
+creates a push to `main` that runs the workflow end to end: it builds the
+site, deploys GitHub Pages, then runs a bounded release-surface smoke
+against the deployed URL at <https://hellices.github.io/korvid/>. Pull request
+builds validate the site (strict build, link checks) but do not deploy it
+— only a push to `main` runs the deploy job and post-deploy smoke. A
+smoke failure can still happen after Pages was deployed and the new site
+is already live.
 
 A custom domain is optional and deliberately deferred. Adopting one later does
 not require a content migration, but it does require updating `site_url`,

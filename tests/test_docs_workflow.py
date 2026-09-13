@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import re
 import shlex
+import shutil
 import subprocess
+import sys
 import textwrap
 from pathlib import Path
 from typing import Any, cast
@@ -276,6 +278,19 @@ def _smoke_function(script: str, name: str) -> str:
     return match.group(0)
 
 
+def _bash_executable() -> str:
+    if sys.platform != "win32":
+        bash = shutil.which("bash")
+        assert bash is not None
+        return bash
+
+    git = shutil.which("git")
+    assert git is not None
+    git_bash = Path(git).parent.parent / "bin" / "bash.exe"
+    assert git_bash.is_file()
+    return str(git_bash)
+
+
 def _run_smoke_checker(checker: str, path: str, description: str, body: str) -> int:
     script = _smoke_script(_load())
     functions = "\n\n".join(
@@ -294,6 +309,10 @@ def _run_smoke_checker(checker: str, path: str, description: str, body: str) -> 
         set -euo pipefail
 
         base_url="https://example.invalid"
+        PUBLIC_ARCHITECTURE_PATH={shlex.quote(PUBLIC_ARCHITECTURE_PATH)}
+        PUBLIC_EVAL_PATH={shlex.quote(PUBLIC_EVAL_PATH)}
+        INTERNAL_CONTROLLER_PATH={shlex.quote(INTERNAL_CONTROLLER_PATH)}
+        INTERNAL_RELEASE_PATH={shlex.quote(INTERNAL_RELEASE_PATH)}
         CONTENT_ATTEMPTS=1
         CONTENT_CURL_MAX_TIME=1
         CONTENT_SLEEP_SECONDS=0
@@ -309,7 +328,7 @@ def _run_smoke_checker(checker: str, path: str, description: str, body: str) -> 
         """
     )
     result = subprocess.run(
-        ["bash", "-lc", probe],
+        [_bash_executable(), "--noprofile", "--norc", "-c", probe],
         check=False,
         cwd=ROOT,
         capture_output=True,
@@ -318,8 +337,62 @@ def _run_smoke_checker(checker: str, path: str, description: str, body: str) -> 
     return result.returncode
 
 
+def test_run_smoke_checker_uses_a_portable_noninteractive_bash_invocation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    git_root = tmp_path / "Git"
+    git = git_root / "cmd" / "git.exe"
+    git.parent.mkdir(parents=True)
+    git.write_text("", encoding="utf-8")
+    git_bash = git_root / "bin" / "bash.exe"
+    git_bash.parent.mkdir(parents=True)
+    git_bash.write_text("", encoding="utf-8")
+
+    captured: dict[str, list[str]] = {}
+
+    def fake_run(command: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+        captured["command"] = command
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(shutil, "which", lambda name: str(git) if name == "git" else None)
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    body = (
+        '{"docs":['
+        '{"location":"dev/specs/2026-08-12-korvid-architecture/"},'
+        '{"location":"evals/methodology/"}'
+        "]}"
+    )
+
+    assert (
+        _run_smoke_checker(
+            "check_search_index", "search/search_index.json", "search index scope", body
+        )
+        == 0
+    )
+    assert captured["command"][:4] == [str(git_bash), "--noprofile", "--norc", "-c"]
+
+
 def _smoke_invocation_count(script: str, helper_name: str) -> int:
     return sum(1 for line in script.splitlines() if line.lstrip().startswith(f"{helper_name} "))
+
+
+def test_smoke_scope_checker_succeeds_when_search_index_matches_contract() -> None:
+    assert (
+        _run_smoke_checker(
+            "check_search_index",
+            "search/search_index.json",
+            "search index scope",
+            (
+                '{"docs":['
+                '{"location":"dev/specs/2026-08-12-korvid-architecture/"},'
+                '{"location":"evals/methodology/"}'
+                "]}"
+            ),
+        )
+        == 0
+    )
 
 
 @pytest.mark.parametrize(
@@ -597,6 +670,15 @@ def test_contributor_docs_explain_how_the_site_is_published() -> None:
         "publishes the site — not merely contain the word 'main' via the "
         "workflow link"
     )
+    assert "release-surface smoke" in normalized, (
+        "the section must explain that a main push runs a bounded release-surface smoke"
+    )
+    assert re.search(r"push[^.]*\bmain\b[^.]*build[^.]*deploy[^.]*smoke", normalized), (
+        "the section must say that a push to main builds, deploys, then runs the smoke check"
+    )
+    assert re.search(r"smoke fail\w*[^.]*after[^.]*pages[^.]*deploy", normalized), (
+        "the section must say a smoke failure can happen after Pages was already deployed"
+    )
     assert "pull request" in normalized, (
         "the section must state that pull-request builds validate but never deploy"
     )
@@ -676,6 +758,17 @@ def test_cleanup_plan_uses_findall_for_sitemap_locations() -> None:
     plan = CLEANUP_PLAN_DOC.read_text(encoding="utf-8")
     assert 'root.findall(".//{*}loc")' in plan
     assert 'root.iter("{*}loc")' not in plan
+
+
+def test_cleanup_plan_task3_names_the_workflow_test_and_local_smoke_replay() -> None:
+    task = CLEANUP_PLAN_DOC.read_text(encoding="utf-8").split(
+        "### Task 3: Run the full documentation gate and prepare the pull request", 1
+    )[1]
+    normalized = " ".join(task.lower().replace("`", "").split())
+    assert ".github/workflows/docs.yml" in task
+    assert "tests/test_docs_workflow.py" in task
+    assert "extract the smoke step" in normalized
+    assert "site_url" in normalized
 
 
 def test_plan_reproduces_the_ephemeral_direct_docs_build() -> None:

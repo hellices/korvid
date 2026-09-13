@@ -303,6 +303,8 @@ git commit -m "docs: bound public search and sitemap scope"
 ### Task 3: Run the full documentation gate and prepare the pull request
 
 **Files:**
+- Inspect: `.github/workflows/docs.yml`
+- Inspect: `tests/test_docs_workflow.py`
 - Modify only if validation exposes a defect in the files above.
 
 **Interfaces:**
@@ -343,15 +345,17 @@ uv run --frozen --group docs mkdocs build --strict
 
 Expected: PASS.
 
-- [ ] **Step 4: Validate rendered behavior**
+- [ ] **Step 4: Inspect artifacts and replay the post-deploy smoke locally**
 
-Serve or open the built site and verify:
+Check the built outputs that the post-deploy smoke guards:
 
-- 1440x900 and 390x844 have no horizontal overflow;
-- Direct, Agent, and MCP tabs activate and load their video or fallback;
-- Getting Started shows stable install before Development build;
-- Unreleased identifies `main` and links the stable release and milestone;
-- public search excludes internal implementation specs.
+- inspect `site/search/search_index.json` and confirm only the public
+  `dev/` entrypoints remain under `dev/`, while internal implementation
+  pages stay absent;
+- inspect `site/sitemap.xml` and confirm the same public/internal scope;
+- serve `site/` locally, extract the smoke step from
+  `.github/workflows/docs.yml`, run it against the local build with
+  `SITE_URL=http://127.0.0.1:<port>`, and expect exit `0`.
 
 - [ ] **Step 5: Commit any validation-only corrections**
 
