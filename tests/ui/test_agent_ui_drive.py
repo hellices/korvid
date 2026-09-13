@@ -17,6 +17,7 @@ from korvid.ui.app import KorvidApp
 from korvid.ui.widgets.confirm_screen import ConfirmScreen
 from korvid.ui.widgets.describe_screen import DescribeScreen
 from korvid.ui.widgets.log_pane import LogPane
+from tests.app_factory import build_test_app
 from tests.ui.agent_session_fakes import FakeSession
 
 _PODS_META = ResourceMeta("Pod", "pods", "", "v1", True, ("po",))
@@ -89,7 +90,7 @@ def make_app(
         while True:
             await asyncio.sleep(0.01)
 
-    return KorvidApp(
+    return build_test_app(
         config=KorvidConfig(namespace="default"),
         store=store,
         watch_manager=WatchManager(store, source),

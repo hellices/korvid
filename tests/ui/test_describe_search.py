@@ -22,6 +22,7 @@ from korvid.ui.widgets.describe_screen import (
     DescribeScreen,
 )
 from korvid.ui.widgets.resource_table import ResourceTable
+from tests.app_factory import build_test_app
 
 from .rendering import painted_text
 from .waits import until
@@ -94,7 +95,7 @@ def make_app() -> KorvidApp:
         return list(_EVENTS_LIST)
 
     store = ResourceStore()
-    return KorvidApp(
+    return build_test_app(
         config=KorvidConfig(namespace="default"),
         store=store,
         watch_manager=WatchManager(store, _fake_source([_pod("my-pod")])),

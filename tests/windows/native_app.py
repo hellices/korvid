@@ -26,6 +26,7 @@ from korvid.ui.app import KorvidApp
 from korvid.ui.widgets.filter_bar import FilterBar
 from korvid.ui.widgets.help_screen import HelpScreen
 from korvid.ui.widgets.resource_table import ResourceTable
+from tests.app_factory import build_test_subclass
 
 _PODS_META = ResourceMeta("Pod", "pods", "", "v1", True, ("po",))
 _ALIASES = {"pods": _PODS_META, "po": _PODS_META, "pod": _PODS_META}
@@ -174,7 +175,12 @@ class _ObservedKorvidApp(KorvidApp):
             self._emit_once("help-closed", state)
         if not self._resume_seen and bool(filter_bar.display) and self.focused is filter_bar:
             self._emit_once("filter-focused", state)
-        if pattern == "api" and rows == 1 and not bool(filter_bar.display):
+        if (
+            pattern == "api"
+            and rows == 1
+            and not bool(filter_bar.display)
+            and self.focused is not filter_bar
+        ):
             self._emit_once("filter-applied", state)
         if (
             self._resume_seen
@@ -183,7 +189,13 @@ class _ObservedKorvidApp(KorvidApp):
             and self.focused is filter_bar
         ):
             self._emit_once("post-resume-filter-focused", state)
-        if self._resume_seen and pattern == "worker" and rows == 1 and not bool(filter_bar.display):
+        if (
+            self._resume_seen
+            and pattern == "worker"
+            and rows == 1
+            and not bool(filter_bar.display)
+            and self.focused is not filter_bar
+        ):
             self._post_resume_filter_applied = True
             self._emit_once("post-resume-filter-applied", state)
         if (
@@ -230,7 +242,8 @@ def _make_app() -> _ObservedKorvidApp:
     async def list_namespaces() -> list[str]:
         return ["default"]
 
-    return _ObservedKorvidApp(
+    return build_test_subclass(
+        _ObservedKorvidApp,
         config=KorvidConfig(namespace="default"),
         store=store,
         watch_manager=WatchManager(store, source),

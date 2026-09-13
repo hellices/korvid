@@ -5,7 +5,7 @@ degradation, and config persistence."""
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 
 import yaml
@@ -30,6 +30,7 @@ from korvid.ui.widgets.top_bar import (
     collapsed_entries,
     group_of,
 )
+from tests.app_factory import build_test_app
 
 from .waits import until
 
@@ -184,7 +185,7 @@ def _pod(name: str) -> PodSummary:
 def make_app(
     *,
     config: KorvidConfig | None = None,
-    save_topbar: object = None,
+    save_topbar: Callable[[bool], None] | None = None,
 ) -> KorvidApp:
     store = ResourceStore()
 
@@ -197,13 +198,13 @@ def make_app(
     async def list_namespaces() -> list[str]:
         return ["default"]
 
-    return KorvidApp(
+    return build_test_app(
         config=config or KorvidConfig(namespace="default"),
         store=store,
         watch_manager=WatchManager(store, source),
         list_namespaces=list_namespaces,
         aliases=dict(_ALIASES),
-        save_topbar=save_topbar,  # type: ignore[arg-type]  # test seam
+        save_topbar=save_topbar,
     )
 
 

@@ -2,6 +2,21 @@ import { writeSync } from "node:fs";
 
 const MAX_RESOURCE_TYPES = 6;
 const MAX_RESOURCE_NAME = 48;
+const STARTED = Symbol.for("korvid.harness.started");
+
+function harnessStarted() {
+  if (typeof globalThis[STARTED] !== "bigint") {
+    globalThis[STARTED] = process.hrtime.bigint();
+  }
+  return globalThis[STARTED];
+}
+
+const started = harnessStarted();
+
+function elapsedMilliseconds() {
+  const elapsed = process.hrtime.bigint() - started;
+  return elapsed < 0n ? 0n : elapsed / 1_000_000n;
+}
 
 function summarize(values) {
   const types = values
@@ -39,7 +54,10 @@ function resources() {
 export function createHarnessLifecycle(label) {
   let finished = false;
   const writeStage = (stage, detail = "") => {
-    writeSync(2, `${label} stage=${stage}${detail}\n`);
+    writeSync(
+      2,
+      `${label} stage=${stage}${detail} elapsed-ms=${elapsedMilliseconds()}\n`,
+    );
   };
 
   process.once("beforeExit", (exitCode) => {

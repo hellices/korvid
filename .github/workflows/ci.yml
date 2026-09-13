@@ -25,6 +25,7 @@ jobs:
   # and a required check that never runs blocks the merge forever).
   changes:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     # Reading the PR's file list needs more than the workflow-level
     # `contents: read`; without this the API call 404s on every PR.
     permissions:
@@ -70,7 +71,8 @@ jobs:
 
   test:
     needs: changes
-    runs-on: korvid-runners
+    runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-latest' || 'korvid-runners' }}
+    timeout-minutes: 45
     strategy:
       matrix:
         python-version: ["3.11", "3.12", "3.13"]
@@ -95,6 +97,7 @@ jobs:
   windows-test:
     needs: changes
     runs-on: windows-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -104,6 +107,8 @@ jobs:
           python-version: "3.12"
           enable-cache: true
       - run: uv sync --locked --dev --all-extras
+      - name: Report pytest-randomly seed
+        run: 'Write-Output "pytest-randomly seed: ${{ github.run_id }}"'
       - name: Exercise the native Windows terminal
         if: needs.changes.outputs.code == 'true'
         timeout-minutes: 5
@@ -121,10 +126,11 @@ jobs:
           retention-days: 7
       # Windows verifies OS-specific behaviour; docs contracts are not that.
       - if: needs.changes.outputs.code == 'true'
-        run: uv run pytest -q --ignore=tests/windows/test_native_terminal.py --deselect=tests/core/test_audit.py::test_concurrent_appends_across_instances
+        run: uv run pytest -q --ignore=tests/windows/test_native_terminal.py --deselect=tests/core/test_audit.py::test_concurrent_appends_across_instances --randomly-seed=${{ github.run_id }}
 
   pre-commit:
-    runs-on: korvid-runners
+    runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-latest' || 'korvid-runners' }}
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -136,7 +142,8 @@ jobs:
       - run: uv run pre-commit run --all-files --show-diff-on-failure
 
   security:
-    runs-on: korvid-runners
+    runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-latest' || 'korvid-runners' }}
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -155,7 +162,8 @@ jobs:
 
   dependency-review:
     if: github.event_name == 'pull_request'
-    runs-on: korvid-runners
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -165,11 +173,13 @@ jobs:
           fail-on-severity: high
 
   ty-experimental:
-    runs-on: korvid-runners
-    continue-on-error: true
+    runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-latest' || 'korvid-runners' }}
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
       - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
-      - run: uvx ty check src/ || true
+      - run: uv sync --locked --dev --all-extras
+      - run: uv run --with ty ty check src/
+        continue-on-error: true

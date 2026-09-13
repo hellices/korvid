@@ -8,8 +8,9 @@ mid-drain cancellation (the node stays cordoned).
 
 import asyncio
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
+from typing import cast
 
 import pytest
 from textual.css.query import NoMatches
@@ -35,6 +36,7 @@ from korvid.ui.app import KorvidApp
 from korvid.ui.widgets.confirm_screen import ConfirmScreen
 from korvid.ui.widgets.resource_table import ResourceTable
 from korvid.ui.widgets.status_bar import StatusBar
+from tests.app_factory import build_test_app
 
 from .waits import until
 
@@ -180,7 +182,7 @@ def make_app(
             ]
         return []
 
-    return KorvidApp(
+    return build_test_app(
         config=KorvidConfig(namespace="default", readonly=readonly),
         store=store,
         watch_manager=WatchManager(store, source),
@@ -1018,7 +1020,7 @@ async def test_drain_graph_failure_keeps_plan_and_notes(tmp_path: Path) -> None:
 
     rec = NodeRecorder(plan)
     audit_path = tmp_path / "audit.jsonl"
-    app = KorvidApp(
+    app = build_test_app(
         config=KorvidConfig(namespace="default", readonly=False),
         store=store,
         watch_manager=WatchManager(store, source),
@@ -1140,7 +1142,7 @@ class _BlockingGraphLister:
 def _make_app_with_custom_lister(
     recorder: NodeRecorder,
     audit_path: Path,
-    lister: object,
+    lister: Callable[[ResourceMeta, str | None], Awaitable[list[Summary]]],
 ) -> KorvidApp:
     """Minimal KorvidApp fixture wired with an arbitrary list_relationship_objects."""
     store = ResourceStore()
@@ -1169,7 +1171,7 @@ def _make_app_with_custom_lister(
         while True:
             await asyncio.sleep(0.01)
 
-    return KorvidApp(
+    return build_test_app(
         config=KorvidConfig(namespace="default", readonly=False),
         store=store,
         watch_manager=WatchManager(store, source),
@@ -1177,8 +1179,11 @@ def _make_app_with_custom_lister(
         write_ops=recorder,
         audit=AuditLog(audit_path),
         check_permission=None,
-        # Race fakes return the broader Summary union used by relationship loading.
-        list_relationship_objects=lister,  # type: ignore[arg-type]
+        # Runtime summaries are a wider union than the client's legacy annotation.
+        list_relationship_objects=cast(
+            Callable[[ResourceMeta, str | None], Awaitable[list[GenericSummary]]],
+            lister,
+        ),
     )
 
 

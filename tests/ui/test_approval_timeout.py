@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from korvid.ui.agent_ui_controller import APPROVAL_TIMEOUT as AGENT_APPROVAL_TIMEOUT
-from korvid.ui.app import AppUIBridge
+from korvid.ui.app_surfaces import AppUIBridge
 from korvid.ui.proposal_controller import APPROVAL_TIMEOUT as PROPOSAL_APPROVAL_TIMEOUT
 from korvid.ui.widgets.confirm_screen import ConfirmScreen
 

@@ -12,25 +12,57 @@ import argparse
 import asyncio
 import contextlib
 import dataclasses
-import importlib.util
+import functools
 import logging
 import os
 import secrets
-import ssl
 import sys
 import threading
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Iterator
-from typing import TYPE_CHECKING, Any, Final
+from collections.abc import AsyncIterator, Awaitable, Callable
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from korvid import __version__
+from korvid import composition_support as _composition_support
 from korvid.agent.install_hint import isolated_install_hint
 from korvid.agent.interaction import (
     AgentUiBridge,
     ClusterFacts,
-    InteractionContext,
-    UiAction,
-    UiActionResult,
+)
+from korvid.composition_support import (
+    _PROMPT_DEGRADE_HINT,
+    _UNKNOWN_CLUSTER,
+    AgentWiring,
+    ObservabilityWiring,
+    _active_model_name,
+    _agent_environment,
+    _agent_unavailable_wiring,
+    _AgentToolUIBridgeProxy,
+    _AgentUiBridgeProxy,
+    _close_agent_in_background,
+    _close_provider_in_background,
+    _cluster_facts,
+    _custom_column_names,
+    _discover_in_background,
+    _log_cleanup_loop_error,
+    _make_disconnect_agent,
+    _make_rebuild_agent,
+    _MCPAppHooks,
+    _missing_extra_packages,
+    _own_run_tasks,
+    _RunState,
+    _start_mcp_if_enabled,
+    _validate_ca_bundle,
+    _warn_agent_disabled,
+)
+from korvid.composition_support import (
+    _protected_context_name as _support_protected_context_name,
+)
+from korvid.composition_support import (
+    _shutdown as _support_shutdown,
+)
+from korvid.composition_support import (
+    _teardown as _support_teardown,
 )
 from korvid.core.audit import AuditLog, default_audit_path
 from korvid.core.config import (
@@ -41,7 +73,6 @@ from korvid.core.config import (
     ModelConnectionConfig,
     ModelConnectionsWriter,
     ObservabilityBackend,
-    context_is_protected,
     load_config,
     save_topbar_state,
 )
@@ -63,7 +94,6 @@ from korvid.k8s.helm import HELM_RELEASES_META, HELM_REVISIONS_META
 from korvid.k8s.helmcli import HelmCLI, find_helm
 from korvid.k8s.metrics import MetricsPoller
 from korvid.k8s.models import reset_age_memo
-from korvid.k8s.olm import PACKAGES_GROUP
 from korvid.k8s.telepresence import (
     TRAFFIC_MANAGER_NAME,
     TRAFFIC_MANAGER_NAMESPACE,
@@ -77,13 +107,46 @@ from korvid.tools.executor import (
 )
 from korvid.tools.proposals import ProposalStore
 from korvid.tools.registry import mcp_tool_schemas
-from korvid.tools.structured import ERROR_PREFIX
-from korvid.ui.app import (
+from korvid.ui.agent_ui_controller import AgentUiController
+from korvid.ui.app import KorvidApp
+from korvid.ui.app_runtime import AppRuntime, AppRuntimeInputs, _LateReference
+from korvid.ui.app_surfaces import (
+    AppAgentPanel,
+    AppAgentScreens,
+    AppContextSurface,
+    AppInspectSurface,
+    AppProposalEvents,
+    AppProposalScreens,
+    AppReviewTasks,
+    AppSessionConfiguration,
+    AppTransferScreens,
     AppUIBridge,
-    KorvidApp,
+    AppUiSurface,
+    AppViewState,
+    AppWorkspaceSurface,
+    _RelationshipLister,
 )
-from korvid.ui.context_switch_coordinator import ContextSwitchResult
-from korvid.ui.hints import EventsFetcher
+from korvid.ui.bridge_dispatch import AppContextDispatch
+from korvid.ui.command_router import CommandRouter
+from korvid.ui.context_switch_coordinator import ContextSwitchCoordinator, ContextSwitchResult
+from korvid.ui.debug import DebugController, DebugSettings
+from korvid.ui.drain import DrainController
+from korvid.ui.forward_controller import ForwardController
+from korvid.ui.helm_controller import HelmController
+from korvid.ui.hints import EventsFetcher, HintController
+from korvid.ui.integration_controller import IntegrationController
+from korvid.ui.log_controller import LogController
+from korvid.ui.operator_controller import OperatorController
+from korvid.ui.proposal_controller import ProposalController
+from korvid.ui.relationship_controller import RelationshipSnapshotLoader
+from korvid.ui.resource_inspect_controller import ResourceInspectController
+from korvid.ui.resource_write_controller import ResourceWriteController
+from korvid.ui.session_timeline_controller import SessionTimelineController
+from korvid.ui.shell_controller import ShellController, ShellSettings
+from korvid.ui.transfer import TransferController
+from korvid.ui.workspace_controller import WorkspaceController
+from korvid.ui.workspace_state import WorkspaceState
+from korvid.ui.write_coordinator import WriteCoordinator
 
 if TYPE_CHECKING:
     # Embedded-agent types appear only in annotations here: an MCP-only or
@@ -94,12 +157,38 @@ if TYPE_CHECKING:
     from korvid.agent.session import AgentSession
     from korvid.providers.litellm_factory import CredentialStore
 
+__all__ = (
+    "_PROMPT_DEGRADE_HINT",
+    "AgentWiring",
+    "ObservabilityWiring",
+    "_AgentToolUIBridgeProxy",
+    "_AgentUiBridgeProxy",
+    "_MCPAppHooks",
+    "_RunState",
+    "_active_model_name",
+    "_agent_environment",
+    "_close_agent_in_background",
+    "_close_provider_in_background",
+    "_cluster_facts",
+    "_custom_column_names",
+    "_discover_in_background",
+    "_missing_extra_packages",
+    "_protected_context_name",
+    "_shutdown",
+    "_start_mcp_if_enabled",
+    "_teardown",
+    "_validate_ca_bundle",
+    "_warn_agent_disabled",
+    "assemble_app_runtime",
+)
+
 logger = logging.getLogger(__name__)
 
 _CLEANUP_GRACE_SECONDS = 5.0
 _CLEANUP_CANCEL_SECONDS = 1.0
 _MCP_SHUTDOWN_GRACE_SECONDS = 11.0
 _RUNNER_SHUTDOWN_SECONDS = 5.0
+AppT = TypeVar("AppT", bound=KorvidApp)
 
 #: Actionable install hints (issue #73): an explicitly requested feature
 #: whose extra is missing must fail with instructions, never degrade
@@ -126,43 +215,6 @@ _OBSERVABILITY_INSTALL_HINT = (
     "an observability backend is configured (observability.prometheus/loki in "
     f"config.yaml) but its dependencies are not installed — {isolated_install_hint(feature='observability')}"
 )
-
-
-def _missing_extra_packages(extra_roots: frozenset[str]) -> list[str]:
-    """The extra's packages that are not installed (empty = extra present)."""
-    return sorted(pkg for pkg in extra_roots if importlib.util.find_spec(pkg) is None)
-
-
-@dataclasses.dataclass(frozen=True, slots=True)
-class ObservabilityWiring:
-    """The observability connectors this session has, if any (issue #193).
-
-    Both are None in the ordinary case: an unconfigured backend is not a
-    tool that fails, it is a tool that is never offered. `backends` is
-    what the tool registry gates on.
-    """
-
-    metrics: Any = None
-    logs: Any = None
-
-    @property
-    def backends(self) -> frozenset[str]:
-        """The backend names the tool registry should offer tools for."""
-        names: set[str] = set()
-        if self.metrics is not None:
-            names.add("metrics")
-        if self.logs is not None:
-            names.add("logs")
-        return frozenset(names)
-
-    async def aclose(self) -> None:
-        """Close every owned client; each is attempted even if one raises."""
-        try:
-            if self.metrics is not None:
-                await self.metrics.aclose()
-        finally:
-            if self.logs is not None:
-                await self.logs.aclose()
 
 
 def _build_observability(config: KorvidConfig) -> ObservabilityWiring:
@@ -289,35 +341,6 @@ def _connectors(
     return ObservabilityWiring(metrics=metrics, logs=logs)
 
 
-def _custom_column_names(config: KorvidConfig) -> dict[str, tuple[str, ...]]:
-    """Configured custom column names per qualified resource or bare fallback.
-
-    The client computes values onto GenericSummary.custom; the tool layer needs
-    the matching names to render them as name=value in list_resources.
-    """
-    return {kind: tuple(col.name for col in view.columns) for kind, view in config.views.items()}
-
-
-class _MCPAppHooks:
-    """Late-bound app hooks for MCP follow mode (issue #153).
-
-    Built (like `_AgentToolUIBridgeProxy`) before the app exists; the composition
-    root points `app` at the live instance right after construction. Until
-    then follow reads as off and activity notes are dropped - external
-    reads simply stay response-only, never an error.
-    """
-
-    def __init__(self) -> None:
-        self.app: KorvidApp | None = None
-
-    def follow_enabled(self) -> bool:
-        return self.app is not None and self.app.integrations.follow_enabled
-
-    def note_activity(self, line: str) -> None:
-        if self.app is not None:
-            self.app.integrations.note_activity(line)
-
-
 def _build_mcp_controller(
     config: KorvidConfig,
     kube: KubeClient,
@@ -390,6 +413,14 @@ def _build_proposal_store(config: KorvidConfig) -> ProposalStore | None:
     return ProposalStore()
 
 
+def _sync_cleanup_limits() -> None:
+    """Keep relocated lifecycle helpers aligned with the root's test seams."""
+    _composition_support._CLEANUP_GRACE_SECONDS = _CLEANUP_GRACE_SECONDS
+    _composition_support._CLEANUP_CANCEL_SECONDS = _CLEANUP_CANCEL_SECONDS
+    _composition_support._MCP_SHUTDOWN_GRACE_SECONDS = _MCP_SHUTDOWN_GRACE_SECONDS
+    _composition_support._RUNNER_SHUTDOWN_SECONDS = _RUNNER_SHUTDOWN_SECONDS
+
+
 async def _shutdown(
     discovery_task: asyncio.Task[None] | None,
     provider: LLMProvider | None,
@@ -398,277 +429,15 @@ async def _shutdown(
     session: AgentSession | None = None,
     close_tasks: set[asyncio.Future[Any]] | None = None,
 ) -> None:
-    """Drain agent cleanup without letting it hold the Kubernetes client hostage.
-
-    A standalone caller owns the terminal policy; `_teardown` instead supplies
-    its task set so observability clients are also attempted before that policy.
-    """
-    tasks = close_tasks if close_tasks is not None else set()
-    if discovery_task is not None:
-        discovery_task.cancel()
-        _track_cleanup_task(discovery_task, tasks, "resource discovery task")
-    if session is not None or provider is not None:
-        _close_agent_in_background(session, provider, tasks)
-    try:
-        await _drain_cleanup_tasks(tasks)
-    finally:
-        kube_task = asyncio.create_task(kube.close())
-        _track_cleanup_task(kube_task, tasks, "Kubernetes client close")
-        try:
-            await _drain_cleanup_tasks({kube_task})
-        finally:
-            if close_tasks is None:
-                _exit_if_cleanup_pending(tasks)
-
-
-def _track_cleanup_task(
-    task: asyncio.Future[Any] | None, tasks: set[asyncio.Future[Any]], label: str
-) -> None:
-    """Retain owned work and consume failures without logging plugin payloads."""
-    if task is None or task in tasks:
-        return
-    tasks.add(task)
-
-    def reap(finished: asyncio.Future[Any]) -> None:
-        tasks.discard(finished)
-        if not finished.cancelled() and finished.exception() is not None:
-            logger.warning("%s failed during cleanup", label)
-
-    task.add_done_callback(reap)
-
-
-def _log_cleanup_loop_error(loop: asyncio.AbstractEventLoop, context: dict[str, Any]) -> None:
-    """Consume loop-reported failures without formatting untrusted context."""
-    future = context.get("future", context.get("task"))
-    if isinstance(future, asyncio.Future) and future.done() and not future.cancelled():
-        future.exception()
-    logger.warning("Event loop operation failed")
-
-
-@contextlib.contextmanager
-def _own_run_tasks() -> Iterator[None]:
-    """Own children at creation, including shielded tasks that finish before teardown.
-
-    Retain descendants locally, outside the explicit cleanup grace set. The
-    final sweep adopts remaining descendants only after clients have closed.
-    The composition root owns this loop for one run. Delegate existing factory
-    keywords unchanged, and restore both hooks for callers using an ambient loop.
-    The exception handler also sanitizes explicit loop reports from shield and
-    async-generator cleanup, which can occur even after a result was retrieved.
-    """
-    tasks: set[asyncio.Future[Any]] = set()
-    loop = asyncio.get_running_loop()
-    previous_factory = loop.get_task_factory()
-    previous_handler = loop.get_exception_handler()
-
-    def create_task(
-        owner_loop: asyncio.AbstractEventLoop, coroutine: Any, **kwargs: Any
-    ) -> asyncio.Future[Any]:
-        task = (
-            previous_factory(owner_loop, coroutine, **kwargs)
-            if previous_factory is not None
-            else asyncio.Task(coroutine, loop=owner_loop, **kwargs)
-        )
-        _track_cleanup_task(task, tasks, "run background task")
-        return task
-
-    loop.set_task_factory(create_task)
-    loop.set_exception_handler(_log_cleanup_loop_error)
-    try:
-        yield
-    finally:
-        loop.set_task_factory(previous_factory)
-        loop.set_exception_handler(previous_handler)
-
-
-async def _drain_cleanup_tasks(
-    tasks: Collection[asyncio.Future[Any]], *, timeout: float | None = None
-) -> None:
-    """Wait once for grace, then once for cancellation, never joining indefinitely.
-
-    Unlike `wait_for`, `wait` does not wait out a task that suppresses
-    cancellation. Such tasks remain owned for the final terminal decision.
-    Caller cancellation still cancels the owned work before propagating.
-    """
-    pending = set(tasks)
-    if not pending:
-        return
-    try:
-        _, pending = await asyncio.wait(
-            pending, timeout=_CLEANUP_GRACE_SECONDS if timeout is None else timeout
-        )
-    finally:
-        pending = {task for task in pending if not task.done()}
-        if pending:
-            logger.warning("Cleanup incomplete; cancelling pending tasks")
-            for task in pending:
-                task.cancel()
-            await asyncio.wait(pending, timeout=_CLEANUP_CANCEL_SECONDS)
-
-
-def _exit_if_cleanup_pending(tasks: Collection[asyncio.Future[Any]]) -> None:
-    """Fail terminally after client cleanup if an owned task will not stop.
-
-    Python cannot forcibly stop a cancellation-resistant task. Returning or
-    raising SystemExit would leave `Runner.close` to try cancelling it again.
-    A nonzero process exit deliberately skips finalization and crash recovery,
-    forfeiting remaining task finalizers only after the client cleanup budgets.
-    A separate watchdog also bounds blocked terminal diagnostics before the
-    runner begins finalization.
-    """
-    if any(not task.done() for task in tasks):
-        watchdog: threading.Timer | None = None
-        try:
-            watchdog = threading.Timer(_RUNNER_SHUTDOWN_SECONDS, _force_runner_exit)
-            watchdog.daemon = True
-            watchdog.start()
-            logger.critical(
-                "Cleanup tasks did not stop after cancellation; exiting without restart"
-            )
-        finally:
-            try:
-                os._exit(1)
-            finally:
-                if watchdog is not None:
-                    watchdog.cancel()
-
-
-async def _discover_in_background(
-    kube: KubeClient, aliases: dict[str, ResourceMeta], app: KorvidApp
-) -> None:
-    """Merge full API discovery into *aliases* once available (shared dict)."""
-    try:
-        metas = await kube.discover_resources()
-        discovered = build_alias_map([PODS_META, HELM_RELEASES_META, HELM_REVISIONS_META, *metas])
-    except Exception:
-        logger.warning("Resource discovery failed; staying pods-only", exc_info=True)
-        return
-    aliases.update(discovered)
-    # Where OLM serves the operator catalog, `:operators` opens it - unless a
-    # real kind (e.g. OLM v1's Operator) already claims that alias.
-    pkg_meta = aliases.get(f"packagemanifests.{PACKAGES_GROUP}")
-    if pkg_meta is not None:
-        aliases.setdefault("operators", pkg_meta)
-    app.on_aliases_updated()
-
-
-def _close_provider_in_background(provider: LLMProvider, tasks: set[asyncio.Future[Any]]) -> None:
-    """Close an old provider without blocking, keeping a strong task reference.
-
-    asyncio only holds weak references to tasks, so fire-and-forget tasks can
-    be garbage-collected before completion; the done callback also consumes
-    any close error to avoid 'Task exception was never retrieved' warnings.
-    """
-    task = asyncio.get_running_loop().create_task(provider.aclose())
-    _track_cleanup_task(task, tasks, "provider close")
-
-
-class _AgentToolUIBridgeProxy(UIBridge):
-    """Late-bound *tools-layer* UI bridge: the ToolExecutor is built before the app exists,
-    so it holds this proxy and the composition root points ``target`` at the
-    app's bridge adapter right after construction. Until then every UI tool
-    degrades to an ERROR result instead of crashing the turn.
-
-    All delegated calls are serialized through one lock: the built-in agent
-    and the MCP server's concurrent stateless requests share this proxy, and
-    the app's UI operations (log pane swaps, describe views) are not safe to
-    interleave - only navigation has its own lock inside the app."""
-
-    #: Composed from the product's own error prefix rather than spelled out:
-    #: every caller decides "this failed" by testing `ERROR_PREFIX`, so a
-    #: literal here would quietly demote this answer to an ordinary text
-    #: result if that constant ever changed.
-    _NOT_READY = f"{ERROR_PREFIX} UI not ready"
-
-    def __init__(self) -> None:
-        self.target: UIBridge | None = None
-        self._lock = asyncio.Lock()
-
-    async def agent_navigate(self, view: str, namespace: str | None = None) -> str:
-        if self.target is None:
-            return self._NOT_READY
-        async with self._lock:
-            return await self.target.agent_navigate(view, namespace)
-
-    async def agent_set_filter(self, pattern: str) -> str:
-        if self.target is None:
-            return self._NOT_READY
-        async with self._lock:
-            return await self.target.agent_set_filter(pattern)
-
-    async def agent_open_logs(self, pod: str, namespace: str, container: str | None = None) -> str:
-        if self.target is None:
-            return self._NOT_READY
-        async with self._lock:
-            return await self.target.agent_open_logs(pod, namespace, container)
-
-    async def agent_open_describe(self, kind: str, name: str, namespace: str | None = None) -> str:
-        if self.target is None:
-            return self._NOT_READY
-        async with self._lock:
-            return await self.target.agent_open_describe(kind, name, namespace)
-
-    async def agent_drill_down(self, name: str) -> str:
-        if self.target is None:
-            return self._NOT_READY
-        async with self._lock:
-            return await self.target.agent_drill_down(name)
-
-    async def agent_request_write(
-        self,
-        action: str,
-        kind: str,
-        name: str,
-        namespace: str | None = None,
-        replicas: int | None = None,
-        resources: dict[str, dict[str, dict[str, str]]] | None = None,
-    ) -> str:
-        if self.target is None:
-            return self._NOT_READY
-        async with self._lock:
-            return await self.target.agent_request_write(
-                action, kind, name, namespace, replicas, resources
-            )
-
-    async def agent_submit_write_proposal(
-        self,
-        action: str,
-        kind: str,
-        name: str,
-        namespace: str | None = None,
-        replicas: int | None = None,
-        resources: dict[str, dict[str, dict[str, str]]] | None = None,
-        *,
-        session_id: str = "",
-        client_name: str = "",
-        client_version: str = "",
-    ) -> str:
-        if self.target is None:
-            return self._NOT_READY
-        async with self._lock:
-            return await self.target.agent_submit_write_proposal(
-                action,
-                kind,
-                name,
-                namespace,
-                replicas,
-                resources,
-                session_id=session_id,
-                client_name=client_name,
-                client_version=client_version,
-            )
-
-    async def agent_get_write_proposal(self, proposal_id: str) -> str:
-        if self.target is None:
-            return self._NOT_READY
-        async with self._lock:
-            return await self.target.agent_get_write_proposal(proposal_id)
-
-    async def agent_cancel_write_proposal(self, proposal_id: str, *, session_id: str = "") -> str:
-        if self.target is None:
-            return self._NOT_READY
-        async with self._lock:
-            return await self.target.agent_cancel_write_proposal(proposal_id, session_id=session_id)
+    """Delegate bounded cleanup while preserving composition-root seams."""
+    _sync_cleanup_limits()
+    await _support_shutdown(
+        discovery_task,
+        provider,
+        kube,
+        session=session,
+        close_tasks=close_tasks,
+    )
 
 
 #: Upper bound on the pods/resize discovery probe at startup: the TUI must
@@ -701,120 +470,6 @@ async def _probe_cloud_provider(kube: KubeClient) -> ProviderInfo:
     except TimeoutError:
         logger.warning("cloud provider detection timed out; provider unknown")
         return detect_provider([])
-
-
-#: What the agent is told when the cloud-provider probe found nothing —
-#: an honest "unknown", never a guess dressed up as a fact.
-_UNKNOWN_CLUSTER = ClusterFacts(provider="unknown", distribution=None)
-
-
-def _cluster_facts(info: ProviderInfo) -> ClusterFacts:
-    """Convert a cloud-provider probe into the facts the agent reasons over.
-
-    The probe result is a display concern everywhere else; the session
-    takes it as data so the prompt harness — not the composition root —
-    decides how a cluster is described to a model.
-    """
-    return ClusterFacts(provider=info.provider, distribution=info.distribution)
-
-
-@dataclasses.dataclass(frozen=True)
-class AgentWiring:
-    """Everything the app and its teardown guard need from the agent wiring.
-
-    A record rather than a tuple because the pieces have different owners:
-    `session` is handed to the app, the two boxes are read by the teardown
-    guard, and the two bridges are bound to the app once it exists.
-    """
-
-    #: The live session, or None when the agent is off/unavailable.
-    session: AgentSession | None
-    #: Whether the agent feature is wired at all. False on an install
-    #: without the `[agent]` extra, where `:ai` reports unavailable.
-    available: bool
-    #: Swap provider and session together, or None when unavailable.
-    rebuild: Callable[[ModelConnectionConfig, str | None], AgentSession | None] | None
-    #: Re-arm a live session for a new cluster (`:ctx`).
-    retarget: Callable[[AgentSession | None, bool, ClusterFacts | None], None]
-    #: `:ai off` — release provider and session for the session.
-    disconnect: Callable[[], None]
-    #: The live provider, shared with the teardown guard.
-    provider_box: list[LLMProvider | None]
-    #: The live session, shared with the teardown guard.
-    session_box: list[AgentSession | None]
-    #: The tools-layer port the executor, MCP and write approval share.
-    tool_bridge: _AgentToolUIBridgeProxy
-    #: The agent-layer port the session reads the workspace through.
-    ui_bridge: _AgentUiBridgeProxy
-
-
-class _AgentUiBridgeProxy(AgentUiBridge):
-    """Late-bound *agent-layer* workspace port.
-
-    The session is constructed before the app exists, so it holds this
-    proxy and the composition root points `target` at the app's workspace
-    bridge right after construction.
-
-    Unlike the tools-layer proxy, an unbound call here raises. A snapshot
-    invented before the UI exists would tell the model it is looking at a
-    screen that does not exist, and a fabricated action result would tell
-    it something happened that did not — both are worse than the wiring
-    bug they would hide.
-    """
-
-    _NOT_READY = "agent UI not ready"
-
-    def __init__(self) -> None:
-        self.target: AgentUiBridge | None = None
-
-    def snapshot(self) -> InteractionContext:
-        if self.target is None:
-            raise RuntimeError(self._NOT_READY)
-        return self.target.snapshot()
-
-    async def apply(self, action: UiAction) -> UiActionResult:
-        if self.target is None:
-            raise RuntimeError(self._NOT_READY)
-        return await self.target.apply(action)
-
-
-def _agent_unavailable_wiring(
-    config: KorvidConfig,
-    missing: list[str],
-    ui_proxy: _AgentToolUIBridgeProxy,
-    agent_ui_proxy: _AgentUiBridgeProxy,
-    provider_box: list[LLMProvider | None],
-    session_box: list[AgentSession | None],
-) -> AgentWiring:
-    """Session-less wiring for installs without the [agent] extra.
-
-    An explicitly enabled agent fails with an actionable install hint; an
-    unrequested one degrades to a wiring the app renders as "unavailable".
-    """
-    if config.agent_enabled:
-        raise SystemExit(f"korvid: {_AGENT_INSTALL_HINT}")
-    logger.info(
-        "embedded-agent providers not installed; :ai disabled (missing %s)", ", ".join(missing)
-    )
-
-    def _retarget_noop(
-        session: AgentSession | None,
-        pod_resize_supported: bool,
-        cluster: ClusterFacts | None,
-    ) -> None:
-        return None
-
-    return AgentWiring(
-        session=None,
-        available=False,
-        rebuild=None,
-        retarget=_retarget_noop,
-        disconnect=lambda: None,
-        provider_box=provider_box,
-        session_box=session_box,
-        tool_bridge=ui_proxy,
-        ui_bridge=agent_ui_proxy,
-    )
 
 
 def _create_provider_from_active_profile(
@@ -876,21 +531,6 @@ def _create_initial_provider(
     return _create_provider_from_active_profile(profile, credentials, config.network_ca_bundle)
 
 
-def _agent_environment(
-    config: KorvidConfig,
-    pod_resize_supported: bool,
-    observability_backends: frozenset[str],
-) -> Any:
-    """The capability facts a model policy is resolved against."""
-    from korvid.agent.model_policy import PolicyEnvironment
-
-    return PolicyEnvironment(
-        readonly=config.readonly,
-        resize_supported=pod_resize_supported,
-        observability_backends=observability_backends,
-    )
-
-
 def _resolve_agent_policy(
     provider: LLMProvider,
     config: KorvidConfig,
@@ -916,36 +556,6 @@ def _resolve_agent_policy(
         explicit_tier=model_tier or None,
         environment=environment,
     )
-
-
-#: What an operator can do about rules that will not fit. The rules
-#: themselves are never quoted back: they are operator text, and a startup
-#: warning is rendered in the TUI and written to the log.
-_PROMPT_DEGRADE_HINT: Final[str] = (
-    "shorten agent.rules or route to a larger-context model with `:ai`"
-)
-
-
-def _warn_agent_disabled(error: Exception, startup_warnings: list[str] | None) -> None:
-    """Record one actionable warning for a session korvid refused to build.
-
-    The agent is the only thing that degrades: the TUI, the write
-    perimeter and the MCP server are unaffected, and the wizard's catalog
-    and rebuild stay wired so the operator can fix the configuration from
-    inside the running app.
-
-    The budget hint is fixed text; it never quotes the operator's rules.
-    """
-    from korvid.agent.prompt_harness import StaticPromptTooLargeError
-
-    detail = str(error)
-    if isinstance(error, StaticPromptTooLargeError):
-        detail = f"{detail} — {_PROMPT_DEGRADE_HINT}"
-        logger.warning("agent session not built; the system prompt does not fit the routed model")
-    else:
-        logger.warning("agent session not built: %s", type(error).__name__)
-    if startup_warnings is not None:
-        startup_warnings.append(f"agent disabled: {detail}")
 
 
 def _build_session(
@@ -1009,33 +619,6 @@ def _build_session(
     )
 
 
-def _close_agent_in_background(
-    session: AgentSession | None,
-    provider: LLMProvider | None,
-    tasks: set[asyncio.Future[Any]],
-) -> None:
-    """Release a replaced session and its provider, in that order.
-
-    The session first: it may still be winding a turn down, and closing
-    the transport under it would turn an orderly stop into a torn stream.
-    Non-blocking, because a swap must not stall the UI on a provider that
-    is slow to close.
-    """
-
-    async def _close() -> None:
-        try:
-            if session is not None:
-                await session.aclose()
-        except Exception:
-            logger.warning("agent session close failed during cleanup")
-        finally:
-            if provider is not None:
-                await provider.aclose()
-
-    task = asyncio.get_running_loop().create_task(_close())
-    _track_cleanup_task(task, tasks, "provider close")
-
-
 def _build_model_catalog(
     *, ca_bundle: str | None = None, models_dev: bool = True
 ) -> ModelCatalog | None:
@@ -1095,21 +678,6 @@ def _build_model_catalog(
             ca_bundle=ca_bundle,
         ),
     )
-
-
-def _active_model_name(config: KorvidConfig) -> str | None:
-    """The model the active profile names, for the header before a session.
-
-    Only a display fallback: once a session exists the controller reads
-    the model off the resolved policy. The bare tag is what the header
-    used to show, so the prefix is dropped rather than shown here.
-    """
-    from korvid.agent.model_profiles import split_reference
-
-    profile = config.model_connections.active_profile
-    if profile is None:
-        return None
-    return split_reference(profile.model)[1] or None
 
 
 def _build_agent_wiring(
@@ -1243,44 +811,6 @@ def _profile_writer() -> ModelConnectionsWriter:
     return ConfigFileModelConnectionsWriter(DEFAULT_CONFIG_PATH)
 
 
-def _make_rebuild_agent(
-    build_provider: Callable[[ModelConnectionConfig], LLMProvider | None],
-    compose: Callable[[LLMProvider, str | None], tuple[AgentSession, Any]],
-    provider_box: list[LLMProvider | None],
-    session_box: list[AgentSession | None],
-    tier_box: list[str | None],
-    close_tasks: set[asyncio.Future[Any]],
-) -> Callable[[ModelConnectionConfig, str | None], AgentSession | None]:
-    """The `:ai` wizard's swap, as one transaction.
-
-    Nothing the app can observe moves until the *whole* replacement —
-    provider and the entire session graph over it — exists. A build that
-    fails halfway releases only what it built and leaves the live agent
-    running, so a mistyped endpoint costs a notification, not the session.
-    """
-
-    def rebuild_agent(
-        profile: ModelConnectionConfig, model_tier: str | None
-    ) -> AgentSession | None:
-        new_provider = build_provider(profile)
-        if new_provider is None:
-            return None
-        try:
-            new_session, _policy = compose(new_provider, model_tier)
-        except Exception:
-            _close_provider_in_background(new_provider, close_tasks)
-            raise
-        old_provider = provider_box[0]
-        old_session = session_box[0]
-        provider_box[0] = new_provider
-        session_box[0] = new_session
-        tier_box[0] = model_tier
-        _close_agent_in_background(old_session, old_provider, close_tasks)
-        return new_session
-
-    return rebuild_agent
-
-
 def _make_retarget_agent(
     config: KorvidConfig,
     obs: ObservabilityWiring,
@@ -1331,45 +861,6 @@ def _make_retarget_agent(
     return retarget_agent
 
 
-def _make_disconnect_agent(
-    provider_box: list[LLMProvider | None],
-    session_box: list[AgentSession | None],
-    close_tasks: set[asyncio.Future[Any]],
-) -> Callable[[], None]:
-    """`:ai off` (issue #167): release the live session and provider.
-
-    Both boxes are cleared first, so nothing can hand the released pair to
-    a caller while the close is in flight. Persisted configuration is
-    untouched, so a later wizard rebuild reconnects with the kept
-    settings. Idempotent when already off.
-    """
-
-    def disconnect_agent() -> None:
-        old_provider = provider_box[0]
-        old_session = session_box[0]
-        provider_box[0] = None
-        session_box[0] = None
-        if old_provider is not None or old_session is not None:
-            _close_agent_in_background(old_session, old_provider, close_tasks)
-
-    return disconnect_agent
-
-
-def _validate_ca_bundle(path: str | None) -> None:
-    """Fail startup actionably when `network.ca_bundle` cannot be loaded.
-
-    Missing, unreadable, and malformed bundles must never silently fall
-    back to default trust (issue #168) — a user who configured a corporate
-    CA needs to know it is not in effect, not debug TLS errors later.
-    """
-    if path is None:
-        return
-    try:
-        ssl.create_default_context(cafile=path)
-    except (OSError, ssl.SSLError) as exc:
-        raise SystemExit(f"korvid: network.ca_bundle {path!r} could not be loaded: {exc}") from exc
-
-
 def _load_startup_config(
     readonly: bool, mcp: bool = False, namespace: str | None = None
 ) -> KorvidConfig:
@@ -1401,101 +892,10 @@ def _load_startup_config(
     return config
 
 
-async def _start_mcp_if_enabled(config: KorvidConfig, controller: MCPControllerBase | None) -> None:
-    if not config.mcp_enabled or controller is None:
-        return
-    startup_msg = await controller.start()
-    if startup_msg.startswith("ERROR"):
-        logger.error("%s", startup_msg)
-
-
-async def _stop_mcp(state: _RunState) -> None:
-    """Bound the controller's stop, retaining any server task it cannot finish.
-
-    Allow its two five-second phases before cancelling the controller itself.
-    """
-    controller = state.mcp
-    if controller is None:
-        return
-    _track_cleanup_task(controller.pending_task(), state.close_tasks, "MCP server task")
-
-    async def stop() -> None:
-        try:
-            leftover = await controller.shutdown()
-            _track_cleanup_task(leftover, state.close_tasks, "MCP server task")
-        finally:
-            _track_cleanup_task(controller.pending_task(), state.close_tasks, "MCP server task")
-
-    task = asyncio.create_task(stop())
-    _track_cleanup_task(task, state.close_tasks, "MCP shutdown")
-    await _drain_cleanup_tasks({task}, timeout=_MCP_SHUTDOWN_GRACE_SECONDS)
-
-
-def _adopt_run_tasks(state: _RunState) -> None:
-    """Retain descendants that survived cancellation of a shielding close wrapper."""
-    if state.preexisting_tasks is None:
-        return
-    current = asyncio.current_task()
-    for task in asyncio.all_tasks() - state.preexisting_tasks:
-        if task is not current:
-            _track_cleanup_task(task, state.close_tasks, "run background task")
-
-
-async def _finish_run_cleanup(state: _RunState) -> None:
-    """Bound the last run-owned tasks before the stdlib runner can gather them.
-
-    Explicit close work has already received grace; cancel remaining descendants
-    without another grace wait after the client cleanup attempts.
-    Only `_run` enables this sweep, excluding tasks that predate the run and
-    the caller itself. Two bounded cancellation sweeps let a finalizer's new
-    descendants stop, while repeated respawns remain subject to terminal exit.
-    """
-    try:
-        if state.preexisting_tasks is not None:
-            _adopt_run_tasks(state)
-            await _drain_cleanup_tasks(state.close_tasks, timeout=0.0)
-    finally:
-        try:
-            if state.preexisting_tasks is not None:
-                _adopt_run_tasks(state)
-                await _drain_cleanup_tasks(state.close_tasks, timeout=0.0)
-        finally:
-            _adopt_run_tasks(state)
-            _exit_if_cleanup_pending(state.close_tasks)
-
-
 async def _teardown(state: _RunState, kube: KubeClient) -> None:
-    """Attempt every owned cleanup under deadlines, then enforce terminal policy.
-
-    MCP stops accepting work first. Live and replaced agents drain together,
-    with sessions preceding their providers. Kubernetes and observability each
-    get an independent cleanup budget even when earlier tasks refuse to stop.
-    """
-    try:
-        await _stop_mcp(state)
-    finally:
-        session = state.session_box[0] if state.session_box else None
-        provider = state.provider_box[0] if state.provider_box else None
-        state.session_box[:] = [None]
-        state.provider_box[:] = [None]
-        try:
-            await _shutdown(
-                state.discovery_box[0] if state.discovery_box else None,
-                provider,
-                kube,
-                session=session,
-                close_tasks=state.close_tasks,
-            )
-        finally:
-            try:
-                observability = state.observability
-                state.observability = None
-                if observability is not None:
-                    task = asyncio.create_task(observability.aclose())
-                    _track_cleanup_task(task, state.close_tasks, "observability client close")
-                    await _drain_cleanup_tasks({task})
-            finally:
-                await _finish_run_cleanup(state)
+    """Delegate full teardown while preserving composition-root seams."""
+    _sync_cleanup_limits()
+    await _support_teardown(state, kube)
 
 
 def _build_helm(config: KorvidConfig) -> HelmCLI | None:
@@ -1534,14 +934,8 @@ def _make_traffic_manager_probe(kube: KubeClient) -> Callable[[], Awaitable[bool
 
 
 def _protected_context_name(config: KorvidConfig, context: str | None) -> str | None:
-    """The effective context's name when it matches `protected_contexts`
-    (issue #83), None otherwise. *context* is explicit (not read from config)
-    so a runtime `:ctx` switch can re-derive protection for the new cluster;
-    None falls back to the kubeconfig's active context name."""
-    effective = resolve_context_name(context)
-    if context_is_protected(effective, config.protected_contexts):
-        return effective
-    return None
+    """Delegate protection matching while retaining the root monkeypatch seam."""
+    return _support_protected_context_name(config, context, resolve_context_name)
 
 
 def _make_switch_context(
@@ -1649,28 +1043,342 @@ def _make_get_manifest(
     return get_manifest
 
 
-@dataclasses.dataclass
-class _RunState:
-    """What `_run`'s teardown guard must release — filled progressively by
-    `_wire_and_run` so a wiring failure releases exactly what was built.
+def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRuntime:
+    """Construct the complete session-scoped controller graph."""
+    config = inputs.config
+    workspace_ref = _LateReference[WorkspaceController]()
+    logs_ref = _LateReference[LogController]()
+    hints_ref = _LateReference[HintController]()
+    timeline_ref = _LateReference[SessionTimelineController]()
+    proposals_ref = _LateReference[ProposalController]()
+    forward_ref = _LateReference[ForwardController]()
+    writes_ref = _LateReference[WriteCoordinator]()
+    agent_ref = _LateReference[AgentUiController]()
+    shell_ref = _LateReference[ShellController]()
+    debug_ref = _LateReference[DebugController]()
 
-    `close_tasks` retains explicit cleanup work, including replaced agents.
-    The task factory retains other descendants until the final sweep.
-    `preexisting_tasks` excludes ambient work from that sweep.
-    """
+    view = AppViewState(app)
+    relationship_loader: RelationshipSnapshotLoader | None = (
+        RelationshipSnapshotLoader(_RelationshipLister(inputs.list_relationship_objects))
+        if inputs.list_relationship_objects is not None
+        else None
+    )
+    context = ContextSwitchCoordinator(
+        ui=AppUiSurface(app),
+        surface=AppContextSurface(app),
+        view=view,
+        session=AppSessionConfiguration(app),
+        store=app.store,
+        watches=app.watch_manager,
+        workspace=workspace_ref.get,
+        logs=logs_ref.get,
+        hints=hints_ref.get,
+        timeline=timeline_ref.get,
+        proposals=proposals_ref.get,
+        forwards=forward_ref.get,
+        registry=lambda: app._forwards,
+        writes=writes_ref.get,
+        agent=agent_ref.get,
+        mcp=lambda: app._mcp,
+        audit=lambda: app._audit,
+        list_contexts=inputs.list_contexts,
+        probe_context=inputs.probe_context,
+        switch_context=inputs.switch_context,
+    )
+    timeline = SessionTimelineController(
+        ui=AppUiSurface(app),
+        view=view,
+        watch_manager=app.watch_manager,
+        timeline=inputs.session_timeline,
+        get_epoch=context.epoch,
+        epoch_crossed=context.crossed,
+        watch_warning_events=inputs.watch_warning_events,
+        selected_resource=lambda: workspace_ref.get().selected_timeline_resource(),
+        navigate=lambda kind, namespace, name, epoch: workspace_ref.get().jump_to_object(
+            kind, namespace, name, epoch=epoch
+        ),
+    )
+    timeline_ref.bind(timeline)
+    writes = WriteCoordinator(
+        ui=AppUiSurface(app),
+        view=view,
+        context=context,
+        audit=lambda: app._audit,
+        timeline=timeline,
+        check_permission=lambda: app._check_permission,
+        relationship_loader=lambda: relationship_loader,
+        focused_pane=lambda: app._pane,
+        canonical_meta_kind=app._canonical_meta_kind,
+        protected_context=inputs.protected_context,
+    )
+    writes_ref.bind(writes)
+    bridge_dispatch = AppContextDispatch()
+    inspect_surface = AppInspectSurface(app)
+    inspect_controller = ResourceInspectController(
+        ui=AppUiSurface(app),
+        view=view,
+        context=context,
+        surface=inspect_surface,
+        shell=shell_ref.get,
+        logs=logs_ref.get,
+        get_manifest=lambda: app._get_manifest,
+        get_events=lambda: app._get_events,
+        stream_logs=lambda: app._stream_logs,
+        target_uid=lambda kind, ns, name: app._target_uid(kind, ns, name),
+        audit=lambda: app._audit,
+        provider_hint=lambda: app._provider_hint,
+    )
+    shell = ShellController(
+        gate=writes,
+        view=view,
+        ui=AppUiSurface(app),
+        debug=debug_ref.get,
+        audit=lambda: app._audit,
+        get_manifest=lambda: app._get_manifest,
+        pod_containers=inspect_controller.pod_containers,
+        node_target=lambda action: app._node_target(action),
+        target_uid=lambda kind, ns, name: app._target_uid(kind, ns, name),
+        settings=lambda: ShellSettings(
+            kube_context=app.config.kube_context,
+            debug_default_image=app.config.debug_default_image,
+            debug_images=app.config.debug_images,
+            node_shell_image=app.config.node_shell_image,
+            node_shell_namespace=app.config.node_shell_namespace,
+        ),
+    )
+    shell_ref.bind(shell)
+    forward_controller = ForwardController(
+        gate=writes,
+        ui=AppUiSurface(app),
+        view=view,
+        forwards=lambda: app._forwards,
+        audit=lambda: app._audit,
+        get_manifest=lambda: app._get_manifest,
+    )
+    forward_ref.bind(forward_controller)
+    transfer = TransferController(
+        ui=AppUiSurface(app),
+        view=view,
+        writes=writes,
+        screens=AppTransferScreens(app),
+        open_pod_exec=lambda: app._open_pod_exec,
+        audit=lambda: app._audit,
+        find_pod=inspect_controller.find_pod,
+        target_uid=lambda kind, ns, name: app._target_uid(kind, ns, name),
+        pod_uid_unchanged=inspect_controller.pod_uid_unchanged,
+    )
+    operators = OperatorController(
+        gate=writes,
+        view=view,
+        ui=AppUiSurface(app),
+        write_ops=lambda: app._write_ops,
+        get_manifest=lambda: app._get_manifest,
+        confirm_screen=writes.confirm_screen,
+        uid_intact_after_fetch=writes.uid_intact_after_fetch,
+        precheck_keybinding_write=writes.precheck_keybinding_write,
+        write_target=writes.write_target,
+    )
+    helm_controller = HelmController(
+        helm=lambda: app._helm,
+        get_release_identity=lambda: app._get_helm_release_identity,
+        gate=writes,
+        view=view,
+        ui=AppUiSurface(app),
+        navigation=workspace_ref.get,
+        edit_in_external_editor=lambda *args, **kwargs: app._edit_in_external_editor(
+            *args, **kwargs
+        ),
+        edit_text=lambda: app._edit_text,
+    )
+    debug = DebugController(
+        ui=AppUiSurface(app),
+        audit=lambda: app._audit,
+        readonly=lambda: app.config.readonly,
+        settings=lambda: DebugSettings(
+            kube_context=app.config.kube_context,
+            default_image=app.config.debug_default_image,
+            images=app.config.debug_images,
+        ),
+        pod_uid_unchanged=inspect_controller.pod_uid_unchanged,
+        get_epoch=context.epoch,
+        epoch_crossed=context.crossed,
+        confirm_screen=writes.confirm_screen,
+        run_debug=lambda: shell_ref.get().run_debug,
+    )
+    debug_ref.bind(debug)
+    drain = DrainController(
+        notify=app.notify,
+        audit_write=writes.audit_write,
+        set_progress=functools.partial(app._set_progress, "drain"),
+    )
+    resource_writes = ResourceWriteController(
+        writes=writes,
+        view=view,
+        ui=AppUiSurface(app),
+        drain=drain,
+        write_ops=lambda: app._write_ops,
+        get_manifest=lambda: app._get_manifest,
+        edit_text=lambda: app._edit_text,
+        managed_note=app._managed_note,
+        managed_note_from=app._managed_note_from,
+        pod_resize_supported=lambda: app._pod_resize_supported,
+        helm_uninstall=lambda: helm_controller.uninstall_selected(),
+        operators=operators,
+    )
+    workspace = WorkspaceState("pods", config.namespace or "default")
+    hints = HintController(
+        find_pod_summary=inspect_controller.find_pod_summary,
+        cursor_row_key=inspect_surface.cursor_row_key,
+        on_pods_view=lambda: app.current_kind == "pods",
+        get_events=lambda: app._get_events,
+        show_trouble=inspect_surface.show_trouble,
+        clear_hint=inspect_surface.clear_hint,
+        start_fetch=lambda coro: app.run_worker(coro, exclusive=True, group="hint-events"),
+        set_timer=app.set_timer,
+        ctx_epoch=context.epoch,
+        ctx_crossed=context.crossed,
+    )
+    hints_ref.bind(hints)
+    logs = LogController(
+        ui=AppUiSurface(app),
+        get_log_pane=lambda: app._log_pane,
+        get_stream_logs=lambda: app._stream_logs,
+        pod_containers=inspect_controller.pod_containers,
+        selected_ns_name=view.selected_ns_name,
+        visible_pod_keys=lambda: [str(row.key.value) for row in app._focused_table().ordered_rows],
+        current_kind=lambda: app.current_kind,
+        focused_pane=lambda: app._pane,
+        ctx_epoch=context.epoch,
+        ctx_switch_crossed=context.crossed,
+        ctx_reads_allowed=context.reads_allowed,
+        refresh_bindings=app.refresh_bindings,
+        buffer_max_lines=config.log_buffer_lines,
+    )
+    logs_ref.bind(logs)
+    workspace_controller = WorkspaceController(
+        state=workspace,
+        store=app.store,
+        watch_manager=app.watch_manager,
+        metrics=app._metrics,
+        relationship_loader=relationship_loader,
+        ui=AppUiSurface(app),
+        surface=AppWorkspaceSurface(app),
+        view=view,
+        context=context,
+        logs=logs,
+        hints=hints,
+        config=lambda: app.config,
+        get_manifest=lambda: app._get_manifest,
+        get_helm_components=lambda: app._get_helm_components,
+        olm_alias_key=operators.alias_key,
+        describe_named=inspect_controller.describe_named,
+        check_permission=lambda: app._check_permission,
+        list_namespaces=lambda: app._list_namespaces,
+    )
+    workspace_ref.bind(workspace_controller)
+    proposals = ProposalController(
+        store=inputs.proposal_store,
+        ui=AppUiSurface(app),
+        screens=AppProposalScreens(app),
+        tasks=AppReviewTasks(app),
+        events=AppProposalEvents(app),
+        context=context,
+        writes=writes,
+        navigation=workspace_controller,
+        builder=agent_ref.get,
+        config=lambda: app.config,
+        audit=lambda: app._audit,
+        approval_timeout_seconds=inputs.approval_timeout_seconds,
+        refresh_status=lambda: app._refresh_status(),
+    )
+    proposals_ref.bind(proposals)
+    integrations = IntegrationController(
+        ui=AppUiSurface(app),
+        context=context,
+        proposals=proposals,
+        serializer=workspace_controller,
+        mcp=lambda: app._mcp,
+        telepresence=inputs.telepresence,
+        probe_traffic_manager=inputs.probe_traffic_manager,
+        telepresence_enabled=lambda: app.config.telepresence_enabled,
+        follow_enabled=config.mcp_follow,
+        refresh_status=lambda: app._refresh_status(),
+    )
+    agent_follow_bridge = inputs.agent_follow_bridge
+    agent_ui = AgentUiController(
+        panel=AppAgentPanel(app),
+        screens=AppAgentScreens(app),
+        ui=AppUiSurface(app),
+        view=view,
+        context=context,
+        writes=writes,
+        workspace=workspace,
+        navigation=workspace_controller,
+        logs=logs,
+        proposals=proposals,
+        dispatch=bridge_dispatch,
+        config=lambda: app.config,
+        get_manifest=lambda: app._get_manifest,
+        get_events=lambda: app._get_events,
+        stream_logs=lambda: app._stream_logs,
+        pod_containers=inspect_controller.pod_containers,
+        write_ops=lambda: app._write_ops,
+        audit=lambda: app._audit,
+        pod_resize_supported=lambda: app._pod_resize_supported,
+        provider_hint=lambda: app._provider_hint,
+        approval_timeout_seconds=inputs.approval_timeout_seconds,
+        refresh_status=lambda: app._refresh_status(),
+        follow_bridge=lambda: agent_follow_bridge,
+        session=inputs.agent_session,
+        model_name=inputs.agent_model_name,
+        catalog=inputs.agent_catalog,
+        save_profiles=inputs.agent_save_profiles,
+        rebuild=inputs.rebuild_agent,
+        disconnect=inputs.disconnect_agent,
+        available=inputs.agent_available,
+    )
+    agent_ref.bind(agent_ui)
+    commands = CommandRouter(
+        ui=AppUiSurface(app),
+        agent=agent_ui,
+        integrations=integrations,
+        proposals=proposals,
+        forwards=forward_controller,
+        operators=operators,
+    )
+    return AppRuntime(
+        view=view,
+        relationship_loader=relationship_loader,
+        context=context,
+        timeline=timeline,
+        writes=writes,
+        bridge_dispatch=bridge_dispatch,
+        inspect_surface=inspect_surface,
+        inspect=inspect_controller,
+        shell=shell,
+        forward=forward_controller,
+        transfer=transfer,
+        operators=operators,
+        helm=helm_controller,
+        debug=debug,
+        drain=drain,
+        resource_writes=resource_writes,
+        workspace=workspace,
+        hints=hints,
+        logs=logs,
+        workspace_controller=workspace_controller,
+        proposals=proposals,
+        integrations=integrations,
+        agent_ui=agent_ui,
+        commands=commands,
+    )
 
-    mcp: MCPControllerBase | None = None
-    provider_box: list[LLMProvider | None] = dataclasses.field(default_factory=lambda: [None])
-    #: The live agent session (issue #166): the teardown guard closes it
-    #: before the provider it speaks through, so a partially-wired startup
-    #: never tears the transport out from under a session.
-    session_box: list[AgentSession | None] = dataclasses.field(default_factory=lambda: [None])
-    close_tasks: set[asyncio.Future[Any]] = dataclasses.field(default_factory=set)
-    preexisting_tasks: set[asyncio.Task[Any]] | None = None
-    discovery_box: list[asyncio.Task[None]] = dataclasses.field(default_factory=list)
-    #: Observability connectors (issue #193): each owns an HTTP client
-    #: that teardown must close, however far wiring got.
-    observability: ObservabilityWiring | None = None
+
+def assemble_app_runtime(app: AppT) -> AppT:
+    """Construct and bind one app runtime at the composition root."""
+    runtime = _construct_app_runtime(app, app.runtime_inputs)
+    app.bind_runtime(runtime)
+    return app
 
 
 async def _run(readonly: bool = False, mcp: bool = False, namespace: str | None = None) -> None:
@@ -1827,6 +1535,7 @@ async def _wire_and_run(config: KorvidConfig, kube: KubeClient, state: _RunState
         # Warning-Event stream, read-only and filtered server-side.
         watch_warning_events=kube.watch_warning_events,
     )
+    app = assemble_app_runtime(app)
     app_box.append(app)
     # Late-bind both ports: from here on the agent's UI-control tools
     # (navigate/set_filter/open_logs/open_describe) land in this app, and

@@ -6,12 +6,27 @@ is repeated later only where trusting the earlier layer would be unsound.
 
 ## 1. Every commit — local, `pre-commit`
 
-`ruff`, `ruff-format`, `typos`, `validate-pyproject`, `mypy`, and two
-repository hooks: `no-bare-type-ignore` and `no-private-index-in-lock`.
+`ruff`, `ruff-format`, `typos`, `validate-pyproject`, `mypy`, and three
+repository hooks: `source-size`, `no-bare-type-ignore`, and
+`no-private-index-in-lock`.
 
 These are fast enough to run on staged files, so nothing slow lives here.
 The same hooks run again in CI over **all** files (`pre-commit` job), which
 is what makes `--no-verify` an unusable shortcut rather than a quiet one.
+
+### Source-size ratchet
+
+`scripts/check_source_size.py` checks every tracked Python module under
+`src/korvid` on every commit. New modules have a 1,200-physical-line ceiling.
+Existing modules already beyond that ceiling are listed with a fixed baseline
+and a non-empty rationale, so they may shrink but cannot grow. The Textual app
+shell has an explicit 1,500-line ceiling, and `KorvidApp.__init__` has a
+separate 160-line ceiling.
+
+If the hook fails, split the module by responsibility or reduce it below its
+reviewed cap. A genuinely necessary exception must be an explicit policy edit
+with a narrow rationale that reviewers can challenge. Never bypass the hook or
+raise a baseline merely to make a change pass.
 
 ### Working behind a corporate package mirror
 
@@ -108,7 +123,7 @@ else is worse than none.
 
 ## 2. Before pushing — local, `make check`
 
-`ruff` → `mypy` → `pytest -x -q` → `tach check`.
+source-size → `ruff` → `mypy` → `pytest -x -q` → `tach check`.
 
 The full test suite takes ~13 minutes locally. Run it before pushing, not
 between edits: CI runs the same checks, and iterating against a 13-minute
@@ -132,6 +147,21 @@ and runs ruff, the format check, mypy, `tach` and `deptry`; a docs-only
 change runs the suite once, on 3.12, and Windows starts and syncs before
 skipping its pytest step. What is saved is three redundant suite runs, not
 the matrix.
+
+Pull-request code never runs on `korvid-runners`. Linux test, pre-commit,
+security, experimental `ty`, and CodeQL jobs select `ubuntu-latest` for pull
+requests and retain `korvid-runners` only for trusted main pushes or the
+scheduled CodeQL scan. Change classification and dependency review always use
+`ubuntu-latest`; Windows always uses `windows-latest`. Every job also has an
+explicit 10–45 minute deadline so a wedged runner cannot consume capacity
+indefinitely.
+
+The Windows full-suite command prints and consumes `${{ github.run_id }}` as
+its single `pytest-randomly` seed, making a failed order reproducible without
+retrying the suite. The `ty-experimental` job syncs the locked development
+environment and runs `uv run --with ty ty check src/`; only that analyzer
+step has `continue-on-error`, so checkout and setup failures remain blocking
+while this second type checker stays advisory.
 
 ### Windows documentation harness lifecycle diagnostics
 
@@ -167,24 +197,54 @@ Node exit naturally. This does not accept parsed output as success: Python
 still requires the process handle to exit inside the same 10-second deadline
 and returns the real exit code.
 
-The shared harness lifecycle reporter writes bounded, value-free summaries of
-active resource, handle, and request type names at `stage=complete` and
+Before the harness module loads, a CommonJS preload synchronously writes
+`korvid-harness stage=node-started elapsed-ms=0`. The shared harness lifecycle
+reporter reuses that monotonic origin and appends a non-negative `elapsed-ms`
+value to every later milestone. It also writes bounded, value-free summaries
+of active resource, handle, and request type names at `stage=complete` and
 `stage=before-exit`, followed by a `stage=exit` marker from Node's synchronous
-exit event. The sequence helps distinguish an active-resource leak from a stall
-after the event loop empties or after Node begins final process teardown.
+exit event. The sequence helps distinguish failure before Node startup from an
+active-resource leak, an empty-event-loop stall, or final process teardown.
 On macOS/Node 22.22.1, intercepting the old forced exit produced empty resource,
 handle, and request sets; 100 consecutive natural-exit runs completed. That
 rules out a deterministic harness-owned leak there, not a Windows-specific
 shutdown or runner stall. The new Windows evidence is required before claiming
 a root cause or fix.
 
+[Run 34706111509, job 103586389583](https://github.com/hellices/korvid/actions/runs/34706111509/job/103586389583)
+on commit `dcfcc62b` supplied a different Windows recurrence.
+`harness_nonzero_exit.mjs` emitted the preload milestone and both contract
+writes, but no `stage=complete`, `stage=before-exit`, or `stage=exit` marker.
+At the ten-second deadline the Node process was still running with only
+0.015625 user CPU seconds and 0.0625 system CPU seconds across 12 threads;
+termination reaped it, and the independently bounded Python, Node-version, and
+CJS/file/ESM probes all exited successfully. The relevant harness sources were
+byte-identical to successful run 34700214127. This localizes the new symptom to
+the synchronous `finish()` path or runner suspension after the contract write,
+but the absent `stage=complete` line cannot distinguish resource enumeration
+from the final synchronous write. It therefore remains evidence, not proof of
+a Node defect or a repository-side runtime fix; issue #371 tracks the remaining
+investigation. The failed run was not retried, skipped, or given a longer
+deadline.
+
 Stdout and stderr remain in separate temporary files under the repository
-instead of `PIPE`s. A true timeout still kills the process, preserves the
-original exception, and reads only bounded head-and-tail diagnostics from the
-files. A regression harness deliberately reports completion while retaining a
-timer: Python still raises the original timeout, and the bounded diagnostics
-retain the `Timeout` resource type. No completion marker is accepted as a
-substitute for process exit.
+instead of `PIPE`s. Python waits on the process handle with `Popen.wait()` for
+the unchanged 10-second deadline. On a true timeout it polls the process and
+takes a bounded `psutil` snapshot before termination. The snapshot contains
+only status, CPU user/system seconds, thread count, and RSS/VMS bytes; it never
+reads command-line arguments, environment values, open files, connections,
+executables, usernames, or parents. The runner then sends terminate and waits
+two seconds, escalating to kill only when needed. After successfully sending
+the non-catchable kill, it waits without another process-level deadline for
+confirmed reaping. If that final wait instead raises `OSError`, the runner
+records the type-only `reap=error` outcome and preserves the original harness
+timeout; that exceptional path does not claim confirmed reaping.
+After confirmed reaping, or after recording that final wait error, it reads
+bounded head-and-tail diagnostics from the files and re-raises the original
+timeout object. A regression harness deliberately
+reports completion while retaining a timer: Python still raises that original
+timeout, and the bounded diagnostics retain the `Timeout` resource type. No
+completion marker is accepted as a substitute for process exit.
 
 After a timeout, separately bounded controls run in this order:
 

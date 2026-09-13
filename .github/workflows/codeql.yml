@@ -18,7 +18,8 @@ concurrency:
 
 jobs:
   analyze:
-    runs-on: korvid-runners
+    runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-latest' || 'korvid-runners' }}
+    timeout-minutes: 20
     permissions:
       contents: read
       security-events: write

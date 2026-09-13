@@ -85,11 +85,13 @@ from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.models import manifest_uid
 from korvid.tools.executor import RecordedExecution, ToolExecutor, ToolOutcome, UIBridge
 from korvid.tools.registry import TOOLS_BY_NAME
-from korvid.ui.app import AppUIBridge, KorvidApp
+from korvid.ui.app import KorvidApp
+from korvid.ui.app_surfaces import AppUIBridge
 from korvid.ui.messages import AgentPromptSubmitted
 from korvid.ui.widgets.agent_panel import AgentPanel
 from korvid.ui.widgets.confirm_screen import ConfirmScreen
 from korvid.ui.widgets.resource_table import ResourceTable
+from tests.app_factory import build_test_app
 from tests.ui.waits import until
 
 __all__ = [
@@ -1188,7 +1190,7 @@ def _build_app(
     approval_timeout_seconds: float,
 ) -> KorvidApp:
     store = ResourceStore()
-    return KorvidApp(
+    return build_test_app(
         config=KorvidConfig(
             namespace=journey.target.namespace,
             kube_context=journey.target.context,

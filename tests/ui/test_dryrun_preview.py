@@ -25,6 +25,7 @@ from korvid.ui.app import KorvidApp
 from korvid.ui.widgets.agent_panel import AgentPanel
 from korvid.ui.widgets.confirm_screen import ConfirmScreen, ReplicasPrompt
 from korvid.ui.widgets.resource_table import ResourceTable
+from tests.app_factory import build_test_app
 
 from .waits import until
 
@@ -153,7 +154,7 @@ def make_app(ops: WriteOps, audit_path: Path) -> KorvidApp:
             },
         }
 
-    return KorvidApp(
+    return build_test_app(
         config=KorvidConfig(namespace="default"),
         store=store,
         watch_manager=WatchManager(store, source),

@@ -139,7 +139,7 @@ async def test_mirror_routes_through_the_injected_serialized_bridge() -> None:
     import asyncio
 
     from korvid.__main__ import _AgentToolUIBridgeProxy
-    from korvid.ui.app import AppUIBridge
+    from korvid.ui.app_surfaces import AppUIBridge
 
     from .waits import until
 

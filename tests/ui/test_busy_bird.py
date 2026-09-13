@@ -18,6 +18,7 @@ from korvid.core.watch import WatchManager
 from korvid.k8s.discovery import PODS_META, ResourceMeta
 from korvid.ui.app import KorvidApp
 from korvid.ui.widgets.status_bar import BIRD_FRAMES, StatusBar, bird_frame
+from tests.app_factory import build_test_app
 
 from .waits import until
 
@@ -68,7 +69,7 @@ def _make_app(audit_path: Path | None = None) -> KorvidApp:
         return ["default"]
 
     aliases: dict[str, ResourceMeta] = {"pods": PODS_META}
-    return KorvidApp(
+    return build_test_app(
         config=KorvidConfig(namespace="default"),
         store=store,
         watch_manager=WatchManager(store, source),

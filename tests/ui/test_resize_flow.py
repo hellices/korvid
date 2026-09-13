@@ -28,6 +28,7 @@ from korvid.ui.app import KorvidApp
 from korvid.ui.widgets.confirm_screen import ConfirmScreen
 from korvid.ui.widgets.resize_prompt import ResizePrompt
 from korvid.ui.widgets.resource_table import ResourceTable
+from tests.app_factory import build_test_app
 
 from .waits import until
 
@@ -112,7 +113,7 @@ def make_app(
     readonly: bool = False,
     permitted: bool | None = None,
     check_calls: list[tuple[str, str, str, str | None, str, str]] | None = None,
-    get_manifest: object = None,
+    get_manifest: (Callable[[str, str | None, str], Awaitable[dict[str, Any]]] | None) = None,
     pod_uid: str | None = "pod-uid-1",
     relationship_calls: list[tuple[str, str | None]] | None = None,
     relationship_lister: (
@@ -178,12 +179,12 @@ def make_app(
             ]
         return []
 
-    return KorvidApp(
+    return build_test_app(
         config=KorvidConfig(namespace="default", readonly=readonly),
         store=store,
         watch_manager=WatchManager(store, source),
         aliases=dict(_ALIASES),
-        get_manifest=get_manifest or default_get_manifest,  # type: ignore[arg-type]  # test seam
+        get_manifest=get_manifest or default_get_manifest,
         write_ops=recorder,
         audit=AuditLog(audit_path),
         check_permission=None if permitted is None else check_permission,

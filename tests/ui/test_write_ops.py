@@ -41,6 +41,7 @@ from korvid.ui.app import KorvidApp
 from korvid.ui.resource_write_controller import _yaml_equal
 from korvid.ui.widgets.confirm_screen import ConfirmScreen, ReplicasPrompt
 from korvid.ui.widgets.resource_table import ResourceTable
+from tests.app_factory import build_test_app
 
 from .waits import until
 
@@ -130,8 +131,8 @@ def make_app(
     *,
     readonly: bool = False,
     permitted: bool | None = None,
-    get_manifest: object = None,
-    edit_text: object = None,
+    get_manifest: (Callable[[str, str | None, str], Awaitable[dict[str, Any]]] | None) = None,
+    edit_text: Callable[[str], Awaitable[str | None]] | None = None,
     check_calls: list[tuple[str, str, str, str | None, str, str]] | None = None,
     extra_pods: list[Summary] | None = None,
     session_timeline: SessionTimeline | None = None,
@@ -178,13 +179,13 @@ def make_app(
             check_calls.append((verb, resource, sub, ns, group, name))
         return permitted
 
-    return KorvidApp(
+    return build_test_app(
         config=KorvidConfig(namespace="default", readonly=readonly),
         store=store,
         watch_manager=WatchManager(store, source),
         aliases=dict(_ALIASES if aliases is None else aliases),
-        get_manifest=get_manifest,  # type: ignore[arg-type]  # tests pass duck-typed callables
-        edit_text=edit_text,  # type: ignore[arg-type]  # tests pass duck-typed callables
+        get_manifest=get_manifest,
+        edit_text=edit_text,
         write_ops=recorder,
         audit=AuditLog(audit_path),
         check_permission=None if permitted is None else check_permission,

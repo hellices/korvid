@@ -1,5 +1,5 @@
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any
 
@@ -17,10 +17,12 @@ from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
 from korvid.core.watch import WatchManager, WatchSource
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.errors import ApiStatusError
+from korvid.k8s.logs import LogLine
 from korvid.k8s.models import GenericSummary, PodSummary
 from korvid.ui.app import KorvidApp
 from korvid.ui.widgets.resource_table import ResourceTable
 from korvid.ui.widgets.status_bar import StatusBar
+from tests.app_factory import build_test_app
 
 from .waits import until
 
@@ -102,7 +104,7 @@ def make_app(
     async def list_namespaces() -> list[str]:
         return ["default"] if namespaces is None else namespaces
 
-    return KorvidApp(
+    return build_test_app(
         config=config if config is not None else KorvidConfig(namespace="default"),
         store=store,
         watch_manager=WatchManager(store, source),
@@ -373,7 +375,7 @@ async def test_namespace_picker_api_error_shows_actionable_message() -> None:
     async def failing_list() -> list[str]:
         raise ApiStatusError(403, "Forbidden")
 
-    app = KorvidApp(
+    app = build_test_app(
         config=KorvidConfig(namespace="default"),
         store=store,
         watch_manager=WatchManager(store, fake_source([])),
@@ -589,7 +591,7 @@ def _pod_with_container(name: str, ns: str = "default") -> PodSummary:
     )
 
 
-def _make_log_app(stream_logs: object) -> KorvidApp:
+def _make_log_app(stream_logs: Callable[..., AsyncIterator[LogLine]]) -> KorvidApp:
     """App with one pod and an injected stream_logs callable."""
     pod = _pod_with_container("my-pod")
     store = ResourceStore()
@@ -599,11 +601,11 @@ def _make_log_app(stream_logs: object) -> KorvidApp:
         while True:
             await asyncio.sleep(0.01)
 
-    return KorvidApp(
+    return build_test_app(
         config=KorvidConfig(namespace="default"),
         store=store,
         watch_manager=WatchManager(store, _source),
-        stream_logs=stream_logs,  # type: ignore[arg-type]
+        stream_logs=stream_logs,
     )
 
 
@@ -1122,7 +1124,7 @@ async def test_namespace_picker_403_shows_permission_notice_and_ns_hint() -> Non
     async def failing_list() -> list[str]:
         raise ApiStatusError(403, "Forbidden")
 
-    app = KorvidApp(
+    app = build_test_app(
         config=KorvidConfig(namespace="default"),
         store=store,
         watch_manager=WatchManager(store, fake_source([])),
@@ -1143,7 +1145,7 @@ async def test_favorite_namespace_keys_navigate_like_ns_command() -> None:
     navigation path as `:ns <name>` (issue #108); unbound digits are no-ops."""
 
     store = ResourceStore()
-    app = KorvidApp(
+    app = build_test_app(
         config=KorvidConfig(namespace="default", favorite_namespaces=("team-a", "team-b")),
         store=store,
         watch_manager=WatchManager(store, fake_source([_pod("api-1")])),
@@ -1174,7 +1176,7 @@ async def test_favorite_namespace_403_keeps_a_usable_ui() -> None:
         while True:
             await asyncio.sleep(0.01)
 
-    app = KorvidApp(
+    app = build_test_app(
         config=KorvidConfig(namespace="default", favorite_namespaces=("secret-ns",)),
         store=store,
         watch_manager=WatchManager(store, source, retry_delay=0),
@@ -1207,7 +1209,7 @@ async def test_toggle_all_namespaces_denied_stays_in_namespace() -> None:
     ) -> bool:
         return not (verb == "list" and ns is None)
 
-    app = KorvidApp(
+    app = build_test_app(
         config=KorvidConfig(namespace="default"),
         store=store,
         watch_manager=WatchManager(store, fake_source([_pod("api-1")])),
@@ -1236,7 +1238,7 @@ async def test_toggle_all_namespaces_rechecks_after_grant() -> None:
     ) -> bool:
         return allowed
 
-    app = KorvidApp(
+    app = build_test_app(
         config=KorvidConfig(namespace="default"),
         store=store,
         watch_manager=WatchManager(store, fake_source([_pod("api-1")])),
@@ -1270,7 +1272,7 @@ async def test_toggle_all_namespaces_allowed_proceeds() -> None:
     ) -> bool:
         return True
 
-    app = KorvidApp(
+    app = build_test_app(
         config=KorvidConfig(namespace="default"),
         store=store,
         watch_manager=WatchManager(store, fake_source([_pod("api-1")])),
@@ -1304,7 +1306,7 @@ async def test_toggle_all_namespaces_denied_for_helm_view_probes_secrets() -> No
 
     aliases = dict(_DEFAULT_TEST_ALIASES)
     aliases["helmreleases"] = HELM_RELEASES_META
-    app = KorvidApp(
+    app = build_test_app(
         config=KorvidConfig(namespace="default"),
         store=store,
         watch_manager=WatchManager(store, fake_source([_pod("api-1")])),

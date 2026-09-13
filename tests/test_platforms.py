@@ -235,6 +235,7 @@ def test_ci_workflow_defines_the_required_windows_test_job() -> None:
     full_suite = (
         "uv run pytest -q --ignore=tests/windows/test_native_terminal.py"
         f" --deselect={audit_regression}"
+        " --randomly-seed=${{ github.run_id }}"
     )
     assert full_suite in runs
     assert "uv run pytest -q" not in runs

@@ -3,7 +3,7 @@ Subscription/CSV opens the component tree; `h` keeps the revision history."""
 
 import asyncio
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Any, cast
 from unittest import mock
 
 from textual.app import ScreenStackError
@@ -25,8 +25,10 @@ from korvid.k8s.helm import (
 from korvid.k8s.models import GenericSummary, OLMSubscriptionSummary
 from korvid.k8s.olm import OPERATORS_GROUP
 from korvid.ui.app import KorvidApp
+from korvid.ui.app_surfaces import AppWorkspaceSurface
 from korvid.ui.widgets.hierarchy_screen import HierarchyScreen
 from korvid.ui.widgets.resource_table import ResourceTable
+from tests.app_factory import build_test_app
 
 from .waits import until
 
@@ -138,7 +140,7 @@ def make_app(
     async def list_namespaces() -> list[str]:
         return [namespace]
 
-    app = KorvidApp(
+    app = build_test_app(
         config=KorvidConfig(namespace=namespace),
         store=store,
         watch_manager=WatchManager(store, source),
@@ -555,6 +557,22 @@ async def test_refresh_hierarchy_survives_an_empty_screen_stack() -> None:
         ):
             app._workspace_ctl.refresh_hierarchy()  # must not raise
         assert True  # reaching here is the assertion: no ScreenStackError
+
+
+def test_hierarchy_update_survives_stack_emptying_after_the_open_check() -> None:
+    screen_reads: list[str] = []
+
+    class EmptyStackApp:
+        @property
+        def screen(self) -> object:
+            screen_reads.append("screen")
+            raise ScreenStackError
+
+    surface = AppWorkspaceSurface(cast("KorvidApp", EmptyStackApp()))
+
+    surface.update_hierarchy_tree(object())
+
+    assert screen_reads == ["screen"]
 
 
 async def test_describe_from_tree_node() -> None:

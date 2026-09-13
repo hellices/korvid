@@ -1,4 +1,7 @@
-.PHONY: lint format typecheck test check docs-build docs-serve
+.PHONY: source-size lint format typecheck test check docs-build docs-serve
+
+source-size:
+	uv run --frozen python scripts/check_source_size.py
 
 lint:
 	uv run ruff check src/ tests/
@@ -12,7 +15,7 @@ typecheck:
 test:
 	uv run pytest -x -q
 
-check: lint typecheck test
+check: source-size lint typecheck test
 	uv run tach check
 
 docs-build:

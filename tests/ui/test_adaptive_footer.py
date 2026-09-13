@@ -31,6 +31,7 @@ from korvid.ui.app import KorvidApp
 from korvid.ui.widgets.help_screen import HelpScreen
 from korvid.ui.widgets.log_pane import LogPane
 from korvid.ui.widgets.resource_table import ResourceTable
+from tests.app_factory import build_test_app
 
 from .waits import until
 
@@ -120,7 +121,7 @@ def make_app(*, audit: AuditLog | None = None) -> KorvidApp:
     async def list_namespaces() -> list[str]:
         return ["default"]
 
-    return KorvidApp(
+    return build_test_app(
         config=KorvidConfig(namespace="default"),
         store=store,
         watch_manager=WatchManager(store, source),

@@ -138,6 +138,20 @@ def _main_tree() -> ast.Module:
     )
 
 
+def test_composition_support_defines_the_ca_validator_once() -> None:
+    """Merge conflict cleanup must not silently shadow a hardened helper."""
+    path = Path(korvid.__main__.__file__).with_name("composition_support.py")
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=path.name)
+    definitions = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+        and node.name == "_validate_ca_bundle"
+    ]
+
+    assert len(definitions) == 1
+
+
 def test_the_composition_root_composes_no_model_facing_prompt_text() -> None:
     """Structural, not textual: the AST must not *reference* the prompt layers.
 
@@ -1736,6 +1750,43 @@ class _FakeKubeForWiring:
         return None
 
 
+async def test_wire_and_run_assembles_app_before_ui_publication(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The shell must be fully assembled before any live port can publish it."""
+    import korvid.__main__ as main_mod
+    from korvid.core.config import KorvidConfig
+
+    events: list[tuple[str, object]] = []
+
+    class RecordingApp(_FakeAppCapturesKwargs):
+        async def run_async(self) -> None:
+            events.append(("run", self))
+
+    class RecordingBridge:
+        def __init__(self, app: object) -> None:
+            events.append(("publish", app))
+
+    def assemble(app: RecordingApp) -> RecordingApp:
+        events.append(("assemble", app))
+        return app
+
+    monkeypatch.setattr(main_mod, "KorvidApp", RecordingApp)
+    monkeypatch.setattr(main_mod, "assemble_app_runtime", assemble)
+    monkeypatch.setattr(main_mod, "AppUIBridge", RecordingBridge)
+    _FakeAppCapturesKwargs.instances.clear()
+
+    state = main_mod._RunState()
+    await main_mod._wire_and_run(
+        KorvidConfig(readonly=True), cast("Any", _FakeKubeForWiring()), state
+    )
+    if state.discovery_box:
+        await state.discovery_box[0]
+
+    app = _FakeAppCapturesKwargs.instances[0]
+    assert events == [("assemble", app), ("publish", app), ("run", app)]
+
+
 async def test_wire_and_run_wires_relationship_lister_from_kube(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1747,6 +1798,7 @@ async def test_wire_and_run_wires_relationship_lister_from_kube(
     from korvid.core.config import KorvidConfig
 
     monkeypatch.setattr(main_mod, "KorvidApp", _FakeAppCapturesKwargs)
+    monkeypatch.setattr(main_mod, "assemble_app_runtime", lambda app: app)
     _FakeAppCapturesKwargs.instances.clear()
 
     kube = _FakeKubeForWiring()
@@ -1776,6 +1828,7 @@ async def test_wire_and_run_wires_helm_release_identity_reader_from_kube(
     from korvid.core.config import KorvidConfig
 
     monkeypatch.setattr(main_mod, "KorvidApp", _FakeAppCapturesKwargs)
+    monkeypatch.setattr(main_mod, "assemble_app_runtime", lambda app: app)
     _FakeAppCapturesKwargs.instances.clear()
 
     kube = _FakeKubeForWiring()
@@ -1799,6 +1852,7 @@ async def test_wire_and_run_passes_session_timeline_and_warning_watch(
     from korvid.core.session_timeline import SessionTimeline
 
     monkeypatch.setattr(main_mod, "KorvidApp", _FakeAppCapturesKwargs)
+    monkeypatch.setattr(main_mod, "assemble_app_runtime", lambda app: app)
     _FakeAppCapturesKwargs.instances.clear()
 
     kube = _FakeKubeForWiring()
@@ -2514,6 +2568,7 @@ async def test_wire_and_run_hands_the_ui_a_declared_profile_writer(
     _profiles_config(path, tier="high")
     monkeypatch.setattr(main_mod, "DEFAULT_CONFIG_PATH", path)
     monkeypatch.setattr(main_mod, "KorvidApp", _FakeAppCapturesKwargs)
+    monkeypatch.setattr(main_mod, "assemble_app_runtime", lambda app: app)
     _FakeAppCapturesKwargs.instances.clear()
 
     kube = _FakeKubeForWiring()

@@ -15,6 +15,7 @@ from korvid.ui.app import KorvidApp
 from korvid.ui.messages import FilterCommand, NavigateCommand
 from korvid.ui.widgets.resource_table import ResourceTable
 from korvid.ui.widgets.status_bar import StatusBar
+from tests.app_factory import build_test_app
 
 from .waits import until
 
@@ -83,7 +84,7 @@ def make_app(data: dict[str, list[Summary]]) -> KorvidApp:
     async def list_namespaces() -> list[str]:
         return ["default"]
 
-    return KorvidApp(
+    return build_test_app(
         config=KorvidConfig(namespace="default"),
         store=store,
         watch_manager=WatchManager(store, source),
@@ -600,7 +601,7 @@ def _make_slow_app(
     async def list_namespaces() -> list[str]:
         return ["default"]
 
-    return KorvidApp(
+    return build_test_app(
         config=KorvidConfig(namespace="default"),
         store=store,
         watch_manager=WatchManager(store, source),
@@ -1067,7 +1068,7 @@ async def test_two_level_pop_waits_for_rows_the_drill_filter_will_show() -> None
     async def list_namespaces() -> list[str]:
         return ["default"]
 
-    app = KorvidApp(
+    app = build_test_app(
         config=KorvidConfig(namespace="default"),
         store=store,
         watch_manager=WatchManager(store, source),
