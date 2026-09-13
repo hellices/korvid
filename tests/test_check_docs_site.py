@@ -11,6 +11,12 @@ from xml.sax.saxutils import escape
 import pytest
 
 SCRIPT = Path(__file__).parent.parent / "scripts" / "check_docs_site.py"
+SITE_URL = "https://hellices.github.io/korvid/"
+PUBLIC_CONTRIBUTOR_PATH = "dev/"
+PUBLIC_ARCHITECTURE_PATH = "dev/specs/2026-08-12-korvid-architecture/"
+PUBLIC_EVAL_PATH = "evals/methodology/"
+INTERNAL_CONTRACT_TESTS_PATH = "dev/contract-tests/"
+INTERNAL_RELEASE_PATH = "release/"
 
 
 def _module() -> types.ModuleType:
@@ -52,65 +58,90 @@ def test_check_site_accepts_expected_publication_artifacts(tmp_path: Path) -> No
     site = _write_site(
         tmp_path,
         search_locations=[
-            "dev/specs/2026-08-12-korvid-architecture/",
-            "evals/methodology/",
+            PUBLIC_CONTRIBUTOR_PATH,
+            PUBLIC_ARCHITECTURE_PATH,
+            PUBLIC_EVAL_PATH,
         ],
         sitemap_locations=[
-            "https://hellices.github.io/korvid/dev/specs/2026-08-12-korvid-architecture/",
-            "https://hellices.github.io/korvid/evals/methodology/",
+            f"{SITE_URL}{PUBLIC_CONTRIBUTOR_PATH}",
+            f"{SITE_URL}{PUBLIC_ARCHITECTURE_PATH}",
+            f"{SITE_URL}{PUBLIC_EVAL_PATH}",
         ],
     )
 
     assert module.check_site(site) == []
 
 
-def test_check_site_reports_missing_required_generated_entries(tmp_path: Path) -> None:
-    module = _module()
-    site = _write_site(
-        tmp_path,
-        search_locations=["evals/methodology/"],
-        sitemap_locations=["https://hellices.github.io/korvid/evals/methodology/"],
-    )
-
-    errors = module.check_site(site)
-    assert (
-        "search/search_index.json is missing required location "
-        "'dev/specs/2026-08-12-korvid-architecture/'" in errors
-    )
-    assert (
-        "sitemap.xml is missing required URL "
-        "'https://hellices.github.io/korvid/dev/specs/2026-08-12-korvid-architecture/'" in errors
-    )
-
-
-def test_check_site_reports_forbidden_generated_entries(tmp_path: Path) -> None:
+def test_check_site_requires_the_public_dev_index_in_search_and_sitemap(tmp_path: Path) -> None:
     module = _module()
     site = _write_site(
         tmp_path,
         search_locations=[
-            "dev/specs/2026-08-12-korvid-architecture/",
-            "evals/methodology/",
-            "dev/ui-controllers/",
-            "release/",
+            PUBLIC_ARCHITECTURE_PATH,
+            PUBLIC_EVAL_PATH,
         ],
         sitemap_locations=[
-            "https://hellices.github.io/korvid/dev/specs/2026-08-12-korvid-architecture/",
-            "https://hellices.github.io/korvid/evals/methodology/",
-            "https://hellices.github.io/korvid/dev/ui-controllers/",
-            "https://hellices.github.io/korvid/release/",
+            f"{SITE_URL}{PUBLIC_ARCHITECTURE_PATH}",
+            f"{SITE_URL}{PUBLIC_EVAL_PATH}",
+        ],
+    )
+
+    errors = module.check_site(site)
+    assert "search/search_index.json is missing required dev location 'dev/'" in errors
+    assert (
+        "sitemap.xml is missing required dev URL 'https://hellices.github.io/korvid/dev/'" in errors
+    )
+
+
+def test_check_site_rejects_extra_internal_dev_pages_in_search_and_sitemap(tmp_path: Path) -> None:
+    module = _module()
+    site = _write_site(
+        tmp_path,
+        search_locations=[
+            PUBLIC_CONTRIBUTOR_PATH,
+            PUBLIC_ARCHITECTURE_PATH,
+            PUBLIC_EVAL_PATH,
+            INTERNAL_CONTRACT_TESTS_PATH,
+        ],
+        sitemap_locations=[
+            f"{SITE_URL}{PUBLIC_CONTRIBUTOR_PATH}",
+            f"{SITE_URL}{PUBLIC_ARCHITECTURE_PATH}",
+            f"{SITE_URL}{PUBLIC_EVAL_PATH}",
+            f"{SITE_URL}{INTERNAL_CONTRACT_TESTS_PATH}",
         ],
     )
 
     errors = module.check_site(site)
     assert (
-        "search/search_index.json unexpectedly includes forbidden location "
-        "'dev/ui-controllers/'" in errors
+        "search/search_index.json unexpectedly includes non-public dev location "
+        "'dev/contract-tests/'" in errors
     )
-    assert "search/search_index.json unexpectedly includes forbidden location 'release/'" in errors
     assert (
-        "sitemap.xml unexpectedly includes forbidden URL "
-        "'https://hellices.github.io/korvid/dev/ui-controllers/'" in errors
+        "sitemap.xml unexpectedly includes non-public dev URL "
+        "'https://hellices.github.io/korvid/dev/contract-tests/'" in errors
     )
+
+
+def test_check_site_reports_release_artifacts_as_forbidden(tmp_path: Path) -> None:
+    module = _module()
+    site = _write_site(
+        tmp_path,
+        search_locations=[
+            PUBLIC_CONTRIBUTOR_PATH,
+            PUBLIC_ARCHITECTURE_PATH,
+            PUBLIC_EVAL_PATH,
+            INTERNAL_RELEASE_PATH,
+        ],
+        sitemap_locations=[
+            f"{SITE_URL}{PUBLIC_CONTRIBUTOR_PATH}",
+            f"{SITE_URL}{PUBLIC_ARCHITECTURE_PATH}",
+            f"{SITE_URL}{PUBLIC_EVAL_PATH}",
+            f"{SITE_URL}{INTERNAL_RELEASE_PATH}",
+        ],
+    )
+
+    errors = module.check_site(site)
+    assert "search/search_index.json unexpectedly includes forbidden location 'release/'" in errors
     assert (
         "sitemap.xml unexpectedly includes forbidden URL "
         "'https://hellices.github.io/korvid/release/'" in errors

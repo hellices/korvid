@@ -90,9 +90,10 @@ jobs:
         run: |
           set -euo pipefail
 
+          CANONICAL_SITE_URL="https://hellices.github.io/korvid/"
+          PUBLIC_CONTRIBUTOR_PATH="dev/"
           PUBLIC_ARCHITECTURE_PATH="dev/specs/2026-08-12-korvid-architecture/"
           PUBLIC_EVAL_PATH="evals/methodology/"
-          INTERNAL_CONTROLLER_PATH="dev/ui-controllers/"
           INTERNAL_RELEASE_PATH="release/"
 
           CONTENT_ATTEMPTS=4
@@ -116,6 +117,15 @@ jobs:
               return 0
             fi
             printf '%s/%s\n' "$base_url" "$path"
+          }
+
+          canonical_url_for() {
+            local path="$1"
+            if [ -z "$path" ]; then
+              printf '%s\n' "$CANONICAL_SITE_URL"
+              return 0
+            fi
+            printf '%s%s\n' "$CANONICAL_SITE_URL" "$path"
           }
 
           fetch_body() {
@@ -172,6 +182,106 @@ jobs:
             fi
           }
 
+          search_locations() {
+            local body="$1"
+            BODY="$body" python3 - <<'PY'
+          import json
+          import os
+          import sys
+
+          try:
+              payload = json.loads(os.environ["BODY"])
+          except json.JSONDecodeError as exc:
+              print(f"search index is not valid JSON: {exc}", file=sys.stderr)
+              raise SystemExit(1)
+
+          docs = payload.get("docs")
+          if not isinstance(docs, list):
+              print("search index must contain a docs list", file=sys.stderr)
+              raise SystemExit(1)
+
+          for entry in docs:
+              if not isinstance(entry, dict):
+                  continue
+              location = entry.get("location")
+              if isinstance(location, str):
+                  print(location.split("#", 1)[0])
+          PY
+          }
+
+          sitemap_urls() {
+            local body="$1"
+            BODY="$body" python3 - <<'PY'
+          import os
+          import sys
+          import xml.etree.ElementTree as ET
+
+          try:
+              root = ET.fromstring(os.environ["BODY"])
+          except ET.ParseError as exc:
+              print(f"sitemap is not valid XML: {exc}", file=sys.stderr)
+              raise SystemExit(1)
+
+          for element in root.findall(".//{*}loc"):
+              if isinstance(element.text, str):
+                  location = element.text.strip()
+                  if location:
+                      print(location)
+          PY
+          }
+
+          lines_with_prefix() {
+            local prefix="$1"
+            local lines="$2"
+            local line
+            while IFS= read -r line; do
+              case "$line" in
+                "$prefix"*)
+                  printf '%s\n' "$line"
+                  ;;
+              esac
+            done <<<"$lines"
+          }
+
+          assert_exact_line_set() {
+            local description="$1"
+            local actual="$2"
+            shift 2
+            local actual_sorted
+            local expected_sorted
+            actual_sorted="$(printf '%s\n' "$actual" | sed '/^$/d' | LC_ALL=C sort -u)"
+            expected_sorted="$(printf '%s\n' "$@" | LC_ALL=C sort -u)"
+            if [ "$actual_sorted" != "$expected_sorted" ]; then
+              echo "$description must equal:" >&2
+              printf '  %s\n' "$@" >&2
+              echo "Actual:" >&2
+              if [ -n "$actual_sorted" ]; then
+                printf '%s\n' "$actual_sorted" | sed 's/^/  /' >&2
+              else
+                echo "  (none)" >&2
+              fi
+              return 1
+            fi
+          }
+
+          assert_line_present() {
+            local expected="$1"
+            local lines="$2"
+            if ! printf '%s\n' "$lines" | grep -Fxq "$expected"; then
+              echo "Expected line '$expected'" >&2
+              return 1
+            fi
+          }
+
+          assert_line_absent() {
+            local forbidden="$1"
+            local lines="$2"
+            if printf '%s\n' "$lines" | grep -Fxq "$forbidden"; then
+              echo "Did not expect line '$forbidden'" >&2
+              return 1
+            fi
+          }
+
           check_home_page() {
             local body="$1"
             assert_body_contains "AI-NATIVE KUBERNETES TUI" "$body" || return 1
@@ -204,18 +314,34 @@ jobs:
 
           check_search_index() {
             local body="$1"
-            assert_body_contains "\"location\":\"$PUBLIC_ARCHITECTURE_PATH\"" "$body" || return 1
-            assert_body_contains "\"location\":\"$PUBLIC_EVAL_PATH\"" "$body" || return 1
-            assert_body_not_contains "\"location\":\"$INTERNAL_CONTROLLER_PATH\"" "$body" || return 1
-            assert_body_not_contains "\"location\":\"$INTERNAL_RELEASE_PATH\"" "$body" || return 1
+            local locations
+            local dev_locations
+            locations="$(search_locations "$body")" || return 1
+            dev_locations="$(lines_with_prefix "dev/" "$locations")"
+            assert_exact_line_set \
+              "search index dev/ locations" \
+              "$dev_locations" \
+              "$PUBLIC_CONTRIBUTOR_PATH" \
+              "$PUBLIC_ARCHITECTURE_PATH" || return 1
+            assert_line_present "$PUBLIC_EVAL_PATH" "$locations" || return 1
+            assert_line_absent "$INTERNAL_RELEASE_PATH" "$locations" || return 1
           }
 
           check_sitemap() {
             local body="$1"
-            assert_body_contains "$(url_for "$PUBLIC_ARCHITECTURE_PATH")" "$body" || return 1
-            assert_body_contains "$(url_for "$PUBLIC_EVAL_PATH")" "$body" || return 1
-            assert_body_not_contains "$(url_for "$INTERNAL_CONTROLLER_PATH")" "$body" || return 1
-            assert_body_not_contains "$(url_for "$INTERNAL_RELEASE_PATH")" "$body" || return 1
+            local urls
+            local dev_urls
+            local dev_prefix
+            urls="$(sitemap_urls "$body")" || return 1
+            dev_prefix="$(canonical_url_for "$PUBLIC_CONTRIBUTOR_PATH")"
+            dev_urls="$(lines_with_prefix "$dev_prefix" "$urls")"
+            assert_exact_line_set \
+              "sitemap dev URLs" \
+              "$dev_urls" \
+              "$(canonical_url_for "$PUBLIC_CONTRIBUTOR_PATH")" \
+              "$(canonical_url_for "$PUBLIC_ARCHITECTURE_PATH")" || return 1
+            assert_line_present "$(canonical_url_for "$PUBLIC_EVAL_PATH")" "$urls" || return 1
+            assert_line_absent "$(canonical_url_for "$INTERNAL_RELEASE_PATH")" "$urls" || return 1
           }
 
           retry_until_body_checks() {

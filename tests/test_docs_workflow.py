@@ -26,9 +26,11 @@ ROOT = Path(__file__).parent.parent
 WORKFLOW = ROOT / ".github" / "workflows" / "docs.yml"
 GETTING_STARTED_HOMEBREW_COMMAND = "brew install hellices/korvid/korvid"
 GETTING_STARTED_HOMEBREW_TOKEN = "hellices/korvid/korvid"
+CANONICAL_SITE_URL = "https://hellices.github.io/korvid/"
+PUBLIC_CONTRIBUTOR_PATH = "dev/"
 PUBLIC_ARCHITECTURE_PATH = "dev/specs/2026-08-12-korvid-architecture/"
 PUBLIC_EVAL_PATH = "evals/methodology/"
-INTERNAL_CONTROLLER_PATH = "dev/ui-controllers/"
+INTERNAL_CONTRACT_TESTS_PATH = "dev/contract-tests/"
 INTERNAL_RELEASE_PATH = "release/"
 CLEANUP_PLAN_DOC = (
     ROOT / "docs" / "superpowers" / "plans" / "2026-09-13-github-pages-v0-5-cleanup.md"
@@ -264,7 +266,11 @@ def _shell_assignment(script: str, name: str) -> int:
 
 
 def _site_page_source(site_path: str) -> Path:
-    return ROOT / "docs" / f"{site_path.removesuffix('/')}.md"
+    normalized = site_path.removesuffix("/")
+    file_candidate = ROOT / "docs" / f"{normalized}.md"
+    if file_candidate.exists():
+        return file_candidate
+    return ROOT / "docs" / normalized / "README.md"
 
 
 def _frontmatter(text: str) -> str:
@@ -301,9 +307,16 @@ def _run_smoke_checker(checker: str, path: str, description: str, body: str) -> 
         _smoke_function(script, name)
         for name in (
             "url_for",
+            "canonical_url_for",
             "assert_body_contains",
             "assert_body_not_contains",
             "assert_body_matches",
+            "search_locations",
+            "sitemap_urls",
+            "lines_with_prefix",
+            "assert_exact_line_set",
+            "assert_line_present",
+            "assert_line_absent",
             "check_home_page",
             "check_release_notes_nav",
             "check_search_index",
@@ -316,9 +329,10 @@ def _run_smoke_checker(checker: str, path: str, description: str, body: str) -> 
         set -euo pipefail
 
         base_url="https://example.invalid"
+        CANONICAL_SITE_URL={shlex.quote(CANONICAL_SITE_URL)}
+        PUBLIC_CONTRIBUTOR_PATH={shlex.quote(PUBLIC_CONTRIBUTOR_PATH)}
         PUBLIC_ARCHITECTURE_PATH={shlex.quote(PUBLIC_ARCHITECTURE_PATH)}
         PUBLIC_EVAL_PATH={shlex.quote(PUBLIC_EVAL_PATH)}
-        INTERNAL_CONTROLLER_PATH={shlex.quote(INTERNAL_CONTROLLER_PATH)}
         INTERNAL_RELEASE_PATH={shlex.quote(INTERNAL_RELEASE_PATH)}
         CONTENT_ATTEMPTS=1
         CONTENT_CURL_MAX_TIME=1
@@ -472,6 +486,7 @@ def test_smoke_scope_checker_succeeds_when_search_index_matches_contract() -> No
             "search index scope",
             (
                 '{"docs":['
+                '{"location":"dev/"},'
                 '{"location":"dev/specs/2026-08-12-korvid-architecture/"},'
                 '{"location":"evals/methodology/"}'
                 "]}"
@@ -495,13 +510,28 @@ def test_smoke_scope_checker_succeeds_when_search_index_matches_contract() -> No
             "search/search_index.json",
             "search index scope",
             '{"docs":[{"location":"dev/specs/2026-08-12-korvid-architecture/"},'
+            '{"location":"evals/methodology/"}]}',
+        ),
+        (
+            "check_search_index",
+            "search/search_index.json",
+            "search index scope",
+            '{"docs":[{"location":"dev/"},'
+            '{"location":"dev/specs/2026-08-12-korvid-architecture/"},'
+            '{"location":"evals/methodology/"},{"location":"dev/contract-tests/"}]}',
+        ),
+        (
+            "check_search_index",
+            "search/search_index.json",
+            "search index scope",
+            '{"docs":[{"location":"dev/specs/2026-08-12-korvid-architecture/"},'
             '{"location":"evals/methodology/"},{"location":"dev/ui-controllers/"}]}',
         ),
         (
             "check_sitemap",
             "sitemap.xml",
             "sitemap scope",
-            ("<urlset><url><loc>https://example.invalid/evals/methodology/</loc></url></urlset>"),
+            (f"<urlset><url><loc>{CANONICAL_SITE_URL}{PUBLIC_EVAL_PATH}</loc></url></urlset>"),
         ),
         (
             "check_sitemap",
@@ -509,10 +539,33 @@ def test_smoke_scope_checker_succeeds_when_search_index_matches_contract() -> No
             "sitemap scope",
             (
                 "<urlset>"
-                "<url><loc>https://example.invalid/dev/specs/2026-08-12-korvid-architecture/"
-                "</loc></url>"
-                "<url><loc>https://example.invalid/evals/methodology/</loc></url>"
-                "<url><loc>https://example.invalid/dev/ui-controllers/</loc></url>"
+                f"<url><loc>{CANONICAL_SITE_URL}{PUBLIC_ARCHITECTURE_PATH}</loc></url>"
+                f"<url><loc>{CANONICAL_SITE_URL}{PUBLIC_EVAL_PATH}</loc></url>"
+                "</urlset>"
+            ),
+        ),
+        (
+            "check_sitemap",
+            "sitemap.xml",
+            "sitemap scope",
+            (
+                "<urlset>"
+                f"<url><loc>{CANONICAL_SITE_URL}{PUBLIC_CONTRIBUTOR_PATH}</loc></url>"
+                f"<url><loc>{CANONICAL_SITE_URL}{PUBLIC_ARCHITECTURE_PATH}</loc></url>"
+                f"<url><loc>{CANONICAL_SITE_URL}{PUBLIC_EVAL_PATH}</loc></url>"
+                f"<url><loc>{CANONICAL_SITE_URL}{INTERNAL_CONTRACT_TESTS_PATH}</loc></url>"
+                "</urlset>"
+            ),
+        ),
+        (
+            "check_sitemap",
+            "sitemap.xml",
+            "sitemap scope",
+            (
+                "<urlset>"
+                f"<url><loc>{CANONICAL_SITE_URL}{PUBLIC_ARCHITECTURE_PATH}</loc></url>"
+                f"<url><loc>{CANONICAL_SITE_URL}{PUBLIC_EVAL_PATH}</loc></url>"
+                f"<url><loc>{CANONICAL_SITE_URL}dev/ui-controllers/</loc></url>"
                 "</urlset>"
             ),
         ),
@@ -640,35 +693,18 @@ def test_smoke_job_checks_public_pages_search_and_media_entrypoints() -> None:
         assert path in script
 
     for assignment in (
+        f'CANONICAL_SITE_URL="{CANONICAL_SITE_URL}"',
+        f'PUBLIC_CONTRIBUTOR_PATH="{PUBLIC_CONTRIBUTOR_PATH}"',
         f'PUBLIC_ARCHITECTURE_PATH="{PUBLIC_ARCHITECTURE_PATH}"',
         f'PUBLIC_EVAL_PATH="{PUBLIC_EVAL_PATH}"',
-        f'INTERNAL_CONTROLLER_PATH="{INTERNAL_CONTROLLER_PATH}"',
         f'INTERNAL_RELEASE_PATH="{INTERNAL_RELEASE_PATH}"',
     ):
         assert assignment in script
 
-    for assertion in (
-        'assert_body_contains "\\"location\\":\\"$PUBLIC_ARCHITECTURE_PATH\\"" "$body" || return 1',
-        'assert_body_contains "\\"location\\":\\"$PUBLIC_EVAL_PATH\\"" "$body" || return 1',
-        'assert_body_not_contains "\\"location\\":\\"$INTERNAL_CONTROLLER_PATH\\"" "$body" || return 1',
-        'assert_body_not_contains "\\"location\\":\\"$INTERNAL_RELEASE_PATH\\"" "$body" || return 1',
-    ):
-        assert assertion in script
-    for assertion in (
-        'assert_body_contains "$(url_for "$PUBLIC_ARCHITECTURE_PATH")" "$body" || return 1',
-        'assert_body_contains "$(url_for "$PUBLIC_EVAL_PATH")" "$body" || return 1',
-        'assert_body_not_contains "$(url_for "$INTERNAL_CONTROLLER_PATH")" "$body" || return 1',
-        'assert_body_not_contains "$(url_for "$INTERNAL_RELEASE_PATH")" "$body" || return 1',
-    ):
-        assert assertion in script
-    for hard_coded_url in (
-        f"{SITE_URL}{PUBLIC_ARCHITECTURE_PATH}",
-        f"{SITE_URL}{PUBLIC_EVAL_PATH}",
-        f"{SITE_URL}{INTERNAL_CONTROLLER_PATH}",
-        f"{SITE_URL}{INTERNAL_RELEASE_PATH}",
-    ):
-        assert hard_coded_url not in script
-    assert "assert_body_not_contains" in script
+    assert "search_locations()" in script
+    assert "sitemap_urls()" in script
+    assert "canonical_url_for()" in script
+    assert "assert_exact_line_set()" in script
     assert "playwright" not in script.lower()
     assert "npm " not in script.lower()
     assert "node " not in script.lower()
@@ -677,13 +713,9 @@ def test_smoke_job_checks_public_pages_search_and_media_entrypoints() -> None:
 def test_smoke_scope_paths_map_to_repository_sources() -> None:
     """Each smoke-checked public or internal route must still point at a real source page."""
 
+    assert _site_page_source(PUBLIC_CONTRIBUTOR_PATH).exists()
     assert _site_page_source(PUBLIC_ARCHITECTURE_PATH).exists()
     assert _site_page_source(PUBLIC_EVAL_PATH).exists()
-    internal_controller_source = _site_page_source(INTERNAL_CONTROLLER_PATH)
-    assert internal_controller_source.exists()
-    assert "exclude: false" not in _frontmatter(
-        internal_controller_source.read_text(encoding="utf-8")
-    )
 
 
 def test_workflow_level_permissions_are_read_only() -> None:
