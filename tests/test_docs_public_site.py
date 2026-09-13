@@ -48,15 +48,10 @@ def test_release_navigation_labels_unreleased_main() -> None:
 
 def test_internal_docs_use_one_inherited_search_policy() -> None:
     config = load_mkdocs_config()
-    plugins = [
-        item if isinstance(item, str) else next(iter(item))
-        for item in config["plugins"]
-    ]
+    plugins = [item if isinstance(item, str) else next(iter(item)) for item in config["plugins"]]
     assert plugins.index("meta") < plugins.index("search")
 
-    defaults = yaml.safe_load(
-        (ROOT / "docs" / "dev" / ".meta.yml").read_text(encoding="utf-8")
-    )
+    defaults = yaml.safe_load((ROOT / "docs" / "dev" / ".meta.yml").read_text(encoding="utf-8"))
     assert defaults == {"search": {"exclude": True}}
 
 
@@ -75,8 +70,6 @@ def test_maintainer_release_runbook_is_not_search_indexed() -> None:
 
 
 def test_sitemap_uses_the_search_exclusion_policy() -> None:
-    source = (ROOT / "docs" / "overrides" / "sitemap.xml").read_text(
-        encoding="utf-8"
-    )
+    source = (ROOT / "docs" / "overrides" / "sitemap.xml").read_text(encoding="utf-8")
     assert 'file.page.meta.get("search", {})' in source
     assert 'search.get("exclude", false)' in source
