@@ -6,10 +6,22 @@ import yaml
 
 ROOT = Path(__file__).parent.parent
 
-yaml.SafeLoader.add_multi_constructor(
+
+class MkDocsLoader(yaml.SafeLoader):
+    """Safe loader that tolerates MkDocs' Python name tags."""
+
+
+MkDocsLoader.add_multi_constructor(
     "tag:yaml.org,2002:python/name:",
     lambda loader, suffix, node: suffix,
 )
+
+
+def load_mkdocs_config() -> dict[str, object]:
+    return yaml.load(
+        (ROOT / "mkdocs.yml").read_text(encoding="utf-8"),
+        Loader=MkDocsLoader,
+    )
 
 
 def test_stable_install_precedes_development_source() -> None:
@@ -29,8 +41,6 @@ def test_unreleased_page_identifies_main_and_stable_release() -> None:
 
 
 def test_release_navigation_labels_unreleased_main() -> None:
-    config = yaml.safe_load((ROOT / "mkdocs.yml").read_text(encoding="utf-8"))
+    config = load_mkdocs_config()
     release_notes = config["nav"][-1]["Project"][-1]["Release notes"]
-    assert release_notes[0] == {
-        "Unreleased (main)": "release-notes/unreleased.md"
-    }
+    assert release_notes[0] == {"Unreleased (main)": "release-notes/unreleased.md"}
