@@ -8,6 +8,7 @@ on:
       - "pyproject.toml"
       - "uv.lock"
       - "Makefile"
+      - "scripts/check_docs_site.py"
       - ".github/workflows/docs.yml"
   push:
     branches: [main]
@@ -17,6 +18,7 @@ on:
       - "pyproject.toml"
       - "uv.lock"
       - "Makefile"
+      - "scripts/check_docs_site.py"
       - ".github/workflows/docs.yml"
 
 permissions:
@@ -45,6 +47,7 @@ jobs:
           enable-cache: true
       - run: uv sync --locked --group docs
       - run: uv run --frozen --group docs mkdocs build --strict
+      - run: uv run --frozen python scripts/check_docs_site.py
       # Only main's build is ever deployed; a PR build exists to prove the
       # site still builds `--strict`, not to produce a Pages artifact.
       - if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -57,6 +60,8 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: build
     runs-on: ubuntu-latest
+    outputs:
+      page_url: ${{ steps.deployment.outputs.page_url }}
     permissions:
       pages: write  # required by actions/deploy-pages to publish the site
       id-token: write  # required by actions/deploy-pages to mint its OIDC token
@@ -70,3 +75,497 @@ jobs:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346  # v5.0.1
+
+  smoke:
+    name: Smoke-test deployed site
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    permissions: {}
+    steps:
+      - name: Probe released pages and media
+        env:
+          SITE_URL: ${{ needs.deploy.outputs.page_url }}
+        run: |
+          set -euo pipefail
+
+          CANONICAL_SITE_URL="https://hellices.github.io/korvid/"
+          PUBLIC_CONTRIBUTOR_PATH="dev/"
+          PUBLIC_ARCHITECTURE_PATH="dev/specs/2026-08-12-korvid-architecture/"
+          PUBLIC_EVAL_PATH="evals/methodology/"
+          PUBLIC_OPERATIONS_PATH="evals/operations/"
+          PUBLIC_SCENARIOS_PATH="evals/scenarios/"
+          PUBLIC_SCOREBOARD_PATH="evals/scoreboard/"
+          INTERNAL_RELEASE_PATH="release/"
+          INTERNAL_WINDOWS_PATH="windows/"
+          PUBLIC_NAV_ROUTES=""
+          ROOT_ROUTE_SENTINEL="."
+
+          CONTENT_ATTEMPTS=4
+          CONTENT_SLEEP_SECONDS=5
+          CONTENT_CURL_MAX_TIME=10
+          MEDIA_ATTEMPTS=3
+          MEDIA_SLEEP_SECONDS=5
+          MEDIA_CURL_MAX_TIME=10
+
+          if [ -z "${SITE_URL:-}" ]; then
+            echo "Missing SITE_URL from deploy job" >&2
+            exit 1
+          fi
+
+          base_url="${SITE_URL%/}"
+
+          url_for() {
+            local path="$1"
+            if [ -z "$path" ]; then
+              printf '%s/\n' "$base_url"
+              return 0
+            fi
+            printf '%s/%s\n' "$base_url" "$path"
+          }
+
+          canonical_url_for() {
+            local path="$1"
+            if [ -z "$path" ]; then
+              printf '%s\n' "$CANONICAL_SITE_URL"
+              return 0
+            fi
+            printf '%s%s\n' "$CANONICAL_SITE_URL" "$path"
+          }
+
+          fetch_body() {
+            local path="$1"
+            local max_time="$2"
+            curl --fail --silent --show-error --location \
+              --connect-timeout 10 --max-time "$max_time" \
+              "$(url_for "$path")"
+          }
+
+          retry_until_contains() {
+            local path="$1"
+            local expected="$2"
+            local body
+            local attempt
+            for attempt in $(seq 1 "$CONTENT_ATTEMPTS"); do
+              if body="$(fetch_body "$path" "$CONTENT_CURL_MAX_TIME")"; then
+                if grep -Fq "$expected" <<<"$body"; then
+                  return 0
+                fi
+              fi
+              if [ "$attempt" -lt "$CONTENT_ATTEMPTS" ]; then
+                sleep "$CONTENT_SLEEP_SECONDS"
+              fi
+            done
+            echo "Expected '$expected' in $(url_for "$path") after $CONTENT_ATTEMPTS attempts" >&2
+            return 1
+          }
+
+          assert_body_contains() {
+            local expected="$1"
+            local body="$2"
+            if ! grep -Fq "$expected" <<<"$body"; then
+              echo "Expected '$expected' in response body" >&2
+              return 1
+            fi
+          }
+
+          assert_body_not_contains() {
+            local forbidden="$1"
+            local body="$2"
+            if grep -Fq "$forbidden" <<<"$body"; then
+              echo "Did not expect '$forbidden' in response body" >&2
+              return 1
+            fi
+          }
+
+          assert_body_matches() {
+            local expression="$1"
+            local body="$2"
+            if ! grep -Eq "$expression" <<<"$body"; then
+              echo "Expected body to match /$expression/" >&2
+              return 1
+            fi
+          }
+
+          public_nav_routes() {
+            local body="$1"
+            printf '%s' "$body" | python3 -c '
+          from html.parser import HTMLParser
+          from urllib.parse import unquote, urljoin, urlsplit
+          import sys
+
+          SITE_URL = "https://hellices.github.io/korvid/"
+          SITE = urlsplit(SITE_URL)
+          ROOT_ROUTE_SENTINEL = "."
+
+          def normalize(href):
+              href = href.strip()
+              if not href or href.startswith("#"):
+                  return None
+              parsed = urlsplit(urljoin(SITE_URL, href))
+              if (parsed.scheme, parsed.netloc) != (SITE.scheme, SITE.netloc):
+                  return None
+              if not parsed.path.startswith(SITE.path):
+                  return None
+              relative = parsed.path.removeprefix(SITE.path).lstrip("/")
+              if relative.endswith("index.html"):
+                  relative = relative[: -len("index.html")]
+              if not relative:
+                  return ROOT_ROUTE_SENTINEL
+              if not relative.endswith("/"):
+                  relative = f"{relative}/"
+              return unquote(relative)
+
+          class Parser(HTMLParser):
+              def __init__(self):
+                  super().__init__(convert_charrefs=True)
+                  self.routes = set()
+
+              def handle_starttag(self, tag, attrs):
+                  if tag != "a":
+                      return
+                  attributes = dict(attrs)
+                  css_classes = attributes.get("class")
+                  href = attributes.get("href")
+                  if not isinstance(css_classes, str) or "md-nav__link" not in css_classes.split():
+                      return
+                  if not isinstance(href, str):
+                      return
+                  route = normalize(href)
+                  if route is not None:
+                      self.routes.add(route)
+
+          parser = Parser()
+          parser.feed(sys.stdin.read())
+          for route in sorted(parser.routes):
+              print(route)
+          '
+          }
+
+          search_locations() {
+            local body="$1"
+            printf '%s' "$body" | python3 -c '
+          import json
+          import sys
+
+          try:
+              payload = json.load(sys.stdin)
+          except json.JSONDecodeError as exc:
+              print(f"search index is not valid JSON: {exc}", file=sys.stderr)
+              raise SystemExit(1)
+
+          docs = payload.get("docs")
+          if not isinstance(docs, list):
+              print("search index must contain a docs list", file=sys.stderr)
+              raise SystemExit(1)
+
+          for entry in docs:
+              if not isinstance(entry, dict):
+                  continue
+              location = entry.get("location")
+              if isinstance(location, str):
+                  print(location.split("#", 1)[0])
+          '
+          }
+
+          sitemap_urls() {
+            local body="$1"
+            printf '%s' "$body" | python3 -c '
+          import sys
+          import xml.etree.ElementTree as ET
+
+          try:
+              root = ET.fromstring(sys.stdin.read())
+          except ET.ParseError as exc:
+              print(f"sitemap is not valid XML: {exc}", file=sys.stderr)
+              raise SystemExit(1)
+
+          for element in root.findall(".//{*}loc"):
+              if isinstance(element.text, str):
+                  location = element.text.strip()
+                  if location:
+                      print(location)
+          '
+          }
+
+          lines_with_prefix() {
+            local prefix="$1"
+            local lines="$2"
+            local line
+            while IFS= read -r line; do
+              case "$line" in
+                "$prefix"*)
+                  printf '%s\n' "$line"
+                  ;;
+              esac
+            done <<<"$lines"
+          }
+
+          lines_in_set() {
+            local lines="$1"
+            shift
+            local line
+            local expected
+            while IFS= read -r line; do
+              for expected in "$@"; do
+                if [ "$line" = "$expected" ]; then
+                  printf '%s\n' "$line"
+                  break
+                fi
+              done
+            done <<<"$lines"
+          }
+
+          assert_exact_line_set() {
+            local description="$1"
+            local actual="$2"
+            shift 2
+            local actual_sorted
+            local expected_sorted
+            actual_sorted="$(printf '%s\n' "$actual" | sed '/^$/d' | LC_ALL=C sort -u)"
+            expected_sorted="$(printf '%s\n' "$@" | LC_ALL=C sort -u)"
+            if [ "$actual_sorted" != "$expected_sorted" ]; then
+              echo "$description must equal:" >&2
+              printf '  %s\n' "$@" >&2
+              echo "Actual:" >&2
+              if [ -n "$actual_sorted" ]; then
+                printf '%s\n' "$actual_sorted" | sed 's/^/  /' >&2
+              else
+                echo "  (none)" >&2
+              fi
+              return 1
+            fi
+          }
+
+          assert_line_present() {
+            local expected="$1"
+            local lines="$2"
+            if ! grep -Fxq "$expected" <<<"$lines"; then
+              echo "Expected line '$expected'" >&2
+              return 1
+            fi
+          }
+
+          assert_line_absent() {
+            local forbidden="$1"
+            local lines="$2"
+            if grep -Fxq "$forbidden" <<<"$lines"; then
+              echo "Did not expect line '$forbidden'" >&2
+              return 1
+            fi
+          }
+
+          check_home_page() {
+            local body="$1"
+            assert_body_contains "AI-NATIVE KUBERNETES TUI" "$body" || return 1
+            assert_body_contains "data-scene-switcher" "$body" || return 1
+            assert_body_contains 'id="scene-tab-direct"' "$body" || return 1
+            assert_body_contains 'id="scene-tab-agent"' "$body" || return 1
+            assert_body_contains 'id="scene-tab-mcp"' "$body" || return 1
+            assert_body_contains 'aria-controls="scene-direct"' "$body" || return 1
+            assert_body_contains 'aria-controls="scene-agent"' "$body" || return 1
+            assert_body_contains 'aria-controls="scene-mcp"' "$body" || return 1
+            assert_body_contains 'id="scene-direct"' "$body" || return 1
+            assert_body_contains 'id="scene-agent"' "$body" || return 1
+            assert_body_contains 'id="scene-mcp"' "$body" || return 1
+            assert_body_contains 'aria-labelledby="scene-tab-direct"' "$body" || return 1
+            assert_body_contains 'aria-labelledby="scene-tab-agent"' "$body" || return 1
+            assert_body_contains 'aria-labelledby="scene-tab-mcp"' "$body" || return 1
+            assert_body_contains 'src="assets/demo.mp4"' "$body" || return 1
+            assert_body_contains 'src="assets/scenes/agent-demo.mp4"' "$body" || return 1
+            assert_body_contains 'src="assets/scenes/mcp-follow-demo.mp4"' "$body" || return 1
+            assert_body_contains "scene-panel__fallback" "$body" || return 1
+            assert_body_contains 'src="assets/scenes/cockpit-poster.png"' "$body" || return 1
+            assert_body_contains 'src="assets/scenes/agent-poster.png"' "$body" || return 1
+            assert_body_contains 'src="assets/scenes/mcp-poster.png"' "$body" || return 1
+          }
+
+          check_release_notes_nav() {
+            local body="$1"
+            printf '%s' "$body" | python3 -c '
+          from html.parser import HTMLParser
+          import re
+          import sys
+
+          VERSIONED_HREF = re.compile(r"^(?:\.\./)?v[0-9]+\.[0-9]+\.[0-9]+/$")
+
+          class Parser(HTMLParser):
+              def __init__(self):
+                  super().__init__(convert_charrefs=True)
+                  self.found = False
+
+              def handle_starttag(self, tag, attrs):
+                  if tag != "a":
+                      return
+                  attributes = dict(attrs)
+                  css_classes = attributes.get("class")
+                  href = attributes.get("href")
+                  if not isinstance(css_classes, str) or "md-nav__link" not in css_classes.split():
+                      return
+                  if not isinstance(href, str):
+                      return
+                  if VERSIONED_HREF.fullmatch(href.strip()):
+                      self.found = True
+
+          parser = Parser()
+          parser.feed(sys.stdin.read())
+          if not parser.found:
+              print(
+                  "Expected release notes navigation to include a versioned md-nav__link",
+                  file=sys.stderr,
+              )
+              raise SystemExit(1)
+          '
+          }
+
+          check_search_index() {
+            local body="$1"
+            local locations
+            local dev_locations
+            local cited_eval_locations
+            local route
+            locations="$(search_locations "$body")" || return 1
+            if [ -z "${PUBLIC_NAV_ROUTES:-}" ]; then
+              echo "PUBLIC_NAV_ROUTES is not initialized" >&2
+              return 1
+            fi
+            dev_locations="$(lines_with_prefix "dev/" "$locations")"
+            cited_eval_locations="$(lines_in_set \
+              "$locations" \
+              "$PUBLIC_EVAL_PATH" \
+              "$PUBLIC_OPERATIONS_PATH" \
+              "$PUBLIC_SCENARIOS_PATH" \
+              "$PUBLIC_SCOREBOARD_PATH")"
+            assert_exact_line_set \
+              "search index dev/ locations" \
+              "$dev_locations" \
+              "$PUBLIC_CONTRIBUTOR_PATH" \
+              "$PUBLIC_ARCHITECTURE_PATH" || return 1
+            assert_exact_line_set \
+              "search index cited eval locations" \
+              "$cited_eval_locations" \
+              "$PUBLIC_EVAL_PATH" \
+              "$PUBLIC_OPERATIONS_PATH" \
+              "$PUBLIC_SCENARIOS_PATH" \
+              "$PUBLIC_SCOREBOARD_PATH" || return 1
+            assert_line_present "" "$locations" || return 1
+            while IFS= read -r route; do
+              if [ -n "$route" ] && [ "$route" != "$ROOT_ROUTE_SENTINEL" ]; then
+                assert_line_present "$route" "$locations" || return 1
+              fi
+            done <<<"$PUBLIC_NAV_ROUTES"
+            assert_line_absent "$INTERNAL_RELEASE_PATH" "$locations" || return 1
+            assert_line_absent "$INTERNAL_WINDOWS_PATH" "$locations" || return 1
+          }
+
+          check_sitemap() {
+            local body="$1"
+            local urls
+            local dev_urls
+            local dev_prefix
+            local cited_eval_urls
+            local route
+            urls="$(sitemap_urls "$body")" || return 1
+            if [ -z "${PUBLIC_NAV_ROUTES:-}" ]; then
+              echo "PUBLIC_NAV_ROUTES is not initialized" >&2
+              return 1
+            fi
+            dev_prefix="$(canonical_url_for "$PUBLIC_CONTRIBUTOR_PATH")"
+            dev_urls="$(lines_with_prefix "$dev_prefix" "$urls")"
+            cited_eval_urls="$(lines_in_set \
+              "$urls" \
+              "$(canonical_url_for "$PUBLIC_EVAL_PATH")" \
+              "$(canonical_url_for "$PUBLIC_OPERATIONS_PATH")" \
+              "$(canonical_url_for "$PUBLIC_SCENARIOS_PATH")" \
+              "$(canonical_url_for "$PUBLIC_SCOREBOARD_PATH")")"
+            assert_exact_line_set \
+              "sitemap dev URLs" \
+              "$dev_urls" \
+              "$(canonical_url_for "$PUBLIC_CONTRIBUTOR_PATH")" \
+              "$(canonical_url_for "$PUBLIC_ARCHITECTURE_PATH")" || return 1
+            assert_exact_line_set \
+              "sitemap cited eval URLs" \
+              "$cited_eval_urls" \
+              "$(canonical_url_for "$PUBLIC_EVAL_PATH")" \
+              "$(canonical_url_for "$PUBLIC_OPERATIONS_PATH")" \
+              "$(canonical_url_for "$PUBLIC_SCENARIOS_PATH")" \
+              "$(canonical_url_for "$PUBLIC_SCOREBOARD_PATH")" || return 1
+            assert_line_present "$(canonical_url_for "")" "$urls" || return 1
+            while IFS= read -r route; do
+              if [ -n "$route" ] && [ "$route" != "$ROOT_ROUTE_SENTINEL" ]; then
+                assert_line_present "$(canonical_url_for "$route")" "$urls" || return 1
+              fi
+            done <<<"$PUBLIC_NAV_ROUTES"
+            assert_line_absent "$(canonical_url_for "$INTERNAL_RELEASE_PATH")" "$urls" || return 1
+            assert_line_absent "$(canonical_url_for "$INTERNAL_WINDOWS_PATH")" "$urls" || return 1
+          }
+
+          retry_until_body_checks() {
+            local path="$1"
+            local description="$2"
+            local checker="$3"
+            local body
+            local attempt
+            for attempt in $(seq 1 "$CONTENT_ATTEMPTS"); do
+              if body="$(fetch_body "$path" "$CONTENT_CURL_MAX_TIME")" && "$checker" "$body"; then
+                return 0
+              fi
+              if [ "$attempt" -lt "$CONTENT_ATTEMPTS" ]; then
+                sleep "$CONTENT_SLEEP_SECONDS"
+              fi
+            done
+            echo "Failed to observe $description at $(url_for "$path") after $CONTENT_ATTEMPTS attempts" >&2
+            return 1
+          }
+
+          retry_until_publication_artifacts() {
+            local home_body
+            local search_body
+            local sitemap_body
+            local attempt
+            for attempt in $(seq 1 "$CONTENT_ATTEMPTS"); do
+              if home_body="$(fetch_body "" "$CONTENT_CURL_MAX_TIME")" \
+                && search_body="$(fetch_body "search/search_index.json" "$CONTENT_CURL_MAX_TIME")" \
+                && sitemap_body="$(fetch_body "sitemap.xml" "$CONTENT_CURL_MAX_TIME")"; then
+                if PUBLIC_NAV_ROUTES="$(public_nav_routes "$home_body")" \
+                  && [ -n "$PUBLIC_NAV_ROUTES" ] \
+                  && check_home_page "$home_body" \
+                  && check_search_index "$search_body" \
+                  && check_sitemap "$sitemap_body"; then
+                  return 0
+                fi
+              fi
+              if [ "$attempt" -lt "$CONTENT_ATTEMPTS" ]; then
+                sleep "$CONTENT_SLEEP_SECONDS"
+              fi
+            done
+            echo "Failed to observe publication artifacts at $(url_for "") after $CONTENT_ATTEMPTS attempts" >&2
+            return 1
+          }
+
+          retry_until_ok() {
+            local path="$1"
+            local attempt
+            for attempt in $(seq 1 "$MEDIA_ATTEMPTS"); do
+              if curl --fail --silent --show-error --location \
+                --connect-timeout 10 --max-time "$MEDIA_CURL_MAX_TIME" \
+                --range 0-0 --output /dev/null \
+                "$(url_for "$path")"; then
+                return 0
+              fi
+              if [ "$attempt" -lt "$MEDIA_ATTEMPTS" ]; then
+                sleep "$MEDIA_SLEEP_SECONDS"
+              fi
+            done
+            echo "Failed to verify $(url_for "$path") after $MEDIA_ATTEMPTS attempts" >&2
+            return 1
+          }
+
+          retry_until_contains "getting-started/" "hellices/korvid/korvid"
+          retry_until_contains "release-notes/unreleased/" "Unreleased (main)"
+          retry_until_body_checks "release-notes/unreleased/" "release-notes navigation" check_release_notes_nav
+          retry_until_publication_artifacts
+          retry_until_ok "assets/demo.mp4"
+          retry_until_ok "assets/scenes/agent-demo.mp4"
+          retry_until_ok "assets/scenes/mcp-follow-demo.mp4"

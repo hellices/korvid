@@ -1,3 +1,8 @@
+---
+search:
+  exclude: true
+---
+
 # Windows contributor notes
 
 Native Windows development is supported for dependency sync and the full test

@@ -20,6 +20,7 @@ check: source-size lint typecheck test
 
 docs-build:
 	uv run --frozen --group docs mkdocs build --strict
+	uv run --frozen python scripts/check_docs_site.py
 
 docs-serve:
 	uv run --frozen --group docs mkdocs serve
