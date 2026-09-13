@@ -39,6 +39,7 @@ PUBLIC_ARCHITECTURE_PATH = "dev/specs/2026-08-12-korvid-architecture/"
 PUBLIC_UNRELEASED_PATH = "release-notes/unreleased/"
 PUBLIC_VERSIONED_RELEASE_PATH = "release-notes/v0.4.1/"
 PUBLIC_EVAL_PATH = "evals/methodology/"
+PUBLIC_OPERATIONS_PATH = "evals/operations/"
 PUBLIC_SCENARIOS_PATH = "evals/scenarios/"
 PUBLIC_SCOREBOARD_PATH = "evals/scoreboard/"
 INTERNAL_CONTRACT_TESTS_PATH = "dev/contract-tests/"
@@ -460,6 +461,7 @@ def _run_smoke_checker(
         PUBLIC_CONTRIBUTOR_PATH={shlex.quote(PUBLIC_CONTRIBUTOR_PATH)}
         PUBLIC_ARCHITECTURE_PATH={shlex.quote(PUBLIC_ARCHITECTURE_PATH)}
         PUBLIC_EVAL_PATH={shlex.quote(PUBLIC_EVAL_PATH)}
+        PUBLIC_OPERATIONS_PATH={shlex.quote(PUBLIC_OPERATIONS_PATH)}
         PUBLIC_SCENARIOS_PATH={shlex.quote(PUBLIC_SCENARIOS_PATH)}
         PUBLIC_SCOREBOARD_PATH={shlex.quote(PUBLIC_SCOREBOARD_PATH)}
         INTERNAL_RELEASE_PATH={shlex.quote(INTERNAL_RELEASE_PATH)}
@@ -567,6 +569,7 @@ def _run_smoke_publication_checker(
         PUBLIC_CONTRIBUTOR_PATH={shlex.quote(PUBLIC_CONTRIBUTOR_PATH)}
         PUBLIC_ARCHITECTURE_PATH={shlex.quote(PUBLIC_ARCHITECTURE_PATH)}
         PUBLIC_EVAL_PATH={shlex.quote(PUBLIC_EVAL_PATH)}
+        PUBLIC_OPERATIONS_PATH={shlex.quote(PUBLIC_OPERATIONS_PATH)}
         PUBLIC_SCENARIOS_PATH={shlex.quote(PUBLIC_SCENARIOS_PATH)}
         PUBLIC_SCOREBOARD_PATH={shlex.quote(PUBLIC_SCOREBOARD_PATH)}
         INTERNAL_RELEASE_PATH={shlex.quote(INTERNAL_RELEASE_PATH)}
@@ -695,6 +698,7 @@ def _large_search_index_body() -> str:
         {"location": location}
         for location in (
             PUBLIC_EVAL_PATH,
+            PUBLIC_OPERATIONS_PATH,
             PUBLIC_SCENARIOS_PATH,
             PUBLIC_SCOREBOARD_PATH,
         )
@@ -751,11 +755,13 @@ def test_run_smoke_checker_uses_a_portable_noninteractive_bash_invocation(
     monkeypatch.setattr(shutil, "which", lambda name: str(git) if name == "git" else None)
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    body = (
-        '{"docs":['
-        '{"location":"dev/specs/2026-08-12-korvid-architecture/"},'
-        '{"location":"evals/methodology/"}'
-        "]}"
+    body = _search_index_body(
+        PUBLIC_HOME_SEARCH_PATH,
+        *PUBLIC_NAV_ROUTES,
+        PUBLIC_EVAL_PATH,
+        PUBLIC_OPERATIONS_PATH,
+        PUBLIC_SCENARIOS_PATH,
+        PUBLIC_SCOREBOARD_PATH,
     )
 
     assert (
@@ -818,6 +824,7 @@ def test_run_smoke_publication_checker_rewrites_python3_for_windows_git_bash(
         PUBLIC_HOME_SEARCH_PATH,
         *PUBLIC_NAV_ROUTES,
         PUBLIC_EVAL_PATH,
+        PUBLIC_OPERATIONS_PATH,
         PUBLIC_SCENARIOS_PATH,
         PUBLIC_SCOREBOARD_PATH,
     )
@@ -825,6 +832,7 @@ def test_run_smoke_publication_checker_rewrites_python3_for_windows_git_bash(
         PUBLIC_HOME_SEARCH_PATH,
         *PUBLIC_NAV_ROUTES,
         PUBLIC_EVAL_PATH,
+        PUBLIC_OPERATIONS_PATH,
         PUBLIC_SCENARIOS_PATH,
         PUBLIC_SCOREBOARD_PATH,
     )
@@ -1045,6 +1053,7 @@ def test_smoke_scope_checker_succeeds_when_search_index_matches_contract() -> No
                 PUBLIC_HOME_SEARCH_PATH,
                 *PUBLIC_NAV_ROUTES,
                 PUBLIC_EVAL_PATH,
+                PUBLIC_OPERATIONS_PATH,
                 PUBLIC_SCENARIOS_PATH,
                 PUBLIC_SCOREBOARD_PATH,
             ),
@@ -1053,54 +1062,15 @@ def test_smoke_scope_checker_succeeds_when_search_index_matches_contract() -> No
     )
 
 
-def test_smoke_scope_checker_succeeds_when_sitemap_uses_canonical_homepage_url() -> None:
-    assert (
-        _run_smoke_checker(
-            "check_sitemap",
-            "sitemap.xml",
-            "sitemap scope",
-            _sitemap_body(
-                PUBLIC_HOME_SEARCH_PATH,
-                *PUBLIC_NAV_ROUTES,
-                PUBLIC_EVAL_PATH,
-                PUBLIC_SCENARIOS_PATH,
-                PUBLIC_SCOREBOARD_PATH,
-            ),
-        )
-        == 0
-    )
-
-
-def test_smoke_publication_checker_succeeds_when_home_search_and_sitemap_match_contract() -> None:
+def test_smoke_publication_checker_requires_the_operations_eval_page_in_search_and_sitemap() -> (
+    None
+):
     assert (
         _run_smoke_publication_checker(
             _smoke_home_body(),
             _search_index_body(
                 PUBLIC_HOME_SEARCH_PATH,
                 *PUBLIC_NAV_ROUTES,
-                PUBLIC_EVAL_PATH,
-                PUBLIC_SCENARIOS_PATH,
-                PUBLIC_SCOREBOARD_PATH,
-            ),
-            _sitemap_body(
-                PUBLIC_HOME_SEARCH_PATH,
-                *PUBLIC_NAV_ROUTES,
-                PUBLIC_EVAL_PATH,
-                PUBLIC_SCENARIOS_PATH,
-                PUBLIC_SCOREBOARD_PATH,
-            ),
-        )
-        == 0
-    )
-
-
-def test_smoke_publication_checker_fails_when_a_primary_guide_is_missing_from_search() -> None:
-    assert (
-        _run_smoke_publication_checker(
-            _smoke_home_body(),
-            _search_index_body(
-                PUBLIC_HOME_SEARCH_PATH,
-                *tuple(path for path in PUBLIC_NAV_ROUTES if path != PUBLIC_GETTING_STARTED_PATH),
                 PUBLIC_EVAL_PATH,
                 PUBLIC_SCENARIOS_PATH,
                 PUBLIC_SCOREBOARD_PATH,
@@ -1117,13 +1087,34 @@ def test_smoke_publication_checker_fails_when_a_primary_guide_is_missing_from_se
     )
 
 
-def test_smoke_publication_checker_fails_when_homepage_is_missing_from_search() -> None:
+def test_smoke_scope_checker_succeeds_when_sitemap_uses_canonical_homepage_url() -> None:
+    assert (
+        _run_smoke_checker(
+            "check_sitemap",
+            "sitemap.xml",
+            "sitemap scope",
+            _sitemap_body(
+                PUBLIC_HOME_SEARCH_PATH,
+                *PUBLIC_NAV_ROUTES,
+                PUBLIC_EVAL_PATH,
+                PUBLIC_OPERATIONS_PATH,
+                PUBLIC_SCENARIOS_PATH,
+                PUBLIC_SCOREBOARD_PATH,
+            ),
+        )
+        == 0
+    )
+
+
+def test_smoke_publication_checker_succeeds_when_home_search_and_sitemap_match_contract() -> None:
     assert (
         _run_smoke_publication_checker(
             _smoke_home_body(),
             _search_index_body(
+                PUBLIC_HOME_SEARCH_PATH,
                 *PUBLIC_NAV_ROUTES,
                 PUBLIC_EVAL_PATH,
+                PUBLIC_OPERATIONS_PATH,
                 PUBLIC_SCENARIOS_PATH,
                 PUBLIC_SCOREBOARD_PATH,
             ),
@@ -1131,6 +1122,56 @@ def test_smoke_publication_checker_fails_when_homepage_is_missing_from_search() 
                 PUBLIC_HOME_SEARCH_PATH,
                 *PUBLIC_NAV_ROUTES,
                 PUBLIC_EVAL_PATH,
+                PUBLIC_OPERATIONS_PATH,
+                PUBLIC_SCENARIOS_PATH,
+                PUBLIC_SCOREBOARD_PATH,
+            ),
+        )
+        == 0
+    )
+
+
+def test_smoke_publication_checker_fails_when_a_primary_guide_is_missing_from_search() -> None:
+    assert (
+        _run_smoke_publication_checker(
+            _smoke_home_body(),
+            _search_index_body(
+                PUBLIC_HOME_SEARCH_PATH,
+                *tuple(path for path in PUBLIC_NAV_ROUTES if path != PUBLIC_GETTING_STARTED_PATH),
+                PUBLIC_EVAL_PATH,
+                PUBLIC_OPERATIONS_PATH,
+                PUBLIC_SCENARIOS_PATH,
+                PUBLIC_SCOREBOARD_PATH,
+            ),
+            _sitemap_body(
+                PUBLIC_HOME_SEARCH_PATH,
+                *PUBLIC_NAV_ROUTES,
+                PUBLIC_EVAL_PATH,
+                PUBLIC_OPERATIONS_PATH,
+                PUBLIC_SCENARIOS_PATH,
+                PUBLIC_SCOREBOARD_PATH,
+            ),
+        )
+        != 0
+    )
+
+
+def test_smoke_publication_checker_fails_when_homepage_is_missing_from_search() -> None:
+    assert (
+        _run_smoke_publication_checker(
+            _smoke_home_body(),
+            _search_index_body(
+                *PUBLIC_NAV_ROUTES,
+                PUBLIC_EVAL_PATH,
+                PUBLIC_OPERATIONS_PATH,
+                PUBLIC_SCENARIOS_PATH,
+                PUBLIC_SCOREBOARD_PATH,
+            ),
+            _sitemap_body(
+                PUBLIC_HOME_SEARCH_PATH,
+                *PUBLIC_NAV_ROUTES,
+                PUBLIC_EVAL_PATH,
+                PUBLIC_OPERATIONS_PATH,
                 PUBLIC_SCENARIOS_PATH,
                 PUBLIC_SCOREBOARD_PATH,
             ),
@@ -1149,6 +1190,7 @@ def test_smoke_publication_checker_fails_when_a_versioned_release_note_is_missin
                 PUBLIC_HOME_SEARCH_PATH,
                 *PUBLIC_NAV_ROUTES,
                 PUBLIC_EVAL_PATH,
+                PUBLIC_OPERATIONS_PATH,
                 PUBLIC_SCENARIOS_PATH,
                 PUBLIC_SCOREBOARD_PATH,
             ),
@@ -1156,6 +1198,7 @@ def test_smoke_publication_checker_fails_when_a_versioned_release_note_is_missin
                 PUBLIC_HOME_SEARCH_PATH,
                 *tuple(path for path in PUBLIC_NAV_ROUTES if path != PUBLIC_VERSIONED_RELEASE_PATH),
                 PUBLIC_EVAL_PATH,
+                PUBLIC_OPERATIONS_PATH,
                 PUBLIC_SCENARIOS_PATH,
                 PUBLIC_SCOREBOARD_PATH,
             ),
@@ -1172,12 +1215,14 @@ def test_smoke_publication_checker_fails_when_canonical_homepage_is_missing_from
                 PUBLIC_HOME_SEARCH_PATH,
                 *PUBLIC_NAV_ROUTES,
                 PUBLIC_EVAL_PATH,
+                PUBLIC_OPERATIONS_PATH,
                 PUBLIC_SCENARIOS_PATH,
                 PUBLIC_SCOREBOARD_PATH,
             ),
             _sitemap_body(
                 *PUBLIC_NAV_ROUTES,
                 PUBLIC_EVAL_PATH,
+                PUBLIC_OPERATIONS_PATH,
                 PUBLIC_SCENARIOS_PATH,
                 PUBLIC_SCOREBOARD_PATH,
             ),
@@ -1244,6 +1289,7 @@ def test_smoke_publication_checker_fails_when_canonical_homepage_is_missing_from
                 PUBLIC_HOME_SEARCH_PATH,
                 *PUBLIC_NAV_ROUTES,
                 PUBLIC_EVAL_PATH,
+                PUBLIC_OPERATIONS_PATH,
                 PUBLIC_SCENARIOS_PATH,
                 PUBLIC_SCOREBOARD_PATH,
                 INTERNAL_CONTRACT_TESTS_PATH,
@@ -1257,6 +1303,7 @@ def test_smoke_publication_checker_fails_when_canonical_homepage_is_missing_from
                 PUBLIC_HOME_SEARCH_PATH,
                 *PUBLIC_NAV_ROUTES,
                 PUBLIC_EVAL_PATH,
+                PUBLIC_OPERATIONS_PATH,
                 PUBLIC_SCENARIOS_PATH,
                 PUBLIC_SCOREBOARD_PATH,
                 INTERNAL_WINDOWS_PATH,
@@ -1317,6 +1364,7 @@ def test_smoke_publication_checker_fails_when_canonical_homepage_is_missing_from
                 PUBLIC_HOME_SEARCH_PATH,
                 *PUBLIC_NAV_ROUTES,
                 PUBLIC_EVAL_PATH,
+                PUBLIC_OPERATIONS_PATH,
                 PUBLIC_SCENARIOS_PATH,
                 PUBLIC_SCOREBOARD_PATH,
                 INTERNAL_CONTRACT_TESTS_PATH,
@@ -1330,6 +1378,7 @@ def test_smoke_publication_checker_fails_when_canonical_homepage_is_missing_from
                 PUBLIC_HOME_SEARCH_PATH,
                 *PUBLIC_NAV_ROUTES,
                 PUBLIC_EVAL_PATH,
+                PUBLIC_OPERATIONS_PATH,
                 PUBLIC_SCENARIOS_PATH,
                 PUBLIC_SCOREBOARD_PATH,
                 INTERNAL_WINDOWS_PATH,
@@ -1529,6 +1578,7 @@ def test_smoke_job_checks_public_pages_search_and_media_entrypoints() -> None:
         f'PUBLIC_CONTRIBUTOR_PATH="{PUBLIC_CONTRIBUTOR_PATH}"',
         f'PUBLIC_ARCHITECTURE_PATH="{PUBLIC_ARCHITECTURE_PATH}"',
         f'PUBLIC_EVAL_PATH="{PUBLIC_EVAL_PATH}"',
+        f'PUBLIC_OPERATIONS_PATH="{PUBLIC_OPERATIONS_PATH}"',
         f'PUBLIC_SCENARIOS_PATH="{PUBLIC_SCENARIOS_PATH}"',
         f'PUBLIC_SCOREBOARD_PATH="{PUBLIC_SCOREBOARD_PATH}"',
         f'INTERNAL_RELEASE_PATH="{INTERNAL_RELEASE_PATH}"',
@@ -1557,6 +1607,7 @@ def test_smoke_scope_paths_map_to_repository_sources() -> None:
     assert _site_page_source(PUBLIC_UNRELEASED_PATH).exists()
     assert _site_page_source(PUBLIC_VERSIONED_RELEASE_PATH).exists()
     assert _site_page_source(PUBLIC_EVAL_PATH).exists()
+    assert _site_page_source(PUBLIC_OPERATIONS_PATH).exists()
 
 
 def test_workflow_level_permissions_are_read_only() -> None:

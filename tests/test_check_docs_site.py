@@ -22,9 +22,11 @@ PUBLIC_UNRELEASED_PATH = "release-notes/unreleased/"
 PUBLIC_VERSIONED_RELEASE_PATH = "release-notes/v0.4.1/"
 PUBLIC_EVAL_PATHS = (
     "evals/methodology/",
+    "evals/operations/",
     "evals/scenarios/",
     "evals/scoreboard/",
 )
+PUBLIC_OPERATIONS_PATH = PUBLIC_EVAL_PATHS[1]
 INTERNAL_CONTRACT_TESTS_PATH = "dev/contract-tests/"
 INTERNAL_RELEASE_PATH = "release/"
 PUBLIC_WINDOWS_PATH = "windows/"
@@ -172,11 +174,13 @@ def test_check_site_requires_all_cited_eval_pages_in_search_and_sitemap(tmp_path
             PUBLIC_CONTRIBUTOR_PATH,
             PUBLIC_ARCHITECTURE_PATH,
             PUBLIC_EVAL_PATHS[0],
+            PUBLIC_OPERATIONS_PATH,
         ],
         sitemap_locations=[
             f"{SITE_URL}{PUBLIC_CONTRIBUTOR_PATH}",
             f"{SITE_URL}{PUBLIC_ARCHITECTURE_PATH}",
             f"{SITE_URL}{PUBLIC_EVAL_PATHS[0]}",
+            f"{SITE_URL}{PUBLIC_OPERATIONS_PATH}",
         ],
     )
 
@@ -189,6 +193,36 @@ def test_check_site_requires_all_cited_eval_pages_in_search_and_sitemap(tmp_path
     )
     assert (
         "sitemap.xml is missing required URL 'https://hellices.github.io/korvid/evals/scoreboard/'"
+        in errors
+    )
+
+
+def test_check_site_requires_the_operations_eval_page_in_search_and_sitemap(
+    tmp_path: Path,
+) -> None:
+    module = _module()
+    site = _write_site(
+        tmp_path,
+        search_locations=[
+            PUBLIC_CONTRIBUTOR_PATH,
+            PUBLIC_ARCHITECTURE_PATH,
+            PUBLIC_EVAL_PATHS[0],
+            PUBLIC_EVAL_PATHS[2],
+            PUBLIC_EVAL_PATHS[3],
+        ],
+        sitemap_locations=[
+            f"{SITE_URL}{PUBLIC_CONTRIBUTOR_PATH}",
+            f"{SITE_URL}{PUBLIC_ARCHITECTURE_PATH}",
+            f"{SITE_URL}{PUBLIC_EVAL_PATHS[0]}",
+            f"{SITE_URL}{PUBLIC_EVAL_PATHS[2]}",
+            f"{SITE_URL}{PUBLIC_EVAL_PATHS[3]}",
+        ],
+    )
+
+    errors = module.check_site(site)
+    assert "search/search_index.json is missing required location 'evals/operations/'" in errors
+    assert (
+        "sitemap.xml is missing required URL 'https://hellices.github.io/korvid/evals/operations/'"
         in errors
     )
 

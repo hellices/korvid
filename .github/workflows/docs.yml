@@ -94,6 +94,7 @@ jobs:
           PUBLIC_CONTRIBUTOR_PATH="dev/"
           PUBLIC_ARCHITECTURE_PATH="dev/specs/2026-08-12-korvid-architecture/"
           PUBLIC_EVAL_PATH="evals/methodology/"
+          PUBLIC_OPERATIONS_PATH="evals/operations/"
           PUBLIC_SCENARIOS_PATH="evals/scenarios/"
           PUBLIC_SCOREBOARD_PATH="evals/scoreboard/"
           INTERNAL_RELEASE_PATH="release/"
@@ -433,6 +434,7 @@ jobs:
             cited_eval_locations="$(lines_in_set \
               "$locations" \
               "$PUBLIC_EVAL_PATH" \
+              "$PUBLIC_OPERATIONS_PATH" \
               "$PUBLIC_SCENARIOS_PATH" \
               "$PUBLIC_SCOREBOARD_PATH")"
             assert_exact_line_set \
@@ -444,6 +446,7 @@ jobs:
               "search index cited eval locations" \
               "$cited_eval_locations" \
               "$PUBLIC_EVAL_PATH" \
+              "$PUBLIC_OPERATIONS_PATH" \
               "$PUBLIC_SCENARIOS_PATH" \
               "$PUBLIC_SCOREBOARD_PATH" || return 1
             assert_line_present "" "$locations" || return 1
@@ -473,6 +476,7 @@ jobs:
             cited_eval_urls="$(lines_in_set \
               "$urls" \
               "$(canonical_url_for "$PUBLIC_EVAL_PATH")" \
+              "$(canonical_url_for "$PUBLIC_OPERATIONS_PATH")" \
               "$(canonical_url_for "$PUBLIC_SCENARIOS_PATH")" \
               "$(canonical_url_for "$PUBLIC_SCOREBOARD_PATH")")"
             assert_exact_line_set \
@@ -484,6 +488,7 @@ jobs:
               "sitemap cited eval URLs" \
               "$cited_eval_urls" \
               "$(canonical_url_for "$PUBLIC_EVAL_PATH")" \
+              "$(canonical_url_for "$PUBLIC_OPERATIONS_PATH")" \
               "$(canonical_url_for "$PUBLIC_SCENARIOS_PATH")" \
               "$(canonical_url_for "$PUBLIC_SCOREBOARD_PATH")" || return 1
             assert_line_present "$(canonical_url_for "")" "$urls" || return 1
