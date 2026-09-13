@@ -20,14 +20,7 @@ environment rather than whatever Python happens to be active. `uv` and
 
 The commands below install the latest published package from PyPI. Check the
 [latest release](https://github.com/hellices/korvid/releases/latest) for its
-version, pinned installation commands, and migration notes. These guides
-describe `main`, which can include changes not yet published.
-
-For unreleased `main` development, install the reviewed source instead:
-
-```sh
-uv tool install 'korvid[all] @ git+https://github.com/hellices/korvid'
-```
+version, pinned installation commands, and migration notes.
 
 ## Install
 
@@ -79,6 +72,15 @@ or both:
 Extras do not expand in place: if you installed `korvid` alone and later want
 the agent, reinstall with the full extra set you want rather than layering
 extras on top of an existing install.
+
+## Development build
+
+The guides describe `main`, which can include changes not yet published.
+To test the reviewed source instead of the latest PyPI release:
+
+```sh
+uv tool install 'korvid[all] @ git+https://github.com/hellices/korvid'
+```
 
 ## First run
 
