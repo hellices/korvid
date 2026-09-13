@@ -129,7 +129,7 @@ def _normalized_public_route(href: str) -> str | None:
     if relative.endswith("index.html"):
         relative = relative[: -len("index.html")]
     if not relative:
-        return None
+        return ""
     if not relative.endswith("/"):
         relative = f"{relative}/"
     return unquote(relative)
