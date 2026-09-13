@@ -12,6 +12,8 @@ import pytest
 
 SCRIPT = Path(__file__).parent.parent / "scripts" / "check_docs_site.py"
 SITE_URL = "https://hellices.github.io/korvid/"
+PUBLIC_HOME_NAV_HREF = "."
+PUBLIC_HOME_SEARCH_PATH = ""
 PUBLIC_OVERVIEW_PATH = "overview/"
 PUBLIC_GETTING_STARTED_PATH = "getting-started/"
 PUBLIC_CONTRIBUTOR_PATH = "dev/"
@@ -56,7 +58,9 @@ def _write_site(
     site = root / "site"
     search = site / "search"
     search.mkdir(parents=True)
-    nav_hrefs = list(PUBLIC_NAV_PATHS if home_nav_hrefs is None else home_nav_hrefs)
+    nav_hrefs = list(
+        (PUBLIC_HOME_NAV_HREF, *PUBLIC_NAV_PATHS) if home_nav_hrefs is None else home_nav_hrefs
+    )
     links = "".join(f'<a class="md-nav__link" href="{escape(href)}">nav</a>' for href in nav_hrefs)
     (site / "index.html").write_text(
         f"<html><body><nav>{links}</nav></body></html>",
@@ -81,10 +85,28 @@ def _public_eval_urls() -> list[str]:
 
 
 def _public_nav_urls() -> list[str]:
-    return [f"{SITE_URL}{path}" for path in PUBLIC_NAV_PATHS]
+    return [SITE_URL, *[f"{SITE_URL}{path}" for path in PUBLIC_NAV_PATHS]]
 
 
 def test_check_site_accepts_expected_publication_artifacts(tmp_path: Path) -> None:
+    module = _module()
+    site = _write_site(
+        tmp_path,
+        search_locations=[
+            PUBLIC_HOME_SEARCH_PATH,
+            *PUBLIC_NAV_PATHS,
+            *PUBLIC_EVAL_PATHS,
+        ],
+        sitemap_locations=[
+            *_public_nav_urls(),
+            *_public_eval_urls(),
+        ],
+    )
+
+    assert module.check_site(site) == []
+
+
+def test_check_site_requires_homepage_search_location(tmp_path: Path) -> None:
     module = _module()
     site = _write_site(
         tmp_path,
@@ -98,7 +120,26 @@ def test_check_site_accepts_expected_publication_artifacts(tmp_path: Path) -> No
         ],
     )
 
-    assert module.check_site(site) == []
+    errors = module.check_site(site)
+    assert "search/search_index.json is missing required location ''" in errors
+
+
+def test_check_site_requires_homepage_sitemap_url(tmp_path: Path) -> None:
+    module = _module()
+    site = _write_site(
+        tmp_path,
+        search_locations=[
+            PUBLIC_HOME_SEARCH_PATH,
+            *PUBLIC_NAV_PATHS,
+            *PUBLIC_EVAL_PATHS,
+        ],
+        sitemap_locations=[
+            url for url in (*_public_nav_urls(), *_public_eval_urls()) if url != SITE_URL
+        ],
+    )
+
+    errors = module.check_site(site)
+    assert f"sitemap.xml is missing required URL {SITE_URL!r}" in errors
 
 
 def test_check_site_requires_the_public_dev_index_in_search_and_sitemap(tmp_path: Path) -> None:

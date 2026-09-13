@@ -29,6 +29,9 @@ WORKFLOW = ROOT / ".github" / "workflows" / "docs.yml"
 GETTING_STARTED_HOMEBREW_COMMAND = "brew install hellices/korvid/korvid"
 GETTING_STARTED_HOMEBREW_TOKEN = "hellices/korvid/korvid"
 CANONICAL_SITE_URL = "https://hellices.github.io/korvid/"
+PUBLIC_HOME_NAV_HREF = "."
+PUBLIC_HOME_ROUTE_SENTINEL = "."
+PUBLIC_HOME_SEARCH_PATH = ""
 PUBLIC_OVERVIEW_PATH = "overview/"
 PUBLIC_GETTING_STARTED_PATH = "getting-started/"
 PUBLIC_CONTRIBUTOR_PATH = "dev/"
@@ -70,6 +73,7 @@ PUBLIC_NAV_ROUTES = (
     PUBLIC_UNRELEASED_PATH,
     PUBLIC_VERSIONED_RELEASE_PATH,
 )
+PUBLIC_NAV_ROUTES_WITH_ROOT = (PUBLIC_HOME_ROUTE_SENTINEL, *PUBLIC_NAV_ROUTES)
 
 
 def _load() -> dict[str, Any]:
@@ -361,7 +365,7 @@ def _run_smoke_checker(
         f"""\
         set -euo pipefail
 
-        base_url="https://example.invalid"
+        base_url={shlex.quote(CANONICAL_SITE_URL.removesuffix("/"))}
         CANONICAL_SITE_URL={shlex.quote(CANONICAL_SITE_URL)}
         PUBLIC_CONTRIBUTOR_PATH={shlex.quote(PUBLIC_CONTRIBUTOR_PATH)}
         PUBLIC_ARCHITECTURE_PATH={shlex.quote(PUBLIC_ARCHITECTURE_PATH)}
@@ -369,7 +373,8 @@ def _run_smoke_checker(
         PUBLIC_SCENARIOS_PATH={shlex.quote(PUBLIC_SCENARIOS_PATH)}
         PUBLIC_SCOREBOARD_PATH={shlex.quote(PUBLIC_SCOREBOARD_PATH)}
         INTERNAL_RELEASE_PATH={shlex.quote(INTERNAL_RELEASE_PATH)}
-        PUBLIC_NAV_ROUTES={shlex.quote(chr(10).join(PUBLIC_NAV_ROUTES))}
+        ROOT_ROUTE_SENTINEL={shlex.quote(PUBLIC_HOME_ROUTE_SENTINEL)}
+        PUBLIC_NAV_ROUTES={shlex.quote(chr(10).join(PUBLIC_NAV_ROUTES_WITH_ROOT))}
         CONTENT_ATTEMPTS=1
         CONTENT_CURL_MAX_TIME=1
         CONTENT_SLEEP_SECONDS=0
@@ -430,7 +435,7 @@ def _run_smoke_publication_checker(
         f"""\
         set -euo pipefail
 
-        base_url="https://example.invalid"
+        base_url={shlex.quote(CANONICAL_SITE_URL.removesuffix("/"))}
         CANONICAL_SITE_URL={shlex.quote(CANONICAL_SITE_URL)}
         PUBLIC_CONTRIBUTOR_PATH={shlex.quote(PUBLIC_CONTRIBUTOR_PATH)}
         PUBLIC_ARCHITECTURE_PATH={shlex.quote(PUBLIC_ARCHITECTURE_PATH)}
@@ -438,6 +443,7 @@ def _run_smoke_publication_checker(
         PUBLIC_SCENARIOS_PATH={shlex.quote(PUBLIC_SCENARIOS_PATH)}
         PUBLIC_SCOREBOARD_PATH={shlex.quote(PUBLIC_SCOREBOARD_PATH)}
         INTERNAL_RELEASE_PATH={shlex.quote(INTERNAL_RELEASE_PATH)}
+        ROOT_ROUTE_SENTINEL={shlex.quote(PUBLIC_HOME_ROUTE_SENTINEL)}
         PUBLIC_NAV_ROUTES=""
         CONTENT_ATTEMPTS=1
         CONTENT_CURL_MAX_TIME=1
@@ -487,7 +493,10 @@ def _run_smoke_publication_checker(
 
 
 def _smoke_home_body(*, nav_routes: tuple[str, ...] = PUBLIC_NAV_ROUTES) -> str:
-    links = "\n".join(f'<a class="md-nav__link" href="{path}">{path}</a>' for path in nav_routes)
+    links = "\n".join(
+        f'<a class="md-nav__link" href="{path}">{path or "home"}</a>'
+        for path in (PUBLIC_HOME_NAV_HREF, *nav_routes)
+    )
     return textwrap.dedent(
         f"""\
         <section data-scene-switcher>
@@ -525,7 +534,7 @@ def _sitemap_body(*paths: str) -> str:
 
 
 def _large_search_index_body() -> str:
-    docs = [{"location": location} for location in (*PUBLIC_NAV_ROUTES,)]
+    docs = [{"location": location} for location in (PUBLIC_HOME_SEARCH_PATH, *PUBLIC_NAV_ROUTES)]
     docs.extend(
         {"location": location}
         for location in (
@@ -602,7 +611,60 @@ def test_run_smoke_checker_uses_a_portable_noninteractive_bash_invocation(
 
 
 def _smoke_invocation_count(script: str, helper_name: str) -> int:
-    return sum(1 for line in script.splitlines() if line.lstrip().startswith(f"{helper_name} "))
+    return sum(
+        1
+        for line in script.splitlines()
+        if line.lstrip() == helper_name or line.lstrip().startswith(f"{helper_name} ")
+    )
+
+
+def _fetch_body_invocation_count(script: str, helper_name: str) -> int:
+    return _smoke_function(script, helper_name).count('fetch_body "')
+
+
+def _legacy_smoke_worst_case_seconds(script: str) -> int:
+    content_budget = _shell_assignment(script, "CONTENT_ATTEMPTS") * _shell_assignment(
+        script, "CONTENT_CURL_MAX_TIME"
+    ) + (_shell_assignment(script, "CONTENT_ATTEMPTS") - 1) * _shell_assignment(
+        script, "CONTENT_SLEEP_SECONDS"
+    )
+    media_budget = _shell_assignment(script, "MEDIA_ATTEMPTS") * _shell_assignment(
+        script, "MEDIA_CURL_MAX_TIME"
+    ) + (_shell_assignment(script, "MEDIA_ATTEMPTS") - 1) * _shell_assignment(
+        script, "MEDIA_SLEEP_SECONDS"
+    )
+    content_probes = _smoke_invocation_count(
+        script, "retry_until_contains"
+    ) + _smoke_invocation_count(script, "retry_until_body_checks")
+    media_probes = _smoke_invocation_count(script, "retry_until_ok")
+    return content_probes * content_budget + media_probes * media_budget
+
+
+def _smoke_worst_case_seconds(script: str) -> int:
+    content_attempts = _shell_assignment(script, "CONTENT_ATTEMPTS")
+    content_curl_max_time = _shell_assignment(script, "CONTENT_CURL_MAX_TIME")
+    content_sleep_seconds = _shell_assignment(script, "CONTENT_SLEEP_SECONDS")
+    media_budget = _shell_assignment(script, "MEDIA_ATTEMPTS") * _shell_assignment(
+        script, "MEDIA_CURL_MAX_TIME"
+    ) + (_shell_assignment(script, "MEDIA_ATTEMPTS") - 1) * _shell_assignment(
+        script, "MEDIA_SLEEP_SECONDS"
+    )
+    content_budget = sum(
+        _smoke_invocation_count(script, helper_name)
+        * (
+            content_attempts
+            * _fetch_body_invocation_count(script, helper_name)
+            * content_curl_max_time
+            + (content_attempts - 1) * content_sleep_seconds
+        )
+        for helper_name in (
+            "retry_until_contains",
+            "retry_until_body_checks",
+            "retry_until_publication_artifacts",
+        )
+    )
+    media_probes = _smoke_invocation_count(script, "retry_until_ok")
+    return content_budget + media_probes * media_budget
 
 
 def test_smoke_home_page_checker_succeeds_when_markup_matches_contract() -> None:
@@ -691,6 +753,7 @@ def test_smoke_scope_checker_succeeds_when_search_index_matches_contract() -> No
             "search/search_index.json",
             "search index scope",
             _search_index_body(
+                PUBLIC_HOME_SEARCH_PATH,
                 *PUBLIC_NAV_ROUTES,
                 PUBLIC_EVAL_PATH,
                 PUBLIC_SCENARIOS_PATH,
@@ -706,12 +769,14 @@ def test_smoke_publication_checker_succeeds_when_home_search_and_sitemap_match_c
         _run_smoke_publication_checker(
             _smoke_home_body(),
             _search_index_body(
+                PUBLIC_HOME_SEARCH_PATH,
                 *PUBLIC_NAV_ROUTES,
                 PUBLIC_EVAL_PATH,
                 PUBLIC_SCENARIOS_PATH,
                 PUBLIC_SCOREBOARD_PATH,
             ),
             _sitemap_body(
+                PUBLIC_HOME_SEARCH_PATH,
                 *PUBLIC_NAV_ROUTES,
                 PUBLIC_EVAL_PATH,
                 PUBLIC_SCENARIOS_PATH,
@@ -727,12 +792,36 @@ def test_smoke_publication_checker_fails_when_a_primary_guide_is_missing_from_se
         _run_smoke_publication_checker(
             _smoke_home_body(),
             _search_index_body(
+                PUBLIC_HOME_SEARCH_PATH,
                 *tuple(path for path in PUBLIC_NAV_ROUTES if path != PUBLIC_GETTING_STARTED_PATH),
                 PUBLIC_EVAL_PATH,
                 PUBLIC_SCENARIOS_PATH,
                 PUBLIC_SCOREBOARD_PATH,
             ),
             _sitemap_body(
+                PUBLIC_HOME_SEARCH_PATH,
+                *PUBLIC_NAV_ROUTES,
+                PUBLIC_EVAL_PATH,
+                PUBLIC_SCENARIOS_PATH,
+                PUBLIC_SCOREBOARD_PATH,
+            ),
+        )
+        != 0
+    )
+
+
+def test_smoke_publication_checker_fails_when_homepage_is_missing_from_search() -> None:
+    assert (
+        _run_smoke_publication_checker(
+            _smoke_home_body(),
+            _search_index_body(
+                *PUBLIC_NAV_ROUTES,
+                PUBLIC_EVAL_PATH,
+                PUBLIC_SCENARIOS_PATH,
+                PUBLIC_SCOREBOARD_PATH,
+            ),
+            _sitemap_body(
+                PUBLIC_HOME_SEARCH_PATH,
                 *PUBLIC_NAV_ROUTES,
                 PUBLIC_EVAL_PATH,
                 PUBLIC_SCENARIOS_PATH,
@@ -750,13 +839,37 @@ def test_smoke_publication_checker_fails_when_a_versioned_release_note_is_missin
         _run_smoke_publication_checker(
             _smoke_home_body(),
             _search_index_body(
+                PUBLIC_HOME_SEARCH_PATH,
                 *PUBLIC_NAV_ROUTES,
                 PUBLIC_EVAL_PATH,
                 PUBLIC_SCENARIOS_PATH,
                 PUBLIC_SCOREBOARD_PATH,
             ),
             _sitemap_body(
+                PUBLIC_HOME_SEARCH_PATH,
                 *tuple(path for path in PUBLIC_NAV_ROUTES if path != PUBLIC_VERSIONED_RELEASE_PATH),
+                PUBLIC_EVAL_PATH,
+                PUBLIC_SCENARIOS_PATH,
+                PUBLIC_SCOREBOARD_PATH,
+            ),
+        )
+        != 0
+    )
+
+
+def test_smoke_publication_checker_fails_when_homepage_is_missing_from_sitemap() -> None:
+    assert (
+        _run_smoke_publication_checker(
+            _smoke_home_body(),
+            _search_index_body(
+                PUBLIC_HOME_SEARCH_PATH,
+                *PUBLIC_NAV_ROUTES,
+                PUBLIC_EVAL_PATH,
+                PUBLIC_SCENARIOS_PATH,
+                PUBLIC_SCOREBOARD_PATH,
+            ),
+            _sitemap_body(
+                *PUBLIC_NAV_ROUTES,
                 PUBLIC_EVAL_PATH,
                 PUBLIC_SCENARIOS_PATH,
                 PUBLIC_SCOREBOARD_PATH,
@@ -933,24 +1046,24 @@ def test_smoke_job_is_main_only_after_deploy_and_least_privilege() -> None:
     assert "CONTENT_CURL_MAX_TIME=10" in script
     assert '--max-time "$MEDIA_CURL_MAX_TIME"' in script
 
-    content_budget = _shell_assignment(script, "CONTENT_ATTEMPTS") * _shell_assignment(
-        script, "CONTENT_CURL_MAX_TIME"
-    ) + (_shell_assignment(script, "CONTENT_ATTEMPTS") - 1) * _shell_assignment(
-        script, "CONTENT_SLEEP_SECONDS"
-    )
-    media_budget = _shell_assignment(script, "MEDIA_ATTEMPTS") * _shell_assignment(
-        script, "MEDIA_CURL_MAX_TIME"
-    ) + (_shell_assignment(script, "MEDIA_ATTEMPTS") - 1) * _shell_assignment(
-        script, "MEDIA_SLEEP_SECONDS"
-    )
-    content_probes = _smoke_invocation_count(
-        script, "retry_until_contains"
-    ) + _smoke_invocation_count(script, "retry_until_body_checks")
-    media_probes = _smoke_invocation_count(script, "retry_until_ok")
-    worst_case_seconds = content_probes * content_budget + media_probes * media_budget
+    worst_case_seconds = _smoke_worst_case_seconds(script)
     assert smoke["timeout-minutes"] * 60 > worst_case_seconds, (
         "smoke timeout must exceed the probe's bounded worst case"
     )
+
+
+def test_smoke_timeout_budget_counts_three_fetches_per_publication_attempt() -> None:
+    script = _smoke_script(_load())
+    assert _fetch_body_invocation_count(script, "retry_until_publication_artifacts") == 3
+
+
+def test_legacy_timeout_math_would_miss_a_retry_increase_that_exceeds_the_job_timeout() -> None:
+    script = _smoke_script(_load())
+    stretched_script = script.replace("CONTENT_ATTEMPTS=4", "CONTENT_ATTEMPTS=6", 1)
+    timeout_seconds = _load()["jobs"]["smoke"]["timeout-minutes"] * 60
+
+    assert _legacy_smoke_worst_case_seconds(stretched_script) < timeout_seconds
+    assert _smoke_worst_case_seconds(stretched_script) > timeout_seconds
 
 
 def test_smoke_job_anchors_the_getting_started_probe_to_a_build_safe_token() -> None:
