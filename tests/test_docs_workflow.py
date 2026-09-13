@@ -75,6 +75,8 @@ PUBLIC_NAV_ROUTES = (
     PUBLIC_VERSIONED_RELEASE_PATH,
 )
 PUBLIC_NAV_ROUTES_WITH_ROOT = (PUBLIC_HOME_ROUTE_SENTINEL, *PUBLIC_NAV_ROUTES)
+_WINDOWS_DRIVE_PATH = re.compile(r"^(?P<drive>[A-Za-z]):(?P<tail>/.*)?$")
+_SMOKE_FAILURE_STDERR_LIMIT = 1800
 
 
 def _load() -> dict[str, Any]:
@@ -347,7 +349,7 @@ def _bash_executable() -> str:
 def _git_bash_python_executable() -> str:
     executable = sys.executable
     if sys.platform == "win32":
-        executable = PureWindowsPath(executable).as_posix()
+        executable = _git_bash_drive_path(PureWindowsPath(executable).as_posix())
     return shlex.quote(executable)
 
 
@@ -355,6 +357,65 @@ def _rewrite_python3_for_git_bash(functions: str) -> str:
     if sys.platform != "win32":
         return functions
     return functions.replace("python3 -c", f"{_git_bash_python_executable()} -c")
+
+
+def _git_bash_drive_path(executable: str) -> str:
+    match = _WINDOWS_DRIVE_PATH.match(executable)
+    if match is None:
+        return executable
+    return f"/{match.group('drive').lower()}{match.group('tail') or ''}"
+
+
+@pytest.mark.parametrize(
+    ("executable", "expected"),
+    [
+        (
+            r"D:\a\korvid\.venv\Scripts\python.exe",
+            "/d/a/korvid/.venv/Scripts/python.exe",
+        ),
+        (
+            r"d:\a\korvid\.venv\Scripts\python.exe",
+            "/d/a/korvid/.venv/Scripts/python.exe",
+        ),
+        (
+            r"E:\Users\Agent Smith\my venv\Scripts\python.exe",
+            "'/e/Users/Agent Smith/my venv/Scripts/python.exe'",
+        ),
+    ],
+)
+def test_git_bash_python_executable_normalizes_drive_letter_and_spaces(
+    monkeypatch: pytest.MonkeyPatch,
+    executable: str,
+    expected: str,
+) -> None:
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(sys, "executable", executable)
+
+    assert _git_bash_python_executable() == expected
+
+
+def test_rewrite_python3_for_git_bash_keeps_non_windows_python3_literal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sys, "platform", "linux")
+    functions = "python3 -c 'print(1)'\npython3 -c 'print(2)'"
+
+    assert _rewrite_python3_for_git_bash(functions) == functions
+
+
+def _report_smoke_subprocess_failure(
+    label: str,
+    result: subprocess.CompletedProcess[str],
+) -> None:
+    if result.returncode == 0:
+        return
+    stderr = result.stderr.strip() or "<empty stderr>"
+    if len(stderr) > _SMOKE_FAILURE_STDERR_LIMIT:
+        stderr = f"{stderr[:_SMOKE_FAILURE_STDERR_LIMIT]}\n...[truncated]"
+    print(
+        f"{label} exited with exit code {result.returncode}; stderr follows:\n{stderr}",
+        file=sys.stderr,
+    )
 
 
 def _run_smoke_checker(
@@ -428,7 +489,42 @@ def _run_smoke_checker(
         input=body,
         text=True,
     )
+    _report_smoke_subprocess_failure(
+        f"smoke checker {description!r} for {path or '/'}",
+        result,
+    )
     return result.returncode
+
+
+def test_run_smoke_checker_reports_bounded_stderr_on_subprocess_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    stderr = "D:/a/korvid/.venv/Scripts/python.exe: No such file or directory\n" + (
+        "traceback\n" * 600
+    )
+
+    def fake_run(command: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(command, 2, "", stderr)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert (
+        _run_smoke_checker(
+            "check_search_index",
+            "search/search_index.json",
+            "search index scope",
+            _search_index_body(PUBLIC_HOME_SEARCH_PATH),
+        )
+        == 2
+    )
+    captured = capsys.readouterr()
+    assert "search index scope" in captured.err
+    assert "search/search_index.json" in captured.err
+    assert "exit code 2" in captured.err
+    assert "D:/a/korvid/.venv/Scripts/python.exe: No such file or directory" in captured.err
+    assert "[truncated]" in captured.err
+    assert len(captured.err) < 2500
 
 
 def _run_smoke_publication_checker(
@@ -521,7 +617,35 @@ def _run_smoke_publication_checker(
         input="",
         text=True,
     )
+    _report_smoke_subprocess_failure("smoke publication artifacts checker", result)
     return result.returncode
+
+
+def test_run_smoke_publication_checker_reports_bounded_stderr_on_subprocess_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    stderr = "shell startup failed\n" + ("stderr line\n" * 600)
+
+    def fake_run(command: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(command, 2, "", stderr)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert (
+        _run_smoke_publication_checker(
+            _smoke_home_body(),
+            _search_index_body(PUBLIC_HOME_SEARCH_PATH),
+            _sitemap_body(PUBLIC_HOME_SEARCH_PATH),
+        )
+        == 2
+    )
+    captured = capsys.readouterr()
+    assert "publication artifacts" in captured.err
+    assert "exit code 2" in captured.err
+    assert "shell startup failed" in captured.err
+    assert "[truncated]" in captured.err
+    assert len(captured.err) < 2500
 
 
 def _smoke_home_body(*, nav_routes: tuple[str, ...] = PUBLIC_NAV_ROUTES) -> str:
