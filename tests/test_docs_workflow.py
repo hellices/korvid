@@ -18,7 +18,7 @@ import shutil
 import subprocess
 import sys
 import textwrap
-from pathlib import Path, PureWindowsPath
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -76,7 +76,11 @@ PUBLIC_NAV_ROUTES = (
     PUBLIC_VERSIONED_RELEASE_PATH,
 )
 PUBLIC_NAV_ROUTES_WITH_ROOT = (PUBLIC_HOME_ROUTE_SENTINEL, *PUBLIC_NAV_ROUTES)
-_WINDOWS_DRIVE_PATH = re.compile(r"^(?P<drive>[A-Za-z]):(?P<tail>/.*)?$")
+HOST_PLATFORM = sys.platform
+WINDOWS_SEMANTIC_SKIP_REASON = (
+    "semantic smoke execution runs only on ubuntu-latest/POSIX; "
+    "required Linux jobs already cover the semantic docs smoke harness"
+)
 _SMOKE_FAILURE_STDERR_LIMIT = 1800
 
 
@@ -347,130 +351,22 @@ def _bash_executable() -> str:
     return str(git_bash)
 
 
-def _git_bash_python_executable() -> str:
-    executable = sys.executable
-    if sys.platform == "win32":
-        executable = _git_bash_drive_path(PureWindowsPath(executable).as_posix())
-    return shlex.quote(executable)
-
-
-def _git_bash_python3_shim() -> str:
-    if sys.platform != "win32":
-        return ""
-    return f'python3() {{ {_git_bash_python_executable()} "$@"; }}\n\n'
-
-
-def _git_bash_drive_path(executable: str) -> str:
-    match = _WINDOWS_DRIVE_PATH.match(executable)
-    if match is None:
-        return executable
-    return f"/{match.group('drive').lower()}{match.group('tail') or ''}"
-
-
-@pytest.mark.parametrize(
-    ("executable", "expected"),
-    [
-        (
-            r"D:\a\korvid\.venv\Scripts\python.exe",
-            "/d/a/korvid/.venv/Scripts/python.exe",
-        ),
-        (
-            r"d:\a\korvid\.venv\Scripts\python.exe",
-            "/d/a/korvid/.venv/Scripts/python.exe",
-        ),
-        (
-            r"E:\Users\Agent Smith\my venv\Scripts\python.exe",
-            "'/e/Users/Agent Smith/my venv/Scripts/python.exe'",
-        ),
-    ],
-)
-def test_git_bash_python_executable_normalizes_drive_letter_and_spaces(
-    monkeypatch: pytest.MonkeyPatch,
-    executable: str,
-    expected: str,
-) -> None:
-    monkeypatch.setattr(sys, "platform", "win32")
-    monkeypatch.setattr(sys, "executable", executable)
-
-    assert _git_bash_python_executable() == expected
-
-
-def test_git_bash_python3_shim_is_syntactically_valid_for_spaced_windows_path(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    bash = _bash_executable()
-    assert Path(bash).is_absolute()
-    monkeypatch.setattr(sys, "platform", "win32")
-    monkeypatch.setattr(
-        sys,
-        "executable",
-        r"E:\Users\Agent Smith\my venv's\Scripts\python.exe",
-    )
-
-    result = subprocess.run(
-        [bash, "-n", "-c", f"{_git_bash_python3_shim()}\npython3 -c 'print(1)'"],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-
-    assert result.returncode == 0
-    assert result.stderr == ""
-    assert result.args[0] == bash
-
-
-@pytest.mark.skipif(
-    sys.platform == "win32",
-    reason=(
-        "the wrapper executes a POSIX shebang and is not runnable on Windows; "
-        "production Windows behavior is covered structurally and by required "
-        "Windows CI harness tests"
-    ),
-)
-def test_git_bash_python3_shim_invokes_target_with_forwarded_arguments(
+def test_bash_executable_selects_git_bash_on_windows(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    bash = _bash_executable()
-    assert Path(bash).is_absolute()
-    fake_python = tmp_path / "fake venv's" / "python3"
-    fake_python.parent.mkdir(parents=True)
-    fake_python_posix = fake_python.as_posix()
-    wrapper = textwrap.dedent(
-        f"""\
-        #!{sys.executable}
-        import json
-        import sys
-
-        print(json.dumps(sys.argv[1:]))
-        """
-    )
-    fake_python.write_text(wrapper, encoding="utf-8")
-    fake_python.chmod(0o755)
-    assert wrapper.startswith(f"#!{sys.executable}")
-    assert "/usr/bin/env python3" not in wrapper
+    git_root = tmp_path / "Git"
+    git = git_root / "cmd" / "git.exe"
+    git.parent.mkdir(parents=True)
+    git.write_text("", encoding="utf-8")
+    git_bash = git_root / "bin" / "bash.exe"
+    git_bash.parent.mkdir(parents=True)
+    git_bash.write_text("", encoding="utf-8")
 
     monkeypatch.setattr(sys, "platform", "win32")
-    monkeypatch.setattr(
-        sys.modules[__name__],
-        "_git_bash_python_executable",
-        lambda: shlex.quote(fake_python_posix),
-    )
+    monkeypatch.setattr(shutil, "which", lambda name: str(git) if name == "git" else None)
 
-    result = subprocess.run(
-        [
-            bash,
-            "-c",
-            f"{_git_bash_python3_shim()}\npython3 -c 'print(1)' sample-arg",
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-
-    assert result.returncode == 0
-    assert result.stdout.strip() == json.dumps(["-c", "print(1)", "sample-arg"])
-    assert result.args[0] == bash
+    assert _bash_executable() == str(git_bash)
 
 
 def _report_smoke_subprocess_failure(
@@ -496,6 +392,9 @@ def _run_smoke_checker(
     *,
     env: dict[str, str] | None = None,
 ) -> int:
+    if HOST_PLATFORM == "win32":
+        pytest.skip(WINDOWS_SEMANTIC_SKIP_REASON)
+
     script = _smoke_script(_load())
     functions = "\n\n".join(
         _smoke_function(script, name)
@@ -540,7 +439,7 @@ def _run_smoke_checker(
         CONTENT_CURL_MAX_TIME=1
         CONTENT_SLEEP_SECONDS=0
 
-        {_git_bash_python3_shim()}{functions}
+        {functions}
 
         fetch_body() {{
           cat
@@ -604,6 +503,9 @@ def _run_smoke_publication_checker(
     *,
     env: dict[str, str] | None = None,
 ) -> int:
+    if HOST_PLATFORM == "win32":
+        pytest.skip(WINDOWS_SEMANTIC_SKIP_REASON)
+
     script = _smoke_script(_load())
     functions = "\n\n".join(
         _smoke_function(script, name)
@@ -647,7 +549,7 @@ def _run_smoke_publication_checker(
         CONTENT_CURL_MAX_TIME=1
         CONTENT_SLEEP_SECONDS=0
 
-        {_git_bash_python3_shim()}{functions}
+        {functions}
 
         fetch_body() {{
           local path="$1"
@@ -716,6 +618,49 @@ def test_run_smoke_publication_checker_reports_bounded_stderr_on_subprocess_fail
     assert "shell startup failed" in captured.err
     assert "[truncated]" in captured.err
     assert len(captured.err) < 2500
+
+
+def test_run_smoke_checker_skips_semantic_execution_on_actual_windows_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sys.modules[__name__], "HOST_PLATFORM", "win32", raising=False)
+
+    def unexpected_run(*_: Any, **__: Any) -> subprocess.CompletedProcess[str]:
+        raise AssertionError("semantic smoke helper must skip before launching bash")
+
+    monkeypatch.setattr(subprocess, "run", unexpected_run)
+
+    with pytest.raises(
+        pytest.skip.Exception,
+        match=re.escape(WINDOWS_SEMANTIC_SKIP_REASON),
+    ):
+        _run_smoke_checker(
+            "check_search_index",
+            "search/search_index.json",
+            "search index scope",
+            _search_index_body(PUBLIC_HOME_SEARCH_PATH),
+        )
+
+
+def test_run_smoke_publication_checker_skips_semantic_execution_on_actual_windows_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sys.modules[__name__], "HOST_PLATFORM", "win32", raising=False)
+
+    def unexpected_run(*_: Any, **__: Any) -> subprocess.CompletedProcess[str]:
+        raise AssertionError("semantic publication helper must skip before launching bash")
+
+    monkeypatch.setattr(subprocess, "run", unexpected_run)
+
+    with pytest.raises(
+        pytest.skip.Exception,
+        match=re.escape(WINDOWS_SEMANTIC_SKIP_REASON),
+    ):
+        _run_smoke_publication_checker(
+            _smoke_home_body(),
+            _search_index_body(PUBLIC_HOME_SEARCH_PATH),
+            _sitemap_body(PUBLIC_HOME_SEARCH_PATH),
+        )
 
 
 def _smoke_home_body(*, nav_routes: tuple[str, ...] = PUBLIC_NAV_ROUTES) -> str:
@@ -817,8 +762,8 @@ def test_run_smoke_checker_uses_a_portable_noninteractive_bash_invocation(
         captured["command"] = command
         return subprocess.CompletedProcess(command, 0, "", "")
 
+    monkeypatch.setattr(sys.modules[__name__], "HOST_PLATFORM", "linux")
     monkeypatch.setattr(sys, "platform", "win32")
-    monkeypatch.setattr(sys, "executable", r"C:\Users\Agent Smith\my venv\Scripts\python.exe")
     monkeypatch.setattr(shutil, "which", lambda name: str(git) if name == "git" else None)
     monkeypatch.setattr(subprocess, "run", fake_run)
 
@@ -838,8 +783,6 @@ def test_run_smoke_checker_uses_a_portable_noninteractive_bash_invocation(
         == 0
     )
     assert captured["command"][:4] == [str(git_bash), "--noprofile", "--norc", "-c"]
-    shim = f'python3() {{ {_git_bash_python_executable()} "$@"; }}'
-    assert shim in captured["command"][4]
     assert captured["command"][4].count("python3 -c") == _python3_invocation_count(
         _smoke_script(_load()),
         (
@@ -865,7 +808,7 @@ def test_run_smoke_checker_uses_a_portable_noninteractive_bash_invocation(
     )
 
 
-def test_run_smoke_publication_checker_injects_windows_python3_shim(
+def test_run_smoke_publication_checker_uses_a_portable_noninteractive_bash_invocation(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     git_root = tmp_path / "Git"
@@ -882,8 +825,8 @@ def test_run_smoke_publication_checker_injects_windows_python3_shim(
         captured["command"] = command
         return subprocess.CompletedProcess(command, 0, "", "")
 
+    monkeypatch.setattr(sys.modules[__name__], "HOST_PLATFORM", "linux")
     monkeypatch.setattr(sys, "platform", "win32")
-    monkeypatch.setattr(sys, "executable", r"C:\Users\Agent Smith\my venv\Scripts\python.exe")
     monkeypatch.setattr(shutil, "which", lambda name: str(git) if name == "git" else None)
     monkeypatch.setattr(subprocess, "run", fake_run)
 
@@ -907,8 +850,6 @@ def test_run_smoke_publication_checker_injects_windows_python3_shim(
 
     assert _run_smoke_publication_checker(home_body, search_body, sitemap_body) == 0
     assert captured["command"][:4] == [str(git_bash), "--noprofile", "--norc", "-c"]
-    shim = f'python3() {{ {_git_bash_python_executable()} "$@"; }}'
-    assert shim in captured["command"][4]
     assert captured["command"][4].count("python3 -c") == _python3_invocation_count(
         _smoke_script(_load()),
         (
@@ -933,16 +874,27 @@ def test_run_smoke_publication_checker_injects_windows_python3_shim(
     )
 
 
-def test_posix_smoke_probes_do_not_inject_a_windows_python3_shim(
+def test_monkeypatched_sys_platform_alone_does_not_bypass_structural_smoke_tests(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
+    git_root = tmp_path / "Git"
+    git = git_root / "cmd" / "git.exe"
+    git.parent.mkdir(parents=True)
+    git.write_text("", encoding="utf-8")
+    git_bash = git_root / "bin" / "bash.exe"
+    git_bash.parent.mkdir(parents=True)
+    git_bash.write_text("", encoding="utf-8")
+
     captured: list[list[str]] = []
 
     def fake_run(command: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
         captured.append(command)
         return subprocess.CompletedProcess(command, 0, "", "")
 
-    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(sys.modules[__name__], "HOST_PLATFORM", "linux")
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(shutil, "which", lambda name: str(git) if name == "git" else None)
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     assert _run_smoke_checker("check_home_page", "", "home page structure", _smoke_home_body()) == 0
@@ -956,7 +908,7 @@ def test_posix_smoke_probes_do_not_inject_a_windows_python3_shim(
     )
 
     for command in captured:
-        assert "python3() {" not in command[4]
+        assert command[:4] == [str(git_bash), "--noprofile", "--norc", "-c"]
 
 
 def _smoke_invocation_count(script: str, helper_name: str) -> int:
@@ -1628,7 +1580,7 @@ def test_smoke_publication_artifact_retry_fetches_home_search_and_sitemap_as_one
 
 
 @pytest.mark.skipif(
-    sys.platform == "win32",
+    HOST_PLATFORM == "win32",
     reason=(
         "regression models Linux execve's per-env-string limit, and the "
         "POSIX shebang wrapper is Linux-only"
