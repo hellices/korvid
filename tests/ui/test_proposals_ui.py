@@ -736,8 +736,11 @@ async def test_mcp_on_when_already_running_keeps_pending_proposals(tmp_path: Pat
     async with app.run_test() as pilot:
         await _submit(app)
         pid = store.pending()[0].id
+        prior_workers = set(app.workers)
         app.integrations.handle_mcp_command(["on"])
-        await until(pilot, lambda: not any(w.is_running for w in app.workers))
+        start_workers = set(app.workers) - prior_workers
+        assert len(start_workers) == 1
+        await until(pilot, lambda: all(worker.is_finished for worker in start_workers))
         found = store.get(pid)
     assert found is not None
     assert found[1] == "pending"
@@ -800,8 +803,11 @@ async def test_mcp_on_never_expires_the_new_runs_first_proposal(tmp_path: Path) 
             client_name="",
             client_version="",
         )
+        prior_workers = set(app.workers)
         app.integrations.handle_mcp_command(["on"])
-        await until(pilot, lambda: not any(w.is_running for w in app.workers))
+        start_workers = set(app.workers) - prior_workers
+        assert len(start_workers) == 1
+        await until(pilot, lambda: all(worker.is_finished for worker in start_workers))
         pending = store.pending()
         assert [p.session_id for p in pending] == ["sess-new"]
         found = store.get(stale.id)
@@ -1141,10 +1147,13 @@ async def test_a_restart_racing_the_late_shutdown_keeps_new_run_proposals(
     mcp.late_submit = store
     app = make_app(Recorder(), tmp_path / "a.jsonl", store, mcp=mcp)
     async with app.run_test() as pilot:
+        prior_workers = set(app.workers)
         app.integrations.handle_mcp_command(["off"])
+        off_workers = set(app.workers) - prior_workers
+        assert len(off_workers) == 1
         await until(pilot, lambda: mcp.running and len(store.pending()) > 0)
         # Wait for the off-worker (and its final sweep decision) to finish.
-        await until(pilot, lambda: all(w.is_finished for w in app.workers))
+        await until(pilot, lambda: all(worker.is_finished for worker in off_workers))
         pending = store.pending()
     assert len(pending) == 1
     assert pending[0].session_id == "sess-new"
@@ -1173,7 +1182,10 @@ async def test_a_run_dying_during_the_stop_sweep_still_gets_the_follow_up_sweep(
             await orig(proposal, state, reason)
 
         app._proposals._audit_outcome = gated  # type: ignore[method-assign]  # holding the sweep's audit in flight to race the dying run
+        prior_workers = set(app.workers)
         app.integrations.handle_mcp_command(["off"])
+        off_workers = set(app.workers) - prior_workers
+        assert len(off_workers) == 1
         await asyncio.wait_for(entered.wait(), timeout=5)
         # While the sweep's audit is in flight: the old run finishes dying
         # and its last in-flight submission lands.
@@ -1199,7 +1211,7 @@ async def test_a_run_dying_during_the_stop_sweep_still_gets_the_follow_up_sweep(
             client_version="",
         )
         gate.set()
-        await until(pilot, lambda: all(w.is_finished for w in app.workers))
+        await until(pilot, lambda: all(worker.is_finished for worker in off_workers))
         assert store.pending() == []
 
 

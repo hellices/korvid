@@ -1,0 +1,29 @@
+name: An individually oversized current finding cannot bypass the byte budget
+now: "2026-09-13T12:00:00Z"
+scope: production
+limits: {max_current_bytes: 1600}
+steps:
+  - sources:
+      pods:
+        objects:
+          - metadata: {namespace: production, name: large, uid: large-uid}
+            status:
+              phase: Failed
+              message: >-
+                This deliberately long current observation exercises serialized item retention.
+                Evidence is repeated in the shared finding, so the budget covers the entire item
+                rather than only the display message. Capacity loss is explicitly distinguished
+                from a successful observation of recovery. The object remains absent only because
+                its sanitized finding is larger than the configured per-source retained byte limit.
+                A smaller finding from the same source still fits and remains visible independently.
+                The cumulative current loss counter changes without changing Warning history loss.
+                No resource identity tombstone is retained for the refused oversized observation.
+          - metadata: {namespace: production, name: small, uid: small-uid}
+            status: {phase: Pending}
+    expect:
+      current_count: 1
+      current_names: [small]
+      forbidden_current_names: [large]
+      current_dropped: 1
+      dropped: 0
+      coverage: {pods: partial, "current-buffer:pods": capped}

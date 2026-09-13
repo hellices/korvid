@@ -1,0 +1,40 @@
+name: Namespaced Events preserve exact cluster-target identities and use Event storage scope
+now: "2026-09-13T12:00:00Z"
+scope: default
+steps:
+  - sources:
+      events:
+        objects:
+          - apiVersion: v1
+            kind: Event
+            metadata: {namespace: default, name: node-warning, uid: node-event-uid}
+            type: Warning
+            reason: NodeWarning
+            lastTimestamp: "2026-09-13T12:00:00Z"
+            involvedObject: {apiVersion: v1, kind: Node, name: worker, uid: exact-node-uid}
+          - apiVersion: events.k8s.io/v1
+            kind: Event
+            metadata: {namespace: default, name: crd-warning, uid: crd-event-uid}
+            type: Warning
+            reason: CustomResourceWarning
+            eventTime: "2026-09-13T12:00:00Z"
+            regarding:
+              apiVersion: apiextensions.k8s.io/v1
+              kind: CustomResourceDefinition
+              namespace: ""
+              name: widgets.example.io
+              uid: exact-crd-uid
+          - metadata: {namespace: foreign, name: foreign-warning, uid: foreign-event-uid}
+            type: Warning
+            reason: ForeignStoredEvent
+            lastTimestamp: "2026-09-13T12:00:00Z"
+            involvedObject: {apiVersion: v1, kind: Pod, namespace: default, name: api, uid: pod-uid}
+    expect:
+      current_count: 0
+      recent_count: 2
+      recent_reasons: [NodeWarning, CustomResourceWarning]
+      forbidden_recent_reasons: [ForeignStoredEvent]
+      recent_namespaces: [""]
+      forbidden_recent_namespaces: [default]
+      recent_uids: [exact-node-uid, exact-crd-uid]
+      coverage: {events: complete, pods: loading, deployments: loading}

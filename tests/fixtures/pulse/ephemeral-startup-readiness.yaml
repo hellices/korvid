@@ -1,0 +1,35 @@
+name: Starting an ephemeral debugger does not resolve application readiness failure
+now: "2026-09-13T12:00:00Z"
+scope: production
+steps:
+  - sources:
+      pods:
+        objects:
+          - metadata: {namespace: production, name: api, uid: api-uid}
+            spec: {containers: [{name: api}]}
+            status:
+              phase: Running
+              conditions: [{type: Ready, status: "False"}]
+              containerStatuses: [{name: api, ready: false, state: {running: {}}}]
+    expect:
+      current_count: 1
+      current_reasons: [NotReady]
+      coverage: {pods: complete}
+  - after_seconds: 1
+    sources:
+      pods:
+        objects:
+          - metadata: {namespace: production, name: api, uid: api-uid}
+            spec: {containers: [{name: api}], ephemeralContainers: [{name: debugger}]}
+            status:
+              phase: Running
+              conditions: [{type: Ready, status: "False"}]
+              containerStatuses: [{name: api, ready: false, state: {running: {}}}]
+              ephemeralContainerStatuses:
+                - name: debugger
+                  state: {waiting: {reason: ContainerCreating}}
+    expect:
+      current_count: 1
+      current_reasons: [NotReady]
+      forbidden_current_reasons: [ContainerCreating]
+      coverage: {pods: complete}

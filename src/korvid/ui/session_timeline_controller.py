@@ -26,6 +26,7 @@ from collections.abc import AsyncIterator, Callable, Coroutine
 from typing import Any, Literal, Protocol
 
 from korvid.core.errors import explain_api_error
+from korvid.core.pulse import PulseCoverageState
 from korvid.core.session_timeline import AppendResult, SessionTimeline, TimelineResourceRef
 from korvid.core.store import Summary
 from korvid.k8s.errors import ApiStatusError
@@ -97,6 +98,8 @@ class SessionTimelineController:
         watch_warning_events: (Callable[[str | None], AsyncIterator[dict[str, Any]]] | None) = None,
         selected_resource: Callable[[], TimelineResourceRef | None] | None = None,
         navigate: Callable[[str, str, str, int], Coroutine[Any, Any, None]],
+        warning_observer: Callable[[dict[str, Any], int], None] | None = None,
+        warning_coverage: Callable[[int, PulseCoverageState, str], None] | None = None,
     ) -> None:
         self._ui = ui
         self._view = view
@@ -107,6 +110,8 @@ class SessionTimelineController:
         self._watch_warning_events = watch_warning_events
         self._selected_resource = selected_resource
         self._navigate = navigate
+        self._warning_observer = warning_observer
+        self._warning_coverage = warning_coverage
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -119,6 +124,9 @@ class SessionTimelineController:
         the manager skips it per event, and no Warning-feed worker starts.
         """
         if self._timeline is None:
+            self._report_warning_coverage(
+                self._get_epoch(), "unavailable", "No existing timeline Warning feed"
+            )
             return
         self._watch_manager.on_event = self.record_watch_event
         self.start_warning_watch()
@@ -142,6 +150,9 @@ class SessionTimelineController:
         TUI down over a record-keeping stream.
         """
         if self._timeline is None or self._watch_warning_events is None:
+            self._report_warning_coverage(
+                self._get_epoch(), "unavailable", "Warning feed unavailable"
+            )
             return
         self._ui.run_worker(
             self._run_warning_watch(),
@@ -311,6 +322,9 @@ class SessionTimelineController:
         failures = 0
         while epoch == self._get_epoch():
             stream: AsyncIterator[dict[str, Any]] | None = None
+            self._report_warning_coverage(
+                epoch, "partial", "Context-wide, best-effort Warning stream"
+            )
             try:
                 stream = watch(None)
                 async for event in stream:
@@ -326,10 +340,18 @@ class SessionTimelineController:
                             kind_alias=self._event_kind_alias(event),
                         ),
                     )
+                    self._share_warning(event, epoch)
                 failures = 0
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
+                self._report_warning_coverage(
+                    epoch,
+                    "forbidden"
+                    if isinstance(exc, ApiStatusError) and exc.status in _DENIED
+                    else "failed",
+                    "Warning stream unavailable; periodic snapshots remain independent",
+                )
                 if self._watch_denied(exc):
                     return
                 failures += 1
@@ -344,6 +366,24 @@ class SessionTimelineController:
                 )
                 return
             await asyncio.sleep(min(self.TIMELINE_EVENT_RETRY_SECONDS * 2**failures, _MAX_BACKOFF))
+
+    def _report_warning_coverage(self, epoch: int, state: PulseCoverageState, detail: str) -> None:
+        if self._warning_coverage is not None:
+            try:
+                self._warning_coverage(epoch, state, detail)
+            except Exception:
+                logger.warning("Warning observation coverage callback failed")
+
+    def _share_warning(self, event: dict[str, Any], epoch: int) -> None:
+        if self._warning_observer is not None:
+            try:
+                self._warning_observer(event, epoch)
+            except Exception:
+                self._report_warning_coverage(
+                    epoch, "failed", "Warning observation callback failed"
+                )
+                return
+        self._report_warning_coverage(epoch, "partial", "Context-wide, best-effort Warning stream")
 
     def _watch_denied(self, exc: Exception) -> bool:
         """True when *exc* is a permanent answer the feed must stop on."""

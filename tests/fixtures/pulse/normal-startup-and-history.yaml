@@ -1,0 +1,43 @@
+name: Startup, completed Pods, and historical restarts are not current failures
+now: "2026-09-13T12:00:00Z"
+scope: production
+steps:
+  - sources:
+      pods:
+        objects:
+          - metadata: {namespace: production, name: starting, uid: starting-uid}
+            spec: {containers: [{name: api}]}
+            status:
+              phase: Pending
+              conditions: [{type: Ready, status: "False"}]
+              containerStatuses:
+                - name: api
+                  state: {waiting: {reason: ContainerCreating}}
+          - metadata: {namespace: production, name: recovered, uid: recovered-uid}
+            spec: {containers: [{name: api}]}
+            status:
+              phase: Running
+              conditions: [{type: Ready, status: "True"}]
+              containerStatuses:
+                - name: api
+                  state: {running: {}}
+                  restartCount: 19
+                  lastState: {terminated: {reason: OOMKilled, exitCode: 137}}
+          - metadata: {namespace: production, name: completed-job, uid: job-uid}
+            status: {phase: Succeeded}
+      deployments:
+        objects:
+          - metadata: {namespace: production, name: zero, uid: zero-uid, generation: 3}
+            spec: {replicas: 0}
+            status:
+              observedGeneration: 3
+              conditions:
+                - {type: Progressing, status: "True", reason: NewReplicaSetAvailable}
+                - {type: Available, status: "False", reason: MinimumReplicasUnavailable}
+      events: {objects: []}
+    expect:
+      current_count: 0
+      recent_count: 0
+      forbidden_current_reasons: [OOMKilled, ContainerCreating, NotReady]
+      forbidden_current_rule_ids: [pulse.deployment.replica-failure, pulse.deployment.progressing-failed]
+      coverage: {pods: complete, deployments: complete, events: complete}

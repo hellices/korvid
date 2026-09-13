@@ -274,6 +274,19 @@ class SwitchTimeline(Protocol):
     async def stop(self) -> None: ...
 
 
+class SwitchPulse(Protocol):
+    """Ambient reads must quiesce before the shared connection changes."""
+
+    @property
+    def suspended(self) -> bool: ...
+
+    async def suspend(self) -> None: ...
+
+    def resume(self) -> None: ...
+
+    def resume_unchanged(self) -> None: ...
+
+
 class SwitchProposals(Protocol):
     """The external write-proposal inbox, invalidated by a committed switch."""
 
@@ -349,6 +362,7 @@ class ContextSwitchCoordinator(ContextGuard):
         list_contexts: Callable[[], tuple[list[str], str | None]] | None = None,
         probe_context: Callable[[str], Awaitable[None]] | None = None,
         switch_context: Callable[[str | None], Awaitable[ContextSwitchResult]] | None = None,
+        pulse: Callable[[], SwitchPulse] | None = None,
     ) -> None:
         self._ui = ui
         self._surface = surface
@@ -370,6 +384,7 @@ class ContextSwitchCoordinator(ContextGuard):
         self._list_contexts = list_contexts
         self._probe_context = probe_context
         self._switch_context = switch_context
+        self._pulse = pulse
         #: True while a switch is probing, tearing down or retargeting;
         #: refuses concurrent switches and marks every captured epoch stale.
         self._switching = False
@@ -585,7 +600,7 @@ class ContextSwitchCoordinator(ContextGuard):
             # perform fallible awaits — expire them now, not at a later
             # point that an exception could keep from ever being reached.
             await self._proposals().expire_all("kube context switched")
-            await self._teardown()
+            await self._teardown_before_retarget()
             ok, applied = await self._retarget(name, old, old_namespace)
             if not ok:
                 if mcp_restart:
@@ -633,6 +648,8 @@ class ContextSwitchCoordinator(ContextGuard):
                 to_context=name,
                 note="all cluster state was reset",
             )
+        if self._pulse is not None:
+            self._pulse().resume()
         self._timeline().start_warning_watch()
 
     async def _quiesce_mcp(self) -> bool | None:
@@ -697,6 +714,19 @@ class ContextSwitchCoordinator(ContextGuard):
                 )
                 return False
         return True
+
+    async def _teardown_before_retarget(self) -> None:
+        """Restore Pulse after an abort that never touched the shared client."""
+        pulse = self._pulse() if self._pulse is not None else None
+        was_suspended = pulse.suspended if pulse is not None else True
+        try:
+            if pulse is not None:
+                await pulse.suspend()
+            await self._teardown()
+        except (Exception, asyncio.CancelledError):
+            if pulse is not None and not was_suspended:
+                pulse.resume_unchanged()
+            raise
 
     async def _teardown(self) -> None:
         """Stop every consumer of the old cluster before the client swaps.

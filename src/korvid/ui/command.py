@@ -54,6 +54,12 @@ class CommandDescriptor:
 
 COMMANDS: tuple[CommandDescriptor, ...] = (
     CommandDescriptor(
+        aliases=("pulse", "problems"),
+        help=((":pulse|:problems", "Current problems, recent warnings and observation coverage"),),
+        operation=BuiltinOperation.PULSE,
+        maximum_arguments=0,
+    ),
+    CommandDescriptor(
         aliases=("q", "quit"),
         help=((":q", "Quit (also :quit)"),),
         operation=CommandParse.QUIT,

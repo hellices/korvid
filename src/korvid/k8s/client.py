@@ -13,7 +13,7 @@ from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Mapping, S
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from datetime import datetime, timedelta
 from typing import Any, cast
-from urllib.parse import quote, urlencode
+from urllib.parse import urlencode
 
 from kubernetes_asyncio import client as k8s_client
 from kubernetes_asyncio import config as k8s_config
@@ -21,6 +21,7 @@ from kubernetes_asyncio import watch as k8s_watch
 from kubernetes_asyncio.client import rest as k8s_rest
 from kubernetes_asyncio.stream import WsApiClient
 
+from korvid.k8s import pulse
 from korvid.k8s.columns import CustomColumn, evaluate_all
 from korvid.k8s.components import ComponentRef, manifest_components
 from korvid.k8s.csp import ProviderInfo, detect_provider
@@ -45,6 +46,7 @@ from korvid.k8s.helm import (
 from korvid.k8s.logs import LogLine
 from korvid.k8s.metrics import PodMetrics, parse_pod_metrics_list
 from korvid.k8s.models import GenericSummary, PodSummary, summary_for
+from korvid.k8s.pulse import path_segment as _path_segment
 from korvid.k8s.reads import ReadOps
 from korvid.k8s.telemetry import ReadOperation, ReadTelemetry, ReadTelemetryEvent
 from korvid.k8s.watch_events import WatchEvent, WatchProgress
@@ -62,20 +64,6 @@ LIST_POLL_INTERVAL = 30.0
 LIST_PAGE_SIZE = 100
 _DISCOVERY_CONCURRENCY = 8
 _DISCOVERY_TIMEOUT_SECONDS = 10.0
-
-
-def _path_segment(value: str) -> str:
-    """Percent-encode *value* for safe use as a single URL path segment.
-
-    Namespaces and names arrive from user and agent input; encoding prevents
-    ``/`` from altering the request path. Empty and dot segments are rejected
-    outright: quote() leaves ``.`` intact, so ``.`` or ``..`` would survive as
-    a literal traversal segment that an HTTP stack can normalize away from
-    the intended (and, for writes, approved) object path.
-    """
-    if value in ("", ".", ".."):
-        raise ValueError(f"invalid URL path segment: {value!r}")
-    return quote(value, safe="")
 
 
 _DNS1123_NAME = re.compile(r"^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$")
@@ -208,7 +196,7 @@ async def load_refreshable_kube_config(
     client_configuration.refresh_api_key_hook = _refresh
 
 
-class KubeClient(ReadOps, WriteOps):
+class KubeClient(ReadOps, WriteOps, pulse.PulseReader):
     """Thin wrapper over kubernetes_asyncio; returns typed summaries."""
 
     def __init__(
@@ -1697,6 +1685,18 @@ class KubeClient(ReadOps, WriteOps):
             return resp
 
         return _watch_call
+
+    async def read_pulse_page(
+        self,
+        source: pulse.PulseSource,
+        namespace: str | None,
+        continuation: str,
+        limit: int,
+        max_bytes: int,
+    ) -> pulse.PulsePage:
+        return await pulse.read_pulse_page(
+            self._api, source, namespace, continuation, limit, max_bytes
+        )
 
     async def _request_json(
         self,

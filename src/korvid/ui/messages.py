@@ -116,6 +116,7 @@ class BuiltinOperation(Enum):
     PROPOSALS = "proposals"
     PORT_FORWARDS = "pf"
     TELEPRESENCE = "tp"
+    PULSE = "pulse"
 
 
 class BuiltinCommand(Message):

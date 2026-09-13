@@ -1,0 +1,41 @@
+name: Fresh successful status resolves a finding but does not erase Warning history
+now: "2026-09-13T12:00:00Z"
+scope: production
+steps:
+  - sources:
+      pods:
+        objects:
+          - metadata: {namespace: production, name: api, uid: api-uid}
+            spec: {containers: [{name: api}]}
+            status:
+              phase: Running
+              conditions: [{type: Ready, status: "False"}]
+              containerStatuses: [{name: api, ready: false, state: {running: {}}}]
+      events:
+        objects:
+          - metadata: {namespace: production, uid: readiness-event}
+            type: Warning
+            reason: Unhealthy
+            lastTimestamp: "2026-09-13T11:59:50Z"
+            involvedObject: {apiVersion: v1, kind: Pod, namespace: production, name: api, uid: api-uid}
+    expect:
+      current_count: 1
+      current_reasons: [NotReady]
+      recent_reasons: [Unhealthy]
+      coverage: {pods: complete, events: complete}
+  - after_seconds: 2
+    sources:
+      pods:
+        objects:
+          - metadata: {namespace: production, name: api, uid: api-uid}
+            spec: {containers: [{name: api}]}
+            status:
+              phase: Running
+              conditions: [{type: Ready, status: "True"}]
+              containerStatuses: [{name: api, ready: true, state: {running: {}}}]
+      events: {objects: []}
+    expect:
+      current_count: 0
+      recent_count: 1
+      forbidden_current_rule_ids: [pulse.pod.not-ready]
+      coverage: {pods: complete, events: complete}

@@ -1,0 +1,28 @@
+name: Deployment failure is visible even when admission prevented every Pod
+now: "2026-09-13T12:00:00Z"
+scope: production
+steps:
+  - sources:
+      pods: {objects: []}
+      deployments:
+        objects:
+          - apiVersion: apps/v1
+            kind: Deployment
+            metadata: {namespace: production, name: api, uid: deployment-uid, generation: 5}
+            spec: {replicas: 3}
+            status:
+              observedGeneration: 5
+              replicas: 0
+              conditions:
+                - type: ReplicaFailure
+                  status: "True"
+                  reason: FailedCreate
+                  message: A ReplicaFailure condition is present
+      events: {objects: []}
+    expect:
+      current_count: 1
+      recent_count: 0
+      current_reasons: [FailedCreate]
+      current_rule_ids: [pulse.deployment.replica-failure]
+      forbidden_current_rule_ids: [pulse.pod.failed]
+      coverage: {pods: complete, deployments: complete, events: complete}
