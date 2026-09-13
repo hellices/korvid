@@ -1,3 +1,8 @@
+---
+search:
+  exclude: false
+---
+
 # korvid architecture: how the pieces hold each other honest
 
 This document explains what korvid is built out of and — more importantly —

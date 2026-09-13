@@ -87,6 +87,7 @@ markdown_extensions:
       permalink: true
 
 plugins:
+  - meta
   - search
   - privacy:
       assets: true

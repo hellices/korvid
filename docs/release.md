@@ -1,3 +1,8 @@
+---
+search:
+  exclude: true
+---
+
 # korvid release runbook
 
 This runbook covers feature releases. `v0.1.2` is the first public PyPI

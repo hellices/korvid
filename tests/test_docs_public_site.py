@@ -44,3 +44,39 @@ def test_release_navigation_labels_unreleased_main() -> None:
     config = load_mkdocs_config()
     release_notes = config["nav"][-1]["Project"][-1]["Release notes"]
     assert release_notes[0] == {"Unreleased (main)": "release-notes/unreleased.md"}
+
+
+def test_internal_docs_use_one_inherited_search_policy() -> None:
+    config = load_mkdocs_config()
+    plugins = [
+        item if isinstance(item, str) else next(iter(item))
+        for item in config["plugins"]
+    ]
+    assert plugins.index("meta") < plugins.index("search")
+
+    defaults = yaml.safe_load(
+        (ROOT / "docs" / "dev" / ".meta.yml").read_text(encoding="utf-8")
+    )
+    assert defaults == {"search": {"exclude": True}}
+
+
+def test_public_dev_entrypoints_override_the_internal_default() -> None:
+    for relative in (
+        "docs/dev/README.md",
+        "docs/dev/specs/2026-08-12-korvid-architecture.md",
+    ):
+        source = (ROOT / relative).read_text(encoding="utf-8")
+        assert source.startswith("---\nsearch:\n  exclude: false\n---\n")
+
+
+def test_maintainer_release_runbook_is_not_search_indexed() -> None:
+    source = (ROOT / "docs" / "release.md").read_text(encoding="utf-8")
+    assert source.startswith("---\nsearch:\n  exclude: true\n---\n")
+
+
+def test_sitemap_uses_the_search_exclusion_policy() -> None:
+    source = (ROOT / "docs" / "overrides" / "sitemap.xml").read_text(
+        encoding="utf-8"
+    )
+    assert 'file.page.meta.get("search", {})' in source
+    assert 'search.get("exclude", false)' in source
