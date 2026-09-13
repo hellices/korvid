@@ -57,6 +57,8 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: build
     runs-on: ubuntu-latest
+    outputs:
+      page_url: ${{ steps.deployment.outputs.page_url }}
     permissions:
       pages: write  # required by actions/deploy-pages to publish the site
       id-token: write  # required by actions/deploy-pages to mint its OIDC token
@@ -70,3 +72,77 @@ jobs:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346  # v5.0.1
+
+  smoke:
+    name: Smoke-test deployed site
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Probe released pages and media
+        run: |
+          set -euo pipefail
+
+          base_url="${{ needs.deploy.outputs.page_url }}"
+
+          url_for() {
+            local path="$1"
+            if [ -z "$path" ]; then
+              printf '%s/\n' "${base_url%/}"
+              return 0
+            fi
+            printf '%s/%s\n' "${base_url%/}" "$path"
+          }
+
+          fetch() {
+            local path="$1"
+            local url
+            local body
+            url="$(url_for "$path")"
+            for attempt in 1 2 3 4 5; do
+              if body="$(curl --fail --silent --show-error --location --connect-timeout 10 --max-time 20 "$url")"; then
+                printf '%s' "$body"
+                return 0
+              fi
+              sleep 5
+            done
+            echo "Failed to fetch $url after 5 attempts" >&2
+            return 1
+          }
+
+          check_contains() {
+            local path="$1"
+            local expected="$2"
+            local body
+            body="$(fetch "$path")"
+            if ! grep -Fq "$expected" <<<"$body"; then
+              echo "Expected '$expected' in $(url_for "$path")" >&2
+              return 1
+            fi
+          }
+
+          check_ok() {
+            local path="$1"
+            local url
+            url="$(url_for "$path")"
+            for attempt in 1 2 3 4 5; do
+              if curl --fail --silent --show-error --location --connect-timeout 10 --max-time 20 --range 0-0 --output /dev/null "$url"; then
+                return 0
+              fi
+              sleep 5
+            done
+            echo "Failed to verify $url after 5 attempts" >&2
+            return 1
+          }
+
+          check_contains "" "AI-NATIVE KUBERNETES TUI"
+          check_contains "getting-started/" "brew install hellices/korvid/korvid"
+          check_contains "release-notes/unreleased/" "Unreleased (main)"
+          check_ok "search/search_index.json"
+          check_ok "sitemap.xml"
+          check_ok "assets/demo.mp4"
+          check_ok "assets/scenes/agent-demo.mp4"
+          check_ok "assets/scenes/mcp-follow-demo.mp4"

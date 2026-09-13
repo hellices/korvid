@@ -18,9 +18,9 @@ environment rather than whatever Python happens to be active. `uv` and
 
 ## Current release
 
-The commands below install the latest published package from PyPI. Check the
-[latest release](https://github.com/hellices/korvid/releases/latest) for its
-version, pinned installation commands, and migration notes.
+Homebrew installs the latest published release from the live tap. The `uv tool` and `pipx` commands below install the latest published package from PyPI.
+Check the [latest release](https://github.com/hellices/korvid/releases/latest) for its version, pinned installation commands, and migration notes.
+Most users should stop at **Install**; use **Development build** only when you need an unreleased change from `main`.
 
 ## Install
 
