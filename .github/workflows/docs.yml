@@ -382,7 +382,40 @@ jobs:
 
           check_release_notes_nav() {
             local body="$1"
-            assert_body_matches 'href="(\.\./)?v[0-9]+\.[0-9]+\.[0-9]+/' "$body" || return 1
+            printf '%s' "$body" | python3 -c '
+          from html.parser import HTMLParser
+          import re
+          import sys
+
+          VERSIONED_HREF = re.compile(r"^(?:\.\./)?v[0-9]+\.[0-9]+\.[0-9]+/$")
+
+          class Parser(HTMLParser):
+              def __init__(self):
+                  super().__init__(convert_charrefs=True)
+                  self.found = False
+
+              def handle_starttag(self, tag, attrs):
+                  if tag != "a":
+                      return
+                  attributes = dict(attrs)
+                  css_classes = attributes.get("class")
+                  href = attributes.get("href")
+                  if not isinstance(css_classes, str) or "md-nav__link" not in css_classes.split():
+                      return
+                  if not isinstance(href, str):
+                      return
+                  if VERSIONED_HREF.fullmatch(href.strip()):
+                      self.found = True
+
+          parser = Parser()
+          parser.feed(sys.stdin.read())
+          if not parser.found:
+              print(
+                  "Expected release notes navigation to include a versioned md-nav__link",
+                  file=sys.stderr,
+              )
+              raise SystemExit(1)
+          '
           }
 
           check_search_index() {
