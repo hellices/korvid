@@ -18,7 +18,7 @@ import shutil
 import subprocess
 import sys
 import textwrap
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any, cast
 
 import pytest
@@ -344,6 +344,19 @@ def _bash_executable() -> str:
     return str(git_bash)
 
 
+def _git_bash_python_executable() -> str:
+    executable = sys.executable
+    if sys.platform == "win32":
+        executable = PureWindowsPath(executable).as_posix()
+    return shlex.quote(executable)
+
+
+def _rewrite_python3_for_git_bash(functions: str) -> str:
+    if sys.platform != "win32":
+        return functions
+    return functions.replace("python3 -c", f"{_git_bash_python_executable()} -c")
+
+
 def _run_smoke_checker(
     checker: str,
     path: str,
@@ -376,6 +389,7 @@ def _run_smoke_checker(
             "retry_until_body_checks",
         )
     )
+    functions = _rewrite_python3_for_git_bash(functions)
     probe = textwrap.dedent(
         f"""\
         set -euo pipefail
@@ -447,6 +461,7 @@ def _run_smoke_publication_checker(
             "retry_until_publication_artifacts",
         )
     )
+    functions = _rewrite_python3_for_git_bash(functions)
     probe = textwrap.dedent(
         f"""\
         set -euo pipefail
@@ -608,6 +623,7 @@ def test_run_smoke_checker_uses_a_portable_noninteractive_bash_invocation(
         return subprocess.CompletedProcess(command, 0, "", "")
 
     monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(sys, "executable", r"C:\Users\Agent Smith\my venv\Scripts\python.exe")
     monkeypatch.setattr(shutil, "which", lambda name: str(git) if name == "git" else None)
     monkeypatch.setattr(subprocess, "run", fake_run)
 
@@ -625,6 +641,95 @@ def test_run_smoke_checker_uses_a_portable_noninteractive_bash_invocation(
         == 0
     )
     assert captured["command"][:4] == [str(git_bash), "--noprofile", "--norc", "-c"]
+    expected_python = f"{_git_bash_python_executable()} -c"
+    assert captured["command"][4].count(expected_python) == _python3_invocation_count(
+        _smoke_script(_load()),
+        (
+            "url_for",
+            "canonical_url_for",
+            "assert_body_contains",
+            "assert_body_not_contains",
+            "assert_body_matches",
+            "public_nav_routes",
+            "search_locations",
+            "sitemap_urls",
+            "lines_with_prefix",
+            "lines_in_set",
+            "assert_exact_line_set",
+            "assert_line_present",
+            "assert_line_absent",
+            "check_home_page",
+            "check_release_notes_nav",
+            "check_search_index",
+            "check_sitemap",
+            "retry_until_body_checks",
+        ),
+    )
+
+
+def test_run_smoke_publication_checker_rewrites_python3_for_windows_git_bash(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    git_root = tmp_path / "Git"
+    git = git_root / "cmd" / "git.exe"
+    git.parent.mkdir(parents=True)
+    git.write_text("", encoding="utf-8")
+    git_bash = git_root / "bin" / "bash.exe"
+    git_bash.parent.mkdir(parents=True)
+    git_bash.write_text("", encoding="utf-8")
+
+    captured: dict[str, list[str]] = {}
+
+    def fake_run(command: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+        captured["command"] = command
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(sys, "executable", r"C:\Users\Agent Smith\my venv\Scripts\python.exe")
+    monkeypatch.setattr(shutil, "which", lambda name: str(git) if name == "git" else None)
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    home_body = _smoke_home_body()
+    search_body = _search_index_body(
+        PUBLIC_HOME_SEARCH_PATH,
+        *PUBLIC_NAV_ROUTES,
+        PUBLIC_EVAL_PATH,
+        PUBLIC_SCENARIOS_PATH,
+        PUBLIC_SCOREBOARD_PATH,
+    )
+    sitemap_body = _sitemap_body(
+        PUBLIC_HOME_SEARCH_PATH,
+        *PUBLIC_NAV_ROUTES,
+        PUBLIC_EVAL_PATH,
+        PUBLIC_SCENARIOS_PATH,
+        PUBLIC_SCOREBOARD_PATH,
+    )
+
+    assert _run_smoke_publication_checker(home_body, search_body, sitemap_body) == 0
+    assert captured["command"][:4] == [str(git_bash), "--noprofile", "--norc", "-c"]
+    expected_python = f"{_git_bash_python_executable()} -c"
+    assert captured["command"][4].count(expected_python) == _python3_invocation_count(
+        _smoke_script(_load()),
+        (
+            "url_for",
+            "canonical_url_for",
+            "assert_body_contains",
+            "assert_body_not_contains",
+            "assert_body_matches",
+            "public_nav_routes",
+            "search_locations",
+            "sitemap_urls",
+            "lines_with_prefix",
+            "lines_in_set",
+            "assert_exact_line_set",
+            "assert_line_present",
+            "assert_line_absent",
+            "check_home_page",
+            "check_search_index",
+            "check_sitemap",
+            "retry_until_publication_artifacts",
+        ),
+    )
 
 
 def _smoke_invocation_count(script: str, helper_name: str) -> int:
@@ -637,6 +742,12 @@ def _smoke_invocation_count(script: str, helper_name: str) -> int:
 
 def _fetch_body_invocation_count(script: str, helper_name: str) -> int:
     return _smoke_function(script, helper_name).count('fetch_body "')
+
+
+def _python3_invocation_count(script: str, helper_names: tuple[str, ...]) -> int:
+    return sum(
+        _smoke_function(script, helper_name).count("python3 -c") for helper_name in helper_names
+    )
 
 
 def _legacy_smoke_worst_case_seconds(script: str) -> int:
