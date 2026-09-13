@@ -91,17 +91,16 @@ def test_pull_request_jobs_never_use_self_hosted_runners() -> None:
     assert _jobs(CODEQL_WORKFLOW)["analyze"]["runs-on"] == TRUSTED_LINUX_RUNNER
 
 
-def test_windows_suite_prints_and_uses_one_deterministic_seed() -> None:
+def test_windows_pytest_processes_print_and_share_one_deterministic_seed() -> None:
     windows_job = _jobs(CI_WORKFLOW)["windows-test"]
     runs = _run_steps(windows_job)
     seed_messages = [run for run in runs if "pytest-randomly seed:" in run]
-    full_suite = next(
-        run for run in runs if "--ignore=tests/windows/test_native_terminal.py" in run
-    )
+    seeded_runs = [run for run in runs if "--randomly-seed=" in run]
 
     assert seed_messages == [f'Write-Output "pytest-randomly seed: {WINDOWS_SEED}"']
-    assert full_suite.endswith(f" --randomly-seed={WINDOWS_SEED}")
-    assert sum(run.count("--randomly-seed=") for run in runs) == 1
+    assert len(seeded_runs) == 2
+    assert all(run.endswith(f" --randomly-seed={WINDOWS_SEED}") for run in seeded_runs)
+    assert sum(run.count("--randomly-seed=") for run in runs) == 2
 
 
 def test_experimental_ty_job_is_honestly_advisory() -> None:
