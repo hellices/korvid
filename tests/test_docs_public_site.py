@@ -81,6 +81,17 @@ def _load_mkdocs_config() -> dict[str, Any]:
     return config
 
 
+def _reserved_top_level_dev_entries(docs_root: Path) -> list[str]:
+    collisions: list[str] = []
+    for path in sorted(docs_root.iterdir(), key=lambda entry: entry.name):
+        if not path.name.startswith("dev"):
+            continue
+        if path.is_dir() and path.name == "dev":
+            continue
+        collisions.append(f"{path.name}/" if path.is_dir() else path.name)
+    return collisions
+
+
 def test_stable_install_precedes_development_source() -> None:
     """Published-install guidance must appear before the development build path."""
 
@@ -192,13 +203,25 @@ def test_public_dev_entrypoints_override_the_internal_default() -> None:
 
 
 def test_top_level_dev_markdown_names_are_reserved_against_meta_prefix_matching() -> None:
-    """A future `docs/dev*.md` page would silently inherit `docs/dev/.meta.yml`."""
+    """Future top-level `docs/dev*` entries must not shadow `docs/dev/.meta.yml`."""
 
-    top_level_dev_pages = sorted(path.name for path in DOCS.glob("dev*.md"))
+    top_level_dev_pages = _reserved_top_level_dev_entries(DOCS)
     assert top_level_dev_pages == [], (
-        "reserve top-level docs/dev*.md names; Material's meta prefix matching would let "
-        f"{top_level_dev_pages!r} inherit docs/dev/.meta.yml unexpectedly"
+        "reserve every top-level docs entry whose name starts with 'dev' except the "
+        f"intended 'docs/dev/' directory; {top_level_dev_pages!r} would inherit "
+        "docs/dev/.meta.yml unexpectedly"
     )
+
+
+def test_reserved_top_level_dev_entries_rejects_future_dev_prefixed_directories(
+    tmp_path: Path,
+) -> None:
+    docs_root = tmp_path / "docs"
+    (docs_root / "dev").mkdir(parents=True)
+    (docs_root / "developer-guide").mkdir()
+    (docs_root / "developer-guide" / "index.md").write_text("# Developer guide\n", encoding="utf-8")
+
+    assert _reserved_top_level_dev_entries(docs_root) == ["developer-guide/"]
 
 
 def test_maintainer_release_runbook_is_not_search_indexed() -> None:

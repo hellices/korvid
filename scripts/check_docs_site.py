@@ -31,6 +31,8 @@ PUBLIC_DEV_SITEMAP_URLS = frozenset(
 REQUIRED_SEARCH_LOCATIONS = frozenset(
     {
         "evals/methodology/",
+        "evals/scenarios/",
+        "evals/scoreboard/",
     }
 )
 FORBIDDEN_SEARCH_LOCATIONS = frozenset(
@@ -41,6 +43,8 @@ FORBIDDEN_SEARCH_LOCATIONS = frozenset(
 REQUIRED_SITEMAP_URLS = frozenset(
     {
         f"{SITE_URL}evals/methodology/",
+        f"{SITE_URL}evals/scenarios/",
+        f"{SITE_URL}evals/scoreboard/",
     }
 )
 FORBIDDEN_SITEMAP_URLS = frozenset(
