@@ -18,7 +18,7 @@ environment rather than whatever Python happens to be active. `uv` and
 
 ## Current release
 
-Homebrew installs the latest published release from the live tap. The
+Homebrew installs the version currently published by the live tap. The
 `uv tool` and `pipx` commands below install the latest published package
 from PyPI. Check the
 [latest release](https://github.com/hellices/korvid/releases/latest) for
