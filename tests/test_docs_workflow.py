@@ -43,6 +43,7 @@ PUBLIC_SCENARIOS_PATH = "evals/scenarios/"
 PUBLIC_SCOREBOARD_PATH = "evals/scoreboard/"
 INTERNAL_CONTRACT_TESTS_PATH = "dev/contract-tests/"
 INTERNAL_RELEASE_PATH = "release/"
+INTERNAL_WINDOWS_PATH = "windows/"
 CLEANUP_PLAN_DOC = (
     ROOT / "docs" / "superpowers" / "plans" / "2026-09-13-github-pages-v0-5-cleanup.md"
 )
@@ -387,6 +388,7 @@ def _run_smoke_checker(
         PUBLIC_SCENARIOS_PATH={shlex.quote(PUBLIC_SCENARIOS_PATH)}
         PUBLIC_SCOREBOARD_PATH={shlex.quote(PUBLIC_SCOREBOARD_PATH)}
         INTERNAL_RELEASE_PATH={shlex.quote(INTERNAL_RELEASE_PATH)}
+        INTERNAL_WINDOWS_PATH={shlex.quote(INTERNAL_WINDOWS_PATH)}
         ROOT_ROUTE_SENTINEL={shlex.quote(PUBLIC_HOME_ROUTE_SENTINEL)}
         PUBLIC_NAV_ROUTES={shlex.quote(chr(10).join(PUBLIC_NAV_ROUTES_WITH_ROOT))}
         CONTENT_ATTEMPTS=1
@@ -457,6 +459,7 @@ def _run_smoke_publication_checker(
         PUBLIC_SCENARIOS_PATH={shlex.quote(PUBLIC_SCENARIOS_PATH)}
         PUBLIC_SCOREBOARD_PATH={shlex.quote(PUBLIC_SCOREBOARD_PATH)}
         INTERNAL_RELEASE_PATH={shlex.quote(INTERNAL_RELEASE_PATH)}
+        INTERNAL_WINDOWS_PATH={shlex.quote(INTERNAL_WINDOWS_PATH)}
         ROOT_ROUTE_SENTINEL={shlex.quote(PUBLIC_HOME_ROUTE_SENTINEL)}
         PUBLIC_NAV_ROUTES=""
         CONTENT_ATTEMPTS=1
@@ -974,6 +977,18 @@ def test_smoke_publication_checker_fails_when_canonical_homepage_is_missing_from
             ),
         ),
         (
+            "check_search_index",
+            "search/search_index.json",
+            "search index scope",
+            _search_index_body(
+                *PUBLIC_NAV_ROUTES,
+                PUBLIC_EVAL_PATH,
+                PUBLIC_SCENARIOS_PATH,
+                PUBLIC_SCOREBOARD_PATH,
+                INTERNAL_WINDOWS_PATH,
+            ),
+        ),
+        (
             "check_sitemap",
             "sitemap.xml",
             "sitemap scope",
@@ -1032,6 +1047,18 @@ def test_smoke_publication_checker_fails_when_canonical_homepage_is_missing_from
                 INTERNAL_CONTRACT_TESTS_PATH,
             ),
         ),
+        (
+            "check_sitemap",
+            "sitemap.xml",
+            "sitemap scope",
+            _sitemap_body(
+                *PUBLIC_NAV_ROUTES,
+                PUBLIC_EVAL_PATH,
+                PUBLIC_SCENARIOS_PATH,
+                PUBLIC_SCOREBOARD_PATH,
+                INTERNAL_WINDOWS_PATH,
+            ),
+        ),
     ],
 )
 def test_smoke_scope_checkers_fail_when_a_required_or_forbidden_entry_is_wrong(
@@ -1070,6 +1097,8 @@ def test_smoke_job_is_main_only_after_deploy_and_least_privilege() -> None:
     assert "retry_until_contains()" in script
     assert "retry_until_body_checks()" in script
     assert "retry_until_ok()" in script
+    assert 'assert_line_absent "$INTERNAL_WINDOWS_PATH" "$locations"' in script
+    assert 'assert_line_absent "$(canonical_url_for "$INTERNAL_WINDOWS_PATH")" "$urls"' in script
     assert 'if [ "$attempt" -lt "$CONTENT_ATTEMPTS" ]; then' in script
     assert 'if [ "$attempt" -lt "$MEDIA_ATTEMPTS" ]; then' in script
     assert 'sleep "$CONTENT_SLEEP_SECONDS"' in script

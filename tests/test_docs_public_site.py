@@ -231,6 +231,13 @@ def test_maintainer_release_runbook_is_not_search_indexed() -> None:
     assert source.startswith("---\nsearch:\n  exclude: true\n---\n")
 
 
+def test_windows_contributor_notes_are_search_index_excluded() -> None:
+    """The contributor-only Windows notes must stay out of public search."""
+
+    source = _source("windows.md")
+    assert source.startswith("---\nsearch:\n  exclude: true\n---\n")
+
+
 def test_sitemap_uses_the_search_exclusion_policy() -> None:
     """The sitemap override must keep using the shared search-exclusion policy."""
 
