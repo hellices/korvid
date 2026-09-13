@@ -1,0 +1,55 @@
+name: Issue 371 Windows harness diagnostic
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, reopened, synchronize]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: issue-371-diagnostic-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  windows-harness-diagnostic:
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.head.ref == 'fix/371-windows-node-harness-exit'
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - name: Install the locked development environment
+        run: uv sync --locked --dev --all-extras
+      - name: Report runner and tool versions
+        shell: pwsh
+        run: |
+          Write-Output "ImageOS=$env:ImageOS"
+          Write-Output "ImageVersion=$env:ImageVersion"
+          Get-Command node | Format-List -Property Source,Version
+          node --version
+          python --version
+          uv --version
+      - name: Run 300 isolated harness trials
+        shell: pwsh
+        run: |
+          $test = "tests/test_docs_landing_behavior.py::test_harness_nonzero_exit_preserves_captured_output"
+          for ($trial = 1; $trial -le 300; $trial++) {
+            Write-Output "::group::trial $trial/300"
+            uv run pytest -p no:tach $test -q
+            $status = $LASTEXITCODE
+            Write-Output "::endgroup::"
+            if ($status -ne 0) {
+              Write-Output "::error::trial $trial/300 failed with exit code $status"
+              exit $status
+            }
+          }
+          Write-Output "All 300 isolated trials passed."
