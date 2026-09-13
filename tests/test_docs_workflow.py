@@ -398,11 +398,17 @@ def test_git_bash_python_executable_normalizes_drive_letter_and_spaces(
 def test_git_bash_python3_shim_is_syntactically_valid_for_spaced_windows_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    bash = _bash_executable()
+    assert Path(bash).is_absolute()
     monkeypatch.setattr(sys, "platform", "win32")
-    monkeypatch.setattr(sys, "executable", r"E:\Users\Agent Smith\my venv\Scripts\python.exe")
+    monkeypatch.setattr(
+        sys,
+        "executable",
+        r"E:\Users\Agent Smith\my venv's\Scripts\python.exe",
+    )
 
     result = subprocess.run(
-        ["bash", "-n", "-c", f"{_git_bash_python3_shim()}\npython3 -c 'print(1)'"],
+        [bash, "-n", "-c", f"{_git_bash_python3_shim()}\npython3 -c 'print(1)'"],
         check=False,
         capture_output=True,
         text=True,
@@ -410,38 +416,50 @@ def test_git_bash_python3_shim_is_syntactically_valid_for_spaced_windows_path(
 
     assert result.returncode == 0
     assert result.stderr == ""
+    assert result.args[0] == bash
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason=(
+        "the wrapper executes a POSIX shebang and is not runnable on Windows; "
+        "production Windows behavior is covered structurally and by required "
+        "Windows CI harness tests"
+    ),
+)
 def test_git_bash_python3_shim_invokes_target_with_forwarded_arguments(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    fake_python = tmp_path / "fake venv" / "python3"
+    bash = _bash_executable()
+    assert Path(bash).is_absolute()
+    fake_python = tmp_path / "fake venv's" / "python3"
     fake_python.parent.mkdir(parents=True)
-    fake_python.write_text(
-        textwrap.dedent(
-            """\
-            #!/usr/bin/env python3
-            import json
-            import sys
+    fake_python_posix = fake_python.as_posix()
+    wrapper = textwrap.dedent(
+        f"""\
+        #!{sys.executable}
+        import json
+        import sys
 
-            print(json.dumps(sys.argv[1:]))
-            """
-        ),
-        encoding="utf-8",
+        print(json.dumps(sys.argv[1:]))
+        """
     )
+    fake_python.write_text(wrapper, encoding="utf-8")
     fake_python.chmod(0o755)
+    assert wrapper.startswith(f"#!{sys.executable}")
+    assert "/usr/bin/env python3" not in wrapper
 
     monkeypatch.setattr(sys, "platform", "win32")
     monkeypatch.setattr(
         sys.modules[__name__],
         "_git_bash_python_executable",
-        lambda: shlex.quote(str(fake_python)),
+        lambda: shlex.quote(fake_python_posix),
     )
 
     result = subprocess.run(
         [
-            "bash",
+            bash,
             "-c",
             f"{_git_bash_python3_shim()}\npython3 -c 'print(1)' sample-arg",
         ],
@@ -452,6 +470,7 @@ def test_git_bash_python3_shim_invokes_target_with_forwarded_arguments(
 
     assert result.returncode == 0
     assert result.stdout.strip() == json.dumps(["-c", "print(1)", "sample-arg"])
+    assert result.args[0] == bash
 
 
 def _report_smoke_subprocess_failure(
