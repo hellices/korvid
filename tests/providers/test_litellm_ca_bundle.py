@@ -34,6 +34,8 @@ import json
 import socketserver
 import ssl
 import threading
+import weakref
+from asyncio.transports import BaseTransport
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -116,7 +118,68 @@ async def _https_endpoint(cert_pem: Path, key_pem: Path) -> AsyncIterator[str]:
 
 
 @pytest.fixture(autouse=True)
-async def _isolated_litellm_trust(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[None]:
+async def _connection_ownership_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> AsyncIterator[None]:
+    """Attribute a stranded connection to the test that actually opened it.
+
+    #390's `PytestUnraisableExceptionWarning` names whichever test happened to
+    be running when the collector reached the object, never the one that owned
+    it, so the allocator has never been identified. Two mechanisms can leave a
+    `_ProactorSocketTransport` holding `_sock`, and they need telling apart:
+
+    1. `_call_connection_lost()` raised. On the proactor loop — and only there
+       — it calls `self._sock.shutdown(SHUT_RDWR)` and `self._sock.close()`
+       unguarded before `self._sock = None` (CPython 3.12.10
+       `Lib/asyncio/proactor_events.py`); the selector loop closes the socket
+       and clears the attribute with neither call. A peer that reset the
+       connection therefore strands the socket on Windows, and the `OSError`
+       surfaces only through the loop's exception handler, in the test that
+       opened the connection rather than the one that reports the warning.
+    2. The queued `_call_connection_lost()` never ran, because the loop was
+       closed first. Then no error is raised anywhere and the transport is
+       simply still holding its socket when this test is over.
+
+    Case 1 lands in `callback_failures`, case 2 in `stranded`. Both name this
+    test. Neither collects garbage, filters a warning, nor waits on a clock.
+    """
+    live: weakref.WeakSet[BaseTransport] = weakref.WeakSet()
+    build_transport = BaseTransport.__init__
+
+    def recording_init(transport: BaseTransport, *args: Any, **kwargs: Any) -> None:
+        build_transport(transport, *args, **kwargs)
+        live.add(transport)
+
+    monkeypatch.setattr(BaseTransport, "__init__", recording_init)
+
+    callback_failures: list[str] = []
+    loop = asyncio.get_running_loop()
+    delegate = loop.get_exception_handler()
+
+    def record(failing_loop: asyncio.AbstractEventLoop, context: dict[str, Any]) -> None:
+        callback_failures.append(f"{context.get('message')}: {context.get('exception')!r}")
+        if delegate is None:
+            failing_loop.default_exception_handler(context)
+        else:
+            delegate(failing_loop, context)
+
+    loop.set_exception_handler(record)
+    try:
+        yield
+    finally:
+        loop.set_exception_handler(delegate)
+
+    stranded = sorted(repr(t) for t in live if getattr(t, "_sock", None) is not None)
+    assert not callback_failures, (
+        f"an event-loop callback failed while this test ran: {callback_failures}"
+    )
+    assert not stranded, f"a transport still owned its socket after teardown: {stranded}"
+
+
+@pytest.fixture(autouse=True)
+async def _isolated_litellm_trust(
+    monkeypatch: pytest.MonkeyPatch, _connection_ownership_probe: None
+) -> AsyncIterator[None]:
     """Restore LiteLLM's global trust and drop its cached clients.
 
     Measured on 1.98.0: the SDK-client cache key is built from the api
@@ -126,6 +189,9 @@ async def _isolated_litellm_trust(monkeypatch: pytest.MonkeyPatch) -> AsyncItera
     korvid applies the bundle at construction, before the first request
     can happen, which is why that ordering is safe in production; a test
     that reuses one process has to flush.
+
+    Requests the ownership probe so the probe is torn down *after* this
+    fixture: a client still open is not yet a stranded connection.
     """
     monkeypatch.setattr(litellm, "ssl_verify", True, raising=False)
     await drop_cached_clients()
