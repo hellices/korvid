@@ -63,14 +63,34 @@ logger = logging.getLogger(__name__)
 
 #: Workload eligibility is keyed on (group, plural): a custom-group CRD whose
 #: plural collides with a built-in (e.g. 'deployments') must never be treated
-#: as an apps/* workload. `KorvidApp._ACTION_VIEWS` gates the keys on the same
-#: identities, so the footer legend and the flow agree.
+#: as an apps/* workload. `ActionPolicy._ACTION_VIEWS` gates the keys on the
+#: same identities, so the footer legend and the flow agree.
 RESTARTABLE: frozenset[tuple[str, str]] = frozenset(
     {("apps", "deployments"), ("apps", "statefulsets"), ("apps", "daemonsets")}
 )
 SCALABLE: frozenset[tuple[str, str]] = frozenset(
     {("apps", "deployments"), ("apps", "replicasets"), ("apps", "statefulsets")}
 )
+
+#: Palette action -> the label the matching flow uses in its own "<Action>
+#: unavailable in this session" refusal when this session has no write
+#: client. One table, so a probe can never invent wording the keypress does
+#: not use (issue #388 task 4).
+_WRITE_CLIENT_LABELS: dict[str, str] = {
+    "delete_resource": "Delete",
+    "rollout_restart": "Rollout restart",
+    "edit_resource": "Edit",
+    "scale_resource": "Scale",
+    "resize_pod": "Resize",
+}
+
+#: Palette action -> the word the matching node flow passes to
+#: `node_target()`, which is also the word its refusals are phrased with.
+_NODE_ACTIONS: dict[str, str] = {
+    "cordon_node": "cordon",
+    "uncordon_node": "uncordon",
+    "drain_node": "drain",
+}
 
 #: `KorvidApp._get_manifest`: (kind alias, namespace, name) -> manifest.
 ManifestFetcher = Callable[[str, str | None, str], Awaitable[dict[str, Any]]]
@@ -304,11 +324,18 @@ class ResourceWriteController:
         resolves or notifies twice: the same call this method makes to
         probe is the one `_capture()` makes to dispatch, just silenced.
 
+        The session's write client comes first, exactly as every flow below
+        reads it before resolving a target (#388 task 4): without one the
+        keypress refuses with "<Action> unavailable in this session", so the
+        palette must not advertise the action as invokable.
+
         `delete_resource` on the helm release browser is the one exception:
         Ctrl-D there routes to `helm uninstall` *before* the generic
         `write_target` path (issue #117, `delete()` below), so the generic
         "this is a read-only view" refusal must not apply to it - only the
         read-only/audit gate `HelmController.gate()` itself enforces."""
+        if action in _NODE_ACTIONS:
+            return self._node_action_reason(_NODE_ACTIONS[action])
         if action == "delete_resource" and self._is_helm_release_view():
             reason = self._writes.readonly_or_audit_reason()
             if reason is not None:
@@ -317,6 +344,11 @@ class ResourceWriteController:
             if name is None:
                 return UnavailableReason(AvailabilityCode.NO_SELECTION, "No resource selected")
             return None
+        label = _WRITE_CLIENT_LABELS.get(action)
+        if label is not None and self._write_ops() is None:
+            return UnavailableReason(
+                AvailabilityCode.MISSING_CAPABILITY, f"{label} unavailable in this session"
+            )
         reason = self._writes.unavailable_reason()
         if reason is not None:
             return reason
@@ -327,7 +359,11 @@ class ResourceWriteController:
             # with the coordinator's own NO_SELECTION wording (not a second
             # invented one), only so mypy can narrow `target` below.
             return UnavailableReason(AvailabilityCode.NO_SELECTION, "No resource selected")
-        meta = target[0]
+        return self._kind_reason(action, target[0])
+
+    def _kind_reason(self, action: str, meta: ResourceMeta) -> UnavailableReason | None:
+        """The "this kind does not take that write" refusals, with each
+        flow's own wording."""
         if action == "rollout_restart" and (meta.group, meta.plural) not in RESTARTABLE:
             return UnavailableReason(
                 AvailabilityCode.UNSUPPORTED_RESOURCE,
@@ -336,6 +372,62 @@ class ResourceWriteController:
         if action == "scale_resource" and (meta.group, meta.plural) not in SCALABLE:
             return UnavailableReason(
                 AvailabilityCode.UNSUPPORTED_RESOURCE, f"scale does not apply to {gvr_label(meta)}"
+            )
+        if action == "resize_pod":
+            if (meta.group, meta.plural) != ("", "pods"):
+                return UnavailableReason(
+                    AvailabilityCode.UNSUPPORTED_RESOURCE,
+                    f"resize does not apply to {gvr_label(meta)}",
+                )
+            if not self._pod_resize_supported():
+                return UnavailableReason(
+                    AvailabilityCode.UNSUPPORTED_RESOURCE,
+                    "This cluster does not expose pods/resize (requires Kubernetes 1.35+)",
+                )
+        return None
+
+    def node_unavailable_reason(self, action: str) -> UnavailableReason | None:
+        """Why `node_target(action)` would refuse right now, or None - the
+        silent twin of the notifications that method emits, for the palette
+        and for the node-shell owner that resolves its target through it
+        (issue #388 task 4). `action` is the same word `node_target` is
+        called with ("cordon", "drain", "node shell"), so the wording
+        matches the real refusal exactly."""
+        if self._write_ops() is None:
+            return UnavailableReason(
+                AvailabilityCode.MISSING_CAPABILITY, f"{action} unavailable in this session"
+            )
+        reason = self._writes.unavailable_reason()
+        if reason is not None:
+            return reason
+        target = self._writes.write_target(notify=False)
+        if target is None:
+            return UnavailableReason(AvailabilityCode.NO_SELECTION, "No resource selected")
+        meta = target[0]
+        if (meta.group, meta.plural) != ("", "nodes"):
+            return UnavailableReason(
+                AvailabilityCode.UNSUPPORTED_RESOURCE,
+                f"{action} does not apply to {gvr_label(meta)}",
+            )
+        return None
+
+    def _node_action_reason(self, action: str) -> UnavailableReason | None:
+        """`node_unavailable_reason` plus the cordon/uncordon refusal a
+        running drain owns: the drain holds the node's schedulable state
+        until it finishes or is cancelled."""
+        reason = self.node_unavailable_reason(action)
+        if reason is not None or action == "drain":
+            return reason
+        target = self._writes.write_target(notify=False)
+        return None if target is None else self._drain_in_progress_reason(target[2])
+
+    def _drain_in_progress_reason(self, name: str) -> UnavailableReason | None:
+        """Why cordon/uncordon must wait for an in-flight drain on *name*."""
+        worker = self._drain_worker
+        if worker is not None and worker.is_running and name == self._drain_node:
+            return UnavailableReason(
+                AvailabilityCode.PROTECTED_UI,
+                f"nodes/{name} is being drained - cancel the drain first",
             )
         return None
 
@@ -1071,15 +1163,12 @@ class ResourceWriteController:
             return
         ops, target = resolved
         meta, name, uid = target.meta, target.name, target.uid
-        worker = self._drain_worker
-        if worker is not None and worker.is_running and name == self._drain_node:
+        drain_reason = self._drain_in_progress_reason(name)
+        if drain_reason is not None:
             # Uncordoning (or re-cordoning) mid-drain would let new pods
             # schedule behind the drain's back; the drain owns the node's
             # schedulable state until it finishes or is cancelled.
-            self._ui.notify(
-                f"nodes/{name} is being drained - cancel the drain first",
-                severity="warning",
-            )
+            self._ui.notify(drain_reason.message, severity=drain_reason.severity)
             return
         if not await self._writes.precheck_keybinding_write(action, meta, None, name):
             return

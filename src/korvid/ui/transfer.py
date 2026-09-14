@@ -46,6 +46,11 @@ from korvid.core.transfer import (
 )
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.models import PodSummary
+from korvid.ui.action_availability import (
+    CONTEXT_SWITCH_IN_PROGRESS,
+    AvailabilityCode,
+    UnavailableReason,
+)
 from korvid.ui.ui_surface import UiSurface
 from korvid.ui.view_state import ViewState
 from korvid.ui.widgets.pick_screen import PickScreen
@@ -126,6 +131,39 @@ class TransferController:
         if self._task is not None:
             self._task.cancel()
 
+    def _capability_reason(self) -> UnavailableReason | None:
+        """The two facts a transfer needs before anything else, in `start`'s
+        own order: an exec client for this session, and the single task slot
+        free. Shared by the keypress (which notifies) and the palette probe
+        (which returns it silently)."""
+        if self._open_pod_exec() is None:
+            return UnavailableReason(
+                AvailabilityCode.MISSING_CAPABILITY,
+                "File transfer unavailable (no cluster connection)",
+            )
+        if self._in_flight:
+            return UnavailableReason(
+                AvailabilityCode.PROTECTED_UI, "A transfer is already in progress"
+            )
+        return None
+
+    def unavailable_reason(self) -> UnavailableReason | None:
+        """Why `ctrl+t` can't open the transfer dialog right now, or None -
+        a side-effect-free probe for the palette (issue #388 task 4).
+
+        Synchronous and silent: the same guards `start()` applies, in the
+        same order (exec client, in-flight transfer, context switch,
+        selection), with the pods-view check left to `ActionPolicy`."""
+        reason = self._capability_reason()
+        if reason is not None:
+            return reason
+        if self._writes.switching():
+            return CONTEXT_SWITCH_IN_PROGRESS
+        namespace, name = self._view.selected_ns_name(notify=False)
+        if namespace is None or name is None:
+            return UnavailableReason(AvailabilityCode.NO_SELECTION, "No resource selected")
+        return None
+
     # ------------------------------------------------------------------
     # The user-facing half: selection, container pick, dialog, approval
     # ------------------------------------------------------------------
@@ -150,11 +188,9 @@ class TransferController:
         if self._view.current_kind() != "pods":
             self._ui.notify("File transfer is only available for pods", severity="warning")
             return
-        if self._open_pod_exec() is None:
-            self._ui.notify("File transfer unavailable (no cluster connection)", severity="warning")
-            return
-        if self._in_flight:
-            self._ui.notify("A transfer is already in progress", severity="warning")
+        reason = self._capability_reason()
+        if reason is not None:
+            self._ui.notify(reason.message, severity=reason.severity)
             return
         if not self._writes.reads_allowed():
             return

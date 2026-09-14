@@ -57,6 +57,7 @@ from korvid.core.audit import AuditLog
 from korvid.core.mcp import MCPControllerBase
 from korvid.core.portforward import ForwardRecord, ForwardRegistry
 from korvid.k8s.helmcli import HelmCLI
+from korvid.ui.action_availability import CONTEXT_SWITCH_IN_PROGRESS
 from korvid.ui.ui_surface import UiSurface
 from korvid.ui.view_state import ViewState
 from korvid.ui.widgets.pick_screen import PickScreen
@@ -413,8 +414,8 @@ class ContextSwitchCoordinator(ContextGuard):
         """
         if self._switching:
             self._ui.notify(
-                "A context switch is in progress — try again once it completes",
-                severity="warning",
+                CONTEXT_SWITCH_IN_PROGRESS.message,
+                severity=CONTEXT_SWITCH_IN_PROGRESS.severity,
             )
             return False
         return True

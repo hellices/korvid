@@ -39,6 +39,11 @@ from korvid.core.logbuffer import LogBuffer
 from korvid.core.logexport import default_log_export_dir, export_log_lines
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.logs import LogLine
+from korvid.ui.action_availability import (
+    CONTEXT_SWITCH_IN_PROGRESS,
+    AvailabilityCode,
+    UnavailableReason,
+)
 from korvid.ui.ui_surface import UiSurface
 from korvid.ui.widgets.log_pane import MAX_PANELS
 
@@ -57,6 +62,25 @@ _MAX_RECONNECT_ATTEMPTS = 5
 #: triple that also carries the namespace for reopen/toggle bookkeeping.
 Source = tuple[str, str]
 Triple = tuple[str, str, str]
+
+#: Actions that drive the *visible* log pane rather than the focused view.
+#: `ActionPolicy` gates their bindings on the same fact; this is the
+#: controller's own half of that agreement (issue #388 task 4).
+_PANE_LOCAL_ACTIONS: frozenset[str] = frozenset(
+    {"log_format", "log_wrap", "log_timestamps", "log_save", "log_previous"}
+)
+
+
+class SelectedNsName(Protocol):
+    """The selection read, with the silent `notify=False` probe path.
+
+    `ViewState.selected_ns_name` satisfies it structurally; naming it here
+    keeps the keyword checked at the injection site instead of erasing it
+    behind `Callable[..., ...]`.
+    """
+
+    def __call__(self, *, notify: bool = True) -> tuple[str | None, str | None]: ...
+
 
 #: The stream producer the app injects: `stream_logs(namespace, pod, container,
 #: *, previous=..., follow=...)` yielding decoded lines. `None` disables logs.
@@ -160,13 +184,16 @@ class LogController:
         get_log_pane: Callable[[], LogPaneView],
         get_stream_logs: Callable[[], StreamLogsFn | None],
         pod_containers: Callable[[str, str], tuple[str, ...]],
-        selected_ns_name: Callable[[], tuple[str | None, str | None]],
+        selected_ns_name: SelectedNsName,
         visible_pod_keys: Callable[[], list[str]],
         current_kind: Callable[[], str],
         focused_pane: Callable[[], object],
         ctx_epoch: Callable[[], int],
         ctx_switch_crossed: Callable[[int], bool],
         ctx_reads_allowed: Callable[[], bool],
+        #: The silent twin of `ctx_reads_allowed`, for the availability
+        #: probe: whether a `:ctx` switch is in flight, without notifying.
+        ctx_switching: Callable[[], bool],
         refresh_bindings: Callable[[], None],
         buffer_max_lines: int,
     ) -> None:
@@ -181,6 +208,7 @@ class LogController:
         self._ctx_epoch = ctx_epoch
         self._ctx_switch_crossed = ctx_switch_crossed
         self._ctx_reads_allowed = ctx_reads_allowed
+        self._ctx_switching = ctx_switching
         self._refresh_bindings = refresh_bindings
 
         #: One task per streaming panel; owned and reaped by this controller.
@@ -244,6 +272,47 @@ class LogController:
     # ------------------------------------------------------------------
     # Open / toggle entry points (`l` and `L`)
     # ------------------------------------------------------------------
+
+    def unavailable_reason(self, action: str) -> UnavailableReason | None:
+        """Why `action` can't run right now, or None - a side-effect-free
+        probe for the palette (issue #388 task 4). Synchronous and silent.
+
+        `logs` and `logs_multi` answer with the same guards their handlers
+        apply, in the same order: a `:ctx` switch, the stream source, and
+        then the selected pod (`l`) or the listed pods (`L`). `l` on an
+        already-open pane in another mode *closes* it, so that case is
+        invokable, exactly as the handler behaves. The pane-local display
+        actions answer with the pane's visibility, matching
+        `ActionPolicy`'s own binding gate on the same actions.
+
+        The deeper refusals stay out on purpose: the cap notices
+        (`Log pane caps at N pods`, `Streaming first N of M`) are emitted by
+        helpers that notify while they compute, which a probe must never
+        do."""
+        if action in _PANE_LOCAL_ACTIONS:
+            if not self._get_log_pane().display:
+                return UnavailableReason(AvailabilityCode.PANE_CLOSED, "Open the log pane first")
+            return None
+        if action not in ("logs", "logs_multi"):
+            return None
+        if self._ctx_switching():
+            return CONTEXT_SWITCH_IN_PROGRESS
+        if action == "logs" and self._get_log_pane().display and self._mode != "l":
+            # `l` closes a pane opened in multi/previous mode; nothing else
+            # is read, so nothing else can refuse.
+            return None
+        if self._get_stream_logs() is None:
+            return UnavailableReason(
+                AvailabilityCode.MISSING_CAPABILITY, "Log streaming unavailable"
+            )
+        if action == "logs_multi":
+            if not self._visible_pod_keys():
+                return UnavailableReason(AvailabilityCode.NO_SELECTION, "No resource selected")
+            return None
+        ns, name = self._selected_ns_name(notify=False)
+        if ns is None or name is None:
+            return UnavailableReason(AvailabilityCode.NO_SELECTION, "No resource selected")
+        return None
 
     async def action_logs(self) -> None:
         """Open logs for the selected pod, or toggle it in/out of the pane (``l``).

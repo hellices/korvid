@@ -1065,6 +1065,7 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
     agent_ref = _LateReference[AgentUiController]()
     shell_ref = _LateReference[ShellController]()
     debug_ref = _LateReference[DebugController]()
+    resource_writes_ref = _LateReference[ResourceWriteController]()
 
     view = AppViewState(app)
     relationship_loader: RelationshipSnapshotLoader | None = (
@@ -1175,6 +1176,9 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
         get_manifest=lambda: app._get_manifest,
         pod_containers=inspect_controller.pod_containers,
         node_target=lambda action: app._node_target(action),
+        node_unavailable_reason=lambda action: resource_writes_ref.get().node_unavailable_reason(
+            action
+        ),
         target_uid=lambda kind, ns, name: app._target_uid(kind, ns, name),
         settings=lambda: ShellSettings(
             kube_context=app.config.kube_context,
@@ -1215,6 +1219,7 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
         uid_intact_after_fetch=writes.uid_intact_after_fetch,
         precheck_keybinding_write=writes.precheck_keybinding_write,
         write_target=writes.write_target,
+        write_unavailable_reason=writes.unavailable_reason,
     )
     helm_controller = HelmController(
         helm=lambda: app._helm,
@@ -1263,6 +1268,7 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
         helm_uninstall=lambda: helm_controller.uninstall_selected(),
         operators=operators,
     )
+    resource_writes_ref.bind(resource_writes)
     hints = HintController(
         find_pod_summary=inspect_controller.find_pod_summary,
         cursor_row_key=inspect_surface.cursor_row_key,
@@ -1288,6 +1294,7 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
         ctx_epoch=context.epoch,
         ctx_switch_crossed=context.crossed,
         ctx_reads_allowed=context.reads_allowed,
+        ctx_switching=context.switching,
         refresh_bindings=app.refresh_bindings,
         buffer_max_lines=config.log_buffer_lines,
     )
@@ -1379,11 +1386,33 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
         view=view,
         agent_available=lambda: agent_ui.available,
         log_pane_open=app._log_pane_open,
+        agent_busy=lambda: agent_ui.busy,
         reason_by_action={
-            "delete_resource": lambda: resource_writes.unavailable_reason("delete_resource"),
-            "edit_resource": lambda: resource_writes.unavailable_reason("edit_resource"),
-            "rollout_restart": lambda: resource_writes.unavailable_reason("rollout_restart"),
-            "scale_resource": lambda: resource_writes.unavailable_reason("scale_resource"),
+            **{
+                action: functools.partial(resource_writes.unavailable_reason, action)
+                for action in (
+                    "delete_resource",
+                    "edit_resource",
+                    "rollout_restart",
+                    "scale_resource",
+                    "resize_pod",
+                    "cordon_node",
+                    "uncordon_node",
+                    "drain_node",
+                )
+            },
+            **{
+                action: functools.partial(helm_controller.unavailable_reason, action)
+                for action in ("helm_install", "helm_upgrade", "helm_history", "helm_rollback")
+            },
+            **{
+                action: functools.partial(logs.unavailable_reason, action)
+                for action in ("logs", "logs_multi")
+            },
+            "port_forward": forward_controller.unavailable_reason,
+            "transfer": transfer.unavailable_reason,
+            "shell": shell.unavailable_reason,
+            "operator_install": operators.unavailable_reason,
         },
     )
     commands = CommandRouter(

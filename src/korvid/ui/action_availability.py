@@ -52,3 +52,14 @@ class ActionAvailability:
     def enabled(cls) -> ActionAvailability:
         """An always-invokable availability, with no reason attached."""
         return cls(binding_enabled=True)
+
+
+#: The one wording for "a `:ctx` switch is in flight". Every flow that spawns
+#: a cluster stream refuses during a switch (issue #84), and each of their
+#: palette probes reports it, so the notification the real keypress emits
+#: (`ContextSwitchCoordinator.reads_allowed`) and the silent reason the
+#: probes return are the same string by construction (issue #388 task 4).
+CONTEXT_SWITCH_IN_PROGRESS = UnavailableReason(
+    AvailabilityCode.TRANSITION,
+    "A context switch is in progress — try again once it completes",
+)

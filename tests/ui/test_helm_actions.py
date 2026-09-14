@@ -2359,3 +2359,89 @@ async def test_the_controller_refuses_install_and_upgrade_off_the_release_view(
         messages = [str(n.message) for n in app._notifications]
         assert any("Helm install is only available" in m for m in messages)
         assert any("Helm upgrade is only available" in m for m in messages)
+
+
+async def test_helm_availability_reports_the_missing_executable_without_notifying(
+    tmp_path: Path,
+) -> None:
+    """The palette probe must report the same refusal `HelmController.gate()`
+    notifies when no helm binary was detected - otherwise the palette would
+    advertise `helm install` as invokable while the real key press refuses
+    (#388 task 4). The probe itself notifies nothing."""
+    app = make_app(helm=None, audit_path=tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "helm", "helmreleases")
+        await _rows_listed(pilot, app, 1)
+        before = len(app._notifications)
+        assert app._helm_ctl.unavailable_reason("helm_install") == UnavailableReason(
+            AvailabilityCode.MISSING_CAPABILITY,
+            "helm CLI not found on PATH - install/upgrade/rollback/uninstall unavailable",
+            severity="error",
+        )
+        assert len(app._notifications) == before
+        availability = app._actions.availability("helm_install")
+        assert availability.binding_enabled is True
+        assert availability.invokable is False
+        assert len(app._notifications) == before
+
+
+async def test_helm_availability_reports_read_only_before_the_binary(tmp_path: Path) -> None:
+    """Read-only is the first thing `gate()` refuses on, so the probe must
+    report it first too (#388 task 4)."""
+    app = make_app(helm=None, audit_path=tmp_path / "audit.jsonl", readonly=True)
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "helm", "helmreleases")
+        await _rows_listed(pilot, app, 1)
+        assert app._helm_ctl.unavailable_reason("helm_upgrade") == UnavailableReason(
+            AvailabilityCode.READ_ONLY, "Read-only mode: cluster writes are disabled"
+        )
+
+
+async def test_helm_availability_reports_a_missing_audit_sink(tmp_path: Path) -> None:
+    """Fail-closed auditing blocks every helm write; the palette says so
+    rather than offering an action the gate will refuse (#388 task 4)."""
+    del tmp_path
+    app = make_app(helm=FakeHelm())  # no audit path -> no audit sink
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "helm", "helmreleases")
+        await _rows_listed(pilot, app, 1)
+        assert app._helm_ctl.unavailable_reason("helm_rollback") == UnavailableReason(
+            AvailabilityCode.MISSING_CAPABILITY, "Writes disabled: no audit log configured"
+        )
+
+
+async def test_helm_availability_is_invokable_with_a_selected_release(tmp_path: Path) -> None:
+    """With helm present, an audit sink configured and a release row
+    selected, every helm action the release view binds is invokable."""
+    app = make_app(helm=FakeHelm(), audit_path=tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "helm", "helmreleases")
+        await _rows_listed(pilot, app, 1)
+        assert app._helm_ctl.unavailable_reason("helm_install") is None
+        assert app._helm_ctl.unavailable_reason("helm_upgrade") is None
+        assert app._helm_ctl.unavailable_reason("helm_history") is None
+        assert app._actions.availability("helm_upgrade").invokable is True
+
+
+async def test_helm_availability_reports_no_selection_for_upgrade(tmp_path: Path) -> None:
+    """`helm upgrade`/`history`/`rollback` all act on the selected row; with
+    an empty release list the palette must say so instead of claiming the
+    action can run (#388 task 4)."""
+    app = make_app(
+        {"helmreleases": [], "helmrevisions": []},
+        helm=FakeHelm(),
+        audit_path=tmp_path / "audit.jsonl",
+    )
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "helm", "helmreleases")
+        await _rows_listed(pilot, app, 0)
+        before = len(app._notifications)
+        assert app._helm_ctl.unavailable_reason("helm_upgrade") == UnavailableReason(
+            AvailabilityCode.NO_SELECTION, "No resource selected"
+        )
+        assert app._helm_ctl.unavailable_reason("helm_history") == UnavailableReason(
+            AvailabilityCode.NO_SELECTION, "No resource selected"
+        )
+        # install needs no row: it is the one helm write that creates one.
+        assert app._helm_ctl.unavailable_reason("helm_install") is None
+        assert len(app._notifications) == before

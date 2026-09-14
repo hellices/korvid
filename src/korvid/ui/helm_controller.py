@@ -47,6 +47,7 @@ from korvid.k8s.helm import (
     HelmRevisionSummary,
 )
 from korvid.k8s.helmcli import ChartHit, HelmCLI, HelmError, HelmPreviewUnsupported
+from korvid.ui.action_availability import AvailabilityCode, UnavailableReason
 from korvid.ui.ui_surface import UiSurface
 from korvid.ui.view_state import ViewState
 from korvid.ui.widgets.helm_chart_search import HelmChartSearchScreen
@@ -73,6 +74,18 @@ _HELM_PREVIEW_MAX_LINES = 60
 #: Exclusive worker group every helm write (rollback, uninstall) runs in: a
 #: second keypress must replace the pending preview, never race it.
 HELM_WRITE_GROUP = "helm-write"
+
+#: The one wording for "no helm binary", shared by the notification `gate()`
+#: emits on a real keypress and the silent reason the palette probe returns,
+#: so the two can never drift.
+_HELM_MISSING = UnavailableReason(
+    AvailabilityCode.MISSING_CAPABILITY,
+    "helm CLI not found on PATH - install/upgrade/rollback/uninstall unavailable",
+    severity="error",
+)
+
+#: Helm actions that act on the selected row (install creates a new release).
+_HELM_ROW_ACTIONS: frozenset[str] = frozenset({"helm_upgrade", "helm_history", "helm_rollback"})
 
 
 def _chart_base(chart: str) -> str:
@@ -189,24 +202,65 @@ class HelmController:
         fail-closed audit rule apply exactly as to API writes, plus the
         binary must have been detected at startup. None (with a
         notification) blocks the flow."""
-        if self._view.readonly():
-            self._ui.notify("Read-only mode: cluster writes are disabled", severity="warning")
-            return None
-        if not self._gate.audit_configured():
-            # Fail-closed auditing (AGENTS.md): no audit sink means no writes.
-            self._ui.notify("Writes disabled: no audit log configured", severity="warning")
+        reason = self._write_gate_reason()
+        if reason is not None:
+            self._ui.notify(reason.message, severity=reason.severity)
             return None
         # Read once: checking one call and returning another could hand back
         # a client the check never saw - and after a `:ctx` switch rebinds the
         # wrapper, one bound to the previous cluster.
         helm = self._helm()
         if helm is None:
-            self._ui.notify(
-                "helm CLI not found on PATH - install/upgrade/rollback/uninstall unavailable",
-                severity="error",
-            )
+            self._ui.notify(_HELM_MISSING.message, severity=_HELM_MISSING.severity)
             return None
         return helm
+
+    def _write_gate_reason(self) -> UnavailableReason | None:
+        """The read-only and fail-closed-audit halves of `gate()`, without
+        reading the helm wrapper: `gate()` must read that exactly once (see
+        above), so the shared part stops just short of it."""
+        if self._view.readonly():
+            return UnavailableReason(
+                AvailabilityCode.READ_ONLY, "Read-only mode: cluster writes are disabled"
+            )
+        if not self._gate.audit_configured():
+            # Fail-closed auditing (AGENTS.md): no audit sink means no writes.
+            return UnavailableReason(
+                AvailabilityCode.MISSING_CAPABILITY, "Writes disabled: no audit log configured"
+            )
+        return None
+
+    def unavailable_reason(self, action: str) -> UnavailableReason | None:
+        """Why `action` can't run right now, or None - a side-effect-free
+        probe for the palette (issue #388 task 4). Synchronous, reads only
+        state this controller already owns, and never notifies: the
+        notification belongs to the real keypress.
+
+        Which view the helm actions belong on stays `ActionPolicy`'s
+        (`_view_guard` mirrors it for direct calls), so this answers only
+        what the *controller* would refuse next:
+
+        - `helm_install`/`helm_upgrade`/`helm_rollback` are writes, so they
+          carry `gate()`'s refusals verbatim (read-only, missing audit sink,
+          missing helm binary).
+        - `helm_history` is a read-only drill-down that `history()` gates on
+          nothing but the selection, so the probe gates it on nothing more
+          either - claiming a read-only refusal there would grey out a key
+          that works.
+        - `helm_upgrade`/`helm_history`/`helm_rollback` all act on the
+          selected row.
+        """
+        if action != "helm_history":
+            reason = self._write_gate_reason()
+            if reason is not None:
+                return reason
+            if self._helm() is None:
+                return _HELM_MISSING
+        if action in _HELM_ROW_ACTIONS:
+            _, name = self._view.selected_ns_name(notify=False)
+            if name is None:
+                return UnavailableReason(AvailabilityCode.NO_SELECTION, "No resource selected")
+        return None
 
     def _view_namespace(self) -> str:
         """Namespace a fresh install targets by default: the active view

@@ -49,6 +49,11 @@ from korvid.core.portforward import (
 )
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.portforward import FORWARDABLE_KINDS, forward_target_gvr
+from korvid.ui.action_availability import (
+    CONTEXT_SWITCH_IN_PROGRESS,
+    AvailabilityCode,
+    UnavailableReason,
+)
 from korvid.ui.ui_surface import UiSurface
 from korvid.ui.view_state import ViewState
 from korvid.ui.widgets.port_forward_screen import ForwardListScreen, PortForwardScreen
@@ -159,6 +164,43 @@ class ForwardController:
         """Accept forwards again after a `:ctx` switch retargets the registry."""
         self._forwards_closing = False
 
+    def _capability_reason(self) -> UnavailableReason | None:
+        """The two composition facts a forward needs, in `open_dialog`'s own
+        order: a registry in this build, and a `kubectl` on PATH. Shared by
+        the keypress (which notifies the message) and the palette probe
+        (which returns it silently), so the two cannot drift."""
+        if self._forwards_registry() is None:
+            return UnavailableReason(
+                AvailabilityCode.MISSING_CAPABILITY, "Port-forward unavailable in this build"
+            )
+        if shutil.which("kubectl") is None:
+            return UnavailableReason(
+                AvailabilityCode.MISSING_CAPABILITY,
+                "kubectl not found on PATH — port-forward requires kubectl",
+                severity="error",
+            )
+        return None
+
+    def unavailable_reason(self) -> UnavailableReason | None:
+        """Why `shift+f` can't open the forward dialog right now, or None -
+        a side-effect-free probe for the palette (issue #388 task 4).
+
+        Synchronous and silent: it reads the same composition state
+        `open_dialog` checks, in the same order (context switch, registry,
+        `kubectl`, selection), and never notifies. Which views bind the key
+        stays `ActionPolicy`'s call, and the Service-has-no-TCP-port refusal
+        stays out: it needs an awaited manifest fetch, which a palette probe
+        must never perform."""
+        if self._gate.switching():
+            return CONTEXT_SWITCH_IN_PROGRESS
+        reason = self._capability_reason()
+        if reason is not None:
+            return reason
+        namespace, name = self._view.selected_ns_name(notify=False)
+        if namespace is None or name is None:
+            return UnavailableReason(AvailabilityCode.NO_SELECTION, "No resource selected")
+        return None
+
     async def open_dialog(self) -> None:
         """`shift+f` — resolve the selected target and open the forward dialog.
 
@@ -182,13 +224,9 @@ class ForwardController:
         if not self._gate.reads_allowed():
             return
         epoch = self._gate.epoch()
-        if self._forwards_registry() is None:
-            self._ui.notify("Port-forward unavailable in this build", severity="warning")
-            return
-        if shutil.which("kubectl") is None:
-            self._ui.notify(
-                "kubectl not found on PATH — port-forward requires kubectl", severity="error"
-            )
+        reason = self._capability_reason()
+        if reason is not None:
+            self._ui.notify(reason.message, severity=reason.severity)
             return
         namespace, name = self._view.selected_ns_name()
         if namespace is None or name is None:

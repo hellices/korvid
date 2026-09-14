@@ -81,15 +81,22 @@ class ActionPolicy:
         view: ViewState,
         agent_available: Callable[[], bool],
         log_pane_open: Callable[[], bool],
+        #: Whether an Agent turn is running. None (no agent composed) reads
+        #: as "invokable": a policy built without one must not grey out a
+        #: bound key it knows nothing about.
+        agent_busy: Callable[[], bool] | None = None,
         reason_by_action: Mapping[str, Callable[[], UnavailableReason | None]] | None = None,
     ) -> None:
         self._view = view
         self._agent_available = agent_available
         self._log_pane_open = log_pane_open
+        self._agent_busy = agent_busy
         #: Owner-supplied reason resolvers for actions whose binding stays
         #: enabled but whose *invocation* may still be refused (the generic
-        #: writes: `ResourceWriteController.unavailable_reason`). Actions
-        #: absent from the map are always invokable once bound.
+        #: writes: `ResourceWriteController.unavailable_reason`; the
+        #: capability owners: helm, forwards, transfer, shell, operators,
+        #: logs). Actions absent from the map are always invokable once
+        #: bound.
         self._reason_by_action: Mapping[str, Callable[[], UnavailableReason | None]] = (
             reason_by_action if reason_by_action is not None else {}
         )
@@ -125,13 +132,25 @@ class ActionPolicy:
         keybinding contract (a disabled binding is skipped during dispatch,
         so an overloaded key falls through to the view actually on screen);
         this composes it with the *invocation* reasons an enabled binding's
-        owner (`ResourceWriteController`, for the generic writes) can still
-        refuse, without changing either owner's own notification path."""
+        owner (`ResourceWriteController` for the generic writes, and the
+        capability owners - helm, forwards, transfer, shell, operators,
+        logs - for their own synchronous guards) can still refuse, without
+        changing either owner's own notification path."""
         if not self.binding_enabled(action):
             return ActionAvailability(binding_enabled=False, reason=self._wrong_view_reason(action))
+        return ActionAvailability(binding_enabled=True, reason=self._invocation_reason(action))
+
+    def _invocation_reason(self, action: str) -> UnavailableReason | None:
+        """The owner's reason a *bound* action still can't run, or None."""
         resolver = self._reason_by_action.get(action)
-        reason = None if resolver is None else resolver()
-        return ActionAvailability(binding_enabled=True, reason=reason)
+        if resolver is not None:
+            return resolver()
+        if action == "interrupt_agent" and self._agent_busy is not None and not self._agent_busy():
+            # Ctrl-X is a priority binding that must stay dispatchable (its
+            # visibility is deliberately unchanged), but with no turn in
+            # flight there is nothing for the palette to interrupt.
+            return UnavailableReason(AvailabilityCode.PROTECTED_UI, "No Agent turn is running")
+        return None
 
     def _wrong_view_reason(self, action: str) -> UnavailableReason:
         """Explain a disabled binding, for a palette entry that stays

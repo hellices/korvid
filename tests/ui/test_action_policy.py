@@ -62,6 +62,7 @@ def _policy(
     synthetic: bool = False,
     log_pane_open: Callable[[], bool] = lambda: False,
     agent_available: Callable[[], bool] = lambda: True,
+    agent_busy: Callable[[], bool] | None = None,
     reason_by_action: Mapping[str, Callable[[], UnavailableReason | None]] | None = None,
 ) -> ActionPolicy:
     meta = ResourceMeta(
@@ -76,6 +77,7 @@ def _policy(
         view=FakeView(meta),
         agent_available=agent_available,
         log_pane_open=log_pane_open,
+        agent_busy=agent_busy,
         reason_by_action=reason_by_action,
     )
 
@@ -206,3 +208,29 @@ def test_binding_enabled_stays_true_for_no_selection_and_read_only() -> None:
     )
     assert policy.binding_enabled("delete_resource") is True
     assert policy.availability("delete_resource").binding_enabled is True
+
+
+def test_interrupt_agent_stays_bound_but_is_not_invokable_while_idle() -> None:
+    """Ctrl-X is a priority binding that must keep working as a key (its
+    visibility is deliberately unchanged), but there is nothing to
+    interrupt while no turn is running - the palette says so (#388)."""
+    policy = _policy(group="", plural="pods", agent_busy=lambda: False)
+    availability = policy.availability("interrupt_agent")
+    assert policy.binding_enabled("interrupt_agent") is True
+    assert availability.binding_enabled is True
+    assert availability.reason == UnavailableReason(
+        AvailabilityCode.PROTECTED_UI, "No Agent turn is running"
+    )
+    assert availability.invokable is False
+
+
+def test_interrupt_agent_is_invokable_during_a_turn() -> None:
+    policy = _policy(group="", plural="pods", agent_busy=lambda: True)
+    assert policy.availability("interrupt_agent") == ActionAvailability.enabled()
+
+
+def test_interrupt_agent_is_invokable_without_an_injected_busy_probe() -> None:
+    """The default composition answer is "invokable": a policy built
+    without an agent (tests, headless) must not grey out a bound key."""
+    policy = _policy(group="", plural="pods")
+    assert policy.availability("interrupt_agent").invokable is True

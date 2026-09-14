@@ -21,6 +21,7 @@ import pytest
 from korvid.core.logbuffer import LogBuffer
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.logs import LogLine
+from korvid.ui.action_availability import AvailabilityCode, UnavailableReason
 from korvid.ui.log_controller import LogController
 from korvid.ui.ui_surface import Severity, UiSurface
 
@@ -201,13 +202,14 @@ def make_harness(
         get_log_pane=lambda: pane,
         get_stream_logs=lambda: stream_logs,
         pod_containers=pod_containers or (lambda ns, name: ("main",)),
-        selected_ns_name=lambda: selected,
+        selected_ns_name=lambda *, notify=True: selected,
         visible_pod_keys=visible_pod_keys or (lambda: []),
         current_kind=lambda: current_kind,
         focused_pane=lambda: owner,
         ctx_epoch=lambda: ctx_epoch,
         ctx_switch_crossed=lambda epoch: ctx_switch_crossed,
         ctx_reads_allowed=lambda: ctx_reads_allowed,
+        ctx_switching=lambda: not ctx_reads_allowed,
         refresh_bindings=lambda: refreshes.append(True),
         buffer_max_lines=buffer_max_lines,
     )
@@ -505,3 +507,75 @@ def test_public_tuning_knobs_are_writable(knob: str) -> None:
     h = make_harness()
     setattr(h.controller, knob, 0)
     assert getattr(h.controller, knob) == 0
+
+
+# ---------------------------------------------------------------------------
+# Side-effect-free availability probes (#388 task 4)
+# ---------------------------------------------------------------------------
+
+
+def test_log_availability_reports_no_selected_pod_without_notifying() -> None:
+    """`l` streams the selected pod's containers; with no row selected the
+    palette says so instead of claiming the action can run - and the probe
+    itself notifies nothing (#388 task 4)."""
+    h = make_harness(selected=(None, None))
+    reason = h.controller.unavailable_reason("logs")
+    assert reason == UnavailableReason(AvailabilityCode.NO_SELECTION, "No resource selected")
+    assert h.ui.notifications == []
+
+
+def test_log_availability_reports_a_missing_stream_source() -> None:
+    h = make_harness(stream_logs=None)
+    assert h.controller.unavailable_reason("logs") == UnavailableReason(
+        AvailabilityCode.MISSING_CAPABILITY, "Log streaming unavailable"
+    )
+    assert h.controller.unavailable_reason("logs_multi") == UnavailableReason(
+        AvailabilityCode.MISSING_CAPABILITY, "Log streaming unavailable"
+    )
+    assert h.ui.notifications == []
+
+
+def test_log_availability_reports_a_context_switch() -> None:
+    h = make_harness(ctx_reads_allowed=False)
+    assert h.controller.unavailable_reason("logs") == UnavailableReason(
+        AvailabilityCode.TRANSITION,
+        "A context switch is in progress — try again once it completes",
+    )
+    assert h.ui.notifications == []
+
+
+def test_log_multi_availability_reports_an_empty_pod_list() -> None:
+    """`L` streams every filtered pod; with nothing listed the real handler
+    refuses with "No resource selected" - so does the probe."""
+    h = make_harness(visible_pod_keys=lambda: [])
+    assert h.controller.unavailable_reason("logs_multi") == UnavailableReason(
+        AvailabilityCode.NO_SELECTION, "No resource selected"
+    )
+    assert h.ui.notifications == []
+
+
+def test_log_availability_is_none_when_the_stream_would_open() -> None:
+    h = make_harness(visible_pod_keys=lambda: ["default/web"])
+    assert h.controller.unavailable_reason("logs") is None
+    assert h.controller.unavailable_reason("logs_multi") is None
+    assert h.ui.notifications == []
+
+
+async def test_log_availability_is_none_when_the_key_would_close_the_pane() -> None:
+    """With the pane open in multi mode, `l` closes it rather than adding a
+    pod - a refusal reason there would grey out a working key."""
+    h = make_harness(stream_logs=None)
+    h.pane.display = True
+    h.controller._mode = "L"
+    assert h.controller.unavailable_reason("logs") is None
+    assert h.ui.notifications == []
+
+
+def test_log_pane_actions_report_a_closed_pane() -> None:
+    """The pane-local display actions need a visible pane; `ActionPolicy`
+    already disables their bindings, and the controller agrees on why."""
+    h = make_harness()
+    assert h.controller.unavailable_reason("log_save") == UnavailableReason(
+        AvailabilityCode.PANE_CLOSED, "Open the log pane first"
+    )
+    assert h.ui.notifications == []

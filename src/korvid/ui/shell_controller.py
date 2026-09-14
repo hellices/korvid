@@ -45,6 +45,11 @@ from korvid.core.debugimage import recommend_debug_images
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.writes import WriteOps
+from korvid.ui.action_availability import (
+    CONTEXT_SWITCH_IN_PROGRESS,
+    AvailabilityCode,
+    UnavailableReason,
+)
 from korvid.ui.debug import DebugController
 from korvid.ui.shell import (
     DEBUG_IMAGE,
@@ -66,6 +71,23 @@ logger = logging.getLogger(__name__)
 
 #: Budget for the target-uid lookup that pins a write to one incarnation.
 _UID_LOOKUP_TIMEOUT = 10.0
+
+#: The word the node shell passes to `node_target()`, which is also how that
+#: method phrases its own refusals.
+_NODE_SHELL_ACTION = "node shell"
+
+#: The two "no kubectl" messages, one per shell path, kept as constants so
+#: the notification the keypress emits and the reason the palette probe
+#: returns are the same string (issue #388 task 4).
+_POD_SHELL_KUBECTL = "kubectl not found on PATH — shell-in requires kubectl"
+_NODE_SHELL_KUBECTL = "kubectl not found on PATH — node shell requires kubectl"
+
+
+def _kubectl_missing(message: str) -> UnavailableReason | None:
+    """*message* as a reason when `kubectl` is absent from PATH, else None."""
+    if shutil.which("kubectl") is not None:
+        return None
+    return UnavailableReason(AvailabilityCode.MISSING_CAPABILITY, message, severity="error")
 
 
 def _looks_like_admission_rejection(stderr: str) -> bool:
@@ -163,6 +185,9 @@ class ShellController:
         get_manifest: Callable[[], Callable[..., Any] | None],
         pod_containers: Callable[[str, str], tuple[str, ...]],
         node_target: Callable[[str], tuple[WriteOps, ResourceMeta, str, str | None] | None],
+        #: The silent twin of `node_target`'s refusals, for the availability
+        #: probe: `ResourceWriteController.node_unavailable_reason`.
+        node_unavailable_reason: Callable[[str], UnavailableReason | None],
         settings: Callable[[], ShellSettings],
         target_uid: Callable[[str, str | None, str], Awaitable[str | None]],
     ) -> None:
@@ -174,9 +199,34 @@ class ShellController:
         self._get_manifest_fn = get_manifest
         self._pod_containers = pod_containers
         self._node_target_fn = node_target
+        self._node_unavailable_reason_fn = node_unavailable_reason
         # Read at call time: a `:ctx` switch retargets kube_context.
         self._settings = settings
         self._target_uid_fn = target_uid
+
+    def unavailable_reason(self) -> UnavailableReason | None:
+        """Why `s` can't open a shell right now, or None - a side-effect-free
+        probe for the palette (issue #388 task 4).
+
+        Synchronous and silent, and split exactly the way `shell()` splits:
+        a context switch refuses both paths, then the nodes view answers
+        with the node-shell flow's own refusals (the write client and target
+        `node_target("node shell")` resolves, then `kubectl`) while the pods
+        view answers with the selection and then `kubectl`. Which views bind
+        the key stays `ActionPolicy`'s call."""
+        if self._gate.switching():
+            return CONTEXT_SWITCH_IN_PROGRESS
+        kind = self._view.canonical_kind(self._view.current_kind())
+        meta = self._view.aliases().get(kind)
+        if meta is not None and (meta.group, meta.plural) == ("", "nodes"):
+            reason = self._node_unavailable_reason_fn(_NODE_SHELL_ACTION)
+            if reason is not None:
+                return reason
+            return _kubectl_missing(_NODE_SHELL_KUBECTL)
+        _, name = self._view.selected_ns_name(notify=False)
+        if name is None:
+            return UnavailableReason(AvailabilityCode.NO_SELECTION, "No resource selected")
+        return _kubectl_missing(_POD_SHELL_KUBECTL)
 
     def shell(self) -> None:
         """Drop into a shell inside the selected pod via kubectl exec.
@@ -205,11 +255,9 @@ class ShellController:
             return
         namespace = ns
 
-        if shutil.which("kubectl") is None:
-            self._ui.notify(
-                "kubectl not found on PATH — shell-in requires kubectl",
-                severity="error",
-            )
+        missing = _kubectl_missing(_POD_SHELL_KUBECTL)
+        if missing is not None:
+            self._ui.notify(missing.message, severity=missing.severity)
             return
 
         containers = self._pod_containers(namespace, name)
@@ -537,14 +585,13 @@ class ShellController:
         approval gate with that stated explicitly, is audit-logged
         fail-closed, and the debug pod is deleted when the shell exits.
         """
-        resolved = self._node_target_fn("node shell")
+        resolved = self._node_target_fn(_NODE_SHELL_ACTION)
         if resolved is None:
             return
         ops, meta, name, uid = resolved
-        if shutil.which("kubectl") is None:
-            self._ui.notify(
-                "kubectl not found on PATH — node shell requires kubectl", severity="error"
-            )
+        missing = _kubectl_missing(_NODE_SHELL_KUBECTL)
+        if missing is not None:
+            self._ui.notify(missing.message, severity=missing.severity)
             return
         image = self._settings().node_shell_image or DEBUG_IMAGE
         shell_ns = self._settings().node_shell_namespace or "default"

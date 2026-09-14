@@ -18,6 +18,7 @@ from korvid.core.store import ResourceStore, Summary
 from korvid.core.watch import WatchManager
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.models import GenericSummary, PodSummary
+from korvid.ui.action_availability import AvailabilityCode, UnavailableReason
 from korvid.ui.app import KorvidApp
 from korvid.ui.debug import DebugController
 from korvid.ui.shell import (
@@ -1971,3 +1972,59 @@ async def test_shell_picker_cancelled_when_context_switched_while_open() -> None
                 label="picker epoch refusal",
             )
             mock_call.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Side-effect-free availability probes (#388 task 4)
+# ---------------------------------------------------------------------------
+
+
+async def test_shell_availability_reports_missing_kubectl_without_notifying() -> None:
+    """The palette probe reports the same refusal the `s` key notifies when
+    kubectl is absent, and emits no notification of its own (#388 task 4)."""
+    app = make_app([_pod("api-1")])
+    with patch("shutil.which", return_value=None):
+        async with app.run_test() as pilot:
+            await until(
+                pilot,
+                lambda: app._inspect_surface.cursor_row_key() == "default/api-1",
+                label="pod row selected",
+            )
+            before = len(app._notifications)
+            assert app._shell.unavailable_reason() == UnavailableReason(
+                AvailabilityCode.MISSING_CAPABILITY,
+                "kubectl not found on PATH — shell-in requires kubectl",
+                severity="error",
+            )
+            assert len(app._notifications) == before
+            availability = app._actions.availability("shell")
+            assert availability.binding_enabled is True
+            assert availability.invokable is False
+            assert len(app._notifications) == before
+
+
+async def test_shell_availability_reports_no_selection_before_kubectl() -> None:
+    """`shell()` reads the selection before the PATH check, so the probe
+    must report the same refusal first."""
+    app = make_app([])
+    with patch("shutil.which", return_value=None):
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            before = len(app._notifications)
+            assert app._shell.unavailable_reason() == UnavailableReason(
+                AvailabilityCode.NO_SELECTION, "No resource selected"
+            )
+            assert len(app._notifications) == before
+
+
+async def test_shell_availability_is_none_when_the_shell_would_launch() -> None:
+    app = make_app([_pod("api-1")])
+    with patch("shutil.which", return_value="/usr/bin/kubectl"):
+        async with app.run_test() as pilot:
+            await until(
+                pilot,
+                lambda: app._inspect_surface.cursor_row_key() == "default/api-1",
+                label="pod row selected",
+            )
+            assert app._shell.unavailable_reason() is None
+            assert app._actions.availability("shell").invokable is True

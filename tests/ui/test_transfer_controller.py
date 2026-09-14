@@ -26,6 +26,7 @@ from korvid.core.audit import AuditLog
 from korvid.core.transfer import RemoteEntry, TransferError, TransferSpec
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.models import PodSummary
+from korvid.ui.action_availability import AvailabilityCode, UnavailableReason
 from korvid.ui.transfer import TransferController, TransferScreens
 from korvid.ui.widgets.confirm_screen import ConfirmScreen
 from korvid.ui.widgets.pick_screen import PickScreen
@@ -614,3 +615,56 @@ async def test_a_pod_summary_without_a_uid_carries_no_precondition(tmp_path: Pat
     h.answer(_spec(tmp_path))
     await h.ui.settle()
     assert h.ran == [("default", "api-1", "app", _spec(tmp_path), None)]
+
+
+# ---------------------------------------------------------------------------
+# Side-effect-free availability probes (#388 task 4)
+# ---------------------------------------------------------------------------
+
+
+async def test_transfer_availability_reports_an_in_flight_transfer_without_notifying(
+    tmp_path: Path,
+) -> None:
+    """One transfer at a time is the controller's own synchronous state, so
+    the palette can say so before the user presses ctrl+t - without the
+    notification the real keypress emits (#388 task 4)."""
+    h = FlowHarness(tmp_path)
+    h.controller._in_flight = True
+    reason = h.controller.unavailable_reason()
+    assert reason == UnavailableReason(
+        AvailabilityCode.PROTECTED_UI, "A transfer is already in progress"
+    )
+    assert h.ui.notifications == []
+
+
+async def test_transfer_availability_reports_a_missing_exec_client(tmp_path: Path) -> None:
+    h = FlowHarness(tmp_path, opener=None)
+    reason = h.controller.unavailable_reason()
+    assert reason == UnavailableReason(
+        AvailabilityCode.MISSING_CAPABILITY, "File transfer unavailable (no cluster connection)"
+    )
+    assert h.ui.notifications == []
+
+
+async def test_transfer_availability_reports_a_context_switch(tmp_path: Path) -> None:
+    h = FlowHarness(tmp_path)
+    h.env.context.is_switching = True
+    reason = h.controller.unavailable_reason()
+    assert reason == UnavailableReason(
+        AvailabilityCode.TRANSITION,
+        "A context switch is in progress — try again once it completes",
+    )
+    assert h.ui.notifications == []
+
+
+async def test_transfer_availability_reports_no_selection(tmp_path: Path) -> None:
+    h = FlowHarness(tmp_path, selected=(None, None))
+    reason = h.controller.unavailable_reason()
+    assert reason == UnavailableReason(AvailabilityCode.NO_SELECTION, "No resource selected")
+    assert h.ui.notifications == []
+
+
+async def test_transfer_availability_is_none_when_the_dialog_would_open(tmp_path: Path) -> None:
+    h = FlowHarness(tmp_path)
+    assert h.controller.unavailable_reason() is None
+    assert h.ui.notifications == []

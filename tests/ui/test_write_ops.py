@@ -1962,3 +1962,65 @@ async def test_failed_write_records_the_error_outcome_it_audited(tmp_path: Path)
     assert actions[0] == ("delete", "intent")
     assert actions[1][0] == "delete"
     assert actions[1][1].startswith("error:")
+
+
+@pytest.mark.parametrize(
+    ("action", "label"),
+    [
+        ("delete_resource", "Delete"),
+        ("rollout_restart", "Rollout restart"),
+        ("edit_resource", "Edit"),
+        ("scale_resource", "Scale"),
+        ("resize_pod", "Resize"),
+    ],
+)
+async def test_unavailable_reason_reports_a_missing_write_client(
+    tmp_path: Path, action: str, label: str
+) -> None:
+    """Carry-over from the task 3 review: every generic write refuses at the
+    keypress when the session has no write client ("<Action> unavailable in
+    this session"), so the palette must not claim the action is invokable -
+    with the handler's own wording and no notification (#388 task 4)."""
+    rec = Recorder()
+    app = make_app(rec, tmp_path / "audit.jsonl")
+    app._write_ops = None
+    async with app.run_test() as pilot:
+        await _to_view(pilot, "deployments")
+        before = len(app._notifications)
+        assert app._resource_writes.unavailable_reason(action) == UnavailableReason(
+            AvailabilityCode.MISSING_CAPABILITY, f"{label} unavailable in this session"
+        )
+        assert len(app._notifications) == before
+
+
+async def test_unavailable_reason_reports_a_missing_write_client_before_the_kind_check(
+    tmp_path: Path,
+) -> None:
+    """`rollout_restart()` reads the write client before it decides the kind
+    does not apply, so the probe must report the same first refusal."""
+    rec = Recorder()
+    app = make_app(rec, tmp_path / "audit.jsonl")
+    app._write_ops = None
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: _selected_name(app) == "web-1", label="pod row selected")
+        assert app._resource_writes.unavailable_reason("rollout_restart") == UnavailableReason(
+            AvailabilityCode.MISSING_CAPABILITY, "Rollout restart unavailable in this session"
+        )
+
+
+async def test_resize_availability_reports_an_unsupported_cluster(tmp_path: Path) -> None:
+    """`R` refuses when discovery never found pods/resize; the palette must
+    say so rather than offer a key that always warns (#388 task 4)."""
+    rec = Recorder()
+    app = make_app(rec, tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: _selected_name(app) == "web-1", label="pod row selected")
+        app._pod_resize_supported = False
+        before = len(app._notifications)
+        assert app._resource_writes.unavailable_reason("resize_pod") == UnavailableReason(
+            AvailabilityCode.UNSUPPORTED_RESOURCE,
+            "This cluster does not expose pods/resize (requires Kubernetes 1.35+)",
+        )
+        app._pod_resize_supported = True
+        assert app._resource_writes.unavailable_reason("resize_pod") is None
+        assert len(app._notifications) == before
