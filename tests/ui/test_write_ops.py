@@ -1993,6 +1993,28 @@ async def test_unavailable_reason_reports_a_missing_write_client(
         assert len(app._notifications) == before
 
 
+async def test_unavailable_reason_reports_a_missing_manifest_source_for_edit(
+    tmp_path: Path,
+) -> None:
+    """Regression (#388 task 4 review): `edit()` refuses with "Edit
+    unavailable in this session" when *either* `write_ops` or `get_manifest`
+    is missing (`ops is None or self._get_manifest() is None`). Before the
+    fix, the probe checked only `write_ops`, so with a write client present
+    but no manifest source wired the palette would have advertised `e` as
+    invokable while the keypress still refuses."""
+    rec = Recorder()
+    app = make_app(rec, tmp_path / "audit.jsonl")  # default: no get_manifest wired
+    assert app._write_ops is not None
+    assert app._get_manifest is None
+    async with app.run_test() as pilot:
+        await _to_view(pilot, "deployments")
+        before = len(app._notifications)
+        assert app._resource_writes.unavailable_reason("edit_resource") == UnavailableReason(
+            AvailabilityCode.MISSING_CAPABILITY, "Edit unavailable in this session"
+        )
+        assert len(app._notifications) == before
+
+
 async def test_unavailable_reason_reports_a_missing_write_client_before_the_kind_check(
     tmp_path: Path,
 ) -> None:

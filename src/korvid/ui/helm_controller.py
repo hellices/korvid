@@ -230,6 +230,16 @@ class HelmController:
             )
         return None
 
+    def cli_unavailable_reason(self) -> UnavailableReason | None:
+        """Whether the helm binary is missing right now, or None - the one
+        fact `gate()` notifies for a real keypress, returned silently for a
+        probe (issue #388 task 4 review). `ResourceWriteController` injects
+        this so `delete_resource` on the helm release browser - which routes
+        to `uninstall_selected()`, and therefore through `gate()`, before the
+        generic write path - can report the same missing-CLI refusal without
+        redeclaring `_HELM_MISSING`'s wording of its own."""
+        return _HELM_MISSING if self._helm() is None else None
+
     def unavailable_reason(self, action: str) -> UnavailableReason | None:
         """Why `action` can't run right now, or None - a side-effect-free
         probe for the palette (issue #388 task 4). Synchronous, reads only
@@ -254,8 +264,9 @@ class HelmController:
             reason = self._write_gate_reason()
             if reason is not None:
                 return reason
-            if self._helm() is None:
-                return _HELM_MISSING
+            reason = self.cli_unavailable_reason()
+            if reason is not None:
+                return reason
         if action in _HELM_ROW_ACTIONS:
             _, name = self._view.selected_ns_name(notify=False)
             if name is None:

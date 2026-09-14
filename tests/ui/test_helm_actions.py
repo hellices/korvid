@@ -1431,6 +1431,34 @@ async def test_delete_action_availability_reports_read_only_on_the_release_view(
         )
 
 
+async def test_delete_action_availability_reports_the_missing_helm_binary(
+    tmp_path: Path,
+) -> None:
+    """Regression (#388 task 4 review): `delete_resource` on the helm
+    release browser routes to `HelmController.uninstall_selected()`, whose
+    own `gate()` refuses with `_HELM_MISSING` when no helm binary was
+    detected - the same fact `helm_install`'s probe already reports. Before
+    the fix, `ResourceWriteController.unavailable_reason("delete_resource")`
+    checked only the read-only/audit gate and the selection, so the palette
+    would have advertised Ctrl-D as invokable on a release row with no helm
+    binary, even though the keypress refuses."""
+    app = make_app(helm=None, audit_path=tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "helm", "helmreleases")
+        await _rows_listed(pilot, app, 1)
+        assert app._actions.binding_enabled("delete_resource") is True
+        before = len(app._notifications)
+        availability = app._actions.availability("delete_resource")
+        assert availability.binding_enabled is True
+        assert availability.reason == UnavailableReason(
+            AvailabilityCode.MISSING_CAPABILITY,
+            "helm CLI not found on PATH - install/upgrade/rollback/uninstall unavailable",
+            severity="error",
+        )
+        assert availability.invokable is False
+        assert len(app._notifications) == before
+
+
 async def test_uninstall_rejects_release_without_captured_identity(tmp_path: Path) -> None:
     helm = FakeHelm()
     audit_path = tmp_path / "audit.jsonl"

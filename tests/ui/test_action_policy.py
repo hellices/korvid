@@ -234,3 +234,18 @@ def test_interrupt_agent_is_invokable_without_an_injected_busy_probe() -> None:
     without an agent (tests, headless) must not grey out a bound key."""
     policy = _policy(group="", plural="pods")
     assert policy.availability("interrupt_agent").invokable is True
+
+
+def test_interrupt_agent_resolver_registered_via_reason_by_action_wins() -> None:
+    """Regression (#388 task 4 review): `interrupt_agent`'s default resolver
+    is folded into `_reason_by_action` at construction rather than checked
+    as a second, hard-coded branch - one source of truth, so an explicit
+    registration (a future caller composing it differently) overrides the
+    `agent_busy` default instead of silently losing to it or racing it."""
+    policy = _policy(
+        group="",
+        plural="pods",
+        agent_busy=lambda: False,  # idle: the default would refuse
+        reason_by_action={"interrupt_agent": lambda: None},  # explicit: always invokable
+    )
+    assert policy.availability("interrupt_agent") == ActionAvailability.enabled()

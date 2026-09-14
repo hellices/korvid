@@ -17,6 +17,7 @@ from collections.abc import AsyncIterator, Callable
 from typing import Any
 
 import pytest
+from textual.css.query import NoMatches
 
 from korvid.core.logbuffer import LogBuffer
 from korvid.k8s.errors import ApiStatusError
@@ -192,6 +193,7 @@ def make_harness(
     ctx_switch_crossed: bool = False,
     ctx_reads_allowed: bool = True,
     buffer_max_lines: int = 5000,
+    get_log_pane: Callable[[], FakeLogPane] | None = None,
 ) -> _Harness:
     ui = FakeUiSurface()
     pane = FakeLogPane()
@@ -199,7 +201,7 @@ def make_harness(
     refreshes: list[bool] = []
     controller = LogController(
         ui=ui,
-        get_log_pane=lambda: pane,
+        get_log_pane=get_log_pane or (lambda: pane),
         get_stream_logs=lambda: stream_logs,
         pod_containers=pod_containers or (lambda ns, name: ("main",)),
         selected_ns_name=lambda *, notify=True: selected,
@@ -577,5 +579,29 @@ def test_log_pane_actions_report_a_closed_pane() -> None:
     h = make_harness()
     assert h.controller.unavailable_reason("log_save") == UnavailableReason(
         AvailabilityCode.PANE_CLOSED, "Open the log pane first"
+    )
+    assert h.ui.notifications == []
+
+
+def _raise_no_matches() -> Any:
+    raise NoMatches("LogPane is not mounted yet")
+
+
+def test_unavailable_reason_reports_a_closed_pane_before_the_pane_is_composed() -> None:
+    """Regression (#388 task 4 review): the app's real `get_log_pane`
+    accessor (`app._log_pane`, a `query_one(LogPane)`) raises `NoMatches`
+    before Textual has mounted the widget - exactly the window
+    `KorvidApp._log_pane_open` already guards for `ActionPolicy.
+    binding_enabled`. A probe must never raise where a real keypress never
+    could, so `unavailable_reason` must report the same "pane closed"
+    fact instead of propagating the exception, both for the pane-local
+    actions and for `logs` (whose "would-close-a-pane" branch reads the
+    same accessor)."""
+    h = make_harness(get_log_pane=_raise_no_matches, stream_logs=None)
+    assert h.controller.unavailable_reason("log_save") == UnavailableReason(
+        AvailabilityCode.PANE_CLOSED, "Open the log pane first"
+    )
+    assert h.controller.unavailable_reason("logs") == UnavailableReason(
+        AvailabilityCode.MISSING_CAPABILITY, "Log streaming unavailable"
     )
     assert h.ui.notifications == []

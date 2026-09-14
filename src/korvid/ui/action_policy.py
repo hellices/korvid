@@ -96,10 +96,18 @@ class ActionPolicy:
         #: writes: `ResourceWriteController.unavailable_reason`; the
         #: capability owners: helm, forwards, transfer, shell, operators,
         #: logs). Actions absent from the map are always invokable once
-        #: bound.
-        self._reason_by_action: Mapping[str, Callable[[], UnavailableReason | None]] = (
+        #: bound. `interrupt_agent`'s resolver is folded in here too (unless
+        #: a caller already supplied one) rather than left as a second,
+        #: hard-coded lookup path in `_invocation_reason` - one source of
+        #: truth, so a future caller that *does* register `interrupt_agent`
+        #: explicitly overrides the default instead of silently competing
+        #: with it (#388 task 4 review).
+        reasons: dict[str, Callable[[], UnavailableReason | None]] = dict(
             reason_by_action if reason_by_action is not None else {}
         )
+        if agent_busy is not None:
+            reasons.setdefault("interrupt_agent", self._interrupt_agent_reason)
+        self._reason_by_action: Mapping[str, Callable[[], UnavailableReason | None]] = reasons
 
     def binding_enabled(self, action: str) -> bool:
         """Whether `action`'s binding is enabled in the current composition and view."""
@@ -141,16 +149,21 @@ class ActionPolicy:
         return ActionAvailability(binding_enabled=True, reason=self._invocation_reason(action))
 
     def _invocation_reason(self, action: str) -> UnavailableReason | None:
-        """The owner's reason a *bound* action still can't run, or None."""
+        """The owner's reason a *bound* action still can't run, or None -
+        `_reason_by_action` is the one place that answers this."""
         resolver = self._reason_by_action.get(action)
-        if resolver is not None:
-            return resolver()
-        if action == "interrupt_agent" and self._agent_busy is not None and not self._agent_busy():
-            # Ctrl-X is a priority binding that must stay dispatchable (its
-            # visibility is deliberately unchanged), but with no turn in
-            # flight there is nothing for the palette to interrupt.
-            return UnavailableReason(AvailabilityCode.PROTECTED_UI, "No Agent turn is running")
-        return None
+        return None if resolver is None else resolver()
+
+    def _interrupt_agent_reason(self) -> UnavailableReason | None:
+        """The default `interrupt_agent` resolver: Ctrl-X is a priority
+        binding that must stay dispatchable (its visibility is deliberately
+        unchanged), but with no turn in flight there is nothing for the
+        palette to interrupt. Only registered when `agent_busy` was
+        injected (see `__init__`); the `None` check below is defensive
+        narrowing for mypy, not a reachable branch."""
+        if self._agent_busy is None or self._agent_busy():
+            return None
+        return UnavailableReason(AvailabilityCode.PROTECTED_UI, "No Agent turn is running")
 
     def _wrong_view_reason(self, action: str) -> UnavailableReason:
         """Explain a disabled binding, for a palette entry that stays

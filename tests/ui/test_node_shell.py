@@ -1034,3 +1034,25 @@ async def test_node_write_availability_is_none_with_a_write_client(tmp_path: Pat
         await _to_nodes(pilot)
         assert app._actions.availability("cordon_node").invokable is True
         assert app._actions.availability("drain_node").invokable is True
+
+
+async def test_cordon_availability_resolves_the_write_target_once(tmp_path: Path) -> None:
+    """`_node_action_reason` must resolve `write_target(notify=False)` once
+    and reuse it for the drain-in-progress check, not twice (#388 task 4
+    review): a second resolve is wasted synchronous work on every palette
+    query, and threading one target through keeps the two checks from ever
+    reading a target that could diverge between calls."""
+    app = make_app(DeleteRecorder(), tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        await _to_nodes(pilot)
+        original = app._writes.write_target
+        calls: list[bool] = []
+
+        def counting(*, notify: bool = True) -> Any:
+            calls.append(notify)
+            return original(notify=notify)
+
+        with patch.object(app._writes, "write_target", side_effect=counting):
+            reason = app._resource_writes.unavailable_reason("cordon_node")
+        assert reason is None
+        assert calls.count(False) == 1

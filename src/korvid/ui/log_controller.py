@@ -34,6 +34,8 @@ from collections.abc import AsyncIterator, Callable
 from datetime import datetime
 from typing import Protocol
 
+from textual.css.query import NoMatches
+
 from korvid.core.errors import explain_api_error
 from korvid.core.logbuffer import LogBuffer
 from korvid.core.logexport import default_log_export_dir, export_log_lines
@@ -273,6 +275,19 @@ class LogController:
     # Open / toggle entry points (`l` and `L`)
     # ------------------------------------------------------------------
 
+    def _pane_displayed(self) -> bool:
+        """`get_log_pane().display`, guarded against the pre-compose window:
+        the app's own accessor (`app._log_pane`) does a `query_one(LogPane)`
+        that raises `NoMatches` before Textual has mounted the widget, and
+        `unavailable_reason` is a probe that must never raise where a real
+        keypress never could (issue #388 task 4 review) - `KorvidApp` guards
+        the same fact the same way for `ActionPolicy.binding_enabled`
+        (`_log_pane_open`); no pane yet reads as not displayed."""
+        try:
+            return self._get_log_pane().display
+        except NoMatches:
+            return False
+
     def unavailable_reason(self, action: str) -> UnavailableReason | None:
         """Why `action` can't run right now, or None - a side-effect-free
         probe for the palette (issue #388 task 4). Synchronous and silent.
@@ -290,14 +305,14 @@ class LogController:
         helpers that notify while they compute, which a probe must never
         do."""
         if action in _PANE_LOCAL_ACTIONS:
-            if not self._get_log_pane().display:
+            if not self._pane_displayed():
                 return UnavailableReason(AvailabilityCode.PANE_CLOSED, "Open the log pane first")
             return None
         if action not in ("logs", "logs_multi"):
             return None
         if self._ctx_switching():
             return CONTEXT_SWITCH_IN_PROGRESS
-        if action == "logs" and self._get_log_pane().display and self._mode != "l":
+        if action == "logs" and self._pane_displayed() and self._mode != "l":
             # `l` closes a pane opened in multi/previous mode; nothing else
             # is read, so nothing else can refuse.
             return None

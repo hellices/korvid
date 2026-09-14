@@ -276,6 +276,7 @@ class ResourceWriteController:
         managed_note_from: ManagedNoteFrom,
         pod_resize_supported: Callable[[], bool],
         helm_uninstall: Callable[[], None],
+        helm_cli_unavailable_reason: Callable[[], UnavailableReason | None],
         operators: OperatorUninstalls,
     ) -> None:
         self._writes = writes
@@ -289,6 +290,7 @@ class ResourceWriteController:
         self._managed_note_from = managed_note_from
         self._pod_resize_supported = pod_resize_supported
         self._helm_uninstall = helm_uninstall
+        self._helm_cli_unavailable_reason = helm_cli_unavailable_reason
         self._operators = operators
         #: The in-flight drain worker, if any - pressing the drain key again
         #: cancels it (evictions stop; the node stays cordoned).
@@ -327,17 +329,28 @@ class ResourceWriteController:
         The session's write client comes first, exactly as every flow below
         reads it before resolving a target (#388 task 4): without one the
         keypress refuses with "<Action> unavailable in this session", so the
-        palette must not advertise the action as invokable.
+        palette must not advertise the action as invokable. `edit_resource`
+        carries a second half of that same refusal: `edit()` also refuses
+        when the manifest source is missing (`ops is None or
+        self._get_manifest() is None`), so the probe must check both halves
+        with the one wording the handler uses, not merely the write client
+        (#388 task 4 review).
 
         `delete_resource` on the helm release browser is the one exception:
         Ctrl-D there routes to `helm uninstall` *before* the generic
         `write_target` path (issue #117, `delete()` below), so the generic
         "this is a read-only view" refusal must not apply to it - only the
-        read-only/audit gate `HelmController.gate()` itself enforces."""
+        read-only/audit gate and the missing-helm-binary gate
+        `HelmController.gate()` itself enforces (the latter injected here so
+        this controller never redeclares `_HELM_MISSING`'s wording of its
+        own, #388 task 4 review)."""
         if action in _NODE_ACTIONS:
             return self._node_action_reason(_NODE_ACTIONS[action])
         if action == "delete_resource" and self._is_helm_release_view():
             reason = self._writes.readonly_or_audit_reason()
+            if reason is not None:
+                return reason
+            reason = self._helm_cli_unavailable_reason()
             if reason is not None:
                 return reason
             _, name = self._view.selected_ns_name(notify=False)
@@ -345,7 +358,10 @@ class ResourceWriteController:
                 return UnavailableReason(AvailabilityCode.NO_SELECTION, "No resource selected")
             return None
         label = _WRITE_CLIENT_LABELS.get(action)
-        if label is not None and self._write_ops() is None:
+        if label is not None and (
+            self._write_ops() is None
+            or (action == "edit_resource" and self._get_manifest() is None)
+        ):
             return UnavailableReason(
                 AvailabilityCode.MISSING_CAPABILITY, f"{label} unavailable in this session"
             )
@@ -393,32 +409,47 @@ class ResourceWriteController:
         (issue #388 task 4). `action` is the same word `node_target` is
         called with ("cordon", "drain", "node shell"), so the wording
         matches the real refusal exactly."""
+        return self._node_reason_and_target(action)[0]
+
+    def _node_reason_and_target(
+        self, action: str
+    ) -> tuple[UnavailableReason | None, tuple[ResourceMeta, str | None, str, str | None] | None]:
+        """`node_unavailable_reason`'s checks, plus the resolved
+        `write_target` on a clean pass - so `_node_action_reason` can reuse
+        the one resolve for its own drain-in-progress check instead of
+        calling `write_target(notify=False)` a second time (#388 task 4
+        review)."""
         if self._write_ops() is None:
-            return UnavailableReason(
-                AvailabilityCode.MISSING_CAPABILITY, f"{action} unavailable in this session"
+            return (
+                UnavailableReason(
+                    AvailabilityCode.MISSING_CAPABILITY, f"{action} unavailable in this session"
+                ),
+                None,
             )
         reason = self._writes.unavailable_reason()
         if reason is not None:
-            return reason
+            return reason, None
         target = self._writes.write_target(notify=False)
         if target is None:
-            return UnavailableReason(AvailabilityCode.NO_SELECTION, "No resource selected")
+            return UnavailableReason(AvailabilityCode.NO_SELECTION, "No resource selected"), None
         meta = target[0]
         if (meta.group, meta.plural) != ("", "nodes"):
-            return UnavailableReason(
-                AvailabilityCode.UNSUPPORTED_RESOURCE,
-                f"{action} does not apply to {gvr_label(meta)}",
+            return (
+                UnavailableReason(
+                    AvailabilityCode.UNSUPPORTED_RESOURCE,
+                    f"{action} does not apply to {gvr_label(meta)}",
+                ),
+                None,
             )
-        return None
+        return None, target
 
     def _node_action_reason(self, action: str) -> UnavailableReason | None:
         """`node_unavailable_reason` plus the cordon/uncordon refusal a
         running drain owns: the drain holds the node's schedulable state
         until it finishes or is cancelled."""
-        reason = self.node_unavailable_reason(action)
+        reason, target = self._node_reason_and_target(action)
         if reason is not None or action == "drain":
             return reason
-        target = self._writes.write_target(notify=False)
         return None if target is None else self._drain_in_progress_reason(target[2])
 
     def _drain_in_progress_reason(self, name: str) -> UnavailableReason | None:
