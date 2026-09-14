@@ -1166,6 +1166,34 @@ def test_write_unavailable_reason_is_none_when_a_write_would_resolve(tmp_path: P
     assert env.ui.notifications == []
 
 
+def test_readonly_or_audit_reason_skips_the_kind_checks(tmp_path: Path) -> None:
+    """`ResourceWriteController`'s helm-delete exception (#388 task 3
+    review) needs the read-only/audit gate alone, without the "synthetic
+    view" refusal `unavailable_reason()` folds in - the helm release
+    browser is exactly the synthetic view Ctrl-D's helm uninstall must not
+    be blocked on."""
+    view = FakeView(kind="helmreleases", aliases={"helmreleases": _HELM_META})
+    env = make_env(tmp_path, view=view)
+    assert env.coordinator.readonly_or_audit_reason() is None
+    assert env.ui.notifications == []
+
+
+def test_readonly_or_audit_reason_reports_read_only(tmp_path: Path) -> None:
+    env = make_env(tmp_path, view=FakeView(readonly=True))
+    assert env.coordinator.readonly_or_audit_reason() == UnavailableReason(
+        AvailabilityCode.READ_ONLY, "Read-only mode: cluster writes are disabled"
+    )
+    assert env.ui.notifications == []
+
+
+def test_readonly_or_audit_reason_reports_a_missing_audit_sink(tmp_path: Path) -> None:
+    env = make_env(tmp_path, audit="none")
+    assert env.coordinator.readonly_or_audit_reason() == UnavailableReason(
+        AvailabilityCode.MISSING_CAPABILITY, "Writes disabled: no audit log configured"
+    )
+    assert env.ui.notifications == []
+
+
 def test_context_intact_refuses_after_a_context_switch(tmp_path: Path) -> None:
     env = make_env(tmp_path)
     epoch = env.coordinator.epoch()

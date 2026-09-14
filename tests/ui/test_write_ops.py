@@ -337,7 +337,8 @@ async def test_rollout_restart_rejected_on_pods(tmp_path: Path) -> None:
 
 async def test_unavailable_reason_matches_the_rollout_restart_key_refusal(tmp_path: Path) -> None:
     """A palette probe on `pods` must explain the same refusal the `r` key
-    would notify - and must not notify while doing it (#388)."""
+    would notify - wording included, so the palette and the key never
+    drift (#388 task 3 review) - and must not notify while doing it."""
     rec = Recorder()
     app = make_app(rec, tmp_path / "audit.jsonl")
     async with app.run_test() as pilot:
@@ -345,7 +346,22 @@ async def test_unavailable_reason_matches_the_rollout_restart_key_refusal(tmp_pa
         before = len(app._notifications)
         reason = app._resource_writes.unavailable_reason("rollout_restart")
         assert reason == UnavailableReason(
-            AvailabilityCode.UNSUPPORTED_RESOURCE, "Restart does not apply to pods"
+            AvailabilityCode.UNSUPPORTED_RESOURCE, "rollout restart does not apply to pods"
+        )
+        assert len(app._notifications) == before
+
+
+async def test_unavailable_reason_matches_the_scale_key_refusal(tmp_path: Path) -> None:
+    """Same wording guarantee as the restart probe above, for `S` (#388
+    task 3 review)."""
+    rec = Recorder()
+    app = make_app(rec, tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: _selected_name(app) == "web-1", label="pod row selected")
+        before = len(app._notifications)
+        reason = app._resource_writes.unavailable_reason("scale_resource")
+        assert reason == UnavailableReason(
+            AvailabilityCode.UNSUPPORTED_RESOURCE, "scale does not apply to pods"
         )
         assert len(app._notifications) == before
 

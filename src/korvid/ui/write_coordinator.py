@@ -337,11 +337,17 @@ class WriteCoordinator(WriteGate):
         pane = self._focused_pane()
         return WriteOrigin(pane, pane.scope)
 
-    def _static_unavailable_reason(self) -> UnavailableReason | None:
-        """The write checks that don't depend on the current selection: the
-        single owner both `write_target()` (which notifies its exact text)
-        and `unavailable_reason()` (fully silent) consult, so neither can
-        drift from the other's idea of "why not"."""
+    def readonly_or_audit_reason(self) -> UnavailableReason | None:
+        """The read-only and fail-closed-audit checks alone, without the
+        *kind* checks below (unknown/synthetic). Exposed for
+        `ResourceWriteController`'s helm-delete exception (#388 task 3
+        review): Ctrl-D on the helm release browser routes to `helm
+        uninstall` (issue #117), not the generic synthetic-view write path,
+        so it must still honor read-only/missing-audit - the same checks
+        `HelmController.gate()` enforces with matching wording before it
+        uninstalls - without inheriting the "this is a read-only view"
+        refusal that (correctly) blocks every *other* generic write on a
+        synthetic view."""
         if self._view.readonly():
             return UnavailableReason(
                 AvailabilityCode.READ_ONLY, "Read-only mode: cluster writes are disabled"
@@ -351,6 +357,16 @@ class WriteCoordinator(WriteGate):
             return UnavailableReason(
                 AvailabilityCode.MISSING_CAPABILITY, "Writes disabled: no audit log configured"
             )
+        return None
+
+    def _static_unavailable_reason(self) -> UnavailableReason | None:
+        """The write checks that don't depend on the current selection: the
+        single owner both `write_target()` (which notifies its exact text)
+        and `unavailable_reason()` (fully silent) consult, so neither can
+        drift from the other's idea of "why not"."""
+        reason = self.readonly_or_audit_reason()
+        if reason is not None:
+            return reason
         kind = self._view.canonical_kind(self._view.current_kind())
         meta = self._view.aliases().get(kind)
         if meta is None:

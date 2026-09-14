@@ -27,6 +27,7 @@ from korvid.k8s.helm import (
     release_uid,
 )
 from korvid.k8s.helmcli import ChartHit, HelmCLI, HelmError, HelmPreviewUnsupported, HelmRepo
+from korvid.ui.action_availability import AvailabilityCode, UnavailableReason
 from korvid.ui.app import KorvidApp
 from korvid.ui.widgets.confirm_screen import ConfirmScreen
 from korvid.ui.widgets.helm_chart_search import HelmChartSearchScreen
@@ -1376,6 +1377,58 @@ async def test_uninstall_ctrl_d_on_release_confirms_and_executes(tmp_path: Path)
         assert entries[0]["action"] == "helm-uninstall"
         assert entries[0]["outcome"] == "intent"
         assert entries[-1]["outcome"] == "success"
+
+
+async def test_delete_action_availability_is_invokable_on_the_release_view(
+    tmp_path: Path,
+) -> None:
+    """Regression (#388 task 3 review): `ActionPolicy.binding_enabled`
+    correctly keeps `delete_resource` bound on the helm release browser
+    because Ctrl-D routes to `helm uninstall` before the generic
+    `write_target` path (issue #117) - so the wired
+    `ActionPolicy.availability("delete_resource")` must agree the action is
+    *invokable*, not merely bound. Before the fix,
+    `ResourceWriteController.unavailable_reason("delete_resource")` asked
+    `WriteCoordinator.unavailable_reason()` first, which blanket-rejects
+    every synthetic view ("{kind} is a read-only view") - so the palette
+    would have shown Ctrl-D as bound yet permanently refused on the one
+    synthetic view where it actually works."""
+    helm = FakeHelm()
+    app = make_app(helm=helm, audit_path=tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "helm", "helmreleases")
+        await _rows_listed(pilot, app, 1)
+        assert app._actions.binding_enabled("delete_resource") is True
+        availability = app._actions.availability("delete_resource")
+        assert availability.binding_enabled is True
+        assert availability.reason is None
+        assert availability.invokable is True
+
+        # The fix must not weaken generic synthetic-resource blocking: the
+        # helm release browser has no `edit_resource` exception, so that
+        # generic write must stay refused as a read-only view.
+        edit_availability = app._actions.availability("edit_resource")
+        assert edit_availability.binding_enabled is False
+        assert edit_availability.reason == UnavailableReason(
+            AvailabilityCode.UNSUPPORTED_RESOURCE, "HelmRelease is a read-only view"
+        )
+
+
+async def test_delete_action_availability_reports_read_only_on_the_release_view(
+    tmp_path: Path,
+) -> None:
+    """The helm-delete exception still defers to the read-only gate
+    `HelmController.gate()` itself enforces before uninstalling (#388)."""
+    helm = FakeHelm()
+    app = make_app(helm=helm, audit_path=tmp_path / "audit.jsonl", readonly=True)
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "helm", "helmreleases")
+        await _rows_listed(pilot, app, 1)
+        availability = app._actions.availability("delete_resource")
+        assert availability.binding_enabled is True
+        assert availability.reason == UnavailableReason(
+            AvailabilityCode.READ_ONLY, "Read-only mode: cluster writes are disabled"
+        )
 
 
 async def test_uninstall_rejects_release_without_captured_identity(tmp_path: Path) -> None:

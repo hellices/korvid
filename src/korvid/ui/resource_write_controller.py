@@ -302,26 +302,53 @@ class ResourceWriteController:
         owner checks (read-only, missing audit, unknown/synthetic kind,
         silent selection) via `write_target(notify=False)`, so it never
         resolves or notifies twice: the same call this method makes to
-        probe is the one `_capture()` makes to dispatch, just silenced."""
+        probe is the one `_capture()` makes to dispatch, just silenced.
+
+        `delete_resource` on the helm release browser is the one exception:
+        Ctrl-D there routes to `helm uninstall` *before* the generic
+        `write_target` path (issue #117, `delete()` below), so the generic
+        "this is a read-only view" refusal must not apply to it - only the
+        read-only/audit gate `HelmController.gate()` itself enforces."""
+        if action == "delete_resource" and self._is_helm_release_view():
+            reason = self._writes.readonly_or_audit_reason()
+            if reason is not None:
+                return reason
+            _, name = self._view.selected_ns_name(notify=False)
+            if name is None:
+                return UnavailableReason(AvailabilityCode.NO_SELECTION, "No resource selected")
+            return None
         reason = self._writes.unavailable_reason()
         if reason is not None:
             return reason
         target = self._writes.write_target(notify=False)
         if target is None:
             # Defensive only: `unavailable_reason()` above shares every
-            # check `write_target()` makes, so this should be unreachable.
-            return UnavailableReason(AvailabilityCode.NO_SELECTION, "Select a resource first")
+            # check `write_target()` makes, so this is unreachable - kept,
+            # with the coordinator's own NO_SELECTION wording (not a second
+            # invented one), only so mypy can narrow `target` below.
+            return UnavailableReason(AvailabilityCode.NO_SELECTION, "No resource selected")
         meta = target[0]
         if action == "rollout_restart" and (meta.group, meta.plural) not in RESTARTABLE:
             return UnavailableReason(
                 AvailabilityCode.UNSUPPORTED_RESOURCE,
-                f"Restart does not apply to {gvr_label(meta)}",
+                f"rollout restart does not apply to {gvr_label(meta)}",
             )
         if action == "scale_resource" and (meta.group, meta.plural) not in SCALABLE:
             return UnavailableReason(
-                AvailabilityCode.UNSUPPORTED_RESOURCE, f"Scale does not apply to {gvr_label(meta)}"
+                AvailabilityCode.UNSUPPORTED_RESOURCE, f"scale does not apply to {gvr_label(meta)}"
             )
         return None
+
+    def _is_helm_release_view(self) -> bool:
+        """Whether the current view is the helm release browser - the one
+        synthetic view where Ctrl-D means `helm uninstall`, not a generic
+        write (issue #117). Shared by `delete()` and `unavailable_reason()`
+        so the two can never disagree on which view gets the exception."""
+        current = self._view.aliases().get(self._view.canonical_kind(self._view.current_kind()))
+        return current is not None and (current.group, current.plural) == (
+            HELM_RELEASES_META.group,
+            HELM_RELEASES_META.plural,
+        )
 
     def _capture(self) -> WriteTarget | None:
         """Resolve and pin the selected row for a write flow."""
@@ -389,11 +416,7 @@ class ResourceWriteController:
         release browser the key means `helm uninstall` (issue #117) - helm
         must remove the release's own bookkeeping, a raw Secret delete would
         orphan the deployed resources."""
-        current = self._view.aliases().get(self._view.canonical_kind(self._view.current_kind()))
-        if current is not None and (current.group, current.plural) == (
-            HELM_RELEASES_META.group,
-            HELM_RELEASES_META.plural,
-        ):
+        if self._is_helm_release_view():
             self._helm_uninstall()
             return
         ops = self._write_ops()
