@@ -31,6 +31,7 @@ from __future__ import annotations
 import asyncio
 import http.server
 import json
+import socketserver
 import ssl
 import threading
 from collections.abc import AsyncIterator
@@ -153,21 +154,35 @@ async def _answer(provider: Any) -> list[dict[str, Any]]:
     return events
 
 
-async def test_tearing_the_endpoint_down_leaves_its_event_loop_running(
-    tmp_path: Path,
+async def test_the_endpoint_shuts_its_server_down_off_the_event_loop_thread(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A callback queued before teardown must still run while it happens.
+    """`shutdown()` must execute on some other thread than this one.
 
-    That is the property the endpoint's clients depend on: asyncio *queues*
-    a connection's socket release on the loop rather than performing it
-    synchronously, so a teardown that holds the loop strands every release it
-    still owes — and deadlocks against an accept thread waiting for one.
+    It blocks until the accept loop notices the request, and that loop runs
+    the server-side TLS handshake inline — so it can be waiting for a client
+    close this very event loop has only *queued*. Which thread runs it is the
+    property under test: an outcome probe cannot stand in for it, because any
+    later `await` in the same teardown drains a queued callback and would hide
+    a `shutdown()` that had gone back to blocking the loop.
     """
+    ran_on: list[int] = []
+    real_shutdown = socketserver.BaseServer.shutdown
+
+    def recording_shutdown(server: socketserver.BaseServer) -> None:
+        ran_on.append(threading.get_ident())
+        real_shutdown(server)
+
+    monkeypatch.setattr(socketserver.BaseServer, "shutdown", recording_shutdown)
+
     _ca_pem, cert_pem, key_pem = mint_ca_and_server_cert(tmp_path)
-    ran_on_the_loop = asyncio.Event()
     async with _https_endpoint(cert_pem, key_pem):
-        asyncio.get_running_loop().call_soon(ran_on_the_loop.set)
-    assert ran_on_the_loop.is_set(), "the endpoint teardown blocked its own event loop"
+        pass
+
+    assert ran_on, "the endpoint never shut its server down"
+    assert threading.get_ident() not in ran_on, (
+        "the endpoint shut its server down on its own event-loop thread"
+    )
 
 
 @pytest.mark.parametrize("reference", CLIENT_SHAPES)
