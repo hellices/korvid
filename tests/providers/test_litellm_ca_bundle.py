@@ -31,6 +31,7 @@ from __future__ import annotations
 import asyncio
 import http.server
 import json
+import socket
 import socketserver
 import ssl
 import threading
@@ -90,6 +91,52 @@ class _Chat(http.server.BaseHTTPRequestHandler):
         return None
 
 
+def _hold_until_the_client_closes(rejected: ssl.SSLSocket) -> None:
+    """Keep a connection whose certificate was refused open until its client goes.
+
+    Disposing of it here would disconnect a client that has not torn its own
+    transport down yet, and the Windows proactor finalizes such a transport by
+    calling `self._sock.shutdown(SHUT_RDWR)` unguarded; against a closed peer
+    that raises and the socket is never released (#390). Reading to the
+    client's EOF costs this endpoint nothing — it has already refused to serve
+    the connection — and leaves the client owning both ends of the teardown.
+    """
+    client = socket.socket(fileno=rejected.detach())
+    # Bounded only so a client that never closes cannot pin this thread.
+    client.settimeout(30)
+    try:
+        while client.recv(4096):
+            pass
+    except OSError:
+        pass
+    finally:
+        client.close()
+
+
+class _ChatServer(http.server.HTTPServer):
+    """Runs the TLS handshake per connection instead of inside `accept()`.
+
+    Wrapping the *listening* socket makes `accept()` hand a refused connection
+    to `ssl.SSLSocket._create`, which closes it — the endpoint closes first,
+    and `_hold_until_the_client_closes` explains why that is not survivable on
+    Windows. Wrapping each accepted socket puts that decision here instead.
+    """
+
+    tls: ssl.SSLContext
+
+    def get_request(self) -> tuple[socket.socket, Any]:
+        raw, address = self.socket.accept()
+        connection = self.tls.wrap_socket(raw, server_side=True, do_handshake_on_connect=False)
+        try:
+            connection.do_handshake()
+        except OSError:
+            threading.Thread(
+                target=_hold_until_the_client_closes, args=(connection,), daemon=True
+            ).start()
+            raise
+        return connection, address
+
+
 @asynccontextmanager
 async def _https_endpoint(cert_pem: Path, key_pem: Path) -> AsyncIterator[str]:
     """A local HTTPS chat endpoint, served with the minted certificate.
@@ -102,11 +149,11 @@ async def _https_endpoint(cert_pem: Path, key_pem: Path) -> AsyncIterator[str]:
     `shutdown()` plus the reader `join()` strands every closure the loop still
     owes, and deadlocks outright when the accept thread is waiting on one.
     """
-    server = http.server.HTTPServer(("127.0.0.1", 0), _Chat)
+    server = _ChatServer(("127.0.0.1", 0), _Chat)
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.minimum_version = ssl.TLSVersion.TLSv1_2
     context.load_cert_chain(certfile=str(cert_pem), keyfile=str(key_pem))
-    server.socket = context.wrap_socket(server.socket, server_side=True)
+    server.tls = context
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -115,6 +162,82 @@ async def _https_endpoint(cert_pem: Path, key_pem: Path) -> AsyncIterator[str]:
         await asyncio.to_thread(server.shutdown)
         await asyncio.to_thread(thread.join, 5)
         server.server_close()
+
+
+#: How long a rejected connection is observed for a peer close before its state
+#: is taken as settled. A safety bound on a blocking read, not a wait for a
+#: result: an endpoint that closes first is observed the instant its FIN lands.
+_PEER_SETTLE_SECONDS: float = 0.5
+
+
+def _port_of(endpoint: str) -> int:
+    return int(endpoint.rsplit(":", 1)[1].split("/", 1)[0])
+
+
+def _reject_the_certificate(port: int) -> socket.socket:
+    """Fail the handshake the negative-control tests fail, keeping the socket.
+
+    The SDK clients reach the same state through aiohttp; this drives it
+    directly so the connection is still available to inspect afterwards.
+    """
+    raw = socket.create_connection(("127.0.0.1", port))
+    tls = ssl.create_default_context().wrap_socket(
+        raw, server_hostname="127.0.0.1", do_handshake_on_connect=False
+    )
+    try:
+        tls.do_handshake()
+    except ssl.SSLCertVerificationError:
+        return socket.socket(fileno=tls.detach())
+    tls.close()
+    raise AssertionError("the throwaway CA was in the system trust store")
+
+
+def _settle_peer_state(rejected: socket.socket) -> None:
+    """Read until the endpoint closes, or until it is clear it has not."""
+    rejected.settimeout(_PEER_SETTLE_SECONDS)
+    try:
+        while rejected.recv(4096):
+            pass
+    except OSError:  # TimeoutError (still open) or a reset peer
+        pass
+
+
+async def test_the_endpoint_lets_a_rejecting_client_close_first(tmp_path: Path) -> None:
+    """A client that refuses the certificate must still own its own teardown.
+
+    The Windows proactor finalizes a connection by calling
+    `self._sock.shutdown(SHUT_RDWR)` and `self._sock.close()` *unguarded*
+    before `self._sock = None` (CPython 3.12.10
+    `Lib/asyncio/proactor_events.py::_call_connection_lost`); the selector loop
+    makes neither call. Against a peer that has already closed, `shutdown()`
+    raises `ENOTCONN`, `self._sock = None` is skipped, and the transport is
+    finalized later still holding its socket — which is #390's
+    `PytestUnraisableExceptionWarning`, reported against whichever unrelated
+    test the collector happened to reach it in.
+
+    Measured on this endpoint, 60 rejected handshakes each: closing first gave
+    `ENOTCONN` 60/60, holding the connection until the client closed gave a
+    clean teardown 60/60. Wrapping the accepted socket more politely changed
+    nothing — the close is an orderly FIN either way — so the ordering is the
+    property under test, not the manner of the close.
+    """
+    _ca_pem, cert_pem, key_pem = mint_ca_and_server_cert(tmp_path)
+    async with _https_endpoint(cert_pem, key_pem) as endpoint:
+        rejected = await asyncio.to_thread(_reject_the_certificate, _port_of(endpoint))
+        teardown_error: OSError | None = None
+        try:
+            await asyncio.to_thread(_settle_peer_state, rejected)
+            try:
+                rejected.shutdown(socket.SHUT_RDWR)
+            except OSError as exc:
+                teardown_error = exc
+        finally:
+            rejected.close()
+
+    assert teardown_error is None, (
+        "the endpoint closed the rejected connection before its client did, so the"
+        f" teardown the Windows proactor performs on it fails: {teardown_error}"
+    )
 
 
 @pytest.fixture(autouse=True)
