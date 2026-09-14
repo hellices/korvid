@@ -17,6 +17,13 @@ from textual.containers import VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Static
 
+from korvid.ui.app_bindings import (
+    HELP_GROUP_ORDER,
+    as_binding,
+    base_action,
+    help_groups_for_action,
+)
+
 # Friendly labels for Textual key names that would read poorly verbatim.
 _KEY_NAMES = {
     "question_mark": "?",
@@ -26,64 +33,6 @@ _KEY_NAMES = {
     "enter": "Enter",
     "space": "Space",
     "tab": "Tab",
-}
-
-# Display order of the binding groups in the overlay.
-_GROUP_ORDER = ("Global", "Table", "Helm", "Logs", "Describe", "Agent")
-
-# Context(s) where each app action's key is actually pressed.  Key names and
-# descriptions are still generated from the live Binding objects; only the
-# grouping needs human context.  A test asserts every KorvidApp binding
-# action appears here, so new bindings cannot land unclassified.
-_ACTION_GROUPS: dict[str, tuple[str, ...]] = {
-    "quit": ("Global",),
-    "help": ("Global",),
-    "open_command": ("Global",),
-    "toggle_all_namespaces": ("Global",),
-    # Parametrised 1-9 favorites (issue #108) merge into one row via the
-    # base-action dedupe in `_add`.
-    "favorite_namespace": ("Global",),
-    # `/` filters the table but searches inside the log / describe panes.
-    "open_filter": ("Table", "Logs"),
-    "describe": ("Table",),
-    "relationships": ("Table",),
-    "timeline": ("Table",),
-    "shell": ("Table",),
-    "port_forward": ("Table",),
-    "logs": ("Table",),
-    "logs_multi": ("Table",),
-    "delete_resource": ("Table",),
-    "rollout_restart": ("Table",),
-    "resize_pod": ("Table",),
-    "operator_install": ("Table",),
-    "cordon_node": ("Table",),
-    "uncordon_node": ("Table",),
-    "drain_node": ("Table",),
-    "scale_resource": ("Table",),
-    "edit_resource": ("Table",),
-    "hint_details": ("Table",),
-    "transfer": ("Table",),
-    # Column sorting (issue #37); shift+n doubles as sort-by-name via
-    # log_search_prev's no-pane fallback.
-    "sort_by_age": ("Table",),
-    "sort_by_cpu": ("Table",),
-    "sort_by_mem": ("Table",),
-    "sort_picker": ("Table",),
-    "toggle_topbar": ("Global",),
-    "log_format": ("Logs",),
-    "log_wrap": ("Logs",),
-    "log_timestamps": ("Logs",),
-    "log_save": ("Logs",),
-    "log_previous": ("Logs",),
-    "log_search_next": ("Logs",),
-    # N steps back through hits in a pane, sorts by name in the table.
-    "log_search_prev": ("Logs", "Table"),
-    "toggle_agent": ("Agent",),
-    "interrupt_agent": ("Agent",),
-    "helm_install": ("Helm",),
-    "helm_upgrade": ("Helm",),
-    "helm_rollback": ("Helm",),
-    "helm_history": ("Helm",),
 }
 
 
@@ -98,22 +47,6 @@ def key_label(key: str) -> str:
     return plain
 
 
-def _base_action(action: str) -> str:
-    """Action name without call parameters (`favorite_namespace(3)` → `favorite_namespace`)."""
-    return action.split("(")[0]
-
-
-def _groups_for_action(action: str) -> tuple[str, ...]:
-    return _ACTION_GROUPS.get(_base_action(action), ("Global",))
-
-
-def _as_binding(binding: BindingType) -> Binding:
-    if isinstance(binding, Binding):
-        return binding
-    key, action, *rest = binding
-    return Binding(key, action, rest[0] if rest else "")
-
-
 def collect_help(
     app_bindings: Sequence[BindingType],
     describe_bindings: Sequence[BindingType],
@@ -123,7 +56,8 @@ def collect_help(
     """Group ``(key, description)`` rows from real bindings for the overlay.
 
     App bindings are grouped by the context where the key is pressed (see
-    `_ACTION_GROUPS`; multi-context keys like ``/`` appear in each group);
+    `korvid.ui.app_bindings.ACTION_HELP_GROUPS`; multi-context keys like
+    ``/`` appear in each group);
     the describe screen's own bindings all land in the Describe group.
     Alternate keys bound to the same action (e.g. ``shift+l`` and ``L``)
     merge into one row under the first key encountered, and hidden
@@ -139,13 +73,13 @@ def collect_help(
     work rather than the defaults.
     """
     remapped = overrides or {}
-    groups: dict[str, list[tuple[str, str]]] = {name: [] for name in _GROUP_ORDER}
+    groups: dict[str, list[tuple[str, str]]] = {name: [] for name in HELP_GROUP_ORDER}
     seen_actions: set[tuple[str, str]] = set()
 
     def _add(group: str, binding: Binding) -> None:
         # Dedupe on the base action so parametrised bindings (nine 1-9
         # favorites) collapse into a single row under the first key.
-        marker = (group, _base_action(binding.action))
+        marker = (group, base_action(binding.action))
         if marker in seen_actions:
             return
         seen_actions.add(marker)
@@ -153,15 +87,15 @@ def collect_help(
         groups[group].append((key_label(key), binding.description))
 
     for raw in app_bindings:
-        binding = _as_binding(raw)
-        for group in _groups_for_action(binding.action):
+        binding = as_binding(raw)
+        for group in help_groups_for_action(binding.action):
             _add(group, binding)
     for raw in describe_bindings:
-        _add("Describe", _as_binding(raw))
+        _add("Describe", as_binding(raw))
     for group, key, description in handler_keys:
         groups[group].append((key_label(key), description))
 
-    return [(name, groups[name]) for name in _GROUP_ORDER if groups[name]]
+    return [(name, groups[name]) for name in HELP_GROUP_ORDER if groups[name]]
 
 
 class HelpScreen(ModalScreen[None]):

@@ -42,6 +42,15 @@ CommandOperation = CommandParse | BuiltinOperation
 
 
 @dataclass(frozen=True, slots=True)
+class PaletteCommand:
+    """Action Palette metadata for a command whose bare form is meaningful."""
+
+    title: str
+    canonical_text: str
+    aliases: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class CommandDescriptor:
     """Immutable definition shared by parsing, help, and completion."""
 
@@ -50,6 +59,14 @@ class CommandDescriptor:
     operation: CommandOperation
     completion: ArgumentCompletion | None = None
     maximum_arguments: int | None = None
+    palette: PaletteCommand | None = None
+    palette_omit_reason: str | None = None
+
+    def __post_init__(self) -> None:
+        if (self.palette is None) == (self.palette_omit_reason is None):
+            raise ValueError(
+                "command descriptor needs exactly one of palette or palette_omit_reason"
+            )
 
 
 COMMANDS: tuple[CommandDescriptor, ...] = (
@@ -58,23 +75,27 @@ COMMANDS: tuple[CommandDescriptor, ...] = (
         help=((":pulse|:problems", "Current problems, recent warnings and observation coverage"),),
         operation=BuiltinOperation.PULSE,
         maximum_arguments=0,
+        palette=PaletteCommand("Open Pulse / Problems", "pulse", ("problems", "warnings")),
     ),
     CommandDescriptor(
         aliases=("q", "quit"),
         help=((":q", "Quit (also :quit)"),),
         operation=CommandParse.QUIT,
+        palette_omit_reason="the bound Quit action is the single palette entry",
     ),
     CommandDescriptor(
         aliases=("ns", "namespaces"),
         help=((":ns|namespaces", "Namespace picker, or :ns <name> to switch"),),
         operation=CommandParse.NAMESPACE,
         completion=ArgumentCompletion.NAMESPACE,
+        palette=PaletteCommand("Choose namespace", "ns", ("namespaces",)),
     ),
     CommandDescriptor(
         aliases=("ctx", "context", "contexts"),
         help=((":ctx|:context|:contexts", "Context picker, or :ctx <name> to switch clusters"),),
         operation=CommandParse.CONTEXT,
         completion=ArgumentCompletion.CONTEXT,
+        palette=PaletteCommand("Choose Kubernetes context", "ctx", ("context", "cluster")),
     ),
     CommandDescriptor(
         aliases=("ai", "agent"),
@@ -86,11 +107,13 @@ COMMANDS: tuple[CommandDescriptor, ...] = (
             (":ai follow [on|off]", "Mirror the agent's cluster reads in the TUI (toggle)"),
         ),
         operation=BuiltinOperation.AI,
+        palette=PaletteCommand("Configure Agent", "ai", ("agent",)),
     ),
     CommandDescriptor(
         aliases=("model",),
         help=((":model [name]", "Show or switch the agent model"),),
         operation=BuiltinOperation.MODEL,
+        palette=PaletteCommand("Choose Agent model", "model"),
     ),
     CommandDescriptor(
         aliases=("mcp",),
@@ -99,29 +122,34 @@ COMMANDS: tuple[CommandDescriptor, ...] = (
             (":mcp follow [on|off]", "Mirror external MCP reads in the TUI (toggle)"),
         ),
         operation=BuiltinOperation.MCP,
+        palette=PaletteCommand("Show MCP state", "mcp"),
     ),
     CommandDescriptor(
         aliases=("proposals",),
         help=((":proposals", "Review pending external write proposals"),),
         operation=BuiltinOperation.PROPOSALS,
         maximum_arguments=0,
+        palette=PaletteCommand("Review external proposals", "proposals"),
     ),
     CommandDescriptor(
         aliases=("pf",),
         help=((":pf", "List port-forwards (Ctrl-D stop, r re-attach)"),),
         operation=BuiltinOperation.PORT_FORWARDS,
         maximum_arguments=0,
+        palette=PaletteCommand("List port-forwards", "pf", ("port forward",)),
     ),
     CommandDescriptor(
         aliases=("tp", "telepresence"),
         help=((":tp", "Telepresence status panel (also :telepresence)"),),
         operation=BuiltinOperation.TELEPRESENCE,
         maximum_arguments=0,
+        palette=PaletteCommand("Show Telepresence status", "tp", ("telepresence",)),
     ),
     CommandDescriptor(
         aliases=("sort",),
         help=((":sort [column]", "Sort by a column (custom too); no argument clears"),),
         operation=CommandParse.SORT,
+        palette=PaletteCommand("Clear table sort", "sort"),
     ),
 )
 

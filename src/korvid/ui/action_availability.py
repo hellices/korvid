@@ -1,0 +1,54 @@
+"""Typed availability values shared by the Action Palette (issue #388).
+
+`ActionPolicy.binding_enabled` (issue #388 task 1) answers a single bool per
+action; the palette needs to say *why* an invokable-but-currently-unusable
+entry can't run right now (e.g. "select a node first") so it can still be
+shown, searchable, with its reason attached, rather than disappearing.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import Enum
+
+from korvid.ui.ui_surface import Severity
+
+
+class AvailabilityCode(Enum):
+    """Machine-readable reason an otherwise-bound action can't run now."""
+
+    WRONG_VIEW = "wrong_view"
+    NO_SELECTION = "no_selection"
+    READ_ONLY = "read_only"
+    MISSING_CAPABILITY = "missing_capability"
+    PANE_CLOSED = "pane_closed"
+    UNSUPPORTED_RESOURCE = "unsupported_resource"
+    PROTECTED_UI = "protected_ui"
+    TRANSITION = "transition"
+
+
+@dataclass(frozen=True, slots=True)
+class UnavailableReason:
+    """Human-readable explanation paired with its machine-readable code."""
+
+    code: AvailabilityCode
+    message: str
+    severity: Severity = "warning"
+
+
+@dataclass(frozen=True, slots=True)
+class ActionAvailability:
+    """Whether an action's binding is enabled, and why it can't run if not."""
+
+    binding_enabled: bool
+    reason: UnavailableReason | None = None
+
+    @property
+    def invokable(self) -> bool:
+        """Whether the palette should let the user run this entry now."""
+        return self.reason is None
+
+    @classmethod
+    def enabled(cls) -> ActionAvailability:
+        """An always-invokable availability, with no reason attached."""
+        return cls(binding_enabled=True)

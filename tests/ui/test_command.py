@@ -201,12 +201,41 @@ def test_zero_argument_builtins_reject_arguments(text: str) -> None:
 
 
 @pytest.mark.parametrize(
-    "field", ["aliases", "help", "operation", "completion", "maximum_arguments"]
+    "field",
+    ["aliases", "help", "operation", "completion", "maximum_arguments", "palette"],
 )
 def test_command_catalog_is_immutable(field: str) -> None:
     descriptor = command.COMMANDS[0]
     with pytest.raises(FrozenInstanceError, match="cannot assign"):
         setattr(descriptor, field, None)
+
+
+def test_quit_is_the_sole_palette_omission() -> None:
+    """Every descriptor gets a palette entry except the bound Quit action."""
+    quit_descriptor = next(d for d in command.COMMANDS if "quit" in d.aliases)
+    assert quit_descriptor.palette is None
+    assert quit_descriptor.palette_omit_reason
+    omitted = [d for d in command.COMMANDS if d.palette is None]
+    assert omitted == [quit_descriptor]
+
+
+def test_command_descriptor_requires_exactly_one_of_palette_or_omit_reason() -> None:
+    from korvid.ui.command import CommandDescriptor, PaletteCommand
+
+    with pytest.raises(ValueError, match="exactly one of palette"):
+        CommandDescriptor(
+            aliases=("x",),
+            help=((":x", "x"),),
+            operation=command.BuiltinOperation.PULSE,
+        )
+    with pytest.raises(ValueError, match="exactly one of palette"):
+        CommandDescriptor(
+            aliases=("x",),
+            help=((":x", "x"),),
+            operation=command.BuiltinOperation.PULSE,
+            palette=PaletteCommand("X", "x"),
+            palette_omit_reason="also omitted",
+        )
 
 
 def test_command_words_are_derived_from_catalog_and_resources() -> None:

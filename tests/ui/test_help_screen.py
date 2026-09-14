@@ -95,12 +95,12 @@ def test_collect_help_groups_timeline_under_table() -> None:
 
 def test_every_app_binding_action_has_an_explicit_group() -> None:
     """New app bindings must be classified — the overlay may not silently drift."""
-    from korvid.ui.widgets.help_screen import _ACTION_GROUPS
+    from korvid.ui.app_bindings import ACTION_HELP_GROUPS
 
     for binding in KorvidApp.BINDINGS:
         action = binding.action if isinstance(binding, Binding) else binding[1]
         base_action = action.split("(")[0]
-        assert base_action in _ACTION_GROUPS, f"unclassified binding action: {action}"
+        assert base_action in ACTION_HELP_GROUPS, f"unclassified binding action: {action}"
 
 
 def test_collect_help_merges_parametrised_favorite_bindings_into_one_row() -> None:
@@ -135,11 +135,11 @@ def test_collect_help_appends_handler_keys_to_their_groups() -> None:
 
 def test_app_handler_key_help_uses_known_groups() -> None:
     """HANDLER_KEY_HELP entries must reference groups the overlay renders."""
-    from korvid.ui.widgets.help_screen import _GROUP_ORDER
+    from korvid.ui.app_bindings import HELP_GROUP_ORDER
 
     assert KorvidApp.HANDLER_KEY_HELP, "expected handler-key help metadata"
     for group, key, description, action in KorvidApp.HANDLER_KEY_HELP:
-        assert group in _GROUP_ORDER, f"unknown group {group!r} for key {key!r}"
+        assert group in HELP_GROUP_ORDER, f"unknown group {group!r} for key {key!r}"
         assert description
         if action:
             binding_ids = {b.id for b in KorvidApp.BINDINGS if isinstance(b, Binding)}

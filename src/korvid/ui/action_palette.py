@@ -1,0 +1,203 @@
+"""The Action Palette's domain model: derivation and ranking (issue #388).
+
+The palette is a search surface over the two catalogs the app already
+executes from — `APP_BINDINGS` (declarative `Binding`s) and the typed
+`COMMANDS` (`:` command descriptors) — never a third, hand-maintained
+table. `derive_action_entries`/`derive_command_entries` build immutable
+`PaletteEntry` values straight from those catalogs, so a new binding or
+command is automatically searchable, and `rank_entries` orders them for a
+query without ever touching Textual or an app instance: no modal, no
+dispatch, no wiring here (that's a later task).
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
+
+from textual.binding import Binding, BindingType
+from textual.fuzzy import Matcher
+
+from korvid.ui.action_availability import ActionAvailability
+from korvid.ui.app_bindings import as_binding, base_action, help_groups_for_action
+from korvid.ui.command import CommandDescriptor
+from korvid.ui.widgets.help_screen import key_label
+
+
+@dataclass(frozen=True, slots=True)
+class AppActionInvocation:
+    """Invoke a bound app action by name (as `check_action`/`run_action` do)."""
+
+    action: str
+
+
+@dataclass(frozen=True, slots=True)
+class CommandInvocation:
+    """Invoke a `:` command by its canonical (bare, colon-free) text."""
+
+    canonical_text: str
+
+
+PaletteInvocation = AppActionInvocation | CommandInvocation
+
+
+@dataclass(frozen=True, slots=True)
+class PaletteEntry:
+    """One immutable, searchable palette row derived from a real catalog."""
+
+    id: str
+    title: str
+    description: str
+    category: str
+    trigger: str
+    aliases: tuple[str, ...]
+    declaration_order: int
+    availability: ActionAvailability
+    invocation: PaletteInvocation
+
+
+def derive_action_entries(
+    bindings: Sequence[Binding | tuple[str, str] | tuple[str, str, str]] | Sequence[BindingType],
+    *,
+    overrides: Mapping[str, str] | None = None,
+    availability: Callable[[str], ActionAvailability],
+) -> list[PaletteEntry]:
+    """Derive one `PaletteEntry` per bound app action from `APP_BINDINGS`.
+
+    Bindings that share an action (e.g. `shift+l`/``L`` both running
+    ``logs_multi``, or a real key with its ``--alt`` id) collapse into a
+    single entry keyed on the first binding encountered; `overrides` (the
+    `keybindings:` config remap, issue #35) takes precedence over each
+    binding's default key so the trigger shown matches what actually runs.
+    Parameterized action expressions (e.g. ``favorite_namespace(3)``) have
+    no single key to invoke generically from the palette, so they are
+    skipped entirely rather than surfacing a broken entry.
+    """
+    remapped = overrides or {}
+    entries: list[PaletteEntry] = []
+    seen_actions: set[str] = set()
+    for order, raw in enumerate(bindings):
+        binding = as_binding(raw)
+        if "(" in binding.action:
+            continue
+        action = base_action(binding.action)
+        if action in seen_actions:
+            continue
+        seen_actions.add(action)
+        key = remapped.get(action, binding.key)
+        entries.append(
+            PaletteEntry(
+                id=f"action:{action}",
+                title=binding.description,
+                description="",
+                category=help_groups_for_action(action)[0],
+                trigger=key_label(key),
+                aliases=(),
+                declaration_order=order,
+                availability=availability(action),
+                invocation=AppActionInvocation(action),
+            )
+        )
+    return entries
+
+
+def derive_command_entries(
+    commands: Sequence[CommandDescriptor],
+    *,
+    availability: Callable[[str], ActionAvailability],
+) -> list[PaletteEntry]:
+    """Derive one `PaletteEntry` per `CommandDescriptor.palette` entry.
+
+    Descriptors that opt out via `palette_omit_reason` (e.g. ``:q`` — the
+    bound Quit action is the single palette entry) contribute nothing.
+    """
+    entries: list[PaletteEntry] = []
+    for order, descriptor in enumerate(commands):
+        palette = descriptor.palette
+        if palette is None:
+            continue
+        entries.append(
+            PaletteEntry(
+                id=f"command:{palette.canonical_text}",
+                title=palette.title,
+                description="",
+                category="Commands",
+                trigger=f":{palette.canonical_text}",
+                aliases=palette.aliases,
+                declaration_order=order,
+                availability=availability(palette.canonical_text),
+                invocation=CommandInvocation(palette.canonical_text),
+            )
+        )
+    return entries
+
+
+def _leading_tokens(text: str) -> list[str]:
+    return text.casefold().split()
+
+
+def _match_tier(
+    entry: PaletteEntry, lower_query: str, matcher: Matcher
+) -> tuple[int, float] | None:
+    """Best (tier, score) for `entry` against `lower_query`, or `None`."""
+    primary_texts = [entry.title, *entry.aliases]
+    if any(text.casefold() == lower_query for text in primary_texts):
+        return (0, 1.0)
+    if any(
+        tokens and tokens[0].startswith(lower_query)
+        for tokens in (_leading_tokens(text) for text in primary_texts)
+    ):
+        return (1, max(matcher.match(text) for text in primary_texts))
+    best_primary = max((matcher.match(text) for text in primary_texts), default=0.0)
+    if best_primary > 0:
+        return (2, best_primary)
+    if entry.description:
+        description_score = matcher.match(entry.description)
+        if description_score > 0:
+            return (3, description_score)
+    return None
+
+
+def _empty_query_rank(entry: PaletteEntry) -> tuple[int, int, str]:
+    if entry.availability.invokable:
+        group = 1 if isinstance(entry.invocation, CommandInvocation) else 0
+    else:
+        group = 2
+    return (group, entry.declaration_order, entry.id)
+
+
+def rank_entries(entries: Sequence[PaletteEntry], query: str) -> list[PaletteEntry]:
+    """Rank `entries` for `query`, most relevant first.
+
+    An empty query orders invokable actions, then invokable commands, then
+    every unavailable entry (each group by declaration order, so the
+    palette's default view mirrors the catalogs it was derived from). A
+    non-empty query ranks by match tier first — exact title/alias, then a
+    leading-token prefix, then a fuzzy title/alias match, then a fuzzy
+    description match — breaking ties by score, invokable-first, then
+    declaration order and id for a fully deterministic, stable order. An
+    exact match on a currently-unavailable entry still ranks by its tier:
+    availability only breaks ties, so its reason stays visible rather than
+    hiding the entry.
+    """
+    stripped = query.strip()
+    if not stripped:
+        return sorted(entries, key=_empty_query_rank)
+
+    lower_query = stripped.casefold()
+    matcher = Matcher(stripped)
+    ranked: list[tuple[tuple[int, float, int, int, str], PaletteEntry]] = []
+    for entry in entries:
+        tier_score = _match_tier(entry, lower_query, matcher)
+        if tier_score is None:
+            continue
+        tier, score = tier_score
+        invokable_rank = 0 if entry.availability.invokable else 1
+        ranked.append(
+            (
+                (tier, -score, invokable_rank, entry.declaration_order, entry.id),
+                entry,
+            )
+        )
+    ranked.sort(key=lambda pair: pair[0])
+    return [entry for _, entry in ranked]
