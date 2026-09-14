@@ -156,11 +156,12 @@ async def test_colon_opens_command_bar_and_ns_switch() -> None:
 
 
 async def test_a_dismissed_bar_releases_focus_before_the_next_key() -> None:
-    """Hiding the command or filter bar must release focus at once (#394).
+    """Hiding the command or filter bar must release focus at once.
 
     The blur used to ride on the compositor's wall-clock reflow, so on a busy
     runner the invisible input still owned the keyboard and swallowed the next
-    keystroke. `batch_update` suspends that reflow, pinning the window.
+    keystroke. `batch_update` suspends that reflow, pinning the window. This
+    is the shared invariant behind issues #394, #395 and #396.
     """
     app = make_app([_pod("api-1")])
     async with app.run_test() as pilot:

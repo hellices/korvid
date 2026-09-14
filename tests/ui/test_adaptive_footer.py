@@ -303,11 +303,16 @@ async def test_gated_key_is_inert_off_view() -> None:
 
 
 async def test_help_overlay_documents_offview_keys() -> None:
+    """`batch_update` suspends the repaint that blurs the dismissed command
+    bar, so `?` typed straight after `:nodes` must still reach the binding
+    rather than the invisible input (issues #394, #395, #396)."""
     app = make_app()
     async with app.run_test() as pilot:
-        await _navigate(pilot, "nodes", "nodes")
-        await _rows_listed(pilot, app)
-        await pilot.press("question_mark")
+        with app.batch_update():
+            await _navigate(pilot, "nodes", "nodes")
+            await _rows_listed(pilot, app)
+            await pilot.press("question_mark")
+            assert app._command_bar.value == ""
         await until(pilot, lambda: isinstance(app.screen, HelpScreen), label="help overlay open")
         assert isinstance(app.screen, HelpScreen)
         body = app.screen.body_text()
