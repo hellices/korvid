@@ -33,8 +33,8 @@ import http.server
 import json
 import ssl
 import threading
-from collections.abc import AsyncIterator, Iterator
-from contextlib import contextmanager
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -87,9 +87,18 @@ class _Chat(http.server.BaseHTTPRequestHandler):
         return None
 
 
-@contextmanager
-def _https_endpoint(cert_pem: Path, key_pem: Path) -> Iterator[str]:
-    """A local HTTPS chat endpoint, served with the minted certificate."""
+@asynccontextmanager
+async def _https_endpoint(cert_pem: Path, key_pem: Path) -> AsyncIterator[str]:
+    """A local HTTPS chat endpoint, served with the minted certificate.
+
+    Teardown is awaited off the event loop. `serve_forever()` runs the
+    server-side TLS handshake inline in `accept()`, and the client half of
+    that handshake belongs to the loop this context manager is torn down on —
+    including the connection closes asyncio only *queues* on the loop instead
+    of performing synchronously. Blocking the loop for the length of
+    `shutdown()` plus the reader `join()` strands every closure the loop still
+    owes, and deadlocks outright when the accept thread is waiting on one.
+    """
     server = http.server.HTTPServer(("127.0.0.1", 0), _Chat)
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.minimum_version = ssl.TLSVersion.TLSv1_2
@@ -100,8 +109,8 @@ def _https_endpoint(cert_pem: Path, key_pem: Path) -> Iterator[str]:
     try:
         yield f"https://127.0.0.1:{server.server_address[1]}/v1"
     finally:
-        server.shutdown()
-        thread.join(timeout=5)
+        await asyncio.to_thread(server.shutdown)
+        await asyncio.to_thread(thread.join, 5)
         server.server_close()
 
 
@@ -144,6 +153,23 @@ async def _answer(provider: Any) -> list[dict[str, Any]]:
     return events
 
 
+async def test_tearing_the_endpoint_down_leaves_its_event_loop_running(
+    tmp_path: Path,
+) -> None:
+    """A callback queued before teardown must still run while it happens.
+
+    That is the property the endpoint's clients depend on: asyncio *queues*
+    a connection's socket release on the loop rather than performing it
+    synchronously, so a teardown that holds the loop strands every release it
+    still owes — and deadlocks against an accept thread waiting for one.
+    """
+    _ca_pem, cert_pem, key_pem = mint_ca_and_server_cert(tmp_path)
+    ran_on_the_loop = asyncio.Event()
+    async with _https_endpoint(cert_pem, key_pem):
+        asyncio.get_running_loop().call_soon(ran_on_the_loop.set)
+    assert ran_on_the_loop.is_set(), "the endpoint teardown blocked its own event loop"
+
+
 @pytest.mark.parametrize("reference", CLIENT_SHAPES)
 async def test_the_configured_bundle_reaches_the_tls_handshake(
     tmp_path: Path, reference: str
@@ -151,7 +177,7 @@ async def test_the_configured_bundle_reaches_the_tls_handshake(
     """The whole point: a private-CA endpoint answers because the operator
     named the bundle, not because verification was relaxed."""
     ca_pem, cert_pem, key_pem = mint_ca_and_server_cert(tmp_path)
-    with _https_endpoint(cert_pem, key_pem) as endpoint:
+    async with _https_endpoint(cert_pem, key_pem) as endpoint:
         provider = create_provider_from_profile(
             _profile(reference, endpoint), ca_bundle=str(ca_pem)
         )
@@ -167,7 +193,7 @@ async def test_without_the_bundle_the_same_endpoint_is_unreachable(
     """The negative control. Without it the test above could pass against
     an endpoint korvid trusted for some other reason."""
     _ca_pem, cert_pem, key_pem = mint_ca_and_server_cert(tmp_path)
-    with _https_endpoint(cert_pem, key_pem) as endpoint:
+    async with _https_endpoint(cert_pem, key_pem) as endpoint:
         provider = create_provider_from_profile(_profile(reference, endpoint), ca_bundle=None)
         assert isinstance(provider, LiteLLMProvider)
         with pytest.raises(OperatorSafeProviderError):
@@ -187,7 +213,7 @@ async def test_a_profile_option_can_never_turn_verification_off(
     is still refused, exactly as it is with no option at all.
     """
     _ca_pem, cert_pem, key_pem = mint_ca_and_server_cert(tmp_path)
-    with _https_endpoint(cert_pem, key_pem) as endpoint:
+    async with _https_endpoint(cert_pem, key_pem) as endpoint:
         provider = create_provider_from_profile(
             _profile(reference, endpoint, ssl_verify=False), ca_bundle=None
         )
@@ -203,7 +229,7 @@ async def test_the_bundle_still_applies_when_an_option_asks_to_ignore_it(
     """The other half of the same rule: with a bundle configured, the
     option changes nothing and the private-CA endpoint answers."""
     ca_pem, cert_pem, key_pem = mint_ca_and_server_cert(tmp_path)
-    with _https_endpoint(cert_pem, key_pem) as endpoint:
+    async with _https_endpoint(cert_pem, key_pem) as endpoint:
         provider = create_provider_from_profile(
             _profile("openai/gpt-4o", endpoint, ssl_verify=False), ca_bundle=str(ca_pem)
         )
@@ -220,7 +246,7 @@ async def test_the_bundle_is_a_transport_setting_not_a_model_parameter(
     """It configures korvid's client. It must not travel in the request
     body, where a provider would reject it as an unknown field."""
     ca_pem, cert_pem, key_pem = mint_ca_and_server_cert(tmp_path)
-    with _https_endpoint(cert_pem, key_pem) as endpoint:
+    async with _https_endpoint(cert_pem, key_pem) as endpoint:
         provider = create_provider_from_profile(
             _profile(reference, endpoint), ca_bundle=str(ca_pem)
         )
