@@ -111,6 +111,7 @@ from korvid.tools.executor import (
 )
 from korvid.tools.proposals import ProposalStore
 from korvid.tools.registry import mcp_tool_schemas
+from korvid.ui.action_policy import ActionPolicy
 from korvid.ui.agent_ui_controller import AgentUiController
 from korvid.ui.app import KorvidApp
 from korvid.ui.app_runtime import AppRuntime, AppRuntimeInputs, _LateReference
@@ -1374,6 +1375,11 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
         available=inputs.agent_available,
     )
     agent_ref.bind(agent_ui)
+    actions = ActionPolicy(
+        view=view,
+        agent_available=lambda: agent_ui.available,
+        log_pane_open=app._log_pane_open,
+    )
     commands = CommandRouter(
         ui=AppUiSurface(app),
         agent=agent_ui,
@@ -1409,6 +1415,7 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
         integrations=integrations,
         agent_ui=agent_ui,
         commands=commands,
+        actions=actions,
     )
 
 

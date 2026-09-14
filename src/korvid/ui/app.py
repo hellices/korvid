@@ -43,20 +43,11 @@ from korvid.k8s.components import (
     ComponentRef,
 )
 from korvid.k8s.discovery import PODS_META, ResourceMeta, canonical_resource_alias
-from korvid.k8s.helm import (
-    HELM_RELEASES_META,
-    HELM_REVISIONS_META,
-    HelmReleaseIdentity,
-)
+from korvid.k8s.helm import HelmReleaseIdentity
 from korvid.k8s.helmcli import HelmCLI
 from korvid.k8s.logs import LogLine
 from korvid.k8s.metrics import MetricsPoller
 from korvid.k8s.models import GenericSummary
-from korvid.k8s.olm import (
-    OPERATORS_GROUP,
-    PACKAGES_GROUP,
-)
-from korvid.k8s.portforward import FORWARDABLE_KINDS
 from korvid.k8s.pulse import PulseReader
 from korvid.k8s.relations import owned_by
 from korvid.k8s.telepresence import TelepresenceCLI
@@ -93,10 +84,6 @@ from korvid.ui.messages import (
     UnknownCommand,
 )
 from korvid.ui.navigation import NavigationStack
-from korvid.ui.resource_write_controller import (
-    RESTARTABLE,
-    SCALABLE,
-)
 from korvid.ui.session_timeline_controller import (
     TIMELINE_EVENT_GROUP,
     TIMELINE_NAVIGATION_GROUP,
@@ -274,6 +261,7 @@ class KorvidApp(App[None]):
         self._integrations = runtime.integrations
         self._agent_ui = runtime.agent_ui
         self._commands = runtime.commands
+        self._actions = runtime.actions
         self.__dict__.pop("_runtime_inputs", None)
 
     def _bind_runtime_inputs(self, inputs: AppRuntimeInputs) -> None:
@@ -1024,14 +1012,6 @@ class KorvidApp(App[None]):
     # -- Write operations (issue #16): every path goes through a ConfirmScreen
     # -- confirmed only by a user keystroke; executed writes are audited.
 
-    #: Workload eligibility, owned by `ResourceWriteController` (the flows
-    #: that enforce it) and re-exported here because `_ACTION_VIEWS` and the
-    #: agent write ops gate the same identities. Keyed on (group, plural): a
-    #: custom-group CRD whose plural collides with a built-in (e.g.
-    #: 'deployments') must never be treated as an apps/* workload.
-    _RESTARTABLE: ClassVar[frozenset[tuple[str, str]]] = RESTARTABLE
-    _SCALABLE: ClassVar[frozenset[tuple[str, str]]] = SCALABLE
-
     async def action_delete_resource(self) -> None:
         """Ctrl-D: delete the selected resource (issue #16)."""
         await self._resource_writes.delete()
@@ -1138,7 +1118,7 @@ class KorvidApp(App[None]):
 
     def _legend_entries(self) -> list[KeyEntry]:
         """The visible bindings as top-bar entries: pre-filtered by
-        Textual's binding machinery (check_action / _ACTION_VIEWS - the
+        Textual's binding machinery (check_action / ActionPolicy - the
         single visibility source), deduplicated across --alt spellings and
         parametrised favorites."""
         entries: list[KeyEntry] = []
@@ -1326,57 +1306,6 @@ class KorvidApp(App[None]):
     # loop logic in the agent session.
     # ------------------------------------------------------------------
 
-    #: Resource identities — (group, plural), see `_RESTARTABLE` — where each
-    #: view-specific action applies; actions absent from the map work on
-    #: every view. `check_action` consults this so the footer legend shows
-    #: only the current view's keys and overloaded keys (i/u/r) dispatch to
-    #: the binding whose view is on screen (issue #114). Identity, not the
-    #: kind string: a foreign CRD claiming a bare plural (e.g.
-    #: `packagemanifests`) must not surface another view's actions.
-    #: `log_search_next`/`log_search_prev` stay unlisted on purpose: they
-    #: also serve the describe pane's search (any view) and the
-    #: sort-by-name fallback. Fail-closed by design: a kind missing from
-    #: `aliases` (e.g. mid-discovery) hides every listed action until its
-    #: identity is known.
-    _ACTION_VIEWS: ClassVar[dict[str, frozenset[tuple[str, str]]]] = {
-        "shell": frozenset({("", "pods"), ("", "nodes")}),
-        "logs": frozenset({("", "pods")}),
-        "logs_multi": frozenset({("", "pods")}),
-        "hint_details": frozenset({("", "pods")}),
-        "resize_pod": frozenset({("", "pods")}),
-        "transfer": frozenset({("", "pods")}),
-        # Core-group identities of FORWARDABLE_KINDS (pods, services).
-        "port_forward": frozenset(("", plural) for plural in FORWARDABLE_KINDS),
-        "cordon_node": frozenset({("", "nodes")}),
-        "uncordon_node": frozenset({("", "nodes")}),
-        "drain_node": frozenset({("", "nodes")}),
-        "rollout_restart": _RESTARTABLE,
-        "scale_resource": _SCALABLE,
-        "operator_install": frozenset(
-            {(PACKAGES_GROUP, "packagemanifests"), (OPERATORS_GROUP, "installplans")}
-        ),
-        # The synthetic helm views (group "", client-side plurals).
-        "helm_install": frozenset({(HELM_RELEASES_META.group, HELM_RELEASES_META.plural)}),
-        "helm_upgrade": frozenset({(HELM_RELEASES_META.group, HELM_RELEASES_META.plural)}),
-        "helm_history": frozenset({(HELM_RELEASES_META.group, HELM_RELEASES_META.plural)}),
-        "helm_rollback": frozenset({(HELM_REVISIONS_META.group, HELM_REVISIONS_META.plural)}),
-    }
-
-    #: Actions that operate on the visible log pane, not the focused view:
-    #: the split workflow tails logs from one pane while the other shows a
-    #: different kind, so these gate on pane visibility (review of #114).
-    _LOG_PANE_ACTIONS: ClassVar[frozenset[str]] = frozenset(
-        {"log_format", "log_wrap", "log_timestamps", "log_save", "log_previous"}
-    )
-
-    #: Generic write actions that `WriteCoordinator.write_target` rejects on synthetic
-    #: (client-side, read-only) views such as the helm browser: advertising
-    #: them there would be a lie (review of #114). The dedicated helm write
-    #: actions stay available through `_ACTION_VIEWS`.
-    _SYNTHETIC_GATED_ACTIONS: ClassVar[frozenset[str]] = frozenset(
-        {"delete_resource", "edit_resource"}
-    )
-
     def _action_available(self, action: str) -> bool:
         """Composition availability, independent of the current view: the
         help overlay filters on this alone so off-view keys stay documented
@@ -1391,34 +1320,9 @@ class KorvidApp(App[None]):
             return False
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
-        """Gate bindings on composition availability and the current view.
-
-        Returning False both hides the binding from the footer and skips it
-        during key dispatch, so overloaded keys fall through to the binding
-        whose view is on screen (issue #114).
-        """
-        if not self._action_available(action):
-            return False
-        if action in self._LOG_PANE_ACTIONS:
-            return self._log_pane_open()
-        if action in self._SYNTHETIC_GATED_ACTIONS:
-            meta = self.aliases.get(self._canonical_kind(self.current_kind))
-            if (
-                action == "delete_resource"
-                and meta is not None
-                and (meta.group, meta.plural)
-                == (HELM_RELEASES_META.group, HELM_RELEASES_META.plural)
-            ):
-                # Ctrl+D on the release browser is `helm uninstall`
-                # (issue #117) - the one synthetic view where delete works.
-                return True
-            # Unknown kinds keep the keys: the handler's own guards decide.
-            return meta is None or not meta.synthetic
-        views = self._ACTION_VIEWS.get(action)
-        if views is None:
-            return True
-        meta = self.aliases.get(self._canonical_kind(self.current_kind))
-        return meta is not None and (meta.group, meta.plural) in views
+        """Gate bindings on composition availability and the current view
+        (issue #114), via the `ActionPolicy` extracted in issue #388."""
+        return self._actions.binding_enabled(action)
 
     def action_toggle_agent(self) -> None:
         """Toggle the agent chat panel (Ctrl-A)."""

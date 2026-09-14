@@ -19,6 +19,7 @@ TEST_APP_FACTORY = TESTS / "app_factory.py"
 UI_PACKAGE = ("korvid", "ui")
 
 RUNTIME_COMPONENTS = {
+    "ActionPolicy",
     "AgentUiController",
     "AppAgentPanel",
     "AppAgentScreens",
@@ -1147,6 +1148,7 @@ def test_app_runtime_can_be_bound_only_once() -> None:
             integrations=value,
             agent_ui=value,
             commands=value,
+            actions=value,
         ),
     )
 

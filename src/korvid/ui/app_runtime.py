@@ -30,6 +30,7 @@ if TYPE_CHECKING:
     from korvid.k8s.writes import WriteOps
     from korvid.tools.executor import UIBridge
     from korvid.tools.proposals import ProposalStore
+    from korvid.ui.action_policy import ActionPolicy
     from korvid.ui.agent_ui_controller import AgentUiController
     from korvid.ui.app_surfaces import AppInspectSurface, AppViewState
     from korvid.ui.bridge_dispatch import AppContextDispatch
@@ -157,3 +158,4 @@ class AppRuntime:
     integrations: IntegrationController
     agent_ui: AgentUiController
     commands: CommandRouter
+    actions: ActionPolicy
