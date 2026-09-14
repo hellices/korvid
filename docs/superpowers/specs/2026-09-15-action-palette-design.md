@@ -4,12 +4,11 @@
 
 This design implements #388 for the `v0.5.0` milestone.
 
-The maintainer previously selected Action Palette as one of the two product
-features to finish before `v0.5.0`, alongside Pulse / Problems. When asked to
-choose the remaining interaction approach, the maintainer was unavailable and
-the session was explicitly directed to choose the pragmatic option best aligned
-with the request. This document therefore records the smallest TUI-native design
-that satisfies #388 without adding a second action path.
+The maintainer selected Action Palette as one of the two product features to
+finish before `v0.5.0`, alongside Pulse / Problems, and reconfirmed on
+2026-09-15 that the release should close the milestone as written. This
+document records the smallest TUI-native design that satisfies #388 without
+adding a second action path.
 
 Implementation is based on #397 because that change makes transient inputs
 release focus synchronously. #397 still requires maintainer merge; this design
@@ -115,30 +114,30 @@ The palette does not introduce a hand-maintained action list.
 
 ### App actions
 
-`app_bindings.py` becomes the canonical home for immutable app action
-descriptors. A descriptor contains:
+The existing `APP_BINDINGS` list remains the canonical app action catalog. The
+palette derives stable IDs, titles, descriptions, default keys, priority, and
+visibility directly from its real `Binding` objects. Configured keymap overrides
+are applied when runtime entries are built, so no palette key table exists.
 
-- stable action ID and Textual action expression;
-- title and description;
-- default key spellings, keymap ID, visibility, and priority;
-- help and top-bar presentation groups;
-- search aliases;
-- whether the action is palette-invokable.
+The existing help grouping map moves next to `APP_BINDINGS` as a reusable
+presentation helper consumed by both Help and the palette. The top bar keeps its
+different compact grouping because it already consumes live active bindings;
+neither grouping defines execution.
 
-`APP_BINDINGS` is generated from these descriptors. Handler-only keys such as
-table drill-down and split-pane chords use immutable handler descriptors in the
-same module; `APP_HANDLER_KEY_HELP` is generated from them. Handler-only entries
-remain visible in `?` but are not palette results because they do not map to a
-single app action.
+Handler-only keys such as table drill-down and split-pane chords remain in
+`APP_HANDLER_KEY_HELP`. They stay visible in `?` but are not palette results
+because they do not map to a single app action. A contract test makes that
+boundary explicit.
 
 Parameterized favorite-namespace shortcuts remain bindings and help metadata,
-but are not palette-invokable in `v0.5.0`; namespace selection already has the
-typed `:ns` route.
+but the generic palette derivation excludes parameterized action expressions in
+`v0.5.0`; namespace selection already has the typed `:ns` route. Alternate
+terminal spellings such as `shift+l` and `L` deduplicate by binding ID suffix,
+using the same rule as the top bar.
 
-The help screen and top bar consume descriptor groups instead of maintaining
-additional action-to-group maps. Contract tests require every generated binding
-and handler row to have exactly one descriptor and every palette action to
-resolve to a real binding action.
+Contract tests require every palette action to resolve to one real binding and
+every app binding to have a known help group. No migration or replacement of
+the working binding catalog is part of #388.
 
 ### Built-in commands
 
