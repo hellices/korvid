@@ -20,10 +20,21 @@ class FilterBar(Input):
         self.display = True
         self.focus()
 
+    def _hide(self) -> None:
+        """Hide the bar and release the keyboard in the same step.
+
+        Hiding alone leaves the blur to the compositor's next reflow, a
+        wall-clock repaint: until it lands the invisible input still owns the
+        keyboard and eats the user's next key (issue #394).
+        `KorvidApp.on_descendant_blur` hands focus back to the table.
+        """
+        self.display = False
+        self.blur()
+
     def dismiss_bar(self) -> None:
         # Switching away from the filter bar: hide it and clear any active
         # filter so no invisible filter remains active in the background.
-        self.display = False
+        self._hide()
         self.post_message(ClearFilter())
 
     def on_input_changed(self, event: Input.Changed) -> None:
@@ -34,11 +45,11 @@ class FilterBar(Input):
         # Enter: keep the active filter, just close the bar so app bindings
         # (q, :, /) work again. Esc remains the way to clear the filter.
         event.stop()
-        self.display = False
+        self._hide()
 
     async def on_key(self, event: Key) -> None:
         if event.key == "escape":
-            self.display = False
+            self._hide()
             # Do NOT set self.value = "" here: that fires on_input_changed →
             # FilterCommand("") → one table rebuild, then ClearFilter triggers
             # a second rebuild. Value is reset in open() before next use.

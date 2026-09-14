@@ -83,6 +83,11 @@ class CommandBar(Input):
     def dismiss_bar(self) -> None:
         self.display = False
         self.value = ""
+        # Hiding alone leaves the blur to the compositor's next reflow, a
+        # wall-clock repaint: until it lands the invisible input still owns
+        # the keyboard and eats the user's next key (issue #394). Release it
+        # here; `KorvidApp.on_descendant_blur` hands focus back to the table.
+        self.blur()
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         event.stop()
