@@ -981,6 +981,9 @@ async def test_drain_shows_plan_graph_and_local_sections(tmp_path: Path) -> None
 
 
 async def test_drain_graph_failure_keeps_plan_and_notes(tmp_path: Path) -> None:
+    """`batch_update` suspends the repaint that blurs the dismissed command
+    bar, so `D` typed straight after `:nodes` must still reach the binding
+    rather than the invisible input (issues #394, #395, #396)."""
     plan = DrainPlan(
         targets=(_target("web-1"),),
         skipped_daemonset=(),
@@ -1031,8 +1034,10 @@ async def test_drain_graph_failure_keeps_plan_and_notes(tmp_path: Path) -> None:
         list_relationship_objects=_bad_relationship,
     )
     async with app.run_test() as pilot:
-        await _to_nodes(pilot)
-        await pilot.press("D")
+        with app.batch_update():
+            await _to_nodes(pilot)
+            await pilot.press("D")
+            assert app._command_bar.value == ""
         await until(
             pilot,
             lambda: (

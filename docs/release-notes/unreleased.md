@@ -1,5 +1,13 @@
 # Unreleased
 
+## Keys typed right after the command or filter bar closes
+
+Pressing `:` or `/`, submitting or cancelling it and immediately pressing the
+next key no longer loses that key. A dismissed bar now releases the keyboard as
+it hides, instead of waiting for the next repaint to do it, so a quick `:helm`
+then `i`, `:nodes` then `?`, or `:nodes` then `D` reliably opens the Helm chart
+search, the help overlay and the drain approval.
+
 ## Ambient Pulse / Problems
 
 The base TUI now keeps a one-line attention summary visible while you browse.

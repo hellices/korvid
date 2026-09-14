@@ -512,6 +512,30 @@ async def test_install_preview_shows_dry_run_output(tmp_path: Path) -> None:
         assert ("dry-run-install", "nginx", "bitnami/nginx", "default", "18.1.0") in helm.calls
 
 
+async def test_install_key_survives_a_pending_repaint_after_the_view_switch(
+    tmp_path: Path,
+) -> None:
+    """`i` typed right after `:helm` must still open the chart search (#394).
+
+    `batch_update` suspends the compositor reflow, which is the only thing
+    that posts `Hide` to the just-dismissed command bar. That models a loaded
+    runner whose repaint lands after the next keystroke: the hidden bar still
+    held keyboard focus, so `i` was typed into the invisible input and the
+    chart search never mounted.
+    """
+    helm = FakeHelm()
+    app = make_app(helm=helm, audit_path=tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        with app.batch_update():
+            await _navigate(pilot, "helm", "helmreleases")
+            await pilot.press("i")
+            assert app._command_bar.value == ""
+        await until(
+            pilot, lambda: isinstance(app.screen, HelmChartSearchScreen), label="chart search"
+        )
+        assert isinstance(app.screen, HelmChartSearchScreen)
+
+
 async def test_install_search_failure_is_reported(tmp_path: Path) -> None:
     helm = FakeHelm()
     helm.search_error = "no repositories configured"

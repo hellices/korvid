@@ -155,6 +155,32 @@ async def test_colon_opens_command_bar_and_ns_switch() -> None:
         assert app.current_scope == "prod"
 
 
+async def test_a_dismissed_bar_releases_focus_before_the_next_key() -> None:
+    """Hiding the command or filter bar must release focus at once.
+
+    The blur used to ride on the compositor's wall-clock reflow, so on a busy
+    runner the invisible input still owned the keyboard and swallowed the next
+    keystroke. `batch_update` suspends that reflow, pinning the window. This
+    is the shared invariant behind issues #394, #395 and #396.
+    """
+    app = make_app([_pod("api-1")])
+    async with app.run_test() as pilot:
+        with app.batch_update():
+            await pilot.press("colon")
+            for ch in "pods":
+                await pilot.press(ch)
+            await pilot.press("enter")
+            assert app.focused is not app._command_bar
+            await pilot.press("slash")
+            assert app._command_bar.value == ""
+            assert app._filter_bar.display
+            await pilot.press("escape")
+            assert app.focused is not app._filter_bar
+            await pilot.press("colon")
+            assert app._filter_bar.value == ""
+            assert app._command_bar.display
+
+
 async def test_slash_filter_narrows_rows() -> None:
     app = make_app([_pod("api-1"), _pod("checkout-2")])
     async with app.run_test() as pilot:
