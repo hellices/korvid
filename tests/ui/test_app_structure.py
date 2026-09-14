@@ -1196,3 +1196,26 @@ def test_late_runtime_reference_fails_before_binding_and_cannot_rebind() -> None
     assert reference.get() is value
     with pytest.raises(RuntimeError, match="already bound"):
         reference.bind(object())
+
+
+def test_app_owns_ctrl_p_instead_of_textuals_system_command_palette() -> None:
+    """Issue #388: korvid's Action Palette replaces Textual's implicit
+    system palette outright. The shell disables the stock one and never
+    reaches into its internals - the modal, its ranking and its catalog are
+    korvid's own public code."""
+    source = (UI / "app.py").read_text(encoding="utf-8")
+    assert "ENABLE_COMMAND_PALETTE: ClassVar[bool] = False" in source
+    assert "CommandPalette" not in source
+    assert "SystemCommands" not in source
+    assert "get_system_commands" not in source
+
+
+def test_app_delegates_palette_catalog_derivation_to_its_own_module() -> None:
+    """The shell asks for the catalog; it does not build a second one.
+    `derive_action_entries`/`derive_command_entries`/`rank_entries` stay in
+    `korvid.ui.action_palette`, which imports no Textual app."""
+    source = (UI / "app.py").read_text(encoding="utf-8")
+    assert "derive_palette_entries(" in source
+    assert "derive_action_entries(" not in source
+    assert "derive_command_entries(" not in source
+    assert "rank_entries(" not in source

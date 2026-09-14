@@ -37,7 +37,7 @@ from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.models import GenericSummary, PodSummary
 from korvid.k8s.writes import WriteOps
-from korvid.ui.action_availability import AvailabilityCode, UnavailableReason
+from korvid.ui.action_availability import ActionAvailability, AvailabilityCode, UnavailableReason
 from korvid.ui.app import KorvidApp
 from korvid.ui.resource_write_controller import _yaml_equal
 from korvid.ui.widgets.confirm_screen import ConfirmScreen, ReplicasPrompt
@@ -2012,6 +2012,28 @@ async def test_unavailable_reason_reports_a_missing_manifest_source_for_edit(
         assert app._resource_writes.unavailable_reason("edit_resource") == UnavailableReason(
             AvailabilityCode.MISSING_CAPABILITY, "Edit unavailable in this session"
         )
+        assert len(app._notifications) == before
+
+
+async def test_edit_is_invokable_with_both_a_write_client_and_a_manifest_source(
+    tmp_path: Path,
+) -> None:
+    """The positive half of the `edit_resource` probe (#388 task 6): with a
+    write client, a manifest source, an audit log and a selected row, `e`
+    really is invokable - so the palette offers it rather than greying it
+    out. Without this the two negative cases above would still pass if the
+    probe simply always refused."""
+    rec = Recorder()
+
+    async def manifest(kind: str, namespace: str | None, name: str) -> dict[str, Any]:
+        return {"kind": "Deployment", "metadata": {"name": name, "namespace": namespace}}
+
+    app = make_app(rec, tmp_path / "audit.jsonl", get_manifest=manifest)
+    async with app.run_test() as pilot:
+        await _to_view(pilot, "deployments")
+        before = len(app._notifications)
+        assert app._resource_writes.unavailable_reason("edit_resource") is None
+        assert app._actions.availability("edit_resource") == ActionAvailability.enabled()
         assert len(app._notifications) == before
 
 

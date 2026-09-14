@@ -14,6 +14,16 @@ APP_BINDINGS: list[Binding | tuple[str, str] | tuple[str, str, str]] = [
     # Top bar collapse/expand (issue #142): the grouped legend's toggle.
     Binding("tilde", "toggle_topbar", "Legend", show=False, id="toggle_topbar"),
     Binding("colon", "open_command", "Command", id="open_command"),
+    # The Action Palette (issue #388): `priority=True` so it opens from any
+    # focused widget (the agent prompt, a pane), with `ActionPolicy` - not
+    # the screen stack - deciding the surfaces where it must stay shut.
+    Binding(
+        "ctrl+p",
+        "open_action_palette",
+        "Actions",
+        priority=True,
+        id="open_action_palette",
+    ),
     Binding("slash", "open_filter", "Filter/Search", id="open_filter"),
     Binding("0", "toggle_all_namespaces", "All NS", id="toggle_all_namespaces"),
     # `favorite_namespaces` shortcuts (issue #108): UI-only jumps, bound
@@ -114,8 +124,7 @@ HELP_GROUP_ORDER = ("Global", "Table", "Helm", "Logs", "Describe", "Agent")
 # descriptions are generated from the live `Binding` objects; only the
 # grouping needs human context. `test_every_app_binding_action_has_an_explicit_group`
 # asserts every `KorvidApp` binding action appears here, so new bindings
-# cannot land unclassified. `open_action_palette` is pre-classified for the
-# palette-open binding a later task wires up.
+# cannot land unclassified.
 ACTION_HELP_GROUPS: dict[str, tuple[str, ...]] = {
     "quit": ("Global",),
     "help": ("Global",),

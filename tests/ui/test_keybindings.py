@@ -7,12 +7,14 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pytest
 from textual.binding import Binding
 
 from korvid.core.config import KorvidConfig
-from korvid.core.keybindings import plan_keybindings
+from korvid.core.keybindings import APPROVAL_KEYS, plan_keybindings
 from korvid.core.session_timeline import SessionTimeline
 from korvid.ui.app import KorvidApp
+from korvid.ui.widgets.action_palette import ActionPaletteScreen
 from korvid.ui.widgets.help_screen import HelpScreen
 from korvid.ui.widgets.resource_table import ResourceTable
 from korvid.ui.widgets.session_timeline_screen import SessionTimelineScreen
@@ -295,3 +297,36 @@ async def test_favorite_digit_keys_are_reserved_against_overrides() -> None:
             label="reserved-key warning notified",
         )
         assert app._keybinding_overrides == {}
+
+
+@pytest.mark.parametrize("key", sorted(APPROVAL_KEYS))
+async def test_palette_binding_cannot_take_an_approval_dialog_key(key: str) -> None:
+    """`open_action_palette` is a priority binding (it fires over any
+    screen), so the planner must refuse every key the approval dialogs
+    listen for - the palette may never become the confirm keystroke."""
+    app = make_app([_pod("web")], config=_config({"open_action_palette": key}))
+    async with app.run_test() as pilot:
+        await until(
+            pilot,
+            lambda: any("approval" in n.message for n in app._notifications),
+            label="priority/approval-key warning notified",
+        )
+        assert app._keybinding_overrides == {}
+
+
+async def test_palette_binding_is_remappable() -> None:
+    """Ctrl-P is only the *default*: the palette open is a normal, id-carrying
+    binding the `keybindings:` section can move (issue #35)."""
+    app = make_app([_pod("web")], config=_config({"open_action_palette": "ctrl+j"}))
+    async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 1, label="pod loaded")
+        await pilot.press("ctrl+p")  # freed default must be inert now
+        await pilot.pause()
+        assert not isinstance(app.screen, ActionPaletteScreen)
+        await pilot.press("ctrl+j")
+        await until(
+            pilot,
+            lambda: isinstance(app.screen, ActionPaletteScreen),
+            label="palette opens on ctrl+j",
+        )

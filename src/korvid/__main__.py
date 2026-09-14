@@ -1388,6 +1388,10 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
         agent_available=lambda: agent_ui.available,
         log_pane_open=app._log_pane_open,
         agent_busy=lambda: agent_ui.busy,
+        screen_depth=AppUiSurface(app).screen_depth,
+        inline_editor_open=app._inline_editor_open,
+        switching=context.switching,
+        app_running=app._accepting_input,
         reason_by_action={
             **{
                 action: functools.partial(resource_writes.unavailable_reason, action)

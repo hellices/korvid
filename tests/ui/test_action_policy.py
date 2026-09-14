@@ -12,7 +12,12 @@ import pytest
 from korvid.core.store import Summary
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.helm import HELM_RELEASES_META
-from korvid.ui.action_availability import ActionAvailability, AvailabilityCode, UnavailableReason
+from korvid.ui.action_availability import (
+    CONTEXT_SWITCH_IN_PROGRESS,
+    ActionAvailability,
+    AvailabilityCode,
+    UnavailableReason,
+)
 from korvid.ui.action_policy import ActionPolicy
 from korvid.ui.view_state import ViewState
 
@@ -249,3 +254,78 @@ def test_interrupt_agent_resolver_registered_via_reason_by_action_wins() -> None
         reason_by_action={"interrupt_agent": lambda: None},  # explicit: always invokable
     )
     assert policy.availability("interrupt_agent") == ActionAvailability.enabled()
+
+
+# ---------------------------------------------------------------------------
+# The palette's own open binding: protected and transient surfaces (task 6)
+# ---------------------------------------------------------------------------
+
+
+def _palette_policy(
+    *,
+    screen_depth: Callable[[], int] = lambda: 1,
+    inline_editor_open: Callable[[], bool] = lambda: False,
+    switching: Callable[[], bool] = lambda: False,
+    app_running: Callable[[], bool] = lambda: True,
+) -> ActionPolicy:
+    meta = ResourceMeta(
+        kind="Pod", plural="pods", group="", version="v1", namespaced=True, synthetic=False
+    )
+    return ActionPolicy(
+        view=FakeView(meta),
+        agent_available=lambda: True,
+        log_pane_open=lambda: False,
+        screen_depth=screen_depth,
+        inline_editor_open=inline_editor_open,
+        switching=switching,
+        app_running=app_running,
+    )
+
+
+def test_palette_binding_is_enabled_on_the_ordinary_workspace() -> None:
+    policy = _palette_policy()
+    assert policy.binding_enabled("open_action_palette") is True
+    assert policy.availability("open_action_palette") == ActionAvailability.enabled()
+
+
+@pytest.mark.parametrize(
+    ("probes", "code", "message"),
+    [
+        ({"screen_depth": lambda: 2}, AvailabilityCode.PROTECTED_UI, "Close the open dialog first"),
+        (
+            {"inline_editor_open": lambda: True},
+            AvailabilityCode.PROTECTED_UI,
+            "Finish the command or filter entry first",
+        ),
+        (
+            {"switching": lambda: True},
+            AvailabilityCode.TRANSITION,
+            CONTEXT_SWITCH_IN_PROGRESS.message,
+        ),
+        (
+            {"app_running": lambda: False},
+            AvailabilityCode.PROTECTED_UI,
+            "korvid is shutting down",
+        ),
+    ],
+)
+def test_palette_binding_is_refused_on_every_protected_surface(
+    probes: dict[str, Callable[[], object]], code: AvailabilityCode, message: str
+) -> None:
+    """`Ctrl-P` is a priority binding, so it fires over any screen: the
+    policy is the only thing that keeps the palette off an approval dialog,
+    a half-typed command, a context switch, or a shutting-down app (#388)."""
+    policy = _palette_policy(**probes)  # type: ignore[arg-type]  # per-case probe override
+    availability = policy.availability("open_action_palette")
+    assert policy.binding_enabled("open_action_palette") is False
+    assert availability.binding_enabled is False
+    assert availability.reason == UnavailableReason(code, message)
+    assert availability.invokable is False
+
+
+def test_palette_binding_defaults_to_enabled_without_injected_probes() -> None:
+    """A policy composed without the app's surface probes (tests, headless)
+    must not grey out a bound key it knows nothing about - the same default
+    stance `agent_busy` takes."""
+    policy = _policy(group="", plural="pods")
+    assert policy.binding_enabled("open_action_palette") is True

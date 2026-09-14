@@ -54,12 +54,17 @@ from korvid.k8s.telepresence import TelepresenceCLI
 from korvid.k8s.writes import WriteOps
 from korvid.tools.executor import UIBridge
 from korvid.tools.proposals import ProposalStore
+from korvid.ui.action_palette import (
+    AppActionInvocation,
+    PaletteEntry,
+    derive_palette_entries,
+)
 from korvid.ui.agent_ui_controller import (
     AgentUiController,
 )
 from korvid.ui.app_bindings import APP_BINDINGS, APP_CSS, APP_HANDLER_KEY_HELP
 from korvid.ui.app_runtime import AppRuntime, AppRuntimeInputs
-from korvid.ui.command import command_help, command_words
+from korvid.ui.command import COMMANDS, command_help, command_words, parse_command
 from korvid.ui.context_switch_coordinator import (
     ContextSwitchResult,
 )
@@ -88,6 +93,7 @@ from korvid.ui.session_timeline_controller import (
     TIMELINE_EVENT_GROUP,
     TIMELINE_NAVIGATION_GROUP,
 )
+from korvid.ui.widgets.action_palette import ActionPaletteScreen
 from korvid.ui.widgets.agent_panel import AgentPanel
 from korvid.ui.widgets.command_bar import CommandBar
 from korvid.ui.widgets.describe_screen import DescribePane, DescribeScreen
@@ -118,6 +124,11 @@ _FORWARD_POLL_SECONDS = 2.0
 
 class KorvidApp(App[None]):
     BINDINGS: ClassVar[list[Binding | tuple[str, str] | tuple[str, str, str]]] = APP_BINDINGS
+    # Textual binds `Ctrl-P` to its own system command palette implicitly.
+    # korvid owns that key (issue #388): the Action Palette searches the
+    # app's real catalogs, so the stock one is switched off rather than
+    # left competing for the same keystroke.
+    ENABLE_COMMAND_PALETTE: ClassVar[bool] = False
     HANDLER_KEY_HELP: ClassVar[tuple[tuple[str, str, str, str], ...]] = APP_HANDLER_KEY_HELP
     DEFAULT_CSS = APP_CSS
 
@@ -698,6 +709,84 @@ class KorvidApp(App[None]):
         # Dismiss the filter bar first so no invisible filter stays active.
         self._filter_bar.dismiss_bar()
         self._command_bar.open()
+
+    # ------------------------------------------------------------------
+    # Action Palette (Ctrl-P, issue #388): one searchable surface over the
+    # two catalogs the app already executes from. Nothing is invoked here
+    # that a key could not invoke: every selection lands on the existing
+    # `run_action` / `parse_command` route, exactly once.
+    # ------------------------------------------------------------------
+
+    def _palette_entries(self) -> list[PaletteEntry]:
+        """A freshly derived catalog: `BINDINGS` + `COMMANDS`, judged now.
+
+        Built per render and again after dismissal rather than cached:
+        availability answers from live state (view, selection, panes,
+        in-flight writes), so a retained list advertises a stale world.
+        """
+        return derive_palette_entries(
+            self.BINDINGS,
+            COMMANDS,
+            overrides=self._keybinding_overrides,
+            availability=self._actions.availability,
+        )
+
+    def action_open_action_palette(self) -> None:
+        """Open the palette, unless the current surface forbids it.
+
+        The guard is repeated here on purpose: `check_action` already
+        refuses the keypress, but the action stays reachable by any other
+        caller, and the palette must never stack over an approval dialog.
+        """
+        if not self._actions.binding_enabled("open_action_palette"):
+            return
+        self.push_screen(ActionPaletteScreen(self._palette_entries()), self._palette_selected)
+
+    async def _palette_selected(self, entry_id: str | None) -> None:
+        """Route one dismissed palette id through its existing app route.
+
+        The screen returns a stable id, never an entry or a callable: this
+        re-derives the catalog *after* the modal is gone and re-checks that
+        id, because the answer shown when the list was rendered may have
+        expired meanwhile. A stale or now-refused id notifies with the
+        owner's own wording and dispatches nothing.
+        """
+        if entry_id is None:
+            return
+        entry = next((e for e in self._palette_entries() if e.id == entry_id), None)
+        if entry is None:
+            self.notify("That action is no longer available", severity="warning")
+            return
+        reason = entry.availability.reason
+        if reason is not None:
+            self.notify(reason.message, severity=reason.severity)
+            return
+        invocation = entry.invocation
+        if isinstance(invocation, AppActionInvocation):
+            await self.run_action(invocation.action)
+            return
+        self.post_message(parse_command(invocation.canonical_text, self._command_bar.known))
+
+    def _inline_editor_open(self) -> bool:
+        """Whether the `:` command bar or `/` filter bar is mid-edit.
+
+        Display, not focus: either bar is shown only while it owns the line
+        being typed, and the palette must not cover it. Other inputs (the
+        agent prompt, a pane's search) stay palette-reachable surfaces.
+        """
+        try:
+            return bool(self._command_bar.display or self._filter_bar.display)
+        except NoMatches:  # widget tree not composed (startup/teardown)
+            return False
+
+    def _accepting_input(self) -> bool:
+        """Whether the app is still live enough to open a modal.
+
+        Both halves matter: `is_running` falls once the message pump stops,
+        while `_exit` is set the moment `exit()` is called and the pump is
+        still draining - a window a new modal must not mount into.
+        """
+        return self.is_running and not self._exit
 
     def action_open_filter(self) -> None:
         # When the describe pane is open, / searches inside it (issue #42).

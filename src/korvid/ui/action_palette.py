@@ -163,6 +163,28 @@ def derive_command_entries(
     return entries
 
 
+def derive_palette_entries(
+    bindings: Sequence[BindingType],
+    commands: Sequence[CommandDescriptor],
+    *,
+    overrides: Mapping[str, str] | None = None,
+    availability: Callable[[str], ActionAvailability],
+) -> list[PaletteEntry]:
+    """Derive the whole palette catalog: bound actions, then `:` commands.
+
+    One list, built fresh by its caller for every render and re-checked
+    after the modal is dismissed - never cached: availability is a live
+    question (the selected row, the current view, an in-flight write) whose
+    answer expires the moment the user does anything. `availability` is
+    asked for each action name and for each command's canonical text, so a
+    single policy answers both halves.
+    """
+    return [
+        *derive_action_entries(bindings, overrides=overrides, availability=availability),
+        *derive_command_entries(commands, availability=availability),
+    ]
+
+
 def _leading_tokens(text: str) -> list[str]:
     return text.casefold().split()
 

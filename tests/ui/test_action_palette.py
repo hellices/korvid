@@ -9,6 +9,7 @@ from korvid.ui.action_palette import (
     PaletteEntry,
     derive_action_entries,
     derive_command_entries,
+    derive_palette_entries,
     rank_entries,
 )
 from korvid.ui.app_bindings import APP_BINDINGS
@@ -204,3 +205,30 @@ def test_action_and_command_descriptions_are_reachable_by_fuzzy_search() -> None
     )
     ranked_commands = rank_entries(command_entries, "disconnects")
     assert ranked_commands[0].id == "command:ai"
+
+
+def test_palette_catalog_combines_both_catalogs_and_asks_about_every_name() -> None:
+    """The app's one catalog call (task 6): actions first, then commands,
+    with the same policy asked about each action name and each command's
+    canonical text - no third, hand-maintained table in between."""
+    asked: list[str] = []
+
+    def availability(name: str) -> ActionAvailability:
+        asked.append(name)
+        return ActionAvailability.enabled()
+
+    entries = derive_palette_entries(
+        APP_BINDINGS,
+        COMMANDS,
+        overrides={"help": "f1"},
+        availability=availability,
+    )
+    ids = [entry.id for entry in entries]
+    assert ids == [
+        *(entry.id for entry in derive_action_entries(APP_BINDINGS, availability=availability)),
+        *(entry.id for entry in derive_command_entries(COMMANDS, availability=availability)),
+    ]
+    assert "action:open_action_palette" in ids
+    assert "command:pulse" in ids
+    assert {"help", "pulse"} <= set(asked)
+    assert next(e for e in entries if e.id == "action:help").trigger == "f1"

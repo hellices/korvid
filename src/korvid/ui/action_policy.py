@@ -14,7 +14,12 @@ from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.helm import HELM_RELEASES_META, HELM_REVISIONS_META
 from korvid.k8s.olm import OPERATORS_GROUP, PACKAGES_GROUP
 from korvid.k8s.portforward import FORWARDABLE_KINDS
-from korvid.ui.action_availability import ActionAvailability, AvailabilityCode, UnavailableReason
+from korvid.ui.action_availability import (
+    CONTEXT_SWITCH_IN_PROGRESS,
+    ActionAvailability,
+    AvailabilityCode,
+    UnavailableReason,
+)
 from korvid.ui.resource_write_controller import RESTARTABLE, SCALABLE
 from korvid.ui.view_state import ViewState
 
@@ -66,6 +71,13 @@ _LOG_PANE_ACTIONS: frozenset[str] = frozenset(
 #: helm write actions stay available through `_ACTION_VIEWS`.
 _SYNTHETIC_GATED_ACTIONS: frozenset[str] = frozenset({"delete_resource", "edit_resource"})
 
+#: The Action Palette's own open action (issue #388). It is the one action
+#: gated on the *surface* rather than the view: its binding is `priority`,
+#: so it fires over any screen and from inside any focused widget, and the
+#: policy is therefore the only thing standing between `Ctrl-P` and an
+#: approval dialog.
+PALETTE_ACTION = "open_action_palette"
+
 
 class ActionPolicy:
     """Gate bindings on composition availability and the current view.
@@ -85,12 +97,28 @@ class ActionPolicy:
         #: as "invokable": a policy built without one must not grey out a
         #: bound key it knows nothing about.
         agent_busy: Callable[[], bool] | None = None,
+        #: The app surfaces `open_action_palette` is gated on (issue #388
+        #: task 6): how many screens are stacked, whether the `:` command
+        #: bar or `/` filter bar is editing, whether a `:ctx` switch is in
+        #: flight, and whether the app is still accepting input. Each is
+        #: optional and defaults to "not blocking" for the same reason
+        #: `agent_busy` does: a policy composed without the Textual shell
+        #: (unit tests, headless callers) must not grey out a bound key it
+        #: knows nothing about.
+        screen_depth: Callable[[], int] | None = None,
+        inline_editor_open: Callable[[], bool] | None = None,
+        switching: Callable[[], bool] | None = None,
+        app_running: Callable[[], bool] | None = None,
         reason_by_action: Mapping[str, Callable[[], UnavailableReason | None]] | None = None,
     ) -> None:
         self._view = view
         self._agent_available = agent_available
         self._log_pane_open = log_pane_open
         self._agent_busy = agent_busy
+        self._screen_depth = screen_depth
+        self._inline_editor_open = inline_editor_open
+        self._switching = switching
+        self._app_running = app_running
         #: Owner-supplied reason resolvers for actions whose binding stays
         #: enabled but whose *invocation* may still be refused (the generic
         #: writes: `ResourceWriteController.unavailable_reason`; the
@@ -111,6 +139,8 @@ class ActionPolicy:
 
     def binding_enabled(self, action: str) -> bool:
         """Whether `action`'s binding is enabled in the current composition and view."""
+        if action == PALETTE_ACTION:
+            return self._palette_reason() is None
         if action == "toggle_agent" and not self._agent_available():
             return False
         if action in _LOG_PANE_ACTIONS:
@@ -154,6 +184,28 @@ class ActionPolicy:
         resolver = self._reason_by_action.get(action)
         return None if resolver is None else resolver()
 
+    def _palette_reason(self) -> UnavailableReason | None:
+        """Why the Action Palette must not open right now, or None.
+
+        One place answers this for both `binding_enabled` (so the priority
+        `Ctrl-P` binding is skipped during dispatch and stays out of the
+        legend) and `availability` (so the direct app action refuses with
+        the same verdict). The order is the user's: an open dialog is the
+        nearest surface, then a half-typed command or filter, then the
+        cluster-wide `:ctx` transition, then a shutting-down app.
+        """
+        if self._screen_depth is not None and self._screen_depth() > 1:
+            return UnavailableReason(AvailabilityCode.PROTECTED_UI, "Close the open dialog first")
+        if self._inline_editor_open is not None and self._inline_editor_open():
+            return UnavailableReason(
+                AvailabilityCode.PROTECTED_UI, "Finish the command or filter entry first"
+            )
+        if self._switching is not None and self._switching():
+            return CONTEXT_SWITCH_IN_PROGRESS
+        if self._app_running is not None and not self._app_running():
+            return UnavailableReason(AvailabilityCode.PROTECTED_UI, "korvid is shutting down")
+        return None
+
     def _interrupt_agent_reason(self) -> UnavailableReason | None:
         """The default `interrupt_agent` resolver: Ctrl-X is a priority
         binding that must stay dispatchable (its visibility is deliberately
@@ -168,6 +220,10 @@ class ActionPolicy:
     def _wrong_view_reason(self, action: str) -> UnavailableReason:
         """Explain a disabled binding, for a palette entry that stays
         searchable but greyed out with its cause attached."""
+        if action == PALETTE_ACTION:
+            reason = self._palette_reason()
+            if reason is not None:
+                return reason
         if action == "toggle_agent" and not self._agent_available():
             return UnavailableReason(AvailabilityCode.MISSING_CAPABILITY, "Agent is not available")
         if action in _LOG_PANE_ACTIONS and not self._log_pane_open():

@@ -38,6 +38,7 @@ _ACTION_GROUPS: dict[str, str] = {
     "quit": "Nav",
     "help": "Nav",
     "open_command": "Nav",
+    "open_action_palette": "Nav",
     "open_filter": "Nav",
     "toggle_all_namespaces": "Nav",
     "toggle_topbar": "Nav",
