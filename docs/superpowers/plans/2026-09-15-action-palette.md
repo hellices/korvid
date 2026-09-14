@@ -678,45 +678,24 @@ git commit -m "feat(ui): derive searchable Action Palette entries (#388)" \
 
 ---
 
-### Task 3: Expose side-effect-free availability at the owning boundaries
+### Task 3: Expose silent selection and write availability
 
 **Files:**
 - Modify: `src/korvid/ui/view_state.py:27-96`
 - Modify: `src/korvid/ui/app_surfaces.py:500-545`
 - Modify: `src/korvid/ui/write_coordinator.py:292-372`
 - Modify: `src/korvid/ui/resource_write_controller.py`
-- Modify: `src/korvid/ui/helm_controller.py:176-215`
-- Modify: `src/korvid/ui/forward_controller.py:160-210`
-- Modify: `src/korvid/ui/transfer.py:140-180`
-- Modify: `src/korvid/ui/shell_controller.py:175-225`
-- Modify: `src/korvid/ui/operator_controller.py:95-145`
-- Modify: `src/korvid/ui/log_controller.py`
 - Modify: `src/korvid/ui/action_policy.py`
 - Modify: `src/korvid/__main__.py`
 - Test: `tests/ui/test_view_state_seam.py`
 - Test: `tests/ui/test_write_coordinator.py`
+- Test: `tests/ui/test_write_ops.py`
 - Test: `tests/ui/test_action_policy.py`
-- Test: `tests/ui/test_forward_controller.py`
-- Test: `tests/ui/test_port_forward.py`
-- Test: `tests/ui/test_transfer_controller.py`
-- Test: `tests/ui/test_transfer_picker.py`
-- Test: `tests/ui/test_shell.py`
-- Test: `tests/ui/test_node_shell.py`
-- Test: `tests/ui/test_operator_install.py`
-- Test: `tests/ui/test_operator_uninstall.py`
-- Test: `tests/ui/test_log_controller.py`
-- Test: `tests/ui/test_log_pane.py`
 
 **Interfaces:**
 - Produces: `ViewState.selected_ns_name(*, notify: bool = True)`.
 - Produces: `WriteCoordinator.unavailable_reason()`,
-  `ResourceWriteController.unavailable_reason(action)`,
-  `HelmController.unavailable_reason(action)`,
-  `ForwardController.unavailable_reason()`,
-  `TransferController.unavailable_reason()`,
-  `ShellController.unavailable_reason()`,
-  `OperatorController.unavailable_reason()`, and
-  `LogController.unavailable_reason(action)`, each returning
+  and `ResourceWriteController.unavailable_reason(action)`, each returning
   `UnavailableReason | None`.
 - Produces: `ActionPolicy.availability(action: str) -> ActionAvailability`.
 - Preserves: `ActionPolicy.binding_enabled` and every existing handler
@@ -750,9 +729,9 @@ def test_write_unavailable_reason_is_side_effect_free(tmp_path: Path) -> None:
 ```
 
 Add parametrized policy cases for wrong view, no selection, read-only, missing
-Helm, missing `kubectl`, closed log pane, busy transfer, unavailable Agent, and
-context switching. Assert `binding_enabled` remains true for no selection and
-read-only where existing key handlers explain the refusal.
+audit, synthetic resource, and unsupported scale/restart targets. Assert
+`binding_enabled` remains true for no selection and read-only where existing
+key handlers explain the refusal.
 
 - [ ] **Step 2: Run the tests to verify RED**
 
@@ -791,38 +770,37 @@ missing audit, unknown kind, synthetic kind, and silent selection. The dispatch
 method emits the exact existing message/severity and returns `None`; the probe
 never notifies.
 
-Use the same pattern in each owner:
+Use the same side-effect-free pattern in `ResourceWriteController`:
 
 ```python
-def unavailable_reason(self) -> UnavailableReason | None:
-    if self._gate.switching():
-        return UnavailableReason(
-            AvailabilityCode.TRANSITION,
-            "Unavailable while the Kubernetes context is switching",
-        )
-    if self._view.selected_ns_name(notify=False)[1] is None:
+def unavailable_reason(self, action: str) -> UnavailableReason | None:
+    reason = self._writes.unavailable_reason()
+    if reason is not None:
+        return reason
+    target = self._writes.write_target(notify=False)
+    if target is None:
         return UnavailableReason(
             AvailabilityCode.NO_SELECTION,
             "Select a resource first",
         )
+    meta = target.meta
+    if action == "rollout_restart" and (meta.group, meta.plural) not in RESTARTABLE:
+        return UnavailableReason(
+            AvailabilityCode.UNSUPPORTED_RESOURCE,
+            f"Restart does not apply to {gvr_label(meta)}",
+        )
+    if action == "scale_resource" and (meta.group, meta.plural) not in SCALABLE:
+        return UnavailableReason(
+            AvailabilityCode.UNSUPPORTED_RESOURCE,
+            f"Scale does not apply to {gvr_label(meta)}",
+        )
     return None
 ```
 
-Preserve each owner's exact extra checks:
-
-- Helm: read-only, missing audit, missing Helm binary, and selection for
-  upgrade/history/rollback but not install.
-- Forward: context switch, registry, `kubectl`, and selection.
-- Transfer: exec client, in-flight transfer, context switch, and selection.
-- Shell: context switch, selection, `kubectl`; node shell also requires the
-  write gate.
-- Operator: write client, write target, Subscription API, and manifest source.
-- Logs: selected pod for opening logs; visible pane for pane-only actions.
-- Resource writes: generic write reason plus resize capability and supported
-  action/resource identity.
-
-Existing action methods call the reason helper, notify once, and return before
-their current body. Do not remove post-await context/UID revalidation.
+Use a private `WriteTargetResolution` value if needed so
+`WriteCoordinator.write_target(notify=True)` and `unavailable_reason()` share
+the same checks without resolving or notifying twice. Preserve the existing
+post-await context/UID revalidation.
 
 - [ ] **Step 5: Extend `ActionPolicy` to compose owner reasons**
 
@@ -841,10 +819,8 @@ def availability(self, action: str) -> ActionAvailability:
     return ActionAvailability(binding_enabled=True, reason=reason)
 ```
 
-Map actions to existing owners in one policy table. The table maps identity to
-reason resolver only; titles, keys, and execution remain catalog-derived.
-`interrupt_agent` uses the existing `AgentUiController.busy` property for
-`invokable` without changing its current binding behavior.
+Map generic write actions to `ResourceWriteController.unavailable_reason`.
+Titles, keys, and execution remain catalog-derived.
 
 - [ ] **Step 6: Run owner tests and prove no duplicate notifications**
 
@@ -855,18 +831,7 @@ uv run --frozen pytest -p no:tach \
   tests/ui/test_action_policy.py \
   tests/ui/test_view_state_seam.py \
   tests/ui/test_write_coordinator.py \
-  tests/ui/test_write_ops.py \
-  tests/ui/test_helm_actions.py \
-  tests/ui/test_forward_controller.py \
-  tests/ui/test_port_forward.py \
-  tests/ui/test_transfer_controller.py \
-  tests/ui/test_transfer_picker.py \
-  tests/ui/test_shell.py \
-  tests/ui/test_node_shell.py \
-  tests/ui/test_operator_install.py \
-  tests/ui/test_operator_uninstall.py \
-  tests/ui/test_log_controller.py \
-  tests/ui/test_log_pane.py -q
+  tests/ui/test_write_ops.py -q
 uv run --frozen ruff check src/korvid/ui/ tests/ui/test_action_policy.py \
   tests/ui/test_view_state_seam.py tests/ui/test_write_coordinator.py
 uv run --frozen mypy src/
@@ -882,25 +847,226 @@ keyboard action.
 git add src/korvid/ui/action_availability.py src/korvid/ui/action_policy.py \
   src/korvid/ui/view_state.py \
   src/korvid/ui/app_surfaces.py src/korvid/ui/write_coordinator.py \
-  src/korvid/ui/resource_write_controller.py src/korvid/ui/helm_controller.py \
-  src/korvid/ui/forward_controller.py src/korvid/ui/transfer.py \
-  src/korvid/ui/shell_controller.py src/korvid/ui/operator_controller.py \
-  src/korvid/ui/log_controller.py src/korvid/__main__.py \
+  src/korvid/ui/resource_write_controller.py src/korvid/__main__.py \
   tests/ui/test_action_policy.py tests/ui/test_view_state_seam.py \
   tests/ui/test_write_coordinator.py tests/ui/test_write_ops.py \
-  tests/ui/test_helm_actions.py tests/ui/test_forward_controller.py \
-  tests/ui/test_port_forward.py tests/ui/test_transfer_controller.py \
-  tests/ui/test_transfer_picker.py tests/ui/test_shell.py \
-  tests/ui/test_node_shell.py tests/ui/test_operator_install.py \
-  tests/ui/test_operator_uninstall.py tests/ui/test_log_controller.py \
-  tests/ui/test_log_pane.py
-git commit -m "feat(ui): explain contextual action availability (#388)" \
+git commit -m "feat(ui): expose write action availability (#388)" \
   -m "Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>"
 ```
 
 ---
 
-### Task 4: Build the keyboard-first palette modal
+### Task 4: Add capability-specific availability without side effects
+
+**Files:**
+- Modify: `src/korvid/ui/helm_controller.py:176-235`
+- Modify: `src/korvid/ui/forward_controller.py:160-220`
+- Modify: `src/korvid/ui/transfer.py:140-190`
+- Modify: `src/korvid/ui/shell_controller.py:175-235`
+- Modify: `src/korvid/ui/operator_controller.py:95-160`
+- Modify: `src/korvid/ui/log_controller.py`
+- Modify: `src/korvid/ui/action_policy.py`
+- Modify: `src/korvid/__main__.py`
+- Test: `tests/ui/test_action_policy.py`
+- Test: `tests/ui/test_helm_actions.py`
+- Test: `tests/ui/test_forward_controller.py`
+- Test: `tests/ui/test_port_forward.py`
+- Test: `tests/ui/test_transfer_controller.py`
+- Test: `tests/ui/test_transfer_picker.py`
+- Test: `tests/ui/test_shell.py`
+- Test: `tests/ui/test_node_shell.py`
+- Test: `tests/ui/test_operator_install.py`
+- Test: `tests/ui/test_operator_uninstall.py`
+- Test: `tests/ui/test_log_controller.py`
+- Test: `tests/ui/test_log_pane.py`
+
+**Interfaces:**
+- Produces: `HelmController.unavailable_reason(action: str)`.
+- Produces: `ForwardController.unavailable_reason()`.
+- Produces: `TransferController.unavailable_reason()`.
+- Produces: `ShellController.unavailable_reason()`.
+- Produces: `OperatorController.unavailable_reason()`.
+- Produces: `LogController.unavailable_reason(action: str)`.
+- Extends: the `reason_by_action` mapping injected into `ActionPolicy`.
+
+- [ ] **Step 1: Write one RED reason test at each owner**
+
+Add focused tests using each module's existing fake constructors:
+
+```python
+def test_helm_availability_reports_the_missing_executable_without_notifying() -> None:
+    controller, ui = make_helm_controller(helm=None)
+    reason = controller.unavailable_reason("helm_install")
+    assert reason == UnavailableReason(
+        AvailabilityCode.MISSING_CAPABILITY,
+        "helm CLI not found on PATH - install/upgrade/rollback/uninstall unavailable",
+        severity="error",
+    )
+    assert ui.notifications == []
+
+
+def test_transfer_availability_reports_an_in_flight_transfer_without_notifying() -> None:
+    controller, ui = make_transfer_controller()
+    controller._in_flight = True
+    reason = controller.unavailable_reason()
+    assert reason == UnavailableReason(
+        AvailabilityCode.PROTECTED_UI,
+        "A transfer is already in progress",
+    )
+    assert ui.notifications == []
+
+
+def test_shell_availability_reports_missing_kubectl_without_notifying(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller, ui = make_shell_controller()
+    monkeypatch.setattr(shutil, "which", lambda _name: None)
+    reason = controller.unavailable_reason()
+    assert reason == UnavailableReason(
+        AvailabilityCode.MISSING_CAPABILITY,
+        "kubectl not found on PATH - shell-in requires kubectl",
+        severity="error",
+    )
+    assert ui.notifications == []
+```
+
+Add equivalent assertions for forward registry/`kubectl`, operator write
+client/API/manifest source, selected-pod log opening, and closed log pane.
+
+- [ ] **Step 2: Run owner tests to verify RED**
+
+Run:
+
+```bash
+uv run --frozen pytest -p no:tach \
+  tests/ui/test_helm_actions.py \
+  tests/ui/test_forward_controller.py \
+  tests/ui/test_transfer_controller.py \
+  tests/ui/test_shell.py \
+  tests/ui/test_operator_install.py \
+  tests/ui/test_log_controller.py -q
+```
+
+Expected: the new tests fail because the reason methods do not exist.
+
+- [ ] **Step 3: Extract each existing synchronous guard into its reason method**
+
+Each method reads only already-owned synchronous state, returns the first
+`UnavailableReason`, and never calls `notify`. Existing action methods reuse the
+method:
+
+```python
+def _report_unavailable(self, reason: UnavailableReason | None) -> bool:
+    if reason is None:
+        return False
+    self._ui.notify(
+        reason.message,
+        severity=reason.severity,
+        markup=False,
+    )
+    return True
+```
+
+Use the exact existing messages and order:
+
+- Helm: wrong view remains policy-owned; controller checks read-only, audit,
+  Helm binary, then selection for upgrade/history/rollback.
+- Forward: context transition, registry, `kubectl`, then selection.
+- Transfer: exec client, in-flight transfer, context transition, then
+  selection.
+- Shell: context transition, selection, `kubectl`; node view also includes the
+  write reason.
+- Operator: write client, write reason, Subscription API, and manifest source.
+- Logs: selected pod for `logs`/`logs_multi`; visible log or describe pane for
+  pane-local search/format actions.
+
+Do not move asynchronous manifest, RBAC, port discovery, or UID/context
+revalidation into these methods.
+
+- [ ] **Step 4: Compose capability reasons in `ActionPolicy`**
+
+At the composition root, extend the existing `reason_by_action` mapping:
+
+```python
+reason_by_action={
+    "delete_resource": functools.partial(resource_writes.unavailable_reason, "delete_resource"),
+    "rollout_restart": functools.partial(
+        resource_writes.unavailable_reason, "rollout_restart"
+    ),
+    "edit_resource": functools.partial(resource_writes.unavailable_reason, "edit_resource"),
+    "scale_resource": functools.partial(
+        resource_writes.unavailable_reason, "scale_resource"
+    ),
+    "resize_pod": functools.partial(resource_writes.unavailable_reason, "resize_pod"),
+    "cordon_node": functools.partial(resource_writes.unavailable_reason, "cordon_node"),
+    "uncordon_node": functools.partial(resource_writes.unavailable_reason, "uncordon_node"),
+    "drain_node": functools.partial(resource_writes.unavailable_reason, "drain_node"),
+    "helm_install": functools.partial(helm_controller.unavailable_reason, "helm_install"),
+    "helm_upgrade": functools.partial(helm_controller.unavailable_reason, "helm_upgrade"),
+    "helm_history": functools.partial(helm_controller.unavailable_reason, "helm_history"),
+    "helm_rollback": functools.partial(helm_controller.unavailable_reason, "helm_rollback"),
+    "port_forward": forward_controller.unavailable_reason,
+    "transfer": transfer.unavailable_reason,
+    "shell": shell.unavailable_reason,
+    "operator_install": operators.unavailable_reason,
+    "logs": functools.partial(logs.unavailable_reason, "logs"),
+    "logs_multi": functools.partial(logs.unavailable_reason, "logs_multi"),
+}
+```
+
+Add `interrupt_agent` through a small policy-owned resolver that returns
+`UnavailableReason(PROTECTED_UI, "No Agent turn is running")` when
+`AgentUiController.busy` is false. Do not change its binding visibility.
+
+- [ ] **Step 5: Run all capability and policy tests**
+
+Run:
+
+```bash
+uv run --frozen pytest -p no:tach \
+  tests/ui/test_action_policy.py \
+  tests/ui/test_helm_actions.py \
+  tests/ui/test_forward_controller.py \
+  tests/ui/test_port_forward.py \
+  tests/ui/test_transfer_controller.py \
+  tests/ui/test_transfer_picker.py \
+  tests/ui/test_shell.py \
+  tests/ui/test_node_shell.py \
+  tests/ui/test_operator_install.py \
+  tests/ui/test_operator_uninstall.py \
+  tests/ui/test_log_controller.py \
+  tests/ui/test_log_pane.py -q
+uv run --frozen ruff check src/korvid/ui/ tests/ui/test_action_policy.py \
+  tests/ui/test_helm_actions.py tests/ui/test_forward_controller.py \
+  tests/ui/test_transfer_controller.py tests/ui/test_shell.py \
+  tests/ui/test_operator_install.py tests/ui/test_log_controller.py
+uv run --frozen mypy src/
+uv run --frozen tach check
+```
+
+Expected: all pass; refused keyboard actions still emit one existing
+notification, while availability probes emit none.
+
+- [ ] **Step 6: Commit capability availability**
+
+```bash
+git add src/korvid/ui/helm_controller.py src/korvid/ui/forward_controller.py \
+  src/korvid/ui/transfer.py src/korvid/ui/shell_controller.py \
+  src/korvid/ui/operator_controller.py src/korvid/ui/log_controller.py \
+  src/korvid/ui/action_policy.py src/korvid/__main__.py \
+  tests/ui/test_action_policy.py tests/ui/test_helm_actions.py \
+  tests/ui/test_forward_controller.py tests/ui/test_port_forward.py \
+  tests/ui/test_transfer_controller.py tests/ui/test_transfer_picker.py \
+  tests/ui/test_shell.py tests/ui/test_node_shell.py \
+  tests/ui/test_operator_install.py tests/ui/test_operator_uninstall.py \
+  tests/ui/test_log_controller.py tests/ui/test_log_pane.py
+git commit -m "feat(ui): expose action capability reasons (#388)" \
+  -m "Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>"
+```
+
+---
+
+### Task 5: Build the keyboard-first palette modal
 
 **Files:**
 - Create: `src/korvid/ui/widgets/action_palette.py`
@@ -1094,7 +1260,7 @@ git commit -m "feat(ui): add the keyboard-first Action Palette modal (#388)" \
 
 ---
 
-### Task 5: Wire guarded opening and exact existing-route dispatch
+### Task 6: Wire guarded opening and exact existing-route dispatch
 
 **Files:**
 - Modify: `src/korvid/ui/app_bindings.py`
@@ -1318,7 +1484,7 @@ git commit -m "feat(ui): route Action Palette selections safely (#388)" \
 
 ---
 
-### Task 6: Prove approval safety, stale-state refusal, and native terminal delivery
+### Task 7: Prove approval safety, stale-state refusal, and native terminal delivery
 
 **Files:**
 - Modify: `tests/ui/test_action_palette_workflow.py`
@@ -1520,10 +1686,10 @@ git commit -m "test(ui): prove Action Palette safety and terminal behavior (#388
 
 ---
 
-### Task 7: Run the complete gate and prepare the milestone handoff
+### Task 8: Run the complete gate and prepare the milestone handoff
 
 **Files:**
-- Modify only files required by failures caused by Tasks 1-6.
+- Modify only files required by failures caused by Tasks 1-7.
 - Verify: `uv.lock` remains byte-identical to `HEAD`.
 
 **Interfaces:**
@@ -1566,7 +1732,8 @@ only intentional tracked changes.
 
 - [ ] **Step 3: Request code review on the complete range**
 
-Use `superpowers:requesting-code-review` with base `7cc99b3a` and the current
+Record `IMPLEMENTATION_BASE=$(git rev-parse HEAD)` immediately before Task 1.
+Use `superpowers:requesting-code-review` with that exact base and the current
 head. Address every credible correctness, security, architecture, and test
 finding through a new RED→GREEN commit; do not amend prior commits.
 
