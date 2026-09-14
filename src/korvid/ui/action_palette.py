@@ -15,7 +15,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 
-from textual.binding import Binding, BindingType
+from textual.binding import BindingType
 from textual.fuzzy import Matcher
 
 from korvid.ui.action_availability import ActionAvailability
@@ -56,8 +56,20 @@ class PaletteEntry:
     invocation: PaletteInvocation
 
 
+def _humanize_action_id(action: str) -> str:
+    """Turn a snake_case action id into a short palette title.
+
+    Deterministic and catalog-derived, not a new metadata table: e.g.
+    ``drain_node`` -> ``Drain node``. Only the first letter is capitalized
+    so multi-word ids read as a normal sentence fragment rather than Title
+    Case.
+    """
+    spaced = action.replace("_", " ").strip()
+    return spaced[:1].upper() + spaced[1:] if spaced else spaced
+
+
 def derive_action_entries(
-    bindings: Sequence[Binding | tuple[str, str] | tuple[str, str, str]] | Sequence[BindingType],
+    bindings: Sequence[BindingType],
     *,
     overrides: Mapping[str, str] | None = None,
     availability: Callable[[str], ActionAvailability],
@@ -72,6 +84,19 @@ def derive_action_entries(
     Parameterized action expressions (e.g. ``favorite_namespace(3)``) have
     no single key to invoke generically from the palette, so they are
     skipped entirely rather than surfacing a broken entry.
+
+    Title and description are both catalog-derived, not a new hand-written
+    table: the title is the humanized action id (``drain_node`` ->
+    ``Drain node``), and the description is the `Binding`'s own
+    `description` text — which is sometimes a fuller explanation (e.g.
+    `resize_pod`'s ``"Resize pod CPU/memory in place (K8s 1.35+)"``) that
+    reads better as a palette second line than as a footer label.
+
+    An action classified under more than one help group by
+    `ACTION_HELP_GROUPS` (e.g. `open_filter` in both `"Table"` and
+    `"Logs"`) surfaces under only its *first* listed group as the entry's
+    one palette `category` — it does not get a second, duplicate entry per
+    group.
     """
     remapped = overrides or {}
     entries: list[PaletteEntry] = []
@@ -88,8 +113,8 @@ def derive_action_entries(
         entries.append(
             PaletteEntry(
                 id=f"action:{action}",
-                title=binding.description,
-                description="",
+                title=_humanize_action_id(action),
+                description=binding.description,
                 category=help_groups_for_action(action)[0],
                 trigger=key_label(key),
                 aliases=(),
@@ -110,17 +135,23 @@ def derive_command_entries(
 
     Descriptors that opt out via `palette_omit_reason` (e.g. ``:q`` — the
     bound Quit action is the single palette entry) contribute nothing.
+
+    The title is `PaletteCommand.title`; the description is the
+    descriptor's own first `help` row description — the same text the
+    `:help` overlay already shows for that command — rather than a new,
+    separately maintained metadata table.
     """
     entries: list[PaletteEntry] = []
     for order, descriptor in enumerate(commands):
         palette = descriptor.palette
         if palette is None:
             continue
+        description = descriptor.help[0][1] if descriptor.help else ""
         entries.append(
             PaletteEntry(
                 id=f"command:{palette.canonical_text}",
                 title=palette.title,
-                description="",
+                description=description,
                 category="Commands",
                 trigger=f":{palette.canonical_text}",
                 aliases=palette.aliases,
