@@ -80,8 +80,13 @@ class ViewState(ABC):
         """
 
     @abstractmethod
-    def selected_ns_name(self) -> tuple[str | None, str | None]:
-        """(namespace, name) of the selected row, or (None, None) with a warning."""
+    def selected_ns_name(self, *, notify: bool = True) -> tuple[str | None, str | None]:
+        """(namespace, name) of the selected row, or (None, None).
+
+        Notifies the user why on a rejected read - unless `notify=False`,
+        the escape hatch for a *probe*: something that must answer "is a
+        row selected right now" (an availability check, e.g.) without the
+        side effect of a warning meant for an actual keybinding refusal."""
 
     @abstractmethod
     def selected_uid(self, namespace: str | None, name: str) -> str | None:

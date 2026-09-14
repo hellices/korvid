@@ -520,15 +520,17 @@ class AppViewState(ViewState):
     def default_namespace(self) -> str | None:
         return self._app.config.namespace
 
-    def selected_ns_name(self) -> tuple[str | None, str | None]:
+    def selected_ns_name(self, *, notify: bool = True) -> tuple[str | None, str | None]:
         table = self._app._focused_table()
         row_key = _row_key_at_cursor(table)
         if row_key is None:
-            self._app.notify("No resource selected", severity="warning")
+            if notify:
+                self._app.notify("No resource selected", severity="warning")
             return None, None
         parts = row_key.split("/", 1)
         if len(parts) != 2:
-            self._app.notify("Cannot determine resource from selection", severity="warning")
+            if notify:
+                self._app.notify("Cannot determine resource from selection", severity="warning")
             return None, None
         return parts[0], parts[1]
 

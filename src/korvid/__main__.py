@@ -1379,6 +1379,12 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
         view=view,
         agent_available=lambda: agent_ui.available,
         log_pane_open=app._log_pane_open,
+        reason_by_action={
+            "delete_resource": lambda: resource_writes.unavailable_reason("delete_resource"),
+            "edit_resource": lambda: resource_writes.unavailable_reason("edit_resource"),
+            "rollout_restart": lambda: resource_writes.unavailable_reason("rollout_restart"),
+            "scale_resource": lambda: resource_writes.unavailable_reason("scale_resource"),
+        },
     )
     commands = CommandRouter(
         ui=AppUiSurface(app),

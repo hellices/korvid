@@ -8,12 +8,13 @@ without composing the Textual app.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.helm import HELM_RELEASES_META, HELM_REVISIONS_META
 from korvid.k8s.olm import OPERATORS_GROUP, PACKAGES_GROUP
 from korvid.k8s.portforward import FORWARDABLE_KINDS
+from korvid.ui.action_availability import ActionAvailability, AvailabilityCode, UnavailableReason
 from korvid.ui.resource_write_controller import RESTARTABLE, SCALABLE
 from korvid.ui.view_state import ViewState
 
@@ -80,10 +81,18 @@ class ActionPolicy:
         view: ViewState,
         agent_available: Callable[[], bool],
         log_pane_open: Callable[[], bool],
+        reason_by_action: Mapping[str, Callable[[], UnavailableReason | None]] | None = None,
     ) -> None:
         self._view = view
         self._agent_available = agent_available
         self._log_pane_open = log_pane_open
+        #: Owner-supplied reason resolvers for actions whose binding stays
+        #: enabled but whose *invocation* may still be refused (the generic
+        #: writes: `ResourceWriteController.unavailable_reason`). Actions
+        #: absent from the map are always invokable once bound.
+        self._reason_by_action: Mapping[str, Callable[[], UnavailableReason | None]] = (
+            reason_by_action if reason_by_action is not None else {}
+        )
 
     def binding_enabled(self, action: str) -> bool:
         """Whether `action`'s binding is enabled in the current composition and view."""
@@ -109,6 +118,35 @@ class ActionPolicy:
             return True
         meta = self._current_meta()
         return meta is not None and (meta.group, meta.plural) in views
+
+    def availability(self, action: str) -> ActionAvailability:
+        """Whether the palette should let `action` run right now, and why
+        not if it shouldn't (issue #388). `binding_enabled` alone stays the
+        keybinding contract (a disabled binding is skipped during dispatch,
+        so an overloaded key falls through to the view actually on screen);
+        this composes it with the *invocation* reasons an enabled binding's
+        owner (`ResourceWriteController`, for the generic writes) can still
+        refuse, without changing either owner's own notification path."""
+        if not self.binding_enabled(action):
+            return ActionAvailability(binding_enabled=False, reason=self._wrong_view_reason(action))
+        resolver = self._reason_by_action.get(action)
+        reason = None if resolver is None else resolver()
+        return ActionAvailability(binding_enabled=True, reason=reason)
+
+    def _wrong_view_reason(self, action: str) -> UnavailableReason:
+        """Explain a disabled binding, for a palette entry that stays
+        searchable but greyed out with its cause attached."""
+        if action == "toggle_agent" and not self._agent_available():
+            return UnavailableReason(AvailabilityCode.MISSING_CAPABILITY, "Agent is not available")
+        if action in _LOG_PANE_ACTIONS and not self._log_pane_open():
+            return UnavailableReason(AvailabilityCode.PANE_CLOSED, "Open the log pane first")
+        if action in _SYNTHETIC_GATED_ACTIONS:
+            meta = self._current_meta()
+            if meta is not None and meta.synthetic:
+                return UnavailableReason(
+                    AvailabilityCode.UNSUPPORTED_RESOURCE, f"{meta.kind} is a read-only view"
+                )
+        return UnavailableReason(AvailabilityCode.WRONG_VIEW, "Not available in this view")
 
     def _current_meta(self) -> ResourceMeta | None:
         return self._view.aliases().get(self._view.canonical_kind(self._view.current_kind()))

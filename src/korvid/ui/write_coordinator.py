@@ -48,6 +48,7 @@ from korvid.core.relationships import GraphResource
 from korvid.core.store import ALL_NAMESPACES
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.errors import ApiStatusError
+from korvid.ui.action_availability import AvailabilityCode, UnavailableReason
 from korvid.ui.impact_preview import render_impact_lines, render_unavailable_lines
 from korvid.ui.ui_surface import UiSurface
 from korvid.ui.view_state import ViewState
@@ -336,31 +337,69 @@ class WriteCoordinator(WriteGate):
         pane = self._focused_pane()
         return WriteOrigin(pane, pane.scope)
 
-    def write_target(self) -> tuple[ResourceMeta, str | None, str, str | None] | None:
-        """Resolve (meta, namespace, name, uid) of the selected row for a
-        write, or None (with a notification) when writes are disabled or
-        nothing usable is selected. Cluster-scoped kinds get namespace=None.
-        The uid pins the object incarnation the user saw: if it is deleted
-        and recreated under the same name while the dialog is open, the API
-        server rejects the write with a 409 instead of hitting the
-        replacement."""
+    def _static_unavailable_reason(self) -> UnavailableReason | None:
+        """The write checks that don't depend on the current selection: the
+        single owner both `write_target()` (which notifies its exact text)
+        and `unavailable_reason()` (fully silent) consult, so neither can
+        drift from the other's idea of "why not"."""
         if self._view.readonly():
-            self._ui.notify("Read-only mode: cluster writes are disabled", severity="warning")
-            return None
+            return UnavailableReason(
+                AvailabilityCode.READ_ONLY, "Read-only mode: cluster writes are disabled"
+            )
         if self._audit() is None:
             # Fail-closed auditing (AGENTS.md): no audit sink means no writes.
-            self._ui.notify("Writes disabled: no audit log configured", severity="warning")
-            return None
+            return UnavailableReason(
+                AvailabilityCode.MISSING_CAPABILITY, "Writes disabled: no audit log configured"
+            )
         kind = self._view.canonical_kind(self._view.current_kind())
         meta = self._view.aliases().get(kind)
         if meta is None:
-            self._ui.notify(f"Unknown resource kind {kind!r}", severity="warning")
-            return None
+            return UnavailableReason(
+                AvailabilityCode.MISSING_CAPABILITY, f"Unknown resource kind {kind!r}"
+            )
         if meta.synthetic:
             # Helm browser rows etc. are read-only views over other objects.
-            self._ui.notify(f"{meta.kind} is a read-only view", severity="warning")
+            return UnavailableReason(
+                AvailabilityCode.UNSUPPORTED_RESOURCE, f"{meta.kind} is a read-only view"
+            )
+        return None
+
+    def unavailable_reason(self) -> UnavailableReason | None:
+        """Why `write_target()` would refuse right now, or None when a write
+        would resolve - a side-effect-free probe for the palette: it never
+        notifies, even for the selection check (`selected_ns_name(notify=False)`),
+        so showing an entry's reason costs nothing extra."""
+        reason = self._static_unavailable_reason()
+        if reason is not None:
+            return reason
+        _, name = self._view.selected_ns_name(notify=False)
+        if name is None:
+            return UnavailableReason(AvailabilityCode.NO_SELECTION, "No resource selected")
+        return None
+
+    def write_target(
+        self, *, notify: bool = True
+    ) -> tuple[ResourceMeta, str | None, str, str | None] | None:
+        """Resolve (meta, namespace, name, uid) of the selected row for a
+        write, or None (with a notification unless ``notify=False``) when
+        writes are disabled or nothing usable is selected. Cluster-scoped
+        kinds get namespace=None. The uid pins the object incarnation the
+        user saw: if it is deleted and recreated under the same name while
+        the dialog is open, the API server rejects the write with a 409
+        instead of hitting the replacement.
+
+        ``notify=False`` is the palette's probe path (via
+        `unavailable_reason`/`ResourceWriteController.unavailable_reason`):
+        it must resolve the exact same target a real dispatch would,
+        without the notification meant for an actual keybinding refusal."""
+        reason = self._static_unavailable_reason()
+        if reason is not None:
+            if notify:
+                self._ui.notify(reason.message, severity=reason.severity)
             return None
-        ns, name = self._view.selected_ns_name()
+        kind = self._view.canonical_kind(self._view.current_kind())
+        meta = self._view.aliases()[kind]
+        ns, name = self._view.selected_ns_name(notify=notify)
         if name is None:
             return None
         namespace = ns if meta.namespaced and ns else None

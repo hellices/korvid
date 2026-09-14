@@ -46,6 +46,7 @@ from korvid.k8s.drain import DrainPlan
 from korvid.k8s.helm import HELM_RELEASES_META
 from korvid.k8s.olm import OPERATORS_GROUP
 from korvid.k8s.writes import WriteOps, restart_stamp
+from korvid.ui.action_availability import AvailabilityCode, UnavailableReason
 from korvid.ui.drain import DrainController
 from korvid.ui.node_impact_preview import (
     compose_node_maintenance_lines,
@@ -294,6 +295,33 @@ class ResourceWriteController:
     # ------------------------------------------------------------------
     # Target capture
     # ------------------------------------------------------------------
+
+    def unavailable_reason(self, action: str) -> UnavailableReason | None:
+        """Why `action` can't run right now, or None - a side-effect-free
+        probe for the palette (issue #388). Shares `WriteCoordinator`'s
+        owner checks (read-only, missing audit, unknown/synthetic kind,
+        silent selection) via `write_target(notify=False)`, so it never
+        resolves or notifies twice: the same call this method makes to
+        probe is the one `_capture()` makes to dispatch, just silenced."""
+        reason = self._writes.unavailable_reason()
+        if reason is not None:
+            return reason
+        target = self._writes.write_target(notify=False)
+        if target is None:
+            # Defensive only: `unavailable_reason()` above shares every
+            # check `write_target()` makes, so this should be unreachable.
+            return UnavailableReason(AvailabilityCode.NO_SELECTION, "Select a resource first")
+        meta = target[0]
+        if action == "rollout_restart" and (meta.group, meta.plural) not in RESTARTABLE:
+            return UnavailableReason(
+                AvailabilityCode.UNSUPPORTED_RESOURCE,
+                f"Restart does not apply to {gvr_label(meta)}",
+            )
+        if action == "scale_resource" and (meta.group, meta.plural) not in SCALABLE:
+            return UnavailableReason(
+                AvailabilityCode.UNSUPPORTED_RESOURCE, f"Scale does not apply to {gvr_label(meta)}"
+            )
+        return None
 
     def _capture(self) -> WriteTarget | None:
         """Resolve and pin the selected row for a write flow."""

@@ -168,7 +168,7 @@ class FakeViewState(ViewState):
     def default_namespace(self) -> str | None:
         return None  # pragma: no cover
 
-    def selected_ns_name(self) -> tuple[str | None, str | None]:
+    def selected_ns_name(self, *, notify: bool = True) -> tuple[str | None, str | None]:
         return None, None  # pragma: no cover
 
     def selected_uid(self, namespace: str | None, name: str) -> str | None:

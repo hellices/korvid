@@ -37,6 +37,7 @@ from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.models import GenericSummary, PodSummary
 from korvid.k8s.writes import WriteOps
+from korvid.ui.action_availability import AvailabilityCode, UnavailableReason
 from korvid.ui.app import KorvidApp
 from korvid.ui.resource_write_controller import _yaml_equal
 from korvid.ui.widgets.confirm_screen import ConfirmScreen, ReplicasPrompt
@@ -332,6 +333,43 @@ async def test_rollout_restart_rejected_on_pods(tmp_path: Path) -> None:
         await pilot.pause()
         assert not isinstance(app.screen, ConfirmScreen)
         assert rec.calls == []
+
+
+async def test_unavailable_reason_matches_the_rollout_restart_key_refusal(tmp_path: Path) -> None:
+    """A palette probe on `pods` must explain the same refusal the `r` key
+    would notify - and must not notify while doing it (#388)."""
+    rec = Recorder()
+    app = make_app(rec, tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: _selected_name(app) == "web-1", label="pod row selected")
+        before = len(app._notifications)
+        reason = app._resource_writes.unavailable_reason("rollout_restart")
+        assert reason == UnavailableReason(
+            AvailabilityCode.UNSUPPORTED_RESOURCE, "Restart does not apply to pods"
+        )
+        assert len(app._notifications) == before
+
+
+async def test_unavailable_reason_is_none_for_a_restartable_selection(tmp_path: Path) -> None:
+    rec = Recorder()
+    app = make_app(rec, tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: _selected_name(app) == "web-1", label="pod row selected")
+        await _to_view(pilot, "deployments")
+        assert app._resource_writes.unavailable_reason("rollout_restart") is None
+
+
+async def test_unavailable_reason_reports_read_only(tmp_path: Path) -> None:
+    rec = Recorder()
+    app = make_app(rec, tmp_path / "audit.jsonl", readonly=True)
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: _selected_name(app) == "web-1", label="pod row selected")
+        before = len(app._notifications)
+        reason = app._resource_writes.unavailable_reason("delete_resource")
+        assert reason == UnavailableReason(
+            AvailabilityCode.READ_ONLY, "Read-only mode: cluster writes are disabled"
+        )
+        assert len(app._notifications) == before
 
 
 async def test_scale_flow_prompts_then_confirms(tmp_path: Path) -> None:

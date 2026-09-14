@@ -38,6 +38,7 @@ from korvid.core.store import ALL_NAMESPACES, Summary
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.models import GenericSummary
+from korvid.ui.action_availability import AvailabilityCode, UnavailableReason
 from korvid.ui.ui_surface import Severity, UiSurface
 from korvid.ui.view_state import ViewState
 from korvid.ui.widgets.confirm_screen import ConfirmScreen
@@ -208,7 +209,7 @@ class FakeView(ViewState):
     def default_namespace(self) -> str | None:
         return "default"
 
-    def selected_ns_name(self) -> tuple[str | None, str | None]:
+    def selected_ns_name(self, *, notify: bool = True) -> tuple[str | None, str | None]:
         return self.selected
 
     def selected_uid(self, namespace: str | None, name: str) -> str | None:
@@ -1100,6 +1101,69 @@ def test_write_target_drops_the_namespace_for_cluster_scoped_kinds(tmp_path: Pat
     view = FakeView(kind="nodes", selected=("default", "node-a"))
     env = make_env(tmp_path, view=view)
     assert env.coordinator.write_target() == (_NODES_META, None, "node-a", "uid-1")
+
+
+def test_write_target_notify_false_resolves_silently(tmp_path: Path) -> None:
+    """The palette's probe path must resolve the same target `write_target()`
+    dispatch would, without notifying (#388)."""
+    env = make_env(tmp_path)
+    assert env.coordinator.write_target(notify=False) == (_PODS_META, "default", "web-1", "uid-1")
+    assert env.ui.notifications == []
+
+
+def test_write_unavailable_reason_is_side_effect_free(tmp_path: Path) -> None:
+    env = make_env(tmp_path, view=FakeView(readonly=True))
+    reason = env.coordinator.unavailable_reason()
+    assert reason == UnavailableReason(
+        AvailabilityCode.READ_ONLY,
+        "Read-only mode: cluster writes are disabled",
+    )
+    assert env.ui.notifications == []
+
+
+def test_write_unavailable_reason_reports_a_missing_audit_sink(tmp_path: Path) -> None:
+    env = make_env(tmp_path, audit="none")
+    assert env.coordinator.unavailable_reason() == UnavailableReason(
+        AvailabilityCode.MISSING_CAPABILITY,
+        "Writes disabled: no audit log configured",
+    )
+    assert env.ui.notifications == []
+
+
+def test_write_unavailable_reason_reports_a_synthetic_view(tmp_path: Path) -> None:
+    view = FakeView(kind="helmreleases", aliases={"helmreleases": _HELM_META})
+    env = make_env(tmp_path, view=view)
+    assert env.coordinator.unavailable_reason() == UnavailableReason(
+        AvailabilityCode.UNSUPPORTED_RESOURCE,
+        "HelmRelease is a read-only view",
+    )
+    assert env.ui.notifications == []
+
+
+def test_write_unavailable_reason_reports_an_unknown_kind(tmp_path: Path) -> None:
+    view = FakeView(kind="widgets", aliases={})
+    env = make_env(tmp_path, view=view)
+    assert env.coordinator.unavailable_reason() == UnavailableReason(
+        AvailabilityCode.MISSING_CAPABILITY,
+        "Unknown resource kind 'widgets'",
+    )
+    assert env.ui.notifications == []
+
+
+def test_write_unavailable_reason_reports_no_selection(tmp_path: Path) -> None:
+    view = FakeView(selected=(None, None))
+    env = make_env(tmp_path, view=view)
+    assert env.coordinator.unavailable_reason() == UnavailableReason(
+        AvailabilityCode.NO_SELECTION,
+        "No resource selected",
+    )
+    assert env.ui.notifications == []
+
+
+def test_write_unavailable_reason_is_none_when_a_write_would_resolve(tmp_path: Path) -> None:
+    env = make_env(tmp_path)
+    assert env.coordinator.unavailable_reason() is None
+    assert env.ui.notifications == []
 
 
 def test_context_intact_refuses_after_a_context_switch(tmp_path: Path) -> None:
