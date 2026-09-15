@@ -227,6 +227,7 @@ class ResourceWriteController:
         pod_resize_supported: Callable[[], bool],
         helm_uninstall: Callable[[], None],
         helm_cli_unavailable_reason: Callable[[], UnavailableReason | None],
+        helm_release_identity_reason: Callable[[], UnavailableReason | None],
         operators: OperatorUninstalls,
     ) -> None:
         self._writes = writes
@@ -257,6 +258,7 @@ class ResourceWriteController:
             manifest_source_available=lambda: get_manifest() is not None,
             pod_resize_supported=pod_resize_supported,
             helm_cli_unavailable_reason=helm_cli_unavailable_reason,
+            helm_release_identity_reason=helm_release_identity_reason,
             draining_node=self._draining_node,
         )
 

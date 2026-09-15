@@ -47,7 +47,15 @@ from korvid.k8s.helm import (
     HelmRevisionSummary,
 )
 from korvid.k8s.helmcli import ChartHit, HelmCLI, HelmError, HelmPreviewUnsupported
-from korvid.ui.action_availability import AvailabilityCode, UnavailableReason
+from korvid.ui.action_availability import UnavailableReason
+from korvid.ui.helm_availability import (
+    HELM_MISSING,
+    RELEASE_HISTORY_UNAVAILABLE,
+    RELEASE_IDENTITY_UNAVAILABLE,
+    STALE_RELEASE_HISTORY,
+    HelmAvailability,
+    cancelled,
+)
 from korvid.ui.ui_surface import UiSurface
 from korvid.ui.view_state import ViewState
 from korvid.ui.widgets.helm_chart_search import HelmChartSearchScreen
@@ -74,27 +82,6 @@ _HELM_PREVIEW_MAX_LINES = 60
 #: Exclusive worker group every helm write (rollback, uninstall) runs in: a
 #: second keypress must replace the pending preview, never race it.
 HELM_WRITE_GROUP = "helm-write"
-
-#: The one wording for "no helm binary", shared by the notification `gate()`
-#: emits on a real keypress and the silent reason the palette probe returns,
-#: so the two can never drift.
-_HELM_MISSING = UnavailableReason(
-    AvailabilityCode.MISSING_CAPABILITY,
-    "helm CLI not found on PATH - install/upgrade/rollback/uninstall unavailable",
-    severity="error",
-)
-
-#: Helm actions that act on the selected row (install creates a new release).
-_HELM_ROW_ACTIONS: frozenset[str] = frozenset({"helm_upgrade", "helm_history", "helm_rollback"})
-
-#: The one wording for "the release moved under the history on screen",
-#: and the prefix `rollback_selected` /
-#: `rollback_with_current_identity` cancel behind it; the palette row
-#: shows the fact alone, because nothing was cancelled there (#388).
-_STALE_RELEASE_HISTORY = UnavailableReason(
-    AvailabilityCode.TRANSITION, "release history changed; refresh and retry"
-)
-_ROLLBACK_CANCELLED = "Helm rollback cancelled - "
 
 
 def _chart_base(chart: str) -> str:
@@ -195,6 +182,18 @@ class HelmController:
         self._navigation = navigation
         self._edit_in_external_editor = edit_in_external_editor
         self._edit_text = edit_text
+        #: The side-effect-free twin of this controller's own refusals,
+        #: built from the same seams so a probe and a keypress can never
+        #: answer differently (issue #388).
+        self._availability = HelmAvailability(
+            readonly=view.readonly,
+            audit_configured=gate.audit_configured,
+            helm_available=lambda: helm() is not None,
+            selected_ns_name=lambda: view.selected_ns_name(notify=False),
+            release_row=self.release_row,
+            revision_row=self.revision_row,
+            latest_revision_identity=self.latest_revision_identity,
+        )
 
     def _view_guard(self, meta: ResourceMeta, what: str) -> bool:
         """`check_action` gates only key dispatch (issue #114); a direct
@@ -211,7 +210,7 @@ class HelmController:
         fail-closed audit rule apply exactly as to API writes, plus the
         binary must have been detected at startup. None (with a
         notification) blocks the flow."""
-        reason = self._write_gate_reason()
+        reason = self._availability.write_gate_reason()
         if reason is not None:
             self._ui.notify(reason.message, severity=reason.severity, markup=False)
             return None
@@ -220,100 +219,36 @@ class HelmController:
         # wrapper, one bound to the previous cluster.
         helm = self._helm()
         if helm is None:
-            self._ui.notify(_HELM_MISSING.message, severity=_HELM_MISSING.severity, markup=False)
+            self._ui.notify(HELM_MISSING.message, severity=HELM_MISSING.severity, markup=False)
             return None
         return helm
 
-    def _write_gate_reason(self) -> UnavailableReason | None:
-        """The read-only and fail-closed-audit halves of `gate()`, without
-        reading the helm wrapper: `gate()` must read that exactly once (see
-        above), so the shared part stops just short of it."""
-        if self._view.readonly():
-            return UnavailableReason(
-                AvailabilityCode.READ_ONLY, "Read-only mode: cluster writes are disabled"
-            )
-        if not self._gate.audit_configured():
-            # Fail-closed auditing (AGENTS.md): no audit sink means no writes.
-            return UnavailableReason(
-                AvailabilityCode.MISSING_CAPABILITY, "Writes disabled: no audit log configured"
-            )
-        return None
-
     def cli_unavailable_reason(self) -> UnavailableReason | None:
-        """Whether the helm binary is missing right now, or None - the one
-        fact `gate()` notifies for a real keypress, returned silently for a
-        probe (issue #388 task 4 review). `ResourceWriteController` injects
-        this so `delete_resource` on the helm release browser - which routes
-        to `uninstall_selected()`, and therefore through `gate()`, before the
-        generic write path - can report the same missing-CLI refusal without
-        redeclaring `_HELM_MISSING`'s wording of its own."""
-        return _HELM_MISSING if self._helm() is None else None
+        """Whether the helm binary is missing right now, or None (#388)."""
+        return self._availability.cli_unavailable_reason()
 
     def unavailable_reason(self, action: str) -> UnavailableReason | None:
-        """Why `action` can't run right now, or None - a side-effect-free
-        probe for the palette (issue #388 task 4). Synchronous, reads only
-        state this controller already owns, and never notifies: the
-        notification belongs to the real keypress.
+        """Why `action` can't run right now, or None - the side-effect-free
+        probe `HelmAvailability` answers from this controller's own seams
+        (issue #388). Synchronous and silent: the notification belongs to
+        the real keypress."""
+        return self._availability.unavailable_reason(action)
 
-        Which view the helm actions belong on stays `ActionPolicy`'s
-        (`_view_guard` mirrors it for direct calls), so this answers only
-        what the *controller* would refuse next:
+    def release_identity_reason(self) -> UnavailableReason | None:
+        """Why a write on the *selected* release row would cancel, or None.
 
-        - `helm_install`/`helm_upgrade`/`helm_rollback` are writes, so they
-          carry `gate()`'s refusals verbatim (read-only, missing audit sink,
-          missing helm binary).
-        - `helm_history` is a read-only drill-down that `history()` gates on
-          nothing but the selection, so the probe gates it on nothing more
-          either - claiming a read-only refusal there would grey out a key
-          that works.
-        - `helm_upgrade`/`helm_history`/`helm_rollback` all act on the
-          selected row.
-        - `helm_rollback` carries one refusal more, and it is the only one
-          this controller can answer without touching helm: the cached
-          release row and the newest revision in the loaded history
-          disagree, which `rollback_selected` cancels on before it starts
-          a worker (#388 round 8).
-        """
-        if action != "helm_history":
-            reason = self._write_gate_reason()
-            if reason is not None:
-                return reason
-            reason = self.cli_unavailable_reason()
-            if reason is not None:
-                return reason
-        if action in _HELM_ROW_ACTIONS:
-            ns, name = self._view.selected_ns_name(notify=False)
-            if name is None:
-                return UnavailableReason(AvailabilityCode.NO_SELECTION, "No resource selected")
-            if action == "helm_rollback":
-                return self._stale_history_reason(ns, name)
-        return None
-
-    def _stale_history_reason(self, ns: str | None, name: str) -> UnavailableReason | None:
-        """Whether `r` would cancel because the release moved, or None.
-
-        The same three cached reads `rollback_selected` makes - the
-        selected revision row, the newest revision of its release in the
-        loaded history, and the release row itself - compared the same
-        way, with no helm call and no notification.
-
-        Its other refusals stay out on purpose: "no helm revision
-        selected" and the two "identity could not be verified" toasts
-        describe rows that are missing or half-loaded, which the next
-        watch event fills in, and a release the store has not loaded at
-        all is resolved through the helm CLI, which a probe must not do.
-        A release whose identity no longer matches its history is the
-        opposite - it stays wrong until the user refreshes.
-        """
-        row = self.revision_row(ns, name)
-        if row is None:
+        Injected into `WriteAvailability` so Ctrl-D on the release browser
+        - which means `helm uninstall` (issue #117) - carries the same
+        identity refusal `u` does, without redeclaring its wording (#388
+        round 13)."""
+        namespace, name = self._view.selected_ns_name(notify=False)
+        if name is None:
             return None
-        namespace = ns or row.namespace
-        history_identity = self.latest_revision_identity(namespace, row.release)
-        release_row = self.release_row(namespace, row.release)
-        if history_identity is None or release_row is None or release_row.identity is None:
-            return None
-        return None if release_row.identity == history_identity else _STALE_RELEASE_HISTORY
+        return self._availability.release_identity_reason(namespace, name)
+
+    def _notify_cancelled(self, action: str, reason: UnavailableReason) -> None:
+        """Cancel a helm flow with the wording its palette row shows."""
+        self._ui.notify(cancelled(action, reason), severity=reason.severity, markup=False)
 
     def _view_namespace(self) -> str:
         """Namespace a fresh install targets by default: the active view
@@ -365,10 +300,7 @@ class HelmController:
             self._ui.notify("no helm release selected", severity="warning")
             return
         if row.identity is None:
-            self._ui.notify(
-                "Helm upgrade cancelled - Helm release identity could not be verified",
-                severity="warning",
-            )
+            self._notify_cancelled("Helm upgrade", RELEASE_IDENTITY_UNAVAILABLE)
             return
         keyword = _chart_base(row.chart)
         namespace = ns or row.namespace
@@ -866,10 +798,7 @@ class HelmController:
         namespace = ns or row.namespace
         history_identity = self.latest_revision_identity(namespace, row.release)
         if history_identity is None:
-            self._ui.notify(
-                "Helm rollback cancelled - Helm release history identity could not be verified",
-                severity="warning",
-            )
+            self._notify_cancelled("Helm rollback", RELEASE_HISTORY_UNAVAILABLE)
             return
         release_row = self.release_row(namespace, row.release)
         if release_row is None:
@@ -885,10 +814,7 @@ class HelmController:
         else:
             identity = release_row.identity
             if identity is None:
-                self._ui.notify(
-                    "Helm rollback cancelled - Helm release identity could not be verified",
-                    severity="warning",
-                )
+                self._notify_cancelled("Helm rollback", RELEASE_IDENTITY_UNAVAILABLE)
                 return
             if identity != history_identity:
                 self._notify_stale_history()
@@ -925,11 +851,7 @@ class HelmController:
 
     def _notify_stale_history(self) -> None:
         """Cancel the rollback with the wording the palette row shows."""
-        self._ui.notify(
-            f"{_ROLLBACK_CANCELLED}{_STALE_RELEASE_HISTORY.message}",
-            severity=_STALE_RELEASE_HISTORY.severity,
-            markup=False,
-        )
+        self._notify_cancelled("Helm rollback", STALE_RELEASE_HISTORY)
 
     def uninstall_selected(self) -> None:
         """Ctrl+D on the helm release browser: uninstall the selected release
@@ -950,10 +872,7 @@ class HelmController:
             self._ui.notify("no helm release selected", severity="warning")
             return
         if row.identity is None:
-            self._ui.notify(
-                "Helm uninstall cancelled - Helm release identity could not be verified",
-                severity="warning",
-            )
+            self._notify_cancelled("Helm uninstall", RELEASE_IDENTITY_UNAVAILABLE)
             return
         namespace = ns or row.namespace
         self._ui.run_worker(

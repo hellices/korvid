@@ -1259,6 +1259,7 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
         pod_resize_supported=lambda: app._pod_resize_supported,
         helm_uninstall=lambda: helm_controller.uninstall_selected(),
         helm_cli_unavailable_reason=helm_controller.cli_unavailable_reason,
+        helm_release_identity_reason=helm_controller.release_identity_reason,
         operators=operators,
     )
     resource_writes_ref.bind(resource_writes)

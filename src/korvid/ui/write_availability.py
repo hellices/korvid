@@ -84,6 +84,11 @@ class WriteAvailability:
     #: redeclared, so the helm-delete exception below cannot invent a
     #: second wording for it (#388 task 4 review).
     helm_cli_unavailable_reason: Callable[[], UnavailableReason | None]
+    #: `HelmController.release_identity_reason`: whether the selected
+    #: release row can be pinned to an incarnation at all. Injected for the
+    #: same reason the one above is - Ctrl-D on the release browser routes
+    #: to `helm uninstall`, which cancels on exactly this (#388 round 13).
+    helm_release_identity_reason: Callable[[], UnavailableReason | None]
     #: The node an in-flight drain is still evicting from, or None when no
     #: drain is running. Owned by the controller, because the drain worker
     #: is its mutable lifecycle state, and read live rather than captured:
@@ -156,7 +161,10 @@ class WriteAvailability:
         _, name = self.view.selected_ns_name(notify=False)
         if name is None:
             return UnavailableReason(AvailabilityCode.NO_SELECTION, "No resource selected")
-        return None
+        # Last, where `uninstall_selected()` reads it: the release row it
+        # captured must carry an identity, or the write is cancelled
+        # before any helm process starts.
+        return self.helm_release_identity_reason()
 
     def _kind_reason(self, action: str, meta: ResourceMeta) -> UnavailableReason | None:
         """The "this kind does not take that write" refusals, with each

@@ -4,6 +4,7 @@ helm binary — approval-gated and audited fail-closed like every other write.
 """
 
 import asyncio
+import dataclasses
 import json
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
@@ -997,7 +998,11 @@ async def test_upgrade_rejects_release_without_captured_identity(tmp_path: Path)
         await pilot.press("u")
         await until(
             pilot,
-            lambda: any("identity could not be verified" in n.message for n in app._notifications),
+            lambda: any(
+                n.message
+                == "Helm upgrade cancelled - release identity unavailable; refresh and retry"
+                for n in app._notifications
+            ),
             label="missing captured identity blocked",
         )
         assert len(app.screen_stack) == 1
@@ -1248,7 +1253,11 @@ async def test_rollback_rejects_release_without_captured_identity(tmp_path: Path
         await pilot.press("r")
         await until(
             pilot,
-            lambda: any("identity could not be verified" in n.message for n in app._notifications),
+            lambda: any(
+                n.message
+                == "Helm rollback cancelled - release identity unavailable; refresh and retry"
+                for n in app._notifications
+            ),
             label="missing captured identity blocked",
         )
         assert len(app.screen_stack) == 1
@@ -1436,7 +1445,7 @@ async def test_delete_action_availability_reports_the_missing_helm_binary(
 ) -> None:
     """Regression (#388 task 4 review): `delete_resource` on the helm
     release browser routes to `HelmController.uninstall_selected()`, whose
-    own `gate()` refuses with `_HELM_MISSING` when no helm binary was
+    own `gate()` refuses with `HELM_MISSING` when no helm binary was
     detected - the same fact `helm_install`'s probe already reports. Before
     the fix, `ResourceWriteController.unavailable_reason("delete_resource")`
     checked only the read-only/audit gate and the selection, so the palette
@@ -1471,7 +1480,11 @@ async def test_uninstall_rejects_release_without_captured_identity(tmp_path: Pat
         await pilot.press("ctrl+d")
         await until(
             pilot,
-            lambda: any("identity could not be verified" in n.message for n in app._notifications),
+            lambda: any(
+                n.message
+                == "Helm uninstall cancelled - release identity unavailable; refresh and retry"
+                for n in app._notifications
+            ),
             label="missing captured identity blocked",
         )
         assert len(app.screen_stack) == 1
@@ -2564,3 +2577,208 @@ async def test_the_stale_rollback_key_still_cancels_with_its_full_sentence(
         )
         assert ("rollback", "web", 2, "default") not in helm.calls
         assert _audit_entries(audit_path) == []
+
+
+# ---------------------------------------------------------------------------
+# Identities the store cannot verify (#388 round 13)
+# ---------------------------------------------------------------------------
+
+
+def _unverifiable_release_data() -> dict[str, list[Summary]]:
+    """The store's release row for `web`, with no captured identity.
+
+    The same fixture the three keypress tests above use (`secret_uid=""`):
+    a release whose Secret uid never made it into the row cannot be pinned
+    to an incarnation, so every helm write on it is cancelled outright.
+    """
+    data = _default_data()
+    data["helmreleases"] = [_release_row("web", secret_uid="", revision=2)]
+    return data
+
+
+async def test_helm_upgrade_availability_reports_an_unverifiable_identity(
+    tmp_path: Path,
+) -> None:
+    """`u` reads the selected release row and cancels when it carries no
+    identity - a refusal made entirely from a row already in the store,
+    before any helm call. The palette offered the row anyway, so selecting
+    it only produced the cancellation toast (#388 round 13)."""
+    app = make_app(_unverifiable_release_data(), helm=FakeHelm(), audit_path=tmp_path / "a.jsonl")
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "helm", "helmreleases")
+        await _rows_listed(pilot, app, 1)
+        before = len(app._notifications)
+        assert app._helm_ctl.unavailable_reason("helm_upgrade") == UnavailableReason(
+            AvailabilityCode.TRANSITION, "release identity unavailable; refresh and retry"
+        )
+        availability = app._actions.availability("helm_upgrade")
+        assert availability.binding_enabled is True
+        assert availability.invocable is False
+        # The read-only drill-down asks for none of this and still runs.
+        assert app._helm_ctl.unavailable_reason("helm_history") is None
+        # Nor does a *new* release depend on the selected row's identity.
+        assert app._helm_ctl.unavailable_reason("helm_install") is None
+        assert len(app._notifications) == before
+
+
+async def test_the_upgrade_key_cancels_with_the_wording_its_row_shows(
+    tmp_path: Path,
+) -> None:
+    """The probe reports the bounded fact; the keypress cancels with the
+    same sentence behind its own prefix, so the two cannot drift."""
+    helm = FakeHelm()
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app(_unverifiable_release_data(), helm=helm, audit_path=audit_path)
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "helm", "helmreleases")
+        await _rows_listed(pilot, app, 1)
+        await pilot.press("u")
+        await until(
+            pilot,
+            lambda: any(
+                n.message
+                == "Helm upgrade cancelled - release identity unavailable; refresh and retry"
+                for n in app._notifications
+            ),
+            label="the upgrade key cancelled with its full sentence",
+        )
+        assert not any(call[0] == "upgrade" for call in helm.calls)
+        assert _audit_entries(audit_path) == []
+
+
+async def test_helm_uninstall_availability_reports_an_unverifiable_identity(
+    tmp_path: Path,
+) -> None:
+    """Ctrl-D on the release browser is `helm uninstall`, and it reads the
+    same identity `u` does. The delete row must therefore carry the helm
+    owner's refusal here too, rather than advertise a write that cancels."""
+    app = make_app(_unverifiable_release_data(), helm=FakeHelm(), audit_path=tmp_path / "a.jsonl")
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "helm", "helmreleases")
+        await _rows_listed(pilot, app, 1)
+        before = len(app._notifications)
+        availability = app._actions.availability("delete_resource")
+        assert availability.binding_enabled is True
+        assert availability.reason == UnavailableReason(
+            AvailabilityCode.TRANSITION, "release identity unavailable; refresh and retry"
+        )
+        assert availability.invocable is False
+        assert len(app._notifications) == before
+
+
+async def test_the_uninstall_key_cancels_with_the_wording_its_row_shows(
+    tmp_path: Path,
+) -> None:
+    """Handler parity for Ctrl-D's own cancellation sentence."""
+    helm = FakeHelm()
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app(_unverifiable_release_data(), helm=helm, audit_path=audit_path)
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "helm", "helmreleases")
+        await _rows_listed(pilot, app, 1)
+        await pilot.press("ctrl+d")
+        await until(
+            pilot,
+            lambda: any(
+                n.message
+                == "Helm uninstall cancelled - release identity unavailable; refresh and retry"
+                for n in app._notifications
+            ),
+            label="the uninstall key cancelled with its full sentence",
+        )
+        assert ("uninstall", "web", "default", False) not in helm.calls
+        assert _audit_entries(audit_path) == []
+
+
+async def test_helm_rollback_availability_reports_an_unverifiable_identity(
+    tmp_path: Path,
+) -> None:
+    """`r` resolves the release row behind the selected revision, and
+    cancels when that row carries no identity - again from cached rows
+    alone, so the palette can and must say it."""
+    app = make_app(_unverifiable_release_data(), helm=FakeHelm(), audit_path=tmp_path / "a.jsonl")
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "helm", "helmreleases")
+        await _rows_listed(pilot, app, 1)
+        await _navigate(pilot, "helmrevisions", "helmrevisions")
+        await _rows_listed(pilot, app, 1)
+        before = len(app._notifications)
+        assert app._helm_ctl.unavailable_reason("helm_rollback") == UnavailableReason(
+            AvailabilityCode.TRANSITION, "release identity unavailable; refresh and retry"
+        )
+        assert app._actions.availability("helm_rollback").invocable is False
+        assert len(app._notifications) == before
+
+
+async def test_helm_rollback_availability_reports_unverifiable_history(
+    tmp_path: Path,
+) -> None:
+    """The newest loaded revision of the release carries no uid, so the
+    history identity `rollback_selected` compares against cannot be built
+    at all - which is the first thing it cancels on."""
+    data = _default_data()
+    data["helmrevisions"] = [
+        dataclasses.replace(_revision_row("web", 2), uid=""),
+    ]
+    app = make_app(data, helm=FakeHelm(), audit_path=tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "helm", "helmreleases")
+        await _rows_listed(pilot, app, 1)
+        await _navigate(pilot, "helmrevisions", "helmrevisions")
+        await _rows_listed(pilot, app, 1)
+        before = len(app._notifications)
+        assert app._helm_ctl.unavailable_reason("helm_rollback") == UnavailableReason(
+            AvailabilityCode.TRANSITION, "release history unavailable; refresh and retry"
+        )
+        assert len(app._notifications) == before
+
+
+async def test_the_rollback_key_cancels_with_the_wording_its_row_shows(
+    tmp_path: Path,
+) -> None:
+    """Handler parity for both rollback cancellations the store can
+    predict: the missing history identity and the missing release one."""
+    helm = FakeHelm()
+    audit_path = tmp_path / "audit.jsonl"
+    data = _default_data()
+    data["helmrevisions"] = [dataclasses.replace(_revision_row("web", 2), uid="")]
+    app = make_app(data, helm=helm, audit_path=audit_path)
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "helm", "helmreleases")
+        await _rows_listed(pilot, app, 1)
+        await _navigate(pilot, "helmrevisions", "helmrevisions")
+        await _rows_listed(pilot, app, 1)
+        await pilot.press("r")
+        await until(
+            pilot,
+            lambda: any(
+                n.message
+                == "Helm rollback cancelled - release history unavailable; refresh and retry"
+                for n in app._notifications
+            ),
+            label="the rollback key cancelled on the missing history identity",
+        )
+        assert ("rollback", "web", 2, "default") not in helm.calls
+        assert _audit_entries(audit_path) == []
+
+
+async def test_a_rollback_without_a_cached_release_row_stays_invocable(
+    tmp_path: Path,
+) -> None:
+    """A release the store never loaded is resolved through the helm CLI.
+
+    `rollback_selected` hands that case to `rollback_with_current_identity`,
+    which *awaits* a lookup - so the probe has nothing local to refuse on
+    and must leave the row runnable rather than invent a refusal the
+    keypress would not make.
+    """
+    data = _default_data()
+    data["helmreleases"] = []
+    app = make_app(data, helm=FakeHelm(), audit_path=tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "helmrevisions", "helmrevisions")
+        await _rows_listed(pilot, app, 1)
+        row = app._helm_ctl.revision_row("default", "web.v2")
+        assert row is not None
+        assert app._helm_ctl.release_row("default", row.release) is None
+        assert app._helm_ctl.unavailable_reason("helm_rollback") is None
