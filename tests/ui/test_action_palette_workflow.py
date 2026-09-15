@@ -10,26 +10,70 @@ action/command routes exactly once.
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
 import pytest
-from textual.widgets import OptionList
+from textual.widgets import Input, OptionList
 
-from korvid.ui.action_availability import ActionAvailability, AvailabilityCode, UnavailableReason
+from korvid.core.config import KorvidConfig
+from korvid.core.store import ResourceStore, Summary
+from korvid.core.watch import WatchManager
+from korvid.ui.action_availability import (
+    AGENT_UNAVAILABLE,
+    ActionAvailability,
+    AvailabilityCode,
+    UnavailableReason,
+)
 from korvid.ui.action_palette import AppActionInvocation, PaletteEntry
 from korvid.ui.app import KorvidApp
 from korvid.ui.widgets.action_palette import ActionPaletteScreen
 from korvid.ui.widgets.confirm_screen import ConfirmScreen
+from korvid.ui.widgets.describe_screen import DescribeScreen
 from korvid.ui.widgets.help_screen import HelpScreen
 from korvid.ui.widgets.log_pane import LogPane
 from korvid.ui.widgets.pulse import PulseScreen
 from korvid.ui.widgets.resource_table import ResourceTable
+from tests.app_factory import build_test_app
 
+from .agent_session_fakes import FakeSession
 from .test_app import _pod, make_app
+from .test_integration_controller import FakeMCP
+from .test_telepresence import FakeTelepresence
 from .test_write_ops import Recorder
 from .test_write_ops import make_app as make_write_app
 from .waits import until
+
+
+def _build_app(**kwargs: Any) -> KorvidApp:
+    """A minimal app whose optional capabilities the caller chooses."""
+    store = ResourceStore()
+
+    async def source(kind: str, scope: str) -> AsyncIterator[tuple[str, Summary]]:
+        yield ("ADDED", _pod("web"))
+        while True:
+            await asyncio.sleep(0.01)
+
+    async def list_namespaces() -> list[str]:
+        return ["default"]
+
+    return build_test_app(
+        config=KorvidConfig(namespace="default"),
+        store=store,
+        watch_manager=WatchManager(store, source),
+        list_namespaces=list_namespaces,
+        **kwargs,
+    )
+
+
+def _app_with_integrations() -> KorvidApp:
+    return _build_app(mcp=FakeMCP(), telepresence=FakeTelepresence())
+
+
+def _app_without_agent() -> KorvidApp:
+    return _build_app(agent_available=False)
 
 
 async def _loaded(pilot: Any, app: KorvidApp) -> ResourceTable:
@@ -110,10 +154,17 @@ async def test_ctrl_p_opens_palette_and_escape_restores_table_focus() -> None:
 
 async def test_palette_opens_from_the_log_split_and_agent_surfaces() -> None:
     """The palette is the keyboard-first entry point for every ordinary
-    workspace surface, not only the bare table (issue #388)."""
-    app = make_app([_pod("web")])
+    workspace surface, not only the bare table (issue #388).
+
+    Each leg asserts the surface is genuinely in the state it claims before
+    pressing `Ctrl-P`: an open log pane, a real second pane owning focus,
+    and the Agent prompt `Input` holding the keyboard. Otherwise a leg could
+    "pass" against a workspace that never changed.
+    """
+    app = _build_app(agent_session=FakeSession(), agent_model_name="test-model")
     async with app.run_test() as pilot:
         await _loaded(pilot, app)
+
         await app._logs.open_pane("default", [("web", "app")])
         log_pane = app.query_one(LogPane)
         await until(pilot, lambda: log_pane.display, label="log pane open")
@@ -122,15 +173,159 @@ async def test_palette_opens_from_the_log_split_and_agent_surfaces() -> None:
         await until(pilot, lambda: app.screen is app.screen_stack[0], label="palette closed")
 
         await pilot.press("ctrl+w", "v")  # split workspace
+        await until(pilot, lambda: len(app.query(ResourceTable)) == 2, label="split panes exist")
+        second = app.query_one("#pane-1", ResourceTable)
+        await until(pilot, lambda: app.focused is second, label="new pane focused")
         await _open_palette(pilot)
         await pilot.press("escape")
         await until(pilot, lambda: app.screen is app.screen_stack[0], label="palette closed")
+        assert app.focused is second
 
         await pilot.press("ctrl+a")  # agent panel
         await until(pilot, lambda: app._agent_panel.display, label="agent panel open")
+        # A session is wired, so opening the panel focuses its prompt: this
+        # leg really exercises "an Input that is not the command or filter
+        # bar owns the keyboard when Ctrl-P is pressed".
+        prompt = app._agent_panel.query_one("#agent-input", Input)
+        await until(pilot, lambda: app.focused is prompt, label="agent prompt focused")
         await _open_palette(pilot)
         await pilot.press("escape")
         await until(pilot, lambda: app.screen is app.screen_stack[0], label="palette closed")
+        assert app.focused is prompt
+
+
+async def test_palette_opens_over_the_inline_describe_pane() -> None:
+    """The agent-shared describe *pane* is an ordinary workspace surface -
+    it is mounted on the base screen, not pushed - so the palette opens over
+    it exactly as it does over the table (task 6 review)."""
+    app = make_app([_pod("web")])
+    async with app.run_test() as pilot:
+        await _loaded(pilot, app)
+        pane = app._describe_pane
+        pane.show("pods/default/web", {"kind": "Pod", "metadata": {"name": "web"}}, [])
+        await until(pilot, lambda: pane.display, label="describe pane shown")
+        assert len(app.screen_stack) == 1
+        assert app._actions.binding_enabled("open_action_palette") is True
+        await _open_palette(pilot)
+        await pilot.press("escape")
+        await until(pilot, lambda: app.screen is app.screen_stack[0], label="palette closed")
+        assert pane.display
+
+
+async def test_palette_refuses_to_open_over_the_describe_modal() -> None:
+    """The describe *screen* is a modal (what `d` opens): stacking the
+    palette over it is exactly what the surface guard forbids."""
+    app = make_app([_pod("web")])
+    async with app.run_test() as pilot:
+        await _loaded(pilot, app)
+        await app.push_screen(DescribeScreen("pods/default/web", {"kind": "Pod"}, []))
+        await until(pilot, lambda: isinstance(app.screen, DescribeScreen), label="describe modal")
+        screen = app.screen
+        await pilot.press("ctrl+p")
+        await pilot.pause()
+        assert app.screen is screen
+        assert len(app.screen_stack) == 2
+        assert app._actions.binding_enabled("open_action_palette") is False
+
+
+async def test_ctrl_p_over_an_approval_dialog_changes_nothing() -> None:
+    """The security case, pressed rather than reasoned about: `Ctrl-P` is a
+    priority binding, so it reaches the app even while an approval dialog is
+    up. Nothing may move - not the screen, not the focus, and no palette."""
+    app = make_app([_pod("web")])
+    async with app.run_test() as pilot:
+        await _loaded(pilot, app)
+        await app.push_screen(ConfirmScreen("Delete pod default/web?", "delete pods/default/web"))
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="approval open")
+        screen = app.screen
+        focused = app.focused
+        stack = list(app.screen_stack)
+        await pilot.press("ctrl+p")
+        await pilot.pause()
+        assert app.screen is screen
+        assert app.focused is focused
+        assert list(app.screen_stack) == stack
+        assert not any(isinstance(s, ActionPaletteScreen) for s in app.screen_stack)
+        assert app._actions.binding_enabled("open_action_palette") is False
+
+
+# ---------------------------------------------------------------------------
+# Command rows answer to their own owners' capabilities
+# ---------------------------------------------------------------------------
+
+
+def _row(app: KorvidApp, entry_id: str) -> PaletteEntry:
+    entries = {entry.id: entry for entry in app._palette_entries()}
+    return entries[entry_id]
+
+
+async def test_command_rows_are_disabled_without_their_capability() -> None:
+    """No MCP controller and no telepresence CLI wired: pressing `:mcp` or
+    `:tp` only earns a refusal, so the palette must not advertise them."""
+    app = make_app([_pod("web")])
+    async with app.run_test() as pilot:
+        await _loaded(pilot, app)
+        assert app._mcp is None
+        assert app._integrations.telepresence_available is False
+        for entry_id in ("command:mcp", "command:tp"):
+            row = _row(app, entry_id)
+            assert row.availability.invokable is False
+            reason = row.availability.reason
+            assert reason is not None
+            assert reason.code is AvailabilityCode.MISSING_CAPABILITY
+        # The agent *is* available here, so its rows stay runnable.
+        assert _row(app, "command:ai").availability.invokable is True
+        assert _row(app, "command:model").availability.invokable is True
+        # And an unavailable row renders as a disabled option.
+        screen = await _open_palette(pilot)
+        await _type_query(pilot, "mcp")
+        options = screen.query_one(OptionList)
+        await until(
+            pilot,
+            lambda: options.option_count > 0 and options.get_option_at_index(0).id == "command:mcp",
+            label="mcp ranked first",
+        )
+        assert options.get_option_at_index(0).disabled is True
+
+
+async def test_command_rows_are_enabled_once_their_capability_is_wired() -> None:
+    app = _app_with_integrations()
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: app._mcp is not None, label="app composed")
+        await pilot.pause()
+        assert _row(app, "command:mcp").availability.invokable is True
+        assert _row(app, "command:tp").availability.invokable is True
+
+
+async def test_agent_command_rows_are_disabled_without_the_agent() -> None:
+    app = _app_without_agent()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        for entry_id in ("command:ai", "command:model"):
+            row = _row(app, entry_id)
+            assert row.availability.invokable is False
+            assert row.availability.reason == AGENT_UNAVAILABLE
+
+
+# ---------------------------------------------------------------------------
+# Shutdown
+# ---------------------------------------------------------------------------
+
+
+async def test_the_palette_closes_its_door_once_the_app_is_exiting() -> None:
+    """`_accepting_input()` is the one place that reads Textual's exit flag;
+    this pins its observable effect rather than the attribute."""
+    app = make_app([_pod("web")])
+    async with app.run_test() as pilot:
+        await _loaded(pilot, app)
+        assert app._accepting_input() is True
+        assert app._actions.binding_enabled("open_action_palette") is True
+        app.exit()
+        assert app._accepting_input() is False
+        assert app._actions.binding_enabled("open_action_palette") is False
+        assert app._actions.availability("open_action_palette").reason == UnavailableReason(
+            AvailabilityCode.PROTECTED_UI, "korvid is shutting down"
+        )
 
 
 # ---------------------------------------------------------------------------

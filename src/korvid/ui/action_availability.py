@@ -54,6 +54,12 @@ class ActionAvailability:
         return cls(binding_enabled=True)
 
 
+#: The one wording for "there is no Agent in this composition". The bound
+#: `toggle_agent` key and the `:ai`/`:model` command rows are refused for
+#: the same reason - the [agent] extra is not installed or was disabled -
+#: so they say it identically (issue #388 task 6).
+AGENT_UNAVAILABLE = UnavailableReason(AvailabilityCode.MISSING_CAPABILITY, "Agent is not available")
+
 #: The one wording for "a `:ctx` switch is in flight". Every flow that spawns
 #: a cluster stream refuses during a switch (issue #84), and each of their
 #: palette probes reports it, so the notification the real keypress emits

@@ -34,6 +34,7 @@ from typing import Protocol
 from korvid.agent.install_hint import isolated_install_hint
 from korvid.core.mcp import MCPControllerBase
 from korvid.k8s.telepresence import TelepresenceCLI, TelepresenceError
+from korvid.ui.action_availability import AvailabilityCode, UnavailableReason
 from korvid.ui.ui_surface import UiSurface
 from korvid.ui.widgets.telepresence_screen import TelepresenceScreen
 from korvid.ui.workspace_controller import ContextGuard
@@ -118,15 +119,43 @@ class IntegrationController:
             # literally, never restyle or forge toast content.
             self._ui.notify(line, title="MCP", severity="information", timeout=3, markup=False)
 
+    def mcp_unavailable_reason(self) -> UnavailableReason | None:
+        """Why `:mcp` cannot run right now, or None (issue #388 task 6).
+
+        The silent palette probe for the refusal `handle_mcp_command`
+        notifies: both read the same live `mcp` handle and both quote
+        `_mcp_missing()`, so the greyed-out row and the pressed command can
+        never explain themselves differently.
+        """
+        return None if self._mcp_fn() is not None else self._mcp_missing()
+
+    @staticmethod
+    def _mcp_missing() -> UnavailableReason:
+        """The one wording for "the [mcp] extra is not installed"."""
+        return UnavailableReason(
+            AvailabilityCode.MISSING_CAPABILITY,
+            f"MCP unavailable — {isolated_install_hint(feature='mcp')}",
+        )
+
+    def telepresence_unavailable_reason(self) -> UnavailableReason | None:
+        """Why `:tp` cannot run right now, or None - the silent probe for
+        the refusal `handle_telepresence_command` notifies (issue #388)."""
+        return None if self._telepresence is not None else self._telepresence_missing()
+
+    @staticmethod
+    def _telepresence_missing() -> UnavailableReason:
+        """The one wording for "no telepresence CLI in this session"."""
+        return UnavailableReason(
+            AvailabilityCode.MISSING_CAPABILITY,
+            "telepresence not available — binary not on PATH, or disabled "
+            "via `integrations: {telepresence: off}`",
+        )
+
     def handle_mcp_command(self, args: list[str]) -> None:
         """`:mcp` shows server state; `:mcp on` / `:mcp off` toggle it live."""
         mcp = self._mcp_fn()
         if mcp is None:
-            self._ui.notify(
-                f"MCP unavailable — {isolated_install_hint(feature='mcp')}",
-                severity="warning",
-                markup=False,
-            )
+            self._ui.notify(self._mcp_missing().message, severity="warning", markup=False)
             return
         if not args:
             follow = "follow on" if self._follow else "follow off"
@@ -251,11 +280,7 @@ class IntegrationController:
         never polls it in the background."""
         tp = self._telepresence
         if tp is None:
-            self._ui.notify(
-                "telepresence not available — binary not on PATH, or disabled "
-                "via `integrations: {telepresence: off}`",
-                severity="warning",
-            )
+            self._ui.notify(self._telepresence_missing().message, severity="warning")
             return
         self._ui.run_worker(self._open_panel(tp), exclusive=True, group="telepresence")
 

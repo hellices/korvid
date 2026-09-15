@@ -15,6 +15,7 @@ from korvid.k8s.helm import HELM_RELEASES_META, HELM_REVISIONS_META
 from korvid.k8s.olm import OPERATORS_GROUP, PACKAGES_GROUP
 from korvid.k8s.portforward import FORWARDABLE_KINDS
 from korvid.ui.action_availability import (
+    AGENT_UNAVAILABLE,
     CONTEXT_SWITCH_IN_PROGRESS,
     ActionAvailability,
     AvailabilityCode,
@@ -110,6 +111,14 @@ class ActionPolicy:
         switching: Callable[[], bool] | None = None,
         app_running: Callable[[], bool] | None = None,
         reason_by_action: Mapping[str, Callable[[], UnavailableReason | None]] | None = None,
+        #: Owner-supplied reasons for `:` *commands*, keyed by canonical
+        #: command text. A separate map on purpose (#388 task 6 review):
+        #: command texts and action names are different vocabularies that
+        #: happen to be strings, so `:help`-the-command could otherwise
+        #: inherit `help`-the-action's answer. `command_availability` is the
+        #: only reader; nothing here is view- or binding-gated, because a
+        #: command is typed, not bound.
+        reason_by_command: Mapping[str, Callable[[], UnavailableReason | None]] | None = None,
     ) -> None:
         self._view = view
         self._agent_available = agent_available
@@ -136,6 +145,9 @@ class ActionPolicy:
         if agent_busy is not None:
             reasons.setdefault("interrupt_agent", self._interrupt_agent_reason)
         self._reason_by_action: Mapping[str, Callable[[], UnavailableReason | None]] = reasons
+        self._reason_by_command: Mapping[str, Callable[[], UnavailableReason | None]] = dict(
+            reason_by_command if reason_by_command is not None else {}
+        )
 
     def binding_enabled(self, action: str) -> bool:
         """Whether `action`'s binding is enabled in the current composition and view."""
@@ -177,6 +189,21 @@ class ActionPolicy:
         if not self.binding_enabled(action):
             return ActionAvailability(binding_enabled=False, reason=self._wrong_view_reason(action))
         return ActionAvailability(binding_enabled=True, reason=self._invocation_reason(action))
+
+    def command_availability(self, command: str) -> ActionAvailability:
+        """Whether the `:` command `command` can run right now (issue #388).
+
+        Its own namespace, deliberately separate from `availability`: a
+        command is typed rather than bound, so none of the binding, view or
+        palette-surface gates apply to it - only the owner's synchronous,
+        silent capability answer (`AgentUiController` for `:ai`/`:model`,
+        `IntegrationController` for `:mcp`/`:tp`). A command with no
+        registered owner reason is simply runnable.
+        """
+        resolver = self._reason_by_command.get(command)
+        return ActionAvailability(
+            binding_enabled=True, reason=None if resolver is None else resolver()
+        )
 
     def _invocation_reason(self, action: str) -> UnavailableReason | None:
         """The owner's reason a *bound* action still can't run, or None -
@@ -225,7 +252,7 @@ class ActionPolicy:
             if reason is not None:
                 return reason
         if action == "toggle_agent" and not self._agent_available():
-            return UnavailableReason(AvailabilityCode.MISSING_CAPABILITY, "Agent is not available")
+            return AGENT_UNAVAILABLE
         if action in _LOG_PANE_ACTIONS and not self._log_pane_open():
             return UnavailableReason(AvailabilityCode.PANE_CLOSED, "Open the log pane first")
         if action in _SYNTHETIC_GATED_ACTIONS:

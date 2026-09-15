@@ -169,19 +169,24 @@ def derive_palette_entries(
     *,
     overrides: Mapping[str, str] | None = None,
     availability: Callable[[str], ActionAvailability],
+    command_availability: Callable[[str], ActionAvailability],
 ) -> list[PaletteEntry]:
     """Derive the whole palette catalog: bound actions, then `:` commands.
 
     One list, built fresh by its caller for every render and re-checked
     after the modal is dismissed - never cached: availability is a live
     question (the selected row, the current view, an in-flight write) whose
-    answer expires the moment the user does anything. `availability` is
-    asked for each action name and for each command's canonical text, so a
-    single policy answers both halves.
+    answer expires the moment the user does anything.
+
+    Two callables, not one: `availability` is asked about *action names*
+    and `command_availability` about *canonical command texts*. They are
+    separate vocabularies that happen to be strings, so a command spelled
+    like an action (`:help`) must not inherit that action's answer, in
+    either direction.
     """
     return [
         *derive_action_entries(bindings, overrides=overrides, availability=availability),
-        *derive_command_entries(commands, availability=availability),
+        *derive_command_entries(commands, availability=command_availability),
     ]
 
 

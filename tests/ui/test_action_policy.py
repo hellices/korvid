@@ -329,3 +329,84 @@ def test_palette_binding_defaults_to_enabled_without_injected_probes() -> None:
     stance `agent_busy` takes."""
     policy = _policy(group="", plural="pods")
     assert policy.binding_enabled("open_action_palette") is True
+
+
+# ---------------------------------------------------------------------------
+# `:` commands answer in their own namespace, never the action one (task 6
+# review): a command's canonical text and an app action's name are different
+# vocabularies that happen to be strings, so they get different APIs.
+# ---------------------------------------------------------------------------
+
+
+def _command_policy(
+    *,
+    plural: str = "pods",
+    reason_by_action: Mapping[str, Callable[[], UnavailableReason | None]] | None = None,
+    reason_by_command: Mapping[str, Callable[[], UnavailableReason | None]] | None = None,
+) -> ActionPolicy:
+    meta = ResourceMeta(
+        kind=plural.removesuffix("s").title(),
+        plural=plural,
+        group="",
+        version="v1",
+        namespaced=plural != "nodes",
+    )
+    return ActionPolicy(
+        view=FakeView(meta),
+        agent_available=lambda: True,
+        log_pane_open=lambda: False,
+        reason_by_action=reason_by_action,
+        reason_by_command=reason_by_command,
+    )
+
+
+def test_command_availability_is_enabled_without_an_owner_reason() -> None:
+    """Most `:` commands have no capability to miss: they are simply runnable."""
+    policy = _command_policy()
+    assert policy.command_availability("pulse") == ActionAvailability.enabled()
+
+
+def test_command_availability_surfaces_the_owner_reason() -> None:
+    reason = UnavailableReason(AvailabilityCode.MISSING_CAPABILITY, "Agent is not available")
+    policy = _command_policy(reason_by_command={"ai": lambda: reason})
+    availability = policy.command_availability("ai")
+    assert availability.binding_enabled is True
+    assert availability.reason == reason
+    assert availability.invokable is False
+
+
+def test_command_and_action_namespaces_cannot_collide() -> None:
+    """A command whose canonical text equals an app action's name must not
+    inherit that action's answer, in either direction."""
+    action_reason = UnavailableReason(AvailabilityCode.NO_SELECTION, "Select a resource first")
+    command_reason = UnavailableReason(AvailabilityCode.MISSING_CAPABILITY, "No owner for this")
+    policy = _command_policy(
+        reason_by_action={"help": lambda: action_reason},
+        reason_by_command={"help": lambda: command_reason},
+    )
+    assert policy.availability("help").reason == action_reason
+    assert policy.command_availability("help").reason == command_reason
+
+
+def test_command_availability_is_not_gated_on_the_current_view() -> None:
+    """`logs` is a pods-only *action*; a `:logs`-shaped command name must not
+    pick up that view gate, because commands are not bound keys."""
+    policy = _command_policy(plural="nodes")
+    assert policy.availability("logs").binding_enabled is False
+    assert policy.command_availability("logs") == ActionAvailability.enabled()
+
+
+def test_command_availability_ignores_the_palette_surface_probes() -> None:
+    """The surface guard belongs to the palette's own open binding, not to
+    every command row inside it."""
+    policy = ActionPolicy(
+        view=FakeView(
+            ResourceMeta(kind="Pod", plural="pods", group="", version="v1", namespaced=True)
+        ),
+        agent_available=lambda: True,
+        log_pane_open=lambda: False,
+        screen_depth=lambda: 2,
+        reason_by_command={"open_action_palette": lambda: None},
+    )
+    assert policy.binding_enabled("open_action_palette") is False
+    assert policy.command_availability("open_action_palette") == ActionAvailability.enabled()

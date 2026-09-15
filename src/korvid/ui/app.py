@@ -729,6 +729,7 @@ class KorvidApp(App[None]):
             COMMANDS,
             overrides=self._keybinding_overrides,
             availability=self._actions.availability,
+            command_availability=self._actions.command_availability,
         )
 
     def action_open_action_palette(self) -> None:

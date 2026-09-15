@@ -1219,3 +1219,27 @@ def test_app_delegates_palette_catalog_derivation_to_its_own_module() -> None:
     assert "derive_action_entries(" not in source
     assert "derive_command_entries(" not in source
     assert "rank_entries(" not in source
+
+
+def test_textuals_exit_flag_is_read_only_by_the_one_shutdown_helper() -> None:
+    """`_accepting_input()` reads Textual's private `App._exit` because there
+    is no public "is the app exiting" API (issue #388 task 6 review). That
+    read stays isolated in that single helper, so the private coupling has
+    exactly one place to fail and one place to fix."""
+    source = (UI / "app.py").read_text(encoding="utf-8")
+    module = ast.parse(source)
+    helper = next(
+        node
+        for node in ast.walk(module)
+        if isinstance(node, ast.FunctionDef) and node.name == "_accepting_input"
+    )
+    reads = [
+        node
+        for node in ast.walk(module)
+        if isinstance(node, ast.Attribute)
+        and node.attr == "_exit"
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "self"
+    ]
+    assert len(reads) == 1
+    assert helper.lineno <= reads[0].lineno <= (helper.end_lineno or helper.lineno)

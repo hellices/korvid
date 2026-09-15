@@ -82,6 +82,7 @@ from korvid.k8s.relations import drill_child, owned_by
 from korvid.k8s.writes import WriteOps, restart_stamp
 from korvid.tools.executor import UIBridge, incarnation_of
 from korvid.tools.follow import FOLLOWABLE_TOOLS, mirror_read
+from korvid.ui.action_availability import AGENT_UNAVAILABLE, UnavailableReason
 from korvid.ui.bridge_dispatch import BridgeDispatch
 from korvid.ui.resize_impact_preview import compose_resize_impact_lines
 from korvid.ui.resource_write_controller import RESTARTABLE, SCALABLE, resize_summary
@@ -611,6 +612,16 @@ class AgentUiController:
     def available(self) -> bool:
         """Whether the [agent] extra was wired at all (issue #73)."""
         return self._available
+
+    def command_unavailable_reason(self) -> UnavailableReason | None:
+        """Why `:ai` / `:model` cannot run right now, or None (issue #388).
+
+        The silent palette probe for the refusal the router already makes:
+        without the [agent] extra no owner claims those commands, so they
+        are reported as unknown when typed. The palette greys the rows out
+        with the same wording the bound `Ctrl-A` key uses.
+        """
+        return None if self._available else AGENT_UNAVAILABLE
 
     @property
     def session(self) -> AgentSession | None:

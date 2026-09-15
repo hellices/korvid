@@ -13,7 +13,8 @@ from korvid.ui.action_palette import (
     rank_entries,
 )
 from korvid.ui.app_bindings import APP_BINDINGS
-from korvid.ui.command import COMMANDS
+from korvid.ui.command import COMMANDS, CommandDescriptor, PaletteCommand
+from korvid.ui.messages import BuiltinOperation
 
 
 def _entry(
@@ -222,6 +223,7 @@ def test_palette_catalog_combines_both_catalogs_and_asks_about_every_name() -> N
         COMMANDS,
         overrides={"help": "f1"},
         availability=availability,
+        command_availability=availability,
     )
     ids = [entry.id for entry in entries]
     assert ids == [
@@ -232,3 +234,44 @@ def test_palette_catalog_combines_both_catalogs_and_asks_about_every_name() -> N
     assert "command:pulse" in ids
     assert {"help", "pulse"} <= set(asked)
     assert next(e for e in entries if e.id == "action:help").trigger == "f1"
+
+
+def test_palette_catalog_keeps_command_names_out_of_the_action_namespace() -> None:
+    """Task 6 review: a command's canonical text and an app action's name are
+    separate vocabularies. The catalog asks a *different* callable for each,
+    so a command that happens to be spelled like an action ("help") gets the
+    command owner's answer - and neither callable ever sees the other's
+    names."""
+    colliding = CommandDescriptor(
+        aliases=("help",),
+        help=(("::help", "a command that collides with an app action name"),),
+        operation=BuiltinOperation.PULSE,
+        palette=PaletteCommand("Help command", "help"),
+    )
+    action_reason = UnavailableReason(AvailabilityCode.NO_SELECTION, "select a resource first")
+    command_reason = UnavailableReason(AvailabilityCode.MISSING_CAPABILITY, "no owner wired")
+    action_names: list[str] = []
+    command_names: list[str] = []
+
+    def action_availability(name: str) -> ActionAvailability:
+        action_names.append(name)
+        return ActionAvailability(True, action_reason if name == "help" else None)
+
+    def command_availability(name: str) -> ActionAvailability:
+        command_names.append(name)
+        return ActionAvailability(True, command_reason)
+
+    entries = {
+        entry.id: entry
+        for entry in derive_palette_entries(
+            APP_BINDINGS,
+            (colliding,),
+            availability=action_availability,
+            command_availability=command_availability,
+        )
+    }
+    assert entries["action:help"].availability.reason == action_reason
+    assert entries["command:help"].availability.reason == command_reason
+    assert command_names == ["help"]
+    assert "quit" in action_names
+    assert action_names.count("help") == 1

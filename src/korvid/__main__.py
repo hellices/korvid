@@ -1419,6 +1419,12 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
             "shell": shell.unavailable_reason,
             "operator_install": operators.unavailable_reason,
         },
+        reason_by_command={
+            "ai": agent_ui.command_unavailable_reason,
+            "model": agent_ui.command_unavailable_reason,
+            "mcp": integrations.mcp_unavailable_reason,
+            "tp": integrations.telepresence_unavailable_reason,
+        },
     )
     commands = CommandRouter(
         ui=AppUiSurface(app),

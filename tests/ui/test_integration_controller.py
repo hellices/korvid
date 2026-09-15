@@ -24,6 +24,7 @@ from korvid.k8s.telepresence import (
     TelepresenceError,
     TelepresenceStatus,
 )
+from korvid.ui.action_availability import AvailabilityCode
 from korvid.ui.integration_controller import IntegrationController
 from korvid.ui.widgets.telepresence_screen import TelepresenceScreen
 
@@ -447,3 +448,41 @@ async def test_a_reprobe_requested_mid_probe_is_queued_not_lost() -> None:
     await first
     await h.ui.settle()
     assert any("traffic-manager detected" in m for m in h.ui.messages())
+
+
+# ---------------------------------------------------------------------------
+# Palette probes: the owner answers "can `:mcp` / `:tp` run now?" silently
+# ---------------------------------------------------------------------------
+
+
+def test_mcp_unavailable_reason_repeats_the_command_refusal_silently() -> None:
+    """Issue #388 task 6 review: the palette greys out `:mcp` with the same
+    wording `handle_mcp_command` notifies, and the probe itself notifies
+    nothing - it is asked while the list is being built, not pressed."""
+    h = Harness(mcp=None)
+    reason = h.controller.mcp_unavailable_reason()
+    assert reason is not None
+    assert reason.code is AvailabilityCode.MISSING_CAPABILITY
+    assert h.ui.messages() == []
+    h.controller.handle_mcp_command([])
+    assert h.ui.messages() == [reason.message]
+
+
+def test_mcp_reason_is_none_once_the_server_is_wired() -> None:
+    h = Harness(mcp=FakeMCP(running=False))
+    assert h.controller.mcp_unavailable_reason() is None
+
+
+def test_telepresence_unavailable_reason_repeats_the_command_refusal_silently() -> None:
+    h = Harness(telepresence=None)
+    reason = h.controller.telepresence_unavailable_reason()
+    assert reason is not None
+    assert reason.code is AvailabilityCode.MISSING_CAPABILITY
+    assert h.ui.messages() == []
+    h.controller.handle_telepresence_command()
+    assert h.ui.messages() == [reason.message]
+
+
+def test_telepresence_reason_is_none_once_the_cli_is_wired() -> None:
+    h = Harness(telepresence=FakeTelepresence())
+    assert h.controller.telepresence_unavailable_reason() is None
