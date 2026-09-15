@@ -58,10 +58,11 @@ modals.
 
 Korvid disables Textual's built-in system palette and binds a dedicated modal to
 `Ctrl-P`. The modal uses public Textual widgets and fuzzy matching but owns
-availability, disabled rows, deterministic ranking, and dispatch.
+availability, unavailable rows, deterministic ranking, and dispatch.
 
-This adds a small screen, but it is the only option that can explain disabled
-actions, exclude framework commands, and enforce Korvid's approval boundary
+This adds a small screen, but it is the only option that can explain
+unavailable actions, exclude framework commands, and enforce Korvid's approval
+boundary
 without subclassing Textual private methods.
 
 ### Rejected: Textual command provider
@@ -242,8 +243,8 @@ availability reasons refer only to UI surfaces or transitions where launching
 another modal would be unsafe.
 
 Commands have the same result type. Optional extras and executable-dependent
-commands are disabled with their install/capability reason rather than silently
-disappearing. A command answers for what *its own* handler reads, which is not
+commands are marked unavailable with their install/capability reason rather
+than silently disappearing. A command answers for what *its own* handler reads, which is not
 always what the nearest bound key reads: `:pf` opens the list of forwards this
 session already started, so its one question is whether this build carries a
 forward registry — not the `kubectl` binary or the selected row that the
@@ -268,8 +269,9 @@ selected or invoked.
 
 A palette reason is **concise by contract**: it is one `Option`'s second line
 at 36 columns, and a row whose reason is clipped there cannot be recovered by
-any keystroke — the list scrolls by whole options and a disabled row is never
-highlighted. So an owner whose *command* answers with remediation (an install
+any keystroke — revealing a row aligns its top, and the list scrolls between
+rows rather than inside one. So an owner whose *command* answers with
+remediation (an install
 or reinstall command, a config snippet) splits the two: the probe returns the
 short capability fact (`:mcp` — "the [mcp] extra is not installed"; `:tp` —
 "no CLI in this session"), and the typed command's notification leads with that
@@ -321,7 +323,8 @@ resource names.
 
 Each result renders a category, title, and effective key or canonical command
 on the first line. The second line renders its description or unavailable
-reason. Unavailable options are visible but disabled. Category separators are
+reason. An unavailable row is visible, greyed and navigable — it simply cannot
+be run. Category separators are
 inserted only between non-empty groups.
 
 The modal uses `width: 76; max-width: 94%` and an **exact height it computes
@@ -378,32 +381,53 @@ Typing filters results. Up/Down, PageUp/PageDown, Home/End, and Enter operate
 the list while the input keeps keyboard focus. `Escape` and `Ctrl-P` cancel.
 A disabled no-results row gives explicit feedback.
 
-Those navigation keys are the **palette's own actions over every rendered
-row**, not `OptionList`'s. Textual's list navigation moves between *enabled*
-options only — `find_next_enabled` and its siblings step over each disabled
-row and answer `None` when none is enabled — and this palette's disabled rows
-are exactly the ones a user opens it to read. A base install without helm
-leaves `helm` matching four rows, all refused by the one owner, whose reason
-wraps: twelve lines against a nine-row viewport at 80x24, twenty against eight
-at 36x16. With skip-disabled navigation every arrow, page and edge key left the
-highlight unset and the viewport at the top, so the last row and its reason
-could not be composited by any keystroke; with no query, the same rows rank
-last, below the final enabled one, and `End` stopped short of them. So Up/Down
-move one row whatever its availability, Home/End reach the real first and last
-row, and a page moves a bounded number of *rows* — the viewport height over the
-list's current average row height, at least one and never more than the
-viewport holds — so it advances the view without jumping content the user never
-saw. Each of them ends in an explicit `scroll_to_highlight()`, because
-`OptionList` scrolls from its `highlighted` watcher only for an enabled option;
-without that, a refused row would be highlighted off screen.
+Those navigation keys are `OptionList`'s own public navigation actions —
+`action_cursor_up`/`_down`, `action_page_up`/`_down`, `action_first`/`_last` —
+over rows that are **all navigable**. Only the no-results row is a disabled
+Textual option; a row whose owner has refused it is an ordinary row that
+carries its refusal itself, as a greyed `Unavailable: <reason>` second line,
+and `_activate` is what refuses to run it.
 
-Browsable is not invocable, and the two stay separate: `Option.disabled` stays
-true on every refused row, `Enter` is still gated on the entry's own
-`availability.invocable`, and the no-results row — which has no entry behind it
-at all — runs nothing under any of these keys. Everything here is public
-`OptionList` API: `option_count`, `highlighted` (validated by the widget),
-`virtual_size`, `scrollable_content_region` and `scroll_to_highlight()`. No
-private line map is read.
+That separation is the whole rule, because Textual answers two different
+questions with one flag. `OptionList.render_line` picks the disabled component
+style *before* it looks at `highlighted`, so a disabled option can never draw a
+cursor; and every navigation action moves between enabled options only
+(`find_next_enabled` and its siblings answer `None` when none is enabled). A
+palette whose refused rows are exactly the ones a user opens it to *read*
+cannot spend that flag on "cannot run". A base install without helm leaves
+`helm` matching four rows, all refused by the one owner, whose reason wraps:
+twelve lines against a nine-row viewport at 80x24, twenty against eight at
+36x16. Marking them disabled left every arrow, page and edge key with nothing
+to land on — the highlight stayed unset and the viewport at the top — and once
+the palette moved the highlight itself, the highlighted row still drew no
+cursor at all: the index changed and the frame did not. With no query the same
+rows rank last, below the final runnable one, and `End` stopped short of them.
+
+So Up/Down move one row whatever its availability, Home/End reach the real
+first and last row, a click reaches a refused row too, and a page moves in
+*lines*: Textual anchors a page on the highlighted row's own first line and
+adds or subtracts the viewport height, so the cursor never jumps more than a
+screenful. Rows differ in height, so the *view* still can — landing on a taller
+row scrolls further than the anchor moved, and paging up snaps back to the
+start of the row the anchor landed inside — and the screen therefore steps the
+cursor back a row at a time, with the list's own cursor actions, until the view
+has moved no further than one viewport. Every key ends in an explicit
+`scroll_to_highlight()`, which is what makes `End` at the end of the list and
+`Home` at the top re-assert a scroll that a resize had moved away.
+
+The query `Input` is the modal's only focus: the results list is created with
+`can_focus` off, so clicking a row that cannot run does not take the keyboard
+away from a query the user is still editing.
+
+Browsable is not invocable, and the two stay separate. `_activate` is the one
+gate, and every selection path reaches it — `Enter` on the input, a click, and
+`OptionList`'s own `action_select` — so it dismisses only for an entry whose
+`availability.invocable` is true. The no-results row has no entry behind it and
+no id, so it stays a genuinely disabled option: no cursor is ever drawn on it
+and nothing runs. Everything here is public `OptionList` API — the navigation
+actions, `highlighted`, `option_count`, `scroll_offset`,
+`scrollable_content_region` and `scroll_to_highlight()`. No private line map is
+read.
 
 ## Invocation and stale state
 
@@ -447,6 +471,10 @@ approve it. A fresh user keystroke remains mandatory.
 - `binding_enabled` remains consistent with boolean `check_action` behavior,
   while `invocable` covers deeper refusal states without making explanatory
   keyboard paths inert;
+- a row that cannot run is a *navigable* row: `Option.disabled` is spent only
+  on the no-results sentinel, so the refusal never costs the row its cursor or
+  its reachability, and `_activate` is the single gate every selection path
+  reaches;
 - the shared key-label table spells every Textual key name the palette and the
   help overlay can show, including `tilde` as `~`, by default and through a
   remap;
@@ -459,14 +487,15 @@ approve it. A fresh user keystroke remains mandatory.
 - `Ctrl-P` opens from base, split, log, describe, and Agent surfaces;
 - cancellation restores focus;
 - command/filter editing and all modal screens block opening;
-- search, no-result, disabled-result, category, and narrow-terminal rendering;
+- search, no-result, unavailable-result, category, and narrow-terminal
+  rendering;
 - at 80x24 and 36x16 the whole modal stays inside the screen, the key hint is
   composited, and the highlighted row is rendered in the results viewport —
   including after `End`, after a resize under the open modal, and for a whole
   real row (`:proposals`, and an owner's long unavailable reason) at 36x16;
 - shrinking a 36x24 terminal to 36x16 with a real row filtered in still
   composites that row whole — heading and description for `:proposals`, heading
-  and the owner's refusal for the disabled `relationships` row, which stays
+  and the owner's refusal for the refused `relationships` row, which stays
   inert with the query input focused — and a scroll that lands after the
   palette was dismissed does nothing;
 - shrinking 80x24 to 36x16 with a *query's worth* of rows left in — the whole
@@ -476,7 +505,7 @@ approve it. A fresh user keystroke remains mandatory.
   heading, the owner's refusal and the rule closing its category, and stays
   inert;
 - narrowing 80x24 to 38x24 over the whole derived catalog composites the row a
-  query left whole — `:ctx`, `:tp`, and the disabled `relationships` row with
+  query left whole — `:ctx`, `:tp`, and the refused `relationships` row with
   the owner's refusal — with the query input still focused;
 - the real integration rows a base install greys out are composited whole at
   the narrow terminals the design supports: `:mcp` at 36x16 and `:tp` at 36x24,
@@ -503,9 +532,22 @@ approve it. A fresh user keystroke remains mandatory.
 - a page key never leaves the highlight off screen: paging to the end of the
   whole derived catalog and back composites the highlighted row after every
   press;
-- the single no-results row stays inert under every navigation key — the
-  highlight does not leave it, nothing is dispatched, and the query input keeps
-  focus;
+- the cursor is *drawn* on the row it reaches, read from the frame the
+  compositor renders rather than from the widget's index: on an all-refused
+  `helm` list at 80x24 and 36x16 every Down changes the cells drawn in the
+  list's own highlight background, and a mixed list keeps the cursor on the
+  step from a runnable row onto a refused one and back;
+- a click on a row that cannot run moves the cursor onto it, composites it, and
+  runs nothing — and `OptionList`'s own `action_select` on such a row dismisses
+  nothing while the next runnable row still dispatches, so removing the
+  `_activate` guard fails the suite;
+- a page key moves the view no further than the results viewport's own height,
+  in both directions, over the real catalog at 80x24 and 36x16 — where rows are
+  two to five lines against an eight- or nine-line viewport — and still reaches
+  the trailing refused rows;
+- the single no-results row stays inert under every navigation key — it stays a
+  disabled, id-less option, no cursor is ever drawn on it, nothing is
+  dispatched, and the query input keeps focus;
 - overloaded view-specific actions show the correct effective key and reason;
 - the `:pf` row is greyed out in a session wired without a forward registry
   and offered once one is, with no `kubectl` and nothing selected; a selection

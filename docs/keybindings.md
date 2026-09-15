@@ -48,8 +48,12 @@ the palette also answers "why did that key do nothing?". A reason is written
 to fit a row on a narrow terminal, so where the key's own toast names a
 resource (the node a running drain is evicting, the node cordon is waiting
 on, the pod that would not fit the log pane) the row states the fact and the
-toast keeps the name. `Esc` closes the palette, and so does `Ctrl-P`, which
-the modal binds as a close key of its own.
+toast keeps the name. Such a row is greyed but not skipped: the arrow, Page
+and Home/End keys put the cursor on it like any other row so the reason can
+be read, and clicking it does the same. It still cannot run — Enter and a
+click on it dispatch nothing and leave the palette open. `Esc` closes the
+palette, and so does `Ctrl-P`, which the modal binds as a close key of its
+own.
 Selecting a write action opens the same approval dialog the key opens, which
 still needs its own fresh keystroke.
 
