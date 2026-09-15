@@ -30,6 +30,20 @@ def test_key_label_symbol_keys() -> None:
     assert key_label("slash") == "/"
 
 
+def test_key_label_names_the_topbar_key_by_the_character_it_types() -> None:
+    """`~` is a real default binding (`toggle_topbar`), and Textual spells
+    it `tilde`.
+
+    Unlabelled, that word is what both surfaces derived from the bindings
+    show - the help overlay's key column and the palette row's trigger -
+    and no key on the keyboard says "tilde". The shared label table is what
+    turns a Textual key name into the character the user presses, and this
+    one belongs in it beside `?`, `:` and `/`.
+    """
+    assert key_label("tilde") == "~"
+    assert key_label("ctrl+tilde") == "Ctrl-~"
+
+
 def test_key_label_modifiers_and_case() -> None:
     assert key_label("ctrl+s") == "Ctrl-S"
     assert key_label("shift+n") == "Shift-N"
@@ -243,6 +257,20 @@ async def test_help_lists_every_app_binding_description() -> None:
             else:
                 description = binding[2] if len(binding) == 3 else ""
             assert description in text
+
+
+async def test_help_shows_the_topbar_key_as_the_character_it_types() -> None:
+    """The overlay is generated from the real bindings, so the key column
+    shows whatever `key_label` makes of `tilde` - and the raw Textual key
+    name must never reach it."""
+    app = make_app([_pod("myapp")])
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("question_mark")
+        await until(pilot, lambda: isinstance(app.screen, HelpScreen), label="help open")
+        text = _help_text(app)
+        assert "~" in text
+        assert "tilde" not in text
 
 
 async def test_help_lists_handler_keys() -> None:

@@ -29,6 +29,7 @@ _KEY_NAMES = {
     "question_mark": "?",
     "colon": ":",
     "slash": "/",
+    "tilde": "~",
     "escape": "Esc",
     "enter": "Enter",
     "space": "Space",
