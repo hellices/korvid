@@ -30,11 +30,22 @@ from korvid.ui.action_availability import (
 #: about panes, not about the table.
 SEARCH_ACTIONS: tuple[str, ...] = ("log_search_next", "log_search_prev")
 
-#: Palette action -> the sort column `KorvidApp.action_sort_by_cpu` /
-#: `action_sort_by_mem` pass to `WorkspaceController.sort_by`. The two
-#: metric keys are the only sorts that can silently do nothing, because
-#: they are the only ones whose column is not on every view.
-METRIC_SORT_COLUMNS: dict[str, str] = {"sort_by_cpu": "cpu", "sort_by_mem": "mem"}
+#: Palette action -> the sort column `KorvidApp.action_sort_by_age` /
+#: `action_sort_by_cpu` / `action_sort_by_mem` pass to
+#: `WorkspaceController.sort_by`. These three are the sorts that can
+#: silently do nothing, because a view can render without their column.
+#: `sort_by("name")` is absent on purpose: no key runs it directly (`N`
+#: falls back to it), and NAME is the one column `replace: true` keeps.
+SORT_ACTION_COLUMNS: dict[str, str] = {
+    "sort_by_age": "age",
+    "sort_by_cpu": "cpu",
+    "sort_by_mem": "mem",
+}
+
+#: The two columns that exist only on the pods view, which is the only one
+#: with a metrics feed behind them. AGE is not one of them: every
+#: discovered view renders it.
+_METRIC_COLUMNS: frozenset[str] = frozenset({"cpu", "mem"})
 
 #: `:ns` in a session with no namespace listing wired. One wording for
 #: the picker's own refusal and the palette row that reports it (#388).
@@ -134,23 +145,33 @@ def relationships_reason(
     return None
 
 
-def metric_sort_reason(column: str, *, kind: str, replaced: bool) -> UnavailableReason | None:
-    """Why `C`/`M` would discard the keypress right now, or None.
+def sort_column_reason(column: str, *, kind: str, replaced: bool) -> UnavailableReason | None:
+    """Why `A`/`C`/`M` would discard the keypress right now, or None.
 
     `WorkspaceController.sort_by` returns without reordering anything -
     and without a notification - in exactly two states: a metric column on
     any view but pods (nothing else has CPU/MEM columns or a metrics
-    feed), and a `replace: true` view, which hides those columns so the
-    reorder would have no visible effect. The handler shares this
-    function, so the greyed-out row and the silent keypress cannot drift.
+    feed), and a `replace: true` view, which renders its own columns
+    instead of AGE/CPU/MEM, so the reorder would have no visible effect.
+    NAME survives both, because `replace: true` keeps that column and `N`
+    falls back to sorting by it. The handler shares this function, so the
+    greyed-out row and the silent keypress cannot drift.
 
     The wording deliberately carries no cluster data. This is row text on
     a 36-column terminal, where a refusal naming an arbitrarily long view
     or column name would be clipped - and a disabled palette row is never
     highlighted, so nothing scrolls the missing words back into view.
+
+    Args:
+        column: A builtin sort column (`name`, `age`, `cpu` or `mem`) -
+            the only ones the key handlers and `:sort` pass to `sort_by`.
+        kind: The view the focused pane is showing.
+        replaced: Whether that view's `replace: true` hid the builtins.
     """
+    if column == "name":
+        return None
     label = column.upper()
-    if kind != "pods":
+    if column in _METRIC_COLUMNS and kind != "pods":
         return UnavailableReason(
             AvailabilityCode.UNSUPPORTED_RESOURCE, f"{label} is not a column on this view"
         )

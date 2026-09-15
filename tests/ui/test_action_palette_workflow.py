@@ -1420,3 +1420,89 @@ async def test_the_refused_metric_sort_key_still_changes_nothing() -> None:
         await pilot.pause()
         assert "nodes" not in app._workspace.focused.sorts
         assert len(app._notifications) == before
+
+
+# ---------------------------------------------------------------------------
+# `A`: a replacement view hides the AGE column the key would sort by
+# ---------------------------------------------------------------------------
+
+
+def _replacement_pods_app() -> KorvidApp:
+    """A pods view whose `replace: true` columns hide NAME's neighbours.
+
+    The same view the metric-sort rows already answer for: `sort_by`
+    refuses every builtin but NAME on it, because reordering rows by a
+    column the view does not render moves them with no indicator.
+    """
+    view = ViewConfig(columns=(CustomColumn("TEAM", "label", "team"),), replace=True)
+    return make_app([_pod("web")], config=KorvidConfig(namespace="default", views={"pods": view}))
+
+
+async def test_the_age_sort_row_is_refused_on_a_replacement_view() -> None:
+    """`A` calls `sort_by("age")`, which a `replace: true` view discards
+    without a notification - the same silence `C`/`M` were fixed for.
+
+    The palette still offered the row as invocable, so selecting it did
+    nothing and said nothing. The refusal is the bounded one the metric
+    keys already use, because it is row text on a 36-column terminal.
+    """
+    app = _replacement_pods_app()
+    async with app.run_test() as pilot:
+        await _loaded(pilot, app)
+        reason = _entry_for(app, "action:sort_by_age").availability.reason
+        assert reason is not None
+        assert reason.message == "This view replaces the AGE column"
+
+
+async def test_the_age_sort_row_is_invocable_where_the_column_is_rendered() -> None:
+    """AGE is not a metrics column: every normal view has one, so the row
+    stays runnable on pods *and* on a view the metric keys are refused on."""
+    app = make_navigation_app()
+    async with app.run_test() as pilot:
+        await _rows_listed(pilot, app)
+        assert app.current_kind == "pods"
+        assert _entry_for(app, "action:sort_by_age").availability.invocable is True
+        await app._workspace_ctl.navigate("nodes", "default")
+        await until(pilot, lambda: app.current_kind == "nodes", label="nodes view active")
+        assert _entry_for(app, "action:sort_by_age").availability.invocable is True
+        assert _entry_for(app, "action:sort_picker").availability.invocable is True
+
+
+async def test_the_refused_age_sort_key_still_changes_nothing() -> None:
+    """The probe reports what the keypress does: `A` on a replacement view
+    leaves the order alone and stays silent, exactly as before."""
+    app = _replacement_pods_app()
+    async with app.run_test() as pilot:
+        await _loaded(pilot, app)
+        before = len(app._notifications)
+        await pilot.press("A")
+        await pilot.pause()
+        assert "pods" not in app._workspace.focused.sorts
+        assert len(app._notifications) == before
+
+
+async def test_dispatching_the_refused_age_sort_row_sorts_nothing() -> None:
+    """The palette's own route is the other half of the evidence: running
+    `sort_by_age` through `_palette_selected` reaches the same handler, so
+    the disabled row would have been a no-op there too."""
+    app = _replacement_pods_app()
+    async with app.run_test() as pilot:
+        await _loaded(pilot, app)
+        await app._palette_selected("action:sort_by_age")
+        await pilot.pause()
+        assert "pods" not in app._workspace.focused.sorts
+        assert any(n.message == "This view replaces the AGE column" for n in app._notifications)
+
+
+async def test_probing_the_sort_rows_notifies_nothing() -> None:
+    """Every sort probe is synchronous and silent: deriving the rows on the
+    view that refuses all three says nothing at all."""
+    app = _replacement_pods_app()
+    async with app.run_test() as pilot:
+        await _loaded(pilot, app)
+        before = len(app._notifications)
+        for _ in range(3):
+            app._palette_entries()
+        await _open_palette(pilot)
+        assert len(app._notifications) == before
+        assert "pods" not in app._workspace.focused.sorts

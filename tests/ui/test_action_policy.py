@@ -31,6 +31,7 @@ from korvid.ui.action_policy import (
 )
 from korvid.ui.app_bindings import APP_BINDINGS, as_binding, base_action
 from korvid.ui.command import COMMANDS
+from korvid.ui.read_availability import SEARCH_ACTIONS, SORT_ACTION_COLUMNS
 from korvid.ui.view_state import ViewState
 
 
@@ -485,6 +486,7 @@ def test_composed_action_reasons_ask_each_owner_about_its_own_actions() -> None:
         "log_search_next",
         "log_search_prev",
         "relationships",
+        "sort_by_age",
         "sort_by_cpu",
         "sort_by_mem",
         "port_forward",
@@ -502,7 +504,8 @@ def test_composed_action_reasons_ask_each_owner_about_its_own_actions() -> None:
     assert inspect_calls == ["log_search_prev"]
     assert reasons["relationships"]() is None
     assert reasons["sort_by_cpu"]() is None
-    assert workspace_calls == ["relationships", "sort_by_cpu"]
+    assert reasons["sort_by_age"]() is None
+    assert workspace_calls == ["relationships", "sort_by_cpu", "sort_by_age"]
 
 
 def test_composed_action_reasons_only_cover_owned_actions() -> None:
@@ -699,3 +702,18 @@ def test_every_owned_command_is_really_a_palette_command() -> None:
         context=lambda: None,
     )
     assert set(reasons) <= _palette_commands()
+
+
+def test_every_refusable_sort_key_has_an_owner() -> None:
+    """`read_availability` decides which sort columns can be refused;
+    `action_policy` decides who is asked about them. A column added to one
+    and not the other is a refusal the palette never shows - so the sort
+    vocabulary is audited against the owner list, not just spelled twice.
+    """
+    assert set(SORT_ACTION_COLUMNS) <= set(_WORKSPACE_REASON_ACTIONS)
+
+
+def test_every_search_key_has_an_owner() -> None:
+    """The same audit for `n`/`N`: `SEARCH_ACTIONS` is the pane-search
+    vocabulary, and the inspect owner is who answers for it."""
+    assert set(SEARCH_ACTIONS) <= set(_INSPECT_REASON_ACTIONS)

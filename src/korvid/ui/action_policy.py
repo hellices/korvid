@@ -118,9 +118,16 @@ _INSPECT_REASON_ACTIONS: tuple[str, ...] = (
 )
 
 #: The keys `WorkspaceController` answers an invocation reason for: `g`,
-#: plus the two metric sort keys, whose handler (`sort_by`) discards the
-#: press without even a warning on a view that has no CPU/MEM column.
-_WORKSPACE_REASON_ACTIONS: tuple[str, ...] = ("relationships", "sort_by_cpu", "sort_by_mem")
+#: plus the three column sort keys, whose handler (`sort_by`) discards the
+#: press without even a warning on a view that does not render the column
+#: they sort by. Kept in step with `read_availability.SORT_ACTION_COLUMNS`
+#: by `test_every_refusable_sort_key_has_an_owner`.
+_WORKSPACE_REASON_ACTIONS: tuple[str, ...] = (
+    "relationships",
+    "sort_by_cpu",
+    "sort_by_mem",
+    "sort_by_age",
+)
 
 
 def _per_action(
@@ -156,7 +163,7 @@ def compose_action_reasons(
         inspect: `ResourceInspectController.unavailable_reason` — the read
             keys `d`, `h` and the `n`/`N` search step.
         workspace: `WorkspaceController.unavailable_reason` — `g` and
-            the two metric sort keys.
+            the three column sort keys.
         port_forward: `ForwardController.unavailable_reason`.
         transfer: `TransferController.unavailable_reason`.
         shell: `ShellController.unavailable_reason`.

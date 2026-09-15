@@ -66,10 +66,10 @@ from korvid.ui.action_availability import UnavailableReason
 from korvid.ui.navigation import DrillLevel
 from korvid.ui.object_navigation import NavigationOrigin, default_scope_for, jump_to_object
 from korvid.ui.read_availability import (
-    METRIC_SORT_COLUMNS,
     NAMESPACE_LISTING_UNAVAILABLE,
-    metric_sort_reason,
+    SORT_ACTION_COLUMNS,
     relationships_reason,
+    sort_column_reason,
 )
 from korvid.ui.ui_surface import UiSurface
 from korvid.ui.view_state import ViewState
@@ -694,15 +694,12 @@ class WorkspaceController:
     def sort_by(self, column: str) -> None:
         """Apply/flip a sort column for the current view kind and re-render."""
         kind = self._state.current_kind
-        if column in METRIC_SORT_COLUMNS.values() and self._metric_sort_reason(column) is not None:
-            # No CPU/MEM column, no metrics feed, or a `replace: true` view
-            # that hides both: the keypress would silently discard the
-            # current order. The palette row reads the same answer.
-            return
-        view = self._view_for(kind)
-        if column != "name" and view is not None and view.replace:
-            # `replace: true` hides AGE/CPU/MEM — sorting by an invisible
-            # column would reorder rows with no indicator, so ignore it.
+        if self._sort_column_reason(column) is not None:
+            # No CPU/MEM column and no metrics feed, or a `replace: true`
+            # view that renders its own columns instead of AGE/CPU/MEM:
+            # the keypress would reorder rows with no visible indicator,
+            # so it is discarded. The palette row reads the same answer
+            # from the same helper, so the two cannot drift.
             return
         sorts = self._state.sorts
         sorts[kind] = toggle_sort(sorts.get(kind), column)
@@ -1370,26 +1367,26 @@ class WorkspaceController:
             group=meta.group, kind=meta.kind, namespace=namespace, name=name, uid=uid
         )
 
-    def _metric_sort_reason(self, column: str) -> UnavailableReason | None:
-        """Why `C`/`M` would sort nothing on the focused pane's view."""
+    def _sort_column_reason(self, column: str) -> UnavailableReason | None:
+        """Why `A`/`C`/`M` would sort nothing on the focused pane's view."""
         kind = self._state.current_kind
         view = self._view_for(kind)
-        return metric_sort_reason(column, kind=kind, replaced=view is not None and view.replace)
+        return sort_column_reason(column, kind=kind, replaced=view is not None and view.replace)
 
     def unavailable_reason(self, action: str) -> UnavailableReason | None:
-        """Why `g`, `C` or `M` can't run right now, or None — a silent
+        """Why `g`, `A`, `C` or `M` can't run right now, or None — a silent
         probe (#388).
 
         The Action Palette shows `relationships` whatever view is on
         screen, so it has to know when the key would only warn: the same
         guards `show_relationships` and `_selected_relationship_root`
         apply, in the same order, read without their notifications. The
-        two metric sort keys are quieter still — `sort_by` discards them
+        three column sort keys are quieter still — `sort_by` discards them
         without a warning — and share that handler's own helper.
         """
-        column = METRIC_SORT_COLUMNS.get(action)
+        column = SORT_ACTION_COLUMNS.get(action)
         if column is not None:
-            return self._metric_sort_reason(column)
+            return self._sort_column_reason(column)
         if action != "relationships":
             return None
         return relationships_reason(
