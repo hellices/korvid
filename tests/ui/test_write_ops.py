@@ -2224,6 +2224,73 @@ class _RunningDrain:
         raise AssertionError("the probe must never cancel the drain it reports")
 
 
+#: The refusal `_cancel_running_drain` notifies when the drain key is
+#: pressed anywhere but on the node currently being drained.
+_OTHER_DRAIN = (
+    "protected_ui",
+    "drain of nodes/worker-2 in progress - press the drain key on it to cancel",
+)
+
+
+async def test_probe_matrix_while_another_node_is_draining(tmp_path: Path) -> None:
+    """A drain in flight on *another* node refuses the drain key.
+
+    `drain_node` is only invocable while a drain runs because pressing it
+    again *cancels* that drain - and cancelling is targeted: with any other
+    node selected the keypress refuses and names the node to press it on
+    instead. The palette has to say the same thing, or it offers a row that
+    can only earn that refusal (issue #388, round 6).
+
+    Cordon and uncordon are unchanged: they ask about the selected node,
+    and worker-1 is not the one being drained.
+    """
+    rec = Recorder()
+    app = make_app(rec, tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        await _to_view(pilot, "nodes")
+        controller = app._resource_writes
+        controller._drain_node = "worker-2"
+        controller._drain_worker = _RunningDrain()
+        before = len(app._notifications)
+        matrix = _probe_matrix(app)
+        assert matrix["drain_node"] == _OTHER_DRAIN
+        assert matrix["cordon_node"] is None
+        assert matrix["uncordon_node"] is None
+        assert len(app._notifications) == before
+
+
+async def test_the_drain_probe_follows_the_keypress_off_the_nodes_view(tmp_path: Path) -> None:
+    """The keypress asks about the running drain *first*: `drain_node`
+    checks the cancel case before it resolves any target, so a drain in
+    flight refuses with the same sentence wherever the user is standing -
+    including a view where nothing draining is selected at all."""
+    rec = Recorder()
+    app = make_app(rec, tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: _selected_name(app) == "web-1", label="pod row selected")
+        controller = app._resource_writes
+        controller._drain_node = "worker-2"
+        controller._drain_worker = _RunningDrain()
+        before = len(app._notifications)
+        assert _probe_matrix(app)["drain_node"] == _OTHER_DRAIN
+        assert len(app._notifications) == before
+
+
+async def test_the_drain_probe_stays_invocable_on_the_draining_node(tmp_path: Path) -> None:
+    """The one node that can still be pressed is the one being drained:
+    that press cancels the drain, so the palette keeps offering it."""
+    rec = Recorder()
+    app = make_app(rec, tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        await _to_view(pilot, "nodes")
+        controller = app._resource_writes
+        controller._drain_node = "worker-1"
+        controller._drain_worker = _RunningDrain()
+        before = len(app._notifications)
+        assert app._resource_writes.unavailable_reason("drain_node") is None
+        assert len(app._notifications) == before
+
+
 async def test_node_probe_shares_the_node_target_wording(tmp_path: Path) -> None:
     """`node_unavailable_reason` is the silent twin of `node_target`'s own
     notifications, so it is phrased with the word the caller passes - here

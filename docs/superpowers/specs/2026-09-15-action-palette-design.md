@@ -209,6 +209,15 @@ key can explain the refusal, but is not palette-invocable. Action handlers retai
 their existing guards as defense in depth. Availability checks must not perform
 network I/O or mutate state.
 
+A probe answers in its handler's order, not in a tidier one. The drain key is
+the clearest case: `drain_node` asks about an in-flight drain *before* it
+resolves any target, because pressing it again is how a drain is cancelled. So
+its probe reports the drain too — invocable only on the node actually being
+drained (that press is the cancel), and otherwise the handler's own "drain of
+nodes/X in progress — press the drain key on it to cancel". Cordon and uncordon
+keep asking about the selected node alone: a drain elsewhere does not hold this
+node's schedulable state.
+
 A protected cluster context does not make a write unavailable; it remains
 invocable and reaches the stronger existing confirmation path. "Protected"
 availability reasons refer only to UI surfaces or transitions where launching

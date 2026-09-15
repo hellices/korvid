@@ -257,13 +257,18 @@ class ResourceWriteController:
             manifest_source_available=lambda: get_manifest() is not None,
             pod_resize_supported=pod_resize_supported,
             helm_cli_unavailable_reason=helm_cli_unavailable_reason,
-            draining=self._is_draining,
+            draining_node=self._draining_node,
         )
 
-    def _is_draining(self, name: str) -> bool:
-        """Whether the in-flight drain is still evicting from `name`."""
+    def _draining_node(self) -> str | None:
+        """The node an in-flight drain is still evicting from, or None.
+
+        The one live read of the drain's lifecycle the probes share: a
+        worker that has stopped running answers None even before
+        `_run_drain`'s `finally` clears the node name.
+        """
         worker = self._drain_worker
-        return worker is not None and worker.is_running and name == self._drain_node
+        return self._drain_node if worker is not None and worker.is_running else None
 
     # ------------------------------------------------------------------
     # Drain lifecycle, observable but not mutable from outside
@@ -1144,11 +1149,10 @@ class ResourceWriteController:
         kind_meta = self._view.aliases().get(self._view.canonical_kind(self._view.current_kind()))
         on_nodes = kind_meta is not None and (kind_meta.group, kind_meta.plural) == ("", "nodes")
         if self._drain_node is not None and (not on_nodes or selected != self._drain_node):
-            self._ui.notify(
-                f"drain of nodes/{self._drain_node} in progress"
-                " - press the drain key on it to cancel",
-                severity="warning",
-            )
+            # One wording with the palette's own refusal for this state, and
+            # rendered literally: the node name in it is cluster data.
+            reason = self._availability.other_drain_reason(self._drain_node)
+            self._ui.notify(reason.message, severity=reason.severity, markup=False)
             return True
         worker.cancel()
         return True

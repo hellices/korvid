@@ -556,7 +556,9 @@ async def test_drain_aborts_when_plan_gains_unapproved_pods_after_cordon(tmp_pat
 async def test_drain_key_on_other_node_does_not_cancel_running_drain(tmp_path: Path) -> None:
     """Cancelling is targeted: pressing the drain key while a *different*
     node is selected must warn instead of silently killing the running
-    drain."""
+    drain - and the palette must report that same refusal rather than
+    offering a drain row that can only earn it (issue #388, round 6).
+    """
     plan = DrainPlan(targets=(_target("web-1"),), skipped_daemonset=(), skipped_mirror=())
     rec = NodeRecorder(plan=plan)
     rec.release_evictions.clear()  # keep the drain in flight
@@ -570,6 +572,15 @@ async def test_drain_key_on_other_node_does_not_cancel_running_drain(tmp_path: P
         await _confirm_typed(pilot, "worker-1")
         await until(pilot, lambda: rec.evict_started.is_set(), label="first eviction in flight")
         await pilot.press("down")  # select worker-2
+        # The palette answers before the key is pressed, and silently.
+        before = len(app._notifications)
+        reason = app._actions.availability("drain_node")
+        assert reason.binding_enabled is True
+        assert reason.reason is not None
+        assert reason.reason.message == (
+            "drain of nodes/worker-1 in progress - press the drain key on it to cancel"
+        )
+        assert len(app._notifications) == before
         await pilot.press("D")  # must NOT cancel worker-1's drain
         await until(
             pilot,
@@ -578,9 +589,19 @@ async def test_drain_key_on_other_node_does_not_cancel_running_drain(tmp_path: P
             ),
             label="wrong-node cancel warning shown",
         )
+        # One wording: the row's reason is the sentence the key notified.
+        assert any(reason.reason.message == n.message for n in app._notifications)
         assert "cancelled" not in (audit_path.read_text() if audit_path.exists() else "")
         assert app._resource_writes.drain_worker is not None
         assert app._resource_writes.drain_worker.is_running
+        # Back on the draining node the row is invocable again, because
+        # that press is the cancel.
+        await pilot.press("up")
+        await until(
+            pilot,
+            lambda: app._actions.availability("drain_node").reason is None,
+            label="the draining node's own row invocable again",
+        )
         rec.release_evictions.set()
         await until(
             pilot,

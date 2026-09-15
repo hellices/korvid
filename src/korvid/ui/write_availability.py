@@ -84,9 +84,14 @@ class WriteAvailability:
     #: redeclared, so the helm-delete exception below cannot invent a
     #: second wording for it (#388 task 4 review).
     helm_cli_unavailable_reason: Callable[[], UnavailableReason | None]
-    #: Whether a drain is still evicting from the named node. Owned by the
-    #: controller, because the drain worker is its mutable lifecycle state.
-    draining: Callable[[str], bool]
+    #: The node an in-flight drain is still evicting from, or None when no
+    #: drain is running. Owned by the controller, because the drain worker
+    #: is its mutable lifecycle state, and read live rather than captured:
+    #: a drain can start, finish or be cancelled long after this value was
+    #: constructed. The *node*, not a per-name predicate, because the drain
+    #: key's own answer depends on which node is draining and not only on
+    #: whether the selected one is (#388 round 6).
+    draining_node: Callable[[], str | None]
 
     def unavailable_reason(self, action: str) -> UnavailableReason | None:
         """Why `action` can't run right now, or None - a side-effect-free
@@ -217,20 +222,64 @@ class WriteAvailability:
         return None, target
 
     def _node_action_reason(self, action: str) -> UnavailableReason | None:
-        """`node_unavailable_reason` plus the cordon/uncordon refusal a
-        running drain owns: the drain holds the node's schedulable state
-        until it finishes or is cancelled."""
+        """`node_unavailable_reason` plus the refusals an in-flight drain
+        owns: the drain holds the node's schedulable state until it
+        finishes or is cancelled, and the drain key itself is that cancel."""
+        if action == "drain":
+            return self._drain_action_reason()
         reason, target = self._node_reason_and_target(action)
-        if reason is not None or action == "drain":
+        if reason is not None:
             return reason
         return None if target is None else self.drain_in_progress_reason(target[2])
+
+    def _drain_action_reason(self) -> UnavailableReason | None:
+        """Why the drain key would do nothing right now, in its own order.
+
+        `ResourceWriteController.drain_node` asks about the running drain
+        *before* it resolves anything (`_cancel_running_drain`), so this
+        does too: while a drain is in flight the key either cancels it -
+        the draining node is the selected row - or refuses with
+        `other_drain_reason`, and never reaches the write client, selection
+        or kind questions below (#388 round 6). Only with no drain running
+        are those the answer.
+        """
+        draining = self.draining_node()
+        if draining is None:
+            return self._node_reason_and_target("drain")[0]
+        if self._selected_node_name() == draining:
+            # Pressing the drain key here *is* the cancel, so it runs.
+            return None
+        return self.other_drain_reason(draining)
+
+    def _selected_node_name(self) -> str | None:
+        """The selected row's name while the nodes view is on screen.
+
+        The drain key is bound app-wide, so `_cancel_running_drain` treats
+        a same-named row in another view as "not the draining node"; the
+        probe reads the selection the same way, silently.
+        """
+        current = self.view.aliases().get(self.view.canonical_kind(self.view.current_kind()))
+        if current is None or (current.group, current.plural) != ("", "nodes"):
+            return None
+        return self.view.selected_ns_name(notify=False)[1]
+
+    def other_drain_reason(self, name: str) -> UnavailableReason:
+        """Why the drain key cannot start a drain while *name* is draining.
+
+        Also the wording `_cancel_running_drain` notifies with, so the
+        greyed-out palette row and the pressed key name the same node to
+        press the key on instead."""
+        return UnavailableReason(
+            AvailabilityCode.PROTECTED_UI,
+            f"drain of nodes/{name} in progress - press the drain key on it to cancel",
+        )
 
     def drain_in_progress_reason(self, name: str) -> UnavailableReason | None:
         """Why cordon/uncordon must wait for an in-flight drain on *name*.
 
         Also the wording `_cordon_action` notifies with, so the probe and
         the keypress explain the wait identically."""
-        if self.draining(name):
+        if self.draining_node() == name:
             return UnavailableReason(
                 AvailabilityCode.PROTECTED_UI,
                 f"nodes/{name} is being drained - cancel the drain first",
