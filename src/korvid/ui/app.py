@@ -11,7 +11,7 @@ from collections.abc import (
     Iterator,
 )
 from time import monotonic
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar, assert_never
 
 if TYPE_CHECKING:
     from korvid.agent.session import AgentSession
@@ -56,6 +56,7 @@ from korvid.tools.executor import UIBridge
 from korvid.tools.proposals import ProposalStore
 from korvid.ui.action_palette import (
     AppActionInvocation,
+    CommandInvocation,
     PaletteEntry,
     derive_palette_entries,
 )
@@ -766,11 +767,13 @@ class KorvidApp(App[None]):
             # same way.
             self.notify(reason.message, severity=reason.severity, markup=False)
             return
-        invocation = entry.invocation
-        if isinstance(invocation, AppActionInvocation):
-            await self.run_action(invocation.action)
-            return
-        self.post_message(parse_command(invocation.canonical_text, self._command_bar.known))
+        match entry.invocation:
+            case AppActionInvocation(action=action):
+                await self.run_action(action)
+            case CommandInvocation(canonical_text=text):
+                self.post_message(parse_command(text, self._command_bar.known))
+            case _ as unreachable:  # pragma: no cover - exhaustive
+                assert_never(unreachable)
 
     def _inline_editor_open(self) -> bool:
         """Whether the `:` command bar or `/` filter bar is mid-edit.

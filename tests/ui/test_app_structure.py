@@ -1299,3 +1299,50 @@ def test_reason_notification_contract_rejects_a_markup_parsed_reason(
         encoding="utf-8",
     )
     assert not _reason_notifications_with_markup(tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# Palette dispatch is exhaustive over its invocation union (#388 task 8)
+# ---------------------------------------------------------------------------
+
+
+def _union_members(module: ast.Module, alias: str) -> list[str]:
+    """The member names of a `X = A | B` type alias in `module`."""
+    for node in ast.walk(module):
+        if not isinstance(node, ast.Assign) or not node.targets:
+            continue
+        target = node.targets[0]
+        if not (isinstance(target, ast.Name) and target.id == alias):
+            continue
+        members: list[str] = []
+        stack = [node.value]
+        while stack:
+            current = stack.pop()
+            if isinstance(current, ast.BinOp) and isinstance(current.op, ast.BitOr):
+                stack.extend((current.left, current.right))
+            elif isinstance(current, ast.Name):
+                members.append(current.id)
+        return sorted(members)
+    raise AssertionError(f"no type alias named {alias}")
+
+
+def test_palette_dispatch_handles_every_invocation_kind_exhaustively() -> None:
+    """`_palette_selected` routes a union, and a third member added later
+    must not fall silently through to the last branch. Every member of
+    `PaletteInvocation` is matched by name and the tail calls
+    `assert_never`, so the miss is a type error at the seam that runs
+    actions rather than a mystery no-op at runtime.
+    """
+    members = _union_members(_tree("action_palette.py"), "PaletteInvocation")
+    assert members == ["AppActionInvocation", "CommandInvocation"]
+
+    app_module = ast.parse((UI / "app.py").read_text(encoding="utf-8"))
+    handler = next(
+        node
+        for node in ast.walk(app_module)
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "_palette_selected"
+    )
+    dispatch = ast.dump(handler)
+    for member in members:
+        assert f"'{member}'" in dispatch, f"_palette_selected ignores {member}"
+    assert "'assert_never'" in dispatch, "_palette_selected must end in assert_never"
