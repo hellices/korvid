@@ -273,13 +273,21 @@ a palette.
 The results list is capped through its `max-height` rather than allowed to grow
 the `height: auto` container, so overflow becomes scrolling inside the list and
 the key hint stays composited on screen. Both the cap and the compact chrome
-are re-applied when the terminal resizes under the open modal, and the
-highlighted row is scrolled back into the viewport after that new layout
-exists — a resize both re-caps the viewport and re-wraps every row, so the
-scroll offset the previous size produced points at a different row afterwards.
-`Home`/`End` re-assert that scroll too: `OptionList` only scrolls from its
-`highlighted` watcher, so the key that lands on the row that is already
-highlighted would otherwise do nothing.
+are re-applied when the terminal resizes under the open modal, and the rows are
+then re-rendered once that new layout exists. Re-rendering, not just
+re-scrolling, is what a resize needs: switching to compact chrome hands the
+list back the columns of its own border, so every row re-wraps, and a list that
+measures the new width for its `height: auto` while still holding the line
+heights it cached at the old one ends up one line taller than the viewport it
+was given — the last words of a row are then never composited, and no keystroke
+recovers them. The rebuild re-measures every row against the width it actually
+has, carries the highlighted row across, and ends by scrolling that row back
+into the viewport; it is ordered through the results list's own
+post-refresh callback, so it sees settled geometry, runs no timer, and causes
+no further resize. A rebuild that arrives after the palette was dismissed finds
+no rows and does nothing. `Home`/`End` re-assert that scroll too: `OptionList`
+only scrolls from its `highlighted` watcher, so the key that lands on the row
+that is already highlighted would otherwise do nothing.
 
 Two-line options wrap rather than forcing horizontal scrolling.
 Narrow-terminal tests cover widths below the normal modal width. Below roughly
@@ -343,6 +351,11 @@ approve it. A fresh user keystroke remains mandatory.
   composited, and the highlighted row is rendered in the results viewport —
   including after `End`, after a resize under the open modal, and for a whole
   real row (`:proposals`, and an owner's long unavailable reason) at 36x16;
+- shrinking a 36x24 terminal to 36x16 with a real row filtered in still
+  composites that row whole — heading and description for `:proposals`, heading
+  and the owner's refusal for the disabled `relationships` row, which stays
+  inert with the query input focused — and a rebuild that lands after the
+  palette was dismissed does nothing;
 - overloaded view-specific actions show the correct effective key and reason;
 - Pulse comes from `COMMANDS`, not a palette-only route;
 - a context or selection change while open is rejected at invocation time;

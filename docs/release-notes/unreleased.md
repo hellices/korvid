@@ -17,7 +17,8 @@ Selecting a write action still opens the same approval flow and requires a
 fresh confirmation keystroke. `Esc` closes the palette, and the key itself
 remaps under `open_action_palette`. On a small terminal the palette takes the
 height it needs instead of clipping a row's key or reason, and resizing the
-terminal under the open palette keeps the row you were on in view.
+terminal under the open palette keeps the row you were on in view and re-draws
+it whole at the new size.
 
 ## Keys typed right after the command or filter bar closes
 

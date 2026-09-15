@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import pytest
 from textual.app import App, ComposeResult
+from textual.pilot import Pilot
 from textual.widgets import Input, OptionList, Static
 
 from korvid.ui.action_availability import ActionAvailability, AvailabilityCode, UnavailableReason
@@ -686,3 +687,98 @@ async def test_a_narrow_terminal_shows_a_whole_unavailable_reason() -> None:
         assert _second_line(options) == f"Unavailable: {reason.message}"
         assert _second_line(options) in visible
         assert screen.query_one(Input).has_focus
+
+
+async def _filter_to_single_row(pilot: Pilot[None], options: OptionList, query: str) -> None:
+    """Type `query` and wait until it has narrowed the list to one row."""
+    await pilot.press(*query)
+    await until(
+        pilot,
+        lambda: options.option_count == 1,
+        label=f"the results filtered to the single {query!r} row",
+    )
+
+
+async def test_a_shrinking_terminal_shows_a_whole_filtered_command_row() -> None:
+    """The narrow row has to survive the resize, not just a narrow start.
+
+    Reaching 36x16 by shrinking is not the same layout path as opening
+    there: the modal switches to tight chrome mid-life, which widens every
+    row by the list border it gives up. The list re-wraps against the old,
+    narrower width first - and the line heights it caches then outlive the
+    settled geometry, so the viewport ends up one row shorter than the row
+    it is showing and the last words of `:proposals` are never composited.
+    No keystroke recovers them, because the list scrolls by whole options.
+    """
+    screen = ActionPaletteScreen(_derived_command_entry("proposals"))
+    app = PaletteHarness(screen)
+    async with app.run_test(size=(36, 24)) as pilot:
+        options = screen.query_one(OptionList)
+        await _filter_to_single_row(pilot, options, "proposals")
+        assert _second_line(options) in _visible_text(options)
+        await pilot.resize_terminal(36, 16)
+        await until(
+            pilot,
+            lambda: _second_line(options) in _visible_text(options),
+            label="the whole filtered command row composited after the resize",
+        )
+        visible = _visible_text(options)
+        assert ":proposals" in _heading(options)
+        assert _heading(options) in visible
+        assert _second_line(options) in visible
+        assert screen.query_one(Input).has_focus
+
+
+async def test_a_shrinking_terminal_shows_a_whole_filtered_unavailable_reason() -> None:
+    """The same resize path, on the row no keystroke can rescue.
+
+    An unavailable row is disabled, so it is never highlighted and never
+    scrolled to: if the resize leaves the viewport shorter than the row,
+    the owner's refusal is simply cut off. It must be composited whole -
+    and the row must stay inert (Enter runs nothing) with the query
+    `Input` still focused, exactly as it is at a narrow start.
+    """
+    reason = _long_owner_reason()
+    entries = _derived_unavailable_action_entry("relationships", reason)
+    screen = ActionPaletteScreen(entries)
+    app = PaletteHarness(screen)
+    async with app.run_test(size=(36, 24)) as pilot:
+        options = screen.query_one(OptionList)
+        await _filter_to_single_row(pilot, options, "relationships")
+        assert _second_line(options) in _visible_text(options)
+        await pilot.resize_terminal(36, 16)
+        await until(
+            pilot,
+            lambda: _second_line(options) in _visible_text(options),
+            label="the whole filtered unavailable reason composited after the resize",
+        )
+        visible = _visible_text(options)
+        assert options.get_option_at_index(0).disabled is True
+        assert _heading(options) in visible
+        assert _second_line(options) == f"Unavailable: {reason.message}"
+        assert _second_line(options) in visible
+        await pilot.press("enter")
+        assert app.results == []
+        assert screen.query_one(Input).has_focus
+
+
+async def test_a_resize_reflow_that_lands_after_dismissal_does_nothing() -> None:
+    """The reflow a resize orders can outlive the palette.
+
+    It is scheduled for after the next refresh, so a resize immediately
+    before `Esc` leaves the callback queued against a screen whose
+    children Textual has already taken away - while the screen object
+    itself still reports as mounted. Running it then has to be inert,
+    rather than raise `NoMatches` out of a Textual callback and take the
+    app down behind an already-closed modal.
+    """
+    screen = ActionPaletteScreen(_derived_command_entry("proposals"))
+    app = PaletteHarness(screen)
+    async with app.run_test(size=(36, 24)) as pilot:
+        await pilot.press("escape")
+        await until(pilot, lambda: app.results == [None], label="the palette dismissed")
+        assert not screen.query(OptionList)
+        screen._reflow_results()
+        await pilot.pause()
+        assert app.results == [None]
+        assert not screen.query(OptionList)

@@ -62,7 +62,9 @@ Three keys answer three different questions, so none of them replaces another:
   selected, no hint on the row, or no search running — stays searchable and
   shows why instead of disappearing. On a terminal too short to spare the
   room, the palette takes the height it needs so that reason stays readable
-  rather than clipped. `Esc` closes the palette.
+  rather than clipped — and resizing the terminal under the open palette
+  re-draws the row you were on whole at the new size instead of cutting its
+  last words. `Esc` closes the palette.
 
 ## Follow one signal
 

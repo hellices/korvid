@@ -159,6 +159,7 @@ class ActionPaletteScreen(ModalScreen[str | None]):
         super().__init__()
         self._entries = tuple(entries)
         self._visible: dict[str, PaletteEntry] = {}
+        self._query = ""
 
     def compose(self) -> ComposeResult:
         with Vertical(id="action-palette"):
@@ -174,7 +175,7 @@ class ActionPaletteScreen(ModalScreen[str | None]):
     def on_resize(self, event: events.Resize) -> None:
         """Re-fit the results list to a terminal that changed size."""
         self._fit_results(event.size.height)
-        self._reveal_highlighted_after_layout()
+        self._reflow_results_after_layout()
 
     def _fit_results(self, screen_rows: int) -> None:
         """Size the modal's parts so all of it fits `screen_rows`.
@@ -215,24 +216,60 @@ class ActionPaletteScreen(ModalScreen[str | None]):
         options.compact = tight
         options.styles.max_height = rows if tight else rows + _RESULTS_BORDER_ROWS
 
-    def _reveal_highlighted_after_layout(self) -> None:
-        """Scroll the highlighted row back into view once the new layout exists.
+    def _reflow_results_after_layout(self) -> None:
+        """Re-render the rows once the resized geometry is the one in effect.
 
-        A resize invalidates the scroll offset twice over, and neither
-        correction has happened yet inside `on_resize`: the viewport was
-        just re-capped (a style change Textual applies on its next layout
-        pass) and every row re-wraps to the new width (the list rebuilds
-        its line heights when its *own* resize message arrives). Scrolling
-        now would aim at rows that no longer exist at those offsets, which
-        is how `End` at 80x24 ends up rendering a middle row at 36x16.
+        Changing the modal's chrome mid-life is not the same as opening
+        with it: `compact` hands the list back the two columns of its own
+        border, so every row re-wraps — but the list measures the *new*
+        width for its `height: auto` while still holding the line heights
+        it cached at the old one. At 36 columns a real row then reports
+        one more line than the viewport it was given, the list keeps a
+        scrollbar for the line that does not fit, and the words on it are
+        never composited. Nothing recovers them: `OptionList` scrolls by
+        whole options, so `Home`/`End`/arrows/page all land on the same
+        clipped row, and an unavailable row is disabled and inert on top
+        of that.
 
-        Asking the list itself to run the scroll after a refresh orders
-        both without a timer: Textual drains that widget's own pending
-        messages before scheduling the callback, and the callback runs
-        after the screen has been laid out and repainted.
+        Re-rendering the rows is what clears that: rebuilding the list
+        empties its wrapped-line and rendered-strip caches and re-measures
+        every row against the width it actually has. Ordering it through
+        the list's own `call_after_refresh` is what makes it a fix rather
+        than a race — Textual drains that widget's pending messages (its
+        own `Resize` among them) and lays the screen out before running
+        the callback, so the geometry the rebuild measures against is the
+        settled one, and the scroll that ends the rebuild aims at rows
+        that exist at their final heights. No timer, and no second resize:
+        the rebuild changes rows inside the list, never the terminal.
         """
         options = self.query_one(OptionList)
-        options.call_after_refresh(options.scroll_to_highlight)
+        options.call_after_refresh(self._reflow_results)
+
+    def _reflow_results(self) -> None:
+        """Rebuild the current rows, keeping the row the user was on.
+
+        This is also where the post-resize scroll belongs. A resize
+        invalidates the scroll offset twice over — the viewport was
+        re-capped and every row re-wrapped — so scrolling from inside
+        `on_resize` would aim at rows that no longer exist at those
+        offsets, which is how `End` at 80x24 used to render a middle row
+        at 36x16. Rebuilding here re-measures the rows first and ends in
+        `_reveal_highlighted`, so the scroll aims at the rows' final
+        heights, with the highlight carried across and the query `Input`
+        never touched.
+
+        Runs from a refresh callback, so the palette may already be gone
+        by the time it fires — a resize immediately before an `Esc`, or
+        before the caller dismisses the screen. The guard is the rows
+        themselves rather than `is_mounted`: Textual takes a dismissed
+        screen's children away without ever clearing that flag, so a
+        callback that trusted it would query a screen with nothing on it
+        and raise `NoMatches` out of the callback.
+        """
+        results = self.query(OptionList)
+        if not results:
+            return
+        self._build_results(self._query, highlight=results.first(OptionList).highlighted)
 
     @on(Input.Changed)
     def _query_changed(self, event: Input.Changed) -> None:
@@ -309,6 +346,19 @@ class ActionPaletteScreen(ModalScreen[str | None]):
             self.dismiss(entry.id)
 
     def _render_results(self, query: str) -> None:
+        """Show the rows matching `query`, starting on the first one."""
+        self._query = query
+        self._build_results(query, highlight=0)
+
+    def _build_results(self, query: str, *, highlight: int | None) -> None:
+        """Render the rows for `query` and put the highlight back on `highlight`.
+
+        Rebuilding is also how a resize re-wraps the rows (see
+        `_reflow_results`), and that must not move the user: `highlight`
+        carries the row they were on across the rebuild. `OptionList`
+        validates it against the rebuilt list, so an index that no longer
+        exists clamps instead of raising.
+        """
         options = self.query_one(OptionList)
         options.clear_options()
         self._visible = {}
@@ -331,5 +381,5 @@ class ActionPaletteScreen(ModalScreen[str | None]):
                 )
             )
         options.add_options(rendered)
-        options.highlighted = 0
+        options.highlighted = highlight
         self._reveal_highlighted(options)
