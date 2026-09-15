@@ -617,6 +617,43 @@ async def test_the_log_save_row_reports_an_empty_buffer() -> None:
         await app._logs.cancel_tasks()
 
 
+async def _idle_stream(
+    namespace: str, pod: str, container: str, **_: Any
+) -> AsyncIterator[LogLine]:
+    """A wired log stream that opens and then simply stays open."""
+    await asyncio.Event().wait()
+    yield LogLine(pod=pod, container=container, text="", timestamp=None)  # pragma: no cover
+
+
+async def test_the_logs_row_reports_a_full_log_pane() -> None:
+    """Four pods are already streaming, so `l` on a fifth only reports the
+    cap. The palette offered the row as runnable; now it carries the
+    owner's bounded reason, and the probe stays silent.
+    """
+    pods = [_pod(f"web-{index}") for index in range(5)]
+    app = _build_app(rows=pods, stream_logs=_idle_stream)
+    async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 5, label="pods loaded")
+        streaming = [("default", f"web-{index}", "") for index in range(4)]
+        await app._logs.open_agent_logs("default", streaming)
+        log_pane = app.query_one(LogPane)
+        await until(pilot, lambda: log_pane.display, label="log pane open")
+        table.move_cursor(row=4)
+        await until(
+            pilot,
+            lambda: str(table.get_row_at(table.cursor_row)[0]) == "web-4",
+            label="the pod that is not streaming is selected",
+        )
+        before = len(app._notifications)
+        row = _row(app, "action:logs")
+        assert row.availability.binding_enabled is True
+        assert row.availability.reason is not None
+        assert row.availability.reason.message == "Log pane caps at 4 pods — Esc closes all"
+        assert len(app._notifications) == before
+        await app._logs.cancel_tasks()
+
+
 # ---------------------------------------------------------------------------
 # Shutdown
 # ---------------------------------------------------------------------------

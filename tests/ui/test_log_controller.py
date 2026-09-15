@@ -684,3 +684,94 @@ def test_search_state_tolerates_a_pane_that_is_not_mounted() -> None:
 
     h.controller._get_log_pane = missing_pane
     assert h.controller.search_state() == PaneSearch(displayed=False, hits=False)
+
+
+# ---------------------------------------------------------------------------
+# The capacity half of `l` (#388 final review)
+# ---------------------------------------------------------------------------
+
+
+def _pods(count: int, containers: int = 1) -> list[tuple[str, str, str]]:
+    """`count` pods' worth of live triples, `containers` panels each."""
+    return [
+        ("default", f"web-{pod}", f"c{index}")
+        for pod in range(count)
+        for index in range(containers)
+    ]
+
+
+async def test_log_availability_reports_the_pod_cap() -> None:
+    """With four pods already streaming, `l` on a fifth only notifies the
+    cap - so the palette must not advertise the row as runnable."""
+    h = make_harness(
+        selected=("default", "web-9"),
+        pod_containers=lambda ns, name: ("main",),
+        visible_pod_keys=lambda: ["default/web-9"],
+    )
+    await h.controller.open_agent_logs("default", _pods(4))
+    try:
+        reason = h.controller.unavailable_reason("logs")
+        assert reason is not None
+        assert reason.message == "Log pane caps at 4 pods — Esc closes all"
+        assert h.ui.notifications == []
+        # `L` re-opens the pane from scratch rather than accumulating, so
+        # the pod cap is not its refusal: its own semantics are unchanged.
+        assert h.controller.unavailable_reason("logs_multi") is None
+    finally:
+        await h.controller.cancel_tasks()
+
+
+async def test_log_availability_reports_the_panel_cap() -> None:
+    """Under the pod cap but over the panel cap: three two-container pods
+    are streaming and the selected pod would add three more panels."""
+    h = make_harness(
+        selected=("default", "web-9"),
+        pod_containers=lambda ns, name: ("a", "b", "c"),
+    )
+    await h.controller.open_agent_logs("default", _pods(3, containers=2))
+    try:
+        reason = h.controller.unavailable_reason("logs")
+        assert reason is not None
+        assert reason.message == "Panel cap is 8 containers"
+        assert h.ui.notifications == []
+    finally:
+        await h.controller.cancel_tasks()
+
+
+async def test_log_availability_still_allows_removing_a_displayed_pod() -> None:
+    """At the pod cap, `l` on a pod that is already shown *removes* it -
+    a real effect, so the row stays invocable."""
+    h = make_harness(selected=("default", "web-0"), pod_containers=lambda ns, name: ("main",))
+    await h.controller.open_agent_logs("default", _pods(4))
+    try:
+        assert h.controller.unavailable_reason("logs") is None
+        assert h.ui.notifications == []
+    finally:
+        await h.controller.cancel_tasks()
+
+
+async def test_log_availability_allows_a_pod_that_still_fits() -> None:
+    h = make_harness(selected=("default", "web-9"), pod_containers=lambda ns, name: ("main",))
+    await h.controller.open_agent_logs("default", _pods(2))
+    try:
+        assert h.controller.unavailable_reason("logs") is None
+    finally:
+        await h.controller.cancel_tasks()
+
+
+async def test_the_capped_keypress_still_names_the_pod_the_row_cannot() -> None:
+    """The palette reason is bounded row text; the toast the keypress
+    raises keeps the pod name it always had."""
+    h = make_harness(
+        selected=("default", "web-9"),
+        pod_containers=lambda ns, name: ("a", "b", "c"),
+    )
+    await h.controller.open_agent_logs("default", _pods(3, containers=2))
+    try:
+        await h.controller.action_logs()
+        assert [n.message for n in h.ui.notifications] == [
+            "Panel cap is 8 containers — cannot add web-9"
+        ]
+        assert h.controller.current_triples == _pods(3, containers=2)
+    finally:
+        await h.controller.cancel_tasks()

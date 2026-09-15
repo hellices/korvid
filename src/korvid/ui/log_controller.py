@@ -83,6 +83,29 @@ _EMPTY_LOG_BUFFER = UnavailableReason(
     AvailabilityCode.NO_SELECTION, "Log buffer is empty — nothing to save"
 )
 
+#: `l` on a fifth pod while four are already streaming. One wording for
+#: the toast `_toggle_log_pod` raises and the palette row that says the
+#: press would do nothing but raise it (issue #388, round 8). PROTECTED_UI
+#: because the refusal is about the state of the pane on screen, not about
+#: the selected resource or a missing capability.
+_POD_CAP_FULL = UnavailableReason(
+    AvailabilityCode.PROTECTED_UI, f"Log pane caps at {_MAX_LOG_PODS} pods — Esc closes all"
+)
+
+#: The same for the panel cap. The *reason* stops at the bounded fact
+#: because it is row text on a 36-column terminal, where a pod name (up to
+#: 253 characters) would push the rest of the sentence out of a viewport
+#: that never scrolls a disabled row; `panel_cap_detail` keeps the name for
+#: the toast the keypress can afford.
+_PANEL_CAP_FULL = UnavailableReason(
+    AvailabilityCode.PROTECTED_UI, f"Panel cap is {MAX_PANELS} containers"
+)
+
+
+def _panel_cap_detail(name: str) -> str:
+    """The panel-cap refusal the real keypress notifies, naming the pod."""
+    return f"{_PANEL_CAP_FULL.message} — cannot add {name}"
+
 
 class SelectedNsName(Protocol):
     """The selection read, with the silent `notify=False` probe path.
@@ -342,6 +365,40 @@ class LogController:
         ns, name = self._selected_ns_name(notify=False)
         if ns is None or name is None:
             return UnavailableReason(AvailabilityCode.NO_SELECTION, "No resource selected")
+        return self._capacity_reason(ns, name)
+
+    def _displayed_pods(self) -> list[Source]:
+        """The distinct (namespace, pod) pairs the live pane is showing,
+        in the order `_toggle_log_pod` collects them."""
+        pods: list[Source] = []
+        for t_ns, t_pod, _ in self._current_triples:
+            if (t_ns, t_pod) not in pods:
+                pods.append((t_ns, t_pod))
+        return pods
+
+    def _capacity_reason(self, namespace: str, name: str) -> UnavailableReason | None:
+        """Why `l` could not add *namespace/name* to the open pane, or None.
+
+        Reached only where `action_logs` reaches `_toggle_log_pod`: a pane
+        already displayed in live mode (the multi/previous modes close it
+        instead, and a closed pane opens fresh, both of which this method
+        is never asked about). It then asks that helper's three questions
+        in its order - an already-shown pod is *removed*, so it runs; a
+        fifth pod is refused; and containers beyond the panel cap are
+        refused - reading the same triples, the same injected container
+        lookup (a store read) and the same two caps. No I/O, no
+        notification, and nothing recomputed that the toast would compute
+        differently (issue #388, round 8).
+        """
+        if not self._pane_displayed():
+            return None
+        pods = self._displayed_pods()
+        if (namespace, name) in pods:
+            return None
+        if len(pods) >= _MAX_LOG_PODS:
+            return _POD_CAP_FULL
+        if len(self._current_triples) + len(self._pod_triples(namespace, name)) > MAX_PANELS:
+            return _PANEL_CAP_FULL
         return None
 
     def _pane_local_reason(self, action: str) -> UnavailableReason | None:
@@ -418,10 +475,7 @@ class LogController:
     async def _toggle_log_pod(self, namespace: str, name: str, epoch: int) -> None:
         """Add or remove *namespace/name* from the accumulated live-log panels."""
         existing = list(self._current_triples)
-        pods: list[Source] = []
-        for t_ns, t_pod, _ in existing:
-            if (t_ns, t_pod) not in pods:
-                pods.append((t_ns, t_pod))
+        pods = self._displayed_pods()
 
         if (namespace, name) in pods:
             triples = [t for t in existing if (t[0], t[1]) != (namespace, name)]
@@ -431,15 +485,13 @@ class LogController:
         else:
             if len(pods) >= _MAX_LOG_PODS:
                 self._ui.notify(
-                    f"Log pane caps at {_MAX_LOG_PODS} pods — Esc closes all",
-                    severity="warning",
+                    _POD_CAP_FULL.message, severity=_POD_CAP_FULL.severity, markup=False
                 )
                 return
             triples = existing + self._pod_triples(namespace, name)
             if len(triples) > MAX_PANELS:
                 self._ui.notify(
-                    f"Panel cap is {MAX_PANELS} containers — cannot add {name}",
-                    severity="warning",
+                    _panel_cap_detail(name), severity=_PANEL_CAP_FULL.severity, markup=False
                 )
                 return
 
