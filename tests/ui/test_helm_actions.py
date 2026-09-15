@@ -2473,3 +2473,94 @@ async def test_helm_availability_reports_no_selection_for_upgrade(tmp_path: Path
         # install needs no row: it is the one helm write that creates one.
         assert app._helm_ctl.unavailable_reason("helm_install") is None
         assert len(app._notifications) == before
+
+
+async def test_helm_rollback_availability_reports_stale_history(tmp_path: Path) -> None:
+    """`r` on the revision drill-down compares the cached release row with
+    the newest revision in the loaded history and cancels when they
+    disagree - a refusal it makes from rows already in the store, before
+    any helm call. The palette offered the row anyway, so selecting it
+    produced the cancellation toast and nothing else (#388 round 8).
+    """
+    data = _default_data()
+    data["helmreleases"] = [_release_row("web", secret_uid="replacement-secret", revision=3)]
+    app = make_app(data, helm=FakeHelm(), audit_path=tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        # The release browser first, so the release row this compares
+        # against is really in the store (the drill-down alone resolves it
+        # through the helm CLI, which a probe must never do).
+        await _navigate(pilot, "helm", "helmreleases")
+        await _rows_listed(pilot, app, 1)
+        await _navigate(pilot, "helmrevisions", "helmrevisions")
+        await _rows_listed(pilot, app, 1)
+        before = len(app._notifications)
+        assert app._helm_ctl.unavailable_reason("helm_rollback") == UnavailableReason(
+            AvailabilityCode.TRANSITION, "release history changed; refresh and retry"
+        )
+        availability = app._actions.availability("helm_rollback")
+        assert availability.binding_enabled is True
+        assert availability.invocable is False
+        assert len(app._notifications) == before
+
+
+async def test_helm_rollback_availability_allows_current_history(tmp_path: Path) -> None:
+    """The cached release and the newest loaded revision agree, so `r`
+    really would open the rollback flow - the row stays invocable."""
+    app = make_app(helm=FakeHelm(), audit_path=tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "helm", "helmreleases")
+        await _rows_listed(pilot, app, 1)
+        await _navigate(pilot, "helmrevisions", "helmrevisions")
+        await _rows_listed(pilot, app, 1)
+        before = len(app._notifications)
+        # The comparison really runs here: both rows are loaded and their
+        # identities match, which is why the row stays invocable.
+        row = app._helm_ctl.revision_row("default", "web.v2")
+        assert row is not None
+        assert app._helm_ctl.release_row("default", row.release) is not None
+        assert app._helm_ctl.unavailable_reason("helm_rollback") is None
+        assert len(app._notifications) == before
+
+
+async def test_helm_rollback_availability_reports_no_selection(tmp_path: Path) -> None:
+    """With no revision row there is nothing to compare; the selection
+    refusal comes first, exactly as `rollback_selected` reads it."""
+    app = make_app(
+        {"helmreleases": [], "helmrevisions": []},
+        helm=FakeHelm(),
+        audit_path=tmp_path / "audit.jsonl",
+    )
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "helmrevisions", "helmrevisions")
+        await _rows_listed(pilot, app, 0)
+        assert app._helm_ctl.unavailable_reason("helm_rollback") == UnavailableReason(
+            AvailabilityCode.NO_SELECTION, "No resource selected"
+        )
+
+
+async def test_the_stale_rollback_key_still_cancels_with_its_full_sentence(
+    tmp_path: Path,
+) -> None:
+    """The probe reports the fact; the keypress keeps the whole
+    cancellation sentence it always had, from the same wording."""
+    data = _default_data()
+    data["helmreleases"] = [_release_row("web", secret_uid="replacement-secret", revision=3)]
+    helm = FakeHelm()
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app(data, helm=helm, audit_path=audit_path)
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "helm", "helmreleases")
+        await _rows_listed(pilot, app, 1)
+        await _navigate(pilot, "helmrevisions", "helmrevisions")
+        await _rows_listed(pilot, app, 1)
+        await pilot.press("r")
+        await until(
+            pilot,
+            lambda: any(
+                n.message == "Helm rollback cancelled - release history changed; refresh and retry"
+                for n in app._notifications
+            ),
+            label="the rollback key cancelled with its full sentence",
+        )
+        assert ("rollback", "web", 2, "default") not in helm.calls
+        assert _audit_entries(audit_path) == []

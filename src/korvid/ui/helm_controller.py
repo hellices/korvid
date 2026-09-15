@@ -87,6 +87,15 @@ _HELM_MISSING = UnavailableReason(
 #: Helm actions that act on the selected row (install creates a new release).
 _HELM_ROW_ACTIONS: frozenset[str] = frozenset({"helm_upgrade", "helm_history", "helm_rollback"})
 
+#: The one wording for "the release moved under the history on screen",
+#: and the prefix `rollback_selected` /
+#: `rollback_with_current_identity` cancel behind it; the palette row
+#: shows the fact alone, because nothing was cancelled there (#388).
+_STALE_RELEASE_HISTORY = UnavailableReason(
+    AvailabilityCode.TRANSITION, "release history changed; refresh and retry"
+)
+_ROLLBACK_CANCELLED = "Helm rollback cancelled - "
+
 
 def _chart_base(chart: str) -> str:
     """`"nginx-18.1.0"` -> `"nginx"`: strip the version suffix helm appends
@@ -259,6 +268,11 @@ class HelmController:
           that works.
         - `helm_upgrade`/`helm_history`/`helm_rollback` all act on the
           selected row.
+        - `helm_rollback` carries one refusal more, and it is the only one
+          this controller can answer without touching helm: the cached
+          release row and the newest revision in the loaded history
+          disagree, which `rollback_selected` cancels on before it starts
+          a worker (#388 round 8).
         """
         if action != "helm_history":
             reason = self._write_gate_reason()
@@ -268,10 +282,38 @@ class HelmController:
             if reason is not None:
                 return reason
         if action in _HELM_ROW_ACTIONS:
-            _, name = self._view.selected_ns_name(notify=False)
+            ns, name = self._view.selected_ns_name(notify=False)
             if name is None:
                 return UnavailableReason(AvailabilityCode.NO_SELECTION, "No resource selected")
+            if action == "helm_rollback":
+                return self._stale_history_reason(ns, name)
         return None
+
+    def _stale_history_reason(self, ns: str | None, name: str) -> UnavailableReason | None:
+        """Whether `r` would cancel because the release moved, or None.
+
+        The same three cached reads `rollback_selected` makes - the
+        selected revision row, the newest revision of its release in the
+        loaded history, and the release row itself - compared the same
+        way, with no helm call and no notification.
+
+        Its other refusals stay out on purpose: "no helm revision
+        selected" and the two "identity could not be verified" toasts
+        describe rows that are missing or half-loaded, which the next
+        watch event fills in, and a release the store has not loaded at
+        all is resolved through the helm CLI, which a probe must not do.
+        A release whose identity no longer matches its history is the
+        opposite - it stays wrong until the user refreshes.
+        """
+        row = self.revision_row(ns, name)
+        if row is None:
+            return None
+        namespace = ns or row.namespace
+        history_identity = self.latest_revision_identity(namespace, row.release)
+        release_row = self.release_row(namespace, row.release)
+        if history_identity is None or release_row is None or release_row.identity is None:
+            return None
+        return None if release_row.identity == history_identity else _STALE_RELEASE_HISTORY
 
     def _view_namespace(self) -> str:
         """Namespace a fresh install targets by default: the active view
@@ -849,10 +891,7 @@ class HelmController:
                 )
                 return
             if identity != history_identity:
-                self._ui.notify(
-                    "Helm rollback cancelled - release history changed; refresh and retry",
-                    severity="warning",
-                )
+                self._notify_stale_history()
                 return
             operation = self.rollback(helm, row, ns, name, namespace, epoch, identity)
         self._ui.run_worker(
@@ -880,12 +919,17 @@ class HelmController:
         if identity is None:
             return
         if history_identity != identity:
-            self._ui.notify(
-                "Helm rollback cancelled - release history changed; refresh and retry",
-                severity="warning",
-            )
+            self._notify_stale_history()
             return
         await self.rollback(helm, row, ns, name, namespace, epoch, identity)
+
+    def _notify_stale_history(self) -> None:
+        """Cancel the rollback with the wording the palette row shows."""
+        self._ui.notify(
+            f"{_ROLLBACK_CANCELLED}{_STALE_RELEASE_HISTORY.message}",
+            severity=_STALE_RELEASE_HISTORY.severity,
+            markup=False,
+        )
 
     def uninstall_selected(self) -> None:
         """Ctrl+D on the helm release browser: uninstall the selected release
