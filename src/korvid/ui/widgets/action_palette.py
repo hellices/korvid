@@ -29,11 +29,12 @@ from korvid.ui.action_palette import PaletteEntry, rank_entries
 #: explicit rather than an empty, ambiguous-looking list.
 _NO_RESULTS_PROMPT = "No matching actions or commands"
 
-#: Rows the modal spends on everything that is not results content: the
-#: query `Input` (3), the key hint (1), the container's vertical padding
-#: (2), the container's border (2) and the results list's own border (2).
-#: Subtracting them is what keeps the hint on screen when the catalog is
-#: longer than the terminal.
+#: Rows the modal's own height spends on everything that is not results
+#: content: the query `Input` (3), the key hint (1), the container's
+#: vertical padding (2), the container's border (2) and the results list's
+#: own border (2). The modal sets an exact height of these plus the rows
+#: it decided to give the results, which is what keeps the hint on screen
+#: when the catalog is longer than the terminal.
 _CHROME_ROWS = 10
 
 #: The same rows once the modal gives up its vertical padding and the
@@ -49,11 +50,6 @@ _TIGHT_CHROME_ROWS = 6
 #: or reason is clipped away cannot be reached by keyboard: the list
 #: scrolls by whole options, never within one.
 _MIN_RESULT_ROWS = 8
-
-#: Rows the results list spends on its own `border: tall` when it is not
-#: compact. Part of `_CHROME_ROWS`, and named separately because the cap
-#: set on the list is a border-box height.
-_RESULTS_BORDER_ROWS = 2
 
 #: Upper bound on the results viewport, so the palette stays a palette on a
 #: very tall terminal instead of becoming a full-height list.
@@ -133,36 +129,44 @@ class ActionPaletteScreen(ModalScreen[str | None]):
         Binding("end", "edge(1)", "Last", show=False, priority=True),
     ]
 
-    DEFAULT_CSS = """
-    ActionPaletteScreen {
+    DEFAULT_CSS = f"""
+    ActionPaletteScreen {{
         align: center middle;
-    }
-    ActionPaletteScreen #action-palette {
+    }}
+    ActionPaletteScreen #action-palette {{
         width: 76;
         max-width: 94%;
-        height: auto;
+        /* An exact height, never `auto`: `_fit_results` replaces this
+           one with the terminal's own budget on mount, before the first
+           paint, and again on every resize. What is left here is only
+           that one frame's fallback — the budget a roomy terminal gets
+           — and `max-height` keeps even it inside a terminal too short
+           to afford it. */
+        height: {_MIN_RESULT_ROWS + _CHROME_ROWS};
         max-height: 100%;
         border: round $accent;
         padding: 1 2;
         background: $surface;
-    }
-    ActionPaletteScreen #action-results {
-        height: auto;
+    }}
+    ActionPaletteScreen #action-results {{
+        /* The results take whatever the modal's exact height leaves after
+           the query input, the key hint and the chrome — they never ask
+           for a height of their own. A list sized from its own content
+           has to be *measured* first, and Textual measures a row against
+           the width it has before the vertical scrollbar is decided while
+           it draws that row against the width after: a row that wraps to
+           six lines is then given five, and the sixth is never
+           composited. Flex sizing asks no such question. */
+        height: 1fr;
         /* Reserve the vertical scrollbar's two columns whether or not a
-           scrollbar is showing. `OptionList` measures each row's wrapped
-           height against the width left over after the scrollbar, and
-           renders that row against the same width later — and between
-           those two moments the scrollbar can come or go (a query rebuild
-           empties the list, a resize re-caps the viewport). A stable
-           gutter makes the two widths the same number always, so a row
-           can never report fewer lines than it draws and lose its last
-           one. */
+           scrollbar is showing, so the width a row wraps against stays
+           the same number as rows come and go with the query. */
         scrollbar-gutter: stable;
-    }
-    ActionPaletteScreen #action-hint {
+    }}
+    ActionPaletteScreen #action-hint {{
         height: 1;
         color: $text-muted;
-    }
+    }}
     """
 
     def __init__(self, entries: Sequence[PaletteEntry]) -> None:
@@ -182,21 +186,21 @@ class ActionPaletteScreen(ModalScreen[str | None]):
         self.query_one(Input).focus()
 
     def on_resize(self, event: events.Resize) -> None:
-        """Re-fit the results list to a terminal that changed size."""
+        """Re-budget the modal for a terminal that changed size."""
         self._fit_results(event.size.height)
         self._reveal_highlighted_after_layout()
 
     def _fit_results(self, screen_rows: int) -> None:
-        """Size the modal's parts so all of it fits `screen_rows`.
+        """Give the modal the exact height `screen_rows` can afford.
 
-        CSS alone cannot say this. The container is `height: auto`, so an
-        `OptionList` asking for its full content height grows the modal
-        past the terminal: the results spill out and the key hint below
-        them is never laid out on screen, while `End` highlights a row
-        clipped away by the container. Capping the list to the rows that
-        are actually left over turns that overflow back into scrolling
-        inside the list, which is what `OptionList` already knows how to
-        do.
+        CSS alone cannot say this, and neither can the rows: a modal that
+        takes its height from what its results measure is a modal whose
+        height changes every time a keystroke changes the query — and one
+        whose results viewport is only ever as tall as some earlier
+        measurement of a row, at a width that is not the width the row is
+        finally drawn at. So the budget is decided here, from the terminal
+        alone, and the results list takes what is left of it (`height:
+        1fr`, see `DEFAULT_CSS`).
 
         The budget is `_HEIGHT_SHARE` of the terminal — but that cap is
         cosmetic, and on a short terminal it is not affordable: 80% of 16
@@ -205,42 +209,43 @@ class ActionPaletteScreen(ModalScreen[str | None]):
         be reached by any keystroke because the list scrolls by whole
         options. So when the share cannot fund `_MIN_RESULT_ROWS`, the
         modal drops to tight chrome (no vertical padding, and Textual's
-        compact `OptionList`, which also widens every row by the border
-        and gutter it gives up) and grows up to — never past — the
-        terminal height. A taller terminal keeps both the share cap and
-        `_MAX_RESULT_ROWS`.
+        compact `OptionList`, which also widens every row by the border it
+        gives up) and grows up to — never past — the terminal height. A
+        taller terminal keeps both the share cap and `_MAX_RESULT_ROWS`.
 
         Everything is set through the public `styles`/`compact` API, and
         never below one row, so the palette still renders on a terminal
         too short for even that (below ~7 rows it is the modal's own
-        chrome, not the results, that no longer fits).
+        chrome, not the results, that no longer fits, and the container's
+        `max-height` keeps what is left inside the screen).
         """
         share = screen_rows * _HEIGHT_SHARE // 100
         tight = share - _CHROME_ROWS < _MIN_RESULT_ROWS
         chrome = _TIGHT_CHROME_ROWS if tight else _CHROME_ROWS
         budget = min(screen_rows, max(share, chrome + _MIN_RESULT_ROWS))
         rows = max(1, min(_MAX_RESULT_ROWS, budget - chrome))
-        self.query_one("#action-palette").styles.padding = (0, 2) if tight else (1, 2)
-        options = self.query_one(OptionList)
-        options.compact = tight
-        options.styles.max_height = rows if tight else rows + _RESULTS_BORDER_ROWS
+        container = self.query_one("#action-palette")
+        container.styles.padding = (0, 2) if tight else (1, 2)
+        container.styles.height = rows + chrome
+        self.query_one(OptionList).compact = tight
 
     def _reveal_highlighted_after_layout(self) -> None:
         """Order the post-resize scroll for once the new geometry is settled.
 
         A resize invalidates the scroll offset twice over: the viewport was
-        re-capped, and every row re-wrapped to a different number of lines.
-        Scrolling from inside `on_resize` would therefore aim at rows that
-        no longer exist at those offsets, which is how `End` at 80x24 used
-        to render a middle row at 36x16. Ordering it through the list's own
-        `call_after_refresh` is what makes it a fix rather than a race —
-        Textual drains that widget's pending messages (its own `Resize`
-        among them) and lays the screen out before running the callback, so
-        the scroll aims at the rows at their final heights.
+        re-budgeted, and every row re-wrapped to a different number of
+        lines. Scrolling from inside `on_resize` would therefore aim at
+        rows that no longer exist at those offsets, which is how `End` at
+        80x24 used to render a middle row at 36x16. Ordering it through
+        the list's own `call_after_refresh` is what makes it a fix rather
+        than a race — Textual drains that widget's pending messages (its
+        own `Resize` among them) and lays the screen out before running
+        the callback, so the scroll aims at the rows at their final
+        heights.
 
-        Only a scroll, and never a rebuild: what the rows are measured
-        against no longer changes under them, because the results list
-        reserves its scrollbar gutter (see `DEFAULT_CSS`). No timer, no
+        Only a scroll, and never a rebuild: the rows are what they always
+        were, and the height they are shown in comes from the modal's
+        budget rather than from anything measured about them. No timer, no
         second resize, and nothing the user typed or highlighted moves.
         """
         options = self.query_one(OptionList)
@@ -339,10 +344,9 @@ class ActionPaletteScreen(ModalScreen[str | None]):
     def _render_results(self, query: str) -> None:
         """Render the rows matching `query`, starting on the first one.
 
-        A new query is the only thing that rebuilds the rows: a resize no
-        longer has to, because reserving the scrollbar gutter (see
-        `DEFAULT_CSS`) keeps the width every row is measured and rendered
-        against the same one all along.
+        A new query is the only thing that rebuilds the rows. A resize
+        never does: it changes the modal's height budget, and the results
+        list follows that budget on its own.
         """
         options = self.query_one(OptionList)
         options.clear_options()

@@ -255,47 +255,50 @@ on the first line. The second line renders its description or unavailable
 reason. Unavailable options are visible but disabled. Category separators are
 inserted only between non-empty groups.
 
-The modal uses `width: 76; max-width: 94%` and `height: auto`. Its height is
-bounded, but the bound is not a single percentage: the modal takes at most 80%
-of the terminal height *while that still leaves eight rows of results*, and
-otherwise grows up to — never past — the full terminal height. Eight rows is
-what one real catalog row needs at 36 columns, where a long title plus a `:`
-spelling, or an owner's refusal such as "Relationships unavailable in this
-session", wraps to six to eight lines. The 80% cap is cosmetic; on a 16-row
-terminal it leaves two rows of results, and a row whose trigger or reason is
-clipped cannot be recovered by any keystroke, because the list scrolls by whole
-options and never within one. A terminal short enough to need that extra space
-also gives up the modal's vertical padding and the results list's own border
-(Textual's compact `OptionList`), which widens every row as well. Tall
-terminals stay capped at 80% and at eighteen result rows, so the palette stays
-a palette.
+The modal uses `width: 76; max-width: 94%` and an **exact height it computes
+from the terminal**, never `height: auto`. That height is bounded, but the
+bound is not a single percentage: the modal takes at most 80% of the terminal
+height *while that still leaves eight rows of results*, and otherwise grows up
+to — never past — the full terminal height. Eight rows is what one real catalog
+row needs at 36 columns, where a long title plus a `:` spelling, or an owner's
+refusal such as "Relationships unavailable in this session", wraps to six to
+eight lines. The 80% cap is cosmetic; on a 16-row terminal it leaves two rows
+of results, and a row whose trigger or reason is clipped cannot be recovered by
+any keystroke, because the list scrolls by whole options and never within one.
+A terminal short enough to need that extra space also gives up the modal's
+vertical padding and the results list's own border (Textual's compact
+`OptionList`), which widens every row as well. Tall terminals stay capped at
+80% and at eighteen result rows, so the palette stays a palette.
 
-The results list is capped through its `max-height` rather than allowed to grow
-the `height: auto` container, so overflow becomes scrolling inside the list and
-the key hint stays composited on screen. Both the cap and the compact chrome
+The results list gets no height of its own: it is `height: 1fr` and takes
+whatever the modal's exact height leaves after the query input, the key hint
+and the chrome. The height therefore depends on the terminal alone — the same
+at 80x24 whether the list holds the whole catalog or the single row a query
+left — and overflow becomes scrolling inside the list, with the key hint still
+composited on screen. This is what keeps a row whole. A list sized from its own
+content has to be *measured* first, and Textual asks `OptionList` for that
+content height at the width it has before the vertical scrollbar is decided,
+then draws the row against the width after: at 38 columns a six-line row was
+measured at 25 columns, given a five-line viewport, and its last word was never
+composited. Flex sizing asks no such question, so there is no measurement to
+disagree with the render — no re-render pass, no line-height cache to
+invalidate, and nothing to re-measure. The height budget and the compact chrome
 are re-applied when the terminal resizes under the open modal, and the
 highlighted row is scrolled back into the viewport once that new layout exists
-— a resize both re-caps the viewport and re-wraps every row, so the scroll
+— a resize both re-budgets the viewport and re-wraps every row, so the scroll
 offset the previous size produced points at a different row afterwards. That
 scroll is ordered through the results list's own post-refresh callback, so it
 sees settled geometry, runs no timer, and causes no further resize; one that
 arrives after the palette was dismissed finds no rows and does nothing.
 
-What keeps the rows themselves whole across that resize is not a re-render but
-a reserved scrollbar gutter on the results list. `OptionList` wraps and
-measures each row against the width left over after its vertical scrollbar, and
-renders the row against that width again later; if the scrollbar comes or goes
-between those two moments — the list is briefly empty while a new query
-rebuilds it, or a re-capped viewport stops needing one — the row reports fewer
-lines than it draws and the last of them is never composited. No keystroke
-recovers that, because the list scrolls by whole options and a disabled row is
-never scrolled to at all. `scrollbar-gutter: stable` removes the difference
-instead of correcting for it: the columns are reserved whether or not a
-scrollbar is showing, so measured width and rendered width are the same number
-at every size, with no rebuild, no timer, and no truncated text. `Home`/`End`
-re-assert the scroll too: `OptionList` only scrolls from its `highlighted`
-watcher, so the key that lands on the row that is already highlighted would
-otherwise do nothing.
+The results list also keeps `scrollbar-gutter: stable`. With the viewport no
+longer derived from a measurement, its remaining job is narrower: the two
+columns are reserved whether or not a scrollbar is showing, so the width a row
+wraps against is the same number as rows come and go with the query, rather
+than moving by two columns every time the list crosses the point where it needs
+a scrollbar. `Home`/`End` re-assert the scroll too: `OptionList` only scrolls
+from its `highlighted` watcher, so the key that lands on the row that is
+already highlighted would otherwise do nothing.
 
 Two-line options wrap rather than forcing horizontal scrolling.
 Narrow-terminal tests cover widths below the normal modal width. Below roughly
@@ -370,6 +373,14 @@ approve it. A fresh user keystroke remains mandatory.
   `Down`; the refused `relationships` row among several results keeps its
   heading, the owner's refusal and the rule closing its category, and stays
   inert;
+- narrowing 80x24 to 38x24 over the whole derived catalog composites the row a
+  query left whole — `:ctx`, `:tp`, and the disabled `relationships` row with
+  the owner's refusal — with the query input still focused;
+- the modal's height is exactly the bounded rule's budget for the terminal (19
+  rows at 80x24, 28 at 80x40, 14 at 36x16, with 9/18/8 rows of results) whether
+  the list holds the whole catalog or one filtered row, it does not change when
+  a query narrows the list, and a run of resizes ends on the final size's
+  budget with that row still whole;
 - overloaded view-specific actions show the correct effective key and reason;
 - Pulse comes from `COMMANDS`, not a palette-only route;
 - a context or selection change while open is rejected at invocation time;

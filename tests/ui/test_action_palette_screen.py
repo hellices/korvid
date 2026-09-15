@@ -903,6 +903,196 @@ async def test_a_shrinking_terminal_keeps_an_unavailable_row_whole_among_many_re
         assert screen.query_one(Input).has_focus
 
 
+#: The terminal the narrowing finding reproduces at. 38 columns is wide
+#: enough that the modal keeps its normal chrome — border, padding, and a
+#: results list with its own border and reserved scrollbar gutter — and
+#: narrow enough that a real command row wraps to six lines there. Any
+#: results viewport derived from a *measurement* of that row rather than
+#: from the modal's own height budget lands one line short of it.
+_NARROWING_SIZE = (38, 24)
+
+#: Two real `:` commands whose description reaches the last line of the
+#: row at `_NARROWING_SIZE`: `:ctx` ends "…to switch clusters" and `:tp`
+#: ends "(also :telepresence)". Each is the whole reason its row exists,
+#: and each is what a viewport one line short drops.
+_NARROWING_QUERIES = [":ctx", ":tp"]
+
+
+@pytest.mark.parametrize("query", _NARROWING_QUERIES, ids=["ctx", "tp"])
+async def test_a_narrowing_terminal_composites_a_whole_filtered_command_row(query: str) -> None:
+    """A narrower terminal must not cut the row the query left behind.
+
+    The modal opens at 80x24 over the catalog `Ctrl-P` really opens, the
+    query narrows it to one row, and the terminal narrows to 38 columns
+    where that row wraps to six lines. A results viewport sized from what
+    the row *measured* at some other width renders five of them and drops
+    the last — and `OptionList` scrolls by whole options, so no keystroke
+    brings the missing line back. The viewport has to come from the
+    modal's own height budget instead, so the whole row is composited and
+    the query `Input` still has focus.
+    """
+    screen = ActionPaletteScreen(_derived_catalog())
+    app = PaletteHarness(screen)
+    async with app.run_test(size=(80, 24)) as pilot:
+        options = screen.query_one(OptionList)
+        await _filter_to_single_row(pilot, options, query)
+        await pilot.resize_terminal(*_NARROWING_SIZE)
+        await until(
+            pilot,
+            lambda: _second_line(options) in _visible_text(options),
+            label=f"the whole {query} row composited after the narrowing resize",
+        )
+        visible = _visible_text(options)
+        assert query in _heading(options)
+        assert _heading(options) in visible
+        assert _second_line(options) in visible
+        assert screen.query_one(Input).has_focus
+
+
+async def test_a_narrowing_terminal_composites_a_whole_unavailable_reason() -> None:
+    """The same narrowing, on the row no keystroke can rescue.
+
+    A refused row is disabled: it is never highlighted and never scrolled
+    to, so whatever the resize leaves of it is all the user gets. Typing
+    the action's own id narrows the catalog to that one row, the owner's
+    real refusal wraps well past one line at 38 columns, and every line of
+    it — plus the heading that says which key would have run it — has to
+    be composited, with the row still inert and the query `Input` still
+    focused.
+    """
+    reason = _long_owner_reason()
+    screen = ActionPaletteScreen(_derived_catalog(("relationships", reason)))
+    app = PaletteHarness(screen)
+    async with app.run_test(size=(80, 24)) as pilot:
+        options = screen.query_one(OptionList)
+        await _filter_to_single_row(pilot, options, "relationships")
+        assert options.get_option_at_index(0).disabled is True
+        await pilot.resize_terminal(*_NARROWING_SIZE)
+        await until(
+            pilot,
+            lambda: _second_line(options) in _visible_text(options),
+            label="the whole refused row composited after the narrowing resize",
+        )
+        visible = _visible_text(options)
+        assert _heading(options) in visible
+        assert _second_line(options) == f"Unavailable: {reason.message}"
+        assert _second_line(options) in visible
+        await pilot.press("enter")
+        assert app.results == []
+        assert screen.query_one(Input).has_focus
+
+
+#: The modal's exact height and its results viewport at three terminals,
+#: as the bounded rule spends them. 80x24: the whole modal is 80% of the
+#: terminal (19 rows), of which the results keep 9. 80x40: the 18-row
+#: result cap binds first, so the modal is 28 — well inside that
+#: terminal's 32-row share. 36x16: the share (12) cannot fund eight
+#: readable rows, so the modal drops its padding and the list its border
+#: and grows to 14 — over the share, still inside the terminal.
+_HEIGHT_BUDGETS = [
+    ((80, 24), 19, 9),
+    ((80, 40), 28, 18),
+    ((36, 16), 14, 8),
+]
+
+
+@pytest.mark.parametrize("query", ["", ":ctx"], ids=["whole-catalog", "one-row"])
+@pytest.mark.parametrize(
+    ("size", "modal_rows", "result_rows"),
+    _HEIGHT_BUDGETS,
+    ids=["80x24", "80x40", "36x16"],
+)
+async def test_the_modal_takes_an_exact_responsive_height(
+    size: tuple[int, int], modal_rows: int, result_rows: int, query: str
+) -> None:
+    """The modal's height is a budget it decides, not one its rows report.
+
+    Every terminal gets one exact height — 80% of it where that is
+    affordable, the eighteen-row result cap on a tall one, and a floor
+    paid for out of the modal's own chrome on a short one — and the
+    results list is whatever is left inside it. The same numbers have to
+    hold whether the list is the whole catalog or a query's single
+    surviving row: a height that follows the content is the defect, not
+    the rule.
+    """
+    screen = ActionPaletteScreen(_derived_catalog())
+    app = PaletteHarness(screen)
+    async with app.run_test(size=size) as pilot:
+        container = screen.query_one("#action-palette")
+        results = screen.query_one(OptionList)
+        hint = screen.query_one("#action-hint", Static)
+        if query:
+            await _filter_to_single_row(pilot, results, query)
+        await until(
+            pilot,
+            lambda: container.region.height == modal_rows,
+            label=f"the modal sized to its {modal_rows}-row budget at {size}",
+        )
+        assert container.region.height == modal_rows
+        assert results.size.height == result_rows
+        assert app.screen.region.contains_region(container.region)
+        assert container.region.contains_region(hint.region)
+
+
+async def test_the_modal_keeps_its_height_when_a_query_leaves_one_row() -> None:
+    """The budget belongs to the terminal, not to what the list holds.
+
+    A height that follows the results is the whole defect: one short row
+    shrinks the modal, and the next row the user types into it no longer
+    fits. Filtering the full catalog down to a single row must leave the
+    modal exactly as tall as it was, with the results viewport unchanged
+    and the one surviving row composited whole.
+    """
+    screen = ActionPaletteScreen(_derived_catalog())
+    app = PaletteHarness(screen)
+    async with app.run_test(size=_NARROWING_SIZE) as pilot:
+        container = screen.query_one("#action-palette")
+        options = screen.query_one(OptionList)
+        full_height = container.region.height
+        full_viewport = options.size.height
+        await _filter_to_single_row(pilot, options, ":ctx")
+        assert container.region.height == full_height
+        assert options.size.height == full_viewport
+        visible = _visible_text(options)
+        assert _heading(options) in visible
+        assert _second_line(options) in visible
+
+
+async def test_a_run_of_resizes_leaves_the_last_size_showing_a_whole_row() -> None:
+    """Several resizes in a row must leave the last one in charge.
+
+    Dragging a terminal corner walks the palette through a run of sizes,
+    each of them re-budgeting the modal. Only the final size's budget may
+    survive: the palette has to end there, with the filtered row
+    composited whole, rather than on the geometry of a size it passed
+    through on the way.
+    """
+    screen = ActionPaletteScreen(_derived_catalog())
+    app = PaletteHarness(screen)
+    async with app.run_test(size=(80, 24)) as pilot:
+        container = screen.query_one("#action-palette")
+        options = screen.query_one(OptionList)
+        await _filter_to_single_row(pilot, options, ":ctx")
+        await pilot.resize_terminal(*_NARROWING_SIZE)
+        await pilot.resize_terminal(80, 40)
+        await pilot.resize_terminal(*_NARROWING_SIZE)
+        await until(
+            pilot,
+            lambda: container.region.height == 19,
+            label="the modal settled on the final size's budget",
+        )
+        await until(
+            pilot,
+            lambda: _second_line(options) in _visible_text(options),
+            label="the whole filtered row composited at the final size",
+        )
+        visible = _visible_text(options)
+        assert container.region.height == 19
+        assert _heading(options) in visible
+        assert _second_line(options) in visible
+        assert screen.query_one(Input).has_focus
+
+
 async def test_a_resize_scroll_that_lands_after_dismissal_does_nothing() -> None:
     """The scroll a resize orders can outlive the palette.
 
