@@ -104,6 +104,15 @@ The action guard remains even though `check_action` normally blocks dispatch.
 That protects direct calls and future remapping changes. A test must prove
 `Ctrl-P` cannot replace, focus, type into, or satisfy `ConfirmScreen`.
 
+Only the *open* key is remappable. The modal binds its own close keys
+statically (`escape,ctrl+p`), so both survive a remap of
+`open_action_palette`: `Escape` is korvid's universal modal close, and the
+default `Ctrl-P` — inert as an opener once a remap frees it — still dismisses
+the palette a remapped key opened. `docs/keybindings.md` says so in the remap
+section, and a contract test derives both keys from the screen's own
+`BINDINGS` so the page can neither promise a key the modal stopped binding nor
+stay silent about one it gained.
+
 Cancelling the palette returns focus to the previously focused widget. If that
 widget disappeared while the modal was open, the existing workspace focus
 restoration chooses the active table.
@@ -118,6 +127,12 @@ The existing `APP_BINDINGS` list remains the canonical app action catalog. The
 palette derives stable IDs, titles, descriptions, default keys, priority, and
 visibility directly from its real `Binding` objects. Configured keymap overrides
 are applied when runtime entries are built, so no palette key table exists.
+
+The trigger a row shows is that effective key spelled by the one shared
+`key_label` table the help overlay already uses, so a Textual key name that no
+keyboard says out loud — `question_mark`, `colon`, `slash`, `tilde` — reaches
+both surfaces as the character the user presses (`?`, `:`, `/`, `~`), whether
+it is a binding's default or a key remapped onto it.
 
 The existing help grouping map moves next to `APP_BINDINGS` as a reusable
 presentation helper consumed by both Help and the palette. The top bar keeps its
@@ -228,7 +243,15 @@ another modal would be unsafe.
 
 Commands have the same result type. Optional extras and executable-dependent
 commands are disabled with their install/capability reason rather than silently
-disappearing. A command whose own state decides the answer reports that state:
+disappearing. A command answers for what *its own* handler reads, which is not
+always what the nearest bound key reads: `:pf` opens the list of forwards this
+session already started, so its one question is whether this build carries a
+forward registry — not the `kubectl` binary or the selected row that the
+`shift+f` dialog also needs. Borrowing the dialog's probe would grey out a
+command that works, so the owner exposes a second, narrower one
+(`list_unavailable_reason`) and both it and `open_list`'s own notification read
+one shared sentence, so the row and the command cannot drift. A command whose
+own state decides the answer reports that state:
 `:proposals` asks `ProposalController` the three questions `open_review` asks —
 is the feature enabled (`mcp.write_proposals`), is anything pending, is a
 review already open — in that order and with those exact sentences and
@@ -355,6 +378,33 @@ Typing filters results. Up/Down, PageUp/PageDown, Home/End, and Enter operate
 the list while the input keeps keyboard focus. `Escape` and `Ctrl-P` cancel.
 A disabled no-results row gives explicit feedback.
 
+Those navigation keys are the **palette's own actions over every rendered
+row**, not `OptionList`'s. Textual's list navigation moves between *enabled*
+options only — `find_next_enabled` and its siblings step over each disabled
+row and answer `None` when none is enabled — and this palette's disabled rows
+are exactly the ones a user opens it to read. A base install without helm
+leaves `helm` matching four rows, all refused by the one owner, whose reason
+wraps: twelve lines against a nine-row viewport at 80x24, twenty against eight
+at 36x16. With skip-disabled navigation every arrow, page and edge key left the
+highlight unset and the viewport at the top, so the last row and its reason
+could not be composited by any keystroke; with no query, the same rows rank
+last, below the final enabled one, and `End` stopped short of them. So Up/Down
+move one row whatever its availability, Home/End reach the real first and last
+row, and a page moves a bounded number of *rows* — the viewport height over the
+list's current average row height, at least one and never more than the
+viewport holds — so it advances the view without jumping content the user never
+saw. Each of them ends in an explicit `scroll_to_highlight()`, because
+`OptionList` scrolls from its `highlighted` watcher only for an enabled option;
+without that, a refused row would be highlighted off screen.
+
+Browsable is not invocable, and the two stay separate: `Option.disabled` stays
+true on every refused row, `Enter` is still gated on the entry's own
+`availability.invocable`, and the no-results row — which has no entry behind it
+at all — runs nothing under any of these keys. Everything here is public
+`OptionList` API: `option_count`, `highlighted` (validated by the widget),
+`virtual_size`, `scrollable_content_region` and `scroll_to_highlight()`. No
+private line map is read.
+
 ## Invocation and stale state
 
 The screen returns only the selected stable entry ID. It never calls an app
@@ -397,6 +447,12 @@ approve it. A fresh user keystroke remains mandatory.
 - `binding_enabled` remains consistent with boolean `check_action` behavior,
   while `invocable` covers deeper refusal states without making explanatory
   keyboard paths inert;
+- the shared key-label table spells every Textual key name the palette and the
+  help overlay can show, including `tilde` as `~`, by default and through a
+  remap;
+- the command reason map carries one resolver per palette command and every
+  key in it is a real canonical command text — `:pf`'s resolver is the forward
+  owner's *list* probe, which reports a missing registry and nothing else;
 
 ### Textual tests
 
@@ -431,7 +487,30 @@ approve it. A fresh user keystroke remains mandatory.
   the list holds the whole catalog or one filtered row, it does not change when
   a query narrows the list, and a run of resizes ends on the final size's
   budget with that row still whole;
+- every row a query leaves is reachable by keyboard even when none of them can
+  run: with `helm` matching four rows all refused by their owner, Up/Down walk
+  each index in turn, Home/End reach the real first and last row, and repeated
+  PageDown/PageUp walk to both edges — at 80x24 and at 36x16, compositing the
+  heading and the whole reason of every row they stop on, with Enter inert and
+  the query input focused throughout;
+- with no query, `End` reaches the trailing unavailable rows that rank below
+  the last enabled one, renders the last of them whole, runs nothing, and
+  `Home` brings the first row back;
+- a query whose results interleave refused and runnable rows is traversed
+  without skipping either: Down visits every index and Up visits every index in
+  reverse, Enter on a refused row does nothing, and the next runnable row still
+  dispatches exactly once;
+- a page key never leaves the highlight off screen: paging to the end of the
+  whole derived catalog and back composites the highlighted row after every
+  press;
+- the single no-results row stays inert under every navigation key — the
+  highlight does not leave it, nothing is dispatched, and the query input keeps
+  focus;
 - overloaded view-specific actions show the correct effective key and reason;
+- the `:pf` row is greyed out in a session wired without a forward registry
+  and offered once one is, with no `kubectl` and nothing selected; a selection
+  made before the registry disappeared is refused after the modal closes with
+  the owner's own wording and routes nothing;
 - Pulse comes from `COMMANDS`, not a palette-only route;
 - a context or selection change while open is rejected at invocation time;
 - an available action and command reach their existing route exactly once.

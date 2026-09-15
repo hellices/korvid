@@ -48,8 +48,8 @@ the palette also answers "why did that key do nothing?". A reason is written
 to fit a row on a narrow terminal, so where the key's own toast names a
 resource (the node a running drain is evicting, the node cordon is waiting
 on, the pod that would not fit the log pane) the row states the fact and the
-toast keeps the name. `Esc`
-closes it.
+toast keeps the name. `Esc` closes the palette, and so does `Ctrl-P`, which
+the modal binds as a close key of its own.
 Selecting a write action opens the same approval dialog the key opens, which
 still needs its own fresh keystroke.
 
@@ -73,4 +73,4 @@ keybindings:
   sort_by_age: z
 ```
 
-Unknown, duplicate, or shadowing remaps warn and are skipped. Keys handled by drill-down, closing, and dialogs are not remappable. The approval dialogs' confirm keys are **not remappable**: every write still requires the fixed fresh keystroke. The palette's own key moves like any other, under the action name `open_action_palette`; `Esc` closes the palette whichever key opened it. Action names come from the app itself; an unrecognised name is skipped at startup with a warning that lists every valid action name. Press `?` for the complete effective set.
+Unknown, duplicate, or shadowing remaps warn and are skipped. Keys handled by drill-down, closing, and dialogs are not remappable. The approval dialogs' confirm keys are **not remappable**: every write still requires the fixed fresh keystroke. The palette's own key moves like any other, under the action name `open_action_palette`; the modal's close keys do not move with it, so `Esc` and the built-in `Ctrl-P` both close the palette whichever key opened it. Action names come from the app itself; an unrecognised name is skipped at startup with a warning that lists every valid action name. Press `?` for the complete effective set.

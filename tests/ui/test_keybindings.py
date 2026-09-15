@@ -15,7 +15,7 @@ from korvid.core.keybindings import APPROVAL_KEYS, plan_keybindings
 from korvid.core.session_timeline import SessionTimeline
 from korvid.ui.app import KorvidApp
 from korvid.ui.widgets.action_palette import ActionPaletteScreen
-from korvid.ui.widgets.help_screen import HelpScreen
+from korvid.ui.widgets.help_screen import HelpScreen, key_label
 from korvid.ui.widgets.resource_table import ResourceTable
 from korvid.ui.widgets.session_timeline_screen import SessionTimelineScreen
 
@@ -365,6 +365,75 @@ async def test_escape_closes_a_remapped_palette_and_the_open_key_cannot_stack_on
         )
         assert not any(isinstance(s, ActionPaletteScreen) for s in app.screen_stack)
         assert app.focused is table
+
+
+def _palette_close_keys() -> tuple[str, ...]:
+    """The keys the palette modal itself dismisses on, from its own BINDINGS.
+
+    Read from the screen rather than spelled here: these are static screen
+    bindings that no `keybindings:` remap touches, and the documentation
+    contract below has to be about the keys the modal really binds.
+    """
+    return tuple(
+        key
+        for binding in ActionPaletteScreen.BINDINGS
+        if isinstance(binding, Binding) and binding.action == "cancel"
+        for key in binding.key.split(",")
+    )
+
+
+async def test_the_built_in_close_key_still_closes_a_remapped_palette() -> None:
+    """Moving the *open* key does not move the modal's own close keys.
+
+    `open_action_palette` is remappable like any other action, but the
+    screen binds `escape,ctrl+p` to its cancel action statically - so the
+    default `Ctrl-P`, inert as an opener once the remap freed it, still
+    closes the palette a remapped key opened. That is a promise the page
+    makes, so it is pinned here as behaviour too (#388 round 10).
+    """
+    app = make_app([_pod("web")], config=_config({"open_action_palette": "ctrl+j"}))
+    async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 1, label="pod loaded")
+        table.focus()
+        await pilot.press("ctrl+j")
+        await until(
+            pilot,
+            lambda: isinstance(app.screen, ActionPaletteScreen),
+            label="palette opens on ctrl+j",
+        )
+        await pilot.press("ctrl+p")
+        await until(
+            pilot,
+            lambda: app.screen is app.screen_stack[0],
+            label="the built-in ctrl+p closes the remapped palette",
+        )
+        assert not any(isinstance(s, ActionPaletteScreen) for s in app.screen_stack)
+        assert app.focused is table
+
+
+def test_keybindings_doc_names_every_palette_close_key_after_a_remap() -> None:
+    """The remap section has to say how the palette closes afterwards.
+
+    A reader who has just moved `open_action_palette` needs to know that
+    neither close key moved with it. Both are derived from the screen's own
+    `BINDINGS` and required by their `key_label` spelling, so the page can
+    neither promise a key the modal stopped binding nor stay silent about
+    one it gained.
+    """
+    closes = _palette_close_keys()
+    assert closes == ("escape", "ctrl+p")
+    doc = Path(__file__).parents[2].joinpath("docs", "keybindings.md").read_text()
+    paragraph = next(block for block in doc.split("\n\n") if "`open_action_palette`" in block)
+    flat = " ".join(paragraph.split())
+    for key in closes:
+        label = key_label(key)
+        assert re.search(rf"`{re.escape(label)}`[^.]*close", flat, re.I), (
+            f"the remap section must say `{label}` closes the palette"
+        )
+    assert re.search(r"whichever key opened it", flat, re.I), (
+        "the remap section must say the close keys hold whichever key opened the palette"
+    )
 
 
 def test_keybindings_doc_documents_the_action_palette_key() -> None:

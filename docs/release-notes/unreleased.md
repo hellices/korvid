@@ -17,11 +17,14 @@ a sort key whose column this view does not render, a log pane that is already
 full, a node whose drain has to finish first, a rollback whose release history
 moved, or a capability this session was started without).
 Selecting a write action still opens the same approval flow and requires a
-fresh confirmation keystroke. `Esc` closes the palette, and the key itself
-remaps under `open_action_palette`. On a small terminal the palette takes the
-height it needs instead of clipping a row's key or reason, and resizing the
-terminal under the open palette keeps the row you were on in view and re-draws
-it whole at the new size.
+fresh confirmation keystroke. Arrow, Page and Home/End keys walk every result,
+including the greyed-out ones, so a reason further down the list can always be
+scrolled into view and read — those rows stay unrunnable, and Enter on one does
+nothing. `Esc` closes the palette and so does `Ctrl-P`, both of them whichever
+key opened it; the opening key itself remaps under `open_action_palette`. On a
+small terminal the palette takes the height it needs instead of clipping a
+row's key or reason, and resizing the terminal under the open palette keeps the
+row you were on in view and re-draws it whole at the new size.
 
 ## Keys typed right after the command or filter bar closes
 
