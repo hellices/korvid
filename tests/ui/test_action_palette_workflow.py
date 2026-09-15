@@ -340,7 +340,7 @@ def _row(app: KorvidApp, entry_id: str) -> PaletteEntry:
     return entries[entry_id]
 
 
-async def test_command_rows_are_disabled_without_their_capability() -> None:
+async def test_command_rows_are_unavailable_without_their_capability() -> None:
     """No MCP controller and no telepresence CLI wired: pressing `:mcp` or
     `:tp` only earns a refusal, so the palette must not advertise them."""
     app = make_app([_pod("web")])
@@ -357,7 +357,9 @@ async def test_command_rows_are_disabled_without_their_capability() -> None:
         # The agent *is* available here, so its rows stay runnable.
         assert _row(app, "command:ai").availability.invocable is True
         assert _row(app, "command:model").availability.invocable is True
-        # And an unavailable row renders as a disabled option.
+        # And the row itself says it cannot run, rather than leaving the
+        # user to infer it: the rendered second line carries the owner's
+        # reason, and Enter on the row runs nothing.
         screen = await _open_palette(pilot)
         await _type_query(pilot, "mcp")
         options = screen.query_one(OptionList)
@@ -366,7 +368,10 @@ async def test_command_rows_are_disabled_without_their_capability() -> None:
             lambda: options.option_count > 0 and options.get_option_at_index(0).id == "command:mcp",
             label="mcp ranked first",
         )
-        assert options.get_option_at_index(0).disabled is True
+        prompt = str(options.get_option_at_index(0).prompt).splitlines()
+        assert prompt[1].startswith("Unavailable: ")
+        await pilot.press("enter")
+        assert app.screen is screen
 
 
 async def test_command_rows_are_enabled_once_their_capability_is_wired() -> None:
@@ -515,7 +520,7 @@ async def test_the_forward_list_row_is_revalidated_after_the_palette_closes() ->
         assert len(app.screen_stack) == 1
 
 
-async def test_agent_command_rows_are_disabled_without_the_agent() -> None:
+async def test_agent_command_rows_are_unavailable_without_the_agent() -> None:
     """`:ai`/`:model` availability is composed at the wiring (the agent
     controller is at its reviewed size cap, so the answer is assembled from
     its existing `available` flag and the shared reason rather than added as
@@ -610,7 +615,7 @@ def _proposals_app(store: ProposalStore | None, tmp_path: Path) -> KorvidApp:
     return make_proposals_app(ProposalRecorder(), tmp_path / "palette-audit.jsonl", store)
 
 
-async def test_the_proposals_row_is_disabled_without_the_feature(tmp_path: Path) -> None:
+async def test_the_proposals_row_is_unavailable_without_the_feature(tmp_path: Path) -> None:
     """`mcp.write_proposals` off is the first thing `open_review` refuses,
     so the row carries that same sentence - and deriving the catalog stays
     a silent probe (issue #388, round 6)."""
@@ -1547,7 +1552,7 @@ async def test_the_refused_age_sort_key_still_changes_nothing() -> None:
 async def test_dispatching_the_refused_age_sort_row_sorts_nothing() -> None:
     """The palette's own route is the other half of the evidence: running
     `sort_by_age` through `_palette_selected` reaches the same handler, so
-    the disabled row would have been a no-op there too."""
+    the refused row would have been a no-op there too."""
     app = _replacement_pods_app()
     async with app.run_test() as pilot:
         await _loaded(pilot, app)

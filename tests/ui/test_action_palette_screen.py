@@ -390,9 +390,9 @@ async def test_unavailable_entry_is_visible_but_not_selectable() -> None:
     app = PaletteHarness(screen)
     async with app.run_test() as pilot:
         await pilot.press("d", "r", "a", "i", "n")
-        option = screen.query_one(OptionList).get_option_at_index(0)
-        assert option.disabled is True
-        assert "Unavailable: select a node first" in str(option.prompt)
+        options = screen.query_one(OptionList)
+        assert _says_it_cannot_run(options, 0)
+        assert "Unavailable: select a node first" in str(options.get_option_at_index(0).prompt)
         await pilot.press("enter")
         assert app.results == []
 
@@ -546,6 +546,26 @@ def _heading(options: OptionList, index: int = 0) -> str:
 
 def _second_line(options: OptionList, index: int = 0) -> str:
     return str(options.get_option_at_index(index).prompt).splitlines()[1]
+
+
+#: What a refused row's second line starts with. The row carries its own
+#: refusal, so "can this run?" is a question the *rendered row* answers -
+#: never one `Option.disabled` answers on its behalf, because a Textual
+#: option that is disabled is also a row `OptionList` refuses to draw a
+#: cursor on (`render_line` picks the disabled component class before it
+#: ever looks at `highlighted`).
+_REFUSED_PREFIX = "unavailable:"
+
+
+def _says_it_cannot_run(options: OptionList, index: int) -> bool:
+    """Whether row `index` tells the user, in its own words, that it can't run."""
+    lines = str(options.get_option_at_index(index).prompt).splitlines()
+    return len(lines) > 1 and lines[1].casefold().startswith(_REFUSED_PREFIX)
+
+
+def _refused_rows(options: OptionList) -> list[bool]:
+    """Which rendered rows say they cannot run, in rendered order."""
+    return [_says_it_cannot_run(options, index) for index in range(options.option_count)]
 
 
 async def test_an_action_row_shows_its_category_title_and_default_trigger() -> None:
@@ -702,10 +722,11 @@ async def test_a_narrow_terminal_shows_a_whole_command_row_not_just_its_first_wr
 async def test_a_narrow_terminal_shows_a_whole_unavailable_reason() -> None:
     """An unavailable row is only useful if its reason is readable.
 
-    The row is disabled and inert, so no keystroke can scroll it into view;
-    at 36 columns the owner's real refusal wraps over several lines, and
-    all of them - plus the trigger that would have run it - must be inside
-    the results viewport.
+    At 36 columns the owner's real refusal wraps over several lines, and a
+    viewport shorter than the row cannot be scrolled *inside* the row: a
+    cursor reveals whole rows, so a line the budget left out is a line no
+    keystroke brings back. All of them - plus the trigger that would have
+    run it - must be inside the results viewport.
     """
     reason = _long_owner_reason()
     entries = _derived_unavailable_action_entry("relationships", reason)
@@ -713,7 +734,7 @@ async def test_a_narrow_terminal_shows_a_whole_unavailable_reason() -> None:
     app = PaletteHarness(screen)
     async with app.run_test(size=(36, 16)):
         options = screen.query_one(OptionList)
-        assert options.get_option_at_index(0).disabled is True
+        assert _says_it_cannot_run(options, 0)
         visible = _visible_text(options)
         assert _heading(options) in visible
         assert _second_line(options) == f"Unavailable: {reason.message}"
@@ -764,11 +785,11 @@ async def test_a_shrinking_terminal_shows_a_whole_filtered_command_row() -> None
 async def test_a_shrinking_terminal_shows_a_whole_filtered_unavailable_reason() -> None:
     """The same resize path, on the row no keystroke can rescue.
 
-    An unavailable row is disabled, so it is never highlighted and never
-    scrolled to: if the resize leaves the viewport shorter than the row,
-    the owner's refusal is simply cut off. It must be composited whole -
-    and the row must stay inert (Enter runs nothing) with the query
-    `Input` still focused, exactly as it is at a narrow start.
+    If the resize leaves the viewport shorter than the row, the owner's
+    refusal is simply cut off: revealing the row again only aligns its
+    top, so the lines past the viewport stay gone. It must be composited
+    whole - and the row must stay inert (Enter runs nothing) with the
+    query `Input` still focused, exactly as it is at a narrow start.
     """
     reason = _long_owner_reason()
     entries = _derived_unavailable_action_entry("relationships", reason)
@@ -785,7 +806,7 @@ async def test_a_shrinking_terminal_shows_a_whole_filtered_unavailable_reason() 
             label="the whole filtered unavailable reason composited after the resize",
         )
         visible = _visible_text(options)
-        assert options.get_option_at_index(0).disabled is True
+        assert _says_it_cannot_run(options, 0)
         assert _heading(options) in visible
         assert _second_line(options) == f"Unavailable: {reason.message}"
         assert _second_line(options) in visible
@@ -898,8 +919,9 @@ async def test_a_shrinking_terminal_shows_the_whole_selected_row_among_many_resu
 async def test_a_shrinking_terminal_keeps_an_unavailable_row_whole_among_many_results() -> None:
     """The same width transition on the row no keystroke can rescue.
 
-    An unavailable row is disabled, so nothing ever scrolls to it: whatever
-    the resize leaves of it is all the user gets. Among several results it
+    Whatever the resize leaves of a row is all the user gets - a reveal
+    aligns the row's top, and the list scrolls between rows rather than
+    inside one. Among several results a refused row
     loses its last line to the scrollbar's two columns the same way - here
     the rule that closes its category, so the refused `Table` row and the
     `Commands` rows below it run together with no boundary between them.
@@ -918,7 +940,7 @@ async def test_a_shrinking_terminal_keeps_an_unavailable_row_whole_among_many_re
             label="the results filtered to several 'rel' rows",
         )
         index = _index_of(options, "action:relationships")
-        assert options.get_option_at_index(index).disabled is True
+        assert _says_it_cannot_run(options, index)
         await pilot.resize_terminal(36, 16)
         await until(
             pilot,
@@ -983,8 +1005,9 @@ async def test_a_narrowing_terminal_composites_a_whole_filtered_command_row(quer
 async def test_a_narrowing_terminal_composites_a_whole_unavailable_reason() -> None:
     """The same narrowing, on the row no keystroke can rescue.
 
-    A refused row is disabled: it is never highlighted and never scrolled
-    to, so whatever the resize leaves of it is all the user gets. Typing
+    Whatever the resize leaves of a row is all the user gets: a reveal
+    aligns the row's top, and the list scrolls between rows rather than
+    inside one. Typing
     the action's own id narrows the catalog to that one row, the owner's
     real refusal wraps well past one line at 38 columns, and every line of
     it — plus the heading that says which key would have run it — has to
@@ -997,7 +1020,7 @@ async def test_a_narrowing_terminal_composites_a_whole_unavailable_reason() -> N
     async with app.run_test(size=(80, 24)) as pilot:
         options = screen.query_one(OptionList)
         await _filter_to_single_row(pilot, options, "relationships")
-        assert options.get_option_at_index(0).disabled is True
+        assert _says_it_cannot_run(options, 0)
         await pilot.resize_terminal(*_NARROWING_SIZE)
         await until(
             pilot,
@@ -1062,9 +1085,10 @@ async def test_a_real_unavailable_integration_row_fits_a_narrow_terminal(
     """A base install's greyed-out `:mcp` / `:tp` row must be readable.
 
     These two rows are the palette's only view of an integration this
-    session does not have, and they are disabled: no keystroke highlights
-    them, and `OptionList` scrolls by whole options, so whatever the
-    viewport holds is all the user ever gets. At the narrow terminals the
+    session does not have. A row taller than the viewport cannot be
+    rescued by any keystroke - revealing it aligns its top, and
+    `OptionList` scrolls between rows rather than inside one - so whatever
+    the viewport holds is all the user ever gets. At the narrow terminals the
     design supports, the whole row — the category, title and `:` spelling
     that say which command it is, and every word of the owner's reason —
     has to be composited inside the results viewport, with the row inert
@@ -1076,7 +1100,7 @@ async def test_a_real_unavailable_integration_row_fits_a_narrow_terminal(
     async with app.run_test(size=size) as pilot:
         options = screen.query_one(OptionList)
         await _filter_to_single_row(pilot, options, f":{command}")
-        assert options.get_option_at_index(0).disabled is True
+        assert _says_it_cannot_run(options, 0)
         visible = _visible_text(options)
         heading = _heading(options)
         assert "Commands" in heading
@@ -1265,8 +1289,9 @@ async def test_a_cross_node_drain_row_fits_a_narrow_terminal() -> None:
     with the draining node's name and the instruction to press it on that
     node instead - a sentence whose length is cluster data. As a *row* it
     is unreadable: at 36 columns a real managed-cluster node name alone
-    outruns the viewport, the row is disabled so no keystroke highlights
-    or scrolls it, and the list scrolls by whole options. The probe's
+    outruns the viewport, and no keystroke rescues a row taller than the
+    viewport - a reveal aligns its top, and the list scrolls between rows
+    rather than inside one. The probe's
     reason therefore states the bounded fact, and the keypress keeps the
     name in its toast (issue #388, round 8).
     """
@@ -1285,7 +1310,7 @@ async def test_a_cross_node_drain_row_fits_a_narrow_terminal() -> None:
             label="the whole refused drain row composited at 36x24",
         )
         visible = _visible_text(options)
-        assert options.get_option_at_index(0).disabled is True
+        assert _says_it_cannot_run(options, 0)
         heading = _heading(options)
         assert "Drain node" in heading
         assert "Shift-D" in heading  # the trigger the refusal is about
@@ -1374,8 +1399,9 @@ async def test_a_selected_node_drain_row_fits_a_narrow_terminal(
 
     That refusal used to name the node, and a node name has no bounded
     length: at 253 characters it outruns a 36-column row many times over,
-    the row is disabled so no keystroke highlights or scrolls it, and the
-    list scrolls by whole options. The probe's reason therefore states the
+    and no keystroke rescues a row taller than the viewport - a reveal
+    aligns its top, and the list scrolls between rows rather than inside
+    one. The probe's reason therefore states the
     bounded fact, and the keypress keeps the name in its toast (#388,
     round 9).
     """
@@ -1392,7 +1418,7 @@ async def test_a_selected_node_drain_row_fits_a_narrow_terminal(
             label=f"the whole refused {action} row composited at 36x24",
         )
         visible = _visible_text(options)
-        assert options.get_option_at_index(0).disabled is True
+        assert _says_it_cannot_run(options, 0)
         heading = _heading(options)
         assert title in heading
         assert trigger in heading  # the trigger the refusal is about
@@ -1428,9 +1454,9 @@ async def test_the_detailed_selected_node_sentence_would_not_have_fitted(
 
 #: The four real `APP_BINDINGS` helm actions one owner refuses together.
 #: A base install without the helm binary greys out all four at once, which
-#: is what makes them the finding's own repro: every surviving row is
-#: disabled, so there is no enabled row for a skip-disabled navigation to
-#: land on and nothing moves at all.
+#: is what makes them the finding's own repro: every surviving row is one
+#: that cannot run, so there is no runnable row for the navigation to fall
+#: back on, and the four of them outrun the viewport at both terminals.
 _HELM_ACTIONS = ("helm_install", "helm_upgrade", "helm_rollback", "helm_history")
 
 #: The title `_humanize_action_id` derives for the *last* of them, which is
@@ -1510,25 +1536,23 @@ async def _helm_results(pilot: Pilot[None], options: OptionList) -> None:
         lambda: options.option_count == len(_HELM_ACTIONS),
         label="the results filtered to the four refused helm rows",
     )
-    assert all(
-        options.get_option_at_index(index).disabled is True for index in range(options.option_count)
-    )
+    assert all(_refused_rows(options))
 
 
 @pytest.mark.parametrize("size", _LAYOUT_SIZES, ids=_LAYOUT_IDS)
 async def test_arrows_reach_every_unavailable_row_past_the_fold(size: tuple[int, int]) -> None:
-    """Down must walk onto a disabled row, not step over the whole list.
+    """Down must walk onto a row that cannot run, not step over the list.
 
     A base install without helm leaves `helm` matching four rows, all of
     them refused by the same owner. Their reason wraps, so the four rows
     are twelve lines at 80x24 against a nine-row viewport and twenty
     against eight at 36x16: the last row - `Helm history`, and the reason
     that says why it is greyed out - starts below the fold. Textual's
-    `OptionList` navigation moves the highlight only between *enabled*
-    options, so with none of them enabled every arrow press left the
-    highlight unset and the viewport at the top, and no keystroke could
-    ever composite that row. The palette owns the arithmetic instead: one
-    row per press whatever its availability, with the row revealed.
+    navigation moves between *enabled* options only, so marking these rows
+    disabled left every arrow press with nothing to land on: the highlight
+    stayed unset, the viewport stayed at the top, and no keystroke could
+    ever composite that row. They are ordinary navigable rows instead -
+    refused by the entry behind them, not by the widget.
     """
     screen = ActionPaletteScreen(_helmless_catalog())
     app = PaletteHarness(screen)
@@ -1552,12 +1576,13 @@ async def test_arrows_reach_every_unavailable_row_past_the_fold(size: tuple[int,
 
 @pytest.mark.parametrize("size", _LAYOUT_SIZES, ids=_LAYOUT_IDS)
 async def test_end_and_home_reach_the_edge_unavailable_rows(size: tuple[int, int]) -> None:
-    """End belongs to the list's last row, not to its last *enabled* row.
+    """End belongs to the list's last row, not to its last *runnable* row.
 
-    With every surviving row refused there is no enabled row at all, so
-    `find_last_enabled` answered None and `End` did nothing: the row the
-    user pressed it to read stayed below the fold. Both edges have to
-    land, composite the row whole, and stay inert.
+    With every surviving row refused there was no enabled option at all,
+    so `find_last_enabled` answered None and `End` did nothing: the row
+    the user pressed it to read stayed below the fold. Every row is
+    navigable now, so both edges have to land, composite the row whole,
+    and stay inert.
     """
     screen = ActionPaletteScreen(_helmless_catalog())
     app = PaletteHarness(screen)
@@ -1580,7 +1605,7 @@ async def test_end_and_home_reach_the_edge_unavailable_rows(size: tuple[int, int
 async def test_page_keys_walk_the_unavailable_rows_to_both_edges(
     size: tuple[int, int],
 ) -> None:
-    """A page key must move a disabled cursor too, and reveal where it lands.
+    """A page key must move across refused rows too, and reveal where it lands.
 
     `OptionList._move_page` looks for the next *enabled* option from the
     line a page away, so an all-refused list left the highlight where it
@@ -1630,8 +1655,8 @@ async def test_the_empty_query_end_reaches_the_trailing_unavailable_rows() -> No
         options = screen.query_one(OptionList)
         last = options.option_count - 1
         assert options.get_option_at_index(last).id == f"action:{_HELM_ACTIONS[-1]}"
-        assert options.get_option_at_index(last).disabled is True
-        assert options.get_option_at_index(last - len(_HELM_ACTIONS)).disabled is False
+        assert _says_it_cannot_run(options, last)
+        assert not _says_it_cannot_run(options, last - len(_HELM_ACTIONS))
         await pilot.press("end")
         assert options.highlighted == last
         _assert_row_composited(options, last)
@@ -1647,8 +1672,8 @@ async def test_the_empty_query_end_reaches_the_trailing_unavailable_rows() -> No
 #: Two real log keys one owner refuses together, and the query that leaves
 #: them among rows that still run. `rank_entries` only breaks *ties* by
 #: availability, so a real query renders the two refused rows in the middle
-#: of the results rather than in a block at the end - the arrangement a
-#: skip-disabled navigation steps straight over.
+#: of the results rather than in a block at the end - the arrangement an
+#: enabled-only navigation steps straight over.
 _MIXED_REFUSED = ("logs_multi", "log_save")
 _MIXED_QUERY = "log"
 
@@ -1673,10 +1698,6 @@ def _mixed_availability_catalog() -> list[PaletteEntry]:
     )
 
 
-def _disabled_flags(options: OptionList) -> list[bool]:
-    return [options.get_option_at_index(index).disabled for index in range(options.option_count)]
-
-
 async def _mixed_results(pilot: Pilot[None], options: OptionList) -> list[bool]:
     """Type `_MIXED_QUERY` and wait for a genuinely mixed result list.
 
@@ -1688,24 +1709,24 @@ async def _mixed_results(pilot: Pilot[None], options: OptionList) -> list[bool]:
     await pilot.press(*_MIXED_QUERY)
 
     def mixed() -> bool:
-        flags = _disabled_flags(options)
+        flags = _refused_rows(options)
         return any(
             flag and any(not f for f in flags[:index]) and any(not f for f in flags[index + 1 :])
             for index, flag in enumerate(flags)
         )
 
     await until(pilot, mixed, label="a refused row rendered between rows that still run")
-    return _disabled_flags(options)
+    return _refused_rows(options)
 
 
 async def test_traversal_does_not_skip_an_unavailable_row_in_either_direction() -> None:
     """Every index has to be visited once, going down and coming back up.
 
-    Skip-disabled navigation jumps the refused rows entirely: `Down` from
-    the enabled row above them lands past both, and neither is ever
-    highlighted or scrolled to. The palette's own arithmetic must visit
-    each index in turn - and an enabled row must still run when Enter is
-    pressed on it, exactly once.
+    Enabled-only navigation jumps the refused rows entirely: `Down` from
+    the runnable row above them lands past both, and neither is ever
+    reached or scrolled to. Every index has to be visited in turn - and a
+    runnable row must still run when Enter is pressed on it, exactly
+    once.
     """
     screen = ActionPaletteScreen(_mixed_availability_catalog())
     app = PaletteHarness(screen)
@@ -1724,8 +1745,8 @@ async def test_traversal_does_not_skip_an_unavailable_row_in_either_direction() 
             await pilot.press("up")
             ascending.append(options.highlighted)
         assert ascending == list(reversed(range(options.option_count)))
+        assert not _says_it_cannot_run(options, 0)
         first = options.get_option_at_index(0)
-        assert first.disabled is False
         await pilot.press("enter")
         assert app.results == [first.id]
 
@@ -1734,10 +1755,10 @@ async def test_enter_on_an_unavailable_row_reached_by_arrows_runs_nothing() -> N
     """The highlight may rest on a refused row; Enter must still do nothing.
 
     Browsable and invocable are different questions. Walking onto a
-    disabled row is how its reason becomes readable, and the row must stay
-    inert there: `Option.disabled` stays true, `_activate` stays guarded by
-    the entry's own availability, and the palette must not dismiss. The
-    next `Down` lands on a row that does run, and runs it exactly once.
+    refused row is how its reason becomes readable, and the row must stay
+    inert there: `_activate` stays guarded by the entry's own
+    availability, and the palette must not dismiss. The next `Down` lands
+    on a row that does run, and runs it exactly once.
     """
     screen = ActionPaletteScreen(_mixed_availability_catalog())
     app = PaletteHarness(screen)
@@ -1754,8 +1775,8 @@ async def test_enter_on_an_unavailable_row_reached_by_arrows_runs_nothing() -> N
                 await pilot.press("enter")
                 assert app.results == []
         assert options.highlighted == runnable
+        assert not _says_it_cannot_run(options, runnable)
         target = options.get_option_at_index(runnable)
-        assert target.disabled is False
         await pilot.press("enter")
         assert app.results == [target.id]
 
@@ -1794,9 +1815,9 @@ async def test_the_no_results_row_stays_inert_under_every_navigation_key() -> No
     """The one row a query with no matches leaves is not an entry at all.
 
     It has no id and no entry behind it, so every key that now moves a
-    highlight has to leave it exactly where it is and run nothing: the
-    palette must not dismiss, and the query `Input` must keep focus so the
-    user can correct the query.
+    cursor has to leave it unreached and run nothing: the palette must not
+    dismiss, and the query `Input` must keep focus so the user can correct
+    the query.
     """
     screen = ActionPaletteScreen(_derived_catalog())
     app = PaletteHarness(screen)
@@ -1812,7 +1833,266 @@ async def test_the_no_results_row_stays_inert_under_every_navigation_key() -> No
         assert options.get_option_at_index(0).id is None
         for key in ("down", "up", "pagedown", "pageup", "end", "home", "enter"):
             await pilot.press(key)
-            assert options.highlighted == 0
+            assert options.option_count == 1
             assert app.results == []
         assert "no match" in str(options.get_option_at_index(0).prompt).casefold()
+        assert screen.query_one(Input).has_focus
+
+
+def _cursor_background(options: OptionList) -> object:
+    """The background colour `OptionList` paints the highlighted row with.
+
+    Read from the widget's own resolved component styles rather than from a
+    literal, and asserted to differ from an ordinary row's: the palette's
+    list is never focused (the query `Input` is), so this is the theme's
+    blurred block cursor, and checking it is a different colour first stops
+    every "the cursor is visible" assertion below from passing vacuously.
+    """
+    cursor = options.get_visual_style("option-list--option", "option-list--option-highlighted")
+    plain = options.get_visual_style("option-list--option")
+    assert cursor.rich_style.bgcolor != plain.rich_style.bgcolor
+    return cursor.rich_style.bgcolor
+
+
+def _cursor_text(options: OptionList) -> str:
+    """Every character the viewport draws in the cursor's own background.
+
+    The frame, not the widget's bookkeeping: `render_line` is the entry
+    point Textual's compositor calls, and the cells carrying the highlight
+    background are exactly the ones the user sees the cursor on. An empty
+    result therefore means *no cursor is on screen at all* - which is what
+    `highlighted` pointing at a disabled option leaves behind. Spaces are
+    dropped so a row that wrapped, at a space or inside a word, still reads
+    as the characters it is made of.
+    """
+    background = _cursor_background(options)
+    return "".join(
+        segment.text
+        for y in range(options.size.height)
+        for segment in options.render_line(y)
+        if segment.style is not None and segment.style.bgcolor == background
+    ).replace(" ", "")
+
+
+def _assert_cursor_on(options: OptionList, index: int) -> None:
+    """Fail unless the frame draws a cursor, and draws it on row `index`."""
+    drawn = _cursor_text(options)
+    assert drawn, f"row {index} is highlighted but no cursor is drawn in the frame"
+    heading = _heading(options, index).replace(" ", "")
+    assert heading in drawn, f"the cursor is not drawn on row {index}: {drawn!r}"
+
+
+@pytest.mark.parametrize("size", _LAYOUT_SIZES, ids=_LAYOUT_IDS)
+async def test_the_cursor_is_drawn_on_each_unavailable_row_it_moves_to(
+    size: tuple[int, int],
+) -> None:
+    """A row the user can walk onto has to show where the cursor is.
+
+    Moving the highlight is not the same thing as moving the *cursor*.
+    `OptionList.render_line` chooses the disabled component style before it
+    looks at `highlighted`, so an option marked disabled is drawn
+    identically whether or not it is the highlighted one: on a list where
+    every row is refused - a base install without helm, `helm` typed - each
+    `Down` changed an index nobody could see and the frame stayed exactly
+    as it was. The cursor has to be in the frame, on the row that was
+    reached, after every single press.
+    """
+    screen = ActionPaletteScreen(_helmless_catalog())
+    app = PaletteHarness(screen)
+    async with app.run_test(size=size) as pilot:
+        options = screen.query_one(OptionList)
+        await _helm_results(pilot, options)
+        assert all(_refused_rows(options))
+        _assert_cursor_on(options, 0)
+        previous = _cursor_text(options)
+        for index in range(1, options.option_count):
+            await pilot.press("down")
+            assert options.highlighted == index
+            _assert_cursor_on(options, index)
+            drawn = _cursor_text(options)
+            assert drawn != previous, f"the frame did not change moving onto row {index}"
+            previous = drawn
+        assert app.results == []
+
+
+async def test_the_cursor_survives_the_step_from_a_runnable_row_to_a_refused_one() -> None:
+    """A mixed list must not lose its cursor on the way through a refusal.
+
+    The `log` query leaves rows that still run above and below the two the
+    logs owner has refused, so `Down` crosses the boundary in both
+    directions. Every row on that walk - runnable or not - has to be the
+    one the cursor is drawn on, or the user loses their place in the middle
+    of the list.
+    """
+    screen = ActionPaletteScreen(_mixed_availability_catalog())
+    app = PaletteHarness(screen)
+    async with app.run_test(size=(80, 24)) as pilot:
+        options = screen.query_one(OptionList)
+        flags = await _mixed_results(pilot, options)
+        refused = flags.index(True)
+        assert refused > 0
+        for index in range(1, refused + 1):
+            await pilot.press("down")
+            assert options.highlighted == index
+            _assert_cursor_on(options, index)
+        assert _says_it_cannot_run(options, refused)
+        await pilot.press("up")
+        _assert_cursor_on(options, refused - 1)
+        assert app.results == []
+
+
+def _click_offset(options: OptionList, line: int) -> tuple[int, int]:
+    """Where to click to hit viewport `line`, in the list's own coordinates.
+
+    The gutter between the widget's region and its content region is its
+    border and padding, and that differs between the two terminals (the
+    short one drops the border for Textual's compact style), so it is
+    measured rather than assumed.
+    """
+    gutter = options.content_region.offset - options.region.offset
+    return (gutter.x, gutter.y + line)
+
+
+def _viewport_line_showing(options: OptionList, text: str) -> int:
+    """The first viewport line whose characters contain `text`."""
+    wanted = text.replace(" ", "")
+    for number, line in enumerate(_viewport_lines(options)):
+        if wanted in line.replace(" ", ""):
+            return number
+    raise AssertionError(f"{text!r} is not on screen: {_viewport_lines(options)}")
+
+
+async def test_clicking_an_unavailable_row_moves_the_cursor_there_and_runs_nothing() -> None:
+    """The mouse reaches a refused row exactly as far as the keyboard does.
+
+    `OptionList._on_click` ignores a disabled option outright, so the row
+    a user clicked to read stayed unhighlighted and unscrolled. A row that
+    is navigable answers the click - the cursor moves onto it, its reason
+    is on screen - and the selection that click raises must still run
+    nothing: `OptionSelected` goes through the same availability guard the
+    keyboard does, so the palette neither dismisses nor dispatches, and the
+    query `Input` keeps focus.
+    """
+    screen = ActionPaletteScreen(_helmless_catalog())
+    app = PaletteHarness(screen)
+    async with app.run_test(size=(80, 24)) as pilot:
+        options = screen.query_one(OptionList)
+        await _helm_results(pilot, options)
+        assert options.highlighted == 0
+        line = _viewport_line_showing(options, _heading(options, 1))
+        await pilot.click(OptionList, offset=_click_offset(options, line))
+        await pilot.pause()
+        assert options.highlighted == 1
+        _assert_cursor_on(options, 1)
+        _assert_row_composited(options, 1)
+        assert _says_it_cannot_run(options, 1)
+        assert app.results == []
+        assert screen.query_one(Input).has_focus
+
+
+async def test_selecting_an_unavailable_row_runs_nothing() -> None:
+    """`OptionList`'s own selection is guarded by the entry, not by the row.
+
+    Every selection path - Enter on the query `Input`, a click, the list's
+    own `action_select` - ends at the palette's one availability guard. A
+    navigable refused row means that guard is now the *only* thing between
+    a refusal and a dispatch, so removing it has to fail here: the palette
+    must not dismiss, and the next runnable row must still run.
+    """
+    screen = ActionPaletteScreen(_mixed_availability_catalog())
+    app = PaletteHarness(screen)
+    async with app.run_test(size=(80, 24)) as pilot:
+        options = screen.query_one(OptionList)
+        flags = await _mixed_results(pilot, options)
+        refused = flags.index(True)
+        options.highlighted = refused
+        options.action_select()
+        await pilot.pause()
+        assert app.results == []
+        runnable = flags.index(False, refused)
+        options.highlighted = runnable
+        options.action_select()
+        await pilot.pause()
+        assert app.results == [options.get_option_at_index(runnable).id]
+
+
+@pytest.mark.parametrize("size", _LAYOUT_SIZES, ids=_LAYOUT_IDS)
+async def test_a_page_key_never_scrolls_past_the_lines_the_viewport_was_showing(
+    size: tuple[int, int],
+) -> None:
+    """One page may not skip content the user never saw.
+
+    A page is a *line* measure, not a row one: the guarantee is that the
+    view after the press still touches the view before it, so nothing
+    scrolls past unread. Row heights in the real catalog vary - a refused
+    helm row is three lines at 80 columns and five at 36, a plain row two -
+    so a page counted in rows times an integer-truncated average row height
+    overshoots, jumping thirteen to fifteen lines across a viewport that
+    holds eight or nine. Each press may move the view by at most the
+    viewport's own height, in both directions, and the row it lands on has
+    to be composited whole.
+    """
+    screen = ActionPaletteScreen(_helmless_catalog())
+    app = PaletteHarness(screen)
+    async with app.run_test(size=size) as pilot:
+        options = screen.query_one(OptionList)
+        viewport = options.scrollable_content_region.height
+        assert options.virtual_size.height > viewport
+        last = options.option_count - 1
+        for _ in range(options.option_count):
+            if options.highlighted == last:
+                break
+            before = options.scroll_offset.y
+            await pilot.press("pagedown")
+            moved = options.scroll_offset.y - before
+            assert 0 <= moved <= viewport, (
+                f"pagedown scrolled {moved} lines across a {viewport}-line viewport"
+            )
+            assert options.highlighted is not None
+            _assert_row_composited(options, options.highlighted)
+        assert options.highlighted == last
+        assert _LAST_HELM_TITLE in _heading(options, last)
+        assert _says_it_cannot_run(options, last)
+        for _ in range(options.option_count):
+            if options.highlighted == 0:
+                break
+            before = options.scroll_offset.y
+            await pilot.press("pageup")
+            moved = before - options.scroll_offset.y
+            assert 0 <= moved <= viewport, (
+                f"pageup scrolled {moved} lines across a {viewport}-line viewport"
+            )
+            assert options.highlighted is not None
+            _assert_row_composited(options, options.highlighted)
+        assert options.highlighted == 0
+        assert app.results == []
+        assert screen.query_one(Input).has_focus
+
+
+async def test_the_no_results_row_is_never_given_a_cursor() -> None:
+    """The one row a query with no matches leaves is not navigable at all.
+
+    Every real catalog row is navigable now, which is exactly why this one
+    must not be: it has no entry behind it, so there is nothing to browse
+    and nothing to run. It stays a disabled, id-less option - no cursor is
+    ever drawn on it, no navigation key dismisses the palette, and the
+    query `Input` keeps focus so the user can correct the query.
+    """
+    screen = ActionPaletteScreen(_derived_catalog())
+    app = PaletteHarness(screen)
+    async with app.run_test(size=(80, 24)) as pilot:
+        options = screen.query_one(OptionList)
+        await pilot.press("z", "z", "z", "z", "z")
+        await until(
+            pilot,
+            lambda: options.option_count == 1,
+            label="the query left the single no-results row",
+        )
+        for key in ("down", "up", "pagedown", "pageup", "end", "home", "enter"):
+            await pilot.press(key)
+            assert options.option_count == 1
+            assert options.get_option_at_index(0).disabled is True
+            assert options.get_option_at_index(0).id is None
+            assert _cursor_text(options) == ""
+            assert app.results == []
         assert screen.query_one(Input).has_focus

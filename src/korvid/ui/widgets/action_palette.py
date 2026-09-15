@@ -29,6 +29,16 @@ from korvid.ui.action_palette import PaletteEntry, rank_entries
 #: explicit rather than an empty, ambiguous-looking list.
 _NO_RESULTS_PROMPT = "No matching actions or commands"
 
+#: How a row that cannot run right now is drawn. A Rich style on the row's
+#: own prompt rather than Textual's `Option.disabled`: a disabled option is
+#: one `OptionList.render_line` picks the disabled component style for
+#: *before* it looks at `highlighted`, so it can never show a cursor, and
+#: this palette's unavailable rows are exactly the ones a user opens it to
+#: read. `dim` greys the whole row without touching its background, which
+#: is what leaves the block cursor visible when the row is the highlighted
+#: one.
+_UNAVAILABLE_STYLE = "dim"
+
 #: Rows the modal's own height spends on everything that is not results
 #: content: the query `Input` (3), the key hint (1), the container's
 #: vertical padding (2), the container's border (2) and the results list's
@@ -83,8 +93,13 @@ def _prompt_for(entry: PaletteEntry) -> Text:
     catalog-derived title, description, or unavailable-reason that happens
     to contain `[`/`]`. Appending each part to a `Text` keeps that content
     literal — `Text.append` never parses markup.
+
+    A row that cannot run is greyed by the `Text`'s own base style
+    (`_UNAVAILABLE_STYLE`), not by `Option.disabled`: the row stays one the
+    cursor can be drawn on while its second line says, in words, that it
+    cannot run.
     """
-    prompt = Text()
+    prompt = Text(style="" if entry.availability.invocable else _UNAVAILABLE_STYLE)
     if entry.category:
         prompt.append(entry.category, style="dim")
         prompt.append(_HEADING_SEPARATOR)
@@ -112,10 +127,11 @@ class ActionPaletteScreen(ModalScreen[str | None]):
     screen — re-resolves that id against live entries and dispatches it;
     this screen never invokes an action or command itself.
 
-    Every navigation key below is this screen's own action over *all* the
-    rendered rows rather than `OptionList`'s enabled-only navigation (see
-    `_highlight`): a refused row is browsable, so the owner's reason on it
-    can be read, and never invocable.
+    Every navigation key below is `OptionList`'s own public navigation
+    action: a row whose owner has refused it is a *navigable* row here (see
+    `_render_results`), so the list's cursor reaches it like any other and
+    the owner's reason on it can be read. Invocation is the separate
+    question, answered once in `_activate`.
     """
 
     BINDINGS: ClassVar[list[Binding | tuple[str, str] | tuple[str, str, str]]] = [
@@ -182,7 +198,15 @@ class ActionPaletteScreen(ModalScreen[str | None]):
     def compose(self) -> ComposeResult:
         with Vertical(id="action-palette"):
             yield Input(placeholder="Search actions and commands", id="action-query")
-            yield OptionList(id="action-results")
+            results = OptionList(id="action-results")
+            # The query `Input` is the modal's only focus. Now that every
+            # real row is navigable, a click on one is a click on a
+            # focusable widget, and it would take the keyboard away from
+            # the query the user is still typing — a refused row does not
+            # dismiss the palette, so they would be left in a palette they
+            # can no longer search.
+            results.can_focus = False
+            yield results
             yield Static("Enter run · Esc close", id="action-hint", markup=False)
 
     def on_mount(self) -> None:
@@ -290,75 +314,69 @@ class ActionPaletteScreen(ModalScreen[str | None]):
         self.dismiss(None)
 
     def action_move(self, direction: int) -> None:
-        """Move the highlight one row, whether or not that row can run."""
+        """Move the cursor one row, whether or not that row can run."""
         options = self.query_one(OptionList)
-        count = options.option_count
-        if not count:
-            return
-        current = options.highlighted
-        self._highlight(options, 0 if current is None else (current + direction) % count)
+        if direction > 0:
+            options.action_cursor_down()
+        else:
+            options.action_cursor_up()
+        self._reveal_highlighted(options)
 
     def action_page(self, direction: int) -> None:
-        """Move the highlight a bounded page, in whole rows."""
+        """Move the cursor one page, bounded by the viewport's own height."""
         options = self.query_one(OptionList)
-        if not options.option_count:
-            return
-        current = options.highlighted or 0
-        self._highlight(options, current + direction * self._page_rows(options))
+        origin = options.highlighted
+        start = options.scroll_offset.y
+        # Textual leaves these two `action_*` methods unannotated, alone
+        # among the list's navigation actions, and `mypy --strict` refuses
+        # an untyped call; both return `None` like the rest of them.
+        if direction > 0:
+            options.action_page_down()  # type: ignore[no-untyped-call]
+        else:
+            options.action_page_up()  # type: ignore[no-untyped-call]
+        self._reveal_highlighted(options)
+        self._keep_the_page_inside_the_viewport(options, origin, start, direction)
+
+    def _keep_the_page_inside_the_viewport(
+        self, options: OptionList, origin: int | None, start: int, direction: int
+    ) -> None:
+        """Pull a page that overshot back a row at a time, never past `origin`.
+
+        `OptionList` pages in lines — it takes the highlighted row's own
+        first line, adds or subtracts the viewport height, and moves to the
+        row that line falls in — so the *cursor* never jumps more than a
+        screenful. The *view* still can, because rows are not all the same
+        height: landing on a taller row scrolls further than the anchor
+        moved, and paging up snaps back to the start of the row the anchor
+        landed inside, which at 36 columns (where a refused helm row wraps
+        to five lines against an eight-line viewport) skipped several lines
+        the user never saw.
+
+        So the page is bounded here rather than recomputed here: step the
+        cursor back with the list's own `action_cursor_up`/`_down` until
+        the view has moved no further than one viewport. Each step moves
+        the cursor one row towards `origin`, so the scroll strictly
+        shrinks and the loop ends — at the row next to `origin` at the
+        latest, which keeps every page press moving.
+        """
+        viewport = options.scrollable_content_region.height
+        step = options.action_cursor_up if direction > 0 else options.action_cursor_down
+        while abs(options.scroll_offset.y - start) > viewport:
+            current = options.highlighted
+            if current is None or origin is None or current == origin + direction:
+                return
+            step()
+            self._reveal_highlighted(options)
+            if options.highlighted == current:
+                return
 
     def action_edge(self, direction: int) -> None:
-        """Move the highlight to the last row, or back to the first one."""
+        """Move the cursor to the last row, or back to the first one."""
         options = self.query_one(OptionList)
-        count = options.option_count
-        if not count:
-            return
-        self._highlight(options, count - 1 if direction > 0 else 0)
-
-    def _page_rows(self, options: OptionList) -> int:
-        """How many rows one page key moves the highlight.
-
-        Counted in rows rather than lines, because the highlight is a row:
-        the viewport's height divided by what a row costs on average right
-        now (the list's own virtual height over its option count, both
-        public). Bounded on both sides — at least one row, so a page always
-        moves, and never more rows than the viewport has lines, so a page
-        cannot jump a screenful of content the user never saw. The average
-        is re-read per press because it changes with the query and with
-        every re-wrap: at 80 columns a refused helm row is three lines, at
-        36 it is five.
-        """
-        rows = options.option_count
-        if rows <= 0:
-            return 1
-        average = max(1, options.virtual_size.height // rows)
-        return max(1, options.scrollable_content_region.height // average)
-
-    def _highlight(self, options: OptionList, target: int) -> None:
-        """Highlight row `target` (clamped to the list) and reveal it.
-
-        The palette does its own index arithmetic — and this is the one
-        place that commits it — because Textual's `OptionList` navigation
-        actions move between *enabled* options only: `find_next_enabled`
-        and friends step over every disabled row, and answer `None` when
-        none is enabled at all. A palette whose refused rows are exactly
-        the ones the user needs to *read* cannot navigate that way. Four
-        refused helm rows outgrow the viewport at both supported terminals,
-        so with skip-disabled navigation the last of them — and the owner's
-        reason on it — could not be composited by any keystroke.
-
-        Assigning `highlighted` directly is still public API and still
-        validated (`OptionList` clamps it to the list); the clamp here is
-        the palette's own, so a page past either end lands on that end
-        rather than being rejected. `Option.disabled` stays true throughout
-        — this makes a row browsable, never invocable, and `_activate`
-        remains gated on the entry's own availability.
-
-        The reveal has to be explicit: `OptionList` scrolls from its
-        `highlighted` watcher only when the newly highlighted option is
-        enabled, so a disabled row would otherwise be highlighted off
-        screen.
-        """
-        options.highlighted = max(0, min(options.option_count - 1, target))
+        if direction > 0:
+            options.action_last()
+        else:
+            options.action_first()
         self._reveal_highlighted(options)
 
     def _reveal_highlighted(self, options: OptionList) -> None:
@@ -383,6 +401,15 @@ class ActionPaletteScreen(ModalScreen[str | None]):
         self._activate(options.get_option_at_index(highlighted).id)
 
     def _activate(self, option_id: str | None) -> None:
+        """Dismiss with `option_id`'s entry, if that entry can run right now.
+
+        The one gate between a refused row and a dispatch, and every
+        selection path reaches it: `Enter` on the query `Input`, a click,
+        and `OptionList`'s own `action_select`. Nothing upstream refuses
+        for it — a refused row is a navigable row, so `OptionList` posts
+        `OptionSelected` for it like any other — which is why the entry's
+        own `availability.invocable` is checked here and nowhere else.
+        """
         if option_id is None:
             return
         entry = self._visible.get(option_id)
@@ -395,6 +422,23 @@ class ActionPaletteScreen(ModalScreen[str | None]):
         A new query is the only thing that rebuilds the rows. A resize
         never does: it changes the modal's height budget, and the results
         list follows that budget on its own.
+
+        Every real catalog row is added as a *navigable* option, including
+        one its owner has refused. Textual's `Option.disabled` would be the
+        obvious spelling for "cannot run", but it answers a different
+        question: `OptionList.render_line` picks the disabled component
+        style before it looks at `highlighted`, and every navigation action
+        skips disabled options outright (`find_next_enabled` answers `None`
+        when none is enabled), so a disabled row can neither show a cursor
+        nor be reached. Those rows are exactly the ones the palette exists
+        to explain — a base install without helm refuses four of them at
+        once, more than a viewport holds. So the refusal is carried by the
+        row itself: an `Unavailable: …` second line, greyed by
+        `_UNAVAILABLE_STYLE`, with `_activate` refusing to run it.
+
+        The no-results row is the one genuinely disabled option: it has no
+        entry behind it, and no id, so there is nothing to browse and
+        nothing to run, and the cursor never lands on it.
         """
         options = self.query_one(OptionList)
         options.clear_options()
@@ -410,13 +454,7 @@ class ActionPaletteScreen(ModalScreen[str | None]):
                 rendered.append(None)
             previous_category = entry.category
             self._visible[entry.id] = entry
-            rendered.append(
-                Option(
-                    _prompt_for(entry),
-                    id=entry.id,
-                    disabled=not entry.availability.invocable,
-                )
-            )
+            rendered.append(Option(_prompt_for(entry), id=entry.id))
         options.add_options(rendered)
         options.highlighted = 0
         self._reveal_highlighted(options)
