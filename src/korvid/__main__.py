@@ -83,7 +83,7 @@ from korvid.core.config import (
 from korvid.core.mcp import MCPControllerBase
 from korvid.core.portforward import ForwardRegistry
 from korvid.core.pulse import PulseModel
-from korvid.core.pulse_collector import PulseCollector
+from korvid.core.pulse_collector import DEFAULT_PULSE_SOURCES, PulseCollector
 from korvid.core.pulse_rules import DeploymentPulseRule, PodPulseRule
 from korvid.core.session_timeline import SessionTimeline
 from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
@@ -101,7 +101,6 @@ from korvid.k8s.helm import HELM_RELEASES_META, HELM_REVISIONS_META
 from korvid.k8s.helmcli import HelmCLI, find_helm
 from korvid.k8s.metrics import MetricsPoller
 from korvid.k8s.models import reset_age_memo
-from korvid.k8s.pulse import PulseSource
 from korvid.k8s.telepresence import (
     TRAFFIC_MANAGER_NAME,
     TRAFFIC_MANAGER_NAMESPACE,
@@ -1106,14 +1105,7 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
         view=view,
         context=context,
         model=PulseModel((PodPulseRule(), DeploymentPulseRule())),
-        collector=PulseCollector(
-            inputs.pulse_reader,
-            (
-                PulseSource("pods", "", "v1", "pods"),
-                PulseSource("deployments", "apps", "v1", "deployments"),
-                PulseSource("events", "", "v1", "events", "type=Warning"),
-            ),
-        )
+        collector=PulseCollector(inputs.pulse_reader, DEFAULT_PULSE_SOURCES)
         if inputs.pulse_reader is not None
         else None,
         present=lambda snapshot: app.query_one(PulseSummary).show_snapshot(snapshot),
@@ -1400,6 +1392,7 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
             transfer=transfer.unavailable_reason,
             shell=shell.unavailable_reason,
             operator_install=operators.unavailable_reason,
+            timeline=timeline.unavailable_reason,
         ),
         reason_by_command=compose_command_reasons(
             agent_available=lambda: agent_ui.available,

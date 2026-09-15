@@ -150,6 +150,7 @@ def compose_action_reasons(
     transfer: Callable[[], UnavailableReason | None],
     shell: Callable[[], UnavailableReason | None],
     operator_install: Callable[[], UnavailableReason | None],
+    timeline: Callable[[], UnavailableReason | None],
 ) -> dict[str, Callable[[], UnavailableReason | None]]:
     """Build `ActionPolicy(reason_by_action=...)` from its owners.
 
@@ -170,6 +171,8 @@ def compose_action_reasons(
         transfer: `TransferController.unavailable_reason`.
         shell: `ShellController.unavailable_reason`.
         operator_install: `OperatorController.unavailable_reason`.
+        timeline: `SessionTimelineController.unavailable_reason` — whether
+            this session was composed with a timeline for `T` to open.
 
     Returns:
         The action -> reason-resolver map, one entry per owned action.
@@ -184,6 +187,7 @@ def compose_action_reasons(
         "transfer": transfer,
         "shell": shell,
         "operator_install": operator_install,
+        "timeline": timeline,
     }
 
 

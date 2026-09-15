@@ -466,6 +466,7 @@ def test_composed_action_reasons_ask_each_owner_about_its_own_actions() -> None:
         transfer=lambda: None,
         shell=lambda: None,
         operator_install=lambda: None,
+        timeline=lambda: None,
     )
     assert set(reasons) == {
         "delete_resource",
@@ -495,6 +496,7 @@ def test_composed_action_reasons_ask_each_owner_about_its_own_actions() -> None:
         "transfer",
         "shell",
         "operator_install",
+        "timeline",
     }
     assert reasons["scale_resource"]() == refused
     assert write_calls == ["scale_resource"]
@@ -523,6 +525,7 @@ def test_composed_action_reasons_only_cover_owned_actions() -> None:
         transfer=lambda: None,
         shell=lambda: None,
         operator_install=lambda: None,
+        timeline=lambda: None,
     )
     assert "open_action_palette" not in reasons
     assert "toggle_agent" not in reasons
@@ -752,7 +755,7 @@ def test_no_owner_silently_overwrites_another_in_the_action_map() -> None:
         "workspace": _WORKSPACE_REASON_ACTIONS,
     }
     declared = [action for actions in owners.values() for action in actions]
-    declared += ["port_forward", "transfer", "shell", "operator_install"]
+    declared += ["port_forward", "transfer", "shell", "operator_install", "timeline"]
     assert len(declared) == len(set(declared))
     reasons = compose_action_reasons(
         writes=lambda _action: None,
@@ -764,6 +767,7 @@ def test_no_owner_silently_overwrites_another_in_the_action_map() -> None:
         transfer=lambda: None,
         shell=lambda: None,
         operator_install=lambda: None,
+        timeline=lambda: None,
     )
     assert set(reasons) == set(declared)
     assert len(reasons) == len(declared)
@@ -783,6 +787,7 @@ def test_every_owned_action_is_really_a_bound_action() -> None:
         transfer=lambda: None,
         shell=lambda: None,
         operator_install=lambda: None,
+        timeline=lambda: None,
     )
     assert set(reasons) <= _bound_actions()
 
