@@ -111,6 +111,11 @@ class ActionPaletteScreen(ModalScreen[str | None]):
     when there is nothing selectable to activate. The caller — not this
     screen — re-resolves that id against live entries and dispatches it;
     this screen never invokes an action or command itself.
+
+    Every navigation key below is this screen's own action over *all* the
+    rendered rows rather than `OptionList`'s enabled-only navigation (see
+    `_highlight`): a refused row is browsable, so the owner's reason on it
+    can be read, and never invocable.
     """
 
     BINDINGS: ClassVar[list[Binding | tuple[str, str] | tuple[str, str, str]]] = [
@@ -285,32 +290,75 @@ class ActionPaletteScreen(ModalScreen[str | None]):
         self.dismiss(None)
 
     def action_move(self, direction: int) -> None:
+        """Move the highlight one row, whether or not that row can run."""
         options = self.query_one(OptionList)
-        if direction > 0:
-            options.action_cursor_down()
-        else:
-            options.action_cursor_up()
-        self._reveal_highlighted(options)
+        count = options.option_count
+        if not count:
+            return
+        current = options.highlighted
+        self._highlight(options, 0 if current is None else (current + direction) % count)
 
     def action_page(self, direction: int) -> None:
+        """Move the highlight a bounded page, in whole rows."""
         options = self.query_one(OptionList)
-        if direction > 0:
-            # Textual's own `action_page_down`/`action_page_up` have no
-            # return-type annotation, so mypy --strict flags calling them
-            # as an untyped call; this is a gap in Textual's public API,
-            # not ours, and there is no typed alternative to reach the same
-            # page-navigation behavior other widgets get from these keys.
-            options.action_page_down()  # type: ignore[no-untyped-call]
-        else:
-            options.action_page_up()  # type: ignore[no-untyped-call]
-        self._reveal_highlighted(options)
+        if not options.option_count:
+            return
+        current = options.highlighted or 0
+        self._highlight(options, current + direction * self._page_rows(options))
 
     def action_edge(self, direction: int) -> None:
+        """Move the highlight to the last row, or back to the first one."""
         options = self.query_one(OptionList)
-        if direction > 0:
-            options.action_last()
-        else:
-            options.action_first()
+        count = options.option_count
+        if not count:
+            return
+        self._highlight(options, count - 1 if direction > 0 else 0)
+
+    def _page_rows(self, options: OptionList) -> int:
+        """How many rows one page key moves the highlight.
+
+        Counted in rows rather than lines, because the highlight is a row:
+        the viewport's height divided by what a row costs on average right
+        now (the list's own virtual height over its option count, both
+        public). Bounded on both sides — at least one row, so a page always
+        moves, and never more rows than the viewport has lines, so a page
+        cannot jump a screenful of content the user never saw. The average
+        is re-read per press because it changes with the query and with
+        every re-wrap: at 80 columns a refused helm row is three lines, at
+        36 it is five.
+        """
+        rows = options.option_count
+        if rows <= 0:
+            return 1
+        average = max(1, options.virtual_size.height // rows)
+        return max(1, options.scrollable_content_region.height // average)
+
+    def _highlight(self, options: OptionList, target: int) -> None:
+        """Highlight row `target` (clamped to the list) and reveal it.
+
+        The palette does its own index arithmetic — and this is the one
+        place that commits it — because Textual's `OptionList` navigation
+        actions move between *enabled* options only: `find_next_enabled`
+        and friends step over every disabled row, and answer `None` when
+        none is enabled at all. A palette whose refused rows are exactly
+        the ones the user needs to *read* cannot navigate that way. Four
+        refused helm rows outgrow the viewport at both supported terminals,
+        so with skip-disabled navigation the last of them — and the owner's
+        reason on it — could not be composited by any keystroke.
+
+        Assigning `highlighted` directly is still public API and still
+        validated (`OptionList` clamps it to the list); the clamp here is
+        the palette's own, so a page past either end lands on that end
+        rather than being rejected. `Option.disabled` stays true throughout
+        — this makes a row browsable, never invocable, and `_activate`
+        remains gated on the entry's own availability.
+
+        The reveal has to be explicit: `OptionList` scrolls from its
+        `highlighted` watcher only when the newly highlighted option is
+        enabled, so a disabled row would otherwise be highlighted off
+        screen.
+        """
+        options.highlighted = max(0, min(options.option_count - 1, target))
         self._reveal_highlighted(options)
 
     def _reveal_highlighted(self, options: OptionList) -> None:
