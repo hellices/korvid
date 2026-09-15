@@ -330,3 +330,71 @@ async def test_palette_binding_is_remappable() -> None:
             lambda: isinstance(app.screen, ActionPaletteScreen),
             label="palette opens on ctrl+j",
         )
+
+
+async def test_escape_closes_a_remapped_palette_and_the_open_key_cannot_stack_one() -> None:
+    """Escape is the documented universal close, remap or not (issue #388).
+
+    Korvid's modals all close on Escape and the palette says so on its own
+    hint line, so a remapped open key does not need to become a second,
+    dynamically-bound close key - and a screen binding that tracked the
+    config would be one more priority key resolved against whatever the
+    user chose. What the remapped key must not do is *stack*: it stays a
+    palette open, and the surface guard refuses an open over an open modal,
+    so pressing it again leaves exactly one palette on the stack.
+    """
+    app = make_app([_pod("web")], config=_config({"open_action_palette": "ctrl+j"}))
+    async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 1, label="pod loaded")
+        table.focus()
+        await pilot.press("ctrl+j")
+        await until(
+            pilot,
+            lambda: isinstance(app.screen, ActionPaletteScreen),
+            label="palette opens on ctrl+j",
+        )
+        await pilot.press("ctrl+j")
+        await pilot.pause()
+        assert len([s for s in app.screen_stack if isinstance(s, ActionPaletteScreen)]) == 1
+        await pilot.press("escape")
+        await until(
+            pilot,
+            lambda: app.screen is app.screen_stack[0],
+            label="escape closes the remapped palette",
+        )
+        assert not any(isinstance(s, ActionPaletteScreen) for s in app.screen_stack)
+        assert app.focused is table
+
+
+def test_keybindings_doc_documents_the_action_palette_key() -> None:
+    """The palette is only discoverable if the key is written down.
+
+    The documented key is derived from the shipped binding, so a future
+    default change fails here instead of leaving the page quietly wrong,
+    and the two facts that make the surface honest have to be on the page:
+    an action that does not apply stays searchable *with its reason*, and
+    the key itself is remappable like any other.
+    """
+    defaults = _default_keys("open_action_palette")
+    assert defaults == ("ctrl+p",), "update docs/keybindings.md with the new default key"
+    doc = Path(__file__).parents[2].joinpath("docs", "keybindings.md").read_text()
+    flat = " ".join(doc.split())
+    assert "`Ctrl-P`" in doc, "docs/keybindings.md must document the Action Palette key"
+    row = [line for line in doc.splitlines() if line.startswith("|") and "`Ctrl-P`" in line]
+    assert len(row) == 1, "the Action Palette needs exactly one key-table row"
+    assert re.search(r"search|palette", row[0], re.I), (
+        "the Ctrl-P row must say the key searches actions"
+    )
+    assert re.search(r"unavailable|not apply|does not apply", flat, re.I), (
+        "docs/keybindings.md must explain that unavailable actions stay searchable"
+    )
+    assert re.search(r"reason", flat, re.I), (
+        "docs/keybindings.md must say an unavailable action shows why"
+    )
+    assert re.search(r"`Esc`[^.]*close", flat, re.I), (
+        "docs/keybindings.md must document Esc as the palette's close key"
+    )
+    assert re.search(r"`open_action_palette`", flat), (
+        "docs/keybindings.md must name the remappable action id for the palette"
+    )

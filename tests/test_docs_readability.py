@@ -841,6 +841,55 @@ def test_tui_states_the_multi_pod_log_stream_cap() -> None:
     assert "reconnect automatically" in flat
 
 
+def test_tui_presents_the_three_discovery_surfaces_as_complementary() -> None:
+    """Issue #388: `:`, `?` and `Ctrl-P` answer three different questions.
+
+    A reader who already knows `:` and `?` needs to be told why a third
+    key exists, or `Ctrl-P` reads as a duplicate command bar and nobody
+    presses it. The page has to separate them by the question each one
+    answers - type a destination, see every effective key, search by
+    intent - and say that the palette runs the app's existing routes
+    rather than a parallel one.
+    """
+    from korvid.ui.app_bindings import APP_BINDINGS
+
+    palette_keys = {
+        binding.key for binding in APP_BINDINGS if binding.action == "open_action_palette"
+    }
+    assert palette_keys == {"ctrl+p"}, "update tui.md with the new Action Palette default key"
+
+    source = _source("tui.md")
+    flat = " ".join(source.split())
+    assert "`Ctrl-P`" in flat, "tui.md must introduce the Action Palette key"
+    for key in ("`:`", "`?`", "`Ctrl-P`"):
+        assert key in flat, f"tui.md must present {key} as one of the discovery surfaces"
+    assert re.search(r"`Ctrl-P`[^.]*(search|intent)", flat, re.I), (
+        "tui.md must say Ctrl-P searches actions by intent"
+    )
+    assert re.search(r"`Ctrl-P`.{0,400}(same|existing) (route|key|approval)", flat, re.I), (
+        "tui.md must say the palette runs the routes the keys already run"
+    )
+    assert re.search(r"`\?`[^.]*(every|complete|effective)", flat, re.I), (
+        "tui.md must keep `?` as the exhaustive effective-key reference"
+    )
+
+
+def test_release_note_promises_the_palette_without_weakening_the_approval_rule() -> None:
+    """The note that announces a new way to *reach* a write must say, in the
+    same breath, that it does not change how a write is approved."""
+    flat = " ".join(_source("release-notes/unreleased.md").split())
+    assert "`Ctrl-P`" in flat, "the unreleased notes must announce the Action Palette"
+    assert re.search(r"remapped key|effective key", flat, re.I), (
+        "the note must say results show the effective (remapped) key"
+    )
+    assert re.search(r"does not apply|unavailable", flat, re.I), (
+        "the note must say an action that does not apply is explained, not hidden"
+    )
+    assert re.search(r"fresh confirmation|fresh user keystroke|approval flow", flat, re.I), (
+        "the note must state that a write still needs its own fresh approval"
+    )
+
+
 def test_agent_guide_tells_a_self_hosted_operator_how_to_diagnose_a_refused_stream() -> None:
     """Issue #336 review: the refusal needs an operator-facing recovery.
 

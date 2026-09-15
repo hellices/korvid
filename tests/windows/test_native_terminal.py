@@ -246,6 +246,55 @@ def test_filter_input_waits_for_focus_before_sending_text() -> None:
     ]
 
 
+@pytest.mark.parametrize(
+    ("screen", "focused", "seen_before", "expected"),
+    [
+        ("palette", "input", False, "palette-open"),
+        ("palette", None, False, None),
+        ("base", None, True, None),
+        ("base", "table", True, "palette-closed"),
+        ("base", "table", False, None),
+    ],
+)
+def test_palette_phases_are_witnessed_only_once_the_keyboard_moved(
+    screen: str, focused: str | None, seen_before: bool, expected: str | None
+) -> None:
+    """The ConPTY phases are gated on focus, not just on the screen class.
+
+    This runs everywhere, so a regression in the witness itself fails on
+    every platform instead of only in the Windows job: an open that is
+    recorded before the search `Input` has the keyboard, or a close
+    recorded before the table gets it back, would freeze a half-finished
+    transition into a phase that is written exactly once.
+    """
+    from textual.screen import Screen
+    from textual.widgets import Input
+
+    from korvid.ui.widgets.action_palette import ActionPaletteScreen
+    from korvid.ui.widgets.resource_table import ResourceTable
+
+    screens = {"palette": ActionPaletteScreen(()), "base": Screen()}
+    widgets: dict[str | None, Any] = {"input": Input(), "table": ResourceTable(), None: None}
+    emitted: list[tuple[str, dict[str, Any]]] = []
+
+    class _Probe:
+        def __init__(self) -> None:
+            self.screen = screens[screen]
+            self.focused = widgets[focused]
+            self._palette_seen = seen_before
+
+        def _emit_once(self, name: str, payload: dict[str, Any]) -> None:
+            emitted.append((name, payload))
+
+    probe = _Probe()
+    state: dict[str, Any] = {"screen": type(probe.screen).__qualname__}
+
+    native_app._ObservedKorvidApp._observe_palette(cast(Any, probe), state)
+
+    assert [name for name, _ in emitted] == ([] if expected is None else [expected])
+    assert probe._palette_seen is (seen_before or expected == "palette-open")
+
+
 def test_run_app_instance_returns_clean_textual_exit_code() -> None:
     app = _RunResultApp(return_code=0)
     witnessed: list[int] = []
@@ -620,6 +669,8 @@ def test_native_cleanup_checks_ownership_not_process_wide_totals(
     }
     overrides: dict[str, dict[str, Any]] = {
         "help-open": {"body": "korvid"},
+        "palette-open": {"screen": "ActionPaletteScreen", "focused": "Input"},
+        "palette-closed": {"screen": "Screen", "focused": "ResourceTable"},
         "filter-applied": {
             "filter": "api",
             "filter_focused": False,
@@ -856,6 +907,21 @@ def test_korvid_operates_through_native_windows_conpty(tmp_path: Path) -> None:
         assert "korvid" in str(help_open["body"]).casefold(), session.diagnostics()
         session.send(b"?")
         _phase(witnesses, "help-closed", session, deadline)
+
+        # Ctrl-P over a real ConPTY: the raw DLE byte, korvid's own Action
+        # Palette on top of the workspace, and Escape handing the keyboard
+        # back to the table it was taken from (issue #388).
+        session.send(b"\x10")
+        palette = _phase(witnesses, "palette-open", session, deadline)
+        assert palette["screen"] == "ActionPaletteScreen", session.diagnostics()
+        assert palette["focused"] == "Input", session.diagnostics()
+        assert palette["rows"] == 2, session.diagnostics()
+        session.send(b"\x1b")
+        closed = _phase(witnesses, "palette-closed", session, deadline)
+        assert closed["screen"] != "ActionPaletteScreen", session.diagnostics()
+        assert closed["focused"] == "ResourceTable", session.diagnostics()
+        assert closed["rows"] == 2, session.diagnostics()
+        assert closed["filter"] == "", session.diagnostics()
 
         _send_filter_pattern(
             session.send,

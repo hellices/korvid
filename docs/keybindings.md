@@ -10,6 +10,7 @@ Korvid shows only the keys that act on the current view. Press `?` for the compl
 |---|---|
 | `:` | Open the command bar |
 | `:pulse` / `:problems` | Inspect [current problems, recent warnings, and coverage](pulse.md) |
+| `Ctrl-P` | Search every action and command by intent |
 | `?` | Show the effective keys for every view |
 | `~` | Expand or collapse the top-bar legend |
 | `/` | Filter a table or search the log pane |
@@ -24,6 +25,14 @@ Korvid shows only the keys that act on the current view. Press `?` for the compl
 | `Ctrl-W v/w/q` | Split, focus, or close a workspace pane |
 | `Ctrl-A` / `Ctrl-X` | Toggle the Agent / stop its current turn |
 | `q` | Quit |
+
+`Ctrl-P` opens the Action Palette: type what you want to do — `scale`, `logs`,
+`context` — and korvid ranks every app action and `:` command against it,
+showing the key each one currently answers to, remaps included. An action that
+does not apply to the current view stays searchable and shows the reason
+instead of vanishing, so the palette also answers "why did that key do
+nothing?". `Esc` closes it. Selecting a write action opens the same approval
+dialog the key opens, which still needs its own fresh keystroke.
 
 ## Act in context
 
@@ -45,4 +54,4 @@ keybindings:
   sort_by_age: z
 ```
 
-Unknown, duplicate, or shadowing remaps warn and are skipped. Keys handled by drill-down, closing, and dialogs are not remappable. The approval dialogs' confirm keys are **not remappable**: every write still requires the fixed fresh keystroke. Action names come from the app itself; an unrecognised name is skipped at startup with a warning that lists every valid action name. Press `?` for the complete effective set.
+Unknown, duplicate, or shadowing remaps warn and are skipped. Keys handled by drill-down, closing, and dialogs are not remappable. The approval dialogs' confirm keys are **not remappable**: every write still requires the fixed fresh keystroke. The palette's own key moves like any other, under the action name `open_action_palette`; `Esc` closes the palette whichever key opened it. Action names come from the app itself; an unrecognised name is skipped at startup with a warning that lists every valid action name. Press `?` for the complete effective set.

@@ -10,6 +10,7 @@ action/command routes exactly once.
 
 from __future__ import annotations
 
+import ast
 import asyncio
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -22,6 +23,7 @@ from textual.widgets import Input, OptionList
 from korvid.core.config import KorvidConfig
 from korvid.core.store import ResourceStore, Summary
 from korvid.core.watch import WatchManager
+from korvid.ui import action_palette as palette_domain
 from korvid.ui.action_availability import (
     AGENT_UNAVAILABLE,
     ActionAvailability,
@@ -30,8 +32,9 @@ from korvid.ui.action_availability import (
 )
 from korvid.ui.action_palette import AppActionInvocation, PaletteEntry
 from korvid.ui.app import KorvidApp
+from korvid.ui.widgets import action_palette as palette_modal
 from korvid.ui.widgets.action_palette import ActionPaletteScreen
-from korvid.ui.widgets.confirm_screen import ConfirmScreen
+from korvid.ui.widgets.confirm_screen import ConfirmScreen, ReplicasPrompt
 from korvid.ui.widgets.describe_screen import DescribeScreen
 from korvid.ui.widgets.help_screen import HelpScreen
 from korvid.ui.widgets.log_pane import LogPane
@@ -40,10 +43,12 @@ from korvid.ui.widgets.resource_table import ResourceTable
 from tests.app_factory import build_test_app
 
 from .agent_session_fakes import FakeSession
+from .test_adaptive_footer import _rows_listed
+from .test_adaptive_footer import make_app as make_navigation_app
 from .test_app import _pod, make_app
 from .test_integration_controller import FakeMCP
 from .test_telepresence import FakeTelepresence
-from .test_write_ops import Recorder
+from .test_write_ops import Recorder, _to_view
 from .test_write_ops import make_app as make_write_app
 from .waits import until
 
@@ -250,6 +255,51 @@ async def test_ctrl_p_over_an_approval_dialog_changes_nothing() -> None:
         assert app._actions.binding_enabled("open_action_palette") is False
 
 
+async def test_ctrl_p_cannot_cover_an_approval_the_real_write_path_opened(
+    tmp_path: Path,
+) -> None:
+    """The same guard against a dialog korvid itself raised.
+
+    The test above pushes a `ConfirmScreen` directly, which proves the
+    policy but not the wiring around a live write. Here `Ctrl-D` runs the
+    production delete flow: dry-run, preview, approval. `Ctrl-P` while that
+    dialog waits must leave the screen, the focus and the pending write
+    exactly as they were - the keystroke that could dismiss or re-target an
+    approval is the one that must never reach it (security invariant).
+    """
+    audit_path = tmp_path / "audit.jsonl"
+    recorder = Recorder()
+    app = make_write_app(recorder, audit_path)
+    async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count > 0, label="pods loaded")
+        await pilot.press("ctrl+d")
+        await until(
+            pilot,
+            lambda: isinstance(app.screen, ConfirmScreen),
+            label="delete confirmation open",
+        )
+        screen = app.screen
+        focused = app.focused
+        await pilot.press("ctrl+p")
+        await pilot.pause()
+        assert app.screen is screen
+        assert app.focused is focused
+        assert not any(isinstance(item, ActionPaletteScreen) for item in app.screen_stack)
+        assert app._actions.binding_enabled("open_action_palette") is False
+        # The dialog is still the only thing that can complete this write.
+        assert recorder.calls == []
+        assert not audit_path.exists()
+        await pilot.press("escape")
+        await until(
+            pilot,
+            lambda: app.screen is app.screen_stack[0],
+            label="approval dismissed",
+        )
+        assert recorder.calls == []
+        assert not audit_path.exists()
+
+
 # ---------------------------------------------------------------------------
 # Command rows answer to their own owners' capabilities
 # ---------------------------------------------------------------------------
@@ -349,6 +399,40 @@ async def test_the_agent_row_explains_the_capability_not_the_router_fallback() -
         assert not any(n.message == AGENT_UNAVAILABLE.message for n in app._notifications)
 
 
+@pytest.mark.parametrize(
+    ("command", "entry_id"), [("ai", "command:ai"), ("model", "command:model")]
+)
+async def test_the_palette_refuses_every_command_the_real_router_cannot_run(
+    command: str, entry_id: str
+) -> None:
+    """Different sentences, one verdict: neither agent command can run.
+
+    The test above pins that the two *wordings* are allowed to differ. What
+    must never differ is the answer underneath them: if typing `:ai` or
+    `:model` only earns a refusal from the real `CommandRouter` - because
+    no agent owner claimed the command in this composition - then the
+    palette must not offer that row as runnable. An enabled row would
+    promise a route the app does not have.
+    """
+    app = _app_without_agent()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("colon")
+        for character in command:
+            await pilot.press(character)
+        await pilot.press("enter")
+        await until(
+            pilot,
+            lambda: any(
+                f"Unknown resource or command: {command}" in n.message for n in app._notifications
+            ),
+            label=f":{command} refused by the router",
+        )
+        row = _row(app, entry_id)
+        assert row.availability.invokable is False
+        assert row.availability.reason == AGENT_UNAVAILABLE
+
+
 # ---------------------------------------------------------------------------
 # Shutdown
 # ---------------------------------------------------------------------------
@@ -408,9 +492,15 @@ async def test_palette_command_posts_the_typed_pulse_route_once() -> None:
 async def test_palette_enter_never_reaches_an_approval_dialog(tmp_path: Path) -> None:
     """The Enter that runs a palette entry must not also answer the approval
     dialog that entry opens: the palette consumes the keystroke, and the
-    dialog is confirmed only by a fresh user keystroke (security invariant)."""
+    dialog is confirmed only by a fresh user keystroke (security invariant).
+
+    The audit file is the second witness: korvid's audit is fail-closed and
+    written around the write itself, so a file that never appears is proof
+    that no write was attempted, not merely that the recorder was missed.
+    """
+    audit_path = tmp_path / "audit.jsonl"
     recorder = Recorder()
-    app = make_write_app(recorder, tmp_path / "audit.jsonl")
+    app = make_write_app(recorder, audit_path)
     async with app.run_test() as pilot:
         await until(
             pilot,
@@ -426,6 +516,59 @@ async def test_palette_enter_never_reaches_an_approval_dialog(tmp_path: Path) ->
         await pilot.pause()
         assert isinstance(app.screen, ConfirmScreen)
         assert recorder.calls == []
+        assert not audit_path.exists()
+        # Walking away from the dialog is still the no-op it always was.
+        await pilot.press("escape")
+        await until(
+            pilot,
+            lambda: app.screen is app.screen_stack[0],
+            label="approval dismissed",
+        )
+        assert recorder.calls == []
+        assert not audit_path.exists()
+
+
+async def test_palette_enter_cannot_satisfy_a_write_parameter_prompt(tmp_path: Path) -> None:
+    """Scale asks for a count before it asks for approval, and `Enter` alone
+    submits that prompt - it is prefilled with the current replica count so
+    a deliberate Enter keeps it (see `ReplicasPrompt`). That makes it the
+    sharpest test of the same invariant as the approval dialog: if the
+    palette's selecting Enter leaked into the modal it opened, the prompt
+    would submit itself and the flow would already be at the confirmation,
+    one keystroke from a write nobody typed a number for.
+    """
+    audit_path = tmp_path / "audit.jsonl"
+    recorder = Recorder()
+    app = make_write_app(recorder, audit_path)
+    async with app.run_test() as pilot:
+        await until(
+            pilot,
+            lambda: app.query_one(ResourceTable).row_count > 0,
+            label="pods loaded",
+        )
+        await _to_view(pilot, "deployments")
+        await _select_palette_entry(pilot, "scale resource", "action:scale_resource")
+        await until(
+            pilot,
+            lambda: isinstance(app.screen, ReplicasPrompt),
+            label="replicas prompt open",
+        )
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, ReplicasPrompt)
+        # Still waiting for a number, not already past it.
+        assert screen.query_one(Input).value == "3"
+        assert not any(isinstance(item, ConfirmScreen) for item in app.screen_stack)
+        assert recorder.calls == []
+        assert not audit_path.exists()
+        await pilot.press("escape")
+        await until(
+            pilot,
+            lambda: app.screen is app.screen_stack[0],
+            label="replicas prompt dismissed",
+        )
+        assert recorder.calls == []
+        assert not audit_path.exists()
 
 
 # ---------------------------------------------------------------------------
@@ -490,6 +633,77 @@ async def test_an_entry_that_became_unavailable_reports_its_owner_reason(
             label="owner reason notified",
         )
         assert not isinstance(app.screen, HelpScreen)
+
+
+async def test_a_selection_is_rechecked_against_the_view_that_is_on_screen_now() -> None:
+    """The same re-resolution, driven by real state instead of a patch.
+
+    The palette is opened on the pods view, where `hint_details` applies;
+    the workspace then navigates to nodes while the modal is up. The entry
+    still exists after dismissal - so this is not the "disappeared" path -
+    but the view it belongs to is gone, and the answer the user sees is the
+    policy's own wording for that, with nothing dispatched.
+    """
+    app = make_navigation_app()
+    async with app.run_test() as pilot:
+        await _rows_listed(pilot, app)
+        palette = await _open_palette(pilot)
+        assert app._actions.availability("hint_details").invokable is True
+        await app._workspace_ctl.navigate("nodes", "default")
+        await until(pilot, lambda: app.current_kind == "nodes", label="nodes view active")
+        palette.dismiss("action:hint_details")
+        await until(
+            pilot,
+            lambda: any("Not available in this view" in n.message for n in app._notifications),
+            label="stale action refused",
+        )
+        assert app.screen is app.screen_stack[0]
+        assert {entry.id for entry in app._palette_entries()} >= {"action:hint_details"}
+
+
+# ---------------------------------------------------------------------------
+# Import boundary: the palette searches and routes, it never writes
+# ---------------------------------------------------------------------------
+
+
+def _imported_names(module: object) -> set[str]:
+    """Every module and symbol `module`'s source imports, by name."""
+    path = Path(str(getattr(module, "__file__", "")))
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module is not None:
+            names.add(node.module)
+            names.update(f"{node.module}.{alias.name}" for alias in node.names)
+            names.update(alias.name for alias in node.names)
+    return names
+
+
+def test_palette_modules_do_not_import_write_implementations() -> None:
+    """Neither palette module may reach a write, an audit or a dry-run.
+
+    The palette's only route to an action is the app's own
+    `run_action`/`parse_command` - the same route a key takes, with the
+    same approval and audit behind it. A direct import of a write
+    implementation here would be the first step of a second route that
+    skips it, so the boundary is asserted structurally rather than trusted.
+    """
+    forbidden_modules = {
+        "korvid.k8s.writes",
+        "korvid.core.audit",
+        "korvid.ui.write_coordinator",
+        "korvid.ui.resource_write_controller",
+    }
+    forbidden_symbols = {"WriteOps", "WriteCoordinator", "ResourceWriteController", "AuditLog"}
+    for module in (palette_domain, palette_modal):
+        imported = _imported_names(module)
+        assert not imported & forbidden_modules, f"{module.__name__} imports a write module"
+        assert not imported & forbidden_symbols, f"{module.__name__} imports a write symbol"
+        source = Path(str(module.__file__)).read_text(encoding="utf-8")
+        for symbol in sorted(forbidden_symbols | forbidden_modules):
+            assert symbol not in source, f"{module.__name__} names {symbol}"
 
 
 # ---------------------------------------------------------------------------

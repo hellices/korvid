@@ -42,6 +42,22 @@ use the qualified plural, such as `:deployments.apps` or
 Qualified views retain their resource identity through watches, describe, and
 drill-down.
 
+## Ask in the way you already think
+
+Three keys answer three different questions, so none of them replaces another:
+
+- `:` is for a destination you can name — `:deployments`, `:ns prod`,
+  `:ctx staging` — plus the built-in commands, with tab completion over
+  discovered aliases.
+- `?` is the exhaustive reference: every effective key for every view,
+  including your remaps.
+- `Ctrl-P` searches by intent. Type `scale`, `restart`, or `context` and
+  korvid ranks matching app actions and `:` commands, each row showing the key
+  it currently answers to. Selecting a row runs the same route that key runs,
+  so a write still opens the same approval dialog and still waits for a fresh
+  keystroke. An action that does not apply to the current view stays
+  searchable and shows why instead of disappearing. `Esc` closes the palette.
+
 ## Follow one signal
 
 Not sure which resource to inspect? The one-line [Pulse summary](pulse.md)

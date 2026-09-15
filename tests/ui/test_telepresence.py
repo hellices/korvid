@@ -306,6 +306,28 @@ async def test_cli_error_notification_renders_without_markup() -> None:
         assert note.markup is False
 
 
+async def test_missing_cli_refusal_is_notified_literally_not_as_markup() -> None:
+    """The refusal `:tp` shows and the reason the Action Palette greys the
+    row with are the same `UnavailableReason` object (issue #388). One
+    surface already renders it literally; this one must too, or the day
+    that shared sentence gains a bracketed install hint - the way the MCP
+    wording already has - `:tp` starts eating part of its own answer while
+    the palette keeps showing all of it.
+    """
+    app = make_app(telepresence=None)
+    async with app.run_test() as pilot:
+        reason = app.integrations.telepresence_unavailable_reason()
+        assert reason is not None
+        app.integrations.handle_telepresence_command()
+        await until(
+            pilot,
+            lambda: any(n.message == reason.message for n in app._notifications),
+            label="refusal surfaced",
+        )
+        note = next(n for n in app._notifications if n.message == reason.message)
+        assert note.markup is False
+
+
 async def test_hint_retries_after_a_managerless_start() -> None:
     """The startup cluster may lack a traffic-manager while a later :ctx
     target runs one: a no-manager probe must not consume the session's

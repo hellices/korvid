@@ -5,6 +5,14 @@ This page tracks changes merged to `main` that are not part of the
 The [current release milestone](https://github.com/hellices/korvid/milestone/6)
 tracks the current release scope.
 
+## Search actions by intent
+
+Press `Ctrl-P` to search korvid actions and built-in commands. Results show the
+effective remapped key and explain when an action does not apply to the current
+view. Selecting a write action still opens the same approval flow and requires a
+fresh confirmation keystroke. `Esc` closes the palette, and the key itself
+remaps under `open_action_palette`.
+
 ## Keys typed right after the command or filter bar closes
 
 Pressing `:` or `/`, submitting or cancelling it and immediately pressing the

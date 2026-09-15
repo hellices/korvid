@@ -280,7 +280,11 @@ class IntegrationController:
         never polls it in the background."""
         tp = self._telepresence
         if tp is None:
-            self._ui.notify(self._telepresence_missing().message, severity="warning")
+            # markup=False: this is the same shared `UnavailableReason` the
+            # Action Palette greys the `:tp` row with, and owner reason text
+            # is data - a bracketed install hint in it must reach the user
+            # whole rather than be parsed away as a style tag (issue #388).
+            self._ui.notify(self._telepresence_missing().message, severity="warning", markup=False)
             return
         self._ui.run_worker(self._open_panel(tp), exclusive=True, group="telepresence")
 
