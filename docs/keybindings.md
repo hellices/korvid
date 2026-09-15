@@ -10,7 +10,7 @@ Korvid shows only the keys that act on the current view. Press `?` for the compl
 |---|---|
 | `:` | Open the command bar |
 | `:pulse` / `:problems` | Inspect [current problems, recent warnings, and coverage](pulse.md) |
-| `Ctrl-P` | Search every action and command by intent |
+| `Ctrl-P` | Search app actions and built-in commands by intent |
 | `?` | Show the effective keys for every view |
 | `~` | Expand or collapse the top-bar legend |
 | `/` | Filter a table or search the log pane |
@@ -27,12 +27,15 @@ Korvid shows only the keys that act on the current view. Press `?` for the compl
 | `q` | Quit |
 
 `Ctrl-P` opens the Action Palette: type what you want to do — `scale`, `logs`,
-`context` — and korvid ranks every app action and `:` command against it,
-showing the key each one currently answers to, remaps included. An action that
-does not apply to the current view stays searchable and shows the reason
-instead of vanishing, so the palette also answers "why did that key do
-nothing?". `Esc` closes it. Selecting a write action opens the same approval
-dialog the key opens, which still needs its own fresh keystroke.
+`context` — and korvid ranks the app actions and the built-in `:` commands
+against it, showing the key each one currently answers to, remaps included.
+Resource views (`:pods`, `:deploy`) are not rows: they come from the live alias
+table, so `:` stays the way to open one. `:q` is not a row either — the bound
+Quit action is its single entry. An action that does not apply to the current
+view stays searchable and shows the reason instead of vanishing, so the palette
+also answers "why did that key do nothing?". `Esc` closes it. Selecting a write
+action opens the same approval dialog the key opens, which still needs its own
+fresh keystroke.
 
 ## Act in context
 

@@ -398,3 +398,31 @@ def test_keybindings_doc_documents_the_action_palette_key() -> None:
     assert re.search(r"`open_action_palette`", flat), (
         "docs/keybindings.md must name the remappable action id for the palette"
     )
+
+
+def test_keybindings_doc_describes_the_catalog_the_palette_actually_searches() -> None:
+    """`Ctrl-P` searches the bound app actions and the built-in `:` commands
+    that opt in - not the resource views (`:pods`, `:deploy`), which are
+    parsed from the live alias table and never enumerated, and not `:q`,
+    which opts out because the bound Quit action is already its single
+    entry. Promising "every ... `:` command" sends a reader looking for
+    rows the palette will never show, and implies a duplicate `:q`.
+    """
+    from korvid.ui.command import COMMANDS
+
+    omitted = [descriptor.aliases for descriptor in COMMANDS if descriptor.palette is None]
+    assert omitted == [("q", "quit")], "update docs/keybindings.md: the omissions changed"
+
+    doc = Path(__file__).parents[2].joinpath("docs", "keybindings.md").read_text()
+    paragraph = next(block for block in doc.split("\n\n") if "opens the Action Palette" in block)
+    flat = " ".join(paragraph.split())
+    assert "every app action and `:` command" not in flat, (
+        "docs/keybindings.md must not promise every `:` command"
+    )
+    assert "built-in `:` commands" in flat, (
+        "docs/keybindings.md must say the palette searches the built-in commands"
+    )
+    assert "`:pods`" in flat, "docs/keybindings.md must say resource views are not palette rows"
+    assert re.search(r"`:q`.{0,80}Quit", flat), (
+        "docs/keybindings.md must explain that `:q` is not a second Quit row"
+    )
