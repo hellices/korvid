@@ -23,6 +23,7 @@ from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.helm import HELM_RELEASES_META
 from korvid.k8s.olm import OPERATORS_GROUP
 from korvid.ui.action_availability import AvailabilityCode, UnavailableReason
+from korvid.ui.olm_ownership import owning_subscription
 from korvid.ui.view_state import ViewState
 from korvid.ui.write_coordinator import WriteCoordinator, gvr_label
 
@@ -148,7 +149,7 @@ class WriteAvailability:
             # with the coordinator's own NO_SELECTION wording (not a second
             # invented one), only so mypy can narrow `target` below.
             return UnavailableReason(AvailabilityCode.NO_SELECTION, "No resource selected")
-        return self._kind_reason(action, target[0])
+        return self._kind_reason(action, target)
 
     def _helm_delete_reason(self) -> UnavailableReason | None:
         """Ctrl-D's refusals on the helm release browser, where the key
@@ -167,13 +168,17 @@ class WriteAvailability:
         # before any helm process starts.
         return self.helm_release_identity_reason()
 
-    def _kind_reason(self, action: str, meta: ResourceMeta) -> UnavailableReason | None:
+    def _kind_reason(self, action: str, target: ResolvedTarget) -> UnavailableReason | None:
         """The "this kind does not take that write" refusals, with each
-        flow's own wording."""
-        if action == "delete_resource" and (meta.group, meta.plural) == (
-            OPERATORS_GROUP,
-            "subscriptions",
-        ):
+        flow's own wording.
+
+        Takes the whole resolved row, not only its `meta`: the CSV half of
+        the operator-uninstall redirect is keyed on the row's namespace and
+        name too, and re-reading the selection here would resolve it twice
+        per probe.
+        """
+        meta = target[0]
+        if action == "delete_resource" and self._redirects_to_operator_uninstall(target):
             return self._operator_uninstall_reason()
         if action == "rollout_restart" and (meta.group, meta.plural) not in RESTARTABLE:
             return UnavailableReason(
@@ -206,21 +211,46 @@ class WriteAvailability:
                 )
         return None
 
+    def _redirects_to_operator_uninstall(self, target: ResolvedTarget) -> bool:
+        """Whether Ctrl-D on the resolved row is the operator uninstall
+        rather than a delete (issue #117).
+
+        Two identities reach it. A Subscription always does: deleting it
+        alone would leave the operator running. A ClusterServiceVersion
+        does only when this session's store already holds the Subscription
+        that installed it - OLM would reinstall a CSV deleted on its own,
+        so `csv_uninstall_redirect` offers the uninstall then, and falls
+        through to the ordinary delete when it knows of no owner.
+
+        That condition is `olm_ownership.owning_subscription`, the very
+        function the redirect itself calls, given the same namespace and
+        name `delete()` hands it: a synchronous store read, no fetch and no
+        notification, which is what lets a probe ask it (#388 round 14).
+        Matched on the OLM identity and never on the bare plural, so a
+        same-plural CRD from another group keeps the generic delete's
+        answer - as its keypress keeps the generic delete.
+        """
+        meta, namespace, name, _ = target
+        identity = (meta.group, meta.plural)
+        if identity == (OPERATORS_GROUP, "subscriptions"):
+            return True
+        if identity != (OPERATORS_GROUP, "clusterserviceversions"):
+            return False
+        return owning_subscription(self.view, namespace, name) is not None
+
     def _operator_uninstall_reason(self) -> UnavailableReason | None:
-        """Why Ctrl-D on an OLM Subscription would refuse, or None.
+        """Why Ctrl-D on a row the operator uninstall claims would refuse.
 
-        Deleting a Subscription alone leaves the operator running, so the
-        key is redirected to `OperatorController.uninstall`, which fetches
-        the Subscription manifest before it can name the installed CSV or
-        describe anything - and refuses with exactly this sentence when no
-        manifest source is wired (#388 round 13).
+        The flow it is redirected to fetches the Subscription manifest
+        before it can name the installed CSV or describe anything - and
+        refuses with exactly this sentence when no manifest source is
+        wired (#388 round 13).
 
-        Scoped to that one identity on purpose. An InstallPlan or a
+        Scoped to the redirected identities on purpose. An InstallPlan or a
         PackageManifest is deleted through the generic path, which reads no
-        manifest; and a CSV's redirect only *offers* the operator uninstall
-        when the store already holds the owning Subscription, falling
-        through to that same generic delete when it does not - so reporting
-        this there would grey out a delete that works.
+        manifest, and so is a CSV whose owning Subscription this session has
+        not loaded - reporting this for either would grey out a delete that
+        works.
         """
         if self.manifest_source_available():
             return None
