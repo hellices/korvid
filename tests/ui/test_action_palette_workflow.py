@@ -514,6 +514,38 @@ async def test_the_proposals_row_is_enabled_with_a_proposal_waiting(tmp_path: Pa
         assert _row(app, "command:proposals").availability == ActionAvailability.enabled()
 
 
+async def test_deriving_the_proposals_row_never_expires_the_inbox(tmp_path: Path) -> None:
+    """Building the catalog is a probe, not a read (issue #388, round 7).
+
+    A stale inbox answers the row the same way an empty one does, but the
+    derivation must not be what *makes* it stale: the sweep that retires a
+    proposal notifies the store's subscribers and hands the app an expiry to
+    audit, and opening (or re-deriving) the palette must spend no I/O on an
+    inbox it is only describing. The proposal is still pending afterwards,
+    so `:proposals`, `:ctx` and shutdown settle and audit it as before.
+    """
+    clock = [0.0]
+    store = ProposalStore(ttl=10.0, clock=lambda: clock[0])
+    app = _proposals_app(store, tmp_path)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await _submit_proposal(app)
+        pending = store.pending()[0]
+        clock[0] = 100.0
+        before = len(app._notifications)
+
+        row = _row(app, "command:proposals")
+
+        assert row.availability.invocable is False
+        assert row.availability.reason == UnavailableReason(
+            AvailabilityCode.NO_SELECTION, "No pending write proposals", severity="information"
+        )
+        assert len(app._notifications) == before
+        # `expire_all` never sweeps, so it can only return a proposal the
+        # derivation left in its pending state.
+        assert [p.id for p in store.expire_all(reason="context switched")] == [pending.id]
+
+
 async def test_an_emptied_inbox_refuses_the_selected_proposals_row(tmp_path: Path) -> None:
     """The same re-resolution every row gets, driven by real state.
 

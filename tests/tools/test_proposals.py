@@ -17,6 +17,7 @@ import pytest
 from korvid.tools.proposals import (
     ProposalClosedError,
     ProposalLimitError,
+    ProposalState,
     ProposalStore,
     ProposalTooLargeError,
     WriteProposal,
@@ -434,3 +435,146 @@ def test_a_closed_store_refuses_new_submissions() -> None:
     with pytest.raises(ProposalClosedError, match="closed"):
         submit(store)
     assert store.pending() == []
+
+
+# --- the pure pending probe (review round 7) -------------------------------
+
+
+def snapshot(
+    store: ProposalStore,
+) -> tuple[list[str], dict[str, tuple[ProposalState, str]], dict[str, float]]:
+    """Every mutable record the store keeps, for a no-side-effect assertion.
+
+    The lazy sweep's two mutations — `pending → expired` and terminal
+    retention eviction — are invisible through the public API, because
+    every public read sweeps before it answers. A probe that promises to
+    change nothing is therefore pinned against the records directly.
+    """
+    return (
+        list(store._order),
+        dict(store._states),
+        dict(store._resolved_at),
+    )
+
+
+def test_has_pending_answers_an_empty_and_a_live_inbox() -> None:
+    store, _ = make_store()
+    assert store.has_pending() is False
+    submit(store)
+    assert store.has_pending() is True
+
+
+def test_has_pending_is_ttl_aware_without_expiring_anything() -> None:
+    """The probe answers the same question the sweeping read answers — an
+    inbox holding only TTL-expired proposals has nothing to review — but it
+    is the silent twin: performing the transition would fire subscribers
+    and the expiry hook (the app's audit I/O) merely from being asked."""
+    store, clock = make_store(ttl=10.0)
+    proposal = submit(store)
+    events: list[int] = []
+    expired: list[str] = []
+    store.subscribe(lambda: events.append(1))
+    store.set_on_expired(lambda p, reason: expired.append(p.id))
+    clock.now += 11.0
+
+    assert store.has_pending() is False
+    assert events == []
+    assert expired == []
+    # Still pending: `expire_all` reads the state machine without sweeping,
+    # so it can only return a proposal the probe left alone.
+    assert [p.id for p in store.expire_all(reason="context switched")] == [proposal.id]
+
+
+def test_has_pending_defers_the_expiry_instead_of_swallowing_it() -> None:
+    """Deferred, not suppressed: the sweep the probe declined still runs on
+    the next real read, so the proposal is audited as expired exactly once
+    — the lifecycle is unchanged, only its trigger is."""
+    store, clock = make_store(ttl=10.0)
+    proposal = submit(store)
+    expired: list[tuple[str, str]] = []
+    store.set_on_expired(lambda p, reason: expired.append((p.id, reason)))
+    clock.now += 11.0
+
+    assert store.has_pending() is False
+    assert expired == []
+    assert store.pending() == []
+    assert expired == [(proposal.id, "proposal expired before review")]
+
+
+def test_has_pending_sees_a_live_proposal_behind_an_expired_one() -> None:
+    """A mixed inbox is still worth reviewing, and finding that out must
+    not expire the stale half on the way past it."""
+    store, clock = make_store(ttl=10.0)
+    old = submit(store, name="old")  # expires at t+10
+    clock.now += 6.0
+    fresh = submit(store, name="fresh")  # expires at t+16
+    clock.now += 5.0  # old is expired, fresh is live
+    events: list[int] = []
+    expired: list[str] = []
+    store.subscribe(lambda: events.append(1))
+    store.set_on_expired(lambda p, reason: expired.append(p.id))
+
+    assert store.has_pending() is True
+    assert events == []
+    assert expired == []
+    assert [p.id for p in store.expire_all(reason="context switched")] == [old.id, fresh.id]
+
+
+def test_has_pending_changes_no_record_at_all() -> None:
+    """Neither of the sweep's mutations happens: no proposal is expired and
+    no retention-due terminal record is evicted."""
+    store, clock = make_store(ttl=10.0, terminal_retention=10.0)
+    submit(store, name="live")
+    denied = submit(store, name="denied")
+    store.resolve(denied.id, "denied", reason="no")
+    clock.now += 11.0  # the pending one is TTL-due, the denied one eviction-due
+    before = snapshot(store)
+
+    assert store.has_pending() is False
+    assert snapshot(store) == before
+
+
+def test_has_pending_still_reports_the_inbox_of_a_closed_store() -> None:
+    """`close()` refuses new submissions; it does not empty the inbox. Until
+    shutdown's own `expire_all` runs, a proposal is still reviewable and the
+    probe must keep saying so."""
+    store, _ = make_store()
+    submit(store)
+    store.close()
+    assert store.has_pending() is True
+
+
+def test_has_pending_is_safe_while_another_thread_claims_a_proposal() -> None:
+    """The MCP server's thread mutates the store while the app thread
+    probes it: the probe takes the same lock, so it never observes a record
+    mid-transition or raises on a changing collection."""
+    store, _ = make_store(max_pending_per_session=100, max_pending_total=100)
+    proposals = [submit(store, name=f"web-{i}") for i in range(4)]
+    wins: list[bool] = []
+    answers: list[bool] = []
+    errors: list[Exception] = []
+    barrier = threading.Barrier(8)
+
+    def claim(proposal: WriteProposal) -> None:
+        barrier.wait()
+        wins.append(store.begin_execution(proposal.id))
+
+    def probe() -> None:
+        barrier.wait()
+        try:
+            answers.append(store.has_pending())
+        except Exception as exc:  # pragma: no cover - the race under test
+            errors.append(exc)
+
+    threads = [threading.Thread(target=claim, args=(p,)) for p in proposals]
+    threads += [threading.Thread(target=probe) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert errors == []
+    assert len(answers) == 4
+    assert sum(wins) == 4
+    # Every proposal is claimed (approved), so nothing is pending any more.
+    assert store.has_pending() is False

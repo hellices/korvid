@@ -512,22 +512,31 @@ class ProposalController(AgentProposals):
         """Why `:proposals` can't run right now, or None (issue #388).
 
         The silent twin of the three refusals `open_review` notifies, asked
-        in that same order: the feature must be enabled, something must be
-        pending, and no review may already be open. `open_review` is built
-        on this method rather than repeating the checks, so the greyed-out
-        palette row and the typed command can never disagree - on the
-        wording or on the severity.
+        in that same order and decided by the same `_refusal` helper, so the
+        greyed-out palette row and the typed command can never disagree - on
+        the wording, the order or the severity.
 
-        Synchronous and silent: it notifies nothing and starts no review.
-        `ProposalStore.pending()` sweeps TTL-expired proposals as it reads,
-        which is the same local, in-memory sweep `status_label()` already
-        triggers on every status-bar repaint - not a probe-only effect, and
-        never network I/O.
+        Synchronous, silent *and* without lifecycle effect: it notifies
+        nothing, starts no review, and asks `ProposalStore.has_pending()`
+        rather than `pending()`. The latter's lazy TTL sweep is a real state
+        change - it retires stale proposals, wakes the store's subscribers
+        and hands this controller an expiry to audit - and a palette row
+        being drawn (or re-derived on every dismissal) must never be what
+        spends that I/O. The sweep still happens, on the next real read.
         """
         store = self._store
-        if store is None:
+        return self._refusal(has_pending=store is not None and store.has_pending())
+
+    def _refusal(self, *, has_pending: bool) -> UnavailableReason | None:
+        """The single decision behind both `:proposals` surfaces (#388).
+
+        Only the *reading* of the inbox differs between the palette probe
+        and the keypress; which refusal that reading earns is decided once,
+        here, so the two can never drift apart.
+        """
+        if self._store is None:
             return _PROPOSALS_DISABLED
-        if not store.pending():
+        if not has_pending:
             return _NO_PENDING_PROPOSALS
         # Never *replace* a live review worker (exclusive=True would cancel
         # it): once a proposal is claimed, cancellation could interrupt
@@ -540,15 +549,22 @@ class ProposalController(AgentProposals):
 
     def open_review(self) -> None:
         """`:proposals` — review pending external proposals one at a time."""
-        reason = self.unavailable_reason()
+        store = self._store
+        # A real read of the inbox, not a probe: `pending()` runs the lazy
+        # TTL sweep, so a proposal that went stale while nobody looked
+        # reaches its terminal state, repaints the indicator and is audited
+        # *before* this keypress decides anything. The palette's probe
+        # cannot do that (see `unavailable_reason`), which is why the two
+        # share the decision rather than the read.
+        has_pending = bool(store.pending()) if store is not None else False
+        reason = self._refusal(has_pending=has_pending)
         if reason is not None:
             # markup=False, like every other owner refusal that shows an
             # `UnavailableReason`: the palette renders this same text
             # literally, and the two paths must not differ (#388).
             self._ui.notify(reason.message, severity=reason.severity, markup=False)
             return
-        store = self._store
-        if store is None:  # pragma: no cover - `unavailable_reason` refused it
+        if store is None:  # pragma: no cover - `_refusal` refused it
             return
         self._tasks.start_review(self._review_proposals(store))
 

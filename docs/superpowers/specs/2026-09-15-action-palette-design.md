@@ -232,7 +232,12 @@ disappearing. A command whose own state decides the answer reports that state:
 `:proposals` asks `ProposalController` the three questions `open_review` asks —
 is the feature enabled (`mcp.write_proposals`), is anything pending, is a
 review already open — in that order and with those exact sentences and
-severities.
+severities. Only the *reading* differs: the probe asks
+`ProposalStore.has_pending()`, which is TTL-aware but changes nothing, while
+the keypress reads through `pending()` and so still settles (and audits) any
+proposal whose TTL ran out. Deriving a row must never be what expires a
+proposal — that is the "must not mutate state" rule above, applied to an owner
+whose state has a clock in it.
 
 Unavailable entries remain searchable by default. They sort after equally
 relevant available entries and render `Unavailable: <reason>`. They cannot be
