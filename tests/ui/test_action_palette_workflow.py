@@ -679,19 +679,84 @@ async def test_a_selection_is_rechecked_against_the_view_that_is_on_screen_now()
 # ---------------------------------------------------------------------------
 
 
-def _imported_names(module: object) -> set[str]:
-    """Every module and symbol `module`'s source imports, by name."""
-    path = Path(str(getattr(module, "__file__", "")))
-    tree = ast.parse(path.read_text(encoding="utf-8"))
+#: Modules a palette module must never import: the write path itself, the
+#: audit log behind it, the coordinator that owns the approval perimeter,
+#: the controller that composes the flows, and the probe built over them.
+_FORBIDDEN_MODULES = {
+    "korvid.k8s.writes",
+    "korvid.core.audit",
+    "korvid.ui.write_coordinator",
+    "korvid.ui.resource_write_controller",
+    "korvid.ui.write_availability",
+}
+_FORBIDDEN_SYMBOLS = {
+    "WriteOps",
+    "WriteCoordinator",
+    "ResourceWriteController",
+    "WriteAvailability",
+    "AuditLog",
+}
+
+
+def _imported_names(source: str, package: str) -> set[str]:
+    """Every module and symbol `source` imports, as absolute dotted names.
+
+    Relative imports are resolved against `package`, because
+    `from .resource_write_controller import ...` and
+    `from korvid.ui.resource_write_controller import ...` name the same
+    module: a boundary asserted only against the absolute spelling could be
+    re-entered through the shorter one. `from . import x` (no module) and
+    `from ..k8s.writes import x` (parent package) resolve the same way.
+    """
     names: set[str] = set()
-    for node in ast.walk(tree):
+    for node in ast.walk(ast.parse(source)):
         if isinstance(node, ast.Import):
             names.update(alias.name for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.module is not None:
-            names.add(node.module)
-            names.update(f"{node.module}.{alias.name}" for alias in node.names)
-            names.update(alias.name for alias in node.names)
+            continue
+        if not isinstance(node, ast.ImportFrom):
+            continue
+        if node.level:
+            anchor = package.rsplit(".", node.level - 1)[0] if node.level > 1 else package
+            base = f"{anchor}.{node.module}" if node.module else anchor
+        else:
+            base = node.module or ""
+        names.add(base)
+        names.update(f"{base}.{alias.name}" for alias in node.names)
+        names.update(alias.name for alias in node.names)
     return names
+
+
+@pytest.mark.parametrize(
+    ("source", "package", "expected"),
+    [
+        (
+            "from .resource_write_controller import ResourceWriteController\n",
+            "korvid.ui",
+            "korvid.ui.resource_write_controller",
+        ),
+        ("from . import write_coordinator\n", "korvid.ui", "korvid.ui.write_coordinator"),
+        (
+            "from ..resource_write_controller import RESTARTABLE\n",
+            "korvid.ui.widgets",
+            "korvid.ui.resource_write_controller",
+        ),
+        ("from ...core.audit import AuditLog\n", "korvid.ui.widgets", "korvid.core.audit"),
+        ("import korvid.k8s.writes\n", "korvid.ui", "korvid.k8s.writes"),
+        (
+            "from korvid.ui.write_availability import WriteAvailability\n",
+            "korvid.ui",
+            "korvid.ui.write_availability",
+        ),
+    ],
+)
+def test_the_import_scanner_resolves_every_spelling_of_a_forbidden_module(
+    source: str, package: str, expected: str
+) -> None:
+    """The boundary below is only as strong as this resolver: a sibling or
+    parent relative import must report the same absolute module an
+    equivalent absolute import would, so neither spelling can slip past."""
+    assert expected in _imported_names(source, package)
+    assert _imported_names(source, package) & _FORBIDDEN_MODULES
 
 
 def test_palette_modules_do_not_import_write_implementations() -> None:
@@ -703,19 +768,12 @@ def test_palette_modules_do_not_import_write_implementations() -> None:
     implementation here would be the first step of a second route that
     skips it, so the boundary is asserted structurally rather than trusted.
     """
-    forbidden_modules = {
-        "korvid.k8s.writes",
-        "korvid.core.audit",
-        "korvid.ui.write_coordinator",
-        "korvid.ui.resource_write_controller",
-    }
-    forbidden_symbols = {"WriteOps", "WriteCoordinator", "ResourceWriteController", "AuditLog"}
     for module in (palette_domain, palette_modal):
-        imported = _imported_names(module)
-        assert not imported & forbidden_modules, f"{module.__name__} imports a write module"
-        assert not imported & forbidden_symbols, f"{module.__name__} imports a write symbol"
         source = Path(str(module.__file__)).read_text(encoding="utf-8")
-        for symbol in sorted(forbidden_symbols | forbidden_modules):
+        imported = _imported_names(source, str(module.__package__))
+        assert not imported & _FORBIDDEN_MODULES, f"{module.__name__} imports a write module"
+        assert not imported & _FORBIDDEN_SYMBOLS, f"{module.__name__} imports a write symbol"
+        for symbol in sorted(_FORBIDDEN_SYMBOLS | _FORBIDDEN_MODULES):
             assert symbol not in source, f"{module.__name__} names {symbol}"
 
 
