@@ -440,14 +440,14 @@ def test_composed_action_reasons_ask_each_owner_about_its_own_actions() -> None:
     helm_calls: list[str] = []
     log_calls: list[str] = []
     inspect_calls: list[str] = []
-    relationship_calls: list[str] = []
+    workspace_calls: list[str] = []
     refused = UnavailableReason(AvailabilityCode.NO_SELECTION, "No resource selected")
     reasons = compose_action_reasons(
         writes=_recording_probe(write_calls, refused),
         helm=_recording_probe(helm_calls, None),
         logs=_recording_probe(log_calls, None),
         inspect=_recording_probe(inspect_calls, None),
-        relationships=_recording_probe(relationship_calls, None),
+        workspace=_recording_probe(workspace_calls, None),
         port_forward=lambda: None,
         transfer=lambda: None,
         shell=lambda: None,
@@ -474,6 +474,8 @@ def test_composed_action_reasons_ask_each_owner_about_its_own_actions() -> None:
         "log_search_next",
         "log_search_prev",
         "relationships",
+        "sort_by_cpu",
+        "sort_by_mem",
         "port_forward",
         "transfer",
         "shell",
@@ -488,7 +490,8 @@ def test_composed_action_reasons_ask_each_owner_about_its_own_actions() -> None:
     assert reasons["log_search_prev"]() is None
     assert inspect_calls == ["log_search_prev"]
     assert reasons["relationships"]() is None
-    assert relationship_calls == ["relationships"]
+    assert reasons["sort_by_cpu"]() is None
+    assert workspace_calls == ["relationships", "sort_by_cpu"]
 
 
 def test_composed_action_reasons_only_cover_owned_actions() -> None:
@@ -499,7 +502,7 @@ def test_composed_action_reasons_only_cover_owned_actions() -> None:
         helm=lambda _action: None,
         logs=lambda _action: None,
         inspect=lambda _action: None,
-        relationships=lambda _action: None,
+        workspace=lambda _action: None,
         port_forward=lambda: None,
         transfer=lambda: None,
         shell=lambda: None,

@@ -117,8 +117,10 @@ _INSPECT_REASON_ACTIONS: tuple[str, ...] = (
     "log_search_prev",
 )
 
-#: `g` — the one key `WorkspaceController` answers an invocation reason for.
-_RELATIONSHIP_REASON_ACTIONS: tuple[str, ...] = ("relationships",)
+#: The keys `WorkspaceController` answers an invocation reason for: `g`,
+#: plus the two metric sort keys, whose handler (`sort_by`) discards the
+#: press without even a warning on a view that has no CPU/MEM column.
+_WORKSPACE_REASON_ACTIONS: tuple[str, ...] = ("relationships", "sort_by_cpu", "sort_by_mem")
 
 
 def _per_action(
@@ -134,7 +136,7 @@ def compose_action_reasons(
     helm: Callable[[str], UnavailableReason | None],
     logs: Callable[[str], UnavailableReason | None],
     inspect: Callable[[str], UnavailableReason | None],
-    relationships: Callable[[str], UnavailableReason | None],
+    workspace: Callable[[str], UnavailableReason | None],
     port_forward: Callable[[], UnavailableReason | None],
     transfer: Callable[[], UnavailableReason | None],
     shell: Callable[[], UnavailableReason | None],
@@ -153,7 +155,8 @@ def compose_action_reasons(
         logs: `LogController.unavailable_reason`.
         inspect: `ResourceInspectController.unavailable_reason` — the read
             keys `d`, `h` and the `n`/`N` search step.
-        relationships: `WorkspaceController.unavailable_reason` — `g`.
+        workspace: `WorkspaceController.unavailable_reason` — `g` and
+            the two metric sort keys.
         port_forward: `ForwardController.unavailable_reason`.
         transfer: `TransferController.unavailable_reason`.
         shell: `ShellController.unavailable_reason`.
@@ -167,7 +170,7 @@ def compose_action_reasons(
         **_per_action(helm, _HELM_REASON_ACTIONS),
         **_per_action(logs, _LOG_REASON_ACTIONS),
         **_per_action(inspect, _INSPECT_REASON_ACTIONS),
-        **_per_action(relationships, _RELATIONSHIP_REASON_ACTIONS),
+        **_per_action(workspace, _WORKSPACE_REASON_ACTIONS),
         "port_forward": port_forward,
         "transfer": transfer,
         "shell": shell,

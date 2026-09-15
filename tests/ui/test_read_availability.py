@@ -11,10 +11,12 @@ from __future__ import annotations
 from korvid.k8s.discovery import ResourceMeta
 from korvid.ui.action_availability import CONTEXT_SWITCH_IN_PROGRESS, AvailabilityCode
 from korvid.ui.read_availability import (
+    METRIC_SORT_COLUMNS,
     SEARCH_ACTIONS,
     PaneSearch,
     describe_reason,
     hint_details_reason,
+    metric_sort_reason,
     relationships_reason,
     search_reason,
 )
@@ -121,3 +123,47 @@ def test_with_no_pane_open_only_next_is_refused() -> None:
     assert refused is not None
     assert refused.code is AvailabilityCode.PANE_CLOSED
     assert search_reason("log_search_prev", describe=_CLOSED, logs=_CLOSED) is None
+
+
+def test_the_metric_sort_actions_name_the_columns_the_keys_pass() -> None:
+    """`C` and `M` are `sort_by("cpu")`/`sort_by("mem")`; the probe has to
+    ask about the same two columns the app's handlers pass."""
+    assert METRIC_SORT_COLUMNS == {"sort_by_cpu": "cpu", "sort_by_mem": "mem"}
+
+
+def test_metric_sort_is_refused_on_a_view_without_those_columns() -> None:
+    """`WorkspaceController.sort_by` discards a CPU/MEM keypress on any
+    view but pods, silently - the palette has to say why instead."""
+    for column, label in (("cpu", "CPU"), ("mem", "MEM")):
+        reason = metric_sort_reason(column, kind="nodes", replaced=False)
+        assert reason is not None
+        assert reason.code is AvailabilityCode.UNSUPPORTED_RESOURCE
+        assert reason.message == f"{label} is not a column on this view"
+
+
+def test_metric_sort_is_refused_where_the_view_replaces_its_columns() -> None:
+    """A `replace: true` view hides AGE/CPU/MEM, so the same keypress
+    reorders rows nobody can see - the handler refuses that too."""
+    reason = metric_sort_reason("cpu", kind="pods", replaced=True)
+    assert reason is not None
+    assert reason.code is AvailabilityCode.UNSUPPORTED_RESOURCE
+    assert reason.message == "This view replaces the CPU column"
+
+
+def test_metric_sort_allows_the_pods_view_with_its_own_columns() -> None:
+    assert metric_sort_reason("cpu", kind="pods", replaced=False) is None
+    assert metric_sort_reason("mem", kind="pods", replaced=False) is None
+
+
+def test_metric_sort_reasons_carry_no_cluster_data() -> None:
+    """Row text on a 36-column terminal: the refusal names the column the
+    user pressed, never the view name, which is cluster data of unbounded
+    length and would push the reason out of the viewport."""
+    reasons = [
+        metric_sort_reason("cpu", kind="a" * 200, replaced=False),
+        metric_sort_reason("mem", kind="a" * 200, replaced=True),
+    ]
+    for reason in reasons:
+        assert reason is not None
+        assert "a" * 200 not in reason.message
+        assert len(reason.message) <= 40

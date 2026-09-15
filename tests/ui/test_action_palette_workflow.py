@@ -21,9 +21,10 @@ from textual.content import Content
 from textual.widget import Widget
 from textual.widgets import Input, OptionList
 
-from korvid.core.config import KorvidConfig
+from korvid.core.config import KorvidConfig, ViewConfig
 from korvid.core.store import ResourceStore, Summary
 from korvid.core.watch import WatchManager
+from korvid.k8s.columns import CustomColumn
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.logs import LogLine
 from korvid.k8s.models import GenericSummary, PodSummary
@@ -1236,3 +1237,73 @@ async def test_the_describe_key_still_notifies_what_the_probe_only_reported() ->
             lambda: any("No resource selected" in n.message for n in app._notifications),
             label="describe key notified",
         )
+
+
+# ---------------------------------------------------------------------------
+# The metric sort keys: `C` / `M` only sort where those columns exist
+# ---------------------------------------------------------------------------
+
+
+_METRIC_SORT_ROWS = ("action:sort_by_cpu", "action:sort_by_mem")
+
+
+async def test_the_metric_sort_rows_are_refused_off_the_pods_view() -> None:
+    """`C`/`M` call `sort_by("cpu"/"mem")`, which returns without touching
+    the order on any view but pods - no CPU/MEM column, no metrics feed.
+
+    The palette offered both rows as invocable there, so selecting one did
+    nothing and said nothing. The owner now answers why, silently: the
+    name/age keys and the sort picker are untouched, because they really
+    do sort that view.
+    """
+    app = make_navigation_app()
+    async with app.run_test() as pilot:
+        await _rows_listed(pilot, app)
+        await app._workspace_ctl.navigate("nodes", "default")
+        await until(pilot, lambda: app.current_kind == "nodes", label="nodes view active")
+        before = len(app._notifications)
+        for entry_id in _METRIC_SORT_ROWS:
+            reason = _entry_for(app, entry_id).availability.reason
+            assert reason is not None, entry_id
+            assert reason.message.endswith("is not a column on this view")
+        assert _entry_for(app, "action:sort_by_age").availability.invocable is True
+        assert _entry_for(app, "action:sort_picker").availability.invocable is True
+        assert len(app._notifications) == before
+
+
+async def test_the_metric_sort_rows_are_invocable_on_the_pods_view() -> None:
+    """Where the handler really sorts, the rows stay runnable."""
+    app = make_navigation_app()
+    async with app.run_test() as pilot:
+        await _rows_listed(pilot, app)
+        assert app.current_kind == "pods"
+        for entry_id in _METRIC_SORT_ROWS:
+            assert _entry_for(app, entry_id).availability.invocable is True, entry_id
+
+
+async def test_the_metric_sort_rows_follow_a_replace_view() -> None:
+    """`replace: true` hides AGE/CPU/MEM, and `sort_by` refuses to reorder
+    rows by a column nobody can see - even on pods. The row says so."""
+    view = ViewConfig(columns=(CustomColumn("TEAM", "label", "team"),), replace=True)
+    app = make_app([_pod("web")], config=KorvidConfig(namespace="default", views={"pods": view}))
+    async with app.run_test() as pilot:
+        await _loaded(pilot, app)
+        for entry_id in _METRIC_SORT_ROWS:
+            reason = _entry_for(app, entry_id).availability.reason
+            assert reason is not None, entry_id
+            assert reason.message.startswith("This view replaces the")
+
+
+async def test_the_refused_metric_sort_key_still_changes_nothing() -> None:
+    """The probe reports what the keypress does: pressing `C` off the pods
+    view leaves the order alone and stays silent, exactly as before."""
+    app = make_navigation_app()
+    async with app.run_test() as pilot:
+        await _rows_listed(pilot, app)
+        await app._workspace_ctl.navigate("nodes", "default")
+        await until(pilot, lambda: app.current_kind == "nodes", label="nodes view active")
+        before = len(app._notifications)
+        await pilot.press("C")
+        await pilot.pause()
+        assert "nodes" not in app._workspace.focused.sorts
+        assert len(app._notifications) == before
