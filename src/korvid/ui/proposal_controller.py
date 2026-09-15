@@ -542,7 +542,10 @@ class ProposalController(AgentProposals):
         """`:proposals` — review pending external proposals one at a time."""
         reason = self.unavailable_reason()
         if reason is not None:
-            self._ui.notify(reason.message, severity=reason.severity)
+            # markup=False, like every other owner refusal that shows an
+            # `UnavailableReason`: the palette renders this same text
+            # literally, and the two paths must not differ (#388).
+            self._ui.notify(reason.message, severity=reason.severity, markup=False)
             return
         store = self._store
         if store is None:  # pragma: no cover - `unavailable_reason` refused it

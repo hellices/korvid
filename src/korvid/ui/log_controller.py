@@ -835,7 +835,11 @@ class LogController:
             return
         lines = self._buffer.lines()
         if not lines:
-            self._ui.notify(_EMPTY_LOG_BUFFER.message, severity=_EMPTY_LOG_BUFFER.severity)
+            # markup=False: the palette greys the `Ctrl-S` row with this
+            # same reason and renders it literally (#388).
+            self._ui.notify(
+                _EMPTY_LOG_BUFFER.message, severity=_EMPTY_LOG_BUFFER.severity, markup=False
+            )
             return
         try:
             path = export_log_lines(lines, default_log_export_dir())
