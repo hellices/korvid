@@ -34,6 +34,7 @@ from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.writes import WriteOps
 from korvid.tools.proposals import ProposalStore, WriteProposal
+from korvid.ui.action_availability import AvailabilityCode, UnavailableReason
 from korvid.ui.agent_ui_controller import AgentProposals, WriteOpBuild
 from korvid.ui.proposal_controller import (
     ProposalController,
@@ -645,6 +646,64 @@ async def test_a_second_review_is_refused_while_one_is_open(env: Env) -> None:
     assert any("already open" in message for message in env.ui.messages())
     env.ui.answer(None)
     await env.tasks.finish()
+
+
+# ---------------------------------------------------------------------------
+# The palette probe: the same three refusals, in the same order, silently
+# ---------------------------------------------------------------------------
+
+
+async def test_the_probe_reports_the_disabled_feature_without_notifying(disabled: Env) -> None:
+    """`:proposals` with `mcp.write_proposals` off earns one refusal from
+    the keypress, so the palette must grey the row with that same sentence
+    - and say nothing while it builds the list (issue #388, round 6)."""
+    reason = disabled.controller.unavailable_reason()
+    assert reason == UnavailableReason(
+        AvailabilityCode.MISSING_CAPABILITY,
+        "External write proposals are disabled (set mcp.write_proposals: true)",
+    )
+    assert disabled.ui.messages() == []
+    disabled.controller.open_review()
+    assert reason is not None
+    assert disabled.ui.messages() == [reason.message]
+
+
+async def test_the_probe_reports_an_empty_inbox_without_notifying(env: Env) -> None:
+    """An enabled but empty inbox: the command notifies as information, so
+    the row's reason carries that severity rather than a warning."""
+    reason = env.controller.unavailable_reason()
+    assert reason == UnavailableReason(
+        AvailabilityCode.NO_SELECTION, "No pending write proposals", severity="information"
+    )
+    assert env.ui.messages() == []
+    env.controller.open_review()
+    assert reason is not None
+    assert env.ui.messages() == [reason.message]
+
+
+async def test_the_probe_reports_a_review_that_is_already_open(env: Env) -> None:
+    """A live review worker is the third refusal `open_review` makes, and
+    the probe must reach it in the same order: a store, then something
+    pending, then the one-at-a-time rule."""
+    await env.submit()
+    env.controller.open_review()
+    await env.dialog()
+    before = len(env.ui.messages())
+    reason = env.controller.unavailable_reason()
+    assert reason == UnavailableReason(
+        AvailabilityCode.PROTECTED_UI, "A proposal review is already open"
+    )
+    assert len(env.ui.messages()) == before
+    env.ui.answer(None)
+    await env.tasks.finish()
+
+
+async def test_the_probe_answers_yes_with_a_proposal_waiting(env: Env) -> None:
+    """Nothing refuses a pending inbox with no review open, so the row is
+    invocable - and the probe still starts no review of its own."""
+    await env.submit()
+    assert env.controller.unavailable_reason() is None
+    assert env.tasks.tasks == []
 
 
 # ---------------------------------------------------------------------------

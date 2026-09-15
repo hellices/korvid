@@ -1407,6 +1407,7 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
             agent_available=lambda: agent_ui.available,
             mcp=integrations.mcp_unavailable_reason,
             telepresence=integrations.telepresence_unavailable_reason,
+            proposals=proposals.unavailable_reason,
         ),
     )
     commands = CommandRouter(

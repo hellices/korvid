@@ -216,7 +216,11 @@ another modal would be unsafe.
 
 Commands have the same result type. Optional extras and executable-dependent
 commands are disabled with their install/capability reason rather than silently
-disappearing.
+disappearing. A command whose own state decides the answer reports that state:
+`:proposals` asks `ProposalController` the three questions `open_review` asks —
+is the feature enabled (`mcp.write_proposals`), is anything pending, is a
+review already open — in that order and with those exact sentences and
+severities.
 
 Unavailable entries remain searchable by default. They sort after equally
 relevant available entries and render `Unavailable: <reason>`. They cannot be

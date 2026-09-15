@@ -175,6 +175,7 @@ def compose_command_reasons(
     agent_available: Callable[[], bool],
     mcp: Callable[[], UnavailableReason | None],
     telepresence: Callable[[], UnavailableReason | None],
+    proposals: Callable[[], UnavailableReason | None],
 ) -> dict[str, Callable[[], UnavailableReason | None]]:
     """Build `ActionPolicy(reason_by_command=...)` from its owners.
 
@@ -188,6 +189,9 @@ def compose_command_reasons(
         agent_available: Whether an Agent is composed and usable now.
         mcp: `IntegrationController.mcp_unavailable_reason`.
         telepresence: `IntegrationController.telepresence_unavailable_reason`.
+        proposals: `ProposalController.unavailable_reason` — the inbox
+            `:proposals` reviews: the feature, then what is pending, then
+            whether a review is already open.
 
     Returns:
         The canonical command text -> reason-resolver map.
@@ -196,7 +200,13 @@ def compose_command_reasons(
     def agent_reason() -> UnavailableReason | None:
         return None if agent_available() else AGENT_UNAVAILABLE
 
-    return {"ai": agent_reason, "model": agent_reason, "mcp": mcp, "tp": telepresence}
+    return {
+        "ai": agent_reason,
+        "model": agent_reason,
+        "mcp": mcp,
+        "tp": telepresence,
+        "proposals": proposals,
+    }
 
 
 class ActionPolicy:

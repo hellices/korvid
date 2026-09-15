@@ -59,12 +59,37 @@ from korvid.tools.proposals import (
     ProposalTooLargeError,
     WriteProposal,
 )
+from korvid.ui.action_availability import AvailabilityCode, UnavailableReason
 from korvid.ui.agent_ui_controller import AgentProposals, WriteOpBuild
 from korvid.ui.ui_surface import UiSurface
 from korvid.ui.workspace_controller import ContextGuard
 from korvid.ui.write_coordinator import WriteCoordinator, gvr_label, write_locus
 
 logger = logging.getLogger(__name__)
+
+#: `:proposals`' three refusals, each the exact sentence `open_review`
+#: notifies and the exact reason the Action Palette greys its row with -
+#: one object per refusal, so the two surfaces cannot drift (issue #388).
+#: The feature itself is off (`mcp.write_proposals`), so nothing can be
+#: reviewed in this session at all.
+_PROPOSALS_DISABLED = UnavailableReason(
+    AvailabilityCode.MISSING_CAPABILITY,
+    "External write proposals are disabled (set mcp.write_proposals: true)",
+)
+
+#: The inbox is enabled and empty: there is nothing to put in front of the
+#: user. Information severity, because that is what the keypress uses -
+#: an empty inbox is the normal state, not a fault.
+_NO_PENDING_PROPOSALS = UnavailableReason(
+    AvailabilityCode.NO_SELECTION, "No pending write proposals", severity="information"
+)
+
+#: A review worker is still live. Protected UI, like every other "a modal
+#: already owns this flow" refusal: a second open would have to replace
+#: the worker, and cancelling it could interrupt a claimed execution.
+_REVIEW_ALREADY_OPEN = UnavailableReason(
+    AvailabilityCode.PROTECTED_UI, "A proposal review is already open"
+)
 
 #: Seconds a proposal-review dialog stays open before it counts as a
 #: dismissal — an unanswered dialog must never wedge the review loop. The
@@ -483,25 +508,44 @@ class ProposalController(AgentProposals):
     # The `:proposals` review loop
     # ------------------------------------------------------------------
 
-    def open_review(self) -> None:
-        """`:proposals` — review pending external proposals one at a time."""
+    def unavailable_reason(self) -> UnavailableReason | None:
+        """Why `:proposals` can't run right now, or None (issue #388).
+
+        The silent twin of the three refusals `open_review` notifies, asked
+        in that same order: the feature must be enabled, something must be
+        pending, and no review may already be open. `open_review` is built
+        on this method rather than repeating the checks, so the greyed-out
+        palette row and the typed command can never disagree - on the
+        wording or on the severity.
+
+        Synchronous and silent: it notifies nothing and starts no review.
+        `ProposalStore.pending()` sweeps TTL-expired proposals as it reads,
+        which is the same local, in-memory sweep `status_label()` already
+        triggers on every status-bar repaint - not a probe-only effect, and
+        never network I/O.
+        """
         store = self._store
         if store is None:
-            self._ui.notify(
-                "External write proposals are disabled (set mcp.write_proposals: true)",
-                severity="warning",
-            )
-            return
+            return _PROPOSALS_DISABLED
         if not store.pending():
-            self._ui.notify("No pending write proposals")
-            return
+            return _NO_PENDING_PROPOSALS
         # Never *replace* a live review worker (exclusive=True would cancel
         # it): once a proposal is claimed, cancellation could interrupt
         # `WriteCoordinator.run` mid-mutation and strand the record as
         # `approved` with an uncertain cluster outcome. Duplicate opens are
         # refused.
         if self._tasks.review_running():
-            self._ui.notify("A proposal review is already open", severity="warning")
+            return _REVIEW_ALREADY_OPEN
+        return None
+
+    def open_review(self) -> None:
+        """`:proposals` — review pending external proposals one at a time."""
+        reason = self.unavailable_reason()
+        if reason is not None:
+            self._ui.notify(reason.message, severity=reason.severity)
+            return
+        store = self._store
+        if store is None:  # pragma: no cover - `unavailable_reason` refused it
             return
         self._tasks.start_review(self._review_proposals(store))
 

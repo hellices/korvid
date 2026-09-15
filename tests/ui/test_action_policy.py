@@ -516,8 +516,9 @@ def test_composed_command_reasons_share_one_agent_answer() -> None:
         agent_available=lambda: False,
         mcp=lambda: None,
         telepresence=lambda: None,
+        proposals=lambda: None,
     )
-    assert set(reasons) == {"ai", "model", "mcp", "tp"}
+    assert set(reasons) == {"ai", "model", "mcp", "tp", "proposals"}
     assert reasons["ai"]() == AGENT_UNAVAILABLE
     assert reasons["model"]() == AGENT_UNAVAILABLE
 
@@ -530,6 +531,7 @@ def test_composed_command_reasons_follow_a_late_agent() -> None:
         agent_available=lambda: available,
         mcp=lambda: None,
         telepresence=lambda: None,
+        proposals=lambda: None,
     )
     assert reasons["ai"]() == AGENT_UNAVAILABLE
     available = True
@@ -538,13 +540,23 @@ def test_composed_command_reasons_follow_a_late_agent() -> None:
 
 
 def test_composed_command_reasons_route_the_integration_commands() -> None:
-    """`:mcp` and `:tp` keep their own owner's answer, unrelated to the agent."""
+    """`:mcp`, `:tp` and `:proposals` keep their own owner's answer,
+    unrelated to the agent - and each is read live, so an inbox that fills
+    or empties after the wiring ran changes the answer."""
     mcp_reason = UnavailableReason(AvailabilityCode.MISSING_CAPABILITY, "MCP is not installed")
     tp_reason = UnavailableReason(AvailabilityCode.MISSING_CAPABILITY, "telepresence not found")
+    proposals_reason = UnavailableReason(
+        AvailabilityCode.NO_SELECTION, "No pending write proposals", severity="information"
+    )
+    pending = False
     reasons = compose_command_reasons(
         agent_available=lambda: True,
         mcp=lambda: mcp_reason,
         telepresence=lambda: tp_reason,
+        proposals=lambda: None if pending else proposals_reason,
     )
     assert reasons["mcp"]() == mcp_reason
     assert reasons["tp"]() == tp_reason
+    assert reasons["proposals"]() == proposals_reason
+    pending = True
+    assert reasons["proposals"]() is None

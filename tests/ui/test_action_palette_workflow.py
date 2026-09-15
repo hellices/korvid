@@ -26,6 +26,7 @@ from korvid.core.store import ResourceStore, Summary
 from korvid.core.watch import WatchManager
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.models import GenericSummary, PodSummary
+from korvid.tools.proposals import ProposalStore
 from korvid.ui import action_palette as palette_domain
 from korvid.ui.action_availability import (
     AGENT_UNAVAILABLE,
@@ -50,6 +51,9 @@ from .test_adaptive_footer import _rows_listed
 from .test_adaptive_footer import make_app as make_navigation_app
 from .test_app import _pod, make_app
 from .test_integration_controller import FakeMCP
+from .test_proposals_ui import Recorder as ProposalRecorder
+from .test_proposals_ui import _submit as _submit_proposal
+from .test_proposals_ui import make_app as make_proposals_app
 from .test_telepresence import FakeTelepresence
 from .test_write_ops import Recorder, _to_view
 from .test_write_ops import make_app as make_write_app
@@ -453,6 +457,95 @@ async def test_the_palette_refuses_every_command_the_real_router_cannot_run(
         row = _row(app, entry_id)
         assert row.availability.invocable is False
         assert row.availability.reason == AGENT_UNAVAILABLE
+
+
+# ---------------------------------------------------------------------------
+# `:proposals` answers to its own inbox
+# ---------------------------------------------------------------------------
+
+
+def _proposals_app(store: ProposalStore | None, tmp_path: Path) -> KorvidApp:
+    """A real app whose external-proposal inbox is `store` (None = off)."""
+    return make_proposals_app(ProposalRecorder(), tmp_path / "palette-audit.jsonl", store)
+
+
+async def test_the_proposals_row_is_disabled_without_the_feature(tmp_path: Path) -> None:
+    """`mcp.write_proposals` off is the first thing `open_review` refuses,
+    so the row carries that same sentence - and deriving the catalog stays
+    a silent probe (issue #388, round 6)."""
+    app = _proposals_app(None, tmp_path)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        before = len(app._notifications)
+        row = _row(app, "command:proposals")
+        assert row.availability.invocable is False
+        assert row.availability.reason == UnavailableReason(
+            AvailabilityCode.MISSING_CAPABILITY,
+            "External write proposals are disabled (set mcp.write_proposals: true)",
+        )
+        assert len(app._notifications) == before
+
+
+async def test_the_proposals_row_reports_an_empty_inbox(tmp_path: Path) -> None:
+    """Enabled but empty is the second refusal, and it is an information
+    toast rather than a warning - the row keeps that severity."""
+    app = _proposals_app(ProposalStore(), tmp_path)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        before = len(app._notifications)
+        row = _row(app, "command:proposals")
+        assert row.availability.invocable is False
+        assert row.availability.reason == UnavailableReason(
+            AvailabilityCode.NO_SELECTION, "No pending write proposals", severity="information"
+        )
+        assert len(app._notifications) == before
+
+
+async def test_the_proposals_row_is_enabled_with_a_proposal_waiting(tmp_path: Path) -> None:
+    """A pending proposal and no open review: `:proposals` would open the
+    dialog, so the palette offers it."""
+    store = ProposalStore()
+    app = _proposals_app(store, tmp_path)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert "is pending user review" in await _submit_proposal(app)
+        assert store.pending() != []
+        assert _row(app, "command:proposals").availability == ActionAvailability.enabled()
+
+
+async def test_an_emptied_inbox_refuses_the_selected_proposals_row(tmp_path: Path) -> None:
+    """The same re-resolution every row gets, driven by real state.
+
+    The palette is opened while a proposal is pending, so the row is
+    offered; the proposal is then cancelled (an external MCP client can do
+    that at any moment) while the modal is up. On dismissal the app
+    re-derives the catalog, finds the owner now refusing, and says so with
+    the owner's own wording - opening no review.
+    """
+    store = ProposalStore()
+    app = _proposals_app(store, tmp_path)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await _submit_proposal(app)
+        palette = await _open_palette(pilot)
+        assert _row(app, "command:proposals").availability.invocable is True
+        pending = store.pending()[0]
+        assert store.cancel(pending.id, session_id="sess-1") is True
+        # Re-derived from the same live owner the dismissal will consult.
+        assert _row(app, "command:proposals").availability.invocable is False
+        palette.dismiss("command:proposals")
+        await until(
+            pilot,
+            lambda: any("No pending write proposals" in n.message for n in app._notifications),
+            label="the emptied inbox reported",
+        )
+        note = next(n for n in app._notifications if "No pending write proposals" in n.message)
+        # The palette's own refusal path, not a dispatched `:proposals`:
+        # owner reason text is notified literally (`markup=False`).
+        assert note.markup is False
+        assert note.severity == "information"
+        assert app.screen is app.screen_stack[0]
+        assert not isinstance(app.screen, ConfirmScreen)
 
 
 # ---------------------------------------------------------------------------
