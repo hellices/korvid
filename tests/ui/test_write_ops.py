@@ -42,6 +42,7 @@ from korvid.ui.app import KorvidApp
 from korvid.ui.resource_write_controller import _yaml_equal
 from korvid.ui.widgets.confirm_screen import ConfirmScreen, ReplicasPrompt
 from korvid.ui.widgets.resource_table import ResourceTable
+from korvid.ui.write_availability import WriteAvailability
 from tests.app_factory import build_test_app
 
 from .waits import until
@@ -2253,6 +2254,14 @@ async def test_probe_matrix_in_read_only_mode(tmp_path: Path) -> None:
         assert len(app._notifications) == before
 
 
+#: The bounded refusal the palette row carries while the node under the
+#: cursor is the one being drained. The node name and the instruction
+#: belong to the toast `_cordon_action` raises, not to a row that cannot
+#: scroll (#388 round 9) - and it is distinct from `_OTHER_DRAIN`, which
+#: is about a node the user is *not* looking at.
+_SELECTED_DRAIN = ("protected_ui", "This node is being drained")
+
+
 async def test_probe_matrix_while_a_drain_is_running(tmp_path: Path) -> None:
     """A running drain owns the node's schedulable state, so cordon and
     uncordon report it while `drain_node` itself stays invocable (pressing
@@ -2265,15 +2274,26 @@ async def test_probe_matrix_while_a_drain_is_running(tmp_path: Path) -> None:
         controller._drain_node = "worker-1"
         controller._drain_worker = _RunningDrain()
         before = len(app._notifications)
-        draining = (
-            "protected_ui",
-            "nodes/worker-1 is being drained - cancel the drain first",
-        )
         matrix = _probe_matrix(app)
-        assert matrix["cordon_node"] == draining
-        assert matrix["uncordon_node"] == draining
+        assert matrix["cordon_node"] == _SELECTED_DRAIN
+        assert matrix["uncordon_node"] == _SELECTED_DRAIN
+        assert "worker-1" not in _SELECTED_DRAIN[1]
         assert matrix["drain_node"] is None
         assert len(app._notifications) == before
+
+
+async def test_the_two_drain_refusals_stay_distinguishable(tmp_path: Path) -> None:
+    """Both drain refusals are now bounded, so neither names a node - and
+    the user has to be able to tell them apart anyway: one says the row
+    under the cursor is the node being drained (wait, or press the drain
+    key to cancel), the other says some node they cannot see is (this row
+    is fine, go find that one)."""
+    assert _SELECTED_DRAIN[1] != _OTHER_DRAIN[1]
+    assert WriteAvailability.selected_drain_reason().message == _SELECTED_DRAIN[1]
+    assert WriteAvailability.other_drain_reason().message == _OTHER_DRAIN[1]
+    detail = WriteAvailability.drain_in_progress_detail("worker-1")
+    assert detail == "nodes/worker-1 is being drained - cancel the drain first"
+    assert detail != WriteAvailability.other_drain_detail("worker-1")
 
 
 class _RunningDrain:

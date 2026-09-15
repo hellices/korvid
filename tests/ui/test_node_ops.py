@@ -741,12 +741,24 @@ async def test_uncordon_is_refused_while_node_is_being_drained(tmp_path: Path) -
         # No uncordon dialog opened and no schedulable write was issued.
         assert not isinstance(app.screen, ConfirmScreen)
         assert not any(call[:3] == ("cordon", "worker-1", False) for call in rec.calls)
-        # The refusal quotes the node by name and is the same
-        # `UnavailableReason` the Action Palette shows with `markup=False`
-        # (#388), so this path must not parse it as content markup either.
+        # The refusal quotes the node by name and is notified with
+        # `markup=False` (#388), so this path must not parse it as content
+        # markup either.
         refusal = next(n for n in app._notifications if "is being drained" in n.message)
         assert refusal.message == "nodes/worker-1 is being drained - cancel the drain first"
         assert refusal.markup is False
+        # The palette row carries the bounded half of the same refusal: a
+        # node name has no bounded length, and a disabled row cannot be
+        # scrolled to read the rest (#388 round 9). Cordon is refused for
+        # the same reason, and the drain key stays invocable because
+        # pressing it here is how the drain is cancelled.
+        for action in ("cordon_node", "uncordon_node"):
+            availability = app._actions.availability(action)
+            assert availability.binding_enabled is True, action
+            assert availability.reason is not None, action
+            assert availability.reason.message == "This node is being drained", action
+            assert "worker-1" not in availability.reason.message, action
+        assert app._actions.availability("drain_node").reason is None
         rec.release_evictions.set()
         await until(
             pilot,

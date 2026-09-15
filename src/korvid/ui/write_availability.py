@@ -298,14 +298,30 @@ class WriteAvailability:
     def drain_in_progress_reason(self, name: str) -> UnavailableReason | None:
         """Why cordon/uncordon must wait for an in-flight drain on *name*.
 
-        Also the wording `_cordon_action` notifies with, so the probe and
-        the keypress explain the wait identically."""
-        if self.draining_node() == name:
-            return UnavailableReason(
-                AvailabilityCode.PROTECTED_UI,
-                f"nodes/{name} is being drained - cancel the drain first",
-            )
-        return None
+        The bounded half of that refusal, for the palette row; the toast
+        `_cordon_action` raises carries `drain_in_progress_detail(name)`."""
+        return self.selected_drain_reason() if self.draining_node() == name else None
+
+    @staticmethod
+    def selected_drain_reason() -> UnavailableReason:
+        """Why cordon/uncordon cannot run while the selected node is the
+        one being drained — the palette row's half of that refusal.
+
+        Bounded for the same reason `other_drain_reason` is (round 9): the
+        node's name is cluster data, a DNS subdomain of up to 253
+        characters, and a refused row is disabled, so no keystroke
+        highlights or scrolls it and the clipped words are simply lost.
+        Distinct from `other_drain_reason` on purpose — that one is about
+        a node the user is *not* looking at, and asks for a different
+        thing (go to that node) than this one (wait, or cancel here).
+        """
+        return UnavailableReason(AvailabilityCode.PROTECTED_UI, "This node is being drained")
+
+    @staticmethod
+    def drain_in_progress_detail(name: str) -> str:
+        """The same refusal `_cordon_action` notifies, naming the node the
+        drain holds and what to do about it."""
+        return f"nodes/{name} is being drained - cancel the drain first"
 
     def is_helm_release_view(self) -> bool:
         """Whether the current view is the helm release browser - the one

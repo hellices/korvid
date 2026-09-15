@@ -1284,3 +1284,114 @@ async def test_the_detailed_cross_node_drain_sentence_would_not_have_fitted() ->
         await pilot.pause()
         assert _LONG_NODE in _second_line(options)
         assert _second_line(options) not in _visible_text(options)
+
+
+#: A node name at Kubernetes' own limit. Node names are DNS subdomains
+#: (RFC 1123): at most 253 characters, in dot-separated labels of at most
+#: 63. Nothing about this one is exotic - it is the shape a managed
+#: cluster's fully-qualified instance name already has, taken to the
+#: longest value the API server accepts, because korvid controls neither
+#: the length nor the content.
+_MAX_NODE = ".".join(
+    (
+        "aks-userpool-41763029-vmss000003".ljust(63, "x"),
+        "internal-cloudapp-private-dns-zone".ljust(63, "y"),
+        "kube-prod-eastus2-node-resource-group".ljust(63, "z"),
+        "example-customer-internal-net".ljust(61, "w"),
+    )
+)
+
+#: Palette action -> the title `_humanize_action_id` derives for it, which
+#: is the row heading the refusal has to be composited beside.
+_SELECTED_NODE_ACTIONS = (
+    ("cordon_node", "Cordon node", "c"),
+    ("uncordon_node", "Uncordon node", "u"),
+)
+
+
+def test_the_fixture_node_name_is_one_kubernetes_would_accept() -> None:
+    """A fixture no cluster could produce would prove nothing about rows.
+
+    253 characters, every label within 63, and only the characters a DNS
+    subdomain allows - the longest name `nodes/<name>` can legally carry.
+    """
+    labels = _MAX_NODE.split(".")
+    assert len(_MAX_NODE) == 253
+    assert all(0 < len(label) <= 63 for label in labels)
+    assert all(label.replace("-", "").isalnum() for label in labels)
+    assert all(not label.startswith("-") and not label.endswith("-") for label in labels)
+
+
+def test_the_two_drain_refusals_are_both_bounded_and_distinct() -> None:
+    """Cordon/uncordon are refused while *this* row is being drained; the
+    drain key is refused while *another* node is. Both rows are bounded,
+    and they have to stay distinguishable, because they ask for different
+    things: wait here, or go to the node that is draining."""
+    selected = WriteAvailability.selected_drain_reason()
+    other = WriteAvailability.other_drain_reason()
+    assert _MAX_NODE not in selected.message
+    assert _MAX_NODE not in other.message
+    assert selected.message != other.message
+    assert _MAX_NODE in WriteAvailability.drain_in_progress_detail(_MAX_NODE)
+
+
+@pytest.mark.parametrize(("action", "title", "trigger"), _SELECTED_NODE_ACTIONS)
+async def test_a_selected_node_drain_row_fits_a_narrow_terminal(
+    action: str, title: str, trigger: str
+) -> None:
+    """Cordon and uncordon are refused while the row under the cursor is
+    the node being drained - the drain owns its schedulable state until it
+    finishes or is cancelled.
+
+    That refusal used to name the node, and a node name has no bounded
+    length: at 253 characters it outruns a 36-column row many times over,
+    the row is disabled so no keystroke highlights or scrolls it, and the
+    list scrolls by whole options. The probe's reason therefore states the
+    bounded fact, and the keypress keeps the name in its toast (#388,
+    round 9).
+    """
+    reason = WriteAvailability.selected_drain_reason()
+    screen = ActionPaletteScreen(_derived_catalog((action, reason)))
+    app = PaletteHarness(screen)
+    async with app.run_test(size=(80, 24)) as pilot:
+        options = screen.query_one(OptionList)
+        await _filter_to_first_row(pilot, options, title.split()[0], f"action:{action}")
+        await pilot.resize_terminal(36, 24)
+        await until(
+            pilot,
+            lambda: _second_line(options) in _visible_text(options),
+            label=f"the whole refused {action} row composited at 36x24",
+        )
+        visible = _visible_text(options)
+        assert options.get_option_at_index(0).disabled is True
+        heading = _heading(options)
+        assert title in heading
+        assert trigger in heading  # the trigger the refusal is about
+        assert heading in visible
+        assert _second_line(options) == f"Unavailable: {reason.message}"
+        assert _second_line(options) in visible
+        await pilot.press("enter")
+        assert app.results == []
+        assert screen.query_one(Input).has_focus
+
+
+@pytest.mark.parametrize(("action", "title", "trigger"), _SELECTED_NODE_ACTIONS)
+async def test_the_detailed_selected_node_sentence_would_not_have_fitted(
+    action: str, title: str, trigger: str
+) -> None:
+    """Why this split exists, asserted rather than asserted-about: the
+    sentence `_cordon_action` notifies - the one the row used to carry -
+    does not fit the row it would have to be composited into."""
+    detail = WriteAvailability.drain_in_progress_detail(_MAX_NODE)
+    screen = ActionPaletteScreen(
+        _derived_catalog((action, UnavailableReason(AvailabilityCode.PROTECTED_UI, detail)))
+    )
+    app = PaletteHarness(screen)
+    async with app.run_test(size=(80, 24)) as pilot:
+        options = screen.query_one(OptionList)
+        await _filter_to_first_row(pilot, options, title.split()[0], f"action:{action}")
+        await pilot.resize_terminal(36, 24)
+        await pilot.pause()
+        assert trigger in _heading(options)
+        assert _MAX_NODE in _second_line(options)
+        assert _second_line(options) not in _visible_text(options)
