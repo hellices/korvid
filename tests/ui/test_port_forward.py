@@ -25,7 +25,7 @@ from korvid.k8s.models import GenericSummary, PodSummary
 from korvid.ui.app import KorvidApp
 from korvid.ui.messages import NavigateCommand
 from korvid.ui.widgets.port_forward_screen import ForwardListScreen, PortForwardScreen
-from tests.app_factory import build_test_app
+from tests.app_factory import build_test_app, session_kubectl
 
 from .waits import until
 
@@ -170,6 +170,10 @@ def make_app(
     extra_data: dict[str, list[Summary]] | None = None,
     audit: AuditLog | None = None,
     get_manifest: Callable[[str, str | None, str], Awaitable[dict[str, Any]]] | None = None,
+    #: The session's `kubectl` snapshot, decided here because the runtime
+    #: resolves it while it is assembled (#388 round 14) - a patch around
+    #: the keypress would be too late, and the real PATH is the runner's.
+    kubectl: bool = True,
 ) -> KorvidApp:
     store = ResourceStore()
     all_data: dict[str, list[Summary]] = {"pods": list(pods)}
@@ -182,15 +186,16 @@ def make_app(
         while True:
             await asyncio.sleep(0.01)
 
-    return build_test_app(
-        config=KorvidConfig(namespace="default"),
-        store=store,
-        watch_manager=WatchManager(store, source),
-        aliases=dict(_TEST_ALIASES),
-        audit=audit,
-        get_manifest=get_manifest,
-        forwards=forwards,
-    )
+    with session_kubectl(kubectl):
+        return build_test_app(
+            config=KorvidConfig(namespace="default"),
+            store=store,
+            watch_manager=WatchManager(store, source),
+            aliases=dict(_TEST_ALIASES),
+            audit=audit,
+            get_manifest=get_manifest,
+            forwards=forwards,
+        )
 
 
 def _audit_log(tmp_path: Path) -> AuditLog:

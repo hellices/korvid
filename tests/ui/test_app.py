@@ -22,7 +22,7 @@ from korvid.k8s.models import GenericSummary, PodSummary
 from korvid.ui.app import KorvidApp
 from korvid.ui.widgets.resource_table import ResourceTable
 from korvid.ui.widgets.status_bar import StatusBar
-from tests.app_factory import build_test_app
+from tests.app_factory import build_test_app, session_kubectl
 
 from .waits import until
 
@@ -89,6 +89,10 @@ def make_app(
     metrics: Any | None = None,
     session_timeline: SessionTimeline | None = None,
     watch_warning_events: Any | None = None,
+    #: The session's `kubectl` snapshot, decided here because the runtime
+    #: resolves it while it is assembled (#388 round 14) - a patch around
+    #: the keypress would be too late, and the real PATH is the runner's.
+    kubectl: bool = True,
 ) -> KorvidApp:
     store = ResourceStore()
     all_data: dict[str, list[Summary]] = {"pods": list(pods)}
@@ -104,20 +108,21 @@ def make_app(
     async def list_namespaces() -> list[str]:
         return ["default"] if namespaces is None else namespaces
 
-    return build_test_app(
-        config=config if config is not None else KorvidConfig(namespace="default"),
-        store=store,
-        watch_manager=WatchManager(store, source),
-        list_namespaces=list_namespaces,
-        aliases=aliases if aliases is not None else dict(_DEFAULT_TEST_ALIASES),
-        audit=audit,
-        provider_hint=provider_hint,
-        open_pod_exec=open_pod_exec,
-        get_manifest=get_manifest,
-        metrics=metrics,
-        session_timeline=session_timeline,
-        watch_warning_events=watch_warning_events,
-    )
+    with session_kubectl(kubectl):
+        return build_test_app(
+            config=config if config is not None else KorvidConfig(namespace="default"),
+            store=store,
+            watch_manager=WatchManager(store, source),
+            list_namespaces=list_namespaces,
+            aliases=aliases if aliases is not None else dict(_DEFAULT_TEST_ALIASES),
+            audit=audit,
+            provider_hint=provider_hint,
+            open_pod_exec=open_pod_exec,
+            get_manifest=get_manifest,
+            metrics=metrics,
+            session_timeline=session_timeline,
+            watch_warning_events=watch_warning_events,
+        )
 
 
 async def test_pods_appear_in_table() -> None:

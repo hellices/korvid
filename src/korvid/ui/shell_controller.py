@@ -244,9 +244,10 @@ class ShellController:
 
     def _kubectl_missing(self, message: str) -> UnavailableReason | None:
         """*message* as a reason when this session found no `kubectl`, else
-        None. The session's snapshot (`KubectlPresence`), not a fresh
-        lookup: the palette asks this owner on every catalog derivation,
-        and a probe must not scan PATH (issue #388 round 13)."""
+        None. The session's snapshot (`KubectlPresence`), taken while the
+        runtime was composed and read from memory here: the palette asks
+        this owner on every catalog derivation, and a probe must not scan
+        PATH (issue #388 round 14)."""
         if self._kubectl_available():
             return None
         return UnavailableReason(AvailabilityCode.MISSING_CAPABILITY, message, severity="error")

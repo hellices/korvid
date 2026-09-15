@@ -28,7 +28,7 @@ from korvid.ui.app import KorvidApp
 from korvid.ui.shell import DEBUG_IMAGE, build_node_debug_create_argv, build_pod_attach_argv
 from korvid.ui.widgets.confirm_screen import ConfirmScreen
 from korvid.ui.widgets.resource_table import ResourceTable
-from tests.app_factory import build_test_app
+from tests.app_factory import build_test_app, session_kubectl
 
 from .waits import until
 
@@ -72,6 +72,10 @@ def make_app(
     extra_nodes: tuple[str, ...] = (),
     permission_gate: asyncio.Event | None = None,
     permission_started: asyncio.Event | None = None,
+    #: The session's `kubectl` snapshot, decided here because the runtime
+    #: resolves it while it is assembled (#388 round 14) - a patch around
+    #: the keypress would be too late, and the real PATH is the runner's.
+    kubectl: bool = True,
 ) -> KorvidApp:
     store = ResourceStore()
     data: dict[str, list[Summary]] = {
@@ -105,23 +109,24 @@ def make_app(
         assert permitted is not None
         return permitted
 
-    return build_test_app(
-        config=KorvidConfig(
-            namespace="default",
-            readonly=readonly,
-            node_shell_image=node_shell_image,
-            node_shell_namespace=node_shell_namespace,
-        ),
-        store=store,
-        watch_manager=WatchManager(store, source),
-        aliases=dict(_ALIASES),
-        write_ops=recorder,
-        audit=audit_log
-        if audit_log is not None
-        else (None if audit_path is None else AuditLog(audit_path)),
-        check_permission=None if permitted is None else check_permission,
-        get_manifest=get_manifest,
-    )
+    with session_kubectl(kubectl):
+        return build_test_app(
+            config=KorvidConfig(
+                namespace="default",
+                readonly=readonly,
+                node_shell_image=node_shell_image,
+                node_shell_namespace=node_shell_namespace,
+            ),
+            store=store,
+            watch_manager=WatchManager(store, source),
+            aliases=dict(_ALIASES),
+            write_ops=recorder,
+            audit=audit_log
+            if audit_log is not None
+            else (None if audit_path is None else AuditLog(audit_path)),
+            check_permission=None if permitted is None else check_permission,
+            get_manifest=get_manifest,
+        )
 
 
 async def _to_nodes(pilot) -> None:  # type: ignore[no-untyped-def]  # Pilot's app type isn't exposed
@@ -958,18 +963,22 @@ async def test_node_shell_refused_when_the_context_switches_while_the_dialog_is_
 async def test_node_shell_availability_reports_missing_kubectl(tmp_path: Path) -> None:
     """On the nodes view `s` needs kubectl for `kubectl debug node/`; the
     palette probe reports the node-shell wording the handler notifies, and
-    notifies nothing itself (#388 task 4)."""
-    app = make_app(DeleteRecorder(), tmp_path / "audit.jsonl")
-    with patch("shutil.which", return_value=None):
-        async with app.run_test() as pilot:
-            await _to_nodes(pilot)
-            before = len(app._notifications)
-            assert app._shell.unavailable_reason() == UnavailableReason(
-                AvailabilityCode.MISSING_CAPABILITY,
-                "kubectl not found on PATH — node shell requires kubectl",
-                severity="error",
-            )
-            assert len(app._notifications) == before
+    notifies nothing itself (#388 task 4).
+
+    The session is composed without `kubectl` (#388 round 14): the snapshot
+    is taken while the runtime is assembled, so a patch around the probe
+    would arrive after the answer was already fixed.
+    """
+    app = make_app(DeleteRecorder(), tmp_path / "audit.jsonl", kubectl=False)
+    async with app.run_test() as pilot:
+        await _to_nodes(pilot)
+        before = len(app._notifications)
+        assert app._shell.unavailable_reason() == UnavailableReason(
+            AvailabilityCode.MISSING_CAPABILITY,
+            "kubectl not found on PATH — node shell requires kubectl",
+            severity="error",
+        )
+        assert len(app._notifications) == before
 
 
 async def test_node_shell_availability_reports_a_missing_write_client(tmp_path: Path) -> None:

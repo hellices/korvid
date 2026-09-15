@@ -182,8 +182,9 @@ class ForwardController:
         probe (which returns it silently), so the two cannot drift.
 
         The `kubectl` half is the session's snapshot (`KubectlPresence`),
-        not a fresh PATH scan: the palette asks this owner every time it
-        derives its catalog, and a probe must do no I/O (#388 round 13).
+        taken while the runtime was composed rather than scanned here: the
+        palette asks this owner every time it derives its catalog, and a
+        probe must do no I/O (#388 round 14).
         """
         reason = self.list_unavailable_reason()
         if reason is not None:

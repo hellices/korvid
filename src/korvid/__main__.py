@@ -1072,9 +1072,9 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
     resource_writes_ref = _LateReference[ResourceWriteController]()
 
     view = AppViewState(app)
-    #: One PATH lookup for `kubectl` per session, shared by the shell and
-    #: forward owners: their palette probes are asked on every catalog
-    #: derivation, and a probe must do no I/O (#388 round 13).
+    #: The session's one PATH lookup for `kubectl`, taken here rather than
+    #: by the first question: the shell and forward owners share it, and
+    #: their palette probes must do no I/O at all (#388 round 14).
     kubectl = KubectlPresence()
     relationship_loader: RelationshipSnapshotLoader | None = (
         RelationshipSnapshotLoader(_RelationshipLister(inputs.list_relationship_objects))

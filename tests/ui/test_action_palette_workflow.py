@@ -1723,51 +1723,77 @@ async def test_probing_the_sort_rows_notifies_nothing() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Deriving the catalog touches no filesystem (#388 round 13)
+# Deriving the catalog touches no filesystem (#388 rounds 13-14)
 # ---------------------------------------------------------------------------
 
 
-async def test_deriving_the_catalog_never_scans_path_for_kubectl() -> None:
+def _kubectl_lookups(which: Any) -> int:
+    """How many of the patched `shutil.which` calls asked for `kubectl`.
+
+    Counted rather than totalled: the patch is global, so an unrelated
+    binary lookup made by some other collaborator must not be read as this
+    session scanning PATH for `kubectl`.
+    """
+    return sum(1 for call in which.call_args_list if call == mock.call("kubectl"))
+
+
+async def test_the_session_resolves_kubectl_while_the_runtime_is_assembled() -> None:
     """Two owners answer for `kubectl` - the shell key and the forward
     dialog - and the palette asks both every time it derives its catalog.
 
     A live `shutil.which` there is a PATH scan (a stat per directory on
     every entry) per derivation, on a keystroke path, and the availability
-    contract forbids a probe from doing I/O at all. The session resolves
-    `kubectl` once instead, so repeated derivations - the palette rebuilds
-    its list on every open and again after each dismissal - touch nothing.
+    contract forbids a probe from doing I/O at all. Deferring the scan to
+    the first *question* only moves it onto whichever keystroke asks first,
+    which in a running TUI is a palette derivation. So composition takes the
+    snapshot: exactly one lookup while the runtime is assembled, and none
+    from mounting the app, from deriving the catalog the first time, or
+    from any of the repeats the palette makes on every open and dismissal
+    (#388 round 14).
     """
     with mock.patch("shutil.which", return_value="/usr/bin/kubectl") as which:
         app = _build_app()
+        assert _kubectl_lookups(which) == 1, "composition takes the session snapshot"
+        which.reset_mock()
         async with app.run_test() as pilot:
             await _loaded(pilot, app)
-            # The session snapshot: taken once, however it was reached.
-            app._palette_entries()
-            baseline = which.call_count
-            assert baseline <= 1
+            assert _kubectl_lookups(which) == 0, "mounting the app scanned PATH"
+            entries = app._palette_entries()
+            assert _kubectl_lookups(which) == 0, "the first derivation scanned PATH"
             for _ in range(5):
                 entries = app._palette_entries()
-            assert which.call_count == baseline
+            assert _kubectl_lookups(which) == 0
             rows = {entry.id: entry for entry in entries}
             assert rows["action:shell"].availability.invocable is True
             assert rows["action:port_forward"].availability.reason == UnavailableReason(
                 AvailabilityCode.MISSING_CAPABILITY,
                 "Port-forward unavailable in this build",
             )
-            assert which.call_count == baseline
+            await _open_palette(pilot)
+            await pilot.press("escape")
+            await until(
+                pilot,
+                lambda: not isinstance(pilot.app.screen, ActionPaletteScreen),
+                label="palette dismissed",
+            )
+            assert _kubectl_lookups(which) == 0, "opening the palette scanned PATH"
 
 
 async def test_the_shell_row_still_reports_a_session_without_kubectl() -> None:
     """The snapshot must not soften the answer: a session that started with
-    no `kubectl` keeps refusing the shell key, with the owner's wording,
-    and still performs no lookup per derivation."""
+    no `kubectl` keeps refusing the shell key, with the owner's wording.
+
+    The patch is installed *before* the app is built, because that is when
+    the lookup happens now - a session assembled against a PATH that has
+    `kubectl` cannot be talked out of it afterwards.
+    """
     with mock.patch("shutil.which", return_value=None) as which:
         app = _build_app()
+        assert _kubectl_lookups(which) == 1
+        which.reset_mock()
         async with app.run_test() as pilot:
             await _loaded(pilot, app)
             before = len(app._notifications)
-            app._palette_entries()
-            baseline = which.call_count
             row = _row(app, "action:shell")
             assert row.availability.invocable is False
             assert row.availability.reason == UnavailableReason(
@@ -1775,13 +1801,39 @@ async def test_the_shell_row_still_reports_a_session_without_kubectl() -> None:
                 "kubectl not found on PATH — shell-in requires kubectl",
                 severity="error",
             )
-            assert which.call_count == baseline
+            assert _kubectl_lookups(which) == 0
+            assert len(app._notifications) == before
+
+
+async def test_the_shell_and_forward_owners_hold_the_same_snapshot_object() -> None:
+    """One session, one answer, shared by reference rather than re-derived.
+
+    Both owners' flows and both of their palette probes read this same
+    object, so neither pair can drift from the other by looking again at a
+    different moment - and with a registry wired, the forward row's own
+    refusal is the `kubectl` half, from the same snapshot.
+    """
+    with mock.patch("shutil.which", return_value=None) as which:
+        app = _build_app(forwards=ForwardRegistry())
+        which.reset_mock()
+        async with app.run_test() as pilot:
+            await _loaded(pilot, app)
+            before = len(app._notifications)
+            assert app._shell._kubectl_available is app._forward._kubectl_available
+            assert _row(app, "action:port_forward").availability.reason == UnavailableReason(
+                AvailabilityCode.MISSING_CAPABILITY,
+                "kubectl not found on PATH — port-forward requires kubectl",
+                severity="error",
+            )
+            assert _row(app, "action:shell").availability.invocable is False
+            assert _kubectl_lookups(which) == 0
             assert len(app._notifications) == before
 
 
 async def test_the_shell_key_and_its_row_share_one_kubectl_answer() -> None:
     """Handler and probe read the same snapshot, so a session cannot offer
-    a row whose keypress then refuses (or the reverse)."""
+    a row whose keypress then refuses (or the reverse). Patched before the
+    app is built, where the session's one lookup now happens."""
     with mock.patch("shutil.which", return_value=None):
         app = _build_app()
         async with app.run_test() as pilot:

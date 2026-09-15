@@ -1,4 +1,4 @@
-"""`kubectl` presence, resolved once per session (issue #388 round 13).
+"""`kubectl` presence, resolved once per session (issue #388 rounds 13-14).
 
 korvid shells out to `kubectl` for the flows the API alone cannot serve -
 `exec`, `debug`, `port-forward` - and both owners refuse up front when the
@@ -9,6 +9,13 @@ key, one for the forward dialog, rebuilt each time the modal opens and
 again after it closes. The availability contract forbids a probe from
 doing I/O at all, so the session takes one snapshot and every later
 question - probe or keypress - is answered from memory.
+
+The snapshot is taken by *construction*, which the composition root
+performs while it assembles the controller graph - before the app is
+mounted, and therefore before any keypress or palette row can be the
+caller that scans. Deferring it to the first question only moves the scan
+onto whichever keystroke asks first, which in a running TUI is a palette
+derivation: the very caller the contract forbids it in.
 
 A `kubectl` that appears on (or vanishes from) PATH *while korvid runs* is
 therefore not observed until the next start. That is the deliberate trade:
@@ -36,26 +43,22 @@ class KubectlPresence:
     all read the same fact, and none of them can drift from another by
     looking again at a different moment.
 
-    Constructing it performs no lookup: the snapshot is taken by the first
-    question, which in a running TUI is startup (the first keypress or
-    catalog derivation), and never retaken.
+    Constructing it *is* the lookup: the answer is fixed while the session
+    is being composed and is never retaken, so every `__call__` - handler
+    or probe - reads memory and nothing else.
     """
 
-    __slots__ = ("_detect", "_present")
+    __slots__ = ("_present",)
 
     def __init__(self, detect: Callable[[], bool] = kubectl_on_path) -> None:
-        """Bind the detection this session will run exactly once.
+        """Take this session's one `kubectl` snapshot.
 
         Args:
             detect: How to look for the binary. Injected so a test can
                 decide the session's answer without a real PATH.
         """
-        self._detect = detect
-        self._present: bool | None = None
+        self._present = detect()
 
     def __call__(self) -> bool:
-        """The session's snapshot, taken on the first call."""
-        present = self._present
-        if present is None:
-            present = self._present = self._detect()
-        return present
+        """The session's snapshot, taken when this object was built."""
+        return self._present
