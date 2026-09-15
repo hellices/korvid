@@ -226,7 +226,7 @@ class ForwardController:
         epoch = self._gate.epoch()
         reason = self._capability_reason()
         if reason is not None:
-            self._ui.notify(reason.message, severity=reason.severity)
+            self._ui.notify(reason.message, severity=reason.severity, markup=False)
             return
         namespace, name = self._view.selected_ns_name()
         if namespace is None or name is None:

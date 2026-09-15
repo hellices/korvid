@@ -204,14 +204,14 @@ class HelmController:
         notification) blocks the flow."""
         reason = self._write_gate_reason()
         if reason is not None:
-            self._ui.notify(reason.message, severity=reason.severity)
+            self._ui.notify(reason.message, severity=reason.severity, markup=False)
             return None
         # Read once: checking one call and returning another could hand back
         # a client the check never saw - and after a `:ctx` switch rebinds the
         # wrapper, one bound to the previous cluster.
         helm = self._helm()
         if helm is None:
-            self._ui.notify(_HELM_MISSING.message, severity=_HELM_MISSING.severity)
+            self._ui.notify(_HELM_MISSING.message, severity=_HELM_MISSING.severity, markup=False)
             return None
         return helm
 

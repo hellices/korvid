@@ -1243,3 +1243,59 @@ def test_textuals_exit_flag_is_read_only_by_the_one_shutdown_helper() -> None:
     ]
     assert len(reads) == 1
     assert helper.lineno <= reads[0].lineno <= (helper.end_lineno or helper.lineno)
+
+
+# ---------------------------------------------------------------------------
+# Owner reason text is not content markup (#388 task 8)
+# ---------------------------------------------------------------------------
+
+
+def _reason_notifications_with_markup(root: Path) -> set[str]:
+    """Every `notify(<reason>.message, ...)` that still parses markup."""
+    offenders: set[str] = set()
+    for path in sorted(root.rglob("*.py")):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+                continue
+            if node.func.attr != "notify" or not node.args:
+                continue
+            first = node.args[0]
+            if not (isinstance(first, ast.Attribute) and first.attr == "message"):
+                continue
+            markup = next((kw for kw in node.keywords if kw.arg == "markup"), None)
+            disabled = (
+                markup is not None
+                and isinstance(markup.value, ast.Constant)
+                and markup.value.value is False
+            )
+            if not disabled:
+                offenders.add(f"{path.name}:{node.lineno}")
+    return offenders
+
+
+def test_owner_reason_notifications_never_parse_their_text_as_markup() -> None:
+    """One `UnavailableReason` is shown by two paths (issue #388): its
+    owner's own refusal toast, and the Action Palette when the same action
+    is chosen there. The palette passes `markup=False` because reason text
+    quotes install hints (`korvid[mcp]`) and cluster-controlled names that
+    Textual's content markup would parse as style tags and swallow - so the
+    owner must emit it the same way, or the two paths show different text
+    for the same fact.
+    """
+    assert not _reason_notifications_with_markup(KORVID)
+
+
+def test_reason_notification_contract_rejects_a_markup_parsed_reason(
+    tmp_path: Path,
+) -> None:
+    """The contract above must actually fail on a violation."""
+    module = tmp_path / "owner.py"
+    module.write_text(
+        "self._ui.notify(reason.message, severity=reason.severity)\n", encoding="utf-8"
+    )
+    assert _reason_notifications_with_markup(tmp_path) == {"owner.py:1"}
+    module.write_text(
+        "self._ui.notify(reason.message, severity=reason.severity, markup=False)\n",
+        encoding="utf-8",
+    )
+    assert not _reason_notifications_with_markup(tmp_path)

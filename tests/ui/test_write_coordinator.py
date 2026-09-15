@@ -1509,3 +1509,17 @@ def test_is_scale_down_needs_a_known_current_count() -> None:
     assert WriteCoordinator.is_scale_down(None, 0) is False
     assert WriteCoordinator.is_scale_down(3, 1) is True
     assert WriteCoordinator.is_scale_down(1, 3) is False
+
+
+def test_write_target_refusal_does_not_parse_the_kind_as_markup(tmp_path: Path) -> None:
+    """The synthetic-view refusal quotes a cluster-controlled kind, and the
+    Action Palette already shows this very `UnavailableReason` with
+    `markup=False` (#388). The keypress path must render it identically:
+    parsed as content markup, a bracketed kind is swallowed, so the user is
+    told "` is a read-only view`" about nothing at all."""
+    meta = ResourceMeta("Helm[Release]", "helmreleases", "", "v1", True, synthetic=True)
+    view = FakeView(kind="helmreleases", aliases={"helmreleases": meta})
+    env = make_env(tmp_path, view=view)
+    assert env.coordinator.write_target() is None
+    assert ("Helm[Release] is a read-only view", "warning") in env.ui.notifications
+    assert env.ui.notification_markup == [False]

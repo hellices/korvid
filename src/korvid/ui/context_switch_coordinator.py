@@ -416,6 +416,7 @@ class ContextSwitchCoordinator(ContextGuard):
             self._ui.notify(
                 CONTEXT_SWITCH_IN_PROGRESS.message,
                 severity=CONTEXT_SWITCH_IN_PROGRESS.severity,
+                markup=False,
             )
             return False
         return True

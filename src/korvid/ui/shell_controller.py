@@ -257,7 +257,7 @@ class ShellController:
 
         missing = _kubectl_missing(_POD_SHELL_KUBECTL)
         if missing is not None:
-            self._ui.notify(missing.message, severity=missing.severity)
+            self._ui.notify(missing.message, severity=missing.severity, markup=False)
             return
 
         containers = self._pod_containers(namespace, name)
@@ -591,7 +591,7 @@ class ShellController:
         ops, meta, name, uid = resolved
         missing = _kubectl_missing(_NODE_SHELL_KUBECTL)
         if missing is not None:
-            self._ui.notify(missing.message, severity=missing.severity)
+            self._ui.notify(missing.message, severity=missing.severity, markup=False)
             return
         image = self._settings().node_shell_image or DEBUG_IMAGE
         shell_ns = self._settings().node_shell_namespace or "default"

@@ -1023,7 +1023,7 @@ class ResourceWriteController:
             # Uncordoning (or re-cordoning) mid-drain would let new pods
             # schedule behind the drain's back; the drain owns the node's
             # schedulable state until it finishes or is cancelled.
-            self._ui.notify(drain_reason.message, severity=drain_reason.severity)
+            self._ui.notify(drain_reason.message, severity=drain_reason.severity, markup=False)
             return
         if not await self._writes.precheck_keybinding_write(action, meta, None, name):
             return

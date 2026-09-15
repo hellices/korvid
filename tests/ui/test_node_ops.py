@@ -715,6 +715,12 @@ async def test_uncordon_is_refused_while_node_is_being_drained(tmp_path: Path) -
         # No uncordon dialog opened and no schedulable write was issued.
         assert not isinstance(app.screen, ConfirmScreen)
         assert not any(call[:3] == ("cordon", "worker-1", False) for call in rec.calls)
+        # The refusal quotes the node by name and is the same
+        # `UnavailableReason` the Action Palette shows with `markup=False`
+        # (#388), so this path must not parse it as content markup either.
+        refusal = next(n for n in app._notifications if "is being drained" in n.message)
+        assert refusal.message == "nodes/worker-1 is being drained - cancel the drain first"
+        assert refusal.markup is False
         rec.release_evictions.set()
         await until(
             pilot,

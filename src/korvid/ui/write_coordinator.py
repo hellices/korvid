@@ -411,7 +411,7 @@ class WriteCoordinator(WriteGate):
         reason = self._static_unavailable_reason()
         if reason is not None:
             if notify:
-                self._ui.notify(reason.message, severity=reason.severity)
+                self._ui.notify(reason.message, severity=reason.severity, markup=False)
             return None
         kind = self._view.canonical_kind(self._view.current_kind())
         meta = self._view.aliases()[kind]

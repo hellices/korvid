@@ -190,7 +190,7 @@ class TransferController:
             return
         reason = self._capability_reason()
         if reason is not None:
-            self._ui.notify(reason.message, severity=reason.severity)
+            self._ui.notify(reason.message, severity=reason.severity, markup=False)
             return
         if not self._writes.reads_allowed():
             return
