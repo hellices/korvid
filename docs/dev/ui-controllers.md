@@ -659,14 +659,16 @@ tests added before the move where the behaviour is not already pinned.
     execution, the dry-run/impact previews, and the protected-context marker.
     It implements `WriteGate` directly, so `AppWriteGate` is gone and the app
     keeps only the action/message entry points that raise a write flow.
-11. ~~Resource and node write workflows~~ — done (#187);
+11. ~~Resource and node write workflows~~ — done (#187, refined #388);
     `ResourceWriteController` (`ui/resource_write_controller.py`) owns delete,
     rollout restart, the editor round-trip, scale, in-place pod resize,
-    cordon/uncordon and drain, together with the drain worker/target state and
-    the workload-eligibility identities (`RESTARTABLE`, `SCALABLE`). It is
-    backed exclusively by `WriteCoordinator`; the app keeps thin action
-    delegates and re-exports the eligibility sets for `_ACTION_VIEWS` and the
-    agent write ops.
+    cordon/uncordon and drain, together with the drain worker/target state. It
+    is backed exclusively by `WriteCoordinator`; the app keeps thin action
+    delegates. The workload-eligibility identities (`RESTARTABLE`, `SCALABLE`)
+    now live in `ui/write_availability.py`, the side-effect-free module the
+    Action Palette's own probe reads; the controller imports them like any
+    other caller and delegates the palette's "why can't this run now?"
+    question to that module instead of answering it itself.
 12. ~~The agent session and its UI bridge~~ — done (#187);
     `AgentUiController` (`ui/agent_ui_controller.py`) owns the session /
     settings / model tier / follow state, the turn task with its

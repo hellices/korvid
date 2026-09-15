@@ -403,15 +403,31 @@ def test_keybindings_doc_documents_the_action_palette_key() -> None:
 def test_keybindings_doc_describes_the_catalog_the_palette_actually_searches() -> None:
     """`Ctrl-P` searches the bound app actions and the built-in `:` commands
     that opt in - not the resource views (`:pods`, `:deploy`), which are
-    parsed from the live alias table and never enumerated, and not `:q`,
-    which opts out because the bound Quit action is already its single
-    entry. Promising "every ... `:` command" sends a reader looking for
-    rows the palette will never show, and implies a duplicate `:q`.
+    parsed from the live alias table and never enumerated; not `:q`, which
+    opts out because the bound Quit action is already its single entry; and
+    not the parameterized favorite-namespace shortcuts (`1`-`9`), which have
+    no single key to invoke generically from the palette (issue #108).
+    Promising "every ... `:` command" sends a reader looking for rows the
+    palette will never show, and implies a duplicate `:q`; leaving the
+    favorites unmentioned leaves a reader hunting the palette for a shortcut
+    that `?` documents instead.
     """
+    from korvid.ui.app_bindings import APP_BINDINGS, as_binding, base_action
     from korvid.ui.command import COMMANDS
 
     omitted = [descriptor.aliases for descriptor in COMMANDS if descriptor.palette is None]
     assert omitted == [("q", "quit")], "update docs/keybindings.md: the omissions changed"
+
+    parameterized = sorted(
+        {
+            base_action(as_binding(raw).action)
+            for raw in APP_BINDINGS
+            if "(" in as_binding(raw).action
+        }
+    )
+    assert parameterized == ["favorite_namespace"], (
+        "update docs/keybindings.md: the parameterized-action omissions changed"
+    )
 
     doc = Path(__file__).parents[2].joinpath("docs", "keybindings.md").read_text()
     paragraph = next(block for block in doc.split("\n\n") if "opens the Action Palette" in block)
@@ -425,4 +441,14 @@ def test_keybindings_doc_describes_the_catalog_the_palette_actually_searches() -
     assert "`:pods`" in flat, "docs/keybindings.md must say resource views are not palette rows"
     assert re.search(r"`:q`.{0,80}Quit", flat), (
         "docs/keybindings.md must explain that `:q` is not a second Quit row"
+    )
+    assert re.search(r"`1`.{0,10}`9`", flat), (
+        "docs/keybindings.md must name the 1-9 favorite-namespace shortcuts"
+    )
+    assert re.search(r"not.{0,40}(a )?(palette )?(row|entry)", flat, re.I), (
+        "docs/keybindings.md must say the favorite-namespace shortcuts are not palette rows"
+    )
+    assert "`?`" in flat, "docs/keybindings.md must point to `?` for the favorites"
+    assert re.search(r"`:ns`|numeric key", flat, re.I), (
+        "docs/keybindings.md must name the route that still reaches a favorite namespace"
     )

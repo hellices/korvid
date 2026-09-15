@@ -31,10 +31,13 @@ Korvid shows only the keys that act on the current view. Press `?` for the compl
 against it, showing the key each one currently answers to, remaps included.
 Resource views (`:pods`, `:deploy`) are not rows: they come from the live alias
 table, so `:` stays the way to open one. `:q` is not a row either — the bound
-Quit action is its single entry. An action that does not apply to the current
-view stays searchable and shows the reason instead of vanishing, so the palette
-also answers "why did that key do nothing?". `Esc` closes it. Selecting a write
-action opens the same approval dialog the key opens, which still needs its own
+Quit action is its single entry. The `1`-`9` favorite-namespace shortcuts are
+not rows either — they take a number the palette has no generic way to invoke,
+so `?` documents them and `:ns`/the numeric keys stay the route. An action
+that does not apply to the current view stays searchable and shows the reason
+instead of vanishing, so the palette also answers "why did that key do
+nothing?". `Esc` closes it. Selecting a write action opens the same approval
+dialog the key opens, which still needs its own
 fresh keystroke.
 
 ## Act in context

@@ -1250,17 +1250,35 @@ def test_textuals_exit_flag_is_read_only_by_the_one_shutdown_helper() -> None:
 # ---------------------------------------------------------------------------
 
 
+def _reads_reason_message(expr: ast.expr) -> bool:
+    """True when `expr` is `<reason>.message` itself, or an f-string that
+    interpolates it - both hand Textual's markup parser the reason's own
+    text, so wrapping the attribute in a format string does not neutralize
+    the bug the bare form has."""
+    if isinstance(expr, ast.Attribute) and expr.attr == "message":
+        return True
+    if isinstance(expr, ast.JoinedStr):
+        return any(
+            isinstance(value, ast.FormattedValue) and _reads_reason_message(value.value)
+            for value in expr.values
+        )
+    return False
+
+
 def _reason_notifications_with_markup(root: Path) -> set[str]:
-    """Every `notify(<reason>.message, ...)` that still parses markup."""
+    """Every `notify(...)` that still parses `<reason>.message` as markup,
+    whichever of the three shapes an owner writes it in: the bare positional
+    argument, the `message=` keyword, or an f-string embedding it."""
     offenders: set[str] = set()
     for path in sorted(root.rglob("*.py")):
         for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
             if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
                 continue
-            if node.func.attr != "notify" or not node.args:
+            if node.func.attr != "notify":
                 continue
-            first = node.args[0]
-            if not (isinstance(first, ast.Attribute) and first.attr == "message"):
+            keyword_message = next((kw.value for kw in node.keywords if kw.arg == "message"), None)
+            message_expr = node.args[0] if node.args else keyword_message
+            if message_expr is None or not _reads_reason_message(message_expr):
                 continue
             markup = next((kw for kw in node.keywords if kw.arg == "markup"), None)
             disabled = (
@@ -1296,6 +1314,44 @@ def test_reason_notification_contract_rejects_a_markup_parsed_reason(
     assert _reason_notifications_with_markup(tmp_path) == {"owner.py:1"}
     module.write_text(
         "self._ui.notify(reason.message, severity=reason.severity, markup=False)\n",
+        encoding="utf-8",
+    )
+    assert not _reason_notifications_with_markup(tmp_path)
+
+
+def test_reason_notification_contract_rejects_the_message_keyword_form(
+    tmp_path: Path,
+) -> None:
+    """`notify(message=reason.message, ...)` is the same parsed-markup bug as
+    the bare positional form - the keyword just names the argument that
+    carries `reason.message` instead of leaving it positional."""
+    module = tmp_path / "owner.py"
+    module.write_text(
+        "self._ui.notify(message=reason.message, severity=reason.severity)\n",
+        encoding="utf-8",
+    )
+    assert _reason_notifications_with_markup(tmp_path) == {"owner.py:1"}
+    module.write_text(
+        "self._ui.notify(message=reason.message, severity=reason.severity, markup=False)\n",
+        encoding="utf-8",
+    )
+    assert not _reason_notifications_with_markup(tmp_path)
+
+
+def test_reason_notification_contract_rejects_a_formatted_string_of_the_message(
+    tmp_path: Path,
+) -> None:
+    """An f-string that interpolates `reason.message` still hands Textual's
+    content markup parser the reason's own text - wrapping it in a format
+    string does not neutralize the bug the bare attribute form has."""
+    module = tmp_path / "owner.py"
+    module.write_text(
+        'self._ui.notify(f"Refused: {reason.message}", severity=reason.severity)\n',
+        encoding="utf-8",
+    )
+    assert _reason_notifications_with_markup(tmp_path) == {"owner.py:1"}
+    module.write_text(
+        'self._ui.notify(f"Refused: {reason.message}", severity=reason.severity, markup=False)\n',
         encoding="utf-8",
     )
     assert not _reason_notifications_with_markup(tmp_path)

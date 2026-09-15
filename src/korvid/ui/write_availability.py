@@ -50,7 +50,9 @@ _WRITE_CLIENT_LABELS: dict[str, str] = {
 
 #: Palette action -> the word the matching node flow passes to
 #: `node_target()`, which is also the word its refusals are phrased with.
-NODE_ACTIONS: dict[str, str] = {
+#: Private: no caller outside this module needs the action->word mapping
+#: itself, only the reason it produces.
+_NODE_ACTIONS: dict[str, str] = {
     "cordon_node": "cordon",
     "uncordon_node": "uncordon",
     "drain_node": "drain",
@@ -110,8 +112,8 @@ class WriteAvailability:
         read-only/audit gate and the missing-helm-binary gate
         `HelmController.gate()` itself enforces.
         """
-        if action in NODE_ACTIONS:
-            return self._node_action_reason(NODE_ACTIONS[action])
+        if action in _NODE_ACTIONS:
+            return self._node_action_reason(_NODE_ACTIONS[action])
         if action == "delete_resource" and self.is_helm_release_view():
             return self._helm_delete_reason()
         label = _WRITE_CLIENT_LABELS.get(action)
