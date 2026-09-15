@@ -313,23 +313,33 @@ identity, or when the newest revision in the loaded history carries none, and
 both are store reads made before any helm process starts. What stays out is
 what the probe cannot answer honestly: a row the store has not loaded yet (the
 next watch event fills it in) and a release the flow resolves through the helm
-CLI, which a probe must never run. The same rule puts one identity on
-`delete_resource`: Ctrl-D on an OLM Subscription is redirected to the operator
-uninstall, which needs a manifest source, while every other row keeps the
-generic delete's answer — including a CSV, whose redirect falls through to that
-generic delete when the owning Subscription is not in the store.
+CLI, which a probe must never run. The same rule reaches `delete_resource`
+through a redirect: Ctrl-D on an OLM Subscription, and on a CSV whose owning
+Subscription this session has already loaded, is the operator uninstall rather
+than a delete, and that flow needs a manifest source. The redirect's own
+condition is a synchronous store read, so the probe asks the very function the
+handler asks — one rule, `olm_ownership.owning_subscription`, over one view. A
+CSV the store knows no owner for keeps the generic delete's answer, because its
+keypress keeps the generic delete; so do an InstallPlan, a PackageManifest, and
+a same-plural CRD from another group, which the OLM identity check excludes on
+both sides.
 
 A capability that lives in the *filesystem* is resolved once per session, not
-per probe. `kubectl` is the one korvid asks about: the shell key and the
-port-forward dialog both refuse without it, and the palette asks both owners
-every time it derives its catalog, so a live `shutil.which` there is a PATH
-scan per row, per open, from a probe the rule above says must do no I/O.
-`KubectlPresence` takes one snapshot — the first question asks, in a running
-TUI that is startup — and hands the same answer to both owners' flows and
-probes. A `kubectl` installed while korvid runs is therefore not seen until the
-next start; the alternative is a filesystem scan on a keystroke path. Detection
-stays in the owners' layer and is injected by the composition root: the palette
-gains no I/O of its own, in either direction.
+per probe, and the session resolves it while it is being composed rather than
+when it is first asked. `kubectl` is the one korvid asks about: the shell key
+and the port-forward dialog both refuse without it, and the palette asks both
+owners every time it derives its catalog, so a live `shutil.which` there is a
+PATH scan per row, per open, from a probe the rule above says must do no I/O.
+Deferring the scan to the first question does not fix that — the first question
+in a running TUI *is* a catalog derivation. So constructing `KubectlPresence`
+is the lookup: the composition root builds it before the app is mounted, and
+every later call, handler or probe, reads one immutable field. A `kubectl`
+installed while korvid runs is therefore not seen until the next start; the
+alternative is a filesystem scan on a keystroke path. Detection stays in the
+owners' layer and is injected by the composition root: the palette gains no I/O
+of its own, in either direction. Tests decide the answer around construction
+for the same reason — patched around the keypress it would arrive too late, and
+left to the real PATH it would be the runner's.
 
 ## Search and ranking
 
@@ -625,6 +635,16 @@ approve it. A fresh user keystroke remains mandatory.
   and offered once one is, with no `kubectl` and nothing selected; a selection
   made before the registry disappeared is refused after the modal closes with
   the owner's own wording and routes nothing;
+- the session's `kubectl` lookup happens exactly once, while the runtime is
+  assembled: mounting the app, the first catalog derivation, five repeats and
+  an open-and-dismiss of the palette add none, both owners hold the same
+  snapshot object, and a session composed without the binary keeps refusing
+  the shell key with its owner's sentence;
+- a CSV whose owning Subscription the store already holds carries the operator
+  uninstall's manifest-source refusal, and its Ctrl-D notifies that same
+  sentence with no dialog and no write; an orphan CSV, one whose owner has not
+  been watched yet, one a cached Subscription does not name, and a same-plural
+  CRD from another group all stay invocable and still open the generic delete;
 - Pulse comes from `COMMANDS`, not a palette-only route;
 - a context or selection change while open is rejected at invocation time;
 - an available action and command reach their existing route exactly once.
