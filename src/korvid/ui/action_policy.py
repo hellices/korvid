@@ -184,6 +184,8 @@ def compose_command_reasons(
     mcp: Callable[[], UnavailableReason | None],
     telepresence: Callable[[], UnavailableReason | None],
     proposals: Callable[[], UnavailableReason | None],
+    namespace: Callable[[], UnavailableReason | None],
+    context: Callable[[], UnavailableReason | None],
 ) -> dict[str, Callable[[], UnavailableReason | None]]:
     """Build `ActionPolicy(reason_by_command=...)` from its owners.
 
@@ -200,6 +202,13 @@ def compose_command_reasons(
         proposals: `ProposalController.unavailable_reason` — the inbox
             `:proposals` reviews: the feature, then what is pending, then
             whether a review is already open.
+        namespace: `WorkspaceController.namespace_picker_unavailable_reason`
+            — whether `:ns` has a namespace listing to open its picker over.
+        context: `ContextSwitchCoordinator.unavailable_reason` — whether
+            this build has the kubeconfig collaborators `:ctx` needs.
+            Separate owners, not one shared answer: the two pickers list
+            different things through different seams, and a session can
+            have either without the other.
 
     Returns:
         The canonical command text -> reason-resolver map.
@@ -214,6 +223,8 @@ def compose_command_reasons(
         "mcp": mcp,
         "tp": telepresence,
         "proposals": proposals,
+        "ns": namespace,
+        "ctx": context,
     }
 
 

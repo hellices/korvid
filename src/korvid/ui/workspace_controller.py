@@ -67,6 +67,7 @@ from korvid.ui.navigation import DrillLevel
 from korvid.ui.object_navigation import NavigationOrigin, default_scope_for, jump_to_object
 from korvid.ui.read_availability import (
     METRIC_SORT_COLUMNS,
+    NAMESPACE_LISTING_UNAVAILABLE,
     metric_sort_reason,
     relationships_reason,
 )
@@ -529,7 +530,8 @@ class WorkspaceController:
         """List the visible namespaces and open the inline picker over them."""
         list_namespaces = self._list_namespaces()
         if list_namespaces is None:
-            self._ui.notify("Namespace listing unavailable", severity="warning")
+            reason = NAMESPACE_LISTING_UNAVAILABLE
+            self._ui.notify(reason.message, severity=reason.severity, markup=False)
             return
         # The listing would race the client swap and could return either
         # cluster's namespaces — refuse up front.
@@ -561,6 +563,16 @@ class WorkspaceController:
             return
         self._surface.set_namespace_words(namespaces)
         self._surface.open_namespace_picker(namespaces)
+
+    def namespace_picker_unavailable_reason(self) -> UnavailableReason | None:
+        """Why `:ns` could not open its picker, or None — a silent probe
+        sharing the sentence `show_namespace_picker` refuses with. What
+        comes after belongs to the listing itself (RBAC, an API error, an
+        empty cluster), which only a real LIST answers — and a probe must
+        never perform one (#388).
+        """
+        listing = self._list_namespaces()
+        return None if listing is not None else NAMESPACE_LISTING_UNAVAILABLE
 
     def _notify_namespace_list_error(self, exc: ApiStatusError) -> None:
         """403 is an authorization boundary (issue #108): show one concise
@@ -1372,9 +1384,8 @@ class WorkspaceController:
         screen, so it has to know when the key would only warn: the same
         guards `show_relationships` and `_selected_relationship_root`
         apply, in the same order, read without their notifications. The
-        two metric sort keys are the quieter case — `sort_by` discards
-        them without even a warning — and answer through the same helper
-        that handler consults.
+        two metric sort keys are quieter still — `sort_by` discards them
+        without a warning — and share that handler's own helper.
         """
         column = METRIC_SORT_COLUMNS.get(action)
         if column is not None:

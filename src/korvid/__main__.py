@@ -1228,9 +1228,7 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
         view=view,
         ui=AppUiSurface(app),
         navigation=workspace_ref.get,
-        edit_in_external_editor=lambda *args, **kwargs: app._edit_in_external_editor(
-            *args, **kwargs
-        ),
+        edit_in_external_editor=app._edit_in_external_editor,
         edit_text=lambda: app._edit_text,
     )
     debug = DebugController(
@@ -1408,6 +1406,8 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
             mcp=integrations.mcp_unavailable_reason,
             telepresence=integrations.telepresence_unavailable_reason,
             proposals=proposals.unavailable_reason,
+            namespace=workspace_controller.namespace_picker_unavailable_reason,
+            context=context.unavailable_reason,
         ),
     )
     commands = CommandRouter(

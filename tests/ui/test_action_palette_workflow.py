@@ -38,6 +38,7 @@ from korvid.ui.action_availability import (
 )
 from korvid.ui.action_palette import AppActionInvocation, PaletteEntry
 from korvid.ui.app import KorvidApp
+from korvid.ui.context_switch_coordinator import ContextSwitchResult
 from korvid.ui.widgets import action_palette as palette_modal
 from korvid.ui.widgets.action_palette import ActionPaletteScreen
 from korvid.ui.widgets.confirm_screen import ConfirmScreen, ReplicasPrompt
@@ -374,6 +375,81 @@ async def test_command_rows_are_enabled_once_their_capability_is_wired() -> None
         await pilot.pause()
         assert _row(app, "command:mcp").availability.invocable is True
         assert _row(app, "command:tp").availability.invocable is True
+
+
+async def test_the_picker_command_rows_report_their_missing_collaborator() -> None:
+    """`:ns` opens the namespace picker and `:ctx` the context picker; each
+    handler refuses outright when the collaborator it lists through was
+    never wired. A base `make_app` session has neither, so both rows carry
+    their handler's own sentence, silently (#388 round 8)."""
+    app = make_app([_pod("web")])
+    async with app.run_test() as pilot:
+        await _loaded(pilot, app)
+        app._list_namespaces = None
+        before = len(app._notifications)
+        namespace_row = _row(app, "command:ns")
+        assert namespace_row.availability.invocable is False
+        assert namespace_row.availability.reason is not None
+        assert namespace_row.availability.reason.message == "Namespace listing unavailable"
+        context_row = _row(app, "command:ctx")
+        assert context_row.availability.invocable is False
+        assert context_row.availability.reason is not None
+        assert (
+            context_row.availability.reason.message == "Context switching unavailable in this build"
+        )
+        assert len(app._notifications) == before
+
+
+async def test_the_namespace_row_follows_a_listing_wired_after_the_palette_ran() -> None:
+    """The answer is re-read for every catalog derivation, not frozen at
+    wiring time: the same session flips as its listing comes and goes."""
+    app = _build_app()  # wires a namespace listing
+    async with app.run_test() as pilot:
+        await _loaded(pilot, app)
+        assert _row(app, "command:ns").availability.invocable is True
+        app._list_namespaces = None
+        assert _row(app, "command:ns").availability.invocable is False
+        assert _row(app, "command:ns").availability.reason is not None
+
+
+async def test_the_context_row_is_enabled_once_the_kubeconfig_seams_are_wired() -> None:
+    """With the listing, the probe and the swap all composed, `:ctx` really
+    opens its picker - so the row is offered."""
+
+    def list_contexts() -> tuple[list[str], str | None]:
+        return ["ctx-a", "ctx-b"], "ctx-a"
+
+    async def probe(name: str) -> None:
+        return None
+
+    async def switch(name: str | None) -> ContextSwitchResult:
+        return ContextSwitchResult(
+            pod_resize_supported=False, provider_hint=None, context_namespace=None
+        )
+
+    app = _build_app(list_contexts=list_contexts, probe_context=probe, switch_context=switch)
+    async with app.run_test() as pilot:
+        await _loaded(pilot, app)
+        before = len(app._notifications)
+        assert _row(app, "command:ctx").availability == ActionAvailability.enabled()
+        assert _row(app, "command:ns").availability == ActionAvailability.enabled()
+        assert len(app._notifications) == before
+
+
+async def test_the_namespace_picker_key_still_notifies_what_the_row_reports() -> None:
+    """The probe is silent; the typed command keeps its own warning and its
+    detailed behaviour (the picker never opens)."""
+    app = make_app([_pod("web")])
+    async with app.run_test() as pilot:
+        await _loaded(pilot, app)
+        app._list_namespaces = None
+        await app._workspace_ctl.show_namespace_picker()
+        await until(
+            pilot,
+            lambda: any(n.message == "Namespace listing unavailable" for n in app._notifications),
+            label="the namespace picker command notified",
+        )
+        assert len(app.screen_stack) == 1
 
 
 async def test_agent_command_rows_are_disabled_without_the_agent() -> None:

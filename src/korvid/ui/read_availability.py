@@ -36,6 +36,12 @@ SEARCH_ACTIONS: tuple[str, ...] = ("log_search_next", "log_search_prev")
 #: they are the only ones whose column is not on every view.
 METRIC_SORT_COLUMNS: dict[str, str] = {"sort_by_cpu": "cpu", "sort_by_mem": "mem"}
 
+#: `:ns` in a session with no namespace listing wired. One wording for
+#: the picker's own refusal and the palette row that reports it (#388).
+NAMESPACE_LISTING_UNAVAILABLE = UnavailableReason(
+    AvailabilityCode.MISSING_CAPABILITY, "Namespace listing unavailable"
+)
+
 #: The wording `ViewState.selected_ns_name` notifies with when a real
 #: keypress finds no row, said silently.
 NO_SELECTION = UnavailableReason(AvailabilityCode.NO_SELECTION, "No resource selected")

@@ -57,7 +57,11 @@ from korvid.core.audit import AuditLog
 from korvid.core.mcp import MCPControllerBase
 from korvid.core.portforward import ForwardRecord, ForwardRegistry
 from korvid.k8s.helmcli import HelmCLI
-from korvid.ui.action_availability import CONTEXT_SWITCH_IN_PROGRESS
+from korvid.ui.action_availability import (
+    CONTEXT_SWITCH_IN_PROGRESS,
+    AvailabilityCode,
+    UnavailableReason,
+)
 from korvid.ui.ui_surface import UiSurface
 from korvid.ui.view_state import ViewState
 from korvid.ui.widgets.pick_screen import PickScreen
@@ -72,6 +76,13 @@ HINT_EVENTS_GROUP = "hint-events"
 
 #: Suffix marking the active context in the `:ctx` picker.
 CURRENT_CONTEXT_SUFFIX = " (current)"
+
+#: The one wording for "this build has no kubeconfig collaborators": the
+#: picker and the switch both refuse with it, and `unavailable_reason`
+#: hands the palette row the same sentence (issue #388).
+_SWITCHING_UNAVAILABLE = UnavailableReason(
+    AvailabilityCode.MISSING_CAPABILITY, "Context switching unavailable in this build"
+)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -405,6 +416,22 @@ class ContextSwitchCoordinator(ContextGuard):
     def switching(self) -> bool:
         return self._switching
 
+    def unavailable_reason(self) -> UnavailableReason | None:
+        """Why `:ctx` could not run right now, or None — a silent probe.
+
+        The command has two halves and one refusal: bare `:ctx` opens the
+        picker, which needs the kubeconfig listing, and picking runs the
+        switch, which needs the probe and the swap. A build missing any of
+        them refuses with the same sentence both handlers notify, so the
+        greyed-out row and the typed command say the same thing (#388).
+
+        It reads only which collaborators were composed — no kubeconfig
+        is opened, no thread is started, nothing is notified.
+        """
+        if self._list_contexts is None or self._probe_context is None:
+            return _SWITCHING_UNAVAILABLE
+        return None if self._switch_context is not None else _SWITCHING_UNAVAILABLE
+
     def reads_allowed(self) -> bool:
         """Refuse read actions that spawn cluster streams during a switch.
 
@@ -475,10 +502,18 @@ class ContextSwitchCoordinator(ContextGuard):
         """`:ctx <name>`: run the whole switch transaction for *name*."""
         self._ui.run_worker(self._switch_flow(name), exclusive=False)
 
+    def _notify_switching_unavailable(self) -> None:
+        """Refuse `:ctx` with the sentence its palette row also shows."""
+        self._ui.notify(
+            _SWITCHING_UNAVAILABLE.message,
+            severity=_SWITCHING_UNAVAILABLE.severity,
+            markup=False,
+        )
+
     async def _show_picker(self) -> None:
         list_contexts = self._list_contexts
         if list_contexts is None:
-            self._ui.notify("Context switching unavailable in this build", severity="warning")
+            self._notify_switching_unavailable()
             return
         names, active = await asyncio.to_thread(list_contexts)
         if not names:
@@ -517,7 +552,7 @@ class ContextSwitchCoordinator(ContextGuard):
         target proceeds to teardown and retarget.
         """
         if self._probe_context is None or self._switch_context is None:
-            self._ui.notify("Context switching unavailable in this build", severity="warning")
+            self._notify_switching_unavailable()
             return
         # Claim before the first await: two queued SwitchContextCommands
         # must not both pass the guards and race the teardown.

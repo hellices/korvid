@@ -512,6 +512,34 @@ def test_composed_action_reasons_only_cover_owned_actions() -> None:
     assert "toggle_agent" not in reasons
 
 
+def test_composed_command_reasons_route_the_picker_commands() -> None:
+    """`:ns` and `:ctx` are typed commands whose handlers refuse without
+    their collaborator - the namespace listing, and the kubeconfig
+    listing/probe/switch trio - so each gets its own owner resolver rather
+    than sharing one, and each is read live."""
+    namespace_reason = UnavailableReason(
+        AvailabilityCode.MISSING_CAPABILITY, "Namespace listing unavailable"
+    )
+    context_reason = UnavailableReason(
+        AvailabilityCode.MISSING_CAPABILITY, "Context switching unavailable in this build"
+    )
+    listing = False
+    reasons = compose_command_reasons(
+        agent_available=lambda: True,
+        mcp=lambda: None,
+        telepresence=lambda: None,
+        proposals=lambda: None,
+        namespace=lambda: None if listing else namespace_reason,
+        context=lambda: context_reason,
+    )
+    assert set(reasons) == {"ai", "model", "mcp", "tp", "proposals", "ns", "ctx"}
+    assert reasons["ns"]() == namespace_reason
+    assert reasons["ctx"]() == context_reason
+    listing = True
+    assert reasons["ns"]() is None
+    assert reasons["ctx"]() == context_reason
+
+
 def test_composed_command_reasons_share_one_agent_answer() -> None:
     """`:ai` and `:model` have no owner at all without the [agent] extra,
     which is the same absence the bound Ctrl-A key refuses with - so both
@@ -521,8 +549,10 @@ def test_composed_command_reasons_share_one_agent_answer() -> None:
         mcp=lambda: None,
         telepresence=lambda: None,
         proposals=lambda: None,
+        namespace=lambda: None,
+        context=lambda: None,
     )
-    assert set(reasons) == {"ai", "model", "mcp", "tp", "proposals"}
+    assert set(reasons) == {"ai", "model", "mcp", "tp", "proposals", "ns", "ctx"}
     assert reasons["ai"]() == AGENT_UNAVAILABLE
     assert reasons["model"]() == AGENT_UNAVAILABLE
 
@@ -536,6 +566,8 @@ def test_composed_command_reasons_follow_a_late_agent() -> None:
         mcp=lambda: None,
         telepresence=lambda: None,
         proposals=lambda: None,
+        namespace=lambda: None,
+        context=lambda: None,
     )
     assert reasons["ai"]() == AGENT_UNAVAILABLE
     available = True
@@ -558,6 +590,8 @@ def test_composed_command_reasons_route_the_integration_commands() -> None:
         mcp=lambda: mcp_reason,
         telepresence=lambda: tp_reason,
         proposals=lambda: None if pending else proposals_reason,
+        namespace=lambda: None,
+        context=lambda: None,
     )
     assert reasons["mcp"]() == mcp_reason
     assert reasons["tp"]() == tp_reason
