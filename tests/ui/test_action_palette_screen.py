@@ -22,6 +22,7 @@ from korvid.ui.action_palette import (
     PaletteEntry,
     derive_action_entries,
     derive_command_entries,
+    derive_palette_entries,
 )
 from korvid.ui.app_bindings import APP_BINDINGS
 from korvid.ui.command import COMMANDS
@@ -762,8 +763,148 @@ async def test_a_shrinking_terminal_shows_a_whole_filtered_unavailable_reason() 
         assert screen.query_one(Input).has_focus
 
 
-async def test_a_resize_reflow_that_lands_after_dismissal_does_nothing() -> None:
-    """The reflow a resize orders can outlive the palette.
+def _derived_catalog(refused: tuple[str, UnavailableReason] | None = None) -> list[PaletteEntry]:
+    """The whole catalog the app itself opens the palette with.
+
+    `derive_palette_entries` is `KorvidApp._palette_entries`' own
+    composition, so a query against this list leaves *several* rows and the
+    results list keeps a scrollbar - the state the single-row fixtures
+    above can never reach, and the one the scrollbar's own two columns make
+    different. `refused` names one action its owner turns down, with the
+    owner's real wording.
+    """
+
+    def availability(action: str) -> ActionAvailability:
+        if refused is not None and action == refused[0]:
+            return ActionAvailability(True, refused[1])
+        return ActionAvailability.enabled()
+
+    return derive_palette_entries(
+        APP_BINDINGS,
+        COMMANDS,
+        overrides={},
+        availability=availability,
+        command_availability=lambda _command: ActionAvailability.enabled(),
+    )
+
+
+def _index_of(options: OptionList, entry_id: str) -> int:
+    """Where `entry_id` is rendered, or fail naming what is there instead."""
+    ids = [options.get_option_at_index(index).id for index in range(options.option_count)]
+    assert entry_id in ids, f"{entry_id} is not among the rendered rows: {ids}"
+    return ids.index(entry_id)
+
+
+async def _highlight_entry(pilot: Pilot[None], options: OptionList, entry_id: str) -> int:
+    """Walk the highlight down onto `entry_id` with `Down`, and return its index."""
+    index = _index_of(options, entry_id)
+    for _ in range(options.option_count):
+        if options.highlighted == index:
+            break
+        await pilot.press("down")
+    assert options.highlighted == index
+    return index
+
+
+def _separator_rules(options: OptionList) -> list[int]:
+    """Viewport lines that are a category rule, by line number.
+
+    The rule is the last line `OptionList` renders for a row that ends a
+    category, so it is also the first line a row that measures one line
+    short loses - and the only thing separating two categories once it is
+    gone.
+    """
+    return [
+        number
+        for number, line in enumerate(_viewport_lines(options))
+        if line.strip() and set(line.strip()) == {"─"}
+    ]
+
+
+async def test_a_shrinking_terminal_shows_the_whole_selected_row_among_many_results() -> None:
+    """A scrollbar makes the resize a different width, and it must not clip.
+
+    One filtered row leaves the list no scrollbar, so the width it measures
+    its rows against and the width it renders them at are the same number
+    either way. A real query does not: the catalog `Ctrl-P` opens with
+    leaves several rows, the list keeps a vertical scrollbar for them, and
+    the two columns that scrollbar takes are exactly the difference between
+    a row measured while the list is momentarily empty and the same row
+    rendered afterwards. `:proposals` then reports one line fewer than it
+    draws and "write proposals" is never composited - and because
+    `OptionList` scrolls by whole options, walking back onto the row with
+    `Home` and `Down` renders the same clipped row again.
+    """
+    screen = ActionPaletteScreen(_derived_catalog())
+    app = PaletteHarness(screen)
+    async with app.run_test(size=(80, 24)) as pilot:
+        options = screen.query_one(OptionList)
+        await pilot.press("p")
+        await until(
+            pilot,
+            lambda: options.option_count > 1,
+            label="the results filtered to several 'p' rows",
+        )
+        index = await _highlight_entry(pilot, options, "command:proposals")
+        await pilot.resize_terminal(36, 16)
+        await until(
+            pilot,
+            lambda: _second_line(options, index) in _visible_text(options),
+            label="the whole highlighted row composited after the resize",
+        )
+        visible = _visible_text(options)
+        assert ":proposals" in _heading(options, index)
+        assert _heading(options, index) in visible
+        assert _second_line(options, index) in visible
+        await pilot.press("home")
+        assert await _highlight_entry(pilot, options, "command:proposals") == index
+        reasserted = _visible_text(options)
+        assert _heading(options, index) in reasserted
+        assert _second_line(options, index) in reasserted
+        assert screen.query_one(Input).has_focus
+
+
+async def test_a_shrinking_terminal_keeps_an_unavailable_row_whole_among_many_results() -> None:
+    """The same width transition on the row no keystroke can rescue.
+
+    An unavailable row is disabled, so nothing ever scrolls to it: whatever
+    the resize leaves of it is all the user gets. Among several results it
+    loses its last line to the scrollbar's two columns the same way - here
+    the rule that closes its category, so the refused `Table` row and the
+    `Commands` rows below it run together with no boundary between them.
+    The refusal itself, the trigger, and that rule all have to be
+    composited, and the row has to stay inert.
+    """
+    reason = _long_owner_reason()
+    screen = ActionPaletteScreen(_derived_catalog(("relationships", reason)))
+    app = PaletteHarness(screen)
+    async with app.run_test(size=(80, 24)) as pilot:
+        options = screen.query_one(OptionList)
+        await pilot.press("r", "e", "l")
+        await until(
+            pilot,
+            lambda: options.option_count > 1,
+            label="the results filtered to several 'rel' rows",
+        )
+        index = _index_of(options, "action:relationships")
+        assert options.get_option_at_index(index).disabled is True
+        await pilot.resize_terminal(36, 16)
+        await until(
+            pilot,
+            lambda: bool(_separator_rules(options)),
+            label="the refused row's category rule composited after the resize",
+        )
+        visible = _visible_text(options)
+        assert _heading(options, index) in visible
+        assert _second_line(options, index) == f"Unavailable: {reason.message}"
+        assert _second_line(options, index) in visible
+        await pilot.press("enter")
+        assert app.results == []
+        assert screen.query_one(Input).has_focus
+
+
+async def test_a_resize_scroll_that_lands_after_dismissal_does_nothing() -> None:
+    """The scroll a resize orders can outlive the palette.
 
     It is scheduled for after the next refresh, so a resize immediately
     before `Esc` leaves the callback queued against a screen whose
@@ -778,7 +919,7 @@ async def test_a_resize_reflow_that_lands_after_dismissal_does_nothing() -> None
         await pilot.press("escape")
         await until(pilot, lambda: app.results == [None], label="the palette dismissed")
         assert not screen.query(OptionList)
-        screen._reflow_results()
+        screen._reveal_after_resize()
         await pilot.pause()
         assert app.results == [None]
         assert not screen.query(OptionList)
