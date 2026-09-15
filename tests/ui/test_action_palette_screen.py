@@ -63,9 +63,9 @@ def _entries(*, drain_available: bool = True) -> list[PaletteEntry]:
 
 
 def _mixed_category_entries(count: int = 30) -> list[PaletteEntry]:
-    """`count` invokable entries, split evenly across two categories.
+    """`count` invocable entries, split evenly across two categories.
 
-    All invokable with an empty query, `rank_entries` breaks ties purely by
+    All invocable with an empty query, `rank_entries` breaks ties purely by
     `declaration_order`, so this fixture's rendered order is exactly this
     list's order — deterministic enough to test paging, edges, and the one
     category transition it contains.

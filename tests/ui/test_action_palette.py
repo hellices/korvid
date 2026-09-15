@@ -132,9 +132,9 @@ def test_exact_unavailable_result_stays_visible_with_its_reason() -> None:
     assert ranked[0].availability.reason is not None
 
 
-def test_empty_query_orders_invokable_actions_before_commands_before_unavailable() -> None:
+def test_empty_query_orders_invocable_actions_before_commands_before_unavailable() -> None:
     """Carry-over from the task 2 review: the brief's default-view ordering
-    ("invokable actions, then invokable commands, then every unavailable
+    ("invocable actions, then invocable commands, then every unavailable
     entry") had no committed characterization test. This pins it, including
     the declaration-order tie-break within each group."""
     entries = [

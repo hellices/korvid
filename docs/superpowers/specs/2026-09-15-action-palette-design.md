@@ -179,9 +179,9 @@ The app therefore introduces a frozen `ActionAvailability` value with two
 decisions:
 
 - `binding_enabled: bool` preserves the existing key-dispatch policy;
-- `invokable: bool` says whether the palette may invoke the action now;
+- `invocable: bool` says whether the palette may invoke the action now;
 - stable reason code;
-- concise operator-facing reason when `invokable` is false.
+- concise operator-facing reason when `invocable` is false.
 
 Reason codes cover:
 
@@ -202,15 +202,15 @@ Ownership follows existing boundaries:
 
 Controllers expose synchronous availability queries over state they already
 own. The app composes those results in `action_availability`. `check_action`
-returns `binding_enabled`, while the palette renders and enforces `invokable`.
+returns `binding_enabled`, while the palette renders and enforces `invocable`.
 For example, a Helm action on the pods view is neither binding-enabled nor
-invokable; a write action with no selected row remains binding-enabled so its
-key can explain the refusal, but is not palette-invokable. Action handlers retain
+invocable; a write action with no selected row remains binding-enabled so its
+key can explain the refusal, but is not palette-invocable. Action handlers retain
 their existing guards as defense in depth. Availability checks must not perform
 network I/O or mutate state.
 
 A protected cluster context does not make a write unavailable; it remains
-invokable and reaches the stronger existing confirmation path. "Protected"
+invocable and reaches the stronger existing confirmation path. "Protected"
 availability reasons refer only to UI surfaces or transitions where launching
 another modal would be unsafe.
 
@@ -303,7 +303,7 @@ approve it. A fresh user keystroke remains mandatory.
 - configured remaps appear as effective palette keys;
 - exact, prefix, fuzzy, availability, declaration-order, and stable-ID ranking;
 - `binding_enabled` remains consistent with boolean `check_action` behavior,
-  while `invokable` covers deeper refusal states without making explanatory
+  while `invocable` covers deeper refusal states without making explanatory
   keyboard paths inert;
 
 ### Textual tests

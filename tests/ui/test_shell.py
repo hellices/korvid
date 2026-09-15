@@ -1999,7 +1999,7 @@ async def test_shell_availability_reports_missing_kubectl_without_notifying() ->
             assert len(app._notifications) == before
             availability = app._actions.availability("shell")
             assert availability.binding_enabled is True
-            assert availability.invokable is False
+            assert availability.invocable is False
             assert len(app._notifications) == before
 
 
@@ -2027,4 +2027,4 @@ async def test_shell_availability_is_none_when_the_shell_would_launch() -> None:
                 label="pod row selected",
             )
             assert app._shell.unavailable_reason() is None
-            assert app._actions.availability("shell").invokable is True
+            assert app._actions.availability("shell").invocable is True

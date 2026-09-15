@@ -1379,7 +1379,7 @@ async def test_uninstall_ctrl_d_on_release_confirms_and_executes(tmp_path: Path)
         assert entries[-1]["outcome"] == "success"
 
 
-async def test_delete_action_availability_is_invokable_on_the_release_view(
+async def test_delete_action_availability_is_invocable_on_the_release_view(
     tmp_path: Path,
 ) -> None:
     """Regression (#388 task 3 review): `ActionPolicy.binding_enabled`
@@ -1387,7 +1387,7 @@ async def test_delete_action_availability_is_invokable_on_the_release_view(
     because Ctrl-D routes to `helm uninstall` before the generic
     `write_target` path (issue #117) - so the wired
     `ActionPolicy.availability("delete_resource")` must agree the action is
-    *invokable*, not merely bound. Before the fix,
+    *invocable*, not merely bound. Before the fix,
     `ResourceWriteController.unavailable_reason("delete_resource")` asked
     `WriteCoordinator.unavailable_reason()` first, which blanket-rejects
     every synthetic view ("{kind} is a read-only view") - so the palette
@@ -1402,7 +1402,7 @@ async def test_delete_action_availability_is_invokable_on_the_release_view(
         availability = app._actions.availability("delete_resource")
         assert availability.binding_enabled is True
         assert availability.reason is None
-        assert availability.invokable is True
+        assert availability.invocable is True
 
         # The fix must not weaken generic synthetic-resource blocking: the
         # helm release browser has no `edit_resource` exception, so that
@@ -1440,7 +1440,7 @@ async def test_delete_action_availability_reports_the_missing_helm_binary(
     detected - the same fact `helm_install`'s probe already reports. Before
     the fix, `ResourceWriteController.unavailable_reason("delete_resource")`
     checked only the read-only/audit gate and the selection, so the palette
-    would have advertised Ctrl-D as invokable on a release row with no helm
+    would have advertised Ctrl-D as invocable on a release row with no helm
     binary, even though the keypress refuses."""
     app = make_app(helm=None, audit_path=tmp_path / "audit.jsonl")
     async with app.run_test() as pilot:
@@ -1455,7 +1455,7 @@ async def test_delete_action_availability_reports_the_missing_helm_binary(
             "helm CLI not found on PATH - install/upgrade/rollback/uninstall unavailable",
             severity="error",
         )
-        assert availability.invokable is False
+        assert availability.invocable is False
         assert len(app._notifications) == before
 
 
@@ -2394,7 +2394,7 @@ async def test_helm_availability_reports_the_missing_executable_without_notifyin
 ) -> None:
     """The palette probe must report the same refusal `HelmController.gate()`
     notifies when no helm binary was detected - otherwise the palette would
-    advertise `helm install` as invokable while the real key press refuses
+    advertise `helm install` as invocable while the real key press refuses
     (#388 task 4). The probe itself notifies nothing."""
     app = make_app(helm=None, audit_path=tmp_path / "audit.jsonl")
     async with app.run_test() as pilot:
@@ -2409,7 +2409,7 @@ async def test_helm_availability_reports_the_missing_executable_without_notifyin
         assert len(app._notifications) == before
         availability = app._actions.availability("helm_install")
         assert availability.binding_enabled is True
-        assert availability.invokable is False
+        assert availability.invocable is False
         assert len(app._notifications) == before
 
 
@@ -2438,9 +2438,9 @@ async def test_helm_availability_reports_a_missing_audit_sink(tmp_path: Path) ->
         )
 
 
-async def test_helm_availability_is_invokable_with_a_selected_release(tmp_path: Path) -> None:
+async def test_helm_availability_is_invocable_with_a_selected_release(tmp_path: Path) -> None:
     """With helm present, an audit sink configured and a release row
-    selected, every helm action the release view binds is invokable."""
+    selected, every helm action the release view binds is invocable."""
     app = make_app(helm=FakeHelm(), audit_path=tmp_path / "audit.jsonl")
     async with app.run_test() as pilot:
         await _navigate(pilot, "helm", "helmreleases")
@@ -2448,7 +2448,7 @@ async def test_helm_availability_is_invokable_with_a_selected_release(tmp_path: 
         assert app._helm_ctl.unavailable_reason("helm_install") is None
         assert app._helm_ctl.unavailable_reason("helm_upgrade") is None
         assert app._helm_ctl.unavailable_reason("helm_history") is None
-        assert app._actions.availability("helm_upgrade").invokable is True
+        assert app._actions.availability("helm_upgrade").invocable is True
 
 
 async def test_helm_availability_reports_no_selection_for_upgrade(tmp_path: Path) -> None:

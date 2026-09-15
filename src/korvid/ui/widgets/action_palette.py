@@ -38,7 +38,7 @@ def _prompt_for(entry: PaletteEntry) -> Text:
     catalog-derived title, description, or unavailable-reason that happens
     to contain `[`/`]`. Wrapping in `Text` keeps that content literal.
     """
-    if entry.availability.invokable:
+    if entry.availability.invocable:
         second_line = entry.description
     else:
         reason = entry.availability.reason
@@ -167,7 +167,7 @@ class ActionPaletteScreen(ModalScreen[str | None]):
         if option_id is None:
             return
         entry = self._visible.get(option_id)
-        if entry is not None and entry.availability.invokable:
+        if entry is not None and entry.availability.invocable:
             self.dismiss(entry.id)
 
     def _render_results(self, query: str) -> None:
@@ -189,7 +189,7 @@ class ActionPaletteScreen(ModalScreen[str | None]):
                 Option(
                     _prompt_for(entry),
                     id=entry.id,
-                    disabled=not entry.availability.invokable,
+                    disabled=not entry.availability.invocable,
                 )
             )
         options.add_options(rendered)

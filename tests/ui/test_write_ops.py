@@ -1979,7 +1979,7 @@ async def test_unavailable_reason_reports_a_missing_write_client(
 ) -> None:
     """Carry-over from the task 3 review: every generic write refuses at the
     keypress when the session has no write client ("<Action> unavailable in
-    this session"), so the palette must not claim the action is invokable -
+    this session"), so the palette must not claim the action is invocable -
     with the handler's own wording and no notification (#388 task 4)."""
     rec = Recorder()
     app = make_app(rec, tmp_path / "audit.jsonl")
@@ -2001,7 +2001,7 @@ async def test_unavailable_reason_reports_a_missing_manifest_source_for_edit(
     is missing (`ops is None or self._get_manifest() is None`). Before the
     fix, the probe checked only `write_ops`, so with a write client present
     but no manifest source wired the palette would have advertised `e` as
-    invokable while the keypress still refuses."""
+    invocable while the keypress still refuses."""
     rec = Recorder()
     app = make_app(rec, tmp_path / "audit.jsonl")  # default: no get_manifest wired
     assert app._write_ops is not None
@@ -2015,12 +2015,12 @@ async def test_unavailable_reason_reports_a_missing_manifest_source_for_edit(
         assert len(app._notifications) == before
 
 
-async def test_edit_is_invokable_with_both_a_write_client_and_a_manifest_source(
+async def test_edit_is_invocable_with_both_a_write_client_and_a_manifest_source(
     tmp_path: Path,
 ) -> None:
     """The positive half of the `edit_resource` probe (#388 task 6): with a
     write client, a manifest source, an audit log and a selected row, `e`
-    really is invokable - so the palette offers it rather than greying it
+    really is invocable - so the palette offers it rather than greying it
     out. Without this the two negative cases above would still pass if the
     probe simply always refused."""
     rec = Recorder()
@@ -2192,7 +2192,7 @@ async def test_probe_matrix_in_read_only_mode(tmp_path: Path) -> None:
 
 async def test_probe_matrix_while_a_drain_is_running(tmp_path: Path) -> None:
     """A running drain owns the node's schedulable state, so cordon and
-    uncordon report it while `drain_node` itself stays invokable (pressing
+    uncordon report it while `drain_node` itself stays invocable (pressing
     the drain key again is how the drain is cancelled)."""
     rec = Recorder()
     app = make_app(rec, tmp_path / "audit.jsonl")

@@ -217,7 +217,7 @@ def _match_tier(
 
 
 def _empty_query_rank(entry: PaletteEntry) -> tuple[int, int, str]:
-    if entry.availability.invokable:
+    if entry.availability.invocable:
         group = 1 if isinstance(entry.invocation, CommandInvocation) else 0
     else:
         group = 2
@@ -227,12 +227,12 @@ def _empty_query_rank(entry: PaletteEntry) -> tuple[int, int, str]:
 def rank_entries(entries: Sequence[PaletteEntry], query: str) -> list[PaletteEntry]:
     """Rank `entries` for `query`, most relevant first.
 
-    An empty query orders invokable actions, then invokable commands, then
+    An empty query orders invocable actions, then invocable commands, then
     every unavailable entry (each group by declaration order, so the
     palette's default view mirrors the catalogs it was derived from). A
     non-empty query ranks by match tier first — exact title/alias, then a
     leading-token prefix, then a fuzzy title/alias match, then a fuzzy
-    description match — breaking ties by score, invokable-first, then
+    description match — breaking ties by score, invocable-first, then
     declaration order and id for a fully deterministic, stable order. An
     exact match on a currently-unavailable entry still ranks by its tier:
     availability only breaks ties, so its reason stays visible rather than
@@ -250,10 +250,10 @@ def rank_entries(entries: Sequence[PaletteEntry], query: str) -> list[PaletteEnt
         if tier_score is None:
             continue
         tier, score = tier_score
-        invokable_rank = 0 if entry.availability.invokable else 1
+        invocable_rank = 0 if entry.availability.invocable else 1
         ranked.append(
             (
-                (tier, -score, invokable_rank, entry.declaration_order, entry.id),
+                (tier, -score, invocable_rank, entry.declaration_order, entry.id),
                 entry,
             )
         )

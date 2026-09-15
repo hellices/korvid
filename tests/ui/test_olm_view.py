@@ -836,7 +836,7 @@ async def test_operator_availability_reports_a_missing_write_client(tmp_path: Pa
         )
         availability = app._actions.availability("operator_install")
         assert availability.binding_enabled is True
-        assert availability.invokable is False
+        assert availability.invocable is False
         assert len(app._notifications) == before
 
 
@@ -892,4 +892,4 @@ async def test_operator_availability_is_none_on_a_selected_package(tmp_path: Pat
         table = app.query_one(ResourceTable)
         await until(pilot, lambda: table.row_count == 1, label="package listed")
         assert app._olm.unavailable_reason() is None
-        assert app._actions.availability("operator_install").invokable is True
+        assert app._actions.availability("operator_install").invocable is True

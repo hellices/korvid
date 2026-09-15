@@ -124,7 +124,7 @@ def compose_action_reasons(
 
     Every value is a live call into the owner that already refuses the
     keypress, so a probe and its keypress can never answer differently.
-    Actions absent from the result have no owner reason and stay invokable
+    Actions absent from the result have no owner reason and stay invocable
     once their binding is enabled.
 
     Args:
@@ -194,7 +194,7 @@ class ActionPolicy:
         agent_available: Callable[[], bool],
         log_pane_open: Callable[[], bool],
         #: Whether an Agent turn is running. None (no agent composed) reads
-        #: as "invokable": a policy built without one must not grey out a
+        #: as "invocable": a policy built without one must not grey out a
         #: bound key it knows nothing about.
         agent_busy: Callable[[], bool] | None = None,
         #: The app surfaces `open_action_palette` is gated on (issue #388
@@ -231,7 +231,7 @@ class ActionPolicy:
         #: enabled but whose *invocation* may still be refused (the generic
         #: writes: `ResourceWriteController.unavailable_reason`; the
         #: capability owners: helm, forwards, transfer, shell, operators,
-        #: logs). Actions absent from the map are always invokable once
+        #: logs). Actions absent from the map are always invocable once
         #: bound. `interrupt_agent`'s resolver is folded in here too (unless
         #: a caller already supplied one) rather than left as a second,
         #: hard-coded lookup path in `_invocation_reason` - one source of

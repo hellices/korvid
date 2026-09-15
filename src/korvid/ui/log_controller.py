@@ -296,7 +296,7 @@ class LogController:
         apply, in the same order: a `:ctx` switch, the stream source, and
         then the selected pod (`l`) or the listed pods (`L`). `l` on an
         already-open pane in another mode *closes* it, so that case is
-        invokable, exactly as the handler behaves. The pane-local display
+        invocable, exactly as the handler behaves. The pane-local display
         actions answer with the pane's visibility, matching
         `ActionPolicy`'s own binding gate on the same actions.
 

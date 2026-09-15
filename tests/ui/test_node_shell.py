@@ -1003,13 +1003,13 @@ async def test_node_shell_availability_is_none_with_a_selected_node(tmp_path: Pa
         async with app.run_test() as pilot:
             await _to_nodes(pilot)
             assert app._shell.unavailable_reason() is None
-            assert app._actions.availability("shell").invokable is True
+            assert app._actions.availability("shell").invocable is True
 
 
 async def test_node_write_availability_reports_a_missing_write_client(tmp_path: Path) -> None:
     """Carry-over from the task 3 review: without a write client every node
     write refuses at the keypress, so the palette must not advertise
-    cordon/uncordon/drain as invokable (#388 task 4)."""
+    cordon/uncordon/drain as invocable (#388 task 4)."""
     app = make_app(DeleteRecorder(), tmp_path / "audit.jsonl")
     app._write_ops = None
     async with app.run_test() as pilot:
@@ -1032,8 +1032,8 @@ async def test_node_write_availability_is_none_with_a_write_client(tmp_path: Pat
     app = make_app(DeleteRecorder(), tmp_path / "audit.jsonl")
     async with app.run_test() as pilot:
         await _to_nodes(pilot)
-        assert app._actions.availability("cordon_node").invokable is True
-        assert app._actions.availability("drain_node").invokable is True
+        assert app._actions.availability("cordon_node").invocable is True
+        assert app._actions.availability("drain_node").invocable is True
 
 
 async def test_cordon_availability_resolves_the_write_target_once(tmp_path: Path) -> None:

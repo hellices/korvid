@@ -121,7 +121,7 @@ def test_binding_policy_preserves_helm_delete_exception() -> None:
 
 
 def test_availability_is_fully_enabled_without_a_registered_reason() -> None:
-    """An action with no owner resolver (most actions) is simply invokable."""
+    """An action with no owner resolver (most actions) is simply invocable."""
     policy = _policy(group="", plural="pods")
     assert policy.availability("help") == ActionAvailability.enabled()
 
@@ -135,7 +135,7 @@ def test_availability_explains_a_wrong_view_binding() -> None:
     assert availability.reason == UnavailableReason(
         AvailabilityCode.WRONG_VIEW, "Not available in this view"
     )
-    assert availability.invokable is False
+    assert availability.invocable is False
 
 
 def test_availability_explains_a_synthetic_gated_binding() -> None:
@@ -196,7 +196,7 @@ def test_availability_surfaces_the_owner_reason_for_a_generic_write(
     availability = policy.availability("delete_resource")
     assert availability.binding_enabled is True
     assert availability.reason == reason
-    assert availability.invokable is False
+    assert availability.invocable is False
 
 
 def test_binding_enabled_stays_true_for_no_selection_and_read_only() -> None:
@@ -216,7 +216,7 @@ def test_binding_enabled_stays_true_for_no_selection_and_read_only() -> None:
     assert policy.availability("delete_resource").binding_enabled is True
 
 
-def test_interrupt_agent_stays_bound_but_is_not_invokable_while_idle() -> None:
+def test_interrupt_agent_stays_bound_but_is_not_invocable_while_idle() -> None:
     """Ctrl-X is a priority binding that must keep working as a key (its
     visibility is deliberately unchanged), but there is nothing to
     interrupt while no turn is running - the palette says so (#388)."""
@@ -227,19 +227,19 @@ def test_interrupt_agent_stays_bound_but_is_not_invokable_while_idle() -> None:
     assert availability.reason == UnavailableReason(
         AvailabilityCode.PROTECTED_UI, "No Agent turn is running"
     )
-    assert availability.invokable is False
+    assert availability.invocable is False
 
 
-def test_interrupt_agent_is_invokable_during_a_turn() -> None:
+def test_interrupt_agent_is_invocable_during_a_turn() -> None:
     policy = _policy(group="", plural="pods", agent_busy=lambda: True)
     assert policy.availability("interrupt_agent") == ActionAvailability.enabled()
 
 
-def test_interrupt_agent_is_invokable_without_an_injected_busy_probe() -> None:
-    """The default composition answer is "invokable": a policy built
+def test_interrupt_agent_is_invocable_without_an_injected_busy_probe() -> None:
+    """The default composition answer is "invocable": a policy built
     without an agent (tests, headless) must not grey out a bound key."""
     policy = _policy(group="", plural="pods")
-    assert policy.availability("interrupt_agent").invokable is True
+    assert policy.availability("interrupt_agent").invocable is True
 
 
 def test_interrupt_agent_resolver_registered_via_reason_by_action_wins() -> None:
@@ -252,7 +252,7 @@ def test_interrupt_agent_resolver_registered_via_reason_by_action_wins() -> None
         group="",
         plural="pods",
         agent_busy=lambda: False,  # idle: the default would refuse
-        reason_by_action={"interrupt_agent": lambda: None},  # explicit: always invokable
+        reason_by_action={"interrupt_agent": lambda: None},  # explicit: always invocable
     )
     assert policy.availability("interrupt_agent") == ActionAvailability.enabled()
 
@@ -321,7 +321,7 @@ def test_palette_binding_is_refused_on_every_protected_surface(
     assert policy.binding_enabled("open_action_palette") is False
     assert availability.binding_enabled is False
     assert availability.reason == UnavailableReason(code, message)
-    assert availability.invokable is False
+    assert availability.invocable is False
 
 
 def test_palette_binding_defaults_to_enabled_without_injected_probes() -> None:
@@ -373,7 +373,7 @@ def test_command_availability_surfaces_the_owner_reason() -> None:
     availability = policy.command_availability("ai")
     assert availability.binding_enabled is True
     assert availability.reason == reason
-    assert availability.invokable is False
+    assert availability.invocable is False
 
 
 def test_command_and_action_namespaces_cannot_collide() -> None:
@@ -478,7 +478,7 @@ def test_composed_action_reasons_ask_each_owner_about_its_own_actions() -> None:
 
 
 def test_composed_action_reasons_only_cover_owned_actions() -> None:
-    """Actions nobody registered a reason for stay invokable once bound -
+    """Actions nobody registered a reason for stay invocable once bound -
     composing the map must not invent an owner for them."""
     reasons = compose_action_reasons(
         writes=lambda _action: None,

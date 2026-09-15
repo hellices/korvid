@@ -21,7 +21,7 @@
 - Never open the palette over any modal, command-bar edit, filter-bar edit, context switch, or shutdown.
 - Palette selection must dismiss the palette before dispatch and must re-check current availability.
 - Palette code never imports write implementations and never confirms an approval.
-- Preserve explanatory key behavior: `check_action` uses `binding_enabled`; deeper `invokable` failures must not make existing keys silently inert.
+- Preserve explanatory key behavior: `check_action` uses `binding_enabled`; deeper `invocable` failures must not make existing keys silently inert.
 - Keep `src/korvid/ui/app.py` at or below its 1,500-line ratchet by moving its existing action policy out before adding palette wiring.
 - Every behavioral task follows RED → GREEN → refactor and ends with a commit carrying the required Copilot co-author trailer.
 - Do not push, open a pull request, merge, or enable auto-merge without explicit maintainer instruction.
@@ -484,7 +484,7 @@ class ActionAvailability:
     reason: UnavailableReason | None = None
 
     @property
-    def invokable(self) -> bool:
+    def invocable(self) -> bool:
         return self.reason is None
 
     @classmethod
@@ -641,8 +641,8 @@ override before the default key, and use `key_label` for display.
 
 `rank_entries` must calculate exact, token-prefix, fuzzy-title/alias, then
 fuzzy-description tiers with `textual.fuzzy.Matcher`; sort non-empty queries by
-negative tier/score, then invokable first, declaration order, and stable ID.
-For an empty query sort invokable actions, invokable commands, then unavailable
+negative tier/score, then invocable first, declaration order, and stable ID.
+For an empty query sort invocable actions, invocable commands, then unavailable
 entries.
 
 - [ ] **Step 7: Run focused tests and static checks**
@@ -1197,7 +1197,7 @@ class ActionPaletteScreen(ModalScreen[str | None]):
     @on(OptionList.OptionSelected)
     def _selected(self, event: OptionList.OptionSelected) -> None:
         entry = self._visible.get(str(event.option.id))
-        if entry is not None and entry.availability.invokable:
+        if entry is not None and entry.availability.invocable:
             self.dismiss(entry.id)
 
     def action_cancel(self) -> None:
@@ -1207,7 +1207,7 @@ class ActionPaletteScreen(ModalScreen[str | None]):
 Keep the `Input` focused and have movement actions manipulate the `OptionList`
 highlight. Build two-line `Text` prompts with `markup=False` semantics for all
 cluster- or configuration-derived text. Use
-`Option(prompt, id=entry.id, disabled=not entry.availability.invokable)`.
+`Option(prompt, id=entry.id, disabled=not entry.availability.invocable)`.
 
 Use CSS exactly matching the design budgets:
 

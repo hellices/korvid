@@ -1,7 +1,7 @@
 """Typed availability values shared by the Action Palette (issue #388).
 
 `ActionPolicy.binding_enabled` (issue #388 task 1) answers a single bool per
-action; the palette needs to say *why* an invokable-but-currently-unusable
+action; the palette needs to say *why* an invocable-but-currently-unusable
 entry can't run right now (e.g. "select a node first") so it can still be
 shown, searchable, with its reason attached, rather than disappearing.
 """
@@ -44,13 +44,13 @@ class ActionAvailability:
     reason: UnavailableReason | None = None
 
     @property
-    def invokable(self) -> bool:
+    def invocable(self) -> bool:
         """Whether the palette should let the user run this entry now."""
         return self.reason is None
 
     @classmethod
     def enabled(cls) -> ActionAvailability:
-        """An always-invokable availability, with no reason attached."""
+        """An always-invocable availability, with no reason attached."""
         return cls(binding_enabled=True)
 
 

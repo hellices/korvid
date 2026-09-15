@@ -97,7 +97,7 @@ class WriteAvailability:
         The session's write client comes first, exactly as every flow reads
         it before resolving a target (#388 task 4): without one the
         keypress refuses with "<Action> unavailable in this session", so the
-        palette must not advertise the action as invokable. `edit_resource`
+        palette must not advertise the action as invocable. `edit_resource`
         carries a second half of that same refusal: `edit()` also refuses
         when the manifest source is missing, so the probe must check both
         halves with the one wording the handler uses, not merely the write

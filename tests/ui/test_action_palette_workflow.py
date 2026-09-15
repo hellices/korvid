@@ -333,13 +333,13 @@ async def test_command_rows_are_disabled_without_their_capability() -> None:
         assert app._integrations.telepresence_available is False
         for entry_id in ("command:mcp", "command:tp"):
             row = _row(app, entry_id)
-            assert row.availability.invokable is False
+            assert row.availability.invocable is False
             reason = row.availability.reason
             assert reason is not None
             assert reason.code is AvailabilityCode.MISSING_CAPABILITY
         # The agent *is* available here, so its rows stay runnable.
-        assert _row(app, "command:ai").availability.invokable is True
-        assert _row(app, "command:model").availability.invokable is True
+        assert _row(app, "command:ai").availability.invocable is True
+        assert _row(app, "command:model").availability.invocable is True
         # And an unavailable row renders as a disabled option.
         screen = await _open_palette(pilot)
         await _type_query(pilot, "mcp")
@@ -357,8 +357,8 @@ async def test_command_rows_are_enabled_once_their_capability_is_wired() -> None
     async with app.run_test() as pilot:
         await until(pilot, lambda: app._mcp is not None, label="app composed")
         await pilot.pause()
-        assert _row(app, "command:mcp").availability.invokable is True
-        assert _row(app, "command:tp").availability.invokable is True
+        assert _row(app, "command:mcp").availability.invocable is True
+        assert _row(app, "command:tp").availability.invocable is True
 
 
 async def test_agent_command_rows_are_disabled_without_the_agent() -> None:
@@ -372,7 +372,7 @@ async def test_agent_command_rows_are_disabled_without_the_agent() -> None:
         before = len(app._notifications)
         for entry_id in ("command:ai", "command:model"):
             row = _row(app, entry_id)
-            assert row.availability.invokable is False
+            assert row.availability.invocable is False
             assert row.availability.reason == AGENT_UNAVAILABLE
         # Deriving the catalog is a silent probe: it asks, it never tells.
         assert len(app._notifications) == before
@@ -442,7 +442,7 @@ async def test_the_palette_refuses_every_command_the_real_router_cannot_run(
             label=f":{command} refused by the router",
         )
         row = _row(app, entry_id)
-        assert row.availability.invokable is False
+        assert row.availability.invocable is False
         assert row.availability.reason == AGENT_UNAVAILABLE
 
 
@@ -661,7 +661,7 @@ async def test_a_selection_is_rechecked_against_the_view_that_is_on_screen_now()
     async with app.run_test() as pilot:
         await _rows_listed(pilot, app)
         palette = await _open_palette(pilot)
-        assert app._actions.availability("hint_details").invokable is True
+        assert app._actions.availability("hint_details").invocable is True
         await app._workspace_ctl.navigate("nodes", "default")
         await until(pilot, lambda: app.current_kind == "nodes", label="nodes view active")
         palette.dismiss("action:hint_details")
