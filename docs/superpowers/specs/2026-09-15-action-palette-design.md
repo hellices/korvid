@@ -222,6 +222,17 @@ Unavailable entries remain searchable by default. They sort after equally
 relevant available entries and render `Unavailable: <reason>`. They cannot be
 selected or invoked.
 
+A palette reason is **concise by contract**: it is one `Option`'s second line
+at 36 columns, and a row whose reason is clipped there cannot be recovered by
+any keystroke — the list scrolls by whole options and a disabled row is never
+highlighted. So an owner whose *command* answers with remediation (an install
+or reinstall command, a config snippet) splits the two: the probe returns the
+short capability fact (`:mcp` — "the [mcp] extra is not installed"; `:tp` —
+"no CLI in this session"), and the typed command's notification leads with that
+same sentence and then adds the full remediation, which a toast has room for.
+The row and the keypress therefore still agree on why, and only the length
+differs.
+
 ## Search and ranking
 
 Search uses Textual's public fuzzy matcher, with deterministic boosts and tie
@@ -376,6 +387,10 @@ approve it. A fresh user keystroke remains mandatory.
 - narrowing 80x24 to 38x24 over the whole derived catalog composites the row a
   query left whole — `:ctx`, `:tp`, and the disabled `relationships` row with
   the owner's refusal — with the query input still focused;
+- the real integration rows a base install greys out are composited whole at
+  the narrow terminals the design supports: `:mcp` at 36x16 and `:tp` at 36x24,
+  each with the reason its own `IntegrationController` answers with, the row
+  inert and the query input focused;
 - the modal's height is exactly the bounded rule's budget for the terminal (19
   rows at 80x24, 28 at 80x40, 14 at 36x16, with 9/18/8 rows of results) whether
   the list holds the whole catalog or one filtered row, it does not change when

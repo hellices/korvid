@@ -123,39 +123,68 @@ class IntegrationController:
         """Why `:mcp` cannot run right now, or None (issue #388 task 6).
 
         The silent palette probe for the refusal `handle_mcp_command`
-        notifies: both read the same live `mcp` handle and both quote
+        notifies: both read the same live `mcp` handle and both lead with
         `_mcp_missing()`, so the greyed-out row and the pressed command can
         never explain themselves differently.
+
+        Concise on purpose (final review round 6). A palette row is one
+        `Option`, and on the 36-column terminal the design supports a row
+        whose reason runs to the length of an install command is clipped -
+        the list scrolls by whole options and a disabled row is never
+        highlighted, so nothing brings the missing words back. The typed
+        command has a toast that can hold them, and still gets the whole
+        remediation (`_mcp_missing_detail`); the row gets the capability
+        fact that fits.
         """
         return None if self._mcp_fn() is not None else self._mcp_missing()
 
     @staticmethod
     def _mcp_missing() -> UnavailableReason:
-        """The one wording for "the [mcp] extra is not installed"."""
+        """The one concise wording for "the [mcp] extra is not installed"."""
         return UnavailableReason(
             AvailabilityCode.MISSING_CAPABILITY,
-            f"MCP unavailable — {isolated_install_hint(feature='mcp')}",
+            "MCP unavailable — the [mcp] extra is not installed",
+        )
+
+    @classmethod
+    def _mcp_missing_detail(cls) -> str:
+        """The same refusal plus the reinstall the typed `:mcp` earns."""
+        return (
+            f"{cls._mcp_missing().message}. To restore it, {isolated_install_hint(feature='mcp')}"
         )
 
     def telepresence_unavailable_reason(self) -> UnavailableReason | None:
         """Why `:tp` cannot run right now, or None - the silent probe for
-        the refusal `handle_telepresence_command` notifies (issue #388)."""
+        the refusal `handle_telepresence_command` notifies (issue #388).
+
+        Concise for the same reason `mcp_unavailable_reason` is: this is
+        row text on a narrow terminal, so it states the capability fact,
+        and `_telepresence_missing_detail` keeps the two causes for the
+        toast the typed command raises (final review round 6).
+        """
         return None if self._telepresence is not None else self._telepresence_missing()
 
     @staticmethod
     def _telepresence_missing() -> UnavailableReason:
-        """The one wording for "no telepresence CLI in this session"."""
+        """The one concise wording for "no telepresence CLI here"."""
         return UnavailableReason(
             AvailabilityCode.MISSING_CAPABILITY,
-            "telepresence not available — binary not on PATH, or disabled "
-            "via `integrations: {telepresence: off}`",
+            "telepresence not available — no CLI in this session",
+        )
+
+    @classmethod
+    def _telepresence_missing_detail(cls) -> str:
+        """The same refusal plus the two causes the typed `:tp` earns."""
+        return (
+            f"{cls._telepresence_missing().message} (binary not on PATH, or "
+            "disabled via `integrations: {telepresence: off}`)"
         )
 
     def handle_mcp_command(self, args: list[str]) -> None:
         """`:mcp` shows server state; `:mcp on` / `:mcp off` toggle it live."""
         mcp = self._mcp_fn()
         if mcp is None:
-            self._ui.notify(self._mcp_missing().message, severity="warning", markup=False)
+            self._ui.notify(self._mcp_missing_detail(), severity="warning", markup=False)
             return
         if not args:
             follow = "follow on" if self._follow else "follow off"
@@ -280,11 +309,12 @@ class IntegrationController:
         never polls it in the background."""
         tp = self._telepresence
         if tp is None:
-            # markup=False: this is the same shared `UnavailableReason` the
-            # Action Palette greys the `:tp` row with, and owner reason text
-            # is data - a bracketed install hint in it must reach the user
-            # whole rather than be parsed away as a style tag (issue #388).
-            self._ui.notify(self._telepresence_missing().message, severity="warning", markup=False)
+            # markup=False: the Action Palette greys the `:tp` row with the
+            # concise half of this same refusal, and owner reason text is
+            # data - a bracketed install hint or a `{...}` config snippet
+            # in it must reach the user whole rather than be parsed away as
+            # a style tag (issue #388).
+            self._ui.notify(self._telepresence_missing_detail(), severity="warning", markup=False)
             return
         self._ui.run_worker(self._open_panel(tp), exclusive=True, group="telepresence")
 

@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+from korvid import __version__
 from korvid.core.mcp import MCPControllerBase
 from korvid.k8s.telepresence import (
     ActiveIntercept,
@@ -455,17 +456,35 @@ async def test_a_reprobe_requested_mid_probe_is_queued_not_lost() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_mcp_unavailable_reason_repeats_the_command_refusal_silently() -> None:
-    """Issue #388 task 6 review: the palette greys out `:mcp` with the same
-    wording `handle_mcp_command` notifies, and the probe itself notifies
-    nothing - it is asked while the list is being built, not pressed."""
+def test_mcp_unavailable_reason_leads_the_command_refusal_silently() -> None:
+    """Issue #388 task 6 review, round 6: the palette greys out `:mcp` with
+    the concise half of what `handle_mcp_command` notifies - the notified
+    refusal *leads* with the row's own wording and then adds the reinstall
+    a toast has room for - and the probe itself notifies nothing: it is
+    asked while the list is being built, not pressed."""
     h = Harness(mcp=None)
     reason = h.controller.mcp_unavailable_reason()
     assert reason is not None
     assert reason.code is AvailabilityCode.MISSING_CAPABILITY
     assert h.ui.messages() == []
     h.controller.handle_mcp_command([])
-    assert h.ui.messages() == [reason.message]
+    (notified,) = h.ui.messages()
+    assert notified.startswith(reason.message)
+    assert notified != reason.message
+    assert f"uv tool install --force 'korvid[all,entra]=={__version__}'" in notified
+    assert f"pipx install --force 'korvid[all,entra]=={__version__}'" in notified
+    assert "including mcp" in notified
+
+
+def test_mcp_palette_reason_fits_one_short_row() -> None:
+    """The row is one `Option` on a 36-column terminal, so the reason it
+    carries has to be short enough to be composited there - the whole point
+    of splitting it from the reinstall the typed command earns. It still
+    names the capability, not merely the refusal."""
+    reason = Harness(mcp=None).controller.mcp_unavailable_reason()
+    assert reason is not None
+    assert len(reason.message) <= 60
+    assert "[mcp]" in reason.message
 
 
 def test_mcp_reason_is_none_once_the_server_is_wired() -> None:
@@ -473,14 +492,27 @@ def test_mcp_reason_is_none_once_the_server_is_wired() -> None:
     assert h.controller.mcp_unavailable_reason() is None
 
 
-def test_telepresence_unavailable_reason_repeats_the_command_refusal_silently() -> None:
+def test_telepresence_unavailable_reason_leads_the_command_refusal_silently() -> None:
     h = Harness(telepresence=None)
     reason = h.controller.telepresence_unavailable_reason()
     assert reason is not None
     assert reason.code is AvailabilityCode.MISSING_CAPABILITY
     assert h.ui.messages() == []
     h.controller.handle_telepresence_command()
-    assert h.ui.messages() == [reason.message]
+    (notified,) = h.ui.messages()
+    assert notified.startswith(reason.message)
+    assert notified != reason.message
+    assert "binary not on PATH" in notified
+    assert "`integrations: {telepresence: off}`" in notified
+
+
+def test_telepresence_palette_reason_fits_one_short_row() -> None:
+    """Same bargain as `:mcp`: the row states the capability fact, and the
+    two causes stay in the toast the typed `:tp` raises."""
+    reason = Harness(telepresence=None).controller.telepresence_unavailable_reason()
+    assert reason is not None
+    assert len(reason.message) <= 60
+    assert "telepresence not available" in reason.message
 
 
 def test_telepresence_reason_is_none_once_the_cli_is_wired() -> None:

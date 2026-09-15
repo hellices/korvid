@@ -29,6 +29,7 @@ from korvid.ui.command import COMMANDS
 from korvid.ui.read_availability import relationships_reason
 from korvid.ui.widgets.action_palette import ActionPaletteScreen
 
+from .test_integration_controller import Harness as IntegrationHarness
 from .waits import until
 
 
@@ -975,6 +976,82 @@ async def test_a_narrowing_terminal_composites_a_whole_unavailable_reason() -> N
         )
         visible = _visible_text(options)
         assert _heading(options) in visible
+        assert _second_line(options) == f"Unavailable: {reason.message}"
+        assert _second_line(options) in visible
+        await pilot.press("enter")
+        assert app.results == []
+        assert screen.query_one(Input).has_focus
+
+
+#: The two real integration rows a base install greys out, each at the
+#: narrow terminal the design supports: `:mcp` with the [mcp] extra absent
+#: at 36x16, and `:tp` with no telepresence CLI at 36x24. Their reasons
+#: are the palette's whole content for those rows — a row whose refusal
+#: only half fits says nothing the user can act on.
+_UNAVAILABLE_INTEGRATIONS = [("mcp", (36, 16)), ("tp", (36, 24))]
+
+
+def _integration_reason(command: str) -> UnavailableReason:
+    """The real `IntegrationController` refusal for `:mcp` / `:tp`.
+
+    Asked of the owner itself, in a session that has neither integration —
+    the state a base install is in — rather than retyped here: the palette
+    has to fit whatever wording that owner actually answers with.
+    """
+    controller = IntegrationHarness(mcp=None, telepresence=None).controller
+    reason = (
+        controller.mcp_unavailable_reason()
+        if command == "mcp"
+        else controller.telepresence_unavailable_reason()
+    )
+    assert reason is not None
+    return reason
+
+
+def _derived_catalog_refusing_command(
+    command: str, reason: UnavailableReason
+) -> list[PaletteEntry]:
+    """The whole real catalog, with one `:` command refused by its owner."""
+    return derive_palette_entries(
+        APP_BINDINGS,
+        COMMANDS,
+        overrides={},
+        availability=lambda _action: ActionAvailability.enabled(),
+        command_availability=lambda text: (
+            ActionAvailability(True, reason) if text == command else ActionAvailability.enabled()
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    ("command", "size"), _UNAVAILABLE_INTEGRATIONS, ids=["mcp-36x16", "tp-36x24"]
+)
+async def test_a_real_unavailable_integration_row_fits_a_narrow_terminal(
+    command: str, size: tuple[int, int]
+) -> None:
+    """A base install's greyed-out `:mcp` / `:tp` row must be readable.
+
+    These two rows are the palette's only view of an integration this
+    session does not have, and they are disabled: no keystroke highlights
+    them, and `OptionList` scrolls by whole options, so whatever the
+    viewport holds is all the user ever gets. At the narrow terminals the
+    design supports, the whole row — the category, title and `:` spelling
+    that say which command it is, and every word of the owner's reason —
+    has to be composited inside the results viewport, with the row inert
+    and the query `Input` still focused.
+    """
+    reason = _integration_reason(command)
+    screen = ActionPaletteScreen(_derived_catalog_refusing_command(command, reason))
+    app = PaletteHarness(screen)
+    async with app.run_test(size=size) as pilot:
+        options = screen.query_one(OptionList)
+        await _filter_to_single_row(pilot, options, f":{command}")
+        assert options.get_option_at_index(0).disabled is True
+        visible = _visible_text(options)
+        heading = _heading(options)
+        assert "Commands" in heading
+        assert f":{command}" in heading
+        assert heading in visible
         assert _second_line(options) == f"Unavailable: {reason.message}"
         assert _second_line(options) in visible
         await pilot.press("enter")

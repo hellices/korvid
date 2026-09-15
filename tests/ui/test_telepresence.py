@@ -307,12 +307,13 @@ async def test_cli_error_notification_renders_without_markup() -> None:
 
 
 async def test_missing_cli_refusal_is_notified_literally_not_as_markup() -> None:
-    """The refusal `:tp` shows and the reason the Action Palette greys the
-    row with are the same `UnavailableReason` object (issue #388). One
-    surface already renders it literally; this one must too, or the day
-    that shared sentence gains a bracketed install hint - the way the MCP
-    wording already has - `:tp` starts eating part of its own answer while
-    the palette keeps showing all of it.
+    """The refusal `:tp` shows leads with the very reason the Action
+    Palette greys the row with (issue #388, final review round 6): the row
+    gets the concise capability fact that fits one `Option` on a narrow
+    terminal, the toast repeats it and adds the two causes. Both surfaces
+    render it literally, or the `{telepresence: off}` config snippet - and
+    any bracketed install hint that sentence later gains, the way the MCP
+    wording already has - is parsed away as a style tag on the way out.
     """
     app = make_app(telepresence=None)
     async with app.run_test() as pilot:
@@ -321,11 +322,12 @@ async def test_missing_cli_refusal_is_notified_literally_not_as_markup() -> None
         app.integrations.handle_telepresence_command()
         await until(
             pilot,
-            lambda: any(n.message == reason.message for n in app._notifications),
+            lambda: any(str(n.message).startswith(reason.message) for n in app._notifications),
             label="refusal surfaced",
         )
-        note = next(n for n in app._notifications if n.message == reason.message)
+        note = next(n for n in app._notifications if str(n.message).startswith(reason.message))
         assert note.markup is False
+        assert "`integrations: {telepresence: off}`" in str(note.message)
 
 
 async def test_hint_retries_after_a_managerless_start() -> None:
