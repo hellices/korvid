@@ -1149,10 +1149,15 @@ class ResourceWriteController:
         kind_meta = self._view.aliases().get(self._view.canonical_kind(self._view.current_kind()))
         on_nodes = kind_meta is not None and (kind_meta.group, kind_meta.plural) == ("", "nodes")
         if self._drain_node is not None and (not on_nodes or selected != self._drain_node):
-            # One wording with the palette's own refusal for this state, and
-            # rendered literally: the node name in it is cluster data.
-            reason = self._availability.other_drain_reason(self._drain_node)
-            self._ui.notify(reason.message, severity=reason.severity, markup=False)
+            # The palette row's own refusal for this state, with the node
+            # and the cancel instruction a toast can afford - rendered
+            # literally, because the node name in it is cluster data.
+            reason = self._availability.other_drain_reason()
+            self._ui.notify(
+                self._availability.other_drain_detail(self._drain_node),
+                severity=reason.severity,
+                markup=False,
+            )
             return True
         worker.cancel()
         return True

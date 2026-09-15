@@ -261,7 +261,7 @@ class WriteAvailability:
         if self._selected_node_name() == draining:
             # Pressing the drain key here *is* the cancel, so it runs.
             return None
-        return self.other_drain_reason(draining)
+        return self.other_drain_reason()
 
     def _selected_node_name(self) -> str | None:
         """The selected row's name while the nodes view is on screen.
@@ -275,16 +275,25 @@ class WriteAvailability:
             return None
         return self.view.selected_ns_name(notify=False)[1]
 
-    def other_drain_reason(self, name: str) -> UnavailableReason:
-        """Why the drain key cannot start a drain while *name* is draining.
+    @staticmethod
+    def other_drain_reason() -> UnavailableReason:
+        """Why the drain key cannot start a drain while another node is
+        draining — the palette row's half of that refusal.
 
-        Also the wording `_cancel_running_drain` notifies with, so the
-        greyed-out palette row and the pressed key name the same node to
-        press the key on instead."""
-        return UnavailableReason(
-            AvailabilityCode.PROTECTED_UI,
-            f"drain of nodes/{name} in progress - press the drain key on it to cancel",
-        )
+        Bounded on purpose (round 8): the draining node's name is cluster
+        data, and a real managed-cluster node name alone outruns a
+        36-column row. A refused row is disabled, so no keystroke
+        highlights or scrolls it and the clipped words are simply lost.
+        `other_drain_detail` keeps the name and the instruction for the
+        toast the keypress raises, which can hold them.
+        """
+        return UnavailableReason(AvailabilityCode.PROTECTED_UI, "Another node drain is in progress")
+
+    @staticmethod
+    def other_drain_detail(name: str) -> str:
+        """The same refusal `_cancel_running_drain` notifies, naming the
+        node to press the drain key on instead."""
+        return f"drain of nodes/{name} in progress - press the drain key on it to cancel"
 
     def drain_in_progress_reason(self, name: str) -> UnavailableReason | None:
         """Why cordon/uncordon must wait for an in-flight drain on *name*.

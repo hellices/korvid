@@ -28,6 +28,7 @@ from korvid.ui.app_bindings import APP_BINDINGS
 from korvid.ui.command import COMMANDS
 from korvid.ui.read_availability import relationships_reason
 from korvid.ui.widgets.action_palette import ActionPaletteScreen
+from korvid.ui.write_availability import WriteAvailability
 
 from .test_integration_controller import Harness as IntegrationHarness
 from .waits import until
@@ -1190,3 +1191,96 @@ async def test_a_resize_scroll_that_lands_after_dismissal_does_nothing() -> None
         await pilot.pause()
         assert app.results == [None]
         assert not screen.query(OptionList)
+
+
+async def _filter_to_first_row(
+    pilot: Pilot[None], options: OptionList, query: str, entry_id: str
+) -> None:
+    """Type `query` and wait until `entry_id` is the top result.
+
+    The narrow-row findings are about what the *viewport* holds, so the
+    row under test has to be the first one - and a real query usually
+    leaves more than one row behind it, which is the state a scrollbar
+    exists in.
+    """
+    await pilot.press(*query)
+    await until(
+        pilot,
+        lambda: options.option_count > 0 and options.get_option_at_index(0).id == entry_id,
+        label=f"{entry_id} ranked first for {query!r}",
+    )
+
+
+#: A real node name of the shape a managed cluster hands out: a VMSS
+#: instance under a fully-qualified private DNS zone. Nothing about it is
+#: unusual - it is a legal DNS subdomain well inside Kubernetes' 253-byte
+#: limit - and a palette reason that interpolates one cannot fit a 36-column
+#: row whatever the viewport does.
+_LONG_NODE = "aks-userpool-41763029-vmss000003.internal.cloudapp.kube-prod-eastus2.example.net"
+
+
+def _cross_node_drain_reason() -> UnavailableReason:
+    """The real refusal the drain key's owner answers a palette probe with
+    while some *other* node is being drained.
+
+    Asked of `WriteAvailability` itself rather than retyped here: what the
+    row has to fit is whatever that owner actually says.
+    """
+    return WriteAvailability.other_drain_reason()
+
+
+async def test_a_cross_node_drain_row_fits_a_narrow_terminal() -> None:
+    """The drain row's refusal names a node the user is not looking at.
+
+    While a drain runs, pressing the drain key on any other row is refused
+    with the draining node's name and the instruction to press it on that
+    node instead - a sentence whose length is cluster data. As a *row* it
+    is unreadable: at 36 columns a real managed-cluster node name alone
+    outruns the viewport, the row is disabled so no keystroke highlights
+    or scrolls it, and the list scrolls by whole options. The probe's
+    reason therefore states the bounded fact, and the keypress keeps the
+    name in its toast (issue #388, round 8).
+    """
+    reason = _cross_node_drain_reason()
+    assert _LONG_NODE not in reason.message
+    assert _LONG_NODE in WriteAvailability.other_drain_detail(_LONG_NODE)
+    screen = ActionPaletteScreen(_derived_catalog(("drain_node", reason)))
+    app = PaletteHarness(screen)
+    async with app.run_test(size=(80, 24)) as pilot:
+        options = screen.query_one(OptionList)
+        await _filter_to_first_row(pilot, options, "Drain", "action:drain_node")
+        await pilot.resize_terminal(36, 24)
+        await until(
+            pilot,
+            lambda: _second_line(options) in _visible_text(options),
+            label="the whole refused drain row composited at 36x24",
+        )
+        visible = _visible_text(options)
+        assert options.get_option_at_index(0).disabled is True
+        heading = _heading(options)
+        assert "Drain node" in heading
+        assert "Shift-D" in heading  # the trigger the refusal is about
+        assert heading in visible
+        assert _second_line(options) == f"Unavailable: {reason.message}"
+        assert _second_line(options) in visible
+        await pilot.press("enter")
+        assert app.results == []
+        assert screen.query_one(Input).has_focus
+
+
+async def test_the_detailed_cross_node_drain_sentence_would_not_have_fitted() -> None:
+    """Why the split exists, asserted rather than asserted-about: the
+    sentence the keypress notifies - the one the row used to carry - does
+    not fit the row it would have to be composited into."""
+    detail = WriteAvailability.other_drain_detail(_LONG_NODE)
+    screen = ActionPaletteScreen(
+        _derived_catalog(("drain_node", UnavailableReason(AvailabilityCode.PROTECTED_UI, detail)))
+    )
+    app = PaletteHarness(screen)
+    async with app.run_test(size=(80, 24)) as pilot:
+        options = screen.query_one(OptionList)
+        await _filter_to_first_row(pilot, options, "Drain", "action:drain_node")
+        await pilot.resize_terminal(36, 24)
+        await pilot.pause()
+        assert _LONG_NODE in _second_line(options)
+        assert _second_line(options) not in _visible_text(options)

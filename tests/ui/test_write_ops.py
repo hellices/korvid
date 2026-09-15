@@ -2287,12 +2287,11 @@ class _RunningDrain:
         raise AssertionError("the probe must never cancel the drain it reports")
 
 
-#: The refusal `_cancel_running_drain` notifies when the drain key is
-#: pressed anywhere but on the node currently being drained.
-_OTHER_DRAIN = (
-    "protected_ui",
-    "drain of nodes/worker-2 in progress - press the drain key on it to cancel",
-)
+#: The bounded refusal the palette row carries when the drain key is
+#: pressed anywhere but on the node currently being drained. The node name
+#: and the cancel instruction belong to the toast `_cancel_running_drain`
+#: raises, not to a row that cannot scroll (#388 round 8).
+_OTHER_DRAIN = ("protected_ui", "Another node drain is in progress")
 
 
 async def test_probe_matrix_while_another_node_is_draining(tmp_path: Path) -> None:

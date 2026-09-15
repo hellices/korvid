@@ -577,9 +577,10 @@ async def test_drain_key_on_other_node_does_not_cancel_running_drain(tmp_path: P
         reason = app._actions.availability("drain_node")
         assert reason.binding_enabled is True
         assert reason.reason is not None
-        assert reason.reason.message == (
-            "drain of nodes/worker-1 in progress - press the drain key on it to cancel"
-        )
+        # The row is bounded: it says a drain is running, not which node
+        # (a real node name does not fit a 36-column palette row).
+        assert reason.reason.message == "Another node drain is in progress"
+        assert "worker-1" not in reason.reason.message
         assert len(app._notifications) == before
         await pilot.press("D")  # must NOT cancel worker-1's drain
         await until(
@@ -589,8 +590,12 @@ async def test_drain_key_on_other_node_does_not_cancel_running_drain(tmp_path: P
             ),
             label="wrong-node cancel warning shown",
         )
-        # One wording: the row's reason is the sentence the key notified.
-        assert any(reason.reason.message == n.message for n in app._notifications)
+        # The toast keeps the node to press the key on, and the row's own
+        # words open it: one refusal, two lengths.
+        assert any(
+            n.message == "drain of nodes/worker-1 in progress - press the drain key on it to cancel"
+            for n in app._notifications
+        )
         assert "cancelled" not in (audit_path.read_text() if audit_path.exists() else "")
         assert app._resource_writes.drain_worker is not None
         assert app._resource_writes.drain_worker.is_running
