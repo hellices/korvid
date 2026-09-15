@@ -13,12 +13,13 @@ from korvid.core.store import Summary
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.helm import HELM_RELEASES_META
 from korvid.ui.action_availability import (
+    AGENT_UNAVAILABLE,
     CONTEXT_SWITCH_IN_PROGRESS,
     ActionAvailability,
     AvailabilityCode,
     UnavailableReason,
 )
-from korvid.ui.action_policy import ActionPolicy
+from korvid.ui.action_policy import ActionPolicy, compose_action_reasons, compose_command_reasons
 from korvid.ui.view_state import ViewState
 
 
@@ -410,3 +411,125 @@ def test_command_availability_ignores_the_palette_surface_probes() -> None:
     )
     assert policy.binding_enabled("open_action_palette") is False
     assert policy.command_availability("open_action_palette") == ActionAvailability.enabled()
+
+
+# ---------------------------------------------------------------------------
+# Reason-map composition (#388 task 8)
+# ---------------------------------------------------------------------------
+
+
+def _recording_probe(
+    calls: list[str], reason: UnavailableReason | None
+) -> Callable[[str], UnavailableReason | None]:
+    def probe(action: str) -> UnavailableReason | None:
+        calls.append(action)
+        return reason
+
+    return probe
+
+
+def test_composed_action_reasons_ask_each_owner_about_its_own_actions() -> None:
+    """The composition root names the owners; this module owns *which*
+    actions each of them answers for, so the action vocabulary lives next
+    to `_ACTION_VIEWS` rather than being spelled out again at the wiring.
+
+    Each resolver must also carry its own action: a bound resolver that
+    dropped the name would ask its owner about the wrong write.
+    """
+    write_calls: list[str] = []
+    helm_calls: list[str] = []
+    log_calls: list[str] = []
+    refused = UnavailableReason(AvailabilityCode.NO_SELECTION, "No resource selected")
+    reasons = compose_action_reasons(
+        writes=_recording_probe(write_calls, refused),
+        helm=_recording_probe(helm_calls, None),
+        logs=_recording_probe(log_calls, None),
+        port_forward=lambda: None,
+        transfer=lambda: None,
+        shell=lambda: None,
+        operator_install=lambda: None,
+    )
+    assert set(reasons) == {
+        "delete_resource",
+        "edit_resource",
+        "rollout_restart",
+        "scale_resource",
+        "resize_pod",
+        "cordon_node",
+        "uncordon_node",
+        "drain_node",
+        "helm_install",
+        "helm_upgrade",
+        "helm_history",
+        "helm_rollback",
+        "logs",
+        "logs_multi",
+        "port_forward",
+        "transfer",
+        "shell",
+        "operator_install",
+    }
+    assert reasons["scale_resource"]() == refused
+    assert write_calls == ["scale_resource"]
+    assert reasons["helm_rollback"]() is None
+    assert helm_calls == ["helm_rollback"]
+    assert reasons["logs_multi"]() is None
+    assert log_calls == ["logs_multi"]
+
+
+def test_composed_action_reasons_only_cover_owned_actions() -> None:
+    """Actions nobody registered a reason for stay invokable once bound -
+    composing the map must not invent an owner for them."""
+    reasons = compose_action_reasons(
+        writes=lambda _action: None,
+        helm=lambda _action: None,
+        logs=lambda _action: None,
+        port_forward=lambda: None,
+        transfer=lambda: None,
+        shell=lambda: None,
+        operator_install=lambda: None,
+    )
+    assert "open_action_palette" not in reasons
+    assert "toggle_agent" not in reasons
+
+
+def test_composed_command_reasons_share_one_agent_answer() -> None:
+    """`:ai` and `:model` have no owner at all without the [agent] extra,
+    which is the same absence the bound Ctrl-A key refuses with - so both
+    answer with the one shared wording, and nothing else does."""
+    reasons = compose_command_reasons(
+        agent_available=lambda: False,
+        mcp=lambda: None,
+        telepresence=lambda: None,
+    )
+    assert set(reasons) == {"ai", "model", "mcp", "tp"}
+    assert reasons["ai"]() == AGENT_UNAVAILABLE
+    assert reasons["model"]() == AGENT_UNAVAILABLE
+
+
+def test_composed_command_reasons_follow_a_late_agent() -> None:
+    """The agent can be composed (or disconnected) after wiring, so the
+    answer is read live rather than frozen when the map was built."""
+    available = False
+    reasons = compose_command_reasons(
+        agent_available=lambda: available,
+        mcp=lambda: None,
+        telepresence=lambda: None,
+    )
+    assert reasons["ai"]() == AGENT_UNAVAILABLE
+    available = True
+    assert reasons["ai"]() is None
+    assert reasons["model"]() is None
+
+
+def test_composed_command_reasons_route_the_integration_commands() -> None:
+    """`:mcp` and `:tp` keep their own owner's answer, unrelated to the agent."""
+    mcp_reason = UnavailableReason(AvailabilityCode.MISSING_CAPABILITY, "MCP is not installed")
+    tp_reason = UnavailableReason(AvailabilityCode.MISSING_CAPABILITY, "telepresence not found")
+    reasons = compose_command_reasons(
+        agent_available=lambda: True,
+        mcp=lambda: mcp_reason,
+        telepresence=lambda: tp_reason,
+    )
+    assert reasons["mcp"]() == mcp_reason
+    assert reasons["tp"]() == tp_reason

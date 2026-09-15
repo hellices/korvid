@@ -43,54 +43,23 @@ from korvid.core.impact import ImpactAction
 from korvid.core.resize_impact import classify_pod_resize
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.drain import DrainPlan
-from korvid.k8s.helm import HELM_RELEASES_META
 from korvid.k8s.olm import OPERATORS_GROUP
 from korvid.k8s.writes import WriteOps, restart_stamp
-from korvid.ui.action_availability import AvailabilityCode, UnavailableReason
+from korvid.ui.action_availability import UnavailableReason
 from korvid.ui.drain import DrainController
 from korvid.ui.node_impact_preview import (
     compose_node_maintenance_lines,
     render_node_maintenance_lines,
 )
-from korvid.ui.resize_impact_preview import compose_resize_impact_lines
+from korvid.ui.resize_impact_preview import compose_resize_impact_lines, resize_summary
 from korvid.ui.ui_surface import UiSurface
 from korvid.ui.view_state import ViewState
 from korvid.ui.widgets.confirm_screen import ReplicasPrompt
 from korvid.ui.widgets.resize_prompt import ResizePrompt
+from korvid.ui.write_availability import RESTARTABLE, SCALABLE, WriteAvailability
 from korvid.ui.write_coordinator import WriteCoordinator, WriteOrigin, gvr_label, write_locus
 
 logger = logging.getLogger(__name__)
-
-#: Workload eligibility is keyed on (group, plural): a custom-group CRD whose
-#: plural collides with a built-in (e.g. 'deployments') must never be treated
-#: as an apps/* workload. `ActionPolicy._ACTION_VIEWS` gates the keys on the
-#: same identities, so the footer legend and the flow agree.
-RESTARTABLE: frozenset[tuple[str, str]] = frozenset(
-    {("apps", "deployments"), ("apps", "statefulsets"), ("apps", "daemonsets")}
-)
-SCALABLE: frozenset[tuple[str, str]] = frozenset(
-    {("apps", "deployments"), ("apps", "replicasets"), ("apps", "statefulsets")}
-)
-
-#: Palette action -> the label the matching flow uses in its own "<Action>
-#: unavailable in this session" refusal when this session has no write
-#: client. One table, so a probe can never invent wording the keypress does
-#: not use (issue #388 task 4).
-_WRITE_CLIENT_LABELS: dict[str, str] = {
-    "delete_resource": "Delete",
-    "rollout_restart": "Rollout restart",
-    "edit_resource": "Edit",
-    "scale_resource": "Scale",
-    "resize_pod": "Resize",
-}
-
-#: Palette action -> the word the matching node flow passes to
-#: `node_target()`, which is also the word its refusals are phrased with.
-_NODE_ACTIONS: dict[str, str] = {
-    "cordon_node": "cordon",
-    "uncordon_node": "uncordon",
-    "drain_node": "drain",
-}
 
 #: `KorvidApp._get_manifest`: (kind alias, namespace, name) -> manifest.
 ManifestFetcher = Callable[[str, str | None, str], Awaitable[dict[str, Any]]]
@@ -137,25 +106,6 @@ def _yaml_equal(a: object, b: object) -> bool:
     if isinstance(a, list) and isinstance(b, list):
         return len(a) == len(b) and all(_yaml_equal(x, y) for x, y in zip(a, b, strict=True))
     return a == b
-
-
-def resize_summary(resources: dict[str, dict[str, dict[str, str]]]) -> str:
-    """One-line 'app: requests.cpu=200m, limits.memory=1Gi; ...' summary
-    shown in the approval dialog and recorded in the audit detail.
-
-    Module-level because the agent's resize tool builds the same operation
-    line from the same shape: one phrasing, so the dialog a user approves
-    and the one an agent proposes cannot drift apart.
-    """
-    parts = []
-    for container, sections in resources.items():
-        changes = ", ".join(
-            f"{section}.{quantity}={value}"
-            for section, values in sections.items()
-            for quantity, value in values.items()
-        )
-        parts.append(f"{container}: {changes}")
-    return "; ".join(parts)
 
 
 class OperatorUninstalls(Protocol):
@@ -290,7 +240,6 @@ class ResourceWriteController:
         self._managed_note_from = managed_note_from
         self._pod_resize_supported = pod_resize_supported
         self._helm_uninstall = helm_uninstall
-        self._helm_cli_unavailable_reason = helm_cli_unavailable_reason
         self._operators = operators
         #: The in-flight drain worker, if any - pressing the drain key again
         #: cancels it (evictions stop; the node stays cordoned).
@@ -299,6 +248,22 @@ class ResourceWriteController:
         #: is still finalizing, so the targeted-cancel and cordon-refusal
         #: guards can still see it.
         self._drain_node: str | None = None
+        #: The refusal half of these flows, over the very same seams: the
+        #: probe cannot read a world the keypress would not read.
+        self._availability = WriteAvailability(
+            writes=writes,
+            view=view,
+            write_client_available=lambda: write_ops() is not None,
+            manifest_source_available=lambda: get_manifest() is not None,
+            pod_resize_supported=pod_resize_supported,
+            helm_cli_unavailable_reason=helm_cli_unavailable_reason,
+            draining=self._is_draining,
+        )
+
+    def _is_draining(self, name: str) -> bool:
+        """Whether the in-flight drain is still evicting from `name`."""
+        worker = self._drain_worker
+        return worker is not None and worker.is_running and name == self._drain_node
 
     # ------------------------------------------------------------------
     # Drain lifecycle, observable but not mutable from outside
@@ -319,159 +284,18 @@ class ResourceWriteController:
     # ------------------------------------------------------------------
 
     def unavailable_reason(self, action: str) -> UnavailableReason | None:
-        """Why `action` can't run right now, or None - a side-effect-free
-        probe for the palette (issue #388). Shares `WriteCoordinator`'s
-        owner checks (read-only, missing audit, unknown/synthetic kind,
-        silent selection) via `write_target(notify=False)`, so it never
-        resolves or notifies twice: the same call this method makes to
-        probe is the one `_capture()` makes to dispatch, just silenced.
-
-        The session's write client comes first, exactly as every flow below
-        reads it before resolving a target (#388 task 4): without one the
-        keypress refuses with "<Action> unavailable in this session", so the
-        palette must not advertise the action as invokable. `edit_resource`
-        carries a second half of that same refusal: `edit()` also refuses
-        when the manifest source is missing (`ops is None or
-        self._get_manifest() is None`), so the probe must check both halves
-        with the one wording the handler uses, not merely the write client
-        (#388 task 4 review).
-
-        `delete_resource` on the helm release browser is the one exception:
-        Ctrl-D there routes to `helm uninstall` *before* the generic
-        `write_target` path (issue #117, `delete()` below), so the generic
-        "this is a read-only view" refusal must not apply to it - only the
-        read-only/audit gate and the missing-helm-binary gate
-        `HelmController.gate()` itself enforces (the latter injected here so
-        this controller never redeclares `_HELM_MISSING`'s wording of its
-        own, #388 task 4 review)."""
-        if action in _NODE_ACTIONS:
-            return self._node_action_reason(_NODE_ACTIONS[action])
-        if action == "delete_resource" and self._is_helm_release_view():
-            reason = self._writes.readonly_or_audit_reason()
-            if reason is not None:
-                return reason
-            reason = self._helm_cli_unavailable_reason()
-            if reason is not None:
-                return reason
-            _, name = self._view.selected_ns_name(notify=False)
-            if name is None:
-                return UnavailableReason(AvailabilityCode.NO_SELECTION, "No resource selected")
-            return None
-        label = _WRITE_CLIENT_LABELS.get(action)
-        if label is not None and (
-            self._write_ops() is None
-            or (action == "edit_resource" and self._get_manifest() is None)
-        ):
-            return UnavailableReason(
-                AvailabilityCode.MISSING_CAPABILITY, f"{label} unavailable in this session"
-            )
-        reason = self._writes.unavailable_reason()
-        if reason is not None:
-            return reason
-        target = self._writes.write_target(notify=False)
-        if target is None:
-            # Defensive only: `unavailable_reason()` above shares every
-            # check `write_target()` makes, so this is unreachable - kept,
-            # with the coordinator's own NO_SELECTION wording (not a second
-            # invented one), only so mypy can narrow `target` below.
-            return UnavailableReason(AvailabilityCode.NO_SELECTION, "No resource selected")
-        return self._kind_reason(action, target[0])
-
-    def _kind_reason(self, action: str, meta: ResourceMeta) -> UnavailableReason | None:
-        """The "this kind does not take that write" refusals, with each
-        flow's own wording."""
-        if action == "rollout_restart" and (meta.group, meta.plural) not in RESTARTABLE:
-            return UnavailableReason(
-                AvailabilityCode.UNSUPPORTED_RESOURCE,
-                f"rollout restart does not apply to {gvr_label(meta)}",
-            )
-        if action == "scale_resource" and (meta.group, meta.plural) not in SCALABLE:
-            return UnavailableReason(
-                AvailabilityCode.UNSUPPORTED_RESOURCE, f"scale does not apply to {gvr_label(meta)}"
-            )
-        if action == "resize_pod":
-            if (meta.group, meta.plural) != ("", "pods"):
-                return UnavailableReason(
-                    AvailabilityCode.UNSUPPORTED_RESOURCE,
-                    f"resize does not apply to {gvr_label(meta)}",
-                )
-            if not self._pod_resize_supported():
-                return UnavailableReason(
-                    AvailabilityCode.UNSUPPORTED_RESOURCE,
-                    "This cluster does not expose pods/resize (requires Kubernetes 1.35+)",
-                )
-        return None
+        """Why `action` can't run right now, or None - the side-effect-free
+        probe the Action Palette asks before it offers a row (issue #388),
+        answered by `WriteAvailability` over this controller's own seams so
+        the probe and the flow can never read different state."""
+        return self._availability.unavailable_reason(action)
 
     def node_unavailable_reason(self, action: str) -> UnavailableReason | None:
         """Why `node_target(action)` would refuse right now, or None - the
         silent twin of the notifications that method emits, for the palette
         and for the node-shell owner that resolves its target through it
-        (issue #388 task 4). `action` is the same word `node_target` is
-        called with ("cordon", "drain", "node shell"), so the wording
-        matches the real refusal exactly."""
-        return self._node_reason_and_target(action)[0]
-
-    def _node_reason_and_target(
-        self, action: str
-    ) -> tuple[UnavailableReason | None, tuple[ResourceMeta, str | None, str, str | None] | None]:
-        """`node_unavailable_reason`'s checks, plus the resolved
-        `write_target` on a clean pass - so `_node_action_reason` can reuse
-        the one resolve for its own drain-in-progress check instead of
-        calling `write_target(notify=False)` a second time (#388 task 4
-        review)."""
-        if self._write_ops() is None:
-            return (
-                UnavailableReason(
-                    AvailabilityCode.MISSING_CAPABILITY, f"{action} unavailable in this session"
-                ),
-                None,
-            )
-        reason = self._writes.unavailable_reason()
-        if reason is not None:
-            return reason, None
-        target = self._writes.write_target(notify=False)
-        if target is None:
-            return UnavailableReason(AvailabilityCode.NO_SELECTION, "No resource selected"), None
-        meta = target[0]
-        if (meta.group, meta.plural) != ("", "nodes"):
-            return (
-                UnavailableReason(
-                    AvailabilityCode.UNSUPPORTED_RESOURCE,
-                    f"{action} does not apply to {gvr_label(meta)}",
-                ),
-                None,
-            )
-        return None, target
-
-    def _node_action_reason(self, action: str) -> UnavailableReason | None:
-        """`node_unavailable_reason` plus the cordon/uncordon refusal a
-        running drain owns: the drain holds the node's schedulable state
-        until it finishes or is cancelled."""
-        reason, target = self._node_reason_and_target(action)
-        if reason is not None or action == "drain":
-            return reason
-        return None if target is None else self._drain_in_progress_reason(target[2])
-
-    def _drain_in_progress_reason(self, name: str) -> UnavailableReason | None:
-        """Why cordon/uncordon must wait for an in-flight drain on *name*."""
-        worker = self._drain_worker
-        if worker is not None and worker.is_running and name == self._drain_node:
-            return UnavailableReason(
-                AvailabilityCode.PROTECTED_UI,
-                f"nodes/{name} is being drained - cancel the drain first",
-            )
-        return None
-
-    def _is_helm_release_view(self) -> bool:
-        """Whether the current view is the helm release browser - the one
-        synthetic view where Ctrl-D means `helm uninstall`, not a generic
-        write (issue #117). Shared by `delete()` and `unavailable_reason()`
-        so the two can never disagree on which view gets the exception."""
-        current = self._view.aliases().get(self._view.canonical_kind(self._view.current_kind()))
-        return current is not None and (current.group, current.plural) == (
-            HELM_RELEASES_META.group,
-            HELM_RELEASES_META.plural,
-        )
+        (issue #388 task 4)."""
+        return self._availability.node_unavailable_reason(action)
 
     def _capture(self) -> WriteTarget | None:
         """Resolve and pin the selected row for a write flow."""
@@ -539,7 +363,7 @@ class ResourceWriteController:
         release browser the key means `helm uninstall` (issue #117) - helm
         must remove the release's own bookkeeping, a raw Secret delete would
         orphan the deployed resources."""
-        if self._is_helm_release_view():
+        if self._availability.is_helm_release_view():
             self._helm_uninstall()
             return
         ops = self._write_ops()
@@ -1194,7 +1018,7 @@ class ResourceWriteController:
             return
         ops, target = resolved
         meta, name, uid = target.meta, target.name, target.uid
-        drain_reason = self._drain_in_progress_reason(name)
+        drain_reason = self._availability.drain_in_progress_reason(name)
         if drain_reason is not None:
             # Uncordoning (or re-cordoning) mid-drain would let new pods
             # schedule behind the drain's back; the drain owns the node's

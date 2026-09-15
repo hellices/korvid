@@ -2068,3 +2068,174 @@ async def test_resize_availability_reports_an_unsupported_cluster(tmp_path: Path
         app._pod_resize_supported = True
         assert app._resource_writes.unavailable_reason("resize_pod") is None
         assert len(app._notifications) == before
+
+
+# ---------------------------------------------------------------------------
+# Characterization: the whole palette probe matrix, per view (#388 task 8)
+# ---------------------------------------------------------------------------
+
+#: Every action `ResourceWriteController.unavailable_reason` answers for,
+#: in one tuple, so a view's whole probe answer is asserted as a unit
+#: instead of one action at a time. Extracting the probe half of this
+#: controller must leave every cell of that matrix identical - wording
+#: included, because the palette shows these strings verbatim.
+_PROBE_ACTIONS: tuple[str, ...] = (
+    "delete_resource",
+    "edit_resource",
+    "rollout_restart",
+    "scale_resource",
+    "resize_pod",
+    "cordon_node",
+    "uncordon_node",
+    "drain_node",
+)
+
+
+def _probe_matrix(app: KorvidApp) -> dict[str, tuple[str, str] | None]:
+    """Every write probe on the current view as `(code, message)` or None."""
+    matrix: dict[str, tuple[str, str] | None] = {}
+    for action in _PROBE_ACTIONS:
+        reason = app._resource_writes.unavailable_reason(action)
+        matrix[action] = None if reason is None else (reason.code.value, reason.message)
+    return matrix
+
+
+async def test_probe_matrix_on_the_pods_view(tmp_path: Path) -> None:
+    """Pods take the generic writes and the in-place resize; the workload
+    and node writes refuse by kind, and `edit` refuses because this session
+    wires no manifest source. Probing must notify nothing."""
+    rec = Recorder()
+    app = make_app(rec, tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: _selected_name(app) == "web-1", label="pod row selected")
+        app._pod_resize_supported = True
+        before = len(app._notifications)
+        assert _probe_matrix(app) == {
+            "delete_resource": None,
+            "edit_resource": ("missing_capability", "Edit unavailable in this session"),
+            "rollout_restart": ("unsupported_resource", "rollout restart does not apply to pods"),
+            "scale_resource": ("unsupported_resource", "scale does not apply to pods"),
+            "resize_pod": None,
+            "cordon_node": ("unsupported_resource", "cordon does not apply to pods"),
+            "uncordon_node": ("unsupported_resource", "uncordon does not apply to pods"),
+            "drain_node": ("unsupported_resource", "drain does not apply to pods"),
+        }
+        assert len(app._notifications) == before
+
+
+async def test_probe_matrix_on_the_deployments_view(tmp_path: Path) -> None:
+    """Deployments take restart and scale; resize and the node writes name
+    the group-qualified plural they were refused for."""
+    rec = Recorder()
+    app = make_app(rec, tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        await _to_view(pilot, "deployments")
+        before = len(app._notifications)
+        assert _probe_matrix(app) == {
+            "delete_resource": None,
+            "edit_resource": ("missing_capability", "Edit unavailable in this session"),
+            "rollout_restart": None,
+            "scale_resource": None,
+            "resize_pod": ("unsupported_resource", "resize does not apply to deployments.apps"),
+            "cordon_node": ("unsupported_resource", "cordon does not apply to deployments.apps"),
+            "uncordon_node": (
+                "unsupported_resource",
+                "uncordon does not apply to deployments.apps",
+            ),
+            "drain_node": ("unsupported_resource", "drain does not apply to deployments.apps"),
+        }
+        assert len(app._notifications) == before
+
+
+async def test_probe_matrix_on_the_nodes_view(tmp_path: Path) -> None:
+    """The nodes view inverts the matrix: the three node writes answer yes
+    and every workload-shaped write refuses by kind."""
+    rec = Recorder()
+    app = make_app(rec, tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        await _to_view(pilot, "nodes")
+        before = len(app._notifications)
+        assert _probe_matrix(app) == {
+            "delete_resource": None,
+            "edit_resource": ("missing_capability", "Edit unavailable in this session"),
+            "rollout_restart": ("unsupported_resource", "rollout restart does not apply to nodes"),
+            "scale_resource": ("unsupported_resource", "scale does not apply to nodes"),
+            "resize_pod": ("unsupported_resource", "resize does not apply to nodes"),
+            "cordon_node": None,
+            "uncordon_node": None,
+            "drain_node": None,
+        }
+        assert len(app._notifications) == before
+
+
+async def test_probe_matrix_in_read_only_mode(tmp_path: Path) -> None:
+    """One refusal answers for every generic and node write: the session
+    refuses cluster writes at all, before any kind or selection question."""
+    rec = Recorder()
+    app = make_app(rec, tmp_path / "audit.jsonl", readonly=True)
+    read_only = ("read_only", "Read-only mode: cluster writes are disabled")
+    async with app.run_test() as pilot:
+        await _to_view(pilot, "nodes")
+        before = len(app._notifications)
+        assert _probe_matrix(app) == {
+            "delete_resource": read_only,
+            "edit_resource": ("missing_capability", "Edit unavailable in this session"),
+            "rollout_restart": read_only,
+            "scale_resource": read_only,
+            "resize_pod": read_only,
+            "cordon_node": read_only,
+            "uncordon_node": read_only,
+            "drain_node": read_only,
+        }
+        assert len(app._notifications) == before
+
+
+async def test_probe_matrix_while_a_drain_is_running(tmp_path: Path) -> None:
+    """A running drain owns the node's schedulable state, so cordon and
+    uncordon report it while `drain_node` itself stays invokable (pressing
+    the drain key again is how the drain is cancelled)."""
+    rec = Recorder()
+    app = make_app(rec, tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        await _to_view(pilot, "nodes")
+        controller = app._resource_writes
+        controller._drain_node = "worker-1"
+        controller._drain_worker = _RunningDrain()
+        before = len(app._notifications)
+        draining = (
+            "protected_ui",
+            "nodes/worker-1 is being drained - cancel the drain first",
+        )
+        matrix = _probe_matrix(app)
+        assert matrix["cordon_node"] == draining
+        assert matrix["uncordon_node"] == draining
+        assert matrix["drain_node"] is None
+        assert len(app._notifications) == before
+
+
+class _RunningDrain:
+    """A drain worker that reports itself as still evicting."""
+
+    @property
+    def is_running(self) -> bool:
+        return True
+
+    def cancel(self) -> None:
+        raise AssertionError("the probe must never cancel the drain it reports")
+
+
+async def test_node_probe_shares_the_node_target_wording(tmp_path: Path) -> None:
+    """`node_unavailable_reason` is the silent twin of `node_target`'s own
+    notifications, so it is phrased with the word the caller passes - here
+    the node shell's "node shell", which is not a bound write action."""
+    rec = Recorder()
+    app = make_app(rec, tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: _selected_name(app) == "web-1", label="pod row selected")
+        before = len(app._notifications)
+        assert app._resource_writes.node_unavailable_reason("node shell") == UnavailableReason(
+            AvailabilityCode.UNSUPPORTED_RESOURCE, "node shell does not apply to pods"
+        )
+        await _to_view(pilot, "nodes")
+        assert app._resource_writes.node_unavailable_reason("node shell") is None
+        assert len(app._notifications) == before

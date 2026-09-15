@@ -83,8 +83,7 @@ from korvid.k8s.writes import WriteOps, restart_stamp
 from korvid.tools.executor import UIBridge, incarnation_of
 from korvid.tools.follow import FOLLOWABLE_TOOLS, mirror_read
 from korvid.ui.bridge_dispatch import BridgeDispatch
-from korvid.ui.resize_impact_preview import compose_resize_impact_lines
-from korvid.ui.resource_write_controller import RESTARTABLE, SCALABLE, resize_summary
+from korvid.ui.resize_impact_preview import compose_resize_impact_lines, resize_summary
 from korvid.ui.ui_surface import UiSurface
 from korvid.ui.view_state import ViewState
 from korvid.ui.widgets.agent_setup_screen import AgentSetupScreen, SetupResult
@@ -94,6 +93,7 @@ from korvid.ui.widgets.payload_inspector import PayloadInspectorScreen
 from korvid.ui.widgets.profile_manager_screen import ProfileManagerResult, ProfileManagerScreen
 from korvid.ui.workspace_controller import ContextGuard
 from korvid.ui.workspace_state import WorkspaceState, filtered_rows
+from korvid.ui.write_availability import RESTARTABLE, SCALABLE
 from korvid.ui.write_coordinator import WriteCoordinator, gvr_label, write_locus
 
 if TYPE_CHECKING:

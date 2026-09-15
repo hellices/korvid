@@ -12,6 +12,25 @@ _RUNTIME_LIMIT = (
 )
 
 
+def resize_summary(resources: dict[str, dict[str, dict[str, str]]]) -> str:
+    """One-line 'app: requests.cpu=200m, limits.memory=1Gi; ...' summary
+    shown in the approval dialog and recorded in the audit detail.
+
+    Module-level because the agent's resize tool builds the same operation
+    line from the same shape: one phrasing, so the dialog a user approves
+    and the one an agent proposes cannot drift apart.
+    """
+    parts = []
+    for container, sections in resources.items():
+        changes = ", ".join(
+            f"{section}.{quantity}={value}"
+            for section, values in sections.items()
+            for quantity, value in values.items()
+        )
+        parts.append(f"{container}: {changes}")
+    return "; ".join(parts)
+
+
 def render_resize_impact_lines(context: ResizeImpactContext) -> tuple[str, ...]:
     lines = [_TITLE, _RELATION_BOUNDARY]
     if context.restart_required:

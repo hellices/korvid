@@ -8,7 +8,8 @@ without composing the Textual app.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+import functools
+from collections.abc import Callable, Iterable, Mapping
 
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.helm import HELM_RELEASES_META, HELM_REVISIONS_META
@@ -21,8 +22,8 @@ from korvid.ui.action_availability import (
     AvailabilityCode,
     UnavailableReason,
 )
-from korvid.ui.resource_write_controller import RESTARTABLE, SCALABLE
 from korvid.ui.view_state import ViewState
+from korvid.ui.write_availability import RESTARTABLE, SCALABLE
 
 #: Resource identities — (group, plural) — where each view-specific action
 #: applies; actions absent from the map work on every view. `ActionPolicy`
@@ -78,6 +79,104 @@ _SYNTHETIC_GATED_ACTIONS: frozenset[str] = frozenset({"delete_resource", "edit_r
 #: policy is therefore the only thing standing between `Ctrl-P` and an
 #: approval dialog.
 PALETTE_ACTION = "open_action_palette"
+
+#: The actions each owner answers an *invocation* reason for. Declared
+#: here, beside `_ACTION_VIEWS`, because "which actions does this owner
+#: speak for" is the same action vocabulary this module already governs -
+#: the composition root names the owners, not their action lists (#388).
+_WRITE_REASON_ACTIONS: tuple[str, ...] = (
+    "delete_resource",
+    "edit_resource",
+    "rollout_restart",
+    "scale_resource",
+    "resize_pod",
+    "cordon_node",
+    "uncordon_node",
+    "drain_node",
+)
+_HELM_REASON_ACTIONS: tuple[str, ...] = (
+    "helm_install",
+    "helm_upgrade",
+    "helm_history",
+    "helm_rollback",
+)
+_LOG_REASON_ACTIONS: tuple[str, ...] = ("logs", "logs_multi")
+
+
+def _per_action(
+    probe: Callable[[str], UnavailableReason | None], actions: Iterable[str]
+) -> dict[str, Callable[[], UnavailableReason | None]]:
+    """Bind one owner's per-action probe to each action it answers for."""
+    return {action: functools.partial(probe, action) for action in actions}
+
+
+def compose_action_reasons(
+    *,
+    writes: Callable[[str], UnavailableReason | None],
+    helm: Callable[[str], UnavailableReason | None],
+    logs: Callable[[str], UnavailableReason | None],
+    port_forward: Callable[[], UnavailableReason | None],
+    transfer: Callable[[], UnavailableReason | None],
+    shell: Callable[[], UnavailableReason | None],
+    operator_install: Callable[[], UnavailableReason | None],
+) -> dict[str, Callable[[], UnavailableReason | None]]:
+    """Build `ActionPolicy(reason_by_action=...)` from its owners.
+
+    Every value is a live call into the owner that already refuses the
+    keypress, so a probe and its keypress can never answer differently.
+    Actions absent from the result have no owner reason and stay invokable
+    once their binding is enabled.
+
+    Args:
+        writes: `ResourceWriteController.unavailable_reason`.
+        helm: `HelmController.unavailable_reason`.
+        logs: `LogController.unavailable_reason`.
+        port_forward: `ForwardController.unavailable_reason`.
+        transfer: `TransferController.unavailable_reason`.
+        shell: `ShellController.unavailable_reason`.
+        operator_install: `OperatorController.unavailable_reason`.
+
+    Returns:
+        The action -> reason-resolver map, one entry per owned action.
+    """
+    return {
+        **_per_action(writes, _WRITE_REASON_ACTIONS),
+        **_per_action(helm, _HELM_REASON_ACTIONS),
+        **_per_action(logs, _LOG_REASON_ACTIONS),
+        "port_forward": port_forward,
+        "transfer": transfer,
+        "shell": shell,
+        "operator_install": operator_install,
+    }
+
+
+def compose_command_reasons(
+    *,
+    agent_available: Callable[[], bool],
+    mcp: Callable[[], UnavailableReason | None],
+    telepresence: Callable[[], UnavailableReason | None],
+) -> dict[str, Callable[[], UnavailableReason | None]]:
+    """Build `ActionPolicy(reason_by_command=...)` from its owners.
+
+    `:ai` and `:model` have no owner at all without the [agent] extra -
+    the same absence the bound Ctrl-A key refuses with - so they share one
+    composed answer here rather than becoming a method on a controller
+    that may not exist (#388 task 6 review). It is read live: the agent can
+    be built, rebuilt or disconnected long after the wiring ran.
+
+    Args:
+        agent_available: Whether an Agent is composed and usable now.
+        mcp: `IntegrationController.mcp_unavailable_reason`.
+        telepresence: `IntegrationController.telepresence_unavailable_reason`.
+
+    Returns:
+        The canonical command text -> reason-resolver map.
+    """
+
+    def agent_reason() -> UnavailableReason | None:
+        return None if agent_available() else AGENT_UNAVAILABLE
+
+    return {"ai": agent_reason, "model": agent_reason, "mcp": mcp, "tp": telepresence}
 
 
 class ActionPolicy:
