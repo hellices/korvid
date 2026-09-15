@@ -39,9 +39,15 @@ Quit action is its single entry. The `1`-`9` favorite-namespace shortcuts are
 not rows either — they take a number the palette has no generic way to invoke,
 so `?` documents them and `:ns`/the numeric keys stay the route. An action
 that does not apply to the current view — or that applies but would currently
-do nothing, because nothing is selected, the row carries no hint, or no search
-is running — stays searchable and shows the reason instead of vanishing, so
-the palette also answers "why did that key do nothing?". `Esc` closes it.
+do nothing, because nothing is selected, the row carries no hint, no search
+is running, the view has no CPU/MEM column, the log pane is already full, or
+this session was started without the capability it needs — stays searchable
+and shows the reason instead of vanishing, so
+the palette also answers "why did that key do nothing?". A reason is written
+to fit a row on a narrow terminal, so where the key's own toast names a
+resource (the node a running drain is evicting, the pod that would not fit
+the log pane) the row states the fact and the toast keeps the name. `Esc`
+closes it.
 Selecting a write action opens the same approval dialog the key opens, which
 still needs its own fresh keystroke.
 

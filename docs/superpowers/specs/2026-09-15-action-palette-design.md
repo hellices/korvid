@@ -254,6 +254,15 @@ same sentence and then adds the full remediation, which a toast has room for.
 The row and the keypress therefore still agree on why, and only the length
 differs.
 
+The same split applies wherever a refusal would otherwise interpolate *cluster
+data*, whose length korvid does not control: a node name (the drain key,
+refused while another node is being drained) or a pod name (the log key,
+refused because the pane is already showing its eight panels). The row states
+the bounded fact — "Another node drain is in progress", "Panel cap is 8
+containers" — and the keypress keeps the name and the instruction that names
+it. The viewport floor is not raised to accommodate an arbitrary identifier:
+one 253-character name would make any floor wrong again.
+
 ## Search and ranking
 
 Search uses Textual's public fuzzy matcher, with deterministic boosts and tie
