@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from textual.content import Content
 from textual.widgets import Input, OptionList
 
 from korvid.core.config import KorvidConfig
@@ -298,13 +299,54 @@ async def test_command_rows_are_enabled_once_their_capability_is_wired() -> None
 
 
 async def test_agent_command_rows_are_disabled_without_the_agent() -> None:
+    """`:ai`/`:model` availability is composed at the wiring (the agent
+    controller is at its reviewed size cap, so the answer is assembled from
+    its existing `available` flag and the shared reason rather than added as
+    a method on it - task 6 re-review)."""
     app = _app_without_agent()
     async with app.run_test() as pilot:
         await pilot.pause()
+        before = len(app._notifications)
         for entry_id in ("command:ai", "command:model"):
             row = _row(app, entry_id)
             assert row.availability.invokable is False
             assert row.availability.reason == AGENT_UNAVAILABLE
+        # Deriving the catalog is a silent probe: it asks, it never tells.
+        assert len(app._notifications) == before
+
+
+async def test_agent_command_rows_are_enabled_with_the_agent() -> None:
+    app = _build_app(agent_session=FakeSession(), agent_model_name="test-model")
+    async with app.run_test() as pilot:
+        await _loaded(pilot, app)
+        assert app._agent_ui.available is True
+        for entry_id in ("command:ai", "command:model"):
+            assert _row(app, entry_id).availability == ActionAvailability.enabled()
+
+
+async def test_the_agent_row_explains_the_capability_not_the_router_fallback() -> None:
+    """The two wordings differ on purpose, so nothing should assert parity.
+
+    Without the [agent] extra no owner claims `:ai`, so `CommandRouter` falls
+    through to its generic "nothing routed this" report - a *routing* outcome
+    phrased for a mistyped command. The palette is answering a different
+    question ("why is this row greyed out?"), and says what is actually
+    missing. Each stays the right sentence for its own moment.
+    """
+    app = _app_without_agent()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert _row(app, "command:ai").availability.reason == AGENT_UNAVAILABLE
+        await pilot.press("colon")
+        for character in "ai":
+            await pilot.press(character)
+        await pilot.press("enter")
+        await until(
+            pilot,
+            lambda: any("Unknown resource or command: ai" in n.message for n in app._notifications),
+            label="router fallback reported",
+        )
+        assert not any(n.message == AGENT_UNAVAILABLE.message for n in app._notifications)
 
 
 # ---------------------------------------------------------------------------
@@ -520,3 +562,41 @@ async def test_the_direct_action_refuses_even_when_dispatch_was_bypassed() -> No
         await pilot.pause()
         assert isinstance(app.screen, HelpScreen)
         assert len(app.screen_stack) == 2
+
+
+# ---------------------------------------------------------------------------
+# Owner text is data, not markup
+# ---------------------------------------------------------------------------
+
+
+async def test_an_owner_reason_is_notified_literally_not_as_markup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Capability reasons quote install hints like `pip install korvid[mcp]`.
+    Rendered as Rich content markup, `[mcp]` is a style tag: the text the
+    user needs would silently disappear (or restyle the toast). The palette
+    notifies the owner's message literally, exactly as the owners' own
+    handlers do with `markup=False` (task 6 re-review)."""
+    message = "MCP unavailable — install korvid[mcp] to enable it"
+    reason = UnavailableReason(AvailabilityCode.MISSING_CAPABILITY, message)
+    app = make_app([_pod("web")])
+    async with app.run_test() as pilot:
+        await _loaded(pilot, app)
+        monkeypatch.setattr(
+            app,
+            "_palette_entries",
+            lambda: [
+                _entry("action:help", ActionAvailability(binding_enabled=True, reason=reason))
+            ],
+        )
+        await app._palette_selected("action:help")
+        await until(
+            pilot,
+            lambda: any(n.message == message for n in app._notifications),
+            label="owner reason notified",
+        )
+        notification = next(n for n in app._notifications if n.message == message)
+        assert notification.markup is False
+        # Why it matters: as markup, the bracketed extra name is parsed away.
+        assert Content.from_markup(message).plain != message
+        assert Content(notification.message).plain == message

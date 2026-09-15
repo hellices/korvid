@@ -760,7 +760,11 @@ class KorvidApp(App[None]):
             return
         reason = entry.availability.reason
         if reason is not None:
-            self.notify(reason.message, severity=reason.severity)
+            # markup=False: capability reasons quote install hints like
+            # `korvid[mcp]`, which content markup would parse as a style tag
+            # and swallow. The owners' own handlers notify the same text the
+            # same way.
+            self.notify(reason.message, severity=reason.severity, markup=False)
             return
         invocation = entry.invocation
         if isinstance(invocation, AppActionInvocation):

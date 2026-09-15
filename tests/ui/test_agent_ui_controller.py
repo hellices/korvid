@@ -44,7 +44,6 @@ from korvid.core.config import KorvidConfig, ModelConnectionConfig, ModelConnect
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.models import PodSummary
 from korvid.k8s.writes import WriteOps
-from korvid.ui.action_availability import AGENT_UNAVAILABLE
 from korvid.ui.agent_ui_controller import (
     AgentPanelPort,
     AgentProposals,
@@ -1240,24 +1239,3 @@ async def test_shutdown_cancels_an_in_flight_dispatch(tmp_path: Path) -> None:
     with contextlib.suppress(asyncio.CancelledError):
         await call
     assert call.done()
-
-
-# ---------------------------------------------------------------------------
-# Palette probe: the agent owner answers for `:ai` / `:model`
-# ---------------------------------------------------------------------------
-
-
-async def test_command_unavailable_reason_explains_a_missing_agent_silently(
-    tmp_path: Path,
-) -> None:
-    """Issue #388 task 6 review: without the [agent] extra the router reports
-    `:ai`/`:model` as unclaimed, so the palette must grey those rows out - and
-    the probe itself says nothing to the user."""
-    env = Env(tmp_path=tmp_path, available=False)
-    assert env.controller.command_unavailable_reason() == AGENT_UNAVAILABLE
-    assert env.ui.messages() == []
-
-
-async def test_command_unavailable_reason_is_none_with_an_agent(tmp_path: Path) -> None:
-    env = Env(tmp_path=tmp_path, available=True)
-    assert env.controller.command_unavailable_reason() is None

@@ -111,6 +111,7 @@ from korvid.tools.executor import (
 )
 from korvid.tools.proposals import ProposalStore
 from korvid.tools.registry import mcp_tool_schemas
+from korvid.ui.action_availability import AGENT_UNAVAILABLE
 from korvid.ui.action_policy import ActionPolicy
 from korvid.ui.agent_ui_controller import AgentUiController
 from korvid.ui.app import KorvidApp
@@ -1420,8 +1421,11 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
             "operator_install": operators.unavailable_reason,
         },
         reason_by_command={
-            "ai": agent_ui.command_unavailable_reason,
-            "model": agent_ui.command_unavailable_reason,
+            # `:ai`/`:model` have no owner at all without the [agent] extra,
+            # which is the same absence the bound Ctrl-A key refuses with -
+            # composed here rather than as a method on the agent controller.
+            "ai": lambda: None if agent_ui.available else AGENT_UNAVAILABLE,
+            "model": lambda: None if agent_ui.available else AGENT_UNAVAILABLE,
             "mcp": integrations.mcp_unavailable_reason,
             "tp": integrations.telepresence_unavailable_reason,
         },
