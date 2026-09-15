@@ -851,10 +851,12 @@ def test_tui_presents_the_three_discovery_surfaces_as_complementary() -> None:
     intent - and say that the palette runs the app's existing routes
     rather than a parallel one.
     """
-    from korvid.ui.app_bindings import APP_BINDINGS
+    from korvid.ui.app_bindings import APP_BINDINGS, as_binding
 
     palette_keys = {
-        binding.key for binding in APP_BINDINGS if binding.action == "open_action_palette"
+        as_binding(raw).key
+        for raw in APP_BINDINGS
+        if as_binding(raw).action == "open_action_palette"
     }
     assert palette_keys == {"ctrl+p"}, "update tui.md with the new Action Palette default key"
 

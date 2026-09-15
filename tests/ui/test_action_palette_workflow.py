@@ -18,6 +18,7 @@ from typing import Any
 
 import pytest
 from textual.content import Content
+from textual.widget import Widget
 from textual.widgets import Input, OptionList
 
 from korvid.core.config import KorvidConfig
@@ -86,6 +87,18 @@ async def _loaded(pilot: Any, app: KorvidApp) -> ResourceTable:
     table = app.query_one(ResourceTable)
     await until(pilot, lambda: table.row_count == 1, label="pod loaded")
     return table
+
+
+def _focused(app: KorvidApp) -> Widget | None:
+    """`app.focused`, read through a call so narrowing cannot leak.
+
+    A test that asserts focus twice in one flow (`... is second`, later
+    `... is prompt`) otherwise trips mypy's `comparison-overlap`: the
+    first identity assert narrows the attribute expression to that widget
+    type for the rest of the function, and the second comparison then
+    looks impossible even though focus really did move between them.
+    """
+    return app.focused
 
 
 async def _open_palette(pilot: Any) -> ActionPaletteScreen:
@@ -197,7 +210,7 @@ async def test_palette_opens_from_the_log_split_and_agent_surfaces() -> None:
         await _open_palette(pilot)
         await pilot.press("escape")
         await until(pilot, lambda: app.screen is app.screen_stack[0], label="palette closed")
-        assert app.focused is prompt
+        assert _focused(app) is prompt
 
 
 async def test_palette_opens_over_the_inline_describe_pane() -> None:
