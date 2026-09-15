@@ -44,7 +44,15 @@ is running, the view does not render the column a sort key sorts by, the log
 pane is already full, or this session was started without the capability it
 needs — stays searchable
 and shows the reason instead of vanishing, so
-the palette also answers "why did that key do nothing?". A reason is written
+the palette also answers "why did that key do nothing?". A command row answers
+for what its own handler needs: `:ai` needs the model catalog its setup wizard
+is driven from, and `:model` needs a connected agent to report, so a session
+can offer one and grey out the other. A row is about the bare command it runs,
+so a greyed-out `:ai` row does not stop you typing `:ai off`. korvid looks for
+`kubectl` once, when the session starts, and the shell and port-forward rows
+report that one answer — install `kubectl` while korvid is running and it is
+picked up at the next start.
+A reason is written
 to fit a row on a narrow terminal, so where the key's own toast names a
 resource (the node a running drain is evicting, the node cordon is waiting
 on, the pod that would not fit the log pane) the row states the fact and the

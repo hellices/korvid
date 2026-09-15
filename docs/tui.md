@@ -59,7 +59,8 @@ Three keys answer three different questions, so none of them replaces another:
   an action's own id (`delete_resource`), a command's text (`pulse`), and
   its `:` form (`:pulse`). An action that does not apply to the current
   view — or that applies but would do nothing right now, with nothing
-  selected, no hint on the row, or no search running — stays searchable and
+  selected, no hint on the row, no search running, or a capability this
+  session started without — stays searchable and
   shows why instead of disappearing. On a terminal too short to spare the
   room, the palette takes the height it needs so that reason stays readable
   rather than clipped — and resizing the terminal under the open palette

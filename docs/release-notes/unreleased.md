@@ -14,8 +14,11 @@ how to run it*, showing the effective remapped key or the canonical command,
 and explains when an action does not apply to the current view or would
 currently do nothing (nothing selected, no hint on the row, no search running,
 a sort key whose column this view does not render, a log pane that is already
-full, a node whose drain has to finish first, a rollback whose release history
-moved, or a capability this session was started without).
+full, a node whose drain has to finish first, a helm release whose identity or
+history the session cannot verify, an operator uninstall with no manifest
+source, a session with no timeline to open, or a capability this session was
+started without — including the `kubectl` korvid looks for once at startup, and
+the agent pieces `:ai` and `:model` each need for themselves).
 Selecting a write action still opens the same approval flow and requires a
 fresh confirmation keystroke. Arrow, Page and Home/End keys walk every result,
 including the greyed-out ones, and the cursor is drawn on whichever row it

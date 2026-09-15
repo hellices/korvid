@@ -10,7 +10,9 @@ Five minutes from an empty terminal to a running cockpit.
   credential plugins as `kubectl`.
 - The [Helm and operator views](helm-operators.md) do not require the Helm CLI;
   they read release data from the cluster. Helm write actions require `helm`
-  on `PATH`, while shell/debug fallbacks require `kubectl`.
+  on `PATH`, while shell/debug fallbacks require `kubectl`. korvid looks for
+  `kubectl` once per session, at startup: install it while korvid is running
+  and restart to pick it up.
 
 korvid is an application, not a library: install it into its own isolated
 environment rather than whatever Python happens to be active. `uv` and

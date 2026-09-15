@@ -293,6 +293,44 @@ going to a node that is not on screen. The viewport floor is not raised to
 accommodate an arbitrary identifier: one 253-character name would make any
 floor wrong again.
 
+A command with more than one prerequisite answers for each of them in its own
+handler's order, and only the first one shared by several commands is shared.
+`:ai` and `:model` both need the `[agent]` extra, so that absence stays one
+answer; past it they diverge, because their handlers read different things.
+`:ai` opens the profile manager or the setup wizard, both driven by the model
+catalog, and reports the install hint when there is none. `:model` reports (or
+swaps) the live session's model and refuses without a session *and* a model
+name — config can carry a name whose provider never came up. A row answers for
+the *bare* command the palette invokes, which is why greying `:ai` out says
+nothing about `:ai off` typed by hand. Both concise sentences are the prefix of
+the handler's own, as `:mcp`/`:tp` already were.
+
+A refusal a flow makes from rows the session already holds belongs to the row
+too, even when the flow is a write that would otherwise reach the cluster. The
+helm writes are the clearest case: `u`, `Ctrl-D` on the release browser and `r`
+on the revision drill-down each cancel when the cached release row carries no
+identity, or when the newest revision in the loaded history carries none, and
+both are store reads made before any helm process starts. What stays out is
+what the probe cannot answer honestly: a row the store has not loaded yet (the
+next watch event fills it in) and a release the flow resolves through the helm
+CLI, which a probe must never run. The same rule puts one identity on
+`delete_resource`: Ctrl-D on an OLM Subscription is redirected to the operator
+uninstall, which needs a manifest source, while every other row keeps the
+generic delete's answer — including a CSV, whose redirect falls through to that
+generic delete when the owning Subscription is not in the store.
+
+A capability that lives in the *filesystem* is resolved once per session, not
+per probe. `kubectl` is the one korvid asks about: the shell key and the
+port-forward dialog both refuse without it, and the palette asks both owners
+every time it derives its catalog, so a live `shutil.which` there is a PATH
+scan per row, per open, from a probe the rule above says must do no I/O.
+`KubectlPresence` takes one snapshot — the first question asks, in a running
+TUI that is startup — and hands the same answer to both owners' flows and
+probes. A `kubectl` installed while korvid runs is therefore not seen until the
+next start; the alternative is a filesystem scan on a keystroke path. Detection
+stays in the owners' layer and is injected by the composition root: the palette
+gains no I/O of its own, in either direction.
+
 ## Search and ranking
 
 Search uses Textual's public fuzzy matcher, with deterministic boosts and tie
