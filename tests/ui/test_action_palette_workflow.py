@@ -25,6 +25,7 @@ from korvid.core.config import KorvidConfig
 from korvid.core.store import ResourceStore, Summary
 from korvid.core.watch import WatchManager
 from korvid.k8s.discovery import ResourceMeta
+from korvid.k8s.logs import LogLine
 from korvid.k8s.models import GenericSummary, PodSummary
 from korvid.tools.proposals import ProposalStore
 from korvid.ui import action_palette as palette_domain
@@ -546,6 +547,41 @@ async def test_an_emptied_inbox_refuses_the_selected_proposals_row(tmp_path: Pat
         assert note.severity == "information"
         assert app.screen is app.screen_stack[0]
         assert not isinstance(app.screen, ConfirmScreen)
+
+
+# ---------------------------------------------------------------------------
+# `Ctrl-S` answers to the buffer behind the pane
+# ---------------------------------------------------------------------------
+
+
+async def test_the_log_save_row_reports_an_empty_buffer() -> None:
+    """A visible-but-empty log pane is a `Ctrl-S` that saves nothing.
+
+    The binding stays enabled - pane visibility is all it ever gated on,
+    and that is unchanged - so the row is offered with the owner's reason
+    attached rather than disappearing. One streamed line is enough to make
+    it invocable again (issue #388, round 6).
+    """
+    app = _build_app()
+    async with app.run_test() as pilot:
+        await _loaded(pilot, app)
+        await app._logs.open_pane("default", [("web", "app")])
+        log_pane = app.query_one(LogPane)
+        await until(pilot, lambda: log_pane.display, label="log pane open")
+        before = len(app._notifications)
+        row = _row(app, "action:log_save")
+        assert row.availability.binding_enabled is True
+        assert row.availability.reason == UnavailableReason(
+            AvailabilityCode.NO_SELECTION, "Log buffer is empty — nothing to save"
+        )
+        # The other pane-local toggles answer only to the pane itself.
+        assert _row(app, "action:log_wrap").availability == ActionAvailability.enabled()
+        assert len(app._notifications) == before
+        buffer = app._logs.buffer
+        assert buffer is not None
+        buffer.append(LogLine(pod="web", container="app", text="hello", timestamp=None))
+        assert _row(app, "action:log_save").availability == ActionAvailability.enabled()
+        await app._logs.cancel_tasks()
 
 
 # ---------------------------------------------------------------------------

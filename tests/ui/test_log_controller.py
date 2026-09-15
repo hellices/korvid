@@ -587,6 +587,56 @@ def test_log_pane_actions_report_a_closed_pane() -> None:
     assert h.ui.notifications == []
 
 
+async def test_log_save_reports_an_empty_buffer_without_notifying() -> None:
+    """A visible pane with nothing in it: `Ctrl-S` can only answer "there is
+    nothing to save", so the palette says that instead of offering the row
+    (issue #388, round 6). The probe itself notifies nothing - and the
+    keypress still notifies exactly what it always did."""
+    h = make_harness()
+    await h.controller.open_pane("default", [("web", "main")])  # buffer exists, nothing streamed
+    try:
+        reason = h.controller.unavailable_reason("log_save")
+        assert reason == UnavailableReason(
+            AvailabilityCode.NO_SELECTION, "Log buffer is empty — nothing to save"
+        )
+        assert h.ui.notifications == []
+        h.controller.action_log_save()
+        assert reason is not None
+        assert [n.message for n in h.ui.notifications] == [reason.message]
+        assert [n.severity for n in h.ui.notifications] == [reason.severity]
+    finally:
+        await h.controller.cancel_tasks()
+
+
+async def test_log_save_reports_an_empty_buffer_before_one_exists() -> None:
+    """The pane can be displayed before any buffer is built. `Ctrl-S` does
+    nothing at all there, silently, so the row has to carry the reason -
+    the same sentence, because it is the same fact."""
+    h = make_harness()
+    h.pane.display = True
+    assert h.controller.buffer is None
+    assert h.controller.unavailable_reason("log_save") == UnavailableReason(
+        AvailabilityCode.NO_SELECTION, "Log buffer is empty — nothing to save"
+    )
+    assert h.ui.notifications == []
+
+
+async def test_log_save_is_invocable_once_the_buffer_has_lines() -> None:
+    """One streamed line is all `Ctrl-S` needs, and the other pane-local
+    actions never asked about the buffer at all."""
+    h = make_harness()
+    await h.controller.open_pane("default", [("web", "main")])
+    try:
+        buffer = h.controller.buffer
+        assert buffer is not None
+        buffer.append(LogLine(pod="web", container="main", text="hello", timestamp=None))
+        assert h.controller.unavailable_reason("log_save") is None
+        assert h.controller.unavailable_reason("log_wrap") is None
+        assert h.ui.notifications == []
+    finally:
+        await h.controller.cancel_tasks()
+
+
 def _raise_no_matches() -> Any:
     raise NoMatches("LogPane is not mounted yet")
 

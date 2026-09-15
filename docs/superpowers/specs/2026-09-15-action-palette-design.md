@@ -216,7 +216,10 @@ its probe reports the drain too — invocable only on the node actually being
 drained (that press is the cancel), and otherwise the handler's own "drain of
 nodes/X in progress — press the drain key on it to cancel". Cordon and uncordon
 keep asking about the selected node alone: a drain elsewhere does not hold this
-node's schedulable state.
+node's schedulable state. `Ctrl-S` is the smaller version of the same rule: its
+binding is gated on the log pane's visibility and stays that way, but the row
+reports an empty (or not yet built) buffer, because that is all the keypress
+could say.
 
 A protected cluster context does not make a write unavailable; it remains
 invocable and reaches the stronger existing confirmation path. "Protected"

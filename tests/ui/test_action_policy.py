@@ -468,6 +468,7 @@ def test_composed_action_reasons_ask_each_owner_about_its_own_actions() -> None:
         "helm_rollback",
         "logs",
         "logs_multi",
+        "log_save",
         "describe",
         "hint_details",
         "log_search_next",

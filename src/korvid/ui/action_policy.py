@@ -100,7 +100,12 @@ _HELM_REASON_ACTIONS: tuple[str, ...] = (
     "helm_history",
     "helm_rollback",
 )
-_LOG_REASON_ACTIONS: tuple[str, ...] = ("logs", "logs_multi")
+#: The actions `LogController` answers an invocation reason for: the two
+#: keys that *open* a stream, plus `Ctrl-S`, whose own question is the
+#: buffer behind the visible pane rather than the pane itself (#388 round
+#: 6). The other pane-local display toggles need nothing beyond the pane
+#: visibility `binding_enabled` already gates them on.
+_LOG_REASON_ACTIONS: tuple[str, ...] = ("logs", "logs_multi", "log_save")
 
 #: The read keys `ResourceInspectController` speaks for: its own describe
 #: and hint-details flows, plus the `n`/`N` search step, whose first

@@ -73,6 +73,16 @@ _PANE_LOCAL_ACTIONS: frozenset[str] = frozenset(
     {"log_format", "log_wrap", "log_timestamps", "log_save", "log_previous"}
 )
 
+#: `Ctrl-S` on a visible pane whose buffer holds nothing. The one wording
+#: for it: `action_log_save` notifies this message and the palette greys
+#: the row with the same sentence (issue #388, round 6). No selection in
+#: the sense the code names - the action has no subject to act on - and
+#: the pane's visibility, which `_PANE_LOCAL_ACTIONS` already answers for,
+#: is a different question with a different code.
+_EMPTY_LOG_BUFFER = UnavailableReason(
+    AvailabilityCode.NO_SELECTION, "Log buffer is empty — nothing to save"
+)
+
 
 class SelectedNsName(Protocol):
     """The selection read, with the silent `notify=False` probe path.
@@ -302,16 +312,17 @@ class LogController:
         already-open pane in another mode *closes* it, so that case is
         invocable, exactly as the handler behaves. The pane-local display
         actions answer with the pane's visibility, matching
-        `ActionPolicy`'s own binding gate on the same actions.
+        `ActionPolicy`'s own binding gate on the same actions - and
+        `log_save` answers with one fact more, because a visible pane with
+        an empty (or not yet built) buffer is a `Ctrl-S` that can only say
+        "nothing to save" (issue #388, round 6).
 
         The deeper refusals stay out on purpose: the cap notices
         (`Log pane caps at N pods`, `Streaming first N of M`) are emitted by
         helpers that notify while they compute, which a probe must never
         do."""
         if action in _PANE_LOCAL_ACTIONS:
-            if not self._pane_displayed():
-                return UnavailableReason(AvailabilityCode.PANE_CLOSED, "Open the log pane first")
-            return None
+            return self._pane_local_reason(action)
         if action not in ("logs", "logs_multi"):
             return None
         if self._ctx_switching():
@@ -332,6 +343,30 @@ class LogController:
         if ns is None or name is None:
             return UnavailableReason(AvailabilityCode.NO_SELECTION, "No resource selected")
         return None
+
+    def _pane_local_reason(self, action: str) -> UnavailableReason | None:
+        """Why a pane-local display action can't run, or None.
+
+        The pane has to be on screen - the fact `ActionPolicy` gates their
+        bindings on - and `Ctrl-S` needs one more: something in the buffer
+        to write out.
+        """
+        if not self._pane_displayed():
+            return UnavailableReason(AvailabilityCode.PANE_CLOSED, "Open the log pane first")
+        if action == "log_save" and not self._saveable_lines():
+            return _EMPTY_LOG_BUFFER
+        return None
+
+    def _saveable_lines(self) -> bool:
+        """Whether the buffer holds anything `action_log_save` would write.
+
+        The same read that handler makes (`self._buffer`, then its lines),
+        so the probe cannot report a save the keypress would refuse. A pane
+        can be displayed before any buffer exists, which `Ctrl-S` ignores
+        silently; for the palette that is the same empty answer.
+        """
+        buffer = self._buffer
+        return buffer is not None and bool(buffer.lines())
 
     async def action_logs(self) -> None:
         """Open logs for the selected pod, or toggle it in/out of the pane (``l``).
@@ -800,7 +835,7 @@ class LogController:
             return
         lines = self._buffer.lines()
         if not lines:
-            self._ui.notify("Log buffer is empty — nothing to save", severity="warning")
+            self._ui.notify(_EMPTY_LOG_BUFFER.message, severity=_EMPTY_LOG_BUFFER.severity)
             return
         try:
             path = export_log_lines(lines, default_log_export_dir())
