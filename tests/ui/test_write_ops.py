@@ -2052,11 +2052,20 @@ async def test_unavailable_reason_reports_a_missing_write_client_before_the_kind
         )
 
 
+async def _pod_manifest(kind: str, namespace: str | None, name: str) -> dict[str, Any]:
+    """The manifest source `R` fetches the current requests/limits from."""
+    return {
+        "kind": "Pod",
+        "metadata": {"name": name, "namespace": namespace},
+        "spec": {"containers": [{"name": "app", "resources": {}}]},
+    }
+
+
 async def test_resize_availability_reports_an_unsupported_cluster(tmp_path: Path) -> None:
     """`R` refuses when discovery never found pods/resize; the palette must
     say so rather than offer a key that always warns (#388 task 4)."""
     rec = Recorder()
-    app = make_app(rec, tmp_path / "audit.jsonl")
+    app = make_app(rec, tmp_path / "audit.jsonl", get_manifest=_pod_manifest)
     async with app.run_test() as pilot:
         await until(pilot, lambda: _selected_name(app) == "web-1", label="pod row selected")
         app._pod_resize_supported = False
@@ -2068,6 +2077,60 @@ async def test_resize_availability_reports_an_unsupported_cluster(tmp_path: Path
         app._pod_resize_supported = True
         assert app._resource_writes.unavailable_reason("resize_pod") is None
         assert len(app._notifications) == before
+
+
+async def test_resize_availability_reports_a_missing_manifest_source(tmp_path: Path) -> None:
+    """`R` prefills the prompt from the live manifest, so with no manifest
+    source wired it refuses with "Resize unavailable: no manifest source" -
+    the palette must carry that same refusal instead of offering the key.
+    """
+    rec = Recorder()
+    app = make_app(rec, tmp_path / "audit.jsonl")  # default: no get_manifest wired
+    assert app._write_ops is not None
+    assert app._get_manifest is None
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: _selected_name(app) == "web-1", label="pod row selected")
+        app._pod_resize_supported = True
+        before = len(app._notifications)
+        assert app._resource_writes.unavailable_reason("resize_pod") == UnavailableReason(
+            AvailabilityCode.MISSING_CAPABILITY, "Resize unavailable: no manifest source"
+        )
+        assert app._actions.availability("resize_pod").invocable is False
+        assert len(app._notifications) == before
+
+
+async def test_resize_is_invocable_with_a_manifest_source(tmp_path: Path) -> None:
+    """The positive half: a write client, a manifest source, a supporting
+    cluster and a pod row - `R` really runs, so the row is offered."""
+    rec = Recorder()
+    app = make_app(rec, tmp_path / "audit.jsonl", get_manifest=_pod_manifest)
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: _selected_name(app) == "web-1", label="pod row selected")
+        app._pod_resize_supported = True
+        before = len(app._notifications)
+        assert app._resource_writes.unavailable_reason("resize_pod") is None
+        assert app._actions.availability("resize_pod") == ActionAvailability.enabled()
+        assert len(app._notifications) == before
+
+
+async def test_the_resize_key_still_notifies_the_missing_manifest_source(
+    tmp_path: Path,
+) -> None:
+    """The probe is the silent twin of a refusal the keypress keeps: `R`
+    with no manifest source still warns with the same sentence."""
+    rec = Recorder()
+    app = make_app(rec, tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: _selected_name(app) == "web-1", label="pod row selected")
+        app._pod_resize_supported = True
+        await pilot.press("R")
+        await until(
+            pilot,
+            lambda: any(
+                n.message == "Resize unavailable: no manifest source" for n in app._notifications
+            ),
+            label="the resize key notified the missing manifest source",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -2115,7 +2178,7 @@ async def test_probe_matrix_on_the_pods_view(tmp_path: Path) -> None:
             "edit_resource": ("missing_capability", "Edit unavailable in this session"),
             "rollout_restart": ("unsupported_resource", "rollout restart does not apply to pods"),
             "scale_resource": ("unsupported_resource", "scale does not apply to pods"),
-            "resize_pod": None,
+            "resize_pod": ("missing_capability", "Resize unavailable: no manifest source"),
             "cordon_node": ("unsupported_resource", "cordon does not apply to pods"),
             "uncordon_node": ("unsupported_resource", "uncordon does not apply to pods"),
             "drain_node": ("unsupported_resource", "drain does not apply to pods"),

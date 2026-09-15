@@ -108,7 +108,10 @@ class WriteAvailability:
         carries a second half of that same refusal: `edit()` also refuses
         when the manifest source is missing, so the probe must check both
         halves with the one wording the handler uses, not merely the write
-        client (#388 task 4 review).
+        client (#388 task 4 review). `resize_pod` needs the manifest source
+        too - it prefills the prompt from the live pod - but refuses it
+        later and in different words, so that half lives in `_kind_reason`
+        where the handler's own order puts it (#388 round 8).
 
         `delete_resource` on the helm release browser is the one exception:
         Ctrl-D there routes to `helm uninstall` *before* the generic
@@ -177,6 +180,15 @@ class WriteAvailability:
                 return UnavailableReason(
                     AvailabilityCode.UNSUPPORTED_RESOURCE,
                     "This cluster does not expose pods/resize (requires Kubernetes 1.35+)",
+                )
+            if not self.manifest_source_available():
+                # `resize_pod()` prefills its prompt from the live manifest
+                # (`_pod_container_resources`), which refuses with exactly
+                # this sentence when no manifest source is wired - after the
+                # kind and cluster-capability checks above, which is where
+                # the handler asks it too (#388 round 8).
+                return UnavailableReason(
+                    AvailabilityCode.MISSING_CAPABILITY, "Resize unavailable: no manifest source"
                 )
         return None
 
