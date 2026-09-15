@@ -15,6 +15,7 @@ import asyncio
 from collections.abc import AsyncIterator, Sequence
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 import pytest
 from textual.content import Content
@@ -1719,3 +1720,79 @@ async def test_probing_the_sort_rows_notifies_nothing() -> None:
         await _open_palette(pilot)
         assert len(app._notifications) == before
         assert "pods" not in app._workspace.focused.sorts
+
+
+# ---------------------------------------------------------------------------
+# Deriving the catalog touches no filesystem (#388 round 13)
+# ---------------------------------------------------------------------------
+
+
+async def test_deriving_the_catalog_never_scans_path_for_kubectl() -> None:
+    """Two owners answer for `kubectl` - the shell key and the forward
+    dialog - and the palette asks both every time it derives its catalog.
+
+    A live `shutil.which` there is a PATH scan (a stat per directory on
+    every entry) per derivation, on a keystroke path, and the availability
+    contract forbids a probe from doing I/O at all. The session resolves
+    `kubectl` once instead, so repeated derivations - the palette rebuilds
+    its list on every open and again after each dismissal - touch nothing.
+    """
+    with mock.patch("shutil.which", return_value="/usr/bin/kubectl") as which:
+        app = _build_app()
+        async with app.run_test() as pilot:
+            await _loaded(pilot, app)
+            # The session snapshot: taken once, however it was reached.
+            app._palette_entries()
+            baseline = which.call_count
+            assert baseline <= 1
+            for _ in range(5):
+                entries = app._palette_entries()
+            assert which.call_count == baseline
+            rows = {entry.id: entry for entry in entries}
+            assert rows["action:shell"].availability.invocable is True
+            assert rows["action:port_forward"].availability.reason == UnavailableReason(
+                AvailabilityCode.MISSING_CAPABILITY,
+                "Port-forward unavailable in this build",
+            )
+            assert which.call_count == baseline
+
+
+async def test_the_shell_row_still_reports_a_session_without_kubectl() -> None:
+    """The snapshot must not soften the answer: a session that started with
+    no `kubectl` keeps refusing the shell key, with the owner's wording,
+    and still performs no lookup per derivation."""
+    with mock.patch("shutil.which", return_value=None) as which:
+        app = _build_app()
+        async with app.run_test() as pilot:
+            await _loaded(pilot, app)
+            before = len(app._notifications)
+            app._palette_entries()
+            baseline = which.call_count
+            row = _row(app, "action:shell")
+            assert row.availability.invocable is False
+            assert row.availability.reason == UnavailableReason(
+                AvailabilityCode.MISSING_CAPABILITY,
+                "kubectl not found on PATH — shell-in requires kubectl",
+                severity="error",
+            )
+            assert which.call_count == baseline
+            assert len(app._notifications) == before
+
+
+async def test_the_shell_key_and_its_row_share_one_kubectl_answer() -> None:
+    """Handler and probe read the same snapshot, so a session cannot offer
+    a row whose keypress then refuses (or the reverse)."""
+    with mock.patch("shutil.which", return_value=None):
+        app = _build_app()
+        async with app.run_test() as pilot:
+            await _loaded(pilot, app)
+            assert _row(app, "action:shell").availability.invocable is False
+            await pilot.press("s")
+            await until(
+                pilot,
+                lambda: any(
+                    n.message == "kubectl not found on PATH — shell-in requires kubectl"
+                    for n in app._notifications
+                ),
+                label="the shell key refused with the same sentence",
+            )

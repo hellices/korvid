@@ -32,7 +32,6 @@ import asyncio
 import dataclasses
 import json
 import logging
-import shutil
 import subprocess
 import weakref
 from collections.abc import Awaitable, Callable, Coroutine, Mapping
@@ -82,13 +81,6 @@ _NODE_SHELL_ACTION = "node shell"
 #: returns are the same string (issue #388 task 4).
 _POD_SHELL_KUBECTL = "kubectl not found on PATH — shell-in requires kubectl"
 _NODE_SHELL_KUBECTL = "kubectl not found on PATH — node shell requires kubectl"
-
-
-def _kubectl_missing(message: str) -> UnavailableReason | None:
-    """*message* as a reason when `kubectl` is absent from PATH, else None."""
-    if shutil.which("kubectl") is not None:
-        return None
-    return UnavailableReason(AvailabilityCode.MISSING_CAPABILITY, message, severity="error")
 
 
 def _looks_like_admission_rejection(stderr: str) -> bool:
@@ -206,6 +198,9 @@ class ShellController:
         #: The silent twin of `node_target`'s refusals, for the availability
         #: probe: `ResourceWriteController.node_unavailable_reason`.
         node_unavailable_reason: Callable[[str], UnavailableReason | None],
+        #: The session's `kubectl` snapshot, shared with the forward owner
+        #: and read by both the flows below and their palette probes.
+        kubectl_available: Callable[[], bool],
         settings: Callable[[], ShellSettings],
         target_uid: Callable[[str, str | None, str], Awaitable[str | None]],
     ) -> None:
@@ -218,6 +213,7 @@ class ShellController:
         self._pod_containers = pod_containers
         self._node_target_fn = node_target
         self._node_unavailable_reason_fn = node_unavailable_reason
+        self._kubectl_available = kubectl_available
         # Read at call time: a `:ctx` switch retargets kube_context.
         self._settings = settings
         self._target_uid_fn = target_uid
@@ -240,11 +236,20 @@ class ShellController:
             reason = self._node_unavailable_reason_fn(_NODE_SHELL_ACTION)
             if reason is not None:
                 return reason
-            return _kubectl_missing(_NODE_SHELL_KUBECTL)
+            return self._kubectl_missing(_NODE_SHELL_KUBECTL)
         _, name = self._view.selected_ns_name(notify=False)
         if name is None:
             return UnavailableReason(AvailabilityCode.NO_SELECTION, "No resource selected")
-        return _kubectl_missing(_POD_SHELL_KUBECTL)
+        return self._kubectl_missing(_POD_SHELL_KUBECTL)
+
+    def _kubectl_missing(self, message: str) -> UnavailableReason | None:
+        """*message* as a reason when this session found no `kubectl`, else
+        None. The session's snapshot (`KubectlPresence`), not a fresh
+        lookup: the palette asks this owner on every catalog derivation,
+        and a probe must not scan PATH (issue #388 round 13)."""
+        if self._kubectl_available():
+            return None
+        return UnavailableReason(AvailabilityCode.MISSING_CAPABILITY, message, severity="error")
 
     def shell(self) -> None:
         """Drop into a shell inside the selected pod via kubectl exec.
@@ -273,7 +278,7 @@ class ShellController:
             return
         namespace = ns
 
-        missing = _kubectl_missing(_POD_SHELL_KUBECTL)
+        missing = self._kubectl_missing(_POD_SHELL_KUBECTL)
         if missing is not None:
             self._ui.notify(missing.message, severity=missing.severity, markup=False)
             return
@@ -607,7 +612,7 @@ class ShellController:
         if resolved is None:
             return
         ops, meta, name, uid = resolved
-        missing = _kubectl_missing(_NODE_SHELL_KUBECTL)
+        missing = self._kubectl_missing(_NODE_SHELL_KUBECTL)
         if missing is not None:
             self._ui.notify(missing.message, severity=missing.severity, markup=False)
             return

@@ -99,6 +99,7 @@ from korvid.k8s.discovery import PODS_META, ResourceMeta, build_alias_map
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.helm import HELM_RELEASES_META, HELM_REVISIONS_META
 from korvid.k8s.helmcli import HelmCLI, find_helm
+from korvid.k8s.kubectl import KubectlPresence
 from korvid.k8s.metrics import MetricsPoller
 from korvid.k8s.models import reset_age_memo
 from korvid.k8s.telepresence import (
@@ -1071,6 +1072,10 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
     resource_writes_ref = _LateReference[ResourceWriteController]()
 
     view = AppViewState(app)
+    #: One PATH lookup for `kubectl` per session, shared by the shell and
+    #: forward owners: their palette probes are asked on every catalog
+    #: derivation, and a probe must do no I/O (#388 round 13).
+    kubectl = KubectlPresence()
     relationship_loader: RelationshipSnapshotLoader | None = (
         RelationshipSnapshotLoader(_RelationshipLister(inputs.list_relationship_objects))
         if inputs.list_relationship_objects is not None
@@ -1175,6 +1180,7 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
         node_unavailable_reason=lambda action: resource_writes_ref.get().node_unavailable_reason(
             action
         ),
+        kubectl_available=kubectl,
         target_uid=lambda kind, ns, name: app._target_uid(kind, ns, name),
         settings=lambda: ShellSettings.from_config(app.config),
     )
@@ -1186,6 +1192,7 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
         forwards=lambda: app._forwards,
         audit=lambda: app._audit,
         get_manifest=lambda: app._get_manifest,
+        kubectl_available=kubectl,
     )
     forward_ref.bind(forward_controller)
     transfer = TransferController(

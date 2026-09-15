@@ -30,7 +30,6 @@ import asyncio
 import contextlib
 import functools
 import logging
-import shutil
 import threading
 from collections import deque
 from collections.abc import Callable
@@ -86,6 +85,9 @@ class ForwardController:
         forwards: Callable[[], ForwardRegistry | None],
         audit: Callable[[], AuditLog | None],
         get_manifest: Callable[[], Callable[[str, str | None, str], Any] | None],
+        #: The session's `kubectl` snapshot, shared with the shell owner
+        #: and read by both `open_dialog` and its palette probe.
+        kubectl_available: Callable[[], bool],
     ) -> None:
         self._gate = gate
         self._ui = ui
@@ -93,6 +95,7 @@ class ForwardController:
         self._forwards_registry = forwards
         self._audit_log = audit
         self._get_manifest_fn = get_manifest
+        self._kubectl_available = kubectl_available
         #: local ports whose forward died; the list screen marks them broken.
         self._broken_forwards: set[int] = set()
         #: audit records queued off the message pump - a slow disk must not
@@ -174,13 +177,18 @@ class ForwardController:
 
     def _capability_reason(self) -> UnavailableReason | None:
         """The two composition facts a forward needs, in `open_dialog`'s own
-        order: a registry in this build, and a `kubectl` on PATH. Shared by
-        the keypress (which notifies the message) and the palette probe
-        (which returns it silently), so the two cannot drift."""
+        order: a registry in this build, and a `kubectl` this session found.
+        Shared by the keypress (which notifies the message) and the palette
+        probe (which returns it silently), so the two cannot drift.
+
+        The `kubectl` half is the session's snapshot (`KubectlPresence`),
+        not a fresh PATH scan: the palette asks this owner every time it
+        derives its catalog, and a probe must do no I/O (#388 round 13).
+        """
         reason = self.list_unavailable_reason()
         if reason is not None:
             return reason
-        if shutil.which("kubectl") is None:
+        if not self._kubectl_available():
             return UnavailableReason(
                 AvailabilityCode.MISSING_CAPABILITY,
                 "kubectl not found on PATH — port-forward requires kubectl",
