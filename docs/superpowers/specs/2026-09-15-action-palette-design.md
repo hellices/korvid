@@ -255,9 +255,36 @@ on the first line. The second line renders its description or unavailable
 reason. Unavailable options are visible but disabled. Category separators are
 inserted only between non-empty groups.
 
-The modal uses `width: 76; max-width: 94%`, `height: auto`, and
-`max-height: 80%`. Two-line options wrap rather than forcing horizontal
-scrolling. Narrow-terminal tests cover widths below the normal modal width.
+The modal uses `width: 76; max-width: 94%` and `height: auto`. Its height is
+bounded, but the bound is not a single percentage: the modal takes at most 80%
+of the terminal height *while that still leaves eight rows of results*, and
+otherwise grows up to — never past — the full terminal height. Eight rows is
+what one real catalog row needs at 36 columns, where a long title plus a `:`
+spelling, or an owner's refusal such as "Relationships unavailable in this
+session", wraps to six to eight lines. The 80% cap is cosmetic; on a 16-row
+terminal it leaves two rows of results, and a row whose trigger or reason is
+clipped cannot be recovered by any keystroke, because the list scrolls by whole
+options and never within one. A terminal short enough to need that extra space
+also gives up the modal's vertical padding and the results list's own border
+(Textual's compact `OptionList`), which widens every row as well. Tall
+terminals stay capped at 80% and at eighteen result rows, so the palette stays
+a palette.
+
+The results list is capped through its `max-height` rather than allowed to grow
+the `height: auto` container, so overflow becomes scrolling inside the list and
+the key hint stays composited on screen. Both the cap and the compact chrome
+are re-applied when the terminal resizes under the open modal, and the
+highlighted row is scrolled back into the viewport after that new layout
+exists — a resize both re-caps the viewport and re-wraps every row, so the
+scroll offset the previous size produced points at a different row afterwards.
+`Home`/`End` re-assert that scroll too: `OptionList` only scrolls from its
+`highlighted` watcher, so the key that lands on the row that is already
+highlighted would otherwise do nothing.
+
+Two-line options wrap rather than forcing horizontal scrolling.
+Narrow-terminal tests cover widths below the normal modal width. Below roughly
+seven rows of terminal the modal's own chrome no longer fits and the results
+clamp to a single row; that is a documented limit, not a supported size.
 
 Typing filters results. Up/Down, PageUp/PageDown, Home/End, and Enter operate
 the list while the input keeps keyboard focus. `Escape` and `Ctrl-P` cancel.
@@ -312,6 +339,10 @@ approve it. A fresh user keystroke remains mandatory.
 - cancellation restores focus;
 - command/filter editing and all modal screens block opening;
 - search, no-result, disabled-result, category, and narrow-terminal rendering;
+- at 80x24 and 36x16 the whole modal stays inside the screen, the key hint is
+  composited, and the highlighted row is rendered in the results viewport —
+  including after `End`, after a resize under the open modal, and for a whole
+  real row (`:proposals`, and an owner's long unavailable reason) at 36x16;
 - overloaded view-specific actions show the correct effective key and reason;
 - Pulse comes from `COMMANDS`, not a palette-only route;
 - a context or selection change while open is rejected at invocation time;

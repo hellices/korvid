@@ -24,7 +24,10 @@ from korvid.ui.action_palette import (
 )
 from korvid.ui.app_bindings import APP_BINDINGS
 from korvid.ui.command import COMMANDS
+from korvid.ui.read_availability import relationships_reason
 from korvid.ui.widgets.action_palette import ActionPaletteScreen
+
+from .waits import until
 
 
 class PaletteHarness(App[None]):
@@ -107,6 +110,34 @@ _LAYOUT_SIZES = [(80, 24), (36, 16)]
 _LAYOUT_IDS = ["80x24", "36x16"]
 
 
+def _rewrapping_entries(count: int = 30) -> list[PaletteEntry]:
+    """`count` invocable rows whose height depends on the terminal width.
+
+    Every description is a real-length sentence that fits one line at 80
+    columns and wraps to several at 36, so the list's virtual height more
+    than doubles on the way down. A scroll offset computed for the wide
+    terminal therefore points at a genuinely different row afterwards —
+    which is the condition the resize finding is about, rather than an
+    offset that happens to still land near the end.
+    """
+    entries: list[PaletteEntry] = []
+    for index in range(count):
+        entries.append(
+            PaletteEntry(
+                id=f"action:item_{index:02d}",
+                title=f"Item {index:02d}",
+                description=f"Safely evict every workload from selected node {index:02d}",
+                category="Global",
+                trigger=f"F{index}",
+                search_terms=(),
+                declaration_order=index,
+                availability=ActionAvailability.enabled(),
+                invocation=AppActionInvocation(f"item_{index:02d}"),
+            )
+        )
+    return entries
+
+
 def _viewport_lines(options: OptionList) -> list[str]:
     """The text the results list is actually showing at its scroll offset.
 
@@ -118,6 +149,17 @@ def _viewport_lines(options: OptionList) -> list[str]:
         "".join(segment.text for segment in options.render_line(y))
         for y in range(options.size.height)
     ]
+
+
+def _visible_text(options: OptionList) -> str:
+    """The viewport's rendered words, rejoined across wrap points.
+
+    A row at 36 columns wraps at spaces, so the words the user can read are
+    the ones this returns; searching it for a whole phrase asks exactly the
+    question the finding did - is the trigger, the description or the
+    reason *on screen* - without pinning where the wrap happens to fall.
+    """
+    return " ".join(word for line in _viewport_lines(options) for word in line.split())
 
 
 @pytest.mark.parametrize("size", _LAYOUT_SIZES, ids=_LAYOUT_IDS)
@@ -167,6 +209,52 @@ async def test_end_renders_the_last_result_inside_the_results_viewport(
         assert any("Item 29" in line for line in _viewport_lines(options))
 
 
+#: Rows of results content a real catalog row needs to render whole at 36
+#: columns (the design doc's "eight rows of results"): a long title plus a
+#: `:` spelling, or an owner's refusal, wraps to six to eight lines there.
+_READABLE_RESULT_ROWS = 8
+
+
+@pytest.mark.parametrize("size", [(80, 24), (80, 40)], ids=["80x24", "80x40"])
+async def test_a_roomy_terminal_keeps_the_modal_inside_its_height_share(
+    size: tuple[int, int],
+) -> None:
+    """The 80% cap still applies wherever it can be afforded.
+
+    A terminal that can spare the share and still show a readable list
+    keeps the palette a palette: bounded above by 80% of the terminal, and
+    by the eighteen-row result cap no matter how tall the terminal is.
+    """
+    screen = ActionPaletteScreen(_mixed_category_entries(30))
+    app = PaletteHarness(screen)
+    async with app.run_test(size=size):
+        container = screen.query_one("#action-palette")
+        results = screen.query_one(OptionList)
+        assert container.region.height <= size[1] * 80 // 100
+        assert results.size.height >= _READABLE_RESULT_ROWS
+        assert results.size.height <= 18
+
+
+async def test_a_short_terminal_spends_the_height_share_on_readable_rows() -> None:
+    """Below that, the cap is what gives way — never the screen.
+
+    80% of 16 rows leaves two rows of results, too few for one real row,
+    and a clipped row cannot be recovered by keyboard because the list
+    scrolls by whole options. So the modal exceeds the share here, up to
+    the terminal height, and pays for the rows with its own chrome.
+    """
+    screen = ActionPaletteScreen(_mixed_category_entries(30))
+    app = PaletteHarness(screen)
+    async with app.run_test(size=(36, 16)):
+        container = screen.query_one("#action-palette")
+        results = screen.query_one(OptionList)
+        hint = screen.query_one("#action-hint", Static)
+        assert container.region.height > 16 * 80 // 100
+        assert app.screen.region.contains_region(container.region)
+        assert results.size.height >= _READABLE_RESULT_ROWS
+        assert container.region.contains_region(hint.region)
+
+
 async def test_a_shrinking_terminal_refits_the_open_palette() -> None:
     """The palette is modal, so a terminal resize can happen under it: the
     results must re-fit rather than keep a viewport sized for the old
@@ -181,6 +269,88 @@ async def test_a_shrinking_terminal_refits_the_open_palette() -> None:
         assert app.screen.region.contains_region(container.region)
         assert container.region.contains_region(screen.query_one(OptionList).region)
         assert container.region.contains_region(hint.region)
+
+
+async def test_a_growing_terminal_gives_the_height_share_back() -> None:
+    """Tight chrome is a concession, not a new default.
+
+    A terminal that grows back to 80x24 can afford the 80% cap again, so
+    the modal has to take its vertical padding and the results list its
+    own border back rather than stay in the compact shape a 16-row
+    terminal needed.
+    """
+    screen = ActionPaletteScreen(_mixed_category_entries(30))
+    app = PaletteHarness(screen)
+    async with app.run_test(size=(36, 16)) as pilot:
+        container = screen.query_one("#action-palette")
+        results = screen.query_one(OptionList)
+        hint = screen.query_one("#action-hint", Static)
+        assert results.compact is True
+        await pilot.resize_terminal(80, 24)
+        await until(
+            pilot,
+            lambda: not results.compact and container.region.height <= 24 * 80 // 100,
+            label="the height share restored at 80x24",
+        )
+        assert results.size.height >= _READABLE_RESULT_ROWS
+        assert app.screen.region.contains_region(container.region)
+        assert container.region.contains_region(hint.region)
+
+
+async def test_end_then_a_shrinking_terminal_keeps_the_last_result_visible() -> None:
+    """A resize under an open palette must not strand the highlight.
+
+    `End` at 80x24 scrolls to an offset that means nothing once 36 columns
+    re-wrap every row and 16 rows shrink the viewport: the list keeps the
+    old offset and renders an arbitrary middle row while the highlight is
+    still the last entry. Re-fitting has to end with the highlighted row
+    rendered again - without a keypress and without taking focus off the
+    query `Input`.
+    """
+    screen = ActionPaletteScreen(_rewrapping_entries(30))
+    app = PaletteHarness(screen)
+    async with app.run_test(size=(80, 24)) as pilot:
+        options = screen.query_one(OptionList)
+        await pilot.press("end")
+        assert any("Item 29" in line for line in _viewport_lines(options))
+        await pilot.resize_terminal(36, 16)
+        await until(
+            pilot,
+            lambda: any("Item 29" in line for line in _viewport_lines(options)),
+            label="the highlighted last result rendered again after the resize",
+        )
+        assert options.highlighted == options.option_count - 1
+        assert any("Item 29" in line for line in _viewport_lines(options))
+        assert screen.query_one(Input).has_focus
+
+
+async def test_end_restores_the_last_result_even_when_the_highlight_cannot_move() -> None:
+    """`End` on an already-last highlight must still bring it back on screen.
+
+    `OptionList` only scrolls from its `highlighted` watcher, so pressing
+    `End` when the highlight is already the last option changes no reactive
+    and scrolls nowhere. After anything moved the viewport away from it -
+    here a resize plus an explicit scroll back to the top - the key the
+    user reaches for has to work the second time too.
+    """
+    screen = ActionPaletteScreen(_rewrapping_entries(30))
+    app = PaletteHarness(screen)
+    async with app.run_test(size=(80, 24)) as pilot:
+        options = screen.query_one(OptionList)
+        await pilot.press("end")
+        await pilot.resize_terminal(36, 16)
+        await until(
+            pilot,
+            lambda: any("Item 29" in line for line in _viewport_lines(options)),
+            label="the highlighted last result rendered again after the resize",
+        )
+        options.scroll_to(y=0, animate=False, immediate=True)
+        await pilot.pause()
+        assert not any("Item 29" in line for line in _viewport_lines(options))
+        await pilot.press("end")
+        assert options.highlighted == options.option_count - 1
+        assert any("Item 29" in line for line in _viewport_lines(options))
+        assert screen.query_one(Input).has_focus
 
 
 def _command_entries() -> list[PaletteEntry]:
@@ -449,3 +619,70 @@ async def test_a_narrow_terminal_still_renders_category_title_and_trigger() -> N
         assert "Commands" in rendered
         assert "Pulse" in rendered
         assert ":pulse" in rendered
+
+
+def _long_owner_reason() -> UnavailableReason:
+    """The real refusal `WorkspaceController` answers `g` with.
+
+    Taken from its owner (`read_availability.relationships_reason`) rather
+    than retyped here: the palette has to render whatever wording the owner
+    actually produces, and this is one of the longest of them.
+    """
+    reason = relationships_reason(
+        loader=False, switching=False, meta=None, kind="pods", selected=False
+    )
+    assert reason is not None
+    return reason
+
+
+def _derived_unavailable_action_entry(action: str, reason: UnavailableReason) -> list[PaletteEntry]:
+    """The real `APP_BINDINGS` row for `action`, refused by its owner."""
+    entries = derive_action_entries(
+        APP_BINDINGS,
+        overrides={},
+        availability=lambda _action: ActionAvailability(True, reason),
+    )
+    return [entry for entry in entries if entry.id == f"action:{action}"]
+
+
+async def test_a_narrow_terminal_shows_a_whole_command_row_not_just_its_first_wrap() -> None:
+    """36x16 must still show the row the user is on, all of it.
+
+    `:proposals` is one of the longest real catalog rows: at 36 columns its
+    category, title and `:` spelling wrap over several lines before the
+    description even starts. A viewport of two content rows renders the
+    first wrap and clips the rest, so the trigger the user needs in order
+    to run the command - and the description that says what it does - are
+    unreachable by keyboard. Both have to be in the viewport.
+    """
+    screen = ActionPaletteScreen(_derived_command_entry("proposals"))
+    app = PaletteHarness(screen)
+    async with app.run_test(size=(36, 16)):
+        options = screen.query_one(OptionList)
+        visible = _visible_text(options)
+        assert ":proposals" in _heading(options)
+        assert _heading(options) in visible
+        assert _second_line(options) in visible
+        assert screen.query_one(Input).has_focus
+
+
+async def test_a_narrow_terminal_shows_a_whole_unavailable_reason() -> None:
+    """An unavailable row is only useful if its reason is readable.
+
+    The row is disabled and inert, so no keystroke can scroll it into view;
+    at 36 columns the owner's real refusal wraps over several lines, and
+    all of them - plus the trigger that would have run it - must be inside
+    the results viewport.
+    """
+    reason = _long_owner_reason()
+    entries = _derived_unavailable_action_entry("relationships", reason)
+    screen = ActionPaletteScreen(entries)
+    app = PaletteHarness(screen)
+    async with app.run_test(size=(36, 16)):
+        options = screen.query_one(OptionList)
+        assert options.get_option_at_index(0).disabled is True
+        visible = _visible_text(options)
+        assert _heading(options) in visible
+        assert _second_line(options) == f"Unavailable: {reason.message}"
+        assert _second_line(options) in visible
+        assert screen.query_one(Input).has_focus

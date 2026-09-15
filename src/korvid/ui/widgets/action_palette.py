@@ -29,17 +29,38 @@ from korvid.ui.action_palette import PaletteEntry, rank_entries
 #: explicit rather than an empty, ambiguous-looking list.
 _NO_RESULTS_PROMPT = "No matching actions or commands"
 
-#: Rows the modal spends on everything that is not the results list: the
+#: Rows the modal spends on everything that is not results content: the
 #: query `Input` (3), the key hint (1), the container's vertical padding
-#: (2) and its border (2). Subtracting them is what keeps the hint on
-#: screen when the catalog is longer than the terminal.
-_CHROME_ROWS = 8
+#: (2), the container's border (2) and the results list's own border (2).
+#: Subtracting them is what keeps the hint on screen when the catalog is
+#: longer than the terminal.
+_CHROME_ROWS = 10
+
+#: The same rows once the modal gives up its vertical padding and the
+#: results list its border (Textual's own `compact` style): 3 + 1 + 0 + 2
+#: + 0. A terminal too short to afford `_MIN_RESULT_ROWS` any other way
+#: gets this instead of a readable-looking modal with an unreadable list.
+_TIGHT_CHROME_ROWS = 6
+
+#: Rows of results content below which a real catalog row stops being
+#: readable. At 36 columns the longest rows — a long title plus a `:`
+#: spelling, or an owner's refusal such as "Relationships unavailable in
+#: this session" — wrap to six to eight lines, and an entry whose trigger
+#: or reason is clipped away cannot be reached by keyboard: the list
+#: scrolls by whole options, never within one.
+_MIN_RESULT_ROWS = 8
+
+#: Rows the results list spends on its own `border: tall` when it is not
+#: compact. Part of `_CHROME_ROWS`, and named separately because the cap
+#: set on the list is a border-box height.
+_RESULTS_BORDER_ROWS = 2
 
 #: Upper bound on the results viewport, so the palette stays a palette on a
 #: very tall terminal instead of becoming a full-height list.
 _MAX_RESULT_ROWS = 18
 
-#: Percentage of the terminal height the whole modal may occupy.
+#: Percentage of the terminal height the whole modal may occupy while that
+#: still leaves `_MIN_RESULT_ROWS` of results.
 _HEIGHT_SHARE = 80
 
 #: What separates the three parts of a row's first line (category, title,
@@ -153,23 +174,65 @@ class ActionPaletteScreen(ModalScreen[str | None]):
     def on_resize(self, event: events.Resize) -> None:
         """Re-fit the results list to a terminal that changed size."""
         self._fit_results(event.size.height)
+        self._reveal_highlighted_after_layout()
 
     def _fit_results(self, screen_rows: int) -> None:
-        """Cap the results viewport so the whole modal fits `screen_rows`.
+        """Size the modal's parts so all of it fits `screen_rows`.
 
         CSS alone cannot say this. The container is `height: auto`, so an
         `OptionList` asking for its full content height grows the modal
         past the terminal: the results spill out and the key hint below
         them is never laid out on screen, while `End` highlights a row
         clipped away by the container. Capping the list to the rows that
-        are actually left over (`_HEIGHT_SHARE` of the terminal minus the
-        modal's own `_CHROME_ROWS`) turns that overflow back into
-        scrolling inside the list, which is what `OptionList` already
-        knows how to do. Set through the public `styles` API, and never
-        below one row, so the palette still renders on a tiny terminal.
+        are actually left over turns that overflow back into scrolling
+        inside the list, which is what `OptionList` already knows how to
+        do.
+
+        The budget is `_HEIGHT_SHARE` of the terminal — but that cap is
+        cosmetic, and on a short terminal it is not affordable: 80% of 16
+        rows leaves two rows of results, too few to render one real
+        catalog row, and a row whose trigger or reason is clipped cannot
+        be reached by any keystroke because the list scrolls by whole
+        options. So when the share cannot fund `_MIN_RESULT_ROWS`, the
+        modal drops to tight chrome (no vertical padding, and Textual's
+        compact `OptionList`, which also widens every row by the border
+        and gutter it gives up) and grows up to — never past — the
+        terminal height. A taller terminal keeps both the share cap and
+        `_MAX_RESULT_ROWS`.
+
+        Everything is set through the public `styles`/`compact` API, and
+        never below one row, so the palette still renders on a terminal
+        too short for even that (below ~7 rows it is the modal's own
+        chrome, not the results, that no longer fits).
         """
-        budget = screen_rows * _HEIGHT_SHARE // 100 - _CHROME_ROWS
-        self.query_one(OptionList).styles.max_height = max(1, min(_MAX_RESULT_ROWS, budget))
+        share = screen_rows * _HEIGHT_SHARE // 100
+        tight = share - _CHROME_ROWS < _MIN_RESULT_ROWS
+        chrome = _TIGHT_CHROME_ROWS if tight else _CHROME_ROWS
+        budget = min(screen_rows, max(share, chrome + _MIN_RESULT_ROWS))
+        rows = max(1, min(_MAX_RESULT_ROWS, budget - chrome))
+        self.query_one("#action-palette").styles.padding = (0, 2) if tight else (1, 2)
+        options = self.query_one(OptionList)
+        options.compact = tight
+        options.styles.max_height = rows if tight else rows + _RESULTS_BORDER_ROWS
+
+    def _reveal_highlighted_after_layout(self) -> None:
+        """Scroll the highlighted row back into view once the new layout exists.
+
+        A resize invalidates the scroll offset twice over, and neither
+        correction has happened yet inside `on_resize`: the viewport was
+        just re-capped (a style change Textual applies on its next layout
+        pass) and every row re-wraps to the new width (the list rebuilds
+        its line heights when its *own* resize message arrives). Scrolling
+        now would aim at rows that no longer exist at those offsets, which
+        is how `End` at 80x24 ends up rendering a middle row at 36x16.
+
+        Asking the list itself to run the scroll after a refresh orders
+        both without a timer: Textual drains that widget's own pending
+        messages before scheduling the callback, and the callback runs
+        after the screen has been laid out and repainted.
+        """
+        options = self.query_one(OptionList)
+        options.call_after_refresh(options.scroll_to_highlight)
 
     @on(Input.Changed)
     def _query_changed(self, event: Input.Changed) -> None:
@@ -194,6 +257,7 @@ class ActionPaletteScreen(ModalScreen[str | None]):
             options.action_cursor_down()
         else:
             options.action_cursor_up()
+        self._reveal_highlighted(options)
 
     def action_page(self, direction: int) -> None:
         options = self.query_one(OptionList)
@@ -206,6 +270,7 @@ class ActionPaletteScreen(ModalScreen[str | None]):
             options.action_page_down()  # type: ignore[no-untyped-call]
         else:
             options.action_page_up()  # type: ignore[no-untyped-call]
+        self._reveal_highlighted(options)
 
     def action_edge(self, direction: int) -> None:
         options = self.query_one(OptionList)
@@ -213,6 +278,21 @@ class ActionPaletteScreen(ModalScreen[str | None]):
             options.action_last()
         else:
             options.action_first()
+        self._reveal_highlighted(options)
+
+    def _reveal_highlighted(self, options: OptionList) -> None:
+        """Make sure the highlighted row is in the viewport after a key.
+
+        `OptionList` scrolls from its `highlighted` watcher, so a key that
+        lands on the row that is already highlighted — `End` at the end of
+        the list, `Home` at the top — changes no reactive and scrolls
+        nowhere. That is invisible until something else moved the viewport
+        away from the highlight (a resize re-wrapping every row, say), and
+        then the key the user reaches for to fix it does nothing at all.
+        Re-asserting the scroll costs nothing when the highlight did move:
+        `scroll_to_highlight` is idempotent.
+        """
+        options.scroll_to_highlight()
 
     def _activate_highlighted(self) -> None:
         options = self.query_one(OptionList)
@@ -252,3 +332,4 @@ class ActionPaletteScreen(ModalScreen[str | None]):
             )
         options.add_options(rendered)
         options.highlighted = 0
+        self._reveal_highlighted(options)

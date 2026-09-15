@@ -15,7 +15,9 @@ and explains when an action does not apply to the current view or would
 currently do nothing (nothing selected, no hint on the row, no search running).
 Selecting a write action still opens the same approval flow and requires a
 fresh confirmation keystroke. `Esc` closes the palette, and the key itself
-remaps under `open_action_palette`.
+remaps under `open_action_palette`. On a small terminal the palette takes the
+height it needs instead of clipping a row's key or reason, and resizing the
+terminal under the open palette keeps the row you were on in view.
 
 ## Keys typed right after the command or filter bar closes
 

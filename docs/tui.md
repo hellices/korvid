@@ -60,7 +60,9 @@ Three keys answer three different questions, so none of them replaces another:
   its `:` form (`:pulse`). An action that does not apply to the current
   view — or that applies but would do nothing right now, with nothing
   selected, no hint on the row, or no search running — stays searchable and
-  shows why instead of disappearing. `Esc` closes the palette.
+  shows why instead of disappearing. On a terminal too short to spare the
+  room, the palette takes the height it needs so that reason stays readable
+  rather than clipped. `Esc` closes the palette.
 
 ## Follow one signal
 
