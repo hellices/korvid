@@ -410,10 +410,34 @@ adds or subtracts the viewport height, so the cursor never jumps more than a
 screenful. Rows differ in height, so the *view* still can — landing on a taller
 row scrolls further than the anchor moved, and paging up snaps back to the
 start of the row the anchor landed inside — and the screen therefore steps the
-cursor back a row at a time, with the list's own cursor actions, until the view
-has moved no further than one viewport. Every key ends in an explicit
+cursor back towards where the page started, a row at a time, until the view has
+moved no further than one viewport. Every key ends in an explicit
 `scroll_to_highlight()`, which is what makes `End` at the end of the list and
 `Home` at the top re-assert a scroll that a resize had moved away.
+
+That pull-back is **arithmetic, not a search**, and both halves of the rule
+matter because the view can be moved by something other than a key. A mouse
+wheel scrolls the results without moving the cursor, so a page press can begin
+with the view already further from the cursor's row than a page is allowed to
+move it — and `PageDown` on the last row, `PageUp` on the first, or any page
+press on a viewport too short to hold a row, leaves the highlight exactly where
+it was. A page that did not advance is therefore corrected *not at all*: the
+key has already re-asserted the scroll onto that row, and there is nothing to
+pull back from. A page that did advance walks the rows strictly *between* where
+it started and where it landed — at most `abs(target - origin) - 1` of them,
+each one closer to the origin than the last — so the walk is finite, cannot
+overshoot past the origin, and always leaves the cursor at least one row from
+where the user pressed the key.
+
+Those rows are set through the list's public `highlighted`, never through
+`action_cursor_up`/`_down`, because those two **wrap**: stepping up from row 0
+lands on the last row. A correction that started from a page which never moved
+then cycled through every row in the catalog for ever, inside one synchronous
+key handler — `End`, one wheel notch, `PageDown` on a 36x7 terminal froze the
+palette with no frame ever painted again. The one-viewport bound is a promise
+about the supported layouts, where a row fits the viewport; below them, where
+the results clamp to a single line and no page press can satisfy it, the
+palette still answers every key.
 
 The query `Input` is the modal's only focus: the results list is created with
 `can_focus` off, so clicking a row that cannot run does not take the keyboard
@@ -545,6 +569,16 @@ approve it. A fresh user keystroke remains mandatory.
   in both directions, over the real catalog at 80x24 and 36x16 — where rows are
   two to five lines against an eight- or nine-line viewport — and still reaches
   the trailing refused rows;
+- a page key the list cannot answer still returns: `End`, a manual scroll of a
+  viewport plus a wheel notch, then `PageDown` (and the `Home`/`PageUp` mirror)
+  leaves the cursor on the row it was already on, never wrapped to the other
+  end, with the view settled on that row and nothing dispatched — driven at
+  80x24, 36x16 and the one-line 36x7 clamp in a *child process*, because the
+  failure it pins is a hang that would otherwise take the suite with it;
+- the pull-back's own arithmetic is pinned directly over every origin/target
+  pair a page can produce: the rows it may walk are finite, strictly between
+  the two, monotone towards the origin, never the origin itself, and empty for
+  a page that did not advance;
 - the single no-results row stays inert under every navigation key — it stays a
   disabled, id-less option, no cursor is ever drawn on it, nothing is
   dispatched, and the query input keeps focus;

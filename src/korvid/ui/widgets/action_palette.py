@@ -119,6 +119,38 @@ def _prompt_for(entry: PaletteEntry) -> Text:
     return prompt
 
 
+def _pull_back_rows(origin: int, target: int) -> tuple[int, ...]:
+    """The rows a page's pull-back may step through, `target` back to `origin`.
+
+    The correction in `_keep_the_page_inside_the_viewport` walks this
+    tuple, and every property that makes that walk terminate is decided
+    here, in arithmetic, rather than by asking a widget where its cursor
+    ended up:
+
+    - it is finite — at most `abs(target - origin) - 1` rows;
+    - every row lies strictly *between* `origin` and `target`, so the
+      correction can never step outside the interval the page itself
+      covered, and never wraps around either end of the list;
+    - each row is one closer to `origin` than the last, so the view can
+      only shrink back towards where the page started;
+    - `origin` itself is never in it, so a page press always leaves the
+      cursor at least one row from where the user pressed it.
+
+    A page that did not advance (`target == origin`, which is what
+    `PageDown` on the last row and `PageUp` on the first both produce)
+    has nothing between the two, so the tuple is empty.
+
+    Args:
+        origin: The row the cursor was on before the page key.
+        target: The row the page key left it on.
+
+    Returns:
+        The rows to try, nearest `target` first.
+    """
+    step = -1 if target > origin else 1
+    return tuple(range(target + step, origin, step))
+
+
 class ActionPaletteScreen(ModalScreen[str | None]):
     """Search-filtered, keyboard-first list over `PaletteEntry` values.
 
@@ -335,10 +367,10 @@ class ActionPaletteScreen(ModalScreen[str | None]):
         else:
             options.action_page_up()  # type: ignore[no-untyped-call]
         self._reveal_highlighted(options)
-        self._keep_the_page_inside_the_viewport(options, origin, start, direction)
+        self._keep_the_page_inside_the_viewport(options, origin, start)
 
     def _keep_the_page_inside_the_viewport(
-        self, options: OptionList, origin: int | None, start: int, direction: int
+        self, options: OptionList, origin: int | None, start: int
     ) -> None:
         """Pull a page that overshot back a row at a time, never past `origin`.
 
@@ -353,22 +385,34 @@ class ActionPaletteScreen(ModalScreen[str | None]):
         the user never saw.
 
         So the page is bounded here rather than recomputed here: step the
-        cursor back with the list's own `action_cursor_up`/`_down` until
-        the view has moved no further than one viewport. Each step moves
-        the cursor one row towards `origin`, so the scroll strictly
-        shrinks and the loop ends — at the row next to `origin` at the
-        latest, which keeps every page press moving.
+        cursor back towards `origin`, one row at a time, until the view has
+        moved no further than one viewport. Two things make that walk
+        finite, and neither of them asks the widget where it ended up. A
+        page that could not advance — `PageDown` on the last row, `PageUp`
+        on the first, either of them on a viewport too short to hold a row
+        — leaves the highlight on `origin`, and is corrected not at all:
+        the key has already re-asserted the scroll onto that row, and
+        there is nothing to pull back from. A page that did advance walks
+        `_pull_back_rows`, a tuple of the rows strictly between `origin`
+        and where the page landed.
+
+        The rows are set through the list's public `highlighted`, never
+        through `action_cursor_up`/`_down`, because those two *wrap*:
+        stepping up from row 0 lands on the last row, and a correction
+        that started from a page which never moved then cycled through
+        every row in the list for ever, inside one synchronous key
+        handler. Assigning the index cannot leave the interval the page
+        itself covered.
         """
+        target = options.highlighted
+        if origin is None or target is None or target == origin:
+            return
         viewport = options.scrollable_content_region.height
-        step = options.action_cursor_up if direction > 0 else options.action_cursor_down
-        while abs(options.scroll_offset.y - start) > viewport:
-            current = options.highlighted
-            if current is None or origin is None or current == origin + direction:
+        for row in _pull_back_rows(origin, target):
+            if abs(options.scroll_offset.y - start) <= viewport:
                 return
-            step()
+            options.highlighted = row
             self._reveal_highlighted(options)
-            if options.highlighted == current:
-                return
 
     def action_edge(self, direction: int) -> None:
         """Move the cursor to the last row, or back to the first one."""

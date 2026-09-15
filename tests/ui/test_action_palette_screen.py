@@ -10,6 +10,11 @@ internals.
 
 from __future__ import annotations
 
+import subprocess
+import sys
+from itertools import pairwise
+from pathlib import Path
+
 import pytest
 from textual.app import App, ComposeResult
 from textual.pilot import Pilot
@@ -27,7 +32,7 @@ from korvid.ui.action_palette import (
 from korvid.ui.app_bindings import APP_BINDINGS
 from korvid.ui.command import COMMANDS
 from korvid.ui.read_availability import relationships_reason
-from korvid.ui.widgets.action_palette import ActionPaletteScreen
+from korvid.ui.widgets.action_palette import ActionPaletteScreen, _pull_back_rows
 from korvid.ui.write_availability import WriteAvailability
 
 from .test_helm_actions import make_app as make_helm_app
@@ -2096,3 +2101,241 @@ async def test_the_no_results_row_is_never_given_a_cursor() -> None:
             assert _cursor_text(options) == ""
             assert app.results == []
         assert screen.query_one(Input).has_focus
+
+
+#: A terminal one row short of the smallest layout the palette supports,
+#: which is what makes it the sharpest test of the pull-back's arithmetic:
+#: below roughly seven rows the modal's own chrome no longer fits and the
+#: results clamp to a *single line*, so every row in the list is taller
+#: than the viewport and no page press can ever satisfy the one-viewport
+#: bound. The palette is not promised to be readable here — it is promised
+#: to keep answering keys.
+_ONE_LINE_VIEWPORT = (36, 7)
+
+#: Lines one mouse-wheel notch scrolls, which is Textual's own
+#: `App.scroll_sensitivity_y`. The regression below scrolls a viewport
+#: *plus* one notch, which is the smallest manual scroll that leaves the
+#: view further from the cursor's row than a page press is allowed to
+#: move it - the state the correction then has to answer for.
+_WHEEL_LINES = 2
+
+#: Seconds the child is given before it is killed. It is a safety net,
+#: never a measurement: a palette that answers the key at all answers it
+#: in the time one process takes to import Textual and paint four frames,
+#: and one that does not never answers at all. Nothing here asserts how
+#: long the working path took.
+_PROBE_TIMEOUT = 120
+
+#: Driven in a child process, because the failure this pins is a *hang*:
+#: the pull-back used to walk the list with `OptionList`'s own wrapping
+#: cursor actions, so a page press that could not advance (`End`, then a
+#: wheel notch, then `PageDown`) span through all 52 rows for ever inside
+#: one synchronous message handler. A test that called it in-process would
+#: take the whole suite down with it; a child can simply be killed.
+_PAGE_SETTLES_PROBE = """
+import asyncio
+import sys
+
+sys.path.insert(0, sys.argv[1])
+
+from textual.widgets import OptionList
+
+from korvid.ui.widgets.action_palette import ActionPaletteScreen
+from tests.ui.test_action_palette_screen import (
+    PaletteHarness,
+    _assert_row_composited,
+    _helmless_catalog,
+)
+
+WHEEL = int(sys.argv[2])
+COLUMNS = int(sys.argv[3])
+SCREEN_ROWS = int(sys.argv[4])
+READABLE = sys.argv[5] == "readable"
+
+
+async def drive() -> str:
+    screen = ActionPaletteScreen(_helmless_catalog())
+    app = PaletteHarness(screen)
+    async with app.run_test(size=(COLUMNS, SCREEN_ROWS)) as pilot:
+        options = screen.query_one(OptionList)
+        await pilot.pause()
+        viewport = options.scrollable_content_region.height
+        rows = options.option_count
+        # Far enough that the view is more than one viewport from the row
+        # the cursor is on - the state the page press has to correct.
+        away = viewport + WHEEL
+
+        await pilot.press("end")
+        await pilot.pause()
+        assert options.highlighted == rows - 1, options.highlighted
+        options.scroll_to(y=options.scroll_offset.y - away, animate=False)
+        await pilot.pause()
+        await pilot.press("pagedown")
+        await pilot.pause()
+        down = options.highlighted
+        down_scroll = options.scroll_offset.y
+        options.scroll_to_highlight()
+        await pilot.pause()
+        down_settled = options.scroll_offset.y == down_scroll
+        if READABLE:
+            _assert_row_composited(options, rows - 1)
+
+        await pilot.press("home")
+        await pilot.pause()
+        assert options.highlighted == 0, options.highlighted
+        options.scroll_to(y=options.scroll_offset.y + away, animate=False)
+        await pilot.pause()
+        await pilot.press("pageup")
+        await pilot.pause()
+        up = options.highlighted
+        up_scroll = options.scroll_offset.y
+        options.scroll_to_highlight()
+        await pilot.pause()
+        up_settled = options.scroll_offset.y == up_scroll
+        if READABLE:
+            _assert_row_composited(options, 0)
+        dispatched = len(app.results)
+    return (
+        f"viewport={viewport} rows={rows} down={down} up={up} "
+        f"down_settled={down_settled} up_settled={up_settled} dispatched={dispatched}"
+    )
+
+
+print(asyncio.run(drive()))
+"""
+
+
+def _probe_report(stdout: str) -> dict[str, str]:
+    """Parse the child's one `key=value` line into a dict."""
+    line = stdout.strip().splitlines()[-1]
+    return dict(item.split("=", 1) for item in line.split())
+
+
+#: The two supported layouts plus the one-line viewport below them. Only
+#: the supported two are asked for a readable row.
+_SETTLE_SIZES = [*_LAYOUT_SIZES, _ONE_LINE_VIEWPORT]
+_SETTLE_IDS = [*_LAYOUT_IDS, "36x7"]
+
+
+@pytest.mark.parametrize("size", _SETTLE_SIZES, ids=_SETTLE_IDS)
+def test_a_page_press_the_list_cannot_answer_still_returns(size: tuple[int, int]) -> None:
+    """A page that cannot advance must end, not walk the list for ever.
+
+    `End` puts the cursor on the last row; a manual scroll then moves the
+    *view* further than a viewport away from it without moving the cursor
+    at all - a mouse wheel does exactly this. The `PageDown` that follows
+    has nowhere to go: `OptionList` leaves the highlight exactly where it
+    was, while the re-assert that reveals that row scrolls the view back
+    by more than the viewport's own height. The pull-back that corrects an
+    overshooting page therefore started from a page that never moved, and
+    stepped with the list's own `action_cursor_up`, which *wraps*: from
+    row 51 it walked 50, 49, ..., 0, 51, for ever, inside one synchronous
+    key handler, with no frame ever painted again. The one-line viewport
+    below the supported sizes is the sharpest case - no row fits it, so no
+    page press there can ever satisfy the bound - but the supported
+    layouts hang on the same arithmetic once the view is scrolled far
+    enough by hand.
+
+    The bound is arithmetic now: a page that did not advance is corrected
+    not at all, and one that did may only step through the rows strictly
+    between where it started and where it landed. Both directions are
+    driven here, and the child prints what the palette settled on.
+    """
+    root = Path(__file__).resolve().parents[2]
+    columns, screen_rows = size
+    readable = "readable" if size in _LAYOUT_SIZES else "clamped"
+    try:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                _PAGE_SETTLES_PROBE,
+                str(root),
+                str(_WHEEL_LINES),
+                str(columns),
+                str(screen_rows),
+                readable,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=_PROBE_TIMEOUT,
+            cwd=root,
+        )
+    except subprocess.TimeoutExpired:
+        pytest.fail(
+            "the palette never came back from the page keys: the viewport "
+            "correction did not terminate"
+        )
+    assert result.returncode == 0, result.stderr
+    report = _probe_report(result.stdout)
+    rows = int(report["rows"])
+    assert rows > 1, report
+    # The list is longer than the viewport at every size under test, which
+    # is what lets a manual scroll leave the cursor's row off screen.
+    assert int(report["viewport"]) < rows, report
+    if size == _ONE_LINE_VIEWPORT:
+        # The precondition that makes this terminal the hardest case: not
+        # one row of the list fits the viewport it is drawn in.
+        assert report["viewport"] == "1", report
+    # A page with nowhere to go leaves the cursor exactly where it was,
+    # never wrapped around to the other end of the list.
+    assert report["down"] == str(rows - 1), report
+    assert report["up"] == "0", report
+    # ...and the view it settles on is the one that reveals that row.
+    assert report["down_settled"] == "True", report
+    assert report["up_settled"] == "True", report
+    assert report["dispatched"] == "0", report
+
+
+#: Every origin/target pair a page press can produce on a short list -
+#: both edges, both directions, and the pairs a page that did not move
+#: produces.
+_PULLBACK_PAIRS = [(origin, target) for origin in range(6) for target in range(6)]
+
+
+@pytest.mark.parametrize(("origin", "target"), _PULLBACK_PAIRS)
+def test_the_pull_back_walks_a_bounded_path_that_never_reaches_the_origin(
+    origin: int, target: int
+) -> None:
+    """The pull-back's path is finite, monotone, and inside its own interval.
+
+    This is the whole termination argument, stated over the arithmetic
+    rather than over a widget: the rows a pull-back may visit are a
+    *tuple*, so the loop that walks it cannot fail to end; they lie
+    strictly between where the page started and where it landed, so the
+    view can only shrink back towards `origin` and never overshoot past
+    it; each is one row closer to `origin` than the last, so no row is
+    visited twice; and `origin` itself is never among them, which is what
+    keeps every page press moving at least one row.
+    """
+    rows = _pull_back_rows(origin, target)
+    assert len(rows) == max(abs(target - origin) - 1, 0)
+    assert origin not in rows
+    assert target not in rows
+    assert all(min(origin, target) < row < max(origin, target) for row in rows)
+    assert len(set(rows)) == len(rows)
+    assert all(abs(later - origin) < abs(earlier - origin) for earlier, later in pairwise(rows))
+    if rows:
+        assert abs(rows[0] - target) == 1
+        assert abs(rows[-1] - origin) == 1
+
+
+def test_a_page_that_did_not_advance_walks_nothing() -> None:
+    """The exact state that used to hang: a page press that moved no row.
+
+    `PageDown` on the last row and `PageUp` on the first leave the
+    highlight where it was, and so does any page press on a list one row
+    long. There is nothing between the origin and the target to walk, so
+    the correction is empty and the key returns having only re-asserted
+    the scroll.
+    """
+    assert _pull_back_rows(51, 51) == ()
+    assert _pull_back_rows(0, 0) == ()
+    assert _pull_back_rows(0, 1) == ()
+    assert _pull_back_rows(1, 0) == ()
+
+
+def test_the_pull_back_steps_from_the_landing_row_back_towards_the_origin() -> None:
+    """Across the whole list, in both directions, spelled out in full."""
+    assert _pull_back_rows(0, 51) == tuple(range(50, 0, -1))
+    assert _pull_back_rows(51, 0) == tuple(range(1, 51))

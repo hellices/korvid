@@ -20,7 +20,10 @@ Selecting a write action still opens the same approval flow and requires a
 fresh confirmation keystroke. Arrow, Page and Home/End keys walk every result,
 including the greyed-out ones, and the cursor is drawn on whichever row it
 reaches, so a reason further down the list can always be scrolled into view and
-read — a page key never skips past more than the results list was showing.
+read — a page key never skips past more than the results list was showing, and
+scrolling the list with the mouse first never leaves a Page key with nothing to
+do but spin: on the last result, or the first, it simply brings that row back
+into view.
 Clicking a greyed-out row does the same. Those rows stay unrunnable: Enter or a
 click on one does nothing and leaves the palette open, with the search box
 still ready for the next keystroke. `Esc` closes the palette and so does
