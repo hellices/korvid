@@ -19,7 +19,18 @@ from korvid.ui.action_availability import (
     AvailabilityCode,
     UnavailableReason,
 )
-from korvid.ui.action_policy import ActionPolicy, compose_action_reasons, compose_command_reasons
+from korvid.ui.action_policy import (
+    _HELM_REASON_ACTIONS,
+    _INSPECT_REASON_ACTIONS,
+    _LOG_REASON_ACTIONS,
+    _WORKSPACE_REASON_ACTIONS,
+    _WRITE_REASON_ACTIONS,
+    ActionPolicy,
+    compose_action_reasons,
+    compose_command_reasons,
+)
+from korvid.ui.app_bindings import APP_BINDINGS, as_binding, base_action
+from korvid.ui.command import COMMANDS
 from korvid.ui.view_state import ViewState
 
 
@@ -598,3 +609,93 @@ def test_composed_command_reasons_route_the_integration_commands() -> None:
     assert reasons["proposals"]() == proposals_reason
     pending = True
     assert reasons["proposals"]() is None
+
+
+# ---------------------------------------------------------------------------
+# The two maps, audited as a whole (#388 round 8)
+# ---------------------------------------------------------------------------
+
+
+def _bound_actions() -> set[str]:
+    """Every action id `APP_BINDINGS` can dispatch, `--alt` ids collapsed."""
+    return {
+        base_action(as_binding(raw).action)
+        for raw in APP_BINDINGS
+        if "(" not in as_binding(raw).action
+    }
+
+
+def _palette_commands() -> set[str]:
+    """Every canonical `:` text the palette can invoke."""
+    return {
+        descriptor.palette.canonical_text
+        for descriptor in COMMANDS
+        if descriptor.palette is not None
+    }
+
+
+def test_no_owner_silently_overwrites_another_in_the_action_map() -> None:
+    """Every owner contributes its own actions and nobody's entry is lost.
+
+    The map is built by merging one dict per owner, so two owners claiming
+    the same action would leave the later one answering for both - with
+    the earlier owner's probe never called again and no error anywhere.
+    Counting the merged map against the declared action lists is what
+    makes that collision visible.
+    """
+    owners = {
+        "writes": _WRITE_REASON_ACTIONS,
+        "helm": _HELM_REASON_ACTIONS,
+        "logs": _LOG_REASON_ACTIONS,
+        "inspect": _INSPECT_REASON_ACTIONS,
+        "workspace": _WORKSPACE_REASON_ACTIONS,
+    }
+    declared = [action for actions in owners.values() for action in actions]
+    declared += ["port_forward", "transfer", "shell", "operator_install"]
+    assert len(declared) == len(set(declared))
+    reasons = compose_action_reasons(
+        writes=lambda _action: None,
+        helm=lambda _action: None,
+        logs=lambda _action: None,
+        inspect=lambda _action: None,
+        workspace=lambda _action: None,
+        port_forward=lambda: None,
+        transfer=lambda: None,
+        shell=lambda: None,
+        operator_install=lambda: None,
+    )
+    assert set(reasons) == set(declared)
+    assert len(reasons) == len(declared)
+
+
+def test_every_owned_action_is_really_a_bound_action() -> None:
+    """An owner reason for an action nothing binds would never be asked:
+    the palette derives its rows from `APP_BINDINGS`, so a typo here is a
+    refusal that silently never happens."""
+    reasons = compose_action_reasons(
+        writes=lambda _action: None,
+        helm=lambda _action: None,
+        logs=lambda _action: None,
+        inspect=lambda _action: None,
+        workspace=lambda _action: None,
+        port_forward=lambda: None,
+        transfer=lambda: None,
+        shell=lambda: None,
+        operator_install=lambda: None,
+    )
+    assert set(reasons) <= _bound_actions()
+
+
+def test_every_owned_command_is_really_a_palette_command() -> None:
+    """Same for the command map, against its own vocabulary: a command
+    reason keyed on an alias (`:namespaces`) or on an action name would
+    never reach the row it was written for."""
+    reasons = compose_command_reasons(
+        agent_available=lambda: True,
+        mcp=lambda: None,
+        telepresence=lambda: None,
+        proposals=lambda: None,
+        namespace=lambda: None,
+        context=lambda: None,
+    )
+    assert set(reasons) <= _palette_commands()
