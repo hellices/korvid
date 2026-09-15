@@ -715,7 +715,13 @@ tests added before the move where the behaviour is not already pinned.
       hint-details overlay, the pods store lookups those share, and the
       pod-identity guard the debug and transfer flows bind an approved action
       to. It reads the two mounted widgets it needs — the table row cursor
-      and the hint strip — through `InspectSurface`.
+      and the hint strip — through `InspectSurface`, which also answers the
+      describe pane's search state for its silent availability probe
+      (`unavailable_reason`, #388): `d`, `h` and the `n`/`N` search step
+      report why they would do nothing without emitting the notification the
+      keypress emits. `WorkspaceController` answers the same question for
+      `g`. Both compose their answer in `ui/read_availability.py`, so the
+      refusal wording and its order live in one reviewed place.
     - `IntegrationController` (`ui/integration_controller.py`) owns the
       optional integrations and all four pieces of state the app used to
       hold: the MCP follow flag, and the telepresence hinted/probing/reprobe

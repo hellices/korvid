@@ -1396,6 +1396,8 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
             writes=resource_writes.unavailable_reason,
             helm=helm_controller.unavailable_reason,
             logs=logs.unavailable_reason,
+            inspect=inspect_controller.unavailable_reason,
+            relationships=workspace_controller.unavailable_reason,
             port_forward=forward_controller.unavailable_reason,
             transfer=transfer.unavailable_reason,
             shell=shell.unavailable_reason,

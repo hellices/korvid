@@ -102,6 +102,19 @@ _HELM_REASON_ACTIONS: tuple[str, ...] = (
 )
 _LOG_REASON_ACTIONS: tuple[str, ...] = ("logs", "logs_multi")
 
+#: The read keys `ResourceInspectController` speaks for: its own describe
+#: and hint-details flows, plus the `n`/`N` search step, whose first
+#: question is the describe pane it owns (issue #388 final review).
+_INSPECT_REASON_ACTIONS: tuple[str, ...] = (
+    "describe",
+    "hint_details",
+    "log_search_next",
+    "log_search_prev",
+)
+
+#: `g` — the one key `WorkspaceController` answers an invocation reason for.
+_RELATIONSHIP_REASON_ACTIONS: tuple[str, ...] = ("relationships",)
+
 
 def _per_action(
     probe: Callable[[str], UnavailableReason | None], actions: Iterable[str]
@@ -115,6 +128,8 @@ def compose_action_reasons(
     writes: Callable[[str], UnavailableReason | None],
     helm: Callable[[str], UnavailableReason | None],
     logs: Callable[[str], UnavailableReason | None],
+    inspect: Callable[[str], UnavailableReason | None],
+    relationships: Callable[[str], UnavailableReason | None],
     port_forward: Callable[[], UnavailableReason | None],
     transfer: Callable[[], UnavailableReason | None],
     shell: Callable[[], UnavailableReason | None],
@@ -131,6 +146,9 @@ def compose_action_reasons(
         writes: `ResourceWriteController.unavailable_reason`.
         helm: `HelmController.unavailable_reason`.
         logs: `LogController.unavailable_reason`.
+        inspect: `ResourceInspectController.unavailable_reason` — the read
+            keys `d`, `h` and the `n`/`N` search step.
+        relationships: `WorkspaceController.unavailable_reason` — `g`.
         port_forward: `ForwardController.unavailable_reason`.
         transfer: `TransferController.unavailable_reason`.
         shell: `ShellController.unavailable_reason`.
@@ -143,6 +161,8 @@ def compose_action_reasons(
         **_per_action(writes, _WRITE_REASON_ACTIONS),
         **_per_action(helm, _HELM_REASON_ACTIONS),
         **_per_action(logs, _LOG_REASON_ACTIONS),
+        **_per_action(inspect, _INSPECT_REASON_ACTIONS),
+        **_per_action(relationships, _RELATIONSHIP_REASON_ACTIONS),
         "port_forward": port_forward,
         "transfer": transfer,
         "shell": shell,

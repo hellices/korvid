@@ -53,7 +53,8 @@ from korvid.ui.impact_preview import render_impact_lines, render_unavailable_lin
 from korvid.ui.ui_surface import UiSurface
 from korvid.ui.view_state import ViewState
 from korvid.ui.widgets.confirm_screen import ConfirmScreen
-from korvid.ui.workspace_controller import ContextGuard, RelationshipLoading
+from korvid.ui.workspace_controller import ContextGuard
+from korvid.ui.workspace_ports import RelationshipLoading
 from korvid.ui.workspace_state import PaneState
 from korvid.ui.write_gate import ReservedWrite, WriteGate
 

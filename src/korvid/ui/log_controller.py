@@ -46,6 +46,7 @@ from korvid.ui.action_availability import (
     AvailabilityCode,
     UnavailableReason,
 )
+from korvid.ui.read_availability import PaneSearch
 from korvid.ui.ui_surface import UiSurface
 from korvid.ui.widgets.log_pane import MAX_PANELS
 
@@ -123,6 +124,9 @@ class LogPaneView(Protocol):
     def search_next(self) -> None: ...
 
     def search_prev(self) -> None: ...
+
+    @property
+    def has_search_hits(self) -> bool: ...
 
     def toggle_format(self) -> None: ...
 
@@ -832,6 +836,21 @@ class LogController:
         log_pane = self._get_log_pane()
         if log_pane.display:
             log_pane.search_next()
+
+    def search_state(self) -> PaneSearch:
+        """Whether the log pane is on screen and has hits (issue #388).
+
+        The two facts `search_next`/`search_prev` act on, answered without
+        acting on them - the palette asks this so `n`/`N` are not offered
+        when they would step nowhere. Guarded like `_pane_displayed`: a
+        probe can be asked before the widget is mounted, where a real
+        keypress could never arrive.
+        """
+        try:
+            log_pane = self._get_log_pane()
+        except NoMatches:
+            return PaneSearch(displayed=False, hits=False)
+        return PaneSearch(displayed=log_pane.display, hits=log_pane.has_search_hits)
 
     def search_prev(self) -> bool:
         """Previous search hit in an open log pane (``N`` key).

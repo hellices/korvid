@@ -37,8 +37,16 @@ from korvid.core.audit import AuditLog
 from korvid.core.errors import explain_api_error
 from korvid.k8s.errors import ApiStatusError, KubeClientError
 from korvid.k8s.models import ContainerTrouble, PodSummary
+from korvid.ui.action_availability import UnavailableReason
 from korvid.ui.hints import EventsFetcher, pod_needs_hint
 from korvid.ui.log_controller import StreamLogsFn
+from korvid.ui.read_availability import (
+    SEARCH_ACTIONS,
+    PaneSearch,
+    describe_reason,
+    hint_details_reason,
+    search_reason,
+)
 from korvid.ui.ui_surface import UiSurface
 from korvid.ui.view_state import ViewState
 from korvid.ui.widgets.containers_screen import ContainersScreen, build_container_rows
@@ -86,6 +94,16 @@ class InspectSurface(ABC):
     def clear_hint(self) -> None:
         """Clear the hint strip (no row, or a healthy one)."""
 
+    @abstractmethod
+    def describe_search(self) -> PaneSearch:
+        """Whether the describe pane is on screen, and whether it has hits.
+
+        The two facts `n`/`N` consult before they reach the log pane. A
+        silent read for the palette's availability probe (issue #388):
+        implementations must tolerate the widget being gone, exactly like
+        `cursor_row_key`, and must never open or move a search.
+        """
+
 
 class InspectShell(Protocol):
     """The interactive-session entry point the container pick raises."""
@@ -97,6 +115,8 @@ class InspectLogs(Protocol):
     """The log-pane entry point the container pick raises."""
 
     async def open_pane(self, namespace: str, targets: list[tuple[str, str]]) -> None: ...
+
+    def search_state(self) -> PaneSearch: ...
 
 
 class ResourceInspectController:
@@ -135,6 +155,48 @@ class ResourceInspectController:
         self._target_uid = target_uid
         self._audit = audit
         self._provider_hint = provider_hint
+
+    # ------------------------------------------------------------------
+    # availability (issue #388): what these read keys would do right now
+    # ------------------------------------------------------------------
+
+    def unavailable_reason(self, action: str) -> UnavailableReason | None:
+        """Why one of this controller's read keys can't run now, or None.
+
+        A synchronous, silent probe for the Action Palette: it never
+        notifies, never starts a worker and never touches the cluster. Each
+        branch hands `read_availability` the same facts the handler reads
+        first - `describe_selected`'s manifest fetcher, switch state and
+        selected row; `hint_details`' row cursor and `pod_needs_hint`; and,
+        for `n`/`N`, the describe pane the app consults before falling
+        through to the log pane - so the reason shown is the refusal the
+        keypress would hit, in the same order.
+        """
+        if action == "describe":
+            return describe_reason(
+                manifest=self._get_manifest_fn() is not None,
+                switching=self._context.switching(),
+                selected=self._selected_row() is not None,
+            )
+        if action == "hint_details":
+            row_key = self._surface.cursor_row_key()
+            summary = None if row_key is None else self.find_pod_summary(row_key)
+            return hint_details_reason(
+                row=row_key is not None,
+                hinted=summary is not None and pod_needs_hint(summary),
+            )
+        if action in SEARCH_ACTIONS:
+            return search_reason(
+                action,
+                describe=self._surface.describe_search(),
+                logs=self._logs_fn().search_state(),
+            )
+        return None
+
+    def _selected_row(self) -> str | None:
+        """The selected row's name, read without the keypress's warning."""
+        namespace, name = self._view.selected_ns_name(notify=False)
+        return None if namespace is None else name
 
     # ------------------------------------------------------------------
     # describe

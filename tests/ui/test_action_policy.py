@@ -439,11 +439,15 @@ def test_composed_action_reasons_ask_each_owner_about_its_own_actions() -> None:
     write_calls: list[str] = []
     helm_calls: list[str] = []
     log_calls: list[str] = []
+    inspect_calls: list[str] = []
+    relationship_calls: list[str] = []
     refused = UnavailableReason(AvailabilityCode.NO_SELECTION, "No resource selected")
     reasons = compose_action_reasons(
         writes=_recording_probe(write_calls, refused),
         helm=_recording_probe(helm_calls, None),
         logs=_recording_probe(log_calls, None),
+        inspect=_recording_probe(inspect_calls, None),
+        relationships=_recording_probe(relationship_calls, None),
         port_forward=lambda: None,
         transfer=lambda: None,
         shell=lambda: None,
@@ -464,6 +468,11 @@ def test_composed_action_reasons_ask_each_owner_about_its_own_actions() -> None:
         "helm_rollback",
         "logs",
         "logs_multi",
+        "describe",
+        "hint_details",
+        "log_search_next",
+        "log_search_prev",
+        "relationships",
         "port_forward",
         "transfer",
         "shell",
@@ -475,6 +484,10 @@ def test_composed_action_reasons_ask_each_owner_about_its_own_actions() -> None:
     assert helm_calls == ["helm_rollback"]
     assert reasons["logs_multi"]() is None
     assert log_calls == ["logs_multi"]
+    assert reasons["log_search_prev"]() is None
+    assert inspect_calls == ["log_search_prev"]
+    assert reasons["relationships"]() is None
+    assert relationship_calls == ["relationships"]
 
 
 def test_composed_action_reasons_only_cover_owned_actions() -> None:
@@ -484,6 +497,8 @@ def test_composed_action_reasons_only_cover_owned_actions() -> None:
         writes=lambda _action: None,
         helm=lambda _action: None,
         logs=lambda _action: None,
+        inspect=lambda _action: None,
+        relationships=lambda _action: None,
         port_forward=lambda: None,
         transfer=lambda: None,
         shell=lambda: None,

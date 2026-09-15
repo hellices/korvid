@@ -24,6 +24,7 @@ from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.logs import LogLine
 from korvid.ui.action_availability import AvailabilityCode, UnavailableReason
 from korvid.ui.log_controller import LogController
+from korvid.ui.read_availability import PaneSearch
 from korvid.ui.ui_surface import Severity, UiSurface
 
 # ---------------------------------------------------------------------------
@@ -114,6 +115,9 @@ class FakeLogPane:
         self.toggles: list[str] = []
         self.last_force_prefix: bool | None = None
         self.last_log_buffer: LogBuffer | None = None
+        #: What `LogPane.has_search_hits` reports: whether `n`/`N` have a
+        #: hit to step to (issue #388).
+        self.has_search_hits: bool = False
 
     def open(
         self,
@@ -605,3 +609,28 @@ def test_unavailable_reason_reports_a_closed_pane_before_the_pane_is_composed() 
         AvailabilityCode.MISSING_CAPABILITY, "Log streaming unavailable"
     )
     assert h.ui.notifications == []
+
+
+def test_search_state_reports_the_panes_visibility_and_hits() -> None:
+    """`n`/`N` step through the log pane's hits, so the palette asks for
+    both facts at once - read, never moved (#388 final review)."""
+    h = make_harness()
+    assert h.controller.search_state() == PaneSearch(displayed=False, hits=False)
+    h.pane.display = True
+    assert h.controller.search_state() == PaneSearch(displayed=True, hits=False)
+    h.pane.has_search_hits = True
+    assert h.controller.search_state() == PaneSearch(displayed=True, hits=True)
+    assert h.ui.notifications == []
+    assert h.pane.searches == []
+
+
+def test_search_state_tolerates_a_pane_that_is_not_mounted() -> None:
+    """A probe can be asked before the widget tree exists, where a real
+    keypress never could."""
+    h = make_harness()
+
+    def missing_pane() -> FakeLogPane:
+        raise NoMatches("log pane")
+
+    h.controller._get_log_pane = missing_pane
+    assert h.controller.search_state() == PaneSearch(displayed=False, hits=False)

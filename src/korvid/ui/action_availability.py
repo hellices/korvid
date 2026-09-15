@@ -22,6 +22,7 @@ class AvailabilityCode(Enum):
     READ_ONLY = "read_only"
     MISSING_CAPABILITY = "missing_capability"
     PANE_CLOSED = "pane_closed"
+    NO_ACTIVE_SEARCH = "no_active_search"
     UNSUPPORTED_RESOURCE = "unsupported_resource"
     PROTECTED_UI = "protected_ui"
     TRANSITION = "transition"

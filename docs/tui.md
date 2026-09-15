@@ -52,11 +52,15 @@ Three keys answer three different questions, so none of them replaces another:
 - `?` is the exhaustive reference: every effective key for every view,
   including your remaps.
 - `Ctrl-P` searches by intent. Type `scale`, `restart`, or `context` and
-  korvid ranks matching app actions and `:` commands, each row showing the key
-  it currently answers to. Selecting a row runs the same route that key runs,
-  so a write still opens the same approval dialog and still waits for a fresh
-  keystroke. An action that does not apply to the current view stays
-  searchable and shows why instead of disappearing. `Esc` closes the palette.
+  korvid ranks matching app actions and `:` commands, each row reading
+  *category · what it does · how to run it*. Selecting a row runs the same
+  route that key runs, so a write still opens the same approval dialog and
+  still waits for a fresh keystroke. Canonical spellings match exactly too:
+  an action's own id (`delete_resource`), a command's text (`pulse`), and
+  its `:` form (`:pulse`). An action that does not apply to the current
+  view — or that applies but would do nothing right now, with nothing
+  selected, no hint on the row, or no search running — stays searchable and
+  shows why instead of disappearing. `Esc` closes the palette.
 
 ## Follow one signal
 

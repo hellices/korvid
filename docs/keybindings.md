@@ -28,17 +28,22 @@ Korvid shows only the keys that act on the current view. Press `?` for the compl
 
 `Ctrl-P` opens the Action Palette: type what you want to do — `scale`, `logs`,
 `context` — and korvid ranks the app actions and the built-in `:` commands
-against it, showing the key each one currently answers to, remaps included.
+against it. Canonical spellings match exactly too: an action's own id
+(`delete_resource`, `logs_multi`), a command's text (`pulse`, `ai`), and its
+`:` form (`:pulse`, `:agent`). Each row reads *category · what it does · how
+to run it* — the key that action currently answers to, remaps included, or
+the command's canonical `:` spelling.
 Resource views (`:pods`, `:deploy`) are not rows: they come from the live alias
 table, so `:` stays the way to open one. `:q` is not a row either — the bound
 Quit action is its single entry. The `1`-`9` favorite-namespace shortcuts are
 not rows either — they take a number the palette has no generic way to invoke,
 so `?` documents them and `:ns`/the numeric keys stay the route. An action
-that does not apply to the current view stays searchable and shows the reason
-instead of vanishing, so the palette also answers "why did that key do
-nothing?". `Esc` closes it. Selecting a write action opens the same approval
-dialog the key opens, which still needs its own
-fresh keystroke.
+that does not apply to the current view — or that applies but would currently
+do nothing, because nothing is selected, the row carries no hint, or no search
+is running — stays searchable and shows the reason instead of vanishing, so
+the palette also answers "why did that key do nothing?". `Esc` closes it.
+Selecting a write action opens the same approval dialog the key opens, which
+still needs its own fresh keystroke.
 
 ## Act in context
 

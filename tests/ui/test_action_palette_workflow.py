@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +24,8 @@ from textual.widgets import Input, OptionList
 from korvid.core.config import KorvidConfig
 from korvid.core.store import ResourceStore, Summary
 from korvid.core.watch import WatchManager
+from korvid.k8s.discovery import ResourceMeta
+from korvid.k8s.models import GenericSummary, PodSummary
 from korvid.ui import action_palette as palette_domain
 from korvid.ui.action_availability import (
     AGENT_UNAVAILABLE,
@@ -36,7 +38,7 @@ from korvid.ui.app import KorvidApp
 from korvid.ui.widgets import action_palette as palette_modal
 from korvid.ui.widgets.action_palette import ActionPaletteScreen
 from korvid.ui.widgets.confirm_screen import ConfirmScreen, ReplicasPrompt
-from korvid.ui.widgets.describe_screen import DescribeScreen
+from korvid.ui.widgets.describe_screen import DescribePane, DescribeScreen
 from korvid.ui.widgets.help_screen import HelpScreen
 from korvid.ui.widgets.log_pane import LogPane
 from korvid.ui.widgets.pulse import PulseScreen
@@ -54,12 +56,19 @@ from .test_write_ops import make_app as make_write_app
 from .waits import until
 
 
-def _build_app(**kwargs: Any) -> KorvidApp:
-    """A minimal app whose optional capabilities the caller chooses."""
+def _build_app(rows: Sequence[Summary] | None = None, **kwargs: Any) -> KorvidApp:
+    """A minimal app whose optional capabilities the caller chooses.
+
+    `rows` is what the watch feeds the pods view; the default single pod
+    keeps every existing caller unchanged, and an explicit `[]` is how a
+    test asks what the palette says about an empty table.
+    """
     store = ResourceStore()
+    listed = [_pod("web")] if rows is None else list(rows)
 
     async def source(kind: str, scope: str) -> AsyncIterator[tuple[str, Summary]]:
-        yield ("ADDED", _pod("web"))
+        for row in listed:
+            yield ("ADDED", row)
         while True:
             await asyncio.sleep(0.01)
 
@@ -661,7 +670,10 @@ async def test_a_selection_is_rechecked_against_the_view_that_is_on_screen_now()
     async with app.run_test() as pilot:
         await _rows_listed(pilot, app)
         palette = await _open_palette(pilot)
-        assert app._actions.availability("hint_details").invocable is True
+        # The *binding* is what the view gates: on pods, `hint_details` is
+        # bound and dispatchable (whether this particular row has a hint to
+        # open is the owner's separate question, tested above).
+        assert app._actions.availability("hint_details").binding_enabled is True
         await app._workspace_ctl.navigate("nodes", "default")
         await until(pilot, lambda: app.current_kind == "nodes", label="nodes view active")
         palette.dismiss("action:hint_details")
@@ -885,3 +897,181 @@ async def test_an_owner_reason_is_notified_literally_not_as_markup(
         # Why it matters: as markup, the bracketed extra name is parsed away.
         assert Content.from_markup(message).plain != message
         assert Content(notification.message).plain == message
+
+
+# ---------------------------------------------------------------------------
+# Read actions: a row that cannot do anything says so, silently
+# ---------------------------------------------------------------------------
+
+
+_READ_MANIFEST = {
+    "apiVersion": "v1",
+    "kind": "Pod",
+    "metadata": {"name": "web", "namespace": "default"},
+    "spec": {"containers": [{"name": "app", "image": "nginx:latest"}]},
+}
+
+
+async def _read_manifest(kind: str, namespace: str | None, name: str) -> dict[str, Any]:
+    return dict(_READ_MANIFEST)
+
+
+async def _read_relationship_objects(
+    meta: ResourceMeta, namespace: str | None
+) -> list[GenericSummary]:
+    return []
+
+
+def _reading_app(rows: Sequence[Summary] | None = None) -> KorvidApp:
+    """An app with every read capability composed.
+
+    `d` has a manifest fetcher and `g` a relationship lister, so what the
+    palette reports about those rows is about the *table* - what is
+    selected, what the row is - rather than about a capability this
+    composition never had.
+    """
+    return _reading_app_with(rows)
+
+
+def _reading_app_with(rows: Sequence[Summary] | None = None, **kwargs: Any) -> KorvidApp:
+    return _build_app(
+        rows,
+        get_manifest=_read_manifest,
+        list_relationship_objects=_read_relationship_objects,
+        **kwargs,
+    )
+
+
+def _entry_for(app: KorvidApp, entry_id: str) -> PaletteEntry:
+    """One freshly derived palette row, judged by the real wiring."""
+    return next(entry for entry in app._palette_entries() if entry.id == entry_id)
+
+
+def _unready_pod(name: str) -> Summary:
+    """A Running pod that is not fully ready - `pod_needs_hint` is True."""
+    return PodSummary(
+        name=name,
+        namespace="default",
+        phase="Running",
+        ready="0/1",
+        restarts=0,
+        node=None,
+        qos="-",
+    )
+
+
+async def test_describe_and_relationships_refuse_an_empty_table() -> None:
+    """Both keys stop at the selected row, so with nothing selected the
+    palette must say so instead of advertising a no-op."""
+    app = _reading_app([])
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        for entry_id in ("action:describe", "action:relationships"):
+            reason = _entry_for(app, entry_id).availability.reason
+            assert reason is not None, entry_id
+            assert reason.message == "No resource selected"
+
+
+async def test_describe_and_relationships_are_invocable_with_a_row_selected() -> None:
+    app = _reading_app()
+    async with app.run_test() as pilot:
+        await _loaded(pilot, app)
+        assert _entry_for(app, "action:describe").availability.invocable is True
+        assert _entry_for(app, "action:relationships").availability.invocable is True
+
+
+async def test_relationships_reports_a_composition_without_a_loader() -> None:
+    """`g` notifies "Relationships unavailable in this session" when no
+    loader was composed; the palette row says exactly that."""
+    app = _build_app(get_manifest=_read_manifest)
+    async with app.run_test() as pilot:
+        await _loaded(pilot, app)
+        reason = _entry_for(app, "action:relationships").availability.reason
+        assert reason is not None
+        assert reason.message == "Relationships unavailable in this session"
+
+
+async def test_describe_reports_a_composition_without_a_manifest_fetcher() -> None:
+    app = _build_app()
+    async with app.run_test() as pilot:
+        await _loaded(pilot, app)
+        reason = _entry_for(app, "action:describe").availability.reason
+        assert reason is not None
+        assert reason.message == "Describe unavailable"
+
+
+async def test_hint_details_refuses_a_row_that_has_no_hint() -> None:
+    """`h` opens the detail overlay only for a row the hint strip flagged;
+    a healthy pod has nothing to expand."""
+    app = _reading_app()
+    async with app.run_test() as pilot:
+        await _loaded(pilot, app)
+        reason = _entry_for(app, "action:hint_details").availability.reason
+        assert reason is not None
+        assert "hint" in reason.message.casefold()
+
+
+async def test_hint_details_is_invocable_for_a_row_that_has_one() -> None:
+    app = _reading_app([_unready_pod("web")])
+    async with app.run_test() as pilot:
+        await _loaded(pilot, app)
+        assert _entry_for(app, "action:hint_details").availability.invocable is True
+
+
+async def test_search_next_refuses_a_closed_pane_while_search_prev_still_sorts() -> None:
+    """`n` does nothing with no pane open, but `N` falls back to sorting by
+    name - a real effect - so only `n` is refused."""
+    app = _reading_app()
+    async with app.run_test() as pilot:
+        await _loaded(pilot, app)
+        reason = _entry_for(app, "action:log_search_next").availability.reason
+        assert reason is not None
+        assert _entry_for(app, "action:log_search_prev").availability.invocable is True
+
+
+async def test_search_rows_follow_the_open_panes_active_search() -> None:
+    """With the describe pane open, `n`/`N` step through *its* hits, so both
+    are refused until a search has actually matched something."""
+    app = _reading_app()
+    async with app.run_test() as pilot:
+        await _loaded(pilot, app)
+        pane = app.query_one(DescribePane)
+        pane.show("Pod: web", dict(_READ_MANIFEST), [])
+        await until(pilot, lambda: pane.display, label="describe pane visible")
+        assert _entry_for(app, "action:log_search_next").availability.invocable is False
+        assert _entry_for(app, "action:log_search_prev").availability.invocable is False
+        await pilot.press("slash")
+        await _type_query(pilot, "nginx")
+        await pilot.press("enter")
+        await until(pilot, lambda: pane.has_search_hits, label="search hits")
+        assert _entry_for(app, "action:log_search_next").availability.invocable is True
+        assert _entry_for(app, "action:log_search_prev").availability.invocable is True
+
+
+async def test_probing_the_read_actions_notifies_nothing() -> None:
+    """Every probe is synchronous and silent: the states that make the real
+    keys warn produce palette reasons without a single notification."""
+    app = _reading_app([])
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        before = len(app._notifications)
+        for _ in range(3):
+            app._palette_entries()
+        await _open_palette(pilot)
+        assert len(app._notifications) == before
+
+
+async def test_the_describe_key_still_notifies_what_the_probe_only_reported() -> None:
+    """The probe stays silent; the keypress keeps its own warning."""
+    app = _reading_app([])
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        before = len(app._notifications)
+        assert _entry_for(app, "action:describe").availability.reason is not None
+        assert len(app._notifications) == before
+        await pilot.press("d")
+        await until(
+            pilot,
+            lambda: any("No resource selected" in n.message for n in app._notifications),
+            label="describe key notified",
+        )

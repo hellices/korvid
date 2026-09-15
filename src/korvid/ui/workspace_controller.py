@@ -38,9 +38,9 @@ import contextlib
 import functools
 import logging
 from abc import ABC, abstractmethod
-from collections.abc import Awaitable, Callable, Coroutine, Mapping
+from collections.abc import Awaitable, Callable, Coroutine
 from time import monotonic
-from typing import Any, Protocol
+from typing import Any
 
 from rich.text import Text
 
@@ -57,18 +57,28 @@ from korvid.k8s.components import (
     installplan_components,
     reference_components,
 )
-from korvid.k8s.discovery import ResourceMeta, canonical_resource_alias, resolve_resource
+from korvid.k8s.discovery import canonical_resource_alias, resolve_resource
 from korvid.k8s.errors import ApiStatusError, KubeClientError
 from korvid.k8s.helm import HELM_RELEASES_META
 from korvid.k8s.olm import OPERATORS_GROUP
 from korvid.k8s.relations import drill_child, owned_by
+from korvid.ui.action_availability import UnavailableReason
 from korvid.ui.navigation import DrillLevel
 from korvid.ui.object_navigation import NavigationOrigin, default_scope_for, jump_to_object
+from korvid.ui.read_availability import relationships_reason
 from korvid.ui.ui_surface import UiSurface
 from korvid.ui.view_state import ViewState
 from korvid.ui.widgets.hierarchy_screen import HierarchyScreen, build_hierarchy
 from korvid.ui.widgets.relationship_screen import GotoResult, RelationshipScreen
 from korvid.ui.widgets.resource_table import validate_selected_view
+from korvid.ui.workspace_ports import (
+    KeyEvent,
+    MetricsLifecycle,
+    RelationshipLoading,
+    WatchLifecycle,
+    WorkspaceHints,
+    WorkspaceLogs,
+)
 from korvid.ui.workspace_state import HierarchyReturn, PaneState, WorkspaceState
 
 logger = logging.getLogger(__name__)
@@ -218,60 +228,6 @@ class ContextGuard(ABC):
     def crossed(self, epoch: int) -> bool:
         """True when a switch started or completed since *epoch* was captured."""
         return self.switching() or epoch != self.epoch()
-
-
-class WatchLifecycle(Protocol):
-    """The watch start/stop surface the workspace flows need (structural)."""
-
-    @property
-    def active(self) -> set[tuple[str, str]]: ...
-
-    async def start(self, kind: str, scope: str) -> None: ...
-
-    async def stop(self, kind: str, scope: str) -> None: ...
-
-
-class MetricsLifecycle(Protocol):
-    """The metrics poller start/stop surface (structural)."""
-
-    async def start(self, namespace: str | None) -> None: ...
-
-    async def stop(self) -> None: ...
-
-
-class RelationshipLoading(Protocol):
-    """The bounded relationship-snapshot loader (structural)."""
-
-    async def load(
-        self, root: GraphResource, namespace: str | None, aliases: Mapping[str, ResourceMeta]
-    ) -> Any: ...
-
-
-class WorkspaceLogs(Protocol):
-    """The log-pane teardown the navigation and close flows trigger."""
-
-    async def close_if_owned_by(self, pane: object) -> None: ...
-
-
-class WorkspaceHints(Protocol):
-    """The pods hint-strip refresh the focus flows trigger."""
-
-    def refresh_for_focus(self) -> None: ...
-
-
-class KeyEvent(Protocol):
-    """The subset of a Textual key event the pane chord consumes.
-
-    `stop`/`prevent_default` mirror `textual.events.Key`'s own signatures
-    (an optional bool, a `Message` return) so the real event satisfies this
-    structurally while a test can pass a lightweight fake.
-    """
-
-    key: str
-
-    def stop(self, stop: bool = ...) -> Any: ...
-
-    def prevent_default(self, prevent: bool = ...) -> Any: ...
 
 
 class WorkspaceController:
@@ -1395,6 +1351,24 @@ class WorkspaceController:
         uid = self._view.selected_uid(namespace or None, name)
         return GraphResource(
             group=meta.group, kind=meta.kind, namespace=namespace, name=name, uid=uid
+        )
+
+    def unavailable_reason(self, action: str) -> UnavailableReason | None:
+        """Why `g` can't run right now, or None — a silent probe (#388).
+
+        The Action Palette shows `relationships` whatever view is on
+        screen, so it has to know when the key would only warn: the same
+        guards `show_relationships` and `_selected_relationship_root`
+        apply, in the same order, read without their notifications.
+        """
+        if action != "relationships":
+            return None
+        return relationships_reason(
+            loader=self._relationship_loader is not None,
+            switching=self._context.switching(),
+            meta=self._view.aliases().get(self._state.current_kind),
+            kind=self._state.current_kind,
+            selected=self._view.selected_ns_name(notify=False)[1] is not None,
         )
 
     def show_relationships(self) -> None:

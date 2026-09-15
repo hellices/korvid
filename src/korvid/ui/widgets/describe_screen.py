@@ -463,6 +463,15 @@ class DescribePane(Vertical):
         search_input.display = True
         search_input.focus()
 
+    @property
+    def has_search_hits(self) -> bool:
+        """Whether `n`/`N` have a hit to step to (issue #388).
+
+        The same `BodySearch.hits` list `next`/`prev` return early on, read
+        without moving the position.
+        """
+        return bool(self._search.hits)
+
     def search_next(self) -> None:
         """Advance to the next hit and scroll to it."""
         self._search.next()

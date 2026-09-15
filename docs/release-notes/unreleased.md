@@ -7,9 +7,13 @@ tracks the current release scope.
 
 ## Search actions by intent
 
-Press `Ctrl-P` to search korvid actions and built-in commands. Results show the
-effective remapped key and explain when an action does not apply to the current
-view. Selecting a write action still opens the same approval flow and requires a
+Press `Ctrl-P` to search korvid actions and built-in commands — by intent
+(`scale`, `logs`), by an action's canonical id (`delete_resource`), or by a
+command's `:` spelling (`:pulse`). Each result reads *category · what it does ·
+how to run it*, showing the effective remapped key or the canonical command,
+and explains when an action does not apply to the current view or would
+currently do nothing (nothing selected, no hint on the row, no search running).
+Selecting a write action still opens the same approval flow and requires a
 fresh confirmation keystroke. `Esc` closes the palette, and the key itself
 remaps under `open_action_palette`.
 

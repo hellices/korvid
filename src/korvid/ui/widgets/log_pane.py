@@ -283,6 +283,16 @@ class LogPane(Widget):
         search_input.display = True
         search_input.focus()
 
+    @property
+    def has_search_hits(self) -> bool:
+        """Whether `n`/`N` have a hit to step to (issue #388).
+
+        The same list `search_next`/`search_prev` return early on, read
+        without moving the position - the palette asks this to avoid
+        advertising a key that would do nothing.
+        """
+        return bool(self._search_hits)
+
     def search_next(self) -> None:
         """Advance to the next search hit and scroll to it."""
         if not self._search_hits:
