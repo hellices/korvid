@@ -38,7 +38,7 @@ import threading
 import weakref
 from asyncio.transports import BaseTransport
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -91,26 +91,36 @@ class _Chat(http.server.BaseHTTPRequestHandler):
         return None
 
 
+#: Bounded only so a client that never closes cannot pin a reaper thread.
+_REJECTED_HOLD_SECONDS: float = 30.0
+
+
 def _hold_until_the_client_closes(rejected: ssl.SSLSocket) -> None:
     """Keep a connection whose certificate was refused open until its client goes.
 
     Disposing of it here would disconnect a client that has not torn its own
     transport down yet, and the Windows proactor finalizes such a transport by
-    calling `self._sock.shutdown(SHUT_RDWR)` unguarded; against a closed peer
-    that raises and the socket is never released (#390). Reading to the
+    calling `self._sock.shutdown(SHUT_RDWR)` unguarded (#390). Reading to the
     client's EOF costs this endpoint nothing — it has already refused to serve
     the connection — and leaves the client owning both ends of the teardown.
+
+    The descriptor is never detached, so `rejected` owns it throughout and is
+    closed exactly once. Nothing may escape this thread either: pytest turns an
+    unhandled thread exception into `PytestUnhandledThreadExceptionWarning`,
+    which this suite's `filterwarnings = ["error"]` would raise in whichever
+    test happened to be running — the very attribution problem #390 is about.
     """
-    client = socket.socket(fileno=rejected.detach())
-    # Bounded only so a client that never closes cannot pin this thread.
-    client.settimeout(30)
     try:
-        while client.recv(4096):
+        rejected.settimeout(_REJECTED_HOLD_SECONDS)
+        # Raw reads: a refused handshake leaves no TLS session to decrypt
+        # through, and the bytes are only interesting as a path to EOF.
+        while socket.socket.recv(rejected, 4096):
             pass
-    except OSError:
+    except Exception:  # a torn-down connection must not reach threading.excepthook
         pass
     finally:
-        client.close()
+        with suppress(Exception):
+            rejected.close()
 
 
 class _ChatServer(http.server.HTTPServer):
@@ -174,11 +184,13 @@ def _port_of(endpoint: str) -> int:
     return int(endpoint.rsplit(":", 1)[1].split("/", 1)[0])
 
 
-def _reject_the_certificate(port: int) -> socket.socket:
+def _reject_the_certificate(port: int) -> ssl.SSLSocket:
     """Fail the handshake the negative-control tests fail, keeping the socket.
 
     The SDK clients reach the same state through aiohttp; this drives it
-    directly so the connection is still available to inspect afterwards.
+    directly so the connection is still available to inspect afterwards. The
+    descriptor is never detached, so the returned socket is its only owner and
+    the caller closes it exactly once.
     """
     raw = socket.create_connection(("127.0.0.1", port))
     tls = ssl.create_default_context().wrap_socket(
@@ -187,56 +199,72 @@ def _reject_the_certificate(port: int) -> socket.socket:
     try:
         tls.do_handshake()
     except ssl.SSLCertVerificationError:
-        return socket.socket(fileno=tls.detach())
+        return tls
     tls.close()
     raise AssertionError("the throwaway CA was in the system trust store")
 
 
-def _settle_peer_state(rejected: socket.socket) -> None:
-    """Read until the endpoint closes, or until it is clear it has not."""
+def _settle_peer_state(rejected: socket.socket) -> str:
+    """Report whether the endpoint closed the rejected connection first.
+
+    Returns `"closed"` when the endpoint's EOF (or reset) arrives, and
+    `"open"` when the connection is still the client's to close. The bound is a
+    safety net on a blocking read, not a wait for a result: an endpoint that
+    closes first is observed the instant its FIN lands.
+    """
     rejected.settimeout(_PEER_SETTLE_SECONDS)
     try:
-        while rejected.recv(4096):
+        while socket.socket.recv(rejected, 4096):
             pass
-    except OSError:  # TimeoutError (still open) or a reset peer
-        pass
+    except TimeoutError:
+        return "open"
+    except OSError as exc:  # a reset peer has also closed first
+        return f"closed (errno {exc.errno})"
+    return "closed (EOF)"
 
 
 async def test_the_endpoint_lets_a_rejecting_client_close_first(tmp_path: Path) -> None:
     """A client that refuses the certificate must still own its own teardown.
 
-    The Windows proactor finalizes a connection by calling
-    `self._sock.shutdown(SHUT_RDWR)` and `self._sock.close()` *unguarded*
-    before `self._sock = None` (CPython 3.12.10
-    `Lib/asyncio/proactor_events.py::_call_connection_lost`); the selector loop
-    makes neither call. Against a peer that has already closed, `shutdown()`
-    raises `ENOTCONN`, `self._sock = None` is skipped, and the transport is
-    finalized later still holding its socket — which is #390's
-    `PytestUnraisableExceptionWarning`, reported against whichever unrelated
-    test the collector happened to reach it in.
+    The property asserted is the *ordering*: within the settle window the
+    endpoint must not close a connection it refused. That is observable the
+    same way on every platform — either its EOF arrives or it does not — and it
+    is what #390 turns on.
 
-    Measured on this endpoint, 60 rejected handshakes each: closing first gave
-    `ENOTCONN` 60/60, holding the connection until the client closed gave a
-    clean teardown 60/60. Wrapping the accepted socket more politely changed
-    nothing — the close is an orderly FIN either way — so the ordering is the
-    property under test, not the manner of the close.
+    What the ordering protects is platform-specific. The Windows proactor
+    finalizes a connection by calling `self._sock.shutdown(SHUT_RDWR)` and
+    `self._sock.close()` *unguarded* before `self._sock = None` (CPython 3.12.10
+    `Lib/asyncio/proactor_events.py::_call_connection_lost`); the selector loop
+    makes neither call. Against a peer that closed first those raise, the
+    socket is never released, and it surfaces later as #390's
+    `PytestUnraisableExceptionWarning` against whichever unrelated test the
+    collector happened to reach it in. The resulting errno is *not* the
+    criterion here — after an orderly FIN a Linux socket sits in `CLOSE_WAIT`
+    where `shutdown()` still succeeds, so asserting on it would pass
+    vacuously — it is only reported alongside the ordering it accompanies.
+
+    Measured on this endpoint over 60 rejected handshakes each: closing first
+    gave `ENOTCONN` 60/60 on macOS, holding the connection gave a clean
+    teardown 60/60. Wrapping the accepted socket more politely changed nothing
+    — the close is an orderly FIN either way — so ordering is the property, not
+    the manner of the close.
     """
     _ca_pem, cert_pem, key_pem = mint_ca_and_server_cert(tmp_path)
     async with _https_endpoint(cert_pem, key_pem) as endpoint:
         rejected = await asyncio.to_thread(_reject_the_certificate, _port_of(endpoint))
-        teardown_error: OSError | None = None
         try:
-            await asyncio.to_thread(_settle_peer_state, rejected)
+            peer_state = await asyncio.to_thread(_settle_peer_state, rejected)
+            teardown = "clean"
             try:
                 rejected.shutdown(socket.SHUT_RDWR)
             except OSError as exc:
-                teardown_error = exc
+                teardown = f"shutdown failed with errno {exc.errno}"
         finally:
             rejected.close()
 
-    assert teardown_error is None, (
-        "the endpoint closed the rejected connection before its client did, so the"
-        f" teardown the Windows proactor performs on it fails: {teardown_error}"
+    assert peer_state == "open", (
+        "the endpoint closed a connection it refused before its client did"
+        f" ({peer_state}); the client's own teardown was then {teardown}"
     )
 
 
