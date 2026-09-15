@@ -222,17 +222,20 @@ def test_quit_is_the_sole_palette_omission() -> None:
 def test_command_descriptor_requires_exactly_one_of_palette_or_omit_reason() -> None:
     from korvid.ui.command import CommandDescriptor, PaletteCommand
 
+    # `BuiltinOperation` is defined in `korvid.ui.messages` and only imported
+    # by `korvid.ui.command`; under mypy --strict reading it back off that
+    # module is an implicit re-export, so name it where it lives.
     with pytest.raises(ValueError, match="exactly one of palette"):
         CommandDescriptor(
             aliases=("x",),
             help=((":x", "x"),),
-            operation=command.BuiltinOperation.PULSE,
+            operation=messages.BuiltinOperation.PULSE,
         )
     with pytest.raises(ValueError, match="exactly one of palette"):
         CommandDescriptor(
             aliases=("x",),
             help=((":x", "x"),),
-            operation=command.BuiltinOperation.PULSE,
+            operation=messages.BuiltinOperation.PULSE,
             palette=PaletteCommand("X", "x"),
             palette_omit_reason="also omitted",
         )
