@@ -13,9 +13,9 @@ command's `:` spelling (`:pulse`). Each result reads *category Â· what it does Â
 how to run it*, showing the effective remapped key or the canonical command,
 and explains when an action does not apply to the current view or would
 currently do nothing (nothing selected, no hint on the row, no search running,
-no CPU/MEM column on this view, a log pane that is already full, a rollback
-whose release history moved, or a capability this session was started
-without).
+a sort key whose column this view does not render, a log pane that is already
+full, a node whose drain has to finish first, a rollback whose release history
+moved, or a capability this session was started without).
 Selecting a write action still opens the same approval flow and requires a
 fresh confirmation keystroke. `Esc` closes the palette, and the key itself
 remaps under `open_action_palette`. On a small terminal the palette takes the

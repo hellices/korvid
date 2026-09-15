@@ -256,12 +256,17 @@ differs.
 
 The same split applies wherever a refusal would otherwise interpolate *cluster
 data*, whose length korvid does not control: a node name (the drain key,
-refused while another node is being drained) or a pod name (the log key,
-refused because the pane is already showing its eight panels). The row states
-the bounded fact — "Another node drain is in progress", "Panel cap is 8
-containers" — and the keypress keeps the name and the instruction that names
-it. The viewport floor is not raised to accommodate an arbitrary identifier:
-one 253-character name would make any floor wrong again.
+refused while another node is being drained; the cordon and uncordon keys,
+refused while the selected node is) or a pod name (the log key, refused
+because the pane is already showing its eight panels). The row states
+the bounded fact — "Another node drain is in progress", "This node is being
+drained", "Panel cap is 8 containers" — and the keypress keeps the name and
+the instruction that names it. Two refusals that split this way must stay
+distinguishable from each other once the names are gone, because they ask for
+different things: waiting on the row under the cursor is not the same as
+going to a node that is not on screen. The viewport floor is not raised to
+accommodate an arbitrary identifier: one 253-character name would make any
+floor wrong again.
 
 ## Search and ranking
 
