@@ -320,3 +320,48 @@ async def test_forward_availability_is_none_when_the_dialog_would_open() -> None
     with _with_kubectl():
         assert harness.controller.unavailable_reason() is None
     assert harness.ui.notifications == []
+
+
+# ---------------------------------------------------------------------------
+# `:pf` — the forward *list*, which needs less than the forward dialog
+# ---------------------------------------------------------------------------
+
+
+async def test_list_availability_reports_a_missing_registry_without_notifying() -> None:
+    """`:pf` has exactly one composition question, and this is it.
+
+    `open_list` refuses only when this build carries no forward registry,
+    and it says so in the same words `open_dialog` uses for the same fact.
+    The probe has to answer with that same reason, and silently: a palette
+    row is drawn, not notified.
+    """
+    harness = _harness(registry=None)
+    with _without_kubectl():
+        reason = harness.controller.list_unavailable_reason()
+    assert reason == UnavailableReason(
+        AvailabilityCode.MISSING_CAPABILITY, "Port-forward unavailable in this build"
+    )
+    assert harness.ui.notifications == []
+
+
+async def test_list_availability_ignores_kubectl_and_the_selected_row() -> None:
+    """The list is not the dialog: it opens over the forwards that already
+    exist, so neither a missing `kubectl` nor an empty selection stops it.
+    Reporting either would grey out a `:pf` row that works."""
+    harness = _harness(registry=ForwardRegistry(), selected=(None, None))
+    with _without_kubectl():
+        assert harness.controller.list_unavailable_reason() is None
+    assert harness.ui.notifications == []
+
+
+async def test_list_availability_and_open_list_share_one_wording() -> None:
+    """The probe and the keypress must not be able to drift apart: the
+    message `open_list` notifies is the message the probe returns."""
+    probe = _harness(registry=None)
+    with _without_kubectl():
+        reason = probe.controller.list_unavailable_reason()
+    assert reason is not None
+    notified = _harness(registry=None)
+    notified.controller.open_list()
+    assert notified.ui.screens == []
+    assert reason.message in notified.ui.messages()

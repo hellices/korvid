@@ -14,7 +14,6 @@ import contextlib
 import dataclasses
 import functools
 import logging
-import os
 import secrets
 import sys
 import threading
@@ -54,6 +53,11 @@ from korvid.composition_support import (
     _start_mcp_if_enabled,
     _validate_ca_bundle,
     _warn_agent_disabled,
+)
+from korvid.composition_support import (
+    # Deliberate re-export (hence the alias): _close_runner and its tests,
+    # which arm and invoke the shutdown watchdog, reach it by this name.
+    _force_runner_exit as _force_runner_exit,
 )
 from korvid.composition_support import (
     _protected_context_name as _support_protected_context_name,
@@ -1408,6 +1412,7 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
             proposals=proposals.unavailable_reason,
             namespace=workspace_controller.namespace_picker_unavailable_reason,
             context=context.unavailable_reason,
+            port_forwards=forward_controller.list_unavailable_reason,
         ),
     )
     commands = CommandRouter(
@@ -1684,11 +1689,6 @@ def _restart_prompt() -> str:
     # swallow the question nor be contaminated by it.
     print("korvid crashed -- restart? [Y/n] ", end="", file=sys.stderr, flush=True)
     return input()
-
-
-def _force_runner_exit() -> None:
-    """Exit without blocking I/O or logging locks on the watchdog thread."""
-    os._exit(1)
 
 
 def _close_runner(runner: asyncio.Runner) -> None:

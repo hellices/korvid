@@ -193,6 +193,7 @@ def compose_command_reasons(
     proposals: Callable[[], UnavailableReason | None],
     namespace: Callable[[], UnavailableReason | None],
     context: Callable[[], UnavailableReason | None],
+    port_forwards: Callable[[], UnavailableReason | None],
 ) -> dict[str, Callable[[], UnavailableReason | None]]:
     """Build `ActionPolicy(reason_by_command=...)` from its owners.
 
@@ -216,6 +217,11 @@ def compose_command_reasons(
             Separate owners, not one shared answer: the two pickers list
             different things through different seams, and a session can
             have either without the other.
+        port_forwards: `ForwardController.list_unavailable_reason` — the
+            registry `:pf` lists through. Deliberately not the `shift+f`
+            probe: opening the *list* needs neither `kubectl` nor a
+            selected row, so borrowing the dialog's answer would grey out
+            a command that works.
 
     Returns:
         The canonical command text -> reason-resolver map.
@@ -232,6 +238,7 @@ def compose_command_reasons(
         "proposals": proposals,
         "ns": namespace,
         "ctx": context,
+        "pf": port_forwards,
     }
 
 

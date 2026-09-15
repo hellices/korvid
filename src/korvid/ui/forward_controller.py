@@ -65,6 +65,14 @@ logger = logging.getLogger(__name__)
 #: confirmation gives up and reports the failure instead.
 _FORWARD_READY_SECONDS = 5.0
 
+#: The one wording for "this build has no forward registry". Three callers
+#: share it - the `shift+f` dialog's capability check, the `:pf` list probe,
+#: and `open_list`'s own notification - so the palette row and the command
+#: that row describes can never say different things (#388 round 10).
+_FORWARD_UNAVAILABLE = UnavailableReason(
+    AvailabilityCode.MISSING_CAPABILITY, "Port-forward unavailable in this build"
+)
+
 
 class ForwardController:
     """Owns port-forward sessions: launch, reattach, audit, and liveness."""
@@ -169,16 +177,32 @@ class ForwardController:
         order: a registry in this build, and a `kubectl` on PATH. Shared by
         the keypress (which notifies the message) and the palette probe
         (which returns it silently), so the two cannot drift."""
-        if self._forwards_registry() is None:
-            return UnavailableReason(
-                AvailabilityCode.MISSING_CAPABILITY, "Port-forward unavailable in this build"
-            )
+        reason = self.list_unavailable_reason()
+        if reason is not None:
+            return reason
         if shutil.which("kubectl") is None:
             return UnavailableReason(
                 AvailabilityCode.MISSING_CAPABILITY,
                 "kubectl not found on PATH — port-forward requires kubectl",
                 severity="error",
             )
+        return None
+
+    def list_unavailable_reason(self) -> UnavailableReason | None:
+        """Why `:pf` can't open the forward list right now, or None -
+        a side-effect-free probe for the palette (issue #388 round 10).
+
+        The list is not the dialog, so it asks for less: `open_list` shows
+        the forwards this session already started and refuses on exactly one
+        fact - no registry in this build. It never reads the selected row
+        (there is nothing to target) and never runs `kubectl` (nothing is
+        launched), so reporting either would grey out a `:pf` row that
+        works. Synchronous and silent: the notification belongs to the real
+        command, and `open_list` notifies this same message, from here, so
+        the two cannot drift.
+        """
+        if self._forwards_registry() is None:
+            return _FORWARD_UNAVAILABLE
         return None
 
     def unavailable_reason(self) -> UnavailableReason | None:
@@ -704,7 +728,11 @@ class ForwardController:
         """`:pf` — the active-forwards screen with stop / re-attach keys."""
         registry = self._forwards_registry()
         if registry is None:
-            self._ui.notify("Port-forward unavailable in this build", severity="warning")
+            reason = _FORWARD_UNAVAILABLE
+            # markup=False, exactly as `open_dialog` and the palette emit the
+            # same reason: one `UnavailableReason` shown by two paths has to
+            # reach the user as the same characters on both.
+            self._ui.notify(reason.message, severity=reason.severity, markup=False)
             return
 
         def _on_stop(record: ForwardRecord) -> None:

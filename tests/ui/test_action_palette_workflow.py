@@ -22,6 +22,7 @@ from textual.widget import Widget
 from textual.widgets import Input, OptionList
 
 from korvid.core.config import KorvidConfig, ViewConfig
+from korvid.core.portforward import ForwardRegistry
 from korvid.core.store import ResourceStore, Summary
 from korvid.core.watch import WatchManager
 from korvid.k8s.columns import CustomColumn
@@ -449,6 +450,68 @@ async def test_the_namespace_picker_key_still_notifies_what_the_row_reports() ->
             lambda: any(n.message == "Namespace listing unavailable" for n in app._notifications),
             label="the namespace picker command notified",
         )
+        assert len(app.screen_stack) == 1
+
+
+async def test_the_forward_list_row_reports_a_build_without_a_registry() -> None:
+    """`:pf` lists the forwards a session already started, so its one
+    composition question is whether this build carries a registry at all.
+
+    A session wired without one refuses `:pf` outright, and the palette has
+    to say so with the owner's own wording rather than advertise a command
+    that only earns a warning - silently, because deriving the catalog is a
+    probe (#388 round 10).
+    """
+    app = _build_app()
+    async with app.run_test() as pilot:
+        await _loaded(pilot, app)
+        assert app._forwards is None
+        before = len(app._notifications)
+        row = _row(app, "command:pf")
+        assert row.availability.invocable is False
+        reason = row.availability.reason
+        assert reason is not None
+        assert reason.code is AvailabilityCode.MISSING_CAPABILITY
+        assert reason.message == "Port-forward unavailable in this build"
+        assert len(app._notifications) == before
+
+
+async def test_the_forward_list_row_is_offered_once_a_registry_is_wired() -> None:
+    """With a registry composed, `:pf` really opens its screen - so the row
+    is offered, and it stays offered with nothing selected and no `kubectl`
+    reachable, because `open_list` reads neither."""
+    app = _build_app(forwards=ForwardRegistry())
+    async with app.run_test() as pilot:
+        await _loaded(pilot, app)
+        before = len(app._notifications)
+        assert _row(app, "command:pf").availability == ActionAvailability.enabled()
+        assert len(app._notifications) == before
+
+
+async def test_the_forward_list_row_is_revalidated_after_the_palette_closes() -> None:
+    """The answer belongs to the moment it is asked, not to the render.
+
+    A capability can appear or vanish while the modal is open, so the row
+    the user selected is re-derived and re-judged afterwards: a `:pf`
+    selection made against a registry that is gone by the time the palette
+    dismisses must notify the owner's refusal and route nothing.
+    """
+    app = _build_app(forwards=ForwardRegistry())
+    async with app.run_test() as pilot:
+        await _loaded(pilot, app)
+        assert _row(app, "command:pf").availability == ActionAvailability.enabled()
+        app._forwards = None
+        assert _row(app, "command:pf").availability.invocable is False
+        before = len(app._notifications)
+        await app._palette_selected("command:pf")
+        await until(
+            pilot,
+            lambda: any(
+                n.message == "Port-forward unavailable in this build" for n in app._notifications
+            ),
+            label="the stale forward-list selection refused with the owner's wording",
+        )
+        assert len(app._notifications) == before + 1
         assert len(app.screen_stack) == 1
 
 

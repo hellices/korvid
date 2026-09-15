@@ -545,13 +545,43 @@ def test_composed_command_reasons_route_the_picker_commands() -> None:
         proposals=lambda: None,
         namespace=lambda: None if listing else namespace_reason,
         context=lambda: context_reason,
+        port_forwards=lambda: None,
     )
-    assert set(reasons) == {"ai", "model", "mcp", "tp", "proposals", "ns", "ctx"}
+    assert set(reasons) == {"ai", "model", "mcp", "tp", "proposals", "ns", "ctx", "pf"}
     assert reasons["ns"]() == namespace_reason
     assert reasons["ctx"]() == context_reason
     listing = True
     assert reasons["ns"]() is None
     assert reasons["ctx"]() == context_reason
+
+
+def test_composed_command_reasons_route_the_forward_list_command() -> None:
+    """`:pf` opens the *list* of forwards, not the forward dialog.
+
+    `ForwardController.open_list` needs one thing only - a forward registry
+    in this build - so the command row is greyed out on exactly that fact,
+    by that owner's own list probe rather than by the `shift+f` probe,
+    which also weighs `kubectl` and the selected row that `:pf` never
+    reads. Read live: nothing else in this map is frozen at wiring time
+    either.
+    """
+    missing = UnavailableReason(
+        AvailabilityCode.MISSING_CAPABILITY, "Port-forward unavailable in this build"
+    )
+    composed = True
+    reasons = compose_command_reasons(
+        agent_available=lambda: True,
+        mcp=lambda: None,
+        telepresence=lambda: None,
+        proposals=lambda: None,
+        namespace=lambda: None,
+        context=lambda: None,
+        port_forwards=lambda: None if composed else missing,
+    )
+    assert set(reasons) == {"ai", "model", "mcp", "tp", "proposals", "ns", "ctx", "pf"}
+    assert reasons["pf"]() is None
+    composed = False
+    assert reasons["pf"]() == missing
 
 
 def test_composed_command_reasons_share_one_agent_answer() -> None:
@@ -565,8 +595,9 @@ def test_composed_command_reasons_share_one_agent_answer() -> None:
         proposals=lambda: None,
         namespace=lambda: None,
         context=lambda: None,
+        port_forwards=lambda: None,
     )
-    assert set(reasons) == {"ai", "model", "mcp", "tp", "proposals", "ns", "ctx"}
+    assert set(reasons) == {"ai", "model", "mcp", "tp", "proposals", "ns", "ctx", "pf"}
     assert reasons["ai"]() == AGENT_UNAVAILABLE
     assert reasons["model"]() == AGENT_UNAVAILABLE
 
@@ -582,6 +613,7 @@ def test_composed_command_reasons_follow_a_late_agent() -> None:
         proposals=lambda: None,
         namespace=lambda: None,
         context=lambda: None,
+        port_forwards=lambda: None,
     )
     assert reasons["ai"]() == AGENT_UNAVAILABLE
     available = True
@@ -606,6 +638,7 @@ def test_composed_command_reasons_route_the_integration_commands() -> None:
         proposals=lambda: None if pending else proposals_reason,
         namespace=lambda: None,
         context=lambda: None,
+        port_forwards=lambda: None,
     )
     assert reasons["mcp"]() == mcp_reason
     assert reasons["tp"]() == tp_reason
@@ -700,6 +733,7 @@ def test_every_owned_command_is_really_a_palette_command() -> None:
         proposals=lambda: None,
         namespace=lambda: None,
         context=lambda: None,
+        port_forwards=lambda: None,
     )
     assert set(reasons) <= _palette_commands()
 
