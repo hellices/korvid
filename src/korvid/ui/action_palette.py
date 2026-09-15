@@ -20,7 +20,7 @@ from textual.fuzzy import Matcher
 
 from korvid.ui.action_availability import ActionAvailability
 from korvid.ui.app_bindings import as_binding, base_action, help_groups_for_action
-from korvid.ui.command import CommandDescriptor
+from korvid.ui.command import CommandDescriptor, PaletteCommand
 from korvid.ui.widgets.help_screen import key_label
 
 
@@ -50,7 +50,7 @@ class PaletteEntry:
     description: str
     category: str
     trigger: str
-    aliases: tuple[str, ...]
+    search_terms: tuple[str, ...]
     declaration_order: int
     availability: ActionAvailability
     invocation: PaletteInvocation
@@ -92,6 +92,11 @@ def derive_action_entries(
     `resize_pod`'s ``"Resize pod CPU/memory in place (K8s 1.35+)"``) that
     reads better as a palette second line than as a footer label.
 
+    The canonical action id is the entry's search term, so the name the
+    user reads in the docs, in an audit line or in a `run_action` call
+    (``delete_resource``, ``logs_multi``) finds its own row exactly - the
+    humanized title alone does not contain the underscore.
+
     An action classified under more than one help group by
     `ACTION_HELP_GROUPS` (e.g. `open_filter` in both `"Table"` and
     `"Logs"`) surfaces under only its *first* listed group as the entry's
@@ -117,13 +122,35 @@ def derive_action_entries(
                 description=binding.description,
                 category=help_groups_for_action(action)[0],
                 trigger=key_label(key),
-                aliases=(),
+                search_terms=(action,),
                 declaration_order=order,
                 availability=availability(action),
                 invocation=AppActionInvocation(action),
             )
         )
     return entries
+
+
+def _command_search_terms(
+    descriptor: CommandDescriptor, palette: PaletteCommand
+) -> tuple[str, ...]:
+    """Every spelling one command row answers to, deterministically ordered.
+
+    A command is reached by typing it, so each way of typing it has to be a
+    search term: the canonical text first, then every alias the parser
+    itself accepts (`problems` for `:pulse`, `agent` for `:ai`), each in
+    both the bare and the colon form the user may reach for. The palette's
+    own synonyms (`PaletteCommand.aliases`) come last and stay bare - they
+    are prose (`port forward`), not command spellings.
+
+    Deduplicated with `dict.fromkeys`, so the order is the declaration
+    order above and the first occurrence wins: `pulse` is both the
+    canonical text and the descriptor's first alias, and appears once.
+    """
+    spellings: list[str] = []
+    for text in (palette.canonical_text, *descriptor.aliases):
+        spellings.extend((text, f":{text}"))
+    return tuple(dict.fromkeys([*spellings, *palette.aliases]))
 
 
 def derive_command_entries(
@@ -139,7 +166,9 @@ def derive_command_entries(
     The title is `PaletteCommand.title`; the description is the
     descriptor's own first `help` row description — the same text the
     `:help` overlay already shows for that command — rather than a new,
-    separately maintained metadata table.
+    separately maintained metadata table. The search terms come from the
+    same two places (see `_command_search_terms`), so a command is found by
+    every spelling that would parse, not only by its prose title.
     """
     entries: list[PaletteEntry] = []
     for order, descriptor in enumerate(commands):
@@ -154,7 +183,7 @@ def derive_command_entries(
                 description=description,
                 category="Commands",
                 trigger=f":{palette.canonical_text}",
-                aliases=palette.aliases,
+                search_terms=_command_search_terms(descriptor, palette),
                 declaration_order=order,
                 availability=availability(palette.canonical_text),
                 invocation=CommandInvocation(palette.canonical_text),
@@ -198,7 +227,7 @@ def _match_tier(
     entry: PaletteEntry, lower_query: str, matcher: Matcher
 ) -> tuple[int, float] | None:
     """Best (tier, score) for `entry` against `lower_query`, or `None`."""
-    primary_texts = [entry.title, *entry.aliases]
+    primary_texts = [entry.title, *entry.search_terms]
     if any(text.casefold() == lower_query for text in primary_texts):
         return (0, 1.0)
     if any(
@@ -230,13 +259,13 @@ def rank_entries(entries: Sequence[PaletteEntry], query: str) -> list[PaletteEnt
     An empty query orders invocable actions, then invocable commands, then
     every unavailable entry (each group by declaration order, so the
     palette's default view mirrors the catalogs it was derived from). A
-    non-empty query ranks by match tier first — exact title/alias, then a
-    leading-token prefix, then a fuzzy title/alias match, then a fuzzy
-    description match — breaking ties by score, invocable-first, then
-    declaration order and id for a fully deterministic, stable order. An
-    exact match on a currently-unavailable entry still ranks by its tier:
-    availability only breaks ties, so its reason stays visible rather than
-    hiding the entry.
+    non-empty query ranks by match tier first — an exact title or search
+    term, then a leading-token prefix, then a fuzzy title/search-term
+    match, then a fuzzy description match — breaking ties by score,
+    invocable-first, then declaration order and id for a fully
+    deterministic, stable order. An exact match on a currently-unavailable
+    entry still ranks by its tier: availability only breaks ties, so its
+    reason stays visible rather than hiding the entry.
     """
     stripped = query.strip()
     if not stripped:

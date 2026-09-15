@@ -137,7 +137,7 @@ def _entry(entry_id: str, availability: ActionAvailability) -> PaletteEntry:
         description="Help",
         category="Global",
         trigger="?",
-        aliases=(),
+        search_terms=(),
         declaration_order=0,
         availability=availability,
         invocation=AppActionInvocation("help"),

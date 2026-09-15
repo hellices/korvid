@@ -10,11 +10,20 @@ internals.
 
 from __future__ import annotations
 
+import pytest
 from textual.app import App, ComposeResult
 from textual.widgets import Input, OptionList, Static
 
 from korvid.ui.action_availability import ActionAvailability, AvailabilityCode, UnavailableReason
-from korvid.ui.action_palette import AppActionInvocation, CommandInvocation, PaletteEntry
+from korvid.ui.action_palette import (
+    AppActionInvocation,
+    CommandInvocation,
+    PaletteEntry,
+    derive_action_entries,
+    derive_command_entries,
+)
+from korvid.ui.app_bindings import APP_BINDINGS
+from korvid.ui.command import COMMANDS
 from korvid.ui.widgets.action_palette import ActionPaletteScreen
 
 
@@ -54,7 +63,7 @@ def _entries(*, drain_available: bool = True) -> list[PaletteEntry]:
             description="Safely evict workloads from a node",
             category="Actions",
             trigger="Shift-D",
-            aliases=("drain",),
+            search_terms=("drain",),
             declaration_order=0,
             availability=ActionAvailability(True, reason),
             invocation=AppActionInvocation("drain_node"),
@@ -81,13 +90,97 @@ def _mixed_category_entries(count: int = 30) -> list[PaletteEntry]:
                 description=f"Description for item {index:02d}",
                 category=category,
                 trigger=f"F{index}",
-                aliases=(),
+                search_terms=(),
                 declaration_order=index,
                 availability=ActionAvailability.enabled(),
                 invocation=AppActionInvocation(f"item_{index:02d}"),
             )
         )
     return entries
+
+
+#: The two terminals the layout is pinned at: the classic 80x24 and a
+#: cramped 36x16 that cannot fit the palette's natural content height. Both
+#: must show the *whole* modal — results and the key hint — inside the
+#: screen, with the highlighted row rendered in the results viewport.
+_LAYOUT_SIZES = [(80, 24), (36, 16)]
+_LAYOUT_IDS = ["80x24", "36x16"]
+
+
+def _viewport_lines(options: OptionList) -> list[str]:
+    """The text the results list is actually showing at its scroll offset.
+
+    `Widget.render_line` is the same public rendering entry point Textual's
+    compositor calls, so this is what the user sees — not what the option
+    list holds.
+    """
+    return [
+        "".join(segment.text for segment in options.render_line(y))
+        for y in range(options.size.height)
+    ]
+
+
+@pytest.mark.parametrize("size", _LAYOUT_SIZES, ids=_LAYOUT_IDS)
+async def test_the_whole_modal_stays_inside_the_screen(size: tuple[int, int]) -> None:
+    """More entries than fit must shrink the results, not push the modal off
+    screen: the container stays inside the screen and both the results list
+    and the key hint stay inside the container."""
+    screen = ActionPaletteScreen(_mixed_category_entries(30))
+    app = PaletteHarness(screen)
+    async with app.run_test(size=size):
+        container = screen.query_one("#action-palette")
+        results = screen.query_one(OptionList)
+        hint = screen.query_one("#action-hint", Static)
+        assert app.screen.region.contains_region(container.region)
+        assert container.region.contains_region(results.region)
+        assert container.region.contains_region(hint.region)
+
+
+@pytest.mark.parametrize("size", _LAYOUT_SIZES, ids=_LAYOUT_IDS)
+async def test_the_key_hint_is_composited_on_screen(size: tuple[int, int]) -> None:
+    """The hint is the only thing telling the user how to run or leave the
+    palette, so it must be a real, hit-testable widget at its own region -
+    a clipped one answers `NoWidget` (or is never laid out on screen)."""
+    screen = ActionPaletteScreen(_mixed_category_entries(30))
+    app = PaletteHarness(screen)
+    async with app.run_test(size=size):
+        hint = screen.query_one("#action-hint", Static)
+        assert app.screen.region.contains_region(hint.region)
+        widget, _ = app.screen.get_widget_at(hint.region.x, hint.region.y)
+        assert widget is hint
+
+
+@pytest.mark.parametrize("size", _LAYOUT_SIZES, ids=_LAYOUT_IDS)
+async def test_end_renders_the_last_result_inside_the_results_viewport(
+    size: tuple[int, int],
+) -> None:
+    """End must highlight a row the user can actually see: the results
+    viewport stays inside the modal, and the last entry is rendered in it."""
+    screen = ActionPaletteScreen(_mixed_category_entries(30))
+    app = PaletteHarness(screen)
+    async with app.run_test(size=size) as pilot:
+        options = screen.query_one(OptionList)
+        container = screen.query_one("#action-palette")
+        await pilot.press("end")
+        assert options.highlighted == options.option_count - 1
+        assert container.region.contains_region(options.region)
+        assert any("Item 29" in line for line in _viewport_lines(options))
+
+
+async def test_a_shrinking_terminal_refits_the_open_palette() -> None:
+    """The palette is modal, so a terminal resize can happen under it: the
+    results must re-fit rather than keep a viewport sized for the old
+    terminal and push the hint back off screen."""
+    screen = ActionPaletteScreen(_mixed_category_entries(30))
+    app = PaletteHarness(screen)
+    async with app.run_test(size=(80, 40)) as pilot:
+        await pilot.resize_terminal(36, 16)
+        await pilot.pause()
+        container = screen.query_one("#action-palette")
+        hint = screen.query_one("#action-hint", Static)
+        assert app.screen.region.contains_region(container.region)
+        assert container.region.contains_region(screen.query_one(OptionList).region)
+        assert container.region.contains_region(hint.region)
 
 
 def _command_entries() -> list[PaletteEntry]:
@@ -98,7 +191,7 @@ def _command_entries() -> list[PaletteEntry]:
             description="Current problems, recent warnings and observation coverage",
             category="Commands",
             trigger=":pulse",
-            aliases=("problems", "warnings"),
+            search_terms=("problems", "warnings"),
             declaration_order=0,
             availability=ActionAvailability.enabled(),
             invocation=CommandInvocation("pulse"),
@@ -246,3 +339,113 @@ async def test_commands_and_actions_are_both_selectable() -> None:
         assert "Open Pulse" in str(options.get_option_at_index(0).prompt)
         await pilot.press("enter")
         assert app.results == ["command:pulse"]
+
+
+def _derived_action_entry(action: str, **overrides: str) -> list[PaletteEntry]:
+    """The real `APP_BINDINGS` row for `action`, with optional key remaps.
+
+    Derived, never hand-written: the category and the trigger a row renders
+    have to be the ones the catalog (and the user's `keybindings:` remap)
+    actually produce, not a second copy maintained in this file.
+    """
+    entries = derive_action_entries(
+        APP_BINDINGS,
+        overrides=overrides,
+        availability=lambda _action: ActionAvailability.enabled(),
+    )
+    return [entry for entry in entries if entry.id == f"action:{action}"]
+
+
+def _derived_command_entry(canonical: str) -> list[PaletteEntry]:
+    """The real `COMMANDS` row for one canonical command text."""
+    entries = derive_command_entries(
+        COMMANDS, availability=lambda _command: ActionAvailability.enabled()
+    )
+    return [entry for entry in entries if entry.id == f"command:{canonical}"]
+
+
+def _heading(options: OptionList, index: int = 0) -> str:
+    """The first rendered line of a row: category, title and trigger."""
+    return str(options.get_option_at_index(index).prompt).splitlines()[0]
+
+
+def _second_line(options: OptionList, index: int = 0) -> str:
+    return str(options.get_option_at_index(index).prompt).splitlines()[1]
+
+
+async def test_an_action_row_shows_its_category_title_and_default_trigger() -> None:
+    screen = ActionPaletteScreen(_derived_action_entry("describe"))
+    app = PaletteHarness(screen)
+    async with app.run_test(size=(80, 24)):
+        heading = _heading(screen.query_one(OptionList))
+        assert "Table" in heading
+        assert "Describe" in heading
+        assert "d" in heading
+        assert "Describe" in _second_line(screen.query_one(OptionList))
+
+
+async def test_an_action_row_shows_the_remapped_trigger_that_actually_runs_it() -> None:
+    """A `keybindings:` remap changes what the user has to press, so the row
+    has to show `Ctrl-K` rather than the binding's declared default key."""
+    screen = ActionPaletteScreen(_derived_action_entry("describe", describe="ctrl+k"))
+    app = PaletteHarness(screen)
+    async with app.run_test(size=(80, 24)):
+        heading = _heading(screen.query_one(OptionList))
+        assert "Ctrl-K" in heading
+        assert "Table" in heading
+        assert "Describe" in heading
+
+
+async def test_a_command_row_shows_its_category_title_and_colon_spelling() -> None:
+    screen = ActionPaletteScreen(_derived_command_entry("pulse"))
+    app = PaletteHarness(screen)
+    async with app.run_test(size=(80, 24)):
+        options = screen.query_one(OptionList)
+        heading = _heading(options)
+        assert "Commands" in heading
+        assert "Open Pulse / Problems" in heading
+        assert ":pulse" in heading
+        assert "Current problems" in _second_line(options)
+
+
+async def test_a_row_renders_catalog_text_literally_not_as_markup() -> None:
+    """Every rendered part is catalog text, so a `[`/`]` in a category,
+    title, trigger or description must survive as characters rather than be
+    parsed away as a Rich style tag."""
+    entry = PaletteEntry(
+        id="action:danger",
+        title="[bold red]Delete[/] pod",
+        description="[link=http://x]details[/link]",
+        category="[Table]",
+        trigger="[d]",
+        search_terms=(),
+        declaration_order=0,
+        availability=ActionAvailability.enabled(),
+        invocation=AppActionInvocation("danger"),
+    )
+    screen = ActionPaletteScreen([entry])
+    app = PaletteHarness(screen)
+    async with app.run_test(size=(80, 24)):
+        options = screen.query_one(OptionList)
+        prompt = str(options.get_option_at_index(0).prompt)
+        rendered = "\n".join(_viewport_lines(options))
+        for literal in (
+            "[bold red]Delete[/] pod",
+            "[link=http://x]details[/link]",
+            "[Table]",
+            "[d]",
+        ):
+            assert literal in prompt
+        assert "[bold red]Delete[/] pod" in rendered
+
+
+async def test_a_narrow_terminal_still_renders_category_title_and_trigger() -> None:
+    """36 columns wraps the heading instead of dropping any of its parts."""
+    screen = ActionPaletteScreen(_derived_command_entry("pulse"))
+    app = PaletteHarness(screen)
+    async with app.run_test(size=(36, 16)):
+        options = screen.query_one(OptionList)
+        rendered = "".join(_viewport_lines(options))
+        assert "Commands" in rendered
+        assert "Pulse" in rendered
+        assert ":pulse" in rendered

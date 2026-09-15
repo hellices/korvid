@@ -22,7 +22,7 @@ def _entry(
     title: str,
     *,
     description: str = "",
-    aliases: tuple[str, ...] = (),
+    search_terms: tuple[str, ...] = (),
     available: bool = True,
     order: int = 0,
 ) -> PaletteEntry:
@@ -40,7 +40,7 @@ def _entry(
         description=description,
         category="Actions",
         trigger="D",
-        aliases=aliases,
+        search_terms=search_terms,
         declaration_order=order,
         availability=ActionAvailability(True, reason),
         invocation=AppActionInvocation(entry_id.removeprefix("action:")),
@@ -69,7 +69,7 @@ def _command_entry(
         description="",
         category="Commands",
         trigger=f":{canonical}",
-        aliases=(),
+        search_terms=(),
         declaration_order=order,
         availability=ActionAvailability(True, reason),
         invocation=CommandInvocation(canonical),
@@ -81,7 +81,7 @@ def _ranking_fixture(*, drain_available: bool = True) -> list[PaletteEntry]:
         _entry(
             "action:drain_node",
             "Drain",
-            aliases=("drain node",),
+            search_terms=("drain node",),
             available=drain_available,
             order=0,
         ),
@@ -275,3 +275,83 @@ def test_palette_catalog_keeps_command_names_out_of_the_action_namespace() -> No
     assert command_names == ["help"]
     assert "quit" in action_names
     assert action_names.count("help") == 1
+
+
+def _real_action_entries(unavailable: str | None = None) -> list[PaletteEntry]:
+    def availability(action: str) -> ActionAvailability:
+        if action == unavailable:
+            return ActionAvailability(
+                True, UnavailableReason(AvailabilityCode.NO_SELECTION, "select a resource first")
+            )
+        return ActionAvailability.enabled()
+
+    return derive_action_entries(APP_BINDINGS, availability=availability)
+
+
+def _real_command_entries() -> list[PaletteEntry]:
+    return derive_command_entries(
+        COMMANDS, availability=lambda _command: ActionAvailability.enabled()
+    )
+
+
+def test_canonical_action_ids_are_searchable_at_the_exact_tier() -> None:
+    """The id a user reads in docs, logs and `run_action` calls
+    (`delete_resource`, `logs_multi`) has to find its own row. Exactness is
+    asserted through the tier's own consequence: an exact match outranks
+    everything even when that one entry is the currently unavailable one,
+    because availability only breaks ties *inside* a tier."""
+    for action in ("delete_resource", "logs_multi"):
+        ranked = rank_entries(_real_action_entries(), action)
+        assert ranked[0].id == f"action:{action}"
+        refused = rank_entries(_real_action_entries(unavailable=action), action)
+        assert refused[0].id == f"action:{action}"
+        assert refused[0].availability.reason is not None
+
+
+def test_commands_answer_to_their_canonical_text_bare_and_in_colon_form() -> None:
+    """`:pulse` is how the user spells the command; `pulse` is how they
+    think of it. Both, plus `ai`/`:ai`, have to land on their own row."""
+    entries = _real_command_entries()
+    for query, expected in (
+        ("pulse", "command:pulse"),
+        (":pulse", "command:pulse"),
+        ("ai", "command:ai"),
+        (":ai", "command:ai"),
+    ):
+        assert rank_entries(entries, query)[0].id == expected
+
+
+def test_commands_answer_to_every_descriptor_alias_bare_and_in_colon_form() -> None:
+    """Every alias the parser accepts is a real spelling of the command, so
+    `:problems` and `:agent` must resolve exactly like `:pulse` and `:ai`."""
+    entries = _real_command_entries()
+    for query, expected in (
+        ("problems", "command:pulse"),
+        (":problems", "command:pulse"),
+        ("agent", "command:ai"),
+        (":agent", "command:ai"),
+        ("telepresence", "command:tp"),
+        (":telepresence", "command:tp"),
+    ):
+        assert rank_entries(entries, query)[0].id == expected
+
+
+def test_command_search_terms_are_deduplicated_in_a_deterministic_order() -> None:
+    """Canonical text first, then each descriptor alias, each in bare and
+    colon form, then the palette's own prose synonyms — first occurrence
+    wins, so `:pulse` (canonical *and* first alias) appears once."""
+    by_id = {entry.id: entry for entry in _real_command_entries()}
+    assert by_id["command:pulse"].search_terms == (
+        "pulse",
+        ":pulse",
+        "problems",
+        ":problems",
+        "warnings",
+    )
+    assert by_id["command:ai"].search_terms == ("ai", ":ai", "agent", ":agent")
+
+
+def test_action_search_terms_carry_the_canonical_action_id() -> None:
+    by_id = {entry.id: entry for entry in _real_action_entries()}
+    assert by_id["action:logs_multi"].search_terms == ("logs_multi",)
+    assert by_id["action:delete_resource"].search_terms == ("delete_resource",)

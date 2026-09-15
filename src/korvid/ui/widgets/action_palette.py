@@ -15,7 +15,7 @@ from collections.abc import Sequence
 from typing import ClassVar
 
 from rich.text import Text
-from textual import on
+from textual import events, on
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
@@ -29,25 +29,62 @@ from korvid.ui.action_palette import PaletteEntry, rank_entries
 #: explicit rather than an empty, ambiguous-looking list.
 _NO_RESULTS_PROMPT = "No matching actions or commands"
 
+#: Rows the modal spends on everything that is not the results list: the
+#: query `Input` (3), the key hint (1), the container's vertical padding
+#: (2) and its border (2). Subtracting them is what keeps the hint on
+#: screen when the catalog is longer than the terminal.
+_CHROME_ROWS = 8
+
+#: Upper bound on the results viewport, so the palette stays a palette on a
+#: very tall terminal instead of becoming a full-height list.
+_MAX_RESULT_ROWS = 18
+
+#: Percentage of the terminal height the whole modal may occupy.
+_HEIGHT_SHARE = 80
+
+#: What separates the three parts of a row's first line (category, title,
+#: trigger). A middle dot rather than a bracket or a pipe: the parts are
+#: catalog text rendered literally, and this must not look like syntax the
+#: user could mistake for part of a name.
+_HEADING_SEPARATOR = " · "
+
 
 def _prompt_for(entry: PaletteEntry) -> Text:
     """Build the two-line prompt for `entry`.
 
+    The first line says what the row is and how to run it: the catalog's
+    own `category`, the entry `title`, and the `trigger` that invokes it
+    right now — the effective key for a bound action (already resolved
+    through any `keybindings:` remap when the entry was derived) or the
+    canonical `:` spelling for a command. The second line stays the
+    description, or the owner's reason when the entry cannot run. None of
+    it is a separate display table: every part is the derived entry's own
+    catalog-derived field.
+
     Always a `Text` object, never a raw `str`: Textual renders a plain
     `str` `Option` prompt as Rich console markup, which would misrender a
     catalog-derived title, description, or unavailable-reason that happens
-    to contain `[`/`]`. Wrapping in `Text` keeps that content literal.
+    to contain `[`/`]`. Appending each part to a `Text` keeps that content
+    literal — `Text.append` never parses markup.
     """
+    prompt = Text()
+    if entry.category:
+        prompt.append(entry.category, style="dim")
+        prompt.append(_HEADING_SEPARATOR)
+    prompt.append(entry.title, style="bold")
+    if entry.trigger:
+        prompt.append(_HEADING_SEPARATOR)
+        prompt.append(entry.trigger, style="dim")
     if entry.availability.invocable:
         second_line = entry.description
     else:
         reason = entry.availability.reason
         message = reason.message if reason is not None else "unavailable"
         second_line = f"Unavailable: {message}"
-    lines = [entry.title]
     if second_line:
-        lines.append(second_line)
-    return Text("\n".join(lines))
+        prompt.append("\n")
+        prompt.append(second_line)
+    return prompt
 
 
 class ActionPaletteScreen(ModalScreen[str | None]):
@@ -83,14 +120,13 @@ class ActionPaletteScreen(ModalScreen[str | None]):
         width: 76;
         max-width: 94%;
         height: auto;
-        max-height: 80%;
+        max-height: 100%;
         border: round $accent;
         padding: 1 2;
         background: $surface;
     }
     ActionPaletteScreen #action-results {
         height: auto;
-        max-height: 18;
     }
     ActionPaletteScreen #action-hint {
         height: 1;
@@ -110,8 +146,30 @@ class ActionPaletteScreen(ModalScreen[str | None]):
             yield Static("Enter run · Esc close", id="action-hint", markup=False)
 
     def on_mount(self) -> None:
+        self._fit_results(self.app.size.height)
         self._render_results("")
         self.query_one(Input).focus()
+
+    def on_resize(self, event: events.Resize) -> None:
+        """Re-fit the results list to a terminal that changed size."""
+        self._fit_results(event.size.height)
+
+    def _fit_results(self, screen_rows: int) -> None:
+        """Cap the results viewport so the whole modal fits `screen_rows`.
+
+        CSS alone cannot say this. The container is `height: auto`, so an
+        `OptionList` asking for its full content height grows the modal
+        past the terminal: the results spill out and the key hint below
+        them is never laid out on screen, while `End` highlights a row
+        clipped away by the container. Capping the list to the rows that
+        are actually left over (`_HEIGHT_SHARE` of the terminal minus the
+        modal's own `_CHROME_ROWS`) turns that overflow back into
+        scrolling inside the list, which is what `OptionList` already
+        knows how to do. Set through the public `styles` API, and never
+        below one row, so the palette still renders on a tiny terminal.
+        """
+        budget = screen_rows * _HEIGHT_SHARE // 100 - _CHROME_ROWS
+        self.query_one(OptionList).styles.max_height = max(1, min(_MAX_RESULT_ROWS, budget))
 
     @on(Input.Changed)
     def _query_changed(self, event: Input.Changed) -> None:
