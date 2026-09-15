@@ -61,6 +61,24 @@ class ActionAvailability:
 #: so they say it identically (issue #388 task 6).
 AGENT_UNAVAILABLE = UnavailableReason(AvailabilityCode.MISSING_CAPABILITY, "Agent is not available")
 
+#: The concise half of `:ai`'s own refusal: with the [agent] extra wired
+#: but no model catalog composed, `AgentUiController._open_setup` has no
+#: wizard and no profile manager to open and reports the install hint
+#: instead. The row shows the bounded fact and the keypress adds the
+#: remediation, exactly as `:mcp`/`:tp` split theirs - the notification
+#: leads with this same sentence, so the two cannot drift (#388 round 13).
+AGENT_SETUP_UNAVAILABLE = UnavailableReason(
+    AvailabilityCode.MISSING_CAPABILITY, "Agent setup unavailable"
+)
+
+#: The concise half of `:model`'s refusal, split the same way: bare
+#: `:model` reports the live session's model, and with no session (never
+#: connected, or disconnected by `:ai off`) it refuses with this sentence
+#: plus the instruction that repairs it ("— run :ai first").
+AGENT_NOT_CONFIGURED = UnavailableReason(
+    AvailabilityCode.MISSING_CAPABILITY, "Agent not configured"
+)
+
 #: The one wording for "a `:ctx` switch is in flight". Every flow that spawns
 #: a cluster stream refuses during a switch (issue #84), and each of their
 #: palette probes reports it, so the notification the real keypress emits

@@ -32,6 +32,8 @@ from korvid.k8s.models import GenericSummary, PodSummary
 from korvid.tools.proposals import ProposalStore
 from korvid.ui import action_palette as palette_domain
 from korvid.ui.action_availability import (
+    AGENT_NOT_CONFIGURED,
+    AGENT_SETUP_UNAVAILABLE,
     AGENT_UNAVAILABLE,
     ActionAvailability,
     AvailabilityCode,
@@ -53,6 +55,7 @@ from tests.app_factory import build_test_app
 from .agent_session_fakes import FakeSession
 from .test_adaptive_footer import _rows_listed
 from .test_adaptive_footer import make_app as make_navigation_app
+from .test_agent_ui_controller_profiles import _StubCatalog
 from .test_app import _pod, make_app
 from .test_integration_controller import FakeMCP
 from .test_proposals_ui import Recorder as ProposalRecorder
@@ -98,6 +101,22 @@ def _app_with_integrations() -> KorvidApp:
 
 def _app_without_agent() -> KorvidApp:
     return _build_app(agent_available=False)
+
+
+def _agent_app(*, session: Any | None, model_name: str | None, catalog: bool = True) -> KorvidApp:
+    """An app whose agent wiring the caller chooses, piece by piece.
+
+    The three pieces the two agent commands read are independent: the
+    [agent] extra itself, the model catalog `:ai`'s wizard is driven from,
+    and the live session `:model` reports. `catalog` defaults to a wired
+    stub so the common case reads as "a fully composed agent"; `False` is
+    how a test asks what `:ai` says without one.
+    """
+    return _build_app(
+        agent_session=session,
+        agent_model_name=model_name,
+        agent_catalog=_StubCatalog() if catalog else None,
+    )
 
 
 async def _loaded(pilot: Any, app: KorvidApp) -> ResourceTable:
@@ -354,9 +373,12 @@ async def test_command_rows_are_unavailable_without_their_capability() -> None:
             reason = row.availability.reason
             assert reason is not None
             assert reason.code is AvailabilityCode.MISSING_CAPABILITY
-        # The agent *is* available here, so its rows stay runnable.
-        assert _row(app, "command:ai").availability.invocable is True
-        assert _row(app, "command:model").availability.invocable is True
+        # The agent *is* available here, but each of its commands still
+        # answers for its own prerequisite: this session has no model
+        # catalog for `:ai` to open and no live session for `:model` to
+        # report (#388 round 13, below).
+        assert _row(app, "command:ai").availability.reason == AGENT_SETUP_UNAVAILABLE
+        assert _row(app, "command:model").availability.reason == AGENT_NOT_CONFIGURED
         # And the row itself says it cannot run, rather than leaving the
         # user to infer it: the rendered second line carries the owner's
         # reason, and Enter on the row runs nothing.
@@ -538,12 +560,135 @@ async def test_agent_command_rows_are_unavailable_without_the_agent() -> None:
 
 
 async def test_agent_command_rows_are_enabled_with_the_agent() -> None:
-    app = _build_app(agent_session=FakeSession(), agent_model_name="test-model")
+    """A fully composed agent session: the extra is wired, `:ai` has the
+    catalog its wizard is driven from, and `:model` has a live session with
+    a model name to report - so both rows really run."""
+    app = _agent_app(session=FakeSession(), model_name="test-model")
     async with app.run_test() as pilot:
         await _loaded(pilot, app)
         assert app._agent_ui.available is True
         for entry_id in ("command:ai", "command:model"):
             assert _row(app, entry_id).availability == ActionAvailability.enabled()
+
+
+async def test_the_agent_setup_row_reports_a_session_without_a_catalog() -> None:
+    """`:ai` opens the profile manager or the setup wizard, and both are
+    driven from the model catalog. A session wired without one cannot open
+    either: `_open_setup` reports the install hint and nothing else
+    happens, so the palette must not advertise a row that only notifies.
+
+    The row carries the bounded half of that same sentence; the keypress
+    keeps the remediation (#388 round 13), and deriving the catalog stays
+    silent.
+    """
+    app = _agent_app(session=FakeSession(), model_name="test-model", catalog=False)
+    async with app.run_test() as pilot:
+        await _loaded(pilot, app)
+        assert app._agent_ui.available is True
+        before = len(app._notifications)
+        row = _row(app, "command:ai")
+        assert row.availability.invocable is False
+        assert row.availability.reason == AGENT_SETUP_UNAVAILABLE
+        # `:model` reads a different fact and this session has it.
+        assert _row(app, "command:model").availability == ActionAvailability.enabled()
+        assert len(app._notifications) == before
+
+
+async def test_the_model_row_reports_a_session_that_was_never_configured() -> None:
+    """`:model` reports the live session's model, and refuses without one.
+
+    A build that has the catalog but no session (provider creation failed,
+    or nothing was ever configured) answers `:model` with "Agent not
+    configured — run :ai first", which is a refusal, not a route - while
+    `:ai`, the command that *fixes* it, stays runnable.
+    """
+    app = _agent_app(session=None, model_name=None)
+    async with app.run_test() as pilot:
+        await _loaded(pilot, app)
+        assert app._agent_ui.session is None
+        before = len(app._notifications)
+        row = _row(app, "command:model")
+        assert row.availability.invocable is False
+        assert row.availability.reason == AGENT_NOT_CONFIGURED
+        assert _row(app, "command:ai").availability == ActionAvailability.enabled()
+        assert len(app._notifications) == before
+
+
+async def test_the_model_row_reports_a_configured_name_without_a_session() -> None:
+    """Config can carry a model name whose provider never came up.
+
+    `handle_model_command` guards on both halves - a live session *and* a
+    model name - because at startup the name survives a failed provider
+    creation. The row asks the same pair, so it cannot promise a report the
+    command would refuse.
+    """
+    app = _agent_app(session=None, model_name="test-model")
+    async with app.run_test() as pilot:
+        await _loaded(pilot, app)
+        assert app._agent_ui.model_name == "test-model"
+        assert _row(app, "command:model").availability.reason == AGENT_NOT_CONFIGURED
+
+
+async def test_the_model_row_is_revalidated_after_the_agent_disconnects() -> None:
+    """`:ai off` releases the session, and the row is re-derived from it.
+
+    The answer belongs to the moment it is asked: a `:model` row offered
+    while the agent was connected must be refused once it is not, and the
+    selection that reaches the real command afterwards earns the handler's
+    own detailed refusal - which leads with the row's own sentence.
+    """
+    app = _agent_app(session=FakeSession(), model_name="test-model")
+    async with app.run_test() as pilot:
+        await _loaded(pilot, app)
+        assert _row(app, "command:model").availability == ActionAvailability.enabled()
+        app._agent_ui.handle_command(["off"])
+        await until(
+            pilot,
+            lambda: app._agent_ui.session is None,
+            label="agent disconnected",
+        )
+        assert _row(app, "command:model").availability.reason == AGENT_NOT_CONFIGURED
+        await app._palette_selected("command:model")
+        await until(
+            pilot,
+            lambda: any(
+                n.message.startswith(AGENT_NOT_CONFIGURED.message) for n in app._notifications
+            ),
+            label="the stale model selection refused with the owner's wording",
+        )
+        assert len(app.screen_stack) == 1
+
+
+async def test_the_agent_rows_lead_with_the_wording_their_handlers_notify() -> None:
+    """Row and keypress say the same thing, and only the length differs.
+
+    Each row carries the bounded capability fact; each handler leads with
+    that same sentence and then adds the remediation a toast has room for
+    (the install hint for `:ai`, "run :ai first" for `:model`). Pinning the
+    prefix relationship here is what keeps the two from drifting apart.
+    """
+    app = _agent_app(session=None, model_name=None, catalog=False)
+    async with app.run_test() as pilot:
+        await _loaded(pilot, app)
+        before = len(app._notifications)
+        app._agent_ui.handle_command([])
+        app._agent_ui.handle_model_command([])
+        await until(
+            pilot,
+            lambda: len(app._notifications) >= before + 2,
+            label="both handlers reported",
+        )
+        messages = [n.message for n in app._notifications]
+        assert any(
+            message.startswith(AGENT_SETUP_UNAVAILABLE.message)
+            and message != AGENT_SETUP_UNAVAILABLE.message
+            for message in messages
+        )
+        assert any(
+            message.startswith(AGENT_NOT_CONFIGURED.message)
+            and message != AGENT_NOT_CONFIGURED.message
+            for message in messages
+        )
 
 
 async def test_the_agent_row_explains_the_capability_not_the_router_fallback() -> None:

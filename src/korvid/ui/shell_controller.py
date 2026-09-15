@@ -41,6 +41,7 @@ from typing import Any, Concatenate, ParamSpec, TypeVar
 from textual.app import SuspendNotSupported
 
 from korvid.core.audit import AuditLog
+from korvid.core.config import KorvidConfig
 from korvid.core.debugimage import recommend_debug_images
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.errors import ApiStatusError
@@ -169,6 +170,23 @@ class ShellSettings:
     debug_images: Mapping[str, str] | None
     node_shell_image: str | None
     node_shell_namespace: str | None
+
+    @classmethod
+    def from_config(cls, config: KorvidConfig) -> ShellSettings:
+        """Snapshot the five values these flows read out of `config`.
+
+        Lives here rather than in the composition root because *which*
+        values this controller is narrowed to is this type's own business
+        (and its size budget), and the root re-takes the snapshot on every
+        read so a `:ctx` switch retargets `kube_context`.
+        """
+        return cls(
+            kube_context=config.kube_context,
+            debug_default_image=config.debug_default_image,
+            debug_images=config.debug_images,
+            node_shell_image=config.node_shell_image,
+            node_shell_namespace=config.node_shell_namespace,
+        )
 
 
 class ShellController:

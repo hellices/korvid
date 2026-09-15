@@ -27,6 +27,7 @@ from time import monotonic
 from typing import Any
 
 from korvid.core.audit import AuditLog
+from korvid.core.config import KorvidConfig
 from korvid.core.debugimage import (
     FALLBACK_IMAGE,
     ephemeral_container_names,
@@ -60,6 +61,19 @@ class DebugSettings:
     #: mapping means the operator curated the debug images, which is what
     #: makes offering a public busybox fallback wrong.
     images: Mapping[str, str] | None
+
+    @classmethod
+    def from_config(cls, config: KorvidConfig) -> DebugSettings:
+        """Snapshot the three values this flow reads out of `config`.
+
+        The composition root re-takes the snapshot on every read, so a
+        `:ctx` switch retargets `kube_context` here too.
+        """
+        return cls(
+            kube_context=config.kube_context,
+            default_image=config.debug_default_image,
+            images=config.debug_images,
+        )
 
 
 class DebugController:

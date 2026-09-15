@@ -1184,13 +1184,7 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
             action
         ),
         target_uid=lambda kind, ns, name: app._target_uid(kind, ns, name),
-        settings=lambda: ShellSettings(
-            kube_context=app.config.kube_context,
-            debug_default_image=app.config.debug_default_image,
-            debug_images=app.config.debug_images,
-            node_shell_image=app.config.node_shell_image,
-            node_shell_namespace=app.config.node_shell_namespace,
-        ),
+        settings=lambda: ShellSettings.from_config(app.config),
     )
     shell_ref.bind(shell)
     forward_controller = ForwardController(
@@ -1239,11 +1233,7 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
         ui=AppUiSurface(app),
         audit=lambda: app._audit,
         readonly=lambda: app.config.readonly,
-        settings=lambda: DebugSettings(
-            kube_context=app.config.kube_context,
-            default_image=app.config.debug_default_image,
-            images=app.config.debug_images,
-        ),
+        settings=lambda: DebugSettings.from_config(app.config),
         pod_uid_unchanged=inspect_controller.pod_uid_unchanged,
         get_epoch=context.epoch,
         epoch_crossed=context.crossed,
@@ -1385,6 +1375,11 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
         available=inputs.agent_available,
     )
     agent_ref.bind(agent_ui)
+    # A bool, not `inputs.agent_catalog` read through a closure: the
+    # catalog is injected once and never replaced, and closing over the
+    # whole inputs record would keep the initial agent session alive past
+    # `:ai off` (which releases it on purpose).
+    agent_setup = inputs.agent_catalog is not None
     actions = ActionPolicy(
         view=view,
         agent_available=lambda: agent_ui.available,
@@ -1407,6 +1402,10 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
         ),
         reason_by_command=compose_command_reasons(
             agent_available=lambda: agent_ui.available,
+            agent_setup_available=lambda: agent_setup,
+            agent_session_configured=lambda: (
+                agent_ui.session is not None and bool(agent_ui.model_name)
+            ),
             mcp=integrations.mcp_unavailable_reason,
             telepresence=integrations.telepresence_unavailable_reason,
             proposals=proposals.unavailable_reason,

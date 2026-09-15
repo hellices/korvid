@@ -16,6 +16,8 @@ from korvid.k8s.helm import HELM_RELEASES_META, HELM_REVISIONS_META
 from korvid.k8s.olm import OPERATORS_GROUP, PACKAGES_GROUP
 from korvid.k8s.portforward import FORWARDABLE_KINDS
 from korvid.ui.action_availability import (
+    AGENT_NOT_CONFIGURED,
+    AGENT_SETUP_UNAVAILABLE,
     AGENT_UNAVAILABLE,
     CONTEXT_SWITCH_IN_PROGRESS,
     ActionAvailability,
@@ -188,6 +190,8 @@ def compose_action_reasons(
 def compose_command_reasons(
     *,
     agent_available: Callable[[], bool],
+    agent_setup_available: Callable[[], bool],
+    agent_session_configured: Callable[[], bool],
     mcp: Callable[[], UnavailableReason | None],
     telepresence: Callable[[], UnavailableReason | None],
     proposals: Callable[[], UnavailableReason | None],
@@ -203,8 +207,21 @@ def compose_command_reasons(
     that may not exist (#388 task 6 review). It is read live: the agent can
     be built, rebuilt or disconnected long after the wiring ran.
 
+    With the extra wired the two commands stop agreeing, because their
+    handlers read different things (#388 round 13): `:ai` opens the setup
+    wizard or the profile manager, which needs the model catalog, and
+    `:model` reports or swaps the live session's model, which needs a
+    session. So each carries its own prerequisite after the shared one,
+    and both are assembled here for the same reason the first answer is -
+    the controller is at its reviewed size cap, and these are composition
+    facts the root already holds.
+
     Args:
         agent_available: Whether an Agent is composed and usable now.
+        agent_setup_available: Whether `:ai` has the model catalog its
+            wizard and profile manager are driven from.
+        agent_session_configured: Whether `:model` has a live session with
+            a model name to report.
         mcp: `IntegrationController.mcp_unavailable_reason`.
         telepresence: `IntegrationController.telepresence_unavailable_reason`.
         proposals: `ProposalController.unavailable_reason` — the inbox
@@ -227,12 +244,19 @@ def compose_command_reasons(
         The canonical command text -> reason-resolver map.
     """
 
-    def agent_reason() -> UnavailableReason | None:
-        return None if agent_available() else AGENT_UNAVAILABLE
+    def ai_reason() -> UnavailableReason | None:
+        if not agent_available():
+            return AGENT_UNAVAILABLE
+        return None if agent_setup_available() else AGENT_SETUP_UNAVAILABLE
+
+    def model_reason() -> UnavailableReason | None:
+        if not agent_available():
+            return AGENT_UNAVAILABLE
+        return None if agent_session_configured() else AGENT_NOT_CONFIGURED
 
     return {
-        "ai": agent_reason,
-        "model": agent_reason,
+        "ai": ai_reason,
+        "model": model_reason,
         "mcp": mcp,
         "tp": telepresence,
         "proposals": proposals,

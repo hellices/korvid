@@ -13,6 +13,8 @@ from korvid.core.store import Summary
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.helm import HELM_RELEASES_META
 from korvid.ui.action_availability import (
+    AGENT_NOT_CONFIGURED,
+    AGENT_SETUP_UNAVAILABLE,
     AGENT_UNAVAILABLE,
     CONTEXT_SWITCH_IN_PROGRESS,
     ActionAvailability,
@@ -540,6 +542,8 @@ def test_composed_command_reasons_route_the_picker_commands() -> None:
     listing = False
     reasons = compose_command_reasons(
         agent_available=lambda: True,
+        agent_setup_available=lambda: True,
+        agent_session_configured=lambda: True,
         mcp=lambda: None,
         telepresence=lambda: None,
         proposals=lambda: None,
@@ -571,6 +575,8 @@ def test_composed_command_reasons_route_the_forward_list_command() -> None:
     composed = True
     reasons = compose_command_reasons(
         agent_available=lambda: True,
+        agent_setup_available=lambda: True,
+        agent_session_configured=lambda: True,
         mcp=lambda: None,
         telepresence=lambda: None,
         proposals=lambda: None,
@@ -590,6 +596,8 @@ def test_composed_command_reasons_share_one_agent_answer() -> None:
     answer with the one shared wording, and nothing else does."""
     reasons = compose_command_reasons(
         agent_available=lambda: False,
+        agent_setup_available=lambda: True,
+        agent_session_configured=lambda: True,
         mcp=lambda: None,
         telepresence=lambda: None,
         proposals=lambda: None,
@@ -608,6 +616,8 @@ def test_composed_command_reasons_follow_a_late_agent() -> None:
     available = False
     reasons = compose_command_reasons(
         agent_available=lambda: available,
+        agent_setup_available=lambda: True,
+        agent_session_configured=lambda: True,
         mcp=lambda: None,
         telepresence=lambda: None,
         proposals=lambda: None,
@@ -619,6 +629,59 @@ def test_composed_command_reasons_follow_a_late_agent() -> None:
     available = True
     assert reasons["ai"]() is None
     assert reasons["model"]() is None
+
+
+def test_composed_command_reasons_split_the_two_agent_prerequisites() -> None:
+    """The extra is only the *first* thing `:ai` and `:model` need.
+
+    With the [agent] extra wired both commands still reach a handler that
+    can refuse on its own composition facts, and they are not the same
+    fact: `:ai` opens the setup wizard/profile manager, which needs the
+    model catalog, while `:model` reports (or swaps) the live session's
+    model and refuses without one. So each answers for what its own
+    handler reads, and a build that has one but not the other greys out
+    exactly one row (#388 round 13).
+    """
+    catalog = False
+    session = False
+    reasons = compose_command_reasons(
+        agent_available=lambda: True,
+        agent_setup_available=lambda: catalog,
+        agent_session_configured=lambda: session,
+        mcp=lambda: None,
+        telepresence=lambda: None,
+        proposals=lambda: None,
+        namespace=lambda: None,
+        context=lambda: None,
+        port_forwards=lambda: None,
+    )
+    assert reasons["ai"]() == AGENT_SETUP_UNAVAILABLE
+    assert reasons["model"]() == AGENT_NOT_CONFIGURED
+    catalog = True
+    assert reasons["ai"]() is None
+    assert reasons["model"]() == AGENT_NOT_CONFIGURED
+    session = True
+    assert reasons["ai"]() is None
+    assert reasons["model"]() is None
+
+
+def test_composed_command_reasons_report_the_missing_extra_before_its_parts() -> None:
+    """Without the extra there is no owner at all, so neither command
+    reports a prerequisite of an agent that was never composed - both say
+    the one shared absence, whatever the inner probes answer."""
+    reasons = compose_command_reasons(
+        agent_available=lambda: False,
+        agent_setup_available=lambda: False,
+        agent_session_configured=lambda: False,
+        mcp=lambda: None,
+        telepresence=lambda: None,
+        proposals=lambda: None,
+        namespace=lambda: None,
+        context=lambda: None,
+        port_forwards=lambda: None,
+    )
+    assert reasons["ai"]() == AGENT_UNAVAILABLE
+    assert reasons["model"]() == AGENT_UNAVAILABLE
 
 
 def test_composed_command_reasons_route_the_integration_commands() -> None:
@@ -633,6 +696,8 @@ def test_composed_command_reasons_route_the_integration_commands() -> None:
     pending = False
     reasons = compose_command_reasons(
         agent_available=lambda: True,
+        agent_setup_available=lambda: True,
+        agent_session_configured=lambda: True,
         mcp=lambda: mcp_reason,
         telepresence=lambda: tp_reason,
         proposals=lambda: None if pending else proposals_reason,
@@ -728,6 +793,8 @@ def test_every_owned_command_is_really_a_palette_command() -> None:
     never reach the row it was written for."""
     reasons = compose_command_reasons(
         agent_available=lambda: True,
+        agent_setup_available=lambda: True,
+        agent_session_configured=lambda: True,
         mcp=lambda: None,
         telepresence=lambda: None,
         proposals=lambda: None,
