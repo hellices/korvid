@@ -21,6 +21,7 @@ from dataclasses import dataclass
 
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.helm import HELM_RELEASES_META
+from korvid.k8s.olm import OPERATORS_GROUP
 from korvid.ui.action_availability import AvailabilityCode, UnavailableReason
 from korvid.ui.view_state import ViewState
 from korvid.ui.write_coordinator import WriteCoordinator, gvr_label
@@ -169,6 +170,11 @@ class WriteAvailability:
     def _kind_reason(self, action: str, meta: ResourceMeta) -> UnavailableReason | None:
         """The "this kind does not take that write" refusals, with each
         flow's own wording."""
+        if action == "delete_resource" and (meta.group, meta.plural) == (
+            OPERATORS_GROUP,
+            "subscriptions",
+        ):
+            return self._operator_uninstall_reason()
         if action == "rollout_restart" and (meta.group, meta.plural) not in RESTARTABLE:
             return UnavailableReason(
                 AvailabilityCode.UNSUPPORTED_RESOURCE,
@@ -199,6 +205,28 @@ class WriteAvailability:
                     AvailabilityCode.MISSING_CAPABILITY, "Resize unavailable: no manifest source"
                 )
         return None
+
+    def _operator_uninstall_reason(self) -> UnavailableReason | None:
+        """Why Ctrl-D on an OLM Subscription would refuse, or None.
+
+        Deleting a Subscription alone leaves the operator running, so the
+        key is redirected to `OperatorController.uninstall`, which fetches
+        the Subscription manifest before it can name the installed CSV or
+        describe anything - and refuses with exactly this sentence when no
+        manifest source is wired (#388 round 13).
+
+        Scoped to that one identity on purpose. An InstallPlan or a
+        PackageManifest is deleted through the generic path, which reads no
+        manifest; and a CSV's redirect only *offers* the operator uninstall
+        when the store already holds the owning Subscription, falling
+        through to that same generic delete when it does not - so reporting
+        this there would grey out a delete that works.
+        """
+        if self.manifest_source_available():
+            return None
+        return UnavailableReason(
+            AvailabilityCode.MISSING_CAPABILITY, "Uninstall unavailable: no manifest source"
+        )
 
     def node_unavailable_reason(self, action: str) -> UnavailableReason | None:
         """Why `ResourceWriteController.node_target(action)` would refuse

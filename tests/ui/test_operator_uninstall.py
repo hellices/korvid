@@ -11,14 +11,18 @@ from typing import Any
 
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.errors import ApiStatusError
+from korvid.ui.action_availability import AvailabilityCode, UnavailableReason
 from korvid.ui.widgets.confirm_screen import ConfirmScreen
+from korvid.ui.widgets.resource_table import ResourceTable
 
 from .test_olm_view import (
     SUB_META,
     Recorder,
     _aliases,
     _csv,
+    _installplan,
     _navigate,
+    _package,
     _subscription,
     make_app,
 )
@@ -544,3 +548,116 @@ async def test_uninstall_holds_exactly_one_write_reservation_during_the_mutation
         await until(pilot, lambda: len(ops.calls) == 2, label="both deletes ran")
         assert observed_during_mutation == [1, 1], "the mutation must reserve exactly one write"
         await until(pilot, lambda: app._writes.active_writes() == 0, label="reservation released")
+
+
+# ---------------------------------------------------------------------------
+# What the palette says about Ctrl-D on a Subscription (#388 round 13)
+# ---------------------------------------------------------------------------
+
+
+async def test_uninstall_availability_reports_a_missing_manifest_source(
+    tmp_path: Path,
+) -> None:
+    """Ctrl-D on a Subscription is the operator uninstall, and that flow
+    fetches the Subscription manifest before it can describe (or approve)
+    anything: with no manifest source wired it refuses with "Uninstall
+    unavailable: no manifest source" and stops.
+
+    The palette offered the row anyway, so selecting it only produced that
+    warning - the probe now carries the same sentence, silently.
+    """
+    app = make_app(
+        {"subscriptions": [_subscription("cert-manager")]},
+        audit_path=tmp_path / "audit.jsonl",
+        write_ops=Recorder(),
+    )
+    app._get_manifest = None
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "subscriptions", "subscriptions")
+        await until(pilot, lambda: bool(app.store.get("subscriptions", "operators")), label="rows")
+        before = len(app._notifications)
+        availability = app._actions.availability("delete_resource")
+        assert availability.binding_enabled is True
+        assert availability.reason == UnavailableReason(
+            AvailabilityCode.MISSING_CAPABILITY, "Uninstall unavailable: no manifest source"
+        )
+        assert availability.invocable is False
+        assert len(app._notifications) == before
+
+
+async def test_the_uninstall_key_still_notifies_the_missing_manifest_source(
+    tmp_path: Path,
+) -> None:
+    """The probe is the silent twin of a refusal the keypress keeps."""
+    ops = Recorder()
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app(
+        {"subscriptions": [_subscription("cert-manager")]},
+        audit_path=audit_path,
+        write_ops=ops,
+    )
+    app._get_manifest = None
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "subscriptions", "subscriptions")
+        await until(pilot, lambda: bool(app.store.get("subscriptions", "operators")), label="rows")
+        await pilot.press("ctrl+d")
+        await until(
+            pilot,
+            lambda: any(
+                n.message == "Uninstall unavailable: no manifest source" for n in app._notifications
+            ),
+            label="the uninstall key notified the missing manifest source",
+        )
+        assert ops.calls == []
+        assert len(app.screen_stack) == 1
+
+
+async def test_uninstall_availability_is_invocable_with_a_manifest_source(
+    tmp_path: Path,
+) -> None:
+    """The positive half: a write client, an audit sink, a manifest source
+    and a Subscription row - Ctrl-D really opens the uninstall flow."""
+    app = make_app(
+        {"subscriptions": [_subscription("cert-manager")]},
+        {"cert-manager": _SUB_MANIFEST, "cert-manager.v1.14.4": _CSV_MANIFEST},
+        tmp_path / "audit.jsonl",
+        write_ops=Recorder(),
+    )
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "subscriptions", "subscriptions")
+        await until(pilot, lambda: bool(app.store.get("subscriptions", "operators")), label="rows")
+        assert app._actions.availability("delete_resource").invocable is True
+
+
+async def test_the_uninstall_refusal_is_only_the_subscription_identity(
+    tmp_path: Path,
+) -> None:
+    """Every other row keeps the ordinary delete's own answer.
+
+    An InstallPlan and a PackageManifest are deleted through the generic
+    path, which reads no manifest, so a session without a manifest source
+    must not grey their Ctrl-D out. The CSV row stays out too: its redirect
+    only *offers* the operator uninstall when the store already holds the
+    owning Subscription, and falls through to an ordinary delete when it
+    does not.
+    """
+    app = make_app(
+        {
+            "installplans": [_installplan("install-abc12", approved=False)],
+            "packagemanifests": [_package("cert-manager")],
+            "clusterserviceversions": [_csv("argocd.v1.0.0", "Succeeded")],
+        },
+        audit_path=tmp_path / "audit.jsonl",
+        write_ops=Recorder(),
+    )
+    app._get_manifest = None
+    async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
+        for command, kind in (
+            ("installplans", "installplans"),
+            ("operators", "packagemanifests"),
+            ("csv", "clusterserviceversions"),
+        ):
+            await _navigate(pilot, command, kind)
+            await until(pilot, lambda: table.row_count == 1, label=f"{kind} row listed")
+            assert app._actions.availability("delete_resource").invocable is True
