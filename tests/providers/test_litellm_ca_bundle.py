@@ -71,6 +71,7 @@ _ANSWER: dict[str, Any] = {
 class _Chat(http.server.BaseHTTPRequestHandler):
     """Answers any POST with one canned chat completion, recording the body."""
 
+    protocol_version = "HTTP/1.1"
     bodies: ClassVar[list[dict[str, Any]]] = []
 
     def do_POST(self) -> None:  # http.server API name
@@ -123,7 +124,7 @@ def _hold_until_the_client_closes(rejected: ssl.SSLSocket) -> None:
             rejected.close()
 
 
-class _ChatServer(http.server.HTTPServer):
+class _ChatServer(http.server.ThreadingHTTPServer):
     """Runs the TLS handshake per connection instead of inside `accept()`.
 
     Wrapping the *listening* socket makes `accept()` hand a refused connection
@@ -176,6 +177,29 @@ class _UnexpectedHandshakeContext:
         return self.wrapped
 
 
+class _TeardownProbeServer:
+    """Server-shaped lifecycle probe that cannot leak its test thread."""
+
+    server_address = ("127.0.0.1", 443)
+
+    def __init__(self) -> None:
+        self._stop = threading.Event()
+        self.finished = threading.Event()
+        self.shutdown_called = False
+        self.close_called = False
+
+    def serve_forever(self) -> None:
+        self._stop.wait()
+        self.finished.set()
+
+    def shutdown(self) -> None:
+        self.shutdown_called = True
+        self._stop.set()
+
+    def server_close(self) -> None:
+        self.close_called = True
+
+
 @asynccontextmanager
 async def _https_endpoint(cert_pem: Path, key_pem: Path) -> AsyncIterator[str]:
     """A local HTTPS chat endpoint, served with the minted certificate.
@@ -198,9 +222,18 @@ async def _https_endpoint(cert_pem: Path, key_pem: Path) -> AsyncIterator[str]:
     try:
         yield f"https://127.0.0.1:{server.server_address[1]}/v1"
     finally:
-        await asyncio.to_thread(server.shutdown)
-        await asyncio.to_thread(thread.join, 5)
-        server.server_close()
+        try:
+            # The endpoint keeps successful HTTP/1.1 connections alive so
+            # the async client owns teardown. Close LiteLLM's cached clients
+            # while the server is still serving; their EOF releases the
+            # request handlers before shutdown waits for the accept loop.
+            await drop_cached_clients()
+        finally:
+            try:
+                await asyncio.to_thread(server.shutdown)
+                await asyncio.to_thread(thread.join, 5)
+            finally:
+                server.server_close()
 
 
 #: How long a rejected connection is observed for a peer close before its state
@@ -235,6 +268,77 @@ def _reject_the_certificate(port: int) -> ssl.SSLSocket:
         if not rejected:
             tls.close()
     raise AssertionError("the throwaway CA was in the system trust store")
+
+
+async def test_endpoint_closes_server_when_cached_client_cleanup_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A client-cleanup error must not strand the listener or server thread."""
+    _ca_pem, cert_pem, key_pem = mint_ca_and_server_cert(tmp_path)
+    server = _TeardownProbeServer()
+
+    async def fail_client_cleanup() -> None:
+        raise RuntimeError("client cleanup failed")
+
+    try:
+        with monkeypatch.context() as scoped:
+            scoped.setitem(globals(), "_ChatServer", lambda *_args, **_kwargs: server)
+            scoped.setitem(globals(), "drop_cached_clients", fail_client_cleanup)
+            with pytest.raises(RuntimeError, match="client cleanup failed"):
+                async with _https_endpoint(cert_pem, key_pem):
+                    pass
+        assert server.shutdown_called
+        assert server.close_called
+        assert await asyncio.to_thread(server.finished.wait, 1)
+    finally:
+        server.shutdown()
+        await asyncio.to_thread(server.finished.wait, 1)
+
+
+def test_chat_server_keeps_request_handlers_off_the_accept_loop() -> None:
+    """Idle HTTP/1.1 keep-alive handlers must not block server shutdown."""
+    assert issubclass(_ChatServer, http.server.ThreadingHTTPServer)
+    assert _ChatServer.daemon_threads is True
+
+
+def _complete_one_chat_request(port: int, ca_pem: Path) -> ssl.SSLSocket:
+    """Complete one trusted HTTP request while retaining the client socket."""
+    raw = socket.create_connection(("127.0.0.1", port))
+    client = ssl.create_default_context(cafile=str(ca_pem)).wrap_socket(
+        raw, server_hostname="127.0.0.1"
+    )
+    request = (
+        b"POST /v1/chat/completions HTTP/1.1\r\n"
+        b"Host: 127.0.0.1\r\n"
+        b"Content-Type: application/json\r\n"
+        b"Content-Length: 2\r\n"
+        b"Connection: keep-alive\r\n"
+        b"\r\n"
+        b"{}"
+    )
+    try:
+        client.sendall(request)
+        response = b""
+        while b"\r\n\r\n" not in response:
+            chunk = client.recv(4096)
+            if not chunk:
+                raise AssertionError("the endpoint closed before sending response headers")
+            response += chunk
+        header, body = response.split(b"\r\n\r\n", 1)
+        length_line = next(
+            line for line in header.split(b"\r\n") if line.lower().startswith(b"content-length:")
+        )
+        content_length = int(length_line.split(b":", 1)[1].strip())
+        while len(body) < content_length:
+            chunk = client.recv(4096)
+            if not chunk:
+                raise AssertionError("the endpoint closed before sending the response body")
+            body += chunk
+        assert b" 200 " in header.split(b"\r\n", 1)[0]
+        return client
+    except BaseException:
+        client.close()
+        raise
 
 
 def test_an_unexpected_handshake_failure_closes_the_socket_owner(
@@ -274,6 +378,21 @@ def _settle_peer_state(rejected: socket.socket) -> str:
     except OSError as exc:  # a reset peer has also closed first
         return f"closed (errno {exc.errno})"
     return "closed (EOF)"
+
+
+async def test_the_endpoint_lets_a_served_client_close_first(tmp_path: Path) -> None:
+    """A successful HTTP response must leave the cached client owning teardown."""
+    ca_pem, cert_pem, key_pem = mint_ca_and_server_cert(tmp_path)
+    async with _https_endpoint(cert_pem, key_pem) as endpoint:
+        client = await asyncio.to_thread(_complete_one_chat_request, _port_of(endpoint), ca_pem)
+        try:
+            peer_state = await asyncio.to_thread(_settle_peer_state, client)
+        finally:
+            client.close()
+
+    assert peer_state == "open", (
+        f"the endpoint closed a served connection before its client did ({peer_state})"
+    )
 
 
 async def test_the_endpoint_lets_a_rejecting_client_close_first(tmp_path: Path) -> None:
