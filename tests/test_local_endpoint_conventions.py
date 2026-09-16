@@ -151,7 +151,7 @@ class _Scanner(ast.NodeVisitor):
         self.name = name
         self.bindings: dict[str, str] = {}
         self.module_bindings: dict[str, str] = {}
-        self.function_depth = 0
+        self.closure_bindings: list[dict[str, str]] = []
         self.found: list[Violation] = []
 
     def visit_Module(self, node: ast.Module) -> None:
@@ -190,7 +190,19 @@ class _Scanner(ast.NodeVisitor):
 
     def visit_Lambda(self, node: ast.Lambda) -> None:
         self.visit(node.args)
-        self._visit_scope([node.body], _argument_names(node.args))
+        inherited = (
+            self.closure_bindings[-1].copy()
+            if self.closure_bindings
+            else self.module_bindings.copy()
+        )
+        shadows = _argument_names(node.args)
+        for shadow in shadows:
+            inherited.pop(shadow, None)
+        self.closure_bindings.append(inherited)
+        try:
+            self._visit_scope([node.body], set(), inherited=inherited)
+        finally:
+            self.closure_bindings.pop()
 
     def visit_Assign(self, node: ast.Assign) -> None:
         self.found.extend(_judge_assignment(node, self.name))
@@ -223,17 +235,24 @@ class _Scanner(ast.NodeVisitor):
         self.visit(node.args)
         if node.returns is not None:
             self.visit(node.returns)
-        inherited = self.bindings.copy() if self.function_depth else self.module_bindings.copy()
+        inherited = (
+            self.closure_bindings[-1].copy()
+            if self.closure_bindings
+            else self.module_bindings.copy()
+        )
         shadows = {
             *_argument_names(node.args),
             *_scope_bound_names(node.body),
             node.name,
         }
-        self.function_depth += 1
+        for shadow in shadows:
+            inherited.pop(shadow, None)
+        final_bindings = _final_scope_bindings(node.body, inherited)
+        self.closure_bindings.append(final_bindings)
         try:
-            self._visit_scope(node.body, shadows, inherited=inherited)
+            self._visit_scope(node.body, set(), inherited=inherited)
         finally:
-            self.function_depth -= 1
+            self.closure_bindings.pop()
         self.bindings.pop(node.name, None)
 
     def _visit_scope(
@@ -263,9 +282,12 @@ class _Scanner(ast.NodeVisitor):
                     self.bindings[name] = resolved
 
 
-def _final_scope_bindings(body: Sequence[ast.stmt]) -> dict[str, str]:
+def _final_scope_bindings(
+    body: Sequence[ast.stmt],
+    inherited: dict[str, str] | None = None,
+) -> dict[str, str]:
     """Bindings visible after one module or function scope initializes."""
-    bindings: dict[str, str] = {}
+    bindings = {} if inherited is None else inherited.copy()
     for node in _scope_nodes(body):
         _update_final_binding(bindings, node)
     return bindings
@@ -621,6 +643,27 @@ def test_a_nested_function_keeps_its_enclosing_server_alias_shadow(
     )
 
     assert violations == ()
+
+
+def test_a_nested_function_resolves_an_enclosing_server_alias_bound_later(
+    tmp_path: Path,
+) -> None:
+    """A closure reads its enclosing local after the outer function binds it."""
+    violations = _scan(
+        tmp_path,
+        """
+        from http.server import HTTPServer
+
+        def outer():
+            def endpoint(handler):
+                return Endpoint(("127.0.0.1", 0), handler)
+            Endpoint = HTTPServer
+            return endpoint
+        """,
+    )
+
+    assert _rules(violations) == [RULE_SERVER]
+    assert violations[0].line == 5
 
 
 def test_assignment_aliases_follow_source_order_and_lexical_scope(
