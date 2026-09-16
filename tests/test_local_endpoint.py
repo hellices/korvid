@@ -452,13 +452,25 @@ def peer_closed_within(client: socket.socket, timeout: float) -> bool:
     return True
 
 
-def open_until_stopped(port: int, stop: threading.Event, opened: list[socket.socket]) -> None:
-    """Keep opening connections until `stop` is set or the listener is gone."""
-    while not stop.is_set():
-        try:
-            opened.append(socket.create_connection((_HOST, port), timeout=_CONNECT_SECONDS))
-        except OSError:
-            return
+def connect_after_signal(
+    port: int,
+    start: threading.Event,
+    finished: threading.Event,
+    opened: list[socket.socket],
+    peer_closed: list[bool],
+    errors: list[Exception],
+) -> None:
+    """Open one connection after `start` and record how the endpoint treats it."""
+    try:
+        if not start.wait(_CONNECT_SECONDS):
+            raise TimeoutError("teardown never began")
+        client = socket.create_connection((_HOST, port), timeout=_CONNECT_SECONDS)
+        opened.append(client)
+        peer_closed.append(peer_closed_within(client, _CONNECT_SECONDS))
+    except Exception as error:
+        errors.append(error)
+    finally:
+        finished.set()
 
 
 def run_stalled_handshake(certificate: Path, key: Path) -> subprocess.CompletedProcess[str]:
@@ -966,48 +978,66 @@ async def test_a_retiring_endpoint_will_not_start_a_client_eof_holder() -> None:
                 leftover.close()
 
 
-async def test_racing_connections_leave_no_endpoint_owned_peer_or_thread() -> None:
-    """Teardown accounts for every connection the endpoint accepted."""
+async def test_teardown_closes_a_connection_arriving_after_retirement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The public teardown refuses a connection that arrives behind retirement."""
     opened: list[socket.socket] = []
-    stop = threading.Event()
+    peer_closed: list[bool] = []
+    errors: list[Exception] = []
     racers: list[threading.Thread] = []
     live: list[LocalEndpoint] = []
+    retiring = threading.Event()
+    finished = threading.Event()
+    real_begin_retiring = local_endpoint._EndpointServer.begin_retiring
+    real_force_close = local_endpoint._EndpointServer.force_close_connections
+
+    def signal_retirement(server: local_endpoint._EndpointServer) -> None:
+        real_begin_retiring(server)
+        retiring.set()
+
+    def wait_for_late_connection(
+        server: local_endpoint._EndpointServer,
+    ) -> tuple[str, ...]:
+        assert finished.wait(_CONNECT_SECONDS), "the late connection never completed"
+        return real_force_close(server)
 
     async def race() -> None:
         [endpoint] = live
         racer = threading.Thread(
-            target=open_until_stopped, args=(endpoint.port, stop, opened), daemon=True
+            target=connect_after_signal,
+            args=(endpoint.port, retiring, finished, opened, peer_closed, errors),
+            daemon=True,
         )
         racers.append(racer)
         racer.start()
-        assert await asyncio.to_thread(endpoint.wait_until_tracked, 1, _CONNECT_SECONDS), (
-            "the endpoint never accepted the first racing connection"
-        )
 
+    monkeypatch.setattr(local_endpoint._EndpointServer, "begin_retiring", signal_retirement)
+    monkeypatch.setattr(
+        local_endpoint._EndpointServer,
+        "force_close_connections",
+        wait_for_late_connection,
+    )
     try:
-        try:
-            with pytest.raises(AssertionError, match="still held"):
-                async with served_endpoint(
-                    JsonHandler, release_clients=race, settle_seconds=_IMPATIENT_SECONDS
-                ) as endpoint:
-                    live.append(endpoint)
-        finally:
-            stop.set()
-            for racing_thread in racers:
-                await asyncio.to_thread(racing_thread.join, _CONNECT_SECONDS)
-
+        async with served_endpoint(JsonHandler, release_clients=race) as endpoint:
+            live.append(endpoint)
         [racer] = racers
+        await asyncio.to_thread(racer.join, _CONNECT_SECONDS)
         assert not racer.is_alive()
-        assert opened, "no client raced the teardown"
+        assert errors == []
+        assert len(opened) == 1
+        assert peer_closed == [True]
         assert endpoint.open_connections() == 0
         activity = endpoint.activity()
-        assert activity.accepted == activity.handlers_started + activity.refused_while_retiring
+        assert activity.accepted == 1
+        assert activity.handlers_started == 0
+        assert activity.refused_while_retiring >= 1
         assert endpoint_threads(endpoint.port) == []
-        # A successful connect may still be waiting in the kernel backlog and
-        # never become an endpoint-owned socket. The registry and worker
-        # postconditions above cover every connection the endpoint accepted.
-        assert activity.accepted >= 1
     finally:
+        retiring.set()
+        finished.set()
+        for racing_thread in racers:
+            await asyncio.to_thread(racing_thread.join, _CONNECT_SECONDS)
         for client in opened:
             client.close()
 
