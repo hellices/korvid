@@ -33,7 +33,7 @@ import subprocess
 import sys
 import threading
 from collections.abc import Awaitable, Callable, Iterator
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any
@@ -966,8 +966,8 @@ async def test_a_retiring_endpoint_will_not_start_a_client_eof_holder() -> None:
                 leftover.close()
 
 
-async def test_connections_opened_during_teardown_do_not_outlive_it() -> None:
-    """Whenever a client arrives, teardown still ends with every peer and thread gone."""
+async def test_racing_connections_leave_no_endpoint_owned_peer_or_thread() -> None:
+    """Teardown accounts for every connection the endpoint accepted."""
     opened: list[socket.socket] = []
     stop = threading.Event()
     racers: list[threading.Thread] = []
@@ -980,26 +980,33 @@ async def test_connections_opened_during_teardown_do_not_outlive_it() -> None:
         )
         racers.append(racer)
         racer.start()
+        assert await asyncio.to_thread(endpoint.wait_until_tracked, 1, _CONNECT_SECONDS), (
+            "the endpoint never accepted the first racing connection"
+        )
 
     try:
-        # Which of these clients the endpoint managed to accept is a race by
-        # construction; that none of them survives teardown is not.
-        with suppress(AssertionError):
-            async with served_endpoint(
-                JsonHandler, release_clients=race, settle_seconds=_IMPATIENT_SECONDS
-            ) as endpoint:
-                live.append(endpoint)
-    finally:
-        stop.set()
+        try:
+            with pytest.raises(AssertionError, match="still held"):
+                async with served_endpoint(
+                    JsonHandler, release_clients=race, settle_seconds=_IMPATIENT_SECONDS
+                ) as endpoint:
+                    live.append(endpoint)
+        finally:
+            stop.set()
+            for racing_thread in racers:
+                await asyncio.to_thread(racing_thread.join, _CONNECT_SECONDS)
+
         [racer] = racers
-        await asyncio.to_thread(racer.join, _CONNECT_SECONDS)
-
-    assert not racer.is_alive()
-    assert opened, "no client raced the teardown"
-    assert endpoint.open_connections() == 0
-    try:
-        for client in opened:
-            assert await asyncio.to_thread(peer_closed_within, client, _CONNECT_SECONDS)
+        assert not racer.is_alive()
+        assert opened, "no client raced the teardown"
+        assert endpoint.open_connections() == 0
+        activity = endpoint.activity()
+        assert activity.accepted == activity.handlers_started + activity.refused_while_retiring
+        assert endpoint_threads(endpoint.port) == []
+        # A successful connect may still be waiting in the kernel backlog and
+        # never become an endpoint-owned socket. The registry and worker
+        # postconditions above cover every connection the endpoint accepted.
+        assert activity.accepted >= 1
     finally:
         for client in opened:
             client.close()
