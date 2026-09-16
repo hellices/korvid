@@ -122,6 +122,9 @@ git commit -m "test: centralize client-owned local endpoints (#390)" \
 
 ### Task 2: Prevent endpoint lifecycle drift
 
+Execute this task **after Tasks 3–5**. The contract must fail while any legacy
+endpoint remains and must land only when its allowlist is empty.
+
 **Files:**
 - Create: `tests/test_local_endpoint_conventions.py`
 
@@ -149,7 +152,8 @@ Expected: failures name the six existing hand-written endpoint modules.
 
 - [ ] **Step 3: Keep the contract RED until Tasks 3–5 migrate every endpoint**
 
-Do not weaken the contract with an allowlist. Commit the contract together with Task 1 only after the migration branch can keep commits buildable, or stage it for the final migration commit.
+Do not weaken the contract with an allowlist. Commit it after Task 5, when the
+migration branch can keep the contract GREEN.
 
 ---
 
