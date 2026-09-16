@@ -395,13 +395,18 @@ def peer_state(client: socket.socket) -> str:
     return "closed (EOF)"
 
 
-def endpoint_threads(port: int) -> list[str]:
-    """Name the threads this endpoint still owns; it names each one with its port."""
-    return sorted(
-        thread.name
+def live_endpoint_threads(port: int) -> list[threading.Thread]:
+    """The threads this endpoint still owns; it names each one with its port."""
+    return [
+        thread
         for thread in threading.enumerate()
         if thread.name.startswith(f"{ENDPOINT_THREAD_PREFIX}-") and thread.name.endswith(f"-{port}")
-    )
+    ]
+
+
+def endpoint_threads(port: int) -> list[str]:
+    """Name the threads this endpoint still owns; it names each one with its port."""
+    return sorted(thread.name for thread in live_endpoint_threads(port))
 
 
 def listener_refused(port: int) -> bool:
@@ -546,6 +551,39 @@ async def test_idle_keep_alive_connections_do_not_block_teardown() -> None:
         finally:
             for client in clients:
                 client.close()
+
+
+async def test_a_handler_runs_on_a_daemon_thread_off_the_accept_loop() -> None:
+    """A handler mid-request must never be able to hold the interpreter open.
+
+    `_EndpointServer.daemon_threads` is the whole of that guarantee, and
+    nothing else in this suite would notice it flipping: `process_request` is
+    overridden, so `ThreadingMixIn._threads` stays empty and `server_close()`
+    never joins, and the autouse survivor guard only looks at threads that are
+    already daemons. So the flag is pinned here, on the live thread that is
+    currently carrying a request — a non-daemon handler that outlived its
+    endpoint would hang interpreter shutdown instead of failing a test.
+    """
+    StallingHandler.started.clear()
+    StallingHandler.released.clear()
+    StallingHandler.finished.clear()
+    async with served_endpoint(StallingHandler) as endpoint:
+        client = await asyncio.to_thread(send_request_only, endpoint.port)
+        try:
+            assert await asyncio.to_thread(StallingHandler.started.wait, _CONNECT_SECONDS)
+            live = live_endpoint_threads(endpoint.port)
+            handlers = [thread for thread in live if "-handler-" in thread.name]
+            assert [(thread.name, thread.daemon) for thread in handlers] == [
+                (f"{ENDPOINT_THREAD_PREFIX}-handler-{endpoint.port}", True)
+            ]
+            # The accept loop is a separate live thread, so the handler stalled
+            # above is demonstrably running off it rather than inside it.
+            accepting = [thread for thread in live if "-accept-" in thread.name]
+            assert [thread.is_alive() for thread in accepting] == [True]
+        finally:
+            StallingHandler.released.set()
+            assert await asyncio.to_thread(StallingHandler.finished.wait, _CONNECT_SECONDS)
+            client.close()
 
 
 async def test_served_endpoint_reports_a_connection_its_client_never_released() -> None:

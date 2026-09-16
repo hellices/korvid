@@ -157,6 +157,14 @@ def _chat_endpoint(cert_pem: Path, key_pem: Path) -> AbstractAsyncContextManager
 #: result: an endpoint that closes first is observed the instant its FIN lands.
 _PEER_SETTLE_SECONDS: float = 0.5
 
+#: The bound on a direct probe's connect, TLS handshake and read. The timeout
+#: `socket.create_connection` is given stays on the socket, so one argument
+#: bounds all three phases and an endpoint that stopped answering fails the
+#: test instead of hanging the job. Deliberately far larger than anything
+#: loopback needs — the same 10 seconds `tests/local_endpoint.py` allows a
+#: handshake — because this bound must never decide a passing test.
+_CONNECT_SECONDS: float = 10.0
+
 
 def _reject_the_certificate(port: int) -> ssl.SSLSocket:
     """Fail the handshake the negative-control tests fail, keeping the socket.
@@ -165,8 +173,12 @@ def _reject_the_certificate(port: int) -> ssl.SSLSocket:
     directly so the connection is still available to inspect afterwards. The
     descriptor is never detached, so the returned socket is its only owner and
     the caller closes it exactly once.
+
+    The connect timeout stays on the socket, so it also bounds the handshake
+    this helper exists to fail: an endpoint that never answers reports here
+    instead of hanging.
     """
-    raw = socket.create_connection(("127.0.0.1", port))
+    raw = socket.create_connection(("127.0.0.1", port), timeout=_CONNECT_SECONDS)
     tls = _client_ssl_context().wrap_socket(
         raw, server_hostname="127.0.0.1", do_handshake_on_connect=False
     )
@@ -183,8 +195,13 @@ def _reject_the_certificate(port: int) -> ssl.SSLSocket:
 
 
 def _complete_one_chat_request(port: int, ca_pem: Path) -> ssl.SSLSocket:
-    """Complete one trusted HTTP request while retaining the client socket."""
-    raw = socket.create_connection(("127.0.0.1", port))
+    """Complete one trusted HTTP request while retaining the client socket.
+
+    The connect timeout stays on the socket, so the handshake and every read
+    below it are bounded too: an endpoint that stops answering mid-response
+    fails this test rather than blocking the job.
+    """
+    raw = socket.create_connection(("127.0.0.1", port), timeout=_CONNECT_SECONDS)
     client = _client_ssl_context(cafile=ca_pem).wrap_socket(raw, server_hostname="127.0.0.1")
     request = (
         b"POST /v1/chat/completions HTTP/1.1\r\n"
@@ -257,6 +274,48 @@ def _settle_peer_state(rejected: socket.socket) -> str:
     except OSError as exc:  # a reset peer has also closed first
         return f"closed (errno {exc.errno})"
     return "closed (EOF)"
+
+
+async def test_the_direct_probes_bound_every_socket_they_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Neither direct probe may open a socket without a finite bound.
+
+    Both helpers connect, hand the descriptor to TLS, and then block — in
+    `do_handshake()` or in a `recv()` loop. The timeout handed to
+    `socket.create_connection` is what bounds all three phases, because it
+    stays on the socket and is carried onto the `SSLSocket` that wraps it. An
+    endpoint that stopped answering then fails this suite in seconds instead of
+    running the job to its own timeout.
+
+    The spy records what each helper actually passed rather than reading the
+    source, and the returned sockets are asked for the bound they are about to
+    block under.
+    """
+    ca_pem, cert_pem, key_pem = mint_ca_and_server_cert(tmp_path)
+    recorded: list[float | None] = []
+    connect = socket.create_connection
+
+    def recording_connect(*args: Any, **kwargs: Any) -> socket.socket:
+        given = kwargs["timeout"] if "timeout" in kwargs else (args[1] if len(args) > 1 else None)
+        recorded.append(given)
+        return connect(*args, **kwargs)
+
+    monkeypatch.setattr(socket, "create_connection", recording_connect)
+
+    async with _chat_endpoint(cert_pem, key_pem) as endpoint:
+        rejected = await asyncio.to_thread(_reject_the_certificate, endpoint.port)
+        try:
+            assert rejected.gettimeout() == _CONNECT_SECONDS
+        finally:
+            rejected.close()
+        client = await asyncio.to_thread(_complete_one_chat_request, endpoint.port, ca_pem)
+        try:
+            assert client.gettimeout() == _CONNECT_SECONDS
+        finally:
+            client.close()
+
+    assert recorded == [_CONNECT_SECONDS, _CONNECT_SECONDS]
 
 
 async def test_the_endpoint_lets_a_served_client_close_first(tmp_path: Path) -> None:
