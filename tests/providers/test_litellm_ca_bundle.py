@@ -68,6 +68,22 @@ _ANSWER: dict[str, Any] = {
 }
 
 
+def _client_ssl_context(*, cafile: Path | None = None) -> ssl.SSLContext:
+    """Verified client context with the same TLS floor as the endpoint."""
+    context = (
+        ssl.create_default_context()
+        if cafile is None
+        else ssl.create_default_context(cafile=str(cafile))
+    )
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    return context
+
+
+def test_direct_tls_probe_requires_tls_1_2_or_newer() -> None:
+    context = _client_ssl_context()
+    assert context.minimum_version >= ssl.TLSVersion.TLSv1_2
+
+
 class _Chat(http.server.BaseHTTPRequestHandler):
     """Answers any POST with one canned chat completion, recording the body."""
 
@@ -255,7 +271,7 @@ def _reject_the_certificate(port: int) -> ssl.SSLSocket:
     the caller closes it exactly once.
     """
     raw = socket.create_connection(("127.0.0.1", port))
-    tls = ssl.create_default_context().wrap_socket(
+    tls = _client_ssl_context().wrap_socket(
         raw, server_hostname="127.0.0.1", do_handshake_on_connect=False
     )
     rejected = False
@@ -304,9 +320,7 @@ def test_chat_server_keeps_request_handlers_off_the_accept_loop() -> None:
 def _complete_one_chat_request(port: int, ca_pem: Path) -> ssl.SSLSocket:
     """Complete one trusted HTTP request while retaining the client socket."""
     raw = socket.create_connection(("127.0.0.1", port))
-    client = ssl.create_default_context(cafile=str(ca_pem)).wrap_socket(
-        raw, server_hostname="127.0.0.1"
-    )
+    client = _client_ssl_context(cafile=ca_pem).wrap_socket(raw, server_hostname="127.0.0.1")
     request = (
         b"POST /v1/chat/completions HTTP/1.1\r\n"
         b"Host: 127.0.0.1\r\n"
