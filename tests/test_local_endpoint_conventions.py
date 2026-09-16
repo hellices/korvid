@@ -416,6 +416,13 @@ def _judge_call(node: ast.Call, bindings: dict[str, str], name: str) -> Iterator
     """A constructed server, and an accept loop started outside the helper."""
     if _is_server(node.func, bindings):
         yield Violation(name, node.lineno, RULE_SERVER, f"{_named(node.func, bindings)}(...)")
+    if _wraps_listening_socket(node):
+        yield Violation(
+            name,
+            node.lineno,
+            RULE_LISTENER_TLS,
+            f"{_WRAP_SOCKET}() is applied to a server's .{_LISTENING_SOCKET}",
+        )
     if _is_accept_loop(node.func, bindings):
         yield Violation(name, node.lineno, RULE_ACCEPT_LOOP, f".{_ACCEPT_LOOP}() is run from here")
         return
@@ -448,9 +455,10 @@ def _judge_assignment(node: ast.Assign | ast.AnnAssign, name: str) -> Iterator[V
     value = node.value
     if not isinstance(value, ast.Call) or _tail(value.func) != _WRAP_SOCKET:
         return
-    wrapped = value.args[0] if value.args else None
+    if _is_explicit_client_wrap(value) or _wraps_listening_socket(value):
+        return
     targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-    if _is_listening_socket(wrapped) or any(_is_listening_socket(target) for target in targets):
+    if any(_is_listening_socket(target) for target in targets):
         yield Violation(
             name,
             node.lineno,
@@ -483,6 +491,25 @@ def _is_accept_loop(node: ast.expr, bindings: dict[str, str]) -> bool:
 
 def _is_listening_socket(node: ast.expr | None) -> bool:
     return isinstance(node, ast.Attribute) and node.attr == _LISTENING_SOCKET
+
+
+def _wraps_listening_socket(node: ast.Call) -> bool:
+    """Whether this call server-side wraps an object kept in `.socket`."""
+    if _tail(node.func) != _WRAP_SOCKET or _is_explicit_client_wrap(node):
+        return False
+    wrapped = node.args[0] if node.args else _keyword_value(node, "sock")
+    return _is_listening_socket(wrapped)
+
+
+def _is_explicit_client_wrap(node: ast.Call) -> bool:
+    """Whether `server_side=False` states that this is the client half."""
+    server_side = _keyword_value(node, "server_side")
+    return isinstance(server_side, ast.Constant) and server_side.value is False
+
+
+def _keyword_value(node: ast.Call, name: str) -> ast.expr | None:
+    """One explicitly named argument, when present."""
+    return next((keyword.value for keyword in node.keywords if keyword.arg == name), None)
 
 
 def _tail(node: ast.expr) -> str | None:
@@ -728,6 +755,33 @@ def test_tls_wrapping_the_listening_socket_is_named(tmp_path: Path) -> None:
 
     assert _rules(violations) == [RULE_LISTENER_TLS]
     assert violations[0].line == 2
+
+
+def test_returning_a_wrapped_listening_socket_is_named(tmp_path: Path) -> None:
+    """The forbidden operation is wrapping the listener, not assigning it."""
+    violations = _scan(
+        tmp_path,
+        """
+        def secure(server, context):
+            return context.wrap_socket(server.socket, server_side=True)
+        """,
+    )
+
+    assert _rules(violations) == [RULE_LISTENER_TLS]
+    assert violations[0].line == 2
+
+
+def test_explicit_client_side_socket_wrapping_is_not_named(tmp_path: Path) -> None:
+    """A client's `.socket` attribute is not an HTTP server listener."""
+    violations = _scan(
+        tmp_path,
+        """
+        def secure(client, context):
+            client.socket = context.wrap_socket(client.socket, server_side=False)
+        """,
+    )
+
+    assert violations == ()
 
 
 def test_a_thread_started_on_serve_forever_is_named(tmp_path: Path) -> None:

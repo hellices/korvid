@@ -54,10 +54,18 @@ async def test_release_failure_still_closes_listener_and_connections() -> None:
     async def fail_release() -> None:
         raise RuntimeError("release failed")
 
-    with pytest.raises(RuntimeError, match="release failed"):
-        async with served_endpoint(JsonHandler, release_clients=fail_release) as endpoint:
-            client = await asyncio.to_thread(open_keepalive_request, endpoint.port)
-    assert client.fileno() == -1
+    opened: list[socket.socket] = []
+    ports: list[int] = []
+    try:
+        with pytest.raises(RuntimeError, match="release failed"):
+            await abandon_one_client(opened, ports, release_clients=fail_release)
+
+        [client], [port] = opened, ports
+        assert await asyncio.to_thread(peer_state, client) != "open"
+        assert await asyncio.to_thread(listener_refused, port)
+    finally:
+        for client in opened:
+            client.close()
 ```
 
 Also test TLS refused-handshake client ownership, off-loop `shutdown()`, HTTP/1.0 handler rejection, and no leaked server/handler/reaper thread.
