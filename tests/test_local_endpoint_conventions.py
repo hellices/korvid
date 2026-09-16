@@ -43,6 +43,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from textwrap import dedent
 
+import pytest
+
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
 #: The one module allowed to stand a local endpoint up. Not a list, and
@@ -148,7 +150,14 @@ class _Scanner(ast.NodeVisitor):
     def __init__(self, name: str) -> None:
         self.name = name
         self.bindings: dict[str, str] = {}
+        self.module_bindings: dict[str, str] = {}
+        self.function_depth = 0
         self.found: list[Violation] = []
+
+    def visit_Module(self, node: ast.Module) -> None:
+        self.module_bindings = _final_scope_bindings(node.body)
+        for statement in node.body:
+            self.visit(statement)
 
     def visit_Import(self, node: ast.Import) -> None:
         for alias in node.names:
@@ -214,12 +223,28 @@ class _Scanner(ast.NodeVisitor):
         self.visit(node.args)
         if node.returns is not None:
             self.visit(node.returns)
-        self._visit_scope(node.body, {*_argument_names(node.args), node.name})
+        inherited = self.bindings.copy() if self.function_depth else self.module_bindings.copy()
+        shadows = {
+            *_argument_names(node.args),
+            *_scope_bound_names(node.body),
+            node.name,
+        }
+        self.function_depth += 1
+        try:
+            self._visit_scope(node.body, shadows, inherited=inherited)
+        finally:
+            self.function_depth -= 1
         self.bindings.pop(node.name, None)
 
-    def _visit_scope(self, body: Sequence[ast.stmt | ast.expr], shadows: set[str]) -> None:
+    def _visit_scope(
+        self,
+        body: Sequence[ast.stmt | ast.expr],
+        shadows: set[str],
+        *,
+        inherited: dict[str, str] | None = None,
+    ) -> None:
         outer = self.bindings
-        self.bindings = outer.copy()
+        self.bindings = (outer if inherited is None else inherited).copy()
         for shadow in shadows:
             self.bindings.pop(shadow, None)
         try:
@@ -236,6 +261,76 @@ class _Scanner(ast.NodeVisitor):
                     self.bindings.pop(name, None)
                 else:
                     self.bindings[name] = resolved
+
+
+def _final_scope_bindings(body: Sequence[ast.stmt]) -> dict[str, str]:
+    """Bindings visible after one module or function scope initializes."""
+    bindings: dict[str, str] = {}
+    for node in _scope_nodes(body):
+        _update_final_binding(bindings, node)
+    return bindings
+
+
+def _update_final_binding(bindings: dict[str, str], node: ast.AST) -> None:
+    """Apply one same-scope syntax node to the final binding snapshot."""
+    if isinstance(node, ast.Import):
+        for alias in node.names:
+            root = alias.name.split(".")[0]
+            bindings[alias.asname or root] = alias.name if alias.asname else root
+    elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+        for alias in node.names:
+            bindings[alias.asname or alias.name] = f"{node.module}.{alias.name}"
+    elif isinstance(node, ast.Assign):
+        _bind_names(bindings, node.targets, node.value)
+    elif isinstance(node, (ast.AnnAssign, ast.NamedExpr)):
+        _bind_names(bindings, [node.target], node.value)
+    elif isinstance(node, ast.AugAssign):
+        _bind_names(bindings, [node.target], None)
+    elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        bindings.pop(node.name, None)
+
+
+def _scope_bound_names(body: Sequence[ast.stmt]) -> set[str]:
+    """Names Python treats as local to this function body."""
+    bound: set[str] = set()
+    external: set[str] = set()
+    for node in _scope_nodes(body):
+        if isinstance(node, (ast.Global, ast.Nonlocal)):
+            external.update(node.names)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                bound.add(alias.asname or alias.name.split(".")[0])
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            bound.add(node.name)
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            bound.add(node.id)
+    return bound - external
+
+
+def _scope_nodes(body: Sequence[ast.stmt]) -> Iterator[ast.AST]:
+    """Walk one lexical scope without entering a nested function or class."""
+    pending: list[ast.AST] = list(reversed(body))
+    while pending:
+        node = pending.pop()
+        yield node
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            continue
+        pending.extend(reversed(list(ast.iter_child_nodes(node))))
+
+
+def _bind_names(
+    bindings: dict[str, str],
+    targets: list[ast.expr],
+    value: ast.expr | None,
+) -> None:
+    """Apply one assignment to a binding snapshot."""
+    resolved = None if value is None else _resolve(value, bindings)
+    for target in targets:
+        for name in _assigned_names(target):
+            if resolved is None:
+                bindings.pop(name, None)
+            else:
+                bindings[name] = resolved
 
 
 def _argument_names(arguments: ast.arguments) -> set[str]:
@@ -461,10 +556,76 @@ def test_an_assignment_alias_of_an_http_server_is_named(tmp_path: Path) -> None:
     assert "Endpoint" in violations[0].detail
 
 
+def test_a_function_resolves_a_server_alias_bound_later_at_module_scope(
+    tmp_path: Path,
+) -> None:
+    """Function globals are resolved when called, after module initialization."""
+    violations = _scan(
+        tmp_path,
+        """
+        def endpoint(handler):
+            return Endpoint(("127.0.0.1", 0), handler)
+
+        from http.server import HTTPServer
+        Endpoint = HTTPServer
+        """,
+    )
+
+    assert _rules(violations) == [RULE_SERVER]
+    assert violations[0].line == 2
+
+
+@pytest.mark.parametrize(
+    "shadow",
+    [
+        pytest.param(
+            """
+            def outer(Endpoint):
+                def inner(handler):
+                    return Endpoint(("127.0.0.1", 0), handler)
+                return inner
+            """,
+            id="parameter",
+        ),
+        pytest.param(
+            """
+            def outer():
+                Endpoint = build_fake()
+                def inner(handler):
+                    return Endpoint(("127.0.0.1", 0), handler)
+                return inner
+            """,
+            id="local",
+        ),
+        pytest.param(
+            """
+            def outer():
+                def inner(handler):
+                    return Endpoint(("127.0.0.1", 0), handler)
+                Endpoint = build_fake()
+                return inner
+            """,
+            id="local-bound-after-inner",
+        ),
+    ],
+)
+def test_a_nested_function_keeps_its_enclosing_server_alias_shadow(
+    tmp_path: Path,
+    shadow: str,
+) -> None:
+    """An enclosing parameter or local remains the nested function's closure."""
+    violations = _scan(
+        tmp_path,
+        f"from http.server import HTTPServer\nEndpoint = HTTPServer\n\n{dedent(shadow).lstrip()}",
+    )
+
+    assert violations == ()
+
+
 def test_assignment_aliases_follow_source_order_and_lexical_scope(
     tmp_path: Path,
 ) -> None:
-    """Aliases apply after binding, can be cleared, and do not leak from functions."""
+    """Final globals reach functions; true local aliases stay source-ordered and scoped."""
     violations = _scan(
         tmp_path,
         """
@@ -492,8 +653,8 @@ def test_assignment_aliases_follow_source_order_and_lexical_scope(
         """,
     )
 
-    assert _rules(violations) == [RULE_SERVER, RULE_SERVER]
-    assert [violation.line for violation in violations] == [9, 18]
+    assert _rules(violations) == [RULE_SERVER]
+    assert violations[0].line == 18
 
 
 def test_a_server_subclass_is_named(tmp_path: Path) -> None:

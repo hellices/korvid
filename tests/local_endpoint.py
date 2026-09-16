@@ -698,17 +698,24 @@ async def _retire(
     """
     release_error = await _release(release_clients)
     stranded: tuple[str, ...] = ()
+    leftovers = _Leftovers(threads=(), unclosed=())
+    cleanup_errors: list[BaseException] = []
     try:
         # Transports whose close the loop has only queued still own their
         # socket; let those callbacks run before ownership is judged.
         await drain_transport_closures()
         stranded = await asyncio.to_thread(server.wait_until_released, settle_seconds)
-    finally:
+    except BaseException as error:
+        cleanup_errors.append(error)
+    try:
         leftovers = await _stop(server, accept, settle_seconds)
+    except BaseException as error:
+        cleanup_errors.append(error)
 
     _report(
         body_error,
         release_error,
+        tuple(cleanup_errors),
         _Unsettled(
             stranded=stranded,
             leftovers=leftovers,
@@ -812,12 +819,13 @@ async def _stop_accepting(
 def _report(
     body_error: BaseException | None,
     release_error: BaseException | None,
+    cleanup_errors: tuple[BaseException, ...],
     unsettled: _Unsettled,
 ) -> None:
     """Raise the one failure that outranks the others, noting the rest."""
-    primary = _primary(body_error, release_error)
+    primary = _primary(body_error, release_error, cleanup_errors)
     if primary is not None:
-        _annotate(primary, body_error, release_error)
+        _annotate(primary, body_error, release_error, cleanup_errors)
         if primary is not body_error:
             raise primary  # the body's own exception is already propagating
         return
@@ -827,28 +835,34 @@ def _report(
 
 
 def _primary(
-    body_error: BaseException | None, release_error: BaseException | None
+    body_error: BaseException | None,
+    release_error: BaseException | None,
+    cleanup_errors: tuple[BaseException, ...],
 ) -> BaseException | None:
-    """Pick the failure to raise: cancellation, then the body, then the release."""
-    if isinstance(body_error, asyncio.CancelledError):
-        return body_error
-    if isinstance(release_error, asyncio.CancelledError):
-        # Downgrading a cancellation to a note leaves whoever requested it
-        # waiting on a task that quietly decided not to be cancelled.
-        return release_error
-    return body_error if body_error is not None else release_error
+    """Pick cancellation, then the body, release, and finally cleanup."""
+    ordered = (body_error, release_error, *cleanup_errors)
+    for error in ordered:
+        if isinstance(error, asyncio.CancelledError):
+            # Downgrading a cancellation to a note leaves whoever requested it
+            # waiting on a task that quietly decided not to be cancelled.
+            return error
+    return next((error for error in ordered if error is not None), None)
 
 
 def _annotate(
     primary: BaseException,
     body_error: BaseException | None,
     release_error: BaseException | None,
+    cleanup_errors: tuple[BaseException, ...],
 ) -> None:
     """Attach the failures that lost to `primary`, so none of them is lost."""
     if release_error is not None and release_error is not primary:
         primary.add_note(f"releasing this endpoint's clients also failed: {release_error!r}")
     if body_error is not None and body_error is not primary:
         primary.add_note(f"this endpoint's body also failed: {body_error!r}")
+    for cleanup_error in cleanup_errors:
+        if cleanup_error is not primary:
+            primary.add_note(f"cleaning up this endpoint also failed: {cleanup_error!r}")
 
 
 @dataclass(frozen=True)

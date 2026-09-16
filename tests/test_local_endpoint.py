@@ -645,6 +645,77 @@ async def test_a_body_failure_stays_primary_and_records_the_release_failure() ->
     assert any("release failed" in note for note in notes), notes
 
 
+@pytest.mark.parametrize(
+    ("primary", "expected_type", "expected_message"),
+    [
+        pytest.param("body", ValueError, "body failed", id="body"),
+        pytest.param("release", RuntimeError, "release failed", id="release"),
+        pytest.param(
+            "cancellation",
+            asyncio.CancelledError,
+            "body was cancelled",
+            id="cancellation",
+        ),
+    ],
+)
+async def test_primary_failure_stays_primary_when_cleanup_also_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    primary: str,
+    expected_type: type[BaseException],
+    expected_message: str,
+) -> None:
+    """Cleanup is completed and recorded without replacing a higher-priority error."""
+    real_server_close = local_endpoint._EndpointServer.server_close
+
+    def fail_after_server_close(server: local_endpoint._EndpointServer) -> None:
+        real_server_close(server)
+        raise RuntimeError("cleanup failed")
+
+    async def release() -> None:
+        if primary == "release":
+            raise RuntimeError("release failed")
+
+    async def fail_with_primary() -> None:
+        async with served_endpoint(JsonHandler, release_clients=release):
+            if primary == "body":
+                raise ValueError("body failed")
+            if primary == "cancellation":
+                raise asyncio.CancelledError("body was cancelled")
+
+    monkeypatch.setattr(
+        local_endpoint._EndpointServer,
+        "server_close",
+        fail_after_server_close,
+    )
+
+    with pytest.raises(expected_type, match=expected_message) as caught:
+        await fail_with_primary()
+
+    notes = getattr(caught.value, "__notes__", [])
+    assert any("cleanup failed" in note for note in notes), notes
+
+
+async def test_cleanup_failure_surfaces_when_nothing_outranks_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cleanup error is raised when no cancellation, body, or release failed."""
+    real_server_close = local_endpoint._EndpointServer.server_close
+
+    def fail_after_server_close(server: local_endpoint._EndpointServer) -> None:
+        real_server_close(server)
+        raise RuntimeError("cleanup failed")
+
+    monkeypatch.setattr(
+        local_endpoint._EndpointServer,
+        "server_close",
+        fail_after_server_close,
+    )
+
+    with pytest.raises(RuntimeError, match="cleanup failed"):
+        async with served_endpoint(JsonHandler):
+            pass
+
+
 async def test_the_release_callback_runs_while_the_endpoint_still_serves() -> None:
     """Clients are released first, so their EOF frees the handlers shutdown waits on."""
     live: list[LocalEndpoint] = []
