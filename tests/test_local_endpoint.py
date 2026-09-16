@@ -25,14 +25,20 @@ an event, never by a sleep, a retry, or a warning filter.
 from __future__ import annotations
 
 import asyncio
+import os
 import socket
 import ssl
+import subprocess
+import sys
 import threading
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
+from contextlib import contextmanager, suppress
 from pathlib import Path
+from typing import Any
 
 import pytest
 
+from tests import local_endpoint
 from tests.local_endpoint import (
     ENDPOINT_THREAD_PREFIX,
     KeepAliveHandler,
@@ -51,10 +57,68 @@ _HOST = "127.0.0.1"
 #: lands.
 _PEER_SETTLE_SECONDS = 0.5
 
+#: The bound on a client's own connect, handshake, and request — and on
+#: every wait that is only here so a *failing* assertion cannot hang. It is
+#: deliberately far larger than anything loopback needs, because a busy CI
+#: runner is slow and this bound must never decide a passing test.
+_CONNECT_SECONDS = 10.0
+
 #: The bound a *negative* lifecycle test spends proving the endpoint gives
 #: up on a client that never released. Short because the test's subject is
 #: the bound itself.
 _IMPATIENT_SECONDS = 0.25
+
+#: How long the stalled-handshake child process may take to exit. Reaching
+#: it means teardown never returned, which is the failure being tested.
+_CHILD_SECONDS = 120.0
+
+#: The stalled-handshake lifecycle, run in a child interpreter by
+#: `run_stalled_handshake`. The client opens a TCP connection to a TLS
+#: endpoint and never sends a ClientHello, so the accept loop is inside
+#: `do_handshake()` when teardown begins. Each marker it prints is a claim
+#: the parent asserts; the child exiting at all is the largest of them,
+#: because a teardown thread that cannot be joined keeps the interpreter
+#: alive past `asyncio.run()`.
+_STALLED_HANDSHAKE_PROGRAM = """
+import asyncio
+import socket
+import sys
+from pathlib import Path
+
+from tests.local_endpoint import KeepAliveHandler, served_endpoint
+
+HOST = "127.0.0.1"
+BOUND = 10.0
+
+
+async def main() -> None:
+    certificate, key = Path(sys.argv[1]), Path(sys.argv[2])
+    silent = None
+    try:
+        try:
+            async with served_endpoint(
+                KeepAliveHandler, tls=(certificate, key), settle_seconds=0.25
+            ) as endpoint:
+                silent = socket.create_connection((HOST, endpoint.port), timeout=BOUND)
+                if not await asyncio.to_thread(endpoint.wait_until_tracked, 1, BOUND):
+                    raise RuntimeError("the endpoint never tracked the silent client")
+                print("tracked", flush=True)
+        except AssertionError:
+            print("unsettled", flush=True)  # the silent client never released it
+        print("retired", flush=True)
+        silent.settimeout(BOUND)
+        try:
+            closed = socket.socket.recv(silent, 4096) == b""
+        except OSError:
+            closed = True
+        print("closed=" + str(closed), flush=True)
+    finally:
+        if silent is not None:
+            silent.close()
+
+
+asyncio.run(main())
+"""
 
 
 class JsonHandler(KeepAliveHandler):
@@ -87,13 +151,117 @@ class DisconnectHandler(KeepAliveHandler):
         self.wfile.write(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
 
 
-def endpoint_threads() -> list[str]:
-    """Names of endpoint-owned threads still alive right now."""
-    return sorted(
-        thread.name
-        for thread in threading.enumerate()
-        if thread.name.startswith(ENDPOINT_THREAD_PREFIX)
+class StallingHandler(KeepAliveHandler):
+    """Stays inside its handler until the test releases it.
+
+    The events are class attributes because `http.server` constructs a
+    handler per request; every test that uses this handler clears them
+    first and releases them in its own `finally`.
+    """
+
+    started = threading.Event()
+    released = threading.Event()
+    finished = threading.Event()
+
+    def do_GET(self) -> None:  # http.server API name
+        StallingHandler.started.set()
+        try:
+            StallingHandler.released.wait(_CONNECT_SECONDS)
+        finally:
+            StallingHandler.finished.set()
+
+
+class ExplodingHandler(KeepAliveHandler):
+    """Fails the way a broken handler fails: with an exception, mid-request."""
+
+    def do_GET(self) -> None:  # http.server API name
+        raise RuntimeError("the handler exploded")
+
+
+class FailOnceContext(ssl.SSLContext):
+    """A server context whose first `wrap_socket` raises a non-`OSError`.
+
+    `socketserver` drops an `OSError` from `get_request()` and keeps
+    accepting; anything else escapes `serve_forever` and kills the accept
+    loop, which is the failure this context provokes.
+    """
+
+    failures = 1
+
+    def wrap_socket(self, sock: socket.socket, *args: Any, **kwargs: Any) -> ssl.SSLSocket:
+        if self.failures:
+            self.failures -= 1
+            raise ValueError("no TLS for you")
+        return super().wrap_socket(sock, *args, **kwargs)
+
+
+def failing_once_context(tls: tuple[Path, Path] | None) -> ssl.SSLContext | None:
+    """Stand in for the endpoint's own server context, failing once."""
+    assert tls is not None
+    certificate, key = tls
+    context = FailOnceContext(ssl.PROTOCOL_TLS_SERVER)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    context.load_cert_chain(certfile=str(certificate), keyfile=str(key))
+    return context
+
+
+@pytest.fixture(autouse=True)
+def no_thread_outlives_the_test() -> Iterator[None]:
+    """Fail the test that leaves a background thread of its own behind.
+
+    The endpoint's threads are daemons and the executor's are not, so the
+    survivors are found by comparing `threading.enumerate()` against the
+    identities that were alive before the test — never by trusting the
+    endpoint to have named its own threads.
+    """
+    before = {thread.ident for thread in threading.enumerate()}
+    yield
+    newcomers = [
+        thread for thread in threading.enumerate() if thread.ident not in before and thread.daemon
+    ]
+    for thread in newcomers:
+        # Bounded, so a thread that is already finishing is not a failure
+        # and a genuinely leaked one still is.
+        thread.join(_CONNECT_SECONDS)
+    assert [thread.name for thread in newcomers if thread.is_alive()] == []
+
+
+@contextmanager
+def raw_endpoint(
+    *,
+    half_close: bool = False,
+    tls: ssl.SSLContext | None = None,
+    handshake_seconds: float = _CONNECT_SECONDS,
+) -> Iterator[local_endpoint._EndpointServer]:
+    """A bare endpoint server the test starts, retires, and closes itself.
+
+    Retirement is a teardown state the public context manager never hands
+    out mid-flight, and its handshake bound is derived from `settle_seconds`
+    rather than chosen, so the claims about *what an endpoint refuses* and
+    *what it gives up on* are made against the server object directly.
+    """
+    server = local_endpoint._EndpointServer(
+        JsonHandler,
+        tls=tls,
+        half_close=half_close,
+        handshake_seconds=handshake_seconds,
     )
+    accept = threading.Thread(
+        target=server.serve_forever,
+        kwargs={"poll_interval": local_endpoint._ACCEPT_POLL_SECONDS},
+        name=f"{ENDPOINT_THREAD_PREFIX}-accept-{server.server_port}",
+        daemon=True,
+    )
+    accept.start()
+    try:
+        yield server
+    finally:
+        server.begin_retiring()
+        server.force_close_connections()
+        server.shutdown()
+        accept.join(_CONNECT_SECONDS)
+        server.join_workers(_CONNECT_SECONDS)
+        server.server_close()
 
 
 def client_context(cafile: Path) -> ssl.SSLContext:
@@ -133,7 +301,7 @@ def open_keepalive_request(port: int, *, cafile: Path | None = None) -> socket.s
     The descriptor is never detached from the returned socket, so the
     caller owns it and closes it exactly once.
     """
-    raw = socket.create_connection((_HOST, port), timeout=_PEER_SETTLE_SECONDS)
+    raw = socket.create_connection((_HOST, port), timeout=_CONNECT_SECONDS)
     client: socket.socket = (
         raw if cafile is None else client_context(cafile).wrap_socket(raw, server_hostname=_HOST)
     )
@@ -151,7 +319,7 @@ def open_keepalive_request(port: int, *, cafile: Path | None = None) -> socket.s
 
 def request_until_eof(port: int) -> tuple[socket.socket, bytes]:
     """Send one request and read to the endpoint's EOF, keeping the socket."""
-    client = socket.create_connection((_HOST, port), timeout=_PEER_SETTLE_SECONDS * 20)
+    client = socket.create_connection((_HOST, port), timeout=_CONNECT_SECONDS)
     try:
         client.sendall(b"GET /drop HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
         received = b""
@@ -167,7 +335,7 @@ def request_until_eof(port: int) -> tuple[socket.socket, bytes]:
 
 def refuse_certificate(port: int) -> ssl.SSLSocket:
     """Fail the handshake a client with the wrong trust store fails."""
-    raw = socket.create_connection((_HOST, port), timeout=_PEER_SETTLE_SECONDS * 20)
+    raw = socket.create_connection((_HOST, port), timeout=_CONNECT_SECONDS)
     context = ssl.create_default_context()
     context.minimum_version = ssl.TLSVersion.TLSv1_2
     rejecting = context.wrap_socket(raw, server_hostname=_HOST, do_handshake_on_connect=False)
@@ -205,11 +373,73 @@ def peer_state(client: socket.socket) -> str:
 def listener_refused(port: int) -> bool:
     """Whether the endpoint's listening socket is gone."""
     try:
-        leftover = socket.create_connection((_HOST, port), timeout=_PEER_SETTLE_SECONDS)
+        leftover = socket.create_connection((_HOST, port), timeout=_CONNECT_SECONDS)
     except OSError:
         return True
     leftover.close()
     return False
+
+
+def connect_without_speaking(port: int) -> socket.socket:
+    """Open a TCP connection and say nothing — no request, no ClientHello."""
+    return socket.create_connection((_HOST, port), timeout=_CONNECT_SECONDS)
+
+
+def send_request_only(port: int) -> socket.socket:
+    """Send one request without reading the answer, keeping the socket."""
+    client = socket.create_connection((_HOST, port), timeout=_CONNECT_SECONDS)
+    try:
+        client.sendall(b"GET /api.json HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+    except BaseException:
+        client.close()
+        raise
+    return client
+
+
+def peer_closed_within(client: socket.socket, timeout: float) -> bool:
+    """Whether the endpoint closed this connection, waiting at most `timeout`.
+
+    The bound only exists so a *failing* claim reports instead of hanging:
+    a closed peer is observed the instant its FIN or reset lands.
+    """
+    client.settimeout(timeout)
+    try:
+        while socket.socket.recv(client, 4096):
+            pass
+    except TimeoutError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
+def open_until_stopped(port: int, stop: threading.Event, opened: list[socket.socket]) -> None:
+    """Keep opening connections until `stop` is set or the listener is gone."""
+    while not stop.is_set():
+        try:
+            opened.append(socket.create_connection((_HOST, port), timeout=_CONNECT_SECONDS))
+        except OSError:
+            return
+
+
+def run_stalled_handshake(certificate: Path, key: Path) -> subprocess.CompletedProcess[str]:
+    """Run the stalled-handshake lifecycle in a child that has to exit.
+
+    A child, because the claim is that teardown *returns* — and that the
+    threads it used are joinable, so the interpreter can shut down. Inside
+    this process a teardown that never returns would hang the whole run
+    instead of failing; `timeout` turns that into a reported failure.
+    """
+    root = Path(__file__).resolve().parents[1]
+    return subprocess.run(
+        [sys.executable, "-c", _STALLED_HANDSHAKE_PROGRAM, str(certificate), str(key)],
+        cwd=root,
+        env={**os.environ, "PYTHONPATH": str(root)},
+        capture_output=True,
+        text=True,
+        timeout=_CHILD_SECONDS,
+        check=False,
+    )
 
 
 async def abandon_one_client(
@@ -273,8 +503,6 @@ async def test_served_endpoint_leaves_the_connection_open_for_the_client() -> No
         finally:
             client.close()
 
-    assert endpoint_threads() == []
-
 
 async def test_idle_keep_alive_connections_do_not_block_teardown() -> None:
     async with served_endpoint(JsonHandler) as endpoint:
@@ -284,8 +512,6 @@ async def test_idle_keep_alive_connections_do_not_block_teardown() -> None:
         finally:
             for client in clients:
                 client.close()
-
-    assert endpoint_threads() == []
 
 
 async def test_served_endpoint_reports_a_connection_its_client_never_released() -> None:
@@ -298,7 +524,6 @@ async def test_served_endpoint_reports_a_connection_its_client_never_released() 
         [client], [port] = opened, ports
         assert await asyncio.to_thread(peer_state, client) != "open"
         assert await asyncio.to_thread(listener_refused, port)
-        assert endpoint_threads() == []
     finally:
         for client in opened:
             client.close()
@@ -317,7 +542,6 @@ async def test_release_failure_still_closes_the_listener_and_its_connections() -
         [client], [port] = opened, ports
         assert await asyncio.to_thread(peer_state, client) != "open"
         assert await asyncio.to_thread(listener_refused, port)
-        assert endpoint_threads() == []
     finally:
         for client in opened:
             client.close()
@@ -333,7 +557,6 @@ async def test_a_body_failure_stays_primary_and_records_the_release_failure() ->
 
     notes = getattr(caught.value, "__notes__", [])
     assert any("release failed" in note for note in notes), notes
-    assert endpoint_threads() == []
 
 
 async def test_the_release_callback_runs_while_the_endpoint_still_serves() -> None:
@@ -353,7 +576,6 @@ async def test_the_release_callback_runs_while_the_endpoint_still_serves() -> No
         live.append(endpoint)
 
     assert observed == [1]
-    assert endpoint_threads() == []
 
 
 def test_served_endpoint_refuses_a_handler_that_is_not_http_1_1() -> None:
@@ -375,7 +597,6 @@ async def test_teardown_leaves_the_event_loop_free_to_close_clients() -> None:
         schedule_after_loop_turns(loop, 64, writer.close)
 
     await writer.wait_closed()
-    assert endpoint_threads() == []
 
 
 async def test_drain_transport_closures_runs_chained_loop_callbacks() -> None:
@@ -406,7 +627,6 @@ async def test_a_served_tls_client_keeps_the_connection_it_opened(tmp_path: Path
             client.close()
 
     assert state == "open", f"the endpoint closed a served connection first ({state})"
-    assert endpoint_threads() == []
 
 
 async def test_a_refused_tls_handshake_leaves_the_client_owning_teardown(tmp_path: Path) -> None:
@@ -427,7 +647,6 @@ async def test_a_refused_tls_handshake_leaves_the_client_owning_teardown(tmp_pat
         "the endpoint closed a connection it refused before its client did"
         f" ({state}); the client's own teardown was then {teardown}"
     )
-    assert endpoint_threads() == []
 
 
 async def test_a_disconnecting_endpoint_keeps_the_peer_the_client_saw_eof_from() -> None:
@@ -452,7 +671,6 @@ async def test_a_disconnecting_endpoint_keeps_the_peer_the_client_saw_eof_from()
             client.close()
 
     assert held == 1, "the endpoint disposed of a peer whose client had not closed yet"
-    assert endpoint_threads() == []
 
 
 def test_a_disconnecting_endpoint_requires_a_reason() -> None:
@@ -472,7 +690,348 @@ async def test_a_disconnecting_endpoint_names_its_reason_when_a_client_stays() -
                 client, _received = await asyncio.to_thread(request_until_eof, endpoint.port)
 
         assert client is not None
-        assert endpoint_threads() == []
     finally:
         if client is not None:
             client.close()
+
+
+async def stall_a_tls_handshake(
+    tls: tuple[Path, Path], opened: list[socket.socket], live: list[LocalEndpoint]
+) -> None:
+    """Open a TLS connection that never sends a ClientHello, and leave it open."""
+    async with served_endpoint(JsonHandler, tls=tls, settle_seconds=_IMPATIENT_SECONDS) as endpoint:
+        live.append(endpoint)
+        opened.append(await asyncio.to_thread(connect_without_speaking, endpoint.port))
+        assert await asyncio.to_thread(endpoint.wait_until_tracked, 1, _CONNECT_SECONDS)
+
+
+async def test_a_tls_peer_is_tracked_before_its_handshake(tmp_path: Path) -> None:
+    """A client that opens the socket and says nothing is still the endpoint's to close.
+
+    Until the peer is registered, nothing in teardown can reach the socket
+    the accept loop is blocked on inside `do_handshake()`, and `shutdown()`
+    waits for an accept loop that is never coming back.
+    """
+    _ca_pem, cert_pem, key_pem = mint_ca_and_server_cert(tmp_path)
+    opened: list[socket.socket] = []
+    live: list[LocalEndpoint] = []
+    try:
+        with pytest.raises(AssertionError, match="still held 1 connection"):
+            await stall_a_tls_handshake((cert_pem, key_pem), opened, live)
+
+        [silent], [endpoint] = opened, live
+        assert await asyncio.to_thread(peer_closed_within, silent, _CONNECT_SECONDS)
+        assert endpoint.open_connections() == 0
+    finally:
+        for client in opened:
+            client.close()
+
+
+def test_a_stalled_handshake_cannot_pin_the_teardown(tmp_path: Path) -> None:
+    _ca_pem, cert_pem, key_pem = mint_ca_and_server_cert(tmp_path)
+
+    finished = run_stalled_handshake(cert_pem, key_pem)
+
+    assert finished.returncode == 0, finished.stderr
+    printed = finished.stdout.split()
+    assert "tracked" in printed, finished.stdout
+    assert "retired" in printed, finished.stdout
+    assert "closed=True" in printed, finished.stdout
+
+
+async def test_a_retiring_endpoint_closes_a_late_connection_instead_of_serving_it() -> None:
+    """Teardown stops accepting *before* it force-closes, so nothing is accepted behind it."""
+    with raw_endpoint() as server:
+        server.begin_retiring()
+        late = await asyncio.to_thread(connect_without_speaking, server.server_port)
+        try:
+            assert await asyncio.to_thread(peer_closed_within, late, _CONNECT_SECONDS)
+            assert server.open_connections() == 0
+            assert server.activity().refused_while_retiring >= 1
+        finally:
+            late.close()
+
+
+async def test_a_handshake_gives_up_at_its_deadline_and_keeps_the_endpoint_serving(
+    tmp_path: Path,
+) -> None:
+    """The accept loop is single-threaded, so a silent client is everyone's problem.
+
+    Force-closing the tracked peer wakes a blocked handshake on some
+    platforms; the deadline is what makes that true on all of them. It is
+    proven here by the client *behind* the silent one being served.
+    """
+    ca_pem, cert_pem, key_pem = mint_ca_and_server_cert(tmp_path)
+    with raw_endpoint(
+        tls=local_endpoint._server_context((cert_pem, key_pem)),
+        handshake_seconds=_IMPATIENT_SECONDS,
+    ) as server:
+        silent = await asyncio.to_thread(connect_without_speaking, server.server_port)
+        try:
+            served = await asyncio.to_thread(
+                open_keepalive_request, server.server_port, cafile=ca_pem
+            )
+            served.close()
+        finally:
+            silent.close()
+
+        assert server.activity().accepted == 2
+
+
+async def test_a_retiring_endpoint_will_not_start_a_client_eof_holder() -> None:
+    """A holder started after the join has run would outlive the endpoint."""
+    with raw_endpoint(half_close=True) as server:
+        held, client = socket.socketpair()
+        late, late_client = socket.socketpair()
+        try:
+            server.shutdown_request(held)
+            assert server.activity().holders_started == 1
+
+            client.close()  # the client releases, so the holder reaches EOF and exits
+            assert await asyncio.to_thread(server.join_workers, _CONNECT_SECONDS) == ()
+
+            server.begin_retiring()
+            server.shutdown_request(late)
+
+            assert server.activity().holders_started == 1
+            assert late.fileno() == -1, "the endpoint held a peer after teardown had begun"
+            assert server.activity().refused_while_retiring >= 1
+        finally:
+            for leftover in (held, client, late, late_client):
+                leftover.close()
+
+
+async def test_connections_opened_during_teardown_do_not_outlive_it() -> None:
+    """Whenever a client arrives, teardown still ends with every peer and thread gone."""
+    opened: list[socket.socket] = []
+    stop = threading.Event()
+    racers: list[threading.Thread] = []
+    live: list[LocalEndpoint] = []
+
+    async def race() -> None:
+        [endpoint] = live
+        racer = threading.Thread(
+            target=open_until_stopped, args=(endpoint.port, stop, opened), daemon=True
+        )
+        racers.append(racer)
+        racer.start()
+
+    try:
+        # Which of these clients the endpoint managed to accept is a race by
+        # construction; that none of them survives teardown is not.
+        with suppress(AssertionError):
+            async with served_endpoint(
+                JsonHandler, release_clients=race, settle_seconds=_IMPATIENT_SECONDS
+            ) as endpoint:
+                live.append(endpoint)
+    finally:
+        stop.set()
+        [racer] = racers
+        await asyncio.to_thread(racer.join, _CONNECT_SECONDS)
+
+    assert not racer.is_alive()
+    assert opened, "no client raced the teardown"
+    assert endpoint.open_connections() == 0
+    try:
+        for client in opened:
+            assert await asyncio.to_thread(peer_closed_within, client, _CONNECT_SECONDS)
+    finally:
+        for client in opened:
+            client.close()
+
+
+async def test_teardown_retires_the_endpoint_before_it_closes_anything(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both force-close passes run, and the first one runs on a retired endpoint.
+
+    A force-close that lands while the endpoint is still accepting closes
+    the peers it can see and leaves whatever arrives behind it, which is
+    the connection that then outlives the endpoint.
+    """
+    real_close = local_endpoint._EndpointServer.force_close_connections
+    retiring_at_each_pass: list[bool] = []
+
+    def recording_close(server: local_endpoint._EndpointServer) -> tuple[str, ...]:
+        retiring_at_each_pass.append(server._is_retiring())
+        return real_close(server)
+
+    monkeypatch.setattr(local_endpoint._EndpointServer, "force_close_connections", recording_close)
+
+    async with served_endpoint(JsonHandler) as endpoint:
+        client = await asyncio.to_thread(open_keepalive_request, endpoint.port)
+        client.close()
+
+    assert retiring_at_each_pass == [True, True]
+
+
+async def test_teardown_drains_queued_closures_while_the_endpoint_still_serves(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The drain runs after the release and before anything waits or closes.
+
+    Recorded rather than timed: the phases are observed from inside the
+    teardown itself, and the connection count taken at the drain proves the
+    endpoint had not disposed of anything yet.
+    """
+    phases: list[str] = []
+    real_drain = local_endpoint.drain_transport_closures
+    live: list[LocalEndpoint] = []
+
+    async def recording_drain() -> None:
+        [endpoint] = live
+        phases.append(f"drain with {endpoint.open_connections()} held")
+        await real_drain()
+
+    async def release() -> None:
+        phases.append("release")
+
+    monkeypatch.setattr(local_endpoint, "drain_transport_closures", recording_drain)
+
+    async with served_endpoint(JsonHandler, release_clients=release) as endpoint:
+        live.append(endpoint)
+        reader, writer = await asyncio.open_connection(_HOST, endpoint.port)
+        writer.write(b"GET /api.json HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+        await writer.drain()
+        header = await reader.readuntil(b"\r\n\r\n")
+        await reader.readexactly(content_length(header))
+        writer.close()  # the loop has only *queued* this close
+
+    await writer.wait_closed()
+    assert phases == ["release", "drain with 1 held"]
+
+
+async def stall_one_handler(opened: list[socket.socket]) -> None:
+    """Leave one handler thread inside its own request when teardown begins."""
+    async with served_endpoint(StallingHandler, settle_seconds=_IMPATIENT_SECONDS) as endpoint:
+        opened.append(await asyncio.to_thread(send_request_only, endpoint.port))
+        assert await asyncio.to_thread(StallingHandler.started.wait, _CONNECT_SECONDS)
+        assert endpoint.activity().handlers_started == 1
+
+
+async def test_a_handler_thread_that_outlives_the_join_is_named_by_teardown() -> None:
+    """Every handler thread is registered before it starts, so the join is complete."""
+    StallingHandler.started.clear()
+    StallingHandler.released.clear()
+    StallingHandler.finished.clear()
+    opened: list[socket.socket] = []
+    try:
+        with pytest.raises(AssertionError, match="still ran") as caught:
+            await stall_one_handler(opened)
+
+        assert ENDPOINT_THREAD_PREFIX in str(caught.value)
+    finally:
+        StallingHandler.released.set()
+        assert await asyncio.to_thread(StallingHandler.finished.wait, _CONNECT_SECONDS)
+        for client in opened:
+            client.close()
+
+
+async def test_the_endpoint_requires_tls_1_2_or_newer(tmp_path: Path) -> None:
+    ca_pem, cert_pem, key_pem = mint_ca_and_server_cert(tmp_path)
+    context = local_endpoint._server_context((cert_pem, key_pem))
+    assert context is not None
+    assert context.minimum_version is ssl.TLSVersion.TLSv1_2
+
+    async with served_endpoint(JsonHandler, tls=(cert_pem, key_pem)) as endpoint:
+        client = await asyncio.to_thread(open_keepalive_request, endpoint.port, cafile=ca_pem)
+        try:
+            assert isinstance(client, ssl.SSLSocket)
+            negotiated = client.version()
+        finally:
+            client.close()
+
+    assert negotiated in {"TLSv1.2", "TLSv1.3"}, negotiated
+
+
+async def abandon_several_clients(opened: list[socket.socket], count: int) -> None:
+    """Leave `count` served connections open when the endpoint context exits."""
+    async with served_endpoint(JsonHandler, settle_seconds=_IMPATIENT_SECONDS) as endpoint:
+        for _ in range(count):
+            opened.append(await asyncio.to_thread(open_keepalive_request, endpoint.port))
+
+
+async def test_the_stranded_peer_report_names_a_few_peers_and_counts_the_rest() -> None:
+    opened: list[socket.socket] = []
+    try:
+        with pytest.raises(AssertionError, match=r"\(\+2 more\)") as caught:
+            await abandon_several_clients(opened, 7)
+
+        message = str(caught.value)
+        assert "still held 7 connection(s)" in message
+        assert message.count(f"{_HOST}:") == 5, message
+    finally:
+        for client in opened:
+            client.close()
+
+
+async def drop_one_handshake(
+    tls: tuple[Path, Path], cafile: Path, opened: list[socket.socket]
+) -> None:
+    """Fail one handshake the way `socketserver` does not expect, then serve a client."""
+    async with served_endpoint(JsonHandler, tls=tls) as endpoint:
+        dropped = await asyncio.to_thread(connect_without_speaking, endpoint.port)
+        opened.append(dropped)
+        assert await asyncio.to_thread(peer_closed_within, dropped, _CONNECT_SECONDS)
+
+        survivor = await asyncio.to_thread(open_keepalive_request, endpoint.port, cafile=cafile)
+        survivor.close()
+
+
+async def test_a_handshake_failure_that_is_not_an_oserror_keeps_the_accept_loop(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`socketserver` only survives an `OSError`, and a dropped peer is still reported."""
+    ca_pem, cert_pem, key_pem = mint_ca_and_server_cert(tmp_path)
+    monkeypatch.setattr(local_endpoint, "_server_context", failing_once_context)
+    opened: list[socket.socket] = []
+    try:
+        with pytest.raises(AssertionError, match="no TLS for you"):
+            await drop_one_handshake((cert_pem, key_pem), ca_pem, opened)
+    finally:
+        for client in opened:
+            client.close()
+
+
+async def explode_one_handler(opened: list[socket.socket]) -> None:
+    """Let one handler raise, and watch the endpoint close the peer it was serving."""
+    async with served_endpoint(ExplodingHandler) as endpoint:
+        client = await asyncio.to_thread(send_request_only, endpoint.port)
+        opened.append(client)
+        assert await asyncio.to_thread(peer_closed_within, client, _CONNECT_SECONDS)
+
+
+async def test_a_handler_failure_is_reported_when_the_body_and_release_were_clean() -> None:
+    opened: list[socket.socket] = []
+    try:
+        with pytest.raises(AssertionError, match="the handler exploded"):
+            await explode_one_handler(opened)
+    finally:
+        for client in opened:
+            client.close()
+
+
+async def test_a_cancelled_release_is_not_downgraded_to_a_note() -> None:
+    """Cancellation outranks the body's own failure: swallowing it strands the canceller."""
+
+    async def cancel_release() -> None:
+        raise asyncio.CancelledError("the release was cancelled")
+
+    with pytest.raises(asyncio.CancelledError, match="the release was cancelled") as caught:
+        async with served_endpoint(JsonHandler, release_clients=cancel_release):
+            raise ValueError("the body failed")
+
+    notes = getattr(caught.value, "__notes__", [])
+    assert any("the body failed" in note for note in notes), notes
+
+
+async def test_a_cancelled_body_outranks_a_release_failure() -> None:
+    async def fail_release() -> None:
+        raise RuntimeError("release failed")
+
+    with pytest.raises(asyncio.CancelledError, match="the body was cancelled") as caught:
+        async with served_endpoint(JsonHandler, release_clients=fail_release):
+            raise asyncio.CancelledError("the body was cancelled")
+
+    notes = getattr(caught.value, "__notes__", [])
+    assert any("release failed" in note for note in notes), notes
