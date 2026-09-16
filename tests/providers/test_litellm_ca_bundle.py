@@ -147,6 +147,35 @@ class _ChatServer(http.server.HTTPServer):
         return connection, address
 
 
+class _UnexpectedHandshakeSocket:
+    """A TLS-shaped sole descriptor owner whose handshake resets."""
+
+    def __init__(self, raw: socket.socket) -> None:
+        self._socket = socket.socket(fileno=raw.detach())
+        self.closed = False
+
+    def do_handshake(self) -> None:
+        raise ConnectionResetError("peer reset during handshake")
+
+    def close(self) -> None:
+        self.closed = True
+        self._socket.close()
+
+    def fileno(self) -> int:
+        return self._socket.fileno()
+
+
+class _UnexpectedHandshakeContext:
+    """Builds one observable TLS-shaped owner for the failure-path test."""
+
+    def __init__(self) -> None:
+        self.wrapped: _UnexpectedHandshakeSocket | None = None
+
+    def wrap_socket(self, raw: socket.socket, **_: object) -> Any:
+        self.wrapped = _UnexpectedHandshakeSocket(raw)
+        return self.wrapped
+
+
 @asynccontextmanager
 async def _https_endpoint(cert_pem: Path, key_pem: Path) -> AsyncIterator[str]:
     """A local HTTPS chat endpoint, served with the minted certificate.
@@ -196,12 +225,36 @@ def _reject_the_certificate(port: int) -> ssl.SSLSocket:
     tls = ssl.create_default_context().wrap_socket(
         raw, server_hostname="127.0.0.1", do_handshake_on_connect=False
     )
+    rejected = False
     try:
         tls.do_handshake()
     except ssl.SSLCertVerificationError:
+        rejected = True
         return tls
-    tls.close()
+    finally:
+        if not rejected:
+            tls.close()
     raise AssertionError("the throwaway CA was in the system trust store")
+
+
+def test_an_unexpected_handshake_failure_closes_the_socket_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, peer = socket.socketpair()
+    context = _UnexpectedHandshakeContext()
+    monkeypatch.setattr(socket, "create_connection", lambda *_args, **_kwargs: client)
+    monkeypatch.setattr(ssl, "create_default_context", lambda: context)
+
+    try:
+        with pytest.raises(ConnectionResetError, match="peer reset during handshake"):
+            _reject_the_certificate(443)
+        assert context.wrapped is not None
+        assert context.wrapped.closed
+        assert context.wrapped.fileno() == -1
+    finally:
+        peer.close()
+        if context.wrapped is not None and not context.wrapped.closed:
+            context.wrapped.close()
 
 
 def _settle_peer_state(rejected: socket.socket) -> str:
