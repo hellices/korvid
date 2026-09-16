@@ -34,15 +34,14 @@ kwargs, not about what korvid believes it does.
 from __future__ import annotations
 
 import asyncio
-import http.server
 import json
 import socket
-import threading
 from collections.abc import AsyncIterator, Iterator
-from contextlib import closing, contextmanager
+from contextlib import AbstractAsyncContextManager, closing, contextmanager
 from pathlib import Path
 from typing import Any, ClassVar, Final
 
+import litellm
 import pytest
 
 from korvid.agent.provider import REQUEST_SENT, OperatorSafeProviderError
@@ -50,6 +49,7 @@ from korvid.core.config import load_config
 from korvid.providers import litellm_runtime
 from korvid.providers.litellm_factory import create_provider_from_profile
 from korvid.providers.litellm_provider import LiteLLMProvider
+from tests.local_endpoint import KeepAliveHandler, LocalEndpoint, served_endpoint
 from tests.providers.litellm_clients import drop_cached_clients
 
 #: A provider LiteLLM reports no supported parameters for, so korvid's
@@ -138,7 +138,7 @@ _ANSWER: Final[dict[str, Any]] = {
 }
 
 
-class _Chat(http.server.BaseHTTPRequestHandler):
+class _Chat(KeepAliveHandler):
     """Answers any POST with one canned completion, recording the body."""
 
     bodies: ClassVar[list[dict[str, Any]]] = []
@@ -157,22 +157,17 @@ class _Chat(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(payload)
 
-    def log_message(self, *args: object) -> None:
-        return None
 
+def _chat_endpoint() -> AbstractAsyncContextManager[LocalEndpoint]:
+    """A local chat endpoint that records every request body it is sent.
 
-@contextmanager
-def _chat_endpoint() -> Iterator[str]:
-    """A local chat endpoint that records every request body it is sent."""
-    server = http.server.HTTPServer(("127.0.0.1", 0), _Chat)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        yield f"http://127.0.0.1:{server.server_address[1]}/v1"
-    finally:
-        server.shutdown()
-        thread.join(timeout=5)
-        server.server_close()
+    The lifecycle is `tests/local_endpoint.py`'s, so the connection stays
+    the client's to close (#390). `release_clients` is the wiring that
+    makes that possible here: the client holding it is one LiteLLM cached
+    for itself, and it has to be closed *inside* this context, while the
+    endpoint is still serving, so its own EOF releases the handler.
+    """
+    return served_endpoint(_Chat, release_clients=drop_cached_clients)
 
 
 @contextmanager
@@ -196,6 +191,12 @@ async def _no_leaked_clients() -> AsyncIterator[None]:
 
     A client left open here is collected during some later, unrelated test
     and the `ResourceWarning` fails that one instead of this one.
+
+    A test that served an endpoint has already been emptied by its
+    `release_clients`, so the second drop finds nothing and costs nothing.
+    It is still the one that runs for a test with no endpoint to release
+    against — `_unreachable_endpoint`'s, where a client can be built for a
+    socket that was never opened.
     """
     await drop_cached_clients()
     _Chat.bodies = []
@@ -283,8 +284,8 @@ async def test_a_mocked_profile_still_gets_the_endpoints_own_answer(tmp_path: Pa
     server's and the tool call the profile tried to plant is absent.
     """
     events: list[dict[str, Any]] = []
-    with _chat_endpoint() as endpoint:
-        provider = _provider(tmp_path, endpoint, MOCK_OPTIONS)
+    async with _chat_endpoint() as endpoint:
+        provider = _provider(tmp_path, endpoint.path("/v1"), MOCK_OPTIONS)
         await _drain(provider, events)
 
     assert {"type": "text_delta", "text": "from the endpoint"} in events
@@ -303,8 +304,8 @@ async def test_the_synthetic_controls_never_reach_the_request_body(tmp_path: Pat
     them is the evidence that the rule is narrow.
     """
     events: list[dict[str, Any]] = []
-    with _chat_endpoint() as endpoint:
-        provider = _provider(tmp_path, endpoint, ATTACK_OPTIONS)
+    async with _chat_endpoint() as endpoint:
+        provider = _provider(tmp_path, endpoint.path("/v1"), ATTACK_OPTIONS)
         await _drain(provider, events)
 
     assert {"type": "text_delta", "text": "from the endpoint"} in events
@@ -322,11 +323,36 @@ async def test_an_ordinary_profile_still_reaches_the_provider(tmp_path: Path) ->
     failure there is the controls and not the harness.
     """
     events: list[dict[str, Any]] = []
-    with _chat_endpoint() as endpoint:
-        provider = _provider(tmp_path, endpoint, "        seed: 7\n")
+    async with _chat_endpoint() as endpoint:
+        provider = _provider(tmp_path, endpoint.path("/v1"), "        seed: 7\n")
         await _drain(provider, events)
 
     assert any(event.get("type") == REQUEST_SENT for event in events)
     assert {"type": "text_delta", "text": "from the endpoint"} in events
     assert _Chat.bodies[0]["seed"] == 7
     assert _Chat.bodies[0]["temperature"] == 0.2
+
+
+async def test_the_endpoint_releases_the_client_litellm_cached(tmp_path: Path) -> None:
+    """This endpoint is plain HTTP, and it is still the client's to close.
+
+    Both halves of that are wiring this module has to get right, and
+    neither is observable once the context has exited. `KeepAliveHandler`
+    is why the endpoint still holds the peer after the answer — under
+    HTTP/1.0 it would have closed a connection the SDK client had not
+    released, which is #390 — and `release_clients` is why the client
+    LiteLLM cached for itself is closed inside the context, while the
+    endpoint is still serving. Without the second, these two assertions
+    become the ownership failure `served_endpoint` raises for a stranded
+    peer instead.
+    """
+    events: list[dict[str, Any]] = []
+    async with _chat_endpoint() as endpoint:
+        provider = _provider(tmp_path, endpoint.path("/v1"), "        seed: 7\n")
+        await _drain(provider, events)
+        held = endpoint.open_connections()
+        cached = len(litellm.in_memory_llm_clients_cache.cache_dict)
+
+    assert cached, "LiteLLM cached no client, so this test proves nothing about releasing one"
+    assert held == 1, f"the endpoint did not hold the connection its cached client owned ({held})"
+    assert litellm.in_memory_llm_clients_cache.cache_dict == {}

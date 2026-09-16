@@ -20,6 +20,8 @@ from contextlib import suppress
 
 import litellm
 
+from tests import local_endpoint
+
 
 async def _drain_logging_worker() -> None:
     """Finish callbacks that have already reached LiteLLM's worker."""
@@ -47,15 +49,6 @@ async def drain_logging() -> None:
     await _drain_logging_worker()
 
 
-async def _wait_for_transport_closures() -> None:
-    """Drain chained TLS and Proactor close callbacks from the ready queue."""
-    loop = asyncio.get_running_loop()
-    for _ in range(2):
-        barrier = asyncio.Event()
-        loop.call_soon(barrier.set)
-        await barrier.wait()
-
-
 async def drop_cached_clients() -> None:
     """Close and forget every client LiteLLM cached, without leaking one."""
     await drain_logging()
@@ -75,5 +68,7 @@ async def drop_cached_clients() -> None:
     flush_cache: Callable[[], None] = litellm.in_memory_llm_clients_cache.flush_cache
     flush_cache()
     # Proactor transport.close() queues connection_lost(), which owns the
-    # socket until that callback runs even after the client's aclose() returns.
-    await _wait_for_transport_closures()
+    # socket until that callback runs even after the client's aclose()
+    # returns. Drained through the endpoint helper, so the clients and the
+    # endpoints they talked to agree on what "closed" means (#390).
+    await local_endpoint.drain_transport_closures()

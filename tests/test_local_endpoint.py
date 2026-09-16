@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import os
 import socket
+import socketserver
 import ssl
 import subprocess
 import sys
@@ -597,6 +598,37 @@ async def test_teardown_leaves_the_event_loop_free_to_close_clients() -> None:
         schedule_after_loop_turns(loop, 64, writer.close)
 
     await writer.wait_closed()
+
+
+async def test_teardown_shuts_the_server_down_off_the_event_loop_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`shutdown()` must run on some thread other than the loop's.
+
+    It blocks until the accept loop notices the request, and that loop can
+    be inside a TLS handshake whose client half belongs to this very event
+    loop — including the closes asyncio has only *queued* on it. Which
+    thread runs it is the property under test, because an outcome probe
+    cannot stand in for it: any later `await` in the same teardown drains a
+    queued callback and would hide a `shutdown()` that had gone back to
+    blocking the loop.
+    """
+    ran_on: list[int] = []
+    real_shutdown = socketserver.BaseServer.shutdown
+
+    def recording_shutdown(server: socketserver.BaseServer) -> None:
+        ran_on.append(threading.get_ident())
+        real_shutdown(server)
+
+    monkeypatch.setattr(socketserver.BaseServer, "shutdown", recording_shutdown)
+
+    async with served_endpoint(JsonHandler):
+        pass
+
+    assert ran_on, "teardown never shut the endpoint's server down"
+    assert threading.get_ident() not in ran_on, (
+        "teardown shut the endpoint's server down on its own event-loop thread"
+    )
 
 
 async def test_drain_transport_closures_runs_chained_loop_callbacks() -> None:

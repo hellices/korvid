@@ -29,16 +29,13 @@ SDK shape ignores it for TLS and then forwards it into the request
 from __future__ import annotations
 
 import asyncio
-import http.server
 import json
 import socket
-import socketserver
 import ssl
-import threading
 import weakref
 from asyncio.transports import BaseTransport
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager, suppress
+from contextlib import AbstractAsyncContextManager
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -49,6 +46,7 @@ from korvid.agent.provider import OperatorSafeProviderError
 from korvid.core.config import ConnectionAuthConfig, ModelConnectionConfig
 from korvid.providers.litellm_factory import create_provider_from_profile
 from korvid.providers.litellm_provider import LiteLLMProvider
+from tests.local_endpoint import KeepAliveHandler, LocalEndpoint, served_endpoint
 from tests.providers.litellm_clients import drop_cached_clients
 from tests.providers.tls_ca import mint_ca_and_server_cert
 
@@ -84,10 +82,9 @@ def test_direct_tls_probe_requires_tls_1_2_or_newer() -> None:
     assert context.minimum_version >= ssl.TLSVersion.TLSv1_2
 
 
-class _Chat(http.server.BaseHTTPRequestHandler):
+class _Chat(KeepAliveHandler):
     """Answers any POST with one canned chat completion, recording the body."""
 
-    protocol_version = "HTTP/1.1"
     bodies: ClassVar[list[dict[str, Any]]] = []
 
     def do_POST(self) -> None:  # http.server API name
@@ -103,65 +100,6 @@ class _Chat(http.server.BaseHTTPRequestHandler):
         self.send_header("content-length", str(len(payload)))
         self.end_headers()
         self.wfile.write(payload)
-
-    def log_message(self, *args: object) -> None:
-        return None
-
-
-#: Bounded only so a client that never closes cannot pin a reaper thread.
-_REJECTED_HOLD_SECONDS: float = 30.0
-
-
-def _hold_until_the_client_closes(rejected: ssl.SSLSocket) -> None:
-    """Keep a connection whose certificate was refused open until its client goes.
-
-    Disposing of it here would disconnect a client that has not torn its own
-    transport down yet, and the Windows proactor finalizes such a transport by
-    calling `self._sock.shutdown(SHUT_RDWR)` unguarded (#390). Reading to the
-    client's EOF costs this endpoint nothing — it has already refused to serve
-    the connection — and leaves the client owning both ends of the teardown.
-
-    The descriptor is never detached, so `rejected` owns it throughout and is
-    closed exactly once. Nothing may escape this thread either: pytest turns an
-    unhandled thread exception into `PytestUnhandledThreadExceptionWarning`,
-    which this suite's `filterwarnings = ["error"]` would raise in whichever
-    test happened to be running — the very attribution problem #390 is about.
-    """
-    try:
-        rejected.settimeout(_REJECTED_HOLD_SECONDS)
-        # Raw reads: a refused handshake leaves no TLS session to decrypt
-        # through, and the bytes are only interesting as a path to EOF.
-        while socket.socket.recv(rejected, 4096):
-            pass
-    except Exception:  # a torn-down connection must not reach threading.excepthook
-        pass
-    finally:
-        with suppress(Exception):
-            rejected.close()
-
-
-class _ChatServer(http.server.ThreadingHTTPServer):
-    """Runs the TLS handshake per connection instead of inside `accept()`.
-
-    Wrapping the *listening* socket makes `accept()` hand a refused connection
-    to `ssl.SSLSocket._create`, which closes it — the endpoint closes first,
-    and `_hold_until_the_client_closes` explains why that is not survivable on
-    Windows. Wrapping each accepted socket puts that decision here instead.
-    """
-
-    tls: ssl.SSLContext
-
-    def get_request(self) -> tuple[socket.socket, Any]:
-        raw, address = self.socket.accept()
-        connection = self.tls.wrap_socket(raw, server_side=True, do_handshake_on_connect=False)
-        try:
-            connection.do_handshake()
-        except OSError:
-            threading.Thread(
-                target=_hold_until_the_client_closes, args=(connection,), daemon=True
-            ).start()
-            raise
-        return connection, address
 
 
 class _UnexpectedHandshakeSocket:
@@ -193,73 +131,31 @@ class _UnexpectedHandshakeContext:
         return self.wrapped
 
 
-class _TeardownProbeServer:
-    """Server-shaped lifecycle probe that cannot leak its test thread."""
-
-    server_address = ("127.0.0.1", 443)
-
-    def __init__(self) -> None:
-        self._stop = threading.Event()
-        self.finished = threading.Event()
-        self.shutdown_called = False
-        self.close_called = False
-
-    def serve_forever(self) -> None:
-        self._stop.wait()
-        self.finished.set()
-
-    def shutdown(self) -> None:
-        self.shutdown_called = True
-        self._stop.set()
-
-    def server_close(self) -> None:
-        self.close_called = True
-
-
-@asynccontextmanager
-async def _https_endpoint(cert_pem: Path, key_pem: Path) -> AsyncIterator[str]:
+def _chat_endpoint(cert_pem: Path, key_pem: Path) -> AbstractAsyncContextManager[LocalEndpoint]:
     """A local HTTPS chat endpoint, served with the minted certificate.
 
-    Teardown is awaited off the event loop. `serve_forever()` runs the
-    server-side TLS handshake inline in `accept()`, and the client half of
-    that handshake belongs to the loop this context manager is torn down on —
-    including the connection closes asyncio only *queues* on the loop instead
-    of performing synchronously. Blocking the loop for the length of
-    `shutdown()` plus the reader `join()` strands every closure the loop still
-    owes, and deadlocks outright when the accept thread is waiting on one.
+    Only the wiring is this module's: the lifecycle — per-accepted-socket
+    TLS, the client-EOF hold on a refused handshake, and a teardown that
+    runs off the event loop — belongs to `tests/local_endpoint.py`, which
+    owns it for every suite (#390).
+
+    `release_clients` is the part that cannot be left out here. LiteLLM
+    caches live SDK clients, so the connection the endpoint is holding
+    belongs to a client this test never named; closing that cache *inside*
+    this context, while the endpoint still serves, is what lets the
+    clients' own EOF release the handlers before teardown waits on them.
     """
-    server = _ChatServer(("127.0.0.1", 0), _Chat)
-    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    context.minimum_version = ssl.TLSVersion.TLSv1_2
-    context.load_cert_chain(certfile=str(cert_pem), keyfile=str(key_pem))
-    server.tls = context
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        yield f"https://127.0.0.1:{server.server_address[1]}/v1"
-    finally:
-        try:
-            # The endpoint keeps successful HTTP/1.1 connections alive so
-            # the async client owns teardown. Close LiteLLM's cached clients
-            # while the server is still serving; their EOF releases the
-            # request handlers before shutdown waits for the accept loop.
-            await drop_cached_clients()
-        finally:
-            try:
-                await asyncio.to_thread(server.shutdown)
-                await asyncio.to_thread(thread.join, 5)
-            finally:
-                server.server_close()
+    return served_endpoint(
+        _Chat,
+        tls=(cert_pem, key_pem),
+        release_clients=drop_cached_clients,
+    )
 
 
 #: How long a rejected connection is observed for a peer close before its state
 #: is taken as settled. A safety bound on a blocking read, not a wait for a
 #: result: an endpoint that closes first is observed the instant its FIN lands.
 _PEER_SETTLE_SECONDS: float = 0.5
-
-
-def _port_of(endpoint: str) -> int:
-    return int(endpoint.rsplit(":", 1)[1].split("/", 1)[0])
 
 
 def _reject_the_certificate(port: int) -> ssl.SSLSocket:
@@ -284,37 +180,6 @@ def _reject_the_certificate(port: int) -> ssl.SSLSocket:
         if not rejected:
             tls.close()
     raise AssertionError("the throwaway CA was in the system trust store")
-
-
-async def test_endpoint_closes_server_when_cached_client_cleanup_fails(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A client-cleanup error must not strand the listener or server thread."""
-    _ca_pem, cert_pem, key_pem = mint_ca_and_server_cert(tmp_path)
-    server = _TeardownProbeServer()
-
-    async def fail_client_cleanup() -> None:
-        raise RuntimeError("client cleanup failed")
-
-    try:
-        with monkeypatch.context() as scoped:
-            scoped.setitem(globals(), "_ChatServer", lambda *_args, **_kwargs: server)
-            scoped.setitem(globals(), "drop_cached_clients", fail_client_cleanup)
-            with pytest.raises(RuntimeError, match="client cleanup failed"):
-                async with _https_endpoint(cert_pem, key_pem):
-                    pass
-        assert server.shutdown_called
-        assert server.close_called
-        assert await asyncio.to_thread(server.finished.wait, 1)
-    finally:
-        server.shutdown()
-        await asyncio.to_thread(server.finished.wait, 1)
-
-
-def test_chat_server_keeps_request_handlers_off_the_accept_loop() -> None:
-    """Idle HTTP/1.1 keep-alive handlers must not block server shutdown."""
-    assert issubclass(_ChatServer, http.server.ThreadingHTTPServer)
-    assert _ChatServer.daemon_threads is True
 
 
 def _complete_one_chat_request(port: int, ca_pem: Path) -> ssl.SSLSocket:
@@ -395,10 +260,10 @@ def _settle_peer_state(rejected: socket.socket) -> str:
 
 
 async def test_the_endpoint_lets_a_served_client_close_first(tmp_path: Path) -> None:
-    """A successful HTTP response must leave the cached client owning teardown."""
+    """A successful HTTP response must leave the client owning teardown."""
     ca_pem, cert_pem, key_pem = mint_ca_and_server_cert(tmp_path)
-    async with _https_endpoint(cert_pem, key_pem) as endpoint:
-        client = await asyncio.to_thread(_complete_one_chat_request, _port_of(endpoint), ca_pem)
+    async with _chat_endpoint(cert_pem, key_pem) as endpoint:
+        client = await asyncio.to_thread(_complete_one_chat_request, endpoint.port, ca_pem)
         try:
             peer_state = await asyncio.to_thread(_settle_peer_state, client)
         finally:
@@ -436,8 +301,8 @@ async def test_the_endpoint_lets_a_rejecting_client_close_first(tmp_path: Path) 
     the manner of the close.
     """
     _ca_pem, cert_pem, key_pem = mint_ca_and_server_cert(tmp_path)
-    async with _https_endpoint(cert_pem, key_pem) as endpoint:
-        rejected = await asyncio.to_thread(_reject_the_certificate, _port_of(endpoint))
+    async with _chat_endpoint(cert_pem, key_pem) as endpoint:
+        rejected = await asyncio.to_thread(_reject_the_certificate, endpoint.port)
         try:
             peer_state = await asyncio.to_thread(_settle_peer_state, rejected)
             teardown = "clean"
@@ -528,7 +393,10 @@ async def _isolated_litellm_trust(
     that reuses one process has to flush.
 
     Requests the ownership probe so the probe is torn down *after* this
-    fixture: a client still open is not yet a stranded connection.
+    fixture: a client still open is not yet a stranded connection. The
+    endpoint's own `release_clients` has usually emptied the cache first,
+    inside the test body, so the drop here finds nothing — it is the
+    isolation that matters, not the closing.
     """
     monkeypatch.setattr(litellm, "ssl_verify", True, raising=False)
     await drop_cached_clients()
@@ -557,35 +425,34 @@ async def _answer(provider: Any) -> list[dict[str, Any]]:
     return events
 
 
-async def test_the_endpoint_shuts_its_server_down_off_the_event_loop_thread(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("reference", CLIENT_SHAPES)
+async def test_the_endpoint_releases_the_client_litellm_cached(
+    tmp_path: Path, reference: str
 ) -> None:
-    """`shutdown()` must execute on some other thread than this one.
+    """The connection this endpoint holds belongs to a client no test named.
 
-    It blocks until the accept loop notices the request, and that loop runs
-    the server-side TLS handshake inline — so it can be waiting for a client
-    close this very event loop has only *queued*. Which thread runs it is the
-    property under test: an outcome probe cannot stand in for it, because any
-    later `await` in the same teardown drains a queued callback and would hide
-    a `shutdown()` that had gone back to blocking the loop.
+    Both LiteLLM client shapes cache a live SDK client keyed by api key,
+    base URL, timeout and retry count, and that cached client is what owns
+    the keep-alive connection once the answer has arrived. So the endpoint
+    is still holding the peer when the body ends — it must be, or it closed
+    a connection its client had not released — and emptying that cache is
+    the endpoint's own teardown job, done inside this context while it is
+    still serving. Without `release_clients` the same two assertions become
+    the ownership failure `served_endpoint` raises for a stranded peer.
     """
-    ran_on: list[int] = []
-    real_shutdown = socketserver.BaseServer.shutdown
+    ca_pem, cert_pem, key_pem = mint_ca_and_server_cert(tmp_path)
+    async with _chat_endpoint(cert_pem, key_pem) as endpoint:
+        provider = create_provider_from_profile(
+            _profile(reference, endpoint.path("/v1")), ca_bundle=str(ca_pem)
+        )
+        assert isinstance(provider, LiteLLMProvider)
+        await _answer(provider)
+        held = endpoint.open_connections()
+        cached = len(litellm.in_memory_llm_clients_cache.cache_dict)
 
-    def recording_shutdown(server: socketserver.BaseServer) -> None:
-        ran_on.append(threading.get_ident())
-        real_shutdown(server)
-
-    monkeypatch.setattr(socketserver.BaseServer, "shutdown", recording_shutdown)
-
-    _ca_pem, cert_pem, key_pem = mint_ca_and_server_cert(tmp_path)
-    async with _https_endpoint(cert_pem, key_pem):
-        pass
-
-    assert ran_on, "the endpoint never shut its server down"
-    assert threading.get_ident() not in ran_on, (
-        "the endpoint shut its server down on its own event-loop thread"
-    )
+    assert cached, "LiteLLM cached no client, so this test proves nothing about releasing one"
+    assert held == 1, f"the endpoint did not hold the connection its cached client owned ({held})"
+    assert litellm.in_memory_llm_clients_cache.cache_dict == {}
 
 
 @pytest.mark.parametrize("reference", CLIENT_SHAPES)
@@ -595,9 +462,9 @@ async def test_the_configured_bundle_reaches_the_tls_handshake(
     """The whole point: a private-CA endpoint answers because the operator
     named the bundle, not because verification was relaxed."""
     ca_pem, cert_pem, key_pem = mint_ca_and_server_cert(tmp_path)
-    async with _https_endpoint(cert_pem, key_pem) as endpoint:
+    async with _chat_endpoint(cert_pem, key_pem) as endpoint:
         provider = create_provider_from_profile(
-            _profile(reference, endpoint), ca_bundle=str(ca_pem)
+            _profile(reference, endpoint.path("/v1")), ca_bundle=str(ca_pem)
         )
         assert isinstance(provider, LiteLLMProvider)
         events = await _answer(provider)
@@ -611,8 +478,10 @@ async def test_without_the_bundle_the_same_endpoint_is_unreachable(
     """The negative control. Without it the test above could pass against
     an endpoint korvid trusted for some other reason."""
     _ca_pem, cert_pem, key_pem = mint_ca_and_server_cert(tmp_path)
-    async with _https_endpoint(cert_pem, key_pem) as endpoint:
-        provider = create_provider_from_profile(_profile(reference, endpoint), ca_bundle=None)
+    async with _chat_endpoint(cert_pem, key_pem) as endpoint:
+        provider = create_provider_from_profile(
+            _profile(reference, endpoint.path("/v1")), ca_bundle=None
+        )
         assert isinstance(provider, LiteLLMProvider)
         with pytest.raises(OperatorSafeProviderError):
             await _answer(provider)
@@ -631,9 +500,9 @@ async def test_a_profile_option_can_never_turn_verification_off(
     is still refused, exactly as it is with no option at all.
     """
     _ca_pem, cert_pem, key_pem = mint_ca_and_server_cert(tmp_path)
-    async with _https_endpoint(cert_pem, key_pem) as endpoint:
+    async with _chat_endpoint(cert_pem, key_pem) as endpoint:
         provider = create_provider_from_profile(
-            _profile(reference, endpoint, ssl_verify=False), ca_bundle=None
+            _profile(reference, endpoint.path("/v1"), ssl_verify=False), ca_bundle=None
         )
         assert isinstance(provider, LiteLLMProvider)
         with pytest.raises(OperatorSafeProviderError):
@@ -647,9 +516,9 @@ async def test_the_bundle_still_applies_when_an_option_asks_to_ignore_it(
     """The other half of the same rule: with a bundle configured, the
     option changes nothing and the private-CA endpoint answers."""
     ca_pem, cert_pem, key_pem = mint_ca_and_server_cert(tmp_path)
-    async with _https_endpoint(cert_pem, key_pem) as endpoint:
+    async with _chat_endpoint(cert_pem, key_pem) as endpoint:
         provider = create_provider_from_profile(
-            _profile("openai/gpt-4o", endpoint, ssl_verify=False), ca_bundle=str(ca_pem)
+            _profile("openai/gpt-4o", endpoint.path("/v1"), ssl_verify=False), ca_bundle=str(ca_pem)
         )
         assert isinstance(provider, LiteLLMProvider)
         events = await _answer(provider)
@@ -664,9 +533,9 @@ async def test_the_bundle_is_a_transport_setting_not_a_model_parameter(
     """It configures korvid's client. It must not travel in the request
     body, where a provider would reject it as an unknown field."""
     ca_pem, cert_pem, key_pem = mint_ca_and_server_cert(tmp_path)
-    async with _https_endpoint(cert_pem, key_pem) as endpoint:
+    async with _chat_endpoint(cert_pem, key_pem) as endpoint:
         provider = create_provider_from_profile(
-            _profile(reference, endpoint), ca_bundle=str(ca_pem)
+            _profile(reference, endpoint.path("/v1")), ca_bundle=str(ca_pem)
         )
         assert isinstance(provider, LiteLLMProvider)
         await _answer(provider)
