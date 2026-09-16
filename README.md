@@ -10,9 +10,13 @@ All three work with the same cockpit; **you approve every cluster write**.
 [Latest release](https://github.com/hellices/korvid/releases/latest) |
 [PyPI](https://pypi.org/project/korvid/)
 
-![korvid demo - browsing pods, filtering, describe, live logs, and help](https://raw.githubusercontent.com/hellices/korvid/main/docs/assets/demo.gif)
+[![korvid overview - keyboard, Agent, and MCP in one cockpit, with human approval for writes](https://raw.githubusercontent.com/hellices/korvid/main/docs/assets/overview.gif)](https://hellices.github.io/korvid/assets/overview.mp4)
 
-*Recorded against synthetic demo data.*
+[Watch the 28-second overview in HD (MP4)](https://hellices.github.io/korvid/assets/overview.mp4)
+
+*Real TUI, synthetic cluster, edited excerpts. Agent: scripted model response
+with real read tools. MCP: local SDK client over Streamable HTTP, read-only
+calls. The ending explains approval policy; no cluster write is shown.*
 
 ## Why korvid
 
