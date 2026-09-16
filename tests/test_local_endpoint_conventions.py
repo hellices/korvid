@@ -179,7 +179,14 @@ class _Scanner(ast.NodeVisitor):
             self.visit(expression)
         for keyword in node.keywords:
             self.visit(keyword.value)
-        self._visit_scope(node.body, {node.name})
+        inherited = self.bindings.copy()
+        global_names = _scope_global_names(node.body)
+        self._restore_globals(inherited, global_names)
+        self._visit_scope(
+            node.body,
+            {node.name} - global_names,
+            inherited=inherited,
+        )
         self.bindings.pop(node.name, None)
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
@@ -240,11 +247,13 @@ class _Scanner(ast.NodeVisitor):
             if self.closure_bindings
             else self.module_bindings.copy()
         )
+        global_names = _scope_global_names(node.body)
+        self._restore_globals(inherited, global_names)
         shadows = {
             *_argument_names(node.args),
             *_scope_bound_names(node.body),
             node.name,
-        }
+        } - global_names
         for shadow in shadows:
             inherited.pop(shadow, None)
         final_bindings = _final_scope_bindings(node.body, inherited)
@@ -280,6 +289,19 @@ class _Scanner(ast.NodeVisitor):
                     self.bindings.pop(name, None)
                 else:
                     self.bindings[name] = resolved
+
+    def _restore_globals(
+        self,
+        bindings: dict[str, str],
+        names: set[str],
+    ) -> None:
+        """Resolve declared globals from the module, not an enclosing closure."""
+        for name in names:
+            module_binding = self.module_bindings.get(name)
+            if module_binding is None:
+                bindings.pop(name, None)
+            else:
+                bindings[name] = module_binding
 
 
 def _final_scope_bindings(
@@ -327,6 +349,13 @@ def _scope_bound_names(body: Sequence[ast.stmt]) -> set[str]:
         elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
             bound.add(node.id)
     return bound - external
+
+
+def _scope_global_names(body: Sequence[ast.stmt]) -> set[str]:
+    """Names this function explicitly resolves from module scope."""
+    return {
+        name for node in _scope_nodes(body) if isinstance(node, ast.Global) for name in node.names
+    }
 
 
 def _scope_nodes(body: Sequence[ast.stmt]) -> Iterator[ast.AST]:
@@ -691,6 +720,66 @@ def test_a_nested_function_resolves_an_enclosing_server_alias_bound_later(
 
     assert _rules(violations) == [RULE_SERVER]
     assert violations[0].line == 5
+
+
+def test_a_nested_function_resolves_a_declared_global_from_module_scope(
+    tmp_path: Path,
+) -> None:
+    """`global` bypasses an enclosing parameter and reads the module binding."""
+    violations = _scan(
+        tmp_path,
+        """
+        from http.server import HTTPServer
+        Endpoint = HTTPServer
+
+        def outer(Endpoint):
+            def inner(handler):
+                global Endpoint
+                return Endpoint(("127.0.0.1", 0), handler)
+            return inner
+        """,
+    )
+
+    assert _rules(violations) == [RULE_SERVER]
+    assert violations[0].line == 7
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param(
+            """
+            def outer(Endpoint):
+                def Endpoint(handler):
+                    global Endpoint
+                    return Endpoint(("127.0.0.1", 0), handler)
+                return Endpoint
+            """,
+            id="function-name",
+        ),
+        pytest.param(
+            """
+            def outer(Endpoint):
+                class Made:
+                    global Endpoint
+                    listener = Endpoint(("127.0.0.1", 0), None)
+                return Made
+            """,
+            id="class-body",
+        ),
+    ],
+)
+def test_global_declarations_override_enclosing_alias_shadows(
+    tmp_path: Path,
+    body: str,
+) -> None:
+    """A declared global always resolves from the module, regardless of syntax scope."""
+    violations = _scan(
+        tmp_path,
+        f"from http.server import HTTPServer\nEndpoint = HTTPServer\n\n{dedent(body).lstrip()}",
+    )
+
+    assert _rules(violations) == [RULE_SERVER]
 
 
 def test_assignment_aliases_follow_source_order_and_lexical_scope(
