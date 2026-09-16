@@ -38,7 +38,7 @@ from __future__ import annotations
 
 import ast
 import subprocess
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from textwrap import dedent
@@ -137,29 +137,125 @@ def _scan_source(source: str, name: str) -> tuple[Violation, ...]:
         tree = ast.parse(source, filename=name)
     except SyntaxError as error:
         return (Violation(name, error.lineno or 1, RULE_UNREADABLE, error.msg),)
-    bindings = _bindings(tree)
-    found = [violation for node in ast.walk(tree) for violation in _judge(node, bindings, name)]
-    return tuple(sorted(found, key=lambda violation: (violation.line, violation.rule)))
+    scanner = _Scanner(name)
+    scanner.visit(tree)
+    return tuple(sorted(scanner.found, key=lambda violation: (violation.line, violation.rule)))
 
 
-def _bindings(tree: ast.AST) -> dict[str, str]:
-    """What each imported name in this module actually refers to.
+class _Scanner(ast.NodeVisitor):
+    """Judge names as each lexical scope binds them in source order."""
 
-    `import http.server as web`, `from http.server import HTTPServer as
-    Listener` and `from http import server` all end up pointing at the same
-    stdlib path, which is what lets the contract judge the thing rather
-    than the spelling.
-    """
-    bindings: dict[str, str] = {}
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.bindings: dict[str, str] = {}
+        self.found: list[Violation] = []
+
+    def visit_Import(self, node: ast.Import) -> None:
+        for alias in node.names:
+            root = alias.name.split(".")[0]
+            self.bindings[alias.asname or root] = alias.name if alias.asname else root
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        if node.module and not node.level:
             for alias in node.names:
-                root = alias.name.split(".")[0]
-                bindings[alias.asname or root] = alias.name if alias.asname else root
-        elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
-            for alias in node.names:
-                bindings[alias.asname or alias.name] = f"{node.module}.{alias.name}"
-    return bindings
+                self.bindings[alias.asname or alias.name] = f"{node.module}.{alias.name}"
+
+    def visit_Call(self, node: ast.Call) -> None:
+        self.found.extend(_judge_call(node, self.bindings, self.name))
+        self.generic_visit(node)
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        self.found.extend(_judge_bases(node, self.bindings, self.name))
+        for expression in (*node.decorator_list, *node.bases):
+            self.visit(expression)
+        for keyword in node.keywords:
+            self.visit(keyword.value)
+        self._visit_scope(node.body, {node.name})
+        self.bindings.pop(node.name, None)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self._visit_function(node)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self._visit_function(node)
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        self.visit(node.args)
+        self._visit_scope([node.body], _argument_names(node.args))
+
+    def visit_Assign(self, node: ast.Assign) -> None:
+        self.found.extend(_judge_assignment(node, self.name))
+        self.visit(node.value)
+        for target in node.targets:
+            self.visit(target)
+        self._bind(node.targets, node.value)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        self.found.extend(_judge_assignment(node, self.name))
+        self.visit(node.annotation)
+        if node.value is not None:
+            self.visit(node.value)
+        self.visit(node.target)
+        self._bind([node.target], node.value)
+
+    def visit_NamedExpr(self, node: ast.NamedExpr) -> None:
+        self.visit(node.value)
+        self.visit(node.target)
+        self._bind([node.target], node.value)
+
+    def visit_AugAssign(self, node: ast.AugAssign) -> None:
+        self.visit(node.target)
+        self.visit(node.value)
+        self._bind([node.target], None)
+
+    def _visit_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        for decorator in node.decorator_list:
+            self.visit(decorator)
+        self.visit(node.args)
+        if node.returns is not None:
+            self.visit(node.returns)
+        self._visit_scope(node.body, {*_argument_names(node.args), node.name})
+        self.bindings.pop(node.name, None)
+
+    def _visit_scope(self, body: Sequence[ast.stmt | ast.expr], shadows: set[str]) -> None:
+        outer = self.bindings
+        self.bindings = outer.copy()
+        for shadow in shadows:
+            self.bindings.pop(shadow, None)
+        try:
+            for statement in body:
+                self.visit(statement)
+        finally:
+            self.bindings = outer
+
+    def _bind(self, targets: list[ast.expr], value: ast.expr | None) -> None:
+        resolved = None if value is None else _resolve(value, self.bindings)
+        for target in targets:
+            for name in _assigned_names(target):
+                if resolved is None:
+                    self.bindings.pop(name, None)
+                else:
+                    self.bindings[name] = resolved
+
+
+def _argument_names(arguments: ast.arguments) -> set[str]:
+    """Names a function scope binds before its body runs."""
+    positional = [*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs]
+    names = {argument.arg for argument in positional}
+    if arguments.vararg is not None:
+        names.add(arguments.vararg.arg)
+    if arguments.kwarg is not None:
+        names.add(arguments.kwarg.arg)
+    return names
+
+
+def _assigned_names(target: ast.expr) -> Iterator[str]:
+    """Every simple name an assignment target shadows."""
+    if isinstance(target, ast.Name):
+        yield target.id
+    elif isinstance(target, (ast.List, ast.Tuple)):
+        for element in target.elts:
+            yield from _assigned_names(element)
 
 
 def _spelling(node: ast.expr) -> str | None:
@@ -185,16 +281,6 @@ def _resolve(node: ast.expr, bindings: dict[str, str]) -> str | None:
     if target is None:
         return spelling
     return f"{target}.{rest}" if rest else target
-
-
-def _judge(node: ast.AST, bindings: dict[str, str], name: str) -> Iterator[Violation]:
-    """Everything one node has to answer for."""
-    if isinstance(node, ast.ClassDef):
-        yield from _judge_bases(node, bindings, name)
-    elif isinstance(node, ast.Call):
-        yield from _judge_call(node, bindings, name)
-    elif isinstance(node, (ast.Assign, ast.AnnAssign)):
-        yield from _judge_assignment(node, name)
 
 
 def _judge_bases(node: ast.ClassDef, bindings: dict[str, str], name: str) -> Iterator[Violation]:
@@ -353,6 +439,61 @@ def test_an_aliased_http_server_import_is_named(tmp_path: Path) -> None:
 
     assert _rules(violations) == [RULE_SERVER, RULE_SERVER]
     assert [violation.line for violation in violations] == [5, 8]
+
+
+def test_an_assignment_alias_of_an_http_server_is_named(tmp_path: Path) -> None:
+    """A normal assignment can rename an imported server more than once."""
+    violations = _scan(
+        tmp_path,
+        """
+        from http.server import HTTPServer
+
+        Listener = HTTPServer
+        Endpoint = Listener
+
+        def endpoint(handler):
+            return Endpoint(("127.0.0.1", 0), handler)
+        """,
+    )
+
+    assert _rules(violations) == [RULE_SERVER]
+    assert violations[0].line == 7
+    assert "Endpoint" in violations[0].detail
+
+
+def test_assignment_aliases_follow_source_order_and_lexical_scope(
+    tmp_path: Path,
+) -> None:
+    """Aliases apply after binding, can be cleared, and do not leak from functions."""
+    violations = _scan(
+        tmp_path,
+        """
+        from http.server import HTTPServer
+
+        def before_binding(handler):
+            return Endpoint(("127.0.0.1", 0), handler)
+
+        Endpoint = HTTPServer
+
+        def after_binding(handler):
+            return Endpoint(("127.0.0.1", 0), handler)
+
+        Endpoint = build_endpoint
+
+        def after_rebinding(handler):
+            return Endpoint(("127.0.0.1", 0), handler)
+
+        def nested_alias(handler):
+            LocalServer = HTTPServer
+            return LocalServer(("127.0.0.1", 0), handler)
+
+        def sibling_scope(handler):
+            return LocalServer(("127.0.0.1", 0), handler)
+        """,
+    )
+
+    assert _rules(violations) == [RULE_SERVER, RULE_SERVER]
+    assert [violation.line for violation in violations] == [9, 18]
 
 
 def test_a_server_subclass_is_named(tmp_path: Path) -> None:

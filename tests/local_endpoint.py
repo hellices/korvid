@@ -536,7 +536,13 @@ class _EndpointServer(ThreadingHTTPServer):
     def _retrack(self, previous: socket.socket, connection: socket.socket) -> None:
         with self._changed:
             self._connections.pop(previous, None)
-            self._track(connection)
+            if not self._retiring:
+                self._track(connection)
+                return
+            self._counts["refused"] += 1
+            self._changed.notify_all()
+        _close(connection)
+        raise _dropped("the endpoint is retiring")
 
     def _discard(self, connection: socket.socket) -> None:
         _close(connection)
@@ -727,6 +733,32 @@ async def _release(
 
 
 async def _stop(
+    server: _EndpointServer, accept: threading.Thread, settle_seconds: float
+) -> _Leftovers:
+    """Finish endpoint cleanup before propagating cancellation."""
+    cleanup = asyncio.create_task(_stop_once(server, accept, settle_seconds))
+    cancellation: asyncio.CancelledError | None = None
+    while not cleanup.done():
+        try:
+            await asyncio.shield(cleanup)
+        except asyncio.CancelledError as error:
+            if cancellation is None:
+                cancellation = error
+        except BaseException:
+            break
+    try:
+        leftovers = cleanup.result()
+    except BaseException as error:
+        if cancellation is None:
+            raise
+        cancellation.add_note(f"endpoint cleanup also failed: {error!r}")
+        raise cancellation from error
+    if cancellation is not None:
+        raise cancellation
+    return leftovers
+
+
+async def _stop_once(
     server: _EndpointServer, accept: threading.Thread, settle_seconds: float
 ) -> _Leftovers:
     """Retire the endpoint, then close and join everything it still owns.

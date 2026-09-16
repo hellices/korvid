@@ -1001,6 +1001,28 @@ async def test_a_handshake_gives_up_at_its_deadline_and_keeps_the_endpoint_servi
         assert server.activity().accepted == 2
 
 
+def test_a_tls_wrapper_cannot_be_retracked_after_retirement() -> None:
+    """A wrapper handed over behind force-close is rejected where it lands."""
+    with raw_endpoint() as server:
+        previous, previous_peer = socket.socketpair()
+        wrapper, wrapper_peer = socket.socketpair()
+        try:
+            with server._changed:
+                server._track(previous)
+            server.begin_retiring()
+            server.force_close_connections()
+
+            with pytest.raises(OSError, match="retiring"):
+                server._retrack(previous, wrapper)
+
+            assert wrapper.fileno() == -1
+            assert server.open_connections() == 0
+            assert server.activity().refused_while_retiring >= 1
+        finally:
+            for connection in (previous, previous_peer, wrapper, wrapper_peer):
+                connection.close()
+
+
 async def test_a_retiring_endpoint_will_not_start_a_client_eof_holder() -> None:
     """A holder started after the join has run would outlive the endpoint."""
     with raw_endpoint(half_close=True) as server:
@@ -1283,3 +1305,51 @@ async def test_a_cancelled_body_outranks_a_release_failure() -> None:
 
     notes = getattr(caught.value, "__notes__", [])
     assert any("release failed" in note for note in notes), notes
+
+
+async def test_cancellation_during_force_close_still_stops_the_accept_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancellation propagates only after the endpoint has stopped every thread."""
+    entered = threading.Event()
+    release = threading.Event()
+    servers: list[local_endpoint._EndpointServer] = []
+    ports: list[int] = []
+    real_force_close = local_endpoint._EndpointServer.force_close_connections
+
+    def blocking_force_close(
+        server: local_endpoint._EndpointServer,
+    ) -> tuple[str, ...]:
+        if not entered.is_set():
+            servers.append(server)
+            entered.set()
+            assert release.wait(_CONNECT_SECONDS), "the force-close was never released"
+        return real_force_close(server)
+
+    async def close_endpoint() -> None:
+        async with served_endpoint(JsonHandler) as endpoint:
+            ports.append(endpoint.port)
+
+    monkeypatch.setattr(
+        local_endpoint._EndpointServer,
+        "force_close_connections",
+        blocking_force_close,
+    )
+    task = asyncio.create_task(close_endpoint())
+    assert await asyncio.to_thread(entered.wait, _CONNECT_SECONDS)
+    task.cancel("teardown was cancelled")
+    release.set()
+    try:
+        with pytest.raises(asyncio.CancelledError, match="teardown was cancelled"):
+            await task
+
+        [port] = ports
+        assert await asyncio.to_thread(listener_refused, port)
+        assert endpoint_threads(port) == []
+    finally:
+        release.set()
+        if servers:
+            await asyncio.to_thread(servers[0].shutdown)
+        for port in ports:
+            for thread in live_endpoint_threads(port):
+                await asyncio.to_thread(thread.join, _CONNECT_SECONDS)
