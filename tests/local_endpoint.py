@@ -77,11 +77,6 @@ _HOST = "127.0.0.1"
 #: bound on teardown, not a correctness wait.
 _ACCEPT_POLL_SECONDS = 0.05
 
-#: Bounded only so a client that never closes cannot pin a holder thread
-#: forever. Teardown wakes a holder long before this, by closing the
-#: socket it is reading.
-_HOLD_SECONDS = 30.0
-
 #: How often a holder looks up from its read to see whether the endpoint
 #: has started retiring. A latency bound on teardown, not a correctness
 #: wait: whether closing a socket wakes the thread blocked in `recv()` on
@@ -490,18 +485,16 @@ class _EndpointServer(ThreadingHTTPServer):
         platform question — and teardown has to be able to join this
         thread on every platform, not on the ones where the answer is yes.
         """
-        deadline = time.monotonic() + _HOLD_SECONDS
         try:
             connection.settimeout(_HOLD_POLL_SECONDS)
             # Raw reads: a refused handshake leaves no TLS session to
             # decrypt through, and the bytes are only a path to EOF.
-            while time.monotonic() < deadline:
+            while not self._is_retiring():
                 try:
                     if not socket.socket.recv(connection, 4096):
                         return
                 except TimeoutError:
-                    if self._is_retiring():
-                        return
+                    continue
         except Exception:  # a torn-down connection must not reach threading.excepthook
             pass
         finally:

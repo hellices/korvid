@@ -36,6 +36,8 @@ from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
+from queue import Queue
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -786,6 +788,50 @@ async def test_a_disconnecting_endpoint_keeps_the_peer_the_client_saw_eof_from()
             client.close()
 
     assert held == 1, "the endpoint disposed of a peer whose client had not closed yet"
+
+
+async def test_a_disconnect_holder_has_no_wall_clock_expiry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only client EOF or endpoint retirement may release a held peer."""
+    observed: Queue[str] = Queue()
+    real_is_retiring = local_endpoint._EndpointServer._is_retiring
+    real_close_request = local_endpoint._EndpointServer.close_request
+
+    def recording_is_retiring(server: local_endpoint._EndpointServer) -> bool:
+        observed.put("checked retirement")
+        return real_is_retiring(server)
+
+    def recording_close_request(server: local_endpoint._EndpointServer, request: Any) -> None:
+        observed.put("closed peer")
+        real_close_request(server, request)
+
+    async with disconnecting_endpoint(
+        DisconnectHandler, reason="the retry budget is the subject"
+    ) as endpoint:
+        client: socket.socket | None = None
+        try:
+            ticks = iter((0.0, 10_000.0))
+            accelerated_time = SimpleNamespace(monotonic=lambda: next(ticks, 10_000.0))
+            with monkeypatch.context() as patch:
+                patch.setattr(local_endpoint, "time", accelerated_time)
+                patch.setattr(
+                    local_endpoint._EndpointServer,
+                    "_is_retiring",
+                    recording_is_retiring,
+                )
+                patch.setattr(
+                    local_endpoint._EndpointServer,
+                    "close_request",
+                    recording_close_request,
+                )
+                client, _received = await asyncio.to_thread(request_until_eof, endpoint.port)
+                first_event = await asyncio.to_thread(observed.get, True, _CONNECT_SECONDS)
+                assert first_event == "checked retirement"
+                assert endpoint.open_connections() == 1
+        finally:
+            if client is not None:
+                client.close()
 
 
 @pytest.mark.parametrize(
