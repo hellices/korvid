@@ -1,11 +1,9 @@
-import asyncio
 import gzip
 import json
 from collections import Counter
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from threading import Thread
+from http.server import BaseHTTPRequestHandler
 from typing import Any, cast
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
@@ -17,6 +15,7 @@ from korvid.core.pulse_collector import PulseCollector
 from korvid.k8s.client import KubeClient
 from korvid.k8s.errors import KubeClientError
 from korvid.k8s.pulse import PulseLimitError, PulseSource, _bounded_session, read_pulse_page
+from tests.local_endpoint import disconnecting_endpoint
 
 
 @asynccontextmanager
@@ -32,16 +31,11 @@ async def serve_http(responder: Callable[[bytes], bytes | None]) -> AsyncIterato
         def log_message(self, format: str, *args: Any) -> None:
             return None
 
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    server.daemon_threads = False
-    thread = Thread(target=server.serve_forever)
-    thread.start()
-    try:
-        yield f"http://127.0.0.1:{server.server_port}"
-    finally:
-        await asyncio.to_thread(server.shutdown)
-        await asyncio.to_thread(server.server_close)
-        thread.join()
+    async with disconnecting_endpoint(
+        Handler,
+        reason="the SDK disconnect/retry budget is the subject",
+    ) as endpoint:
+        yield endpoint.url
 
 
 @asynccontextmanager

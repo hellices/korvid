@@ -34,6 +34,7 @@ import sys
 import threading
 from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager, suppress
+from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any
 
@@ -144,12 +145,44 @@ class LegacyHandler(KeepAliveHandler):
         self.end_headers()
 
 
+#: The response a handler that announces its own close writes, byte for
+#: byte. A transport test asserts on exactly these bytes, so they are
+#: written straight to `wfile`: `send_response` would add headers of its
+#: own.
+RAW_CLOSE_RESPONSE = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}"
+
+
 class DisconnectHandler(KeepAliveHandler):
     """Answers once and drops the connection, the way a remote peer does."""
 
     def do_GET(self) -> None:  # http.server API name
         self.close_connection = True
-        self.wfile.write(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
+        self.wfile.write(RAW_CLOSE_RESPONSE)
+
+
+class SilentHandler(BaseHTTPRequestHandler):
+    """Answers nothing at all, the way a remote that dropped mid-request does.
+
+    Deliberately not a `KeepAliveHandler`: this is the handler shape a
+    transport test writes when the subject is the client's retry budget,
+    and the answer that never comes is the point.
+    """
+
+    def do_GET(self) -> None:  # http.server API name
+        self.close_connection = True
+
+
+class RawCloseHandler(BaseHTTPRequestHandler):
+    """Writes its own response bytes, and announces the close itself.
+
+    `DisconnectHandler` writes the same bytes from a keep-alive base; this
+    one is the plain `http.server` handler a transport fixture builds, so
+    what a disconnecting endpoint owes the two bases is the same claim.
+    """
+
+    def do_GET(self) -> None:  # http.server API name
+        self.close_connection = True
+        self.wfile.write(RAW_CLOSE_RESPONSE)
 
 
 class StallingHandler(KeepAliveHandler):
@@ -369,6 +402,15 @@ def peer_state(client: socket.socket) -> str:
     except OSError as exc:
         return f"closed (errno {exc.errno})"
     return "closed (EOF)"
+
+
+def endpoint_threads(port: int) -> list[str]:
+    """Name the threads this endpoint still owns; it names each one with its port."""
+    return sorted(
+        thread.name
+        for thread in threading.enumerate()
+        if thread.name.startswith(f"{ENDPOINT_THREAD_PREFIX}-") and thread.name.endswith(f"-{port}")
+    )
 
 
 def listener_refused(port: int) -> bool:
@@ -703,6 +745,43 @@ async def test_a_disconnecting_endpoint_keeps_the_peer_the_client_saw_eof_from()
             client.close()
 
     assert held == 1, "the endpoint disposed of a peer whose client had not closed yet"
+
+
+@pytest.mark.parametrize(
+    ("handler", "answer"),
+    [
+        pytest.param(SilentHandler, b"", id="no-response"),
+        pytest.param(RawCloseHandler, RAW_CLOSE_RESPONSE, id="connection-close"),
+    ],
+)
+async def test_an_intentional_disconnect_leaves_the_endpoint_holding_nothing(
+    handler: type[BaseHTTPRequestHandler], answer: bytes
+) -> None:
+    """A raw responder's disconnect is the write side only, and it settles.
+
+    Both shapes a transport test writes are covered: the handler that
+    answers nothing, and the one that writes its own bytes and announces
+    `Connection: close`. Either way the client reads the EOF a dropped
+    remote produces while the accepted peer stays the client's to close —
+    and once it has closed, the endpoint is left holding no socket and
+    running no thread of its own.
+    """
+    async with disconnecting_endpoint(
+        handler, reason="the retry budget is the subject"
+    ) as endpoint:
+        client, received = await asyncio.to_thread(request_until_eof, endpoint.port)
+        try:
+            assert received == answer
+            assert client.fileno() != -1
+            held = endpoint.open_connections()
+            holders = endpoint.activity().holders_started
+        finally:
+            client.close()
+
+    assert held == 1, "the endpoint disposed of a peer whose client had not closed yet"
+    assert holders == 1, "the endpoint never held the peer it had half-closed"
+    assert endpoint.open_connections() == 0
+    assert endpoint_threads(endpoint.port) == []
 
 
 def test_a_disconnecting_endpoint_requires_a_reason() -> None:
