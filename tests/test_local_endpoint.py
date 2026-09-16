@@ -1424,3 +1424,40 @@ async def test_cancellation_during_force_close_still_stops_the_accept_loop(
         for port in ports:
             for thread in live_endpoint_threads(port):
                 await asyncio.to_thread(thread.join, _CONNECT_SECONDS)
+
+
+async def test_force_close_failure_still_stops_the_accept_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed cleanup phase cannot skip listener shutdown or its join."""
+    servers: list[local_endpoint._EndpointServer] = []
+    ports: list[int] = []
+    real_force_close = local_endpoint._EndpointServer.force_close_connections
+
+    def fail_first_force_close(
+        server: local_endpoint._EndpointServer,
+    ) -> tuple[str, ...]:
+        if not servers:
+            servers.append(server)
+            raise RuntimeError("force-close failed")
+        return real_force_close(server)
+
+    monkeypatch.setattr(
+        local_endpoint._EndpointServer,
+        "force_close_connections",
+        fail_first_force_close,
+    )
+    try:
+        with pytest.raises(RuntimeError, match="force-close failed"):
+            async with served_endpoint(JsonHandler) as endpoint:
+                ports.append(endpoint.port)
+
+        [port] = ports
+        assert await asyncio.to_thread(listener_refused, port)
+        assert endpoint_threads(port) == []
+    finally:
+        if servers:
+            await asyncio.to_thread(servers[0].shutdown)
+        for port in ports:
+            for thread in live_endpoint_threads(port):
+                await asyncio.to_thread(thread.join, _CONNECT_SECONDS)

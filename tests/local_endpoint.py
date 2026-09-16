@@ -65,7 +65,9 @@ from dataclasses import dataclass
 from functools import partial
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
+
+_T = TypeVar("_T")
 
 #: Every thread an endpoint owns is named with this prefix, so an
 #: ownership failure can say which of them outlived the endpoint.
@@ -777,22 +779,38 @@ async def _stop_once(
     The second close runs after the join, when only the endpoint itself
     could still be holding a socket.
     """
-    server.begin_retiring()
+    failures: list[tuple[str, BaseException]] = []
     threads: tuple[str, ...] = ()
     unclosed: tuple[str, ...] = ()
-    try:
-        await asyncio.to_thread(server.force_close_connections)
-        await _stop_accepting(server, accept, settle_seconds)
-    finally:
-        try:
-            threads = await asyncio.to_thread(server.join_workers, settle_seconds)
-        finally:
-            try:
-                unclosed = await asyncio.to_thread(server.close_remaining, settle_seconds)
-            finally:
-                server.server_close()
+    _capture_cleanup_sync(server.begin_retiring, failures, "retiring the endpoint")
+    await _capture_cleanup(
+        asyncio.to_thread(server.force_close_connections),
+        failures,
+        "force-closing endpoint connections",
+    )
+    await _capture_cleanup(
+        _stop_accepting(server, accept, settle_seconds),
+        failures,
+        "stopping the accept loop",
+    )
+    joined = await _capture_cleanup(
+        asyncio.to_thread(server.join_workers, settle_seconds),
+        failures,
+        "joining endpoint workers",
+    )
+    if joined is not None:
+        threads = joined
+    closed = await _capture_cleanup(
+        asyncio.to_thread(server.close_remaining, settle_seconds),
+        failures,
+        "closing remaining endpoint connections",
+    )
+    if closed is not None:
+        unclosed = closed
+    _capture_cleanup_sync(server.server_close, failures, "closing the endpoint listener")
     if accept.is_alive():
         threads = (*threads, accept.name)
+    _raise_cleanup_failures(failures)
     return _Leftovers(threads=tuple(sorted(threads)), unclosed=unclosed)
 
 
@@ -810,10 +828,55 @@ async def _stop_accepting(
     """
     if accept.ident is None:
         return
+    failures: list[tuple[str, BaseException]] = []
+    await _capture_cleanup(
+        asyncio.to_thread(server.shutdown),
+        failures,
+        "requesting accept-loop shutdown",
+    )
+    await _capture_cleanup(
+        asyncio.to_thread(accept.join, settle_seconds),
+        failures,
+        "joining the accept loop",
+    )
+    _raise_cleanup_failures(failures)
+
+
+async def _capture_cleanup(
+    operation: Awaitable[_T],
+    failures: list[tuple[str, BaseException]],
+    phase: str,
+) -> _T | None:
+    """Run one async cleanup phase and retain its failure for precedence."""
     try:
-        await asyncio.to_thread(server.shutdown)
-    finally:
-        await asyncio.to_thread(accept.join, settle_seconds)
+        return await operation
+    except BaseException as error:
+        failures.append((phase, error))
+        return None
+
+
+def _capture_cleanup_sync(
+    operation: Callable[[], _T],
+    failures: list[tuple[str, BaseException]],
+    phase: str,
+) -> _T | None:
+    """Run one synchronous cleanup phase and retain its failure."""
+    try:
+        return operation()
+    except BaseException as error:
+        failures.append((phase, error))
+        return None
+
+
+def _raise_cleanup_failures(failures: list[tuple[str, BaseException]]) -> None:
+    """Raise the first cleanup failure, recording every later one."""
+    if not failures:
+        return
+    (primary_phase, primary), *remaining = failures
+    for phase, error in remaining:
+        primary.add_note(f"{phase} also failed: {error!r}")
+    primary.add_note(f"first endpoint cleanup failure: {primary_phase}")
+    raise primary
 
 
 def _report(

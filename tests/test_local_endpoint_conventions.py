@@ -394,13 +394,13 @@ def _judge_call(node: ast.Call, bindings: dict[str, str], name: str) -> Iterator
     """A constructed server, and an accept loop started outside the helper."""
     if _is_server(node.func, bindings):
         yield Violation(name, node.lineno, RULE_SERVER, f"{_named(node.func, bindings)}(...)")
-    if _is_accept_loop(node.func):
+    if _is_accept_loop(node.func, bindings):
         yield Violation(name, node.lineno, RULE_ACCEPT_LOOP, f".{_ACCEPT_LOOP}() is run from here")
         return
     # Only the call's *own* arguments, never the tree beneath them: a
     # `partial(server.serve_forever)` handed to a thread is one accept
     # loop, and it is named where it is bound rather than twice.
-    if any(_is_accept_loop(argument) for argument in _arguments(node)):
+    if any(_is_accept_loop(argument, bindings) for argument in _arguments(node)):
         yield Violation(
             name,
             node.lineno,
@@ -453,9 +453,10 @@ def _named(node: ast.expr, bindings: dict[str, str]) -> str:
     return spelling if resolved in (None, spelling) else f"{spelling} ({resolved})"
 
 
-def _is_accept_loop(node: ast.expr) -> bool:
+def _is_accept_loop(node: ast.expr, bindings: dict[str, str]) -> bool:
     """Whether this expression *is* the accept loop, rather than reaches one."""
-    return isinstance(node, ast.Attribute) and node.attr == _ACCEPT_LOOP
+    resolved = _resolve(node, bindings)
+    return resolved is not None and resolved.rsplit(".", 1)[-1] == _ACCEPT_LOOP
 
 
 def _is_listening_socket(node: ast.expr | None) -> bool:
@@ -699,6 +700,23 @@ def test_a_thread_started_on_serve_forever_is_named(tmp_path: Path) -> None:
 
     assert _rules(violations) == [RULE_ACCEPT_LOOP]
     assert violations[0].line == 4
+
+
+def test_an_assignment_alias_of_serve_forever_is_named(tmp_path: Path) -> None:
+    """Renaming the accept loop does not make starting it a different lifecycle."""
+    violations = _scan(
+        tmp_path,
+        """
+        import threading
+
+        def start(server):
+            runner = server.serve_forever
+            threading.Thread(target=runner, daemon=True).start()
+        """,
+    )
+
+    assert _rules(violations) == [RULE_ACCEPT_LOOP]
+    assert violations[0].line == 5
 
 
 def test_a_positional_thread_target_on_serve_forever_is_named(tmp_path: Path) -> None:
