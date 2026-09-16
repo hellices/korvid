@@ -774,12 +774,15 @@ async def test_an_intentional_disconnect_leaves_the_endpoint_holding_nothing(
             assert received == answer
             assert client.fileno() != -1
             held = endpoint.open_connections()
-            holders = endpoint.activity().holders_started
         finally:
             client.close()
 
     assert held == 1, "the endpoint disposed of a peer whose client had not closed yet"
-    assert holders == 1, "the endpoint never held the peer it had half-closed"
+    # Read once teardown has settled: the endpoint half-closes before it starts
+    # the holder, so a client that has just seen EOF can still outrun the count.
+    assert endpoint.activity().holders_started == 1, (
+        "the endpoint never held the peer it had half-closed"
+    )
     assert endpoint.open_connections() == 0
     assert endpoint_threads(endpoint.port) == []
 
