@@ -54,8 +54,13 @@ import ssl
 import sys
 import threading
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import AbstractAsyncContextManager, asynccontextmanager, suppress
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from contextlib import (
+    AbstractAsyncContextManager,
+    asynccontextmanager,
+    contextmanager,
+    suppress,
+)
 from dataclasses import dataclass
 from functools import partial
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -564,16 +569,11 @@ async def _endpoint(
     half_close: bool,
     reason: str | None,
 ) -> AsyncIterator[LocalEndpoint]:
-    server = _EndpointServer(
+    server, accept = _start(
         handler,
         tls=_server_context(tls),
         half_close=half_close,
         handshake_seconds=max(settle_seconds, _MIN_HANDSHAKE_SECONDS),
-    )
-    accept = threading.Thread(
-        target=partial(server.serve_forever, poll_interval=_ACCEPT_POLL_SECONDS),
-        name=f"{ENDPOINT_THREAD_PREFIX}-accept-{server.server_port}",
-        daemon=True,
     )
     endpoint = LocalEndpoint(
         url=f"{'http' if tls is None else 'https'}://{_HOST}:{server.server_port}",
@@ -582,11 +582,6 @@ async def _endpoint(
         activity=server.activity,
         wait_until_tracked=server.wait_until_tracked,
     )
-    try:
-        accept.start()
-    except BaseException:
-        server.server_close()
-        raise
 
     body_error: BaseException | None = None
     try:
@@ -603,6 +598,85 @@ async def _endpoint(
             body_error=body_error,
             reason=reason,
         )
+
+
+def _start(
+    handler: type[BaseHTTPRequestHandler],
+    *,
+    tls: ssl.SSLContext | None,
+    half_close: bool,
+    handshake_seconds: float,
+) -> tuple[_EndpointServer, threading.Thread]:
+    """Stand one endpoint up: the only place this suite builds a server.
+
+    Every local endpoint in the suite is born here, accept loop and all,
+    so the ownership ordering #390 turns on is decided once rather than
+    re-derived by whichever module needed an endpoint next. The accept
+    thread is a daemon and is named after its port, so a thread that
+    outlives its endpoint can be attributed to it.
+    """
+    server = _EndpointServer(
+        handler,
+        tls=tls,
+        half_close=half_close,
+        handshake_seconds=handshake_seconds,
+    )
+    accept = threading.Thread(
+        target=partial(server.serve_forever, poll_interval=_ACCEPT_POLL_SECONDS),
+        name=f"{ENDPOINT_THREAD_PREFIX}-accept-{server.server_port}",
+        daemon=True,
+    )
+    try:
+        accept.start()
+    except BaseException:
+        server.server_close()
+        raise
+    return server, accept
+
+
+@contextmanager
+def _unmanaged_endpoint(
+    handler: type[BaseHTTPRequestHandler],
+    *,
+    tls: ssl.SSLContext | None = None,
+    half_close: bool = False,
+    handshake_seconds: float,
+    join_seconds: float,
+) -> Iterator[_EndpointServer]:
+    """A running endpoint server, without the ownership contract around it.
+
+    The suite's own lifecycle tests make claims about the server object:
+    the retiring state the public contexts never hand out mid-flight, and
+    a handshake bound chosen rather than derived from `settle_seconds`.
+    They get that object from here instead of building a second endpoint
+    by hand, which is what keeps this module the only one that constructs
+    an HTTP server and starts an accept loop (#390).
+
+    Teardown is the bare ordering, with nothing waiting on a client: the
+    endpoint is marked retiring, its connections are force-closed, the
+    accept loop is stopped and joined, and the listener is closed last.
+    Deliberately synchronous — its callers are asserting on the server,
+    not on an event loop's transports.
+
+    Args:
+        handler: The request handler the endpoint serves with.
+        tls: A server context, applied per accepted socket.
+        half_close: Whether the endpoint half-closes its write side.
+        handshake_seconds: Bound on one connection's TLS handshake.
+        join_seconds: Bound on each teardown join.
+    """
+    server, accept = _start(
+        handler, tls=tls, half_close=half_close, handshake_seconds=handshake_seconds
+    )
+    try:
+        yield server
+    finally:
+        server.begin_retiring()
+        server.force_close_connections()
+        server.shutdown()
+        accept.join(join_seconds)
+        server.join_workers(join_seconds)
+        server.server_close()
 
 
 async def _retire(

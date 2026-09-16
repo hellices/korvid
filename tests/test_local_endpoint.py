@@ -267,35 +267,26 @@ def raw_endpoint(
     tls: ssl.SSLContext | None = None,
     handshake_seconds: float = _CONNECT_SECONDS,
 ) -> Iterator[local_endpoint._EndpointServer]:
-    """A bare endpoint server the test starts, retires, and closes itself.
+    """A bare endpoint server, retired and closed when the test is done.
 
     Retirement is a teardown state the public context manager never hands
-    out mid-flight, and its handshake bound is derived from `settle_seconds`
-    rather than chosen, so the claims about *what an endpoint refuses* and
-    *what it gives up on* are made against the server object directly.
+    out mid-flight, and its handshake bound is derived from
+    `settle_seconds` rather than chosen, so the claims about *what an
+    endpoint refuses* and *what it gives up on* are made against the
+    server object directly.
+
+    The server and its accept loop still come from `tests/local_endpoint.py`:
+    a test that built its own would be the seventh hand-written endpoint,
+    which is the drift #390 closed.
     """
-    server = local_endpoint._EndpointServer(
+    with local_endpoint._unmanaged_endpoint(
         JsonHandler,
         tls=tls,
         half_close=half_close,
         handshake_seconds=handshake_seconds,
-    )
-    accept = threading.Thread(
-        target=server.serve_forever,
-        kwargs={"poll_interval": local_endpoint._ACCEPT_POLL_SECONDS},
-        name=f"{ENDPOINT_THREAD_PREFIX}-accept-{server.server_port}",
-        daemon=True,
-    )
-    accept.start()
-    try:
+        join_seconds=_CONNECT_SECONDS,
+    ) as server:
         yield server
-    finally:
-        server.begin_retiring()
-        server.force_close_connections()
-        server.shutdown()
-        accept.join(_CONNECT_SECONDS)
-        server.join_workers(_CONNECT_SECONDS)
-        server.server_close()
 
 
 def client_context(cafile: Path) -> ssl.SSLContext:
@@ -851,6 +842,28 @@ def test_a_stalled_handshake_cannot_pin_the_teardown(tmp_path: Path) -> None:
     assert "tracked" in printed, finished.stdout
     assert "retired" in printed, finished.stdout
     assert "closed=True" in printed, finished.stdout
+
+
+async def test_the_unmanaged_endpoint_serves_and_then_closes_what_it_started() -> None:
+    """The raw lifecycle is the helper's too, even without the ownership contract.
+
+    These tests need the server object itself, so the accept loop they run
+    is started by `tests/local_endpoint.py` rather than by a second
+    hand-written endpoint here — which is the whole point of #390 having
+    one lifecycle. What the helper owes them is the same either way: an
+    endpoint that answers while the context is open, and a listener and
+    threads that are gone once it has closed.
+    """
+    with local_endpoint._unmanaged_endpoint(
+        JsonHandler, handshake_seconds=_CONNECT_SECONDS, join_seconds=_CONNECT_SECONDS
+    ) as server:
+        port = server.server_port
+        client = await asyncio.to_thread(open_keepalive_request, port)
+        client.close()
+        assert server.activity().accepted == 1
+
+    assert await asyncio.to_thread(listener_refused, port)
+    assert endpoint_threads(port) == []
 
 
 async def test_a_retiring_endpoint_closes_a_late_connection_instead_of_serving_it() -> None:
