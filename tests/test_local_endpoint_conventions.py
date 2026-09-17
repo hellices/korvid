@@ -212,14 +212,14 @@ class _Scanner(ast.NodeVisitor):
             self.closure_bindings.pop()
 
     def visit_Assign(self, node: ast.Assign) -> None:
-        self.found.extend(_judge_assignment(node, self.name))
+        self.found.extend(_judge_assignment(node, self.bindings, self.name))
         self.visit(node.value)
         for target in node.targets:
             self.visit(target)
         self._bind(node.targets, node.value)
 
     def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
-        self.found.extend(_judge_assignment(node, self.name))
+        self.found.extend(_judge_assignment(node, self.bindings, self.name))
         self.visit(node.annotation)
         if node.value is not None:
             self.visit(node.value)
@@ -445,7 +445,7 @@ def _judge_call(node: ast.Call, bindings: dict[str, str], name: str) -> Iterator
     """A constructed server, and an accept loop started outside the helper."""
     if _is_server(node.func, bindings):
         yield Violation(name, node.lineno, RULE_SERVER, f"{_named(node.func, bindings)}(...)")
-    if _wraps_listening_socket(node):
+    if _wraps_listening_socket(node, bindings):
         yield Violation(
             name,
             node.lineno,
@@ -474,7 +474,11 @@ def _arguments(node: ast.Call) -> Iterator[ast.expr]:
         yield keyword.value
 
 
-def _judge_assignment(node: ast.Assign | ast.AnnAssign, name: str) -> Iterator[Violation]:
+def _judge_assignment(
+    node: ast.Assign | ast.AnnAssign,
+    bindings: dict[str, str],
+    name: str,
+) -> Iterator[Violation]:
     """TLS on the *listening* socket, which is not TLS on an accepted one.
 
     Wrapping the listener makes `accept()` hand a refused connection to
@@ -484,10 +488,10 @@ def _judge_assignment(node: ast.Assign | ast.AnnAssign, name: str) -> Iterator[V
     value = node.value
     if not isinstance(value, ast.Call) or _tail(value.func) != _WRAP_SOCKET:
         return
-    if _is_explicit_client_wrap(value) or _wraps_listening_socket(value):
+    if _is_explicit_client_wrap(value) or _wraps_listening_socket(value, bindings):
         return
     targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-    if any(_is_listening_socket(target) for target in targets):
+    if any(_is_listening_socket(target, {}) for target in targets):
         yield Violation(
             name,
             node.lineno,
@@ -518,16 +522,21 @@ def _is_accept_loop(node: ast.expr, bindings: dict[str, str]) -> bool:
     return resolved is not None and resolved.rsplit(".", 1)[-1] == _ACCEPT_LOOP
 
 
-def _is_listening_socket(node: ast.expr | None) -> bool:
-    return isinstance(node, ast.Attribute) and node.attr == _LISTENING_SOCKET
+def _is_listening_socket(node: ast.expr | None, bindings: dict[str, str]) -> bool:
+    if isinstance(node, ast.Attribute):
+        return node.attr == _LISTENING_SOCKET
+    if not isinstance(node, ast.Name):
+        return False
+    resolved = bindings.get(node.id)
+    return resolved is not None and resolved.endswith(f".{_LISTENING_SOCKET}")
 
 
-def _wraps_listening_socket(node: ast.Call) -> bool:
+def _wraps_listening_socket(node: ast.Call, bindings: dict[str, str]) -> bool:
     """Whether this call server-side wraps an object kept in `.socket`."""
     if _tail(node.func) != _WRAP_SOCKET or _is_explicit_client_wrap(node):
         return False
     wrapped = node.args[0] if node.args else _keyword_value(node, "sock")
-    return _is_listening_socket(wrapped)
+    return _is_listening_socket(wrapped, bindings)
 
 
 def _is_explicit_client_wrap(node: ast.Call) -> bool:
@@ -858,6 +867,94 @@ def test_returning_a_wrapped_listening_socket_is_named(tmp_path: Path) -> None:
 
     assert _rules(violations) == [RULE_LISTENER_TLS]
     assert violations[0].line == 2
+
+
+@pytest.mark.parametrize(
+    "wrap",
+    [
+        pytest.param(
+            "context.wrap_socket(listener, server_side=True)",
+            id="positional",
+        ),
+        pytest.param(
+            "context.wrap_socket(sock=listener, server_side=True)",
+            id="keyword",
+        ),
+    ],
+)
+def test_a_listening_socket_alias_cannot_hide_server_side_wrapping(
+    tmp_path: Path,
+    wrap: str,
+) -> None:
+    """The wrapped value is resolved through the same assignment bindings."""
+    violations = _scan(
+        tmp_path,
+        f"""
+        def secure(server, context):
+            listener = server.socket
+            return {wrap}
+        """,
+    )
+
+    assert _rules(violations) == [RULE_LISTENER_TLS]
+    assert violations[0].line == 3
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        pytest.param(
+            """
+            def secure(servers, context):
+                return context.wrap_socket(servers[0].socket, server_side=True)
+            """,
+            id="subscript",
+        ),
+        pytest.param(
+            """
+            def secure(make, context, conn):
+                make().socket = context.wrap_socket(conn, server_side=True)
+            """,
+            id="call-target",
+        ),
+    ],
+)
+def test_non_name_rooted_listening_sockets_remain_named(
+    tmp_path: Path,
+    source: str,
+) -> None:
+    """Any structural `.socket` access remains the fail-closed floor."""
+    violations = _scan(tmp_path, source)
+
+    assert _rules(violations) == [RULE_LISTENER_TLS]
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        pytest.param(
+            """
+            def secure(socket, context):
+                return context.wrap_socket(socket, server_side=True)
+            """,
+            id="parameter",
+        ),
+        pytest.param(
+            """
+            def secure(conn, context):
+                socket = context.wrap_socket(conn, server_side=True)
+                return socket
+            """,
+            id="assignment",
+        ),
+    ],
+)
+def test_a_bare_socket_name_is_not_a_listening_socket(
+    tmp_path: Path,
+    source: str,
+) -> None:
+    """Only a `.socket` attribute or a binding to one denotes a listener."""
+    assert _scan(tmp_path, source) == ()
 
 
 def test_explicit_client_side_socket_wrapping_is_not_named(tmp_path: Path) -> None:
