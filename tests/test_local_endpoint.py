@@ -1426,6 +1426,43 @@ async def test_cancellation_during_force_close_still_stops_the_accept_loop(
                 await asyncio.to_thread(thread.join, _CONNECT_SECONDS)
 
 
+async def test_cancellation_during_release_waits_for_client_cleanup() -> None:
+    """Client release finishes before cancellation can force-close its peer."""
+    entered = threading.Event()
+    released = threading.Event()
+    continue_release = asyncio.Event()
+    opened: list[socket.socket] = []
+    ports: list[int] = []
+
+    async def release_client() -> None:
+        entered.set()
+        await continue_release.wait()
+        opened[0].close()
+        released.set()
+
+    async def close_endpoint() -> None:
+        async with served_endpoint(JsonHandler, release_clients=release_client) as endpoint:
+            ports.append(endpoint.port)
+            opened.append(await asyncio.to_thread(open_keepalive_request, endpoint.port))
+
+    task = asyncio.create_task(close_endpoint())
+    assert await asyncio.to_thread(entered.wait, _CONNECT_SECONDS)
+    task.cancel("release was cancelled")
+    continue_release.set()
+    try:
+        with pytest.raises(asyncio.CancelledError, match="release was cancelled"):
+            await task
+
+        [port] = ports
+        assert released.is_set(), "cancellation interrupted the endpoint's client release"
+        assert await asyncio.to_thread(listener_refused, port)
+        assert endpoint_threads(port) == []
+    finally:
+        continue_release.set()
+        for client in opened:
+            client.close()
+
+
 async def test_force_close_failure_still_stops_the_accept_loop(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

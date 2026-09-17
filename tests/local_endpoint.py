@@ -698,15 +698,18 @@ async def _retire(
     passing test would otherwise hide. Whatever is raised, every socket is
     closed and every thread is joined first.
     """
-    release_error = await _release(release_clients)
+    release_error: BaseException | None = None
     stranded: tuple[str, ...] = ()
     leftovers = _Leftovers(threads=(), unclosed=())
     cleanup_errors: list[BaseException] = []
     try:
-        # Transports whose close the loop has only queued still own their
-        # socket; let those callbacks run before ownership is judged.
-        await drain_transport_closures()
-        stranded = await asyncio.to_thread(server.wait_until_released, settle_seconds)
+        prepared, cancellation = await _complete_despite_cancellation(
+            _prepare_retirement(server, release_clients, settle_seconds)
+        )
+        release_error, stranded, preparation_errors = prepared
+        cleanup_errors.extend(preparation_errors)
+        if cancellation is not None:
+            cleanup_errors.append(cancellation)
     except BaseException as error:
         cleanup_errors.append(error)
     try:
@@ -728,6 +731,25 @@ async def _retire(
     )
 
 
+async def _prepare_retirement(
+    server: _EndpointServer,
+    release_clients: Callable[[], Awaitable[None]] | None,
+    settle_seconds: float,
+) -> tuple[BaseException | None, tuple[str, ...], tuple[BaseException, ...]]:
+    """Release clients and settle their transports before server cleanup."""
+    release_error = await _release(release_clients)
+    stranded: tuple[str, ...] = ()
+    cleanup_errors: list[BaseException] = []
+    try:
+        # Transports whose close the loop has only queued still own their
+        # socket; let those callbacks run before ownership is judged.
+        await drain_transport_closures()
+        stranded = await asyncio.to_thread(server.wait_until_released, settle_seconds)
+    except BaseException as error:
+        cleanup_errors.append(error)
+    return release_error, stranded, tuple(cleanup_errors)
+
+
 async def _release(
     release_clients: Callable[[], Awaitable[None]] | None,
 ) -> BaseException | None:
@@ -745,7 +767,19 @@ async def _stop(
     server: _EndpointServer, accept: threading.Thread, settle_seconds: float
 ) -> _Leftovers:
     """Finish endpoint cleanup before propagating cancellation."""
-    cleanup = asyncio.create_task(_stop_once(server, accept, settle_seconds))
+    leftovers, cancellation = await _complete_despite_cancellation(
+        _stop_once(server, accept, settle_seconds)
+    )
+    if cancellation is not None:
+        raise cancellation
+    return leftovers
+
+
+async def _complete_despite_cancellation(
+    operation: Awaitable[_T],
+) -> tuple[_T, asyncio.CancelledError | None]:
+    """Finish one ownership phase and return the first deferred cancellation."""
+    cleanup = asyncio.ensure_future(operation)
     cancellation: asyncio.CancelledError | None = None
     while not cleanup.done():
         try:
@@ -762,9 +796,7 @@ async def _stop(
             raise
         cancellation.add_note(f"endpoint cleanup also failed: {error!r}")
         raise cancellation from error
-    if cancellation is not None:
-        raise cancellation
-    return leftovers
+    return leftovers, cancellation
 
 
 async def _stop_once(
