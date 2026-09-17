@@ -2,14 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import http.server
 import inspect
 import json
 import os
 import platform
-import ssl
 import stat
-import threading
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from pathlib import Path
@@ -28,6 +25,7 @@ from korvid.providers.models_dev import (
     RefreshOutcome,
     default_cache_path,
 )
+from tests.local_endpoint import KeepAliveHandler, LocalEndpoint, served_endpoint
 from tests.providers.tls_ca import mint_ca_and_server_cert
 
 httpx = pytest.importorskip("httpx")
@@ -750,13 +748,12 @@ async def test_a_forced_refresh_never_joins_a_cache_read(tmp_path: Path) -> None
 # ---------------------------------------------------------------------------
 
 
-@contextlib.contextmanager
 def _tls_document_server(
     cert_pem: Path, key_pem: Path, seen: list[tuple[str, dict[str, str]]]
-) -> Iterator[str]:
+) -> contextlib.AbstractAsyncContextManager[LocalEndpoint]:
     """A local HTTPS server that serves `_DOCUMENT` and records the request."""
 
-    class Handler(http.server.BaseHTTPRequestHandler):
+    class Handler(KeepAliveHandler):
         def do_GET(self) -> None:  # http.server API name
             seen.append((self.path, {k.lower(): v for k, v in self.headers.items()}))
             body = json.dumps(_DOCUMENT).encode("utf-8")
@@ -767,22 +764,7 @@ def _tls_document_server(
             self.end_headers()
             self.wfile.write(body)
 
-        def log_message(self, *args: object) -> None:
-            return None
-
-    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
-    server_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    server_ctx.minimum_version = ssl.TLSVersion.TLSv1_2  # no legacy TLS
-    server_ctx.load_cert_chain(certfile=str(cert_pem), keyfile=str(key_pem))
-    server.socket = server_ctx.wrap_socket(server.socket, server_side=True)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        yield f"https://127.0.0.1:{server.server_address[1]}/api.json"
-    finally:
-        server.shutdown()
-        thread.join(timeout=5)
-        server.server_close()
+    return served_endpoint(Handler, tls=(cert_pem, key_pem))
 
 
 async def test_the_default_client_is_built_through_korvids_trust(tmp_path: Path) -> None:
@@ -824,8 +806,8 @@ async def test_a_private_ca_endpoint_needs_the_configured_bundle(
     ca_pem, cert_pem, key_pem = mint_ca_and_server_cert(tmp_path)
     seen: list[tuple[str, dict[str, str]]] = []
 
-    with _tls_document_server(cert_pem, key_pem, seen) as url:
-        monkeypatch.setattr(models_dev, "MODELS_DEV_URL", url)
+    async with _tls_document_server(cert_pem, key_pem, seen) as endpoint:
+        monkeypatch.setattr(models_dev, "MODELS_DEV_URL", endpoint.path("/api.json"))
 
         untrusted = ModelsDevSource(cache_path=tmp_path / "untrusted.json")
         assert await untrusted.refresh(force=True) is RefreshOutcome.UNAVAILABLE
@@ -848,8 +830,8 @@ async def test_the_tls_request_carries_no_trust_configuration(
     ca_pem, cert_pem, key_pem = mint_ca_and_server_cert(tmp_path)
     seen: list[tuple[str, dict[str, str]]] = []
 
-    with _tls_document_server(cert_pem, key_pem, seen) as url:
-        monkeypatch.setattr(models_dev, "MODELS_DEV_URL", url)
+    async with _tls_document_server(cert_pem, key_pem, seen) as endpoint:
+        monkeypatch.setattr(models_dev, "MODELS_DEV_URL", endpoint.path("/api.json"))
         source = ModelsDevSource(cache_path=tmp_path / "cache.json", ca_bundle=str(ca_pem))
         assert await source.refresh(force=True) is RefreshOutcome.UPDATED
 

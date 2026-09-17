@@ -7,16 +7,15 @@ actionably, and TLS verification can never be disabled through it.
 
 from __future__ import annotations
 
-import http.server
 import os
 import ssl
-import threading
 from pathlib import Path
 
 import httpx
 import pytest
 
 from korvid.providers.net import build_verify, make_http_client_factory
+from tests.local_endpoint import KeepAliveHandler, served_endpoint
 from tests.providers.tls_ca import mint_ca_and_server_cert
 
 #: Kept under the old private name so the tests below read unchanged; the
@@ -57,35 +56,22 @@ async def test_private_ca_endpoint_needs_the_bundle(tmp_path: Path) -> None:
     the system trust store."""
     ca_pem, cert_pem, key_pem = _mint_ca_and_server_cert(tmp_path)
 
-    class Handler(http.server.BaseHTTPRequestHandler):
+    class Handler(KeepAliveHandler):
         def do_GET(self) -> None:  # http.server API name
+            body = b"ok"
             self.send_response(200)
+            self.send_header("content-length", str(len(body)))
             self.end_headers()
-            self.wfile.write(b"ok")
+            self.wfile.write(body)
 
-        def log_message(self, *args: object) -> None:
-            return None
-
-    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
-    server_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    server_ctx.minimum_version = ssl.TLSVersion.TLSv1_2  # no legacy TLS
-    server_ctx.load_cert_chain(certfile=str(cert_pem), keyfile=str(key_pem))
-    server.socket = server_ctx.wrap_socket(server.socket, server_side=True)
-    port = server.server_address[1]
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    url = f"https://127.0.0.1:{port}/"
-    try:
+    async with served_endpoint(Handler, tls=(cert_pem, key_pem)) as endpoint:
+        url = endpoint.path("/")
         async with httpx.AsyncClient(timeout=5.0) as default_client:
             with pytest.raises(httpx.ConnectError):
                 await default_client.get(url)
         async with make_http_client_factory(str(ca_pem))() as trusted:
             response = await trusted.get(url)
         assert response.status_code == 200
-    finally:
-        server.shutdown()
-        thread.join(timeout=5)
-        server.server_close()
 
 
 async def test_factory_and_providers_share_one_trust_builder(tmp_path: Path) -> None:
@@ -134,31 +120,18 @@ async def test_verification_failure_names_the_configured_bundle(tmp_path: Path) 
     other_dir.mkdir()
     wrong_ca, _, _ = _mint_ca_and_server_cert(other_dir)
 
-    class Handler(http.server.BaseHTTPRequestHandler):
+    class Handler(KeepAliveHandler):
         def do_GET(self) -> None:  # http.server API name
             self.send_response(200)
+            self.send_header("content-length", "0")
             self.end_headers()
 
-        def log_message(self, *args: object) -> None:
-            return None
-
-    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
-    server_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    server_ctx.minimum_version = ssl.TLSVersion.TLSv1_2  # no legacy TLS
-    server_ctx.load_cert_chain(certfile=str(cert_pem), keyfile=str(key_pem))
-    server.socket = server_ctx.wrap_socket(server.socket, server_side=True)
-    port = server.server_address[1]
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
+    async with served_endpoint(Handler, tls=(cert_pem, key_pem)) as endpoint:
+        url = endpoint.path("/")
         async with make_http_client_factory(str(wrong_ca))() as client:
             with pytest.raises(httpx.ConnectError, match=r"network\.ca_bundle") as excinfo:
-                await client.get(f"https://127.0.0.1:{port}/")
+                await client.get(url)
         assert str(wrong_ca) in str(excinfo.value)  # the path the user set
-    finally:
-        server.shutdown()
-        thread.join(timeout=5)
-        server.server_close()
 
 
 async def test_ca_bundle_keeps_environment_proxy_discovery(

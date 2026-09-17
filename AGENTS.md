@@ -166,6 +166,10 @@ For each review round on a PR:
 ## Testing Gotchas
 
 - Run a single test file without the tach plugin: `uv run pytest -p no:tach <path>`.
+- Local HTTP/TLS servers in tests come from `tests/local_endpoint.py`; a served
+  endpoint's connections are the client's to close, an intentional disconnect
+  needs `disconnecting_endpoint(reason=...)` naming what it proves, and the
+  listening socket is never TLS-wrapped (wrap each accepted socket instead).
 - New `UIBridge` method or parameter? Update every fake in the same change:
   `tests/tools/test_executor.py::FakeBridge`, `tests/tools/test_write_tools.py` fakes,
   `tests/test_main_wiring.py::_FakeApp`, the in-app bridge adapter in `ui/app.py`,

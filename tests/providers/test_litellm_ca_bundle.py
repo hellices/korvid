@@ -29,12 +29,13 @@ SDK shape ignores it for TLS and then forwards it into the request
 from __future__ import annotations
 
 import asyncio
-import http.server
 import json
+import socket
 import ssl
-import threading
-from collections.abc import AsyncIterator, Iterator
-from contextlib import contextmanager
+import weakref
+from asyncio.transports import BaseTransport
+from collections.abc import AsyncIterator
+from contextlib import AbstractAsyncContextManager
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -45,6 +46,7 @@ from korvid.agent.provider import OperatorSafeProviderError
 from korvid.core.config import ConnectionAuthConfig, ModelConnectionConfig
 from korvid.providers.litellm_factory import create_provider_from_profile
 from korvid.providers.litellm_provider import LiteLLMProvider
+from tests.local_endpoint import KeepAliveHandler, LocalEndpoint, served_endpoint
 from tests.providers.litellm_clients import drop_cached_clients
 from tests.providers.tls_ca import mint_ca_and_server_cert
 
@@ -64,7 +66,23 @@ _ANSWER: dict[str, Any] = {
 }
 
 
-class _Chat(http.server.BaseHTTPRequestHandler):
+def _client_ssl_context(*, cafile: Path | None = None) -> ssl.SSLContext:
+    """Verified client context with the same TLS floor as the endpoint."""
+    context = (
+        ssl.create_default_context()
+        if cafile is None
+        else ssl.create_default_context(cafile=str(cafile))
+    )
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    return context
+
+
+def test_direct_tls_probe_requires_tls_1_2_or_newer() -> None:
+    context = _client_ssl_context()
+    assert context.minimum_version >= ssl.TLSVersion.TLSv1_2
+
+
+class _Chat(KeepAliveHandler):
     """Answers any POST with one canned chat completion, recording the body."""
 
     bodies: ClassVar[list[dict[str, Any]]] = []
@@ -83,30 +101,346 @@ class _Chat(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(payload)
 
-    def log_message(self, *args: object) -> None:
-        return None
+
+class _UnexpectedHandshakeSocket:
+    """A TLS-shaped sole descriptor owner whose handshake resets."""
+
+    def __init__(self, raw: socket.socket) -> None:
+        self._socket = socket.socket(fileno=raw.detach())
+        self.closed = False
+
+    def do_handshake(self) -> None:
+        raise ConnectionResetError("peer reset during handshake")
+
+    def close(self) -> None:
+        self.closed = True
+        self._socket.close()
+
+    def fileno(self) -> int:
+        return self._socket.fileno()
 
 
-@contextmanager
-def _https_endpoint(cert_pem: Path, key_pem: Path) -> Iterator[str]:
-    """A local HTTPS chat endpoint, served with the minted certificate."""
-    server = http.server.HTTPServer(("127.0.0.1", 0), _Chat)
-    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    context.minimum_version = ssl.TLSVersion.TLSv1_2
-    context.load_cert_chain(certfile=str(cert_pem), keyfile=str(key_pem))
-    server.socket = context.wrap_socket(server.socket, server_side=True)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
+class _UnexpectedHandshakeContext:
+    """Builds one observable TLS-shaped owner for the failure-path test."""
+
+    def __init__(self) -> None:
+        self.wrapped: _UnexpectedHandshakeSocket | None = None
+
+    def wrap_socket(self, raw: socket.socket, **_: object) -> Any:
+        self.wrapped = _UnexpectedHandshakeSocket(raw)
+        return self.wrapped
+
+
+def _chat_endpoint(cert_pem: Path, key_pem: Path) -> AbstractAsyncContextManager[LocalEndpoint]:
+    """A local HTTPS chat endpoint, served with the minted certificate.
+
+    Only the wiring is this module's: the lifecycle — per-accepted-socket
+    TLS, the client-EOF hold on a refused handshake, and a teardown that
+    runs off the event loop — belongs to `tests/local_endpoint.py`, which
+    owns it for every suite (#390).
+
+    `release_clients` is the part that cannot be left out here. LiteLLM
+    caches live SDK clients, so the connection the endpoint is holding
+    belongs to a client this test never named; closing that cache *inside*
+    this context, while the endpoint still serves, is what lets the
+    clients' own EOF release the handlers before teardown waits on them.
+    """
+    return served_endpoint(
+        _Chat,
+        tls=(cert_pem, key_pem),
+        release_clients=drop_cached_clients,
+    )
+
+
+#: How long a rejected connection is observed for a peer close before its state
+#: is taken as settled. A safety bound on a blocking read, not a wait for a
+#: result: an endpoint that closes first is observed the instant its FIN lands.
+_PEER_SETTLE_SECONDS: float = 0.5
+
+#: The bound on a direct probe's connect, TLS handshake and read. The timeout
+#: `socket.create_connection` is given stays on the socket, so one argument
+#: bounds all three phases and an endpoint that stopped answering fails the
+#: test instead of hanging the job. Deliberately far larger than anything
+#: loopback needs — the same 10 seconds `tests/local_endpoint.py` allows a
+#: handshake — because this bound must never decide a passing test.
+_CONNECT_SECONDS: float = 10.0
+
+
+def _reject_the_certificate(port: int) -> ssl.SSLSocket:
+    """Fail the handshake the negative-control tests fail, keeping the socket.
+
+    The SDK clients reach the same state through aiohttp; this drives it
+    directly so the connection is still available to inspect afterwards. The
+    descriptor is never detached, so the returned socket is its only owner and
+    the caller closes it exactly once.
+
+    The connect timeout stays on the socket, so it also bounds the handshake
+    this helper exists to fail: an endpoint that never answers reports here
+    instead of hanging.
+    """
+    raw = socket.create_connection(("127.0.0.1", port), timeout=_CONNECT_SECONDS)
+    tls = _client_ssl_context().wrap_socket(
+        raw, server_hostname="127.0.0.1", do_handshake_on_connect=False
+    )
+    rejected = False
     try:
-        yield f"https://127.0.0.1:{server.server_address[1]}/v1"
+        tls.do_handshake()
+    except ssl.SSLCertVerificationError:
+        rejected = True
+        return tls
     finally:
-        server.shutdown()
-        thread.join(timeout=5)
-        server.server_close()
+        if not rejected:
+            tls.close()
+    raise AssertionError("the throwaway CA was in the system trust store")
+
+
+def _complete_one_chat_request(port: int, ca_pem: Path) -> ssl.SSLSocket:
+    """Complete one trusted HTTP request while retaining the client socket.
+
+    The connect timeout stays on the socket, so the handshake and every read
+    below it are bounded too: an endpoint that stops answering mid-response
+    fails this test rather than blocking the job.
+    """
+    raw = socket.create_connection(("127.0.0.1", port), timeout=_CONNECT_SECONDS)
+    client = _client_ssl_context(cafile=ca_pem).wrap_socket(raw, server_hostname="127.0.0.1")
+    request = (
+        b"POST /v1/chat/completions HTTP/1.1\r\n"
+        b"Host: 127.0.0.1\r\n"
+        b"Content-Type: application/json\r\n"
+        b"Content-Length: 2\r\n"
+        b"Connection: keep-alive\r\n"
+        b"\r\n"
+        b"{}"
+    )
+    try:
+        client.sendall(request)
+        response = b""
+        while b"\r\n\r\n" not in response:
+            chunk = client.recv(4096)
+            if not chunk:
+                raise AssertionError("the endpoint closed before sending response headers")
+            response += chunk
+        header, body = response.split(b"\r\n\r\n", 1)
+        length_line = next(
+            line for line in header.split(b"\r\n") if line.lower().startswith(b"content-length:")
+        )
+        content_length = int(length_line.split(b":", 1)[1].strip())
+        while len(body) < content_length:
+            chunk = client.recv(4096)
+            if not chunk:
+                raise AssertionError("the endpoint closed before sending the response body")
+            body += chunk
+        assert b" 200 " in header.split(b"\r\n", 1)[0]
+        return client
+    except BaseException:
+        client.close()
+        raise
+
+
+def test_an_unexpected_handshake_failure_closes_the_socket_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, peer = socket.socketpair()
+    context = _UnexpectedHandshakeContext()
+    monkeypatch.setattr(socket, "create_connection", lambda *_args, **_kwargs: client)
+    monkeypatch.setattr(ssl, "create_default_context", lambda: context)
+
+    try:
+        with pytest.raises(ConnectionResetError, match="peer reset during handshake"):
+            _reject_the_certificate(443)
+        assert context.wrapped is not None
+        assert context.wrapped.closed
+        assert context.wrapped.fileno() == -1
+    finally:
+        peer.close()
+        if context.wrapped is not None and not context.wrapped.closed:
+            context.wrapped.close()
+
+
+def _settle_peer_state(rejected: socket.socket) -> str:
+    """Report whether the endpoint closed the rejected connection first.
+
+    Returns `"closed"` when the endpoint's EOF (or reset) arrives, and
+    `"open"` when the connection is still the client's to close. The bound is a
+    safety net on a blocking read, not a wait for a result: an endpoint that
+    closes first is observed the instant its FIN lands.
+    """
+    rejected.settimeout(_PEER_SETTLE_SECONDS)
+    try:
+        while socket.socket.recv(rejected, 4096):
+            pass
+    except TimeoutError:
+        return "open"
+    except OSError as exc:  # a reset peer has also closed first
+        return f"closed (errno {exc.errno})"
+    return "closed (EOF)"
+
+
+async def test_the_direct_probes_bound_every_socket_they_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Neither direct probe may open a socket without a finite bound.
+
+    Both helpers connect, hand the descriptor to TLS, and then block — in
+    `do_handshake()` or in a `recv()` loop. The timeout handed to
+    `socket.create_connection` is what bounds all three phases, because it
+    stays on the socket and is carried onto the `SSLSocket` that wraps it. An
+    endpoint that stopped answering then fails this suite in seconds instead of
+    running the job to its own timeout.
+
+    The spy records what each helper actually passed rather than reading the
+    source, and the returned sockets are asked for the bound they are about to
+    block under.
+    """
+    ca_pem, cert_pem, key_pem = mint_ca_and_server_cert(tmp_path)
+    recorded: list[float | None] = []
+    connect = socket.create_connection
+
+    def recording_connect(*args: Any, **kwargs: Any) -> socket.socket:
+        given = kwargs["timeout"] if "timeout" in kwargs else (args[1] if len(args) > 1 else None)
+        recorded.append(given)
+        return connect(*args, **kwargs)
+
+    monkeypatch.setattr(socket, "create_connection", recording_connect)
+
+    async with _chat_endpoint(cert_pem, key_pem) as endpoint:
+        rejected = await asyncio.to_thread(_reject_the_certificate, endpoint.port)
+        try:
+            assert rejected.gettimeout() == _CONNECT_SECONDS
+        finally:
+            rejected.close()
+        client = await asyncio.to_thread(_complete_one_chat_request, endpoint.port, ca_pem)
+        try:
+            assert client.gettimeout() == _CONNECT_SECONDS
+        finally:
+            client.close()
+
+    assert recorded == [_CONNECT_SECONDS, _CONNECT_SECONDS]
+
+
+async def test_the_endpoint_lets_a_served_client_close_first(tmp_path: Path) -> None:
+    """A successful HTTP response must leave the client owning teardown."""
+    ca_pem, cert_pem, key_pem = mint_ca_and_server_cert(tmp_path)
+    async with _chat_endpoint(cert_pem, key_pem) as endpoint:
+        client = await asyncio.to_thread(_complete_one_chat_request, endpoint.port, ca_pem)
+        try:
+            peer_state = await asyncio.to_thread(_settle_peer_state, client)
+        finally:
+            client.close()
+
+    assert peer_state == "open", (
+        f"the endpoint closed a served connection before its client did ({peer_state})"
+    )
+
+
+async def test_the_endpoint_lets_a_rejecting_client_close_first(tmp_path: Path) -> None:
+    """A client that refuses the certificate must still own its own teardown.
+
+    The property asserted is the *ordering*: within the settle window the
+    endpoint must not close a connection it refused. That is observable the
+    same way on every platform — either its EOF arrives or it does not — and it
+    is what #390 turns on.
+
+    What the ordering protects is platform-specific. The Windows proactor
+    finalizes a connection by calling `self._sock.shutdown(SHUT_RDWR)` and
+    `self._sock.close()` *unguarded* before `self._sock = None` (CPython 3.12.10
+    `Lib/asyncio/proactor_events.py::_call_connection_lost`); the selector loop
+    makes neither call. Against a peer that closed first those raise, the
+    socket is never released, and it surfaces later as #390's
+    `PytestUnraisableExceptionWarning` against whichever unrelated test the
+    collector happened to reach it in. The resulting errno is *not* the
+    criterion here — after an orderly FIN a Linux socket sits in `CLOSE_WAIT`
+    where `shutdown()` still succeeds, so asserting on it would pass
+    vacuously — it is only reported alongside the ordering it accompanies.
+
+    Measured on this endpoint over 60 rejected handshakes each: closing first
+    gave `ENOTCONN` 60/60 on macOS, holding the connection gave a clean
+    teardown 60/60. Wrapping the accepted socket more politely changed nothing
+    — the close is an orderly FIN either way — so ordering is the property, not
+    the manner of the close.
+    """
+    _ca_pem, cert_pem, key_pem = mint_ca_and_server_cert(tmp_path)
+    async with _chat_endpoint(cert_pem, key_pem) as endpoint:
+        rejected = await asyncio.to_thread(_reject_the_certificate, endpoint.port)
+        try:
+            peer_state = await asyncio.to_thread(_settle_peer_state, rejected)
+            teardown = "clean"
+            try:
+                rejected.shutdown(socket.SHUT_RDWR)
+            except OSError as exc:
+                teardown = f"shutdown failed with errno {exc.errno}"
+        finally:
+            rejected.close()
+
+    assert peer_state == "open", (
+        "the endpoint closed a connection it refused before its client did"
+        f" ({peer_state}); the client's own teardown was then {teardown}"
+    )
 
 
 @pytest.fixture(autouse=True)
-async def _isolated_litellm_trust(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[None]:
+async def _connection_ownership_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> AsyncIterator[None]:
+    """Attribute a stranded connection to the test that actually opened it.
+
+    #390's `PytestUnraisableExceptionWarning` names whichever test happened to
+    be running when the collector reached the object, never the one that owned
+    it, so the allocator has never been identified. Two mechanisms can leave a
+    `_ProactorSocketTransport` holding `_sock`, and they need telling apart:
+
+    1. `_call_connection_lost()` raised. On the proactor loop — and only there
+       — it calls `self._sock.shutdown(SHUT_RDWR)` and `self._sock.close()`
+       unguarded before `self._sock = None` (CPython 3.12.10
+       `Lib/asyncio/proactor_events.py`); the selector loop closes the socket
+       and clears the attribute with neither call. A peer that reset the
+       connection therefore strands the socket on Windows, and the `OSError`
+       surfaces only through the loop's exception handler, in the test that
+       opened the connection rather than the one that reports the warning.
+    2. The queued `_call_connection_lost()` never ran, because the loop was
+       closed first. Then no error is raised anywhere and the transport is
+       simply still holding its socket when this test is over.
+
+    Case 1 lands in `callback_failures`, case 2 in `stranded`. Both name this
+    test. Neither collects garbage, filters a warning, nor waits on a clock.
+    """
+    live: weakref.WeakSet[BaseTransport] = weakref.WeakSet()
+    build_transport = BaseTransport.__init__
+
+    def recording_init(transport: BaseTransport, *args: Any, **kwargs: Any) -> None:
+        build_transport(transport, *args, **kwargs)
+        live.add(transport)
+
+    monkeypatch.setattr(BaseTransport, "__init__", recording_init)
+
+    callback_failures: list[str] = []
+    loop = asyncio.get_running_loop()
+    delegate = loop.get_exception_handler()
+
+    def record(failing_loop: asyncio.AbstractEventLoop, context: dict[str, Any]) -> None:
+        callback_failures.append(f"{context.get('message')}: {context.get('exception')!r}")
+        if delegate is None:
+            failing_loop.default_exception_handler(context)
+        else:
+            delegate(failing_loop, context)
+
+    loop.set_exception_handler(record)
+    try:
+        yield
+    finally:
+        loop.set_exception_handler(delegate)
+
+    stranded = sorted(repr(t) for t in live if getattr(t, "_sock", None) is not None)
+    assert not callback_failures, (
+        f"an event-loop callback failed while this test ran: {callback_failures}"
+    )
+    assert not stranded, f"a transport still owned its socket after teardown: {stranded}"
+
+
+@pytest.fixture(autouse=True)
+async def _isolated_litellm_trust(
+    monkeypatch: pytest.MonkeyPatch, _connection_ownership_probe: None
+) -> AsyncIterator[None]:
     """Restore LiteLLM's global trust and drop its cached clients.
 
     Measured on 1.98.0: the SDK-client cache key is built from the api
@@ -116,6 +450,12 @@ async def _isolated_litellm_trust(monkeypatch: pytest.MonkeyPatch) -> AsyncItera
     korvid applies the bundle at construction, before the first request
     can happen, which is why that ordering is safe in production; a test
     that reuses one process has to flush.
+
+    Requests the ownership probe so the probe is torn down *after* this
+    fixture: a client still open is not yet a stranded connection. The
+    endpoint's own `release_clients` has usually emptied the cache first,
+    inside the test body, so the drop here finds nothing — it is the
+    isolation that matters, not the closing.
     """
     monkeypatch.setattr(litellm, "ssl_verify", True, raising=False)
     await drop_cached_clients()
@@ -145,15 +485,45 @@ async def _answer(provider: Any) -> list[dict[str, Any]]:
 
 
 @pytest.mark.parametrize("reference", CLIENT_SHAPES)
+async def test_the_endpoint_releases_the_client_litellm_cached(
+    tmp_path: Path, reference: str
+) -> None:
+    """The connection this endpoint holds belongs to a client no test named.
+
+    Both LiteLLM client shapes cache a live SDK client keyed by api key,
+    base URL, timeout and retry count, and that cached client is what owns
+    the keep-alive connection once the answer has arrived. So the endpoint
+    is still holding the peer when the body ends — it must be, or it closed
+    a connection its client had not released — and emptying that cache is
+    the endpoint's own teardown job, done inside this context while it is
+    still serving. Without `release_clients` the same two assertions become
+    the ownership failure `served_endpoint` raises for a stranded peer.
+    """
+    ca_pem, cert_pem, key_pem = mint_ca_and_server_cert(tmp_path)
+    async with _chat_endpoint(cert_pem, key_pem) as endpoint:
+        provider = create_provider_from_profile(
+            _profile(reference, endpoint.path("/v1")), ca_bundle=str(ca_pem)
+        )
+        assert isinstance(provider, LiteLLMProvider)
+        await _answer(provider)
+        held = endpoint.open_connections()
+        cached = len(litellm.in_memory_llm_clients_cache.cache_dict)
+
+    assert cached, "LiteLLM cached no client, so this test proves nothing about releasing one"
+    assert held == 1, f"the endpoint did not hold the connection its cached client owned ({held})"
+    assert litellm.in_memory_llm_clients_cache.cache_dict == {}
+
+
+@pytest.mark.parametrize("reference", CLIENT_SHAPES)
 async def test_the_configured_bundle_reaches_the_tls_handshake(
     tmp_path: Path, reference: str
 ) -> None:
     """The whole point: a private-CA endpoint answers because the operator
     named the bundle, not because verification was relaxed."""
     ca_pem, cert_pem, key_pem = mint_ca_and_server_cert(tmp_path)
-    with _https_endpoint(cert_pem, key_pem) as endpoint:
+    async with _chat_endpoint(cert_pem, key_pem) as endpoint:
         provider = create_provider_from_profile(
-            _profile(reference, endpoint), ca_bundle=str(ca_pem)
+            _profile(reference, endpoint.path("/v1")), ca_bundle=str(ca_pem)
         )
         assert isinstance(provider, LiteLLMProvider)
         events = await _answer(provider)
@@ -167,8 +537,10 @@ async def test_without_the_bundle_the_same_endpoint_is_unreachable(
     """The negative control. Without it the test above could pass against
     an endpoint korvid trusted for some other reason."""
     _ca_pem, cert_pem, key_pem = mint_ca_and_server_cert(tmp_path)
-    with _https_endpoint(cert_pem, key_pem) as endpoint:
-        provider = create_provider_from_profile(_profile(reference, endpoint), ca_bundle=None)
+    async with _chat_endpoint(cert_pem, key_pem) as endpoint:
+        provider = create_provider_from_profile(
+            _profile(reference, endpoint.path("/v1")), ca_bundle=None
+        )
         assert isinstance(provider, LiteLLMProvider)
         with pytest.raises(OperatorSafeProviderError):
             await _answer(provider)
@@ -187,9 +559,9 @@ async def test_a_profile_option_can_never_turn_verification_off(
     is still refused, exactly as it is with no option at all.
     """
     _ca_pem, cert_pem, key_pem = mint_ca_and_server_cert(tmp_path)
-    with _https_endpoint(cert_pem, key_pem) as endpoint:
+    async with _chat_endpoint(cert_pem, key_pem) as endpoint:
         provider = create_provider_from_profile(
-            _profile(reference, endpoint, ssl_verify=False), ca_bundle=None
+            _profile(reference, endpoint.path("/v1"), ssl_verify=False), ca_bundle=None
         )
         assert isinstance(provider, LiteLLMProvider)
         with pytest.raises(OperatorSafeProviderError):
@@ -203,9 +575,9 @@ async def test_the_bundle_still_applies_when_an_option_asks_to_ignore_it(
     """The other half of the same rule: with a bundle configured, the
     option changes nothing and the private-CA endpoint answers."""
     ca_pem, cert_pem, key_pem = mint_ca_and_server_cert(tmp_path)
-    with _https_endpoint(cert_pem, key_pem) as endpoint:
+    async with _chat_endpoint(cert_pem, key_pem) as endpoint:
         provider = create_provider_from_profile(
-            _profile("openai/gpt-4o", endpoint, ssl_verify=False), ca_bundle=str(ca_pem)
+            _profile("openai/gpt-4o", endpoint.path("/v1"), ssl_verify=False), ca_bundle=str(ca_pem)
         )
         assert isinstance(provider, LiteLLMProvider)
         events = await _answer(provider)
@@ -220,9 +592,9 @@ async def test_the_bundle_is_a_transport_setting_not_a_model_parameter(
     """It configures korvid's client. It must not travel in the request
     body, where a provider would reject it as an unknown field."""
     ca_pem, cert_pem, key_pem = mint_ca_and_server_cert(tmp_path)
-    with _https_endpoint(cert_pem, key_pem) as endpoint:
+    async with _chat_endpoint(cert_pem, key_pem) as endpoint:
         provider = create_provider_from_profile(
-            _profile(reference, endpoint), ca_bundle=str(ca_pem)
+            _profile(reference, endpoint.path("/v1")), ca_bundle=str(ca_pem)
         )
         assert isinstance(provider, LiteLLMProvider)
         await _answer(provider)

@@ -1,0 +1,1229 @@
+"""One file owns the local endpoint lifecycle, and this is what says so.
+
+#390 is a socket-ownership bug: an endpoint that closes an accepted
+connection before its client has released the client's own transport
+strands that transport on the Windows proactor, and the `OSError` it
+raises is reported later against an unrelated test. The fix was to decide
+the ordering once, in `tests/local_endpoint.py`, and to route every suite
+through it.
+
+A fix like that lasts exactly as long as the next hand-written endpoint.
+The three lines below are all it takes to reintroduce the bug:
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    server.socket = context.wrap_socket(server.socket, server_side=True)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+
+So they are read as syntax, not as text. Every tracked module under
+`tests/` is parsed, and a module other than the helper that constructs or
+subclasses an HTTP server, TLS-wraps a *listening* socket, or reaches
+`serve_forever` is named with its line. A module that will not parse is
+named too: a file this contract cannot read is one it cannot clear.
+
+Reading syntax is what makes the contract precise enough to live without
+an allowlist of exceptions. The shapes below are legitimate and stay
+unnamed, because none of them owns an accepted connection:
+
+- a port probe that binds and releases a socket without serving on it;
+- a *client-side* `wrap_socket()`, which wraps the client's own socket;
+- a fake that merely defines a `wrap_socket()` method;
+- a request handler class, including one nested inside a function;
+- prose, and source fixtures quoted as strings — such as the ones in this
+  module, which are written to temporary files and parsed from there
+  precisely so that the contract's own examples are never mistaken for the
+  repository's code.
+"""
+
+from __future__ import annotations
+
+import ast
+import subprocess
+from collections.abc import Iterator, Sequence
+from dataclasses import dataclass
+from pathlib import Path
+from textwrap import dedent
+
+import pytest
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+
+#: The one module allowed to stand a local endpoint up. Not a list, and
+#: not a pattern: an exception granted to a second file is the drift this
+#: contract exists to prevent.
+HELPER = "tests/local_endpoint.py"
+
+RULE_SERVER = "builds an HTTP server"
+RULE_LISTENER_TLS = "wraps the listening socket in TLS"
+RULE_ACCEPT_LOOP = "starts the accept loop"
+RULE_UNREADABLE = "cannot be parsed"
+
+#: The stdlib servers, by the dotted path an import resolves to and by the
+#: bare name. The resolved path is the precise judgement; the bare name is
+#: what a spelling the imports cannot explain is judged by.
+_SERVER_PATHS = frozenset({"http.server.HTTPServer", "http.server.ThreadingHTTPServer"})
+_SERVER_NAMES = frozenset({"HTTPServer", "ThreadingHTTPServer"})
+
+_WRAP_SOCKET = "wrap_socket"
+
+#: The accept loop, judged wherever it is reached: called outright, or
+#: handed to whatever will call it — `threading.Thread(target=...)`,
+#: `Thread(group, target)`, `asyncio.to_thread(...)`, an executor, or a
+#: `partial()` of any of them. Naming the thread helpers instead would
+#: only name the spellings this suite happens to use today.
+_ACCEPT_LOOP = "serve_forever"
+
+#: The attribute a `socketserver` server keeps its *listening* socket in.
+_LISTENING_SOCKET = "socket"
+
+
+@dataclass(frozen=True)
+class Violation:
+    """One line of one module that stands up an endpoint by hand."""
+
+    path: str
+    line: int
+    rule: str
+    detail: str
+
+    def describe(self) -> str:
+        """The violation as a path, a line, and what was found there."""
+        return f"{self.path}:{self.line}: {self.rule}: {self.detail}"
+
+
+def _scan_repository(root: Path) -> tuple[Violation, ...]:
+    """Judge every tracked test module, in path order."""
+    found: list[Violation] = []
+    for name in _tracked_test_modules(root):
+        found.extend(_scan_file(root / name, name))
+    return tuple(found)
+
+
+def _tracked_test_modules(root: Path) -> tuple[str, ...]:
+    """The repository's own test modules, as git knows them.
+
+    Tracked, so an untracked scratch file, a stale `.pyc`, or a virtualenv
+    vendored under `tests/` can neither dilute the scan nor fail it.
+    """
+    result = subprocess.run(
+        ["git", "-C", str(root), "ls-files", "-z", "--", "tests"],
+        check=True,
+        capture_output=True,
+    )
+    names = tuple(
+        sorted(name for name in result.stdout.decode("utf-8").split("\0") if name.endswith(".py"))
+    )
+    assert names, "git listed no tracked test modules, so this scan would clear anything"
+    return names
+
+
+def _scan_file(path: Path, name: str) -> tuple[Violation, ...]:
+    """Judge one module, reporting a read failure rather than raising it."""
+    if not path.is_file():
+        # Tracked but absent from the worktree: a deletion in flight, and a
+        # module being deleted cannot reintroduce the lifecycle.
+        return ()
+    try:
+        source = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as error:
+        return (Violation(name, 1, RULE_UNREADABLE, f"{type(error).__name__}: {error}"),)
+    return _scan_source(source, name)
+
+
+def _scan_source(source: str, name: str) -> tuple[Violation, ...]:
+    """Judge one module's syntax, so prose and quoted source are inert.
+
+    Fails closed on a module that will not parse: a file the contract
+    cannot read is a file it cannot clear.
+    """
+    try:
+        tree = ast.parse(source, filename=name)
+    except SyntaxError as error:
+        return (Violation(name, error.lineno or 1, RULE_UNREADABLE, error.msg),)
+    scanner = _Scanner(name)
+    scanner.visit(tree)
+    return tuple(sorted(scanner.found, key=lambda violation: (violation.line, violation.rule)))
+
+
+class _Scanner(ast.NodeVisitor):
+    """Judge names as each lexical scope binds them in source order."""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.bindings: dict[str, str] = {}
+        self.module_bindings: dict[str, str] = {}
+        self.closure_bindings: list[dict[str, str]] = []
+        self.found: list[Violation] = []
+
+    def visit_Module(self, node: ast.Module) -> None:
+        self.module_bindings = _final_scope_bindings(node.body)
+        for statement in node.body:
+            self.visit(statement)
+
+    def visit_Import(self, node: ast.Import) -> None:
+        for alias in node.names:
+            root = alias.name.split(".")[0]
+            self.bindings[alias.asname or root] = alias.name if alias.asname else root
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        if node.module and not node.level:
+            for alias in node.names:
+                self.bindings[alias.asname or alias.name] = f"{node.module}.{alias.name}"
+
+    def visit_Call(self, node: ast.Call) -> None:
+        self.found.extend(_judge_call(node, self.bindings, self.name))
+        self.generic_visit(node)
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        self.found.extend(_judge_bases(node, self.bindings, self.name))
+        for expression in (*node.decorator_list, *node.bases):
+            self.visit(expression)
+        for keyword in node.keywords:
+            self.visit(keyword.value)
+        inherited = self.bindings.copy()
+        global_names = _scope_global_names(node.body)
+        self._restore_globals(inherited, global_names)
+        self._visit_scope(
+            node.body,
+            {node.name} - global_names,
+            inherited=inherited,
+        )
+        self.bindings.pop(node.name, None)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self._visit_function(node)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self._visit_function(node)
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        self.visit(node.args)
+        inherited = (
+            self.closure_bindings[-1].copy()
+            if self.closure_bindings
+            else self.module_bindings.copy()
+        )
+        shadows = _argument_names(node.args)
+        for shadow in shadows:
+            inherited.pop(shadow, None)
+        self.closure_bindings.append(inherited)
+        try:
+            self._visit_scope([node.body], set(), inherited=inherited)
+        finally:
+            self.closure_bindings.pop()
+
+    def visit_Assign(self, node: ast.Assign) -> None:
+        self.found.extend(_judge_assignment(node, self.bindings, self.name))
+        self.visit(node.value)
+        for target in node.targets:
+            self.visit(target)
+        self._bind(node.targets, node.value)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        self.found.extend(_judge_assignment(node, self.bindings, self.name))
+        self.visit(node.annotation)
+        if node.value is not None:
+            self.visit(node.value)
+        self.visit(node.target)
+        self._bind([node.target], node.value)
+
+    def visit_NamedExpr(self, node: ast.NamedExpr) -> None:
+        self.visit(node.value)
+        self.visit(node.target)
+        self._bind([node.target], node.value)
+
+    def visit_AugAssign(self, node: ast.AugAssign) -> None:
+        self.visit(node.target)
+        self.visit(node.value)
+        self._bind([node.target], None)
+
+    def _visit_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        for decorator in node.decorator_list:
+            self.visit(decorator)
+        self.visit(node.args)
+        if node.returns is not None:
+            self.visit(node.returns)
+        inherited = (
+            self.closure_bindings[-1].copy()
+            if self.closure_bindings
+            else self.module_bindings.copy()
+        )
+        global_names = _scope_global_names(node.body)
+        self._restore_globals(inherited, global_names)
+        shadows = {
+            *_argument_names(node.args),
+            *_scope_bound_names(node.body),
+            node.name,
+        } - global_names
+        for shadow in shadows:
+            inherited.pop(shadow, None)
+        final_bindings = _final_scope_bindings(node.body, inherited)
+        self.closure_bindings.append(final_bindings)
+        try:
+            self._visit_scope(node.body, set(), inherited=inherited)
+        finally:
+            self.closure_bindings.pop()
+        self.bindings.pop(node.name, None)
+
+    def _visit_scope(
+        self,
+        body: Sequence[ast.stmt | ast.expr],
+        shadows: set[str],
+        *,
+        inherited: dict[str, str] | None = None,
+    ) -> None:
+        outer = self.bindings
+        self.bindings = (outer if inherited is None else inherited).copy()
+        for shadow in shadows:
+            self.bindings.pop(shadow, None)
+        try:
+            for statement in body:
+                self.visit(statement)
+        finally:
+            self.bindings = outer
+
+    def _bind(self, targets: list[ast.expr], value: ast.expr | None) -> None:
+        resolved = None if value is None else _resolve(value, self.bindings)
+        for target in targets:
+            for name in _assigned_names(target):
+                if resolved is None:
+                    self.bindings.pop(name, None)
+                else:
+                    self.bindings[name] = resolved
+
+    def _restore_globals(
+        self,
+        bindings: dict[str, str],
+        names: set[str],
+    ) -> None:
+        """Resolve declared globals from the module, not an enclosing closure."""
+        for name in names:
+            module_binding = self.module_bindings.get(name)
+            if module_binding is None:
+                bindings.pop(name, None)
+            else:
+                bindings[name] = module_binding
+
+
+def _final_scope_bindings(
+    body: Sequence[ast.stmt],
+    inherited: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Bindings visible after one module or function scope initializes."""
+    bindings = {} if inherited is None else inherited.copy()
+    for node in _scope_nodes(body):
+        _update_final_binding(bindings, node)
+    return bindings
+
+
+def _update_final_binding(bindings: dict[str, str], node: ast.AST) -> None:
+    """Apply one same-scope syntax node to the final binding snapshot."""
+    if isinstance(node, ast.Import):
+        for alias in node.names:
+            root = alias.name.split(".")[0]
+            bindings[alias.asname or root] = alias.name if alias.asname else root
+    elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+        for alias in node.names:
+            bindings[alias.asname or alias.name] = f"{node.module}.{alias.name}"
+    elif isinstance(node, ast.Assign):
+        _bind_names(bindings, node.targets, node.value)
+    elif isinstance(node, (ast.AnnAssign, ast.NamedExpr)):
+        _bind_names(bindings, [node.target], node.value)
+    elif isinstance(node, ast.AugAssign):
+        _bind_names(bindings, [node.target], None)
+    elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        bindings.pop(node.name, None)
+
+
+def _scope_bound_names(body: Sequence[ast.stmt]) -> set[str]:
+    """Names Python treats as local to this function body."""
+    bound: set[str] = set()
+    external: set[str] = set()
+    for node in _scope_nodes(body):
+        if isinstance(node, (ast.Global, ast.Nonlocal)):
+            external.update(node.names)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                bound.add(alias.asname or alias.name.split(".")[0])
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            bound.add(node.name)
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            bound.add(node.id)
+    return bound - external
+
+
+def _scope_global_names(body: Sequence[ast.stmt]) -> set[str]:
+    """Names this function explicitly resolves from module scope."""
+    return {
+        name for node in _scope_nodes(body) if isinstance(node, ast.Global) for name in node.names
+    }
+
+
+def _scope_nodes(body: Sequence[ast.stmt]) -> Iterator[ast.AST]:
+    """Walk one lexical scope without entering a nested function or class."""
+    pending: list[ast.AST] = list(reversed(body))
+    while pending:
+        node = pending.pop()
+        yield node
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            continue
+        pending.extend(reversed(list(ast.iter_child_nodes(node))))
+
+
+def _bind_names(
+    bindings: dict[str, str],
+    targets: list[ast.expr],
+    value: ast.expr | None,
+) -> None:
+    """Apply one assignment to a binding snapshot."""
+    resolved = None if value is None else _resolve(value, bindings)
+    for target in targets:
+        for name in _assigned_names(target):
+            if resolved is None:
+                bindings.pop(name, None)
+            else:
+                bindings[name] = resolved
+
+
+def _argument_names(arguments: ast.arguments) -> set[str]:
+    """Names a function scope binds before its body runs."""
+    positional = [*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs]
+    names = {argument.arg for argument in positional}
+    if arguments.vararg is not None:
+        names.add(arguments.vararg.arg)
+    if arguments.kwarg is not None:
+        names.add(arguments.kwarg.arg)
+    return names
+
+
+def _assigned_names(target: ast.expr) -> Iterator[str]:
+    """Every simple name an assignment target shadows."""
+    if isinstance(target, ast.Name):
+        yield target.id
+    elif isinstance(target, (ast.List, ast.Tuple)):
+        for element in target.elts:
+            yield from _assigned_names(element)
+
+
+def _spelling(node: ast.expr) -> str | None:
+    """The dotted name as it is written, or `None` when it is not one."""
+    parts: list[str] = []
+    current: ast.expr = node
+    while isinstance(current, ast.Attribute):
+        parts.append(current.attr)
+        current = current.value
+    if not isinstance(current, ast.Name):
+        return None
+    parts.append(current.id)
+    return ".".join(reversed(parts))
+
+
+def _resolve(node: ast.expr, bindings: dict[str, str]) -> str | None:
+    """The dotted name with its root replaced by whatever was imported."""
+    spelling = _spelling(node)
+    if spelling is None:
+        return None
+    root, _, rest = spelling.partition(".")
+    target = bindings.get(root)
+    if target is None:
+        return spelling
+    return f"{target}.{rest}" if rest else target
+
+
+def _judge_bases(node: ast.ClassDef, bindings: dict[str, str], name: str) -> Iterator[Violation]:
+    """A server subclass is a second lifecycle, whoever constructs it."""
+    for base in node.bases:
+        if _is_server(base, bindings):
+            yield Violation(
+                name,
+                node.lineno,
+                RULE_SERVER,
+                f"class {node.name} extends {_named(base, bindings)}",
+            )
+
+
+def _judge_call(node: ast.Call, bindings: dict[str, str], name: str) -> Iterator[Violation]:
+    """A constructed server, and an accept loop started outside the helper."""
+    if _is_server(node.func, bindings):
+        yield Violation(name, node.lineno, RULE_SERVER, f"{_named(node.func, bindings)}(...)")
+    if _wraps_listening_socket(node, bindings):
+        yield Violation(
+            name,
+            node.lineno,
+            RULE_LISTENER_TLS,
+            f"{_WRAP_SOCKET}() is applied to a server's .{_LISTENING_SOCKET}",
+        )
+    if _is_accept_loop(node.func, bindings):
+        yield Violation(name, node.lineno, RULE_ACCEPT_LOOP, f".{_ACCEPT_LOOP}() is run from here")
+        return
+    # Only the call's *own* arguments, never the tree beneath them: a
+    # `partial(server.serve_forever)` handed to a thread is one accept
+    # loop, and it is named where it is bound rather than twice.
+    if any(_is_accept_loop(argument, bindings) for argument in _arguments(node)):
+        yield Violation(
+            name,
+            node.lineno,
+            RULE_ACCEPT_LOOP,
+            f".{_ACCEPT_LOOP} is handed to {_named(node.func, bindings)}",
+        )
+
+
+def _arguments(node: ast.Call) -> Iterator[ast.expr]:
+    """Everything this call is passed, positionally or by keyword."""
+    yield from node.args
+    for keyword in node.keywords:
+        yield keyword.value
+
+
+def _judge_assignment(
+    node: ast.Assign | ast.AnnAssign,
+    bindings: dict[str, str],
+    name: str,
+) -> Iterator[Violation]:
+    """TLS on the *listening* socket, which is not TLS on an accepted one.
+
+    Wrapping the listener makes `accept()` hand a refused connection to
+    `ssl.SSLSocket._create`, which closes it — the endpoint closing first,
+    which is #390.
+    """
+    value = node.value
+    if not isinstance(value, ast.Call) or _tail(value.func) != _WRAP_SOCKET:
+        return
+    if _is_explicit_client_wrap(value) or _wraps_listening_socket(value, bindings):
+        return
+    targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+    if any(_is_listening_socket(target, {}) for target in targets):
+        yield Violation(
+            name,
+            node.lineno,
+            RULE_LISTENER_TLS,
+            f"{_WRAP_SOCKET}() is applied to a server's .{_LISTENING_SOCKET}",
+        )
+
+
+def _is_server(node: ast.expr, bindings: dict[str, str]) -> bool:
+    resolved = _resolve(node, bindings)
+    if resolved is None:
+        return False
+    return resolved in _SERVER_PATHS or resolved.rsplit(".", 1)[-1] in _SERVER_NAMES
+
+
+def _named(node: ast.expr, bindings: dict[str, str]) -> str:
+    """How the node is written, and what it resolves to when they differ."""
+    spelling = _spelling(node)
+    if spelling is None:
+        return "a call"
+    resolved = _resolve(node, bindings)
+    return spelling if resolved in (None, spelling) else f"{spelling} ({resolved})"
+
+
+def _is_accept_loop(node: ast.expr, bindings: dict[str, str]) -> bool:
+    """Whether this expression *is* the accept loop, rather than reaches one."""
+    resolved = _resolve(node, bindings)
+    return resolved is not None and resolved.rsplit(".", 1)[-1] == _ACCEPT_LOOP
+
+
+def _is_listening_socket(node: ast.expr | None, bindings: dict[str, str]) -> bool:
+    if isinstance(node, ast.Attribute):
+        return node.attr == _LISTENING_SOCKET
+    if not isinstance(node, ast.Name):
+        return False
+    resolved = bindings.get(node.id)
+    return resolved is not None and resolved.endswith(f".{_LISTENING_SOCKET}")
+
+
+def _wraps_listening_socket(node: ast.Call, bindings: dict[str, str]) -> bool:
+    """Whether this call server-side wraps an object kept in `.socket`."""
+    if _tail(node.func) != _WRAP_SOCKET or _is_explicit_client_wrap(node):
+        return False
+    wrapped = node.args[0] if node.args else _keyword_value(node, "sock")
+    return _is_listening_socket(wrapped, bindings)
+
+
+def _is_explicit_client_wrap(node: ast.Call) -> bool:
+    """Whether `server_side=False` states that this is the client half."""
+    server_side = _keyword_value(node, "server_side")
+    return isinstance(server_side, ast.Constant) and server_side.value is False
+
+
+def _keyword_value(node: ast.Call, name: str) -> ast.expr | None:
+    """One explicitly named argument, when present."""
+    return next((keyword.value for keyword in node.keywords if keyword.arg == name), None)
+
+
+def _tail(node: ast.expr) -> str | None:
+    """The last segment of a dotted name: the method or class being used."""
+    spelling = _spelling(node)
+    return None if spelling is None else spelling.rsplit(".", 1)[-1]
+
+
+def _module(tmp_path: Path, source: str, name: str = "fixture_endpoint.py") -> Path:
+    """Write one source fixture to its own module, and say where it landed."""
+    path = tmp_path / name
+    path.write_text(dedent(source).lstrip(), encoding="utf-8")
+    return path
+
+
+def _scan(tmp_path: Path, source: str) -> tuple[Violation, ...]:
+    """Parse one source fixture the way the repository scan parses a module."""
+    name = "fixture_endpoint.py"
+    return _scan_file(_module(tmp_path, source, name), f"tests/{name}")
+
+
+def _rules(violations: tuple[Violation, ...]) -> list[str]:
+    return [violation.rule for violation in violations]
+
+
+def test_a_stdlib_http_server_construction_is_named(tmp_path: Path) -> None:
+    violations = _scan(
+        tmp_path,
+        """
+        from http.server import ThreadingHTTPServer
+
+        def endpoint(handler):
+            return ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        """,
+    )
+
+    assert _rules(violations) == [RULE_SERVER]
+    assert violations[0].line == 4
+    assert "ThreadingHTTPServer" in violations[0].detail
+
+
+def test_a_dotted_http_server_construction_is_named(tmp_path: Path) -> None:
+    violations = _scan(
+        tmp_path,
+        """
+        import http.server
+
+        def endpoint(handler):
+            return http.server.HTTPServer(("127.0.0.1", 0), handler)
+        """,
+    )
+
+    assert _rules(violations) == [RULE_SERVER]
+    assert "http.server.HTTPServer" in violations[0].detail
+
+
+def test_an_aliased_http_server_import_is_named(tmp_path: Path) -> None:
+    """An alias renames the spelling, not the lifecycle it stands up."""
+    violations = _scan(
+        tmp_path,
+        """
+        import http.server as web
+        from http.server import HTTPServer as Listener
+
+        def aliased_module(handler):
+            return web.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+
+        def aliased_name(handler):
+            return Listener(("127.0.0.1", 0), handler)
+        """,
+    )
+
+    assert _rules(violations) == [RULE_SERVER, RULE_SERVER]
+    assert [violation.line for violation in violations] == [5, 8]
+
+
+def test_an_assignment_alias_of_an_http_server_is_named(tmp_path: Path) -> None:
+    """A normal assignment can rename an imported server more than once."""
+    violations = _scan(
+        tmp_path,
+        """
+        from http.server import HTTPServer
+
+        Listener = HTTPServer
+        Endpoint = Listener
+
+        def endpoint(handler):
+            return Endpoint(("127.0.0.1", 0), handler)
+        """,
+    )
+
+    assert _rules(violations) == [RULE_SERVER]
+    assert violations[0].line == 7
+    assert "Endpoint" in violations[0].detail
+
+
+def test_a_function_resolves_a_server_alias_bound_later_at_module_scope(
+    tmp_path: Path,
+) -> None:
+    """Function globals are resolved when called, after module initialization."""
+    violations = _scan(
+        tmp_path,
+        """
+        def endpoint(handler):
+            return Endpoint(("127.0.0.1", 0), handler)
+
+        from http.server import HTTPServer
+        Endpoint = HTTPServer
+        """,
+    )
+
+    assert _rules(violations) == [RULE_SERVER]
+    assert violations[0].line == 2
+
+
+@pytest.mark.parametrize(
+    "shadow",
+    [
+        pytest.param(
+            """
+            def outer(Endpoint):
+                def inner(handler):
+                    return Endpoint(("127.0.0.1", 0), handler)
+                return inner
+            """,
+            id="parameter",
+        ),
+        pytest.param(
+            """
+            def outer():
+                Endpoint = build_fake()
+                def inner(handler):
+                    return Endpoint(("127.0.0.1", 0), handler)
+                return inner
+            """,
+            id="local",
+        ),
+        pytest.param(
+            """
+            def outer():
+                def inner(handler):
+                    return Endpoint(("127.0.0.1", 0), handler)
+                Endpoint = build_fake()
+                return inner
+            """,
+            id="local-bound-after-inner",
+        ),
+    ],
+)
+def test_a_nested_function_keeps_its_enclosing_server_alias_shadow(
+    tmp_path: Path,
+    shadow: str,
+) -> None:
+    """An enclosing parameter or local remains the nested function's closure."""
+    violations = _scan(
+        tmp_path,
+        f"from http.server import HTTPServer\nEndpoint = HTTPServer\n\n{dedent(shadow).lstrip()}",
+    )
+
+    assert violations == ()
+
+
+def test_a_nested_function_resolves_an_enclosing_server_alias_bound_later(
+    tmp_path: Path,
+) -> None:
+    """A closure reads its enclosing local after the outer function binds it."""
+    violations = _scan(
+        tmp_path,
+        """
+        from http.server import HTTPServer
+
+        def outer():
+            def endpoint(handler):
+                return Endpoint(("127.0.0.1", 0), handler)
+            Endpoint = HTTPServer
+            return endpoint
+        """,
+    )
+
+    assert _rules(violations) == [RULE_SERVER]
+    assert violations[0].line == 5
+
+
+def test_a_nested_function_resolves_a_declared_global_from_module_scope(
+    tmp_path: Path,
+) -> None:
+    """`global` bypasses an enclosing parameter and reads the module binding."""
+    violations = _scan(
+        tmp_path,
+        """
+        from http.server import HTTPServer
+        Endpoint = HTTPServer
+
+        def outer(Endpoint):
+            def inner(handler):
+                global Endpoint
+                return Endpoint(("127.0.0.1", 0), handler)
+            return inner
+        """,
+    )
+
+    assert _rules(violations) == [RULE_SERVER]
+    assert violations[0].line == 7
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param(
+            """
+            def outer(Endpoint):
+                def Endpoint(handler):
+                    global Endpoint
+                    return Endpoint(("127.0.0.1", 0), handler)
+                return Endpoint
+            """,
+            id="function-name",
+        ),
+        pytest.param(
+            """
+            def outer(Endpoint):
+                class Made:
+                    global Endpoint
+                    listener = Endpoint(("127.0.0.1", 0), None)
+                return Made
+            """,
+            id="class-body",
+        ),
+    ],
+)
+def test_global_declarations_override_enclosing_alias_shadows(
+    tmp_path: Path,
+    body: str,
+) -> None:
+    """A declared global always resolves from the module, regardless of syntax scope."""
+    violations = _scan(
+        tmp_path,
+        f"from http.server import HTTPServer\nEndpoint = HTTPServer\n\n{dedent(body).lstrip()}",
+    )
+
+    assert _rules(violations) == [RULE_SERVER]
+
+
+def test_assignment_aliases_follow_source_order_and_lexical_scope(
+    tmp_path: Path,
+) -> None:
+    """Final globals reach functions; true local aliases stay source-ordered and scoped."""
+    violations = _scan(
+        tmp_path,
+        """
+        from http.server import HTTPServer
+
+        def before_binding(handler):
+            return Endpoint(("127.0.0.1", 0), handler)
+
+        Endpoint = HTTPServer
+
+        def after_binding(handler):
+            return Endpoint(("127.0.0.1", 0), handler)
+
+        Endpoint = build_endpoint
+
+        def after_rebinding(handler):
+            return Endpoint(("127.0.0.1", 0), handler)
+
+        def nested_alias(handler):
+            LocalServer = HTTPServer
+            return LocalServer(("127.0.0.1", 0), handler)
+
+        def sibling_scope(handler):
+            return LocalServer(("127.0.0.1", 0), handler)
+        """,
+    )
+
+    assert _rules(violations) == [RULE_SERVER]
+    assert violations[0].line == 18
+
+
+def test_a_server_subclass_is_named(tmp_path: Path) -> None:
+    """Subclassing the server is how a second lifecycle gets written."""
+    violations = _scan(
+        tmp_path,
+        """
+        from http.server import ThreadingHTTPServer
+
+        class MyServer(ThreadingHTTPServer):
+            daemon_threads = True
+        """,
+    )
+
+    assert _rules(violations) == [RULE_SERVER]
+    assert violations[0].line == 3
+
+
+def test_tls_wrapping_the_listening_socket_is_named(tmp_path: Path) -> None:
+    violations = _scan(
+        tmp_path,
+        """
+        def secure(server, context):
+            server.socket = context.wrap_socket(server.socket, server_side=True)
+        """,
+    )
+
+    assert _rules(violations) == [RULE_LISTENER_TLS]
+    assert violations[0].line == 2
+
+
+def test_returning_a_wrapped_listening_socket_is_named(tmp_path: Path) -> None:
+    """The forbidden operation is wrapping the listener, not assigning it."""
+    violations = _scan(
+        tmp_path,
+        """
+        def secure(server, context):
+            return context.wrap_socket(server.socket, server_side=True)
+        """,
+    )
+
+    assert _rules(violations) == [RULE_LISTENER_TLS]
+    assert violations[0].line == 2
+
+
+@pytest.mark.parametrize(
+    "wrap",
+    [
+        pytest.param(
+            "context.wrap_socket(listener, server_side=True)",
+            id="positional",
+        ),
+        pytest.param(
+            "context.wrap_socket(sock=listener, server_side=True)",
+            id="keyword",
+        ),
+    ],
+)
+def test_a_listening_socket_alias_cannot_hide_server_side_wrapping(
+    tmp_path: Path,
+    wrap: str,
+) -> None:
+    """The wrapped value is resolved through the same assignment bindings."""
+    violations = _scan(
+        tmp_path,
+        f"""
+        def secure(server, context):
+            listener = server.socket
+            return {wrap}
+        """,
+    )
+
+    assert _rules(violations) == [RULE_LISTENER_TLS]
+    assert violations[0].line == 3
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        pytest.param(
+            """
+            def secure(servers, context):
+                return context.wrap_socket(servers[0].socket, server_side=True)
+            """,
+            id="subscript",
+        ),
+        pytest.param(
+            """
+            def secure(make, context, conn):
+                make().socket = context.wrap_socket(conn, server_side=True)
+            """,
+            id="call-target",
+        ),
+    ],
+)
+def test_non_name_rooted_listening_sockets_remain_named(
+    tmp_path: Path,
+    source: str,
+) -> None:
+    """Any structural `.socket` access remains the fail-closed floor."""
+    violations = _scan(tmp_path, source)
+
+    assert _rules(violations) == [RULE_LISTENER_TLS]
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        pytest.param(
+            """
+            def secure(socket, context):
+                return context.wrap_socket(socket, server_side=True)
+            """,
+            id="parameter",
+        ),
+        pytest.param(
+            """
+            def secure(conn, context):
+                socket = context.wrap_socket(conn, server_side=True)
+                return socket
+            """,
+            id="assignment",
+        ),
+    ],
+)
+def test_a_bare_socket_name_is_not_a_listening_socket(
+    tmp_path: Path,
+    source: str,
+) -> None:
+    """Only a `.socket` attribute or a binding to one denotes a listener."""
+    assert _scan(tmp_path, source) == ()
+
+
+def test_explicit_client_side_socket_wrapping_is_not_named(tmp_path: Path) -> None:
+    """A client's `.socket` attribute is not an HTTP server listener."""
+    violations = _scan(
+        tmp_path,
+        """
+        def secure(client, context):
+            client.socket = context.wrap_socket(client.socket, server_side=False)
+        """,
+    )
+
+    assert violations == ()
+
+
+def test_a_thread_started_on_serve_forever_is_named(tmp_path: Path) -> None:
+    violations = _scan(
+        tmp_path,
+        """
+        import threading
+
+        def start(server):
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+        """,
+    )
+
+    assert _rules(violations) == [RULE_ACCEPT_LOOP]
+    assert violations[0].line == 4
+
+
+def test_an_assignment_alias_of_serve_forever_is_named(tmp_path: Path) -> None:
+    """Renaming the accept loop does not make starting it a different lifecycle."""
+    violations = _scan(
+        tmp_path,
+        """
+        import threading
+
+        def start(server):
+            runner = server.serve_forever
+            threading.Thread(target=runner, daemon=True).start()
+        """,
+    )
+
+    assert _rules(violations) == [RULE_ACCEPT_LOOP]
+    assert violations[0].line == 5
+
+
+def test_a_positional_thread_target_on_serve_forever_is_named(tmp_path: Path) -> None:
+    """`Thread(group, target)` starts the same accept loop as `target=`."""
+    violations = _scan(
+        tmp_path,
+        """
+        from threading import Thread
+
+        def start(server):
+            Thread(None, server.serve_forever).start()
+        """,
+    )
+
+    assert _rules(violations) == [RULE_ACCEPT_LOOP]
+    assert violations[0].line == 4
+
+
+def test_an_accept_loop_wrapped_in_a_partial_or_lambda_is_named(tmp_path: Path) -> None:
+    violations = _scan(
+        tmp_path,
+        """
+        import asyncio
+        import threading
+        from functools import partial
+
+        def start(server):
+            threading.Thread(target=partial(server.serve_forever, poll_interval=0.05)).start()
+
+        def start_lambda(server):
+            threading.Thread(target=lambda: server.serve_forever()).start()
+
+        async def start_worker(server):
+            await asyncio.to_thread(server.serve_forever)
+        """,
+    )
+
+    assert _rules(violations) == [RULE_ACCEPT_LOOP] * 3
+    assert [violation.line for violation in violations] == [6, 9, 12]
+
+
+def test_running_the_accept_loop_without_a_thread_helper_is_named(tmp_path: Path) -> None:
+    """The accept loop is the violation, not the spelling that starts it.
+
+    An executor, or a call made straight from a worker function, runs the
+    same loop that `threading.Thread` would.
+    """
+    violations = _scan(
+        tmp_path,
+        """
+        def start(loop, server):
+            return loop.run_in_executor(None, server.serve_forever)
+
+        def run(server):
+            server.serve_forever(poll_interval=0.05)
+        """,
+    )
+
+    assert _rules(violations) == [RULE_ACCEPT_LOOP] * 2
+    assert [violation.line for violation in violations] == [2, 5]
+
+
+def test_every_prohibited_form_in_a_module_is_named_with_its_line(tmp_path: Path) -> None:
+    """The scan reports all of them, in file order, so one run is enough."""
+    violations = _scan(
+        tmp_path,
+        """
+        import http.server
+        import threading
+
+        def endpoint(handler, context):
+            server = http.server.HTTPServer(("127.0.0.1", 0), handler)
+            server.socket = context.wrap_socket(server.socket, server_side=True)
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            return server
+        """,
+    )
+
+    assert _rules(violations) == [RULE_SERVER, RULE_LISTENER_TLS, RULE_ACCEPT_LOOP]
+    assert [violation.line for violation in violations] == [5, 6, 7]
+    assert [violation.describe() for violation in violations] == [
+        f"tests/fixture_endpoint.py:{violation.line}: {violation.rule}: {violation.detail}"
+        for violation in violations
+    ]
+
+
+def test_a_port_probe_that_serves_nothing_is_not_named(tmp_path: Path) -> None:
+    """Binding a port to learn it is free starts no endpoint."""
+    violations = _scan(
+        tmp_path,
+        """
+        import socket
+
+        def unreachable_endpoint():
+            probe = socket.socket()
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+            probe.close()
+            return f"http://127.0.0.1:{port}"
+        """,
+    )
+
+    assert violations == ()
+
+
+def test_a_client_side_tls_wrap_is_not_named(tmp_path: Path) -> None:
+    """The client wraps its own socket; nobody's accepted peer is involved."""
+    violations = _scan(
+        tmp_path,
+        """
+        import socket
+        import ssl
+
+        def connect(port, cafile):
+            raw = socket.create_connection(("127.0.0.1", port))
+            context = ssl.create_default_context(cafile=str(cafile))
+            client = context.wrap_socket(raw, server_hostname="127.0.0.1")
+            return client
+        """,
+    )
+
+    assert violations == ()
+
+
+def test_a_fake_that_defines_wrap_socket_is_not_named(tmp_path: Path) -> None:
+    """Defining the method is not calling it on a listener."""
+    violations = _scan(
+        tmp_path,
+        """
+        class UnexpectedHandshakeContext:
+            def __init__(self):
+                self.wrapped = None
+
+            def wrap_socket(self, raw, **_):
+                self.wrapped = UnexpectedHandshakeSocket(raw)
+                return self.wrapped
+        """,
+    )
+
+    assert violations == ()
+
+
+def test_a_handler_class_nested_in_a_function_is_not_named(tmp_path: Path) -> None:
+    """Handlers are what the helper is *given*; they are not a lifecycle."""
+    violations = _scan(
+        tmp_path,
+        """
+        from http.server import BaseHTTPRequestHandler
+
+        from tests.local_endpoint import KeepAliveHandler, served_endpoint
+
+        def endpoint(payload):
+            class Handler(KeepAliveHandler):
+                def do_GET(self):
+                    self.send_response(200)
+                    self.end_headers()
+                    self.wfile.write(payload)
+
+            class Raw(BaseHTTPRequestHandler):
+                protocol_version = "HTTP/1.1"
+
+            return served_endpoint(Handler)
+        """,
+    )
+
+    assert violations == ()
+
+
+def test_prose_and_quoted_source_are_not_named(tmp_path: Path) -> None:
+    """The scan reads syntax, so a module may still talk about the bug."""
+    violations = _scan(
+        tmp_path,
+        '''
+        """Why threading.Thread(target=server.serve_forever) is forbidden."""
+
+        PROGRAM = """
+        server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        server.socket = context.wrap_socket(server.socket, server_side=True)
+        """
+        ''',
+    )
+
+    assert violations == ()
+
+
+def test_a_tracked_module_that_cannot_be_parsed_fails_the_scan(tmp_path: Path) -> None:
+    """Fail closed: a module the scan cannot read is a module it cannot clear."""
+    violations = _scan(
+        tmp_path,
+        """
+        def endpoint(
+        """,
+    )
+
+    assert _rules(violations) == [RULE_UNREADABLE]
+    assert violations[0].line >= 1
+
+
+def test_the_scan_reads_only_the_test_modules_git_tracks() -> None:
+    """The scan's input comes from git, so scratch files cannot dilute it."""
+    tracked = _tracked_test_modules(REPOSITORY_ROOT)
+
+    assert HELPER in tracked
+    assert "tests/test_local_endpoint.py" in tracked
+    assert all(name.startswith("tests/") and name.endswith(".py") for name in tracked)
+    assert len(tracked) > 50, "git listed too few test modules for the scan to mean anything"
+
+
+def test_the_helper_is_where_the_lifecycle_actually_lives() -> None:
+    """A canary: the scan is only meaningful if it can still see the real thing."""
+    found = {violation.rule for violation in _scan_file(REPOSITORY_ROOT / HELPER, HELPER)}
+
+    assert found == {RULE_SERVER, RULE_ACCEPT_LOOP}
+
+
+def test_only_the_endpoint_helper_stands_up_a_local_endpoint() -> None:
+    violations = [
+        violation for violation in _scan_repository(REPOSITORY_ROOT) if violation.path != HELPER
+    ]
+
+    assert violations == [], "\n".join(
+        [
+            f"{len(violations)} test module line(s) stand up a local endpoint by hand;"
+            f" {HELPER} owns that lifecycle for the whole suite (#390):",
+            *[violation.describe() for violation in violations],
+        ]
+    )

@@ -7,8 +7,10 @@ from collections.abc import Callable, Coroutine
 from typing import Any
 
 import litellm
+import pytest
 from litellm.litellm_core_utils.logging_worker import GLOBAL_LOGGING_WORKER
 
+from tests import local_endpoint
 from tests.providers.litellm_clients import drop_cached_clients
 
 
@@ -111,3 +113,29 @@ async def test_client_cleanup_waits_for_nested_transport_close_callbacks() -> No
     await drop_cached_clients()
 
     assert closed.is_set()
+
+
+async def test_client_cleanup_drains_transport_closures_through_the_shared_helper(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One drain, shared with every local endpoint this suite stands up (#390).
+
+    `tests/local_endpoint.py` takes the same two loop turns when it retires
+    an endpoint, for the same reason — a queued `connection_lost()` still
+    owns its socket — so a second copy here would be a second place to fix
+    when that chain changes. The order is the other half of the contract:
+    the drain follows the cache flush, because the closes it is draining are
+    the ones the flush queued. An empty cache at drain time is what says so.
+    """
+    await drop_cached_clients()
+    flushed: list[int] = []
+
+    async def record_drain() -> None:
+        flushed.append(len(litellm.in_memory_llm_clients_cache.cache_dict))
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(local_endpoint, "drain_transport_closures", record_drain)
+        litellm.in_memory_llm_clients_cache.cache_dict["nothing-to-close"] = object()
+        await drop_cached_clients()
+
+    assert flushed == [0], "the drain has to follow the cache flush whose closes it drains"

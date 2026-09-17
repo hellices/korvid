@@ -1,13 +1,10 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
-import http.server
 import json
 import logging
-import ssl
-import threading
-from collections.abc import AsyncIterator, Callable, Iterator
+from collections.abc import AsyncIterator, Callable
+from contextlib import AbstractAsyncContextManager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -16,6 +13,7 @@ import pytest
 from korvid.agent.model_profiles import ModelEntrySource
 from korvid.providers import endpoint_discovery
 from korvid.providers.endpoint_discovery import EndpointDiscovery
+from tests.local_endpoint import KeepAliveHandler, LocalEndpoint, served_endpoint
 from tests.providers.tls_ca import mint_ca_and_server_cert
 
 pytestmark = pytest.mark.anyio
@@ -507,13 +505,12 @@ async def test_the_budget_covers_both_attempts_together(
 # ---------------------------------------------------------------------------
 
 
-@contextlib.contextmanager
 def _tls_models_server(
     cert_pem: Path, key_pem: Path, seen: list[tuple[str, dict[str, str]]]
-) -> Iterator[str]:
+) -> AbstractAsyncContextManager[LocalEndpoint]:
     """A local HTTPS endpoint that lists one model and records the request."""
 
-    class Handler(http.server.BaseHTTPRequestHandler):
+    class Handler(KeepAliveHandler):
         def do_GET(self) -> None:  # http.server API name
             seen.append((self.path, {k.lower(): v for k, v in self.headers.items()}))
             body = json.dumps({"data": [{"id": "private-model"}]}).encode("utf-8")
@@ -523,22 +520,7 @@ def _tls_models_server(
             self.end_headers()
             self.wfile.write(body)
 
-        def log_message(self, *args: object) -> None:
-            return None
-
-    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
-    server_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    server_ctx.minimum_version = ssl.TLSVersion.TLSv1_2  # no legacy TLS
-    server_ctx.load_cert_chain(certfile=str(cert_pem), keyfile=str(key_pem))
-    server.socket = server_ctx.wrap_socket(server.socket, server_side=True)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        yield f"https://127.0.0.1:{server.server_address[1]}"
-    finally:
-        server.shutdown()
-        thread.join(timeout=5)
-        server.server_close()
+    return served_endpoint(Handler, tls=(cert_pem, key_pem))
 
 
 async def test_the_default_client_is_built_through_korvids_trust(tmp_path: Path) -> None:
@@ -612,13 +594,15 @@ async def test_a_private_ca_endpoint_needs_the_configured_bundle(tmp_path: Path)
     ca_pem, cert_pem, key_pem = mint_ca_and_server_cert(tmp_path)
     seen: list[tuple[str, dict[str, str]]] = []
 
-    with _tls_models_server(cert_pem, key_pem, seen) as base_url:
+    async with _tls_models_server(cert_pem, key_pem, seen) as endpoint:
         untrusted = EndpointDiscovery()
-        assert await untrusted.list_models(base_url=base_url, api_key=None, prefix="openai") == ()
+        assert (
+            await untrusted.list_models(base_url=endpoint.url, api_key=None, prefix="openai") == ()
+        )
         assert seen == []
 
         trusted = EndpointDiscovery(ca_bundle=str(ca_pem))
-        entries = await trusted.list_models(base_url=base_url, api_key=_SECRET, prefix="openai")
+        entries = await trusted.list_models(base_url=endpoint.url, api_key=_SECRET, prefix="openai")
 
     assert [entry.reference for entry in entries] == ["openai/private-model"]
 
@@ -635,9 +619,9 @@ async def test_the_tls_request_carries_the_key_and_no_trust_configuration(
     ca_pem, cert_pem, key_pem = mint_ca_and_server_cert(tmp_path)
     seen: list[tuple[str, dict[str, str]]] = []
 
-    with _tls_models_server(cert_pem, key_pem, seen) as base_url:
+    async with _tls_models_server(cert_pem, key_pem, seen) as endpoint:
         discovery = EndpointDiscovery(ca_bundle=str(ca_pem))
-        assert await discovery.list_models(base_url=base_url, api_key=_SECRET, prefix="openai")
+        assert await discovery.list_models(base_url=endpoint.url, api_key=_SECRET, prefix="openai")
 
     assert len(seen) == 1
     path, headers = seen[0]
