@@ -1,5 +1,11 @@
 # korvid — AI-Native Kubernetes TUI Design Document
 
+> **Historical baseline.** This document preserves the original 2026-07-23
+> intent; it is not the current product inventory. Read the
+> [current architecture](2026-08-12-korvid-architecture.md) and
+> [living capability ledger](../capabilities.md) for the system as built and
+> current product decisions.
+
 - **Date**: 2026-07-23
 - **Status**: Draft (awaiting review)
 - **Project name**: `korvid` (corvid = the crow family, tool-using birds — naming research confirmed no conflicts on GitHub/PyPI; finalized 2026-07-23)
