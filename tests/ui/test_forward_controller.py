@@ -13,10 +13,10 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable, Coroutine
 from typing import Any
-from unittest.mock import patch
 
 from korvid.core.portforward import ForwardRegistry
 from korvid.k8s.discovery import ResourceMeta
+from korvid.ui.action_availability import AvailabilityCode, UnavailableReason
 from korvid.ui.forward_controller import ForwardController
 from korvid.ui.widgets.port_forward_screen import PortForwardScreen
 from korvid.ui.write_gate import WriteGate
@@ -97,6 +97,7 @@ class Harness:
         registry: ForwardRegistry | None = None,
         manifest: dict[str, Any] | None = None,
         manifest_error: BaseException | None = None,
+        kubectl: bool = True,
     ) -> None:
         self.ui = FakeUi()
         self.view = FakeView(kind=kind, selected=selected, aliases=dict(_ALIASES))
@@ -112,6 +113,10 @@ class Harness:
             forwards=lambda: self.registry,
             audit=lambda: None,
             get_manifest=lambda: self._get_manifest,
+            # The session's snapshot, injected: the real composition root
+            # resolves `kubectl` once and hands the same answer to this
+            # controller and to the shell owner (#388 round 13).
+            kubectl_available=lambda: kubectl,
         )
         # Spawning kubectl has its own tests; what matters here is the
         # dialog's decision to launch and the target it launches for.
@@ -149,14 +154,9 @@ def _harness(**kwargs: Any) -> Harness:
     return Harness(**kwargs)
 
 
-def _with_kubectl() -> Any:
-    return patch("shutil.which", return_value="/usr/bin/kubectl")
-
-
 async def test_open_dialog_rejects_unforwardable_kind() -> None:
     harness = _harness(kind="deployments")
-    with _with_kubectl():
-        await harness.controller.open_dialog()
+    await harness.controller.open_dialog()
     assert harness.ui.screens == []
     assert "Port-forward is only available for pods and services" in harness.ui.messages()
 
@@ -164,23 +164,20 @@ async def test_open_dialog_rejects_unforwardable_kind() -> None:
 async def test_open_dialog_refuses_while_a_context_switch_is_in_flight() -> None:
     harness = _harness(registry=ForwardRegistry())
     harness.gate.reads = False
-    with _with_kubectl():
-        await harness.controller.open_dialog()
+    await harness.controller.open_dialog()
     assert harness.ui.screens == []
 
 
 async def test_open_dialog_reports_a_missing_registry() -> None:
     harness = _harness(registry=None)
-    with _with_kubectl():
-        await harness.controller.open_dialog()
+    await harness.controller.open_dialog()
     assert harness.ui.screens == []
     assert "Port-forward unavailable in this build" in harness.ui.messages()
 
 
 async def test_open_dialog_reports_missing_kubectl() -> None:
-    harness = _harness(registry=ForwardRegistry())
-    with patch("shutil.which", return_value=None):
-        await harness.controller.open_dialog()
+    harness = _harness(registry=ForwardRegistry(), kubectl=False)
+    await harness.controller.open_dialog()
     assert harness.ui.screens == []
     assert any("kubectl not found on PATH" in message for message in harness.ui.messages())
 
@@ -191,16 +188,14 @@ async def test_open_dialog_rejects_a_service_without_tcp_ports() -> None:
         registry=ForwardRegistry(),
         manifest=_UDP_SERVICE_MANIFEST,
     )
-    with _with_kubectl():
-        await harness.controller.open_dialog()
+    await harness.controller.open_dialog()
     assert harness.ui.screens == []
     assert any("kubectl port-forward is TCP-only" in message for message in harness.ui.messages())
 
 
 async def test_open_dialog_prefills_service_ports_and_launches_on_accept() -> None:
     harness = _harness(kind="services", registry=ForwardRegistry(), manifest=_SERVICE_MANIFEST)
-    with _with_kubectl():
-        await harness.controller.open_dialog()
+    await harness.controller.open_dialog()
     dialog = harness.dialog()
     assert dialog._target == "services/default/api"
     assert dialog._remote_ports == [80]
@@ -217,15 +212,13 @@ async def test_open_dialog_still_opens_when_the_manifest_fetch_fails() -> None:
         registry=ForwardRegistry(),
         manifest_error=RuntimeError("boom"),
     )
-    with _with_kubectl():
-        await harness.controller.open_dialog()
+    await harness.controller.open_dialog()
     assert harness.dialog()._remote_ports == []
 
 
 async def test_open_dialog_cancels_when_the_context_changed_while_it_was_open() -> None:
     harness = _harness(registry=ForwardRegistry())
-    with _with_kubectl():
-        await harness.controller.open_dialog()
+    await harness.controller.open_dialog()
     harness.gate.value += 1  # a `:ctx` switch completed behind the dialog
     harness.answer((8080, 80))
     await harness.ui.settle()
@@ -235,15 +228,13 @@ async def test_open_dialog_cancels_when_the_context_changed_while_it_was_open() 
 
 async def test_open_dialog_does_nothing_without_a_selection() -> None:
     harness = _harness(registry=ForwardRegistry(), selected=(None, None))
-    with _with_kubectl():
-        await harness.controller.open_dialog()
+    await harness.controller.open_dialog()
     assert harness.ui.screens == []
 
 
 async def test_dismissed_dialog_launches_nothing() -> None:
     harness = _harness(registry=ForwardRegistry())
-    with _with_kubectl():
-        await harness.controller.open_dialog()
+    await harness.controller.open_dialog()
     harness.answer(None)
     await asyncio.sleep(0)
     assert harness.started == []
@@ -252,8 +243,102 @@ async def test_dismissed_dialog_launches_nothing() -> None:
 async def test_open_dialog_restricts_remote_ports_for_services_only() -> None:
     service = _harness(kind="services", registry=ForwardRegistry(), manifest=_SERVICE_MANIFEST)
     pod = _harness(registry=ForwardRegistry(), manifest={"spec": {"containers": []}})
-    with _with_kubectl():
-        await service.controller.open_dialog()
-        await pod.controller.open_dialog()
+    await service.controller.open_dialog()
+    await pod.controller.open_dialog()
     assert service.dialog()._restrict_remote is True
     assert pod.dialog()._restrict_remote is False
+
+
+# ---------------------------------------------------------------------------
+# Side-effect-free availability probes (#388 task 4)
+# ---------------------------------------------------------------------------
+
+
+async def test_forward_availability_reports_a_missing_registry_without_notifying() -> None:
+    """The palette probe reports the same refusal `open_dialog` notifies
+    when the build carries no forward registry - silently (#388 task 4)."""
+    harness = _harness(registry=None)
+    reason = harness.controller.unavailable_reason()
+    assert reason == UnavailableReason(
+        AvailabilityCode.MISSING_CAPABILITY, "Port-forward unavailable in this build"
+    )
+    assert harness.ui.notifications == []
+
+
+async def test_forward_availability_reports_a_missing_kubectl_without_notifying() -> None:
+    harness = _harness(registry=ForwardRegistry(), kubectl=False)
+    reason = harness.controller.unavailable_reason()
+    assert reason == UnavailableReason(
+        AvailabilityCode.MISSING_CAPABILITY,
+        "kubectl not found on PATH — port-forward requires kubectl",
+        severity="error",
+    )
+    assert harness.ui.notifications == []
+
+
+async def test_forward_availability_reports_a_context_switch_first() -> None:
+    """A `:ctx` switch beats every other refusal, exactly as `open_dialog`
+    checks `reads_allowed()` before the registry and kubectl."""
+    harness = _harness(registry=None)
+    harness.gate.is_switching = True
+    reason = harness.controller.unavailable_reason()
+    assert reason == UnavailableReason(
+        AvailabilityCode.TRANSITION,
+        "A context switch is in progress — try again once it completes",
+    )
+    assert harness.ui.notifications == []
+
+
+async def test_forward_availability_reports_no_selection() -> None:
+    harness = _harness(registry=ForwardRegistry(), selected=(None, None))
+    reason = harness.controller.unavailable_reason()
+    assert reason == UnavailableReason(AvailabilityCode.NO_SELECTION, "No resource selected")
+    assert harness.ui.notifications == []
+
+
+async def test_forward_availability_is_none_when_the_dialog_would_open() -> None:
+    harness = _harness(registry=ForwardRegistry())
+    assert harness.controller.unavailable_reason() is None
+    assert harness.ui.notifications == []
+
+
+# ---------------------------------------------------------------------------
+# `:pf` — the forward *list*, which needs less than the forward dialog
+# ---------------------------------------------------------------------------
+
+
+async def test_list_availability_reports_a_missing_registry_without_notifying() -> None:
+    """`:pf` has exactly one composition question, and this is it.
+
+    `open_list` refuses only when this build carries no forward registry,
+    and it says so in the same words `open_dialog` uses for the same fact.
+    The probe has to answer with that same reason, and silently: a palette
+    row is drawn, not notified.
+    """
+    harness = _harness(registry=None)
+    reason = harness.controller.list_unavailable_reason()
+    assert reason == UnavailableReason(
+        AvailabilityCode.MISSING_CAPABILITY, "Port-forward unavailable in this build"
+    )
+    assert harness.ui.notifications == []
+
+
+async def test_list_availability_ignores_kubectl_and_the_selected_row() -> None:
+    """The list is not the dialog: it opens over the forwards that already
+    exist, so neither a missing `kubectl` nor an empty selection stops it.
+    Reporting either would grey out a `:pf` row that works."""
+    harness = _harness(registry=ForwardRegistry(), selected=(None, None), kubectl=False)
+    assert harness.controller.list_unavailable_reason() is None
+    assert harness.ui.notifications == []
+
+
+async def test_list_availability_and_open_list_share_one_wording() -> None:
+    """The probe and the keypress must not be able to drift apart: the
+    message `open_list` notifies is the message the probe returns."""
+    probe = _harness(registry=None)
+    reason = probe.controller.list_unavailable_reason()
+    assert reason is not None
+    notified = _harness(registry=None)
+    notified.controller.open_list()
+    assert notified.ui.screens == []
+    assert reason.message in notified.ui.messages()

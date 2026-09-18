@@ -29,6 +29,7 @@ from korvid.core.pulse import PulseCoverage, PulseModel
 from korvid.core.pulse_rules import PodPulseRule
 from korvid.core.session_timeline import SessionTimeline
 from korvid.k8s.errors import KubeClientError
+from korvid.ui.action_availability import AvailabilityCode
 from korvid.ui.context_switch_coordinator import (
     HINT_EVENTS_GROUP,
     ContextSurface,
@@ -1086,6 +1087,29 @@ async def test_a_build_without_switch_collaborators_says_so(tmp_path: Path) -> N
     env = Env(tmp_path, wire_collaborators=False)
     await env.switch()
     assert env.ui.messages() == ["Context switching unavailable in this build"]
+
+
+async def test_the_command_probe_reports_a_build_without_switch_collaborators(
+    tmp_path: Path,
+) -> None:
+    """`:ctx` opens the picker and a pick runs the switch, so a build with
+    neither collaborator refuses both halves with one sentence. The palette
+    row has to carry it - silently, and without touching the kubeconfig
+    (#388 round 8)."""
+    env = Env(tmp_path, wire_collaborators=False)
+    reason = env.coordinator.unavailable_reason()
+    assert reason is not None
+    assert reason.message == "Context switching unavailable in this build"
+    assert reason.code is AvailabilityCode.MISSING_CAPABILITY
+    assert env.ui.messages() == []
+    assert env.list_calls == 0
+
+
+async def test_the_command_probe_allows_a_wired_build(tmp_path: Path) -> None:
+    env = Env(tmp_path)
+    assert env.coordinator.unavailable_reason() is None
+    assert env.ui.messages() == []
+    assert env.list_calls == 0
 
 
 # ---------------------------------------------------------------------------

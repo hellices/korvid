@@ -14,7 +14,6 @@ import contextlib
 import dataclasses
 import functools
 import logging
-import os
 import secrets
 import sys
 import threading
@@ -56,6 +55,11 @@ from korvid.composition_support import (
     _warn_agent_disabled,
 )
 from korvid.composition_support import (
+    # Deliberate re-export (hence the alias): _close_runner and its tests,
+    # which arm and invoke the shutdown watchdog, reach it by this name.
+    _force_runner_exit as _force_runner_exit,
+)
+from korvid.composition_support import (
     _protected_context_name as _support_protected_context_name,
 )
 from korvid.composition_support import (
@@ -79,7 +83,7 @@ from korvid.core.config import (
 from korvid.core.mcp import MCPControllerBase
 from korvid.core.portforward import ForwardRegistry
 from korvid.core.pulse import PulseModel
-from korvid.core.pulse_collector import PulseCollector
+from korvid.core.pulse_collector import DEFAULT_PULSE_SOURCES, PulseCollector
 from korvid.core.pulse_rules import DeploymentPulseRule, PodPulseRule
 from korvid.core.session_timeline import SessionTimeline
 from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
@@ -95,9 +99,9 @@ from korvid.k8s.discovery import PODS_META, ResourceMeta, build_alias_map
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.helm import HELM_RELEASES_META, HELM_REVISIONS_META
 from korvid.k8s.helmcli import HelmCLI, find_helm
+from korvid.k8s.kubectl import KubectlPresence
 from korvid.k8s.metrics import MetricsPoller
 from korvid.k8s.models import reset_age_memo
-from korvid.k8s.pulse import PulseSource
 from korvid.k8s.telepresence import (
     TRAFFIC_MANAGER_NAME,
     TRAFFIC_MANAGER_NAMESPACE,
@@ -111,6 +115,7 @@ from korvid.tools.executor import (
 )
 from korvid.tools.proposals import ProposalStore
 from korvid.tools.registry import mcp_tool_schemas
+from korvid.ui.action_policy import ActionPolicy, compose_action_reasons, compose_command_reasons
 from korvid.ui.agent_ui_controller import AgentUiController
 from korvid.ui.app import KorvidApp
 from korvid.ui.app_runtime import AppRuntime, AppRuntimeInputs, _LateReference
@@ -1064,8 +1069,13 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
     agent_ref = _LateReference[AgentUiController]()
     shell_ref = _LateReference[ShellController]()
     debug_ref = _LateReference[DebugController]()
+    resource_writes_ref = _LateReference[ResourceWriteController]()
 
     view = AppViewState(app)
+    #: The session's one PATH lookup for `kubectl`, taken here rather than
+    #: by the first question: the shell and forward owners share it, and
+    #: their palette probes must do no I/O at all (#388 round 14).
+    kubectl = KubectlPresence()
     relationship_loader: RelationshipSnapshotLoader | None = (
         RelationshipSnapshotLoader(_RelationshipLister(inputs.list_relationship_objects))
         if inputs.list_relationship_objects is not None
@@ -1100,14 +1110,7 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
         view=view,
         context=context,
         model=PulseModel((PodPulseRule(), DeploymentPulseRule())),
-        collector=PulseCollector(
-            inputs.pulse_reader,
-            (
-                PulseSource("pods", "", "v1", "pods"),
-                PulseSource("deployments", "apps", "v1", "deployments"),
-                PulseSource("events", "", "v1", "events", "type=Warning"),
-            ),
-        )
+        collector=PulseCollector(inputs.pulse_reader, DEFAULT_PULSE_SOURCES)
         if inputs.pulse_reader is not None
         else None,
         present=lambda snapshot: app.query_one(PulseSummary).show_snapshot(snapshot),
@@ -1174,14 +1177,12 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
         get_manifest=lambda: app._get_manifest,
         pod_containers=inspect_controller.pod_containers,
         node_target=lambda action: app._node_target(action),
-        target_uid=lambda kind, ns, name: app._target_uid(kind, ns, name),
-        settings=lambda: ShellSettings(
-            kube_context=app.config.kube_context,
-            debug_default_image=app.config.debug_default_image,
-            debug_images=app.config.debug_images,
-            node_shell_image=app.config.node_shell_image,
-            node_shell_namespace=app.config.node_shell_namespace,
+        node_unavailable_reason=lambda action: resource_writes_ref.get().node_unavailable_reason(
+            action
         ),
+        kubectl_available=kubectl,
+        target_uid=lambda kind, ns, name: app._target_uid(kind, ns, name),
+        settings=lambda: ShellSettings.from_config(app.config),
     )
     shell_ref.bind(shell)
     forward_controller = ForwardController(
@@ -1191,6 +1192,7 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
         forwards=lambda: app._forwards,
         audit=lambda: app._audit,
         get_manifest=lambda: app._get_manifest,
+        kubectl_available=kubectl,
     )
     forward_ref.bind(forward_controller)
     transfer = TransferController(
@@ -1214,6 +1216,7 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
         uid_intact_after_fetch=writes.uid_intact_after_fetch,
         precheck_keybinding_write=writes.precheck_keybinding_write,
         write_target=writes.write_target,
+        write_unavailable_reason=writes.unavailable_reason,
     )
     helm_controller = HelmController(
         helm=lambda: app._helm,
@@ -1222,20 +1225,14 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
         view=view,
         ui=AppUiSurface(app),
         navigation=workspace_ref.get,
-        edit_in_external_editor=lambda *args, **kwargs: app._edit_in_external_editor(
-            *args, **kwargs
-        ),
+        edit_in_external_editor=app._edit_in_external_editor,
         edit_text=lambda: app._edit_text,
     )
     debug = DebugController(
         ui=AppUiSurface(app),
         audit=lambda: app._audit,
         readonly=lambda: app.config.readonly,
-        settings=lambda: DebugSettings(
-            kube_context=app.config.kube_context,
-            default_image=app.config.debug_default_image,
-            images=app.config.debug_images,
-        ),
+        settings=lambda: DebugSettings.from_config(app.config),
         pod_uid_unchanged=inspect_controller.pod_uid_unchanged,
         get_epoch=context.epoch,
         epoch_crossed=context.crossed,
@@ -1260,8 +1257,11 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
         managed_note_from=app._managed_note_from,
         pod_resize_supported=lambda: app._pod_resize_supported,
         helm_uninstall=lambda: helm_controller.uninstall_selected(),
+        helm_cli_unavailable_reason=helm_controller.cli_unavailable_reason,
+        helm_release_identity_reason=helm_controller.release_identity_reason,
         operators=operators,
     )
+    resource_writes_ref.bind(resource_writes)
     hints = HintController(
         find_pod_summary=inspect_controller.find_pod_summary,
         cursor_row_key=inspect_surface.cursor_row_key,
@@ -1287,6 +1287,7 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
         ctx_epoch=context.epoch,
         ctx_switch_crossed=context.crossed,
         ctx_reads_allowed=context.reads_allowed,
+        ctx_switching=context.switching,
         refresh_bindings=app.refresh_bindings,
         buffer_max_lines=config.log_buffer_lines,
     )
@@ -1374,6 +1375,46 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
         available=inputs.agent_available,
     )
     agent_ref.bind(agent_ui)
+    # A bool, not `inputs.agent_catalog` read through a closure: the
+    # catalog is injected once and never replaced, and closing over the
+    # whole inputs record would keep the initial agent session alive past
+    # `:ai off` (which releases it on purpose).
+    agent_setup = inputs.agent_catalog is not None
+    actions = ActionPolicy(
+        view=view,
+        agent_available=lambda: agent_ui.available,
+        log_pane_open=app._log_pane_open,
+        agent_busy=lambda: agent_ui.busy,
+        screen_depth=AppUiSurface(app).screen_depth,
+        inline_editor_open=app._inline_editor_open,
+        switching=context.switching,
+        app_running=app._accepting_input,
+        reason_by_action=compose_action_reasons(
+            writes=resource_writes.unavailable_reason,
+            helm=helm_controller.unavailable_reason,
+            logs=logs.unavailable_reason,
+            inspect=inspect_controller.unavailable_reason,
+            workspace=workspace_controller.unavailable_reason,
+            port_forward=forward_controller.unavailable_reason,
+            transfer=transfer.unavailable_reason,
+            shell=shell.unavailable_reason,
+            operator_install=operators.unavailable_reason,
+            timeline=timeline.unavailable_reason,
+        ),
+        reason_by_command=compose_command_reasons(
+            agent_available=lambda: agent_ui.available,
+            agent_setup_available=lambda: agent_setup,
+            agent_session_configured=lambda: (
+                agent_ui.session is not None and bool(agent_ui.model_name)
+            ),
+            mcp=integrations.mcp_unavailable_reason,
+            telepresence=integrations.telepresence_unavailable_reason,
+            proposals=proposals.unavailable_reason,
+            namespace=workspace_controller.namespace_picker_unavailable_reason,
+            context=context.unavailable_reason,
+            port_forwards=forward_controller.list_unavailable_reason,
+        ),
+    )
     commands = CommandRouter(
         ui=AppUiSurface(app),
         agent=agent_ui,
@@ -1409,6 +1450,7 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
         integrations=integrations,
         agent_ui=agent_ui,
         commands=commands,
+        actions=actions,
     )
 
 
@@ -1647,11 +1689,6 @@ def _restart_prompt() -> str:
     # swallow the question nor be contaminated by it.
     print("korvid crashed -- restart? [Y/n] ", end="", file=sys.stderr, flush=True)
     return input()
-
-
-def _force_runner_exit() -> None:
-    """Exit without blocking I/O or logging locks on the watchdog thread."""
-    os._exit(1)
 
 
 def _close_runner(runner: asyncio.Runner) -> None:

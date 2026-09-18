@@ -18,7 +18,7 @@ from korvid.k8s.models import PodSummary
 from korvid.ui.app import KorvidApp
 from korvid.ui.widgets.containers_screen import ContainersScreen, build_container_rows
 from korvid.ui.widgets.resource_table import ResourceTable
-from tests.app_factory import build_test_app
+from tests.app_factory import build_test_app, session_kubectl
 
 from .waits import until
 
@@ -95,7 +95,7 @@ def _pod(name: str, containers: tuple[str, ...] = ("app", "sidecar")) -> PodSumm
     )
 
 
-def make_app(pods: list[PodSummary], **kwargs: Any) -> KorvidApp:
+def make_app(pods: list[PodSummary], *, kubectl: bool = True, **kwargs: Any) -> KorvidApp:
     store = ResourceStore()
     data: dict[str, list[Summary]] = {"pods": list(pods)}
 
@@ -105,13 +105,17 @@ def make_app(pods: list[PodSummary], **kwargs: Any) -> KorvidApp:
         while True:
             await asyncio.sleep(0.01)
 
-    return build_test_app(
-        config=KorvidConfig(namespace="default"),
-        store=store,
-        watch_manager=WatchManager(store, source),
-        aliases=dict(_TEST_ALIASES),
-        **kwargs,
-    )
+    # The session's `kubectl` snapshot is taken while the runtime is
+    # assembled (#388 round 14), so it is decided here rather than by a
+    # patch around the keypress - and never by the runner's own PATH.
+    with session_kubectl(kubectl):
+        return build_test_app(
+            config=KorvidConfig(namespace="default"),
+            store=store,
+            watch_manager=WatchManager(store, source),
+            aliases=dict(_TEST_ALIASES),
+            **kwargs,
+        )
 
 
 async def _get_manifest(kind: str, namespace: str | None, name: str) -> dict[str, Any]:

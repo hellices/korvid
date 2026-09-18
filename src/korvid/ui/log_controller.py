@@ -34,11 +34,19 @@ from collections.abc import AsyncIterator, Callable
 from datetime import datetime
 from typing import Protocol
 
+from textual.css.query import NoMatches
+
 from korvid.core.errors import explain_api_error
 from korvid.core.logbuffer import LogBuffer
 from korvid.core.logexport import default_log_export_dir, export_log_lines
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.logs import LogLine
+from korvid.ui.action_availability import (
+    CONTEXT_SWITCH_IN_PROGRESS,
+    AvailabilityCode,
+    UnavailableReason,
+)
+from korvid.ui.read_availability import PaneSearch
 from korvid.ui.ui_surface import UiSurface
 from korvid.ui.widgets.log_pane import MAX_PANELS
 
@@ -57,6 +65,58 @@ _MAX_RECONNECT_ATTEMPTS = 5
 #: triple that also carries the namespace for reopen/toggle bookkeeping.
 Source = tuple[str, str]
 Triple = tuple[str, str, str]
+
+#: Actions that drive the *visible* log pane rather than the focused view.
+#: `ActionPolicy` gates their bindings on the same fact; this is the
+#: controller's own half of that agreement (issue #388 task 4).
+_PANE_LOCAL_ACTIONS: frozenset[str] = frozenset(
+    {"log_format", "log_wrap", "log_timestamps", "log_save", "log_previous"}
+)
+
+#: `Ctrl-S` on a visible pane whose buffer holds nothing. The one wording
+#: for it: `action_log_save` notifies this message and the palette greys
+#: the row with the same sentence (issue #388, round 6). No selection in
+#: the sense the code names - the action has no subject to act on - and
+#: the pane's visibility, which `_PANE_LOCAL_ACTIONS` already answers for,
+#: is a different question with a different code.
+_EMPTY_LOG_BUFFER = UnavailableReason(
+    AvailabilityCode.NO_SELECTION, "Log buffer is empty — nothing to save"
+)
+
+#: `l` on a fifth pod while four are already streaming. One wording for
+#: the toast `_toggle_log_pod` raises and the palette row that says the
+#: press would do nothing but raise it (issue #388, round 8). PROTECTED_UI
+#: because the refusal is about the state of the pane on screen, not about
+#: the selected resource or a missing capability.
+_POD_CAP_FULL = UnavailableReason(
+    AvailabilityCode.PROTECTED_UI, f"Log pane caps at {_MAX_LOG_PODS} pods — Esc closes all"
+)
+
+#: The same for the panel cap. The *reason* stops at the bounded fact
+#: because it is row text on a 36-column terminal, where a pod name (up to
+#: 253 characters) would push the rest of the sentence out of a viewport
+#: that never scrolls a disabled row; `panel_cap_detail` keeps the name for
+#: the toast the keypress can afford.
+_PANEL_CAP_FULL = UnavailableReason(
+    AvailabilityCode.PROTECTED_UI, f"Panel cap is {MAX_PANELS} containers"
+)
+
+
+def _panel_cap_detail(name: str) -> str:
+    """The panel-cap refusal the real keypress notifies, naming the pod."""
+    return f"{_PANEL_CAP_FULL.message} — cannot add {name}"
+
+
+class SelectedNsName(Protocol):
+    """The selection read, with the silent `notify=False` probe path.
+
+    `ViewState.selected_ns_name` satisfies it structurally; naming it here
+    keeps the keyword checked at the injection site instead of erasing it
+    behind `Callable[..., ...]`.
+    """
+
+    def __call__(self, *, notify: bool = True) -> tuple[str | None, str | None]: ...
+
 
 #: The stream producer the app injects: `stream_logs(namespace, pod, container,
 #: *, previous=..., follow=...)` yielding decoded lines. `None` disables logs.
@@ -97,6 +157,9 @@ class LogPaneView(Protocol):
     def search_next(self) -> None: ...
 
     def search_prev(self) -> None: ...
+
+    @property
+    def has_search_hits(self) -> bool: ...
 
     def toggle_format(self) -> None: ...
 
@@ -160,13 +223,16 @@ class LogController:
         get_log_pane: Callable[[], LogPaneView],
         get_stream_logs: Callable[[], StreamLogsFn | None],
         pod_containers: Callable[[str, str], tuple[str, ...]],
-        selected_ns_name: Callable[[], tuple[str | None, str | None]],
+        selected_ns_name: SelectedNsName,
         visible_pod_keys: Callable[[], list[str]],
         current_kind: Callable[[], str],
         focused_pane: Callable[[], object],
         ctx_epoch: Callable[[], int],
         ctx_switch_crossed: Callable[[int], bool],
         ctx_reads_allowed: Callable[[], bool],
+        #: The silent twin of `ctx_reads_allowed`, for the availability
+        #: probe: whether a `:ctx` switch is in flight, without notifying.
+        ctx_switching: Callable[[], bool],
         refresh_bindings: Callable[[], None],
         buffer_max_lines: int,
     ) -> None:
@@ -181,6 +247,7 @@ class LogController:
         self._ctx_epoch = ctx_epoch
         self._ctx_switch_crossed = ctx_switch_crossed
         self._ctx_reads_allowed = ctx_reads_allowed
+        self._ctx_switching = ctx_switching
         self._refresh_bindings = refresh_bindings
 
         #: One task per streaming panel; owned and reaped by this controller.
@@ -245,6 +312,119 @@ class LogController:
     # Open / toggle entry points (`l` and `L`)
     # ------------------------------------------------------------------
 
+    def _pane_displayed(self) -> bool:
+        """`get_log_pane().display`, guarded against the pre-compose window:
+        the app's own accessor (`app._log_pane`) does a `query_one(LogPane)`
+        that raises `NoMatches` before Textual has mounted the widget, and
+        `unavailable_reason` is a probe that must never raise where a real
+        keypress never could (issue #388 task 4 review) - `KorvidApp` guards
+        the same fact the same way for `ActionPolicy.binding_enabled`
+        (`_log_pane_open`); no pane yet reads as not displayed."""
+        try:
+            return self._get_log_pane().display
+        except NoMatches:
+            return False
+
+    def unavailable_reason(self, action: str) -> UnavailableReason | None:
+        """Why `action` can't run right now, or None - a side-effect-free
+        probe for the palette (issue #388 task 4). Synchronous and silent.
+
+        `logs` and `logs_multi` answer with the same guards their handlers
+        apply, in the same order: a `:ctx` switch, the stream source, and
+        then the selected pod (`l`) or the listed pods (`L`). `l` on an
+        already-open pane in another mode *closes* it, so that case is
+        invocable, exactly as the handler behaves. The pane-local display
+        actions answer with the pane's visibility, matching
+        `ActionPolicy`'s own binding gate on the same actions - and
+        `log_save` answers with one fact more, because a visible pane with
+        an empty (or not yet built) buffer is a `Ctrl-S` that can only say
+        "nothing to save" (issue #388, round 6).
+
+        The deeper refusals stay out on purpose: the cap notices
+        (`Log pane caps at N pods`, `Streaming first N of M`) are emitted by
+        helpers that notify while they compute, which a probe must never
+        do."""
+        if action in _PANE_LOCAL_ACTIONS:
+            return self._pane_local_reason(action)
+        if action not in ("logs", "logs_multi"):
+            return None
+        if self._ctx_switching():
+            return CONTEXT_SWITCH_IN_PROGRESS
+        if action == "logs" and self._pane_displayed() and self._mode != "l":
+            # `l` closes a pane opened in multi/previous mode; nothing else
+            # is read, so nothing else can refuse.
+            return None
+        if self._get_stream_logs() is None:
+            return UnavailableReason(
+                AvailabilityCode.MISSING_CAPABILITY, "Log streaming unavailable"
+            )
+        if action == "logs_multi":
+            if not self._visible_pod_keys():
+                return UnavailableReason(AvailabilityCode.NO_SELECTION, "No resource selected")
+            return None
+        ns, name = self._selected_ns_name(notify=False)
+        if ns is None or name is None:
+            return UnavailableReason(AvailabilityCode.NO_SELECTION, "No resource selected")
+        return self._capacity_reason(ns, name)
+
+    def _displayed_pods(self) -> list[Source]:
+        """The distinct (namespace, pod) pairs the live pane is showing,
+        in the order `_toggle_log_pod` collects them."""
+        pods: list[Source] = []
+        for t_ns, t_pod, _ in self._current_triples:
+            if (t_ns, t_pod) not in pods:
+                pods.append((t_ns, t_pod))
+        return pods
+
+    def _capacity_reason(self, namespace: str, name: str) -> UnavailableReason | None:
+        """Why `l` could not add *namespace/name* to the open pane, or None.
+
+        Reached only where `action_logs` reaches `_toggle_log_pod`: a pane
+        already displayed in live mode (the multi/previous modes close it
+        instead, and a closed pane opens fresh, both of which this method
+        is never asked about). It then asks that helper's three questions
+        in its order - an already-shown pod is *removed*, so it runs; a
+        fifth pod is refused; and containers beyond the panel cap are
+        refused - reading the same triples, the same injected container
+        lookup (a store read) and the same two caps. No I/O, no
+        notification, and nothing recomputed that the toast would compute
+        differently (issue #388, round 8).
+        """
+        if not self._pane_displayed():
+            return None
+        pods = self._displayed_pods()
+        if (namespace, name) in pods:
+            return None
+        if len(pods) >= _MAX_LOG_PODS:
+            return _POD_CAP_FULL
+        if len(self._current_triples) + len(self._pod_triples(namespace, name)) > MAX_PANELS:
+            return _PANEL_CAP_FULL
+        return None
+
+    def _pane_local_reason(self, action: str) -> UnavailableReason | None:
+        """Why a pane-local display action can't run, or None.
+
+        The pane has to be on screen - the fact `ActionPolicy` gates their
+        bindings on - and `Ctrl-S` needs one more: something in the buffer
+        to write out.
+        """
+        if not self._pane_displayed():
+            return UnavailableReason(AvailabilityCode.PANE_CLOSED, "Open the log pane first")
+        if action == "log_save" and not self._saveable_lines():
+            return _EMPTY_LOG_BUFFER
+        return None
+
+    def _saveable_lines(self) -> bool:
+        """Whether the buffer holds anything `action_log_save` would write.
+
+        The same read that handler makes (`self._buffer`, then its lines),
+        so the probe cannot report a save the keypress would refuse. A pane
+        can be displayed before any buffer exists, which `Ctrl-S` ignores
+        silently; for the palette that is the same empty answer.
+        """
+        buffer = self._buffer
+        return buffer is not None and bool(buffer.lines())
+
     async def action_logs(self) -> None:
         """Open logs for the selected pod, or toggle it in/out of the pane (``l``).
 
@@ -295,10 +475,7 @@ class LogController:
     async def _toggle_log_pod(self, namespace: str, name: str, epoch: int) -> None:
         """Add or remove *namespace/name* from the accumulated live-log panels."""
         existing = list(self._current_triples)
-        pods: list[Source] = []
-        for t_ns, t_pod, _ in existing:
-            if (t_ns, t_pod) not in pods:
-                pods.append((t_ns, t_pod))
+        pods = self._displayed_pods()
 
         if (namespace, name) in pods:
             triples = [t for t in existing if (t[0], t[1]) != (namespace, name)]
@@ -308,15 +485,13 @@ class LogController:
         else:
             if len(pods) >= _MAX_LOG_PODS:
                 self._ui.notify(
-                    f"Log pane caps at {_MAX_LOG_PODS} pods — Esc closes all",
-                    severity="warning",
+                    _POD_CAP_FULL.message, severity=_POD_CAP_FULL.severity, markup=False
                 )
                 return
             triples = existing + self._pod_triples(namespace, name)
             if len(triples) > MAX_PANELS:
                 self._ui.notify(
-                    f"Panel cap is {MAX_PANELS} containers — cannot add {name}",
-                    severity="warning",
+                    _panel_cap_detail(name), severity=_PANEL_CAP_FULL.severity, markup=False
                 )
                 return
 
@@ -712,7 +887,11 @@ class LogController:
             return
         lines = self._buffer.lines()
         if not lines:
-            self._ui.notify("Log buffer is empty — nothing to save", severity="warning")
+            # markup=False: the palette greys the `Ctrl-S` row with this
+            # same reason and renders it literally (#388).
+            self._ui.notify(
+                _EMPTY_LOG_BUFFER.message, severity=_EMPTY_LOG_BUFFER.severity, markup=False
+            )
             return
         try:
             path = export_log_lines(lines, default_log_export_dir())
@@ -748,6 +927,21 @@ class LogController:
         log_pane = self._get_log_pane()
         if log_pane.display:
             log_pane.search_next()
+
+    def search_state(self) -> PaneSearch:
+        """Whether the log pane is on screen and has hits (issue #388).
+
+        The two facts `search_next`/`search_prev` act on, answered without
+        acting on them - the palette asks this so `n`/`N` are not offered
+        when they would step nowhere. Guarded like `_pane_displayed`: a
+        probe can be asked before the widget is mounted, where a real
+        keypress could never arrive.
+        """
+        try:
+            log_pane = self._get_log_pane()
+        except NoMatches:
+            return PaneSearch(displayed=False, hits=False)
+        return PaneSearch(displayed=log_pane.display, hits=log_pane.has_search_hits)
 
     def search_prev(self) -> bool:
         """Previous search hit in an open log pane (``N`` key).

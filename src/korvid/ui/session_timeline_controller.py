@@ -30,6 +30,7 @@ from korvid.core.pulse import PulseCoverageState
 from korvid.core.session_timeline import AppendResult, SessionTimeline, TimelineResourceRef
 from korvid.core.store import Summary
 from korvid.k8s.errors import ApiStatusError
+from korvid.ui.action_availability import AvailabilityCode, UnavailableReason
 from korvid.ui.ui_surface import UiSurface
 from korvid.ui.view_state import ViewState
 from korvid.ui.widgets.session_timeline_screen import SessionTimelineScreen, TimelineGotoResult
@@ -43,6 +44,14 @@ TIMELINE_EVENT_GROUP = "timeline-warning-events"
 #: Worker group for the timeline goto navigation (mirrors the relationship
 #: controller's exclusive/exit_on_error=False shape).
 TIMELINE_NAVIGATION_GROUP = "timeline"
+
+#: The one wording for "this session was composed without a timeline",
+#: shared by the notification `open()` emits for a real `T` press and the
+#: silent reason the palette probe returns, so the two cannot drift
+#: (issue #388 round 13).
+TIMELINE_UNAVAILABLE = UnavailableReason(
+    AvailabilityCode.MISSING_CAPABILITY, "Timeline unavailable in this session"
+)
 
 #: API status codes that answer the Warning feed permanently.
 _DENIED = frozenset({401, 403, 405})
@@ -250,6 +259,19 @@ class SessionTimelineController:
     # Modal lifecycle
     # ------------------------------------------------------------------
 
+    def unavailable_reason(self) -> UnavailableReason | None:
+        """Why `T` can't open the timeline right now, or None - a
+        side-effect-free probe for the palette (issue #388 round 13).
+
+        Synchronous and silent, and it asks the one question `open()`
+        asks: was a `SessionTimeline` composed for this session? Nothing
+        else gates the modal - `snapshot` is an in-memory read, so an
+        empty feed and an unselected table both still open - and the
+        notification stays the keypress's to emit, from this same
+        sentence.
+        """
+        return None if self._timeline is not None else TIMELINE_UNAVAILABLE
+
     def open(self) -> None:
         """Open the session timeline modal, or warn when unavailable.
 
@@ -258,7 +280,11 @@ class SessionTimelineController:
         """
         timeline = self._timeline
         if timeline is None:
-            self._ui.notify("Timeline unavailable in this session", severity="warning")
+            self._ui.notify(
+                TIMELINE_UNAVAILABLE.message,
+                severity=TIMELINE_UNAVAILABLE.severity,
+                markup=False,
+            )
             return
         epoch = self._get_epoch()
         selected = self._selected_resource() if self._selected_resource is not None else None

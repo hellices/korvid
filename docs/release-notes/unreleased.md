@@ -5,6 +5,37 @@ This page tracks changes merged to `main` that are not part of the
 The [current release milestone](https://github.com/hellices/korvid/milestone/6)
 tracks the current release scope.
 
+## Search actions by intent
+
+Press `Ctrl-P` to search korvid actions and built-in commands — by intent
+(`scale`, `logs`), by an action's canonical id (`delete_resource`), or by a
+command's `:` spelling (`:pulse`). Each result reads *category · what it does ·
+how to run it*, showing the effective remapped key or the canonical command,
+and explains when an action does not apply to the current view or would
+currently do nothing (nothing selected, no hint on the row, no search running,
+a sort key whose column this view does not render, a log pane that is already
+full, a node whose drain has to finish first, a helm release whose identity or
+history the session cannot verify, an operator uninstall with no manifest
+source, a session with no timeline to open, or a capability this session was
+started without — including the `kubectl` korvid looks for once at startup, and
+the agent pieces `:ai` and `:model` each need for themselves).
+Selecting a write action still opens the same approval flow and requires a
+fresh confirmation keystroke. Arrow, Page and Home/End keys walk every result,
+including the greyed-out ones, and the cursor is drawn on whichever row it
+reaches, so a reason further down the list can always be scrolled into view and
+read — a page key never skips past more than the results list was showing, and
+scrolling the list with the mouse first never leaves a Page key with nothing to
+do but spin: on the last result, or the first, it simply brings that row back
+into view.
+Clicking a greyed-out row does the same. Those rows stay unrunnable: Enter or a
+click on one does nothing and leaves the palette open, with the search box
+still ready for the next keystroke. `Esc` closes the palette and so does
+`Ctrl-P`, both of them whichever
+key opened it; the opening key itself remaps under `open_action_palette`. On a
+small terminal the palette takes the height it needs instead of clipping a
+row's key or reason, and resizing the terminal under the open palette keeps the
+row you were on in view and re-draws it whole at the new size.
+
 ## Keys typed right after the command or filter bar closes
 
 Pressing `:` or `/`, submitting or cancelling it and immediately pressing the

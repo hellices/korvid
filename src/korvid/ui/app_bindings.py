@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from textual.binding import Binding
+from textual.binding import Binding, BindingType
 
 # Every remappable binding carries an ``id`` so the `keybindings:` config
 # section can remap it via Textual's keymap (issue #35); the intentionally
@@ -14,6 +14,16 @@ APP_BINDINGS: list[Binding | tuple[str, str] | tuple[str, str, str]] = [
     # Top bar collapse/expand (issue #142): the grouped legend's toggle.
     Binding("tilde", "toggle_topbar", "Legend", show=False, id="toggle_topbar"),
     Binding("colon", "open_command", "Command", id="open_command"),
+    # The Action Palette (issue #388): `priority=True` so it opens from any
+    # focused widget (the agent prompt, a pane), with `ActionPolicy` - not
+    # the screen stack - deciding the surfaces where it must stay shut.
+    Binding(
+        "ctrl+p",
+        "open_action_palette",
+        "Actions",
+        priority=True,
+        id="open_action_palette",
+    ),
     Binding("slash", "open_filter", "Filter/Search", id="open_filter"),
     Binding("0", "toggle_all_namespaces", "All NS", id="toggle_all_namespaces"),
     # `favorite_namespaces` shortcuts (issue #108): UI-only jumps, bound
@@ -104,6 +114,87 @@ APP_BINDINGS: list[Binding | tuple[str, str] | tuple[str, str, str]] = [
     Binding("h", "helm_history", "History", id="helm_history"),
     Binding("ctrl+t", "transfer", "Transfer", show=False, id="transfer"),
 ]
+
+# Display order of the binding groups in the help overlay (issue #41) and,
+# by extension, the Action Palette's categories (issue #388): both render
+# from this single classification so they cannot drift from each other.
+HELP_GROUP_ORDER = ("Global", "Table", "Helm", "Logs", "Describe", "Agent")
+
+# Context(s) where each app action's key is actually pressed. Key names and
+# descriptions are generated from the live `Binding` objects; only the
+# grouping needs human context. `test_every_app_binding_action_has_an_explicit_group`
+# asserts every `KorvidApp` binding action appears here, so new bindings
+# cannot land unclassified.
+ACTION_HELP_GROUPS: dict[str, tuple[str, ...]] = {
+    "quit": ("Global",),
+    "help": ("Global",),
+    "open_command": ("Global",),
+    "open_action_palette": ("Global",),
+    "toggle_all_namespaces": ("Global",),
+    # Parametrised 1-9 favorites (issue #108) merge into one row via the
+    # base-action dedupe in help_screen's `_add`.
+    "favorite_namespace": ("Global",),
+    # `/` filters the table but searches inside the log / describe panes.
+    "open_filter": ("Table", "Logs"),
+    "describe": ("Table",),
+    "relationships": ("Table",),
+    "timeline": ("Table",),
+    "shell": ("Table",),
+    "port_forward": ("Table",),
+    "logs": ("Table",),
+    "logs_multi": ("Table",),
+    "delete_resource": ("Table",),
+    "rollout_restart": ("Table",),
+    "resize_pod": ("Table",),
+    "operator_install": ("Table",),
+    "cordon_node": ("Table",),
+    "uncordon_node": ("Table",),
+    "drain_node": ("Table",),
+    "scale_resource": ("Table",),
+    "edit_resource": ("Table",),
+    "hint_details": ("Table",),
+    "transfer": ("Table",),
+    # Column sorting (issue #37); shift+n doubles as sort-by-name via
+    # log_search_prev's no-pane fallback.
+    "sort_by_age": ("Table",),
+    "sort_by_cpu": ("Table",),
+    "sort_by_mem": ("Table",),
+    "sort_picker": ("Table",),
+    "toggle_topbar": ("Global",),
+    "log_format": ("Logs",),
+    "log_wrap": ("Logs",),
+    "log_timestamps": ("Logs",),
+    "log_save": ("Logs",),
+    "log_previous": ("Logs",),
+    "log_search_next": ("Logs",),
+    # N steps back through hits in a pane, sorts by name in the table.
+    "log_search_prev": ("Logs", "Table"),
+    "toggle_agent": ("Agent",),
+    "interrupt_agent": ("Agent",),
+    "helm_install": ("Helm",),
+    "helm_upgrade": ("Helm",),
+    "helm_rollback": ("Helm",),
+    "helm_history": ("Helm",),
+}
+
+
+def base_action(action: str) -> str:
+    """Action name without call parameters (`favorite_namespace(3)` → `favorite_namespace`)."""
+    return action.partition("(")[0]
+
+
+def help_groups_for_action(action: str) -> tuple[str, ...]:
+    """Help-overlay/palette group(s) for `action`, defaulting to `("Global",)`."""
+    return ACTION_HELP_GROUPS.get(base_action(action), ("Global",))
+
+
+def as_binding(binding: BindingType) -> Binding:
+    """Normalize a `Binding` or legacy `(key, action[, description])` tuple."""
+    if isinstance(binding, Binding):
+        return binding
+    key, action, *rest = binding
+    return Binding(key, action, rest[0] if rest else "")
+
 
 # User-facing keys handled in event handlers rather than BINDINGS:
 # Enter drills down via `on_data_table_row_selected`, Escape closes

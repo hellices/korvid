@@ -265,6 +265,27 @@ class ProposalStore:
         self._after_sweep(swept)
         return result
 
+    def has_pending(self) -> bool:
+        """Whether any proposal is pending and not yet past its TTL.
+
+        The pure twin of `pending()`, for callers that only need the yes/no
+        and must not *cause* anything: the lazy sweep is a real state change
+        that notifies subscribers and fires the expiry hook, so a probe
+        built on `pending()` (the Action Palette asking whether `:proposals`
+        would do anything) would queue audit I/O just by being asked.
+
+        TTL-aware, so an inbox holding only expired proposals answers False
+        exactly as the sweeping read would, but it expires nothing, evicts
+        nothing, and calls no callback. The deferred sweep still happens on
+        the next real read.
+        """
+        with self._lock:
+            now = self._clock()
+            return any(
+                self._states[pid][0] == "pending" and self._proposals[pid].expires_at > now
+                for pid in self._order
+            )
+
     def resolve(self, proposal_id: str, state: ProposalState, *, reason: str = "") -> bool:
         """Move a pending proposal to a terminal state exactly once.
 

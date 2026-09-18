@@ -17,11 +17,14 @@ from collections.abc import AsyncIterator, Callable
 from typing import Any
 
 import pytest
+from textual.css.query import NoMatches
 
 from korvid.core.logbuffer import LogBuffer
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.logs import LogLine
+from korvid.ui.action_availability import AvailabilityCode, UnavailableReason
 from korvid.ui.log_controller import LogController
+from korvid.ui.read_availability import PaneSearch
 from korvid.ui.ui_surface import Severity, UiSurface
 
 # ---------------------------------------------------------------------------
@@ -112,6 +115,9 @@ class FakeLogPane:
         self.toggles: list[str] = []
         self.last_force_prefix: bool | None = None
         self.last_log_buffer: LogBuffer | None = None
+        #: What `LogPane.has_search_hits` reports: whether `n`/`N` have a
+        #: hit to step to (issue #388).
+        self.has_search_hits: bool = False
 
     def open(
         self,
@@ -191,6 +197,7 @@ def make_harness(
     ctx_switch_crossed: bool = False,
     ctx_reads_allowed: bool = True,
     buffer_max_lines: int = 5000,
+    get_log_pane: Callable[[], FakeLogPane] | None = None,
 ) -> _Harness:
     ui = FakeUiSurface()
     pane = FakeLogPane()
@@ -198,16 +205,17 @@ def make_harness(
     refreshes: list[bool] = []
     controller = LogController(
         ui=ui,
-        get_log_pane=lambda: pane,
+        get_log_pane=get_log_pane or (lambda: pane),
         get_stream_logs=lambda: stream_logs,
         pod_containers=pod_containers or (lambda ns, name: ("main",)),
-        selected_ns_name=lambda: selected,
+        selected_ns_name=lambda *, notify=True: selected,
         visible_pod_keys=visible_pod_keys or (lambda: []),
         current_kind=lambda: current_kind,
         focused_pane=lambda: owner,
         ctx_epoch=lambda: ctx_epoch,
         ctx_switch_crossed=lambda epoch: ctx_switch_crossed,
         ctx_reads_allowed=lambda: ctx_reads_allowed,
+        ctx_switching=lambda: not ctx_reads_allowed,
         refresh_bindings=lambda: refreshes.append(True),
         buffer_max_lines=buffer_max_lines,
     )
@@ -505,3 +513,265 @@ def test_public_tuning_knobs_are_writable(knob: str) -> None:
     h = make_harness()
     setattr(h.controller, knob, 0)
     assert getattr(h.controller, knob) == 0
+
+
+# ---------------------------------------------------------------------------
+# Side-effect-free availability probes (#388 task 4)
+# ---------------------------------------------------------------------------
+
+
+def test_log_availability_reports_no_selected_pod_without_notifying() -> None:
+    """`l` streams the selected pod's containers; with no row selected the
+    palette says so instead of claiming the action can run - and the probe
+    itself notifies nothing (#388 task 4)."""
+    h = make_harness(selected=(None, None))
+    reason = h.controller.unavailable_reason("logs")
+    assert reason == UnavailableReason(AvailabilityCode.NO_SELECTION, "No resource selected")
+    assert h.ui.notifications == []
+
+
+def test_log_availability_reports_a_missing_stream_source() -> None:
+    h = make_harness(stream_logs=None)
+    assert h.controller.unavailable_reason("logs") == UnavailableReason(
+        AvailabilityCode.MISSING_CAPABILITY, "Log streaming unavailable"
+    )
+    assert h.controller.unavailable_reason("logs_multi") == UnavailableReason(
+        AvailabilityCode.MISSING_CAPABILITY, "Log streaming unavailable"
+    )
+    assert h.ui.notifications == []
+
+
+def test_log_availability_reports_a_context_switch() -> None:
+    h = make_harness(ctx_reads_allowed=False)
+    assert h.controller.unavailable_reason("logs") == UnavailableReason(
+        AvailabilityCode.TRANSITION,
+        "A context switch is in progress — try again once it completes",
+    )
+    assert h.ui.notifications == []
+
+
+def test_log_multi_availability_reports_an_empty_pod_list() -> None:
+    """`L` streams every filtered pod; with nothing listed the real handler
+    refuses with "No resource selected" - so does the probe."""
+    h = make_harness(visible_pod_keys=lambda: [])
+    assert h.controller.unavailable_reason("logs_multi") == UnavailableReason(
+        AvailabilityCode.NO_SELECTION, "No resource selected"
+    )
+    assert h.ui.notifications == []
+
+
+def test_log_availability_is_none_when_the_stream_would_open() -> None:
+    h = make_harness(visible_pod_keys=lambda: ["default/web"])
+    assert h.controller.unavailable_reason("logs") is None
+    assert h.controller.unavailable_reason("logs_multi") is None
+    assert h.ui.notifications == []
+
+
+async def test_log_availability_is_none_when_the_key_would_close_the_pane() -> None:
+    """With the pane open in multi mode, `l` closes it rather than adding a
+    pod - a refusal reason there would grey out a working key."""
+    h = make_harness(stream_logs=None)
+    h.pane.display = True
+    h.controller._mode = "L"
+    assert h.controller.unavailable_reason("logs") is None
+    assert h.ui.notifications == []
+
+
+def test_log_pane_actions_report_a_closed_pane() -> None:
+    """The pane-local display actions need a visible pane; `ActionPolicy`
+    already disables their bindings, and the controller agrees on why."""
+    h = make_harness()
+    assert h.controller.unavailable_reason("log_save") == UnavailableReason(
+        AvailabilityCode.PANE_CLOSED, "Open the log pane first"
+    )
+    assert h.ui.notifications == []
+
+
+async def test_log_save_reports_an_empty_buffer_without_notifying() -> None:
+    """A visible pane with nothing in it: `Ctrl-S` can only answer "there is
+    nothing to save", so the palette says that instead of offering the row
+    (issue #388, round 6). The probe itself notifies nothing - and the
+    keypress still notifies exactly what it always did."""
+    h = make_harness()
+    await h.controller.open_pane("default", [("web", "main")])  # buffer exists, nothing streamed
+    try:
+        reason = h.controller.unavailable_reason("log_save")
+        assert reason == UnavailableReason(
+            AvailabilityCode.NO_SELECTION, "Log buffer is empty — nothing to save"
+        )
+        assert h.ui.notifications == []
+        h.controller.action_log_save()
+        assert reason is not None
+        assert [n.message for n in h.ui.notifications] == [reason.message]
+        assert [n.severity for n in h.ui.notifications] == [reason.severity]
+    finally:
+        await h.controller.cancel_tasks()
+
+
+async def test_log_save_reports_an_empty_buffer_before_one_exists() -> None:
+    """The pane can be displayed before any buffer is built. `Ctrl-S` does
+    nothing at all there, silently, so the row has to carry the reason -
+    the same sentence, because it is the same fact."""
+    h = make_harness()
+    h.pane.display = True
+    assert h.controller.buffer is None
+    assert h.controller.unavailable_reason("log_save") == UnavailableReason(
+        AvailabilityCode.NO_SELECTION, "Log buffer is empty — nothing to save"
+    )
+    assert h.ui.notifications == []
+
+
+async def test_log_save_is_invocable_once_the_buffer_has_lines() -> None:
+    """One streamed line is all `Ctrl-S` needs, and the other pane-local
+    actions never asked about the buffer at all."""
+    h = make_harness()
+    await h.controller.open_pane("default", [("web", "main")])
+    try:
+        buffer = h.controller.buffer
+        assert buffer is not None
+        buffer.append(LogLine(pod="web", container="main", text="hello", timestamp=None))
+        assert h.controller.unavailable_reason("log_save") is None
+        assert h.controller.unavailable_reason("log_wrap") is None
+        assert h.ui.notifications == []
+    finally:
+        await h.controller.cancel_tasks()
+
+
+def _raise_no_matches() -> Any:
+    raise NoMatches("LogPane is not mounted yet")
+
+
+def test_unavailable_reason_reports_a_closed_pane_before_the_pane_is_composed() -> None:
+    """Regression (#388 task 4 review): the app's real `get_log_pane`
+    accessor (`app._log_pane`, a `query_one(LogPane)`) raises `NoMatches`
+    before Textual has mounted the widget - exactly the window
+    `KorvidApp._log_pane_open` already guards for `ActionPolicy.
+    binding_enabled`. A probe must never raise where a real keypress never
+    could, so `unavailable_reason` must report the same "pane closed"
+    fact instead of propagating the exception, both for the pane-local
+    actions and for `logs` (whose "would-close-a-pane" branch reads the
+    same accessor)."""
+    h = make_harness(get_log_pane=_raise_no_matches, stream_logs=None)
+    assert h.controller.unavailable_reason("log_save") == UnavailableReason(
+        AvailabilityCode.PANE_CLOSED, "Open the log pane first"
+    )
+    assert h.controller.unavailable_reason("logs") == UnavailableReason(
+        AvailabilityCode.MISSING_CAPABILITY, "Log streaming unavailable"
+    )
+    assert h.ui.notifications == []
+
+
+def test_search_state_reports_the_panes_visibility_and_hits() -> None:
+    """`n`/`N` step through the log pane's hits, so the palette asks for
+    both facts at once - read, never moved (#388 final review)."""
+    h = make_harness()
+    assert h.controller.search_state() == PaneSearch(displayed=False, hits=False)
+    h.pane.display = True
+    assert h.controller.search_state() == PaneSearch(displayed=True, hits=False)
+    h.pane.has_search_hits = True
+    assert h.controller.search_state() == PaneSearch(displayed=True, hits=True)
+    assert h.ui.notifications == []
+    assert h.pane.searches == []
+
+
+def test_search_state_tolerates_a_pane_that_is_not_mounted() -> None:
+    """A probe can be asked before the widget tree exists, where a real
+    keypress never could."""
+    h = make_harness()
+
+    def missing_pane() -> FakeLogPane:
+        raise NoMatches("log pane")
+
+    h.controller._get_log_pane = missing_pane
+    assert h.controller.search_state() == PaneSearch(displayed=False, hits=False)
+
+
+# ---------------------------------------------------------------------------
+# The capacity half of `l` (#388 final review)
+# ---------------------------------------------------------------------------
+
+
+def _pods(count: int, containers: int = 1) -> list[tuple[str, str, str]]:
+    """`count` pods' worth of live triples, `containers` panels each."""
+    return [
+        ("default", f"web-{pod}", f"c{index}")
+        for pod in range(count)
+        for index in range(containers)
+    ]
+
+
+async def test_log_availability_reports_the_pod_cap() -> None:
+    """With four pods already streaming, `l` on a fifth only notifies the
+    cap - so the palette must not advertise the row as runnable."""
+    h = make_harness(
+        selected=("default", "web-9"),
+        pod_containers=lambda ns, name: ("main",),
+        visible_pod_keys=lambda: ["default/web-9"],
+    )
+    await h.controller.open_agent_logs("default", _pods(4))
+    try:
+        reason = h.controller.unavailable_reason("logs")
+        assert reason is not None
+        assert reason.message == "Log pane caps at 4 pods — Esc closes all"
+        assert h.ui.notifications == []
+        # `L` re-opens the pane from scratch rather than accumulating, so
+        # the pod cap is not its refusal: its own semantics are unchanged.
+        assert h.controller.unavailable_reason("logs_multi") is None
+    finally:
+        await h.controller.cancel_tasks()
+
+
+async def test_log_availability_reports_the_panel_cap() -> None:
+    """Under the pod cap but over the panel cap: three two-container pods
+    are streaming and the selected pod would add three more panels."""
+    h = make_harness(
+        selected=("default", "web-9"),
+        pod_containers=lambda ns, name: ("a", "b", "c"),
+    )
+    await h.controller.open_agent_logs("default", _pods(3, containers=2))
+    try:
+        reason = h.controller.unavailable_reason("logs")
+        assert reason is not None
+        assert reason.message == "Panel cap is 8 containers"
+        assert h.ui.notifications == []
+    finally:
+        await h.controller.cancel_tasks()
+
+
+async def test_log_availability_still_allows_removing_a_displayed_pod() -> None:
+    """At the pod cap, `l` on a pod that is already shown *removes* it -
+    a real effect, so the row stays invocable."""
+    h = make_harness(selected=("default", "web-0"), pod_containers=lambda ns, name: ("main",))
+    await h.controller.open_agent_logs("default", _pods(4))
+    try:
+        assert h.controller.unavailable_reason("logs") is None
+        assert h.ui.notifications == []
+    finally:
+        await h.controller.cancel_tasks()
+
+
+async def test_log_availability_allows_a_pod_that_still_fits() -> None:
+    h = make_harness(selected=("default", "web-9"), pod_containers=lambda ns, name: ("main",))
+    await h.controller.open_agent_logs("default", _pods(2))
+    try:
+        assert h.controller.unavailable_reason("logs") is None
+    finally:
+        await h.controller.cancel_tasks()
+
+
+async def test_the_capped_keypress_still_names_the_pod_the_row_cannot() -> None:
+    """The palette reason is bounded row text; the toast the keypress
+    raises keeps the pod name it always had."""
+    h = make_harness(
+        selected=("default", "web-9"),
+        pod_containers=lambda ns, name: ("a", "b", "c"),
+    )
+    await h.controller.open_agent_logs("default", _pods(3, containers=2))
+    try:
+        await h.controller.action_logs()
+        assert [n.message for n in h.ui.notifications] == [
+            "Panel cap is 8 containers — cannot add web-9"
+        ]
+        assert h.controller.current_triples == _pods(3, containers=2)
+    finally:
+        await h.controller.cancel_tasks()

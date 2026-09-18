@@ -17,6 +17,8 @@ from __future__ import annotations
 from textual.widgets import DataTable
 
 from korvid.core.session_timeline import SessionTimeline
+from korvid.ui.action_availability import ActionAvailability
+from korvid.ui.session_timeline_controller import TIMELINE_UNAVAILABLE
 from korvid.ui.widgets.resource_table import ResourceTable
 from korvid.ui.widgets.session_timeline_screen import SessionTimelineScreen
 
@@ -172,3 +174,72 @@ async def test_timeline_navigation_failure_renders_event_name_literally() -> Non
         notification = next(item for item in app._notifications if "is not visible" in item.message)
         assert "[/bold]" in notification.message
         assert notification.markup is False
+
+
+# ---------------------------------------------------------------------------
+# What the palette says about `T` (#388 round 13)
+# ---------------------------------------------------------------------------
+
+
+async def test_timeline_availability_reports_a_session_without_the_feature() -> None:
+    """`T` has exactly one composition question, and `open()` asks it
+    first: was a `SessionTimeline` injected at all? Without one the key
+    only warns, so the palette must carry that same sentence instead of
+    offering a row that opens nothing - silently, because deriving the
+    catalog is a probe (#388 round 13)."""
+    app = make_app([_pod("web")])
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: app.query_one(ResourceTable).row_count == 1, label="pod loaded")
+        before = len(app._notifications)
+        assert app._timeline.unavailable_reason() == TIMELINE_UNAVAILABLE
+        availability = app._actions.availability("timeline")
+        assert availability.binding_enabled is True
+        assert availability.reason == TIMELINE_UNAVAILABLE
+        assert availability.invocable is False
+        assert len(app._notifications) == before
+
+
+async def test_timeline_availability_is_invocable_with_the_feature() -> None:
+    """With a timeline composed the modal really opens - even with nothing
+    selected and nothing recorded, because `snapshot` is an in-memory read.
+    So the row is offered."""
+    app = make_app([_pod("web")], session_timeline=SessionTimeline(8, 4096))
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: app.query_one(ResourceTable).row_count == 1, label="pod loaded")
+        before = len(app._notifications)
+        assert app._timeline.unavailable_reason() is None
+        assert app._actions.availability("timeline") == ActionAvailability.enabled()
+        assert len(app._notifications) == before
+
+
+async def test_the_timeline_key_notifies_the_wording_its_row_shows() -> None:
+    """The probe is the silent twin of the refusal the keypress keeps: one
+    sentence, read by both, so they cannot drift."""
+    app = make_app([_pod("web")])
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: app.query_one(ResourceTable).row_count == 1, label="pod loaded")
+        await pilot.press("T")
+        await until(
+            pilot,
+            lambda: any(n.message == TIMELINE_UNAVAILABLE.message for n in app._notifications),
+            label="the timeline key notified its own refusal",
+        )
+        assert not isinstance(app.screen, SessionTimelineScreen)
+
+
+async def test_the_timeline_row_is_revalidated_after_the_palette_closes() -> None:
+    """The answer belongs to the moment it is asked: a feature that is gone
+    by the time the modal dismisses refuses the selection it made."""
+    app = make_app([_pod("web")], session_timeline=SessionTimeline(8, 4096))
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: app.query_one(ResourceTable).row_count == 1, label="pod loaded")
+        assert app._actions.availability("timeline") == ActionAvailability.enabled()
+        app._timeline._timeline = None
+        assert app._actions.availability("timeline").reason == TIMELINE_UNAVAILABLE
+        await app._palette_selected("action:timeline")
+        await until(
+            pilot,
+            lambda: any(n.message == TIMELINE_UNAVAILABLE.message for n in app._notifications),
+            label="the stale timeline selection refused with the owner's wording",
+        )
+        assert not isinstance(app.screen, SessionTimelineScreen)

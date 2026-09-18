@@ -20,6 +20,7 @@ from korvid.k8s.models import (
 )
 from korvid.k8s.olm import OPERATORS_GROUP, PACKAGES_GROUP
 from korvid.k8s.writes import WriteOps
+from korvid.ui.action_availability import AvailabilityCode, UnavailableReason
 from korvid.ui.app import KorvidApp
 from korvid.ui.widgets.confirm_screen import ConfirmScreen
 from korvid.ui.widgets.operator_install import OperatorInstallPrompt
@@ -810,3 +811,85 @@ async def test_the_controller_refuses_the_install_key_without_write_ops(
             label="warned",
         )
         assert len(app.screen_stack) == 1
+
+
+# ---------------------------------------------------------------------------
+# Side-effect-free availability probes (#388 task 4)
+# ---------------------------------------------------------------------------
+
+
+async def test_operator_availability_reports_a_missing_write_client(tmp_path: Path) -> None:
+    """`I` refuses without a write client; the palette probe reports the
+    same wording and notifies nothing (#388 task 4)."""
+    app = make_app(
+        {"packagemanifests": [_package("cert-manager")]},
+        audit_path=tmp_path / "audit.jsonl",
+        write_ops=None,
+    )
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "operators", "packagemanifests")
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 1, label="package listed")
+        before = len(app._notifications)
+        assert app._olm.unavailable_reason() == UnavailableReason(
+            AvailabilityCode.MISSING_CAPABILITY, "Install unavailable in this session"
+        )
+        availability = app._actions.availability("operator_install")
+        assert availability.binding_enabled is True
+        assert availability.invocable is False
+        assert len(app._notifications) == before
+
+
+async def test_operator_availability_reports_an_undiscovered_subscription_api(
+    tmp_path: Path,
+) -> None:
+    """Without the OLM Subscription API the install wizard cannot create
+    anything, exactly as `install()` reports (#388 task 4)."""
+    aliases = _aliases()
+    del aliases["subscriptions"]
+    app = make_app(
+        {"packagemanifests": [_package("cert-manager")]},
+        audit_path=tmp_path / "audit.jsonl",
+        write_ops=Recorder(),
+        aliases=aliases,
+    )
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "operators", "packagemanifests")
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 1, label="package listed")
+        before = len(app._notifications)
+        assert app._olm.unavailable_reason() == UnavailableReason(
+            AvailabilityCode.MISSING_CAPABILITY,
+            "Install unavailable: the OLM Subscription API was not discovered",
+        )
+        assert len(app._notifications) == before
+
+
+async def test_operator_availability_reports_a_missing_manifest_source(tmp_path: Path) -> None:
+    app = make_app(
+        {"packagemanifests": [_package("cert-manager")]},
+        audit_path=tmp_path / "audit.jsonl",
+        write_ops=Recorder(),
+    )
+    app._get_manifest = None
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "operators", "packagemanifests")
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 1, label="package listed")
+        assert app._olm.unavailable_reason() == UnavailableReason(
+            AvailabilityCode.MISSING_CAPABILITY, "Install unavailable: no manifest source"
+        )
+
+
+async def test_operator_availability_is_none_on_a_selected_package(tmp_path: Path) -> None:
+    app = make_app(
+        {"packagemanifests": [_package("cert-manager")]},
+        audit_path=tmp_path / "audit.jsonl",
+        write_ops=Recorder(),
+    )
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "operators", "packagemanifests")
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 1, label="package listed")
+        assert app._olm.unavailable_reason() is None
+        assert app._actions.availability("operator_install").invocable is True

@@ -5,20 +5,26 @@ RBAC. CRDs and custom resources are never touched. Ctrl+d on a CSV whose
 Subscription is known redirects to the same full flow."""
 
 import asyncio
+import dataclasses
 import json
 from pathlib import Path
 from typing import Any
 
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.errors import ApiStatusError
+from korvid.ui.action_availability import AvailabilityCode, UnavailableReason
+from korvid.ui.app import KorvidApp
 from korvid.ui.widgets.confirm_screen import ConfirmScreen
+from korvid.ui.widgets.resource_table import ResourceTable
 
 from .test_olm_view import (
     SUB_META,
     Recorder,
     _aliases,
     _csv,
+    _installplan,
     _navigate,
+    _package,
     _subscription,
     make_app,
 )
@@ -544,3 +550,393 @@ async def test_uninstall_holds_exactly_one_write_reservation_during_the_mutation
         await until(pilot, lambda: len(ops.calls) == 2, label="both deletes ran")
         assert observed_during_mutation == [1, 1], "the mutation must reserve exactly one write"
         await until(pilot, lambda: app._writes.active_writes() == 0, label="reservation released")
+
+
+# ---------------------------------------------------------------------------
+# What the palette says about Ctrl-D on a Subscription (#388 round 13)
+# ---------------------------------------------------------------------------
+
+
+async def test_uninstall_availability_reports_a_missing_manifest_source(
+    tmp_path: Path,
+) -> None:
+    """Ctrl-D on a Subscription is the operator uninstall, and that flow
+    fetches the Subscription manifest before it can describe (or approve)
+    anything: with no manifest source wired it refuses with "Uninstall
+    unavailable: no manifest source" and stops.
+
+    The palette offered the row anyway, so selecting it only produced that
+    warning - the probe now carries the same sentence, silently.
+    """
+    app = make_app(
+        {"subscriptions": [_subscription("cert-manager")]},
+        audit_path=tmp_path / "audit.jsonl",
+        write_ops=Recorder(),
+    )
+    app._get_manifest = None
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "subscriptions", "subscriptions")
+        await until(pilot, lambda: bool(app.store.get("subscriptions", "operators")), label="rows")
+        before = len(app._notifications)
+        availability = app._actions.availability("delete_resource")
+        assert availability.binding_enabled is True
+        assert availability.reason == UnavailableReason(
+            AvailabilityCode.MISSING_CAPABILITY, "Uninstall unavailable: no manifest source"
+        )
+        assert availability.invocable is False
+        assert len(app._notifications) == before
+
+
+async def test_the_uninstall_key_still_notifies_the_missing_manifest_source(
+    tmp_path: Path,
+) -> None:
+    """The probe is the silent twin of a refusal the keypress keeps."""
+    ops = Recorder()
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app(
+        {"subscriptions": [_subscription("cert-manager")]},
+        audit_path=audit_path,
+        write_ops=ops,
+    )
+    app._get_manifest = None
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "subscriptions", "subscriptions")
+        await until(pilot, lambda: bool(app.store.get("subscriptions", "operators")), label="rows")
+        await pilot.press("ctrl+d")
+        await until(
+            pilot,
+            lambda: any(
+                n.message == "Uninstall unavailable: no manifest source" for n in app._notifications
+            ),
+            label="the uninstall key notified the missing manifest source",
+        )
+        assert ops.calls == []
+        assert len(app.screen_stack) == 1
+
+
+async def test_uninstall_availability_is_invocable_with_a_manifest_source(
+    tmp_path: Path,
+) -> None:
+    """The positive half: a write client, an audit sink, a manifest source
+    and a Subscription row - Ctrl-D really opens the uninstall flow."""
+    app = make_app(
+        {"subscriptions": [_subscription("cert-manager")]},
+        {"cert-manager": _SUB_MANIFEST, "cert-manager.v1.14.4": _CSV_MANIFEST},
+        tmp_path / "audit.jsonl",
+        write_ops=Recorder(),
+    )
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "subscriptions", "subscriptions")
+        await until(pilot, lambda: bool(app.store.get("subscriptions", "operators")), label="rows")
+        assert app._actions.availability("delete_resource").invocable is True
+
+
+async def test_the_uninstall_refusal_is_only_the_redirected_identities(
+    tmp_path: Path,
+) -> None:
+    """Every row that keeps the generic delete keeps its own answer.
+
+    An InstallPlan and a PackageManifest are deleted through the generic
+    path, which reads no manifest, so a session without a manifest source
+    must not grey their Ctrl-D out. An *orphan* CSV stays out for the same
+    reason: its redirect only offers the operator uninstall when the store
+    already holds the owning Subscription, and this one has none loaded, so
+    Ctrl-D really is the ordinary delete.
+    """
+    app = make_app(
+        {
+            "installplans": [_installplan("install-abc12", approved=False)],
+            "packagemanifests": [_package("cert-manager")],
+            "clusterserviceversions": [_csv("argocd.v1.0.0", "Succeeded")],
+        },
+        audit_path=tmp_path / "audit.jsonl",
+        write_ops=Recorder(),
+    )
+    app._get_manifest = None
+    async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
+        for command, kind in (
+            ("installplans", "installplans"),
+            ("operators", "packagemanifests"),
+            ("csv", "clusterserviceversions"),
+        ):
+            await _navigate(pilot, command, kind)
+            await until(pilot, lambda: table.row_count == 1, label=f"{kind} row listed")
+            assert app._actions.availability("delete_resource").invocable is True
+
+
+# ---------------------------------------------------------------------------
+# The CSV that is redirected too (#388 round 14)
+# ---------------------------------------------------------------------------
+
+
+async def _owned_csv_session(app: KorvidApp, pilot: Any) -> None:
+    """Load the Subscription the CSV view's owner lookup reads, then land
+    on the CSV row.
+
+    The redirect resolves the owner from the *store*, so the link only
+    exists once the subscriptions view has been visited - which is exactly
+    the state both the handler and the probe have to agree about.
+    """
+    await _navigate(pilot, "subscriptions", "subscriptions")
+    await until(pilot, lambda: bool(app.store.get("subscriptions", "operators")), label="subs")
+    await _navigate(pilot, "clusterserviceversions", "clusterserviceversions")
+    await until(
+        pilot,
+        lambda: bool(app.store.get("clusterserviceversions", "operators")),
+        label="csvs",
+    )
+
+
+def _owned_csv_app(tmp_path: Path, *, manifests: dict[str, Any] | None = None) -> KorvidApp:
+    """A session whose CSV really is redirected: the owning Subscription
+    names it in `status.installedCSV`."""
+    return make_app(
+        {
+            "subscriptions": [_subscription("cert-manager")],
+            "clusterserviceversions": [_csv("cert-manager.v1.14.4", "Succeeded")],
+        },
+        manifests,
+        tmp_path / "audit.jsonl",
+        write_ops=Recorder(),
+    )
+
+
+async def test_a_csv_with_a_cached_owner_reports_the_uninstall_prerequisite(
+    tmp_path: Path,
+) -> None:
+    """Ctrl-D on a CSV the store knows a Subscription installed is not a
+    delete either: `csv_uninstall_redirect` hands it to the same operator
+    uninstall, which fetches the Subscription manifest before it can name
+    anything and refuses with "Uninstall unavailable: no manifest source".
+
+    Round 13 left this row offered, because the probe only claimed the
+    Subscription identity. The redirect's own condition - an owning
+    Subscription already in the store - is a synchronous store read, which
+    is exactly what a probe may do, so the row now carries the sentence the
+    keypress would produce.
+    """
+    fetch_log: list[str] = []
+    app = make_app(
+        {
+            "subscriptions": [_subscription("cert-manager")],
+            "clusterserviceversions": [_csv("cert-manager.v1.14.4", "Succeeded")],
+        },
+        audit_path=tmp_path / "audit.jsonl",
+        write_ops=Recorder(),
+        fetch_log=fetch_log,
+    )
+    app._get_manifest = None
+    async with app.run_test() as pilot:
+        await _owned_csv_session(app, pilot)
+        before = len(app._notifications)
+        availability = app._actions.availability("delete_resource")
+        assert availability.binding_enabled is True
+        assert availability.reason == UnavailableReason(
+            AvailabilityCode.MISSING_CAPABILITY, "Uninstall unavailable: no manifest source"
+        )
+        assert availability.invocable is False
+        # A probe fetches nothing and says nothing.
+        assert fetch_log == []
+        assert len(app._notifications) == before
+
+
+async def test_the_uninstall_key_on_an_owned_csv_notifies_the_same_sentence(
+    tmp_path: Path,
+) -> None:
+    """Handler parity: the probe is the silent twin of the refusal Ctrl-D
+    earns on that very row - no dialog, no write, the same sentence."""
+    ops = Recorder()
+    app = make_app(
+        {
+            "subscriptions": [_subscription("cert-manager")],
+            "clusterserviceversions": [_csv("cert-manager.v1.14.4", "Succeeded")],
+        },
+        audit_path=tmp_path / "audit.jsonl",
+        write_ops=ops,
+    )
+    app._get_manifest = None
+    async with app.run_test() as pilot:
+        await _owned_csv_session(app, pilot)
+        await pilot.press("ctrl+d")
+        await until(
+            pilot,
+            lambda: any(
+                n.message == "Uninstall unavailable: no manifest source" for n in app._notifications
+            ),
+            label="the redirected CSV key notified the missing manifest source",
+        )
+        assert ops.calls == []
+        assert len(app.screen_stack) == 1
+
+
+async def test_an_owned_csv_is_invocable_with_a_manifest_source(tmp_path: Path) -> None:
+    """The positive half: with the manifest source wired, Ctrl-D on the
+    same row really opens the operator uninstall."""
+    app = _owned_csv_app(
+        tmp_path,
+        manifests={"cert-manager": _SUB_MANIFEST, "cert-manager.v1.14.4": _CSV_MANIFEST},
+    )
+    async with app.run_test() as pilot:
+        await _owned_csv_session(app, pilot)
+        assert app._actions.availability("delete_resource").invocable is True
+
+
+async def test_a_csv_whose_owner_is_not_loaded_yet_keeps_the_generic_delete(
+    tmp_path: Path,
+) -> None:
+    """The owner lookup is store-only, and the probe must claim no more
+    than the handler does.
+
+    Half-loaded is the honest case: the Subscription exists in the cluster
+    but this session has not watched that kind yet, so `csv_uninstall_
+    redirect` finds nothing and falls through to the ordinary delete - which
+    reads no manifest and works. Greying the row out here would refuse a
+    delete that runs.
+    """
+    ops = Recorder()
+    app = make_app(
+        {
+            "subscriptions": [_subscription("cert-manager")],
+            "clusterserviceversions": [_csv("cert-manager.v1.14.4", "Succeeded")],
+        },
+        {"cert-manager.v1.14.4": _CSV_MANIFEST},
+        tmp_path / "audit.jsonl",
+        write_ops=ops,
+    )
+    app._get_manifest = None
+    async with app.run_test() as pilot:
+        # No visit to the subscriptions view: the link is not in the store.
+        await _navigate(pilot, "clusterserviceversions", "clusterserviceversions")
+        await until(
+            pilot,
+            lambda: bool(app.store.get("clusterserviceversions", "operators")),
+            label="csvs",
+        )
+        assert app.store.get("subscriptions", "operators") == []
+        assert app._actions.availability("delete_resource").invocable is True
+        await pilot.press("ctrl+d")
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="approval")
+        operation = app.screen._operation  # type: ignore[attr-defined]  # test peeks
+        assert "OPERATOR UNINSTALL" not in operation
+        assert "DELETE clusterserviceversions.operators.coreos.com/cert-manager.v1.14.4" in (
+            operation
+        )
+
+
+async def test_a_csv_a_cached_subscription_does_not_name_keeps_the_generic_delete(
+    tmp_path: Path,
+) -> None:
+    """A loaded Subscription that installed something else is not an owner.
+
+    The predicate matches `status.installedCSV` against this row's name, so
+    an unrelated operator's Subscription in the same namespace leaves the
+    CSV an orphan - and an orphan's Ctrl-D is the ordinary delete.
+    """
+    app = make_app(
+        {
+            "subscriptions": [_subscription("cert-manager")],
+            "clusterserviceversions": [_csv("argocd.v1.0.0", "Succeeded")],
+        },
+        audit_path=tmp_path / "audit.jsonl",
+        write_ops=Recorder(),
+    )
+    app._get_manifest = None
+    async with app.run_test() as pilot:
+        await _owned_csv_session(app, pilot)
+        assert app._actions.availability("delete_resource").invocable is True
+
+
+async def test_a_foreign_clusterserviceversions_alias_keeps_the_generic_delete(
+    tmp_path: Path,
+) -> None:
+    """The redirect is keyed on the OLM identity, not on the plural.
+
+    A same-plural CRD from another group that won the alias collision is a
+    different resource with a different delete, so neither the handler's
+    redirect nor the probe may claim it - even with a cached Subscription
+    naming a CSV of exactly this name.
+    """
+    foreign = ResourceMeta(
+        "ClusterServiceVersion", "clusterserviceversions", "example.com", "v1", True, ("csv",)
+    )
+    aliases = _aliases()
+    aliases["clusterserviceversions"] = foreign
+    aliases["csv"] = foreign
+    app = make_app(
+        {
+            "subscriptions": [_subscription("cert-manager")],
+            "clusterserviceversions": [_csv("cert-manager.v1.14.4", "Succeeded")],
+        },
+        audit_path=tmp_path / "audit.jsonl",
+        write_ops=Recorder(),
+        aliases=aliases,
+    )
+    app._get_manifest = None
+    async with app.run_test() as pilot:
+        await _owned_csv_session(app, pilot)
+        assert app._actions.availability("delete_resource").invocable is True
+
+
+async def test_a_foreign_subscriptions_alias_owns_nothing(tmp_path: Path) -> None:
+    """The owner lookup resolves the Subscription alias by group too.
+
+    When a same-plural CRD from another group holds `subscriptions`, this
+    session discovered no OLM Subscription API at all, so the CSV has no
+    known owner - and `csv_uninstall_redirect` falls through to the plain
+    delete, which is what the row must say.
+    """
+    foreign = ResourceMeta("Subscription", "subscriptions", "messaging.example", "v1", True)
+    aliases = _aliases()
+    aliases["subscriptions"] = foreign
+    app = make_app(
+        {
+            "subscriptions": [_subscription("cert-manager")],
+            "clusterserviceversions": [_csv("cert-manager.v1.14.4", "Succeeded")],
+        },
+        audit_path=tmp_path / "audit.jsonl",
+        write_ops=Recorder(),
+        aliases=aliases,
+    )
+    app._get_manifest = None
+    async with app.run_test() as pilot:
+        await _owned_csv_session(app, pilot)
+        assert app._actions.availability("delete_resource").invocable is True
+
+
+async def test_two_cached_subscriptions_naming_one_csv_still_redirect(
+    tmp_path: Path,
+) -> None:
+    """Ambiguity resolves the same way on both sides, because it is the
+    same call: the row and the keypress read one function over one store,
+    so a second Subscription claiming the same CSV cannot make the probe
+    and the handler disagree about which flow Ctrl-D reaches.
+    """
+    twin = dataclasses.replace(
+        _subscription("argocd"), installed_csv="cert-manager.v1.14.4", uid="sub-argocd"
+    )
+    ops = Recorder()
+    app = make_app(
+        {
+            "subscriptions": [_subscription("cert-manager"), twin],
+            "clusterserviceversions": [_csv("cert-manager.v1.14.4", "Succeeded")],
+        },
+        audit_path=tmp_path / "audit.jsonl",
+        write_ops=ops,
+    )
+    app._get_manifest = None
+    async with app.run_test() as pilot:
+        await _owned_csv_session(app, pilot)
+        assert app._actions.availability("delete_resource").reason == UnavailableReason(
+            AvailabilityCode.MISSING_CAPABILITY, "Uninstall unavailable: no manifest source"
+        )
+        await pilot.press("ctrl+d")
+        await until(
+            pilot,
+            lambda: any(
+                n.message == "Uninstall unavailable: no manifest source" for n in app._notifications
+            ),
+            label="the key took the redirect the row described",
+        )
+        assert ops.calls == []
+        assert len(app.screen_stack) == 1

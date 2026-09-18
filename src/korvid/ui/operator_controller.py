@@ -40,6 +40,8 @@ from korvid.k8s.olm import (
     resolve_olm_meta,
 )
 from korvid.k8s.writes import WriteOps
+from korvid.ui.action_availability import AvailabilityCode, UnavailableReason
+from korvid.ui.olm_ownership import olm_alias_key, owning_subscription
 from korvid.ui.ui_surface import UiSurface
 from korvid.ui.view_state import ViewState
 from korvid.ui.widgets.operator_install import OperatorInstallPrompt
@@ -83,6 +85,9 @@ class OperatorController:
         uid_intact_after_fetch: Callable[..., bool],
         precheck_keybinding_write: Callable[..., Any],
         write_target: Callable[[], tuple[ResourceMeta, str | None, str, str | None] | None],
+        #: The silent twin of `write_target`'s refusals, for the availability
+        #: probe: `WriteCoordinator.unavailable_reason`.
+        write_unavailable_reason: Callable[[], UnavailableReason | None],
     ) -> None:
         self._gate = gate
         self._view = view
@@ -93,6 +98,45 @@ class OperatorController:
         self._uid_intact_after_fetch = uid_intact_after_fetch
         self._precheck_keybinding_write = precheck_keybinding_write
         self._write_target = write_target
+        self._write_unavailable_reason = write_unavailable_reason
+
+    def unavailable_reason(self) -> UnavailableReason | None:
+        """Why `I` can't install/approve right now, or None - a
+        side-effect-free probe for the palette (issue #388 task 4).
+
+        Synchronous and silent, in `install_selected`'s own order: the write
+        client, then whatever `write_target()` would refuse, then the two
+        composition facts the flow it routes to reads next - the discovered
+        OLM Subscription API (packages only; approving an InstallPlan
+        creates nothing) and a manifest source. Which views bind the key
+        stays `ActionPolicy`'s call, and the awaited manifest fetch and its
+        uid revalidation stay out of a probe entirely."""
+        if self._write_ops() is None:
+            return UnavailableReason(
+                AvailabilityCode.MISSING_CAPABILITY, "Install unavailable in this session"
+            )
+        reason = self._write_unavailable_reason()
+        if reason is not None:
+            return reason
+        meta = self._view.aliases().get(self._view.canonical_kind(self._view.current_kind()))
+        if meta is None:
+            return None
+        if (meta.group, meta.plural) == (PACKAGES_GROUP, "packagemanifests"):
+            if resolve_olm_meta(self._view.aliases(), "subscriptions", OPERATORS_GROUP) is None:
+                return UnavailableReason(
+                    AvailabilityCode.MISSING_CAPABILITY,
+                    "Install unavailable: the OLM Subscription API was not discovered",
+                )
+            verb = "Install"
+        elif (meta.group, meta.plural) == (OPERATORS_GROUP, "installplans"):
+            verb = "Approve"
+        else:
+            return None
+        if self._get_manifest() is None:
+            return UnavailableReason(
+                AvailabilityCode.MISSING_CAPABILITY, f"{verb} unavailable: no manifest source"
+            )
+        return None
 
     async def install_selected(self) -> None:
         """`I`: on the operator catalog, install the selected package (wizard,
@@ -352,12 +396,12 @@ class OperatorController:
     def alias_key(self, plural: str) -> str | None:
         """The aliases key resolving to the OLM *plural* (prefers the
         group-qualified alias, like `resolve_olm_meta`), or None when the
-        API was not discovered."""
-        for key in (f"{plural}.{OPERATORS_GROUP}", plural):
-            meta = self._view.aliases().get(key)
-            if meta is not None and meta.group == OPERATORS_GROUP:
-                return key
-        return None
+        API was not discovered.
+
+        Delegated to `olm_ownership`, which the availability probe reads
+        too: the CSV redirect's condition must be one rule, not two copies
+        (#388 round 14)."""
+        return olm_alias_key(self._view, plural)
 
     def explain_missing_catalog(self) -> bool:
         """Explain an undiscovered operator catalog; True when it did.
@@ -679,33 +723,25 @@ class OperatorController:
         would reinstall a deleted CSV and offer the full uninstall instead
         (issue #117). False - the plain delete proceeds - when no owning
         Subscription is found; the lookup reads the store, so only
-        Subscriptions this session has watched count."""
-        sub_key = self.alias_key("subscriptions")
-        if sub_key is None:
-            return False
-        row = next(
-            (
-                obj
-                for obj in self._view.resources(
-                    self._view.canonical_kind(sub_key), self._view.current_scope()
-                )
-                if getattr(obj, "installed_csv", "") == name and (ns is None or obj.namespace == ns)
-            ),
-            None,
-        )
-        if row is None:
+        Subscriptions this session has watched count.
+
+        That lookup is `olm_ownership.owning_subscription`, shared with the
+        palette's delete probe: the row and the keypress have to agree on
+        which of the two flows Ctrl-D reaches (#388 round 14)."""
+        owner = owning_subscription(self._view, ns, name)
+        if owner is None:
             return False
         self._ui.notify(
-            f"{name} was installed by subscriptions/{row.name} - OLM would"
+            f"{name} was installed by subscriptions/{owner.name} - OLM would"
             " reinstall a deleted CSV; uninstalling the operator instead",
             severity="warning",
         )
         await self.uninstall(
-            self._view.aliases()[sub_key],
-            row.namespace or None,
-            row.name,
-            str(getattr(row, "uid", "") or "") or None,
-            fetch_kind=sub_key,
+            self._view.aliases()[owner.alias_key],
+            owner.namespace,
+            owner.name,
+            owner.uid,
+            fetch_kind=owner.alias_key,
             ctx=(csv_meta, ns, name),
         )
         return True

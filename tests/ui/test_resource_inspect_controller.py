@@ -26,8 +26,10 @@ from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.errors import ApiStatusError, KubeClientError
 from korvid.k8s.logs import LogLine
 from korvid.k8s.models import ContainerTrouble, PodSummary
+from korvid.ui.action_availability import CONTEXT_SWITCH_IN_PROGRESS, AvailabilityCode
 from korvid.ui.hints import EventsFetcher
 from korvid.ui.log_controller import StreamLogsFn
+from korvid.ui.read_availability import PaneSearch
 from korvid.ui.resource_inspect_controller import InspectSurface, ResourceInspectController
 from korvid.ui.widgets.containers_screen import ContainersScreen
 from korvid.ui.widgets.describe_screen import DescribeScreen
@@ -98,14 +100,23 @@ def _pod(
 
 _TROUBLE = (ContainerTrouble(container="app", reason="CrashLoopBackOff", message="boom"),)
 
+#: No read pane on screen - the default both fakes report.
+_NO_PANE = PaneSearch(displayed=False, hits=False)
+
 
 class FakeSurface(InspectSurface):
-    """The two mounted widgets: the row cursor and the hint strip."""
+    """The mounted widgets: the row cursor, the hint strip, and the
+    describe pane's search state the `n`/`N` probe reads."""
 
-    def __init__(self, row_key: str | None = "default/api-1") -> None:
+    def __init__(
+        self,
+        row_key: str | None = "default/api-1",
+        describe: PaneSearch = _NO_PANE,
+    ) -> None:
         self.row_key = row_key
         self.troubles: list[tuple[tuple[ContainerTrouble, ...], str | None]] = []
         self.cleared = 0
+        self.describe = describe
 
     def cursor_row_key(self) -> str | None:
         return self.row_key
@@ -118,6 +129,9 @@ class FakeSurface(InspectSurface):
     def clear_hint(self) -> None:
         self.cleared += 1
 
+    def describe_search(self) -> PaneSearch:
+        return self.describe
+
 
 class FakeShell:
     def __init__(self) -> None:
@@ -128,11 +142,15 @@ class FakeShell:
 
 
 class FakeLogs:
-    def __init__(self) -> None:
+    def __init__(self, search: PaneSearch = _NO_PANE) -> None:
         self.calls: list[tuple[str, list[tuple[str, str]]]] = []
+        self.search = search
 
     async def open_pane(self, namespace: str, targets: list[tuple[str, str]]) -> None:
         self.calls.append((namespace, targets))
+
+    def search_state(self) -> PaneSearch:
+        return self.search
 
 
 class FakeEvents(EventsFetcher):
@@ -588,3 +606,69 @@ def test_the_log_stream_port_carries_the_shared_stream_signature() -> None:
     stream signature. The port names that signature."""
     hints = get_type_hints(ResourceInspectController.__init__)
     assert hints["stream_logs"] == Callable[[], StreamLogsFn | None]
+
+
+# ---------------------------------------------------------------------------
+# availability probes (issue #388): the same guards, asked silently
+# ---------------------------------------------------------------------------
+
+
+def test_describe_probe_reports_the_guard_the_keypress_would_hit() -> None:
+    """Same order as `describe_selected`: the fetcher, then the switch, then
+    the selection - and not one notification while answering."""
+    missing = Harness(get_manifest=False)
+    reason = missing.controller.unavailable_reason("describe")
+    assert reason is not None
+    assert reason.message == "Describe unavailable"
+
+    switching = Harness()
+    switching.context.is_switching = True
+    assert switching.controller.unavailable_reason("describe") == CONTEXT_SWITCH_IN_PROGRESS
+
+    empty = Harness(selected=(None, None))
+    refused = empty.controller.unavailable_reason("describe")
+    assert refused is not None
+    assert refused.message == "No resource selected"
+    assert empty.ui.messages() == []
+
+    ready = Harness()
+    assert ready.controller.unavailable_reason("describe") is None
+    assert ready.ui.messages() == []
+
+
+def test_hint_details_probe_follows_the_row_under_the_cursor() -> None:
+    no_row = Harness(row_key=None)
+    refused = no_row.controller.unavailable_reason("hint_details")
+    assert refused is not None
+    assert refused.code is AvailabilityCode.NO_SELECTION
+
+    healthy = Harness(rows=[_pod()])
+    no_hint = healthy.controller.unavailable_reason("hint_details")
+    assert no_hint is not None
+    assert no_hint.code is AvailabilityCode.UNSUPPORTED_RESOURCE
+    assert healthy.ui.messages() == []
+
+    troubled = Harness(rows=[_pod(trouble=_TROUBLE)])
+    assert troubled.controller.unavailable_reason("hint_details") is None
+
+
+def test_search_probe_asks_the_describe_pane_before_the_log_pane() -> None:
+    """`n`/`N` reach the log pane only when the describe pane is closed, so
+    the probe consults them in that order - and neither pane is touched
+    beyond reading its state."""
+    h = Harness()
+    h.surface.describe = PaneSearch(displayed=True, hits=False)
+    h.logs.search = PaneSearch(displayed=True, hits=True)
+    refused = h.controller.unavailable_reason("log_search_next")
+    assert refused is not None
+    assert refused.code is AvailabilityCode.NO_ACTIVE_SEARCH
+
+    h.surface.describe = PaneSearch(displayed=False, hits=False)
+    assert h.controller.unavailable_reason("log_search_next") is None
+    assert h.ui.messages() == []
+
+
+def test_probes_answer_nothing_for_actions_this_controller_does_not_own() -> None:
+    h = Harness()
+    assert h.controller.unavailable_reason("delete_resource") is None
+    assert h.controller.unavailable_reason("shell") is None

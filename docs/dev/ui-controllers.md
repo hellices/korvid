@@ -536,6 +536,7 @@ owns the whole external-proposal inbox, which used to live on `KorvidApp`:
 | the update subscription and external-change handling | `subscribe()` registers the store callbacks; both are marshalled onto the UI loop through the `ProposalEvents` port, because the store is shared with the MCP server's thread |
 | the pending-proposal status label | `status_label()`; the app's `_refresh_status` reads it |
 | the `:proposals` review loop | Oldest first, one decision at a time, on a supervised worker in the `proposal-review` group through the `ReviewTasks` port — never `exclusive`, because cancelling a claimed execution would strand the record |
+| the `:proposals` availability probe | `unavailable_reason()` and `open_review()` share one `_refusal(has_pending=…)` decision, so the palette row and the keypress cannot drift; the probe reads the inbox with `ProposalStore.has_pending()` (TTL-aware, mutates nothing, fires no callback), while the keypress reads with `pending()` and therefore still sweeps, repaints and audits an expired proposal before refusing |
 | the approval dialog | `WriteCoordinator.confirm_screen`, resolved only by real key input, refused outright when another screen is stacked, and treated as a dismissal after `APPROVAL_TIMEOUT` (a dismissed proposal stays pending until its own TTL) |
 | operation rebuild and re-validation | The stored record never carries an executable closure: `build_write_op` runs again at review time, and context epoch, kube context, RBAC and the UID binding are each rechecked before the dialog *and* after the claim |
 | execution, settlement and failure | The claim is taken under the shared `nav_lock` so it linearizes with the `:ctx`/`:mcp` expiry sweeps; the mutation goes through `WriteCoordinator.run` and nothing else; a cancelled worker settles the record as `failed` with the cluster outcome explicitly uncertain, and the terminal audit append is shielded |
@@ -659,14 +660,16 @@ tests added before the move where the behaviour is not already pinned.
     execution, the dry-run/impact previews, and the protected-context marker.
     It implements `WriteGate` directly, so `AppWriteGate` is gone and the app
     keeps only the action/message entry points that raise a write flow.
-11. ~~Resource and node write workflows~~ — done (#187);
+11. ~~Resource and node write workflows~~ — done (#187, refined #388);
     `ResourceWriteController` (`ui/resource_write_controller.py`) owns delete,
     rollout restart, the editor round-trip, scale, in-place pod resize,
-    cordon/uncordon and drain, together with the drain worker/target state and
-    the workload-eligibility identities (`RESTARTABLE`, `SCALABLE`). It is
-    backed exclusively by `WriteCoordinator`; the app keeps thin action
-    delegates and re-exports the eligibility sets for `_ACTION_VIEWS` and the
-    agent write ops.
+    cordon/uncordon and drain, together with the drain worker/target state. It
+    is backed exclusively by `WriteCoordinator`; the app keeps thin action
+    delegates. The workload-eligibility identities (`RESTARTABLE`, `SCALABLE`)
+    now live in `ui/write_availability.py`, the side-effect-free module the
+    Action Palette's own probe reads; the controller imports them like any
+    other caller and delegates the palette's "why can't this run now?"
+    question to that module instead of answering it itself.
 12. ~~The agent session and its UI bridge~~ — done (#187);
     `AgentUiController` (`ui/agent_ui_controller.py`) owns the session /
     settings / model tier / follow state, the turn task with its
@@ -713,7 +716,13 @@ tests added before the move where the behaviour is not already pinned.
       hint-details overlay, the pods store lookups those share, and the
       pod-identity guard the debug and transfer flows bind an approved action
       to. It reads the two mounted widgets it needs — the table row cursor
-      and the hint strip — through `InspectSurface`.
+      and the hint strip — through `InspectSurface`, which also answers the
+      describe pane's search state for its silent availability probe
+      (`unavailable_reason`, #388): `d`, `h` and the `n`/`N` search step
+      report why they would do nothing without emitting the notification the
+      keypress emits. `WorkspaceController` answers the same question for
+      `g`. Both compose their answer in `ui/read_availability.py`, so the
+      refusal wording and its order live in one reviewed place.
     - `IntegrationController` (`ui/integration_controller.py`) owns the
       optional integrations and all four pieces of state the app used to
       hold: the MCP follow flag, and the telepresence hinted/probing/reprobe

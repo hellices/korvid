@@ -38,9 +38,9 @@ import contextlib
 import functools
 import logging
 from abc import ABC, abstractmethod
-from collections.abc import Awaitable, Callable, Coroutine, Mapping
+from collections.abc import Awaitable, Callable, Coroutine
 from time import monotonic
-from typing import Any, Protocol
+from typing import Any
 
 from rich.text import Text
 
@@ -57,18 +57,33 @@ from korvid.k8s.components import (
     installplan_components,
     reference_components,
 )
-from korvid.k8s.discovery import ResourceMeta, canonical_resource_alias, resolve_resource
+from korvid.k8s.discovery import canonical_resource_alias, resolve_resource
 from korvid.k8s.errors import ApiStatusError, KubeClientError
 from korvid.k8s.helm import HELM_RELEASES_META
 from korvid.k8s.olm import OPERATORS_GROUP
 from korvid.k8s.relations import drill_child, owned_by
+from korvid.ui.action_availability import UnavailableReason
 from korvid.ui.navigation import DrillLevel
 from korvid.ui.object_navigation import NavigationOrigin, default_scope_for, jump_to_object
+from korvid.ui.read_availability import (
+    NAMESPACE_LISTING_UNAVAILABLE,
+    SORT_ACTION_COLUMNS,
+    relationships_reason,
+    sort_column_reason,
+)
 from korvid.ui.ui_surface import UiSurface
 from korvid.ui.view_state import ViewState
 from korvid.ui.widgets.hierarchy_screen import HierarchyScreen, build_hierarchy
 from korvid.ui.widgets.relationship_screen import GotoResult, RelationshipScreen
 from korvid.ui.widgets.resource_table import validate_selected_view
+from korvid.ui.workspace_ports import (
+    KeyEvent,
+    MetricsLifecycle,
+    RelationshipLoading,
+    WatchLifecycle,
+    WorkspaceHints,
+    WorkspaceLogs,
+)
 from korvid.ui.workspace_state import HierarchyReturn, PaneState, WorkspaceState
 
 logger = logging.getLogger(__name__)
@@ -218,60 +233,6 @@ class ContextGuard(ABC):
     def crossed(self, epoch: int) -> bool:
         """True when a switch started or completed since *epoch* was captured."""
         return self.switching() or epoch != self.epoch()
-
-
-class WatchLifecycle(Protocol):
-    """The watch start/stop surface the workspace flows need (structural)."""
-
-    @property
-    def active(self) -> set[tuple[str, str]]: ...
-
-    async def start(self, kind: str, scope: str) -> None: ...
-
-    async def stop(self, kind: str, scope: str) -> None: ...
-
-
-class MetricsLifecycle(Protocol):
-    """The metrics poller start/stop surface (structural)."""
-
-    async def start(self, namespace: str | None) -> None: ...
-
-    async def stop(self) -> None: ...
-
-
-class RelationshipLoading(Protocol):
-    """The bounded relationship-snapshot loader (structural)."""
-
-    async def load(
-        self, root: GraphResource, namespace: str | None, aliases: Mapping[str, ResourceMeta]
-    ) -> Any: ...
-
-
-class WorkspaceLogs(Protocol):
-    """The log-pane teardown the navigation and close flows trigger."""
-
-    async def close_if_owned_by(self, pane: object) -> None: ...
-
-
-class WorkspaceHints(Protocol):
-    """The pods hint-strip refresh the focus flows trigger."""
-
-    def refresh_for_focus(self) -> None: ...
-
-
-class KeyEvent(Protocol):
-    """The subset of a Textual key event the pane chord consumes.
-
-    `stop`/`prevent_default` mirror `textual.events.Key`'s own signatures
-    (an optional bool, a `Message` return) so the real event satisfies this
-    structurally while a test can pass a lightweight fake.
-    """
-
-    key: str
-
-    def stop(self, stop: bool = ...) -> Any: ...
-
-    def prevent_default(self, prevent: bool = ...) -> Any: ...
 
 
 class WorkspaceController:
@@ -569,7 +530,8 @@ class WorkspaceController:
         """List the visible namespaces and open the inline picker over them."""
         list_namespaces = self._list_namespaces()
         if list_namespaces is None:
-            self._ui.notify("Namespace listing unavailable", severity="warning")
+            reason = NAMESPACE_LISTING_UNAVAILABLE
+            self._ui.notify(reason.message, severity=reason.severity, markup=False)
             return
         # The listing would race the client swap and could return either
         # cluster's namespaces — refuse up front.
@@ -601,6 +563,16 @@ class WorkspaceController:
             return
         self._surface.set_namespace_words(namespaces)
         self._surface.open_namespace_picker(namespaces)
+
+    def namespace_picker_unavailable_reason(self) -> UnavailableReason | None:
+        """Why `:ns` could not open its picker, or None — a silent probe
+        sharing the sentence `show_namespace_picker` refuses with. What
+        comes after belongs to the listing itself (RBAC, an API error, an
+        empty cluster), which only a real LIST answers — and a probe must
+        never perform one (#388).
+        """
+        listing = self._list_namespaces()
+        return None if listing is not None else NAMESPACE_LISTING_UNAVAILABLE
 
     def _notify_namespace_list_error(self, exc: ApiStatusError) -> None:
         """403 is an authorization boundary (issue #108): show one concise
@@ -722,14 +694,12 @@ class WorkspaceController:
     def sort_by(self, column: str) -> None:
         """Apply/flip a sort column for the current view kind and re-render."""
         kind = self._state.current_kind
-        if column in ("cpu", "mem") and kind != "pods":
-            # Only the pods view has CPU/MEM columns and a metrics feed;
-            # elsewhere the keypress would silently discard the current order.
-            return
-        view = self._view_for(kind)
-        if column != "name" and view is not None and view.replace:
-            # `replace: true` hides AGE/CPU/MEM — sorting by an invisible
-            # column would reorder rows with no indicator, so ignore it.
+        if self._sort_column_reason(column) is not None:
+            # No CPU/MEM column and no metrics feed, or a `replace: true`
+            # view that renders its own columns instead of AGE/CPU/MEM:
+            # the keypress would reorder rows with no visible indicator,
+            # so it is discarded. The palette row reads the same answer
+            # from the same helper, so the two cannot drift.
             return
         sorts = self._state.sorts
         sorts[kind] = toggle_sort(sorts.get(kind), column)
@@ -1395,6 +1365,36 @@ class WorkspaceController:
         uid = self._view.selected_uid(namespace or None, name)
         return GraphResource(
             group=meta.group, kind=meta.kind, namespace=namespace, name=name, uid=uid
+        )
+
+    def _sort_column_reason(self, column: str) -> UnavailableReason | None:
+        """Why `A`/`C`/`M` would sort nothing on the focused pane's view."""
+        kind = self._state.current_kind
+        view = self._view_for(kind)
+        return sort_column_reason(column, kind=kind, replaced=view is not None and view.replace)
+
+    def unavailable_reason(self, action: str) -> UnavailableReason | None:
+        """Why `g`, `A`, `C` or `M` can't run right now, or None — a silent
+        probe (#388).
+
+        The Action Palette shows `relationships` whatever view is on
+        screen, so it has to know when the key would only warn: the same
+        guards `show_relationships` and `_selected_relationship_root`
+        apply, in the same order, read without their notifications. The
+        three column sort keys are quieter still — `sort_by` discards them
+        without a warning — and share that handler's own helper.
+        """
+        column = SORT_ACTION_COLUMNS.get(action)
+        if column is not None:
+            return self._sort_column_reason(column)
+        if action != "relationships":
+            return None
+        return relationships_reason(
+            loader=self._relationship_loader is not None,
+            switching=self._context.switching(),
+            meta=self._view.aliases().get(self._state.current_kind),
+            kind=self._state.current_kind,
+            selected=self._view.selected_ns_name(notify=False)[1] is not None,
         )
 
     def show_relationships(self) -> None:

@@ -18,6 +18,7 @@ from korvid.core.store import ResourceStore, Summary
 from korvid.core.watch import WatchManager
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.models import GenericSummary, PodSummary
+from korvid.ui.action_availability import AvailabilityCode, UnavailableReason
 from korvid.ui.app import KorvidApp
 from korvid.ui.debug import DebugController
 from korvid.ui.shell import (
@@ -33,7 +34,7 @@ from korvid.ui.shell import (
 from korvid.ui.widgets.confirm_screen import ConfirmScreen, ImagePrompt
 from korvid.ui.widgets.pick_screen import PickScreen
 from korvid.ui.widgets.resource_table import ResourceTable
-from tests.app_factory import build_test_app
+from tests.app_factory import build_test_app, session_kubectl
 
 from .waits import until
 
@@ -311,6 +312,10 @@ def make_app(
     ) = _DEFAULT_MANIFEST,
     debug_images: dict[str, str] | None = None,
     debug_default_image: str | None = None,
+    #: The session's `kubectl` snapshot, decided here because the runtime
+    #: resolves it while it is assembled (#388 round 14) - a patch around
+    #: the keypress would be too late, and the real PATH is the runner's.
+    kubectl: bool = True,
 ) -> KorvidApp:
     store = ResourceStore()
     all_data: dict[str, list[Summary]] = {"pods": list(pods)}
@@ -341,21 +346,22 @@ def make_app(
     else:
         manifest_source = get_manifest
 
-    return build_test_app(
-        config=KorvidConfig(
-            namespace="default",
-            kube_context=kube_context,
-            readonly=readonly,
-            debug_images=debug_images,
-            debug_default_image=debug_default_image,
-        ),
-        store=store,
-        watch_manager=WatchManager(store, source),
-        aliases=dict(_TEST_ALIASES),
-        audit=audit,
-        get_manifest=manifest_source,
-        check_permission=None if permitted is None else check_permission,
-    )
+    with session_kubectl(kubectl):
+        return build_test_app(
+            config=KorvidConfig(
+                namespace="default",
+                kube_context=kube_context,
+                readonly=readonly,
+                debug_images=debug_images,
+                debug_default_image=debug_default_image,
+            ),
+            store=store,
+            watch_manager=WatchManager(store, source),
+            aliases=dict(_TEST_ALIASES),
+            audit=audit,
+            get_manifest=manifest_source,
+            check_permission=None if permitted is None else check_permission,
+        )
 
 
 @contextmanager
@@ -428,11 +434,8 @@ def _recording_call(records: list[list[str]], exit_code: int = 1) -> Callable[[l
 
 async def test_shell_kubectl_missing_error_notify() -> None:
     """s with kubectl missing → error notification; subprocess.call NOT invoked."""
-    app = make_app([_pod("api-1")])
-    with (
-        patch("shutil.which", return_value=None),
-        patch("subprocess.call") as mock_call,
-    ):
+    app = make_app([_pod("api-1")], kubectl=False)
+    with patch("subprocess.call") as mock_call:
         async with app.run_test() as pilot:
             await until(
                 pilot,
@@ -1971,3 +1974,62 @@ async def test_shell_picker_cancelled_when_context_switched_while_open() -> None
                 label="picker epoch refusal",
             )
             mock_call.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Side-effect-free availability probes (#388 task 4)
+# ---------------------------------------------------------------------------
+
+
+async def test_shell_availability_reports_missing_kubectl_without_notifying() -> None:
+    """The palette probe reports the same refusal the `s` key notifies when
+    kubectl is absent, and emits no notification of its own (#388 task 4).
+
+    The session is composed without `kubectl` (#388 round 14): the snapshot
+    is taken while the runtime is assembled, so a patch around the probe
+    would arrive after the answer was already fixed.
+    """
+    app = make_app([_pod("api-1")], kubectl=False)
+    async with app.run_test() as pilot:
+        await until(
+            pilot,
+            lambda: app._inspect_surface.cursor_row_key() == "default/api-1",
+            label="pod row selected",
+        )
+        before = len(app._notifications)
+        assert app._shell.unavailable_reason() == UnavailableReason(
+            AvailabilityCode.MISSING_CAPABILITY,
+            "kubectl not found on PATH — shell-in requires kubectl",
+            severity="error",
+        )
+        assert len(app._notifications) == before
+        availability = app._actions.availability("shell")
+        assert availability.binding_enabled is True
+        assert availability.invocable is False
+        assert len(app._notifications) == before
+
+
+async def test_shell_availability_reports_no_selection_before_kubectl() -> None:
+    """`shell()` reads the selection before the PATH check, so the probe
+    must report the same refusal first."""
+    app = make_app([], kubectl=False)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        before = len(app._notifications)
+        assert app._shell.unavailable_reason() == UnavailableReason(
+            AvailabilityCode.NO_SELECTION, "No resource selected"
+        )
+        assert len(app._notifications) == before
+
+
+async def test_shell_availability_is_none_when_the_shell_would_launch() -> None:
+    app = make_app([_pod("api-1")])
+    with patch("shutil.which", return_value="/usr/bin/kubectl"):
+        async with app.run_test() as pilot:
+            await until(
+                pilot,
+                lambda: app._inspect_surface.cursor_row_key() == "default/api-1",
+                label="pod row selected",
+            )
+            assert app._shell.unavailable_reason() is None
+            assert app._actions.availability("shell").invocable is True

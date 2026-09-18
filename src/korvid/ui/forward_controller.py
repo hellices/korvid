@@ -30,7 +30,6 @@ import asyncio
 import contextlib
 import functools
 import logging
-import shutil
 import threading
 from collections import deque
 from collections.abc import Callable
@@ -49,6 +48,11 @@ from korvid.core.portforward import (
 )
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.portforward import FORWARDABLE_KINDS, forward_target_gvr
+from korvid.ui.action_availability import (
+    CONTEXT_SWITCH_IN_PROGRESS,
+    AvailabilityCode,
+    UnavailableReason,
+)
 from korvid.ui.ui_surface import UiSurface
 from korvid.ui.view_state import ViewState
 from korvid.ui.widgets.port_forward_screen import ForwardListScreen, PortForwardScreen
@@ -59,6 +63,14 @@ logger = logging.getLogger(__name__)
 #: How long a freshly launched forward gets to report ready before the
 #: confirmation gives up and reports the failure instead.
 _FORWARD_READY_SECONDS = 5.0
+
+#: The one wording for "this build has no forward registry". Three callers
+#: share it - the `shift+f` dialog's capability check, the `:pf` list probe,
+#: and `open_list`'s own notification - so the palette row and the command
+#: that row describes can never say different things (#388 round 10).
+_FORWARD_UNAVAILABLE = UnavailableReason(
+    AvailabilityCode.MISSING_CAPABILITY, "Port-forward unavailable in this build"
+)
 
 
 class ForwardController:
@@ -73,6 +85,9 @@ class ForwardController:
         forwards: Callable[[], ForwardRegistry | None],
         audit: Callable[[], AuditLog | None],
         get_manifest: Callable[[], Callable[[str, str | None, str], Any] | None],
+        #: The session's `kubectl` snapshot, shared with the shell owner
+        #: and read by both `open_dialog` and its palette probe.
+        kubectl_available: Callable[[], bool],
     ) -> None:
         self._gate = gate
         self._ui = ui
@@ -80,6 +95,7 @@ class ForwardController:
         self._forwards_registry = forwards
         self._audit_log = audit
         self._get_manifest_fn = get_manifest
+        self._kubectl_available = kubectl_available
         #: local ports whose forward died; the list screen marks them broken.
         self._broken_forwards: set[int] = set()
         #: audit records queued off the message pump - a slow disk must not
@@ -159,6 +175,65 @@ class ForwardController:
         """Accept forwards again after a `:ctx` switch retargets the registry."""
         self._forwards_closing = False
 
+    def _capability_reason(self) -> UnavailableReason | None:
+        """The two composition facts a forward needs, in `open_dialog`'s own
+        order: a registry in this build, and a `kubectl` this session found.
+        Shared by the keypress (which notifies the message) and the palette
+        probe (which returns it silently), so the two cannot drift.
+
+        The `kubectl` half is the session's snapshot (`KubectlPresence`),
+        taken while the runtime was composed rather than scanned here: the
+        palette asks this owner every time it derives its catalog, and a
+        probe must do no I/O (#388 round 14).
+        """
+        reason = self.list_unavailable_reason()
+        if reason is not None:
+            return reason
+        if not self._kubectl_available():
+            return UnavailableReason(
+                AvailabilityCode.MISSING_CAPABILITY,
+                "kubectl not found on PATH — port-forward requires kubectl",
+                severity="error",
+            )
+        return None
+
+    def list_unavailable_reason(self) -> UnavailableReason | None:
+        """Why `:pf` can't open the forward list right now, or None -
+        a side-effect-free probe for the palette (issue #388 round 10).
+
+        The list is not the dialog, so it asks for less: `open_list` shows
+        the forwards this session already started and refuses on exactly one
+        fact - no registry in this build. It never reads the selected row
+        (there is nothing to target) and never runs `kubectl` (nothing is
+        launched), so reporting either would grey out a `:pf` row that
+        works. Synchronous and silent: the notification belongs to the real
+        command, and `open_list` notifies this same message, from here, so
+        the two cannot drift.
+        """
+        if self._forwards_registry() is None:
+            return _FORWARD_UNAVAILABLE
+        return None
+
+    def unavailable_reason(self) -> UnavailableReason | None:
+        """Why `shift+f` can't open the forward dialog right now, or None -
+        a side-effect-free probe for the palette (issue #388 task 4).
+
+        Synchronous and silent: it reads the same composition state
+        `open_dialog` checks, in the same order (context switch, registry,
+        `kubectl`, selection), and never notifies. Which views bind the key
+        stays `ActionPolicy`'s call, and the Service-has-no-TCP-port refusal
+        stays out: it needs an awaited manifest fetch, which a palette probe
+        must never perform."""
+        if self._gate.switching():
+            return CONTEXT_SWITCH_IN_PROGRESS
+        reason = self._capability_reason()
+        if reason is not None:
+            return reason
+        namespace, name = self._view.selected_ns_name(notify=False)
+        if namespace is None or name is None:
+            return UnavailableReason(AvailabilityCode.NO_SELECTION, "No resource selected")
+        return None
+
     async def open_dialog(self) -> None:
         """`shift+f` — resolve the selected target and open the forward dialog.
 
@@ -182,13 +257,9 @@ class ForwardController:
         if not self._gate.reads_allowed():
             return
         epoch = self._gate.epoch()
-        if self._forwards_registry() is None:
-            self._ui.notify("Port-forward unavailable in this build", severity="warning")
-            return
-        if shutil.which("kubectl") is None:
-            self._ui.notify(
-                "kubectl not found on PATH — port-forward requires kubectl", severity="error"
-            )
+        reason = self._capability_reason()
+        if reason is not None:
+            self._ui.notify(reason.message, severity=reason.severity, markup=False)
             return
         namespace, name = self._view.selected_ns_name()
         if namespace is None or name is None:
@@ -666,7 +737,11 @@ class ForwardController:
         """`:pf` — the active-forwards screen with stop / re-attach keys."""
         registry = self._forwards_registry()
         if registry is None:
-            self._ui.notify("Port-forward unavailable in this build", severity="warning")
+            reason = _FORWARD_UNAVAILABLE
+            # markup=False, exactly as `open_dialog` and the palette emit the
+            # same reason: one `UnavailableReason` shown by two paths has to
+            # reach the user as the same characters on both.
+            self._ui.notify(reason.message, severity=reason.severity, markup=False)
             return
 
         def _on_stop(record: ForwardRecord) -> None:

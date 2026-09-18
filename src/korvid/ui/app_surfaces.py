@@ -55,6 +55,7 @@ from korvid.ui.proposal_controller import (
     ProposalScreens,
     ReviewTasks,
 )
+from korvid.ui.read_availability import PaneSearch
 from korvid.ui.resource_inspect_controller import InspectSurface
 from korvid.ui.transfer import TransferScreens
 from korvid.ui.ui_surface import ScreenResultT, Severity, UiSurface
@@ -433,6 +434,20 @@ class AppInspectSurface(InspectSurface):
         with contextlib.suppress(NoMatches):  # strip unmounted during shutdown
             self._app._hint_strip.clear_hint()
 
+    def describe_search(self) -> PaneSearch:
+        """The describe pane's current search state, read silently.
+
+        A live lookup like the others, and tolerant of the widget being
+        gone: the palette can ask this before the tree is composed or
+        after it is torn down, where a real `n`/`N` keypress could never
+        arrive. Nothing here opens, runs or moves a search.
+        """
+        try:
+            pane = self._app._describe_pane
+        except NoMatches:
+            return PaneSearch(displayed=False, hits=False)
+        return PaneSearch(displayed=pane.display, hits=pane.has_search_hits)
+
 
 class AppTransferScreens(TransferScreens):
     """Nominal `TransferScreens` adapter over `KorvidApp`'s screen stack.
@@ -520,15 +535,17 @@ class AppViewState(ViewState):
     def default_namespace(self) -> str | None:
         return self._app.config.namespace
 
-    def selected_ns_name(self) -> tuple[str | None, str | None]:
+    def selected_ns_name(self, *, notify: bool = True) -> tuple[str | None, str | None]:
         table = self._app._focused_table()
         row_key = _row_key_at_cursor(table)
         if row_key is None:
-            self._app.notify("No resource selected", severity="warning")
+            if notify:
+                self._app.notify("No resource selected", severity="warning")
             return None, None
         parts = row_key.split("/", 1)
         if len(parts) != 2:
-            self._app.notify("Cannot determine resource from selection", severity="warning")
+            if notify:
+                self._app.notify("Cannot determine resource from selection", severity="warning")
             return None, None
         return parts[0], parts[1]
 

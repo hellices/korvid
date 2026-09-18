@@ -7,13 +7,15 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pytest
 from textual.binding import Binding
 
 from korvid.core.config import KorvidConfig
-from korvid.core.keybindings import plan_keybindings
+from korvid.core.keybindings import APPROVAL_KEYS, plan_keybindings
 from korvid.core.session_timeline import SessionTimeline
 from korvid.ui.app import KorvidApp
-from korvid.ui.widgets.help_screen import HelpScreen
+from korvid.ui.widgets.action_palette import ActionPaletteScreen
+from korvid.ui.widgets.help_screen import HelpScreen, key_label
 from korvid.ui.widgets.resource_table import ResourceTable
 from korvid.ui.widgets.session_timeline_screen import SessionTimelineScreen
 
@@ -295,3 +297,264 @@ async def test_favorite_digit_keys_are_reserved_against_overrides() -> None:
             label="reserved-key warning notified",
         )
         assert app._keybinding_overrides == {}
+
+
+@pytest.mark.parametrize("key", sorted(APPROVAL_KEYS))
+async def test_palette_binding_cannot_take_an_approval_dialog_key(key: str) -> None:
+    """`open_action_palette` is a priority binding (it fires over any
+    screen), so the planner must refuse every key the approval dialogs
+    listen for - the palette may never become the confirm keystroke."""
+    app = make_app([_pod("web")], config=_config({"open_action_palette": key}))
+    async with app.run_test() as pilot:
+        await until(
+            pilot,
+            lambda: any("approval" in n.message for n in app._notifications),
+            label="priority/approval-key warning notified",
+        )
+        assert app._keybinding_overrides == {}
+
+
+async def test_palette_binding_is_remappable() -> None:
+    """Ctrl-P is only the *default*: the palette open is a normal, id-carrying
+    binding the `keybindings:` section can move (issue #35)."""
+    app = make_app([_pod("web")], config=_config({"open_action_palette": "ctrl+j"}))
+    async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 1, label="pod loaded")
+        await pilot.press("ctrl+p")  # freed default must be inert now
+        await pilot.pause()
+        assert not isinstance(app.screen, ActionPaletteScreen)
+        await pilot.press("ctrl+j")
+        await until(
+            pilot,
+            lambda: isinstance(app.screen, ActionPaletteScreen),
+            label="palette opens on ctrl+j",
+        )
+
+
+async def test_escape_closes_a_remapped_palette_and_the_open_key_cannot_stack_one() -> None:
+    """Escape is the documented universal close, remap or not (issue #388).
+
+    Korvid's modals all close on Escape and the palette says so on its own
+    hint line, so a remapped open key does not need to become a second,
+    dynamically-bound close key - and a screen binding that tracked the
+    config would be one more priority key resolved against whatever the
+    user chose. What the remapped key must not do is *stack*: it stays a
+    palette open, and the surface guard refuses an open over an open modal,
+    so pressing it again leaves exactly one palette on the stack.
+    """
+    app = make_app([_pod("web")], config=_config({"open_action_palette": "ctrl+j"}))
+    async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 1, label="pod loaded")
+        table.focus()
+        await pilot.press("ctrl+j")
+        await until(
+            pilot,
+            lambda: isinstance(app.screen, ActionPaletteScreen),
+            label="palette opens on ctrl+j",
+        )
+        await pilot.press("ctrl+j")
+        await pilot.pause()
+        assert len([s for s in app.screen_stack if isinstance(s, ActionPaletteScreen)]) == 1
+        await pilot.press("escape")
+        await until(
+            pilot,
+            lambda: app.screen is app.screen_stack[0],
+            label="escape closes the remapped palette",
+        )
+        assert not any(isinstance(s, ActionPaletteScreen) for s in app.screen_stack)
+        assert app.focused is table
+
+
+def _palette_close_keys() -> tuple[str, ...]:
+    """The keys the palette modal itself dismisses on, from its own BINDINGS.
+
+    Read from the screen rather than spelled here: these are static screen
+    bindings that no `keybindings:` remap touches, and the documentation
+    contract below has to be about the keys the modal really binds.
+    """
+    return tuple(
+        key
+        for binding in ActionPaletteScreen.BINDINGS
+        if isinstance(binding, Binding) and binding.action == "cancel"
+        for key in binding.key.split(",")
+    )
+
+
+async def test_the_built_in_close_key_still_closes_a_remapped_palette() -> None:
+    """Moving the *open* key does not move the modal's own close keys.
+
+    `open_action_palette` is remappable like any other action, but the
+    screen binds `escape,ctrl+p` to its cancel action statically - so the
+    default `Ctrl-P`, inert as an opener once the remap freed it, still
+    closes the palette a remapped key opened. That is a promise the page
+    makes, so it is pinned here as behaviour too (#388 round 10).
+    """
+    app = make_app([_pod("web")], config=_config({"open_action_palette": "ctrl+j"}))
+    async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 1, label="pod loaded")
+        table.focus()
+        await pilot.press("ctrl+j")
+        await until(
+            pilot,
+            lambda: isinstance(app.screen, ActionPaletteScreen),
+            label="palette opens on ctrl+j",
+        )
+        await pilot.press("ctrl+p")
+        await until(
+            pilot,
+            lambda: app.screen is app.screen_stack[0],
+            label="the built-in ctrl+p closes the remapped palette",
+        )
+        assert not any(isinstance(s, ActionPaletteScreen) for s in app.screen_stack)
+        assert app.focused is table
+
+
+async def test_priority_remap_cannot_steal_the_palettes_fixed_ctrl_p_close() -> None:
+    app = make_app(
+        [_pod("web")],
+        config=_config(
+            {
+                "open_action_palette": "ctrl+j",
+                "toggle_agent": "ctrl+p",
+            }
+        ),
+    )
+    async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 1, label="pod loaded")
+        await until(
+            pilot,
+            lambda: any("fixed modal key" in n.message for n in app._notifications),
+            label="fixed palette close-key warning notified",
+        )
+        assert app._keybinding_overrides == {"open_action_palette": "ctrl+j"}
+
+        table.focus()
+        await pilot.press("ctrl+j")
+        await until(
+            pilot,
+            lambda: isinstance(app.screen, ActionPaletteScreen),
+            label="palette opens on ctrl+j",
+        )
+        await pilot.press("ctrl+p")
+        await until(
+            pilot,
+            lambda: app.screen is app.screen_stack[0],
+            label="fixed ctrl+p closes the remapped palette",
+        )
+        assert not any(isinstance(s, ActionPaletteScreen) for s in app.screen_stack)
+        assert app.focused is table
+
+
+def test_keybindings_doc_names_every_palette_close_key_after_a_remap() -> None:
+    """The remap section has to say how the palette closes afterwards.
+
+    A reader who has just moved `open_action_palette` needs to know that
+    neither close key moved with it. Both are derived from the screen's own
+    `BINDINGS` and required by their `key_label` spelling, so the page can
+    neither promise a key the modal stopped binding nor stay silent about
+    one it gained.
+    """
+    closes = _palette_close_keys()
+    assert closes == ("escape", "ctrl+p")
+    doc = Path(__file__).parents[2].joinpath("docs", "keybindings.md").read_text()
+    paragraph = next(block for block in doc.split("\n\n") if "`open_action_palette`" in block)
+    flat = " ".join(paragraph.split())
+    for key in closes:
+        label = key_label(key)
+        assert re.search(rf"`{re.escape(label)}`[^.]*close", flat, re.I), (
+            f"the remap section must say `{label}` closes the palette"
+        )
+    assert re.search(r"whichever key opened it", flat, re.I), (
+        "the remap section must say the close keys hold whichever key opened the palette"
+    )
+
+
+def test_keybindings_doc_documents_the_action_palette_key() -> None:
+    """The palette is only discoverable if the key is written down.
+
+    The documented key is derived from the shipped binding, so a future
+    default change fails here instead of leaving the page quietly wrong,
+    and the two facts that make the surface honest have to be on the page:
+    an action that does not apply stays searchable *with its reason*, and
+    the key itself is remappable like any other.
+    """
+    defaults = _default_keys("open_action_palette")
+    assert defaults == ("ctrl+p",), "update docs/keybindings.md with the new default key"
+    doc = Path(__file__).parents[2].joinpath("docs", "keybindings.md").read_text()
+    flat = " ".join(doc.split())
+    assert "`Ctrl-P`" in doc, "docs/keybindings.md must document the Action Palette key"
+    row = [line for line in doc.splitlines() if line.startswith("|") and "`Ctrl-P`" in line]
+    assert len(row) == 1, "the Action Palette needs exactly one key-table row"
+    assert re.search(r"search|palette", row[0], re.I), (
+        "the Ctrl-P row must say the key searches actions"
+    )
+    assert re.search(r"unavailable|not apply|does not apply", flat, re.I), (
+        "docs/keybindings.md must explain that unavailable actions stay searchable"
+    )
+    assert re.search(r"reason", flat, re.I), (
+        "docs/keybindings.md must say an unavailable action shows why"
+    )
+    assert re.search(r"`Esc`[^.]*close", flat, re.I), (
+        "docs/keybindings.md must document Esc as the palette's close key"
+    )
+    assert re.search(r"`open_action_palette`", flat), (
+        "docs/keybindings.md must name the remappable action id for the palette"
+    )
+
+
+def test_keybindings_doc_describes_the_catalog_the_palette_actually_searches() -> None:
+    """`Ctrl-P` searches the bound app actions and the built-in `:` commands
+    that opt in - not the resource views (`:pods`, `:deploy`), which are
+    parsed from the live alias table and never enumerated; not `:q`, which
+    opts out because the bound Quit action is already its single entry; and
+    not the parameterized favorite-namespace shortcuts (`1`-`9`), which have
+    no single key to invoke generically from the palette (issue #108).
+    Promising "every ... `:` command" sends a reader looking for rows the
+    palette will never show, and implies a duplicate `:q`; leaving the
+    favorites unmentioned leaves a reader hunting the palette for a shortcut
+    that `?` documents instead.
+    """
+    from korvid.ui.app_bindings import APP_BINDINGS, as_binding, base_action
+    from korvid.ui.command import COMMANDS
+
+    omitted = [descriptor.aliases for descriptor in COMMANDS if descriptor.palette is None]
+    assert omitted == [("q", "quit")], "update docs/keybindings.md: the omissions changed"
+
+    parameterized = sorted(
+        {
+            base_action(as_binding(raw).action)
+            for raw in APP_BINDINGS
+            if "(" in as_binding(raw).action
+        }
+    )
+    assert parameterized == ["favorite_namespace"], (
+        "update docs/keybindings.md: the parameterized-action omissions changed"
+    )
+
+    doc = Path(__file__).parents[2].joinpath("docs", "keybindings.md").read_text()
+    paragraph = next(block for block in doc.split("\n\n") if "opens the Action Palette" in block)
+    flat = " ".join(paragraph.split())
+    assert "every app action and `:` command" not in flat, (
+        "docs/keybindings.md must not promise every `:` command"
+    )
+    assert "built-in `:` commands" in flat, (
+        "docs/keybindings.md must say the palette searches the built-in commands"
+    )
+    assert "`:pods`" in flat, "docs/keybindings.md must say resource views are not palette rows"
+    assert re.search(r"`:q`.{0,80}Quit", flat), (
+        "docs/keybindings.md must explain that `:q` is not a second Quit row"
+    )
+    assert re.search(r"`1`.{0,10}`9`", flat), (
+        "docs/keybindings.md must name the 1-9 favorite-namespace shortcuts"
+    )
+    assert re.search(r"not.{0,40}(a )?(palette )?(row|entry)", flat, re.I), (
+        "docs/keybindings.md must say the favorite-namespace shortcuts are not palette rows"
+    )
+    assert "`?`" in flat, "docs/keybindings.md must point to `?` for the favorites"
+    assert re.search(r"`:ns`|numeric key", flat, re.I), (
+        "docs/keybindings.md must name the route that still reaches a favorite namespace"
+    )

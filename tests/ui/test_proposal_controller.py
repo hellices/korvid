@@ -34,6 +34,7 @@ from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.writes import WriteOps
 from korvid.tools.proposals import ProposalStore, WriteProposal
+from korvid.ui.action_availability import AvailabilityCode, UnavailableReason
 from korvid.ui.agent_ui_controller import AgentProposals, WriteOpBuild
 from korvid.ui.proposal_controller import (
     ProposalController,
@@ -645,6 +646,134 @@ async def test_a_second_review_is_refused_while_one_is_open(env: Env) -> None:
     assert any("already open" in message for message in env.ui.messages())
     env.ui.answer(None)
     await env.tasks.finish()
+
+
+# ---------------------------------------------------------------------------
+# The palette probe: the same three refusals, in the same order, silently
+# ---------------------------------------------------------------------------
+
+
+async def test_the_probe_reports_the_disabled_feature_without_notifying(disabled: Env) -> None:
+    """`:proposals` with `mcp.write_proposals` off earns one refusal from
+    the keypress, so the palette must grey the row with that same sentence
+    - and say nothing while it builds the list (issue #388, round 6)."""
+    reason = disabled.controller.unavailable_reason()
+    assert reason == UnavailableReason(
+        AvailabilityCode.MISSING_CAPABILITY,
+        "External write proposals are disabled (set mcp.write_proposals: true)",
+    )
+    assert disabled.ui.messages() == []
+    disabled.controller.open_review()
+    assert reason is not None
+    assert disabled.ui.messages() == [reason.message]
+
+
+async def test_the_probe_reports_an_empty_inbox_without_notifying(env: Env) -> None:
+    """An enabled but empty inbox: the command notifies as information, so
+    the row's reason carries that severity rather than a warning."""
+    reason = env.controller.unavailable_reason()
+    assert reason == UnavailableReason(
+        AvailabilityCode.NO_SELECTION, "No pending write proposals", severity="information"
+    )
+    assert env.ui.messages() == []
+    env.controller.open_review()
+    assert reason is not None
+    assert env.ui.messages() == [reason.message]
+
+
+async def test_the_probe_reports_a_review_that_is_already_open(env: Env) -> None:
+    """A live review worker is the third refusal `open_review` makes, and
+    the probe must reach it in the same order: a store, then something
+    pending, then the one-at-a-time rule."""
+    await env.submit()
+    env.controller.open_review()
+    await env.dialog()
+    before = len(env.ui.messages())
+    reason = env.controller.unavailable_reason()
+    assert reason == UnavailableReason(
+        AvailabilityCode.PROTECTED_UI, "A proposal review is already open"
+    )
+    assert len(env.ui.messages()) == before
+    env.ui.answer(None)
+    await env.tasks.finish()
+
+
+async def test_the_probe_answers_yes_with_a_proposal_waiting(env: Env) -> None:
+    """Nothing refuses a pending inbox with no review open, so the row is
+    invocable - and the probe still starts no review of its own."""
+    await env.submit()
+    assert env.controller.unavailable_reason() is None
+    assert env.tasks.tasks == []
+
+
+def _expiring_env(tmp_path: Path, ttl: float = 10.0) -> tuple[Env, list[float]]:
+    """A subscribed controller over a fake-clock store, so a test can make
+    the inbox go stale between two calls without sleeping."""
+    clock = [0.0]
+    env = Env(tmp_path=tmp_path, store=ProposalStore(ttl=ttl, clock=lambda: clock[0]))
+    env.controller.subscribe()
+    return env, clock
+
+
+async def test_the_probe_reports_a_stale_inbox_without_expiring_it(tmp_path: Path) -> None:
+    """The probe must have no lifecycle side effect (issue #388, round 7).
+
+    Deriving a palette row - or re-deriving it on every dismissal - asked
+    `ProposalStore.pending()`, whose lazy TTL sweep *performs* the
+    `pending -> expired` transition: subscribers fire and the expiry hook
+    reaches the app, which marshals an audit append. Merely looking at the
+    inbox must not spend I/O on it; the answer is the same either way.
+    """
+    env, clock = _expiring_env(tmp_path)
+    await env.submit()
+    assert env.store is not None
+    proposal = env.store.pending()[0]
+    clock[0] = 100.0
+    changes = env.events.changes
+    outcomes = env.outcomes()
+    notifications = len(env.ui.notifications)
+
+    reason = env.controller.unavailable_reason()
+
+    assert reason == UnavailableReason(
+        AvailabilityCode.NO_SELECTION, "No pending write proposals", severity="information"
+    )
+    assert env.events.expiries == []
+    assert env.events.changes == changes
+    assert env.ui.notifications[notifications:] == []
+    assert env.outcomes() == outcomes
+    assert env.tasks.tasks == []
+    # Untouched in the store's own state machine: `expire_all` never sweeps,
+    # so it can only return a proposal that is still recorded as pending.
+    assert [p.id for p in env.store.expire_all(reason="context switched")] == [proposal.id]
+
+
+async def test_opening_a_review_still_settles_a_stale_inbox(tmp_path: Path) -> None:
+    """The keypress keeps the sweep the probe declined (issue #388, round 7).
+
+    `:proposals` is a real read of the inbox, not a probe: it must settle
+    the TTL first, so the expired proposal reaches its terminal state, the
+    indicator repaints and the outcome is audited - and only then refuse
+    with the same empty-inbox sentence the palette row carries.
+    """
+    env, clock = _expiring_env(tmp_path)
+    await env.submit()
+    assert env.store is not None
+    proposal = env.store.pending()[0]
+    clock[0] = 100.0
+    notifications = len(env.ui.notifications)
+
+    env.controller.open_review()
+
+    assert env.ui.notifications[notifications:] == [("No pending write proposals", "information")]
+    assert env.ui.notification_markup[notifications:] == [False]
+    assert env.tasks.tasks == []
+    assert [(p.id, reason) for p, reason in env.events.expiries] == [
+        (proposal.id, "proposal expired before review")
+    ]
+    # Settled, not merely reported: the record is terminal, so a later sweep
+    # finds nothing left to expire (and cannot double-audit it).
+    assert env.store.expire_all(reason="context switched") == []
 
 
 # ---------------------------------------------------------------------------

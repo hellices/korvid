@@ -43,33 +43,23 @@ from korvid.core.impact import ImpactAction
 from korvid.core.resize_impact import classify_pod_resize
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.drain import DrainPlan
-from korvid.k8s.helm import HELM_RELEASES_META
 from korvid.k8s.olm import OPERATORS_GROUP
 from korvid.k8s.writes import WriteOps, restart_stamp
+from korvid.ui.action_availability import UnavailableReason
 from korvid.ui.drain import DrainController
 from korvid.ui.node_impact_preview import (
     compose_node_maintenance_lines,
     render_node_maintenance_lines,
 )
-from korvid.ui.resize_impact_preview import compose_resize_impact_lines
+from korvid.ui.resize_impact_preview import compose_resize_impact_lines, resize_summary
 from korvid.ui.ui_surface import UiSurface
 from korvid.ui.view_state import ViewState
 from korvid.ui.widgets.confirm_screen import ReplicasPrompt
 from korvid.ui.widgets.resize_prompt import ResizePrompt
+from korvid.ui.write_availability import RESTARTABLE, SCALABLE, WriteAvailability
 from korvid.ui.write_coordinator import WriteCoordinator, WriteOrigin, gvr_label, write_locus
 
 logger = logging.getLogger(__name__)
-
-#: Workload eligibility is keyed on (group, plural): a custom-group CRD whose
-#: plural collides with a built-in (e.g. 'deployments') must never be treated
-#: as an apps/* workload. `KorvidApp._ACTION_VIEWS` gates the keys on the same
-#: identities, so the footer legend and the flow agree.
-RESTARTABLE: frozenset[tuple[str, str]] = frozenset(
-    {("apps", "deployments"), ("apps", "statefulsets"), ("apps", "daemonsets")}
-)
-SCALABLE: frozenset[tuple[str, str]] = frozenset(
-    {("apps", "deployments"), ("apps", "replicasets"), ("apps", "statefulsets")}
-)
 
 #: `KorvidApp._get_manifest`: (kind alias, namespace, name) -> manifest.
 ManifestFetcher = Callable[[str, str | None, str], Awaitable[dict[str, Any]]]
@@ -116,25 +106,6 @@ def _yaml_equal(a: object, b: object) -> bool:
     if isinstance(a, list) and isinstance(b, list):
         return len(a) == len(b) and all(_yaml_equal(x, y) for x, y in zip(a, b, strict=True))
     return a == b
-
-
-def resize_summary(resources: dict[str, dict[str, dict[str, str]]]) -> str:
-    """One-line 'app: requests.cpu=200m, limits.memory=1Gi; ...' summary
-    shown in the approval dialog and recorded in the audit detail.
-
-    Module-level because the agent's resize tool builds the same operation
-    line from the same shape: one phrasing, so the dialog a user approves
-    and the one an agent proposes cannot drift apart.
-    """
-    parts = []
-    for container, sections in resources.items():
-        changes = ", ".join(
-            f"{section}.{quantity}={value}"
-            for section, values in sections.items()
-            for quantity, value in values.items()
-        )
-        parts.append(f"{container}: {changes}")
-    return "; ".join(parts)
 
 
 class OperatorUninstalls(Protocol):
@@ -255,6 +226,8 @@ class ResourceWriteController:
         managed_note_from: ManagedNoteFrom,
         pod_resize_supported: Callable[[], bool],
         helm_uninstall: Callable[[], None],
+        helm_cli_unavailable_reason: Callable[[], UnavailableReason | None],
+        helm_release_identity_reason: Callable[[], UnavailableReason | None],
         operators: OperatorUninstalls,
     ) -> None:
         self._writes = writes
@@ -276,6 +249,28 @@ class ResourceWriteController:
         #: is still finalizing, so the targeted-cancel and cordon-refusal
         #: guards can still see it.
         self._drain_node: str | None = None
+        #: The refusal half of these flows, over the very same seams: the
+        #: probe cannot read a world the keypress would not read.
+        self._availability = WriteAvailability(
+            writes=writes,
+            view=view,
+            write_client_available=lambda: write_ops() is not None,
+            manifest_source_available=lambda: get_manifest() is not None,
+            pod_resize_supported=pod_resize_supported,
+            helm_cli_unavailable_reason=helm_cli_unavailable_reason,
+            helm_release_identity_reason=helm_release_identity_reason,
+            draining_node=self._draining_node,
+        )
+
+    def _draining_node(self) -> str | None:
+        """The node an in-flight drain is still evicting from, or None.
+
+        The one live read of the drain's lifecycle the probes share: a
+        worker that has stopped running answers None even before
+        `_run_drain`'s `finally` clears the node name.
+        """
+        worker = self._drain_worker
+        return self._drain_node if worker is not None and worker.is_running else None
 
     # ------------------------------------------------------------------
     # Drain lifecycle, observable but not mutable from outside
@@ -294,6 +289,20 @@ class ResourceWriteController:
     # ------------------------------------------------------------------
     # Target capture
     # ------------------------------------------------------------------
+
+    def unavailable_reason(self, action: str) -> UnavailableReason | None:
+        """Why `action` can't run right now, or None - the side-effect-free
+        probe the Action Palette asks before it offers a row (issue #388),
+        answered by `WriteAvailability` over this controller's own seams so
+        the probe and the flow can never read different state."""
+        return self._availability.unavailable_reason(action)
+
+    def node_unavailable_reason(self, action: str) -> UnavailableReason | None:
+        """Why `node_target(action)` would refuse right now, or None - the
+        silent twin of the notifications that method emits, for the palette
+        and for the node-shell owner that resolves its target through it
+        (issue #388 task 4)."""
+        return self._availability.node_unavailable_reason(action)
 
     def _capture(self) -> WriteTarget | None:
         """Resolve and pin the selected row for a write flow."""
@@ -361,11 +370,7 @@ class ResourceWriteController:
         release browser the key means `helm uninstall` (issue #117) - helm
         must remove the release's own bookkeeping, a raw Secret delete would
         orphan the deployed resources."""
-        current = self._view.aliases().get(self._view.canonical_kind(self._view.current_kind()))
-        if current is not None and (current.group, current.plural) == (
-            HELM_RELEASES_META.group,
-            HELM_RELEASES_META.plural,
-        ):
+        if self._availability.is_helm_release_view():
             self._helm_uninstall()
             return
         ops = self._write_ops()
@@ -1020,14 +1025,17 @@ class ResourceWriteController:
             return
         ops, target = resolved
         meta, name, uid = target.meta, target.name, target.uid
-        worker = self._drain_worker
-        if worker is not None and worker.is_running and name == self._drain_node:
+        drain_reason = self._availability.drain_in_progress_reason(name)
+        if drain_reason is not None:
             # Uncordoning (or re-cordoning) mid-drain would let new pods
             # schedule behind the drain's back; the drain owns the node's
-            # schedulable state until it finishes or is cancelled.
+            # schedulable state until it finishes or is cancelled. The
+            # palette row states the bounded fact; this toast can afford
+            # the node name and what to do about it.
             self._ui.notify(
-                f"nodes/{name} is being drained - cancel the drain first",
-                severity="warning",
+                self._availability.drain_in_progress_detail(name),
+                severity=drain_reason.severity,
+                markup=False,
             )
             return
         if not await self._writes.precheck_keybinding_write(action, meta, None, name):
@@ -1149,10 +1157,14 @@ class ResourceWriteController:
         kind_meta = self._view.aliases().get(self._view.canonical_kind(self._view.current_kind()))
         on_nodes = kind_meta is not None and (kind_meta.group, kind_meta.plural) == ("", "nodes")
         if self._drain_node is not None and (not on_nodes or selected != self._drain_node):
+            # The palette row's own refusal for this state, with the node
+            # and the cancel instruction a toast can afford - rendered
+            # literally, because the node name in it is cluster data.
+            reason = self._availability.other_drain_reason()
             self._ui.notify(
-                f"drain of nodes/{self._drain_node} in progress"
-                " - press the drain key on it to cancel",
-                severity="warning",
+                self._availability.other_drain_detail(self._drain_node),
+                severity=reason.severity,
+                markup=False,
             )
             return True
         worker.cancel()

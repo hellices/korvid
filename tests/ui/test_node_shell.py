@@ -23,11 +23,12 @@ from korvid.core.watch import WatchManager
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.models import GenericSummary
 from korvid.k8s.writes import WriteOps
+from korvid.ui.action_availability import AvailabilityCode, UnavailableReason
 from korvid.ui.app import KorvidApp
 from korvid.ui.shell import DEBUG_IMAGE, build_node_debug_create_argv, build_pod_attach_argv
 from korvid.ui.widgets.confirm_screen import ConfirmScreen
 from korvid.ui.widgets.resource_table import ResourceTable
-from tests.app_factory import build_test_app
+from tests.app_factory import build_test_app, session_kubectl
 
 from .waits import until
 
@@ -71,6 +72,10 @@ def make_app(
     extra_nodes: tuple[str, ...] = (),
     permission_gate: asyncio.Event | None = None,
     permission_started: asyncio.Event | None = None,
+    #: The session's `kubectl` snapshot, decided here because the runtime
+    #: resolves it while it is assembled (#388 round 14) - a patch around
+    #: the keypress would be too late, and the real PATH is the runner's.
+    kubectl: bool = True,
 ) -> KorvidApp:
     store = ResourceStore()
     data: dict[str, list[Summary]] = {
@@ -104,23 +109,24 @@ def make_app(
         assert permitted is not None
         return permitted
 
-    return build_test_app(
-        config=KorvidConfig(
-            namespace="default",
-            readonly=readonly,
-            node_shell_image=node_shell_image,
-            node_shell_namespace=node_shell_namespace,
-        ),
-        store=store,
-        watch_manager=WatchManager(store, source),
-        aliases=dict(_ALIASES),
-        write_ops=recorder,
-        audit=audit_log
-        if audit_log is not None
-        else (None if audit_path is None else AuditLog(audit_path)),
-        check_permission=None if permitted is None else check_permission,
-        get_manifest=get_manifest,
-    )
+    with session_kubectl(kubectl):
+        return build_test_app(
+            config=KorvidConfig(
+                namespace="default",
+                readonly=readonly,
+                node_shell_image=node_shell_image,
+                node_shell_namespace=node_shell_namespace,
+            ),
+            store=store,
+            watch_manager=WatchManager(store, source),
+            aliases=dict(_ALIASES),
+            write_ops=recorder,
+            audit=audit_log
+            if audit_log is not None
+            else (None if audit_path is None else AuditLog(audit_path)),
+            check_permission=None if permitted is None else check_permission,
+            get_manifest=get_manifest,
+        )
 
 
 async def _to_nodes(pilot) -> None:  # type: ignore[no-untyped-def]  # Pilot's app type isn't exposed
@@ -947,3 +953,115 @@ async def test_node_shell_refused_when_the_context_switches_while_the_dialog_is_
     assert call_records == []
     assert not any("debug" in argv for argv in run_calls)
     assert not audit_path.is_file() or "intent" not in audit_path.read_text()
+
+
+# ---------------------------------------------------------------------------
+# Side-effect-free availability probes (#388 task 4)
+# ---------------------------------------------------------------------------
+
+
+async def test_node_shell_availability_reports_missing_kubectl(tmp_path: Path) -> None:
+    """On the nodes view `s` needs kubectl for `kubectl debug node/`; the
+    palette probe reports the node-shell wording the handler notifies, and
+    notifies nothing itself (#388 task 4).
+
+    The session is composed without `kubectl` (#388 round 14): the snapshot
+    is taken while the runtime is assembled, so a patch around the probe
+    would arrive after the answer was already fixed.
+    """
+    app = make_app(DeleteRecorder(), tmp_path / "audit.jsonl", kubectl=False)
+    async with app.run_test() as pilot:
+        await _to_nodes(pilot)
+        before = len(app._notifications)
+        assert app._shell.unavailable_reason() == UnavailableReason(
+            AvailabilityCode.MISSING_CAPABILITY,
+            "kubectl not found on PATH — node shell requires kubectl",
+            severity="error",
+        )
+        assert len(app._notifications) == before
+
+
+async def test_node_shell_availability_reports_a_missing_write_client(tmp_path: Path) -> None:
+    """The node shell deletes its own debug pod, so it needs a write client;
+    `node_target()` refuses without one and the probe says the same."""
+    app = make_app(DeleteRecorder(), tmp_path / "audit.jsonl")
+    app._write_ops = None
+    with patch("shutil.which", return_value="/usr/bin/kubectl"):
+        async with app.run_test() as pilot:
+            await _to_nodes(pilot)
+            before = len(app._notifications)
+            assert app._shell.unavailable_reason() == UnavailableReason(
+                AvailabilityCode.MISSING_CAPABILITY, "node shell unavailable in this session"
+            )
+            assert len(app._notifications) == before
+
+
+async def test_node_shell_availability_reports_read_only(tmp_path: Path) -> None:
+    app = make_app(DeleteRecorder(), tmp_path / "audit.jsonl", readonly=True)
+    with patch("shutil.which", return_value="/usr/bin/kubectl"):
+        async with app.run_test() as pilot:
+            await _to_nodes(pilot)
+            assert app._shell.unavailable_reason() == UnavailableReason(
+                AvailabilityCode.READ_ONLY, "Read-only mode: cluster writes are disabled"
+            )
+
+
+async def test_node_shell_availability_is_none_with_a_selected_node(tmp_path: Path) -> None:
+    app = make_app(DeleteRecorder(), tmp_path / "audit.jsonl")
+    with patch("shutil.which", return_value="/usr/bin/kubectl"):
+        async with app.run_test() as pilot:
+            await _to_nodes(pilot)
+            assert app._shell.unavailable_reason() is None
+            assert app._actions.availability("shell").invocable is True
+
+
+async def test_node_write_availability_reports_a_missing_write_client(tmp_path: Path) -> None:
+    """Carry-over from the task 3 review: without a write client every node
+    write refuses at the keypress, so the palette must not advertise
+    cordon/uncordon/drain as invocable (#388 task 4)."""
+    app = make_app(DeleteRecorder(), tmp_path / "audit.jsonl")
+    app._write_ops = None
+    async with app.run_test() as pilot:
+        await _to_nodes(pilot)
+        before = len(app._notifications)
+        for action, label in (
+            ("cordon_node", "cordon"),
+            ("uncordon_node", "uncordon"),
+            ("drain_node", "drain"),
+        ):
+            availability = app._actions.availability(action)
+            assert availability.binding_enabled is True
+            assert availability.reason == UnavailableReason(
+                AvailabilityCode.MISSING_CAPABILITY, f"{label} unavailable in this session"
+            )
+        assert len(app._notifications) == before
+
+
+async def test_node_write_availability_is_none_with_a_write_client(tmp_path: Path) -> None:
+    app = make_app(DeleteRecorder(), tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        await _to_nodes(pilot)
+        assert app._actions.availability("cordon_node").invocable is True
+        assert app._actions.availability("drain_node").invocable is True
+
+
+async def test_cordon_availability_resolves_the_write_target_once(tmp_path: Path) -> None:
+    """`_node_action_reason` must resolve `write_target(notify=False)` once
+    and reuse it for the drain-in-progress check, not twice (#388 task 4
+    review): a second resolve is wasted synchronous work on every palette
+    query, and threading one target through keeps the two checks from ever
+    reading a target that could diverge between calls."""
+    app = make_app(DeleteRecorder(), tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        await _to_nodes(pilot)
+        original = app._writes.write_target
+        calls: list[bool] = []
+
+        def counting(*, notify: bool = True) -> Any:
+            calls.append(notify)
+            return original(notify=notify)
+
+        with patch.object(app._writes, "write_target", side_effect=counting):
+            reason = app._resource_writes.unavailable_reason("cordon_node")
+        assert reason is None
+        assert calls.count(False) == 1

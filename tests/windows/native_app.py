@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from textual.app import App
+from textual.widgets import Input
 
 from korvid.core.config import KorvidConfig
 from korvid.core.store import ResourceStore, Summary
@@ -23,6 +24,7 @@ from korvid.core.watch import WatchManager
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.models import PodSummary
 from korvid.ui.app import KorvidApp
+from korvid.ui.widgets.action_palette import ActionPaletteScreen
 from korvid.ui.widgets.filter_bar import FilterBar
 from korvid.ui.widgets.help_screen import HelpScreen
 from korvid.ui.widgets.resource_table import ResourceTable
@@ -111,6 +113,7 @@ class _ObservedKorvidApp(KorvidApp):
         super().__init__(**kwargs)
         self._witnessed: set[str] = set()
         self._help_seen = False
+        self._palette_seen = False
         self._resume_seen = False
         self._post_resume_filter_applied = False
         self._post_resume_filter_seen = False
@@ -147,6 +150,23 @@ class _ObservedKorvidApp(KorvidApp):
         self._resume_seen = True
         self._emit_once("resumed", _snapshot(self))
 
+    def _observe_palette(self, state: dict[str, Any]) -> None:
+        """Witness the Action Palette over a real ConPTY (issue #388).
+
+        Both phases are gated on the focus that proves the keystroke was
+        genuinely delivered, not merely on the screen class: the palette is
+        only "open" once its search `Input` owns the keyboard, and only
+        "closed" once the table owns it again. A phase emitted on the tick
+        between the two would record a transient state and freeze it, since
+        each name is written exactly once.
+        """
+        if isinstance(self.screen, ActionPaletteScreen):
+            if isinstance(self.focused, Input):
+                self._palette_seen = True
+                self._emit_once("palette-open", state)
+        elif self._palette_seen and isinstance(self.focused, ResourceTable):
+            self._emit_once("palette-closed", state)
+
     def _observe_state(self) -> None:
         table = self.query_one(ResourceTable)
         workspace = self.query_one("#workspace")
@@ -160,6 +180,7 @@ class _ObservedKorvidApp(KorvidApp):
             "filter": pattern,
             "filter_focused": self.focused is filter_bar,
             "filter_open": bool(filter_bar.display),
+            "focused": None if self.focused is None else self.focused.__class__.__qualname__,
             "rows": rows,
             "screen": self.screen.__class__.__qualname__,
             "table_visible": table_visible,
@@ -167,6 +188,7 @@ class _ObservedKorvidApp(KorvidApp):
         }
         if pattern == "" and _resources_are_visible(rows, table_visible, workspace_visible):
             self._emit_once("resources-ready", state)
+        self._observe_palette(state)
         screen = self.screen
         if isinstance(screen, HelpScreen):
             self._help_seen = True

@@ -13,6 +13,17 @@ from korvid.core.pulse import PulseCoverage, PulseCoverageState
 from korvid.k8s.errors import ApiStatusError, KubeClientError
 from korvid.k8s.pulse import PulseLimitError, PulseReader, PulseSource
 
+#: The three inputs korvid's ambient attention model is fed from, as the
+#: composition root registers them. Declared beside the collector that
+#: consumes them rather than inline at the wiring: the set is a property of
+#: this collector's contract (explicitly registered, namespaced LISTs), not
+#: a per-session choice.
+DEFAULT_PULSE_SOURCES: tuple[PulseSource, ...] = (
+    PulseSource("pods", "", "v1", "pods"),
+    PulseSource("deployments", "apps", "v1", "deployments"),
+    PulseSource("events", "", "v1", "events", "type=Warning"),
+)
+
 PAGE_SIZE = 100
 PAGE_BYTES = 256 * 1024
 MAX_PAGES = 2

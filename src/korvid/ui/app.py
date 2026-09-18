@@ -11,7 +11,7 @@ from collections.abc import (
     Iterator,
 )
 from time import monotonic
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar, assert_never
 
 if TYPE_CHECKING:
     from korvid.agent.session import AgentSession
@@ -43,32 +43,29 @@ from korvid.k8s.components import (
     ComponentRef,
 )
 from korvid.k8s.discovery import PODS_META, ResourceMeta, canonical_resource_alias
-from korvid.k8s.helm import (
-    HELM_RELEASES_META,
-    HELM_REVISIONS_META,
-    HelmReleaseIdentity,
-)
+from korvid.k8s.helm import HelmReleaseIdentity
 from korvid.k8s.helmcli import HelmCLI
 from korvid.k8s.logs import LogLine
 from korvid.k8s.metrics import MetricsPoller
 from korvid.k8s.models import GenericSummary
-from korvid.k8s.olm import (
-    OPERATORS_GROUP,
-    PACKAGES_GROUP,
-)
-from korvid.k8s.portforward import FORWARDABLE_KINDS
 from korvid.k8s.pulse import PulseReader
 from korvid.k8s.relations import owned_by
 from korvid.k8s.telepresence import TelepresenceCLI
 from korvid.k8s.writes import WriteOps
 from korvid.tools.executor import UIBridge
 from korvid.tools.proposals import ProposalStore
+from korvid.ui.action_palette import (
+    AppActionInvocation,
+    CommandInvocation,
+    PaletteEntry,
+    derive_palette_entries,
+)
 from korvid.ui.agent_ui_controller import (
     AgentUiController,
 )
 from korvid.ui.app_bindings import APP_BINDINGS, APP_CSS, APP_HANDLER_KEY_HELP
 from korvid.ui.app_runtime import AppRuntime, AppRuntimeInputs
-from korvid.ui.command import command_help, command_words
+from korvid.ui.command import COMMANDS, command_help, command_words, parse_command
 from korvid.ui.context_switch_coordinator import (
     ContextSwitchResult,
 )
@@ -93,14 +90,11 @@ from korvid.ui.messages import (
     UnknownCommand,
 )
 from korvid.ui.navigation import NavigationStack
-from korvid.ui.resource_write_controller import (
-    RESTARTABLE,
-    SCALABLE,
-)
 from korvid.ui.session_timeline_controller import (
     TIMELINE_EVENT_GROUP,
     TIMELINE_NAVIGATION_GROUP,
 )
+from korvid.ui.widgets.action_palette import ActionPaletteScreen
 from korvid.ui.widgets.agent_panel import AgentPanel
 from korvid.ui.widgets.command_bar import CommandBar
 from korvid.ui.widgets.describe_screen import DescribePane, DescribeScreen
@@ -131,6 +125,11 @@ _FORWARD_POLL_SECONDS = 2.0
 
 class KorvidApp(App[None]):
     BINDINGS: ClassVar[list[Binding | tuple[str, str] | tuple[str, str, str]]] = APP_BINDINGS
+    # Textual binds `Ctrl-P` to its own system command palette implicitly.
+    # korvid owns that key (issue #388): the Action Palette searches the
+    # app's real catalogs, so the stock one is switched off rather than
+    # left competing for the same keystroke.
+    ENABLE_COMMAND_PALETTE: ClassVar[bool] = False
     HANDLER_KEY_HELP: ClassVar[tuple[tuple[str, str, str, str], ...]] = APP_HANDLER_KEY_HELP
     DEFAULT_CSS = APP_CSS
 
@@ -274,6 +273,7 @@ class KorvidApp(App[None]):
         self._integrations = runtime.integrations
         self._agent_ui = runtime.agent_ui
         self._commands = runtime.commands
+        self._actions = runtime.actions
         self.__dict__.pop("_runtime_inputs", None)
 
     def _bind_runtime_inputs(self, inputs: AppRuntimeInputs) -> None:
@@ -474,7 +474,8 @@ class KorvidApp(App[None]):
             self.config.keybindings,
             self._binding_actions(),
             priority_actions,
-            reserved_keys=reserved_keys,
+            reserved_keys,
+            dict.fromkeys(ActionPaletteScreen.CLOSE_KEYS, "open_action_palette"),
         )
         self._keybinding_overrides = plan.overrides
         keymap: dict[str, str] = {}
@@ -710,6 +711,91 @@ class KorvidApp(App[None]):
         # Dismiss the filter bar first so no invisible filter stays active.
         self._filter_bar.dismiss_bar()
         self._command_bar.open()
+
+    # ------------------------------------------------------------------
+    # Action Palette (Ctrl-P, issue #388): one searchable surface over the
+    # two catalogs the app already executes from. Nothing is invoked here
+    # that a key could not invoke: every selection lands on the existing
+    # `run_action` / `parse_command` route, exactly once.
+    # ------------------------------------------------------------------
+
+    def _palette_entries(self) -> list[PaletteEntry]:
+        """A freshly derived catalog: `BINDINGS` + `COMMANDS`, judged now.
+
+        Built per render and again after dismissal rather than cached:
+        availability answers from live state (view, selection, panes,
+        in-flight writes), so a retained list advertises a stale world.
+        """
+        return derive_palette_entries(
+            self.BINDINGS,
+            COMMANDS,
+            overrides=self._keybinding_overrides,
+            availability=self._actions.availability,
+            command_availability=self._actions.command_availability,
+        )
+
+    def action_open_action_palette(self) -> None:
+        """Open the palette, unless the current surface forbids it.
+
+        The guard is repeated here on purpose: `check_action` already
+        refuses the keypress, but the action stays reachable by any other
+        caller, and the palette must never stack over an approval dialog.
+        """
+        if not self._actions.binding_enabled("open_action_palette"):
+            return
+        self.push_screen(ActionPaletteScreen(self._palette_entries()), self._palette_selected)
+
+    async def _palette_selected(self, entry_id: str | None) -> None:
+        """Route one dismissed palette id through its existing app route.
+
+        The screen returns a stable id, never an entry or a callable: this
+        re-derives the catalog *after* the modal is gone and re-checks that
+        id, because the answer shown when the list was rendered may have
+        expired meanwhile. A stale or now-refused id notifies with the
+        owner's own wording and dispatches nothing.
+        """
+        if entry_id is None:
+            return
+        entry = next((e for e in self._palette_entries() if e.id == entry_id), None)
+        if entry is None:
+            self.notify("That action is no longer available", severity="warning")
+            return
+        reason = entry.availability.reason
+        if reason is not None:
+            # markup=False: capability reasons quote install hints like
+            # `korvid[mcp]`, which content markup would parse as a style tag
+            # and swallow. The owners' own handlers notify the same text the
+            # same way.
+            self.notify(reason.message, severity=reason.severity, markup=False)
+            return
+        match entry.invocation:
+            case AppActionInvocation(action=action):
+                await self.run_action(action)
+            case CommandInvocation(canonical_text=text):
+                self.post_message(parse_command(text, self._command_bar.known))
+            case _ as unreachable:  # pragma: no cover - exhaustive
+                assert_never(unreachable)
+
+    def _inline_editor_open(self) -> bool:
+        """Whether the `:` command bar or `/` filter bar is mid-edit.
+
+        Display, not focus: either bar is shown only while it owns the line
+        being typed, and the palette must not cover it. Other inputs (the
+        agent prompt, a pane's search) stay palette-reachable surfaces.
+        """
+        try:
+            return bool(self._command_bar.display or self._filter_bar.display)
+        except NoMatches:  # widget tree not composed (startup/teardown)
+            return False
+
+    def _accepting_input(self) -> bool:
+        """Whether the app is still live enough to open a modal.
+
+        Both halves matter: `is_running` falls once the message pump stops,
+        while `_exit` is set the moment `exit()` is called and the pump is
+        still draining - a window a new modal must not mount into.
+        """
+        return self.is_running and not self._exit
 
     def action_open_filter(self) -> None:
         # When the describe pane is open, / searches inside it (issue #42).
@@ -1024,14 +1110,6 @@ class KorvidApp(App[None]):
     # -- Write operations (issue #16): every path goes through a ConfirmScreen
     # -- confirmed only by a user keystroke; executed writes are audited.
 
-    #: Workload eligibility, owned by `ResourceWriteController` (the flows
-    #: that enforce it) and re-exported here because `_ACTION_VIEWS` and the
-    #: agent write ops gate the same identities. Keyed on (group, plural): a
-    #: custom-group CRD whose plural collides with a built-in (e.g.
-    #: 'deployments') must never be treated as an apps/* workload.
-    _RESTARTABLE: ClassVar[frozenset[tuple[str, str]]] = RESTARTABLE
-    _SCALABLE: ClassVar[frozenset[tuple[str, str]]] = SCALABLE
-
     async def action_delete_resource(self) -> None:
         """Ctrl-D: delete the selected resource (issue #16)."""
         await self._resource_writes.delete()
@@ -1138,7 +1216,7 @@ class KorvidApp(App[None]):
 
     def _legend_entries(self) -> list[KeyEntry]:
         """The visible bindings as top-bar entries: pre-filtered by
-        Textual's binding machinery (check_action / _ACTION_VIEWS - the
+        Textual's binding machinery (check_action / ActionPolicy - the
         single visibility source), deduplicated across --alt spellings and
         parametrised favorites."""
         entries: list[KeyEntry] = []
@@ -1326,57 +1404,6 @@ class KorvidApp(App[None]):
     # loop logic in the agent session.
     # ------------------------------------------------------------------
 
-    #: Resource identities — (group, plural), see `_RESTARTABLE` — where each
-    #: view-specific action applies; actions absent from the map work on
-    #: every view. `check_action` consults this so the footer legend shows
-    #: only the current view's keys and overloaded keys (i/u/r) dispatch to
-    #: the binding whose view is on screen (issue #114). Identity, not the
-    #: kind string: a foreign CRD claiming a bare plural (e.g.
-    #: `packagemanifests`) must not surface another view's actions.
-    #: `log_search_next`/`log_search_prev` stay unlisted on purpose: they
-    #: also serve the describe pane's search (any view) and the
-    #: sort-by-name fallback. Fail-closed by design: a kind missing from
-    #: `aliases` (e.g. mid-discovery) hides every listed action until its
-    #: identity is known.
-    _ACTION_VIEWS: ClassVar[dict[str, frozenset[tuple[str, str]]]] = {
-        "shell": frozenset({("", "pods"), ("", "nodes")}),
-        "logs": frozenset({("", "pods")}),
-        "logs_multi": frozenset({("", "pods")}),
-        "hint_details": frozenset({("", "pods")}),
-        "resize_pod": frozenset({("", "pods")}),
-        "transfer": frozenset({("", "pods")}),
-        # Core-group identities of FORWARDABLE_KINDS (pods, services).
-        "port_forward": frozenset(("", plural) for plural in FORWARDABLE_KINDS),
-        "cordon_node": frozenset({("", "nodes")}),
-        "uncordon_node": frozenset({("", "nodes")}),
-        "drain_node": frozenset({("", "nodes")}),
-        "rollout_restart": _RESTARTABLE,
-        "scale_resource": _SCALABLE,
-        "operator_install": frozenset(
-            {(PACKAGES_GROUP, "packagemanifests"), (OPERATORS_GROUP, "installplans")}
-        ),
-        # The synthetic helm views (group "", client-side plurals).
-        "helm_install": frozenset({(HELM_RELEASES_META.group, HELM_RELEASES_META.plural)}),
-        "helm_upgrade": frozenset({(HELM_RELEASES_META.group, HELM_RELEASES_META.plural)}),
-        "helm_history": frozenset({(HELM_RELEASES_META.group, HELM_RELEASES_META.plural)}),
-        "helm_rollback": frozenset({(HELM_REVISIONS_META.group, HELM_REVISIONS_META.plural)}),
-    }
-
-    #: Actions that operate on the visible log pane, not the focused view:
-    #: the split workflow tails logs from one pane while the other shows a
-    #: different kind, so these gate on pane visibility (review of #114).
-    _LOG_PANE_ACTIONS: ClassVar[frozenset[str]] = frozenset(
-        {"log_format", "log_wrap", "log_timestamps", "log_save", "log_previous"}
-    )
-
-    #: Generic write actions that `WriteCoordinator.write_target` rejects on synthetic
-    #: (client-side, read-only) views such as the helm browser: advertising
-    #: them there would be a lie (review of #114). The dedicated helm write
-    #: actions stay available through `_ACTION_VIEWS`.
-    _SYNTHETIC_GATED_ACTIONS: ClassVar[frozenset[str]] = frozenset(
-        {"delete_resource", "edit_resource"}
-    )
-
     def _action_available(self, action: str) -> bool:
         """Composition availability, independent of the current view: the
         help overlay filters on this alone so off-view keys stay documented
@@ -1391,34 +1418,9 @@ class KorvidApp(App[None]):
             return False
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
-        """Gate bindings on composition availability and the current view.
-
-        Returning False both hides the binding from the footer and skips it
-        during key dispatch, so overloaded keys fall through to the binding
-        whose view is on screen (issue #114).
-        """
-        if not self._action_available(action):
-            return False
-        if action in self._LOG_PANE_ACTIONS:
-            return self._log_pane_open()
-        if action in self._SYNTHETIC_GATED_ACTIONS:
-            meta = self.aliases.get(self._canonical_kind(self.current_kind))
-            if (
-                action == "delete_resource"
-                and meta is not None
-                and (meta.group, meta.plural)
-                == (HELM_RELEASES_META.group, HELM_RELEASES_META.plural)
-            ):
-                # Ctrl+D on the release browser is `helm uninstall`
-                # (issue #117) - the one synthetic view where delete works.
-                return True
-            # Unknown kinds keep the keys: the handler's own guards decide.
-            return meta is None or not meta.synthetic
-        views = self._ACTION_VIEWS.get(action)
-        if views is None:
-            return True
-        meta = self.aliases.get(self._canonical_kind(self.current_kind))
-        return meta is not None and (meta.group, meta.plural) in views
+        """Gate bindings on composition availability and the current view
+        (issue #114), via the `ActionPolicy` extracted in issue #388."""
+        return self._actions.binding_enabled(action)
 
     def action_toggle_agent(self) -> None:
         """Toggle the agent chat panel (Ctrl-A)."""

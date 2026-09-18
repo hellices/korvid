@@ -9,10 +9,11 @@ compact logo, in two modes:
   priority keys for this view + a "more" hint,
 - **expanded**: the full grouped legend.
 
-Which actions are visible stays decided exclusively by the app's
-``check_action`` / ``_ACTION_VIEWS`` (the entries arrive pre-filtered from
-``screen.active_bindings``); this module only classifies and presents.
-Group structure is fixed, members swap per view.
+Which actions are visible stays decided exclusively by ``ActionPolicy``
+(the app's ``check_action`` consults its ``_ACTION_VIEWS`` map, and the
+entries arrive here pre-filtered from ``screen.active_bindings``); this
+module only classifies and presents. Group structure is fixed, members
+swap per view.
 """
 
 from __future__ import annotations
@@ -38,6 +39,7 @@ _ACTION_GROUPS: dict[str, str] = {
     "quit": "Nav",
     "help": "Nav",
     "open_command": "Nav",
+    "open_action_palette": "Nav",
     "open_filter": "Nav",
     "toggle_all_namespaces": "Nav",
     "toggle_topbar": "Nav",

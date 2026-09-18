@@ -19,6 +19,7 @@ TEST_APP_FACTORY = TESTS / "app_factory.py"
 UI_PACKAGE = ("korvid", "ui")
 
 RUNTIME_COMPONENTS = {
+    "ActionPolicy",
     "AgentUiController",
     "AppAgentPanel",
     "AppAgentScreens",
@@ -1147,6 +1148,7 @@ def test_app_runtime_can_be_bound_only_once() -> None:
             integrations=value,
             agent_ui=value,
             commands=value,
+            actions=value,
         ),
     )
 
@@ -1194,3 +1196,209 @@ def test_late_runtime_reference_fails_before_binding_and_cannot_rebind() -> None
     assert reference.get() is value
     with pytest.raises(RuntimeError, match="already bound"):
         reference.bind(object())
+
+
+def test_app_owns_ctrl_p_instead_of_textuals_system_command_palette() -> None:
+    """Issue #388: korvid's Action Palette replaces Textual's implicit
+    system palette outright. The shell disables the stock one and never
+    reaches into its internals - the modal, its ranking and its catalog are
+    korvid's own public code."""
+    source = (UI / "app.py").read_text(encoding="utf-8")
+    assert "ENABLE_COMMAND_PALETTE: ClassVar[bool] = False" in source
+    assert "CommandPalette" not in source
+    assert "SystemCommands" not in source
+    assert "get_system_commands" not in source
+
+
+def test_app_delegates_palette_catalog_derivation_to_its_own_module() -> None:
+    """The shell asks for the catalog; it does not build a second one.
+    `derive_action_entries`/`derive_command_entries`/`rank_entries` stay in
+    `korvid.ui.action_palette`, which imports no Textual app."""
+    source = (UI / "app.py").read_text(encoding="utf-8")
+    assert "derive_palette_entries(" in source
+    assert "derive_action_entries(" not in source
+    assert "derive_command_entries(" not in source
+    assert "rank_entries(" not in source
+
+
+def test_textuals_exit_flag_is_read_only_by_the_one_shutdown_helper() -> None:
+    """`_accepting_input()` reads Textual's private `App._exit` because there
+    is no public "is the app exiting" API (issue #388 task 6 review). That
+    read stays isolated in that single helper, so the private coupling has
+    exactly one place to fail and one place to fix."""
+    source = (UI / "app.py").read_text(encoding="utf-8")
+    module = ast.parse(source)
+    helper = next(
+        node
+        for node in ast.walk(module)
+        if isinstance(node, ast.FunctionDef) and node.name == "_accepting_input"
+    )
+    reads = [
+        node
+        for node in ast.walk(module)
+        if isinstance(node, ast.Attribute)
+        and node.attr == "_exit"
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "self"
+    ]
+    assert len(reads) == 1
+    assert helper.lineno <= reads[0].lineno <= (helper.end_lineno or helper.lineno)
+
+
+# ---------------------------------------------------------------------------
+# Owner reason text is not content markup (#388 task 8)
+# ---------------------------------------------------------------------------
+
+
+def _reads_reason_message(expr: ast.expr) -> bool:
+    """True when `expr` is `<reason>.message` itself, or an f-string that
+    interpolates it - both hand Textual's markup parser the reason's own
+    text, so wrapping the attribute in a format string does not neutralize
+    the bug the bare form has."""
+    if isinstance(expr, ast.Attribute) and expr.attr == "message":
+        return True
+    if isinstance(expr, ast.JoinedStr):
+        return any(
+            isinstance(value, ast.FormattedValue) and _reads_reason_message(value.value)
+            for value in expr.values
+        )
+    return False
+
+
+def _reason_notifications_with_markup(root: Path) -> set[str]:
+    """Every `notify(...)` that still parses `<reason>.message` as markup,
+    whichever of the three shapes an owner writes it in: the bare positional
+    argument, the `message=` keyword, or an f-string embedding it."""
+    offenders: set[str] = set()
+    for path in sorted(root.rglob("*.py")):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+                continue
+            if node.func.attr != "notify":
+                continue
+            keyword_message = next((kw.value for kw in node.keywords if kw.arg == "message"), None)
+            message_expr = node.args[0] if node.args else keyword_message
+            if message_expr is None or not _reads_reason_message(message_expr):
+                continue
+            markup = next((kw for kw in node.keywords if kw.arg == "markup"), None)
+            disabled = (
+                markup is not None
+                and isinstance(markup.value, ast.Constant)
+                and markup.value.value is False
+            )
+            if not disabled:
+                offenders.add(f"{path.name}:{node.lineno}")
+    return offenders
+
+
+def test_owner_reason_notifications_never_parse_their_text_as_markup() -> None:
+    """One `UnavailableReason` is shown by two paths (issue #388): its
+    owner's own refusal toast, and the Action Palette when the same action
+    is chosen there. The palette passes `markup=False` because reason text
+    quotes install hints (`korvid[mcp]`) and cluster-controlled names that
+    Textual's content markup would parse as style tags and swallow - so the
+    owner must emit it the same way, or the two paths show different text
+    for the same fact.
+    """
+    assert not _reason_notifications_with_markup(KORVID)
+
+
+def test_reason_notification_contract_rejects_a_markup_parsed_reason(
+    tmp_path: Path,
+) -> None:
+    """The contract above must actually fail on a violation."""
+    module = tmp_path / "owner.py"
+    module.write_text(
+        "self._ui.notify(reason.message, severity=reason.severity)\n", encoding="utf-8"
+    )
+    assert _reason_notifications_with_markup(tmp_path) == {"owner.py:1"}
+    module.write_text(
+        "self._ui.notify(reason.message, severity=reason.severity, markup=False)\n",
+        encoding="utf-8",
+    )
+    assert not _reason_notifications_with_markup(tmp_path)
+
+
+def test_reason_notification_contract_rejects_the_message_keyword_form(
+    tmp_path: Path,
+) -> None:
+    """`notify(message=reason.message, ...)` is the same parsed-markup bug as
+    the bare positional form - the keyword just names the argument that
+    carries `reason.message` instead of leaving it positional."""
+    module = tmp_path / "owner.py"
+    module.write_text(
+        "self._ui.notify(message=reason.message, severity=reason.severity)\n",
+        encoding="utf-8",
+    )
+    assert _reason_notifications_with_markup(tmp_path) == {"owner.py:1"}
+    module.write_text(
+        "self._ui.notify(message=reason.message, severity=reason.severity, markup=False)\n",
+        encoding="utf-8",
+    )
+    assert not _reason_notifications_with_markup(tmp_path)
+
+
+def test_reason_notification_contract_rejects_a_formatted_string_of_the_message(
+    tmp_path: Path,
+) -> None:
+    """An f-string that interpolates `reason.message` still hands Textual's
+    content markup parser the reason's own text - wrapping it in a format
+    string does not neutralize the bug the bare attribute form has."""
+    module = tmp_path / "owner.py"
+    module.write_text(
+        'self._ui.notify(f"Refused: {reason.message}", severity=reason.severity)\n',
+        encoding="utf-8",
+    )
+    assert _reason_notifications_with_markup(tmp_path) == {"owner.py:1"}
+    module.write_text(
+        'self._ui.notify(f"Refused: {reason.message}", severity=reason.severity, markup=False)\n',
+        encoding="utf-8",
+    )
+    assert not _reason_notifications_with_markup(tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# Palette dispatch is exhaustive over its invocation union (#388 task 8)
+# ---------------------------------------------------------------------------
+
+
+def _union_members(module: ast.Module, alias: str) -> list[str]:
+    """The member names of a `X = A | B` type alias in `module`."""
+    for node in ast.walk(module):
+        if not isinstance(node, ast.Assign) or not node.targets:
+            continue
+        target = node.targets[0]
+        if not (isinstance(target, ast.Name) and target.id == alias):
+            continue
+        members: list[str] = []
+        stack = [node.value]
+        while stack:
+            current = stack.pop()
+            if isinstance(current, ast.BinOp) and isinstance(current.op, ast.BitOr):
+                stack.extend((current.left, current.right))
+            elif isinstance(current, ast.Name):
+                members.append(current.id)
+        return sorted(members)
+    raise AssertionError(f"no type alias named {alias}")
+
+
+def test_palette_dispatch_handles_every_invocation_kind_exhaustively() -> None:
+    """`_palette_selected` routes a union, and a third member added later
+    must not fall silently through to the last branch. Every member of
+    `PaletteInvocation` is matched by name and the tail calls
+    `assert_never`, so the miss is a type error at the seam that runs
+    actions rather than a mystery no-op at runtime.
+    """
+    members = _union_members(_tree("action_palette.py"), "PaletteInvocation")
+    assert members == ["AppActionInvocation", "CommandInvocation"]
+
+    app_module = ast.parse((UI / "app.py").read_text(encoding="utf-8"))
+    handler = next(
+        node
+        for node in ast.walk(app_module)
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "_palette_selected"
+    )
+    dispatch = ast.dump(handler)
+    for member in members:
+        assert f"'{member}'" in dispatch, f"_palette_selected ignores {member}"
+    assert "'assert_never'" in dispatch, "_palette_selected must end in assert_never"

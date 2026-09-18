@@ -30,6 +30,20 @@ def test_key_label_symbol_keys() -> None:
     assert key_label("slash") == "/"
 
 
+def test_key_label_names_the_topbar_key_by_the_character_it_types() -> None:
+    """`~` is a real default binding (`toggle_topbar`), and Textual spells
+    it `tilde`.
+
+    Unlabelled, that word is what both surfaces derived from the bindings
+    show - the help overlay's key column and the palette row's trigger -
+    and no key on the keyboard says "tilde". The shared label table is what
+    turns a Textual key name into the character the user presses, and this
+    one belongs in it beside `?`, `:` and `/`.
+    """
+    assert key_label("tilde") == "~"
+    assert key_label("ctrl+tilde") == "Ctrl-~"
+
+
 def test_key_label_modifiers_and_case() -> None:
     assert key_label("ctrl+s") == "Ctrl-S"
     assert key_label("shift+n") == "Shift-N"
@@ -95,12 +109,12 @@ def test_collect_help_groups_timeline_under_table() -> None:
 
 def test_every_app_binding_action_has_an_explicit_group() -> None:
     """New app bindings must be classified — the overlay may not silently drift."""
-    from korvid.ui.widgets.help_screen import _ACTION_GROUPS
+    from korvid.ui.app_bindings import ACTION_HELP_GROUPS
 
     for binding in KorvidApp.BINDINGS:
         action = binding.action if isinstance(binding, Binding) else binding[1]
         base_action = action.split("(")[0]
-        assert base_action in _ACTION_GROUPS, f"unclassified binding action: {action}"
+        assert base_action in ACTION_HELP_GROUPS, f"unclassified binding action: {action}"
 
 
 def test_collect_help_merges_parametrised_favorite_bindings_into_one_row() -> None:
@@ -135,11 +149,11 @@ def test_collect_help_appends_handler_keys_to_their_groups() -> None:
 
 def test_app_handler_key_help_uses_known_groups() -> None:
     """HANDLER_KEY_HELP entries must reference groups the overlay renders."""
-    from korvid.ui.widgets.help_screen import _GROUP_ORDER
+    from korvid.ui.app_bindings import HELP_GROUP_ORDER
 
     assert KorvidApp.HANDLER_KEY_HELP, "expected handler-key help metadata"
     for group, key, description, action in KorvidApp.HANDLER_KEY_HELP:
-        assert group in _GROUP_ORDER, f"unknown group {group!r} for key {key!r}"
+        assert group in HELP_GROUP_ORDER, f"unknown group {group!r} for key {key!r}"
         assert description
         if action:
             binding_ids = {b.id for b in KorvidApp.BINDINGS if isinstance(b, Binding)}
@@ -243,6 +257,20 @@ async def test_help_lists_every_app_binding_description() -> None:
             else:
                 description = binding[2] if len(binding) == 3 else ""
             assert description in text
+
+
+async def test_help_shows_the_topbar_key_as_the_character_it_types() -> None:
+    """The overlay is generated from the real bindings, so the key column
+    shows whatever `key_label` makes of `tilde` - and the raw Textual key
+    name must never reach it."""
+    app = make_app([_pod("myapp")])
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("question_mark")
+        await until(pilot, lambda: isinstance(app.screen, HelpScreen), label="help open")
+        text = _help_text(app)
+        assert "~" in text
+        assert "tilde" not in text
 
 
 async def test_help_lists_handler_keys() -> None:

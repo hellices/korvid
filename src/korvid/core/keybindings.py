@@ -65,12 +65,14 @@ def _validated_overrides(
     actions: Mapping[str, tuple[str, ...]],
     priority_actions: Collection[str],
     reserved_keys: Mapping[str, str],
+    priority_reserved_keys: Mapping[str, str],
     warnings: list[str],
 ) -> dict[str, str]:
     """First pass: per-entry checks (action known, key usable, no dup key)."""
     overrides: dict[str, str] = {}
     used_keys: dict[str, str] = {}
     reserved = {canonical_key(k): owner for k, owner in reserved_keys.items()}
+    priority_reserved = {canonical_key(k): owner for k, owner in priority_reserved_keys.items()}
     for action, raw_key in raw.items():
         if action in PROTECTED_ACTIONS:
             warnings.append(
@@ -96,6 +98,13 @@ def _validated_overrides(
             warnings.append(
                 f"keybindings: '{action}' is a priority binding and may not take "
                 f"'{key}' — the approval dialogs listen for that key"
+            )
+            continue
+        priority_owner = priority_reserved.get(marker)
+        if action in priority_actions and priority_owner is not None and priority_owner != action:
+            warnings.append(
+                f"keybindings: priority action '{action}' may not take fixed modal key "
+                f"'{key}' owned by '{priority_owner}'"
             )
             continue
         if marker in reserved:
@@ -149,6 +158,7 @@ def plan_keybindings(
     actions: Mapping[str, tuple[str, ...]],
     priority_actions: Collection[str] = frozenset(),
     reserved_keys: Mapping[str, str] | None = None,
+    priority_reserved_keys: Mapping[str, str] | None = None,
 ) -> KeymapPlan:
     """Validate config keybinding overrides against the app's actions.
 
@@ -160,12 +170,21 @@ def plan_keybindings(
             these may not take an approval-dialog key (`APPROVAL_KEYS`).
         reserved_keys: Keys owned by non-remappable bindings (key → owning
             action, e.g. the 1-9 favorites); an override may not take one.
+        priority_reserved_keys: Fixed modal keys (key → owning action) that
+            another priority action must not intercept before the modal.
 
     Returns:
         A plan whose `overrides` contains only safe, conflict-free entries;
         every rejected entry produces one entry in `warnings`.
     """
     warnings: list[str] = []
-    overrides = _validated_overrides(raw, actions, priority_actions, reserved_keys or {}, warnings)
+    overrides = _validated_overrides(
+        raw,
+        actions,
+        priority_actions,
+        reserved_keys or {},
+        priority_reserved_keys or {},
+        warnings,
+    )
     _drop_default_collisions(overrides, actions, warnings)
     return KeymapPlan(overrides, tuple(warnings))

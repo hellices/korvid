@@ -42,6 +42,31 @@ use the qualified plural, such as `:deployments.apps` or
 Qualified views retain their resource identity through watches, describe, and
 drill-down.
 
+## Ask in the way you already think
+
+Three keys answer three different questions, so none of them replaces another:
+
+- `:` is for a destination you can name — `:deployments`, `:ns prod`,
+  `:ctx staging` — plus the built-in commands, with tab completion over
+  discovered aliases.
+- `?` is the exhaustive reference: every effective key for every view,
+  including your remaps.
+- `Ctrl-P` searches by intent. Type `scale`, `restart`, or `context` and
+  korvid ranks matching app actions and `:` commands, each row reading
+  *category · what it does · how to run it*. Selecting a row runs the same
+  route that key runs, so a write still opens the same approval dialog and
+  still waits for a fresh keystroke. Canonical spellings match exactly too:
+  an action's own id (`delete_resource`), a command's text (`pulse`), and
+  its `:` form (`:pulse`). An action that does not apply to the current
+  view — or that applies but would do nothing right now, with nothing
+  selected, no hint on the row, no search running, or a capability this
+  session started without — stays searchable and
+  shows why instead of disappearing. On a terminal too short to spare the
+  room, the palette takes the height it needs so that reason stays readable
+  rather than clipped — and resizing the terminal under the open palette
+  re-draws the row you were on whole at the new size instead of cutting its
+  last words. `Esc` closes the palette.
+
 ## Follow one signal
 
 Not sure which resource to inspect? The one-line [Pulse summary](pulse.md)

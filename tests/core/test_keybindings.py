@@ -111,6 +111,28 @@ def test_priority_actions_may_not_take_approval_dialog_keys() -> None:
     assert plan.overrides == {"describe": "y"}
 
 
+def test_priority_action_cannot_take_another_actions_fixed_modal_key() -> None:
+    actions = {
+        **_ACTIONS,
+        "open_action_palette": ("ctrl+p",),
+        "toggle_agent": ("ctrl+a",),
+    }
+    plan = plan_keybindings(
+        {
+            "open_action_palette": "ctrl+j",
+            "toggle_agent": "ctrl+p",
+        },
+        actions,
+        {"open_action_palette", "toggle_agent"},
+        priority_reserved_keys={"ctrl+p": "open_action_palette"},
+    )
+
+    assert plan.overrides == {"open_action_palette": "ctrl+j"}
+    assert len(plan.warnings) == 1
+    assert "fixed modal key" in plan.warnings[0]
+    assert "open_action_palette" in plan.warnings[0]
+
+
 def test_shift_alias_keys_expands_both_spellings() -> None:
     assert shift_alias_keys("shift+g") == "shift+g,G"
     assert shift_alias_keys("G") == "shift+g,G"

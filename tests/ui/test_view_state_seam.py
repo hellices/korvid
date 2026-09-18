@@ -118,6 +118,20 @@ def test_selected_ns_name_rejects_a_negative_cursor() -> None:
     assert notifications == [("No resource selected", "warning")]
 
 
+def test_silent_selection_probe_does_not_notify() -> None:
+    """`notify=False` lets an availability probe read the selection without
+    surfacing a warning meant for a real keybinding refusal (#388)."""
+    table = _negative_cursor_table()
+    notifications: list[tuple[str, str]] = []
+    app = SimpleNamespace(
+        _focused_table=lambda: table,
+        notify=lambda message, *, severity: notifications.append((message, severity)),
+    )
+    view = AppViewState(cast("KorvidApp", app))
+    assert view.selected_ns_name(notify=False) == (None, None)
+    assert notifications == []
+
+
 def test_workspace_focused_row_key_rejects_a_negative_cursor() -> None:
     table = _negative_cursor_table()
     app = SimpleNamespace(_focused_table=lambda: table)

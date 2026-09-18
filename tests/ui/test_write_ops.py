@@ -37,10 +37,12 @@ from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.models import GenericSummary, PodSummary
 from korvid.k8s.writes import WriteOps
+from korvid.ui.action_availability import ActionAvailability, AvailabilityCode, UnavailableReason
 from korvid.ui.app import KorvidApp
 from korvid.ui.resource_write_controller import _yaml_equal
 from korvid.ui.widgets.confirm_screen import ConfirmScreen, ReplicasPrompt
 from korvid.ui.widgets.resource_table import ResourceTable
+from korvid.ui.write_availability import WriteAvailability
 from tests.app_factory import build_test_app
 
 from .waits import until
@@ -332,6 +334,59 @@ async def test_rollout_restart_rejected_on_pods(tmp_path: Path) -> None:
         await pilot.pause()
         assert not isinstance(app.screen, ConfirmScreen)
         assert rec.calls == []
+
+
+async def test_unavailable_reason_matches_the_rollout_restart_key_refusal(tmp_path: Path) -> None:
+    """A palette probe on `pods` must explain the same refusal the `r` key
+    would notify - wording included, so the palette and the key never
+    drift (#388 task 3 review) - and must not notify while doing it."""
+    rec = Recorder()
+    app = make_app(rec, tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: _selected_name(app) == "web-1", label="pod row selected")
+        before = len(app._notifications)
+        reason = app._resource_writes.unavailable_reason("rollout_restart")
+        assert reason == UnavailableReason(
+            AvailabilityCode.UNSUPPORTED_RESOURCE, "rollout restart does not apply to pods"
+        )
+        assert len(app._notifications) == before
+
+
+async def test_unavailable_reason_matches_the_scale_key_refusal(tmp_path: Path) -> None:
+    """Same wording guarantee as the restart probe above, for `S` (#388
+    task 3 review)."""
+    rec = Recorder()
+    app = make_app(rec, tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: _selected_name(app) == "web-1", label="pod row selected")
+        before = len(app._notifications)
+        reason = app._resource_writes.unavailable_reason("scale_resource")
+        assert reason == UnavailableReason(
+            AvailabilityCode.UNSUPPORTED_RESOURCE, "scale does not apply to pods"
+        )
+        assert len(app._notifications) == before
+
+
+async def test_unavailable_reason_is_none_for_a_restartable_selection(tmp_path: Path) -> None:
+    rec = Recorder()
+    app = make_app(rec, tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: _selected_name(app) == "web-1", label="pod row selected")
+        await _to_view(pilot, "deployments")
+        assert app._resource_writes.unavailable_reason("rollout_restart") is None
+
+
+async def test_unavailable_reason_reports_read_only(tmp_path: Path) -> None:
+    rec = Recorder()
+    app = make_app(rec, tmp_path / "audit.jsonl", readonly=True)
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: _selected_name(app) == "web-1", label="pod row selected")
+        before = len(app._notifications)
+        reason = app._resource_writes.unavailable_reason("delete_resource")
+        assert reason == UnavailableReason(
+            AvailabilityCode.READ_ONLY, "Read-only mode: cluster writes are disabled"
+        )
+        assert len(app._notifications) == before
 
 
 async def test_scale_flow_prompts_then_confirms(tmp_path: Path) -> None:
@@ -1908,3 +1963,428 @@ async def test_failed_write_records_the_error_outcome_it_audited(tmp_path: Path)
     assert actions[0] == ("delete", "intent")
     assert actions[1][0] == "delete"
     assert actions[1][1].startswith("error:")
+
+
+@pytest.mark.parametrize(
+    ("action", "label"),
+    [
+        ("delete_resource", "Delete"),
+        ("rollout_restart", "Rollout restart"),
+        ("edit_resource", "Edit"),
+        ("scale_resource", "Scale"),
+        ("resize_pod", "Resize"),
+    ],
+)
+async def test_unavailable_reason_reports_a_missing_write_client(
+    tmp_path: Path, action: str, label: str
+) -> None:
+    """Carry-over from the task 3 review: every generic write refuses at the
+    keypress when the session has no write client ("<Action> unavailable in
+    this session"), so the palette must not claim the action is invocable -
+    with the handler's own wording and no notification (#388 task 4)."""
+    rec = Recorder()
+    app = make_app(rec, tmp_path / "audit.jsonl")
+    app._write_ops = None
+    async with app.run_test() as pilot:
+        await _to_view(pilot, "deployments")
+        before = len(app._notifications)
+        assert app._resource_writes.unavailable_reason(action) == UnavailableReason(
+            AvailabilityCode.MISSING_CAPABILITY, f"{label} unavailable in this session"
+        )
+        assert len(app._notifications) == before
+
+
+async def test_unavailable_reason_reports_a_missing_manifest_source_for_edit(
+    tmp_path: Path,
+) -> None:
+    """Regression (#388 task 4 review): `edit()` refuses with "Edit
+    unavailable in this session" when *either* `write_ops` or `get_manifest`
+    is missing (`ops is None or self._get_manifest() is None`). Before the
+    fix, the probe checked only `write_ops`, so with a write client present
+    but no manifest source wired the palette would have advertised `e` as
+    invocable while the keypress still refuses."""
+    rec = Recorder()
+    app = make_app(rec, tmp_path / "audit.jsonl")  # default: no get_manifest wired
+    assert app._write_ops is not None
+    assert app._get_manifest is None
+    async with app.run_test() as pilot:
+        await _to_view(pilot, "deployments")
+        before = len(app._notifications)
+        assert app._resource_writes.unavailable_reason("edit_resource") == UnavailableReason(
+            AvailabilityCode.MISSING_CAPABILITY, "Edit unavailable in this session"
+        )
+        assert len(app._notifications) == before
+
+
+async def test_edit_is_invocable_with_both_a_write_client_and_a_manifest_source(
+    tmp_path: Path,
+) -> None:
+    """The positive half of the `edit_resource` probe (#388 task 6): with a
+    write client, a manifest source, an audit log and a selected row, `e`
+    really is invocable - so the palette offers it rather than greying it
+    out. Without this the two negative cases above would still pass if the
+    probe simply always refused."""
+    rec = Recorder()
+
+    async def manifest(kind: str, namespace: str | None, name: str) -> dict[str, Any]:
+        return {"kind": "Deployment", "metadata": {"name": name, "namespace": namespace}}
+
+    app = make_app(rec, tmp_path / "audit.jsonl", get_manifest=manifest)
+    async with app.run_test() as pilot:
+        await _to_view(pilot, "deployments")
+        before = len(app._notifications)
+        assert app._resource_writes.unavailable_reason("edit_resource") is None
+        assert app._actions.availability("edit_resource") == ActionAvailability.enabled()
+        assert len(app._notifications) == before
+
+
+async def test_unavailable_reason_reports_a_missing_write_client_before_the_kind_check(
+    tmp_path: Path,
+) -> None:
+    """`rollout_restart()` reads the write client before it decides the kind
+    does not apply, so the probe must report the same first refusal."""
+    rec = Recorder()
+    app = make_app(rec, tmp_path / "audit.jsonl")
+    app._write_ops = None
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: _selected_name(app) == "web-1", label="pod row selected")
+        assert app._resource_writes.unavailable_reason("rollout_restart") == UnavailableReason(
+            AvailabilityCode.MISSING_CAPABILITY, "Rollout restart unavailable in this session"
+        )
+
+
+async def _pod_manifest(kind: str, namespace: str | None, name: str) -> dict[str, Any]:
+    """The manifest source `R` fetches the current requests/limits from."""
+    return {
+        "kind": "Pod",
+        "metadata": {"name": name, "namespace": namespace},
+        "spec": {"containers": [{"name": "app", "resources": {}}]},
+    }
+
+
+async def test_resize_availability_reports_an_unsupported_cluster(tmp_path: Path) -> None:
+    """`R` refuses when discovery never found pods/resize; the palette must
+    say so rather than offer a key that always warns (#388 task 4)."""
+    rec = Recorder()
+    app = make_app(rec, tmp_path / "audit.jsonl", get_manifest=_pod_manifest)
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: _selected_name(app) == "web-1", label="pod row selected")
+        app._pod_resize_supported = False
+        before = len(app._notifications)
+        assert app._resource_writes.unavailable_reason("resize_pod") == UnavailableReason(
+            AvailabilityCode.UNSUPPORTED_RESOURCE,
+            "This cluster does not expose pods/resize (requires Kubernetes 1.35+)",
+        )
+        app._pod_resize_supported = True
+        assert app._resource_writes.unavailable_reason("resize_pod") is None
+        assert len(app._notifications) == before
+
+
+async def test_resize_availability_reports_a_missing_manifest_source(tmp_path: Path) -> None:
+    """`R` prefills the prompt from the live manifest, so with no manifest
+    source wired it refuses with "Resize unavailable: no manifest source" -
+    the palette must carry that same refusal instead of offering the key.
+    """
+    rec = Recorder()
+    app = make_app(rec, tmp_path / "audit.jsonl")  # default: no get_manifest wired
+    assert app._write_ops is not None
+    assert app._get_manifest is None
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: _selected_name(app) == "web-1", label="pod row selected")
+        app._pod_resize_supported = True
+        before = len(app._notifications)
+        assert app._resource_writes.unavailable_reason("resize_pod") == UnavailableReason(
+            AvailabilityCode.MISSING_CAPABILITY, "Resize unavailable: no manifest source"
+        )
+        assert app._actions.availability("resize_pod").invocable is False
+        assert len(app._notifications) == before
+
+
+async def test_resize_is_invocable_with_a_manifest_source(tmp_path: Path) -> None:
+    """The positive half: a write client, a manifest source, a supporting
+    cluster and a pod row - `R` really runs, so the row is offered."""
+    rec = Recorder()
+    app = make_app(rec, tmp_path / "audit.jsonl", get_manifest=_pod_manifest)
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: _selected_name(app) == "web-1", label="pod row selected")
+        app._pod_resize_supported = True
+        before = len(app._notifications)
+        assert app._resource_writes.unavailable_reason("resize_pod") is None
+        assert app._actions.availability("resize_pod") == ActionAvailability.enabled()
+        assert len(app._notifications) == before
+
+
+async def test_the_resize_key_still_notifies_the_missing_manifest_source(
+    tmp_path: Path,
+) -> None:
+    """The probe is the silent twin of a refusal the keypress keeps: `R`
+    with no manifest source still warns with the same sentence."""
+    rec = Recorder()
+    app = make_app(rec, tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: _selected_name(app) == "web-1", label="pod row selected")
+        app._pod_resize_supported = True
+        await pilot.press("R")
+        await until(
+            pilot,
+            lambda: any(
+                n.message == "Resize unavailable: no manifest source" for n in app._notifications
+            ),
+            label="the resize key notified the missing manifest source",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Characterization: the whole palette probe matrix, per view (#388 task 8)
+# ---------------------------------------------------------------------------
+
+#: Every action `ResourceWriteController.unavailable_reason` answers for,
+#: in one tuple, so a view's whole probe answer is asserted as a unit
+#: instead of one action at a time. Extracting the probe half of this
+#: controller must leave every cell of that matrix identical - wording
+#: included, because the palette shows these strings verbatim.
+_PROBE_ACTIONS: tuple[str, ...] = (
+    "delete_resource",
+    "edit_resource",
+    "rollout_restart",
+    "scale_resource",
+    "resize_pod",
+    "cordon_node",
+    "uncordon_node",
+    "drain_node",
+)
+
+
+def _probe_matrix(app: KorvidApp) -> dict[str, tuple[str, str] | None]:
+    """Every write probe on the current view as `(code, message)` or None."""
+    matrix: dict[str, tuple[str, str] | None] = {}
+    for action in _PROBE_ACTIONS:
+        reason = app._resource_writes.unavailable_reason(action)
+        matrix[action] = None if reason is None else (reason.code.value, reason.message)
+    return matrix
+
+
+async def test_probe_matrix_on_the_pods_view(tmp_path: Path) -> None:
+    """Pods take the generic writes and the in-place resize; the workload
+    and node writes refuse by kind, and `edit` refuses because this session
+    wires no manifest source. Probing must notify nothing."""
+    rec = Recorder()
+    app = make_app(rec, tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: _selected_name(app) == "web-1", label="pod row selected")
+        app._pod_resize_supported = True
+        before = len(app._notifications)
+        assert _probe_matrix(app) == {
+            "delete_resource": None,
+            "edit_resource": ("missing_capability", "Edit unavailable in this session"),
+            "rollout_restart": ("unsupported_resource", "rollout restart does not apply to pods"),
+            "scale_resource": ("unsupported_resource", "scale does not apply to pods"),
+            "resize_pod": ("missing_capability", "Resize unavailable: no manifest source"),
+            "cordon_node": ("unsupported_resource", "cordon does not apply to pods"),
+            "uncordon_node": ("unsupported_resource", "uncordon does not apply to pods"),
+            "drain_node": ("unsupported_resource", "drain does not apply to pods"),
+        }
+        assert len(app._notifications) == before
+
+
+async def test_probe_matrix_on_the_deployments_view(tmp_path: Path) -> None:
+    """Deployments take restart and scale; resize and the node writes name
+    the group-qualified plural they were refused for."""
+    rec = Recorder()
+    app = make_app(rec, tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        await _to_view(pilot, "deployments")
+        before = len(app._notifications)
+        assert _probe_matrix(app) == {
+            "delete_resource": None,
+            "edit_resource": ("missing_capability", "Edit unavailable in this session"),
+            "rollout_restart": None,
+            "scale_resource": None,
+            "resize_pod": ("unsupported_resource", "resize does not apply to deployments.apps"),
+            "cordon_node": ("unsupported_resource", "cordon does not apply to deployments.apps"),
+            "uncordon_node": (
+                "unsupported_resource",
+                "uncordon does not apply to deployments.apps",
+            ),
+            "drain_node": ("unsupported_resource", "drain does not apply to deployments.apps"),
+        }
+        assert len(app._notifications) == before
+
+
+async def test_probe_matrix_on_the_nodes_view(tmp_path: Path) -> None:
+    """The nodes view inverts the matrix: the three node writes answer yes
+    and every workload-shaped write refuses by kind."""
+    rec = Recorder()
+    app = make_app(rec, tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        await _to_view(pilot, "nodes")
+        before = len(app._notifications)
+        assert _probe_matrix(app) == {
+            "delete_resource": None,
+            "edit_resource": ("missing_capability", "Edit unavailable in this session"),
+            "rollout_restart": ("unsupported_resource", "rollout restart does not apply to nodes"),
+            "scale_resource": ("unsupported_resource", "scale does not apply to nodes"),
+            "resize_pod": ("unsupported_resource", "resize does not apply to nodes"),
+            "cordon_node": None,
+            "uncordon_node": None,
+            "drain_node": None,
+        }
+        assert len(app._notifications) == before
+
+
+async def test_probe_matrix_in_read_only_mode(tmp_path: Path) -> None:
+    """One refusal answers for every generic and node write: the session
+    refuses cluster writes at all, before any kind or selection question."""
+    rec = Recorder()
+    app = make_app(rec, tmp_path / "audit.jsonl", readonly=True)
+    read_only = ("read_only", "Read-only mode: cluster writes are disabled")
+    async with app.run_test() as pilot:
+        await _to_view(pilot, "nodes")
+        before = len(app._notifications)
+        assert _probe_matrix(app) == {
+            "delete_resource": read_only,
+            "edit_resource": ("missing_capability", "Edit unavailable in this session"),
+            "rollout_restart": read_only,
+            "scale_resource": read_only,
+            "resize_pod": read_only,
+            "cordon_node": read_only,
+            "uncordon_node": read_only,
+            "drain_node": read_only,
+        }
+        assert len(app._notifications) == before
+
+
+#: The bounded refusal the palette row carries while the node under the
+#: cursor is the one being drained. The node name and the instruction
+#: belong to the toast `_cordon_action` raises, not to a row that cannot
+#: scroll (#388 round 9) - and it is distinct from `_OTHER_DRAIN`, which
+#: is about a node the user is *not* looking at.
+_SELECTED_DRAIN = ("protected_ui", "This node is being drained")
+
+
+async def test_probe_matrix_while_a_drain_is_running(tmp_path: Path) -> None:
+    """A running drain owns the node's schedulable state, so cordon and
+    uncordon report it while `drain_node` itself stays invocable (pressing
+    the drain key again is how the drain is cancelled)."""
+    rec = Recorder()
+    app = make_app(rec, tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        await _to_view(pilot, "nodes")
+        controller = app._resource_writes
+        controller._drain_node = "worker-1"
+        controller._drain_worker = _RunningDrain()
+        before = len(app._notifications)
+        matrix = _probe_matrix(app)
+        assert matrix["cordon_node"] == _SELECTED_DRAIN
+        assert matrix["uncordon_node"] == _SELECTED_DRAIN
+        assert "worker-1" not in _SELECTED_DRAIN[1]
+        assert matrix["drain_node"] is None
+        assert len(app._notifications) == before
+
+
+async def test_the_two_drain_refusals_stay_distinguishable(tmp_path: Path) -> None:
+    """Both drain refusals are now bounded, so neither names a node - and
+    the user has to be able to tell them apart anyway: one says the row
+    under the cursor is the node being drained (wait, or press the drain
+    key to cancel), the other says some node they cannot see is (this row
+    is fine, go find that one)."""
+    assert _SELECTED_DRAIN[1] != _OTHER_DRAIN[1]
+    assert WriteAvailability.selected_drain_reason().message == _SELECTED_DRAIN[1]
+    assert WriteAvailability.other_drain_reason().message == _OTHER_DRAIN[1]
+    detail = WriteAvailability.drain_in_progress_detail("worker-1")
+    assert detail == "nodes/worker-1 is being drained - cancel the drain first"
+    assert detail != WriteAvailability.other_drain_detail("worker-1")
+
+
+class _RunningDrain:
+    """A drain worker that reports itself as still evicting."""
+
+    @property
+    def is_running(self) -> bool:
+        return True
+
+    def cancel(self) -> None:
+        raise AssertionError("the probe must never cancel the drain it reports")
+
+
+#: The bounded refusal the palette row carries when the drain key is
+#: pressed anywhere but on the node currently being drained. The node name
+#: and the cancel instruction belong to the toast `_cancel_running_drain`
+#: raises, not to a row that cannot scroll (#388 round 8).
+_OTHER_DRAIN = ("protected_ui", "Another node drain is in progress")
+
+
+async def test_probe_matrix_while_another_node_is_draining(tmp_path: Path) -> None:
+    """A drain in flight on *another* node refuses the drain key.
+
+    `drain_node` is only invocable while a drain runs because pressing it
+    again *cancels* that drain - and cancelling is targeted: with any other
+    node selected the keypress refuses and names the node to press it on
+    instead. The palette has to say the same thing, or it offers a row that
+    can only earn that refusal (issue #388, round 6).
+
+    Cordon and uncordon are unchanged: they ask about the selected node,
+    and worker-1 is not the one being drained.
+    """
+    rec = Recorder()
+    app = make_app(rec, tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        await _to_view(pilot, "nodes")
+        controller = app._resource_writes
+        controller._drain_node = "worker-2"
+        controller._drain_worker = _RunningDrain()
+        before = len(app._notifications)
+        matrix = _probe_matrix(app)
+        assert matrix["drain_node"] == _OTHER_DRAIN
+        assert matrix["cordon_node"] is None
+        assert matrix["uncordon_node"] is None
+        assert len(app._notifications) == before
+
+
+async def test_the_drain_probe_follows_the_keypress_off_the_nodes_view(tmp_path: Path) -> None:
+    """The keypress asks about the running drain *first*: `drain_node`
+    checks the cancel case before it resolves any target, so a drain in
+    flight refuses with the same sentence wherever the user is standing -
+    including a view where nothing draining is selected at all."""
+    rec = Recorder()
+    app = make_app(rec, tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: _selected_name(app) == "web-1", label="pod row selected")
+        controller = app._resource_writes
+        controller._drain_node = "worker-2"
+        controller._drain_worker = _RunningDrain()
+        before = len(app._notifications)
+        assert _probe_matrix(app)["drain_node"] == _OTHER_DRAIN
+        assert len(app._notifications) == before
+
+
+async def test_the_drain_probe_stays_invocable_on_the_draining_node(tmp_path: Path) -> None:
+    """The one node that can still be pressed is the one being drained:
+    that press cancels the drain, so the palette keeps offering it."""
+    rec = Recorder()
+    app = make_app(rec, tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        await _to_view(pilot, "nodes")
+        controller = app._resource_writes
+        controller._drain_node = "worker-1"
+        controller._drain_worker = _RunningDrain()
+        before = len(app._notifications)
+        assert app._resource_writes.unavailable_reason("drain_node") is None
+        assert len(app._notifications) == before
+
+
+async def test_node_probe_shares_the_node_target_wording(tmp_path: Path) -> None:
+    """`node_unavailable_reason` is the silent twin of `node_target`'s own
+    notifications, so it is phrased with the word the caller passes - here
+    the node shell's "node shell", which is not a bound write action."""
+    rec = Recorder()
+    app = make_app(rec, tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: _selected_name(app) == "web-1", label="pod row selected")
+        before = len(app._notifications)
+        assert app._resource_writes.node_unavailable_reason("node shell") == UnavailableReason(
+            AvailabilityCode.UNSUPPORTED_RESOURCE, "node shell does not apply to pods"
+        )
+        await _to_view(pilot, "nodes")
+        assert app._resource_writes.node_unavailable_reason("node shell") is None
+        assert len(app._notifications) == before
