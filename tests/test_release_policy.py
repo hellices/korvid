@@ -633,6 +633,20 @@ def test_current_release_note_names_persisted_v041_azure_profile_migration() -> 
     assert expected in _section_bullets(migration)
 
 
+def test_current_release_note_requires_v041_ollama_numeric_normalization() -> None:
+    migration = markdown_section(
+        _release_notes(_project_version()), "Breaking changes and migration"
+    )
+    expected = (
+        "Preserve v0.4.1's normalized Ollama numeric types when moving "
+        "`agent.ollama` into profile `options`; do not copy quoted numbers or "
+        "`num_ctx`/`seed` floats verbatim. Follow the maintained "
+        "[Agent guide](https://hellices.github.io/korvid/agent/#connect-a-provider)."
+    )
+
+    assert expected in _section_bullets(migration)
+
+
 def test_first_published_0_4_release_note_records_the_security_remediation() -> None:
     notes = _FIRST_PUBLISHED_0_4_NOTE.read_text(encoding="utf-8")
     security = markdown_section(notes, "Security fixes")

@@ -310,6 +310,21 @@ def _flat_profile_migration_example() -> tuple[str, str, str]:
     return migration, before, after
 
 
+def _legacy_ollama_migration_rows(migration: str) -> dict[str, str]:
+    header = "| Legacy `agent.ollama` key | Store in profile `options` |"
+    lines = migration.splitlines()
+    assert header in lines, "the maintained guide needs the v0.4.1 Ollama normalization table"
+    start = lines.index(header)
+    rows: dict[str, str] = {}
+    for line in lines[start + 2 :]:
+        if not line.startswith("|"):
+            break
+        cells = [cell.strip() for cell in line.strip("|").split("|")]
+        assert len(cells) == 2, f"unexpected Ollama migration row: {line!r}"
+        rows[cells[0]] = cells[1]
+    return rows
+
+
 def test_flat_profile_migration_example_preserves_legacy_ollama_transport() -> None:
     """Moving the maintained example must not change its v0.4.1 wire protocol."""
     _, before, after = _flat_profile_migration_example()
@@ -318,6 +333,29 @@ def test_flat_profile_migration_example_preserves_legacy_ollama_transport() -> N
     assert "ollama:\n    num_ctx: 8192" in before
     assert "native_thinking" not in before
     assert ("      options:\n        native_thinking: true\n        num_ctx: 8192") in after
+
+
+def test_flat_profile_migration_preserves_v041_ollama_value_normalization() -> None:
+    """The manual move must reproduce the removed v0.4.1 parser exactly."""
+    migration, _, _ = _flat_profile_migration_example()
+
+    assert _legacy_ollama_migration_rows(migration) == {
+        "`num_ctx`, `seed`": (
+            "For an integer, finite float, or numeric string, store `int(value)`; "
+            "drop booleans, non-finite values, and values `int` cannot convert. "
+            "`seed: 0` remains valid."
+        ),
+        "`temperature`": (
+            "For an integer, finite float, or numeric string, store `float(value)`; "
+            "drop booleans, non-finite values, and values `float` cannot convert."
+        ),
+        "`num_predict`": (
+            "Copy only a positive integer (not a boolean); drop every string or float "
+            "and every non-positive integer."
+        ),
+        "`think`": "Copy only a boolean; drop every other value.",
+        "`keep_alive`": "Copy the value unchanged.",
+    }
 
 
 def test_flat_profile_migration_binds_every_v041_alias_and_auth_mapping() -> None:

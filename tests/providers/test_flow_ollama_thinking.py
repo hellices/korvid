@@ -318,6 +318,85 @@ async def test_request_carries_options_think_and_keep_alive() -> None:
     }
 
 
+@pytest.mark.parametrize(
+    ("key", "legacy_value", "normalized_value", "expected"),
+    [
+        pytest.param("num_ctx", "8192", 8192, OllamaOptions(num_ctx=8192), id="quoted-num-ctx"),
+        pytest.param("num_ctx", 8192.9, 8192, OllamaOptions(num_ctx=8192), id="float-num-ctx"),
+        pytest.param("seed", "0", 0, OllamaOptions(seed=0), id="quoted-zero-seed"),
+        pytest.param("seed", 7.9, 7, OllamaOptions(seed=7), id="float-seed"),
+        pytest.param(
+            "temperature",
+            "0.2",
+            0.2,
+            OllamaOptions(temperature=0.2),
+            id="quoted-temperature",
+        ),
+    ],
+)
+def test_v041_numeric_normalization_must_be_materialized_before_profile_copy(
+    key: str,
+    legacy_value: object,
+    normalized_value: int | float,
+    expected: OllamaOptions,
+) -> None:
+    """v0.4.1 coerced these values before constructing `OllamaOptions`."""
+    copied = build_provider(_profile(options={"native_thinking": True, key: legacy_value}))
+    normalized = build_provider(_profile(options={"native_thinking": True, key: normalized_value}))
+
+    assert isinstance(copied, OllamaProvider)
+    assert isinstance(normalized, OllamaProvider)
+    assert copied._options != expected
+    assert normalized._options == expected
+    assert type(getattr(normalized._options, key)) is type(normalized_value)
+
+
+async def test_current_native_flow_does_not_coerce_v041_quoted_numerics() -> None:
+    """Verbatim quoted values lose v0.4.1's effective request settings."""
+    copied_capture: dict[str, Any] = {}
+    copied = _built(
+        _profile(
+            options={
+                "native_thinking": True,
+                "num_ctx": "8192",
+                "temperature": "0.2",
+                "seed": "0",
+            }
+        ),
+        copied_capture,
+    )
+    await _events(copied)
+
+    normalized_capture: dict[str, Any] = {}
+    normalized = _built(
+        _profile(
+            options={
+                "native_thinking": True,
+                "num_ctx": 8192,
+                "temperature": 0.2,
+                "seed": 0,
+            }
+        ),
+        normalized_capture,
+    )
+    await _events(normalized)
+
+    assert copied_capture["json"]["options"] == {
+        "num_ctx": 16384,
+        "temperature": 0.0,
+    }
+    assert normalized._options == OllamaOptions(
+        num_ctx=8192,
+        temperature=0.2,
+        seed=0,
+    )
+    assert normalized_capture["json"]["options"] == {
+        "num_ctx": 8192,
+        "temperature": 0.2,
+        "seed": 0,
+    }
+
+
 async def test_an_unusable_option_value_falls_back_instead_of_shipping_a_string() -> None:
     """`OllamaOptions` has no validation of its own: a `"8192"` that
     reached it would be sent as a JSON string and would land in
