@@ -347,26 +347,27 @@ def test_flat_profile_migration_binds_every_v041_alias_and_auth_mapping() -> Non
     assert "release-notes/unreleased.md" not in migration
 
 
-def test_flat_profile_migration_binds_v041_azure_scoped_endpoint_rewrites() -> None:
-    """The two v0.4.1 Azure URL shapes must retain their distinct meaning."""
+def test_flat_profile_migration_binds_behavior_preserving_azure_endpoints() -> None:
+    """Each legacy Azure URL must retain the deployment it addressed."""
     migration, _, _ = _flat_profile_migration_example()
     rows = {line.strip() for line in migration.splitlines()}
     expected = {
         (
             "| `provider: azure` with "
             "`base_url: https://<resource>.openai.azure.com/openai/v1` | "
-            "`endpoint: https://<resource>.openai.azure.com`; no "
-            "`options.azure_deployment` is invented. |"
+            "Use resource-root `endpoint: https://<resource>.openai.azure.com`. |"
         ),
         (
             "| `provider: azure` with "
             "`base_url: https://<resource>.openai.azure.com/openai/deployments/<name>` | "
-            "`endpoint: https://<resource>.openai.azure.com` plus "
-            "`options.azure_deployment: <name>`. |"
+            "Retain the complete URL as "
+            "`endpoint: https://<resource>.openai.azure.com/openai/deployments/<name>`; "
+            "do not convert it to a resource root. |"
         ),
     }
 
     assert expected <= rows
+    assert "options.azure_deployment" not in migration
 
 
 def test_flat_profile_migration_binds_v041_azure_rewrite_boundaries() -> None:

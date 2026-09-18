@@ -14,6 +14,7 @@ import logging
 from pathlib import Path
 from typing import Any, cast
 
+import httpx
 import pytest
 
 import korvid.providers.litellm_factory
@@ -794,6 +795,79 @@ def test_the_same_provider_builds_once_the_endpoint_is_named(
     )
     provider = create_provider_from_profile(profile)
     assert isinstance(provider, LiteLLMProvider)
+
+
+async def test_a_complete_azure_deployment_endpoint_outlives_a_different_model_tag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The migrated path selects Azure; a filtered option and model tag do not."""
+    from litellm.llms.azure.common_utils import BaseAzureLLM
+    from openai import AsyncAzureOpenAI
+
+    deployment_endpoint = "https://example.openai.azure.com/openai/deployments/operator-chosen"
+    model_tag = "catalog-model-tag"
+    api_version = "2024-06-01"
+    monkeypatch.setenv("MY_KEY", "sk-live")
+    plan = _plan_for(
+        _profile(
+            f"azure/{model_tag}",
+            base_url=deployment_endpoint,
+            auth=_env_auth("MY_KEY"),
+            options={
+                "api_version": api_version,
+                "azure_deployment": "filtered-option-target",
+            },
+        )
+    )
+    kwargs = plan.call_kwargs([], [], stream=False)
+
+    assert kwargs["base_url"] == deployment_endpoint
+    assert "azure_deployment" not in kwargs
+
+    seen: list[str] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        seen.append(str(request.url))
+        return httpx.Response(
+            200,
+            request=request,
+            json={
+                "id": "chatcmpl-test",
+                "object": "chat.completion",
+                "created": 0,
+                "model": model_tag,
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "ok"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            },
+        )
+
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+    azure = BaseAzureLLM()
+    monkeypatch.setattr(azure, "_get_async_http_client", lambda: http_client)
+    client_params = azure.initialize_azure_sdk_client(
+        litellm_params={},
+        api_key=cast(str, kwargs["api_key"]),
+        api_base=cast(str, kwargs["base_url"]),
+        model_name=model_tag,
+        api_version=cast(str, kwargs["api_version"]),
+        is_async=True,
+    )
+    client = AsyncAzureOpenAI(**client_params)
+    try:
+        await client.chat.completions.create(
+            model=model_tag,
+            messages=[{"role": "user", "content": "hello"}],
+        )
+    finally:
+        await client.close()
+
+    assert seen == [f"{deployment_endpoint}/chat/completions?api-version={api_version}"]
 
 
 def test_a_provider_with_its_own_default_host_needs_no_endpoint(
