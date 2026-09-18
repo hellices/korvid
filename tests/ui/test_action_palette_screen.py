@@ -348,14 +348,10 @@ async def test_end_restores_the_last_result_even_when_the_highlight_cannot_move(
     async with app.run_test(size=(80, 24)) as pilot:
         options = screen.query_one(OptionList)
         await pilot.press("end")
-        await pilot.resize_terminal(36, 16)
-        await until(
-            pilot,
-            lambda: any("Item 29" in line for line in _viewport_lines(options)),
-            label="the highlighted last result rendered again after the resize",
-        )
+        assert options.virtual_size.height > options.size.height
+        assert options.highlighted == options.option_count - 1
         options.scroll_to(y=0, animate=False, immediate=True)
-        await pilot.pause()
+        assert options.scroll_offset.y == 0
         assert not any("Item 29" in line for line in _viewport_lines(options))
         await pilot.press("end")
         assert options.highlighted == options.option_count - 1

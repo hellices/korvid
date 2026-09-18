@@ -1217,29 +1217,61 @@ async def test_teardown_drains_queued_closures_while_the_endpoint_still_serves(
     """
     phases: list[str] = []
     real_drain = local_endpoint.drain_transport_closures
+    real_wait = local_endpoint._EndpointServer.wait_until_released
+    real_begin_retiring = local_endpoint._EndpointServer.begin_retiring
     live: list[LocalEndpoint] = []
+    writers: list[asyncio.StreamWriter] = []
 
     async def recording_drain() -> None:
-        [endpoint] = live
-        phases.append(f"drain with {endpoint.open_connections()} held")
+        phases.append("drain")
         await real_drain()
 
     async def release() -> None:
-        phases.append("release")
+        [endpoint], [writer] = live, writers
+        phases.append(f"release with {endpoint.open_connections()} held")
+        writer.close()
+
+    def recording_wait(
+        server: local_endpoint._EndpointServer,
+        timeout: float,
+    ) -> tuple[str, ...]:
+        phases.append(f"wait while retiring={server._is_retiring()}")
+        return real_wait(server, timeout)
+
+    def recording_begin_retiring(server: local_endpoint._EndpointServer) -> None:
+        phases.append(f"retire with {server.open_connections()} held")
+        real_begin_retiring(server)
 
     monkeypatch.setattr(local_endpoint, "drain_transport_closures", recording_drain)
+    monkeypatch.setattr(
+        local_endpoint._EndpointServer,
+        "wait_until_released",
+        recording_wait,
+    )
+    monkeypatch.setattr(
+        local_endpoint._EndpointServer,
+        "begin_retiring",
+        recording_begin_retiring,
+    )
 
     async with served_endpoint(JsonHandler, release_clients=release) as endpoint:
         live.append(endpoint)
         reader, writer = await asyncio.open_connection(_HOST, endpoint.port)
+        writers.append(writer)
         writer.write(b"GET /api.json HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
         await writer.drain()
         header = await reader.readuntil(b"\r\n\r\n")
         await reader.readexactly(content_length(header))
-        writer.close()  # the loop has only *queued* this close
+        assert await asyncio.to_thread(endpoint.wait_until_tracked, 1, _CONNECT_SECONDS)
 
     await writer.wait_closed()
-    assert phases == ["release", "drain with 1 held"]
+    assert phases == [
+        "release with 1 held",
+        "drain",
+        "wait while retiring=False",
+        "retire with 0 held",
+        "wait while retiring=True",
+    ]
 
 
 async def stall_one_handler(opened: list[socket.socket]) -> None:
