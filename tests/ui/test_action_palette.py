@@ -212,27 +212,49 @@ def test_palette_catalog_combines_both_catalogs_and_asks_about_every_name() -> N
     """The app's one catalog call (task 6): actions first, then commands,
     with the same policy asked about each action name and each command's
     canonical text - no third, hand-maintained table in between."""
-    asked: list[str] = []
+    asked_actions: list[str] = []
+    asked_commands: list[str] = []
 
-    def availability(name: str) -> ActionAvailability:
-        asked.append(name)
+    def action_availability(name: str) -> ActionAvailability:
+        asked_actions.append(name)
+        return ActionAvailability.enabled()
+
+    def command_availability(name: str) -> ActionAvailability:
+        asked_commands.append(name)
         return ActionAvailability.enabled()
 
     entries = derive_palette_entries(
         APP_BINDINGS,
         COMMANDS,
         overrides={"help": "f1"},
-        availability=availability,
-        command_availability=availability,
+        availability=action_availability,
+        command_availability=command_availability,
+    )
+    expected_actions = derive_action_entries(
+        APP_BINDINGS,
+        availability=lambda _action: ActionAvailability.enabled(),
+    )
+    expected_commands = derive_command_entries(
+        COMMANDS,
+        availability=lambda _command: ActionAvailability.enabled(),
     )
     ids = [entry.id for entry in entries]
     assert ids == [
-        *(entry.id for entry in derive_action_entries(APP_BINDINGS, availability=availability)),
-        *(entry.id for entry in derive_command_entries(COMMANDS, availability=availability)),
+        *(entry.id for entry in expected_actions),
+        *(entry.id for entry in expected_commands),
+    ]
+    assert asked_actions == [
+        entry.invocation.action
+        for entry in expected_actions
+        if isinstance(entry.invocation, AppActionInvocation)
+    ]
+    assert asked_commands == [
+        entry.invocation.canonical_text
+        for entry in expected_commands
+        if isinstance(entry.invocation, CommandInvocation)
     ]
     assert "action:open_action_palette" in ids
     assert "command:pulse" in ids
-    assert {"help", "pulse"} <= set(asked)
     assert next(e for e in entries if e.id == "action:help").trigger == "f1"
 
 

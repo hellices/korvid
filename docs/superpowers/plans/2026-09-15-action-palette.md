@@ -849,7 +849,7 @@ git add src/korvid/ui/action_availability.py src/korvid/ui/action_policy.py \
   src/korvid/ui/app_surfaces.py src/korvid/ui/write_coordinator.py \
   src/korvid/ui/resource_write_controller.py src/korvid/__main__.py \
   tests/ui/test_action_policy.py tests/ui/test_view_state_seam.py \
-  tests/ui/test_write_coordinator.py tests/ui/test_write_ops.py \
+  tests/ui/test_write_coordinator.py tests/ui/test_write_ops.py
 git commit -m "feat(ui): expose write action availability (#388)" \
   -m "Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>"
 ```
