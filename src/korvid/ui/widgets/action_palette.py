@@ -25,10 +25,6 @@ from textual.widgets.option_list import Option
 
 from korvid.ui.action_palette import PaletteEntry, rank_entries
 
-# Static modal close keys. The app's keymap planner reserves them from
-# competing priority actions, which Textual dispatches before screen bindings.
-ACTION_PALETTE_CLOSE_KEYS = ("escape", "ctrl+p")
-
 #: The sole, disabled row shown when a query matches nothing — visible and
 #: explicit rather than an empty, ambiguous-looking list.
 _NO_RESULTS_PROMPT = "No matching actions or commands"
@@ -170,8 +166,11 @@ class ActionPaletteScreen(ModalScreen[str | None]):
     question, answered once in `_activate`.
     """
 
+    # The app's keymap planner reserves these from competing priority actions,
+    # which Textual dispatches before screen bindings.
+    CLOSE_KEYS = ("escape", "ctrl+p")
     BINDINGS: ClassVar[list[Binding | tuple[str, str] | tuple[str, str, str]]] = [
-        Binding(",".join(ACTION_PALETTE_CLOSE_KEYS), "cancel", "Close", show=False),
+        Binding(",".join(CLOSE_KEYS), "cancel", "Close", show=False),
         Binding("down", "move(1)", "Next", show=False),
         Binding("up", "move(-1)", "Previous", show=False),
         Binding("pagedown", "page(1)", "Next page", show=False),
