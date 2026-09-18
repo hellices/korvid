@@ -550,13 +550,35 @@ def test_current_release_note_is_a_concise_user_facing_summary() -> None:
         flat,
         re.I,
     )
-    assert "(../agent.md#connect-a-provider)" in notes
+    assert "(https://hellices.github.io/korvid/agent/#connect-a-provider)" in notes
 
     assert "[milestone 6](https://github.com/hellices/korvid/milestone/6)" in notes
     assert not re.search(r"(?<!\w)#\d+\b", notes), (
         "link milestone 6 instead of listing issue-by-issue history"
     )
     assert "github.com/hellices/korvid/issues/" not in notes
+
+
+def test_current_release_note_uses_canonical_public_guide_urls() -> None:
+    notes = _release_notes(_project_version())
+    canonical_urls = (
+        "https://hellices.github.io/korvid/tui/#change-scope-without-losing-context",
+        "https://hellices.github.io/korvid/agent/#connect-a-provider",
+        "https://hellices.github.io/korvid/provider-plugins/",
+        "https://hellices.github.io/korvid/agent/#self-hosted-endpoints-and-proxies",
+    )
+
+    missing = [url for url in canonical_urls if f"]({url})" not in notes]
+    assert not missing, f"GitHub Release guide links must use canonical public URLs: {missing}"
+
+
+def test_current_release_note_rejects_relative_markdown_guide_links() -> None:
+    notes = _release_notes(_project_version())
+    relative_links = re.findall(r"\]\((\.\./[^)]*\.md(?:#[^)]*)?)\)", notes, re.I)
+
+    assert not relative_links, (
+        f"GitHub Release guide links cannot be relative Markdown paths: {relative_links}"
+    )
 
 
 def test_current_release_note_names_legacy_namespace_scope_migration() -> None:
@@ -566,7 +588,9 @@ def test_current_release_note_names_legacy_namespace_scope_migration() -> None:
 
     for key in ("`namespaces:`", "`namespace:`", "`favorite_namespaces:`"):
         assert key in migration
-    assert "(../tui.md#change-scope-without-losing-context)" in migration
+    assert (
+        "(https://hellices.github.io/korvid/tui/#change-scope-without-losing-context)" in migration
+    )
 
 
 def test_first_published_0_4_release_note_records_the_security_remediation() -> None:
