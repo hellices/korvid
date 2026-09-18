@@ -300,13 +300,33 @@ selected profile's `options`. Unsupported root or `agent` settings are
 configuration errors rather than alternate input formats.
 
 Configurations from versions that accepted flat `agent.provider`,
-`agent.model`, `agent.base_url`, or `agent.ollama.*` settings must be moved
-manually; they are no longer migrated on load. The v0.4.1 parser translated
-these provider aliases exactly:
+`agent.model`, `agent.base_url`, `agent.api_key_env`, `agent.auth`,
+`agent.ollama`, `agent.options`, or `agent.enabled` settings must be moved
+manually; they are no longer migrated on load.
+
+Before alias or authentication handling, v0.4.1 stripped surrounding
+whitespace, lowercased the provider, and collapsed every run of `-`, `_`, or
+`.` to one `-`. `GitHub.Copilot` and `github_copilot` therefore both became
+`github-copilot`; `openai.compat` became `openai-compat` before the alias table
+was applied. Reproduce that canonical provider spelling first because
+v0.5.0's profile-prefix normalization does not fold dots.
+
+The v0.4.1 parser translated these provider aliases exactly:
 
 | Legacy `provider` | Profile `model` |
 |---|---|
 | `openai-compat`, `openai`, `vllm`, `github`, `anthropic`, `claude` | `openai/<model>` |
+
+Every other canonical provider became `<provider>/<model>`. The remaining
+flat inputs had these ordering semantics:
+
+| Legacy flat input | v0.4.1 result to reproduce in the profile |
+|---|---|
+| `agent.base_url` | Copy to profile `endpoint`, except for the Azure cases below. |
+| `agent.api_key_env` and `agent.auth` | Build profile `auth` using the explicit and inferred mappings below. |
+| `agent.ollama` | Normalize the supported values below, then inject `native_api: true` and `native_thinking: true` for an Ollama provider. Only `native_thinking` selects that transport in v0.5.0. |
+| `agent.options` | When it was a mapping, v0.4.1 copied it into profile `options` **after** normalized `agent.ollama` values and injected `native_api` and `native_thinking`; its value overrode the same key. Preserve that final, last-wins mapping, subject to v0.5.0's reserved-option validation. |
+| `agent.enabled` | `enabled: false` became `active: null`; the generated profile remains present so it can be selected later. Every other value left it active. |
 
 Map provider-specific legacy URLs to v0.5.0 endpoints without changing where
 their requests are sent:
@@ -381,6 +401,48 @@ The `native_thinking: true` line retains v0.4.1's native `/api/chat`
 transport. See the
 [v0.5.0 migration notes](release-notes/v0.5.0.md#breaking-changes-and-migration)
 for the complete set of removed compatibility inputs.
+
+### Python API migration from v0.4.1 { #python-api-migration-from-v041 }
+
+`korvid.agent` no longer re-exports symbols. Of its 53 package-level exports
+in v0.4.1, 51 still exist in their defining modules. Change package imports
+to the module in this complete map:
+
+| v0.5.0 defining module | v0.4.1 names formerly exported by `korvid.agent` |
+|---|---|
+| `korvid.agent.engine` | `AgentEngine`, `AgentTurnRequest` |
+| `korvid.agent.events` | `AgentError`, `AgentEvent`, `TextDelta`, `ToolCallFinished`, `ToolCallStarted`, `TurnComplete`, `TurnInterrupted` |
+| `korvid.agent.evidence` | `Evidence`, `EvidenceLedger` |
+| `korvid.agent.interaction` | `AgentUiBridge`, `ClusterFacts`, `DrillDown`, `InteractionContext`, `Navigate`, `OpenDescribe`, `OpenLogs`, `PaneContext`, `ResourceIdentity`, `SetFilter`, `UiAction`, `UiActionResult` |
+| `korvid.agent.model_policy` | `CapabilitySource`, `ModelCapabilities`, `ModelCatalogEntry`, `ModelDescriptor`, `ModelRouter`, `ModelRoutingError`, `ModelTier`, `PolicyEnvironment`, `ResolvedAgentPolicy` |
+| `korvid.agent.model_profiles` | `DeviceLoginPrompt` |
+| `korvid.agent.native_engine` | `NativeAgentEngine` |
+| `korvid.agent.outbound` | `OutboundPolicy`, `OutboundSnapshot` |
+| `korvid.agent.prompt_harness` | `ComposedPrompt`, `PromptCompositionError`, `PromptHarness`, `PromptInputs`, `StaticPromptTooLargeError`, `cluster_context_note` |
+| `korvid.agent.provider` | `LLMProvider`, `REQUEST_SENT` |
+| `korvid.agent.request_gateway` | `PreparedGatewayRequest`, `RequestGateway` |
+| `korvid.agent.session` | `AgentSession`, `DefaultAgentSession`, `SessionRetargetError` |
+| `korvid.agent.tool_harness` | `ToolExecution`, `ToolHarness` |
+
+Direct imports alone are not enough for the contracts that changed shape. The
+prompt constructor migration is
+`PromptHarness(packs=..., provider_overlays=..., model_overlays=...)` →
+`PromptHarness(tier_prompt=..., extra_layers=...)`; the table gives its
+semantics and every other required adaptation. Terminal event constructors
+remain source-compatible because their new argument is
+`diagnostics: TurnDiagnostics | None = None`.
+
+| v0.4.1 contract | v0.5.0 migration |
+|---|---|
+| `UnknownPromptPackError`, `UnknownPromptOverlayError` | No replacement. Prompt-pack and overlay registries were removed, so the harness no longer performs those lookups or raises these exceptions. `StaticPromptTooLargeError` remains. |
+| `PromptHarness(packs=..., provider_overlays=..., model_overlays=...)` | → `PromptHarness(tier_prompt=..., extra_layers=...)`. Eval code passes one selected tier-prompt replacement and an ordered sequence of explicit extra layers. Production provider/model prompt overrides were removed. |
+| `ModelCatalogEntry.prompt_overlay_ids` | Removed with model overlays; construct entries without it. |
+| `ResolvedAgentPolicy.prompt_pack_id` and `.prompt_overlay_ids` | Removed. `tier` selects the shipped prompt and behavior from `korvid.agent.tiers.low` or `.high`; eval-only additions use the `PromptHarness` constructor's `extra_layers` argument. |
+| `AgentEvent` | The union now also contains `AgentPhaseChanged` from `korvid.agent.events`; exhaustive consumers must accept it. |
+| `AgentError`, `TurnComplete`, and `TurnInterrupted` | Each adds optional `diagnostics: TurnDiagnostics \| None = None`. Existing constructors remain valid; consumers may read snapshots from `korvid.agent.diagnostics`. |
+| `AgentTurnRequest` and `DefaultAgentSession` | `AgentTurnRequest.diagnostics` is optional, and `DefaultAgentSession(..., diagnostics_factory=None)` enables per-turn recording when a `TurnDiagnosticsFactory` is supplied. Both defaults preserve callers that do not record diagnostics. |
+| `korvid.agent.model_profiles.SpecialFlowRegistry` | `korvid.agent.model_profiles.SpecialFlowRegistry` moved to `korvid.providers.special_flows.SpecialFlowRegistry`; use the current registry and flow contract rather than relying on the old two-method implementation. |
+| `ProviderPlugin`, `ProviderPluginMetadata`, `ProviderPluginConfig`, and `PROVIDER_PLUGIN_API_VERSION` from `korvid.agent.provider_plugin` | The module and construction API were removed without a shim. Publish a `SpecialFlow` declaration, following [Migrating the removed construction API](provider-plugins.md#migrating-the-removed-construction-api). |
 
 !!! warning "GitHub Copilot"
 
