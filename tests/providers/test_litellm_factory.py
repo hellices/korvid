@@ -14,6 +14,7 @@ import logging
 from pathlib import Path
 from typing import Any, cast
 
+import httpx
 import pytest
 
 import korvid.providers.litellm_factory
@@ -26,7 +27,7 @@ from korvid.agent.model_profiles import (
     SpecialFlow,
 )
 from korvid.agent.provider import LLMProvider
-from korvid.core.config import ConnectionAuthConfig, ModelConnectionConfig
+from korvid.core.config import ConnectionAuthConfig, ModelConnectionConfig, load_config
 from korvid.providers.litellm_factory import (
     OMIT_API_KEY,
     create_provider_from_profile,
@@ -117,6 +118,65 @@ def _plan_for(profile: ModelConnectionConfig, **kwargs: Any) -> RequestPlan:
     provider = create_provider_from_profile(profile, **kwargs)
     assert isinstance(provider, LiteLLMProvider)
     return provider._plan
+
+
+async def _observed_azure_completion_url(
+    monkeypatch: pytest.MonkeyPatch,
+    profile: ModelConnectionConfig,
+    *,
+    model_tag: str,
+) -> tuple[dict[str, Any], str]:
+    from litellm.llms.azure.common_utils import BaseAzureLLM
+    from openai import AsyncAzureOpenAI
+
+    kwargs = _plan_for(profile).call_kwargs([], [], stream=False)
+    api_version = kwargs.get("api_version")
+    assert api_version is None or isinstance(api_version, str)
+    seen: list[str] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        seen.append(str(request.url))
+        return httpx.Response(
+            200,
+            request=request,
+            json={
+                "id": "chatcmpl-test",
+                "object": "chat.completion",
+                "created": 0,
+                "model": model_tag,
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "ok"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            },
+        )
+
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+    azure = BaseAzureLLM()
+    monkeypatch.setattr(azure, "_get_async_http_client", lambda: http_client)
+    client_params = azure.initialize_azure_sdk_client(
+        litellm_params={},
+        api_key=cast(str, kwargs["api_key"]),
+        api_base=cast(str, kwargs["base_url"]),
+        model_name=model_tag,
+        api_version=api_version,
+        is_async=True,
+    )
+    client = AsyncAzureOpenAI(**client_params)
+    try:
+        await client.chat.completions.create(
+            model=model_tag,
+            messages=[{"role": "user", "content": "hello"}],
+        )
+    finally:
+        await client.close()
+
+    assert len(seen) == 1
+    return kwargs, seen[0]
 
 
 class _Catalog:
@@ -794,6 +854,77 @@ def test_the_same_provider_builds_once_the_endpoint_is_named(
     )
     provider = create_provider_from_profile(profile)
     assert isinstance(provider, LiteLLMProvider)
+
+
+async def test_persisted_v041_azure_profile_requires_deployment_endpoint_correction(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The v0.4.1 profile is accepted, but its option no longer selects Azure."""
+    resource_endpoint = "https://example.openai.azure.com"
+    deployment = "operator-chosen"
+    deployment_endpoint = f"{resource_endpoint}/openai/deployments/{deployment}"
+    model_tag = "catalog-model-tag"
+    api_version = "2024-06-01"
+    path = tmp_path / "config.yaml"
+    monkeypatch.setenv("MY_KEY", "sk-live")
+    monkeypatch.setenv("AZURE_API_VERSION", api_version)
+    path.write_text(
+        "agent:\n"
+        "  active: default\n"
+        "  profiles:\n"
+        "    default:\n"
+        f"      model: azure/{model_tag}\n"
+        f"      endpoint: {resource_endpoint}\n"
+        "      auth:\n"
+        "        method: environment\n"
+        "        key: MY_KEY\n"
+        "      options:\n"
+        f"        azure_deployment: {deployment}\n",
+        encoding="utf-8",
+    )
+    persisted = load_config(path).model_connections.active_profile
+    assert persisted is not None
+    assert persisted.model == f"azure/{model_tag}"
+    assert persisted.endpoint == resource_endpoint
+    assert dict(persisted.options) == {"azure_deployment": deployment}
+
+    persisted_kwargs, persisted_url = await _observed_azure_completion_url(
+        monkeypatch,
+        persisted,
+        model_tag=model_tag,
+    )
+    assert "azure_deployment" not in persisted_kwargs
+    assert persisted_url == (
+        f"{resource_endpoint}/openai/deployments/{model_tag}"
+        f"/chat/completions?api-version={api_version}"
+    )
+
+    path.write_text(
+        "agent:\n"
+        "  active: default\n"
+        "  profiles:\n"
+        "    default:\n"
+        f"      model: azure/{model_tag}\n"
+        f"      endpoint: {deployment_endpoint}\n"
+        "      auth:\n"
+        "        method: environment\n"
+        "        key: MY_KEY\n",
+        encoding="utf-8",
+    )
+    corrected = load_config(path).model_connections.active_profile
+    assert corrected is not None
+    assert corrected.endpoint == deployment_endpoint
+    assert dict(corrected.options) == {}
+
+    corrected_kwargs, corrected_url = await _observed_azure_completion_url(
+        monkeypatch,
+        corrected,
+        model_tag=model_tag,
+    )
+    assert corrected_kwargs["base_url"] == deployment_endpoint
+    assert "azure_deployment" not in corrected_kwargs
+    assert corrected_url == f"{deployment_endpoint}/chat/completions?api-version={api_version}"
 
 
 def test_a_provider_with_its_own_default_host_needs_no_endpoint(

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import re
+import textwrap
 import tomllib
 from pathlib import Path
 
 import pytest
 
+from korvid import __version__
 from tests.release_contracts import UPGRADE_SOURCE_VERSION, markdown_section
 
 _ROOT = Path(__file__).parents[1]
@@ -461,8 +463,11 @@ def _assert_current_release_note_contracts(version: str, notes: str) -> None:
 
     verify = markdown_section(notes, "Verify")
     assert "```sh\nset -eu" in verify
-    assert f"gh release download v{version} --dir dist/v{version}" in verify, (
-        "docs/release-notes downloads the current tagged artifacts"
+    download_command = (
+        f"gh release download v{version} --dir dist/v{version} --repo hellices/korvid"
+    )
+    assert download_command in verify.splitlines(), (
+        "docs/release-notes downloads the current tagged artifacts from hellices/korvid"
     )
     assert f"gh attestation verify dist/v{version}/korvid-{version}-py3-none-any.whl" in verify, (
         "docs/release-notes verifies the current wheel filename"
@@ -522,6 +527,124 @@ def test_current_release_docs_only_name_allowed_versions() -> None:
         _RUNBOOK.read_text(encoding="utf-8"),
         _release_notes(version),
     )
+
+
+def test_current_release_note_is_a_concise_user_facing_summary() -> None:
+    notes = _release_notes(_project_version())
+    expected_sections = [
+        "Why upgrade",
+        "Breaking changes and migration",
+        "Reliability and safety",
+        "Install or upgrade",
+        "Verify",
+        "Known limits",
+    ]
+
+    assert re.findall(r"^## (.+)$", notes, re.MULTILINE) == expected_sections
+    assert len(notes.splitlines()) <= 180
+
+    flat = _normalized(notes)
+    assert "Pulse / Problems" in flat
+    assert re.search(r"`Ctrl-P`.{0,40}Action Palette", flat)
+    assert re.search(
+        r"write actions? still require a fresh approval keystroke",
+        flat,
+        re.I,
+    )
+    assert "(https://hellices.github.io/korvid/agent/#connect-a-provider)" in notes
+
+    assert "[milestone 6](https://github.com/hellices/korvid/milestone/6)" in notes
+    assert not re.search(r"(?<!\w)#\d+\b", notes), (
+        "link milestone 6 instead of listing issue-by-issue history"
+    )
+    assert "github.com/hellices/korvid/issues/" not in notes
+
+
+def test_current_release_note_uses_canonical_public_guide_urls() -> None:
+    notes = _release_notes(_project_version())
+    canonical_urls = (
+        "https://hellices.github.io/korvid/tui/#change-scope-without-losing-context",
+        "https://hellices.github.io/korvid/agent/#connect-a-provider",
+        "https://hellices.github.io/korvid/provider-plugins/",
+        "https://hellices.github.io/korvid/agent/#self-hosted-endpoints-and-proxies",
+    )
+
+    missing = [url for url in canonical_urls if f"]({url})" not in notes]
+    assert not missing, f"GitHub Release guide links must use canonical public URLs: {missing}"
+
+
+def test_current_release_note_rejects_relative_markdown_guide_links() -> None:
+    notes = _release_notes(_project_version())
+    relative_links = re.findall(r"\]\((\.\./[^)]*\.md(?:#[^)]*)?)\)", notes, re.I)
+
+    assert not relative_links, (
+        f"GitHub Release guide links cannot be relative Markdown paths: {relative_links}"
+    )
+
+
+def test_current_release_note_names_legacy_namespace_scope_migration() -> None:
+    migration = markdown_section(
+        _release_notes(_project_version()), "Breaking changes and migration"
+    )
+
+    for key in ("`namespaces:`", "`namespace:`", "`favorite_namespaces:`"):
+        assert key in migration
+    assert (
+        "(https://hellices.github.io/korvid/tui/#change-scope-without-losing-context)" in migration
+    )
+
+
+def test_current_release_note_ollama_example_preserves_v041_native_transport() -> None:
+    notes = _release_notes(_project_version())
+    migration = markdown_section(notes, "Breaking changes and migration")
+    examples = re.findall(r"(?ms)^[ ]*```yaml\n(.*?)^[ ]*```", notes)
+
+    assert len(examples) == 1, "keep one copyable migration example in the release note"
+    assert textwrap.dedent(examples[0]).strip() == (
+        "agent:\n"
+        "  active: local\n"
+        "  profiles:\n"
+        "    local:\n"
+        "      model: ollama/qwen3:8b\n"
+        "      endpoint: http://localhost:11434\n"
+        "      auth: {method: none}\n"
+        "      options:\n"
+        "        native_thinking: true"
+    )
+    assert (
+        "This exact profile preserves v0.4.1's native Ollama `/api/chat` transport; "
+        "keep `options.native_thinking: true` when migrating it."
+    ) in _normalized(migration)
+
+
+def test_current_release_note_names_persisted_v041_azure_profile_migration() -> None:
+    migration = markdown_section(
+        _release_notes(_project_version()), "Breaking changes and migration"
+    )
+    expected = (
+        "If v0.4.1 already persisted an Azure profile with resource-root "
+        "`endpoint: https://<resource>.openai.azure.com` plus "
+        "`options.azure_deployment: <name>`, set `endpoint` to "
+        "`https://<resource>.openai.azure.com/openai/deployments/<name>` and remove "
+        "`options.azure_deployment` before upgrading; see the maintained "
+        "[Agent guide](https://hellices.github.io/korvid/agent/#connect-a-provider)."
+    )
+
+    assert expected in _section_bullets(migration)
+
+
+def test_current_release_note_requires_v041_ollama_numeric_normalization() -> None:
+    migration = markdown_section(
+        _release_notes(_project_version()), "Breaking changes and migration"
+    )
+    expected = (
+        "Preserve v0.4.1's normalized Ollama numeric types when moving "
+        "`agent.ollama` into profile `options`; do not copy quoted numbers or "
+        "`num_ctx`/`seed` floats verbatim. Follow the maintained "
+        "[Agent guide](https://hellices.github.io/korvid/agent/#connect-a-provider)."
+    )
+
+    assert expected in _section_bullets(migration)
 
 
 def test_first_published_0_4_release_note_records_the_security_remediation() -> None:
@@ -702,6 +825,12 @@ def test_publish_step_requires_reviewed_commit_version_guard() -> None:
         AssertionError, match=r'git show "\$COMMIT:pyproject\.toml" >"\$metadata" 2>/dev/null'
     ):
         _assert_release_runbook_contracts(runbook.replace(publish, mutated))
+
+
+def test_v0_5_release_metadata_uses_the_last_published_minor() -> None:
+    assert _project_version() == "0.5.0"
+    assert UPGRADE_SOURCE_VERSION == "0.4.1"
+    assert __version__ == "0.5.0"
 
 
 def test_upgrade_source_is_the_previous_minor_release() -> None:
