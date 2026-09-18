@@ -367,7 +367,24 @@ def test_flat_profile_migration_binds_behavior_preserving_azure_endpoints() -> N
     }
 
     assert expected <= rows
-    assert "options.azure_deployment" not in migration
+
+
+def test_flat_profile_migration_binds_persisted_v041_azure_profile_correction() -> None:
+    """The guide must repair the profile v0.4.1 could already have saved."""
+    migration, _, _ = _flat_profile_migration_example()
+    normalized = " ".join(migration.split())
+
+    assert (
+        "When v0.4.1 automatically migrated a flat Azure deployment URL, it could "
+        "persist a named profile with resource-root "
+        "`endpoint: https://<resource>.openai.azure.com` plus "
+        "`options.azure_deployment: <name>`. v0.5.0 accepts that profile, but "
+        "filters the option and uses the profile's model tag as the deployment. "
+        "Before upgrading, set "
+        "`endpoint: https://<resource>.openai.azure.com/openai/deployments/<name>` "
+        "and remove `options.azure_deployment`; this preserves `<name>` when it "
+        "differs from the model tag."
+    ) in normalized
 
 
 def test_flat_profile_migration_binds_v041_azure_rewrite_boundaries() -> None:

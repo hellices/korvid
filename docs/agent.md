@@ -318,8 +318,15 @@ their requests are sent:
 | `provider: azure` with bare `base_url: https://<resource>.openai.azure.com` | The same resource-root `endpoint: https://<resource>.openai.azure.com`. |
 | Any non-`azure` provider | Copy the complete `base_url` to `endpoint` unchanged; do not rewrite `/openai/...` paths. |
 
-For a deployment-scoped URL, the path selects `<name>` even when it differs
-from the profile's model tag.
+When v0.4.1 automatically migrated a flat Azure deployment URL, it could
+persist a named profile with resource-root
+`endpoint: https://<resource>.openai.azure.com` plus
+`options.azure_deployment: <name>`. v0.5.0 accepts that profile, but filters
+the option and uses the profile's model tag as the deployment. Before
+upgrading, set
+`endpoint: https://<resource>.openai.azure.com/openai/deployments/<name>` and
+remove `options.azure_deployment`; this preserves `<name>` when it differs
+from the model tag.
 
 It translated explicit legacy authentication methods as follows:
 
