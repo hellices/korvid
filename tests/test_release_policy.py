@@ -462,8 +462,11 @@ def _assert_current_release_note_contracts(version: str, notes: str) -> None:
 
     verify = markdown_section(notes, "Verify")
     assert "```sh\nset -eu" in verify
-    assert f"gh release download v{version} --dir dist/v{version}" in verify, (
-        "docs/release-notes downloads the current tagged artifacts"
+    download_command = (
+        f"gh release download v{version} --dir dist/v{version} --repo hellices/korvid"
+    )
+    assert download_command in verify.splitlines(), (
+        "docs/release-notes downloads the current tagged artifacts from hellices/korvid"
     )
     assert f"gh attestation verify dist/v{version}/korvid-{version}-py3-none-any.whl" in verify, (
         "docs/release-notes verifies the current wheel filename"
