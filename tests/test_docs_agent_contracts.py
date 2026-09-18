@@ -385,6 +385,67 @@ def test_flat_profile_migration_binds_every_v041_alias_and_auth_mapping() -> Non
     assert "release-notes/unreleased.md" not in migration
 
 
+def test_flat_profile_migration_preserves_v041_mixed_shape_precedence() -> None:
+    """Profiles won wholesale; ignored flat keys must be deleted, not migrated."""
+    migration, _, _ = _flat_profile_migration_example()
+    mixed_row = next(
+        line
+        for line in migration.splitlines()
+        if line.startswith("| `agent.profiles` was present |")
+    )
+    flat_row = next(
+        line
+        for line in migration.splitlines()
+        if line.startswith("| `agent.profiles` was absent |")
+    )
+
+    assert "kept `agent.active` and `agent.profiles`" in mixed_row
+    assert "ignored" in mixed_row
+    for key in (
+        "provider",
+        "model",
+        "base_url",
+        "api_key_env",
+        "auth",
+        "ollama",
+        "options",
+        "enabled",
+    ):
+        assert f"`{key}`" in mixed_row
+    assert "Delete those flat keys" in mixed_row
+    assert "do not apply the conversions below" in mixed_row
+    assert "Only this shape uses the conversions below" in flat_row
+
+
+def test_release_note_preserves_v041_mixed_shape_precedence() -> None:
+    """The concise upgrade checklist must not tell profile users to re-migrate."""
+    notes = " ".join(_text(_CURRENT_RELEASE_NOTE).split())
+
+    assert (
+        "If `agent.profiles` was already present in v0.4.1, keep its `active` "
+        "selection and profiles, and delete the ignored flat connection keys; "
+        "do not migrate those stale values."
+    ) in notes
+    assert (
+        "Only a v0.4.1 configuration without `agent.profiles` should convert "
+        "the flat connection into a profile."
+    ) in notes
+
+
+def test_flat_profile_migration_preserves_v041_api_key_env_value() -> None:
+    """Environment auth needs both the method and the credential variable name."""
+    migration, _, _ = _flat_profile_migration_example()
+    normalized = " ".join(migration.split())
+
+    assert (
+        "Whenever the resulting method is `environment`, copy "
+        "`agent.api_key_env: NAME` to profile `auth.key: NAME`."
+    ) in normalized
+    assert (
+        "For every other resulting method, v0.4.1 ignored `api_key_env`; do not add `auth.key`."
+    ) in normalized
+
+
 def test_flat_profile_migration_binds_v041_provider_canonicalization() -> None:
     """Aliases and auth were selected after the legacy separator folding."""
     migration, _, _ = _flat_profile_migration_example()

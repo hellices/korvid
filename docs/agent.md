@@ -304,6 +304,13 @@ Configurations from versions that accepted flat `agent.provider`,
 `agent.ollama`, `agent.options`, or `agent.enabled` settings must be moved
 manually; they are no longer migrated on load.
 
+First distinguish the two shapes v0.4.1 accepted:
+
+| v0.4.1 file shape | Upgrade action |
+|---|---|
+| `agent.profiles` was present | v0.4.1 kept `agent.active` and `agent.profiles` and ignored flat `provider`, `model`, `base_url`, `api_key_env`, `auth`, `ollama`, `options`, and `enabled`. Delete those flat keys; do not apply the conversions below. |
+| `agent.profiles` was absent | Only this shape uses the conversions below to build a profile from the flat connection. |
+
 Before alias or authentication handling, v0.4.1 stripped surrounding
 whitespace, lowercased the provider, and collapsed every run of `-`, `_`, or
 `.` to one `-`. `GitHub.Copilot` and `github_copilot` therefore both became
@@ -359,7 +366,10 @@ It translated explicit legacy authentication methods as follows:
 
 Without an explicit legacy `auth.method`, `github-copilot` becomes
 `device-login`; every other provider becomes `environment` when
-`api_key_env` is set, or `none` otherwise.
+`api_key_env` is set, or `none` otherwise. Whenever the resulting method is
+`environment`, copy `agent.api_key_env: NAME` to profile `auth.key: NAME`.
+For every other resulting method, v0.4.1 ignored `api_key_env`; do not add
+`auth.key`.
 
 Normalize each legacy `agent.ollama` value before placing it in profile
 `options`; copying a quoted numeric or a `num_ctx`/`seed` float verbatim can
