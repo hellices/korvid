@@ -412,6 +412,43 @@ async def test_the_built_in_close_key_still_closes_a_remapped_palette() -> None:
         assert app.focused is table
 
 
+async def test_priority_remap_cannot_steal_the_palettes_fixed_ctrl_p_close() -> None:
+    app = make_app(
+        [_pod("web")],
+        config=_config(
+            {
+                "open_action_palette": "ctrl+j",
+                "toggle_agent": "ctrl+p",
+            }
+        ),
+    )
+    async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 1, label="pod loaded")
+        await until(
+            pilot,
+            lambda: any("fixed modal key" in n.message for n in app._notifications),
+            label="fixed palette close-key warning notified",
+        )
+        assert app._keybinding_overrides == {"open_action_palette": "ctrl+j"}
+
+        table.focus()
+        await pilot.press("ctrl+j")
+        await until(
+            pilot,
+            lambda: isinstance(app.screen, ActionPaletteScreen),
+            label="palette opens on ctrl+j",
+        )
+        await pilot.press("ctrl+p")
+        await until(
+            pilot,
+            lambda: app.screen is app.screen_stack[0],
+            label="fixed ctrl+p closes the remapped palette",
+        )
+        assert not any(isinstance(s, ActionPaletteScreen) for s in app.screen_stack)
+        assert app.focused is table
+
+
 def test_keybindings_doc_names_every_palette_close_key_after_a_remap() -> None:
     """The remap section has to say how the palette closes afterwards.
 

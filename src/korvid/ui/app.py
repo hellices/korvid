@@ -94,7 +94,10 @@ from korvid.ui.session_timeline_controller import (
     TIMELINE_EVENT_GROUP,
     TIMELINE_NAVIGATION_GROUP,
 )
-from korvid.ui.widgets.action_palette import ActionPaletteScreen
+from korvid.ui.widgets.action_palette import (
+    ACTION_PALETTE_CLOSE_KEYS,
+    ActionPaletteScreen,
+)
 from korvid.ui.widgets.agent_panel import AgentPanel
 from korvid.ui.widgets.command_bar import CommandBar
 from korvid.ui.widgets.describe_screen import DescribePane, DescribeScreen
@@ -475,6 +478,7 @@ class KorvidApp(App[None]):
             self._binding_actions(),
             priority_actions,
             reserved_keys=reserved_keys,
+            priority_reserved_keys=dict.fromkeys(ACTION_PALETTE_CLOSE_KEYS, "open_action_palette"),
         )
         self._keybinding_overrides = plan.overrides
         keymap: dict[str, str] = {}
