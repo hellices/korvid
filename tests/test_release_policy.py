@@ -556,6 +556,16 @@ def test_current_release_note_is_a_concise_user_facing_summary() -> None:
     assert "github.com/hellices/korvid/issues/" not in notes
 
 
+def test_current_release_note_names_legacy_namespace_scope_migration() -> None:
+    migration = markdown_section(
+        _release_notes(_project_version()), "Breaking changes and migration"
+    )
+
+    for key in ("`namespaces:`", "`namespace:`", "`favorite_namespaces:`"):
+        assert key in migration
+    assert "(../tui.md#change-scope-without-losing-context)" in migration
+
+
 def test_first_published_0_4_release_note_records_the_security_remediation() -> None:
     notes = _FIRST_PUBLISHED_0_4_NOTE.read_text(encoding="utf-8")
     security = markdown_section(notes, "Security fixes")
