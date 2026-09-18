@@ -339,7 +339,21 @@ It translated explicit legacy authentication methods as follows:
 
 Without an explicit legacy `auth.method`, `github-copilot` becomes
 `device-login`; every other provider becomes `environment` when
-`api_key_env` is set, or `none` otherwise. For example:
+`api_key_env` is set, or `none` otherwise.
+
+Normalize each legacy `agent.ollama` value before placing it in profile
+`options`; copying a quoted numeric or a `num_ctx`/`seed` float verbatim can
+change the effective request:
+
+| Legacy `agent.ollama` key | Store in profile `options` |
+|---|---|
+| `num_ctx`, `seed` | For an integer, finite float, or numeric string, store `int(value)`; drop booleans, non-finite values, and values `int` cannot convert. `seed: 0` remains valid. |
+| `temperature` | For an integer, finite float, or numeric string, store `float(value)`; drop booleans, non-finite values, and values `float` cannot convert. |
+| `num_predict` | Copy only a positive integer (not a boolean); drop every string or float and every non-positive integer. |
+| `think` | Copy only a boolean; drop every other value. |
+| `keep_alive` | Copy the value unchanged. |
+
+For example:
 
 ```yaml
 # before
