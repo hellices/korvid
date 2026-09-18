@@ -364,7 +364,7 @@ def test_provider_acknowledgement_docstrings_allow_custom_adapters(docstring: st
 
 
 def test_agent_api_removals_are_marked_as_breaking_in_release_notes() -> None:
-    text = " ".join(_text("docs/release-notes/unreleased.md").split())
+    text = " ".join(_text(_CURRENT_RELEASE_NOTE).split())
 
     assert "**Breaking:**" in text
     assert "SpecialFlow provider contract" in text
