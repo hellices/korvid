@@ -308,15 +308,18 @@ these provider aliases exactly:
 |---|---|
 | `openai-compat`, `openai`, `vllm`, `github`, `anthropic`, `claude` | `openai/<model>` |
 
-It also treated endpoint migration as provider-specific. Preserve these exact
-v0.4.1 results when moving a file manually:
+Map provider-specific legacy URLs to v0.5.0 endpoints without changing where
+their requests are sent:
 
 | Legacy input | Profile result |
 |---|---|
-| `provider: azure` with `base_url: https://<resource>.openai.azure.com/openai/v1` | `endpoint: https://<resource>.openai.azure.com`; no `options.azure_deployment` is invented. |
-| `provider: azure` with `base_url: https://<resource>.openai.azure.com/openai/deployments/<name>` | `endpoint: https://<resource>.openai.azure.com` plus `options.azure_deployment: <name>`. |
+| `provider: azure` with `base_url: https://<resource>.openai.azure.com/openai/v1` | Use resource-root `endpoint: https://<resource>.openai.azure.com`. |
+| `provider: azure` with `base_url: https://<resource>.openai.azure.com/openai/deployments/<name>` | Retain the complete URL as `endpoint: https://<resource>.openai.azure.com/openai/deployments/<name>`; do not convert it to a resource root. |
 | `provider: azure` with bare `base_url: https://<resource>.openai.azure.com` | The same resource-root `endpoint: https://<resource>.openai.azure.com`. |
 | Any non-`azure` provider | Copy the complete `base_url` to `endpoint` unchanged; do not rewrite `/openai/...` paths. |
+
+For a deployment-scoped URL, the path selects `<name>` even when it differs
+from the profile's model tag.
 
 It translated explicit legacy authentication methods as follows:
 

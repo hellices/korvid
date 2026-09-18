@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import textwrap
 import tomllib
 from pathlib import Path
 
@@ -594,17 +595,26 @@ def test_current_release_note_names_legacy_namespace_scope_migration() -> None:
 
 
 def test_current_release_note_ollama_example_preserves_v041_native_transport() -> None:
-    migration = markdown_section(
-        _release_notes(_project_version()), "Breaking changes and migration"
-    )
-    examples = re.findall(r"(?ms)^[ ]*```yaml\n(.*?)^[ ]*```", migration)
+    notes = _release_notes(_project_version())
+    migration = markdown_section(notes, "Breaking changes and migration")
+    examples = re.findall(r"(?ms)^[ ]*```yaml\n(.*?)^[ ]*```", notes)
 
     assert len(examples) == 1, "keep one copyable migration example in the release note"
-    example = examples[0]
-    assert "model: ollama/qwen3:8b" in example
+    assert textwrap.dedent(examples[0]).strip() == (
+        "agent:\n"
+        "  active: local\n"
+        "  profiles:\n"
+        "    local:\n"
+        "      model: ollama/qwen3:8b\n"
+        "      endpoint: http://localhost:11434\n"
+        "      auth: {method: none}\n"
+        "      options:\n"
+        "        native_thinking: true"
+    )
     assert (
-        "        auth: {method: none}\n        options:\n          native_thinking: true"
-    ) in example
+        "This exact profile preserves v0.4.1's native Ollama `/api/chat` transport; "
+        "keep `options.native_thinking: true` when migrating it."
+    ) in _normalized(migration)
 
 
 def test_first_published_0_4_release_note_records_the_security_remediation() -> None:
