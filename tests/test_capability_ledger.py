@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+import ast
 import hashlib
 import re
 import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).parent.parent
+AGENTS = ROOT / "AGENTS.md"
 LEDGER = ROOT / "docs/dev/capabilities.md"
 DEVELOPMENT_INDEX = ROOT / "docs/dev/README.md"
 HISTORICAL_DESIGN = ROOT / "docs/dev/specs/2026-07-23-korvid-tui-design.md"
 PYPROJECT = ROOT / "pyproject.toml"
+TOOL_REGISTRY = ROOT / "src/korvid/tools/registry.py"
 
 STATUSES = frozenset({"implemented", "partial", "validated", "deferred", "rejected"})
 STATUS_MEANINGS = {
@@ -109,6 +112,49 @@ def test_ledger_names_only_the_public_external_extension_contracts() -> None:
 
     project = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))["project"]
     assert set(project["entry-points"]) == {"korvid.provider", "korvid.credential"}
+
+
+def test_contributor_registration_guidance_matches_the_extension_ledger() -> None:
+    ledger_scope = _capabilities()["External extension contracts"][1]
+    project = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))["project"]
+    public_groups = set(project["entry-points"])
+    unavailable_groups = set(
+        re.findall(r"`(korvid\.\w+)` is unimplemented and is not a public contract", ledger_scope)
+    )
+    agents = AGENTS.read_text(encoding="utf-8")
+    match = re.search(r"(?ms)^- Plugins/providers register .*?(?=^- |\n## |\Z)", agents)
+    assert match is not None
+    guidance = " ".join(match.group().split())
+    public_guidance, separator, unavailable_guidance = guidance.partition(
+        "Panel and tool extension groups"
+    )
+
+    assert public_groups == {"korvid.provider", "korvid.credential"}
+    assert unavailable_groups == {"korvid.panel", "korvid.tool"}
+    assert "only public external entry-point groups" in public_guidance
+    assert set(re.findall(r"`(korvid\.\w+)`", public_guidance)) == public_groups
+    assert separator
+    for group in unavailable_groups:
+        assert f"`{group}`" in unavailable_guidance
+    assert "not implemented" in unavailable_guidance
+    assert "not public contracts" in unavailable_guidance
+
+
+def test_tool_registry_docstring_keeps_unimplemented_extension_loading_private() -> None:
+    ledger_scope = _capabilities()["External extension contracts"][1]
+    project = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))["project"]
+    registry_source = TOOL_REGISTRY.read_text(encoding="utf-8")
+    docstring = ast.get_docstring(ast.parse(registry_source), clean=False)
+
+    assert "`korvid.tool` is unimplemented and is not a public contract" in ledger_scope
+    assert "korvid.tool" not in project["entry-points"]
+    assert docstring is not None
+    assert (
+        "External tool loading and a public tool-extension contract are not implemented"
+        in docstring
+    )
+    assert "`korvid.tool` is not a public entry-point group" in docstring
+    assert "documented `korvid.tool`" not in docstring
 
 
 def test_development_docs_link_the_capability_ledger() -> None:

@@ -301,7 +301,25 @@ configuration errors rather than alternate input formats.
 
 Configurations from versions that accepted flat `agent.provider`,
 `agent.model`, `agent.base_url`, or `agent.ollama.*` settings must be moved
-manually; they are no longer migrated on load. For example:
+manually; they are no longer migrated on load. The v0.4.1 parser translated
+these provider aliases exactly:
+
+| Legacy `provider` | Profile `model` |
+|---|---|
+| `openai-compat`, `openai`, `vllm`, `github`, `anthropic`, `claude` | `openai/<model>` |
+
+It translated explicit legacy authentication methods as follows:
+
+| Legacy `auth.method` | Profile `auth.method` |
+|---|---|
+| `api_key` | `environment` |
+| `entra` | `provider-default` |
+| `device-login` | `device-login` |
+| `none` | `none` |
+
+Without an explicit legacy `auth.method`, `github-copilot` becomes
+`device-login`; every other provider becomes `environment` when
+`api_key_env` is set, or `none` otherwise. For example:
 
 ```yaml
 # before
@@ -321,10 +339,13 @@ agent:
       endpoint: http://localhost:11434
       auth: {method: none}
       options:
+        native_thinking: true
         num_ctx: 8192
 ```
 
-See the [unreleased migration notes](release-notes/unreleased.md#current-configuration-and-extension-contracts)
+The `native_thinking: true` line retains v0.4.1's native `/api/chat`
+transport. See the
+[v0.5.0 migration notes](release-notes/v0.5.0.md#breaking-changes-and-migration)
 for the complete set of removed compatibility inputs.
 
 !!! warning "GitHub Copilot"

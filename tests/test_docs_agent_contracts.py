@@ -297,6 +297,56 @@ def test_the_ollama_row_names_the_six_keys_and_where_they_live() -> None:
     assert "options" in row, "the Ollama row must say the six keys nest under a profile's `options`"
 
 
+def _flat_profile_migration_example() -> tuple[str, str, str]:
+    guide = _text("docs/agent.md")
+    start = guide.index("Configurations from versions that accepted flat")
+    end = guide.index("\n## Model search", start)
+    migration = guide[start:end]
+    match = re.search(r"(?s)For example:\n\n```yaml\n(.*?)\n```", migration)
+    assert match is not None, "the flat-profile migration needs one maintained YAML example"
+    example = match.group(1)
+    before, separator, after = example.partition("# after")
+    assert separator, "the maintained migration example must show both before and after"
+    return migration, before, after
+
+
+def test_flat_profile_migration_example_preserves_legacy_ollama_transport() -> None:
+    """Moving the maintained example must not change its v0.4.1 wire protocol."""
+    _, before, after = _flat_profile_migration_example()
+
+    assert "provider: ollama" in before
+    assert "ollama:\n    num_ctx: 8192" in before
+    assert "native_thinking" not in before
+    assert ("      options:\n        native_thinking: true\n        num_ctx: 8192") in after
+
+
+def test_flat_profile_migration_binds_every_v041_alias_and_auth_mapping() -> None:
+    """The migration text is an exact map of the removed v0.4.1 parser."""
+    migration, _, _ = _flat_profile_migration_example()
+    aliases = ("openai-compat", "openai", "vllm", "github", "anthropic", "claude")
+    alias_row = next(line for line in migration.splitlines() if "`openai/<model>`" in line)
+
+    for alias in aliases:
+        assert f"`{alias}`" in alias_row
+    auth_methods = {
+        "api_key": "environment",
+        "entra": "provider-default",
+        "device-login": "device-login",
+        "none": "none",
+    }
+    for legacy, profile in auth_methods.items():
+        assert f"| `{legacy}` | `{profile}` |" in migration
+
+    normalized = " ".join(migration.split())
+    assert (
+        "Without an explicit legacy `auth.method`, `github-copilot` becomes "
+        "`device-login`; every other provider becomes `environment` when "
+        "`api_key_env` is set, or `none` otherwise."
+    ) in normalized
+    assert "(release-notes/v0.5.0.md#breaking-changes-and-migration)" in migration
+    assert "release-notes/unreleased.md" not in migration
+
+
 # ---------------------------------------------------------------------------
 # 2. The provider-plugin API version a third party writes against
 # ---------------------------------------------------------------------------
@@ -364,12 +414,27 @@ def test_provider_acknowledgement_docstrings_allow_custom_adapters(docstring: st
 
 
 def test_agent_api_removals_are_marked_as_breaking_in_release_notes() -> None:
-    text = " ".join(_text(_CURRENT_RELEASE_NOTE).split())
+    notes = _text(_CURRENT_RELEASE_NOTE)
+    breaking = [
+        " ".join(match.split())
+        for match in re.findall(
+            r"(?ms)^- \*\*Breaking:\*\* (.*?)(?=^- |\n## |\Z)",
+            notes,
+        )
+    ]
 
-    assert "**Breaking:**" in text
-    assert "SpecialFlow provider contract" in text
-    assert "`meta.policy.overlays`" in text
-    assert "`meta.prompts.overlays`" in text
+    provider = next(item for item in breaking if "`korvid.provider`" in item)
+    assert "SpecialFlow provider contract" in provider
+
+    agent = next(item for item in breaking if "`korvid.agent`" in item)
+    assert "package-level" in agent.lower()
+    assert "re-exports are removed" in agent
+    assert "defining submodules" in agent
+    assert "`from korvid.agent.provider import LLMProvider`" in agent
+    assert "`from korvid.agent.session import AgentSession`" in agent
+
+    evaluation = next(item for item in breaking if "`meta.policy.overlays`" in item)
+    assert "`meta.prompts.overlays`" in evaluation
 
 
 def test_the_readme_explains_the_current_agent_and_mcp_starting_points() -> None:

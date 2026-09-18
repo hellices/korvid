@@ -10,9 +10,9 @@ The registry deliberately does **not** store bound handler methods:
 definitions are instance-independent, and dispatch resolves the validated
 method name against the executor/bridge instance at call time.
 
-External plugin loading (the documented `korvid.tool` entry-point group)
-is explicitly out of scope here; plugin trust, collision, exposure, and
-approval policy need their own threat model.
+External tool loading and a public tool-extension contract are not implemented;
+`korvid.tool` is not a public entry-point group. Plugin trust, collision,
+exposure, and approval policy need their own threat model.
 """
 
 from __future__ import annotations
