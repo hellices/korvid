@@ -347,6 +347,48 @@ def test_flat_profile_migration_binds_every_v041_alias_and_auth_mapping() -> Non
     assert "release-notes/unreleased.md" not in migration
 
 
+def test_flat_profile_migration_binds_v041_azure_scoped_endpoint_rewrites() -> None:
+    """The two v0.4.1 Azure URL shapes must retain their distinct meaning."""
+    migration, _, _ = _flat_profile_migration_example()
+    rows = {line.strip() for line in migration.splitlines()}
+    expected = {
+        (
+            "| `provider: azure` with "
+            "`base_url: https://<resource>.openai.azure.com/openai/v1` | "
+            "`endpoint: https://<resource>.openai.azure.com`; no "
+            "`options.azure_deployment` is invented. |"
+        ),
+        (
+            "| `provider: azure` with "
+            "`base_url: https://<resource>.openai.azure.com/openai/deployments/<name>` | "
+            "`endpoint: https://<resource>.openai.azure.com` plus "
+            "`options.azure_deployment: <name>`. |"
+        ),
+    }
+
+    assert expected <= rows
+
+
+def test_flat_profile_migration_binds_v041_azure_rewrite_boundaries() -> None:
+    """Bare Azure roots and every non-Azure endpoint were left alone."""
+    migration, _, _ = _flat_profile_migration_example()
+    rows = {line.strip() for line in migration.splitlines()}
+    expected = {
+        (
+            "| `provider: azure` with bare "
+            "`base_url: https://<resource>.openai.azure.com` | "
+            "The same resource-root "
+            "`endpoint: https://<resource>.openai.azure.com`. |"
+        ),
+        (
+            "| Any non-`azure` provider | Copy the complete `base_url` to "
+            "`endpoint` unchanged; do not rewrite `/openai/...` paths. |"
+        ),
+    }
+
+    assert expected <= rows
+
+
 # ---------------------------------------------------------------------------
 # 2. The provider-plugin API version a third party writes against
 # ---------------------------------------------------------------------------
