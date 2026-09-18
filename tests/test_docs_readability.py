@@ -879,17 +879,26 @@ def test_tui_presents_the_three_discovery_surfaces_as_complementary() -> None:
 def test_release_note_promises_the_palette_without_weakening_the_approval_rule() -> None:
     """The note that announces a new way to *reach* a write must say, in the
     same breath, that it does not change how a write is approved."""
-    flat = " ".join(_source("release-notes/unreleased.md").split())
-    assert "`Ctrl-P`" in flat, "the unreleased notes must announce the Action Palette"
+    flat = " ".join(_source(CURRENT_RELEASE_NOTE).split())
+    assert "`Ctrl-P`" in flat, "the current release note must announce the Action Palette"
     assert re.search(r"remapped key|effective key", flat, re.I), (
         "the note must say results show the effective (remapped) key"
     )
     assert re.search(r"does not apply|unavailable", flat, re.I), (
         "the note must say an action that does not apply is explained, not hidden"
     )
-    assert re.search(r"fresh confirmation|fresh user keystroke|approval flow", flat, re.I), (
-        "the note must state that a write still needs its own fresh approval"
-    )
+    assert re.search(
+        r"fresh approval keystroke|fresh confirmation|fresh user keystroke|approval flow",
+        flat,
+        re.I,
+    ), "the note must state that a write still needs its own fresh approval"
+
+
+def test_unreleased_note_forwards_existing_migration_links() -> None:
+    notes = _source("release-notes/unreleased.md")
+
+    assert "## Current configuration and extension contracts" in notes
+    assert f"(v{__version__}.md#breaking-changes-and-migration)" in notes
 
 
 def test_agent_guide_tells_a_self_hosted_operator_how_to_diagnose_a_refused_stream() -> None:

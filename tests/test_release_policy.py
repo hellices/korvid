@@ -525,6 +525,37 @@ def test_current_release_docs_only_name_allowed_versions() -> None:
     )
 
 
+def test_current_release_note_is_a_concise_user_facing_summary() -> None:
+    notes = _release_notes(_project_version())
+    expected_sections = [
+        "Why upgrade",
+        "Breaking changes and migration",
+        "Reliability and safety",
+        "Install or upgrade",
+        "Verify",
+        "Known limits",
+    ]
+
+    assert re.findall(r"^## (.+)$", notes, re.MULTILINE) == expected_sections
+    assert len(notes.splitlines()) <= 180
+
+    flat = _normalized(notes)
+    assert "Pulse / Problems" in flat
+    assert re.search(r"`Ctrl-P`.{0,40}Action Palette", flat)
+    assert re.search(
+        r"write actions? still require a fresh approval keystroke",
+        flat,
+        re.I,
+    )
+    assert "(../agent.md#connect-a-provider)" in notes
+
+    assert "[milestone 6](https://github.com/hellices/korvid/milestone/6)" in notes
+    assert not re.search(r"(?<!\w)#\d+\b", notes), (
+        "link milestone 6 instead of listing issue-by-issue history"
+    )
+    assert "github.com/hellices/korvid/issues/" not in notes
+
+
 def test_first_published_0_4_release_note_records_the_security_remediation() -> None:
     notes = _FIRST_PUBLISHED_0_4_NOTE.read_text(encoding="utf-8")
     security = markdown_section(notes, "Security fixes")
