@@ -617,6 +617,22 @@ def test_current_release_note_ollama_example_preserves_v041_native_transport() -
     ) in _normalized(migration)
 
 
+def test_current_release_note_names_persisted_v041_azure_profile_migration() -> None:
+    migration = markdown_section(
+        _release_notes(_project_version()), "Breaking changes and migration"
+    )
+    expected = (
+        "If v0.4.1 already persisted an Azure profile with resource-root "
+        "`endpoint: https://<resource>.openai.azure.com` plus "
+        "`options.azure_deployment: <name>`, set `endpoint` to "
+        "`https://<resource>.openai.azure.com/openai/deployments/<name>` and remove "
+        "`options.azure_deployment` before upgrading; see the maintained "
+        "[Agent guide](https://hellices.github.io/korvid/agent/#connect-a-provider)."
+    )
+
+    assert expected in _section_bullets(migration)
+
+
 def test_first_published_0_4_release_note_records_the_security_remediation() -> None:
     notes = _FIRST_PUBLISHED_0_4_NOTE.read_text(encoding="utf-8")
     security = markdown_section(notes, "Security fixes")
