@@ -954,7 +954,7 @@ def test_the_release_note_sends_a_broken_gateway_to_that_section() -> None:
     from the note that announces it, not only from the guide."""
     notes = _source(CURRENT_RELEASE_NOTE)
 
-    assert "#self-hosted-endpoints-and-proxies" in notes, (
+    assert "https://hellices.github.io/korvid/agent/#self-hosted-endpoints-and-proxies" in notes, (
         "the release note must link the agent guide's troubleshooting anchor"
     )
     assert re.search(r"connection test.{0,200}(fail|refus)", notes, re.S | re.I)
