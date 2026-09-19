@@ -654,6 +654,12 @@ class _ApprovalDriver:
         self._state = state
         self._expiry_timeout = expiry_timeout
         self._remaining = journey.expected_approval_dialogs
+        self._dialog_seen = False
+
+    def note_dialog_open(self) -> None:
+        """Remember that polling observed an approval dialog."""
+        if self._remaining > 0:
+            self._dialog_seen = True
 
     def _expected_title(self) -> str:
         target = self._journey.target
@@ -710,6 +716,8 @@ class _ApprovalDriver:
     async def handle(self, pilot: Any) -> None:
         screen = self._app.screen
         if not isinstance(screen, ConfirmScreen):
+            if self._remaining <= 0 or not self._dialog_seen:
+                return
             expired = self._journey.approval == "expired"
             self._journal.append(
                 event="dialog_closed_before_decision",
@@ -726,7 +734,9 @@ class _ApprovalDriver:
                     approval="expired",
                     result="no_keystroke",
                 )
+            self._dialog_seen = False
             return
+        self.note_dialog_open()
         # `render()`, not `renderable`: Textual 8's `Static` exposes its
         # content that way, and it is what every other `tests/ui/` dialog
         # assertion reads.
@@ -756,10 +766,12 @@ class _ApprovalDriver:
             )
             await pilot.press(_APPROVAL_KEYS["denied"])
             await until(pilot, self._closed, label="unexpected dialog declined")
+            self._dialog_seen = False
             return
         self._remaining -= 1
         self._apply_intervention()
         await self._decide(pilot)
+        self._dialog_seen = False
 
     async def _decide(self, pilot: Any) -> None:
         approval = self._journey.approval
@@ -953,9 +965,16 @@ def _turn_ended(journal: ActionJournal, completed: int) -> Callable[[], bool]:
     return ended
 
 
-def _dialog_or_turn_end(app: KorvidApp, ended: Callable[[], bool]) -> Callable[[], bool]:
+def _dialog_or_turn_end(
+    app: KorvidApp,
+    ended: Callable[[], bool],
+    driver: _ApprovalDriver,
+) -> Callable[[], bool]:
     def ready() -> bool:
-        return isinstance(app.screen, ConfirmScreen) or ended()
+        if isinstance(app.screen, ConfirmScreen):
+            driver.note_dialog_open()
+            return True
+        return ended()
 
     return ready
 
@@ -1013,11 +1032,13 @@ async def _drive_turn(
 ) -> None:
     """Answer every dialog this turn opens, then wait for it to settle."""
     ended = _turn_ended(journal, completed)
-    ready = _dialog_or_turn_end(app, ended)
+    ready = _dialog_or_turn_end(app, ended, driver)
     while not ended():
         await until(pilot, ready, timeout=turn_timeout, label="approval dialog or turn end")
         if isinstance(app.screen, ConfirmScreen):
             await driver.handle(pilot)
+    if not isinstance(app.screen, ConfirmScreen):
+        await driver.handle(pilot)
     await _dismiss_dialog_after_turn(app, pilot, journal, turn_timeout=turn_timeout)
     await until(
         pilot,

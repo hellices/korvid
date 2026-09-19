@@ -203,12 +203,87 @@ async def test_expired_dialog_closure_between_poll_and_handle_is_observed() -> N
         cast(Any, None),
         expiry_timeout=MIN_APPROVAL_TIMEOUT,
     )
+    driver.note_dialog_open()
     await driver.handle(cast(Any, None))
     assert [event.event for event in journal.events] == [
         "dialog_closed_before_decision",
         "approval_observed",
     ]
     assert journal.events[-1].approval == "expired"
+
+
+async def test_turn_end_without_a_dialog_does_not_fabricate_an_expiry() -> None:
+    app = SimpleNamespace(
+        screen=object(),
+        _agent_ui=SimpleNamespace(turn_task=None),
+    )
+    panel = SimpleNamespace(status_text="")
+    journal = ActionJournal()
+    journal.append(event="turn_finished", actor="app_internal", result="empty")
+    driver = _ApprovalDriver(
+        cast(Any, app),
+        _JOURNEYS["restart-approval-expired"],
+        journal,
+        cast(Any, None),
+        expiry_timeout=MIN_APPROVAL_TIMEOUT,
+    )
+
+    await operation_app._drive_turn(
+        cast(Any, app),
+        cast(Any, SimpleNamespace()),
+        cast(Any, panel),
+        journal,
+        driver,
+        completed=0,
+        turn_timeout=MIN_APPROVAL_TIMEOUT,
+    )
+
+    assert [event for event in journal.events if event.event == "approval_observed"] == []
+
+
+async def test_turn_end_records_an_observed_dialog_that_just_expired(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeConfirm:
+        pass
+
+    journal = ActionJournal()
+
+    class RacingApp:
+        _agent_ui = SimpleNamespace(turn_task=None)
+        _screen_reads = 0
+
+        @property
+        def screen(self) -> object:
+            self._screen_reads += 1
+            if self._screen_reads == 1:
+                journal.append(event="turn_finished", actor="app_internal", result="empty")
+                return FakeConfirm()
+            return object()
+
+    app = RacingApp()
+    panel = SimpleNamespace(status_text="")
+    driver = _ApprovalDriver(
+        cast(Any, app),
+        _JOURNEYS["restart-approval-expired"],
+        journal,
+        cast(Any, None),
+        expiry_timeout=MIN_APPROVAL_TIMEOUT,
+    )
+    monkeypatch.setattr(operation_app, "ConfirmScreen", FakeConfirm)
+
+    await operation_app._drive_turn(
+        cast(Any, app),
+        cast(Any, SimpleNamespace()),
+        cast(Any, panel),
+        journal,
+        driver,
+        completed=0,
+        turn_timeout=MIN_APPROVAL_TIMEOUT,
+    )
+
+    approvals = [event for event in journal.events if event.event == "approval_observed"]
+    assert [event.approval for event in approvals] == ["expired"]
 
 
 def test_declared_intervention_fails_when_target_replacement_is_missing() -> None:
