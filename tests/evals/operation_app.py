@@ -710,6 +710,8 @@ class _ApprovalDriver:
     async def handle(self, pilot: Any) -> None:
         screen = self._app.screen
         if not isinstance(screen, ConfirmScreen):
+            if self._remaining <= 0:
+                return
             expired = self._journey.approval == "expired"
             self._journal.append(
                 event="dialog_closed_before_decision",
@@ -1018,6 +1020,8 @@ async def _drive_turn(
         await until(pilot, ready, timeout=turn_timeout, label="approval dialog or turn end")
         if isinstance(app.screen, ConfirmScreen):
             await driver.handle(pilot)
+    if not isinstance(app.screen, ConfirmScreen):
+        await driver.handle(pilot)
     await _dismiss_dialog_after_turn(app, pilot, journal, turn_timeout=turn_timeout)
     await until(
         pilot,

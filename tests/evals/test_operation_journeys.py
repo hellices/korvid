@@ -211,6 +211,36 @@ async def test_expired_dialog_closure_between_poll_and_handle_is_observed() -> N
     assert journal.events[-1].approval == "expired"
 
 
+async def test_turn_end_still_observes_an_expired_dialog_closure() -> None:
+    app = SimpleNamespace(
+        screen=object(),
+        _agent_ui=SimpleNamespace(turn_task=None),
+    )
+    panel = SimpleNamespace(status_text="")
+    journal = ActionJournal()
+    journal.append(event="turn_finished", actor="app_internal", result="empty")
+    driver = _ApprovalDriver(
+        cast(Any, app),
+        _JOURNEYS["restart-approval-expired"],
+        journal,
+        cast(Any, None),
+        expiry_timeout=MIN_APPROVAL_TIMEOUT,
+    )
+
+    await operation_app._drive_turn(
+        cast(Any, app),
+        cast(Any, SimpleNamespace()),
+        cast(Any, panel),
+        journal,
+        driver,
+        completed=0,
+        turn_timeout=MIN_APPROVAL_TIMEOUT,
+    )
+
+    approvals = [event for event in journal.events if event.event == "approval_observed"]
+    assert [event.approval for event in approvals] == ["expired"]
+
+
 def test_declared_intervention_fails_when_target_replacement_is_missing() -> None:
     journal = ActionJournal()
     state = SimpleNamespace(replace_incarnation=lambda **_kwargs: False)
