@@ -297,6 +297,383 @@ def test_the_ollama_row_names_the_six_keys_and_where_they_live() -> None:
     assert "options" in row, "the Ollama row must say the six keys nest under a profile's `options`"
 
 
+def _flat_profile_migration_example() -> tuple[str, str, str]:
+    guide = _text("docs/agent.md")
+    start = guide.index("Configurations from versions that accepted flat")
+    end = guide.index("\n## Model search", start)
+    migration = guide[start:end]
+    match = re.search(r"(?s)For example:\n\n```yaml\n(.*?)\n```", migration)
+    assert match is not None, "the flat-profile migration needs one maintained YAML example"
+    example = match.group(1)
+    before, separator, after = example.partition("# after")
+    assert separator, "the maintained migration example must show both before and after"
+    return migration, before, after
+
+
+def _legacy_ollama_migration_rows(migration: str) -> dict[str, str]:
+    header = "| Legacy `agent.ollama` key | Store in profile `options` |"
+    lines = migration.splitlines()
+    assert header in lines, "the maintained guide needs the v0.4.1 Ollama normalization table"
+    start = lines.index(header)
+    rows: dict[str, str] = {}
+    for line in lines[start + 2 :]:
+        if not line.startswith("|"):
+            break
+        cells = [cell.strip() for cell in line.strip("|").split("|")]
+        assert len(cells) == 2, f"unexpected Ollama migration row: {line!r}"
+        rows[cells[0]] = cells[1]
+    return rows
+
+
+def test_flat_profile_migration_example_preserves_legacy_ollama_transport() -> None:
+    """Moving the maintained example must not change its v0.4.1 wire protocol."""
+    _, before, after = _flat_profile_migration_example()
+
+    assert "provider: ollama" in before
+    assert "ollama:\n    num_ctx: 8192" in before
+    assert "native_thinking" not in before
+    assert ("      options:\n        native_thinking: true\n        num_ctx: 8192") in after
+
+
+def test_flat_profile_migration_preserves_v041_ollama_value_normalization() -> None:
+    """The manual move must reproduce the removed v0.4.1 parser exactly."""
+    migration, _, _ = _flat_profile_migration_example()
+
+    assert _legacy_ollama_migration_rows(migration) == {
+        "`num_ctx`, `seed`": (
+            "For an integer, finite float, or numeric string, store `int(value)`; "
+            "drop booleans, non-finite values, and values `int` cannot convert. "
+            "`seed: 0` remains valid."
+        ),
+        "`temperature`": (
+            "For an integer, finite float, or numeric string, store `float(value)`; "
+            "drop booleans, non-finite values, and values `float` cannot convert."
+        ),
+        "`num_predict`": (
+            "Copy only a positive integer (not a boolean); drop every string or float "
+            "and every non-positive integer."
+        ),
+        "`think`": "Copy only a boolean; drop every other value.",
+        "`keep_alive`": "Copy the value unchanged.",
+    }
+
+
+def test_flat_profile_migration_binds_every_v041_alias_and_auth_mapping() -> None:
+    """The migration text is an exact map of the removed v0.4.1 parser."""
+    migration, _, _ = _flat_profile_migration_example()
+    aliases = ("openai-compat", "openai", "vllm", "github", "anthropic", "claude")
+    alias_row = next(line for line in migration.splitlines() if "`openai/<model>`" in line)
+
+    for alias in aliases:
+        assert f"`{alias}`" in alias_row
+    auth_methods = {
+        "api_key": "environment",
+        "entra": "provider-default",
+        "device-login": "device-login",
+        "none": "none",
+    }
+    for legacy, profile in auth_methods.items():
+        assert f"| `{legacy}` | `{profile}` |" in migration
+
+    normalized = " ".join(migration.split())
+    assert (
+        "Without an explicit legacy `auth.method`, `github-copilot` becomes "
+        "`device-login`; every other provider becomes `environment` when "
+        "`api_key_env` is set, or `none` otherwise."
+    ) in normalized
+    assert "(release-notes/v0.5.0.md#breaking-changes-and-migration)" in migration
+    assert "release-notes/unreleased.md" not in migration
+
+
+def test_flat_profile_migration_preserves_v041_mixed_shape_precedence() -> None:
+    """Profiles won wholesale; ignored flat keys must be deleted, not migrated."""
+    migration, _, _ = _flat_profile_migration_example()
+    mixed_row = next(
+        line
+        for line in migration.splitlines()
+        if line.startswith("| `agent.profiles` was present |")
+    )
+    flat_row = next(
+        line
+        for line in migration.splitlines()
+        if line.startswith("| `agent.profiles` was absent |")
+    )
+
+    assert "kept `agent.active` and `agent.profiles`" in mixed_row
+    assert "ignored" in mixed_row
+    for key in (
+        "provider",
+        "model",
+        "base_url",
+        "api_key_env",
+        "auth",
+        "ollama",
+        "options",
+        "enabled",
+    ):
+        assert f"`{key}`" in mixed_row
+    assert "Delete those flat keys" in mixed_row
+    assert "do not apply the conversions below" in mixed_row
+    assert "Only this shape uses the conversions below" in flat_row
+
+
+def test_release_note_preserves_v041_mixed_shape_precedence() -> None:
+    """The concise upgrade checklist must not tell profile users to re-migrate."""
+    notes = " ".join(_text(_CURRENT_RELEASE_NOTE).split())
+
+    assert (
+        "If `agent.profiles` was already present in v0.4.1, keep its `active` "
+        "selection and profiles, and delete the ignored flat connection keys; "
+        "do not migrate those stale values."
+    ) in notes
+    assert (
+        "Only a v0.4.1 configuration without `agent.profiles` should convert "
+        "the flat connection into a profile."
+    ) in notes
+
+
+def test_flat_profile_migration_preserves_v041_api_key_env_value() -> None:
+    """Environment auth needs both the method and the credential variable name."""
+    migration, _, _ = _flat_profile_migration_example()
+    normalized = " ".join(migration.split())
+
+    assert (
+        "Whenever the resulting method is `environment`, copy "
+        "`agent.api_key_env: NAME` to profile `auth.key: NAME`."
+    ) in normalized
+    assert (
+        "For every other resulting method, v0.4.1 ignored `api_key_env`; do not add `auth.key`."
+    ) in normalized
+
+
+def test_flat_profile_migration_binds_v041_provider_canonicalization() -> None:
+    """Aliases and auth were selected after the legacy separator folding."""
+    migration, _, _ = _flat_profile_migration_example()
+    normalized = " ".join(migration.split())
+    canonicalization = (
+        "Before alias or authentication handling, v0.4.1 stripped surrounding "
+        "whitespace, lowercased the provider, and collapsed every run of `-`, `_`, "
+        "or `.` to one `-`."
+    )
+
+    assert canonicalization in normalized
+    assert normalized.index(canonicalization) < normalized.index(
+        "The v0.4.1 parser translated these provider aliases exactly:"
+    )
+    assert (
+        "`GitHub.Copilot` and `github_copilot` therefore both became `github-copilot`" in normalized
+    )
+    assert "`openai.compat` became `openai-compat` before the alias table was applied" in normalized
+
+
+def test_flat_profile_migration_binds_v041_extra_options_and_disabled_state() -> None:
+    """The last legacy option update and old off switch must survive the move."""
+    migration, _, _ = _flat_profile_migration_example()
+    options_row = next(
+        line for line in migration.splitlines() if line.startswith("| `agent.options` |")
+    )
+    enabled_row = next(
+        line for line in migration.splitlines() if line.startswith("| `agent.enabled` |")
+    )
+
+    assert "mapping" in options_row
+    assert "after" in options_row
+    assert "`agent.ollama`" in options_row
+    assert "`native_api`" in options_row
+    assert "`native_thinking`" in options_row
+    assert "overrode the same key" in options_row
+    assert "`enabled: false`" in enabled_row
+    assert "`active: null`" in enabled_row
+    assert "profile remains present" in enabled_row
+
+
+def test_flat_profile_migration_binds_behavior_preserving_azure_endpoints() -> None:
+    """Each legacy Azure URL must retain the deployment it addressed."""
+    migration, _, _ = _flat_profile_migration_example()
+    rows = {line.strip() for line in migration.splitlines()}
+    expected = {
+        (
+            "| `provider: azure` with "
+            "`base_url: https://<resource>.openai.azure.com/openai/v1` | "
+            "Use resource-root `endpoint: https://<resource>.openai.azure.com`. |"
+        ),
+        (
+            "| `provider: azure` with "
+            "`base_url: https://<resource>.openai.azure.com/openai/deployments/<name>` | "
+            "Retain the complete URL as "
+            "`endpoint: https://<resource>.openai.azure.com/openai/deployments/<name>`; "
+            "do not convert it to a resource root. |"
+        ),
+    }
+
+    assert expected <= rows
+
+
+def test_flat_profile_migration_binds_persisted_v041_azure_profile_correction() -> None:
+    """The guide must repair the profile v0.4.1 could already have saved."""
+    migration, _, _ = _flat_profile_migration_example()
+    normalized = " ".join(migration.split())
+
+    assert (
+        "When v0.4.1 automatically migrated a flat Azure deployment URL, it could "
+        "persist a named profile with resource-root "
+        "`endpoint: https://<resource>.openai.azure.com` plus "
+        "`options.azure_deployment: <name>`. v0.5.0 accepts that profile, but "
+        "filters the option and uses the profile's model tag as the deployment. "
+        "Before upgrading, set "
+        "`endpoint: https://<resource>.openai.azure.com/openai/deployments/<name>` "
+        "and remove `options.azure_deployment`; this preserves `<name>` when it "
+        "differs from the model tag."
+    ) in normalized
+
+
+def test_flat_profile_migration_binds_v041_azure_rewrite_boundaries() -> None:
+    """Bare Azure roots and every non-Azure endpoint were left alone."""
+    migration, _, _ = _flat_profile_migration_example()
+    rows = {line.strip() for line in migration.splitlines()}
+    expected = {
+        (
+            "| `provider: azure` with bare "
+            "`base_url: https://<resource>.openai.azure.com` | "
+            "The same resource-root "
+            "`endpoint: https://<resource>.openai.azure.com`. |"
+        ),
+        (
+            "| Any non-`azure` provider | Copy the complete `base_url` to "
+            "`endpoint` unchanged; do not rewrite `/openai/...` paths. |"
+        ),
+    }
+
+    assert expected <= rows
+
+
+_V041_PACKAGE_EXPORTS_BY_MODULE = {
+    "korvid.agent.engine": frozenset({"AgentEngine", "AgentTurnRequest"}),
+    "korvid.agent.events": frozenset(
+        {
+            "AgentError",
+            "AgentEvent",
+            "TextDelta",
+            "ToolCallFinished",
+            "ToolCallStarted",
+            "TurnComplete",
+            "TurnInterrupted",
+        }
+    ),
+    "korvid.agent.evidence": frozenset({"Evidence", "EvidenceLedger"}),
+    "korvid.agent.interaction": frozenset(
+        {
+            "AgentUiBridge",
+            "ClusterFacts",
+            "DrillDown",
+            "InteractionContext",
+            "Navigate",
+            "OpenDescribe",
+            "OpenLogs",
+            "PaneContext",
+            "ResourceIdentity",
+            "SetFilter",
+            "UiAction",
+            "UiActionResult",
+        }
+    ),
+    "korvid.agent.model_policy": frozenset(
+        {
+            "CapabilitySource",
+            "ModelCapabilities",
+            "ModelCatalogEntry",
+            "ModelDescriptor",
+            "ModelRouter",
+            "ModelRoutingError",
+            "ModelTier",
+            "PolicyEnvironment",
+            "ResolvedAgentPolicy",
+        }
+    ),
+    "korvid.agent.model_profiles": frozenset({"DeviceLoginPrompt"}),
+    "korvid.agent.native_engine": frozenset({"NativeAgentEngine"}),
+    "korvid.agent.outbound": frozenset({"OutboundPolicy", "OutboundSnapshot"}),
+    "korvid.agent.prompt_harness": frozenset(
+        {
+            "ComposedPrompt",
+            "PromptCompositionError",
+            "PromptHarness",
+            "PromptInputs",
+            "StaticPromptTooLargeError",
+            "cluster_context_note",
+        }
+    ),
+    "korvid.agent.provider": frozenset({"LLMProvider", "REQUEST_SENT"}),
+    "korvid.agent.request_gateway": frozenset({"PreparedGatewayRequest", "RequestGateway"}),
+    "korvid.agent.session": frozenset(
+        {"AgentSession", "DefaultAgentSession", "SessionRetargetError"}
+    ),
+    "korvid.agent.tool_harness": frozenset({"ToolExecution", "ToolHarness"}),
+}
+_V041_REMOVED_PACKAGE_EXPORTS = frozenset({"UnknownPromptOverlayError", "UnknownPromptPackError"})
+
+
+def _python_api_migration() -> str:
+    guide = _text("docs/agent.md")
+    start = guide.index("### Python API migration from v0.4.1")
+    end = guide.index("\n## Model search", start)
+    return guide[start:end]
+
+
+def test_v041_package_export_migration_table_covers_all_53_names() -> None:
+    """Every formerly lazy package export needs one explicit disposition."""
+    migration = _python_api_migration()
+    documented: set[str] = set()
+
+    for module, expected in _V041_PACKAGE_EXPORTS_BY_MODULE.items():
+        prefix = f"| `{module}` |"
+        row = next(line for line in migration.splitlines() if line.startswith(prefix))
+        names_cell = row.split("|")[2]
+        actual = frozenset(re.findall(r"`([A-Za-z_][A-Za-z0-9_]*)`", names_cell))
+        assert actual == expected, module
+        assert documented.isdisjoint(actual), f"duplicate v0.4.1 export in API table: {module}"
+        documented.update(actual)
+
+    removed_row = next(
+        line
+        for line in migration.splitlines()
+        if all(f"`{name}`" in line for name in _V041_REMOVED_PACKAGE_EXPORTS)
+    )
+    assert "No replacement" in removed_row
+    assert documented.isdisjoint(_V041_REMOVED_PACKAGE_EXPORTS)
+    documented.update(_V041_REMOVED_PACKAGE_EXPORTS)
+
+    assert len(documented) == 53
+    assert documented == set().union(
+        *_V041_PACKAGE_EXPORTS_BY_MODULE.values(),
+        _V041_REMOVED_PACKAGE_EXPORTS,
+    )
+
+
+def test_v041_python_api_migration_binds_every_reshaped_contract() -> None:
+    """Direct imports alone are insufficient where the public shape changed."""
+    migration = " ".join(_python_api_migration().split())
+
+    assert (
+        "`PromptHarness(packs=..., provider_overlays=..., model_overlays=...)` "
+        "→ `PromptHarness(tier_prompt=..., extra_layers=...)`"
+    ) in migration
+    assert "`ModelCatalogEntry.prompt_overlay_ids`" in migration
+    assert "`ResolvedAgentPolicy.prompt_pack_id` and `.prompt_overlay_ids`" in migration
+    assert "`AgentEvent`" in migration
+    assert "`AgentPhaseChanged`" in migration
+    assert "`AgentError`, `TurnComplete`, and `TurnInterrupted`" in migration
+    assert "`diagnostics: TurnDiagnostics | None = None`" in migration
+    assert "`AgentTurnRequest.diagnostics`" in migration
+    assert "`DefaultAgentSession(..., diagnostics_factory=None)`" in migration
+    assert (
+        "`korvid.agent.model_profiles.SpecialFlowRegistry` moved to "
+        "`korvid.providers.special_flows.SpecialFlowRegistry`"
+    ) in migration
+    assert "`korvid.agent.provider_plugin`" in migration
+    assert "(provider-plugins.md#migrating-the-removed-construction-api)" in migration
+
+
 # ---------------------------------------------------------------------------
 # 2. The provider-plugin API version a third party writes against
 # ---------------------------------------------------------------------------
@@ -364,12 +741,27 @@ def test_provider_acknowledgement_docstrings_allow_custom_adapters(docstring: st
 
 
 def test_agent_api_removals_are_marked_as_breaking_in_release_notes() -> None:
-    text = " ".join(_text("docs/release-notes/unreleased.md").split())
+    notes = _text(_CURRENT_RELEASE_NOTE)
+    breaking = [
+        " ".join(match.split())
+        for match in re.findall(
+            r"(?ms)^- \*\*Breaking:\*\* (.*?)(?=^- |\n## |\Z)",
+            notes,
+        )
+    ]
 
-    assert "**Breaking:**" in text
-    assert "SpecialFlow provider contract" in text
-    assert "`meta.policy.overlays`" in text
-    assert "`meta.prompts.overlays`" in text
+    provider = next(item for item in breaking if "`korvid.provider`" in item)
+    assert "SpecialFlow provider contract" in provider
+
+    agent = next(item for item in breaking if "`korvid.agent`" in item)
+    assert "package-level" in agent.lower()
+    assert "re-exports are removed" in agent
+    assert "53-name" in agent
+    assert "removed and reshaped contracts" in agent
+    assert "https://hellices.github.io/korvid/agent/#python-api-migration-from-v041" in agent
+
+    evaluation = next(item for item in breaking if "`meta.policy.overlays`" in item)
+    assert "`meta.prompts.overlays`" in evaluation
 
 
 def test_the_readme_explains_the_current_agent_and_mcp_starting_points() -> None:

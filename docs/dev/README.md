@@ -16,6 +16,9 @@ provider boundary, and the evidence system, with diagrams. It documents the
 system as built (and names the tensions it still has), where the 2026-07-23
 design document states the original intent.
 
+- [`capabilities.md`](capabilities.md) — the internal living capability ledger:
+  what is shipped, bounded, validated, deferred without commitment, or
+  intentionally rejected. It is not an issue backlog or public roadmap.
 - [`specs/`](https://github.com/hellices/korvid/tree/main/docs/dev/specs) — the product design document and the engineering
   standards. These are the durable references: layer rules and the
   security invariants that code must never weaken.
