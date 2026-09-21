@@ -459,7 +459,9 @@ class KorvidApp(App[None]):
         # which keys are visible (issue #142).
         self.screen.bindings_updated_signal.subscribe(self, self._on_bindings_updated)
         self._refresh_top_bar()
-        self._keybindings.load(self.config.keybindings)
+        self._keybindings.load(
+            self.config.keybindings, cleanup_required=self.config.keybindings_section_rejected
+        )
         # Wire the `known` closure into CommandBar so parse_command can resolve aliases.
         command_bar = self._command_bar
         command_bar.known = lambda a: self._canonical_kind(a) if a in self.aliases else None

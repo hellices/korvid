@@ -32,11 +32,11 @@ class KeybindingController:
         self._can_open = can_open
         self._cleanup_required = False
 
-    def load(self, raw: Mapping[str, object]) -> None:
-        """Install safe startup overrides under the same rules as the editor."""
+    def load(self, raw: Mapping[str, object], *, cleanup_required: bool = False) -> None:
+        """Install safe overrides, retaining any rejected-section cleanup metadata."""
         plan = self.catalog.rules.plan(raw)
         self._surface.install(plan.overrides, self.catalog.keymap(plan.overrides))
-        self._cleanup_required = bool(plan.warnings)
+        self._cleanup_required = cleanup_required or bool(plan.warnings)
         for warning in plan.warnings:
             self._ui.notify(warning, title="Keybindings", severity="warning", markup=False)
 

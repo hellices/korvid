@@ -9,9 +9,100 @@ import yaml
 
 from korvid.core import config as config_module
 from korvid.core import keybinding_config as keybinding_module
-from korvid.core.config import ConfigError, load_config
+from korvid.core.config import ConfigError, KorvidConfig, load_config
 from korvid.core.keybinding_config import save_keybindings
 from tests.platforms import POSIX, posix_only
+
+
+@pytest.mark.parametrize(
+    "section",
+    ["true", "1", "1.5", "false", "0", "''", "[]", "[help]", "[[help, f1]]", "'help: f1'"],
+    ids=[
+        "boolean",
+        "integer",
+        "float",
+        "false",
+        "zero",
+        "empty-string",
+        "empty-list",
+        "list",
+        "pairs",
+        "string",
+    ],
+)
+def test_malformed_section_loads_safe_defaults_and_remains_explicitly_cleanable(
+    tmp_path: Path, section: str
+) -> None:
+    path = tmp_path / "config.yaml"
+    settings = {"favorite_namespaces": ["prod"], "namespace": "default", "log_buffer_lines": 800}
+    path.write_text(f"{yaml.safe_dump(settings)}keybindings: {section}\n", encoding="utf-8")
+    original = path.read_bytes()
+
+    config = load_config(path)
+
+    assert config.keybindings == {}
+    assert config.keybindings_section_rejected
+    warnings = [warning for warning in config.warnings if warning.startswith("keybindings:")]
+    assert len(warnings) == 1
+    assert all(
+        fragment in warnings[0] for fragment in ("mapping", "defaults", ":keys", "F8", "F9", "F10")
+    )
+    assert config.favorite_namespaces == ("prod",)
+    assert config.namespace == "default"
+    assert config.log_buffer_lines == 800
+    assert path.read_bytes() == original
+
+    save_keybindings(path, {})
+
+    assert yaml.safe_load(path.read_text(encoding="utf-8")) == settings
+    restarted = load_config(path)
+    assert restarted.keybindings == {}
+    assert not restarted.keybindings_section_rejected
+    assert restarted.warnings == ()
+
+
+@pytest.mark.parametrize(
+    "content", ["", "{}\n", "keybindings: {}\n", "keybindings:\n", "keybindings: null\n"]
+)
+def test_absent_or_empty_keybinding_sections_do_not_require_cleanup(
+    tmp_path: Path, content: str
+) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(content, encoding="utf-8")
+    original = path.read_bytes()
+
+    config = load_config(path)
+
+    assert config.keybindings == {}
+    assert not config.keybindings_section_rejected
+    assert config.warnings == ()
+    assert path.read_bytes() == original
+
+
+def test_missing_config_and_default_constructor_do_not_require_keybinding_cleanup(
+    tmp_path: Path,
+) -> None:
+    default = KorvidConfig()
+    loaded = load_config(tmp_path / "missing.yaml")
+
+    assert loaded == default
+    assert not loaded.keybindings_section_rejected
+    assert loaded.keybindings == {}
+    assert loaded.warnings == ()
+
+
+@pytest.mark.parametrize("overrides", [{"help": "f1"}, {"help": 1}])
+def test_mapping_entries_remain_available_for_startup_validation(
+    tmp_path: Path, overrides: dict[str, object]
+) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump({"keybindings": overrides}), encoding="utf-8")
+
+    config = load_config(path)
+
+    assert config.keybindings == overrides
+    assert not config.keybindings_section_rejected
+    assert config.warnings == ()
 
 
 @pytest.fixture

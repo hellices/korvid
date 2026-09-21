@@ -30,8 +30,13 @@ async def _open_editor(pilot: Pilot[None], app: KorvidApp) -> KeybindingEditorSc
     return screen
 
 
+@pytest.mark.parametrize(
+    "section",
+    [{"help": 1}, True, 1, False, [], [["help", "f1"]]],
+    ids=["rejected-entry", "boolean", "integer", "false", "empty-list", "pairs"],
+)
 async def test_rejected_only_cleanup_requires_confirmation_and_stops_restart_warnings(
-    tmp_path: Path,
+    tmp_path: Path, section: object
 ) -> None:
     path = tmp_path / "config.yaml"
     settings = {
@@ -39,7 +44,7 @@ async def test_rejected_only_cleanup_requires_confirmation_and_stops_restart_war
         "log_buffer_lines": 800,
         "ui": {"topbar": {"expanded": True}},
     }
-    path.write_text(yaml.safe_dump({**settings, "keybindings": {"help": 1}}), encoding="utf-8")
+    path.write_text(yaml.safe_dump({**settings, "keybindings": section}), encoding="utf-8")
     original = path.read_bytes()
     saved: list[dict[str, str]] = []
 
@@ -51,6 +56,16 @@ async def test_rejected_only_cleanup_requires_confirmation_and_stops_restart_war
     async with app.run_test(size=(120, 40)) as pilot:
         await until(pilot, lambda: app.query_one(ResourceTable).row_count == 1)
         assert any("keybindings:" in notice.message for notice in app._notifications)
+        if not isinstance(section, dict):
+            warnings = [
+                notice.message
+                for notice in app._notifications
+                if notice.message.startswith("keybindings:")
+            ]
+            assert len(warnings) == 1
+            assert all(
+                fragment in warnings[0] for fragment in ("mapping", ":keys", "F8", "F9", "F10")
+            )
         assert app._keybinding_overrides == {}
         screen = await _open_editor(pilot, app)
         assert not screen.query_one("#keybinding-reset-all", Button).disabled
@@ -100,13 +115,17 @@ async def test_rejected_only_cleanup_requires_confirmation_and_stops_restart_war
 
 
 @pytest.mark.parametrize("control", ["escape", "f6"], ids=["cancel", "undo"])
-@pytest.mark.parametrize("safe", [{}, {"logs": "r"}], ids=["rejected-only", "mixed"])
+@pytest.mark.parametrize(
+    ("section", "safe"),
+    [({"help": 1}, {}), ({"help": 1, "logs": "r"}, {"logs": "r"}), (True, {}), ([], {})],
+    ids=["rejected-only", "mixed", "boolean-section", "empty-list-section"],
+)
 async def test_cancel_or_undo_preserves_rejected_and_safe_persisted_entries(
-    tmp_path: Path, control: str, safe: dict[str, str]
+    tmp_path: Path, control: str, section: object, safe: dict[str, str]
 ) -> None:
     path = tmp_path / "config.yaml"
     path.write_text(
-        yaml.safe_dump({"favorite_namespaces": ["prod"], "keybindings": {"help": 1, **safe}}),
+        yaml.safe_dump({"favorite_namespaces": ["prod"], "keybindings": section}),
         encoding="utf-8",
     )
     original = path.read_bytes()
@@ -145,15 +164,17 @@ async def test_cancel_or_undo_preserves_rejected_and_safe_persisted_entries(
         await pilot.press("escape")
 
 
-@pytest.mark.parametrize("safe", [{}, {"logs": "r"}], ids=["rejected-only", "mixed"])
+@pytest.mark.parametrize(
+    ("section", "safe"),
+    [({"help": 1}, {}), ({"help": 1, "logs": "r"}, {"logs": "r"}), (1, {}), (False, {})],
+    ids=["rejected-only", "mixed", "integer-section", "false-section"],
+)
 async def test_failed_atomic_cleanup_can_be_reopened_and_retried(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, safe: dict[str, str]
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, section: object, safe: dict[str, str]
 ) -> None:
     path = tmp_path / "config.yaml"
     settings = {"favorite_namespaces": ["prod"], "log_buffer_lines": 800}
-    path.write_text(
-        yaml.safe_dump({**settings, "keybindings": {"help": 1, **safe}}), encoding="utf-8"
-    )
+    path.write_text(yaml.safe_dump({**settings, "keybindings": section}), encoding="utf-8")
     original = path.read_bytes()
     attempts: list[Path] = []
 
@@ -200,4 +221,29 @@ async def test_failed_atomic_cleanup_can_be_reopened_and_retried(
         assert yaml.safe_load(path.read_text(encoding="utf-8")) == settings
         reopened = await _open_editor(pilot, app)
         assert reopened.query_one("#keybinding-reset-all", Button).disabled
+        await pilot.press("escape")
+
+
+@pytest.mark.parametrize("content", ["", "keybindings: {}\n", "keybindings: null\n"])
+async def test_absent_or_empty_sections_leave_cleanup_and_apply_disabled(
+    tmp_path: Path, content: str
+) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(content, encoding="utf-8")
+    original = path.read_bytes()
+    saved: list[Mapping[str, str]] = []
+    app = make_app([_pod("web")], config=load_config(path), save_keybindings=saved.append)
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await _open_editor(pilot, app)
+        assert not any("keybindings:" in notice.message for notice in app._notifications)
+        assert screen.query_one("#keybinding-reset-all", Button).disabled
+        assert screen.query_one("#keybinding-review", Button).disabled
+        assert screen.query_one("#keybinding-apply", Button).disabled
+        await pilot.press("f8", "f9", "f10")
+        assert app.screen is screen
+        assert not screen.edit.dirty
+        assert not screen.edit.cleanup_pending
+        assert saved == []
+        assert path.read_bytes() == original
         await pilot.press("escape")

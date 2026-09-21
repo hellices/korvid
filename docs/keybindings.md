@@ -118,6 +118,8 @@ separately saved namespace-assignment state are preserved. Namespace slots
 Reset All also stages removal of saved overrides rejected at startup, even
 when no custom bindings are active. That cleanup appears in the preview,
 can be undone or cancelled, and is saved only after Review and Apply.
+A malformed section such as `keybindings: true` also warns, uses defaults,
+and can be removed through this staged reset.
 
 You can also edit the `keybindings` section of the shared configuration directly:
 
@@ -132,13 +134,16 @@ mutually exclusive resource views can share a key, but global or pane actions
 that can run together cannot. Equivalent spellings such as `shift+g` and `G`
 refer to the same physical key. Unknown, invalid, duplicate, or shadowing
 overrides warn and are skipped at startup; an invalid editor proposal cannot
-be applied.
+be applied. Unicode key names must match the terminal's emitted spelling:
+use `a`, for example, rather than the unsupported `latin_small_letter_a`.
 
 Fixed navigation, pane-chord, and namespace keys are reserved. The approval
 dialogs' actions and confirm keys are **not remappable**: every write still
 requires a fixed fresh keystroke. Priority overrides cannot intercept approval
-controls, including `Ctrl-N` to decline, or editor controls. The editor cannot
-open over a dialog or during a context switch. The palette's own key moves under
+controls, including `Ctrl-N` to decline, editor controls, or any other modal's
+fixed keys. Remapping Quit away from `q` does not free it for a priority action:
+it still closes Help and Describe. The editor cannot open over a dialog or
+during a context switch. The palette's own key moves under
 `open_action_palette`, but its fixed
 `Esc` and `Ctrl-P` keys close the palette whichever key opened it;
 another priority action cannot take them.

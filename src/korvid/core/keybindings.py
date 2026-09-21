@@ -133,7 +133,12 @@ def _usable_key(key: str) -> bool:
         character = unicodedata.lookup(name.replace("_", " ").upper())
     except KeyError:
         return False
-    return len(character) == 1 and character.isprintable() and not character.isspace()
+    return (
+        len(character) == 1
+        and character.isprintable()
+        and not character.isspace()
+        and canonical_key(character) == name
+    )
 
 
 def actions_overlap(action: str, other: str, contexts: ActionContexts) -> bool:

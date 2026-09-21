@@ -51,7 +51,6 @@ def _open_editor(controller: KeybindingController, ui: FakeUi) -> KeybindingEdit
         ("{unknown_action: f1}", {"unknown_action": "f1"}, {}),
         ("{help: '1'}", {"help": "1"}, {}),
         ("{help: l}", {"help": "l"}, {}),
-        ("[[help, 1]]", {"help": 1}, {}),
         ("{help: 1, logs: r}", {"help": 1, "logs": "r"}, {"logs": "r"}),
     ],
     ids=[
@@ -62,7 +61,6 @@ def _open_editor(controller: KeybindingController, ui: FakeUi) -> KeybindingEdit
         "unknown",
         "reserved",
         "collision",
-        "pairs",
         "mixed",
     ],
 )
@@ -125,8 +123,11 @@ def test_load_uses_contextual_rules_and_warns_without_persisting() -> None:
 
 
 @pytest.mark.parametrize("proposal", [{}, {"help": "f1"}], ids=["reset", "assignment"])
+@pytest.mark.parametrize(
+    "cleanup_required", [False, True], ids=["rejected-entry", "rejected-section"]
+)
 async def test_successful_save_clears_cleanup_for_reopened_sessions(
-    proposal: dict[str, str],
+    proposal: dict[str, str], cleanup_required: bool
 ) -> None:
     surface = MemoryBindings()
     ui = FakeUi()
@@ -138,7 +139,7 @@ async def test_successful_save_clears_cleanup_for_reopened_sessions(
         save=saved.append,
         can_open=lambda: None,
     )
-    controller.load({"help": 1})
+    controller.load({} if cleanup_required else {"help": 1}, cleanup_required=cleanup_required)
     screen = _open_editor(controller, ui)
     screen.edit.reset_all()
     assert screen.edit.dirty
@@ -162,7 +163,12 @@ async def test_successful_save_clears_cleanup_for_reopened_sessions(
         yaml.YAMLError("bad YAML"),
     ],
 )
-async def test_failed_save_retains_cleanup_for_reopened_sessions(error: Exception) -> None:
+@pytest.mark.parametrize(
+    "cleanup_required", [False, True], ids=["rejected-entry", "rejected-section"]
+)
+async def test_failed_save_retains_cleanup_for_reopened_sessions(
+    error: Exception, cleanup_required: bool
+) -> None:
     surface = MemoryBindings()
     ui = FakeUi()
 
@@ -176,7 +182,7 @@ async def test_failed_save_retains_cleanup_for_reopened_sessions(error: Exceptio
         save=save,
         can_open=lambda: None,
     )
-    controller.load({"help": 1})
+    controller.load({} if cleanup_required else {"help": 1}, cleanup_required=cleanup_required)
     previous_keymap = dict(surface.keymap)
     screen = _open_editor(controller, ui)
     screen.edit.reset_all()
