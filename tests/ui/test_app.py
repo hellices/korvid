@@ -1,5 +1,5 @@
 import asyncio
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -89,6 +89,7 @@ def make_app(
     metrics: Any | None = None,
     session_timeline: SessionTimeline | None = None,
     watch_warning_events: Any | None = None,
+    save_keybindings: Callable[[Mapping[str, str]], None] | None = None,
     #: The session's `kubectl` snapshot, decided here because the runtime
     #: resolves it while it is assembled (#388 round 14) - a patch around
     #: the keypress would be too late, and the real PATH is the runner's.
@@ -122,6 +123,7 @@ def make_app(
             metrics=metrics,
             session_timeline=session_timeline,
             watch_warning_events=watch_warning_events,
+            save_keybindings=save_keybindings,
         )
 
 

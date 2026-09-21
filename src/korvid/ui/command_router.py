@@ -74,6 +74,12 @@ class PulseCommands(Protocol):
     def open_detail(self) -> None: ...
 
 
+class KeybindingCommands(Protocol):
+    """The staged `:keys` / `:keybindings` owner."""
+
+    def open_editor(self) -> None: ...
+
+
 class CommandRouter:
     """Dispatches typed commands to the owner that implements them."""
 
@@ -87,6 +93,7 @@ class CommandRouter:
         forwards: ForwardCommands,
         operators: CatalogCommands,
         pulse: PulseCommands,
+        keybindings: KeybindingCommands,
     ) -> None:
         self._ui = ui
         self._agent = agent
@@ -95,22 +102,14 @@ class CommandRouter:
         self._forwards = forwards
         self._operators = operators
         self._pulse = pulse
+        self._keybindings = keybindings
 
     def route_builtin(self, command: BuiltinCommand) -> None:
         """Dispatch an app-owned command by canonical operation identity."""
         arguments = list(command.arguments)
         operation = command.operation
-        if operation is BuiltinOperation.AI:
-            if self._agent.available:
-                self._agent.handle_command(arguments)
-            else:
-                self._report_unknown(_builtin_text(command))
-            return
-        if operation is BuiltinOperation.MODEL:
-            if self._agent.available:
-                self._agent.handle_model_command(arguments)
-            else:
-                self._report_unknown(_builtin_text(command))
+        if operation in (BuiltinOperation.AI, BuiltinOperation.MODEL):
+            self._route_agent(command)
             return
         if operation is BuiltinOperation.MCP:
             self._integrations.handle_mcp_command(arguments)
@@ -127,7 +126,18 @@ class CommandRouter:
         if operation is BuiltinOperation.PULSE:
             self._pulse.open_detail()
             return
+        if operation is BuiltinOperation.KEYBINDINGS:
+            self._keybindings.open_editor()
+            return
         assert_never(operation)
+
+    def _route_agent(self, command: BuiltinCommand) -> None:
+        if not self._agent.available:
+            self._report_unknown(_builtin_text(command))
+        elif command.operation is BuiltinOperation.AI:
+            self._agent.handle_command(list(command.arguments))
+        else:
+            self._agent.handle_model_command(list(command.arguments))
 
     def route_unknown(self, command: UnknownCommand) -> None:
         """Explain a missing operator catalog or report a genuine unknown."""

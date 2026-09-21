@@ -1149,10 +1149,12 @@ def test_app_runtime_can_be_bound_only_once() -> None:
             agent_ui=value,
             commands=value,
             actions=value,
+            keybindings=value,
         ),
     )
 
     app.bind_runtime(runtime)
+    assert app._keybindings is value
 
     with pytest.raises(RuntimeError, match="app runtime already bound"):
         app.bind_runtime(runtime)

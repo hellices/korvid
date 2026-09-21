@@ -11,6 +11,7 @@ Korvid shows only the keys that act on the current view. Press `?` for the compl
 | `:` | Open the command bar |
 | `:pulse` / `:problems` | Inspect [current problems, recent warnings, and coverage](pulse.md) |
 | `Ctrl-P` | Search app actions and built-in commands by intent |
+| `:keys` / `:keybindings` | Edit, review, and save app keybindings |
 | `?` | Show the effective keys for every view |
 | `~` | Expand or collapse the top-bar legend |
 | `/` | Filter a table or search the log pane |
@@ -79,10 +80,64 @@ still needs its own fresh keystroke.
 
 ## Remap an app action
 
+Type `:keys` (or `:keybindings`), or select **Edit keybindings** in the
+Action Palette. Search for an action and select it with Tab/Enter. The
+editor shows its scope, default keys, current keys, and proposed keys.
+
+| Editor key | What it does |
+|---|---|
+| `F1` / `F2` | Focus action search / replacement-key input |
+| `Enter` in the key input | Stage the typed key name, such as `ctrl+g` or `shift+g` |
+| `F3` | Stage a deterministic suggestion, when a complete valid proposal is available |
+| `F4` | Select a conflicting owner to continue resolving the chain |
+| `F5` | Swap with the conflicting owner, only if the complete result is valid |
+| `F6` | Undo the last staged change |
+| `F7` / `F8` | Stage a reset of the selected action / all keybindings |
+| `F9` | Review every pending change |
+| `F10` | Apply the reviewed proposal explicitly |
+| `Esc` | Cancel without saving or changing the live keymap |
+
+The editor keeps one session open while you resolve conflicts. Move each
+conflicting owner to another key, use a valid swap, or undo and try a different
+route. Two-way swaps and longer rotations are supported; unresolved conflicts
+block Apply. A suggestion is not offered if other pending conflicts would
+still leave the complete map invalid. Editing after Review invalidates it:
+review again before Apply. Enter stages a key; it never applies the map.
+
+Only a successful save activates the new keymap. Dispatch, Help (`?`), the
+top-bar legend, and the Action Palette then use the same effective keys,
+including after restart. If saving fails, the editor remains open and the
+previous live bindings and saved configuration remain unchanged.
+
+Resetting an action removes its override. If its default is occupied by
+another pending override, resolve that conflict before applying. Reset All is
+also staged and requires Review followed by Apply. It removes only the
+`keybindings` section: unrelated settings, `favorite_namespaces`, and any
+separately saved namespace-assignment state are preserved. Namespace slots
+`1`–`9` remain reserved; the all-namespaces action on `0` remains remappable.
+
+You can also edit the `keybindings` section of the shared configuration directly:
+
 ```yaml
 keybindings:
   delete_resource: ctrl+k
   sort_by_age: z
 ```
 
-Unknown, duplicate, or shadowing remaps warn and are skipped. Keys handled by drill-down, closing, and dialogs are not remappable. The approval dialogs' confirm keys are **not remappable**: every write still requires the fixed fresh keystroke. The palette's own key moves like any other, under the action name `open_action_palette`; the modal's close keys do not move with it, so `Esc` and the built-in `Ctrl-P` both close the palette whichever key opened it. Another priority action cannot be remapped onto either fixed close key because it would run before the modal could dismiss itself. Action names come from the app itself; an unrecognised name is skipped at startup with a warning that lists every valid action name. Press `?` for the complete effective set.
+Startup and the editor use the same context-aware validation. Actions in
+mutually exclusive resource views can share a key, but global or pane actions
+that can run together cannot. Equivalent spellings such as `shift+g` and `G`
+refer to the same physical key. Unknown, invalid, duplicate, or shadowing
+overrides warn and are skipped at startup; an invalid editor proposal cannot
+be applied.
+
+Fixed navigation, pane-chord, and namespace keys are reserved. The approval
+dialogs' actions and confirm keys are **not remappable**: every write still
+requires a fixed fresh keystroke. Priority overrides cannot intercept approval
+or editor controls. The editor cannot open over a dialog or during a context
+switch. The palette's own key moves under `open_action_palette`, but its fixed
+`Esc` and `Ctrl-P` keys close the palette whichever key opened it;
+another priority action cannot take them.
+Action names come from the app itself.
+An unrecognised name is skipped at startup with a warning that lists every valid action name.
+Press `?` for the complete effective set.

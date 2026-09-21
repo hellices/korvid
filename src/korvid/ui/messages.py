@@ -117,6 +117,7 @@ class BuiltinOperation(Enum):
     PORT_FORWARDS = "pf"
     TELEPRESENCE = "tp"
     PULSE = "pulse"
+    KEYBINDINGS = "keys"
 
 
 class BuiltinCommand(Message):

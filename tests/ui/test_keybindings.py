@@ -11,9 +11,10 @@ import pytest
 from textual.binding import Binding
 
 from korvid.core.config import KorvidConfig
-from korvid.core.keybindings import APPROVAL_KEYS, plan_keybindings
+from korvid.core.keybindings import APPROVAL_KEYS
 from korvid.core.session_timeline import SessionTimeline
 from korvid.ui.app import KorvidApp
+from korvid.ui.keybinding_catalog import KeybindingCatalog
 from korvid.ui.widgets.action_palette import ActionPaletteScreen
 from korvid.ui.widgets.help_screen import HelpScreen, key_label
 from korvid.ui.widgets.resource_table import ResourceTable
@@ -176,13 +177,7 @@ def test_documented_remap_example_survives_the_real_keybinding_planner() -> None
     documented = dict(re.findall(r"^\s{2}([a-z_]+):\s*(\S+)", block, flags=re.MULTILINE))
     assert documented, "docs/keybindings.md must keep a worked remap example"
 
-    bindings = _app_bindings()
-    plan = plan_keybindings(
-        dict(documented),
-        KorvidApp._binding_actions(),
-        {binding.action for binding in bindings if binding.priority},
-        reserved_keys={binding.key: binding.action for binding in bindings if binding.id is None},
-    )
+    plan = KeybindingCatalog(KorvidApp.BINDINGS).rules.plan(dict(documented))
     assert plan.warnings == ()
     assert plan.overrides == documented
 
@@ -231,7 +226,7 @@ async def test_documented_remap_example_rebinds_the_running_app() -> None:
 def test_favorite_namespace_keys_are_not_remappable() -> None:
     # The nine 1-9 favorite bindings carry no keymap id — the keymap cannot
     # move them, so offering them as remappable actions would be a lie.
-    actions = KorvidApp._binding_actions()
+    actions = KeybindingCatalog(KorvidApp.BINDINGS).rules.actions
     assert not any(action.startswith("favorite_namespace") for action in actions)
 
 

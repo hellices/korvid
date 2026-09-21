@@ -146,7 +146,7 @@ def test_unreleased_page_identifies_main_and_stable_release() -> None:
     opening = source.split("## ", 1)[0]
     assert "`main`" in opening
     assert "https://github.com/hellices/korvid/releases/latest" in opening
-    assert "https://github.com/hellices/korvid/milestone/6" in opening
+    assert "https://github.com/hellices/korvid/milestone/8" in opening
     assert "current release milestone" in opening.lower()
 
 

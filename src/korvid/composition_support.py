@@ -10,7 +10,7 @@ import logging
 import os
 import ssl
 import threading
-from collections.abc import Callable, Collection, Iterator
+from collections.abc import Awaitable, Callable, Collection, Iterator
 from typing import TYPE_CHECKING, Any, Final, Protocol
 
 from korvid.agent.install_hint import isolated_install_hint
@@ -51,6 +51,29 @@ _PROMPT_DEGRADE_HINT: Final[str] = (
     "shorten agent.rules or route to a larger-context model with `:ai`"
 )
 _UNKNOWN_CLUSTER = ClusterFacts(provider="unknown", distribution=None)
+
+
+def _make_get_manifest(
+    kube: KubeClient, aliases: dict[str, ResourceMeta]
+) -> Callable[[str, str | None, str], Awaitable[dict[str, Any]]]:
+    """Describe fetcher: decode Helm releases/revisions, otherwise GET the object."""
+
+    async def get_manifest(kind: str, namespace: str | None, name: str) -> dict[str, Any]:
+        meta = aliases.get(kind)
+        if meta is None:
+            raise ValueError(f"Unknown resource kind: {kind!r}")
+        if meta.identity == HELM_RELEASES_META.identity:
+            if namespace is None:
+                raise ValueError("helm releases are namespaced; namespace required")
+            return await kube.get_helm_release(namespace, name)
+        if meta.identity == HELM_REVISIONS_META.identity:
+            release, _separator, revision = name.rpartition(".v")
+            if namespace is None or not release or not revision.isdigit():
+                raise ValueError(f"not a helm revision row: {name!r}")
+            return await kube.get_helm_release(namespace, release, revision=int(revision))
+        return await kube.get_object(meta, namespace, name)
+
+    return get_manifest
 
 
 def _missing_extra_packages(extra_roots: frozenset[str]) -> list[str]:
