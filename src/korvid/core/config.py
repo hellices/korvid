@@ -24,6 +24,7 @@ from urllib.parse import urlsplit
 
 import yaml
 
+from korvid.core.config_sections import mapping_section, parse_keybindings
 from korvid.k8s.columns import SOURCES, CustomColumn, parse_jsonpath
 from korvid.k8s.helm import SYNTHETIC_VIEW_KINDS
 from korvid.option_keys import matched_credential_segment
@@ -428,6 +429,7 @@ class KorvidConfig:
     #: Human-readable config problems (e.g. an invalid custom column) that
     #: the UI surfaces once at startup instead of crashing or hiding them.
     warnings: tuple[str, ...] = ()
+    keybindings_section_rejected: bool = False
 
 
 #: Top-level keys `load_config` reads. Any key not in this set is unsupported.
@@ -495,17 +497,12 @@ def load_config(path: Path | None = None) -> KorvidConfig:
     else:
         raise ConfigError(f"config root must be a mapping (got {type(loaded).__name__})")
     _check_unknown_root_keys(raw)
-    agent_value = raw.get("agent")
-    # User-edited configs can hold scalars where mappings are expected;
-    # treat anything that is not a mapping as absent instead of crashing.
-    agent_raw: dict[str, Any] = agent_value if isinstance(agent_value, dict) else {}
+    agent_raw = mapping_section(raw.get("agent"))
     _check_unknown_agent_keys(agent_raw)
     warnings: list[str] = []
     model_connections = _parse_model_connections(agent_raw, warnings)
-    mcp_value = raw.get("mcp")
-    mcp_raw: dict[str, Any] = mcp_value if isinstance(mcp_value, dict) else {}
-    logs_value = raw.get("logs")
-    logs_raw: dict[str, Any] = logs_value if isinstance(logs_value, dict) else {}
+    mcp_raw = mapping_section(raw.get("mcp"))
+    logs_raw = mapping_section(raw.get("logs"))
     debug_value = raw.get("debug")
     debug_raw: dict[str, Any] = debug_value if isinstance(debug_value, dict) else {}
     node_shell_value = raw.get("node_shell")
@@ -557,6 +554,7 @@ def load_config(path: Path | None = None) -> KorvidConfig:
         observability_raw.get("loki"), "observability.loki"
     )
     warnings.extend(loki_warnings)
+    keybindings, keybindings_section_rejected = parse_keybindings(raw.get("keybindings"), warnings)
     return KorvidConfig(
         kube_context=raw.get("kube_context"),
         namespace=raw.get("namespace"),
@@ -565,7 +563,8 @@ def load_config(path: Path | None = None) -> KorvidConfig:
         agent_enabled=model_connections.active_profile is not None,
         agent_model_tier=model_tier,
         agent_rules=agent_rules,
-        keybindings=dict(raw.get("keybindings") or {}),
+        keybindings=keybindings,
+        keybindings_section_rejected=keybindings_section_rejected,
         log_buffer_lines=_parse_buffer_lines(raw.get("log_buffer_lines")),
         log_wrap=logs_raw.get("wrap") is True,
         log_timestamps=logs_raw.get("timestamps") is True,
