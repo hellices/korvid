@@ -30,11 +30,13 @@ class KeybindingController:
         self._ui = ui
         self._save = save
         self._can_open = can_open
+        self._cleanup_required = False
 
     def load(self, raw: Mapping[str, object]) -> None:
         """Install safe startup overrides under the same rules as the editor."""
         plan = self.catalog.rules.plan(raw)
         self._surface.install(plan.overrides, self.catalog.keymap(plan.overrides))
+        self._cleanup_required = bool(plan.warnings)
         for warning in plan.warnings:
             self._ui.notify(warning, title="Keybindings", severity="warning", markup=False)
 
@@ -64,6 +66,7 @@ class KeybindingController:
                 self._surface.overrides(),
                 self.catalog.descriptions,
                 apply=self.apply,
+                cleanup_required=self._cleanup_required,
             )
         )
 
@@ -80,4 +83,5 @@ class KeybindingController:
         except (OSError, ConfigError, UnicodeError, yaml.YAMLError) as exc:
             return f"Could not save keybindings: {exc}"
         self._surface.install(plan.overrides, keymap)
+        self._cleanup_required = False
         return None

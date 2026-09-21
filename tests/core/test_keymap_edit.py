@@ -92,6 +92,117 @@ def test_full_reset_is_staged_and_undoable() -> None:
     assert not edit.dirty
 
 
+def test_rejected_persisted_cleanup_is_explicit_undoable_and_idempotent() -> None:
+    from korvid.core.keymap_edit import KeymapEdit
+
+    edit = KeymapEdit(_edit().rules, {}, cleanup_required=True)
+    assert not edit.dirty
+    assert not edit.cleanup_pending
+    assert edit.can_reset_all
+    assert not edit.can_undo
+
+    edit.reset_all()
+
+    assert edit.dirty
+    assert edit.cleanup_pending
+    assert edit.overrides == {}
+    assert edit.changes() == ()
+    assert not edit.can_reset_all
+    edit.reset_all()
+    assert edit.undo()
+    assert not edit.dirty
+    assert not edit.cleanup_pending
+    assert edit.can_reset_all
+    assert not edit.undo()
+
+
+def test_cleanup_undo_interleaves_with_assignments_and_action_resets() -> None:
+    from korvid.core.keymap_edit import KeymapEdit
+
+    original = {"logs": "z"}
+    edit = KeymapEdit(_edit().rules, original, cleanup_required=True)
+    edit.assign("describe", "x")
+    edit.reset_all()
+    edit.assign("logs", "z")
+    assert edit.overrides == original
+    assert edit.dirty
+    assert edit.cleanup_pending
+    edit.reset("logs")
+    assert edit.overrides == {}
+
+    assert edit.undo()
+    assert edit.overrides == original
+    assert edit.dirty
+    assert edit.cleanup_pending
+    assert edit.undo()
+    assert edit.overrides == {}
+    assert edit.cleanup_pending
+    assert edit.undo()
+    assert edit.overrides == {"logs": "z", "describe": "x"}
+    assert edit.last_action == "describe"
+    assert edit.cleanup_pending
+    assert edit.undo()
+    assert edit.overrides == original
+    assert not edit.dirty
+    assert not edit.cleanup_pending
+    assert not edit.can_undo
+    assert original == {"logs": "z"}
+
+
+def test_cleanup_undo_restores_a_pending_conflict_and_swap() -> None:
+    from korvid.core.keymap_edit import KeymapEdit
+
+    edit = KeymapEdit(_edit().rules, {}, cleanup_required=True)
+    edit.assign("logs", "d")
+    edit.reset_all()
+    assert not edit.conflicts()
+    assert edit.cleanup_pending
+
+    assert edit.undo()
+    assert edit.can_swap
+    assert edit.swap()
+    assert edit.overrides == {"logs": "d", "describe": "l"}
+    assert edit.cleanup_pending
+    assert edit.undo()
+    assert edit.undo()
+    assert not edit.dirty
+    assert not edit.cleanup_pending
+
+
+def test_cleanup_preview_tracks_ordinary_edits_without_forcing_a_save() -> None:
+    from korvid.core.keymap_edit import KeymapEdit
+
+    edit = KeymapEdit(_edit().rules, {}, cleanup_required=True)
+    edit.assign("logs", "z")
+    assert edit.cleanup_pending
+    edit.reset("logs")
+    assert not edit.dirty
+    assert not edit.cleanup_pending
+    assert edit.can_reset_all
+    assert edit.undo()
+    assert edit.cleanup_pending
+    assert edit.undo()
+    assert not edit.cleanup_pending
+
+
+def test_reset_without_overrides_or_rejected_entries_remains_a_noop() -> None:
+    edit = _edit()
+
+    edit.reset_all()
+
+    assert not edit.dirty
+    assert not edit.can_undo
+    assert not edit.cleanup_pending
+    assert not edit.can_reset_all
+
+
+def test_cleanup_metadata_does_not_admit_rejected_overrides_into_the_session() -> None:
+    from korvid.core.keymap_edit import KeymapEdit
+
+    with pytest.raises(ValueError, match="reserved"):
+        KeymapEdit(_edit().rules, {"logs": "1"}, cleanup_required=True)
+
+
 def test_pending_map_is_not_mutable_through_the_public_snapshot() -> None:
     edit = _edit()
     snapshot = edit.overrides

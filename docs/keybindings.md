@@ -115,6 +115,9 @@ also staged and requires Review followed by Apply. It removes only the
 `keybindings` section: unrelated settings, `favorite_namespaces`, and any
 separately saved namespace-assignment state are preserved. Namespace slots
 `1`–`9` remain reserved; the all-namespaces action on `0` remains remappable.
+Reset All also stages removal of saved overrides rejected at startup, even
+when no custom bindings are active. That cleanup appears in the preview,
+can be undone or cancelled, and is saved only after Review and Apply.
 
 You can also edit the `keybindings` section of the shared configuration directly:
 
@@ -134,8 +137,9 @@ be applied.
 Fixed navigation, pane-chord, and namespace keys are reserved. The approval
 dialogs' actions and confirm keys are **not remappable**: every write still
 requires a fixed fresh keystroke. Priority overrides cannot intercept approval
-or editor controls. The editor cannot open over a dialog or during a context
-switch. The palette's own key moves under `open_action_palette`, but its fixed
+controls, including `Ctrl-N` to decline, or editor controls. The editor cannot
+open over a dialog or during a context switch. The palette's own key moves under
+`open_action_palette`, but its fixed
 `Esc` and `Ctrl-P` keys close the palette whichever key opened it;
 another priority action cannot take them.
 Action names come from the app itself.

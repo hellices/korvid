@@ -227,6 +227,44 @@ async def test_editor_cannot_stack_over_or_confirm_an_approval() -> None:
         assert answers == [True]
 
 
+@pytest.mark.parametrize("action", ["toggle_agent", "interrupt_agent"])
+@pytest.mark.parametrize("gate", ["plain", "name", "protected-context"])
+async def test_priority_override_cannot_intercept_approval_decline(
+    monkeypatch: pytest.MonkeyPatch, action: str, gate: str
+) -> None:
+    answers: list[bool | None] = []
+    intercepted: list[str] = []
+    app = make_app([_pod("web")], config=KorvidConfig(keybindings={action: "ctrl+n"}))
+    monkeypatch.setattr(app, f"action_{action}", lambda: intercepted.append(action))
+    async with app.run_test() as pilot:
+        approval = ConfirmScreen(
+            "Delete pod",
+            "delete pod web",
+            require_name="web" if gate == "name" else None,
+            protected_context="prod" if gate == "protected-context" else None,
+        )
+        app.push_screen(approval, answers.append)
+        await until(pilot, lambda: app.screen is approval)
+        await pilot.press("ctrl+n")
+        await until(pilot, lambda: answers or intercepted, label="decline key dispatched")
+        assert answers == [False]
+        assert intercepted == []
+        assert app._keybinding_overrides == {}
+
+
+@pytest.mark.parametrize("action", ["toggle_agent", "interrupt_agent"])
+async def test_editor_cannot_stage_priority_approval_decline_remap(action: str) -> None:
+    saved: list[Mapping[str, str]] = []
+    app = make_app([_pod("web")], save_keybindings=saved.append)
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await _open_editor(pilot, app)
+        await pilot.press("f1", "ctrl+u", *action, "tab", "enter", "f2", "ctrl+u")
+        await pilot.press("c", "t", "r", "l", "plus", "n", "enter", "f9", "f10")
+        assert screen.edit.overrides == {}
+        assert saved == []
+        assert app.screen is screen
+
+
 async def test_editor_priority_controls_and_namespace_slots_cannot_be_stolen() -> None:
     app = make_app(
         [_pod("web")],

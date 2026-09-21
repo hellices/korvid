@@ -15,6 +15,7 @@ from korvid.core.keymap_edit import KeymapRules
 from korvid.ui.action_policy import action_contexts
 from korvid.ui.app_bindings import APP_HANDLER_KEY_HELP, as_binding
 from korvid.ui.widgets.action_palette import ActionPaletteScreen
+from korvid.ui.widgets.confirm_screen import ConfirmScreen
 
 
 def _key_owners(bindings: Iterable[BindingType]) -> dict[str, str]:
@@ -67,6 +68,7 @@ class KeybindingCatalog:
 
     def _priority_keys(self, modal_keys: Collection[str]) -> dict[str, str]:
         fixed = _key_owners(Input.BINDINGS)
+        fixed.update(_key_owners(ConfirmScreen.BINDINGS))
         fixed.update(dict.fromkeys(modal_keys, "keybinding_editor"))
         fixed.update(dict.fromkeys(ActionPaletteScreen.CLOSE_KEYS, "open_action_palette"))
         for binding in self._bindings:

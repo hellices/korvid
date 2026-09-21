@@ -64,6 +64,19 @@ def test_priority_actions_cannot_steal_editor_controls() -> None:
     assert catalog.rules.plan({"help": "f10"}).overrides == {"help": "f10"}
 
 
+@pytest.mark.parametrize("action", ["toggle_agent", "interrupt_agent", "open_action_palette"])
+def test_priority_actions_cannot_steal_approval_decline(action: str) -> None:
+    plan = KeybindingCatalog(APP_BINDINGS).rules.plan({action: "ctrl+n"})
+    assert not plan.overrides
+    assert any("decline" in warning for warning in plan.warnings)
+
+
+def test_nonpriority_actions_can_reuse_approval_decline_outside_a_modal() -> None:
+    plan = KeybindingCatalog(APP_BINDINGS).rules.plan({"help": "ctrl+n"})
+    assert plan.overrides == {"help": "ctrl+n"}
+    assert not plan.warnings
+
+
 def test_complete_keymap_preserves_contextual_owners_on_the_same_key() -> None:
     catalog = KeybindingCatalog(APP_BINDINGS)
     keymap = catalog.keymap({"logs": "r"})

@@ -59,6 +59,7 @@ class KeybindingEditorScreen(ModalScreen[bool]):
         descriptions: Display descriptions indexed by the rules' action names.
         apply: Synchronous persistence callback. Return None on success, or a
             safe error string on failure. Only F10 invokes this callback.
+        cleanup_required: Whether startup rejected persisted keybinding entries.
     """
 
     CONTROL_KEYS: ClassVar[frozenset[str]] = CONTROL_KEYS
@@ -112,9 +113,10 @@ class KeybindingEditorScreen(ModalScreen[bool]):
         descriptions: Mapping[str, str],
         *,
         apply: Callable[[Mapping[str, str]], str | None],
+        cleanup_required: bool = False,
     ) -> None:
         super().__init__()
-        self.edit = KeymapEdit(rules, overrides)
+        self.edit = KeymapEdit(rules, overrides, cleanup_required=cleanup_required)
         self._original = self.edit.overrides
         self._descriptions = dict(descriptions)
         self._apply_callback = apply
@@ -430,6 +432,8 @@ class KeybindingEditorScreen(ModalScreen[bool]):
         )
         proposal = self.edit.overrides
         lines = [heading]
+        if self.edit.cleanup_pending:
+            lines.append("Remove rejected persisted keybindings.")
         for change in self.edit.changes():
             defaults = " (defaults)" if change.action not in proposal else ""
             lines.append(
@@ -447,7 +451,7 @@ class KeybindingEditorScreen(ModalScreen[bool]):
             "swap": not self.edit.can_swap,
             "undo": not self.edit.can_undo,
             "reset": self._selected_action is None,
-            "reset-all": not self.edit.overrides,
+            "reset-all": not self.edit.can_reset_all,
             "review": not self.edit.dirty,
             "apply": self._reviewed is None or self._review_problem() is not None,
         }

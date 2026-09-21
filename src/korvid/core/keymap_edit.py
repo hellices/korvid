@@ -76,12 +76,19 @@ class KeymapChange:
 class _EditState:
     overrides: dict[str, str]
     swap_anchor: tuple[str, str] | None
+    cleanup_staged: bool
 
 
 class KeymapEdit:
     """One session whose complete pending proposal is isolated from live state."""
 
-    def __init__(self, rules: KeymapRules, overrides: Mapping[str, str]) -> None:
+    def __init__(
+        self,
+        rules: KeymapRules,
+        overrides: Mapping[str, str],
+        *,
+        cleanup_required: bool = False,
+    ) -> None:
         plan = rules.plan(overrides)
         if plan.warnings:
             raise ValueError("; ".join(plan.warnings))
@@ -90,6 +97,8 @@ class KeymapEdit:
         self._overrides = dict(plan.overrides)
         self._history: deque[_EditState] = deque(maxlen=128)
         self._swap_anchor: tuple[str, str] | None = None
+        self._cleanup_required = cleanup_required
+        self._cleanup_staged = False
 
     @property
     def overrides(self) -> dict[str, str]:
@@ -99,7 +108,17 @@ class KeymapEdit:
     @property
     def dirty(self) -> bool:
         """Whether confirmation would change the original override section."""
-        return self._overrides != self._baseline
+        return self._cleanup_staged or self._overrides != self._baseline
+
+    @property
+    def cleanup_pending(self) -> bool:
+        """Whether saving the proposal also removes rejected persisted entries."""
+        return self._cleanup_required and self.dirty
+
+    @property
+    def can_reset_all(self) -> bool:
+        """Whether overrides or rejected persisted entries remain to be reset."""
+        return bool(self._overrides) or (self._cleanup_required and not self._cleanup_staged)
 
     @property
     def can_undo(self) -> bool:
@@ -136,15 +155,16 @@ class KeymapEdit:
 
     def reset_all(self) -> None:
         """Stage removal of every keybinding override, without touching settings."""
-        self._stage({}, None)
+        self._stage({}, None, cleanup=self._cleanup_required)
 
     def undo(self) -> bool:
-        """Restore one prior staged state and its swap decision."""
+        """Restore one prior staged state, including cleanup and its swap decision."""
         if not self._history:
             return False
         state = self._history.pop()
         self._overrides = dict(state.overrides)
         self._swap_anchor = state.swap_anchor
+        self._cleanup_staged = state.cleanup_staged
         return True
 
     def conflicts(self) -> tuple[KeymapConflict, ...]:
@@ -236,9 +256,19 @@ class KeymapEdit:
             proposal[action] = key
         return proposal
 
-    def _stage(self, proposal: dict[str, str], anchor: tuple[str, str] | None) -> None:
-        if proposal == self._overrides:
+    def _stage(
+        self,
+        proposal: dict[str, str],
+        anchor: tuple[str, str] | None,
+        *,
+        cleanup: bool = False,
+    ) -> None:
+        cleanup_staged = self._cleanup_staged or cleanup
+        if proposal == self._overrides and cleanup_staged == self._cleanup_staged:
             return
-        self._history.append(_EditState(dict(self._overrides), self._swap_anchor))
+        self._history.append(
+            _EditState(dict(self._overrides), self._swap_anchor, self._cleanup_staged)
+        )
         self._overrides = proposal
         self._swap_anchor = anchor
+        self._cleanup_staged = cleanup_staged
