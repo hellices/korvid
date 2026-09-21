@@ -50,7 +50,9 @@ async def test_topbar_prefers_the_remapped_quit_key_to_the_inherited_fixed_alias
         assert entry.key == "f12"
         palette_entry = next(entry for entry in app._palette_entries() if entry.id == "action:quit")
         assert palette_entry.trigger == "f12"
-        await pilot.press("q", "f12")
+        await pilot.press("q")
+        assert invoked == []
+        await pilot.press("f12")
         assert invoked == ["quit"]
 
 
