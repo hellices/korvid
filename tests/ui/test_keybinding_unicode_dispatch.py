@@ -45,6 +45,8 @@ def test_unicode_names_without_terminal_events_are_rejected(character: str, name
         ("a", "a"),
         ("A", "A"),
         ("shift+a", "A"),
+        ("shift+A", "A"),
+        ("É", "É"),
         ("é", "é"),
         ("\u03b1", "\u03b1"),
         ("한", "한"),
@@ -71,6 +73,12 @@ def test_unicode_names_without_terminal_events_are_rejected(character: str, name
         ("newline", "\n"),
         ("backtab", "\x1b[Z"),
         ("shift+tab", "\x1b[Z"),
+        ("alt+shift+a", "\x1b[97;4u"),
+        ("alt+shift+é", "\x1b[233;4u"),
+        ("ctrl+shift+a", "\x1b[97;6u"),
+        ("alt+ctrl+shift+a", "\x1b[97;8u"),
+        ("shift+super+z", "\x1b[122;10u"),
+        ("meta+shift+ω", "\x1b[969;34u"),
     ],
 )
 def test_supported_keys_match_actual_terminal_dispatch(key: str, sequence: str) -> None:
@@ -84,4 +92,24 @@ def test_supported_keys_match_actual_terminal_dispatch(key: str, sequence: str) 
 
     assert len(events) == 1
     assert canonical_key(events[0].key) == canonical_key(key)
+    assert [binding.action for binding in bindings.key_to_bindings[events[0].key]] == ["logs"]
+
+
+@pytest.mark.parametrize(("uppercase", "emitted"), [("A", "alt+shift+a"), ("É", "alt+shift+é")])
+def test_legacy_alt_uppercase_uses_the_explicit_terminal_spelling(
+    uppercase: str, emitted: str
+) -> None:
+    parser = XTermParser()
+    messages = [*parser.feed(f"\x1b{uppercase}x"), *parser.feed("")]
+    events = [event for event in messages if isinstance(event, Key)]
+
+    assert [event.key for event in events] == [emitted, "x"]
+    rejected = plan_keybindings({"logs": f"alt+{uppercase}"}, _ACTIONS)
+    assert rejected.overrides == {}
+    assert len(rejected.warnings) == 1
+
+    accepted = plan_keybindings({"logs": emitted}, _ACTIONS)
+    assert accepted.overrides == {"logs": emitted}
+    assert not accepted.warnings
+    bindings = BindingsMap([(shift_alias_keys(accepted.overrides["logs"]), "logs")])
     assert [binding.action for binding in bindings.key_to_bindings[events[0].key]] == ["logs"]

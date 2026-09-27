@@ -136,6 +136,10 @@ refer to the same physical key. Unknown, invalid, duplicate, or shadowing
 overrides warn and are skipped at startup; an invalid editor proposal cannot
 be applied. Unicode key names must match the terminal's emitted spelling:
 use `a`, for example, rather than the unsupported `latin_small_letter_a`.
+Write modified uppercase letters with an explicit Shift modifier and lowercase
+base: `alt+shift+a`, not `alt+A`. Ambiguous modified-uppercase spellings are
+rejected rather than guessed across terminal protocols. Unmodified `A` and
+the existing ASCII `shift+a`/`shift+A` aliases remain supported.
 
 Fixed navigation, pane-chord, and namespace keys are reserved. The approval
 dialogs' actions and confirm keys are **not remappable**: every write still
