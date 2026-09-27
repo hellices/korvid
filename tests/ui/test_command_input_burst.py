@@ -67,8 +67,18 @@ async def test_command_burst_can_include_submit() -> None:
     async with app.run_test(size=(120, 40)) as pilot:
         await until(pilot, lambda: app.query_one(ResourceTable).has_focus)
         _send_burst(app, ":keybindings\r")
-        await until(pilot, lambda: isinstance(app.screen, KeybindingEditorScreen))
+        await until(
+            pilot,
+            lambda: (
+                isinstance(app.screen, KeybindingEditorScreen)
+                and app.screen.is_mounted
+                and app.screen.query_one("#keybinding-search", Input).has_focus
+            ),
+            label="submitted command editor mounted and focused",
+        )
         assert isinstance(app.screen, KeybindingEditorScreen)
+        assert app.screen.is_mounted
+        assert app.screen.query_one("#keybinding-search", Input).has_focus
         assert not app._command_bar.display
         assert saved == []
 
