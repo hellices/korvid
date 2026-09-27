@@ -8,7 +8,7 @@ never crashes startup or silently does nothing.
 Safety invariant: approval dialogs are confirmed only by fixed user
 keystrokes, so their actions can never be remapped from config, and
 priority actions (dispatched before any screen) can never take one of the
-dialogs' keys.
+dialogs' keys or printable text-entry keys.
 """
 
 from __future__ import annotations
@@ -53,7 +53,11 @@ _KEY_ALIASES = {
     "newline": "ctrl+j",
 }
 _MODIFIERS = frozenset({"ctrl", "alt", "shift", "super", "meta"})
-_NAMED_KEYS = frozenset(
+_FUNCTION_KEY = re.compile(r"f(?:[1-9]|1[0-9]|2[0-4])")
+_PRINTABLE_NAMED_KEYS = frozenset(
+    {"space", "at", "minus", "plus", "less_than_sign", "greater_than_sign"}
+)
+_NAMED_KEYS = _PRINTABLE_NAMED_KEYS | frozenset(
     {
         "enter",
         "escape",
@@ -70,12 +74,6 @@ _NAMED_KEYS = frozenset(
         "right",
         "up",
         "down",
-        "space",
-        "at",
-        "minus",
-        "plus",
-        "less_than_sign",
-        "greater_than_sign",
         "print_screen",
         "pause",
     }
@@ -127,7 +125,7 @@ def _usable_key(key: str) -> bool:
         return True
     if len(name) == 1 and name.isprintable() and not name.isspace():
         return True
-    if re.fullmatch(r"f(?:[1-9]|1[0-9]|2[0-4])", name):
+    if _FUNCTION_KEY.fullmatch(name):
         return True
     try:
         character = unicodedata.lookup(name.replace("_", " ").upper())
@@ -138,6 +136,17 @@ def _usable_key(key: str) -> bool:
         and character.isprintable()
         and not character.isspace()
         and canonical_key(character) == name
+    )
+
+
+def _printable_key(key: str) -> bool:
+    """Whether a validated key can enter text without a control modifier."""
+    parts = canonical_key(key).split("+")
+    modifiers, name = parts[:-1], parts[-1]
+    if any(modifier != "shift" for modifier in modifiers):
+        return False
+    return name in _PRINTABLE_NAMED_KEYS or (
+        name not in _NAMED_KEYS and _FUNCTION_KEY.fullmatch(name) is None
     )
 
 
@@ -195,6 +204,8 @@ def _entry_problem(
         return f"priority action '{action}' may not take fixed modal key '{key}' owned by '{priority_owner}'"
     if marker in reserved:
         return f"key '{key}' for '{action}' is reserved by '{reserved[marker]}' and cannot be remapped over"
+    if action in priority_actions and _printable_key(key):
+        return f"priority action '{action}' may not take printable key '{key}' — text input must keep that key"
     return None
 
 
@@ -290,7 +301,8 @@ def plan_keybindings(
             are `object` because YAML may supply non-strings.
         actions: Every remappable action mapped to its default keys.
         priority_actions: Actions whose bindings fire before any screen;
-            these may not take an approval-dialog key (`APPROVAL_KEYS`).
+            these may not take an approval-dialog key (`APPROVAL_KEYS`)
+            or a printable text-entry key.
         reserved_keys: Keys owned by non-remappable bindings (key → owning
             action, e.g. the 1-9 favorites); an override may not take one.
         priority_reserved_keys: Fixed modal keys (key → owning action) that

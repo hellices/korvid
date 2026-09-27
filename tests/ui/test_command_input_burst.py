@@ -82,17 +82,76 @@ async def test_command_bar_takes_focus_without_waiting_for_reflow() -> None:
             assert app.focused is app._command_bar
 
 
-@pytest.mark.parametrize("bar_key", ["colon", "slash"])
-async def test_colon_in_an_open_input_remains_text(bar_key: str) -> None:
-    app = make_app([_pod("web")])
+@pytest.mark.parametrize("input_kind", ["command", "filter"])
+@pytest.mark.parametrize(
+    ("command_key", "sequence", "expected"),
+    [
+        ("colon", ":", "seed:tail"),
+        ("semicolon", ";", "seed;tail"),
+        ("f1", "\x1bOP", "seedtail"),
+        ("ctrl+u", "\x15", "tail"),
+        ("ctrl+n", "\x0e", "seedtail"),
+    ],
+)
+async def test_command_key_in_an_open_input_preserves_native_editing(
+    monkeypatch: pytest.MonkeyPatch,
+    input_kind: str,
+    command_key: str,
+    sequence: str,
+    expected: str,
+) -> None:
+    opened: list[bool] = []
+    app = make_app([_pod("web")], config=KorvidConfig(keybindings={"open_command": command_key}))
+    open_command = app.action_open_command
+
+    def record_command() -> None:
+        opened.append(True)
+        open_command()
+
+    monkeypatch.setattr(app, "action_open_command", record_command)
     async with app.run_test() as pilot:
-        await pilot.press(bar_key)
+        assert app._keybinding_overrides == {"open_command": command_key}
+        await pilot.press(command_key if input_kind == "command" else "slash")
         bar = app.focused
         assert isinstance(bar, Input)
-        _send_burst(app, "text:keys")
-        await until(pilot, lambda: bar.value == "text:keys")
+        opening_count = len(opened)
+        _send_burst(app, "seedtail")
+        await until(pilot, lambda: bar.value == "seedtail")
+        bar.cursor_position = 4
+        _send_burst(app, sequence)
+        await pilot.pause()
+        assert bar.value == expected
+        bar.cursor_position = len(bar.value)
+        _send_burst(app, ":literal")
+        await until(pilot, lambda: bar.value == expected + ":literal")
         assert app.focused is bar
-        assert bar.value == "text:keys"
+        assert bar.display
+        assert app._command_bar.display == (input_kind == "command")
+        assert app._filter_bar.display == (input_kind == "filter")
+        assert len(opened) == opening_count
+
+
+@pytest.mark.parametrize("input_kind", ["command", "filter"])
+@pytest.mark.parametrize(("command_key", "prefix"), [("colon", ":"), ("f1", "\x1bOP")])
+async def test_command_entry_after_table_click_replaces_a_visible_unfocused_bar(
+    input_kind: str, command_key: str, prefix: str
+) -> None:
+    app = make_app(
+        [_pod("seed-web")], config=KorvidConfig(keybindings={"open_command": command_key})
+    )
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.press(command_key if input_kind == "command" else "slash")
+        bar = app.focused
+        assert isinstance(bar, Input)
+        _send_burst(app, "seed")
+        await until(pilot, lambda: bar.value == "seed")
+        await pilot.click(ResourceTable, offset=(2, 5))
+        await until(pilot, lambda: app.query_one(ResourceTable).has_focus)
+        assert bar.display
+        _send_burst(app, prefix + "keys")
+        await until(pilot, lambda: app._command_bar.has_focus)
+        assert app._command_bar.value == "keys"
+        assert not app._filter_bar.display
 
 
 @pytest.mark.parametrize("modal_kind", ["help", "approval"])

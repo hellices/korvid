@@ -142,8 +142,13 @@ dialogs' actions and confirm keys are **not remappable**: every write still
 requires a fixed fresh keystroke. Priority overrides cannot intercept approval
 controls, including `Ctrl-N` to decline, editor controls, or any other modal's
 fixed keys. Remapping Quit away from `q` does not free it for a priority action:
-it still closes Help and Describe. The editor cannot open over a dialog or
-during a context switch. The palette's own key moves under
+it still closes Help and Describe. Global priority actions also cannot take
+printable keys, including Shift-only letters, punctuation, spaces, and Unicode:
+those keys must remain available to text inputs and typed approval gates.
+Use an available Ctrl/Alt combination or function key instead. This restriction
+does not apply to normal actions or the main-screen-only command-bar shortcut.
+The editor cannot open over a dialog or during a context switch. The palette's
+own key moves under
 `open_action_palette`, but its fixed
 `Esc` and `Ctrl-P` keys close the palette whichever key opened it;
 another priority action cannot take them.
