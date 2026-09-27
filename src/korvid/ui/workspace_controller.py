@@ -77,7 +77,6 @@ from korvid.ui.widgets.hierarchy_screen import HierarchyScreen, build_hierarchy
 from korvid.ui.widgets.relationship_screen import GotoResult, RelationshipScreen
 from korvid.ui.widgets.resource_table import validate_selected_view
 from korvid.ui.workspace_ports import (
-    KeyEvent,
     MetricsLifecycle,
     RelationshipLoading,
     WatchLifecycle,
@@ -1479,28 +1478,24 @@ class WorkspaceController:
     # Split-pane lifecycle (issue #48)
     # ------------------------------------------------------------------
 
-    async def handle_pane_chord(self, event: KeyEvent) -> None:
-        """`ctrl+w` chord state machine: the prefix always swallows the next
-        key - an unmapped second key must not fall through to normal handling."""
+    async def handle_pane_chord_key(self, key: str) -> bool:
+        """Apply a table chord key; even an unmapped continuation is consumed."""
         if not self._state.chord_pending:
             # Arm only while a table is focused: with an Input focused the
             # second key never reaches App.on_key, which would orphan the
             # pending flag and swallow the next table keypress.
-            if not self._surface.focused_is_table():
-                return
+            if key != "ctrl+w" or not self._surface.focused_is_table():
+                return False
             self._state.chord_pending = True
-            event.stop()
-            event.prevent_default()
-            return
+            return True
         self._state.chord_pending = False
-        event.stop()
-        event.prevent_default()
-        if event.key == "v":
+        if key == "v":
             await self.split_pane()
-        elif event.key in ("w", "ctrl+w"):
+        elif key in ("w", "ctrl+w"):
             self.focus_other_pane()
-        elif event.key == "q":
+        elif key == "q":
             await self.close_focused_pane()
+        return True
 
     async def split_pane(self) -> None:
         """`ctrl+w v`: clone the focused view into a second pane and focus it."""

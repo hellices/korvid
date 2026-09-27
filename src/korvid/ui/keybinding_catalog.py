@@ -13,7 +13,11 @@ from textual.widgets import DataTable, Input
 from korvid.core.keybindings import canonical_key, shift_alias_keys
 from korvid.core.keymap_edit import KeymapRules
 from korvid.ui.action_policy import action_contexts
-from korvid.ui.app_bindings import APP_HANDLER_KEY_HELP, as_binding
+from korvid.ui.app_bindings import (
+    APP_HANDLER_KEY_HELP,
+    MAIN_SCREEN_PRIORITY_ACTIONS,
+    as_binding,
+)
 from korvid.ui.modal_bindings import modal_bindings
 
 
@@ -42,7 +46,9 @@ class KeybindingCatalog:
         self.rules = KeymapRules(
             actions=actions,
             priority_actions=frozenset(
-                binding.action for binding in self._bindings if binding.priority
+                binding.action
+                for binding in self._bindings
+                if binding.priority and binding.action not in MAIN_SCREEN_PRIORITY_ACTIONS
             ),
             reserved_keys=self._reserved_keys(),
             priority_reserved_keys=self._priority_keys(modal_keys),

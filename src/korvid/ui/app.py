@@ -63,7 +63,12 @@ from korvid.ui.action_palette import (
 from korvid.ui.agent_ui_controller import (
     AgentUiController,
 )
-from korvid.ui.app_bindings import APP_BINDINGS, APP_CSS, APP_HANDLER_KEY_HELP
+from korvid.ui.app_bindings import (
+    APP_BINDINGS,
+    APP_CSS,
+    APP_HANDLER_KEY_HELP,
+    MAIN_SCREEN_PRIORITY_ACTIONS,
+)
 from korvid.ui.app_runtime import AppRuntime, AppRuntimeInputs
 from korvid.ui.command import COMMANDS, command_help, command_words, parse_command
 from korvid.ui.context_switch_coordinator import (
@@ -974,12 +979,21 @@ class KorvidApp(App[None]):
         message.stop()
         self._transfer.cancel()
 
+    async def _check_bindings(self, key: str, priority: bool = False) -> bool:
+        """Keep the whole pane chord ordered behind global priority bindings."""
+        if await super()._check_bindings(key, priority=priority):
+            return True
+        if (
+            priority
+            and len(self.screen_stack) == 1
+            and isinstance(self.focused, ResourceTable)
+            and (key == "ctrl+w" or self._workspace_ctl.chord_pending)
+        ):
+            return await self._workspace_ctl.handle_pane_chord_key(key)
+        return False
+
     async def on_key(self, event: Key) -> None:
-        """Pane chords (`ctrl+w` v/w/q) and Escape (closes describe/log
-        panes, then pops one drill-down level)."""
-        if self._workspace_ctl.chord_pending or event.key == "ctrl+w":
-            await self._workspace_ctl.handle_pane_chord(event)
-            return
+        """Handle Escape for describe/log panes and drill-down navigation."""
         if event.key != "escape":
             return
         if len(self.screen_stack) > 1:
@@ -1379,6 +1393,10 @@ class KorvidApp(App[None]):
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         """Gate bindings on composition availability and the current view
         (issue #114), via the `ActionPolicy` extracted in issue #388."""
+        if action in MAIN_SCREEN_PRIORITY_ACTIONS and (
+            len(self.screen_stack) != 1 or self._workspace_ctl.chord_pending
+        ):
+            return False
         return self._actions.binding_enabled(action)
 
     def action_toggle_agent(self) -> None:

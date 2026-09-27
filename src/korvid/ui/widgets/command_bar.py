@@ -76,9 +76,10 @@ class CommandBar(Input):
         return None
 
     def open(self) -> None:
+        """Enter command mode before the next key in a terminal batch is routed."""
         self.value = ""
         self.display = True
-        self.focus()
+        self.screen.set_focus(self)
 
     def dismiss_bar(self) -> None:
         self.display = False
