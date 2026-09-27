@@ -281,6 +281,7 @@ async def test_repeated_chords_in_one_burst_preserve_dispatch_order(
             lambda: len(completed) == 4 and not app._workspace_ctl.chord_pending,
             label="all chord handlers completed",
         )
+        await pilot.pause()
         assert handled == ["ctrl+w", "v", "ctrl+w", "w"]
         assert completed == handled
         assert app._workspace.is_split

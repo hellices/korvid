@@ -52,6 +52,8 @@ def test_unicode_names_without_terminal_events_are_rejected(character: str, name
         ("한", "한"),
         ("/", "/"),
         ("slash", "/"),
+        ("?", "?"),
+        ("question_mark", "?"),
         (",", ","),
         ("comma", ","),
         ("<", "<"),
@@ -79,6 +81,11 @@ def test_unicode_names_without_terminal_events_are_rejected(character: str, name
         ("alt+ctrl+shift+a", "\x1b[97;8u"),
         ("shift+super+z", "\x1b[122;10u"),
         ("meta+shift+ω", "\x1b[969;34u"),
+        ("ctrl+question_mark", "\x1b[63;5u"),
+        ("alt+question_mark", "\x1b[63;3u"),
+        ("ctrl+shift+slash", "\x1b[47;6u"),
+        ("alt+shift+slash", "\x1b[47;4u"),
+        ("ctrl+shift+snowman", "\x1b[9731;6u"),
     ],
 )
 def test_supported_keys_match_actual_terminal_dispatch(key: str, sequence: str) -> None:
@@ -113,3 +120,43 @@ def test_legacy_alt_uppercase_uses_the_explicit_terminal_spelling(
     assert not accepted.warnings
     bindings = BindingsMap([(shift_alias_keys(accepted.overrides["logs"]), "logs")])
     assert [binding.action for binding in bindings.key_to_bindings[events[0].key]] == ["logs"]
+
+
+@pytest.mark.parametrize(
+    ("unsupported", "sequence", "emitted"),
+    [
+        ("shift+slash", "?", "question_mark"),
+        ("shift+?", "?", "question_mark"),
+        ("shift+1", "!", "exclamation_mark"),
+        ("shift+comma", "<", "less_than_sign"),
+        ("shift+space", " ", "space"),
+        ("shift+é", "É", "É"),
+    ],
+)
+def test_shift_only_text_requires_the_emitted_character_spelling(
+    unsupported: str, sequence: str, emitted: str
+) -> None:
+    events = [event for event in XTermParser().feed(sequence) if isinstance(event, Key)]
+    inert = BindingsMap([(shift_alias_keys(unsupported), "logs")])
+
+    assert [event.key for event in events] == [emitted]
+    assert emitted not in inert.key_to_bindings
+    rejected = plan_keybindings({"logs": unsupported, "describe": emitted}, _ACTIONS)
+    assert rejected.overrides == {"describe": emitted}
+    assert len(rejected.warnings) == 1
+
+    accepted = plan_keybindings({"logs": emitted}, _ACTIONS)
+    assert accepted.overrides == {"logs": emitted}
+    assert not accepted.warnings
+    bindings = BindingsMap([(shift_alias_keys(accepted.overrides["logs"]), "logs")])
+    assert [binding.action for binding in bindings.key_to_bindings[emitted]] == ["logs"]
+
+
+def test_enhanced_shift_only_symbol_identity_is_not_conflated_with_plain_text() -> None:
+    events = [event for event in XTermParser().feed("\x1b[47;2u") if isinstance(event, Key)]
+
+    assert [event.key for event in events] == ["shift+slash"]
+    assert canonical_key(events[0].key) != canonical_key("?")
+    plan = plan_keybindings({"logs": events[0].key, "describe": "?"}, _ACTIONS)
+    assert plan.overrides == {"describe": "?"}
+    assert len(plan.warnings) == 1

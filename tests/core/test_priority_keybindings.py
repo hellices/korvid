@@ -20,7 +20,6 @@ _PRIORITY_ACTIONS = frozenset({"interrupt_agent"})
         "é",
         "한",
         "space",
-        "shift+space",
         "at",
         "slash",
         "backslash",
@@ -35,7 +34,6 @@ _PRIORITY_ACTIONS = frozenset({"interrupt_agent"})
         "?",
         "<",
         "[",
-        "shift+slash",
     ],
 )
 def test_printable_priority_overrides_are_rejected_but_normal_actions_keep_them(key: str) -> None:

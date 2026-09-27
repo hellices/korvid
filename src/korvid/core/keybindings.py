@@ -121,7 +121,9 @@ def _usable_key(key: str) -> bool:
     modifiers, name = parts[:-1], parts[-1]
     if len(set(modifiers)) != len(modifiers) or any(part not in _MODIFIERS for part in modifiers):
         return False
-    if modifiers and len(name) == 1 and name.isupper():
+    if (modifiers and len(name) == 1 and name.isupper()) or (
+        modifiers == ["shift"] and _printable_key(name)
+    ):
         return False
     if name in _NAMED_KEYS or name in _PUNCTUATION_NAMES.values():
         return True
