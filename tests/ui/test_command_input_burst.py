@@ -6,10 +6,10 @@ from collections.abc import Mapping
 
 import pytest
 from textual._xterm_parser import XTermParser
+from textual.pilot import Pilot
 from textual.widgets import Input
 
 from korvid.core.config import KorvidConfig
-from korvid.ui.app import KorvidApp
 from korvid.ui.widgets.confirm_screen import ConfirmScreen
 from korvid.ui.widgets.help_screen import HelpScreen
 from korvid.ui.widgets.keybinding_editor import KeybindingEditorScreen
@@ -19,10 +19,13 @@ from .test_app import _pod, make_app
 from .waits import until
 
 
-def _send_burst(app: KorvidApp, sequence: str) -> None:
+async def _send_burst(pilot: Pilot[None], sequence: str) -> None:
+    """Deliver one raw terminal batch, then drain its queued UI work."""
+    app = pilot.app
     assert app._driver is not None
     for event in XTermParser().feed(sequence):
         app._driver.process_message(event)
+    await pilot.pause()
 
 
 @pytest.mark.parametrize("after_help", [False, True])
@@ -47,7 +50,7 @@ async def test_command_burst_opens_editor_without_losing_characters(
             await pilot.press("question_mark", "escape")
         await pilot.press("down")
         assert table.cursor_row == 1
-        _send_burst(app, prefix + "keys")
+        await _send_burst(pilot, prefix + "keys")
         await until(pilot, lambda: app._command_bar.has_focus)
         assert app._command_bar.value == "keys"
         await pilot.press("enter")
@@ -66,7 +69,7 @@ async def test_command_burst_can_include_submit() -> None:
     )
     async with app.run_test(size=(120, 40)) as pilot:
         await until(pilot, lambda: app.query_one(ResourceTable).has_focus)
-        _send_burst(app, ":keybindings\r")
+        await _send_burst(pilot, ":keybindings\r")
         await until(
             pilot,
             lambda: (
@@ -125,14 +128,13 @@ async def test_command_key_in_an_open_input_preserves_native_editing(
         bar = app.focused
         assert isinstance(bar, Input)
         opening_count = len(opened)
-        _send_burst(app, "seedtail")
+        await _send_burst(pilot, "seedtail")
         await until(pilot, lambda: bar.value == "seedtail")
         bar.cursor_position = 4
-        _send_burst(app, sequence)
-        await pilot.pause()
+        await _send_burst(pilot, sequence)
         assert bar.value == expected
         bar.cursor_position = len(bar.value)
-        _send_burst(app, ":literal")
+        await _send_burst(pilot, ":literal")
         await until(pilot, lambda: bar.value == expected + ":literal")
         assert app.focused is bar
         assert bar.display
@@ -153,12 +155,12 @@ async def test_command_entry_after_table_click_replaces_a_visible_unfocused_bar(
         await pilot.press(command_key if input_kind == "command" else "slash")
         bar = app.focused
         assert isinstance(bar, Input)
-        _send_burst(app, "seed")
+        await _send_burst(pilot, "seed")
         await until(pilot, lambda: bar.value == "seed")
         await pilot.click(ResourceTable, offset=(2, 5))
         await until(pilot, lambda: app.query_one(ResourceTable).has_focus)
         assert bar.display
-        _send_burst(app, prefix + "keys")
+        await _send_burst(pilot, prefix + "keys")
         await until(pilot, lambda: app._command_bar.has_focus)
         assert app._command_bar.value == "keys"
         assert not app._filter_bar.display
@@ -171,7 +173,7 @@ async def test_command_burst_cannot_open_a_bar_behind_a_modal(modal_kind: str) -
         modal = HelpScreen([], []) if modal_kind == "help" else ConfirmScreen("Delete", "delete")
         app.push_screen(modal)
         await until(pilot, lambda: app.screen is modal and modal.is_mounted)
-        _send_burst(app, ":keys")
+        await _send_burst(pilot, ":keys")
         await pilot.press("escape")
         assert len(app.screen_stack) == 1
         assert not app._command_bar.display
@@ -199,7 +201,7 @@ async def test_command_burst_preserves_priority_interrupt(
     monkeypatch.setattr(app, "action_interrupt_agent", lambda: interrupted.append(True))
     async with app.run_test() as pilot:
         await until(pilot, lambda: app.query_one(ResourceTable).has_focus)
-        _send_burst(app, ":keys\x18")
+        await _send_burst(pilot, ":keys\x18")
         await until(pilot, lambda: interrupted and app._command_bar.value == "keys")
         assert interrupted == [True]
         assert app._command_bar.value == "keys"
@@ -212,11 +214,11 @@ async def test_pane_chord_keeps_a_remapped_command_key(single_burst: bool) -> No
         await until(pilot, lambda: app.query_one(ResourceTable).has_focus)
         assert app._keybinding_overrides == {"open_command": "v"}
         if single_burst:
-            _send_burst(app, "\x17v")
+            await _send_burst(pilot, "\x17v")
         else:
             await pilot.press("ctrl+w")
             assert app._workspace_ctl.chord_pending
-            _send_burst(app, "v")
+            await _send_burst(pilot, "v")
         await until(pilot, lambda: app._workspace.is_split or app._command_bar.display)
         assert app._workspace.is_split
         assert not app._command_bar.display
@@ -248,7 +250,7 @@ async def test_repeated_chords_in_one_burst_close_a_pane_without_quitting(
     monkeypatch.setattr(app, "action_quit", lambda: quit_requested.append(True))
     async with app.run_test() as pilot:
         await until(pilot, lambda: app.query_one(ResourceTable).has_focus)
-        _send_burst(app, "\x17v\x17q")
+        await _send_burst(pilot, "\x17v\x17q")
         await until(pilot, lambda: closed or quit_requested)
         assert quit_requested == []
         assert closed == [1]
@@ -260,19 +262,27 @@ async def test_repeated_chords_in_one_burst_preserve_dispatch_order(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     handled: list[str] = []
+    completed: list[str] = []
     app = make_app([_pod("web")])
     handle_key = app._workspace_ctl.handle_pane_chord_key
 
     async def record_key(key: str) -> bool:
         handled.append(key)
-        return await handle_key(key)
+        result = await handle_key(key)
+        completed.append(key)
+        return result
 
     monkeypatch.setattr(app._workspace_ctl, "handle_pane_chord_key", record_key)
     async with app.run_test() as pilot:
         await until(pilot, lambda: app.query_one(ResourceTable).has_focus)
-        _send_burst(app, "\x17v\x17w")
-        await until(pilot, lambda: len(handled) == 4 and not app._workspace_ctl.chord_pending)
+        await _send_burst(pilot, "\x17v\x17w")
+        await until(
+            pilot,
+            lambda: len(completed) == 4 and not app._workspace_ctl.chord_pending,
+            label="all chord handlers completed",
+        )
         assert handled == ["ctrl+w", "v", "ctrl+w", "w"]
+        assert completed == handled
         assert app._workspace.is_split
         assert not app._workspace_ctl.chord_pending
 
@@ -288,8 +298,7 @@ async def test_forwarded_key_cannot_consume_a_later_chord_prefix(
     async with app.run_test() as pilot:
         table = app.query_one(ResourceTable)
         await until(pilot, lambda: table.row_count == 2 and table.has_focus)
-        _send_burst(app, earlier_key + "\x17")
-        await pilot.pause()
+        await _send_burst(pilot, earlier_key + "\x17")
         assert app._workspace_ctl.chord_pending
         assert table.cursor_row == expected_row
         await pilot.press("v")

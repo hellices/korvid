@@ -31,7 +31,7 @@ async def test_printable_priority_remap_cannot_steal_input_text(
             await pilot.press("colon" if input_kind == "command" else "slash")
         text_input = app.focused
         assert isinstance(text_input, Input)
-        _send_burst(app, "worker-k")
+        await _send_burst(pilot, "worker-k")
         await pilot.pause()
         assert text_input.value == "worker-k"
         assert interrupted == []
@@ -54,7 +54,7 @@ async def test_printable_priority_remap_cannot_steal_a_pane_chord_continuation(
     monkeypatch.setattr(app, "action_interrupt_agent", lambda: interrupted.append(True))
     async with app.run_test() as pilot:
         await until(pilot, lambda: app.query_one(ResourceTable).has_focus)
-        _send_burst(app, "\x17v")
+        await _send_burst(pilot, "\x17v")
         await until(pilot, lambda: app._workspace.is_split or interrupted)
         assert app._workspace.is_split
         assert interrupted == []
