@@ -154,7 +154,7 @@ async def test_stop_hint_tracks_a_remapped_interrupt_key() -> None:
             await asyncio.sleep(0.01)
 
     app = build_test_app(
-        config=KorvidConfig(namespace="default", keybindings={"interrupt_agent": "ctrl+g"}),
+        config=KorvidConfig(namespace="default", keybindings={"interrupt_agent": "ctrl+f12"}),
         store=store,
         watch_manager=WatchManager(store, source),
         agent_session=session,
@@ -164,10 +164,10 @@ async def test_stop_hint_tracks_a_remapped_interrupt_key() -> None:
         await _start_turn(app, pilot, "check")
         panel = app.query_one(AgentPanel)
         await until(pilot, lambda: "stop" in panel.status_text, label="stop hint shown")
-        assert "ctrl+g" in panel.status_text
+        assert "ctrl+f12" in panel.status_text
         assert "ctrl+x" not in panel.status_text
         # and the remapped key actually stops the turn
-        await pilot.press("ctrl+g")
+        await pilot.press("ctrl+f12")
         await until(pilot, lambda: session.finalized == 1, label="remapped key stops")
 
 

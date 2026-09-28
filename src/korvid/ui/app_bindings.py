@@ -1,8 +1,15 @@
-"""Declarative bindings and CSS for the Textual application shell."""
+"""Declarative bindings and CSS for the Textual application shell.
+
+Main-screen priority actions run before terminal batches are forwarded to a
+widget. They remain disabled on other screens, so unlike global priority
+actions their remaps cannot intercept a modal's controls.
+"""
 
 from __future__ import annotations
 
 from textual.binding import Binding, BindingType
+
+MAIN_SCREEN_PRIORITY_ACTIONS = frozenset({"open_command"})
 
 # Every remappable binding carries an ``id`` so the `keybindings:` config
 # section can remap it via Textual's keymap (issue #35); the intentionally
@@ -13,7 +20,7 @@ APP_BINDINGS: list[Binding | tuple[str, str] | tuple[str, str, str]] = [
     Binding("question_mark", "help", "Help", id="help"),
     # Top bar collapse/expand (issue #142): the grouped legend's toggle.
     Binding("tilde", "toggle_topbar", "Legend", show=False, id="toggle_topbar"),
-    Binding("colon", "open_command", "Command", id="open_command"),
+    Binding("colon", "open_command", "Command", priority=True, id="open_command"),
     # The Action Palette (issue #388): `priority=True` so it opens from any
     # focused widget (the agent prompt, a pane), with `ActionPolicy` - not
     # the screen stack - deciding the surfaces where it must stay shut.

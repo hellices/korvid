@@ -71,6 +71,13 @@ class CommandDescriptor:
 
 COMMANDS: tuple[CommandDescriptor, ...] = (
     CommandDescriptor(
+        aliases=("keys", "keybindings"),
+        help=((":keys|:keybindings", "Edit, review and save keybindings"),),
+        operation=BuiltinOperation.KEYBINDINGS,
+        maximum_arguments=0,
+        palette=PaletteCommand("Edit keybindings", "keys", ("shortcuts", "keyboard")),
+    ),
+    CommandDescriptor(
         aliases=("pulse", "problems"),
         help=((":pulse|:problems", "Current problems, recent warnings and observation coverage"),),
         operation=BuiltinOperation.PULSE,

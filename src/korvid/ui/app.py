@@ -9,6 +9,7 @@ from collections.abc import (
     Awaitable,
     Callable,
     Iterator,
+    Mapping,
 )
 from time import monotonic
 from typing import TYPE_CHECKING, Any, ClassVar, assert_never
@@ -30,7 +31,6 @@ from korvid.agent.model_profiles import ModelCatalog
 from korvid.core.audit import AuditLog
 from korvid.core.config import KorvidConfig, ModelConnectionConfig, ModelConnectionsWriter
 from korvid.core.filters import ResourceFilter
-from korvid.core.keybindings import plan_keybindings, shift_alias_keys
 from korvid.core.mcp import MCPControllerBase
 from korvid.core.portforward import (
     ForwardRegistry,
@@ -63,7 +63,12 @@ from korvid.ui.action_palette import (
 from korvid.ui.agent_ui_controller import (
     AgentUiController,
 )
-from korvid.ui.app_bindings import APP_BINDINGS, APP_CSS, APP_HANDLER_KEY_HELP
+from korvid.ui.app_bindings import (
+    APP_BINDINGS,
+    APP_CSS,
+    APP_HANDLER_KEY_HELP,
+    MAIN_SCREEN_PRIORITY_ACTIONS,
+)
 from korvid.ui.app_runtime import AppRuntime, AppRuntimeInputs
 from korvid.ui.command import COMMANDS, command_help, command_words, parse_command
 from korvid.ui.context_switch_coordinator import (
@@ -174,6 +179,7 @@ class KorvidApp(App[None]):
         helm: HelmCLI | None = None,
         proposal_store: ProposalStore | None = None,
         save_topbar: Callable[[bool], None] | None = None,
+        save_keybindings: Callable[[Mapping[str, str]], None] | None = None,
         telepresence: TelepresenceCLI | None = None,
         probe_traffic_manager: Callable[[], Awaitable[bool]] | None = None,
         agent_follow_bridge: UIBridge | None = None,
@@ -226,6 +232,7 @@ class KorvidApp(App[None]):
             helm=helm,
             proposal_store=proposal_store,
             save_topbar=save_topbar,
+            save_keybindings=save_keybindings,
             telepresence=telepresence,
             probe_traffic_manager=probe_traffic_manager,
             agent_follow_bridge=agent_follow_bridge,
@@ -274,6 +281,7 @@ class KorvidApp(App[None]):
         self._agent_ui = runtime.agent_ui
         self._commands = runtime.commands
         self._actions = runtime.actions
+        self._keybindings = runtime.keybindings
         self.__dict__.pop("_runtime_inputs", None)
 
     def _bind_runtime_inputs(self, inputs: AppRuntimeInputs) -> None:
@@ -439,54 +447,6 @@ class KorvidApp(App[None]):
         yield PulseSummary()
         yield StatusBar()
 
-    @classmethod
-    def _binding_actions(cls) -> dict[str, tuple[str, ...]]:
-        """Every remappable app action mapped to its default keys.
-
-        Bindings without a keymap ``id`` (the parametrised 1-9 favorites)
-        are excluded: Textual's keymap moves bindings by id, so an
-        id-less binding cannot actually be remapped.
-        """
-        actions: dict[str, tuple[str, ...]] = {}
-        for raw in cls.BINDINGS:
-            binding = raw if isinstance(raw, Binding) else Binding(*raw)
-            if binding.id is None:
-                continue
-            actions[binding.action] = (*actions.get(binding.action, ()), binding.key)
-        return actions
-
-    def _apply_keybindings(self) -> None:
-        """Apply the `keybindings:` config overrides via the keymap (issue #35).
-
-        Only app bindings carry keymap ids, so the approval dialogs'
-        confirm keys are structurally out of reach; `plan_keybindings`
-        additionally rejects their action names and blocks priority
-        actions from taking the dialogs' keys. Shifted-letter overrides
-        expand to both spellings (`shift+g,G`) because real terminals
-        deliver Shift+<letter> as the uppercase character.
-        """
-        bindings = [raw if isinstance(raw, Binding) else Binding(*raw) for raw in self.BINDINGS]
-        priority_actions = {binding.action for binding in bindings if binding.priority}
-        # Id-less bindings (the 1-9 favorites) are not remappable, but their
-        # keys stay reserved so an override cannot silently shadow them.
-        reserved_keys = {binding.key: binding.action for binding in bindings if binding.id is None}
-        plan = plan_keybindings(
-            self.config.keybindings,
-            self._binding_actions(),
-            priority_actions,
-            reserved_keys,
-            dict.fromkeys(ActionPaletteScreen.CLOSE_KEYS, "open_action_palette"),
-        )
-        self._keybinding_overrides = plan.overrides
-        keymap: dict[str, str] = {}
-        for binding in bindings:
-            if binding.id is not None and binding.action in plan.overrides:
-                keymap[binding.id] = shift_alias_keys(plan.overrides[binding.action])
-        if keymap:
-            self.set_keymap(keymap)
-        for warning in plan.warnings:
-            self.notify(warning, title="Keybindings", severity="warning")
-
     async def on_mount(self) -> None:
         # Snapshot the app-owned execution context (issue #165): on_mount
         # runs inside Textual's message pump, so the snapshot the dispatcher
@@ -504,7 +464,9 @@ class KorvidApp(App[None]):
         # which keys are visible (issue #142).
         self.screen.bindings_updated_signal.subscribe(self, self._on_bindings_updated)
         self._refresh_top_bar()
-        self._apply_keybindings()
+        self._keybindings.load(
+            self.config.keybindings, cleanup_required=self.config.keybindings_section_rejected
+        )
         # Wire the `known` closure into CommandBar so parse_command can resolve aliases.
         command_bar = self._command_bar
         command_bar.known = lambda a: self._canonical_kind(a) if a in self.aliases else None
@@ -1017,12 +979,21 @@ class KorvidApp(App[None]):
         message.stop()
         self._transfer.cancel()
 
+    async def _check_bindings(self, key: str, priority: bool = False) -> bool:
+        """Keep the whole pane chord ordered behind global priority bindings."""
+        if await super()._check_bindings(key, priority=priority):
+            return True
+        if (
+            priority
+            and len(self.screen_stack) == 1
+            and isinstance(self.focused, ResourceTable)
+            and (key == "ctrl+w" or self._workspace_ctl.chord_pending)
+        ):
+            return await self._workspace_ctl.handle_pane_chord_key(key)
+        return False
+
     async def on_key(self, event: Key) -> None:
-        """Pane chords (`ctrl+w` v/w/q) and Escape (closes describe/log
-        panes, then pops one drill-down level)."""
-        if self._workspace_ctl.chord_pending or event.key == "ctrl+w":
-            await self._workspace_ctl.handle_pane_chord(event)
-            return
+        """Handle Escape for describe/log panes and drill-down navigation."""
         if event.key != "escape":
             return
         if len(self.screen_stack) > 1:
@@ -1223,6 +1194,8 @@ class KorvidApp(App[None]):
         seen: set[str] = set()
         for active in self.screen.active_bindings.values():
             binding = active.binding
+            if binding.id is None and binding.action in self._keybindings.catalog.rules.actions:
+                continue
             base = (binding.id or binding.action).removesuffix("--alt")
             action = binding.action.partition("(")[0]
             if action == "favorite_namespace" or base in seen:
@@ -1420,6 +1393,10 @@ class KorvidApp(App[None]):
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         """Gate bindings on composition availability and the current view
         (issue #114), via the `ActionPolicy` extracted in issue #388."""
+        if action in MAIN_SCREEN_PRIORITY_ACTIONS and (
+            len(self.screen_stack) != 1 or self._workspace_ctl.chord_pending
+        ):
+            return False
         return self._actions.binding_enabled(action)
 
     def action_toggle_agent(self) -> None:
