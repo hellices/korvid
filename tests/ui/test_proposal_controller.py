@@ -21,7 +21,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-from collections.abc import Callable, Coroutine
+from collections.abc import Awaitable, Callable, Coroutine
 from pathlib import Path
 from typing import Any
 
@@ -259,6 +259,7 @@ class Env:
         uid: str | None = "uid-1",
         permitted: bool = True,
         kube_context: str | None = "ctx-a",
+        approval_timeout_seconds: float | None = None,
     ) -> None:
         self.ui = FakeUi()
         self.view = FakeView(aliases=_ALIASES)
@@ -308,6 +309,7 @@ class Env:
             config=lambda: self.config,
             audit=lambda: self.audit,
             refresh_status=self._refresh_status,
+            approval_timeout_seconds=approval_timeout_seconds,
         )
 
     async def _check_permission(
@@ -826,13 +828,24 @@ async def test_a_stacked_dialog_refuses_the_review_instead_of_stealing_the_keyst
 
 
 async def test_an_unanswered_dialog_expires_as_a_dismissal(
-    env: Env, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("korvid.ui.proposal_controller.APPROVAL_TIMEOUT", 0.01)
+    env = Env(tmp_path=tmp_path, store=ProposalStore(), approval_timeout_seconds=0.01)
     await env.submit()
+    wait_for = asyncio.wait_for
+    decision_timeouts: list[float | None] = []
+
+    async def wait_for_decision(decision: Awaitable[Any], timeout: float | None) -> Any:
+        if isinstance(decision, asyncio.Future):
+            decision_timeouts.append(timeout)
+            assert timeout == 0.01
+        return await wait_for(decision, timeout)
+
+    monkeypatch.setattr(asyncio, "wait_for", wait_for_decision)
     env.controller.open_review()
     screen = await env.dialog()
     await env.tasks.finish()
+    assert decision_timeouts == [0.01]
     assert env.screens.dismissed == [screen]
     assert env.store is not None
     assert len(env.store.pending()) == 1

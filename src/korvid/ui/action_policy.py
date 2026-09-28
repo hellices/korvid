@@ -191,6 +191,11 @@ def compose_action_reasons(
     }
 
 
+def action_contexts() -> dict[str, frozenset[tuple[str, str]]]:
+    """Return a detached copy of the static dispatch scopes for keymap validation."""
+    return dict(_ACTION_VIEWS)
+
+
 def compose_command_reasons(
     *,
     agent_available: Callable[[], bool],
@@ -202,6 +207,7 @@ def compose_command_reasons(
     namespace: Callable[[], UnavailableReason | None],
     context: Callable[[], UnavailableReason | None],
     port_forwards: Callable[[], UnavailableReason | None],
+    keybindings: Callable[[], UnavailableReason | None] | None = None,
 ) -> dict[str, Callable[[], UnavailableReason | None]]:
     """Build `ActionPolicy(reason_by_command=...)` from its owners.
 
@@ -243,6 +249,7 @@ def compose_command_reasons(
             probe: opening the *list* needs neither `kubectl` nor a
             selected row, so borrowing the dialog's answer would grey out
             a command that works.
+        keybindings: The keybinding editor's protected-surface and persistence probe.
 
     Returns:
         The canonical command text -> reason-resolver map.
@@ -267,6 +274,7 @@ def compose_command_reasons(
         "ns": namespace,
         "ctx": context,
         "pf": port_forwards,
+        **({"keys": keybindings} if keybindings is not None else {}),
     }
 
 
@@ -342,7 +350,7 @@ class ActionPolicy:
     def binding_enabled(self, action: str) -> bool:
         """Whether `action`'s binding is enabled in the current composition and view."""
         if action == PALETTE_ACTION:
-            return self._palette_reason() is None
+            return self.modal_unavailable_reason() is None
         if action == "toggle_agent" and not self._agent_available():
             return False
         if action in _LOG_PANE_ACTIONS:
@@ -401,8 +409,8 @@ class ActionPolicy:
         resolver = self._reason_by_action.get(action)
         return None if resolver is None else resolver()
 
-    def _palette_reason(self) -> UnavailableReason | None:
-        """Why the Action Palette must not open right now, or None.
+    def modal_unavailable_reason(self) -> UnavailableReason | None:
+        """Why the Action Palette or keybinding editor must stay closed, or None.
 
         One place answers this for both `binding_enabled` (so the priority
         `Ctrl-P` binding is skipped during dispatch and stays out of the
@@ -438,7 +446,7 @@ class ActionPolicy:
         """Explain a disabled binding, for a palette entry that stays
         searchable but greyed out with its cause attached."""
         if action == PALETTE_ACTION:
-            reason = self._palette_reason()
+            reason = self.modal_unavailable_reason()
             if reason is not None:
                 return reason
         if action == "toggle_agent" and not self._agent_available():

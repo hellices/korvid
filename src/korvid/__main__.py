@@ -45,6 +45,7 @@ from korvid.composition_support import (
     _discover_in_background,
     _log_cleanup_loop_error,
     _make_disconnect_agent,
+    _make_get_manifest,
     _make_rebuild_agent,
     _MCPAppHooks,
     _missing_extra_packages,
@@ -80,6 +81,7 @@ from korvid.core.config import (
     load_config,
     save_topbar_state,
 )
+from korvid.core.keybinding_config import save_keybindings
 from korvid.core.mcp import MCPControllerBase
 from korvid.core.portforward import ForwardRegistry
 from korvid.core.pulse import PulseModel
@@ -144,6 +146,9 @@ from korvid.ui.forward_controller import ForwardController
 from korvid.ui.helm_controller import HelmController
 from korvid.ui.hints import EventsFetcher, HintController
 from korvid.ui.integration_controller import IntegrationController
+from korvid.ui.keybinding_catalog import KeybindingCatalog
+from korvid.ui.keybinding_controller import KeybindingController
+from korvid.ui.keybinding_surface import AppKeybindingSurface
 from korvid.ui.log_controller import LogController
 from korvid.ui.object_navigation import capture_navigation_origin
 from korvid.ui.operator_controller import OperatorController
@@ -155,6 +160,7 @@ from korvid.ui.resource_write_controller import ResourceWriteController
 from korvid.ui.session_timeline_controller import SessionTimelineController
 from korvid.ui.shell_controller import ShellController, ShellSettings
 from korvid.ui.transfer import TransferController
+from korvid.ui.widgets.keybinding_editor import KeybindingEditorScreen
 from korvid.ui.widgets.pulse import PulseSummary
 from korvid.ui.workspace_controller import WorkspaceController
 from korvid.ui.workspace_state import WorkspaceState
@@ -184,6 +190,7 @@ __all__ = (
     "_cluster_facts",
     "_custom_column_names",
     "_discover_in_background",
+    "_make_get_manifest",
     "_missing_extra_packages",
     "_protected_context_name",
     "_shutdown",
@@ -1031,30 +1038,6 @@ def _make_watch_source(
     return source
 
 
-def _make_get_manifest(
-    kube: KubeClient, aliases: dict[str, ResourceMeta]
-) -> Callable[[str, str | None, str], Awaitable[dict[str, Any]]]:
-    """Describe fetcher: helm kinds decode release Secrets, the rest GET raw."""
-
-    async def get_manifest(kind: str, namespace: str | None, name: str) -> dict[str, Any]:
-        meta = aliases.get(kind)
-        if meta is None:
-            raise ValueError(f"Unknown resource kind: {kind!r}")
-        if meta.identity == HELM_RELEASES_META.identity:
-            if namespace is None:
-                raise ValueError("helm releases are namespaced; namespace required")
-            return await kube.get_helm_release(namespace, name)
-        if meta.identity == HELM_REVISIONS_META.identity:
-            # Revision rows are named "<release>.v<revision>".
-            release, _, rev = name.rpartition(".v")
-            if namespace is None or not release or not rev.isdigit():
-                raise ValueError(f"not a helm revision row: {name!r}")
-            return await kube.get_helm_release(namespace, release, revision=int(rev))
-        return await kube.get_object(meta, namespace, name)
-
-    return get_manifest
-
-
 def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRuntime:
     """Construct the complete session-scoped controller graph."""
     config = inputs.config
@@ -1380,6 +1363,13 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
     # whole inputs record would keep the initial agent session alive past
     # `:ai off` (which releases it on purpose).
     agent_setup = inputs.agent_catalog is not None
+    keybindings = KeybindingController(
+        catalog=KeybindingCatalog(app.BINDINGS, modal_keys=KeybindingEditorScreen.CONTROL_KEYS),
+        surface=AppKeybindingSurface(app),
+        ui=AppUiSurface(app),
+        save=inputs.save_keybindings,
+        can_open=lambda: actions.modal_unavailable_reason(),
+    )
     actions = ActionPolicy(
         view=view,
         agent_available=lambda: agent_ui.available,
@@ -1413,6 +1403,7 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
             namespace=workspace_controller.namespace_picker_unavailable_reason,
             context=context.unavailable_reason,
             port_forwards=forward_controller.list_unavailable_reason,
+            keybindings=keybindings.unavailable_reason,
         ),
     )
     commands = CommandRouter(
@@ -1423,6 +1414,7 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
         forwards=forward_controller,
         operators=operators,
         pulse=pulse,
+        keybindings=keybindings,
     )
     return AppRuntime(
         view=view,
@@ -1451,6 +1443,7 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
         agent_ui=agent_ui,
         commands=commands,
         actions=actions,
+        keybindings=keybindings,
     )
 
 
@@ -1607,6 +1600,7 @@ async def _wire_and_run(config: KorvidConfig, kube: KubeClient, state: _RunState
         agent_follow_bridge=ui_proxy,
         proposal_store=proposal_store,
         save_topbar=lambda expanded: save_topbar_state(DEFAULT_CONFIG_PATH, expanded=expanded),
+        save_keybindings=lambda overrides: save_keybindings(DEFAULT_CONFIG_PATH, overrides),
         list_relationship_objects=kube.list_relationship_objects,
         # Bounded session record (issue #282): the composition root owns the
         # buffer's limits, so a long session cannot grow it without bound.

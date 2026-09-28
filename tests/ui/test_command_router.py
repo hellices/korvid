@@ -74,6 +74,14 @@ class FakePulse:
         self.opens += 1
 
 
+class FakeKeybindings:
+    def __init__(self) -> None:
+        self.opens = 0
+
+    def open_editor(self) -> None:
+        self.opens += 1
+
+
 class Harness:
     def __init__(self, *, agent_available: bool = True, catalog_missing: bool = False) -> None:
         self.ui = FakeUi()
@@ -83,6 +91,7 @@ class Harness:
         self.forwards = FakeForwards()
         self.operators = FakeOperators(catalog_missing=catalog_missing)
         self.pulse = FakePulse()
+        self.keybindings = FakeKeybindings()
         self.router = CommandRouter(
             ui=self.ui,
             agent=self.agent,
@@ -91,11 +100,19 @@ class Harness:
             forwards=self.forwards,
             operators=self.operators,
             pulse=self.pulse,
+            keybindings=self.keybindings,
         )
 
 
 def _builtin(operation: BuiltinOperation, *arguments: str) -> BuiltinCommand:
     return BuiltinCommand(operation, arguments)
+
+
+def test_editor_reaches_its_owner_once() -> None:
+    harness = Harness()
+    harness.router.route_builtin(_builtin(BuiltinOperation.KEYBINDINGS))
+    assert harness.keybindings.opens == 1
+    assert harness.ui.notifications == []
 
 
 def test_pulse_reaches_its_owner_once() -> None:

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
 
 if TYPE_CHECKING:
@@ -42,6 +42,7 @@ if TYPE_CHECKING:
     from korvid.ui.helm_controller import HelmController
     from korvid.ui.hints import EventsFetcher, HintController
     from korvid.ui.integration_controller import IntegrationController
+    from korvid.ui.keybinding_controller import KeybindingController
     from korvid.ui.log_controller import LogController
     from korvid.ui.operator_controller import OperatorController
     from korvid.ui.proposal_controller import ProposalController
@@ -117,6 +118,7 @@ class AppRuntimeInputs:
     helm: HelmCLI | None
     proposal_store: ProposalStore | None
     save_topbar: Callable[[bool], None] | None
+    save_keybindings: Callable[[Mapping[str, str]], None] | None
     telepresence: TelepresenceCLI | None
     probe_traffic_manager: Callable[[], Awaitable[bool]] | None
     agent_follow_bridge: UIBridge | None
@@ -159,3 +161,4 @@ class AppRuntime:
     agent_ui: AgentUiController
     commands: CommandRouter
     actions: ActionPolicy
+    keybindings: KeybindingController

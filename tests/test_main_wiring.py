@@ -2586,6 +2586,39 @@ async def test_wire_and_run_hands_the_ui_a_declared_profile_writer(
     assert yaml.safe_load(path.read_text(encoding="utf-8"))["agent"]["model_tier"] == "high"
 
 
+async def test_wire_and_run_injects_a_narrow_keybinding_writer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import korvid.__main__ as main_mod
+    from korvid.core.config import KorvidConfig
+
+    path = tmp_path / "config.yaml"
+    original = {
+        "favorite_namespaces": ["prod"],
+        "namespace_assignments": {"context": {"1": "prod"}},
+    }
+    path.write_text(yaml.safe_dump(original), encoding="utf-8")
+    monkeypatch.setattr(main_mod, "DEFAULT_CONFIG_PATH", path)
+    monkeypatch.setattr(main_mod, "KorvidApp", _FakeAppCapturesKwargs)
+    monkeypatch.setattr(main_mod, "assemble_app_runtime", lambda app: app)
+    _FakeAppCapturesKwargs.instances.clear()
+    state = main_mod._RunState()
+    await main_mod._wire_and_run(
+        KorvidConfig(readonly=True), cast("Any", _FakeKubeForWiring()), state
+    )
+    if state.discovery_box:
+        await state.discovery_box[0]
+    writer = _FakeAppCapturesKwargs.instances[0].captured["save_keybindings"]
+    assert callable(writer)
+    writer({"help": "f1"})
+    assert yaml.safe_load(path.read_text(encoding="utf-8")) == {
+        **original,
+        "keybindings": {"help": "f1"},
+    }
+    writer({})
+    assert yaml.safe_load(path.read_text(encoding="utf-8")) == original
+
+
 def _profile_connections(reference: str, **overrides: Any) -> Any:
     """One active profile, built the way the config loader builds it."""
     from korvid.core.config import (

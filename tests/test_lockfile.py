@@ -26,6 +26,7 @@ from urllib.parse import urlsplit
 import pytest
 import yaml
 from packaging.requirements import Requirement
+from packaging.utils import canonicalize_name
 from packaging.version import Version
 
 from tests.release_contracts import run_scripts, workflow_jobs
@@ -67,6 +68,34 @@ def test_lockfile_project_version_matches_pyproject() -> None:
     lock_version = korvid.get("version")
     assert lock_version == project["project"]["version"], (
         f"uv.lock korvid version {lock_version!r} != pyproject {project['project']['version']}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("group", "field"),
+    [("runtime", "patterns"), ("dev-tooling", "exclude-patterns")],
+)
+def test_dependabot_separates_runtime_dependencies_from_dev_tools(group: str, field: str) -> None:
+    project = tomllib.loads((_ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+    requirements = [
+        *project["dependencies"],
+        *(
+            requirement
+            for extra in project["optional-dependencies"].values()
+            for requirement in extra
+        ),
+    ]
+    runtime_names = {canonicalize_name(Requirement(value).name) for value in requirements}
+    runtime_names.discard(canonicalize_name(project["name"]))
+    configuration = yaml.safe_load(
+        (_ROOT / ".github" / "dependabot.yml").read_text(encoding="utf-8")
+    )
+    uv_update = next(
+        update for update in configuration["updates"] if update["package-ecosystem"] == "uv"
+    )
+    patterns = {canonicalize_name(pattern) for pattern in uv_update["groups"][group][field]}
+    assert runtime_names <= patterns, (
+        f"Runtime dependencies missing from {group}.{field}: {sorted(runtime_names - patterns)}"
     )
 
 
