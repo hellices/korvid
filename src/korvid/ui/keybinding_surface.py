@@ -7,6 +7,8 @@ from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
+from korvid.ui.binding_cache import CachedBindingsMap
+
 if TYPE_CHECKING:
     from korvid.ui.app import KorvidApp
 
@@ -28,6 +30,9 @@ class AppKeybindingSurface(KeybindingSurface):
 
     def __init__(self, app: KorvidApp) -> None:
         self._app = app
+        self._app._bindings = CachedBindingsMap.from_keys(
+            self._app._bindings.key_to_bindings.copy()
+        )
 
     def overrides(self) -> dict[str, str]:
         return dict(self._app._keybinding_overrides)
