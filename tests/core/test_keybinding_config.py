@@ -3,6 +3,7 @@ from os import chmod
 from pathlib import Path
 from stat import S_IMODE
 from types import MappingProxyType
+from typing import get_type_hints
 
 import pytest
 import yaml
@@ -10,6 +11,7 @@ import yaml
 from korvid.core import config as config_module
 from korvid.core import keybinding_config as keybinding_module
 from korvid.core.config import ConfigError, KorvidConfig, load_config
+from korvid.core.config_sections import parse_keybindings
 from korvid.core.keybinding_config import save_keybindings
 from tests.platforms import POSIX, posix_only
 
@@ -103,6 +105,14 @@ def test_mapping_entries_remain_available_for_startup_validation(
     assert config.keybindings == overrides
     assert not config.keybindings_section_rejected
     assert config.warnings == ()
+
+
+def test_parser_type_contract_preserves_unvalidated_keybinding_values() -> None:
+    assert get_type_hints(parse_keybindings)["return"] == tuple[dict[str, object], bool]
+
+
+def test_config_type_contract_preserves_unvalidated_keybinding_values() -> None:
+    assert get_type_hints(KorvidConfig)["keybindings"] == dict[str, object]
 
 
 @pytest.fixture

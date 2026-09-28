@@ -5,6 +5,7 @@ help overlay shows the effective keys."""
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
@@ -24,8 +25,8 @@ from .test_app import _pod, make_app
 from .waits import until
 
 
-def _config(keybindings: dict[str, str]) -> KorvidConfig:
-    return KorvidConfig(namespace="default", keybindings=keybindings)
+def _config(keybindings: Mapping[str, object]) -> KorvidConfig:
+    return KorvidConfig(namespace="default", keybindings=dict(keybindings))
 
 
 async def test_remapped_key_triggers_action_and_default_is_freed() -> None:

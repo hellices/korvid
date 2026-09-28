@@ -10,11 +10,11 @@ def mapping_section(value: object) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def parse_keybindings(value: object, warnings: list[str]) -> tuple[dict[str, str], bool]:
+def parse_keybindings(value: object, warnings: list[str]) -> tuple[dict[str, object], bool]:
     """Parse the section shape, leaving entry validation to the keymap planner.
 
     Returns:
-        Overrides and whether a malformed persisted section needs explicit cleanup.
+        Raw overrides and whether a malformed persisted section needs explicit cleanup.
     """
     if value is None:
         return {}, False

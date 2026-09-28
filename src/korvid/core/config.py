@@ -354,7 +354,7 @@ class KorvidConfig:
     #: `korvid.agent.prompt_harness.PromptHarness`, which never lets a rule
     #: widen what the safety contract above it granted.
     agent_rules: tuple[str, ...] = ()
-    keybindings: dict[str, str] = field(default_factory=dict)
+    keybindings: dict[str, object] = field(default_factory=dict)
     log_buffer_lines: int = 5000
     log_wrap: bool = False
     log_timestamps: bool = False
