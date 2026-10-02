@@ -155,18 +155,31 @@ for the Linux test, pre-commit, security and experimental `ty` jobs:
 `korvid-runners` for main pushes, and for a pull request only when the run
 was triggered by a push (`synchronize`) to a head branch in this repository,
 the owner opened the PR, pushed that commit and started the run, the PR's
-head is still that commit once its file list has been read, and no changed
-path — old or new side of a rename — is `uv.lock`, `pyproject.toml`,
-`.pre-commit-config.yaml` or under `.github/`. Every other pull request —
-forks, Dependabot, an owner-opened dependency or Actions bump, the run for
-opening or reopening a PR (neither event says who pushed the branch), or a
-file list the API would not return — runs on `ubuntu-latest`. Those jobs run even if
+head is still that commit once its file list has been read, the list is
+complete (the files endpoint stops at 3,000, so a larger PR never qualifies),
+and no changed path — old or new side of a rename — is `uv.lock`,
+`pyproject.toml`, `.pre-commit-config.yaml` or under `.github/`. Every other
+pull request — forks, Dependabot, an owner-opened dependency or Actions bump,
+the run for opening or reopening a PR (neither event says who pushed the
+branch), or a file list the API would not return in full — runs on
+`ubuntu-latest`. Those jobs run even if
 `changes` fails, falling back to `ubuntu-latest`, because a required job
 skipped by a failed `needs` reports as passing. CodeQL keeps
 `ubuntu-latest` for every pull request. Change classification and dependency
 review always use `ubuntu-latest`; Windows always uses `windows-latest`.
 Every job also has an explicit 10–45 minute deadline so a wedged runner
 cannot consume capacity indefinitely.
+
+That selection routes runs that are already allowed to start; it is not what
+keeps hostile code off `korvid-runners`. A `pull_request` run reads `ci.yml`
+from the pull request's merge commit, so a pull request that edits the
+workflow can rewrite the selector or any job's `runs-on`, as it always could.
+What stops that is who can start such a run. The owner is the only
+collaborator, so adding one trusts them with the pool. Every outside
+contributor's run waits for the owner's approval, so review a fork's
+`.github/` change before approving its run, as if merging it. An installed
+app that pushes branches starts runs without approval, so letting one change
+workflows trusts it with the pool too.
 
 The Windows full-suite command prints and consumes `${{ github.run_id }}` as
 its single `pytest-randomly` seed, making a failed order reproducible without

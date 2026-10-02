@@ -117,10 +117,15 @@ jobs:
             hosted "could not read the file list"
           fi
           # The list describes the PR's current head; a later push would make
-          # it describe a commit other than the one this run checks out.
-          if ! current_head=$(gh api "repos/$REPO/pulls/$PR" --jq '.head.sha') || [ "$current_head" != "$HEAD_SHA" ]; then
-            hosted "head moved while the file list was read"
+          # it describe a commit other than the one this run checks out. It
+          # also stops at 3000 files, so a longer list may omit an excluded path.
+          if ! pull_request=$(gh api "repos/$REPO/pulls/$PR" --jq '"\(.head.sha) \(.changed_files)"'); then
+            hosted "could not read the pull request"
           fi
+          read -r current_head changed_files <<< "$pull_request"
+          [ "$current_head" = "$HEAD_SHA" ] || hosted "head moved while the file list was read"
+          case "$changed_files" in ''|*[!0-9]*) hosted "changed-file count '$changed_files' is not a number" ;; esac
+          [ "$changed_files" -le 3000 ] || hosted "$changed_files changed files exceed the 3000 the file list returns"
           # Count every match rather than `grep -q`; see the classifier above.
           third_party=$(printf '%s\n' "$files" | { grep -cE '^(uv\.lock|pyproject\.toml|\.pre-commit-config\.yaml|\.github/.*)$' || true; })
           [ "${third_party:-1}" -eq 0 ] || hosted "changes dependencies, hooks or workflows"

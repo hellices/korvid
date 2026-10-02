@@ -53,7 +53,9 @@ OWNER_PULL_REQUEST = {
 FILE_LIST_CALL = "api --paginate repos/hellices/korvid/pulls/7/files --jq " + (
     ".[] | .filename, (.previous_filename // empty)"
 )
-HEAD_CALL = "api repos/hellices/korvid/pulls/7 --jq .head.sha"
+PULL_REQUEST_CALL = "api repos/hellices/korvid/pulls/7 --jq " + (
+    r'"\(.head.sha) \(.changed_files)"'
+)
 WINDOWS_SEED = "${{ github.run_id }}"
 CI_JOB_TIMEOUTS = {
     "changes": 10,
@@ -133,6 +135,7 @@ def _select_runner(
     files: tuple[str, ...] = ("src/korvid/ui/app.py",),
     api_fails: bool = False,
     current_head: str | None = None,
+    changed_files: str | None = None,
 ) -> str:
     """Run the workflow's own runner-selection step against a fake `gh`."""
     script = str(_runner_step(_jobs(CI_WORKFLOW))["run"])
@@ -141,12 +144,15 @@ def _select_runner(
     calls = tmp_path / "gh-calls.txt"
     output = tmp_path / "github-output.txt"
     output.write_text("", encoding="utf-8")
-    # The file list arrives already reduced by `--jq`, one path per line;
-    # test_file_list_query_reports_both_sides_of_a_rename checks the query.
+    head = context.get("HEAD_SHA", "") if current_head is None else current_head
+    count = str(len(files)) if changed_files is None else changed_files
+    # Both answers arrive already reduced by `--jq`: the file list one path
+    # per line, the pull request as "<head sha> <changed_files>". The query
+    # tests below run the real queries through jq.
     fake_gh = (
         'gh() { printf "%s\\n" "$*" >> "$FAKE_GH_CALLS"; '
         '[ "$FAKE_GH_FAILS" = 1 ] && return 1; '
-        'case "$2" in --paginate) cat "$FAKE_GH_FILES" ;; *) echo "$FAKE_GH_HEAD" ;; esac; }\n'
+        'case "$2" in --paginate) cat "$FAKE_GH_FILES" ;; *) echo "$FAKE_GH_PULL_REQUEST" ;; esac; }\n'
     )
     env = {
         "PATH": os.environ.get("PATH", ""),
@@ -155,7 +161,7 @@ def _select_runner(
         "FAKE_GH_FILES": listing.as_posix(),
         "FAKE_GH_CALLS": calls.as_posix(),
         "FAKE_GH_FAILS": "1" if api_fails else "0",
-        "FAKE_GH_HEAD": context.get("HEAD_SHA", "") if current_head is None else current_head,
+        "FAKE_GH_PULL_REQUEST": f"{head} {count}",
         **context,
     }
 
@@ -176,7 +182,7 @@ def _select_runner(
     assert len(selections) == 1, f"expected one runner selection, got {selections}"
     if context["EVENT_NAME"] == "pull_request" and calls.exists():
         made = calls.read_text(encoding="utf-8").splitlines()
-        assert made in ([FILE_LIST_CALL], [FILE_LIST_CALL, HEAD_CALL]), made
+        assert made in ([FILE_LIST_CALL], [FILE_LIST_CALL, PULL_REQUEST_CALL]), made
     return selections[0]
 
 
@@ -307,6 +313,51 @@ def test_pull_request_whose_head_moved_during_selection_runs_hosted(tmp_path: Pa
     selected = _select_runner(tmp_path, OWNER_PULL_REQUEST, current_head="b" * 40)
 
     assert selected == "ubuntu-latest"
+
+
+@pytest.mark.parametrize(
+    ("changed_files", "expected"),
+    [("3000", "korvid-runners"), ("3001", "ubuntu-latest")],
+)
+def test_pull_request_larger_than_the_file_list_runs_hosted(
+    tmp_path: Path,
+    changed_files: str,
+    expected: str,
+) -> None:
+    # The files endpoint returns at most 3000 entries; past that, an excluded
+    # path could be missing from the list the step scans.
+    selected = _select_runner(tmp_path, OWNER_PULL_REQUEST, changed_files=changed_files)
+
+    assert selected == expected
+
+
+@pytest.mark.parametrize("changed_files", ["null", ""])
+def test_pull_request_without_a_changed_file_count_runs_hosted(
+    tmp_path: Path,
+    changed_files: str,
+) -> None:
+    # Without the count, nothing shows the file list is complete.
+    selected = _select_runner(tmp_path, OWNER_PULL_REQUEST, changed_files=changed_files)
+
+    assert selected == "ubuntu-latest"
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="needs jq to evaluate the query")
+def test_pull_request_query_reports_the_head_and_the_changed_file_count() -> None:
+    script = str(_runner_step(_jobs(CI_WORKFLOW))["run"])
+    query = PULL_REQUEST_CALL.split(" --jq ", 1)[1]
+    pulls = [{"head": {"sha": "a" * 40}, "changed_files": 3001}, {"head": {"sha": "a" * 40}}]
+
+    result = subprocess.run(
+        ["jq", "-r", f".[] | {query}"],
+        input=json.dumps(pulls),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert f"--jq '{query}'" in script
+    assert result.stdout.splitlines() == [f"{'a' * 40} 3001", f"{'a' * 40} null"]
 
 
 def test_missing_identity_context_runs_hosted(tmp_path: Path) -> None:
