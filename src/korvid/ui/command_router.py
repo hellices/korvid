@@ -80,6 +80,12 @@ class KeybindingCommands(Protocol):
     def open_editor(self) -> None: ...
 
 
+class SlotCommands(Protocol):
+    """The `:slots` / `:ns-slots` namespace shortcut owner."""
+
+    def open_reallocation(self) -> None: ...
+
+
 class CommandRouter:
     """Dispatches typed commands to the owner that implements them."""
 
@@ -94,6 +100,7 @@ class CommandRouter:
         operators: CatalogCommands,
         pulse: PulseCommands,
         keybindings: KeybindingCommands,
+        slots: SlotCommands,
     ) -> None:
         self._ui = ui
         self._agent = agent
@@ -103,6 +110,7 @@ class CommandRouter:
         self._operators = operators
         self._pulse = pulse
         self._keybindings = keybindings
+        self._slots = slots
 
     def route_builtin(self, command: BuiltinCommand) -> None:
         """Dispatch an app-owned command by canonical operation identity."""
@@ -128,6 +136,9 @@ class CommandRouter:
             return
         if operation is BuiltinOperation.KEYBINDINGS:
             self._keybindings.open_editor()
+            return
+        if operation is BuiltinOperation.NAMESPACE_SLOTS:
+            self._slots.open_reallocation()
             return
         assert_never(operation)
 

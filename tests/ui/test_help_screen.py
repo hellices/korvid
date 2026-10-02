@@ -8,13 +8,19 @@ from collections.abc import AsyncIterator
 from textual.binding import Binding
 
 from korvid.core.config import KorvidConfig
+from korvid.core.namespace_slots import SlotEntry, SlotMap, SlotOrigin
 from korvid.core.store import ResourceStore, Summary
 from korvid.core.watch import WatchManager
 from korvid.k8s.models import PodSummary
 from korvid.ui.app import KorvidApp
 from korvid.ui.command import command_help
 from korvid.ui.widgets.filter_bar import FilterBar
-from korvid.ui.widgets.help_screen import HelpScreen, collect_help, key_label
+from korvid.ui.widgets.help_screen import (
+    HelpScreen,
+    collect_help,
+    key_label,
+    namespace_slot_group,
+)
 from tests.app_factory import build_test_app
 
 from .waits import until
@@ -362,3 +368,30 @@ async def test_help_hides_agent_binding_when_agent_unavailable() -> None:
         text = _help_text(app)
         assert "Ctrl-A" not in text
         assert "Global" in text  # the rest of the overlay is intact
+
+
+# ---------------------------------------------------------------------------
+# Namespace slots (issue #406)
+# ---------------------------------------------------------------------------
+
+
+def test_slot_help_lists_the_map_dispatch_reads() -> None:
+    slots = SlotMap(
+        {
+            1: SlotEntry("prod", SlotOrigin.PINNED),
+            3: SlotEntry("gone", SlotOrigin.AUTO, available=False),
+        }
+    )
+
+    assert namespace_slot_group(slots, stale=False) == (
+        "Namespace slots",
+        [("1", "prod (pinned)"), ("3", "gone (auto, unavailable)")],
+    )
+
+
+def test_slot_help_notes_a_stale_map_and_is_omitted_when_empty() -> None:
+    stale = namespace_slot_group(SlotMap({2: SlotEntry("dev", SlotOrigin.AUTO)}), stale=True)
+
+    assert stale is not None
+    assert stale[1][-1] == ("", "Last known map - namespace discovery failed")
+    assert namespace_slot_group(SlotMap(), stale=True) is None

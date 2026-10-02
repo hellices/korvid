@@ -12,12 +12,13 @@ Korvid shows only the keys that act on the current view. Press `?` for the compl
 | `:pulse` / `:problems` | Inspect [current problems, recent warnings, and coverage](pulse.md) |
 | `Ctrl-P` | Search app actions and built-in commands by intent |
 | `:keys` / `:keybindings` | Edit, review, and save app keybindings |
+| `:slots` / `:ns-slots` | Preview and repack the `1`–`9` namespace shortcuts |
 | `?` | Show the effective keys for every view |
 | `~` | Expand or collapse the top-bar legend |
 | `/` | Filter a table or search the log pane |
 | `Enter` / `Esc` | Drill in / return one level |
 | `0` | Toggle all namespaces |
-| `1`–`9` | Jump to a configured favorite namespace |
+| `1`–`9` | Jump to a [namespace shortcut](tui.md#namespace-shortcuts): pinned favorites first, then stable automatic slots |
 | `d` | Describe the selected resource |
 | `g` | Open operational relationships |
 | `T` | Open the bounded session timeline |
@@ -36,7 +37,7 @@ to run it* — the key that action currently answers to, remaps included, or
 the command's canonical `:` spelling.
 Resource views (`:pods`, `:deploy`) are not rows: they come from the live alias
 table, so `:` stays the way to open one. `:q` is not a row either — the bound
-Quit action is its single entry. The `1`-`9` favorite-namespace shortcuts are
+Quit action is its single entry. The `1`-`9` namespace shortcuts are
 not rows either — they take a number the palette has no generic way to invoke,
 so `?` documents them and `:ns`/the numeric keys stay the route. An action
 that does not apply to the current view — or that applies but would currently

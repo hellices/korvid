@@ -398,6 +398,8 @@ def _assert_cleanup_contracts(readme: str, runbook: str) -> None:
         "~/.local/state/korvid/audit.jsonl.lock",
         "~/.local/state/korvid/mcp-endpoint.json",
         "~/.local/state/korvid/mcp-endpoint.json.lock",
+        "~/.local/state/korvid/namespace-slots.json",
+        "~/.local/state/korvid/namespace-slots.json.lock",
         "~/.local/share/korvid/logs",
         "~/.local/share/korvid/agent-payloads",
     ):
@@ -413,6 +415,10 @@ def _assert_cleanup_contracts(readme: str, runbook: str) -> None:
     assert 'rm -f "$state_root/audit.jsonl"' in cleanup
     assert '"$state_root/audit.jsonl.lock"' in cleanup
     assert 'rm -f "$state_root/mcp-endpoint.json" "$state_root/mcp-endpoint.json.lock"' in cleanup
+    assert (
+        'rm -f "$state_root/namespace-slots.json" "$state_root/namespace-slots.json.lock"'
+        in cleanup
+    )
     assert 'rm -rf "$data_root/logs" "$data_root/agent-payloads"' in cleanup
     assert "--force" not in cleanup
 

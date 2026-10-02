@@ -97,6 +97,11 @@ class NamespaceSlotStore:
     def __init__(self, path: Path) -> None:
         self._path = path
 
+    @property
+    def path(self) -> Path:
+        """The JSON state file this store reads and replaces."""
+        return self._path
+
     def _read(self) -> list[tuple[ClusterIdentity, dict[int, SlotEntry]]]:
         try:
             content = self._path.read_text(encoding="utf-8")

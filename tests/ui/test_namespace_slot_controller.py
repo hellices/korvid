@@ -464,3 +464,18 @@ async def test_reallocation_is_refused_without_a_listing_or_over_protected_ui(
         "Namespace listing unavailable",
         "Close the dialog first",
     ]
+
+
+def test_the_palette_probe_answers_like_the_command_without_listing(tmp_path: Path) -> None:
+    harness = Harness(tmp_path)
+    assert harness.controller.unavailable_reason() is None
+
+    harness.listing_available = False
+    unlisted = harness.controller.unavailable_reason()
+    harness.blocked = UnavailableReason(AvailabilityCode.PROTECTED_UI, "Close the dialog first")
+
+    assert unlisted is not None
+    assert unlisted.message == "Namespace listing unavailable"
+    assert harness.controller.unavailable_reason() == harness.blocked
+    assert harness.ui.workers == []
+    assert harness.ui.notifications == []

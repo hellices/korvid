@@ -5,7 +5,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from korvid.__main__ import _discover_in_background, _make_get_manifest, _make_watch_source
+from korvid.__main__ import _discover_in_background, _make_get_manifest
+from korvid.composition_support import _make_watch_source
 from korvid.core.store import ResourceStore, Summary
 from korvid.core.watch import WatchManager
 from korvid.k8s.client import KubeClient

@@ -44,6 +44,7 @@ if TYPE_CHECKING:
     from korvid.ui.integration_controller import IntegrationController
     from korvid.ui.keybinding_controller import KeybindingController
     from korvid.ui.log_controller import LogController
+    from korvid.ui.namespace_slot_controller import SlotPersistence
     from korvid.ui.operator_controller import OperatorController
     from korvid.ui.proposal_controller import ProposalController
     from korvid.ui.pulse_controller import PulseController
@@ -119,6 +120,7 @@ class AppRuntimeInputs:
     proposal_store: ProposalStore | None
     save_topbar: Callable[[bool], None] | None
     save_keybindings: Callable[[Mapping[str, str]], None] | None
+    namespace_slots: SlotPersistence | None
     telepresence: TelepresenceCLI | None
     probe_traffic_manager: Callable[[], Awaitable[bool]] | None
     agent_follow_bridge: UIBridge | None

@@ -17,6 +17,7 @@ from textual.containers import VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Static
 
+from korvid.core.namespace_slots import SlotMap
 from korvid.ui.app_bindings import (
     HELP_GROUP_ORDER,
     as_binding,
@@ -97,6 +98,22 @@ def collect_help(
         groups[group].append((key_label(key), description))
 
     return [(name, groups[name]) for name in HELP_GROUP_ORDER if groups[name]]
+
+
+def namespace_slot_group(
+    slots: SlotMap, *, stale: bool
+) -> tuple[str, list[tuple[str, str]]] | None:
+    """The "Namespace slots" group: what each 1-9 key reaches now (issue #406).
+
+    Built from the same map dispatch reads, so the overlay cannot promise a
+    namespace the key would not switch to. None when no slot is occupied.
+    """
+    rows = [(str(slot), entry.describe()) for slot, entry in slots.items()]
+    if not rows:
+        return None
+    if stale:
+        rows.append(("", "Last known map - namespace discovery failed"))
+    return "Namespace slots", rows
 
 
 class HelpScreen(ModalScreen[None]):

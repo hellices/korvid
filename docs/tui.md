@@ -110,12 +110,37 @@ korvid always watches exactly one explicit scope. The startup namespace
 resolves from `-n`/`--namespace`, then `namespace:` in
 `~/.config/korvid/config.yaml`, then your kubeconfig context's namespace,
 then `default`. Switch with `:ns <name>`, the `:ns` picker, `0` for
-all-namespaces, or `1`–`9` for your configured `favorite_namespaces`. A
+all-namespaces, or a `1`–`9` [namespace shortcut](#namespace-shortcuts). A
 watch denied by RBAC stops with one concise notice instead of retrying or
 fanning out into other namespaces.
 
 Both `:ns <name>` and the namespace picker preserve the current resource view;
 selecting a namespace while browsing deployments does not switch to pods.
+
+### Namespace shortcuts
+
+Keys `1`–`9` are namespace slots. Your `favorite_namespaces` are pinned to
+the first slots in their configured order. When korvid lists the cluster's
+namespaces, every other namespace fills a free slot in name order. Pressing
+a slot key only switches scope; discovering a namespace never navigates.
+
+Automatic slots are stable. A namespace keeps its number on every later
+refresh and after a restart: korvid saves the assignment per cluster (context
+name and API server) in `$XDG_STATE_HOME/korvid/namespace-slots.json`. A
+namespace that disappears from the listing keeps its number but is marked
+unavailable, so the key is refused instead of reused. When it reappears, the
+same key works again.
+
+`?` lists the current slots, and the `:ns` picker shows each namespace's slot
+number. To repack the slots, run `:slots` (or `:ns-slots`). It previews every
+slot that would change and saves only after you confirm with `Enter`; `Esc`
+keeps the current slots. `:slots` touches neither your configuration nor your
+keybindings.
+
+If the namespace listing fails or RBAC denies it, korvid keeps the last known
+slots, marks the map as stale in `?`, and never probes namespaces one by one.
+Pinned slots and `:ns <name>` keep working. After a `:ctx` switch, only pinned
+slots answer until the new cluster's saved slots are restored.
 
 `:ctx` switches kubeconfig context. korvid probes the target first — loads
 its credentials in isolation and runs a self-access review — so an

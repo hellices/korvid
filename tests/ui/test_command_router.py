@@ -82,6 +82,14 @@ class FakeKeybindings:
         self.opens += 1
 
 
+class FakeSlots:
+    def __init__(self) -> None:
+        self.opens = 0
+
+    def open_reallocation(self) -> None:
+        self.opens += 1
+
+
 class Harness:
     def __init__(self, *, agent_available: bool = True, catalog_missing: bool = False) -> None:
         self.ui = FakeUi()
@@ -92,6 +100,7 @@ class Harness:
         self.operators = FakeOperators(catalog_missing=catalog_missing)
         self.pulse = FakePulse()
         self.keybindings = FakeKeybindings()
+        self.slots = FakeSlots()
         self.router = CommandRouter(
             ui=self.ui,
             agent=self.agent,
@@ -101,6 +110,7 @@ class Harness:
             operators=self.operators,
             pulse=self.pulse,
             keybindings=self.keybindings,
+            slots=self.slots,
         )
 
 
@@ -112,6 +122,13 @@ def test_editor_reaches_its_owner_once() -> None:
     harness = Harness()
     harness.router.route_builtin(_builtin(BuiltinOperation.KEYBINDINGS))
     assert harness.keybindings.opens == 1
+    assert harness.ui.notifications == []
+
+
+def test_slot_reallocation_reaches_its_owner_once() -> None:
+    harness = Harness()
+    harness.router.route_builtin(_builtin(BuiltinOperation.NAMESPACE_SLOTS))
+    assert harness.slots.opens == 1
     assert harness.ui.notifications == []
 
 

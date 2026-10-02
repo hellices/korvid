@@ -25,6 +25,16 @@ from korvid.ui.ui_surface import UiSurface
 ListNamespaces = Callable[[], Awaitable[list[str]]]
 
 
+def notify_namespace_list_error(ui: UiSurface, exc: ApiStatusError) -> None:
+    """403 is an authorization boundary (issue #108): show one concise
+    permission notice pointing at `:ns <name>` free-text entry - never
+    manufacture a namespace list from configuration."""
+    msg = explain_api_error(exc.status, exc.reason, "namespaces", None)
+    if exc.status == 403:
+        msg += " Switch directly with `:ns <name>`."
+    ui.notify(msg, title="Failed to list namespaces", severity="error")
+
+
 @dataclasses.dataclass(frozen=True)
 class SlotPersistence:
     """Where automatic slots are saved and how the live cluster is named."""
@@ -161,9 +171,16 @@ class NamespaceSlotController:
     # Explicit reallocation (`:slots`)
     # ------------------------------------------------------------------
 
+    def unavailable_reason(self) -> UnavailableReason | None:
+        """Why `:slots` would refuse now - a silent probe that never lists."""
+        reason = self._can_open()
+        if reason is None and self._list_namespaces() is None:
+            return NAMESPACE_LISTING_UNAVAILABLE
+        return reason
+
     def open_reallocation(self) -> None:
         """List namespaces afresh, then preview a rebuilt map for confirmation."""
-        reason = self._can_open()
+        reason = self.unavailable_reason()
         lister = self._list_namespaces()
         if reason is None and lister is not None:
             self._ui.run_worker(
@@ -182,10 +199,7 @@ class NamespaceSlotController:
         except ApiStatusError as exc:
             self.observe_failure(token)
             if token == self._generation:
-                message = explain_api_error(exc.status, exc.reason, "namespaces", None)
-                if exc.status == 403:
-                    message += " Switch directly with `:ns <name>`."
-                self._ui.notify(message, title="Failed to list namespaces", severity="error")
+                notify_namespace_list_error(self._ui, exc)
         except Exception as exc:  # any other listing failure is reported, never inferred
             self.observe_failure(token)
             if token == self._generation:
