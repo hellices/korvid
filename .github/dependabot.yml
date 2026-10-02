@@ -30,7 +30,10 @@ updates:
           - pyyaml
           - rich
           - regex
+          - litellm
+          - openai
           - httpx
+          - httpx2
           - keyring
           - mcp
           - anyio
@@ -46,7 +49,10 @@ updates:
           - pyyaml
           - rich
           - regex
+          - litellm
+          - openai
           - httpx
+          - httpx2
           - keyring
           - mcp
           - anyio

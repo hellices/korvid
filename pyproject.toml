@@ -109,7 +109,7 @@ all = [
 
 [build-system]
 # hatchling >=1.26 required: PEP 639 SPDX string form of `license` above
-requires = ["hatchling==1.32.0"]
+requires = ["hatchling==1.32.4"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build]

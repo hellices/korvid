@@ -8,7 +8,7 @@ import textwrap
 
 import pytest
 
-#: The two tests below drive the real SDK. The forced-environment test does
+#: The SDK-facing tests drive the real SDK. The forced-environment test does
 #: not — it stands a stub in for `litellm` precisely so the ordering can be
 #: proven in a base installation too.
 _needs_litellm = pytest.mark.skipif(
@@ -38,6 +38,33 @@ _PROBE = textwrap.dedent(
     assert total > 0
 
     print(len(attempts))
+    """
+)
+
+
+_SCHEMA_PROBE = textwrap.dedent(
+    """
+    import sys
+    import warnings
+
+    network_attempts = []
+
+    def refuse_network(event: str, arguments: tuple[object, ...]) -> None:
+        if event in {"socket.connect", "socket.getaddrinfo"}:
+            network_attempts.append(event)
+            raise AssertionError("schema construction must not access the network")
+
+    sys.addaudithook(refuse_network)
+
+    import korvid.providers.litellm_runtime
+    from litellm.types.utils import Message, ModelResponse
+
+    warnings.simplefilter("error")
+    constructor = {"Message": Message, "ModelResponse": ModelResponse}[sys.argv[1]]
+    response = constructor()
+    assert isinstance(response.model_dump(), dict)
+    assert not network_attempts, network_attempts
+    print("schema-ok")
     """
 )
 
@@ -148,3 +175,18 @@ def test_litellm_logging_cannot_reach_the_terminal() -> None:
     assert isinstance(logger, logging.Logger), "litellm no longer ships `verbose_logger`"
     assert not any(type(h) is logging.StreamHandler for h in logger.handlers), logger.handlers
     assert logger.propagate is False
+
+
+@_needs_litellm
+@pytest.mark.parametrize("constructor", ["Message", "ModelResponse"])
+def test_response_schemas_construct_offline_with_warnings_as_errors(constructor: str) -> None:
+    """Validate each real SDK schema in a fresh interpreter without cached schemas."""
+    result = subprocess.run(
+        [sys.executable, "-W", "error", "-c", _SCHEMA_PROBE, constructor],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "schema-ok", result.stdout
