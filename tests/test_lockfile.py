@@ -99,6 +99,24 @@ def test_dependabot_separates_runtime_dependencies_from_dev_tools(group: str, fi
     )
 
 
+def test_dependabot_opens_version_updates_monthly() -> None:
+    """Weekly runs opened up to three pull requests every week.
+
+    Each one needs its own CI run and review, and they kept colliding on the
+    same failing checks. A monthly cadence still gives every update a path to
+    a pull request; runtime vulnerabilities already fail the `security` job
+    in between.
+    """
+    configuration = yaml.safe_load(
+        (_ROOT / ".github" / "dependabot.yml").read_text(encoding="utf-8")
+    )
+    intervals = {
+        update["package-ecosystem"]: update["schedule"]["interval"]
+        for update in configuration["updates"]
+    }
+    assert intervals == {"uv": "monthly", "github-actions": "monthly"}
+
+
 def test_dependabot_holds_litellm_exactly_above_the_measured_pin() -> None:
     """LiteLLM 1.101+ breaks the provider tests (#420), so the pin is held.
 
