@@ -152,12 +152,15 @@ the matrix.
 also use, so pull-request code reaches it only when the repository owner wrote
 it and it brings in no third-party code. The `changes` job selects the pool
 for the Linux test, pre-commit, security and experimental `ty` jobs:
-`korvid-runners` for main pushes, and for a pull request only when its head
-branch is in this repository, the owner opened it, pushed the commit and
-started the run, and no changed path is `uv.lock`, `pyproject.toml`,
+`korvid-runners` for main pushes, and for a pull request only when the run
+was triggered by a push (`synchronize`) to a head branch in this repository,
+the owner opened the PR, pushed that commit and started the run, the PR's
+head is still that commit once its file list has been read, and no changed
+path — old or new side of a rename — is `uv.lock`, `pyproject.toml`,
 `.pre-commit-config.yaml` or under `.github/`. Every other pull request —
-forks, Dependabot, an owner-opened dependency or Actions bump, or a file list
-the API would not return — runs on `ubuntu-latest`. Those jobs run even if
+forks, Dependabot, an owner-opened dependency or Actions bump, the run for
+opening or reopening a PR (neither event says who pushed the branch), or a
+file list the API would not return — runs on `ubuntu-latest`. Those jobs run even if
 `changes` fails, falling back to `ubuntu-latest`, because a required job
 skipped by a failed `needs` reports as passing. CodeQL keeps
 `ubuntu-latest` for every pull request. Change classification and dependency

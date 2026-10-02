@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import os
+import shutil
 import subprocess
 from collections.abc import Mapping
 from pathlib import Path
@@ -26,6 +28,7 @@ RUNNER_SELECTED_JOBS = ("test", "pre-commit", "security", "ty-experimental")
 RUNNER_STEP_ENV = {
     "GH_TOKEN": "${{ secrets.GITHUB_TOKEN }}",
     "EVENT_NAME": "${{ github.event_name }}",
+    "EVENT_ACTION": "${{ github.event.action }}",
     "PR": "${{ github.event.pull_request.number }}",
     "REPO": "${{ github.repository }}",
     "OWNER": "${{ github.repository_owner }}",
@@ -33,9 +36,11 @@ RUNNER_STEP_ENV = {
     "PR_AUTHOR": "${{ github.event.pull_request.user.login }}",
     "ACTOR": "${{ github.actor }}",
     "TRIGGERING_ACTOR": "${{ github.triggering_actor }}",
+    "HEAD_SHA": "${{ github.event.pull_request.head.sha }}",
 }
 OWNER_PULL_REQUEST = {
     "EVENT_NAME": "pull_request",
+    "EVENT_ACTION": "synchronize",
     "PR": "7",
     "REPO": "hellices/korvid",
     "OWNER": "hellices",
@@ -43,7 +48,12 @@ OWNER_PULL_REQUEST = {
     "PR_AUTHOR": "hellices",
     "ACTOR": "hellices",
     "TRIGGERING_ACTOR": "hellices",
+    "HEAD_SHA": "a" * 40,
 }
+FILE_LIST_CALL = "api --paginate repos/hellices/korvid/pulls/7/files --jq " + (
+    ".[] | .filename, (.previous_filename // empty)"
+)
+HEAD_CALL = "api repos/hellices/korvid/pulls/7 --jq .head.sha"
 WINDOWS_SEED = "${{ github.run_id }}"
 CI_JOB_TIMEOUTS = {
     "changes": 10,
@@ -122,6 +132,7 @@ def _select_runner(
     *,
     files: tuple[str, ...] = ("src/korvid/ui/app.py",),
     api_fails: bool = False,
+    current_head: str | None = None,
 ) -> str:
     """Run the workflow's own runner-selection step against a fake `gh`."""
     script = str(_runner_step(_jobs(CI_WORKFLOW))["run"])
@@ -130,9 +141,12 @@ def _select_runner(
     calls = tmp_path / "gh-calls.txt"
     output = tmp_path / "github-output.txt"
     output.write_text("", encoding="utf-8")
+    # The file list arrives already reduced by `--jq`, one path per line;
+    # test_file_list_query_reports_both_sides_of_a_rename checks the query.
     fake_gh = (
         'gh() { printf "%s\\n" "$*" >> "$FAKE_GH_CALLS"; '
-        '[ "$FAKE_GH_FAILS" = 1 ] && return 1; cat "$FAKE_GH_FILES"; }\n'
+        '[ "$FAKE_GH_FAILS" = 1 ] && return 1; '
+        'case "$2" in --paginate) cat "$FAKE_GH_FILES" ;; *) echo "$FAKE_GH_HEAD" ;; esac; }\n'
     )
     env = {
         "PATH": os.environ.get("PATH", ""),
@@ -141,6 +155,7 @@ def _select_runner(
         "FAKE_GH_FILES": listing.as_posix(),
         "FAKE_GH_CALLS": calls.as_posix(),
         "FAKE_GH_FAILS": "1" if api_fails else "0",
+        "FAKE_GH_HEAD": context.get("HEAD_SHA", "") if current_head is None else current_head,
         **context,
     }
 
@@ -160,9 +175,8 @@ def _select_runner(
     ]
     assert len(selections) == 1, f"expected one runner selection, got {selections}"
     if context["EVENT_NAME"] == "pull_request" and calls.exists():
-        assert calls.read_text(encoding="utf-8").splitlines() == [
-            "api --paginate repos/hellices/korvid/pulls/7/files --jq .[].filename"
-        ]
+        made = calls.read_text(encoding="utf-8").splitlines()
+        assert made in ([FILE_LIST_CALL], [FILE_LIST_CALL, HEAD_CALL]), made
     return selections[0]
 
 
@@ -219,6 +233,13 @@ def test_owner_pull_request_without_dependency_changes_runs_on_korvid_runners(
         ("ACTOR", "someone"),
         ("TRIGGERING_ACTOR", "someone"),
         ("OWNER", ""),
+        # Only a push names who supplied the head. Opening or reopening a PR
+        # makes the owner the actor without saying who pushed the branch -
+        # a collaborator's push followed by the owner's reopen would pass.
+        ("EVENT_ACTION", "opened"),
+        ("EVENT_ACTION", "reopened"),
+        ("EVENT_ACTION", ""),
+        ("HEAD_SHA", ""),
     ],
 )
 def test_pull_request_not_wholly_from_the_owner_runs_hosted(
@@ -250,9 +271,57 @@ def test_owner_pull_request_that_changes_third_party_code_runs_hosted(
     assert _select_runner(tmp_path, OWNER_PULL_REQUEST, files=files) == "ubuntu-latest"
 
 
+def test_owner_pull_request_that_renames_third_party_code_away_runs_hosted(
+    tmp_path: Path,
+) -> None:
+    # The file list reports a rename as its new path plus `previous_filename`.
+    files = ("uv.lock.old", "uv.lock")
+
+    assert _select_runner(tmp_path, OWNER_PULL_REQUEST, files=files) == "ubuntu-latest"
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="needs jq to evaluate the query")
+def test_file_list_query_reports_both_sides_of_a_rename() -> None:
+    script = str(_runner_step(_jobs(CI_WORKFLOW))["run"])
+    query = FILE_LIST_CALL.split(" --jq ", 1)[1]
+    page = [
+        {"filename": "src/korvid/ui/app.py", "status": "modified"},
+        {"filename": "uv.lock.old", "previous_filename": "uv.lock", "status": "renamed"},
+    ]
+
+    result = subprocess.run(
+        ["jq", "-r", query],
+        input=json.dumps(page),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert f"--jq '{query}'" in script
+    assert result.stdout.splitlines() == ["src/korvid/ui/app.py", "uv.lock.old", "uv.lock"]
+
+
+def test_pull_request_whose_head_moved_during_selection_runs_hosted(tmp_path: Path) -> None:
+    # The file list describes the PR's current head, not necessarily the
+    # commit this run checks out.
+    selected = _select_runner(tmp_path, OWNER_PULL_REQUEST, current_head="b" * 40)
+
+    assert selected == "ubuntu-latest"
+
+
 def test_missing_identity_context_runs_hosted(tmp_path: Path) -> None:
     blank = dict.fromkeys(
-        ("REPO", "OWNER", "HEAD_REPO", "PR_AUTHOR", "ACTOR", "TRIGGERING_ACTOR"), ""
+        (
+            "REPO",
+            "OWNER",
+            "HEAD_REPO",
+            "PR_AUTHOR",
+            "ACTOR",
+            "TRIGGERING_ACTOR",
+            "EVENT_ACTION",
+            "HEAD_SHA",
+        ),
+        "",
     )
     context = {**OWNER_PULL_REQUEST, **blank}
 
