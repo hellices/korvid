@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -9,12 +11,39 @@ from typing import Any
 import pytest
 import yaml
 
+from tests.platforms import bash_executable
+
 ROOT = Path(__file__).parent.parent
 CI_WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
 CODEQL_WORKFLOW = ROOT / ".github" / "workflows" / "codeql.yml"
 TRUSTED_LINUX_RUNNER = (
     "${{ github.event_name == 'pull_request' && 'ubuntu-latest' || 'korvid-runners' }}"
 )
+SELECTED_LINUX_RUNNER = (
+    "${{ needs.changes.outputs.runner == 'korvid-runners' && 'korvid-runners' || 'ubuntu-latest' }}"
+)
+RUNNER_SELECTED_JOBS = ("test", "pre-commit", "security", "ty-experimental")
+RUNNER_STEP_ENV = {
+    "GH_TOKEN": "${{ secrets.GITHUB_TOKEN }}",
+    "EVENT_NAME": "${{ github.event_name }}",
+    "PR": "${{ github.event.pull_request.number }}",
+    "REPO": "${{ github.repository }}",
+    "OWNER": "${{ github.repository_owner }}",
+    "HEAD_REPO": "${{ github.event.pull_request.head.repo.full_name }}",
+    "PR_AUTHOR": "${{ github.event.pull_request.user.login }}",
+    "ACTOR": "${{ github.actor }}",
+    "TRIGGERING_ACTOR": "${{ github.triggering_actor }}",
+}
+OWNER_PULL_REQUEST = {
+    "EVENT_NAME": "pull_request",
+    "PR": "7",
+    "REPO": "hellices/korvid",
+    "OWNER": "hellices",
+    "HEAD_REPO": "hellices/korvid",
+    "PR_AUTHOR": "hellices",
+    "ACTOR": "hellices",
+    "TRIGGERING_ACTOR": "hellices",
+}
 WINDOWS_SEED = "${{ github.run_id }}"
 CI_JOB_TIMEOUTS = {
     "changes": 10,
@@ -78,17 +107,160 @@ def test_timeout_contract_rejects_an_unreviewed_unsafe_job(
         _assert_job_timeouts(label, jobs, expected)
 
 
-def test_pull_request_jobs_never_use_self_hosted_runners() -> None:
+def _runner_step(jobs: Mapping[str, Any]) -> Mapping[str, Any]:
+    steps = jobs["changes"]["steps"]
+    matches = [step for step in steps if isinstance(step, dict) and step.get("id") == "runner"]
+    assert len(matches) == 1, "changes must have exactly one step with id 'runner'"
+    step = matches[0]
+    assert isinstance(step, dict)
+    return step
+
+
+def _select_runner(
+    tmp_path: Path,
+    context: Mapping[str, str],
+    *,
+    files: tuple[str, ...] = ("src/korvid/ui/app.py",),
+    api_fails: bool = False,
+) -> str:
+    """Run the workflow's own runner-selection step against a fake `gh`."""
+    script = str(_runner_step(_jobs(CI_WORKFLOW))["run"])
+    listing = tmp_path / "files.txt"
+    listing.write_text("".join(f"{name}\n" for name in files), encoding="utf-8")
+    calls = tmp_path / "gh-calls.txt"
+    output = tmp_path / "github-output.txt"
+    output.write_text("", encoding="utf-8")
+    fake_gh = (
+        'gh() { printf "%s\\n" "$*" >> "$FAKE_GH_CALLS"; '
+        '[ "$FAKE_GH_FAILS" = 1 ] && return 1; cat "$FAKE_GH_FILES"; }\n'
+    )
+    env = {
+        "PATH": os.environ.get("PATH", ""),
+        "SYSTEMROOT": os.environ.get("SYSTEMROOT", ""),
+        "GITHUB_OUTPUT": output.as_posix(),
+        "FAKE_GH_FILES": listing.as_posix(),
+        "FAKE_GH_CALLS": calls.as_posix(),
+        "FAKE_GH_FAILS": "1" if api_fails else "0",
+        **context,
+    }
+
+    result = subprocess.run(
+        [bash_executable(), "--noprofile", "--norc", "-c", fake_gh + script],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    selections = [
+        line.removeprefix("runner=")
+        for line in output.read_text(encoding="utf-8").splitlines()
+        if line.startswith("runner=")
+    ]
+    assert len(selections) == 1, f"expected one runner selection, got {selections}"
+    if context["EVENT_NAME"] == "pull_request" and calls.exists():
+        assert calls.read_text(encoding="utf-8").splitlines() == [
+            "api --paginate repos/hellices/korvid/pulls/7/files --jq .[].filename"
+        ]
+    return selections[0]
+
+
+def test_linux_ci_jobs_take_the_runner_selected_by_changes() -> None:
     ci_jobs = _jobs(CI_WORKFLOW)
-    event_sensitive_jobs = ("test", "pre-commit", "security", "ty-experimental")
 
     assert ci_jobs["changes"]["runs-on"] == "ubuntu-latest"
+    assert ci_jobs["changes"]["outputs"]["runner"] == "${{ steps.runner.outputs.runner }}"
     assert ci_jobs["windows-test"]["runs-on"] == "windows-latest"
     assert ci_jobs["dependency-review"]["runs-on"] == "ubuntu-latest"
-    assert {name: ci_jobs[name]["runs-on"] for name in event_sensitive_jobs} == dict.fromkeys(
-        event_sensitive_jobs, TRUSTED_LINUX_RUNNER
+    assert {name: ci_jobs[name]["runs-on"] for name in RUNNER_SELECTED_JOBS} == dict.fromkeys(
+        RUNNER_SELECTED_JOBS, SELECTED_LINUX_RUNNER
     )
+    assert all(ci_jobs[name]["needs"] == "changes" for name in RUNNER_SELECTED_JOBS)
     assert _jobs(CODEQL_WORKFLOW)["analyze"]["runs-on"] == TRUSTED_LINUX_RUNNER
+
+
+def test_required_jobs_that_newly_wait_on_changes_still_run_when_it_fails() -> None:
+    # A job skipped because `needs` failed reports as passing to a required
+    # check; these must run on the hosted fallback instead.
+    ci_jobs = _jobs(CI_WORKFLOW)
+
+    for name in ("pre-commit", "security", "ty-experimental"):
+        assert ci_jobs[name]["if"] == "${{ !cancelled() }}", name
+
+
+def test_runner_step_reads_its_inputs_only_from_the_environment() -> None:
+    step = _runner_step(_jobs(CI_WORKFLOW))
+
+    assert step["env"] == RUNNER_STEP_ENV
+    assert "${{" not in str(step["run"])
+
+
+def test_trusted_push_runs_on_korvid_runners(tmp_path: Path) -> None:
+    context = {**OWNER_PULL_REQUEST, "EVENT_NAME": "push", "PR": ""}
+
+    assert _select_runner(tmp_path, context) == "korvid-runners"
+
+
+def test_owner_pull_request_without_dependency_changes_runs_on_korvid_runners(
+    tmp_path: Path,
+) -> None:
+    files = ("src/korvid/ui/app.py", "tests/test_ci_workflow.py", "docs/index.md")
+
+    assert _select_runner(tmp_path, OWNER_PULL_REQUEST, files=files) == "korvid-runners"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("HEAD_REPO", "someone/korvid"),
+        ("PR_AUTHOR", "dependabot[bot]"),
+        ("PR_AUTHOR", "someone"),
+        ("ACTOR", "someone"),
+        ("TRIGGERING_ACTOR", "someone"),
+        ("OWNER", ""),
+    ],
+)
+def test_pull_request_not_wholly_from_the_owner_runs_hosted(
+    tmp_path: Path,
+    field: str,
+    value: str,
+) -> None:
+    context = {**OWNER_PULL_REQUEST, field: value}
+
+    assert _select_runner(tmp_path, context) == "ubuntu-latest"
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "uv.lock",
+        "pyproject.toml",
+        ".pre-commit-config.yaml",
+        ".github/workflows/ci.yml",
+        ".github/dependabot.yml",
+    ],
+)
+def test_owner_pull_request_that_changes_third_party_code_runs_hosted(
+    tmp_path: Path,
+    path: str,
+) -> None:
+    files = ("src/korvid/ui/app.py", path)
+
+    assert _select_runner(tmp_path, OWNER_PULL_REQUEST, files=files) == "ubuntu-latest"
+
+
+def test_missing_identity_context_runs_hosted(tmp_path: Path) -> None:
+    blank = dict.fromkeys(
+        ("REPO", "OWNER", "HEAD_REPO", "PR_AUTHOR", "ACTOR", "TRIGGERING_ACTOR"), ""
+    )
+    context = {**OWNER_PULL_REQUEST, **blank}
+
+    assert _select_runner(tmp_path, context) == "ubuntu-latest"
+
+
+def test_unreadable_file_list_runs_hosted(tmp_path: Path) -> None:
+    assert _select_runner(tmp_path, OWNER_PULL_REQUEST, api_fails=True) == "ubuntu-latest"
 
 
 def test_windows_pytest_processes_print_and_share_one_deterministic_seed() -> None:

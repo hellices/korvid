@@ -148,13 +148,22 @@ change runs the suite once, on 3.12, and Windows starts and syncs before
 skipping its pytest step. What is saved is three redundant suite runs, not
 the matrix.
 
-Pull-request code never runs on `korvid-runners`. Linux test, pre-commit,
-security, experimental `ty`, and CodeQL jobs select `ubuntu-latest` for pull
-requests and retain `korvid-runners` only for trusted main pushes or the
-scheduled CodeQL scan. Change classification and dependency review always use
-`ubuntu-latest`; Windows always uses `windows-latest`. Every job also has an
-explicit 10–45 minute deadline so a wedged runner cannot consume capacity
-indefinitely.
+`korvid-runners` is persistent shared infrastructure that the release jobs
+also use, so pull-request code reaches it only when the repository owner wrote
+it and it brings in no third-party code. The `changes` job selects the pool
+for the Linux test, pre-commit, security and experimental `ty` jobs:
+`korvid-runners` for main pushes, and for a pull request only when its head
+branch is in this repository, the owner opened it, pushed the commit and
+started the run, and no changed path is `uv.lock`, `pyproject.toml`,
+`.pre-commit-config.yaml` or under `.github/`. Every other pull request —
+forks, Dependabot, an owner-opened dependency or Actions bump, or a file list
+the API would not return — runs on `ubuntu-latest`. Those jobs run even if
+`changes` fails, falling back to `ubuntu-latest`, because a required job
+skipped by a failed `needs` reports as passing. CodeQL keeps
+`ubuntu-latest` for every pull request. Change classification and dependency
+review always use `ubuntu-latest`; Windows always uses `windows-latest`.
+Every job also has an explicit 10–45 minute deadline so a wedged runner
+cannot consume capacity indefinitely.
 
 The Windows full-suite command prints and consumes `${{ github.run_id }}` as
 its single `pytest-randomly` seed, making a failed order reproducible without

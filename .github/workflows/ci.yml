@@ -33,6 +33,7 @@ jobs:
       pull-requests: read
     outputs:
       code: ${{ steps.classify.outputs.code }}
+      runner: ${{ steps.runner.outputs.runner }}
     steps:
       - name: Classify the change
         id: classify
@@ -69,9 +70,55 @@ jobs:
             echo "docs-only: one full test pass instead of four"
           fi
 
+      # Pick the Linux pool for the jobs below. `korvid-runners` is persistent
+      # shared infrastructure the release jobs also use, so pull-request code
+      # may run there only when the repository owner wrote and pushed it and
+      # it brings in no third-party code: no lockfile, project metadata,
+      # pre-commit hook or workflow change. Fail closed: anything not
+      # positively identified as that goes to `ubuntu-latest`.
+      - name: Select the Linux runner
+        id: runner
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          OWNER: ${{ github.repository_owner }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          ACTOR: ${{ github.actor }}
+          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+        run: |
+          set -uo pipefail
+          hosted() {
+            echo "runner=ubuntu-latest" >> "$GITHUB_OUTPUT"
+            echo "ubuntu-latest: $1"
+            exit 0
+          }
+          if [ "$EVENT_NAME" != "pull_request" ]; then
+            echo "runner=korvid-runners" >> "$GITHUB_OUTPUT"
+            echo "korvid-runners: trusted $EVENT_NAME run"
+            exit 0
+          fi
+          if [ -z "$REPO" ] || [ -z "$OWNER" ] || [ -z "$PR" ]; then
+            hosted "missing repository or pull request context"
+          fi
+          [ "$HEAD_REPO" = "$REPO" ] || hosted "head branch is not in $REPO"
+          [ "$PR_AUTHOR" = "$OWNER" ] || hosted "opened by '$PR_AUTHOR', not the owner"
+          [ "$ACTOR" = "$OWNER" ] || hosted "pushed by '$ACTOR', not the owner"
+          [ "$TRIGGERING_ACTOR" = "$OWNER" ] || hosted "started by '$TRIGGERING_ACTOR', not the owner"
+          if ! files=$(gh api --paginate "repos/$REPO/pulls/$PR/files" --jq '.[].filename'); then
+            hosted "could not read the file list"
+          fi
+          # Count every match rather than `grep -q`; see the classifier above.
+          third_party=$(printf '%s\n' "$files" | { grep -cE '^(uv\.lock|pyproject\.toml|\.pre-commit-config\.yaml|\.github/.*)$' || true; })
+          [ "${third_party:-1}" -eq 0 ] || hosted "changes dependencies, hooks or workflows"
+          echo "runner=korvid-runners" >> "$GITHUB_OUTPUT"
+          echo "korvid-runners: owner pull request without third-party changes"
+
   test:
     needs: changes
-    runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-latest' || 'korvid-runners' }}
+    runs-on: ${{ needs.changes.outputs.runner == 'korvid-runners' && 'korvid-runners' || 'ubuntu-latest' }}
     timeout-minutes: 45
     strategy:
       matrix:
@@ -135,7 +182,11 @@ jobs:
         run: uv run pytest -q --ignore=tests/windows/test_native_terminal.py --ignore=tests/test_docs_landing_behavior.py --deselect=tests/core/test_audit.py::test_concurrent_appends_across_instances --randomly-seed=${{ github.run_id }}
 
   pre-commit:
-    runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-latest' || 'korvid-runners' }}
+    needs: changes
+    # Run on the hosted fallback even if `changes` failed: a required job
+    # skipped by a failed `needs` reports as passing.
+    if: ${{ !cancelled() }}
+    runs-on: ${{ needs.changes.outputs.runner == 'korvid-runners' && 'korvid-runners' || 'ubuntu-latest' }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -148,7 +199,11 @@ jobs:
       - run: uv run pre-commit run --all-files --show-diff-on-failure
 
   security:
-    runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-latest' || 'korvid-runners' }}
+    needs: changes
+    # Run on the hosted fallback even if `changes` failed: a required job
+    # skipped by a failed `needs` reports as passing.
+    if: ${{ !cancelled() }}
+    runs-on: ${{ needs.changes.outputs.runner == 'korvid-runners' && 'korvid-runners' || 'ubuntu-latest' }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -179,7 +234,11 @@ jobs:
           fail-on-severity: high
 
   ty-experimental:
-    runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-latest' || 'korvid-runners' }}
+    needs: changes
+    # Run on the hosted fallback even if `changes` failed: a required job
+    # skipped by a failed `needs` reports as passing.
+    if: ${{ !cancelled() }}
+    runs-on: ${{ needs.changes.outputs.runner == 'korvid-runners' && 'korvid-runners' || 'ubuntu-latest' }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
