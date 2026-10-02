@@ -36,6 +36,11 @@ class SlotEntry:
     origin: SlotOrigin
     available: bool = True
 
+    def describe(self) -> str:
+        """`dev (pinned)` / `qa (auto, unavailable)` - one label for every surface."""
+        state = "" if self.available else ", unavailable"
+        return f"{self.namespace} ({self.origin.value}{state})"
+
 
 @dataclasses.dataclass(frozen=True)
 class SlotChange:

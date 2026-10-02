@@ -163,6 +163,11 @@ def test_preview_lists_only_changed_slots() -> None:
     ]
 
 
+def test_entries_describe_their_origin_and_availability() -> None:
+    assert SlotEntry("dev", PINNED).describe() == "dev (pinned)"
+    assert _auto("qa", available=False).describe() == "qa (auto, unavailable)"
+
+
 def test_automatic_entries_exclude_pins() -> None:
     slots = build(["prod"], {}, frozenset({"prod", "dev"}))
 
