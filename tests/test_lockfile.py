@@ -99,6 +99,32 @@ def test_dependabot_separates_runtime_dependencies_from_dev_tools(group: str, fi
     )
 
 
+def test_dependabot_holds_litellm_exactly_above_the_measured_pin() -> None:
+    """LiteLLM 1.101+ breaks the provider tests (#420), so the pin is held.
+
+    Without an ignore rule the runtime group keeps bundling the incompatible
+    release with every other runtime update, and the whole group fails. The
+    ignored range must start right above the pin: starting lower would hide
+    the measured release, and a stale range left behind after the pin moves
+    would silently stop future LiteLLM updates.
+    """
+    project = tomllib.loads((_ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+    pinned = next(
+        Requirement(value)
+        for value in project["optional-dependencies"]["agent"]
+        if Requirement(value).name == "litellm"
+    )
+    configuration = yaml.safe_load(
+        (_ROOT / ".github" / "dependabot.yml").read_text(encoding="utf-8")
+    )
+    uv_update = next(
+        update for update in configuration["updates"] if update["package-ecosystem"] == "uv"
+    )
+    ignored = [rule for rule in uv_update.get("ignore", []) if rule["dependency-name"] == "litellm"]
+    assert [str(pinned.specifier)] == ["==1.100.0"]
+    assert ignored == [{"dependency-name": "litellm", "versions": [">=1.101.0"]}]
+
+
 def test_mcp_http_client_requirement_rejects_known_vulnerable_versions() -> None:
     project = tomllib.loads((_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     requirements = [

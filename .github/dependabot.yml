@@ -13,6 +13,15 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    # LiteLLM 1.101+ annotates a schema-walked TypedDict field `ReadOnly`, and
+    # the resulting Pydantic warning fails provider construction under the
+    # warnings-as-errors policy (#420). Grouped with the rest of the runtime
+    # set, it would fail every runtime update along with it. Remove this rule
+    # when #420's exit criteria are met; tests/test_lockfile.py keeps the
+    # range pinned to the line above the measured release.
+    ignore:
+      - dependency-name: litellm
+        versions: [">=1.101.0"]
     groups:
       # One pull request per group keeps the review loop bounded: a routine
       # dev-tool bump does not deserve the same attention as a runtime one.
