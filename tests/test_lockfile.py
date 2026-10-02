@@ -121,7 +121,7 @@ def test_dependabot_holds_litellm_exactly_above_the_measured_pin() -> None:
         update for update in configuration["updates"] if update["package-ecosystem"] == "uv"
     )
     ignored = [rule for rule in uv_update.get("ignore", []) if rule["dependency-name"] == "litellm"]
-    assert [str(pinned.specifier)] == ["==1.100.0"]
+    assert [str(pinned.specifier)] == ["==1.100.3"]
     assert ignored == [{"dependency-name": "litellm", "versions": [">=1.101.0"]}]
 
 
