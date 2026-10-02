@@ -3,6 +3,8 @@
 import errno
 import os
 import re
+import shutil
+import sys
 from collections.abc import Iterator, Mapping
 from pathlib import Path
 
@@ -16,6 +18,20 @@ POSIX = os.name == "posix"
 def posix_only(reason: str) -> pytest.MarkDecorator:
     """Skip a test when POSIX-specific behavior is unavailable."""
     return pytest.mark.skipif(not POSIX, reason=reason)
+
+
+def bash_executable() -> str:
+    """Return a bash that can run workflow shell steps, Git Bash on Windows."""
+    if sys.platform != "win32":
+        bash = shutil.which("bash")
+        assert bash is not None
+        return bash
+
+    git = shutil.which("git")
+    assert git is not None
+    git_bash = Path(git).parent.parent / "bin" / "bash.exe"
+    assert git_bash.is_file()
+    return str(git_bash)
 
 
 def read_text_utf8(path: Path) -> str:

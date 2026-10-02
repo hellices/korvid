@@ -8,10 +8,14 @@ updates:
   # because dev packages do not ship in the wheel - but they do run in CI
   # with the repository checked out, and nine GitPython advisories sat open
   # because an alert with no path to a pull request is not a process.
+  #
+  # Both ecosystems run monthly: weekly runs opened up to three pull requests
+  # a week, each with its own CI run and review loop. tests/test_lockfile.py
+  # pins the cadence.
   - package-ecosystem: uv
     directory: /
     schedule:
-      interval: weekly
+      interval: monthly
     open-pull-requests-limit: 5
     # LiteLLM 1.101+ annotates a schema-walked TypedDict field `ReadOnly`, and
     # the resulting Pydantic warning fails provider construction under the
@@ -76,7 +80,7 @@ updates:
   - package-ecosystem: github-actions
     directory: /
     schedule:
-      interval: weekly
+      interval: monthly
     groups:
       actions:
         patterns: ["*"]
