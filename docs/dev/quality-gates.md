@@ -162,13 +162,15 @@ and no changed path — old or new side of a rename — is `uv.lock`,
 pull request — forks, Dependabot, an owner-opened dependency or Actions bump,
 the run for opening or reopening a PR (neither event says who pushed the
 branch), or a file list the API would not return in full — runs on
-`ubuntu-latest`. Those jobs run even if
-`changes` fails, falling back to `ubuntu-latest`, because a required job
-skipped by a failed `needs` reports as passing. CodeQL keeps
-`ubuntu-latest` for every pull request. Change classification and dependency
-review always use `ubuntu-latest`; Windows always uses `windows-latest`.
-Every job also has an explicit 10–45 minute deadline so a wedged runner
-cannot consume capacity indefinitely.
+`ubuntu-latest`, and so does any other event: a trigger added later, or a push
+the branch filter no longer limits to main, stays hosted until the selector
+names it. Pre-commit, security and experimental `ty`, which wait on `changes`
+only for this choice, run even if it fails, falling back to `ubuntu-latest`,
+because a required job skipped by a failed `needs` reports as passing. CodeQL
+keeps `ubuntu-latest` for every pull request. Change classification and
+dependency review always use `ubuntu-latest`; Windows always uses
+`windows-latest`. Every job also has an explicit 10–45 minute deadline so a
+wedged runner cannot consume capacity indefinitely.
 
 That selection routes runs that are already allowed to start; it is not what
 keeps hostile code off `korvid-runners`. A `pull_request` run reads `ci.yml`

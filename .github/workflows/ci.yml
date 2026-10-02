@@ -71,17 +71,19 @@ jobs:
           fi
 
       # Pick the Linux pool for the jobs below. `korvid-runners` is persistent
-      # shared infrastructure the release jobs also use, so pull-request code
-      # may run there only when the repository owner wrote and pushed it and
-      # it brings in no third-party code: no lockfile, project metadata,
-      # pre-commit hook or workflow change. Fail closed: anything not
-      # positively identified as that goes to `ubuntu-latest`.
+      # shared infrastructure the release jobs also use, so it takes pushes to
+      # main, and pull-request code only when the repository owner wrote and
+      # pushed it and it brings in no third-party code: no lockfile, project
+      # metadata, pre-commit hook or workflow change. Fail closed: anything
+      # not positively identified as one of those - a trigger added later
+      # included - goes to `ubuntu-latest`.
       - name: Select the Linux runner
         id: runner
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           EVENT_NAME: ${{ github.event_name }}
           EVENT_ACTION: ${{ github.event.action }}
+          REF: ${{ github.ref }}
           PR: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
           OWNER: ${{ github.repository_owner }}
@@ -97,11 +99,12 @@ jobs:
             echo "ubuntu-latest: $1"
             exit 0
           }
-          if [ "$EVENT_NAME" != "pull_request" ]; then
+          if [ "$EVENT_NAME" = "push" ] && [ "$REF" = "refs/heads/main" ]; then
             echo "runner=korvid-runners" >> "$GITHUB_OUTPUT"
-            echo "korvid-runners: trusted $EVENT_NAME run"
+            echo "korvid-runners: push to main"
             exit 0
           fi
+          [ "$EVENT_NAME" = "pull_request" ] || hosted "'$EVENT_NAME' run on '$REF' is neither a push to main nor a pull request"
           if [ -z "$REPO" ] || [ -z "$OWNER" ] || [ -z "$PR" ] || [ -z "$HEAD_SHA" ]; then
             hosted "missing repository or pull request context"
           fi

@@ -29,6 +29,7 @@ RUNNER_STEP_ENV = {
     "GH_TOKEN": "${{ secrets.GITHUB_TOKEN }}",
     "EVENT_NAME": "${{ github.event_name }}",
     "EVENT_ACTION": "${{ github.event.action }}",
+    "REF": "${{ github.ref }}",
     "PR": "${{ github.event.pull_request.number }}",
     "REPO": "${{ github.repository }}",
     "OWNER": "${{ github.repository_owner }}",
@@ -41,6 +42,7 @@ RUNNER_STEP_ENV = {
 OWNER_PULL_REQUEST = {
     "EVENT_NAME": "pull_request",
     "EVENT_ACTION": "synchronize",
+    "REF": "refs/pull/7/merge",
     "PR": "7",
     "REPO": "hellices/korvid",
     "OWNER": "hellices",
@@ -49,6 +51,17 @@ OWNER_PULL_REQUEST = {
     "ACTOR": "hellices",
     "TRIGGERING_ACTOR": "hellices",
     "HEAD_SHA": "a" * 40,
+}
+# A push carries no pull request, so every pull-request field is empty.
+MAIN_PUSH = {
+    **OWNER_PULL_REQUEST,
+    "EVENT_NAME": "push",
+    "EVENT_ACTION": "",
+    "REF": "refs/heads/main",
+    "PR": "",
+    "HEAD_REPO": "",
+    "PR_AUTHOR": "",
+    "HEAD_SHA": "",
 }
 FILE_LIST_CALL = "api --paginate repos/hellices/korvid/pulls/7/files --jq " + (
     ".[] | .filename, (.previous_filename // empty)"
@@ -216,10 +229,32 @@ def test_runner_step_reads_its_inputs_only_from_the_environment() -> None:
     assert "${{" not in str(step["run"])
 
 
-def test_trusted_push_runs_on_korvid_runners(tmp_path: Path) -> None:
-    context = {**OWNER_PULL_REQUEST, "EVENT_NAME": "push", "PR": ""}
+def test_push_to_main_runs_on_korvid_runners(tmp_path: Path) -> None:
+    assert _select_runner(tmp_path, MAIN_PUSH) == "korvid-runners"
 
-    assert _select_runner(tmp_path, context) == "korvid-runners"
+
+@pytest.mark.parametrize(
+    "event",
+    ["workflow_dispatch", "schedule", "merge_group", "pull_request_target", "workflow_run", ""],
+)
+def test_event_other_than_a_main_push_or_pull_request_runs_hosted(
+    tmp_path: Path,
+    event: str,
+) -> None:
+    # A trigger added later must not inherit the pool: a `merge_group` run,
+    # for one, tests pull-request code that has not merged yet.
+    context = {**MAIN_PUSH, "EVENT_NAME": event}
+
+    assert _select_runner(tmp_path, context) == "ubuntu-latest"
+
+
+@pytest.mark.parametrize("ref", ["refs/heads/feature", "refs/tags/v0.5.0", ""])
+def test_push_outside_main_runs_hosted(tmp_path: Path, ref: str) -> None:
+    # Only the trigger's branch filter keeps other pushes out today; widening
+    # it must not widen what reaches the pool.
+    context = {**MAIN_PUSH, "REF": ref}
+
+    assert _select_runner(tmp_path, context) == "ubuntu-latest"
 
 
 def test_owner_pull_request_without_dependency_changes_runs_on_korvid_runners(
