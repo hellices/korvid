@@ -104,7 +104,8 @@ during that write, the old cluster's queued map is rebuilt the same way
 before it is written, so it cannot overwrite the confirmed map. Quitting
 during that write rebuilds the queue the same way before `shutdown` drains
 it. Either rebuild is judged against a listing of that cluster that landed
-after the reallocation's own, so newer availability is kept. If the write
+after the reallocation's own, so newer availability is kept; when that later
+listing failed, the inventory is unknown and every visit is trusted. If the write
 fails, maps already queued stay queued and are still written. A queued save
 that fails after `:ctx` switched away is reported with the old context name.
 It does not stop the new cluster's saves.
@@ -165,8 +166,9 @@ and persistence. The workspace controller asks it for slot *n* in
 `navigate_command` path, in the focused pane only. An unavailable slot posts
 a notice naming the namespace and `:slots` instead of navigating. An empty
 slot stays a no-op. While a `:ctx` switch runs, slot keys do nothing. A key
-whose slot was read before the switch is checked again under the navigation
-lock, so it never sends the new cluster to the old cluster's namespace.
+is checked again under the navigation lock: one read before the switch never
+sends the new cluster to the old cluster's namespace, and one whose slot
+discovery or a reallocation changed while it waited does nothing.
 
 Help and the picker read the same map object that dispatch reads:
 

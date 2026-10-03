@@ -262,6 +262,23 @@ async def test_slot_keys_never_navigate_across_a_context_switch(
         assert app.current_scope == "default"
 
 
+async def test_a_slot_key_rereads_its_slot_under_the_navigation_lock(tmp_path: Path) -> None:
+    app, _ = _app(Cluster(["alpha", "beta"]), tmp_path, config=KorvidConfig(namespace="default"))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _ready(pilot, app, ["alpha", "beta"])
+        await _visit(pilot, app, "alpha", "beta")
+        workspace, slots = app._workspace_ctl, app._workspace_ctl.slots
+        lock = workspace._nav_lock
+        await lock.acquire()  # another navigation owns the lock...
+        pressed = asyncio.create_task(workspace.favorite_namespace(1))
+        await asyncio.sleep(0)  # ...while key 1 resolves alpha and queues
+        slots.observe(slots.token(), ["beta"])  # ...and discovery finds alpha gone
+        lock.release()
+        await pressed
+
+        assert app.current_scope == "beta"
+
+
 async def test_help_omits_the_slots_while_a_context_switch_runs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

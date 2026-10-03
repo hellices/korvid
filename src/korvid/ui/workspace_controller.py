@@ -655,16 +655,16 @@ class WorkspaceController:
         )
 
     async def favorite_namespace(self, index: int) -> None:
-        """Jump to namespace slot *index* (issues #108/#406, keys 1-9).
+        """Jump to namespace slot *index* (#108/#406) as `:ns <name>` does, granting no access.
 
-        The same navigation as `:ns <name>`, granting no access. Empty slots
-        are no-ops and unavailable ones explain themselves; a slot read
-        before a `:ctx` switch is refused under the navigation lock.
+        Empty slots are no-ops and unavailable ones explain themselves. The slot
+        is re-read under the navigation lock and refused across a `:ctx` switch.
         """
         epoch = self._context.epoch()
         namespace = None if self._context.switching() else self._slots.target(index)
         if namespace is not None:
-            await self.navigate_command(None, namespace, lambda: not self._context.crossed(epoch))
+            guard = self._slots.guard(index, namespace, lambda: not self._context.crossed(epoch))
+            await self.navigate_command(None, namespace, guard)
 
     # ------------------------------------------------------------------
     # Filter

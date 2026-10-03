@@ -837,6 +837,22 @@ async def test_a_listing_before_a_switch_during_a_confirmed_save_still_judges_it
     assert harness.saved() == {1: _auto("dev"), 2: _auto("qa", available=False)}
 
 
+async def test_a_listing_failure_before_a_switch_during_a_confirmed_save_trusts_visits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = Harness(tmp_path, names=["dev", "old", "qa"])
+    tasks, gated = await _confirm_held(harness, monkeypatch)
+    harness.controller.observe_failure(harness.controller.token())
+    harness.controller.visit("created-since")  # trusted: the listing is unknown
+
+    harness.controller.deactivate()  # `:ctx` away before the write returns
+    gated.gate.set()
+    await asyncio.gather(*tasks)
+    await harness.ui.drain()
+
+    assert harness.saved() == {1: _auto("dev"), 2: _auto("qa"), 3: _auto("created-since")}
+
+
 async def test_a_listing_failure_during_a_confirmed_save_keeps_the_map_stale(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

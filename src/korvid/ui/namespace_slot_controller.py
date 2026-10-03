@@ -81,9 +81,9 @@ class NamespaceSlotController:
         self._inventory: frozenset[str] | None = None
         #: Bumped by every listing outcome, so a slower one never replaces it.
         self._observed = 0
-        #: The latest complete listing, its cluster and revision: a save that
-        #: is rebased after its cluster was left is still judged against it.
-        self._listed: tuple[ClusterIdentity, int, frozenset[str]] | None = None
+        #: The latest listing outcome (None when it failed), its cluster and
+        #: revision: a save rebased after its cluster was left is judged by it.
+        self._listed: tuple[ClusterIdentity, int, frozenset[str] | None] | None = None
         #: Set once a save failed or the document is unreadable for this
         #: cluster: later saves are skipped so one fault reports once.
         self._persist_failed = False
@@ -221,6 +221,8 @@ class NamespaceSlotController:
             self._observed += 1
             self._stale = True
             self._inventory = None
+            if self._identity is not None:
+                self._listed = (self._identity, self._observed, None)
 
     def target(self, slot: int) -> str | None:
         """The namespace key *slot* navigates to, or None (notifies if unavailable)."""
@@ -236,6 +238,18 @@ class NamespaceSlotController:
             )
             return None
         return entry.namespace
+
+    def guard(self, slot: int, namespace: str, outer: Callable[[], bool]) -> Callable[[], bool]:
+        """*outer*, narrowed to *slot* still dispatching to *namespace*: a key
+        waits for the navigation lock, and discovery may change its slot."""
+
+        def held() -> bool:
+            entry = self.slots.get(slot)
+            return (
+                outer() and entry is not None and entry.available and entry.namespace == namespace
+            )
+
+        return held
 
     def _report_persist_failure(self, message: str, severity: str) -> None:
         if self._persist_failed:
@@ -441,14 +455,15 @@ class NamespaceSlotController:
         self,
         identity: ClusterIdentity,
         proposed: SlotMap,
-        inventory: frozenset[str],
+        inventory: frozenset[str] | None,
         before: dict[int, SlotEntry],
         seen: int,
     ) -> None:
         """Rebuild the map queued for *identity* on the saved *proposed* one.
 
         The queued map was built on the old map, so only its new visits carry
-        over. A listing of that cluster newer than *seen* judges the result.
+        over. A listing outcome of that cluster newer than *seen* judges the
+        result; a failed one trusts every visit.
         """
         queued = self._pending.pop(identity, None)
         listed = self._listed
