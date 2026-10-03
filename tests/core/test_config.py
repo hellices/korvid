@@ -162,6 +162,15 @@ def test_log_buffer_lines_invalid_falls_back(tmp_path: Path) -> None:
         assert load_config(cfg_file).log_buffer_lines == 5000
 
 
+def test_log_buffer_lines_rejects_fractional_and_infinite_floats(tmp_path: Path) -> None:
+    """The floats mcp.port already refuses: int() would truncate 12.9 to a
+    12-line buffer and raise OverflowError on .inf, crashing startup."""
+    for raw in ("12.9", ".inf", "-.inf", ".nan"):
+        cfg_file = tmp_path / "config.yaml"
+        cfg_file.write_text(f"log_buffer_lines: {raw}\n")
+        assert load_config(cfg_file).log_buffer_lines == 5000
+
+
 def test_auth_method_parsed(tmp_path: Path) -> None:
     p = tmp_path / "c.yaml"
     p.write_text(

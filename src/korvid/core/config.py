@@ -1156,30 +1156,28 @@ def _atomic_write_text(path: Path, text: str) -> None:
         tmp.unlink(missing_ok=True)
 
 
+def _whole_number(value: Any) -> int | None:
+    """`value` as an int, or None when YAML gave something else: a bool
+    (`true` would become 1), a fraction (int() truncates 7878.9), or
+    .inf/.nan (int() raises OverflowError/ValueError)."""
+    if isinstance(value, bool) or (isinstance(value, float) and not value.is_integer()):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
 def _parse_port(value: Any) -> int:
     """Coerce mcp.port to a valid TCP port; fall back to 7878."""
-    if isinstance(value, bool):  # YAML `true` would silently become port 1
-        return 7878
-    if isinstance(value, float) and not value.is_integer():
-        # Rejects fractional ports (7878.9) as well as .inf/.nan, which
-        # int() would otherwise truncate or blow up on (OverflowError).
-        return 7878
-    try:
-        port = int(value)
-    except (TypeError, ValueError, OverflowError):
-        return 7878
-    return port if 0 < port < 65536 else 7878
+    port = _whole_number(value)
+    return port if port is not None and 0 < port < 65536 else 7878
 
 
 def _parse_buffer_lines(value: Any) -> int:
     """Coerce log_buffer_lines to a sane positive int; fall back to 5000."""
-    if isinstance(value, bool):  # YAML `true` would silently become a 1-line buffer
-        return 5000
-    try:
-        lines = int(value)
-    except (TypeError, ValueError):
-        return 5000
-    return lines if lines > 0 else 5000
+    lines = _whole_number(value)
+    return lines if lines is not None and lines > 0 else 5000
 
 
 def _parse_model_tier(value: Any) -> str | None:
