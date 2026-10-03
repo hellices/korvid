@@ -110,6 +110,21 @@ def test_a_malformed_document_is_reported_and_never_overwritten(
     assert path.read_text(encoding="utf-8") == content
 
 
+def test_a_state_file_that_is_not_utf8_is_malformed_and_never_overwritten(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "slots.json"
+    content = b'{"version": 1, "clusters": []}\xff\xfe'
+    path.write_bytes(content)
+    store = NamespaceSlotStore(path)
+
+    with pytest.raises(SlotStateError, match="namespace slot state"):
+        store.load(DEV)
+    with pytest.raises(SlotStateError, match="namespace slot state"):
+        store.save(DEV, {2: _auto("a")})
+    assert path.read_bytes() == content
+
+
 def test_a_failed_write_keeps_the_last_saved_map(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

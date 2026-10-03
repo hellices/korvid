@@ -389,9 +389,20 @@ def test_slot_help_lists_the_map_dispatch_reads() -> None:
     )
 
 
-def test_slot_help_notes_a_stale_map_and_is_omitted_when_empty() -> None:
+def test_slot_help_notes_a_stale_map_and_is_omitted_only_when_empty_and_fresh() -> None:
     stale = namespace_slot_group(SlotMap({2: SlotEntry("dev", SlotOrigin.AUTO)}), stale=True)
 
     assert stale is not None
     assert stale[1][-1] == ("", "Last known map - namespace discovery failed")
-    assert namespace_slot_group(SlotMap(), stale=True) is None
+    assert namespace_slot_group(SlotMap(), stale=False) is None
+    assert namespace_slot_group(SlotMap(), stale=True) == (
+        "Namespace slots",
+        [("", "Last known map - namespace discovery failed")],
+    )
+
+
+def test_help_describes_keys_1_to_9_as_namespace_slots() -> None:
+    groups = dict(collect_help(KorvidApp.BINDINGS, []))
+    rows = [row for row in groups["Global"] if row[0] == "1"]
+
+    assert rows == [("1", "Jump to namespace slot (1-9)")]

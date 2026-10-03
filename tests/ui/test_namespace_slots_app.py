@@ -209,14 +209,15 @@ async def test_escape_keeps_the_current_slots(tmp_path: Path) -> None:
     async with app.run_test(size=(120, 40)) as pilot:
         await _ready(pilot, app, 2, "old")
         cluster.names = ["alpha"]
+        state = (tmp_path / "namespace-slots.json").read_bytes()
 
         await _reallocate(pilot, app)
         await pilot.press("escape")
         await until(pilot, lambda: len(app.screen_stack) == 1, label="preview dismissed")
 
-        entry = _slot(app, 2)
-        assert entry == SlotEntry("old", SlotOrigin.AUTO, available=False)
-    assert slot_store.load(IDENTITY)[2] == SlotEntry("old", SlotOrigin.AUTO, available=False)
+        assert _slot(app, 2) == SlotEntry("old", SlotOrigin.AUTO)
+    assert (tmp_path / "namespace-slots.json").read_bytes() == state
+    assert slot_store.load(IDENTITY)[2] == SlotEntry("old", SlotOrigin.AUTO)
 
 
 async def test_keybinding_apply_and_reset_leave_the_slot_state_untouched(tmp_path: Path) -> None:

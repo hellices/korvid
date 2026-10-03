@@ -345,8 +345,7 @@ async def test_confirmed_reallocation_reclaims_unavailable_slots_after_saving(
     screen = await _open_reallocation(harness)
 
     assert [(c.slot, c.before, c.after) for c in screen.changes] == [
-        (3, _auto("old", available=False), _auto("new")),
-        (4, _auto("new"), None),
+        (3, _auto("old"), _auto("new")),
     ]
     harness.ui.callbacks[-1](True)
     assert harness.layout() == {
@@ -361,14 +360,30 @@ async def test_cancelled_reallocation_keeps_the_current_map(tmp_path: Path) -> N
     harness = Harness(tmp_path, names=["dev", "old"])
     await harness.controller.activate()
     harness.discover()
-    harness.names = ["dev"]
-    await _open_reallocation(harness)
-    saved = harness.saved()
+    harness.names = ["dev", "new"]
+    layout, saved = harness.layout(), harness.saved()
 
+    await _open_reallocation(harness)
+    assert harness.layout() == layout, "opening the preview must not touch the map"
+    assert harness.saved() == saved, "opening the preview must not touch the file"
     harness.ui.callbacks[-1](False)
 
-    assert harness.layout() == {1: ("dev", "auto", True), 2: ("old", "auto", False)}
+    assert harness.layout() == layout == {1: ("dev", "auto", True), 2: ("old", "auto", True)}
     assert harness.saved() == saved
+
+
+async def test_confirmed_reallocation_clears_a_stale_map(tmp_path: Path) -> None:
+    harness = Harness(tmp_path, names=["dev"])
+    await harness.controller.activate()
+    harness.controller.observe_failure(harness.controller.token())
+    harness.names = ["dev", "new"]
+
+    await _open_reallocation(harness)
+    assert harness.controller.stale, "only a confirmed reallocation rewrites the map"
+    harness.ui.callbacks[-1](True)
+
+    assert not harness.controller.stale
+    assert harness.layout() == {1: ("dev", "auto", True), 2: ("new", "auto", True)}
 
 
 async def test_reallocation_save_failure_keeps_the_current_map(
@@ -386,7 +401,7 @@ async def test_reallocation_save_failure_keeps_the_current_map(
     monkeypatch.setattr(harness.store, "save", fail_save)
     harness.ui.callbacks[-1](True)
 
-    assert harness.layout() == {1: ("dev", "auto", True), 2: ("old", "auto", False)}
+    assert harness.layout() == {1: ("dev", "auto", True), 2: ("old", "auto", True)}
     message, severity = harness.ui.notifications[-1]
     assert "disk full" in message
     assert severity == "error"
@@ -404,7 +419,7 @@ async def test_a_reallocation_confirmed_after_a_context_switch_is_refused(
     harness.controller.deactivate()
     harness.ui.callbacks[-1](True)
 
-    assert harness.saved() == {1: _auto("dev"), 2: _auto("old", available=False)}
+    assert harness.saved() == {1: _auto("dev"), 2: _auto("old")}
     assert "context changed" in harness.ui.notifications[-1][0]
 
 

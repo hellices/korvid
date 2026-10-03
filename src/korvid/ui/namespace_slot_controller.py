@@ -211,7 +211,8 @@ class NamespaceSlotController:
         names = await self._list(lister, token)
         if names is None or token != self._generation:
             return
-        self.observe(token, names)
+        # The preview compares against the map as it stands: nothing changes
+        # in memory or on disk until the user confirms (Escape keeps it all).
         proposed = reallocate(self._pinned(), frozenset(names))
         changes = preview(self.slots, proposed)
         if not changes:
@@ -236,6 +237,7 @@ class NamespaceSlotController:
         persistence, identity = self._persistence, self._identity
         if persistence is None or identity is None:
             self._auto = slots
+            self._stale = False
             self._ui.notify("Namespace slots reallocated for this session (not saved)")
             return
         try:
@@ -249,5 +251,6 @@ class NamespaceSlotController:
             )
             return
         self._auto = slots
+        self._stale = False
         self._persist_failed = False
         self._ui.notify("Namespace slots reallocated")

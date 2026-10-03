@@ -107,6 +107,8 @@ class NamespaceSlotStore:
             content = self._path.read_text(encoding="utf-8")
         except FileNotFoundError:
             return []
+        except UnicodeDecodeError as exc:
+            raise _malformed("not valid UTF-8") from exc
         try:
             document = json.loads(content)
         except json.JSONDecodeError as exc:

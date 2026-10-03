@@ -106,14 +106,13 @@ def namespace_slot_group(
     """The "Namespace slots" group: what each 1-9 key reaches now (issue #406).
 
     Built from the same map dispatch reads, so the overlay cannot promise a
-    namespace the key would not switch to. None when no slot is occupied.
+    namespace the key would not switch to. None only when no slot is
+    occupied and discovery has not failed, so a failure is never hidden.
     """
     rows = [(str(slot), entry.describe()) for slot, entry in slots.items()]
-    if not rows:
-        return None
     if stale:
         rows.append(("", "Last known map - namespace discovery failed"))
-    return "Namespace slots", rows
+    return ("Namespace slots", rows) if rows else None
 
 
 class HelpScreen(ModalScreen[None]):
