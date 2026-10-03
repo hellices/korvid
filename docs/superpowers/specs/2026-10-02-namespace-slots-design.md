@@ -5,8 +5,8 @@
 Implement issue #406 for v0.6.0. Keys 1-9 keep their fixed bindings and
 dispatch path. What changes is the map behind them. Configured
 `favorite_namespaces` stay pinned first. Saved automatic slots for the
-current cluster come next. Namespaces found by an authorized listing fill
-whatever slots are still free. The handoff is an implementation PR with
+current cluster come next. A namespace the user switches to takes whatever
+slot is still free, the first time they visit it. The handoff is an implementation PR with
 completed review rounds and exact-head checks. It is never merged by the
 agent. The cross-feature remap/reset/reallocation/restart journey belongs to
 release tracker #421, as recorded in the #404 design.
@@ -33,13 +33,15 @@ no I/O, no Textual and no Kubernetes.
      becomes unavailable. It keeps its slot, so the number is not reused.
      An unavailable namespace that reappears becomes available again in the
      same slot. With an unknown inventory, saved availability is kept as is.
-  4. With a complete inventory, unmapped names fill free slots in ascending
-     slot order, using sorted name order. They are never re-sorted on a later
-     refresh. Example: `1 dev / 2 prod / 3 staging` plus `alpha` becomes
-     `... / 4 alpha`.
-- `reallocate(pinned, inventory)` is the explicit rebuild. It needs a complete
-  inventory. It keeps pins and packs every other listed name into the free
-  slots in name order. Unavailable slots are reclaimed.
+  4. A listing never adds an entry. Only a visit does.
+- `place(slots, namespace)` records a visit. A namespace not yet in the map
+  takes the lowest free slot; one already there, pinned, automatic or
+  unavailable, keeps its slot. With no free slot nothing changes. Example:
+  `1 dev / 2 prod / 3 staging` plus a visit to `alpha` becomes `... / 4 alpha`.
+- `reallocate(pinned, saved, inventory)` is the explicit rebuild. It needs a
+  complete inventory. It keeps pins, drops automatic entries the listing no
+  longer contains and moves the rest up into the lowest free slots in their
+  current slot order. Unavailable slots are reclaimed.
 - `preview(current, proposed)` lists the slots that change, for the
   confirmation modal.
 
@@ -82,11 +84,33 @@ save keeps the last saved file intact and reports an actionable notice once.
 Routine discovery keeps the new map in memory for this session. Reallocation
 commits only after its save succeeds, mirroring the #404 apply contract.
 
+## Visits
+
+Slots follow the namespaces the user works in, not the cluster's name order.
+An earlier draft filled free slots from the listing in name order. In a
+cluster with more than nine namespaces that fills every key with
+`cert-manager`, `default`, `kube-node-lease`, `kube-public`, `kube-system` and
+similar names, and saving the numbers would make that permanent.
+
+A visit is a user-initiated `NavigateCommand` that lands on a namespace:
+`:ns <name>`, `:<view> <name>` or a picker selection. Agent navigation, the `0`
+all-namespaces toggle and the slot keys themselves are not visits. After the
+navigation, the app asks the slot controller to `visit` the namespace.
+
+- The all-namespaces scope is never assigned.
+- With a complete inventory from the current generation, a name the listing
+  lacks (a mistyped `:ns`) is not assigned. Without one the visit is trusted,
+  and the next complete listing marks it unavailable if it does not exist.
+- A visit while a `:ctx` switch is in progress lands in the cleared map and is
+  replaced when the new cluster's saved map is restored, so it is never saved
+  to either cluster.
+
 ## Discovery triggers
 
 No new trigger and no new watch. The existing startup/post-`:ctx` completion
 prefetch and the `:ns` picker listing feed their results to the slot
-controller. A 403 keeps the existing single permission notice and never
+controller, which uses them only to judge availability and to reject
+mistyped visits. A 403 keeps the existing single permission notice and never
 probes individual namespaces. Configured favorites are never used as a
 fallback inventory. When discovery fails, help shows the map as last known,
 with a stale note.
@@ -133,15 +157,17 @@ extracting existing code rather than raising caps.
 
 ## Verification
 
-- Pure tests: pins first, pin/auto collisions, duplicates, additions without
-  renumbering, confirmed removal, reappearance, unknown inventory, more than
-  nine names, reallocation and preview.
+- Pure tests: pins first, pin/auto collisions, duplicates, visits in
+  first-visit order, a listing that never assigns, confirmed removal,
+  reappearance, unknown inventory, more than nine visits, reallocation and
+  preview.
 - Store tests: round trip, per-identity isolation, other records preserved,
   malformed/wrong-version documents, write failure leaves the old file.
 - Identity tests: explicit and current-context names, server change isolates.
-- Controller and TUI tests: dispatch matches help and picker labels, unavailable
-  notice, stale result after `:ctx` rejected, 403 does not probe, refresh never
-  navigates, reallocation confirm/cancel/save failure, keybinding reset leaves
+- Controller and TUI tests: dispatch matches help and picker labels, visits
+  through `NavigateCommand`, a mistyped visit is not assigned, a visit during
+  `:ctx` is not saved, unavailable notice, stale result after `:ctx` rejected,
+  403 does not probe, refresh never navigates, reallocation confirm/cancel/save failure, keybinding reset leaves
   slots and reallocation leaves keybindings.
 - Targeted checks while iterating; `make check`, coverage and the existing
   pre-commit gates before handoff. Follow the review loop in AGENTS.md and

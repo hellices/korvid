@@ -19,7 +19,7 @@ from korvid.core.watch import WatchManager
 from korvid.k8s.errors import ApiStatusError
 from korvid.ui.app import KorvidApp
 from korvid.ui.context_switch_coordinator import ContextSwitchResult
-from korvid.ui.messages import SwitchContextCommand
+from korvid.ui.messages import NavigateCommand, SwitchContextCommand
 from korvid.ui.namespace_slot_controller import SlotPersistence
 from korvid.ui.widgets.help_screen import HelpScreen
 from korvid.ui.widgets.namespace_picker import NamespacePicker
@@ -75,13 +75,24 @@ def _slot(app: KorvidApp, slot: int) -> SlotEntry | None:
     return app._workspace_ctl.slots.slots.get(slot)
 
 
-async def _ready(pilot: Pilot[None], app: KorvidApp, slot: int, namespace: str) -> None:
+async def _ready(pilot: Pilot[None], app: KorvidApp, names: list[str]) -> None:
     await until(pilot, lambda: app.query_one(ResourceTable).row_count == 1, label="table seeded")
-    await until(
-        pilot,
-        lambda: (entry := _slot(app, slot)) is not None and entry.namespace == namespace,
-        label=f"slot {slot} discovered",
-    )
+    await until(pilot, lambda: app._command_bar.namespace_words == names, label="namespaces listed")
+
+
+def _mapped(app: KorvidApp, namespace: str) -> bool:
+    return any(entry.namespace == namespace for _, entry in app._workspace_ctl.slots.slots.items())
+
+
+def _arrived(app: KorvidApp, namespace: str) -> bool:
+    return app.current_scope == namespace and _mapped(app, namespace)
+
+
+async def _visit(pilot: Pilot[None], app: KorvidApp, *namespaces: str) -> None:
+    """Switch to each namespace the way `:ns <name>` and the picker do."""
+    for namespace in namespaces:
+        app.post_message(NavigateCommand(None, namespace=namespace))
+        await until(pilot, partial(_arrived, app, namespace), label=f"visited {namespace}")
 
 
 async def _help_text(pilot: Pilot[None], app: KorvidApp) -> str:
@@ -110,9 +121,11 @@ async def test_help_picker_and_keys_agree_and_discovery_never_navigates(tmp_path
     cluster = Cluster(["prod", "beta", "alpha"])
     app, slot_store = _app(cluster, tmp_path)
     async with app.run_test(size=(120, 40)) as pilot:
-        await _ready(pilot, app, 3, "beta")
+        await _ready(pilot, app, cluster.names)
         assert app.current_scope == "default"
+        assert _slot(app, 2) is None, "a listing alone assigns no slot"
 
+        await _visit(pilot, app, "alpha", "beta")
         help_text = await _help_text(pilot, app)
         assert "Namespace slots" in help_text
         assert "2          alpha (auto)" in help_text
@@ -133,20 +146,21 @@ async def test_a_namespace_gone_from_the_listing_keeps_its_key_but_refuses_it(
     cluster = Cluster(["alpha", "beta"])
     app, _ = _app(cluster, tmp_path, config=KorvidConfig(namespace="default"))
     async with app.run_test(size=(120, 40)) as pilot:
-        await _ready(pilot, app, 2, "beta")
+        await _ready(pilot, app, cluster.names)
+        await _visit(pilot, app, "beta", "alpha")
         cluster.names = ["alpha", "gamma"]
 
         rows = await _picker_rows(pilot, app)
-        await pilot.press("2")
+        await pilot.press("1")
 
-        assert ("2  beta (unavailable)", True) in rows
-        assert ("3  gamma", False) in rows
+        assert ("1  beta (unavailable)", True) in rows
+        assert ("   gamma", False) in rows
         await until(
             pilot,
             lambda: any(":slots" in n.message for n in app._notifications),
             label="unavailable slot explained",
         )
-        assert app.current_scope == "default"
+        assert app.current_scope == "alpha"
 
 
 async def test_a_denied_listing_infers_nothing_and_never_probes(tmp_path: Path) -> None:
@@ -182,7 +196,8 @@ async def test_slots_command_previews_then_saves_only_the_slot_state(tmp_path: P
         cluster, tmp_path, config=load_config(config_path), save=saved_keybindings.append
     )
     async with app.run_test(size=(120, 40)) as pilot:
-        await _ready(pilot, app, 2, "old")
+        await _ready(pilot, app, cluster.names)
+        await _visit(pilot, app, "old", "alpha")
         cluster.names = ["alpha", "new"]
 
         screen = await _reallocate(pilot, app)
@@ -190,15 +205,12 @@ async def test_slots_command_previews_then_saves_only_the_slot_state(tmp_path: P
         await pilot.press("enter")
         await until(
             pilot,
-            lambda: (entry := _slot(app, 2)) is not None and entry.namespace == "new",
+            lambda: (entry := _slot(app, 1)) is not None and entry.namespace == "alpha",
             label="reallocated",
         )
 
-        assert app.current_scope == "default"
-    assert slot_store.load(IDENTITY) == {
-        1: SlotEntry("alpha", SlotOrigin.AUTO),
-        2: SlotEntry("new", SlotOrigin.AUTO),
-    }
+        assert app.current_scope == "alpha"
+    assert slot_store.load(IDENTITY) == {1: SlotEntry("alpha", SlotOrigin.AUTO)}
     assert saved_keybindings == []
     assert yaml.safe_load(config_path.read_text(encoding="utf-8")) == {"namespace": "default"}
 
@@ -207,7 +219,8 @@ async def test_escape_keeps_the_current_slots(tmp_path: Path) -> None:
     cluster = Cluster(["alpha", "old"])
     app, slot_store = _app(cluster, tmp_path, config=KorvidConfig(namespace="default"))
     async with app.run_test(size=(120, 40)) as pilot:
-        await _ready(pilot, app, 2, "old")
+        await _ready(pilot, app, cluster.names)
+        await _visit(pilot, app, "alpha", "old")
         cluster.names = ["alpha"]
         state = (tmp_path / "namespace-slots.json").read_bytes()
 
@@ -231,7 +244,8 @@ async def test_keybinding_apply_and_reset_leave_the_slot_state_untouched(tmp_pat
         save=partial(save_keybindings, config_path),
     )
     async with app.run_test(size=(120, 40)) as pilot:
-        await _ready(pilot, app, 2, "beta")
+        await _ready(pilot, app, cluster.names)
+        await _visit(pilot, app, "alpha", "beta")
         state = (tmp_path / "namespace-slots.json").read_bytes()
 
         screen = await _open_editor(pilot, app)
@@ -293,9 +307,15 @@ async def test_a_context_switch_never_carries_the_old_clusters_slots(tmp_path: P
         namespace_slots=SlotPersistence(slot_store, lambda context: (context or "", SERVER)),
     )
     async with app.run_test(size=(120, 40)) as pilot:
-        await _ready(pilot, app, 1, "a-only")
+        await _ready(pilot, app, ["a-only"])
+        await _visit(pilot, app, "a-only")
 
         await _switch(pilot, app, "ctx-b")
+        await until(
+            pilot, lambda: app._command_bar.namespace_words == ["b-only"], label="ctx-b listed"
+        )
+        assert dict(app._workspace_ctl.slots.slots.items()) == {}
+        await _visit(pilot, app, "b-only")
         await until(pilot, _only(app, "b-only"), label="only ctx-b slots")
         await _switch(pilot, app, "ctx-a")
         await until(pilot, _only(app, "a-only"), label="ctx-a slots restored")

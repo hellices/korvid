@@ -120,9 +120,12 @@ selecting a namespace while browsing deployments does not switch to pods.
 ### Namespace shortcuts
 
 Keys `1`–`9` are namespace slots. Your `favorite_namespaces` are pinned to
-the first slots in their configured order. When korvid lists the cluster's
-namespaces, every other namespace fills a free slot in name order. Pressing
-a slot key only switches scope; discovering a namespace never navigates.
+the first slots in their configured order. The first time you switch to
+another namespace with `:ns <name>`, `:<view> <name>` or the namespace picker,
+it takes the lowest free slot, so the namespaces you actually work in get
+numbers in the order you first visit them. A namespace the latest listing does
+not contain (a typo) gets no slot. Pressing a slot key only switches scope,
+and listing namespaces never assigns a slot or navigates.
 
 Automatic slots are stable. A namespace keeps its number on every later
 refresh and after a restart: korvid saves the assignment per cluster (context
@@ -132,9 +135,12 @@ unavailable, so the key is refused instead of reused. When it reappears, the
 same key works again.
 
 `?` lists the current slots, and the `:ns` picker shows each namespace's slot
-number. To repack the slots, run `:slots` (or `:ns-slots`). It previews every
-slot that would change and saves only after you confirm with `Enter`; `Esc`
-keeps the current slots. `:slots` touches neither your configuration nor your
+number. Once all nine are taken, other namespaces stay reachable through the
+picker and `:ns <name>`. To repack the slots, run `:slots` (or `:ns-slots`).
+It drops the namespaces that are no longer listed and moves the rest up, in
+their current order, so the freed numbers come back. It previews every slot
+that would change and saves only after you confirm with `Enter`; `Esc` keeps
+the current slots. `:slots` touches neither your configuration nor your
 keybindings.
 
 If the namespace listing fails or RBAC denies it, korvid keeps the last known

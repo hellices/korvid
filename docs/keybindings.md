@@ -18,7 +18,7 @@ Korvid shows only the keys that act on the current view. Press `?` for the compl
 | `/` | Filter a table or search the log pane |
 | `Enter` / `Esc` | Drill in / return one level |
 | `0` | Toggle all namespaces |
-| `1`–`9` | Jump to a [namespace shortcut](tui.md#namespace-shortcuts): pinned favorites first, then stable automatic slots |
+| `1`–`9` | Jump to a [namespace shortcut](tui.md#namespace-shortcuts): pinned favorites first, then the namespaces you visit, in first-visit order |
 | `d` | Describe the selected resource |
 | `g` | Open operational relationships |
 | `T` | Open the bounded session timeline |
