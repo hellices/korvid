@@ -1539,8 +1539,8 @@ def _raise_if_secret_key_segment(key: str, *, path: str) -> None:
         return
     raise _AgentOptionsError(
         f"{_agent_options_path(f'{path}.{key}')} uses reserved "
-        f"secret-bearing key segment {segment!r}; keep secrets in "
-        f"env vars such as agent.api_key_env"
+        f"secret-bearing key segment {segment!r}; keep secrets out of options "
+        "and name an environment variable or keychain entry in the profile's auth.key"
     )
 
 

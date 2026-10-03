@@ -595,6 +595,29 @@ agent:
     assert any("rejected" in w for w in cfg.warnings)
 
 
+def test_the_inline_secret_refusal_points_at_the_profile_auth_key(tmp_path: Path) -> None:
+    """The refusal tells the operator where the key belongs now. Flat
+    `agent.api_key_env` is itself a configuration error since profiles
+    replaced it, so recommending it sent people from one error to another."""
+    path = _write(
+        tmp_path,
+        """
+agent:
+  active: main
+  profiles:
+    main:
+      model: openai/gpt-4o
+      options:
+        api_key: inline-secret-value
+""",
+    )
+    error = load_config(path).model_connections.profiles["main"].config_error
+
+    assert error is not None
+    assert "auth.key" in error
+    assert "api_key_env" not in error
+
+
 def test_a_plural_inline_secret_is_refused_and_the_profile_still_survives(
     tmp_path: Path,
 ) -> None:
