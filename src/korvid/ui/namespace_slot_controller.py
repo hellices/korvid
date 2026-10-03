@@ -81,6 +81,9 @@ class NamespaceSlotController:
         self._inventory: frozenset[str] | None = None
         #: Bumped by every listing outcome, so a slower one never replaces it.
         self._observed = 0
+        #: The latest complete listing, its cluster and revision: a save that
+        #: is rebased after its cluster was left is still judged against it.
+        self._listed: tuple[ClusterIdentity, int, frozenset[str]] | None = None
         #: Set once a save failed or the document is unreadable for this
         #: cluster: later saves are skipped so one fault reports once.
         self._persist_failed = False
@@ -177,6 +180,8 @@ class NamespaceSlotController:
         self._observed += 1
         self._stale = False
         self._inventory = frozenset(names)
+        if self._identity is not None:
+            self._listed = (self._identity, self._observed, self._inventory)
         self._update(build(self._pinned(), self._auto, self._inventory).automatic())
 
     def visit(self, namespace: str) -> None:
@@ -421,11 +426,11 @@ class NamespaceSlotController:
             except asyncio.CancelledError:
                 # Quitting cancelled the worker, but the shielded write still
                 # lands: `shutdown` must drain a queue rebased on it.
-                self._rebase(identity, proposed, inventory, before)
+                self._rebase(identity, proposed, inventory, before, seen)
                 raise
             if token != self._generation:
                 # Switched while writing: requeue for the old cluster's file.
-                self._rebase(identity, proposed, inventory, before)
+                self._rebase(identity, proposed, inventory, before, seen)
                 return
             self._pending.pop(identity, None)  # `_install` carries its visits
             self._persist_failed = False
@@ -438,12 +443,24 @@ class NamespaceSlotController:
         proposed: SlotMap,
         inventory: frozenset[str],
         before: dict[int, SlotEntry],
+        seen: int,
     ) -> None:
-        """Rebuild the map queued for *identity* on the saved *proposed* one:
-        it was built on the old map, so only its new visits carry over."""
+        """Rebuild the map queued for *identity* on the saved *proposed* one.
+
+        The queued map was built on the old map, so only its new visits carry
+        over. A listing of that cluster newer than *seen* judges the result.
+        """
         queued = self._pending.pop(identity, None)
-        if queued is not None:
-            self._pending[identity] = _with_visits(proposed, inventory, before, queued)
+        listed = self._listed
+        newer = listed is not None and listed[0] == identity and listed[1] > seen
+        if listed is not None and newer:
+            inventory = listed[2]
+        elif queued is None:
+            return
+        merged = _with_visits(proposed, inventory, before, queued or {})
+        rebased = build(self._pinned(), merged, inventory).automatic()
+        if rebased != proposed.automatic():
+            self._pending[identity] = rebased
 
     def _install(
         self,

@@ -103,7 +103,8 @@ contains them. If `:ctx` switched
 during that write, the old cluster's queued map is rebuilt the same way
 before it is written, so it cannot overwrite the confirmed map. Quitting
 during that write rebuilds the queue the same way before `shutdown` drains
-it. If the write
+it. Either rebuild is judged against a listing of that cluster that landed
+after the reallocation's own, so newer availability is kept. If the write
 fails, maps already queued stay queued and are still written. A queued save
 that fails after `:ctx` switched away is reported with the old context name.
 It does not stop the new cluster's saves.
