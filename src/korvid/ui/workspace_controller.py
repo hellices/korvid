@@ -370,7 +370,9 @@ class WorkspaceController:
     # Navigation
     # ------------------------------------------------------------------
 
-    async def navigate_command(self, view: str | None, namespace: str | None) -> None:
+    async def navigate_command(
+        self, view: str | None, namespace: str | None, guard: Callable[[], bool] | None = None
+    ) -> None:
         """`:view`/agent navigate: abandon drill + hierarchy-return, then navigate.
 
         The stack clear happens inside the navigation lock so a concurrent
@@ -387,7 +389,7 @@ class WorkspaceController:
             # return (issue #135) - Escape afterwards must not teleport back.
             pane.hierarchy_return = None
 
-        await self.navigate(view, namespace, drill_op=_abandon)
+        await self.navigate(view, namespace, drill_op=_abandon, navigation_guard=guard)
 
     async def navigate(
         self,
@@ -655,14 +657,14 @@ class WorkspaceController:
     async def favorite_namespace(self, index: int) -> None:
         """Jump to namespace slot *index* (issues #108/#406, keys 1-9).
 
-        A slot is a UI-only shortcut: it uses the exact same navigation path
-        as `:ns <name>` — no access is granted, and a forbidden watch reports
-        its own concise notice. Empty slots are no-ops; unavailable ones
-        explain themselves instead of navigating.
+        The same navigation as `:ns <name>`, granting no access. Empty slots
+        are no-ops and unavailable ones explain themselves; a slot read
+        before a `:ctx` switch is refused under the navigation lock.
         """
-        namespace = self._slots.target(index)
+        epoch = self._context.epoch()
+        namespace = None if self._context.switching() else self._slots.target(index)
         if namespace is not None:
-            await self.navigate_command(None, namespace)
+            await self.navigate_command(None, namespace, lambda: not self._context.crossed(epoch))
 
     # ------------------------------------------------------------------
     # Filter

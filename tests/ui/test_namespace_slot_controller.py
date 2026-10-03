@@ -665,6 +665,32 @@ async def test_visits_queued_behind_a_failed_reallocation_save_are_still_saved(
     assert harness.saved() == expected
 
 
+async def test_a_reallocation_confirmed_while_the_saved_map_loads_is_refused(
+    tmp_path: Path,
+) -> None:
+    harness = Harness(tmp_path, names=["dev"])
+    harness.store.save(ClusterIdentity("dev", DEV_SERVER), {1: _auto("dev"), 3: _auto("qa")})
+    harness.resolving = threading.Event()
+    activation = asyncio.create_task(harness.controller.activate())
+    await asyncio.to_thread(harness.resolving.wait, 5)
+    await harness.visit("dev", "old")
+    await _open_reallocation(harness)
+
+    await _decide(harness, True)
+    harness.resolved.set()
+    await activation
+    await harness.ui.drain()
+
+    messages = [message for message, _ in harness.ui.notifications]
+    assert not any("reallocated" in message for message in messages)
+    assert any("still loading" in message for message in messages)
+    assert harness.layout() == {
+        1: ("dev", "auto", True),
+        2: ("old", "auto", True),
+        3: ("qa", "auto", True),
+    }
+
+
 async def test_a_switch_during_a_confirmed_save_never_lets_an_older_map_overwrite_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

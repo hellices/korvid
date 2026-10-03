@@ -124,7 +124,8 @@ class NamespaceSlotStore:
             document = json.loads(content)
         except json.JSONDecodeError as exc:
             raise _malformed("not valid JSON") from exc
-        if not isinstance(document, dict) or document.get("version") != _VERSION:
+        version = document.get("version") if isinstance(document, dict) else None
+        if type(version) is not int or version != _VERSION:  # True == 1.0 == 1
             raise _malformed(f"expected a version {_VERSION} document")
         clusters = document.get("clusters")
         if not isinstance(clusters, list):

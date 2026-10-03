@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from functools import partial
 from pathlib import Path
@@ -219,6 +220,59 @@ async def test_quitting_writes_the_slot_maps_still_queued(
         monkeypatch.setattr(slots, "shutdown", recording)
 
     assert drained == [True]
+
+
+async def test_a_visit_is_not_recorded_across_a_context_switch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app, _ = _app(Cluster(["alpha"]), tmp_path, config=KorvidConfig(namespace="default"))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _ready(pilot, app, ["alpha"])
+        navigate = app._workspace_ctl.navigate_command
+
+        async def navigate_across_a_switch(view: str | None, namespace: str | None) -> None:
+            await navigate(view, namespace)
+            monkeypatch.setattr(app._ctx, "epoch", lambda: -1)  # `:ctx` retargeted meanwhile
+
+        monkeypatch.setattr(app._workspace_ctl, "navigate_command", navigate_across_a_switch)
+        app.post_message(NavigateCommand(None, namespace="alpha"))
+        await until(pilot, lambda: app.current_scope == "alpha", label="navigated")
+        await pilot.pause()
+
+        assert not _mapped(app, "alpha")
+
+
+async def test_slot_keys_never_navigate_across_a_context_switch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app, _ = _app(Cluster(["prod"]), tmp_path)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _ready(pilot, app, ["prod"])
+        workspace = app._workspace_ctl
+        lock = workspace._nav_lock
+        await lock.acquire()  # the switch owns navigation...
+        pressed = asyncio.create_task(workspace.favorite_namespace(1))
+        await asyncio.sleep(0)  # ...while the key's slot is resolved and queued
+        monkeypatch.setattr(app._ctx, "epoch", lambda: -1)  # ...and retargets
+        lock.release()
+        await pressed
+        monkeypatch.setattr(app._ctx, "switching", lambda: True)
+        await workspace.favorite_namespace(1)  # pressed while it tears down
+
+        assert app.current_scope == "default"
+
+
+async def test_help_omits_the_slots_while_a_context_switch_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app, _ = _app(Cluster(["prod"]), tmp_path)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _ready(pilot, app, ["prod"])
+        monkeypatch.setattr(app._ctx, "switching", lambda: True)
+
+        help_text = await _help_text(pilot, app)
+
+        assert "Namespace slots" not in help_text
 
 
 async def test_a_denied_listing_infers_nothing_and_never_probes(tmp_path: Path) -> None:

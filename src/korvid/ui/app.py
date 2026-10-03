@@ -669,7 +669,9 @@ class KorvidApp(App[None]):
             overrides=overrides,
         )
         slots = self._workspace_ctl.slots
-        slot_group = namespace_slot_group(slots.slots, stale=slots.stale)
+        # Mid-`:ctx` the map belongs to neither cluster, so help omits it.
+        switching = self._ctx.switching()
+        slot_group = None if switching else namespace_slot_group(slots.slots, stale=slots.stale)
         if slot_group is not None:
             groups.append(slot_group)
         self.push_screen(
@@ -789,7 +791,10 @@ class KorvidApp(App[None]):
 
     async def on_navigate_command(self, message: NavigateCommand) -> None:
         pane = self._pane  # focus may move to another split pane while this awaits
+        epoch = self._ctx.epoch()
         await self._workspace_ctl.navigate_command(message.view, message.namespace)
+        if self._ctx.crossed(epoch):
+            return  # the namespace belongs to the cluster switched away from
         if message.namespace and pane.scope == message.namespace:
             # A namespace you switch to takes a free 1-9 slot (issue #406).
             self._workspace_ctl.slots.visit(message.namespace)

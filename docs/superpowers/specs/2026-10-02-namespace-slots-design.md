@@ -78,7 +78,8 @@ state lives outside config.
 Saving takes the existing `interprocess_lock`, re-reads the latest document,
 replaces only this identity's record and writes through the shared atomic
 same-directory writer. Other clusters' records survive concurrent korvid
-processes. A malformed or wrong-version document is not overwritten. Loading
+processes. A malformed or wrong-version document (the version must be the
+integer 1, not `true` or `1.0`) is not overwritten. Loading
 it yields an empty saved map with one warning, and saving it fails. A failed
 save keeps the last saved file intact and reports an actionable notice once.
 Routine discovery keeps the new map in memory for this session. Reallocation
@@ -121,7 +122,9 @@ all-namespaces toggle and the slot keys themselves are not visits. After the
 navigation, the app asks the slot controller to `visit` the namespace when
 the pane that issued the command is now on it. Focus may have moved to another
 split pane meanwhile. A visit made while activation resolves the cluster
-identity takes a free slot of the restored map.
+identity takes a free slot of the restored map. A navigation that a `:ctx`
+switch started or finished during is not recorded: the namespace belongs to
+the cluster switched away from.
 
 - The all-namespaces scope is never assigned.
 - With a complete inventory from the current generation, a name the listing
@@ -149,13 +152,16 @@ and persistence. The workspace controller asks it for slot *n* in
 `favorite_namespace`. An available entry navigates through the unchanged
 `navigate_command` path, in the focused pane only. An unavailable slot posts
 a notice naming the namespace and `:slots` instead of navigating. An empty
-slot stays a no-op.
+slot stays a no-op. While a `:ctx` switch runs, slot keys do nothing. A key
+whose slot was read before the switch is checked again under the navigation
+lock, so it never sends the new cluster to the old cluster's namespace.
 
 Help and the picker read the same map object that dispatch reads:
 
 - Help keeps the generic 1-9 row and adds a "Namespace slots" group. Each row
   is a slot number and `namespace (pinned|auto[, unavailable])`, plus a stale
-  note when discovery failed.
+  note when discovery failed. Help opened during a `:ctx` switch omits the
+  group, because the map then belongs to neither cluster.
 - The picker labels listed namespaces with their slot number. Slots whose
   namespace the listing lacks follow it; only unavailable ones are disabled,
   so an unlisted pin stays selectable. An empty listing still opens the
@@ -167,7 +173,9 @@ builds the reallocation proposal and opens a class-selected confirmation modal
 with a bounded `VerticalScroll` preview. Enter confirms; Escape cancels and
 keeps the current map. An unchanged proposal is reported without opening the
 modal. A failed listing refuses with the same notice as the picker. If a
-dialog opened while the listing ran, the preview is not stacked over it.
+dialog opened while the listing ran, the preview is not stacked over it. A
+confirmation while the saved map is still loading is refused with a retry
+notice, because the restore would replace the new map.
 
 ## #404 boundary
 

@@ -85,6 +85,8 @@ class NamespaceSlotController:
         self._flushing = False
         #: Serializes every write, so an older map never lands after a newer one.
         self._save_lock = asyncio.Lock()
+        #: The generation `activate` is restoring, None once it settled.
+        self._restoring: int | None = None
         #: The latest thread write; it outlives a cancelled worker.
         self._writing: asyncio.Future[None] | None = None
 
@@ -119,7 +121,14 @@ class NamespaceSlotController:
     async def activate(self) -> None:
         """Restore the saved automatic slots of the cluster now connected."""
         self.deactivate()
-        generation = self._generation
+        generation = self._restoring = self._generation
+        try:
+            await self._restore(generation)
+        finally:
+            if self._restoring == generation:
+                self._restoring = None
+
+    async def _restore(self, generation: int) -> None:
         persistence = self._persistence
         if persistence is None:
             return
@@ -363,6 +372,12 @@ class NamespaceSlotController:
             self._ui.notify(
                 "Namespace slot reallocation cancelled - the kube context changed",
                 severity="warning",
+            )
+            return
+        if self._restoring is not None:
+            # The saved map is still loading and would replace this one.
+            self._ui.notify(
+                "Namespace slots are still loading - run :slots again", severity="warning"
             )
             return
         persistence, identity = self._persistence, self._identity
