@@ -407,7 +407,7 @@ class KorvidConfig:
     views: dict[str, ViewConfig] = field(default_factory=dict)
     #: `ui.topbar` (issue #142): "expanded" starts the top bar with the full
     #: grouped legend; anything else (or unset) starts collapsed. The
-    #: runtime toggle persists the choice back through save_topbar_state.
+    #: runtime toggle persists it through config_store.save_topbar_state.
     ui_topbar_expanded: bool = False
     #: `integrations.telepresence` kill-switch (issue #159): False disables
     #: detection, the status panel and the install hint entirely. On by
@@ -1110,21 +1110,6 @@ def save_model_connections(
 #: in. A *name*: nothing in this module reads the environment, so a secret
 #: value can never travel from a profile into a projection or back to disk.
 _AUTH_ENV_KEY_SETTING: str = "key"
-
-
-def save_topbar_state(path: Path, *, expanded: bool) -> None:
-    """Persist the top bar collapse/expand choice (issue #142), preserving
-    unrelated keys (same read-modify-write shape as save_model_connections)."""
-    raw: dict[str, Any] = {}
-    if path.is_file():
-        loaded = yaml.safe_load(path.read_text())
-        raw = loaded if isinstance(loaded, dict) else {}
-    existing = raw.get("ui")
-    ui: dict[str, Any] = dict(existing) if isinstance(existing, dict) else {}
-    ui["topbar"] = "expanded" if expanded else "collapsed"
-    raw["ui"] = ui
-    path.parent.mkdir(parents=True, exist_ok=True)
-    _atomic_write_text(path, yaml.safe_dump(raw, sort_keys=False))
 
 
 def _atomic_write_text(path: Path, text: str) -> None:
