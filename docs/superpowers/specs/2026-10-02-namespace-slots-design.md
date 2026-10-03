@@ -25,7 +25,9 @@ no I/O, no Textual and no Kubernetes.
 - `build(pinned, saved, inventory)` lays out the effective map:
   1. Pins take slots 1..n in configured order, exactly as `favorite_namespaces`
      does today, capped at nine by the existing parser. Pins always dispatch;
-     their authorization behavior is unchanged.
+     their authorization behavior is unchanged. A namespace listed twice is
+     pinned once, at its first position, so the map never repeats a name and
+     visits still take the lowest genuinely free slot.
   2. Saved automatic entries keep their slot numbers. An entry is dropped if
      its slot is now pinned, its namespace is now pinned, or it repeats an
      earlier namespace. Pins always win.

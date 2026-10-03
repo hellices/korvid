@@ -196,3 +196,13 @@ def test_automatic_entries_exclude_pins() -> None:
     slots = place(build(["prod"], {}, None), "dev")
 
     assert slots.automatic() == {2: _auto("dev")}
+
+
+def test_a_duplicate_pin_takes_one_slot_and_frees_the_next_for_visits() -> None:
+    slots = place(build(["prod", "prod", "dev"], {}, None), "alpha")
+
+    assert _layout(slots) == {
+        1: ("prod", "pinned", True),
+        2: ("dev", "pinned", True),
+        3: ("alpha", "auto", True),
+    }

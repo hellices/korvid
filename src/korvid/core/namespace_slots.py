@@ -75,9 +75,10 @@ class SlotMap:
 
 
 def _pins(pinned: Sequence[str]) -> dict[int, SlotEntry]:
+    """A namespace pinned twice takes only its first slot."""
     return {
         slot: SlotEntry(namespace, SlotOrigin.PINNED)
-        for slot, namespace in zip(_SLOTS, pinned, strict=False)
+        for slot, namespace in zip(_SLOTS, dict.fromkeys(pinned), strict=False)
     }
 
 
