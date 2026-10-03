@@ -1412,10 +1412,10 @@ class KorvidApp(App[None]):
         self._agent_ui.interrupt()
 
     async def _target_uid(self, kind_alias: str, ns: str | None, name: str) -> str | None:
-        """Uid of a write target at request time, for the flows that are not
-        the agent's own: the interactive shell, the transfer pre-checks and
-        the proposal execution path all bind their approval to one exact
-        object incarnation through the same lookup."""
+        """Uid of a write target at request time, for the interactive flows
+        outside the agent's own: pod debug, the node shell and the transfer
+        pre-checks bind their approval to one exact object incarnation through
+        the same lookup."""
         return await self._agent_ui.target_uid(kind_alias, ns, name)
 
     async def _managed_note(self, kind_alias: str, ns: str | None, name: str) -> str | None:

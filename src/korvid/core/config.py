@@ -407,7 +407,7 @@ class KorvidConfig:
     views: dict[str, ViewConfig] = field(default_factory=dict)
     #: `ui.topbar` (issue #142): "expanded" starts the top bar with the full
     #: grouped legend; anything else (or unset) starts collapsed. The
-    #: runtime toggle persists the choice back through save_topbar_state.
+    #: runtime toggle persists it through config_store.save_topbar_state.
     ui_topbar_expanded: bool = False
     #: `integrations.telepresence` kill-switch (issue #159): False disables
     #: detection, the status panel and the install hint entirely. On by
@@ -487,9 +487,12 @@ def _check_unknown_agent_keys(agent_raw: dict[str, Any]) -> None:
 def load_config(path: Path | None = None) -> KorvidConfig:
     """Load config; missing file means zero-config defaults."""
     cfg_path = path or DEFAULT_CONFIG_PATH
-    if not cfg_path.is_file():
+    try:
+        loaded = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
         return KorvidConfig()
-    loaded = yaml.safe_load(cfg_path.read_text())
+    except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
+        raise ConfigError(f"cannot load {cfg_path}: {_unreadable(exc)}") from exc
     if loaded is None:
         raw: dict[str, Any] = {}
     elif isinstance(loaded, dict):
@@ -1112,21 +1115,6 @@ def save_model_connections(
 _AUTH_ENV_KEY_SETTING: str = "key"
 
 
-def save_topbar_state(path: Path, *, expanded: bool) -> None:
-    """Persist the top bar collapse/expand choice (issue #142), preserving
-    unrelated keys (same read-modify-write shape as save_model_connections)."""
-    raw: dict[str, Any] = {}
-    if path.is_file():
-        loaded = yaml.safe_load(path.read_text())
-        raw = loaded if isinstance(loaded, dict) else {}
-    existing = raw.get("ui")
-    ui: dict[str, Any] = dict(existing) if isinstance(existing, dict) else {}
-    ui["topbar"] = "expanded" if expanded else "collapsed"
-    raw["ui"] = ui
-    path.parent.mkdir(parents=True, exist_ok=True)
-    _atomic_write_text(path, yaml.safe_dump(raw, sort_keys=False))
-
-
 def _atomic_write_text(path: Path, text: str) -> None:
     """Unique same-directory temp file + fsync + atomic replace: an
     interrupted write can never leave truncated YAML behind (destroying
@@ -1156,30 +1144,40 @@ def _atomic_write_text(path: Path, text: str) -> None:
         tmp.unlink(missing_ok=True)
 
 
+def _unreadable(exc: OSError | UnicodeDecodeError | yaml.YAMLError) -> str:
+    """Why config.yaml could not be read, on one line that never quotes the
+    file: YAML's own message repeats the offending line, which may be a secret."""
+    if isinstance(exc, UnicodeDecodeError):
+        return "the file is not UTF-8 text"
+    if isinstance(exc, OSError):
+        return exc.strerror or type(exc).__name__
+    mark = getattr(exc, "problem_mark", None)
+    where = f" at line {mark.line + 1}, column {mark.column + 1}" if mark is not None else ""
+    return f"malformed YAML{where}"
+
+
+def _whole_number(value: Any) -> int | None:
+    """`value` as an int, or None when YAML gave something else: a bool
+    (`true` would become 1), a fraction (int() truncates 7878.9), or
+    .inf/.nan (int() raises OverflowError/ValueError)."""
+    if isinstance(value, bool) or (isinstance(value, float) and not value.is_integer()):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
 def _parse_port(value: Any) -> int:
     """Coerce mcp.port to a valid TCP port; fall back to 7878."""
-    if isinstance(value, bool):  # YAML `true` would silently become port 1
-        return 7878
-    if isinstance(value, float) and not value.is_integer():
-        # Rejects fractional ports (7878.9) as well as .inf/.nan, which
-        # int() would otherwise truncate or blow up on (OverflowError).
-        return 7878
-    try:
-        port = int(value)
-    except (TypeError, ValueError, OverflowError):
-        return 7878
-    return port if 0 < port < 65536 else 7878
+    port = _whole_number(value)
+    return port if port is not None and 0 < port < 65536 else 7878
 
 
 def _parse_buffer_lines(value: Any) -> int:
     """Coerce log_buffer_lines to a sane positive int; fall back to 5000."""
-    if isinstance(value, bool):  # YAML `true` would silently become a 1-line buffer
-        return 5000
-    try:
-        lines = int(value)
-    except (TypeError, ValueError):
-        return 5000
-    return lines if lines > 0 else 5000
+    lines = _whole_number(value)
+    return lines if lines is not None and lines > 0 else 5000
 
 
 def _parse_model_tier(value: Any) -> str | None:
@@ -1541,8 +1539,8 @@ def _raise_if_secret_key_segment(key: str, *, path: str) -> None:
         return
     raise _AgentOptionsError(
         f"{_agent_options_path(f'{path}.{key}')} uses reserved "
-        f"secret-bearing key segment {segment!r}; keep secrets in "
-        f"env vars such as agent.api_key_env"
+        f"secret-bearing key segment {segment!r}; keep secrets out of options "
+        "and name an environment variable or keychain entry in the profile's auth.key"
     )
 
 

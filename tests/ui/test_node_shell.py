@@ -16,11 +16,14 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
+import pytest
+
 from korvid.core.audit import AuditLog
 from korvid.core.config import KorvidConfig
 from korvid.core.store import ResourceStore, Summary
 from korvid.core.watch import WatchManager
 from korvid.k8s.discovery import ResourceMeta
+from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.models import GenericSummary
 from korvid.k8s.writes import WriteOps
 from korvid.ui.action_availability import AvailabilityCode, UnavailableReason
@@ -99,6 +102,14 @@ def make_app(
         while True:
             await asyncio.sleep(0.01)
 
+    async def node_manifest(kind: str, ns: str | None, name: str) -> dict[str, Any]:
+        # The fixture nodes as the API server returns them: the node shell
+        # re-reads the approved UID before it creates the privileged pod.
+        uids = {"worker-1": "node-uid-1", **{extra: f"uid-{extra}" for extra in extra_nodes}}
+        if name not in uids:
+            raise ApiStatusError(404, "NotFound")
+        return {"metadata": {"name": name, "uid": uids[name]}}
+
     async def check_permission(
         verb: str, resource: str, sub: str, ns: str | None, group: str, name: str
     ) -> bool:
@@ -125,7 +136,7 @@ def make_app(
             if audit_log is not None
             else (None if audit_path is None else AuditLog(audit_path)),
             check_permission=None if permitted is None else check_permission,
-            get_manifest=get_manifest,
+            get_manifest=get_manifest or node_manifest,
         )
 
 
@@ -536,6 +547,92 @@ async def test_node_shell_aborts_when_node_replaced_after_prompt(tmp_path: Path)
     assert not audit_path.is_file() or "intent" not in audit_path.read_text()
 
 
+@pytest.mark.parametrize(
+    "lookup",
+    [
+        pytest.param({"metadata": {}}, id="no-uid-in-manifest"),
+        pytest.param(ApiStatusError(503, "ServiceUnavailable"), id="apiserver-unavailable"),
+    ],
+)
+async def test_node_shell_refuses_when_node_identity_cannot_be_verified(
+    tmp_path: Path, lookup: dict[str, Any] | Exception
+) -> None:
+    """kubectl addresses the node by name only, so the approved incarnation
+    must be read back before the privileged pod exists: a lookup that cannot
+    answer refuses (fail closed, as pod debug and transfer do since #334)
+    rather than shelling into whichever node holds the name now."""
+    rec = DeleteRecorder()
+    audit_path = tmp_path / "audit.jsonl"
+
+    async def get_manifest(kind: str, ns: str | None, name: str) -> dict[str, Any]:
+        if isinstance(lookup, Exception):
+            raise lookup
+        return lookup
+
+    app = make_app(rec, audit_path, get_manifest=get_manifest)
+    run_fake, run_calls = _kubectl_run()
+    with _node_shell_env(run_fake) as call_records:
+        async with app.run_test() as pilot:
+            await _to_nodes(pilot)
+            await pilot.press("s")
+            await until(
+                pilot,
+                lambda: isinstance(app.screen, ConfirmScreen),
+                label="node-shell approval dialog opened",
+            )
+            await pilot.press("y")
+
+            def _refused() -> bool:
+                return any("could not be verified" in n.message for n in app._notifications)
+
+            await until(pilot, _refused, label="unverified-node cancel notification")
+    assert call_records == []
+    assert not any("debug" in argv for argv in run_calls)
+    assert not audit_path.is_file() or "intent" not in audit_path.read_text()
+
+
+async def test_node_shell_refuses_an_approval_without_a_node_uid(tmp_path: Path) -> None:
+    """A node row without a UID gives the approval nothing to bind to: the
+    privileged shell must not run on the strength of the name alone."""
+    rec = DeleteRecorder()
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app(rec, audit_path)
+    run_fake, run_calls = _kubectl_run()
+    with _node_shell_env(run_fake) as call_records:
+        async with app.run_test() as pilot:
+            await app._shell._run_node_shell(rec, "worker-1", "default", DEBUG_IMAGE, None)
+            await until(
+                pilot,
+                lambda: any("could not be verified" in n.message for n in app._notifications),
+                label="unverified-node cancel notification",
+            )
+    assert call_records == []
+    assert run_calls == []
+    assert not audit_path.is_file()
+
+
+async def test_node_shell_reports_a_node_deleted_after_prompt(tmp_path: Path) -> None:
+    """Deletion stays distinguishable from an unreachable cluster."""
+    rec = DeleteRecorder()
+    audit_path = tmp_path / "audit.jsonl"
+
+    async def get_manifest(kind: str, ns: str | None, name: str) -> dict[str, Any]:
+        raise ApiStatusError(404, "NotFound")
+
+    app = make_app(rec, audit_path, get_manifest=get_manifest)
+    run_fake, run_calls = _kubectl_run()
+    with _node_shell_env(run_fake) as call_records:
+        async with app.run_test() as pilot:
+            await app._shell._run_node_shell(rec, "worker-1", "default", DEBUG_IMAGE, "node-uid-1")
+            await until(
+                pilot,
+                lambda: any("no longer exists" in n.message for n in app._notifications),
+                label="deleted-node cancel notification",
+            )
+    assert call_records == []
+    assert run_calls == []
+
+
 class _ExplodingAudit(AuditLog):
     """AuditLog whose persistence always fails."""
 
@@ -652,7 +749,7 @@ async def test_node_shell_cancelled_worker_still_deletes_pod(tmp_path: Path) -> 
         async with app.run_test():
             loop_box.append(asyncio.get_running_loop())
             task = asyncio.ensure_future(
-                app._shell._run_node_shell(rec, "worker-1", "default", DEBUG_IMAGE, None)
+                app._shell._run_node_shell(rec, "worker-1", "default", DEBUG_IMAGE, "node-uid-1")
             )
             await asyncio.wait_for(wait_entered.wait(), timeout=5)
             task.cancel()
@@ -721,7 +818,7 @@ async def test_node_shell_cancelled_during_create_still_deletes_pod(tmp_path: Pa
         async with app.run_test():
             loop_box.append(asyncio.get_running_loop())
             task = asyncio.ensure_future(
-                app._shell._run_node_shell(rec, "worker-1", "default", DEBUG_IMAGE, None)
+                app._shell._run_node_shell(rec, "worker-1", "default", DEBUG_IMAGE, "node-uid-1")
             )
             await asyncio.wait_for(create_entered.wait(), timeout=5)
             task.cancel()

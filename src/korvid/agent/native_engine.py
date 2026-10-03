@@ -67,7 +67,11 @@ from korvid.agent.events import (
 )
 from korvid.agent.model_policy import ResolvedAgentPolicy
 from korvid.agent.outbound import OutboundPolicyError, OutboundRequestTooLarge
-from korvid.agent.provider import OperatorSafeProviderError
+from korvid.agent.provider import (
+    STREAM_LIMIT,
+    OperatorSafeProviderError,
+    ProviderStreamLimitError,
+)
 from korvid.agent.request_gateway import PreparedGatewayRequest, RequestGateway
 from korvid.agent.tool_harness import ToolExecution, ToolHarness
 from korvid.tools.registry import tool_def
@@ -92,8 +96,12 @@ _DISCARD_EXCESS = "discarded: too many tool calls in one response"
 _BAD_ARGUMENTS = "tool arguments must be a JSON object"
 
 
-class ProviderResponseLimitError(RuntimeError):
-    """A provider stream exceeded the resolved turn response budget."""
+class ProviderResponseLimitError(ProviderStreamLimitError):
+    """A provider stream exceeded the resolved turn response budget.
+
+    The bound is korvid's own, so the operator sees `STREAM_LIMIT` rather
+    than the withheld-failure text reserved for a provider's own errors.
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -524,9 +532,7 @@ class NativeAgentEngine(AgentEngine):
                 content_seen = self._note_stream_event(event, event_count, recorder, content_seen)
                 response_chars += _stream_event_chars(event)
                 if event_count > response_limit or response_chars > response_limit:
-                    raise ProviderResponseLimitError(
-                        f"provider response exceeded the {response_limit}-character policy limit"
-                    )
+                    raise ProviderResponseLimitError(STREAM_LIMIT)
                 kind = str(event.get("type", ""))
                 if kind == "text_delta":
                     text = str(event.get("text", ""))

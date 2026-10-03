@@ -213,7 +213,9 @@ started them closes:
 - **Debug shells** — `s` on a shell-less pod offers an ephemeral
   `kubectl debug` container; `s` on a node opens a privileged
   `kubectl debug node/` session with the host filesystem at `/host`. Both pass
-  the approval gate and are audited fail-closed, but they end differently. The
+  the approval gate, re-read the approved pod's or node's UID just before they
+  run (refusing when the cluster cannot confirm it), and are audited
+  fail-closed, but they end differently. The
   pod path injects an ephemeral container into the **existing pod**, and
   Kubernetes offers no API to remove that spec entry: it stays until the pod is
   replaced or deleted, and a retry with a different image adds another entry.

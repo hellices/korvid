@@ -79,8 +79,8 @@ from korvid.core.config import (
     ModelConnectionsWriter,
     ObservabilityBackend,
     load_config,
-    save_topbar_state,
 )
+from korvid.core.config_store import save_topbar_state
 from korvid.core.keybinding_config import save_keybindings
 from korvid.core.mcp import MCPControllerBase
 from korvid.core.portforward import ForwardRegistry

@@ -162,6 +162,15 @@ def test_log_buffer_lines_invalid_falls_back(tmp_path: Path) -> None:
         assert load_config(cfg_file).log_buffer_lines == 5000
 
 
+def test_log_buffer_lines_rejects_fractional_and_infinite_floats(tmp_path: Path) -> None:
+    """The floats mcp.port already refuses: int() would truncate 12.9 to a
+    12-line buffer and raise OverflowError on .inf, crashing startup."""
+    for raw in ("12.9", ".inf", "-.inf", ".nan"):
+        cfg_file = tmp_path / "config.yaml"
+        cfg_file.write_text(f"log_buffer_lines: {raw}\n")
+        assert load_config(cfg_file).log_buffer_lines == 5000
+
+
 def test_auth_method_parsed(tmp_path: Path) -> None:
     p = tmp_path / "c.yaml"
     p.write_text(
@@ -1399,6 +1408,64 @@ def test_config_root_must_be_a_mapping(tmp_path: Path, contents: str) -> None:
     path.write_text(contents)
     with pytest.raises(ConfigError, match="config root must be a mapping"):
         load_config(path)
+
+
+@pytest.mark.parametrize(
+    ("content", "expected"),
+    [
+        pytest.param(
+            b"namespace: prod\nfavorite_namespaces: [prod, dev\n",
+            "malformed YAML at line 3, column 1",
+            id="unclosed-flow-sequence",
+        ),
+        pytest.param(
+            b"namespace: prod\n  api_key: sk-live-SECRET\n",
+            "malformed YAML at line 2, column 10",
+            id="bad-indent",
+        ),
+        pytest.param(b"namespace: \xff\xfe\n", "the file is not UTF-8 text", id="not-utf8"),
+    ],
+)
+def test_an_unreadable_config_is_one_config_error_that_never_quotes_the_file(
+    tmp_path: Path, content: bytes, expected: str
+) -> None:
+    """Startup turns ConfigError into one `korvid: ...` line; anything else
+    escaped as a traceback that quoted the offending line, secret included."""
+    path = tmp_path / "config.yaml"
+    path.write_bytes(content)
+
+    with pytest.raises(ConfigError, match=expected) as caught:
+        load_config(path)
+
+    assert "SECRET" not in str(caught.value)
+    assert "\n" not in str(caught.value)
+
+
+@pytest.mark.skipif(
+    not POSIX or os.geteuid() == 0, reason="needs POSIX permissions that bind the caller"
+)
+def test_a_config_behind_an_unsearchable_directory_is_a_config_error(tmp_path: Path) -> None:
+    """Only a missing file means zero-config. An existence check outside the
+    handler either raised EACCES raw (Python 3.11-3.13) or reported the file
+    absent and silently ignored it (3.14)."""
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    (locked / "config.yaml").write_text("namespace: team-a\n", encoding="utf-8")
+    locked.chmod(0)
+    try:
+        with pytest.raises(ConfigError, match=r"cannot load .*config\.yaml: "):
+            load_config(locked / "config.yaml")
+    finally:
+        locked.chmod(0o700)
+
+
+def test_config_is_read_as_utf8_whatever_the_locale(tmp_path: Path) -> None:
+    """Windows CI runs under a cp1252 locale, where `read_text()` without an
+    encoding garbles a UTF-8 "café" into mojibake."""
+    path = tmp_path / "config.yaml"
+    path.write_text("namespace: café\n", encoding="utf-8")
+
+    assert load_config(path).namespace == "café"
 
 
 def test_unknown_agent_setting_is_rejected(tmp_path: Path) -> None:

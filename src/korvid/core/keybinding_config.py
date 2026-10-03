@@ -7,7 +7,8 @@ from pathlib import Path
 
 import yaml
 
-from korvid.core.config import ConfigError, _atomic_write_text
+from korvid.core.config import _atomic_write_text
+from korvid.core.config_store import read_config_document
 
 
 def save_keybindings(path: Path, overrides: Mapping[str, str]) -> None:
@@ -18,23 +19,11 @@ def save_keybindings(path: Path, overrides: Mapping[str, str]) -> None:
         overrides: Action-to-key overrides, or an empty mapping to reset them.
 
     Raises:
-        ConfigError: The current YAML is malformed or its root is not a mapping.
+        ConfigError: The current file is not UTF-8 text, is malformed YAML,
+            or its root is not a mapping.
         OSError: Reading or atomically writing the configuration fails.
     """
-    try:
-        content = path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        content = ""
-    try:
-        document = yaml.safe_load(content)
-        if document is None:
-            node = yaml.compose(content, Loader=yaml.SafeLoader)
-            if node is None or node.start_mark.index == node.end_mark.index:
-                document = {}
-    except yaml.YAMLError as exc:
-        raise ConfigError("Cannot save keybindings: config contains malformed YAML") from exc
-    if not isinstance(document, dict):
-        raise ConfigError("Cannot save keybindings: config must be a mapping")
+    document = read_config_document(path, action="save keybindings")
     if overrides:
         document["keybindings"] = dict(overrides)
     else:

@@ -11,7 +11,8 @@ from pathlib import Path
 import yaml
 from rich.cells import cell_len
 
-from korvid.core.config import KorvidConfig, load_config, save_topbar_state
+from korvid.core.config import KorvidConfig, load_config
+from korvid.core.config_store import save_topbar_state
 from korvid.core.store import ResourceStore, Summary
 from korvid.core.watch import WatchManager
 from korvid.k8s.discovery import ResourceMeta
