@@ -35,6 +35,7 @@ from korvid.agent.events import (
     TurnComplete,
     TurnInterrupted,
 )
+from korvid.agent.provider import STREAM_LIMIT
 from korvid.tools.executor import ToolOutcome
 
 from .engine_fakes import (
@@ -433,7 +434,7 @@ async def test_provider_response_is_bounded_by_the_history_policy(
 
     errors = [event for event in events if isinstance(event, AgentError)]
     assert errors
-    assert "ProviderResponseLimitError" in errors[-1].message
+    assert errors[-1].message == STREAM_LIMIT  # korvid's own bound, not a withheld failure
     assert sum(len(event.text) for event in events if isinstance(event, TextDelta)) <= 256
     assert execution.calls == []
     assert not any(isinstance(event, ToolCallStarted) for event in events)
@@ -458,7 +459,7 @@ async def test_reasoning_counts_against_the_budget_by_its_real_length(
 
     errors = [event for event in events if isinstance(event, AgentError)]
     assert errors
-    assert "ProviderResponseLimitError" in errors[-1].message
+    assert errors[-1].message == STREAM_LIMIT  # korvid's own bound, not a withheld failure
 
 
 # -- how many calls one response may make ------------------------------------
