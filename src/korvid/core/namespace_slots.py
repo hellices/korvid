@@ -105,7 +105,8 @@ def build(
 
     Returns:
         The map: pins first, then saved slots in place. A listing marks
-        entries available or not; it never adds one.
+        automatic entries available or not and never adds one; pins always
+        dispatch, as `favorite_namespaces` did before slots existed.
     """
     entries = _pins(pinned)
     taken = {entry.namespace for entry in entries.values()}

@@ -88,7 +88,10 @@ Because a save waits on that lock and fsyncs, it never runs on the event loop.
 Visits and discovery queue the latest map per cluster, and one worker writes
 the queue in a thread. Every write, including a confirmed reallocation, holds
 one asyncio lock, so an older map never lands after a newer one. A map queued
-before a `:ctx` switch is still written to the cluster it belongs to.
+before a `:ctx` switch is still written to the cluster it belongs to. A
+confirmed reallocation also installs its fresh listing as the inventory later
+visits are checked against. Visits made while its write waited are replayed
+onto the new map when that listing still contains them.
 
 ## Visits
 
@@ -148,7 +151,8 @@ Help and the picker read the same map object that dispatch reads:
 builds the reallocation proposal and opens a class-selected confirmation modal
 with a bounded `VerticalScroll` preview. Enter confirms; Escape cancels and
 keeps the current map. An unchanged proposal is reported without opening the
-modal. A failed listing refuses with the same notice as the picker.
+modal. A failed listing refuses with the same notice as the picker. If a
+dialog opened while the listing ran, the preview is not stacked over it.
 
 ## #404 boundary
 

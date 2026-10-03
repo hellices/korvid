@@ -133,10 +133,7 @@ class NamespaceSlotController:
         visited = [entry.namespace for _, entry in sorted(self._auto.items())]
         self._identity = identity
         self._auto = saved
-        merged = self.slots
-        for namespace in visited:
-            merged = place(merged, namespace)
-        self._update(merged.automatic())
+        self._replay(visited)
         # A listing that started before this restore would merge into the
         # pre-restore map; only listings started from here on count.
         self._generation += 1
@@ -161,6 +158,13 @@ class NamespaceSlotController:
         if self._inventory is not None and namespace not in self._inventory:
             return
         self._update(place(self.slots, namespace).automatic())
+
+    def _replay(self, visited: Sequence[str]) -> None:
+        """Give *visited* namespaces free slots of the current map, in order."""
+        merged = self.slots
+        for namespace in visited:
+            merged = place(merged, namespace)
+        self._update(merged.automatic())
 
     def _update(self, updated: dict[int, SlotEntry]) -> None:
         if updated == self._auto:
@@ -275,9 +279,14 @@ class NamespaceSlotController:
         names = await self._list(lister, token)
         if names is None or token != self._generation:
             return
+        blocked = self._can_open()
+        if blocked is not None:  # a dialog opened while the listing ran
+            self._ui.notify(blocked.message, severity=blocked.severity, markup=False)
+            return
+        inventory = frozenset(names)
         # The preview compares against the map as it stands: nothing changes
         # in memory or on disk until the user confirms (Escape keeps it all).
-        proposed = reallocate(self._pinned(), self._auto, frozenset(names))
+        proposed = reallocate(self._pinned(), self._auto, inventory)
         changes = preview(self.slots, proposed)
         if not changes:
             self._ui.notify("Namespace slots are already compact", markup=False)
@@ -287,32 +296,31 @@ class NamespaceSlotController:
         def _decided(confirmed: bool | None) -> None:
             if confirmed:
                 self._ui.run_worker(
-                    self._commit(token, proposed),
+                    self._commit(token, proposed, inventory),
                     group="namespace-slot-save",
                     exit_on_error=False,
                 )
 
         self._ui.push_screen(NamespaceSlotsScreen(changes), _decided)
 
-    async def _commit(self, token: int, proposed: SlotMap) -> None:
+    async def _commit(self, token: int, proposed: SlotMap, inventory: frozenset[str]) -> None:
         if token != self._generation:
             self._ui.notify(
                 "Namespace slot reallocation cancelled - the kube context changed",
                 severity="warning",
             )
             return
-        slots = proposed.automatic()
         persistence, identity = self._persistence, self._identity
         if persistence is None or identity is None:
-            self._auto = slots
-            self._stale = False
+            self._install(proposed, inventory, self._auto)
             self._ui.notify("Namespace slots reallocated for this session (not saved)")
             return
+        before = dict(self._auto)
         async with self._save_lock:
             # The reallocation supersedes maps still queued for this cluster.
             self._pending.pop(identity, None)
             try:
-                await self._save(identity, slots)
+                await self._save(identity, proposed.automatic())
             except (OSError, SlotStateError) as exc:
                 self._ui.notify(
                     f"Could not save namespace slots: {exc}",
@@ -323,10 +331,25 @@ class NamespaceSlotController:
                 return
             if token != self._generation:
                 return  # switched while writing: the old cluster's file has it
-            # Still under the lock: a visit queued during the write was based
-            # on the old map and must not overwrite the reallocation.
+            # Still under the lock: maps queued during the write were built on
+            # the old map, so their visits are replayed onto the new one.
             self._pending.pop(identity, None)
-            self._auto = slots
-        self._stale = False
-        self._persist_failed = False
+            self._persist_failed = False
+            self._install(proposed, inventory, before)
         self._ui.notify("Namespace slots reallocated")
+
+    def _install(
+        self, proposed: SlotMap, inventory: frozenset[str], before: dict[int, SlotEntry]
+    ) -> None:
+        """Adopt a confirmed reallocation and its listing, keeping visits
+        made since *before* that the listing still contains."""
+        known = {entry.namespace for entry in before.values()}
+        visited = [
+            entry.namespace
+            for _, entry in sorted(self._auto.items())
+            if entry.namespace not in known and entry.namespace in inventory
+        ]
+        self._auto = proposed.automatic()
+        self._inventory = inventory
+        self._stale = False
+        self._replay(visited)

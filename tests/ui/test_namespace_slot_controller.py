@@ -118,6 +118,8 @@ class Harness:
         #: When set, identity resolution reports `resolving` and waits for `resolved`.
         self.resolving: threading.Event | None = None
         self.resolved = threading.Event()
+        #: Runs while a listing is in flight, before it returns.
+        self.during_listing: Callable[[], None] | None = None
         self.path = tmp_path / "slots.json"
         self.store = NamespaceSlotStore(self.path)
         persistence = SlotPersistence(self.store, self._identity) if persist else None
@@ -141,6 +143,8 @@ class Harness:
             return None
 
         async def _list() -> list[str]:
+            if self.during_listing is not None:
+                self.during_listing()
             if self.listing_error is not None:
                 raise self.listing_error
             return list(self.names)
@@ -471,6 +475,69 @@ async def test_confirmed_reallocation_clears_a_stale_map(tmp_path: Path) -> None
 
     assert not harness.controller.stale
     assert harness.layout() == {1: ("dev", "auto", True)}
+
+
+async def test_a_visit_during_a_confirmed_save_takes_a_slot_of_the_new_map(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = Harness(tmp_path, names=["dev", "old"])
+    await harness.controller.activate()
+    await harness.visit("dev", "old")
+    harness.names = ["dev", "new"]
+    await _open_reallocation(harness)
+    writing, release = threading.Event(), threading.Event()
+    save = harness.store.save
+
+    def held(identity: ClusterIdentity, slots: Mapping[int, SlotEntry]) -> None:
+        writing.set()  # another korvid holds the file lock
+        release.wait(timeout=5)
+        save(identity, slots)
+
+    monkeypatch.setattr(harness.store, "save", held)
+    harness.ui.callbacks[-1](True)
+    committing = asyncio.create_task(harness.ui.drain())
+    await asyncio.to_thread(writing.wait, 5)
+    harness.controller.visit("new")
+    release.set()
+    await committing
+    await harness.ui.drain()
+
+    assert harness.layout() == {1: ("dev", "auto", True), 2: ("new", "auto", True)}
+    assert harness.saved() == {1: _auto("dev"), 2: _auto("new")}
+
+
+async def test_a_confirmed_reallocation_installs_its_listing_for_later_visits(
+    tmp_path: Path,
+) -> None:
+    harness = Harness(tmp_path, names=["dev", "old"])
+    await harness.controller.activate()
+    await harness.visit("dev", "old")
+    await harness.discover()
+    harness.names = ["dev", "new"]
+    await _open_reallocation(harness)
+    await _decide(harness, True)
+
+    await harness.visit("old", "new")
+
+    assert harness.layout() == {1: ("dev", "auto", True), 2: ("new", "auto", True)}
+
+
+async def test_a_dialog_opened_during_the_listing_suppresses_the_preview(
+    tmp_path: Path,
+) -> None:
+    harness = Harness(tmp_path, names=["dev", "old"])
+    await harness.controller.activate()
+    await harness.visit("dev", "old")
+    harness.names = ["dev"]
+    reason = UnavailableReason(AvailabilityCode.PROTECTED_UI, "Close the dialog first")
+    harness.during_listing = lambda: setattr(harness, "blocked", reason)
+
+    harness.controller.open_reallocation()
+    await harness.ui.drain()
+
+    assert harness.ui.screens == []
+    assert harness.ui.notifications[-1][0] == "Close the dialog first"
+    assert harness.layout() == {1: ("dev", "auto", True), 2: ("old", "auto", True)}
 
 
 async def test_reallocation_save_failure_keeps_the_current_map(
