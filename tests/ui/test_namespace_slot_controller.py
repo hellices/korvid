@@ -130,6 +130,7 @@ class Harness:
             list_namespaces=self._lister,
             persistence=persistence,
             can_open=lambda: self.blocked,
+            picker_open=lambda: False,
         )
 
     def _identity(self, context: str | None) -> tuple[str, str] | None:

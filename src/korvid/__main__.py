@@ -1264,6 +1264,7 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
         list_namespaces=lambda: app._list_namespaces,
         persistence=inputs.namespace_slots,
         can_open=lambda: actions.modal_unavailable_reason(),
+        picker_open=AppContextSurface(app).namespace_picker_open,
     )
     workspace_controller = WorkspaceController(
         state=workspace,

@@ -25,11 +25,12 @@ from korvid.core.namespace_slot_store import ClusterIdentity, NamespaceSlotStore
 from korvid.core.namespace_slots import SlotEntry, SlotMap, build, place, preview, reallocate
 from korvid.core.store import ALL_NAMESPACES
 from korvid.k8s.errors import ApiStatusError
-from korvid.ui.action_availability import UnavailableReason
+from korvid.ui.action_availability import AvailabilityCode, UnavailableReason
 from korvid.ui.read_availability import NAMESPACE_LISTING_UNAVAILABLE
 from korvid.ui.ui_surface import UiSurface
 
 _STILL_LOADING = "Namespace slots are still loading - run :slots again"
+_PICKER_OPEN = UnavailableReason(AvailabilityCode.PROTECTED_UI, "Close the namespace picker first")
 
 #: The kubeconfig-scoped namespace listing, None when it is not wired.
 ListNamespaces = Callable[[], Awaitable[list[str]]]
@@ -66,6 +67,7 @@ class NamespaceSlotController:
         list_namespaces: Callable[[], ListNamespaces | None],
         persistence: SlotPersistence | None,
         can_open: Callable[[], UnavailableReason | None],
+        picker_open: Callable[[], bool],
     ) -> None:
         self._ui = ui
         self._pinned = pinned
@@ -73,6 +75,7 @@ class NamespaceSlotController:
         self._list_namespaces = list_namespaces
         self._persistence = persistence
         self._can_open = can_open
+        self._picker_open = picker_open
         self._generation = 0
         self._identity: ClusterIdentity | None = None
         self._auto: dict[int, SlotEntry] = {}
@@ -335,9 +338,14 @@ class NamespaceSlotController:
     # Explicit reallocation (`:slots`)
     # ------------------------------------------------------------------
 
+    def _blocked(self) -> UnavailableReason | None:
+        """An open dialog, or the `:ns` picker whose slot labels a confirmed
+        reallocation would leave stale while the keys dispatch the new map."""
+        return self._can_open() or (_PICKER_OPEN if self._picker_open() else None)
+
     def unavailable_reason(self) -> UnavailableReason | None:
         """Why `:slots` would refuse now - a silent probe that never lists."""
-        reason = self._can_open()
+        reason = self._blocked()
         if reason is None and self._list_namespaces() is None:
             return NAMESPACE_LISTING_UNAVAILABLE
         return reason
@@ -379,8 +387,8 @@ class NamespaceSlotController:
             # A preview now would be built on the map the restore replaces.
             self._ui.notify(_STILL_LOADING, severity="warning")
             return
-        blocked = self._can_open()
-        if blocked is not None:  # a dialog opened while the listing ran
+        blocked = self._blocked()
+        if blocked is not None:  # a dialog or the picker opened while the listing ran
             self._ui.notify(blocked.message, severity=blocked.severity, markup=False)
             return
         inventory, seen, before = frozenset(names), self._observed, dict(self._auto)

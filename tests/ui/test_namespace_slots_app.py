@@ -205,21 +205,27 @@ async def test_a_visit_belongs_to_the_pane_that_navigated_not_the_one_focused_af
 async def test_quitting_writes_the_slot_maps_still_queued(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    app, _ = _app(Cluster(["alpha"]), tmp_path)
-    drained: list[bool] = []
+    app, slot_store = _app(Cluster(["alpha"]), tmp_path, config=KorvidConfig(namespace="default"))
+    drained: list[tuple[bool, bool]] = []
     async with app.run_test(size=(120, 40)) as pilot:
         await _ready(pilot, app, ["alpha"])
         slots = app._workspace_ctl.slots
         shutdown = slots.shutdown
+        await slots._save_lock.acquire()  # an earlier write still holds the lock...
+        app.post_message(NavigateCommand(None, namespace="alpha"))
+        await until(pilot, partial(_mapped, app, "alpha"), label="alpha took a slot")
 
         async def recording() -> None:
             # Textual cancels app workers before unmount, queued saves with them.
-            drained.append(all(w.is_cancelled or w.is_finished for w in app.workers))
+            stopped = all(w.is_cancelled or w.is_finished for w in app.workers)
+            drained.append((stopped, bool(slots._pending)))  # ...so the visit is still queued
+            slots._save_lock.release()
             await shutdown()
 
         monkeypatch.setattr(slots, "shutdown", recording)
 
-    assert drained == [True]
+    assert drained == [(True, True)]
+    assert slot_store.load(IDENTITY) == {1: SlotEntry("alpha", SlotOrigin.AUTO)}
 
 
 async def test_a_visit_is_not_recorded_across_a_context_switch(
@@ -237,7 +243,10 @@ async def test_a_visit_is_not_recorded_across_a_context_switch(
         monkeypatch.setattr(app._workspace_ctl, "navigate_command", navigate_across_a_switch)
         app.post_message(NavigateCommand(None, namespace="alpha"))
         await until(pilot, lambda: app.current_scope == "alpha", label="navigated")
-        await pilot.pause()
+        # The app pump handles one message at a time: once the next one has
+        # navigated, the first handler has finished deciding about the visit.
+        app.post_message(NavigateCommand(None, namespace="default"))
+        await until(pilot, lambda: app.current_scope == "default", label="handler finished")
 
         assert not _mapped(app, "alpha")
 
@@ -342,6 +351,32 @@ async def test_slots_command_previews_then_saves_only_the_slot_state(tmp_path: P
     assert slot_store.load(IDENTITY) == {1: SlotEntry("alpha", SlotOrigin.AUTO)}
     assert saved_keybindings == []
     assert yaml.safe_load(config_path.read_text(encoding="utf-8")) == {"namespace": "default"}
+
+
+async def test_slots_refuses_while_the_namespace_picker_shows_the_current_labels(
+    tmp_path: Path,
+) -> None:
+    cluster = Cluster(["alpha", "old"])
+    app, _ = _app(cluster, tmp_path, config=KorvidConfig(namespace="default"))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _ready(pilot, app, cluster.names)
+        await _visit(pilot, app, "old", "alpha")
+        cluster.names = ["alpha"]
+        picker = app.query_one(NamespacePicker)
+        await pilot.press("colon", "n", "s", "enter")
+        await until(pilot, lambda: picker.display, label="picker open")
+
+        await pilot.press("colon", *"slots", "enter")  # `:` is a priority binding
+        await until(
+            pilot,
+            lambda: any("namespace picker" in n.message for n in app._notifications),
+            label="reallocation refused",
+        )
+
+        assert picker.display
+        assert len(app.screen_stack) == 1
+        assert _slot(app, 1) == SlotEntry("old", SlotOrigin.AUTO, available=False), "kept"
+        assert app._workspace_ctl.slots.unavailable_reason() is not None
 
 
 async def test_escape_keeps_the_current_slots(tmp_path: Path) -> None:

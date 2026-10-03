@@ -184,7 +184,9 @@ Help and the picker read the same map object that dispatch reads:
 
 `:slots` (alias `:ns-slots`, also in the Action Palette) runs a fresh listing,
 builds the reallocation proposal and opens a class-selected confirmation modal
-with a bounded `VerticalScroll` preview. Enter confirms; Escape cancels and
+with a bounded `VerticalScroll` preview. It refuses while the `:ns` picker is
+open, because a confirmed map would leave the picker's slot labels stale
+while the keys dispatch the new one. Enter confirms; Escape cancels and
 keeps the current map. An unchanged proposal is reported without opening the
 modal; its listing still counts, clearing a stale map and becoming the
 inventory later visits are checked against. A failed listing refuses with the same notice as the picker. If a
