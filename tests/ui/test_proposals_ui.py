@@ -924,21 +924,48 @@ async def test_submit_during_a_context_switch_is_rejected(tmp_path: Path) -> Non
     assert rec.calls == []
 
 
+def _io_probe_app(tmp_path: Path, store: ProposalStore, io_calls: list[str]) -> KorvidApp:
+    """An app whose RBAC check and manifest reads record themselves in
+    `io_calls`: the two cluster round trips a proposal can trigger before
+    it is queued (the UID lookup reads the manifest)."""
+
+    async def counting_permission(
+        verb: str, resource: str, sub: str, ns: str | None, group: str, name: str
+    ) -> bool:
+        io_calls.append(f"rbac:{verb}")
+        return True
+
+    app = make_app(Recorder(), tmp_path / "a.jsonl", store, check_permission=counting_permission)
+    original = app._get_manifest
+    assert original is not None
+
+    async def counting_manifest(kind: str, ns: str | None, name: str) -> dict[str, Any]:
+        io_calls.append(f"manifest:{name}")
+        return await original(kind, ns, name)
+
+    app._get_manifest = counting_manifest
+    return app
+
+
+async def test_io_probe_sees_a_normal_proposal_reach_the_cluster(tmp_path: Path) -> None:
+    """Control for the test below: without this, a probe on a seam the
+    proposal path never calls would pass vacuously."""
+    store = ProposalStore()
+    io_calls: list[str] = []
+    app = _io_probe_app(tmp_path, store, io_calls)
+    async with app.run_test():
+        result = await _submit(app)
+    assert not result.startswith("ERROR:")
+    assert {"rbac:delete", "manifest:web"} <= set(io_calls)
+
+
 async def test_oversized_arguments_are_rejected_before_any_cluster_io(tmp_path: Path) -> None:
     """The size bound is untrusted-input validation: it must run before the
     RBAC check, UID lookup, and server dry-run, or a caller can force
     cluster I/O with an arbitrarily large payload."""
-    rec = Recorder()
     store = ProposalStore()
-    manifest_calls: list[str] = []
-    app = make_app(rec, tmp_path / "a.jsonl", store)
-    original_uid = app._target_uid
-
-    async def counting_uid(kind: str, ns: str | None, name: str) -> str | None:
-        manifest_calls.append(name)
-        return await original_uid(kind, ns, name)
-
-    app._target_uid = counting_uid  # type: ignore[assignment]  # test seam
+    io_calls: list[str] = []
+    app = _io_probe_app(tmp_path, store, io_calls)
     async with app.run_test():
         result = await app._proposals.submit_write_proposal(
             "delete",
@@ -950,7 +977,7 @@ async def test_oversized_arguments_are_rejected_before_any_cluster_io(tmp_path: 
         )
     assert result.startswith("ERROR:")
     assert "exceed" in result
-    assert manifest_calls == []  # no UID lookup: rejected before cluster I/O
+    assert io_calls == []  # rejected before the RBAC check and the UID lookup
     assert store.pending() == []
 
 
