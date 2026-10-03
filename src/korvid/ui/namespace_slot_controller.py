@@ -77,6 +77,8 @@ class NamespaceSlotController:
         self._stale = False
         #: Names from this cluster's latest complete listing, None until one lands.
         self._inventory: frozenset[str] | None = None
+        #: Bumped by every listing outcome, so a slower one never replaces it.
+        self._observed = 0
         #: Set once a save failed or the document is unreadable for this
         #: cluster: later saves are skipped so one fault reports once.
         self._persist_failed = False
@@ -168,6 +170,7 @@ class NamespaceSlotController:
         """Judge availability from a complete listing; it never assigns a slot."""
         if token != self._generation:
             return
+        self._observed += 1
         self._stale = False
         self._inventory = frozenset(names)
         self._update(build(self._pinned(), self._auto, self._inventory).automatic())
@@ -206,6 +209,7 @@ class NamespaceSlotController:
         next complete listing; the entries keep their availability.
         """
         if token == self._generation:
+            self._observed += 1
             self._stale = True
             self._inventory = None
 
@@ -347,7 +351,7 @@ class NamespaceSlotController:
         if blocked is not None:  # a dialog opened while the listing ran
             self._ui.notify(blocked.message, severity=blocked.severity, markup=False)
             return
-        inventory = frozenset(names)
+        inventory, seen = frozenset(names), self._observed
         # The preview compares against the map as it stands: nothing changes
         # in memory or on disk until the user confirms (Escape keeps it all).
         proposed = reallocate(self._pinned(), self._auto, inventory)
@@ -361,14 +365,16 @@ class NamespaceSlotController:
         def _decided(confirmed: bool | None) -> None:
             if confirmed:
                 self._ui.run_worker(
-                    self._commit(token, proposed, inventory),
+                    self._commit(token, proposed, inventory, seen),
                     group="namespace-slot-save",
                     exit_on_error=False,
                 )
 
         self._ui.push_screen(NamespaceSlotsScreen(changes), _decided)
 
-    async def _commit(self, token: int, proposed: SlotMap, inventory: frozenset[str]) -> None:
+    async def _commit(
+        self, token: int, proposed: SlotMap, inventory: frozenset[str], seen: int
+    ) -> None:
         if token != self._generation:
             self._ui.notify(
                 "Namespace slot reallocation cancelled - the kube context changed",
@@ -383,7 +389,7 @@ class NamespaceSlotController:
             return
         persistence, identity = self._persistence, self._identity
         if persistence is None or identity is None:
-            self._install(proposed, inventory, self._auto)
+            self._install(proposed, inventory, self._auto, seen)
             self._ui.notify("Namespace slots reallocated for this session (not saved)")
             return
         before = dict(self._auto)
@@ -410,7 +416,7 @@ class NamespaceSlotController:
                 return
             self._pending.pop(identity, None)  # `_install` carries its visits
             self._persist_failed = False
-            self._install(proposed, inventory, before)
+            self._install(proposed, inventory, before, seen)
         self._ui.notify("Namespace slots reallocated")
 
     def _rebase(
@@ -427,28 +433,35 @@ class NamespaceSlotController:
             self._pending[identity] = _with_visits(proposed, inventory, before, queued)
 
     def _install(
-        self, proposed: SlotMap, inventory: frozenset[str], before: dict[int, SlotEntry]
+        self,
+        proposed: SlotMap,
+        inventory: frozenset[str],
+        before: dict[int, SlotEntry],
+        seen: int,
     ) -> None:
-        """Adopt a confirmed reallocation and its listing, keeping visits
-        made since *before* that the listing still contains."""
-        merged = _with_visits(proposed, inventory, before, self._auto)
+        """Adopt a confirmed reallocation, keeping visits made since *before*.
+
+        Its listing becomes the inventory unless a listing outcome landed
+        after it (*seen*); then that newer one judges the map instead.
+        """
+        if self._observed == seen:
+            self._inventory, self._stale = inventory, False
+        merged = _with_visits(proposed, self._inventory, before, self._auto)
         self._auto = proposed.automatic()
-        self._inventory = inventory
-        self._stale = False
-        self._update(merged)
+        self._update(build(self._pinned(), merged, self._inventory).automatic())
 
 
 def _with_visits(
     proposed: SlotMap,
-    inventory: frozenset[str],
+    inventory: frozenset[str] | None,
     before: dict[int, SlotEntry],
     current: dict[int, SlotEntry],
 ) -> dict[int, SlotEntry]:
     """*proposed* plus the namespaces *current* gained since *before* that
-    *inventory* still lists, in slot order."""
+    *inventory* still lists (all of them when it is unknown), in slot order."""
     known = {entry.namespace for entry in before.values()}
     merged = proposed
     for _, entry in sorted(current.items()):
-        if entry.namespace not in known and entry.namespace in inventory:
+        if entry.namespace not in known and (inventory is None or entry.namespace in inventory):
             merged = place(merged, entry.namespace)
     return merged.automatic()

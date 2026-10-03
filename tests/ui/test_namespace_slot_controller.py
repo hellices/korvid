@@ -743,6 +743,55 @@ async def test_quitting_during_a_confirmed_save_never_lets_an_older_map_overwrit
     assert harness.saved() == {1: _auto("dev"), 2: _auto("qa")}
 
 
+async def _confirm_held(harness: Harness, monkeypatch: pytest.MonkeyPatch) -> Any:
+    """Confirm a reallocation of dev/old/qa down to dev/qa; return its
+    running workers while the write is held, and the gate releasing it."""
+    await harness.controller.activate()
+    await harness.visit("dev", "old", "qa")
+    harness.names = ["dev", "qa"]
+    await _open_reallocation(harness)
+    gated = GatedSave(harness, monkeypatch)
+    harness.ui.callbacks[-1](True)
+    tasks = await _run_workers(harness)
+    await gated.held()
+    return tasks, gated
+
+
+async def test_a_listing_during_a_confirmed_save_outranks_the_reallocation_listing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = Harness(tmp_path, names=["dev", "old", "qa"])
+    tasks, gated = await _confirm_held(harness, monkeypatch)
+    harness.controller.observe(harness.controller.token(), ["dev"])  # qa deleted since
+
+    gated.gate.set()
+    await asyncio.gather(*tasks)
+    await harness.ui.drain()
+
+    assert harness.layout() == {1: ("dev", "auto", True), 2: ("qa", "auto", False)}
+    assert harness.saved() == {1: _auto("dev"), 2: _auto("qa", available=False)}
+
+
+async def test_a_listing_failure_during_a_confirmed_save_keeps_the_map_stale(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = Harness(tmp_path, names=["dev", "old", "qa"])
+    tasks, gated = await _confirm_held(harness, monkeypatch)
+    harness.controller.observe_failure(harness.controller.token())
+
+    gated.gate.set()
+    await asyncio.gather(*tasks)
+    await harness.ui.drain()
+    await harness.visit("created-since")
+
+    assert harness.controller.stale
+    assert harness.layout() == {
+        1: ("dev", "auto", True),
+        2: ("qa", "auto", True),
+        3: ("created-since", "auto", True),
+    }, "without a current listing a visit is trusted"
+
+
 async def test_a_confirmed_reallocation_installs_its_listing_for_later_visits(
     tmp_path: Path,
 ) -> None:
