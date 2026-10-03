@@ -89,6 +89,8 @@ class NamespaceSlotController:
         self._save_lock = asyncio.Lock()
         #: The generation `activate` is restoring, None once it settled.
         self._restoring: int | None = None
+        #: The generation whose restore was cancelled; `shutdown` finishes it.
+        self._interrupted: int | None = None
         #: The latest thread write; it outlives a cancelled worker.
         self._writing: asyncio.Future[None] | None = None
 
@@ -126,6 +128,9 @@ class NamespaceSlotController:
         generation = self._restoring = self._generation
         try:
             await self._restore(generation)
+        except asyncio.CancelledError:
+            self._interrupted = generation  # unmount or `:ctx` reaped it
+            raise
         finally:
             if self._restoring == generation:
                 self._restoring = None
@@ -292,8 +297,13 @@ class NamespaceSlotController:
         """Write what the app's worker sweep left: Textual cancels workers
         before `on_unmount`, so queued maps would otherwise be lost on quit.
 
-        Errors are dropped - nothing is left on screen to report them.
+        A restore that quitting cut short is finished first, so visits made
+        while it ran merge into the saved map. Errors are dropped - nothing
+        is left on screen to report them.
         """
+        self._flushing = True  # no worker runs any more: queue, then drain here
+        if self._interrupted is not None and self._interrupted == self._generation:
+            await self._restore(self._generation)
         async with self._save_lock:
             if self._writing is not None:
                 with contextlib.suppress(OSError, SlotStateError):
@@ -351,7 +361,7 @@ class NamespaceSlotController:
         if blocked is not None:  # a dialog opened while the listing ran
             self._ui.notify(blocked.message, severity=blocked.severity, markup=False)
             return
-        inventory, seen = frozenset(names), self._observed
+        inventory, seen, before = frozenset(names), self._observed, dict(self._auto)
         # The preview compares against the map as it stands: nothing changes
         # in memory or on disk until the user confirms (Escape keeps it all).
         proposed = reallocate(self._pinned(), self._auto, inventory)
@@ -365,7 +375,7 @@ class NamespaceSlotController:
         def _decided(confirmed: bool | None) -> None:
             if confirmed:
                 self._ui.run_worker(
-                    self._commit(token, proposed, inventory, seen),
+                    self._commit(token, proposed, inventory, seen, before),
                     group="namespace-slot-save",
                     exit_on_error=False,
                 )
@@ -373,8 +383,15 @@ class NamespaceSlotController:
         self._ui.push_screen(NamespaceSlotsScreen(changes), _decided)
 
     async def _commit(
-        self, token: int, proposed: SlotMap, inventory: frozenset[str], seen: int
+        self,
+        token: int,
+        proposed: SlotMap,
+        inventory: frozenset[str],
+        seen: int,
+        before: dict[int, SlotEntry],
     ) -> None:
+        """Save and adopt a confirmed *proposed* map; *before* is the map it
+        was built on, so visits made since the preview carry over."""
         if token != self._generation:
             self._ui.notify(
                 "Namespace slot reallocation cancelled - the kube context changed",
@@ -389,10 +406,9 @@ class NamespaceSlotController:
             return
         persistence, identity = self._persistence, self._identity
         if persistence is None or identity is None:
-            self._install(proposed, inventory, self._auto, seen)
+            self._install(proposed, inventory, before, seen)
             self._ui.notify("Namespace slots reallocated for this session (not saved)")
             return
-        before = dict(self._auto)
         async with self._save_lock:
             try:
                 await self._save(identity, proposed.automatic())

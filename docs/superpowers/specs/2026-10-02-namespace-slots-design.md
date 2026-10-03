@@ -92,11 +92,12 @@ Visits and discovery queue the latest map per cluster, and one worker writes
 the queue in a thread. Every write, including a confirmed reallocation, holds
 one asyncio lock, so an older map never lands after a newer one. A map queued
 before a `:ctx` switch is still written to the cluster it belongs to. A
-confirmed reallocation also installs its fresh listing as the inventory later
+confirmed reallocation installs its fresh listing as the inventory later
 visits are checked against, unless another listing completed or failed while
 its write waited: that newer outcome then judges the new map and keeps any
-stale state. Visits made while its write waited are replayed
-onto the new map when that listing still contains them. If `:ctx` switched
+stale state. Visits made since its preview was built, including while its
+write waited, are replayed onto the new map when the inventory still
+contains them. If `:ctx` switched
 during that write, the old cluster's queued map is rebuilt the same way
 before it is written, so it cannot overwrite the confirmed map. Quitting
 during that write rebuilds the queue the same way before `shutdown` drains
@@ -111,8 +112,10 @@ of the older file. Restored entries and replayed visits are judged against
 a listing that completed during the restore. A cancelled worker leaves its
 thread write running.
 Textual cancels app workers before `on_unmount`, so unmount calls the
-controller's `shutdown`. It waits for that write, then writes the maps still
-queued, so a visit just before quitting is kept.
+controller's `shutdown`. If quitting cut an activation short, it first
+finishes the restore, so visits made while the saved map loaded merge into
+it. It then waits for that write and writes the maps still queued, so a
+visit just before quitting is kept.
 
 ## Visits
 

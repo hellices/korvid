@@ -377,6 +377,26 @@ async def test_switching_back_waits_for_this_clusters_save_and_its_queue(
     assert harness.saved() == {1: _auto("qa"), 2: _auto("beta")}
 
 
+async def test_quitting_while_the_saved_map_loads_still_saves_the_visits_made_meanwhile(
+    tmp_path: Path,
+) -> None:
+    harness = Harness(tmp_path)
+    harness.store.save(ClusterIdentity("dev", DEV_SERVER), {2: _auto("qa")})
+    harness.resolving = threading.Event()
+    activation = asyncio.create_task(harness.controller.activate())
+    await asyncio.to_thread(harness.resolving.wait, 5)
+    harness.controller.visit("dev")
+
+    activation.cancel()  # unmount reaps the prefetch that runs activation
+    with contextlib.suppress(asyncio.CancelledError):
+        await activation
+    harness.resolved.set()
+    await harness.controller.shutdown()
+
+    assert harness.saved() == {1: _auto("dev"), 2: _auto("qa")}
+    assert harness.ui.workers == [], "nothing is left to run a worker"
+
+
 async def test_a_listing_during_activation_judges_the_restored_map(tmp_path: Path) -> None:
     harness = Harness(tmp_path, names=["dev"])
     harness.store.save(ClusterIdentity("dev", DEV_SERVER), {1: _auto("gone")})
@@ -790,6 +810,23 @@ async def test_a_listing_failure_during_a_confirmed_save_keeps_the_map_stale(
         2: ("qa", "auto", True),
         3: ("created-since", "auto", True),
     }, "without a current listing a visit is trusted"
+
+
+async def test_a_visit_while_the_preview_is_open_survives_the_confirmation(
+    tmp_path: Path,
+) -> None:
+    harness = Harness(tmp_path, names=["dev", "old", "qa"])
+    await harness.controller.activate()
+    await harness.visit("dev", "old")
+    harness.names = ["dev", "qa"]
+    await _open_reallocation(harness)
+    await harness.visit("qa")  # a navigation finishing behind the preview
+
+    await _decide(harness, True)
+    await harness.ui.drain()
+
+    assert harness.layout() == {1: ("dev", "auto", True), 2: ("qa", "auto", True)}
+    assert harness.saved() == {1: _auto("dev"), 2: _auto("qa")}
 
 
 async def test_a_confirmed_reallocation_installs_its_listing_for_later_visits(
