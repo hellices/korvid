@@ -713,6 +713,36 @@ async def test_a_switch_during_a_confirmed_save_never_lets_an_older_map_overwrit
     assert harness.saved() == {1: _auto("dev"), 2: _auto("qa")}
 
 
+async def test_quitting_during_a_confirmed_save_never_lets_an_older_map_overwrite_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = Harness(tmp_path, names=["dev", "old"])
+    await harness.controller.activate()
+    await harness.visit("dev", "old")
+    harness.names = ["dev", "qa"]
+    await _open_reallocation(harness)
+    gated = GatedSave(harness, monkeypatch)
+    harness.ui.callbacks[-1](True)
+    tasks = await _run_workers(harness)
+    await gated.held()
+    harness.controller.visit("qa")  # queued on the old map during the write
+
+    # Textual cancels app workers before `on_unmount`: the commit mid-write,
+    # and the flush the visit queued before it ever ran.
+    for work in harness.ui.workers:
+        work.close()
+    harness.ui.workers = []
+    for task in tasks:
+        task.cancel()
+    gated.gate.set()
+    for task in tasks:
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+    await harness.controller.shutdown()
+
+    assert harness.saved() == {1: _auto("dev"), 2: _auto("qa")}
+
+
 async def test_a_confirmed_reallocation_installs_its_listing_for_later_visits(
     tmp_path: Path,
 ) -> None:
@@ -794,6 +824,20 @@ async def test_an_unchanged_reallocation_opens_no_modal(tmp_path: Path) -> None:
 
     assert harness.ui.screens == []
     assert "already" in harness.ui.notifications[-1][0]
+
+
+async def test_an_unchanged_reallocation_still_records_its_listing(tmp_path: Path) -> None:
+    harness = Harness(tmp_path, names=["dev"])
+    await harness.controller.activate()
+    await harness.visit("dev")
+    harness.controller.observe_failure(harness.controller.token())
+
+    harness.controller.open_reallocation()
+    await harness.ui.drain()
+    await harness.visit("typo")
+
+    assert not harness.controller.stale
+    assert harness.layout() == {1: ("dev", "auto", True)}, "the fresh listing lacks it"
 
 
 async def test_in_memory_reallocation_does_not_claim_it_was_saved(tmp_path: Path) -> None:

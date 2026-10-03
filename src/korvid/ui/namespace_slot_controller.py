@@ -353,6 +353,7 @@ class NamespaceSlotController:
         proposed = reallocate(self._pinned(), self._auto, inventory)
         changes = preview(self.slots, proposed)
         if not changes:
+            self.observe(token, names)  # a fresh listing still counts
             self._ui.notify("Namespace slots are already compact", markup=False)
             return
         from korvid.ui.widgets.namespace_slots_screen import NamespaceSlotsScreen
@@ -398,17 +399,32 @@ class NamespaceSlotController:
                     markup=False,
                 )
                 return
-            # Still under the lock: maps queued before or during the write were
-            # built on the old map, so only their new visits carry over.
-            queued = self._pending.pop(identity, None)
+            except asyncio.CancelledError:
+                # Quitting cancelled the worker, but the shielded write still
+                # lands: `shutdown` must drain a queue rebased on it.
+                self._rebase(identity, proposed, inventory, before)
+                raise
             if token != self._generation:
                 # Switched while writing: requeue for the old cluster's file.
-                if queued is not None:
-                    self._pending[identity] = _with_visits(proposed, inventory, before, queued)
+                self._rebase(identity, proposed, inventory, before)
                 return
+            self._pending.pop(identity, None)  # `_install` carries its visits
             self._persist_failed = False
             self._install(proposed, inventory, before)
         self._ui.notify("Namespace slots reallocated")
+
+    def _rebase(
+        self,
+        identity: ClusterIdentity,
+        proposed: SlotMap,
+        inventory: frozenset[str],
+        before: dict[int, SlotEntry],
+    ) -> None:
+        """Rebuild the map queued for *identity* on the saved *proposed* one:
+        it was built on the old map, so only its new visits carry over."""
+        queued = self._pending.pop(identity, None)
+        if queued is not None:
+            self._pending[identity] = _with_visits(proposed, inventory, before, queued)
 
     def _install(
         self, proposed: SlotMap, inventory: frozenset[str], before: dict[int, SlotEntry]

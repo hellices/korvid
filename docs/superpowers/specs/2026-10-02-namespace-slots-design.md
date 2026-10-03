@@ -96,7 +96,9 @@ confirmed reallocation also installs its fresh listing as the inventory later
 visits are checked against. Visits made while its write waited are replayed
 onto the new map when that listing still contains them. If `:ctx` switched
 during that write, the old cluster's queued map is rebuilt the same way
-before it is written, so it cannot overwrite the confirmed map. If the write
+before it is written, so it cannot overwrite the confirmed map. Quitting
+during that write rebuilds the queue the same way before `shutdown` drains
+it. If the write
 fails, maps already queued stay queued and are still written. A queued save
 that fails after `:ctx` switched away is reported with the old context name.
 It does not stop the new cluster's saves.
@@ -174,7 +176,8 @@ Help and the picker read the same map object that dispatch reads:
 builds the reallocation proposal and opens a class-selected confirmation modal
 with a bounded `VerticalScroll` preview. Enter confirms; Escape cancels and
 keeps the current map. An unchanged proposal is reported without opening the
-modal. A failed listing refuses with the same notice as the picker. If a
+modal; its listing still counts, clearing a stale map and becoming the
+inventory later visits are checked against. A failed listing refuses with the same notice as the picker. If a
 dialog opened while the listing ran, the preview is not stacked over it. A
 confirmation while the saved map is still loading is refused with a retry
 notice, because the restore would replace the new map.
