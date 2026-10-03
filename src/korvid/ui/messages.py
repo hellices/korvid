@@ -118,6 +118,7 @@ class BuiltinOperation(Enum):
     TELEPRESENCE = "tp"
     PULSE = "pulse"
     KEYBINDINGS = "keys"
+    NAMESPACE_SLOTS = "slots"
 
 
 class BuiltinCommand(Message):

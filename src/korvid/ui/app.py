@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, assert_never
 
 if TYPE_CHECKING:
     from korvid.agent.session import AgentSession
+    from korvid.ui.namespace_slot_controller import SlotPersistence
 
 from rich.text import Text
 from textual.app import App, ComposeResult
@@ -104,7 +105,7 @@ from korvid.ui.widgets.agent_panel import AgentPanel
 from korvid.ui.widgets.command_bar import CommandBar
 from korvid.ui.widgets.describe_screen import DescribePane, DescribeScreen
 from korvid.ui.widgets.filter_bar import FilterBar
-from korvid.ui.widgets.help_screen import HelpScreen, collect_help
+from korvid.ui.widgets.help_screen import HelpScreen, collect_help, namespace_slot_group
 from korvid.ui.widgets.hint_strip import HintStrip
 from korvid.ui.widgets.log_pane import LogPane
 from korvid.ui.widgets.logo import SplashLogo
@@ -180,6 +181,7 @@ class KorvidApp(App[None]):
         proposal_store: ProposalStore | None = None,
         save_topbar: Callable[[bool], None] | None = None,
         save_keybindings: Callable[[Mapping[str, str]], None] | None = None,
+        namespace_slots: SlotPersistence | None = None,
         telepresence: TelepresenceCLI | None = None,
         probe_traffic_manager: Callable[[], Awaitable[bool]] | None = None,
         agent_follow_bridge: UIBridge | None = None,
@@ -233,6 +235,7 @@ class KorvidApp(App[None]):
             proposal_store=proposal_store,
             save_topbar=save_topbar,
             save_keybindings=save_keybindings,
+            namespace_slots=namespace_slots,
             telepresence=telepresence,
             probe_traffic_manager=probe_traffic_manager,
             agent_follow_bridge=agent_follow_bridge,
@@ -665,6 +668,10 @@ class KorvidApp(App[None]):
             handler_keys=handler_keys,
             overrides=overrides,
         )
+        slots = self._workspace_ctl.slots
+        slot_group = namespace_slot_group(slots.slots, stale=slots.stale)
+        if slot_group is not None:
+            groups.append(slot_group)
         self.push_screen(
             HelpScreen(groups, command_help(telepresence=self._integrations.telepresence_available))
         )
@@ -781,7 +788,11 @@ class KorvidApp(App[None]):
         self._workspace_ctl.clear_filter()
 
     async def on_navigate_command(self, message: NavigateCommand) -> None:
+        pane = self._pane  # focus may move to another split pane while this awaits
         await self._workspace_ctl.navigate_command(message.view, message.namespace)
+        if message.namespace and pane.scope == message.namespace:
+            # A namespace you switch to takes a free 1-9 slot (issue #406).
+            self._workspace_ctl.slots.visit(message.namespace)
 
     async def action_toggle_all_namespaces(self) -> None:
         """Toggle scope between ALL_NAMESPACES and the config-default namespace."""
@@ -1462,6 +1473,8 @@ class KorvidApp(App[None]):
         # The `:ns` completion prefetch belongs to the workspace controller;
         # this cancels and reaps it, exactly as the `:ctx` teardown does.
         await self._workspace_ctl.cancel_namespace_prefetch()
+        # Workers are already cancelled; write the slot maps they left queued.
+        await self._workspace_ctl.slots.shutdown()
         # The `:ctx` completion prefetch belongs to the switch coordinator;
         # this is the narrow lifecycle call that cancels and reaps it.
         await self._ctx.shutdown()

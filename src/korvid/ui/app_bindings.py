@@ -33,15 +33,16 @@ APP_BINDINGS: list[Binding | tuple[str, str] | tuple[str, str, str]] = [
     ),
     Binding("slash", "open_filter", "Filter/Search", id="open_filter"),
     Binding("0", "toggle_all_namespaces", "All NS", id="toggle_all_namespaces"),
-    # `favorite_namespaces` shortcuts (issue #108): UI-only jumps, bound
-    # in config order. They deliberately have no keymap id because 1-9 are
-    # reserved for this feature. Hidden from the footer; the help overlay
+    # Namespace slot shortcuts (issues #108, #406): UI-only jumps to the
+    # slot map - pinned `favorite_namespaces` first, then stable automatic
+    # slots. They deliberately have no keymap id because 1-9 are reserved
+    # for this feature. Hidden from the footer; the help overlay
     # merges the nine bindings into a single row.
     *[
         Binding(
             str(i),
             f"favorite_namespace({i})",
-            "Jump to favorite namespace (1-9)",
+            "Jump to namespace slot (1-9)",
             show=False,
         )
         for i in range(1, 10)

@@ -2619,6 +2619,32 @@ async def test_wire_and_run_injects_a_narrow_keybinding_writer(
     assert yaml.safe_load(path.read_text(encoding="utf-8")) == original
 
 
+async def test_wire_and_run_saves_namespace_slots_in_the_state_dir_per_cluster(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #406: slots persist under `$XDG_STATE_HOME`, never in config,
+    and are keyed by the live context + server identity."""
+    import korvid.__main__ as main_mod
+    from korvid.core.config import KorvidConfig
+    from korvid.k8s.cluster_identity import current_cluster_identity
+    from korvid.ui.namespace_slot_controller import SlotPersistence
+
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setattr(main_mod, "KorvidApp", _FakeAppCapturesKwargs)
+    monkeypatch.setattr(main_mod, "assemble_app_runtime", lambda app: app)
+    _FakeAppCapturesKwargs.instances.clear()
+    state = main_mod._RunState()
+    await main_mod._wire_and_run(
+        KorvidConfig(readonly=True), cast("Any", _FakeKubeForWiring()), state
+    )
+    if state.discovery_box:
+        await state.discovery_box[0]
+    persistence = _FakeAppCapturesKwargs.instances[0].captured["namespace_slots"]
+    assert isinstance(persistence, SlotPersistence)
+    assert persistence.identity is current_cluster_identity
+    assert persistence.store.path == tmp_path / "state" / "korvid" / "namespace-slots.json"
+
+
 def _profile_connections(reference: str, **overrides: Any) -> Any:
     """One active profile, built the way the config loader builds it."""
     from korvid.core.config import (

@@ -28,6 +28,24 @@ See the [keybinding guide](../keybindings.md#remap-an-app-action). This implemen
 assignment, post-action Deployment observation, and Pod comparison remain
 separate milestone work, not features delivered by this change.
 
+## Stable namespace shortcuts
+
+- Keys `1`–`9` keep your `favorite_namespaces` pinned first. Each namespace
+  you switch to with `:ns`, `:<view> <ns>` or the picker takes the next free
+  slot, so the keys follow the namespaces you actually use.
+- An automatic slot keeps its number across refreshes and restarts. The
+  assignment is saved per cluster under `$XDG_STATE_HOME/korvid`, separately
+  from `config.yaml` and keybindings.
+- A namespace that leaves the listing keeps its slot as unavailable and the
+  key is refused rather than reused. A failed or denied listing keeps the last
+  known map and never probes namespaces individually.
+- `?` and the `:ns` picker show the same slots the keys dispatch. `:slots` /
+  `:ns-slots` previews a repack that reclaims unavailable slots and saves it
+  only after you confirm.
+
+See [namespace shortcuts](../tui.md#namespace-shortcuts). This implements
+[#406](https://github.com/hellices/korvid/issues/406).
+
 ## Current configuration and extension contracts
 
 Existing migration links now continue at the

@@ -10,7 +10,7 @@ import logging
 import os
 import ssl
 import threading
-from collections.abc import Awaitable, Callable, Collection, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Iterator
 from typing import TYPE_CHECKING, Any, Final, Protocol
 
 from korvid.agent.install_hint import isolated_install_hint
@@ -23,11 +23,13 @@ from korvid.agent.interaction import (
 )
 from korvid.core.config import KorvidConfig, ModelConnectionConfig, context_is_protected
 from korvid.core.mcp import MCPControllerBase
+from korvid.core.store import ALL_NAMESPACES, Summary
 from korvid.k8s.client import KubeClient
 from korvid.k8s.csp import ProviderInfo
 from korvid.k8s.discovery import PODS_META, ResourceMeta, build_alias_map
 from korvid.k8s.helm import HELM_RELEASES_META, HELM_REVISIONS_META
 from korvid.k8s.olm import PACKAGES_GROUP
+from korvid.k8s.watch_events import WatchEvent
 from korvid.tools.executor import UIBridge
 from korvid.tools.structured import ERROR_PREFIX
 
@@ -773,3 +775,24 @@ def _protected_context_name(
     if context_is_protected(effective, config.protected_contexts):
         return effective
     return None
+
+
+def _make_watch_source(
+    kube: KubeClient, aliases: dict[str, ResourceMeta]
+) -> Callable[[str, str], AsyncIterator[WatchEvent[Summary]]]:
+    """Watch source for the WatchManager: kind + scope -> summary events.
+
+    Extracted from _run for complexity; *aliases* is the live shared dict
+    that background discovery mutates.
+    """
+
+    async def source(kind: str, scope: str) -> AsyncIterator[WatchEvent[Summary]]:
+        ns = None if scope == ALL_NAMESPACES else scope
+        meta = aliases.get(kind)
+        if meta is None:
+            logger.warning("Unknown resource kind %r requested for watch; stopping", kind)
+            raise ValueError(f"Unknown resource kind: {kind!r}")
+        async for event in kube.watch_resources(meta, ns):
+            yield event
+
+    return source
