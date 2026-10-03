@@ -1066,7 +1066,7 @@ def test_an_unreadable_config_is_one_config_error_that_never_quotes_the_file(
 
 def test_config_is_read_as_utf8_whatever_the_locale(tmp_path: Path) -> None:
     """Windows CI runs under a cp1252 locale, where `read_text()` without an
-    encoding turns a UTF-8 "café" into "cafÃ©"."""
+    encoding garbles a UTF-8 "café" into mojibake."""
     path = tmp_path / "config.yaml"
     path.write_text("namespace: café\n", encoding="utf-8")
 
