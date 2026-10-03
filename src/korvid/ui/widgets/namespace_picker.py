@@ -15,8 +15,9 @@ def _options(namespaces: list[str], slots: SlotMap | None) -> list[Option]:
     """Listed names labelled with their 1-9 slot (issue #406).
 
     The label is display only: each option's id is the namespace, so
-    selection never parses a label. Slots whose namespace is no longer listed
-    follow as disabled rows, matching what the number key would refuse.
+    selection never parses a label. Slots whose namespace the listing lacks
+    follow; only unavailable ones are disabled, matching what the number key
+    would refuse (a pin is never judged by discovery).
     """
     if slots is None:
         return [Option(Text(name), id=name) for name in namespaces]
@@ -27,9 +28,13 @@ def _options(namespaces: list[str], slots: SlotMap | None) -> list[Option]:
     ]
     listed = set(namespaces)
     options.extend(
-        Option(Text(f"{slot}  {entry.namespace} (unavailable)"), id=entry.namespace, disabled=True)
+        Option(
+            Text(f"{slot}  {entry.namespace}" + ("" if entry.available else " (unavailable)")),
+            id=entry.namespace,
+            disabled=not entry.available,
+        )
         for slot, entry in slots.items()
-        if not entry.available and entry.namespace not in listed
+        if entry.namespace not in listed
     )
     return options
 

@@ -6,6 +6,9 @@ completion prefetch and the `:ns` picker) and only judge availability. They
 carry a generation token captured before the listing awaited. Activation and
 deactivation advance the generation, so a listing that outlives a `:ctx`
 switch is discarded instead of judging the new cluster's slots.
+
+Saves take a cross-process lock and fsync, so they never run on the event
+loop: one worker writes queued maps in a thread, oldest first.
 """
 
 from __future__ import annotations
@@ -74,6 +77,11 @@ class NamespaceSlotController:
         #: Set once a save failed or the document is unreadable for this
         #: cluster: later saves are skipped so one fault reports once.
         self._persist_failed = False
+        #: The latest unsaved automatic map per cluster, drained by `_flush`.
+        self._pending: dict[ClusterIdentity, dict[int, SlotEntry]] = {}
+        self._flushing = False
+        #: Serializes every write, so an older map never lands after a newer one.
+        self._save_lock = asyncio.Lock()
 
     @property
     def slots(self) -> SlotMap:
@@ -84,6 +92,11 @@ class NamespaceSlotController:
     def stale(self) -> bool:
         """Whether the latest discovery for this cluster failed."""
         return self._stale
+
+    @property
+    def saving(self) -> bool:
+        """Whether a slot map is still queued or being written."""
+        return self._flushing or self._save_lock.locked()
 
     def token(self) -> int:
         """Capture before a listing awaits; pass back with its result."""
@@ -115,8 +128,15 @@ class NamespaceSlotController:
         except (OSError, SlotStateError) as exc:
             self._report_persist_failure(f"Namespace slots will not be saved: {exc}", "warning")
             saved = {}
+        # Visits made while the identity resolved belong to this cluster:
+        # they take free slots of the restored map instead of being lost.
+        visited = [entry.namespace for _, entry in sorted(self._auto.items())]
         self._identity = identity
         self._auto = saved
+        merged = self.slots
+        for namespace in visited:
+            merged = place(merged, namespace)
+        self._update(merged.automatic())
         # A listing that started before this restore would merge into the
         # pre-restore map; only listings started from here on count.
         self._generation += 1
@@ -180,13 +200,36 @@ class NamespaceSlotController:
         )
 
     def _persist(self, slots: dict[int, SlotEntry]) -> None:
-        persistence, identity = self._persistence, self._identity
-        if persistence is None or identity is None or self._persist_failed:
+        """Queue *slots* for this cluster; `_flush` writes them off the loop."""
+        identity = self._identity
+        if self._persistence is None or identity is None or self._persist_failed:
             return
+        self._pending[identity] = slots
+        if not self._flushing:
+            self._flushing = True
+            self._ui.run_worker(self._flush(), group="namespace-slot-save", exit_on_error=False)
+
+    async def _flush(self) -> None:
         try:
-            persistence.store.save(identity, slots)
-        except (OSError, SlotStateError) as exc:
-            self._report_persist_failure(f"Could not save namespace slots: {exc}", "error")
+            while self._pending:
+                async with self._save_lock:
+                    if not self._pending:
+                        break  # a confirmed reallocation superseded the queue
+                    identity = next(iter(self._pending))
+                    slots = self._pending.pop(identity)
+                    try:
+                        await self._save(identity, slots)
+                    except (OSError, SlotStateError) as exc:
+                        if identity == self._identity:
+                            message = f"Could not save namespace slots: {exc}"
+                            self._report_persist_failure(message, "error")
+        finally:
+            self._flushing = False
+
+    async def _save(self, identity: ClusterIdentity, slots: dict[int, SlotEntry]) -> None:
+        """Write *slots* in a thread; the caller holds `_save_lock`."""
+        if self._persistence is not None:
+            await asyncio.to_thread(self._persistence.store.save, identity, slots)
 
     # ------------------------------------------------------------------
     # Explicit reallocation (`:slots`)
@@ -243,11 +286,15 @@ class NamespaceSlotController:
 
         def _decided(confirmed: bool | None) -> None:
             if confirmed:
-                self._commit(token, proposed)
+                self._ui.run_worker(
+                    self._commit(token, proposed),
+                    group="namespace-slot-save",
+                    exit_on_error=False,
+                )
 
         self._ui.push_screen(NamespaceSlotsScreen(changes), _decided)
 
-    def _commit(self, token: int, proposed: SlotMap) -> None:
+    async def _commit(self, token: int, proposed: SlotMap) -> None:
         if token != self._generation:
             self._ui.notify(
                 "Namespace slot reallocation cancelled - the kube context changed",
@@ -261,17 +308,25 @@ class NamespaceSlotController:
             self._stale = False
             self._ui.notify("Namespace slots reallocated for this session (not saved)")
             return
-        try:
-            persistence.store.save(identity, slots)
-        except (OSError, SlotStateError) as exc:
-            self._ui.notify(
-                f"Could not save namespace slots: {exc}",
-                title="Namespace slots",
-                severity="error",
-                markup=False,
-            )
-            return
-        self._auto = slots
+        async with self._save_lock:
+            # The reallocation supersedes maps still queued for this cluster.
+            self._pending.pop(identity, None)
+            try:
+                await self._save(identity, slots)
+            except (OSError, SlotStateError) as exc:
+                self._ui.notify(
+                    f"Could not save namespace slots: {exc}",
+                    title="Namespace slots",
+                    severity="error",
+                    markup=False,
+                )
+                return
+            if token != self._generation:
+                return  # switched while writing: the old cluster's file has it
+            # Still under the lock: a visit queued during the write was based
+            # on the old map and must not overwrite the reallocation.
+            self._pending.pop(identity, None)
+            self._auto = slots
         self._stale = False
         self._persist_failed = False
         self._ui.notify("Namespace slots reallocated")

@@ -569,7 +569,7 @@ class WorkspaceController:
                 severity="warning",
             )
             return
-        if not namespaces:
+        if not namespaces and not self._slots.slots.entries:
             self._ui.notify("No namespaces visible (check RBAC)", severity="warning")
             return
         self._surface.set_namespace_words(namespaces)

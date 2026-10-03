@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
-from collections.abc import Awaitable, Callable, Sequence
+import threading
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -113,6 +115,9 @@ class Harness:
         self.listing_error: Exception | None = None
         self.listing_available = True
         self.blocked: UnavailableReason | None = None
+        #: When set, identity resolution reports `resolving` and waits for `resolved`.
+        self.resolving: threading.Event | None = None
+        self.resolved = threading.Event()
         self.path = tmp_path / "slots.json"
         self.store = NamespaceSlotStore(self.path)
         persistence = SlotPersistence(self.store, self._identity) if persist else None
@@ -126,6 +131,9 @@ class Harness:
         )
 
     def _identity(self, context: str | None) -> tuple[str, str] | None:
+        if self.resolving is not None:
+            self.resolving.set()
+            self.resolved.wait(timeout=5)
         return None if context is None else (context, self.server)
 
     def _lister(self) -> Callable[[], Awaitable[list[str]]] | None:
@@ -148,13 +156,15 @@ class Harness:
     def saved(self, context: str = "dev") -> dict[int, SlotEntry]:
         return self.store.load(ClusterIdentity(context, self.server))
 
-    def discover(self) -> None:
+    async def discover(self) -> None:
         token = self.controller.token()
         self.controller.observe(token, self.names)
+        await self.ui.drain()
 
-    def visit(self, *namespaces: str) -> None:
+    async def visit(self, *namespaces: str) -> None:
         for namespace in namespaces:
             self.controller.visit(namespace)
+        await self.ui.drain()
 
 
 def _auto(namespace: str, *, available: bool = True) -> SlotEntry:
@@ -178,11 +188,11 @@ async def test_activation_restores_saved_slots_and_visits_fill_free_ones(
     await harness.controller.activate()
     assert harness.layout() == {1: ("prod", "pinned", True), 4: ("qa", "auto", True)}
 
-    harness.discover()
+    await harness.discover()
     assert harness.layout() == {1: ("prod", "pinned", True), 4: ("qa", "auto", True)}, (
         "a listing alone never assigns a slot"
     )
-    harness.visit("dev", "prod", "qa", "alpha")
+    await harness.visit("dev", "prod", "qa", "alpha")
 
     assert harness.layout() == {
         1: ("prod", "pinned", True),
@@ -198,13 +208,54 @@ async def test_a_visit_absent_from_the_last_complete_listing_is_not_assigned(
 ) -> None:
     harness = Harness(tmp_path, names=["dev"])
     await harness.controller.activate()
-    harness.visit("unlisted")
+    await harness.visit("unlisted")
     assert harness.layout() == {1: ("unlisted", "auto", True)}, "unknown inventory trusts it"
 
-    harness.discover()
-    harness.visit("misspelled", "dev", "*", "")
+    await harness.discover()
+    await harness.visit("misspelled", "dev", "*", "")
 
     assert harness.layout() == {1: ("unlisted", "auto", False), 2: ("dev", "auto", True)}
+
+
+async def test_a_visit_while_the_saved_map_loads_is_kept(tmp_path: Path) -> None:
+    harness = Harness(tmp_path, names=["dev", "qa"])
+    harness.store.save(ClusterIdentity("dev", DEV_SERVER), {1: _auto("qa")})
+
+    harness.resolving = threading.Event()
+
+    activation = asyncio.create_task(harness.controller.activate())
+    await asyncio.to_thread(harness.resolving.wait, 5)
+    await harness.visit("dev")
+    harness.resolved.set()
+    await activation
+    await harness.ui.drain()
+
+    assert harness.layout() == {1: ("qa", "auto", True), 2: ("dev", "auto", True)}
+    assert harness.saved() == {1: _auto("qa"), 2: _auto("dev")}
+
+
+async def test_saves_run_off_the_event_loop_and_the_latest_map_wins(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = Harness(tmp_path)
+    await harness.controller.activate()
+    writers: list[int] = []
+    save = harness.store.save
+
+    def recording(identity: ClusterIdentity, slots: Mapping[int, SlotEntry]) -> None:
+        writers.append(threading.get_ident())
+        save(identity, slots)
+
+    monkeypatch.setattr(harness.store, "save", recording)
+    harness.controller.visit("dev")
+    harness.controller.visit("qa")
+
+    assert writers == [], "a visit never writes the state file on the event loop"
+    assert harness.controller.saving
+    await harness.ui.drain()
+    assert not harness.controller.saving
+    assert threading.get_ident() not in writers
+    assert harness.saved() == {1: _auto("dev"), 2: _auto("qa")}
 
 
 async def test_a_refresh_with_an_unchanged_map_does_not_rewrite_the_file(
@@ -212,14 +263,14 @@ async def test_a_refresh_with_an_unchanged_map_does_not_rewrite_the_file(
 ) -> None:
     harness = Harness(tmp_path, names=["dev"])
     await harness.controller.activate()
-    harness.visit("dev")
-    harness.discover()
-    harness.visit("dev")
+    await harness.visit("dev")
+    await harness.discover()
+    await harness.visit("dev")
     before = harness.path.stat().st_mtime_ns
     harness.path.write_text(harness.path.read_text(encoding="utf-8"), encoding="utf-8")
     marker = harness.path.stat().st_mtime_ns
 
-    harness.discover()
+    await harness.discover()
 
     assert before <= marker == harness.path.stat().st_mtime_ns
 
@@ -229,10 +280,10 @@ async def test_a_confirmed_missing_namespace_is_kept_unavailable_and_not_dispatc
 ) -> None:
     harness = Harness(tmp_path, names=["dev", "prod"])
     await harness.controller.activate()
-    harness.visit("dev", "prod")
+    await harness.visit("dev", "prod")
     harness.names = ["dev", "zeta"]
 
-    harness.discover()
+    await harness.discover()
 
     assert harness.layout() == {1: ("dev", "auto", True), 2: ("prod", "auto", False)}
     assert harness.controller.target(2) is None
@@ -245,13 +296,13 @@ async def test_a_confirmed_missing_namespace_is_kept_unavailable_and_not_dispatc
 async def test_failed_discovery_keeps_the_map_and_marks_it_stale(tmp_path: Path) -> None:
     harness = Harness(tmp_path, names=["dev"])
     await harness.controller.activate()
-    harness.visit("dev")
+    await harness.visit("dev")
 
     harness.controller.observe_failure(harness.controller.token())
 
     assert harness.layout() == {1: ("dev", "auto", True)}
     assert harness.controller.stale
-    harness.discover()
+    await harness.discover()
     assert not harness.controller.stale
 
 
@@ -276,10 +327,10 @@ async def test_a_visit_during_a_context_switch_is_not_saved_to_either_cluster(
 ) -> None:
     harness = Harness(tmp_path, names=["dev"])
     await harness.controller.activate()
-    harness.visit("dev")
+    await harness.visit("dev")
 
     harness.controller.deactivate()
-    harness.visit("between")
+    await harness.visit("between")
     harness.context = "prod"
     await harness.controller.activate()
 
@@ -293,7 +344,7 @@ async def test_a_switch_shows_only_pins_until_the_new_cluster_is_restored(
 ) -> None:
     harness = Harness(tmp_path, pinned=["shared"], names=["dev-only"])
     await harness.controller.activate()
-    harness.visit("dev-only")
+    await harness.visit("dev-only")
 
     harness.controller.deactivate()
 
@@ -312,7 +363,7 @@ async def test_an_unresolved_identity_keeps_slots_in_memory_only(tmp_path: Path)
     harness.context = None
 
     await harness.controller.activate()
-    harness.visit("dev")
+    await harness.visit("dev")
 
     assert harness.layout() == {1: ("dev", "auto", True)}
     assert not harness.path.exists()
@@ -325,8 +376,8 @@ async def test_a_malformed_state_file_warns_once_and_is_never_overwritten(
     harness.path.write_text("{broken", encoding="utf-8")
 
     await harness.controller.activate()
-    harness.visit("dev")
-    harness.visit("qa")
+    await harness.visit("dev")
+    await harness.visit("qa")
 
     assert harness.layout() == {1: ("dev", "auto", True), 2: ("qa", "auto", True)}
     assert harness.path.read_text(encoding="utf-8") == "{broken"
@@ -342,14 +393,14 @@ async def test_a_failed_save_is_reported_once_and_keeps_the_last_saved_file(
 ) -> None:
     harness = Harness(tmp_path, names=["dev"])
     await harness.controller.activate()
-    harness.visit("dev")
+    await harness.visit("dev")
 
     def fail_save(*_args: object) -> None:
         raise OSError("read-only file system")
 
     monkeypatch.setattr(harness.store, "save", fail_save)
-    harness.visit("qa")
-    harness.visit("zeta")
+    await harness.visit("qa")
+    await harness.visit("zeta")
 
     assert harness.layout()[3] == ("zeta", "auto", True)
     errors = [message for message, severity in harness.ui.notifications if severity == "error"]
@@ -368,12 +419,17 @@ async def _open_reallocation(harness: Harness) -> NamespaceSlotsScreen:
     return screen
 
 
+async def _decide(harness: Harness, confirmed: bool) -> None:
+    harness.ui.callbacks[-1](confirmed)
+    await harness.ui.drain()
+
+
 async def test_confirmed_reallocation_reclaims_unavailable_slots_after_saving(
     tmp_path: Path,
 ) -> None:
     harness = Harness(tmp_path, pinned=["prod"], names=["prod", "old", "dev"])
     await harness.controller.activate()
-    harness.visit("old", "dev")
+    await harness.visit("old", "dev")
     harness.names = ["prod", "dev", "new"]
 
     screen = await _open_reallocation(harness)
@@ -382,7 +438,7 @@ async def test_confirmed_reallocation_reclaims_unavailable_slots_after_saving(
         (2, _auto("old"), _auto("dev")),
         (3, _auto("dev"), None),
     ]
-    harness.ui.callbacks[-1](True)
+    await _decide(harness, True)
     assert harness.layout() == {1: ("prod", "pinned", True), 2: ("dev", "auto", True)}
     assert harness.saved() == {2: _auto("dev")}
 
@@ -390,14 +446,14 @@ async def test_confirmed_reallocation_reclaims_unavailable_slots_after_saving(
 async def test_cancelled_reallocation_keeps_the_current_map(tmp_path: Path) -> None:
     harness = Harness(tmp_path, names=["dev", "old"])
     await harness.controller.activate()
-    harness.visit("dev", "old")
+    await harness.visit("dev", "old")
     harness.names = ["dev", "new"]
     layout, saved = harness.layout(), harness.saved()
 
     await _open_reallocation(harness)
     assert harness.layout() == layout, "opening the preview must not touch the map"
     assert harness.saved() == saved, "opening the preview must not touch the file"
-    harness.ui.callbacks[-1](False)
+    await _decide(harness, False)
 
     assert harness.layout() == layout == {1: ("dev", "auto", True), 2: ("old", "auto", True)}
     assert harness.saved() == saved
@@ -406,12 +462,12 @@ async def test_cancelled_reallocation_keeps_the_current_map(tmp_path: Path) -> N
 async def test_confirmed_reallocation_clears_a_stale_map(tmp_path: Path) -> None:
     harness = Harness(tmp_path, names=["dev"])
     await harness.controller.activate()
-    harness.visit("gone", "dev")
+    await harness.visit("gone", "dev")
     harness.controller.observe_failure(harness.controller.token())
 
     await _open_reallocation(harness)
     assert harness.controller.stale, "only a confirmed reallocation rewrites the map"
-    harness.ui.callbacks[-1](True)
+    await _decide(harness, True)
 
     assert not harness.controller.stale
     assert harness.layout() == {1: ("dev", "auto", True)}
@@ -422,7 +478,7 @@ async def test_reallocation_save_failure_keeps_the_current_map(
 ) -> None:
     harness = Harness(tmp_path, names=["dev", "old"])
     await harness.controller.activate()
-    harness.visit("dev", "old")
+    await harness.visit("dev", "old")
     harness.names = ["dev"]
     await _open_reallocation(harness)
 
@@ -430,7 +486,7 @@ async def test_reallocation_save_failure_keeps_the_current_map(
         raise OSError("disk full")
 
     monkeypatch.setattr(harness.store, "save", fail_save)
-    harness.ui.callbacks[-1](True)
+    await _decide(harness, True)
 
     assert harness.layout() == {1: ("dev", "auto", True), 2: ("old", "auto", True)}
     message, severity = harness.ui.notifications[-1]
@@ -443,12 +499,12 @@ async def test_a_reallocation_confirmed_after_a_context_switch_is_refused(
 ) -> None:
     harness = Harness(tmp_path, names=["dev", "old"])
     await harness.controller.activate()
-    harness.visit("dev", "old")
+    await harness.visit("dev", "old")
     harness.names = ["dev"]
     await _open_reallocation(harness)
 
     harness.controller.deactivate()
-    harness.ui.callbacks[-1](True)
+    await _decide(harness, True)
 
     assert harness.saved() == {1: _auto("dev"), 2: _auto("old")}
     assert "context changed" in harness.ui.notifications[-1][0]
@@ -457,7 +513,7 @@ async def test_a_reallocation_confirmed_after_a_context_switch_is_refused(
 async def test_an_unchanged_reallocation_opens_no_modal(tmp_path: Path) -> None:
     harness = Harness(tmp_path, names=["dev", "unvisited"])
     await harness.controller.activate()
-    harness.visit("dev")
+    await harness.visit("dev")
 
     harness.controller.open_reallocation()
     await harness.ui.drain()
@@ -469,11 +525,11 @@ async def test_an_unchanged_reallocation_opens_no_modal(tmp_path: Path) -> None:
 async def test_in_memory_reallocation_does_not_claim_it_was_saved(tmp_path: Path) -> None:
     harness = Harness(tmp_path, names=["dev", "old"], persist=False)
     await harness.controller.activate()
-    harness.visit("dev", "old")
+    await harness.visit("dev", "old")
     harness.names = ["dev"]
     await _open_reallocation(harness)
 
-    harness.ui.callbacks[-1](True)
+    await _decide(harness, True)
 
     assert harness.layout() == {1: ("dev", "auto", True)}
     assert "not saved" in harness.ui.notifications[-1][0]
@@ -482,7 +538,7 @@ async def test_in_memory_reallocation_does_not_claim_it_was_saved(tmp_path: Path
 async def test_a_denied_listing_refuses_reallocation_without_probing(tmp_path: Path) -> None:
     harness = Harness(tmp_path, names=["dev"])
     await harness.controller.activate()
-    harness.visit("dev")
+    await harness.visit("dev")
     harness.listing_error = ApiStatusError(403, "Forbidden", "namespaces is forbidden")
 
     harness.controller.open_reallocation()

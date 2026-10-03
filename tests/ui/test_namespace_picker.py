@@ -70,3 +70,23 @@ async def test_without_slots_the_picker_lists_plain_names() -> None:
         picker.open(["dev"])
 
         assert _rows(picker) == [("dev", "dev", False)]
+
+
+async def test_every_unlisted_slot_is_shown_and_only_unavailable_ones_are_disabled() -> None:
+    app = _PickerApp()
+    async with app.run_test():
+        picker = app.query_one(NamespacePicker)
+        picker.open(["dev"], SLOTS)
+        unlisted = _rows(picker)
+        picker.open([], SLOTS)
+
+        assert unlisted == [
+            ("dev", "2  dev", False),
+            ("prod", "1  prod", False),
+            ("gone", "3  gone (unavailable)", True),
+        ]
+        assert _rows(picker) == [
+            ("prod", "1  prod", False),
+            ("dev", "2  dev", False),
+            ("gone", "3  gone (unavailable)", True),
+        ]

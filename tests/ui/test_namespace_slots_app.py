@@ -7,6 +7,7 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 
+import pytest
 import yaml
 from textual.pilot import Pilot
 
@@ -85,11 +86,13 @@ def _mapped(app: KorvidApp, namespace: str) -> bool:
 
 
 def _arrived(app: KorvidApp, namespace: str) -> bool:
-    return app.current_scope == namespace and _mapped(app, namespace)
+    slots = app._workspace_ctl.slots
+    return app.current_scope == namespace and _mapped(app, namespace) and not slots.saving
 
 
 async def _visit(pilot: Pilot[None], app: KorvidApp, *namespaces: str) -> None:
-    """Switch to each namespace the way `:ns <name>` and the picker do."""
+    """Switch to each namespace the way `:ns <name>` and the picker do, and
+    wait until the slot it took is saved."""
     for namespace in namespaces:
         app.post_message(NavigateCommand(None, namespace=namespace))
         await until(pilot, partial(_arrived, app, namespace), label=f"visited {namespace}")
@@ -134,10 +137,10 @@ async def test_help_picker_and_keys_agree_and_discovery_never_navigates(tmp_path
 
         await pilot.press("2")
         await until(pilot, lambda: app.current_scope == "alpha", label="slot 2 entered")
-    assert slot_store.load(IDENTITY) == {
-        2: SlotEntry("alpha", SlotOrigin.AUTO),
-        3: SlotEntry("beta", SlotOrigin.AUTO),
-    }
+        assert slot_store.load(IDENTITY) == {
+            2: SlotEntry("alpha", SlotOrigin.AUTO),
+            3: SlotEntry("beta", SlotOrigin.AUTO),
+        }
 
 
 async def test_a_namespace_gone_from_the_listing_keeps_its_key_but_refuses_it(
@@ -161,6 +164,41 @@ async def test_a_namespace_gone_from_the_listing_keeps_its_key_but_refuses_it(
             label="unavailable slot explained",
         )
         assert app.current_scope == "alpha"
+
+
+async def test_an_empty_listing_still_opens_the_picker_on_the_slot_map(tmp_path: Path) -> None:
+    cluster = Cluster(["alpha"])
+    app, _ = _app(cluster, tmp_path)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _ready(pilot, app, cluster.names)
+        await _visit(pilot, app, "alpha")
+        cluster.names = []
+
+        rows = await _picker_rows(pilot, app)
+
+        assert rows == [("1  prod", False), ("2  alpha (unavailable)", True)]
+
+
+async def test_a_visit_belongs_to_the_pane_that_navigated_not_the_one_focused_after(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cluster = Cluster(["alpha"])
+    app, _ = _app(cluster, tmp_path, config=KorvidConfig(namespace="default"))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _ready(pilot, app, cluster.names)
+        await pilot.press("ctrl+w", "v")
+        await until(pilot, lambda: app._workspace.is_split, label="split")
+        navigate = app._workspace_ctl.navigate_command
+
+        async def navigate_then_refocus(view: str | None, namespace: str | None) -> None:
+            await navigate(view, namespace)
+            app._workspace.focus_other()  # focus moves while the command finishes
+
+        monkeypatch.setattr(app._workspace_ctl, "navigate_command", navigate_then_refocus)
+        app.post_message(NavigateCommand(None, namespace="alpha"))
+        await until(pilot, partial(_mapped, app, "alpha"), label="alpha took a slot")
+
+        assert app.current_scope == "default"
 
 
 async def test_a_denied_listing_infers_nothing_and_never_probes(tmp_path: Path) -> None:

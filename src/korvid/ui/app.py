@@ -788,8 +788,9 @@ class KorvidApp(App[None]):
         self._workspace_ctl.clear_filter()
 
     async def on_navigate_command(self, message: NavigateCommand) -> None:
+        pane = self._pane  # focus may move to another split pane while this awaits
         await self._workspace_ctl.navigate_command(message.view, message.namespace)
-        if message.namespace and self.current_scope == message.namespace:
+        if message.namespace and pane.scope == message.namespace:
             # A namespace you switch to takes a free 1-9 slot (issue #406).
             self._workspace_ctl.slots.visit(message.namespace)
 

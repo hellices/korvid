@@ -84,6 +84,12 @@ save keeps the last saved file intact and reports an actionable notice once.
 Routine discovery keeps the new map in memory for this session. Reallocation
 commits only after its save succeeds, mirroring the #404 apply contract.
 
+Because a save waits on that lock and fsyncs, it never runs on the event loop.
+Visits and discovery queue the latest map per cluster, and one worker writes
+the queue in a thread. Every write, including a confirmed reallocation, holds
+one asyncio lock, so an older map never lands after a newer one. A map queued
+before a `:ctx` switch is still written to the cluster it belongs to.
+
 ## Visits
 
 Slots follow the namespaces the user works in, not the cluster's name order.
@@ -95,7 +101,10 @@ similar names, and saving the numbers would make that permanent.
 A visit is a user-initiated `NavigateCommand` that lands on a namespace:
 `:ns <name>`, `:<view> <name>` or a picker selection. Agent navigation, the `0`
 all-namespaces toggle and the slot keys themselves are not visits. After the
-navigation, the app asks the slot controller to `visit` the namespace.
+navigation, the app asks the slot controller to `visit` the namespace when
+the pane that issued the command is now on it. Focus may have moved to another
+split pane meanwhile. A visit made while activation resolves the cluster
+identity takes a free slot of the restored map.
 
 - The all-namespaces scope is never assigned.
 - With a complete inventory from the current generation, a name the listing
@@ -129,8 +138,10 @@ Help and the picker read the same map object that dispatch reads:
 - Help keeps the generic 1-9 row and adds a "Namespace slots" group. Each row
   is a slot number and `namespace (pinned|auto[, unavailable])`, plus a stale
   note when discovery failed.
-- The picker labels listed namespaces with their slot number. Unavailable
-  slots appear as disabled rows. Selection navigates by the option's namespace
+- The picker labels listed namespaces with their slot number. Slots whose
+  namespace the listing lacks follow it; only unavailable ones are disabled,
+  so an unlisted pin stays selectable. An empty listing still opens the
+  picker when the map has slots. Selection navigates by the option's namespace
   id, never by parsing its label.
 
 `:slots` (alias `:ns-slots`, also in the Action Palette) runs a fresh listing,
