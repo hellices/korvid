@@ -78,6 +78,9 @@ def test_pinned_entries_are_never_written(tmp_path: Path) -> None:
         ' "slots": {"x": {"namespace": "a", "available": true}}}]}',
         '{"version": 1, "clusters": [{"context": "dev", "server": "s",'
         ' "slots": {"12": {"namespace": "a", "available": true}}}]}',
+        '{"version": 1, "clusters": [{"context": "dev", "server": "s", "slots": {"'
+        + "1" * 5000
+        + '": {"namespace": "a", "available": true}}}]}',
         '{"version": 1, "clusters": [{"context": "dev", "server": "s",'
         ' "slots": {"2": {"namespace": "", "available": true}}}]}',
         '{"version": 1, "clusters": [{"context": "dev", "server": "s",'
@@ -92,6 +95,7 @@ def test_pinned_entries_are_never_written(tmp_path: Path) -> None:
         "slots-not-a-mapping",
         "non-numeric-slot",
         "out-of-range-slot",
+        "slot-beyond-the-int-digit-limit",
         "empty-namespace",
         "non-boolean-availability",
     ],

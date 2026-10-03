@@ -53,9 +53,20 @@ def _malformed(detail: str) -> SlotStateError:
     return SlotStateError(f"Malformed namespace slot state: {detail}")
 
 
+def _slot_number(key: object) -> int | None:
+    if not isinstance(key, str) or not key.isdecimal():
+        return None
+    try:
+        slot = int(key)
+    except ValueError:  # more digits than int() converts
+        return None
+    return slot if 1 <= slot <= SLOT_COUNT else None
+
+
 def _parse_slot(key: object, value: object) -> tuple[int, SlotEntry]:
-    if not isinstance(key, str) or not key.isdecimal() or not 1 <= int(key) <= SLOT_COUNT:
-        raise _malformed(f"slot {key!r} is not 1-{SLOT_COUNT}")
+    slot = _slot_number(key)
+    if slot is None:
+        raise _malformed(f"slot {str(key)[:20]!r} is not 1-{SLOT_COUNT}")
     if not isinstance(value, dict):
         raise _malformed(f"slot {key} is not a mapping")
     namespace, available = value.get("namespace"), value.get("available")
@@ -63,7 +74,7 @@ def _parse_slot(key: object, value: object) -> tuple[int, SlotEntry]:
         raise _malformed(f"slot {key} has no namespace")
     if not isinstance(available, bool):
         raise _malformed(f"slot {key} availability is not a boolean")
-    return int(key), SlotEntry(namespace, SlotOrigin.AUTO, available=available)
+    return slot, SlotEntry(namespace, SlotOrigin.AUTO, available=available)
 
 
 def _parse_record(record: object) -> tuple[ClusterIdentity, dict[int, SlotEntry]]:

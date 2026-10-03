@@ -93,6 +93,13 @@ confirmed reallocation also installs its fresh listing as the inventory later
 visits are checked against. Visits made while its write waited are replayed
 onto the new map when that listing still contains them.
 
+Activation reads the file under the same lock. A write still in flight for
+the cluster lands first, and a map still queued for it is adopted instead
+of the older file. A cancelled worker leaves its thread write running.
+Textual cancels app workers before `on_unmount`, so unmount calls the
+controller's `shutdown`. It waits for that write, then writes the maps still
+queued, so a visit just before quitting is kept.
+
 ## Visits
 
 Slots follow the namespaces the user works in, not the cluster's name order.
@@ -125,7 +132,8 @@ controller, which uses them only to judge availability and to reject
 mistyped visits. A 403 keeps the existing single permission notice and never
 probes individual namespaces. Configured favorites are never used as a
 fallback inventory. When discovery fails, help shows the map as last known,
-with a stale note.
+with a stale note. A failed listing also clears the inventory, so a visit
+during the outage is trusted until the next complete listing.
 
 ## UI and dispatch
 
@@ -177,7 +185,8 @@ extracting existing code rather than raising caps.
   reappearance, unknown inventory, more than nine visits, reallocation and
   preview.
 - Store tests: round trip, per-identity isolation, other records preserved,
-  malformed/wrong-version documents, write failure leaves the old file.
+  malformed/wrong-version documents (including a slot key beyond `int()`'s
+  digit limit), write failure leaves the old file.
 - Identity tests: explicit and current-context names, server change isolates.
 - Controller and TUI tests: dispatch matches help and picker labels, visits
   through `NavigateCommand`, a mistyped visit is not assigned, a visit during

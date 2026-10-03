@@ -8,12 +8,15 @@ deactivation advance the generation, so a listing that outlives a `:ctx`
 switch is discarded instead of judging the new cluster's slots.
 
 Saves take a cross-process lock and fsync, so they never run on the event
-loop: one worker writes queued maps in a thread, oldest first.
+loop: one worker writes queued maps in a thread, oldest first. Activation
+reads under the same lock, and `shutdown` writes what the app's worker
+sweep left queued.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
 from collections.abc import Awaitable, Callable, Sequence
 
@@ -82,6 +85,8 @@ class NamespaceSlotController:
         self._flushing = False
         #: Serializes every write, so an older map never lands after a newer one.
         self._save_lock = asyncio.Lock()
+        #: The latest thread write; it outlives a cancelled worker.
+        self._writing: asyncio.Future[None] | None = None
 
     @property
     def slots(self) -> SlotMap:
@@ -123,11 +128,23 @@ class NamespaceSlotController:
         if generation != self._generation or resolved is None:
             return
         identity = ClusterIdentity(*resolved)
-        try:
-            saved = persistence.store.load(identity)
-        except (OSError, SlotStateError) as exc:
-            self._report_persist_failure(f"Namespace slots will not be saved: {exc}", "warning")
-            saved = {}
+        failure: Exception | None = None
+        # A write in flight or a map still queued for this cluster is newer
+        # than the file: wait for the write, and adopt the queued map.
+        async with self._save_lock:
+            queued = self._pending.get(identity)
+            try:
+                saved = (
+                    dict(queued)
+                    if queued is not None
+                    else await asyncio.to_thread(persistence.store.load, identity)
+                )
+            except (OSError, SlotStateError) as exc:
+                saved, failure = {}, exc
+        if generation != self._generation:
+            return
+        if failure is not None:
+            self._report_persist_failure(f"Namespace slots will not be saved: {failure}", "warning")
         # Visits made while the identity resolved belong to this cluster:
         # they take free slots of the restored map instead of being lost.
         visited = [entry.namespace for _, entry in sorted(self._auto.items())]
@@ -173,9 +190,14 @@ class NamespaceSlotController:
         self._persist(updated)
 
     def observe_failure(self, token: int) -> None:
-        """A failed or denied listing infers nothing; the map is marked stale."""
+        """A failed or denied listing infers nothing; the map is marked stale.
+
+        The inventory becomes unknown again, so visits are trusted until the
+        next complete listing; the entries keep their availability.
+        """
         if token == self._generation:
             self._stale = True
+            self._inventory = None
 
     def target(self, slot: int) -> str | None:
         """The namespace key *slot* navigates to, or None (notifies if unavailable)."""
@@ -231,9 +253,30 @@ class NamespaceSlotController:
             self._flushing = False
 
     async def _save(self, identity: ClusterIdentity, slots: dict[int, SlotEntry]) -> None:
-        """Write *slots* in a thread; the caller holds `_save_lock`."""
+        """Write *slots* in a thread; the caller holds `_save_lock`.
+
+        The write is shielded: a cancelled worker leaves it running, and
+        `shutdown` waits for it before writing anything newer.
+        """
         if self._persistence is not None:
-            await asyncio.to_thread(self._persistence.store.save, identity, slots)
+            store = self._persistence.store
+            self._writing = asyncio.ensure_future(asyncio.to_thread(store.save, identity, slots))
+            await asyncio.shield(self._writing)
+
+    async def shutdown(self) -> None:
+        """Write what the app's worker sweep left: Textual cancels workers
+        before `on_unmount`, so queued maps would otherwise be lost on quit.
+
+        Errors are dropped - nothing is left on screen to report them.
+        """
+        async with self._save_lock:
+            if self._writing is not None:
+                with contextlib.suppress(OSError, SlotStateError):
+                    await self._writing
+            while self._pending:
+                identity = next(iter(self._pending))
+                with contextlib.suppress(OSError, SlotStateError):
+                    await self._save(identity, self._pending.pop(identity))
 
     # ------------------------------------------------------------------
     # Explicit reallocation (`:slots`)

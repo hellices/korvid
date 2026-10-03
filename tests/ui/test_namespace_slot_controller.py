@@ -310,6 +310,80 @@ async def test_failed_discovery_keeps_the_map_and_marks_it_stale(tmp_path: Path)
     assert not harness.controller.stale
 
 
+async def test_a_failed_listing_forgets_the_last_inventory(tmp_path: Path) -> None:
+    harness = Harness(tmp_path, names=["dev"])
+    await harness.controller.activate()
+    await harness.discover()
+
+    harness.controller.observe_failure(harness.controller.token())
+    await harness.visit("created-since")
+
+    assert harness.layout() == {1: ("created-since", "auto", True)}, (
+        "without a current listing a visit is trusted again"
+    )
+
+
+class GatedSave:
+    """Holds the first state-file write in its thread until `release`."""
+
+    def __init__(self, harness: Harness, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.entered = threading.Event()
+        self.gate = threading.Event()
+        self._save = harness.store.save
+        monkeypatch.setattr(harness.store, "save", self)
+
+    def __call__(self, identity: ClusterIdentity, slots: Mapping[int, SlotEntry]) -> None:
+        self.entered.set()
+        self.gate.wait(timeout=5)
+        self._save(identity, slots)
+
+    async def held(self) -> None:
+        await asyncio.to_thread(self.entered.wait, 5)
+
+
+async def test_switching_back_waits_for_this_clusters_save_and_its_queue(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = Harness(tmp_path, names=["qa", "beta"])
+    await harness.controller.activate()
+    gated = GatedSave(harness, monkeypatch)
+    harness.controller.visit("qa")
+    flush = asyncio.create_task(harness.ui.drain())
+    await gated.held()
+    harness.controller.visit("beta")  # queued behind the write in flight
+
+    harness.controller.deactivate()  # `:ctx` away and straight back
+    activation = asyncio.create_task(harness.controller.activate())
+    await asyncio.sleep(0)
+    gated.gate.set()
+    await activation
+    await flush
+    await harness.ui.drain()
+
+    assert harness.layout() == {1: ("qa", "auto", True), 2: ("beta", "auto", True)}
+    assert harness.saved() == {1: _auto("qa"), 2: _auto("beta")}
+
+
+async def test_shutdown_finishes_the_write_in_flight_then_writes_the_queue(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = Harness(tmp_path)
+    await harness.controller.activate()
+    gated = GatedSave(harness, monkeypatch)
+    harness.controller.visit("dev")
+    flush = asyncio.create_task(harness.ui.drain())
+    await gated.held()
+    harness.controller.visit("qa")
+
+    flush.cancel()  # Textual cancels app workers before `on_unmount` runs
+    with contextlib.suppress(asyncio.CancelledError):
+        await flush
+    gated.gate.set()
+    await harness.controller.shutdown()
+
+    assert harness.saved() == {1: _auto("dev"), 2: _auto("qa")}
+
+
 async def test_a_result_from_before_a_context_switch_is_discarded(tmp_path: Path) -> None:
     harness = Harness(tmp_path, names=["old-a", "old-b"])
     await harness.controller.activate()

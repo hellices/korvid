@@ -1473,6 +1473,8 @@ class KorvidApp(App[None]):
         # The `:ns` completion prefetch belongs to the workspace controller;
         # this cancels and reaps it, exactly as the `:ctx` teardown does.
         await self._workspace_ctl.cancel_namespace_prefetch()
+        # Workers are already cancelled; write the slot maps they left queued.
+        await self._workspace_ctl.slots.shutdown()
         # The `:ctx` completion prefetch belongs to the switch coordinator;
         # this is the narrow lifecycle call that cancels and reaps it.
         await self._ctx.shutdown()

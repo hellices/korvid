@@ -201,6 +201,26 @@ async def test_a_visit_belongs_to_the_pane_that_navigated_not_the_one_focused_af
         assert app.current_scope == "default"
 
 
+async def test_quitting_writes_the_slot_maps_still_queued(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app, _ = _app(Cluster(["alpha"]), tmp_path)
+    drained: list[bool] = []
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _ready(pilot, app, ["alpha"])
+        slots = app._workspace_ctl.slots
+        shutdown = slots.shutdown
+
+        async def recording() -> None:
+            # Textual cancels app workers before unmount, queued saves with them.
+            drained.append(all(w.is_cancelled or w.is_finished for w in app.workers))
+            await shutdown()
+
+        monkeypatch.setattr(slots, "shutdown", recording)
+
+    assert drained == [True]
+
+
 async def test_a_denied_listing_infers_nothing_and_never_probes(tmp_path: Path) -> None:
     cluster = Cluster([])
     cluster.error = ApiStatusError(403, "Forbidden", "namespaces is forbidden")
