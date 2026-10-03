@@ -1410,6 +1410,46 @@ def test_config_root_must_be_a_mapping(tmp_path: Path, contents: str) -> None:
         load_config(path)
 
 
+@pytest.mark.parametrize(
+    ("content", "expected"),
+    [
+        pytest.param(
+            b"namespace: prod\nfavorite_namespaces: [prod, dev\n",
+            "malformed YAML at line 3, column 1",
+            id="unclosed-flow-sequence",
+        ),
+        pytest.param(
+            b"namespace: prod\n  api_key: sk-live-SECRET\n",
+            "malformed YAML at line 2, column 10",
+            id="bad-indent",
+        ),
+        pytest.param(b"namespace: \xff\xfe\n", "the file is not UTF-8 text", id="not-utf8"),
+    ],
+)
+def test_an_unreadable_config_is_one_config_error_that_never_quotes_the_file(
+    tmp_path: Path, content: bytes, expected: str
+) -> None:
+    """Startup turns ConfigError into one `korvid: ...` line; anything else
+    escaped as a traceback that quoted the offending line, secret included."""
+    path = tmp_path / "config.yaml"
+    path.write_bytes(content)
+
+    with pytest.raises(ConfigError, match=expected) as caught:
+        load_config(path)
+
+    assert "SECRET" not in str(caught.value)
+    assert "\n" not in str(caught.value)
+
+
+def test_config_is_read_as_utf8_whatever_the_locale(tmp_path: Path) -> None:
+    """Windows CI runs under a cp1252 locale, where `read_text()` without an
+    encoding turns a UTF-8 "café" into "cafÃ©"."""
+    path = tmp_path / "config.yaml"
+    path.write_text("namespace: café\n", encoding="utf-8")
+
+    assert load_config(path).namespace == "café"
+
+
 def test_unknown_agent_setting_is_rejected(tmp_path: Path) -> None:
     path = tmp_path / "config.yaml"
     path.write_text("agent:\n  unexpected_setting: true\n")

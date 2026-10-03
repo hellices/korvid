@@ -14,6 +14,7 @@ import yaml
 from korvid.core.config import (
     AGENT_PROFILE_NAME_MAX_LENGTH,
     KEEP_MODEL_TIER,
+    ConfigError,
     ConfigFileModelConnectionsWriter,
     ConnectionAuthConfig,
     ModelConnectionConfig,
@@ -1048,7 +1049,8 @@ agent:
 def test_a_sequence_profile_key_never_reaches_korvid(tmp_path: Path) -> None:
     """The tuple-like key YAML can spell is one `safe_load` refuses to
     build, so the document fails as a document — korvid is never handed
-    half a profile set to preserve."""
+    half a profile set to preserve. The refusal names the place, not the
+    text: startup prints it as one `korvid: ...` line."""
     path = _write(
         tmp_path,
         """
@@ -1058,8 +1060,10 @@ agent:
     : {model: openai/gpt-4o}
 """,
     )
-    with pytest.raises(yaml.YAMLError, match="unhashable key"):
+    with pytest.raises(ConfigError, match="malformed YAML at line 4, column 7") as caught:
         load_config(path)
+
+    assert isinstance(caught.value.__cause__, yaml.YAMLError)
 
 
 def test_deleting_a_string_profile_leaves_its_numeric_twin_alone(tmp_path: Path) -> None:

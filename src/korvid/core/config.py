@@ -489,7 +489,10 @@ def load_config(path: Path | None = None) -> KorvidConfig:
     cfg_path = path or DEFAULT_CONFIG_PATH
     if not cfg_path.is_file():
         return KorvidConfig()
-    loaded = yaml.safe_load(cfg_path.read_text())
+    try:
+        loaded = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
+        raise ConfigError(f"cannot load {cfg_path}: {_unreadable(exc)}") from exc
     if loaded is None:
         raw: dict[str, Any] = {}
     elif isinstance(loaded, dict):
@@ -1139,6 +1142,18 @@ def _atomic_write_text(path: Path, text: str) -> None:
         os_replace(tmp, path)
     finally:
         tmp.unlink(missing_ok=True)
+
+
+def _unreadable(exc: OSError | UnicodeDecodeError | yaml.YAMLError) -> str:
+    """Why config.yaml could not be read, on one line that never quotes the
+    file: YAML's own message repeats the offending line, which may be a secret."""
+    if isinstance(exc, UnicodeDecodeError):
+        return "the file is not UTF-8 text"
+    if isinstance(exc, OSError):
+        return exc.strerror or type(exc).__name__
+    mark = getattr(exc, "problem_mark", None)
+    where = f" at line {mark.line + 1}, column {mark.column + 1}" if mark is not None else ""
+    return f"malformed YAML{where}"
 
 
 def _whole_number(value: Any) -> int | None:
