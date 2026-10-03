@@ -43,7 +43,7 @@ from korvid.core.audit import AuditLog
 from korvid.core.config import KorvidConfig
 from korvid.core.debugimage import recommend_debug_images
 from korvid.k8s.discovery import ResourceMeta
-from korvid.k8s.errors import ApiStatusError
+from korvid.k8s.errors import ApiStatusError, KubeClientError
 from korvid.k8s.writes import WriteOps
 from korvid.ui.action_availability import (
     CONTEXT_SWITCH_IN_PROGRESS,
@@ -667,7 +667,7 @@ class ShellController:
         audit = self._audit_log()
         if audit is None:  # _node_target already refused; defensive re-check
             return
-        if approved_uid is not None and not await self._node_uid_unchanged(node, approved_uid):
+        if not await self._node_uid_unchanged(node, approved_uid):
             return
         detail = f"privileged node shell (kubectl debug node, image {image}, namespace {namespace})"
         try:
@@ -953,10 +953,15 @@ class ShellController:
             return False
         return proc.returncode == 0
 
-    async def _node_uid_unchanged(self, name: str, approved_uid: str) -> bool:
+    async def _node_uid_unchanged(self, name: str, approved_uid: str | None) -> bool:
         """Re-verify the approved node incarnation just before the shell
-        launches; notifies and returns False when the node is gone or was
-        replaced under the same name while the dialog was open."""
+        launches. kubectl addresses the node by name only, so only the
+        approved UID read back from the cluster permits the shell: a node
+        that is gone, was replaced, or cannot be verified right now refuses
+        (fail closed, like `pod_uid_unchanged` for pod debug and transfer)."""
+        if approved_uid is None:
+            self._node_unverified(name)
+            return False
         try:
             current_uid = await self._target_uid_fn("nodes", None, name)
         except ApiStatusError:
@@ -965,13 +970,25 @@ class ShellController:
                 severity="warning",
             )
             return False
-        if current_uid is not None and current_uid != approved_uid:
+        except KubeClientError:
+            current_uid = None
+        if current_uid is None:
+            self._node_unverified(name)
+            return False
+        if current_uid != approved_uid:
             self._ui.notify(
                 f"node shell cancelled - node {name} was replaced since the prompt was shown.",
                 severity="warning",
             )
             return False
         return True
+
+    def _node_unverified(self, name: str) -> None:
+        self._ui.notify(
+            f"node shell cancelled - node {name} could not be verified."
+            " Retry when the cluster is reachable.",
+            severity="warning",
+        )
 
     async def _delete_node_debug_pod(
         self, ops: WriteOps, namespace: str, pod_name: str, pod_uid: str
