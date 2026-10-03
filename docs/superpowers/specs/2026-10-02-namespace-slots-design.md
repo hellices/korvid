@@ -91,11 +91,18 @@ one asyncio lock, so an older map never lands after a newer one. A map queued
 before a `:ctx` switch is still written to the cluster it belongs to. A
 confirmed reallocation also installs its fresh listing as the inventory later
 visits are checked against. Visits made while its write waited are replayed
-onto the new map when that listing still contains them.
+onto the new map when that listing still contains them. If `:ctx` switched
+during that write, the old cluster's queued map is rebuilt the same way
+before it is written, so it cannot overwrite the confirmed map. If the write
+fails, maps already queued stay queued and are still written. A queued save
+that fails after `:ctx` switched away is reported with the old context name.
+It does not stop the new cluster's saves.
 
 Activation reads the file under the same lock. A write still in flight for
 the cluster lands first, and a map still queued for it is adopted instead
-of the older file. A cancelled worker leaves its thread write running.
+of the older file. Restored entries and replayed visits are judged against
+a listing that completed during the restore. A cancelled worker leaves its
+thread write running.
 Textual cancels app workers before `on_unmount`, so unmount calls the
 controller's `shutdown`. It waits for that write, then writes the maps still
 queued, so a visit just before quitting is kept.

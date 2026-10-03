@@ -324,17 +324,30 @@ async def test_a_failed_listing_forgets_the_last_inventory(tmp_path: Path) -> No
 
 
 class GatedSave:
-    """Holds the first state-file write in its thread until `release`."""
+    """Holds the first state-file write in its thread until `gate` is set;
+    the writes numbered in *failing* (from 0) raise instead of writing."""
 
-    def __init__(self, harness: Harness, monkeypatch: pytest.MonkeyPatch) -> None:
+    def __init__(
+        self,
+        harness: Harness,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        failing: frozenset[int] = frozenset(),
+    ) -> None:
         self.entered = threading.Event()
         self.gate = threading.Event()
+        self._failing = failing
+        self._calls = 0
         self._save = harness.store.save
         monkeypatch.setattr(harness.store, "save", self)
 
     def __call__(self, identity: ClusterIdentity, slots: Mapping[int, SlotEntry]) -> None:
-        self.entered.set()
-        self.gate.wait(timeout=5)
+        call, self._calls = self._calls, self._calls + 1
+        if call == 0:
+            self.entered.set()
+            self.gate.wait(timeout=5)
+        if call in self._failing:
+            raise OSError("disk full")
         self._save(identity, slots)
 
     async def held(self) -> None:
@@ -362,6 +375,47 @@ async def test_switching_back_waits_for_this_clusters_save_and_its_queue(
 
     assert harness.layout() == {1: ("qa", "auto", True), 2: ("beta", "auto", True)}
     assert harness.saved() == {1: _auto("qa"), 2: _auto("beta")}
+
+
+async def test_a_listing_during_activation_judges_the_restored_map(tmp_path: Path) -> None:
+    harness = Harness(tmp_path, names=["dev"])
+    harness.store.save(ClusterIdentity("dev", DEV_SERVER), {1: _auto("gone")})
+    harness.resolving = threading.Event()
+    activation = asyncio.create_task(harness.controller.activate())
+    await asyncio.to_thread(harness.resolving.wait, 5)
+    await harness.visit("typo")  # before any listing, so it is trusted
+    await harness.discover()  # the picker's listing lands mid-activation
+
+    harness.resolved.set()
+    await activation
+    await harness.ui.drain()
+
+    assert harness.layout() == {1: ("gone", "auto", False), 2: ("typo", "auto", False)}
+    assert harness.controller.target(1) is None
+    assert harness.saved() == {1: _auto("gone", available=False), 2: _auto("typo", available=False)}
+
+
+async def test_a_failed_save_for_the_cluster_left_behind_is_still_reported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = Harness(tmp_path)
+    await harness.controller.activate()
+    gated = GatedSave(harness, monkeypatch, failing=frozenset({0}))
+    harness.controller.visit("qa")
+    flush = asyncio.create_task(harness.ui.drain())
+    await gated.held()
+
+    harness.controller.deactivate()  # `:ctx prod` while dev's map is written
+    harness.context = "prod"
+    gated.gate.set()
+    await flush
+    await harness.controller.activate()
+    await harness.visit("api")
+
+    assert [(m, s) for m, s in harness.ui.notifications if "'dev'" in m] == [
+        ("Could not save namespace slots for context 'dev': disk full", "error")
+    ]
+    assert harness.saved("prod") == {1: _auto("api")}, "prod's saves are not suppressed"
 
 
 async def test_shutdown_finishes_the_write_in_flight_then_writes_the_queue(
@@ -578,6 +632,59 @@ async def test_a_visit_during_a_confirmed_save_takes_a_slot_of_the_new_map(
 
     assert harness.layout() == {1: ("dev", "auto", True), 2: ("new", "auto", True)}
     assert harness.saved() == {1: _auto("dev"), 2: _auto("new")}
+
+
+async def _run_workers(harness: Harness) -> list[asyncio.Task[Any]]:
+    """Start the queued workers side by side, as the app runs them."""
+    pending, harness.ui.workers = harness.ui.workers, []
+    return [asyncio.create_task(work) for work in pending]
+
+
+async def test_visits_queued_behind_a_failed_reallocation_save_are_still_saved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = Harness(tmp_path, names=["dev", "old"])
+    await harness.controller.activate()
+    await harness.visit("dev", "old")
+    harness.names = ["dev"]
+    await _open_reallocation(harness)
+    gated = GatedSave(harness, monkeypatch, failing=frozenset({1}))
+    harness.controller.visit("qa")  # its save holds the lock...
+    harness.ui.callbacks[-1](True)  # ...so the confirmed save waits for it
+    tasks = await _run_workers(harness)
+    await gated.held()
+    harness.controller.visit("beta")  # queued while both wait
+
+    gated.gate.set()
+    await asyncio.gather(*tasks)
+    await harness.ui.drain()
+
+    assert any("Could not save" in m for m, _ in harness.ui.notifications)
+    expected = {1: _auto("dev"), 2: _auto("old"), 3: _auto("qa"), 4: _auto("beta")}
+    assert dict(harness.controller.slots.items()) == expected
+    assert harness.saved() == expected
+
+
+async def test_a_switch_during_a_confirmed_save_never_lets_an_older_map_overwrite_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = Harness(tmp_path, names=["dev", "old"])
+    await harness.controller.activate()
+    await harness.visit("dev", "old")
+    harness.names = ["dev", "qa"]
+    await _open_reallocation(harness)
+    gated = GatedSave(harness, monkeypatch)
+    harness.ui.callbacks[-1](True)
+    tasks = await _run_workers(harness)
+    await gated.held()
+    harness.controller.visit("qa")  # queued on the old map during the write
+
+    harness.controller.deactivate()  # `:ctx` away before the write returns
+    gated.gate.set()
+    await asyncio.gather(*tasks)
+    await harness.ui.drain()
+
+    assert harness.saved() == {1: _auto("dev"), 2: _auto("qa")}
 
 
 async def test_a_confirmed_reallocation_installs_its_listing_for_later_visits(

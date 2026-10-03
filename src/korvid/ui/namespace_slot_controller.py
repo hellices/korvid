@@ -177,11 +177,12 @@ class NamespaceSlotController:
         self._update(place(self.slots, namespace).automatic())
 
     def _replay(self, visited: Sequence[str]) -> None:
-        """Give *visited* namespaces free slots of the current map, in order."""
+        """Give *visited* namespaces free slots of the current map, in order,
+        judged against the latest complete listing (one may land mid-restore)."""
         merged = self.slots
         for namespace in visited:
             merged = place(merged, namespace)
-        self._update(merged.automatic())
+        self._update(build(self._pinned(), merged.automatic(), self._inventory).automatic())
 
     def _update(self, updated: dict[int, SlotEntry]) -> None:
         if updated == self._auto:
@@ -246,11 +247,22 @@ class NamespaceSlotController:
                     try:
                         await self._save(identity, slots)
                     except (OSError, SlotStateError) as exc:
-                        if identity == self._identity:
-                            message = f"Could not save namespace slots: {exc}"
-                            self._report_persist_failure(message, "error")
+                        self._report_save_failure(identity, exc)
         finally:
             self._flushing = False
+
+    def _report_save_failure(self, identity: ClusterIdentity, exc: Exception) -> None:
+        if identity == self._identity:
+            self._report_persist_failure(f"Could not save namespace slots: {exc}", "error")
+            return
+        # A cluster switched away from: its map is lost on restart, so say
+        # so, without suppressing the active cluster's saves.
+        self._ui.notify(
+            f"Could not save namespace slots for context {identity.context!r}: {exc}",
+            title="Namespace slots",
+            severity="error",
+            markup=False,
+        )
 
     async def _save(self, identity: ClusterIdentity, slots: dict[int, SlotEntry]) -> None:
         """Write *slots* in a thread; the caller holds `_save_lock`.
@@ -360,11 +372,10 @@ class NamespaceSlotController:
             return
         before = dict(self._auto)
         async with self._save_lock:
-            # The reallocation supersedes maps still queued for this cluster.
-            self._pending.pop(identity, None)
             try:
                 await self._save(identity, proposed.automatic())
             except (OSError, SlotStateError) as exc:
+                # Maps still queued stay queued: their visits are saved anyway.
                 self._ui.notify(
                     f"Could not save namespace slots: {exc}",
                     title="Namespace slots",
@@ -372,11 +383,14 @@ class NamespaceSlotController:
                     markup=False,
                 )
                 return
+            # Still under the lock: maps queued before or during the write were
+            # built on the old map, so only their new visits carry over.
+            queued = self._pending.pop(identity, None)
             if token != self._generation:
-                return  # switched while writing: the old cluster's file has it
-            # Still under the lock: maps queued during the write were built on
-            # the old map, so their visits are replayed onto the new one.
-            self._pending.pop(identity, None)
+                # Switched while writing: requeue for the old cluster's file.
+                if queued is not None:
+                    self._pending[identity] = _with_visits(proposed, inventory, before, queued)
+                return
             self._persist_failed = False
             self._install(proposed, inventory, before)
         self._ui.notify("Namespace slots reallocated")
@@ -386,13 +400,24 @@ class NamespaceSlotController:
     ) -> None:
         """Adopt a confirmed reallocation and its listing, keeping visits
         made since *before* that the listing still contains."""
-        known = {entry.namespace for entry in before.values()}
-        visited = [
-            entry.namespace
-            for _, entry in sorted(self._auto.items())
-            if entry.namespace not in known and entry.namespace in inventory
-        ]
+        merged = _with_visits(proposed, inventory, before, self._auto)
         self._auto = proposed.automatic()
         self._inventory = inventory
         self._stale = False
-        self._replay(visited)
+        self._update(merged)
+
+
+def _with_visits(
+    proposed: SlotMap,
+    inventory: frozenset[str],
+    before: dict[int, SlotEntry],
+    current: dict[int, SlotEntry],
+) -> dict[int, SlotEntry]:
+    """*proposed* plus the namespaces *current* gained since *before* that
+    *inventory* still lists, in slot order."""
+    known = {entry.namespace for entry in before.values()}
+    merged = proposed
+    for _, entry in sorted(current.items()):
+        if entry.namespace not in known and entry.namespace in inventory:
+            merged = place(merged, entry.namespace)
+    return merged.automatic()
