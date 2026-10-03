@@ -685,25 +685,55 @@ async def test_visits_queued_behind_a_failed_reallocation_save_are_still_saved(
     assert harness.saved() == expected
 
 
-async def test_a_reallocation_confirmed_while_the_saved_map_loads_is_refused(
-    tmp_path: Path,
-) -> None:
-    harness = Harness(tmp_path, names=["dev"])
+async def _restoring(harness: Harness) -> asyncio.Task[None]:
+    """Start activation over a saved dev/qa map; return it while it resolves."""
     harness.store.save(ClusterIdentity("dev", DEV_SERVER), {1: _auto("dev"), 3: _auto("qa")})
     harness.resolving = threading.Event()
     activation = asyncio.create_task(harness.controller.activate())
     await asyncio.to_thread(harness.resolving.wait, 5)
-    await harness.visit("dev", "old")
-    await _open_reallocation(harness)
+    return activation
 
+
+async def test_a_reallocation_listed_across_the_restore_previews_the_restored_map(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = Harness(tmp_path)
+    activation = await _restoring(harness)
+    listed = asyncio.Event()
+
+    async def slow_listing() -> list[str]:
+        await listed.wait()
+        return ["dev", "qa"]
+
+    monkeypatch.setattr(harness.controller, "_list_namespaces", lambda: slow_listing)
+    harness.controller.open_reallocation()
+    (reallocation,) = await _run_workers(harness)
+    await asyncio.sleep(0)  # the listing is in flight before the restore lands
+    harness.resolved.set()
+    await activation
+    listed.set()
+    await reallocation
     await _decide(harness, True)
+    await harness.ui.drain()
+
+    assert harness.layout() == {1: ("dev", "auto", True), 2: ("qa", "auto", True)}
+
+
+async def test_a_reallocation_listed_before_the_restore_lands_is_refused(
+    tmp_path: Path,
+) -> None:
+    harness = Harness(tmp_path, names=["dev", "qa"])
+    activation = await _restoring(harness)
+    harness.controller.visit("old")  # the map before the restore lands
+
+    harness.controller.open_reallocation()
+    await harness.ui.drain()
     harness.resolved.set()
     await activation
     await harness.ui.drain()
 
-    messages = [message for message, _ in harness.ui.notifications]
-    assert not any("reallocated" in message for message in messages)
-    assert any("still loading" in message for message in messages)
+    assert harness.ui.screens == [], "a preview of the map before the restore"
+    assert any("still loading" in message for message, _ in harness.ui.notifications)
     assert harness.layout() == {
         1: ("dev", "auto", True),
         2: ("old", "auto", True),

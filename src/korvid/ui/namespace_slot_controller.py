@@ -29,6 +29,8 @@ from korvid.ui.action_availability import UnavailableReason
 from korvid.ui.read_availability import NAMESPACE_LISTING_UNAVAILABLE
 from korvid.ui.ui_surface import UiSurface
 
+_STILL_LOADING = "Namespace slots are still loading - run :slots again"
+
 #: The kubeconfig-scoped namespace listing, None when it is not wired.
 ListNamespaces = Callable[[], Awaitable[list[str]]]
 
@@ -167,9 +169,6 @@ class NamespaceSlotController:
         self._identity = identity
         self._auto = saved
         self._replay(visited)
-        # A listing that started before this restore would merge into the
-        # pre-restore map; only listings started from here on count.
-        self._generation += 1
 
     def observe(self, token: int, names: Sequence[str]) -> None:
         """Judge availability from a complete listing; it never assigns a slot."""
@@ -357,6 +356,10 @@ class NamespaceSlotController:
         names = await self._list(lister, token)
         if names is None or token != self._generation:
             return
+        if self._restoring is not None:
+            # A preview now would be built on the map the restore replaces.
+            self._ui.notify(_STILL_LOADING, severity="warning")
+            return
         blocked = self._can_open()
         if blocked is not None:  # a dialog opened while the listing ran
             self._ui.notify(blocked.message, severity=blocked.severity, markup=False)
@@ -396,12 +399,6 @@ class NamespaceSlotController:
             self._ui.notify(
                 "Namespace slot reallocation cancelled - the kube context changed",
                 severity="warning",
-            )
-            return
-        if self._restoring is not None:
-            # The saved map is still loading and would replace this one.
-            self._ui.notify(
-                "Namespace slots are still loading - run :slots again", severity="warning"
             )
             return
         persistence, identity = self._persistence, self._identity

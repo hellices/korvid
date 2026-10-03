@@ -63,7 +63,9 @@ slots run in memory only, with pins plus discovery, and nothing is saved.
 
 The slot controller holds a generation counter. Activation (startup and each
 completed `:ctx` switch) and deactivation (context-switch teardown) advance
-it. Every listing captures the generation before it awaits. A result that
+it once, before the restore starts; finishing the restore does not, so a
+same-cluster listing that started while the saved map loaded still counts.
+Every listing captures the generation before it awaits. A result that
 returns under a different generation is discarded. During a switch the
 effective map falls back to pins only, so a numeric key can never dispatch an
 old cluster's automatic slot.
@@ -184,8 +186,9 @@ keeps the current map. An unchanged proposal is reported without opening the
 modal; its listing still counts, clearing a stale map and becoming the
 inventory later visits are checked against. A failed listing refuses with the same notice as the picker. If a
 dialog opened while the listing ran, the preview is not stacked over it. A
-confirmation while the saved map is still loading is refused with a retry
-notice, because the restore would replace the new map.
+listing that lands while the saved map is still loading opens no preview and
+asks for a retry, because the preview would be built on the map the restore
+replaces. A listing that lands after the restore previews the restored map.
 
 ## #404 boundary
 
