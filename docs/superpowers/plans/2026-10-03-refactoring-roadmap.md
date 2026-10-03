@@ -32,10 +32,10 @@ Phase 1 is fully specified TDD work: one PR of seven commits. Phases 2-4 are sco
   - Run `git restore uv.lock` before every commit.
   - Git hooks do not run locally, so run `UV_NO_SYNC=1 uv run pre-commit run --all-files` before pushing.
 - **Full gate:** `UV_NO_SYNC=1 make check` (source-size, lint, typecheck, test) plus `UV_NO_SYNC=1 uv run tach check`.
-- **Fallback when the worktree has no `.venv`.** Use the main checkout's interpreter:
+- **Fallback when the worktree has no `.venv`.** Use the main checkout's interpreter, with `MAIN_CHECKOUT` set to that checkout's path:
 
   ```bash
-  PYTHONPATH="$PWD/src:$PWD" /Users/hwang-inhwan/workspace/kube/.venv/bin/python -m pytest -p no:tach -p no:randomly -q <path>
+  PYTHONPATH="$PWD/src:$PWD" "$MAIN_CHECKOUT/.venv/bin/python" -m pytest -p no:tach -p no:randomly -q <path>
   ```
 
   `ruff`, `mypy` and `tach` live in the same `bin/`. That venv lacks httpx, openai and mcp. The resulting `test_main_wiring`, `test_outbound` ollama-hook, `test_agent_setup_screen` real-probe, `test_mcp_ui_context` and `test_mcp_stdio_safety` failures are environmental, and also happen on an untouched checkout.

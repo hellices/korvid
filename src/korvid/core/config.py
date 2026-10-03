@@ -487,10 +487,10 @@ def _check_unknown_agent_keys(agent_raw: dict[str, Any]) -> None:
 def load_config(path: Path | None = None) -> KorvidConfig:
     """Load config; missing file means zero-config defaults."""
     cfg_path = path or DEFAULT_CONFIG_PATH
-    if not cfg_path.is_file():
-        return KorvidConfig()
     try:
         loaded = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return KorvidConfig()
     except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
         raise ConfigError(f"cannot load {cfg_path}: {_unreadable(exc)}") from exc
     if loaded is None:

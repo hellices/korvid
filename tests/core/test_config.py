@@ -1441,6 +1441,24 @@ def test_an_unreadable_config_is_one_config_error_that_never_quotes_the_file(
     assert "\n" not in str(caught.value)
 
 
+@pytest.mark.skipif(
+    not POSIX or os.geteuid() == 0, reason="needs POSIX permissions that bind the caller"
+)
+def test_a_config_behind_an_unsearchable_directory_is_a_config_error(tmp_path: Path) -> None:
+    """Only a missing file means zero-config. An existence check outside the
+    handler either raised EACCES raw (Python 3.11-3.13) or reported the file
+    absent and silently ignored it (3.14)."""
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    (locked / "config.yaml").write_text("namespace: team-a\n", encoding="utf-8")
+    locked.chmod(0)
+    try:
+        with pytest.raises(ConfigError, match=r"cannot load .*config\.yaml: "):
+            load_config(locked / "config.yaml")
+    finally:
+        locked.chmod(0o700)
+
+
 def test_config_is_read_as_utf8_whatever_the_locale(tmp_path: Path) -> None:
     """Windows CI runs under a cp1252 locale, where `read_text()` without an
     encoding garbles a UTF-8 "café" into mojibake."""
