@@ -251,6 +251,30 @@ async def test_a_visit_is_not_recorded_across_a_context_switch(
         assert not _mapped(app, "alpha")
 
 
+async def test_a_visit_landing_while_a_context_switch_probes_is_not_recorded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app, _ = _app(Cluster(["alpha"]), tmp_path, config=KorvidConfig(namespace="default"))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _ready(pilot, app, ["alpha"])
+        navigate = app._workspace_ctl.navigate_command
+
+        async def navigate_into_a_probe(view: str | None, namespace: str | None) -> None:
+            await navigate(view, namespace)
+            # `:ctx` began probing meanwhile: the epoch moves only on retarget.
+            monkeypatch.setattr(app._ctx, "switching", lambda: True)
+
+        monkeypatch.setattr(app._workspace_ctl, "navigate_command", navigate_into_a_probe)
+        app.post_message(NavigateCommand(None, namespace="alpha"))
+        await until(pilot, lambda: app.current_scope == "alpha", label="navigated")
+        # The app pump handles one message at a time: once the next one has
+        # navigated, the first handler has finished deciding about the visit.
+        app.post_message(NavigateCommand(None, namespace="default"))
+        await until(pilot, lambda: app.current_scope == "default", label="handler finished")
+
+        assert not _mapped(app, "alpha")
+
+
 async def test_slot_keys_never_navigate_across_a_context_switch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

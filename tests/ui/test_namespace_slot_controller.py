@@ -838,6 +838,27 @@ async def test_a_listing_before_a_switch_during_a_confirmed_save_still_judges_it
     assert harness.saved() == {1: _auto("dev"), 2: _auto("qa", available=False)}
 
 
+async def test_another_clusters_listing_never_replaces_the_one_a_rebase_is_judged_by(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = Harness(tmp_path, names=["dev", "old", "qa"])
+    tasks, gated = await _confirm_held(harness, monkeypatch)
+    harness.controller.observe(harness.controller.token(), ["dev"])  # qa deleted since
+
+    harness.context = "prod"  # `:ctx` to prod before the dev write returns
+    harness.resolving = threading.Event()
+    harness.resolved.set()
+    activating = asyncio.ensure_future(harness.controller.activate())
+    await asyncio.to_thread(harness.resolving.wait, 5)  # prod's restore is underway
+    harness.controller.observe(harness.controller.token(), ["prod"])
+    gated.gate.set()
+    await asyncio.gather(*tasks, activating)
+    harness.controller.observe(harness.controller.token(), ["prod"])
+    await harness.ui.drain()
+
+    assert harness.saved() == {1: _auto("dev"), 2: _auto("qa", available=False)}
+
+
 async def test_a_listing_failure_before_a_switch_during_a_confirmed_save_trusts_visits(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
