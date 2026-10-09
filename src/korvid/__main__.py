@@ -1096,6 +1096,7 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
         protected_context=inputs.protected_context,
     )
     writes_ref.bind(writes)
+    outcome_events = inputs.get_events
     deployment_outcomes = DeploymentOutcomeController(
         ui=AppUiSurface(app),
         reader=inputs.deployment_outcome_reader,
@@ -1108,7 +1109,7 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
             workspace=workspace_ref.get,
             inspect=lambda: inspect_controller,
             logs=lambda: logs_ref.get().action_logs(),
-            events=lambda: inputs.get_events,
+            events=lambda: outcome_events,
         ),
     )
     bridge_dispatch = AppContextDispatch()
