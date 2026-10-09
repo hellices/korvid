@@ -27,6 +27,7 @@ from textual.worker import Worker, WorkerError
 
 from korvid.agent.events import AgentEvent
 from korvid.agent.interaction import PaneContext, ResourceIdentity
+from korvid.core.namespace_slots import SlotMap
 from korvid.core.relationships import SummaryLike
 from korvid.core.store import ALL_NAMESPACES, Summary
 from korvid.k8s.discovery import ResourceMeta
@@ -807,8 +808,8 @@ class AppWorkspaceSurface(WorkspaceSurface):
     def set_namespace_words(self, names: list[str]) -> None:
         self._app._command_bar.namespace_words = names
 
-    def open_namespace_picker(self, names: list[str]) -> None:
-        self._app._namespace_picker.open(names)
+    def open_namespace_picker(self, names: list[str], slots: SlotMap) -> None:
+        self._app._namespace_picker.open(names, slots)
 
     def focused_row_key(self) -> str | None:
         return _row_key_at_cursor(self._app._focused_table())

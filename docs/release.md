@@ -465,13 +465,16 @@ retains these paths:
   backups when rotation has occurred
 - `~/.local/state/korvid/mcp-endpoint.json` (MCP discovery registry) and its
   sibling lock file `~/.local/state/korvid/mcp-endpoint.json.lock`
+- `~/.local/state/korvid/namespace-slots.json` (automatic `1`-`9` namespace
+  shortcuts per cluster) and its sibling lock file
+  `~/.local/state/korvid/namespace-slots.json.lock`
 - `~/.local/share/korvid/logs`
 - `~/.local/share/korvid/agent-payloads`
 
 Environment overrides are **not** uniform:
 
 - `XDG_STATE_HOME` relocates the `~/.local/state/korvid` paths (audit log, MCP
-  endpoint registry).
+  endpoint registry, namespace shortcuts).
 - `XDG_DATA_HOME` relocates the `~/.local/share/korvid` paths (log exports,
   agent payloads).
 - `XDG_CONFIG_HOME` is not honored. `config.yaml` and the `credentials.json`
@@ -514,6 +517,7 @@ rm -f "$state_root/audit.jsonl" "$state_root/audit.jsonl.1" \
   "$state_root/audit.jsonl.2" "$state_root/audit.jsonl.3" \
   "$state_root/audit.jsonl.lock"
 rm -f "$state_root/mcp-endpoint.json" "$state_root/mcp-endpoint.json.lock"
+rm -f "$state_root/namespace-slots.json" "$state_root/namespace-slots.json.lock"
 rm -rf "$data_root/logs" "$data_root/agent-payloads"
 ```
 

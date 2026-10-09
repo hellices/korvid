@@ -208,6 +208,7 @@ def compose_command_reasons(
     context: Callable[[], UnavailableReason | None],
     port_forwards: Callable[[], UnavailableReason | None],
     keybindings: Callable[[], UnavailableReason | None] | None = None,
+    slots: Callable[[], UnavailableReason | None] | None = None,
 ) -> dict[str, Callable[[], UnavailableReason | None]]:
     """Build `ActionPolicy(reason_by_command=...)` from its owners.
 
@@ -250,6 +251,8 @@ def compose_command_reasons(
             selected row, so borrowing the dialog's answer would grey out
             a command that works.
         keybindings: The keybinding editor's protected-surface and persistence probe.
+        slots: `NamespaceSlotController.unavailable_reason` - whether `:slots`
+            has a listing to reallocate from and a surface to preview on.
 
     Returns:
         The canonical command text -> reason-resolver map.
@@ -275,6 +278,7 @@ def compose_command_reasons(
         "ctx": context,
         "pf": port_forwards,
         **({"keys": keybindings} if keybindings is not None else {}),
+        **({"slots": slots} if slots is not None else {}),
     }
 
 

@@ -18,7 +18,7 @@ import secrets
 import sys
 import threading
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from korvid import __version__
@@ -47,6 +47,7 @@ from korvid.composition_support import (
     _make_disconnect_agent,
     _make_get_manifest,
     _make_rebuild_agent,
+    _make_watch_source,
     _MCPAppHooks,
     _missing_extra_packages,
     _own_run_tasks,
@@ -83,12 +84,13 @@ from korvid.core.config import (
 from korvid.core.config_store import save_topbar_state
 from korvid.core.keybinding_config import save_keybindings
 from korvid.core.mcp import MCPControllerBase
+from korvid.core.namespace_slot_store import NamespaceSlotStore, default_slot_state_path
 from korvid.core.portforward import ForwardRegistry
 from korvid.core.pulse import PulseModel
 from korvid.core.pulse_collector import DEFAULT_PULSE_SOURCES, PulseCollector
 from korvid.core.pulse_rules import DeploymentPulseRule, PodPulseRule
 from korvid.core.session_timeline import SessionTimeline
-from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
+from korvid.core.store import ResourceStore
 from korvid.core.watch import WatchManager
 from korvid.k8s.client import (
     KubeClient,
@@ -96,6 +98,7 @@ from korvid.k8s.client import (
     resolve_context_name,
     resolve_context_namespace,
 )
+from korvid.k8s.cluster_identity import current_cluster_identity
 from korvid.k8s.csp import ProviderInfo, detect_provider
 from korvid.k8s.discovery import PODS_META, ResourceMeta, build_alias_map
 from korvid.k8s.errors import ApiStatusError
@@ -110,7 +113,6 @@ from korvid.k8s.telepresence import (
     TelepresenceCLI,
     find_telepresence,
 )
-from korvid.k8s.watch_events import WatchEvent
 from korvid.tools.executor import (
     ToolExecutor,
     UIBridge,
@@ -150,6 +152,7 @@ from korvid.ui.keybinding_catalog import KeybindingCatalog
 from korvid.ui.keybinding_controller import KeybindingController
 from korvid.ui.keybinding_surface import AppKeybindingSurface
 from korvid.ui.log_controller import LogController
+from korvid.ui.namespace_slot_controller import NamespaceSlotController, SlotPersistence
 from korvid.ui.object_navigation import capture_navigation_origin
 from korvid.ui.operator_controller import OperatorController
 from korvid.ui.proposal_controller import ProposalController
@@ -1017,27 +1020,6 @@ def _make_switch_context(
     return switch_context
 
 
-def _make_watch_source(
-    kube: KubeClient, aliases: dict[str, ResourceMeta]
-) -> Callable[[str, str], AsyncIterator[WatchEvent[Summary]]]:
-    """Watch source for the WatchManager: kind + scope -> summary events.
-
-    Extracted from _run for complexity; *aliases* is the live shared dict
-    that background discovery mutates.
-    """
-
-    async def source(kind: str, scope: str) -> AsyncIterator[WatchEvent[Summary]]:
-        ns = None if scope == ALL_NAMESPACES else scope
-        meta = aliases.get(kind)
-        if meta is None:
-            logger.warning("Unknown resource kind %r requested for watch; stopping", kind)
-            raise ValueError(f"Unknown resource kind: {kind!r}")
-        async for event in kube.watch_resources(meta, ns):
-            yield event
-
-    return source
-
-
 def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRuntime:
     """Construct the complete session-scoped controller graph."""
     config = inputs.config
@@ -1275,6 +1257,15 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
         buffer_max_lines=config.log_buffer_lines,
     )
     logs_ref.bind(logs)
+    slots = NamespaceSlotController(
+        ui=AppUiSurface(app),
+        pinned=lambda: app.config.favorite_namespaces,
+        context=lambda: app.config.kube_context,
+        list_namespaces=lambda: app._list_namespaces,
+        persistence=inputs.namespace_slots,
+        can_open=lambda: actions.modal_unavailable_reason(),
+        picker_open=AppContextSurface(app).namespace_picker_open,
+    )
     workspace_controller = WorkspaceController(
         state=workspace,
         store=app.store,
@@ -1294,6 +1285,7 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
         describe_named=inspect_controller.describe_named,
         check_permission=lambda: app._check_permission,
         list_namespaces=lambda: app._list_namespaces,
+        slots=slots,
     )
     workspace_ref.bind(workspace_controller)
     proposals = ProposalController(
@@ -1404,6 +1396,7 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
             context=context.unavailable_reason,
             port_forwards=forward_controller.list_unavailable_reason,
             keybindings=keybindings.unavailable_reason,
+            slots=slots.unavailable_reason,
         ),
     )
     commands = CommandRouter(
@@ -1415,6 +1408,7 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
         operators=operators,
         pulse=pulse,
         keybindings=keybindings,
+        slots=slots,
     )
     return AppRuntime(
         view=view,
@@ -1601,6 +1595,9 @@ async def _wire_and_run(config: KorvidConfig, kube: KubeClient, state: _RunState
         proposal_store=proposal_store,
         save_topbar=lambda expanded: save_topbar_state(DEFAULT_CONFIG_PATH, expanded=expanded),
         save_keybindings=lambda overrides: save_keybindings(DEFAULT_CONFIG_PATH, overrides),
+        namespace_slots=SlotPersistence(
+            NamespaceSlotStore(default_slot_state_path()), current_cluster_identity
+        ),
         list_relationship_objects=kube.list_relationship_objects,
         # Bounded session record (issue #282): the composition root owns the
         # buffer's limits, so a long session cannot grow it without bound.

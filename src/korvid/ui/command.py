@@ -78,6 +78,15 @@ COMMANDS: tuple[CommandDescriptor, ...] = (
         palette=PaletteCommand("Edit keybindings", "keys", ("shortcuts", "keyboard")),
     ),
     CommandDescriptor(
+        aliases=("slots", "ns-slots"),
+        help=((":slots|:ns-slots", "Reallocate the 1-9 namespace shortcuts (preview first)"),),
+        operation=BuiltinOperation.NAMESPACE_SLOTS,
+        maximum_arguments=0,
+        palette=PaletteCommand(
+            "Reallocate namespace shortcuts", "slots", ("ns-slots", "namespace keys")
+        ),
+    ),
+    CommandDescriptor(
         aliases=("pulse", "problems"),
         help=((":pulse|:problems", "Current problems, recent warnings and observation coverage"),),
         operation=BuiltinOperation.PULSE,

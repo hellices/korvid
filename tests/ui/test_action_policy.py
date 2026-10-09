@@ -806,8 +806,10 @@ def test_every_owned_command_is_really_a_palette_command() -> None:
         namespace=lambda: None,
         context=lambda: None,
         port_forwards=lambda: None,
+        slots=lambda: None,
     )
     assert set(reasons) <= _palette_commands()
+    assert "slots" in reasons
 
 
 def test_every_refusable_sort_key_has_an_owner() -> None:

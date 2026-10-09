@@ -45,8 +45,8 @@ from typing import Any
 from rich.text import Text
 
 from korvid.core.config import KorvidConfig, ViewConfig
-from korvid.core.errors import explain_api_error
 from korvid.core.filters import parse_filter
+from korvid.core.namespace_slots import SlotMap
 from korvid.core.relationships import GraphResource
 from korvid.core.session_timeline import TimelineResourceRef
 from korvid.core.sorting import SORT_COLUMNS, toggle_sort
@@ -63,6 +63,11 @@ from korvid.k8s.helm import HELM_RELEASES_META
 from korvid.k8s.olm import OPERATORS_GROUP
 from korvid.k8s.relations import drill_child, owned_by
 from korvid.ui.action_availability import UnavailableReason
+from korvid.ui.namespace_slot_controller import (
+    ListNamespaces,
+    NamespaceSlotController,
+    notify_namespace_list_error,
+)
 from korvid.ui.navigation import DrillLevel
 from korvid.ui.object_navigation import NavigationOrigin, default_scope_for, jump_to_object
 from korvid.ui.read_availability import (
@@ -107,9 +112,6 @@ _PERMISSION_CHECK_TIMEOUT = 10.0
 #: `(verb, plural, namespace, name, group, subresource) -> allowed`, the
 #: SelfSubjectAccessReview probe the all-namespaces guard runs.
 PermissionCheck = Callable[[str, str, str, str | None, str, str], Awaitable[bool]]
-
-#: The kubeconfig-scoped namespace listing behind `:ns` and the picker.
-ListNamespaces = Callable[[], Awaitable[list[str]]]
 
 
 class WorkspaceSurface(ABC):
@@ -194,8 +196,8 @@ class WorkspaceSurface(ABC):
         """Publish *names* as the command bar's `:ns` completions."""
 
     @abstractmethod
-    def open_namespace_picker(self, names: list[str]) -> None:
-        """Open the inline namespace picker over *names*."""
+    def open_namespace_picker(self, names: list[str], slots: SlotMap) -> None:
+        """Open the inline namespace picker over *names*, labelled by *slots*."""
 
     @abstractmethod
     def focused_row_key(self) -> str | None:
@@ -267,6 +269,7 @@ class WorkspaceController:
         describe_named: Callable[[str, str, str], Coroutine[Any, Any, None]],
         check_permission: Callable[[], PermissionCheck | None],
         list_namespaces: Callable[[], ListNamespaces | None],
+        slots: NamespaceSlotController,
     ) -> None:
         self._state = state
         self._store = store
@@ -293,6 +296,7 @@ class WorkspaceController:
         self._describe_named = describe_named
         self._check_permission = check_permission
         self._list_namespaces = list_namespaces
+        self._slots = slots
         # Serializes view/scope switches: keyboard NavigateCommands and the
         # agent's navigate tool share this handler, which yields while
         # stopping/starting watches — interleaving would corrupt state. The
@@ -323,6 +327,11 @@ class WorkspaceController:
     # ------------------------------------------------------------------
     # Exposed workspace-only state (owned here, read by the coordinators)
     # ------------------------------------------------------------------
+
+    @property
+    def slots(self) -> NamespaceSlotController:
+        """The 1-9 namespace map that dispatch, help and the picker share."""
+        return self._slots
 
     @property
     def nav_lock(self) -> asyncio.Lock:
@@ -361,7 +370,9 @@ class WorkspaceController:
     # Navigation
     # ------------------------------------------------------------------
 
-    async def navigate_command(self, view: str | None, namespace: str | None) -> None:
+    async def navigate_command(
+        self, view: str | None, namespace: str | None, guard: Callable[[], bool] | None = None
+    ) -> None:
         """`:view`/agent navigate: abandon drill + hierarchy-return, then navigate.
 
         The stack clear happens inside the navigation lock so a concurrent
@@ -378,7 +389,7 @@ class WorkspaceController:
             # return (issue #135) - Escape afterwards must not teleport back.
             pane.hierarchy_return = None
 
-        await self.navigate(view, namespace, drill_op=_abandon)
+        await self.navigate(view, namespace, drill_op=_abandon, navigation_guard=guard)
 
     async def navigate(
         self,
@@ -536,19 +547,22 @@ class WorkspaceController:
         # cluster's namespaces — refuse up front.
         if not self._context.reads_allowed():
             return
-        epoch = self._context.epoch()
+        epoch, token = self._context.epoch(), self._slots.token()
         try:
             namespaces = await list_namespaces()
         except ApiStatusError as exc:  # API failures get the actionable mapping (§5-5)
+            self._slots.observe_failure(token)
             if self._context.crossed(epoch):
                 return  # a stale old-cluster error is not worth surfacing
-            self._notify_namespace_list_error(exc)
+            notify_namespace_list_error(self._ui, exc)
             return
         except Exception as exc:  # surface any other listing failure to the user
+            self._slots.observe_failure(token)
             if self._context.crossed(epoch):
                 return
             self._ui.notify(str(exc), title="Failed to list namespaces", severity="error")
             return
+        self._slots.observe(token, namespaces)
         if self._context.crossed(epoch):
             # The listing awaited through a :ctx switch: opening the picker
             # now would offer old-cluster namespaces to the new session.
@@ -557,11 +571,11 @@ class WorkspaceController:
                 severity="warning",
             )
             return
-        if not namespaces:
+        if not namespaces and not self._slots.slots.entries:
             self._ui.notify("No namespaces visible (check RBAC)", severity="warning")
             return
         self._surface.set_namespace_words(namespaces)
-        self._surface.open_namespace_picker(namespaces)
+        self._surface.open_namespace_picker(namespaces, self._slots.slots)
 
     def namespace_picker_unavailable_reason(self) -> UnavailableReason | None:
         """Why `:ns` could not open its picker, or None — a silent probe
@@ -573,35 +587,32 @@ class WorkspaceController:
         listing = self._list_namespaces()
         return None if listing is not None else NAMESPACE_LISTING_UNAVAILABLE
 
-    def _notify_namespace_list_error(self, exc: ApiStatusError) -> None:
-        """403 is an authorization boundary (issue #108): show one concise
-        permission notice pointing at `:ns <name>` free-text entry — never
-        manufacture a namespace list from configuration."""
-        msg = explain_api_error(exc.status, exc.reason, "namespaces", None)
-        if exc.status == 403:
-            msg += " Switch directly with `:ns <name>`."
-        self._ui.notify(msg, title="Failed to list namespaces", severity="error")
-
     def start_namespace_prefetch(self) -> None:
-        """Warm the command-bar namespace completions in the background."""
+        """Restore this cluster's namespace slots, then warm the completions
+        and slot discovery from one background listing (issue #406)."""
         list_namespaces = self._list_namespaces()
-        if list_namespaces is None:
-            return
 
         async def _fetch() -> None:
+            await self._slots.activate()
+            if list_namespaces is None:
+                return
+            token = self._slots.token()
             try:
                 namespaces = await list_namespaces()
             except Exception:
                 logger.debug("namespace prefetch for completion failed", exc_info=True)
+                self._slots.observe_failure(token)
                 return
+            self._slots.observe(token, namespaces)
             self._surface.set_namespace_words(namespaces)
 
         self._ns_prefetch_task = asyncio.create_task(_fetch())
 
     def clear_namespace_words(self) -> None:
         """Drop the loaded completions — after a `:ctx` switch they name the
-        old cluster's namespaces."""
+        old cluster's namespaces. The slots fall back to pins alone."""
         self._surface.set_namespace_words([])
+        self._slots.deactivate()
 
     async def cancel_namespace_prefetch(self) -> None:
         """Cancel and reap an in-flight prefetch (`:ctx` teardown, unmount).
@@ -644,16 +655,16 @@ class WorkspaceController:
         )
 
     async def favorite_namespace(self, index: int) -> None:
-        """Jump to `favorite_namespaces[index-1]` (issue #108, keys 1-9).
+        """Jump to namespace slot *index* (#108/#406) as `:ns <name>` does, granting no access.
 
-        A favorite is a UI-only shortcut: it uses the exact same navigation
-        path as `:ns <name>` — no access is granted, no namespace list is
-        derived, and a forbidden watch reports its own concise notice.
+        Empty slots are no-ops and unavailable ones explain themselves. The slot
+        is re-read under the navigation lock and refused across a `:ctx` switch.
         """
-        favorites = self._config().favorite_namespaces
-        if index > len(favorites):
-            return
-        await self.navigate_command(None, favorites[index - 1])
+        epoch = self._context.epoch()
+        namespace = None if self._context.switching() else self._slots.target(index)
+        if namespace is not None:
+            guard = self._slots.guard(index, namespace, lambda: not self._context.crossed(epoch))
+            await self.navigate_command(None, namespace, guard)
 
     # ------------------------------------------------------------------
     # Filter
