@@ -100,6 +100,7 @@ from korvid.k8s.client import (
 )
 from korvid.k8s.cluster_identity import current_cluster_identity
 from korvid.k8s.csp import ProviderInfo, detect_provider
+from korvid.k8s.deployment_outcomes import KubeDeploymentOutcomeReader
 from korvid.k8s.discovery import PODS_META, ResourceMeta, build_alias_map
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.helm import HELM_RELEASES_META, HELM_REVISIONS_META
@@ -143,6 +144,7 @@ from korvid.ui.bridge_dispatch import AppContextDispatch
 from korvid.ui.command_router import CommandRouter
 from korvid.ui.context_switch_coordinator import ContextSwitchCoordinator, ContextSwitchResult
 from korvid.ui.debug import DebugController, DebugSettings
+from korvid.ui.deployment_outcome_controller import DeploymentOutcomeController
 from korvid.ui.drain import DrainController
 from korvid.ui.forward_controller import ForwardController
 from korvid.ui.helm_controller import HelmController
@@ -1035,6 +1037,12 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
     shell_ref = _LateReference[ShellController]()
     debug_ref = _LateReference[DebugController]()
     resource_writes_ref = _LateReference[ResourceWriteController]()
+    deployment_outcomes_ref = _LateReference[DeploymentOutcomeController | None]()
+
+    async def stop_deployment_outcomes() -> None:
+        controller = deployment_outcomes_ref.get()
+        if controller is not None:
+            await controller.stop_all("kube context changed")
 
     view = AppViewState(app)
     #: The session's one PATH lookup for `kubectl`, taken here rather than
@@ -1068,6 +1076,7 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
         probe_context=inputs.probe_context,
         switch_context=inputs.switch_context,
         pulse=pulse_ref.get,
+        stop_deployment_outcomes=stop_deployment_outcomes,
     )
     workspace = WorkspaceState("pods", config.namespace or "default")
     pulse = PulseController(
@@ -1117,6 +1126,17 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
         protected_context=inputs.protected_context,
     )
     writes_ref.bind(writes)
+    deployment_outcomes = (
+        DeploymentOutcomeController(
+            ui=AppUiSurface(app),
+            reader=inputs.deployment_outcome_reader,
+            get_epoch=context.epoch,
+            cluster_id=inputs.deployment_cluster_id,
+        )
+        if inputs.deployment_outcome_reader is not None
+        else None
+    )
+    deployment_outcomes_ref.bind(deployment_outcomes)
     bridge_dispatch = AppContextDispatch()
     inspect_surface = AppInspectSurface(app)
     inspect_controller = ResourceInspectController(
@@ -1225,6 +1245,7 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
         helm_cli_unavailable_reason=helm_controller.cli_unavailable_reason,
         helm_release_identity_reason=helm_controller.release_identity_reason,
         operators=operators,
+        deployment_outcomes=deployment_outcomes,
     )
     resource_writes_ref.bind(resource_writes)
     hints = HintController(
@@ -1438,6 +1459,7 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
         commands=commands,
         actions=actions,
         keybindings=keybindings,
+        deployment_outcomes=deployment_outcomes,
     )
 
 
@@ -1606,6 +1628,15 @@ async def _wire_and_run(config: KorvidConfig, kube: KubeClient, state: _RunState
         # Warning-Event stream, read-only and filtered server-side.
         watch_warning_events=kube.watch_warning_events,
         pulse_reader=kube,
+        deployment_outcome_reader=KubeDeploymentOutcomeReader(
+            get_object=kube.get_object,
+            list_raw_objects=kube.list_raw_objects,
+        ),
+        deployment_cluster_id=lambda: (
+            "|".join(identity)
+            if (identity := current_cluster_identity(app.config.kube_context)) is not None
+            else None
+        ),
     )
     app = assemble_app_runtime(app)
     app_box.append(app)

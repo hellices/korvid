@@ -46,6 +46,7 @@ from korvid.k8s.drain import DrainPlan
 from korvid.k8s.olm import OPERATORS_GROUP
 from korvid.k8s.writes import WriteOps, restart_stamp
 from korvid.ui.action_availability import UnavailableReason
+from korvid.ui.deployment_outcome_controller import DeploymentOutcomeController
 from korvid.ui.drain import DrainController
 from korvid.ui.node_impact_preview import (
     compose_node_maintenance_lines,
@@ -229,6 +230,7 @@ class ResourceWriteController:
         helm_cli_unavailable_reason: Callable[[], UnavailableReason | None],
         helm_release_identity_reason: Callable[[], UnavailableReason | None],
         operators: OperatorUninstalls,
+        deployment_outcomes: DeploymentOutcomeController | None = None,
     ) -> None:
         self._writes = writes
         self._view = view
@@ -242,6 +244,7 @@ class ResourceWriteController:
         self._pod_resize_supported = pod_resize_supported
         self._helm_uninstall = helm_uninstall
         self._operators = operators
+        self._deployment_outcomes = deployment_outcomes
         #: The in-flight drain worker, if any - pressing the drain key again
         #: cancels it (evictions stop; the node stays cordoned).
         self._drain_worker: CancellableWork | None = None
@@ -511,6 +514,18 @@ class ResourceWriteController:
             preview=preview,
             managed_note=note,
             impact_lines=impact,
+            on_accepted=(
+                self._deployment_outcomes.restart_observer(
+                    epoch=target.epoch,
+                    namespace=ns,
+                    name=name,
+                    uid=uid,
+                    restarted_at=stamp,
+                )
+                if self._deployment_outcomes is not None
+                and (meta.group, meta.plural) == ("apps", "deployments")
+                else None
+            ),
         )
 
     # ------------------------------------------------------------------
@@ -850,6 +865,18 @@ class ResourceWriteController:
             # exists.
             approval_guard=lambda: self._scale_intact(
                 target, current, phase="the confirmation dialog"
+            ),
+            on_accepted=(
+                self._deployment_outcomes.scale_observer(
+                    epoch=target.epoch,
+                    namespace=ns,
+                    name=name,
+                    uid=uid,
+                    replicas=replicas,
+                )
+                if self._deployment_outcomes is not None
+                and (meta.group, meta.plural) == ("apps", "deployments")
+                else None
             ),
         )
 

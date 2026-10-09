@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from korvid.core.store import ResourceStore
     from korvid.core.watch import WatchManager
     from korvid.k8s.components import ComponentRef
+    from korvid.k8s.deployment_outcomes import DeploymentOutcomeReader
     from korvid.k8s.discovery import ResourceMeta
     from korvid.k8s.helm import HelmReleaseIdentity
     from korvid.k8s.helmcli import HelmCLI
@@ -37,6 +38,7 @@ if TYPE_CHECKING:
     from korvid.ui.command_router import CommandRouter
     from korvid.ui.context_switch_coordinator import ContextSwitchCoordinator, ContextSwitchResult
     from korvid.ui.debug import DebugController
+    from korvid.ui.deployment_outcome_controller import DeploymentOutcomeController
     from korvid.ui.drain import DrainController
     from korvid.ui.forward_controller import ForwardController
     from korvid.ui.helm_controller import HelmController
@@ -131,6 +133,8 @@ class AppRuntimeInputs:
     watch_warning_events: Callable[[str | None], AsyncIterator[dict[str, Any]]] | None
     pulse_reader: PulseReader | None
     approval_timeout_seconds: float | None
+    deployment_outcome_reader: DeploymentOutcomeReader | None
+    deployment_cluster_id: Callable[[], str | None]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -164,3 +168,4 @@ class AppRuntime:
     commands: CommandRouter
     actions: ActionPolicy
     keybindings: KeybindingController
+    deployment_outcomes: DeploymentOutcomeController | None
