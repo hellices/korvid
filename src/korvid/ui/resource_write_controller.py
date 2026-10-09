@@ -47,6 +47,7 @@ from korvid.k8s.olm import OPERATORS_GROUP
 from korvid.k8s.writes import WriteOps, restart_stamp
 from korvid.ui.action_availability import UnavailableReason
 from korvid.ui.deployment_outcome_controller import DeploymentOutcomeController
+from korvid.ui.deployment_outcome_writes import restart_observer, scale_observer
 from korvid.ui.drain import DrainController
 from korvid.ui.node_impact_preview import (
     compose_node_maintenance_lines,
@@ -230,7 +231,7 @@ class ResourceWriteController:
         helm_cli_unavailable_reason: Callable[[], UnavailableReason | None],
         helm_release_identity_reason: Callable[[], UnavailableReason | None],
         operators: OperatorUninstalls,
-        deployment_outcomes: DeploymentOutcomeController | None = None,
+        deployment_outcomes: DeploymentOutcomeController,
     ) -> None:
         self._writes = writes
         self._view = view
@@ -514,18 +515,7 @@ class ResourceWriteController:
             preview=preview,
             managed_note=note,
             impact_lines=impact,
-            on_accepted=(
-                self._deployment_outcomes.restart_observer(
-                    epoch=target.epoch,
-                    namespace=ns,
-                    name=name,
-                    uid=uid,
-                    restarted_at=stamp,
-                )
-                if self._deployment_outcomes is not None
-                and (meta.group, meta.plural) == ("apps", "deployments")
-                else None
-            ),
+            on_accepted=restart_observer(self._deployment_outcomes, target, stamp),
         )
 
     # ------------------------------------------------------------------
@@ -866,18 +856,7 @@ class ResourceWriteController:
             approval_guard=lambda: self._scale_intact(
                 target, current, phase="the confirmation dialog"
             ),
-            on_accepted=(
-                self._deployment_outcomes.scale_observer(
-                    epoch=target.epoch,
-                    namespace=ns,
-                    name=name,
-                    uid=uid,
-                    replicas=replicas,
-                )
-                if self._deployment_outcomes is not None
-                and (meta.group, meta.plural) == ("apps", "deployments")
-                else None
-            ),
+            on_accepted=scale_observer(self._deployment_outcomes, target, replicas),
         )
 
     # ------------------------------------------------------------------

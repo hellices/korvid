@@ -151,11 +151,7 @@ def _bounded_text(value: object, path: str) -> str:
 def _controller_owner_uid(manifest: Mapping[str, Any], kind: str) -> str | None:
     metadata = _mapping(manifest.get("metadata"))
     for owner in _entries(metadata.get("ownerReferences")):
-        if (
-            owner.get("kind") == kind
-            and owner.get("controller") is True
-            and owner.get("uid")
-        ):
+        if owner.get("kind") == kind and owner.get("controller") is True and owner.get("uid"):
             return str(owner["uid"])
     return None
 
@@ -279,9 +275,7 @@ def normalize_deployment_observation(
         available_replicas=_integer(status.get("availableReplicas")),
         unavailable_replicas=_integer(status.get("unavailableReplicas")),
         restart_stamp=(
-            str(annotations[_RESTART_ANNOTATION])
-            if annotations.get(_RESTART_ANNOTATION)
-            else None
+            str(annotations[_RESTART_ANNOTATION]) if annotations.get(_RESTART_ANNOTATION) else None
         ),
         conditions=_condition_entries(status),
         pods=tuple(all_pod_evidence[:max_pod_evidence]),
@@ -295,11 +289,7 @@ def _condition_failure(
     for condition in conditions:
         if condition.type == "ReplicaFailure" and condition.status == "True":
             return condition
-        if (
-            condition.type == "Progressing"
-            and condition.status == "False"
-            and condition.reason
-        ):
+        if condition.type == "Progressing" and condition.status == "False" and condition.reason:
             return condition
     return None
 
@@ -383,10 +373,7 @@ def _observing_outcome(observation: DeploymentObservation) -> DeploymentOutcome:
 def _evaluate_scale(
     intent: DeploymentScaleIntent, observation: DeploymentObservation
 ) -> DeploymentOutcome:
-    if (
-        observation.desired_replicas is not None
-        and observation.desired_replicas != intent.replicas
-    ):
+    if observation.desired_replicas is not None and observation.desired_replicas != intent.replicas:
         return DeploymentOutcome(
             phase=DeploymentOutcomePhase.SUPERSEDED,
             summary=(

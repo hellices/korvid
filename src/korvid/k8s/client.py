@@ -25,6 +25,7 @@ from korvid.k8s import pulse
 from korvid.k8s.columns import CustomColumn, evaluate_all
 from korvid.k8s.components import ComponentRef, manifest_components
 from korvid.k8s.csp import ProviderInfo, detect_provider
+from korvid.k8s.deployment_outcomes import iter_raw_object_pages, list_raw_object_page
 from korvid.k8s.discovery import PODS_META, ResourceMeta
 from korvid.k8s.drain import DrainPlan, build_drain_plan
 from korvid.k8s.dryrun import diff_manifests
@@ -225,10 +226,7 @@ class KubeClient(ReadOps, WriteOps, pulse.PulseReader):
 
     def connected_api_server(self) -> str | None:
         """Return the active API server without rereading kubeconfig."""
-
-        if self._api is None:
-            return None
-        return self._api.configuration.host or None
+        return self._api.configuration.host or None if self._api is not None else None
 
     @staticmethod
     def _namespaces_path() -> str:
@@ -699,34 +697,17 @@ class KubeClient(ReadOps, WriteOps, pulse.PulseReader):
         """Read bounded LIST pages and project only summaries the caller consumes."""
         if self._api is None:
             raise RuntimeError("connect() first")
-        path = self._list_path(meta, namespace)
-        continuation = ""
-        seen_continuations: set[str] = set()
-        while True:
-            query = [("limit", str(LIST_PAGE_SIZE))]
-            if continuation:
-                query.append(("continue", continuation))
-            try:
-                data = await self._request_json(path, query_params=query)
-                items, next_token = _parse_list_page(data)
-            except ApiStatusError as exc:
-                self._observe_read_error(path, exc)
-                raise
-            except KubeClientError:
-                self._observe_read("error", path)
-                raise
-            self._observe_read("list", path, payload=data, object_count=len(items))
-            for item in items:
-                yield self._object_summary(meta, item)
-            if not next_token:
-                return
-            if next_token in seen_continuations:
-                self._observe_read("error", path)
-                raise KubeClientError("LIST continuation did not advance")
-            seen_continuations.add(next_token)
-            continuation = next_token
-            del data, items
-            await asyncio.sleep(0)
+        pages = iter_raw_object_pages(
+            meta,
+            namespace,
+            page_size=LIST_PAGE_SIZE,
+            list_path=self._list_path,
+            request_json=self._request_json,
+            observe=self._observe_read,
+            observe_error=self._observe_read_error,
+        )
+        async for item in pages:
+            yield self._object_summary(meta, item)
 
     async def list_objects(self, meta: ResourceMeta, namespace: str | None) -> list[GenericSummary]:
         """LIST any resource kind and return GenericSummary items.
@@ -754,20 +735,16 @@ class KubeClient(ReadOps, WriteOps, pulse.PulseReader):
         limit: int,
     ) -> tuple[list[dict[str, Any]], bool]:
         """Return one bounded raw LIST page and whether more items exist."""
-        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
-            raise ValueError("limit must be a positive integer")
-        path = self._list_path(meta, namespace)
-        query = [("limit", str(limit))]
-        if label_selector:
-            query.append(("labelSelector", label_selector))
-        try:
-            data = await self._request_json(path, query_params=query)
-            items, continuation = _parse_list_page(data)
-        except ApiStatusError as exc:
-            self._observe_read_error(path, exc)
-            raise
-        self._observe_read("list", path, payload=data, object_count=len(items))
-        return items, continuation is not None
+        return await list_raw_object_page(
+            meta,
+            namespace,
+            label_selector,
+            limit,
+            list_path=self._list_path,
+            request_json=self._request_json,
+            observe=self._observe_read,
+            observe_error=self._observe_read_error,
+        )
 
     async def list_relationship_objects(
         self, meta: ResourceMeta, namespace: str | None
@@ -1929,19 +1906,6 @@ def _resource_short_names(value: Any) -> tuple[str, ...]:
     if not isinstance(value, list):
         return ()
     return tuple(alias for alias in value if isinstance(alias, str) and alias)
-
-
-def _parse_list_page(data: dict[str, Any]) -> tuple[list[dict[str, Any]], str]:
-    items = data.get("items")
-    if not isinstance(items, list) or any(not isinstance(item, dict) for item in items):
-        raise _malformed_response_error()
-    metadata = data.get("metadata", {})
-    if not isinstance(metadata, Mapping):
-        raise _malformed_response_error()
-    continuation = metadata.get("continue", "")
-    if not isinstance(continuation, str):
-        raise _malformed_response_error()
-    return items, continuation
 
 
 def _parse_resource_list(data: dict[str, Any], *, group: str, version: str) -> list[ResourceMeta]:

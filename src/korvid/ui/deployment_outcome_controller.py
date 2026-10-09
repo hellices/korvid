@@ -95,7 +95,7 @@ class DeploymentOutcomeController:
         self,
         *,
         ui: UiSurface,
-        reader: DeploymentOutcomeReader,
+        reader: DeploymentOutcomeReader | None,
         get_epoch: Callable[[], int],
         cluster_id: Callable[[], str | None],
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
@@ -175,6 +175,8 @@ class DeploymentOutcomeController:
         name: str,
         uid: str | None,
     ) -> DeploymentOperationTarget | None:
+        if self._reader is None:
+            return None
         cluster_id = self._cluster_id()
         if namespace is None or uid is None or cluster_id is None:
             return None
@@ -253,8 +255,11 @@ class DeploymentOutcomeController:
         if self._get_epoch() != snapshot.intent.target.epoch:
             self._update(tracker_id, _stopped_outcome("kube context changed"), attempt - 1)
             return True
+        reader = self._reader
+        if reader is None:
+            return True
         try:
-            raw = await self._reader.snapshot(
+            raw = await reader.snapshot(
                 snapshot.intent.target.namespace,
                 snapshot.intent.target.name,
             )

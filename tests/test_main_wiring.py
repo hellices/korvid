@@ -1368,9 +1368,12 @@ def test_telepresence_wiring_respects_detection_and_kill_switch() -> None:
     from korvid.core.config import KorvidConfig
     from korvid.k8s.telepresence import TelepresenceCLI
 
-    with mock.patch("korvid.__main__.find_telepresence", return_value=None):
+    with mock.patch("korvid.k8s.telepresence.find_telepresence", return_value=None):
         assert _build_telepresence(KorvidConfig()) is None
-    with mock.patch("korvid.__main__.find_telepresence", return_value="/x/telepresence"):
+    with mock.patch(
+        "korvid.k8s.telepresence.find_telepresence",
+        return_value="/x/telepresence",
+    ):
         assert isinstance(_build_telepresence(KorvidConfig()), TelepresenceCLI)
         assert _build_telepresence(KorvidConfig(telepresence_enabled=False)) is None
 

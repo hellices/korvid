@@ -485,12 +485,13 @@ class ContextSwitchCoordinator(ContextGuard):
         an unmounting app must not leave that landing behind it.
         """
         task = self._prefetch_task
-        if task is None:
-            return
-        self._prefetch_task = None
-        task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await task
+        if task is not None:
+            self._prefetch_task = None
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        if self._stop_deployment_outcomes is not None:
+            await self._stop_deployment_outcomes()
 
     # ------------------------------------------------------------------
     # Entry points — the app's `:ctx` handlers delegate straight to these

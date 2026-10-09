@@ -146,12 +146,10 @@ class _Api:
 
 
 def _reader(api: _Api) -> KubeDeploymentOutcomeReader:
-    get_object: Callable[
-        [ResourceMeta, str | None, str], Awaitable[dict[str, Any]]
-    ] = api.get_object
-    list_raw: Callable[..., Awaitable[tuple[list[dict[str, Any]], bool]]] = (
-        api.list_raw_objects
+    get_object: Callable[[ResourceMeta, str | None, str], Awaitable[dict[str, Any]]] = (
+        api.get_object
     )
+    list_raw: Callable[..., Awaitable[tuple[list[dict[str, Any]], bool]]] = api.list_raw_objects
     return KubeDeploymentOutcomeReader(
         get_object=get_object,
         list_raw_objects=list_raw,
@@ -195,9 +193,7 @@ async def test_snapshot_uses_server_side_deployment_selector() -> None:
 
 
 async def test_snapshot_retains_only_relevant_conditions() -> None:
-    observation = normalize_deployment_observation(
-        await _reader(_Api()).snapshot("default", "web")
-    )
+    observation = normalize_deployment_observation(await _reader(_Api()).snapshot("default", "web"))
 
     assert [(condition.type, condition.reason) for condition in observation.conditions] == [
         ("Progressing", "ReplicaSetUpdated")
@@ -228,9 +224,7 @@ async def test_snapshot_does_not_default_malformed_counts_to_zero() -> None:
 async def test_snapshot_propagates_authoritative_get_failure() -> None:
     api = _Api()
 
-    async def denied(
-        meta: ResourceMeta, namespace: str | None, name: str
-    ) -> dict[str, Any]:
+    async def denied(meta: ResourceMeta, namespace: str | None, name: str) -> dict[str, Any]:
         raise PermissionError("denied")
 
     reader = KubeDeploymentOutcomeReader(

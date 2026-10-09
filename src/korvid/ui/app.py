@@ -290,7 +290,6 @@ class KorvidApp(App[None]):
         self._commands = runtime.commands
         self._actions = runtime.actions
         self._keybindings = runtime.keybindings
-        self._deployment_outcomes = runtime.deployment_outcomes
         self.__dict__.pop("_runtime_inputs", None)
 
     def _bind_runtime_inputs(self, inputs: AppRuntimeInputs) -> None:
@@ -1476,8 +1475,6 @@ class KorvidApp(App[None]):
         # (log streams) after the unmount sweeps and leave it alive against
         # an unmounted app.
         await self._bridge_dispatch.shutdown()
-        if self._deployment_outcomes is not None:
-            await self._deployment_outcomes.shutdown()
         await self._pulse.stop()
         # A proposal must never outlive the session that previewed it: the
         # controller closes the store first so an in-flight submission cannot

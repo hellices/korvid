@@ -102,17 +102,15 @@ from korvid.k8s.cluster_identity import current_cluster_identity
 from korvid.k8s.csp import ProviderInfo, detect_provider
 from korvid.k8s.deployment_outcomes import KubeDeploymentOutcomeReader
 from korvid.k8s.discovery import PODS_META, ResourceMeta, build_alias_map
-from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.helm import HELM_RELEASES_META, HELM_REVISIONS_META
 from korvid.k8s.helmcli import HelmCLI, find_helm
 from korvid.k8s.kubectl import KubectlPresence
 from korvid.k8s.metrics import MetricsPoller
 from korvid.k8s.models import reset_age_memo
 from korvid.k8s.telepresence import (
-    TRAFFIC_MANAGER_NAME,
-    TRAFFIC_MANAGER_NAMESPACE,
     TelepresenceCLI,
-    find_telepresence,
+    build_telepresence,
+    make_traffic_manager_probe,
 )
 from korvid.tools.executor import (
     ToolExecutor,
@@ -144,10 +142,8 @@ from korvid.ui.bridge_dispatch import AppContextDispatch
 from korvid.ui.command_router import CommandRouter
 from korvid.ui.context_switch_coordinator import ContextSwitchCoordinator, ContextSwitchResult
 from korvid.ui.debug import DebugController, DebugSettings
-from korvid.ui.deployment_outcome_controller import (
-    OUTCOMES_UNAVAILABLE,
-    DeploymentOutcomeController,
-)
+from korvid.ui.deployment_outcome_actions import DeploymentOutcomePodActions
+from korvid.ui.deployment_outcome_controller import DeploymentOutcomeController
 from korvid.ui.drain import DrainController
 from korvid.ui.forward_controller import ForwardController
 from korvid.ui.helm_controller import HelmController
@@ -168,7 +164,6 @@ from korvid.ui.resource_write_controller import ResourceWriteController
 from korvid.ui.session_timeline_controller import SessionTimelineController
 from korvid.ui.shell_controller import ShellController, ShellSettings
 from korvid.ui.transfer import TransferController
-from korvid.ui.widgets.hint_detail import HintDetailScreen
 from korvid.ui.widgets.keybinding_editor import KeybindingEditorScreen
 from korvid.ui.widgets.pulse import PulseSummary
 from korvid.ui.workspace_controller import WorkspaceController
@@ -935,30 +930,7 @@ def _build_helm(config: KorvidConfig) -> HelmCLI | None:
 
 
 def _build_telepresence(config: KorvidConfig) -> TelepresenceCLI | None:
-    """Wrap a detected telepresence binary (issue #159), or None when the
-    binary is absent or the kill-switch (`integrations.telepresence: off`)
-    disabled the integration."""
-    if not config.telepresence_enabled:
-        return None
-    binary = find_telepresence()
-    if binary is None:
-        return None
-    return TelepresenceCLI(binary)
-
-
-def _make_traffic_manager_probe(kube: KubeClient) -> Callable[[], Awaitable[bool]]:
-    """Cluster-side telepresence detection (issue #159): a pure API GET for
-    the traffic-manager deployment - never the telepresence binary."""
-
-    async def probe() -> bool:
-        meta = ResourceMeta("Deployment", "deployments", "apps", "v1", True)
-        try:
-            await kube.get_object(meta, TRAFFIC_MANAGER_NAMESPACE, TRAFFIC_MANAGER_NAME)
-        except ApiStatusError:
-            return False  # absent or forbidden: either way, no hint
-        return True
-
-    return probe
+    return build_telepresence(enabled=config.telepresence_enabled)
 
 
 def _protected_context_name(config: KorvidConfig, context: str | None) -> str | None:
@@ -1026,60 +998,6 @@ def _make_switch_context(
     return switch_context
 
 
-async def _handle_outcome_pod_action(
-    verb: str,
-    epoch: int,
-    namespace: str,
-    name: str,
-    uid: str,
-    *,
-    app: KorvidApp,
-    inputs: AppRuntimeInputs,
-    context: ContextSwitchCoordinator,
-    workspace: WorkspaceController,
-    inspect: ResourceInspectController,
-    logs: LogController,
-) -> None:
-    """Run a Pod action only while the tracked incarnation still exists."""
-
-    if context.crossed(epoch) or await app._target_uid("pods", namespace, name) != uid:
-        app.notify(
-            "Pod identity changed; refresh the Deployment outcome",
-            severity="warning",
-            markup=False,
-        )
-        return
-    await workspace.jump_to_object(
-        "pods",
-        namespace,
-        name,
-        epoch=epoch,
-        expected_uid=uid,
-    )
-    if verb == "goto":
-        return
-    if context.crossed(epoch) or await app._target_uid("pods", namespace, name) != uid:
-        app.notify(
-            "Pod identity changed; refresh the Deployment outcome",
-            severity="warning",
-            markup=False,
-        )
-        return
-    if verb == "describe":
-        await inspect.describe_selected()
-    elif verb == "logs":
-        await logs.action_logs()
-    elif verb == "events":
-        get_events = inputs.get_events
-        if get_events is None:
-            app.notify("Events unavailable in this session", severity="warning")
-            return
-        events = await get_events.fetch(namespace, name, uid=uid)
-        await AppUiSurface(app).push_screen(
-            HintDetailScreen(f"Events for pod/{namespace}/{name}", (), events)
-        )
-
-
 def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRuntime:
     """Construct the complete session-scoped controller graph."""
     config = inputs.config
@@ -1095,12 +1013,6 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
     shell_ref = _LateReference[ShellController]()
     debug_ref = _LateReference[DebugController]()
     resource_writes_ref = _LateReference[ResourceWriteController]()
-    deployment_outcomes_ref = _LateReference[DeploymentOutcomeController | None]()
-
-    async def stop_deployment_outcomes() -> None:
-        controller = deployment_outcomes_ref.get()
-        if controller is not None:
-            await controller.stop_all("kube context changed")
 
     view = AppViewState(app)
     #: The session's one PATH lookup for `kubectl`, taken here rather than
@@ -1134,7 +1046,7 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
         probe_context=inputs.probe_context,
         switch_context=inputs.switch_context,
         pulse=pulse_ref.get,
-        stop_deployment_outcomes=stop_deployment_outcomes,
+        stop_deployment_outcomes=lambda: deployment_outcomes.stop_all("kube context changed"),
     )
     workspace = WorkspaceState("pods", config.namespace or "default")
     pulse = PulseController(
@@ -1184,30 +1096,21 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
         protected_context=inputs.protected_context,
     )
     writes_ref.bind(writes)
-    deployment_outcomes = (
-        DeploymentOutcomeController(
+    deployment_outcomes = DeploymentOutcomeController(
+        ui=AppUiSurface(app),
+        reader=inputs.deployment_outcome_reader,
+        get_epoch=context.epoch,
+        cluster_id=inputs.deployment_cluster_id,
+        pod_action=DeploymentOutcomePodActions(
             ui=AppUiSurface(app),
-            reader=inputs.deployment_outcome_reader,
-            get_epoch=context.epoch,
-            cluster_id=inputs.deployment_cluster_id,
-            pod_action=lambda verb, epoch, namespace, name, uid: _handle_outcome_pod_action(
-                verb,
-                epoch,
-                namespace,
-                name,
-                uid,
-                app=app,
-                inputs=inputs,
-                context=context,
-                workspace=workspace_ref.get(),
-                inspect=inspect_controller,
-                logs=logs_ref.get(),
-            ),
-        )
-        if inputs.deployment_outcome_reader is not None
-        else None
+            target_uid=app._target_uid,
+            context=context,
+            workspace=workspace_ref.get,
+            inspect=lambda: inspect_controller,
+            logs=lambda: logs_ref.get().action_logs(),
+            events=lambda: inputs.get_events,
+        ),
     )
-    deployment_outcomes_ref.bind(deployment_outcomes)
     bridge_dispatch = AppContextDispatch()
     inspect_surface = AppInspectSurface(app)
     inspect_controller = ResourceInspectController(
@@ -1489,11 +1392,7 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
             port_forwards=forward_controller.list_unavailable_reason,
             keybindings=keybindings.unavailable_reason,
             slots=slots.unavailable_reason,
-            outcomes=(
-                deployment_outcomes.unavailable_reason
-                if deployment_outcomes is not None
-                else lambda: OUTCOMES_UNAVAILABLE
-            ),
+            outcomes=deployment_outcomes.unavailable_reason,
         ),
     )
     commands = CommandRouter(
@@ -1536,7 +1435,6 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
         commands=commands,
         actions=actions,
         keybindings=keybindings,
-        deployment_outcomes=deployment_outcomes,
     )
 
 
@@ -1686,7 +1584,7 @@ async def _wire_and_run(config: KorvidConfig, kube: KubeClient, state: _RunState
         ),
         helm=_build_helm(config),
         telepresence=_build_telepresence(config),
-        probe_traffic_manager=_make_traffic_manager_probe(kube),
+        probe_traffic_manager=make_traffic_manager_probe(kube.get_object),
         # Agent follow mirrors route through the same serialized proxy: the
         # built-in agent and concurrent MCP UI calls must never interleave
         # (log-pane swaps and describes are not overlap-safe).

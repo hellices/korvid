@@ -848,9 +848,7 @@ class WriteCoordinator(WriteGate):
                 await self.audit_write(action, meta, namespace, name, detail, f"error: {exc}")
             self._ui.notify(f"{action} {kind}/{name} failed: {exc}", severity="error")
             return f"failed: {exc}"
-        await self._finish_success(
-            action, meta, namespace, name, detail, on_accepted
-        )
+        await self._finish_success(action, meta, namespace, name, detail, on_accepted)
         self._ui.notify(f"{action} {kind}/{name}: done", severity="information")
         return "done"
 

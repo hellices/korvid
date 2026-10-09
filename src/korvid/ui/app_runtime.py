@@ -38,7 +38,6 @@ if TYPE_CHECKING:
     from korvid.ui.command_router import CommandRouter
     from korvid.ui.context_switch_coordinator import ContextSwitchCoordinator, ContextSwitchResult
     from korvid.ui.debug import DebugController
-    from korvid.ui.deployment_outcome_controller import DeploymentOutcomeController
     from korvid.ui.drain import DrainController
     from korvid.ui.forward_controller import ForwardController
     from korvid.ui.helm_controller import HelmController
@@ -168,4 +167,3 @@ class AppRuntime:
     commands: CommandRouter
     actions: ActionPolicy
     keybindings: KeybindingController
-    deployment_outcomes: DeploymentOutcomeController | None

@@ -354,7 +354,7 @@ async def test_rollout_restart_starts_deployment_outcome_tracker(tmp_path: Path)
         )
         await pilot.press("y")
         await until(pilot, reader.started.is_set, label="outcome reader started")
-        controller = app._deployment_outcomes
+        controller = app._resource_writes._deployment_outcomes
         assert controller is not None
         snapshot = controller.latest()
         assert snapshot is not None
@@ -465,7 +465,7 @@ async def test_scale_starts_deployment_outcome_tracker_with_exact_count(tmp_path
         )
         await pilot.press("y")
         await until(pilot, reader.started.is_set, label="outcome reader started")
-        controller = app._deployment_outcomes
+        controller = app._resource_writes._deployment_outcomes
         assert controller is not None
         snapshot = controller.latest()
         assert snapshot is not None

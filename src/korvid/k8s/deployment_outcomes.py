@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 from abc import ABC, abstractmethod
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
 from korvid.k8s.discovery import ResourceMeta
+from korvid.k8s.errors import ApiStatusError, KubeClientError
 
 DEPLOYMENT_META = ResourceMeta(
     "Deployment", "deployments", "apps", "v1", True, ("deploy", "deployment")
@@ -123,3 +125,90 @@ class KubeDeploymentOutcomeReader(DeploymentOutcomeReader):
             pods=tuple(pods),
             partial=selector_partial or replica_sets_partial or pods_partial,
         )
+
+
+def parse_list_page(data: dict[str, Any]) -> tuple[list[dict[str, Any]], str]:
+    """Validate one Kubernetes LIST response page."""
+
+    items = data.get("items")
+    metadata = data.get("metadata", {})
+    continuation = metadata.get("continue", "") if isinstance(metadata, Mapping) else None
+    if (
+        not isinstance(items, list)
+        or any(not isinstance(item, dict) for item in items)
+        or not isinstance(continuation, str)
+    ):
+        raise KubeClientError(
+            "Kubernetes API returned a malformed response; retry, then check the API server"
+        )
+    return items, continuation
+
+
+async def list_raw_object_page(
+    meta: ResourceMeta,
+    namespace: str | None,
+    label_selector: str | None,
+    limit: int,
+    *,
+    list_path: Callable[[ResourceMeta, str | None], str],
+    request_json: Callable[..., Awaitable[dict[str, Any]]],
+    observe: Callable[..., None],
+    observe_error: Callable[[str, ApiStatusError], None],
+) -> tuple[list[dict[str, Any]], bool]:
+    """Read one bounded raw LIST page through a KubeClient's transport seams."""
+
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+        raise ValueError("limit must be a positive integer")
+    path = list_path(meta, namespace)
+    query = [("limit", str(limit))]
+    if label_selector:
+        query.append(("labelSelector", label_selector))
+    try:
+        data = await request_json(path, query_params=query)
+        items, continuation = parse_list_page(data)
+    except ApiStatusError as exc:
+        observe_error(path, exc)
+        raise
+    observe("list", path, payload=data, object_count=len(items))
+    return items, bool(continuation)
+
+
+async def iter_raw_object_pages(
+    meta: ResourceMeta,
+    namespace: str | None,
+    *,
+    page_size: int,
+    list_path: Callable[[ResourceMeta, str | None], str],
+    request_json: Callable[..., Awaitable[dict[str, Any]]],
+    observe: Callable[..., None],
+    observe_error: Callable[[str, ApiStatusError], None],
+) -> AsyncIterator[dict[str, Any]]:
+    """Yield validated raw objects across bounded Kubernetes LIST pages."""
+
+    path = list_path(meta, namespace)
+    continuation = ""
+    seen: set[str] = set()
+    while True:
+        query = [("limit", str(page_size))]
+        if continuation:
+            query.append(("continue", continuation))
+        try:
+            data = await request_json(path, query_params=query)
+            items, next_token = parse_list_page(data)
+        except ApiStatusError as exc:
+            observe_error(path, exc)
+            raise
+        except KubeClientError:
+            observe("error", path)
+            raise
+        observe("list", path, payload=data, object_count=len(items))
+        for item in items:
+            yield item
+        if not next_token:
+            return
+        if next_token in seen:
+            observe("error", path)
+            raise KubeClientError("LIST continuation did not advance")
+        seen.add(next_token)
+        continuation = next_token
+        await asyncio.sleep(0)
