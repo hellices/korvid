@@ -51,7 +51,7 @@ from korvid.k8s.pulse import path_segment as _path_segment
 from korvid.k8s.reads import ReadOps
 from korvid.k8s.telemetry import ReadOperation, ReadTelemetry, ReadTelemetryEvent
 from korvid.k8s.watch_events import WatchEvent, WatchProgress
-from korvid.k8s.writes import WriteOps
+from korvid.k8s.writes import WriteMutationResult, WriteOps
 
 logger = logging.getLogger(__name__)
 _AIOHTTP_CLIENT_ERROR = (
@@ -1113,15 +1113,16 @@ class KubeClient(ReadOps, WriteOps, pulse.PulseReader):
         *,
         uid: str | None = None,
         restarted_at: str | None = None,
-    ) -> None:
+    ) -> WriteMutationResult:
         """Restart whose patch body carries the caller-provided stamp, so the
         approved write is byte-identical to the previewed dry run."""
-        await self._request_write(
+        raw = await self._request_write(
             self._object_path(meta, namespace, name),
             "PATCH",
             body=self._restart_patch(uid, restarted_at),
             content_type="application/strategic-merge-patch+json",
         )
+        return WriteMutationResult.from_response(raw)
 
     @staticmethod
     def _resize_patch(

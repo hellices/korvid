@@ -38,7 +38,7 @@ from korvid.k8s.deployment_outcomes import DeploymentOutcomeReader, RawDeploymen
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.models import GenericSummary, PodSummary
-from korvid.k8s.writes import WriteOps
+from korvid.k8s.writes import WriteMutationResult, WriteOps
 from korvid.ui.action_availability import ActionAvailability, AvailabilityCode, UnavailableReason
 from korvid.ui.app import KorvidApp
 from korvid.ui.resource_write_controller import _yaml_equal
@@ -113,6 +113,18 @@ class Recorder(WriteOps):
     ) -> None:
         self.uids.append(uid)
         self.calls.append(("restart", meta.plural, namespace, name))
+
+    async def rollout_restart_with_stamp(
+        self,
+        meta: ResourceMeta,
+        namespace: str | None,
+        name: str,
+        *,
+        uid: str | None = None,
+        restarted_at: str | None = None,
+    ) -> WriteMutationResult:
+        await self.rollout_restart(meta, namespace, name, uid=uid)
+        return WriteMutationResult(generation=3)
 
     async def replace_object(
         self,

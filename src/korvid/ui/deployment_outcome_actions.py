@@ -55,9 +55,9 @@ class DeploymentOutcomePodActions:
             await self._show_events(namespace, name, uid)
 
     async def _identity_intact(self, epoch: int, namespace: str, name: str, uid: str) -> bool:
-        intact = not self._context.crossed(epoch) and (
-            await self._target_uid("pods", namespace, name) == uid
-        )
+        intact = not self._context.crossed(epoch)
+        live_uid = await self._target_uid("pods", namespace, name) if intact else None
+        intact = intact and not self._context.crossed(epoch) and live_uid == uid
         if not intact:
             self._ui.notify(
                 "Pod identity changed; refresh the Deployment outcome",

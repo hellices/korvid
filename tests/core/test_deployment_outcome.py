@@ -26,8 +26,15 @@ def _scale(replicas: int = 3) -> DeploymentScaleIntent:
     return DeploymentScaleIntent(target=_target(), replicas=replicas)
 
 
-def _restart(stamp: str = "2026-10-09T12:00:00+00:00") -> DeploymentRestartIntent:
-    return DeploymentRestartIntent(target=_target(), restarted_at=stamp)
+def _restart(
+    stamp: str = "2026-10-09T12:00:00+00:00",
+    generation: int = 7,
+) -> DeploymentRestartIntent:
+    return DeploymentRestartIntent(
+        target=_target(),
+        restarted_at=stamp,
+        generation=generation,
+    )
 
 
 def _observation(
@@ -140,6 +147,31 @@ def test_restart_with_later_marker_is_superseded() -> None:
 
     assert outcome.phase is DeploymentOutcomePhase.SUPERSEDED
     assert "restart" in outcome.summary.lower()
+
+
+def test_restart_with_later_generation_is_superseded() -> None:
+    outcome = evaluate_deployment_outcome(
+        _restart("accepted", generation=7),
+        _observation(generation=8, observed_generation=8, restart_stamp="accepted"),
+    )
+
+    assert outcome.phase is DeploymentOutcomePhase.SUPERSEDED
+
+
+def test_stale_failure_condition_does_not_stall_new_generation() -> None:
+    condition = DeploymentCondition(
+        type="Progressing",
+        status="False",
+        reason="ProgressDeadlineExceeded",
+        message="old rollout",
+    )
+
+    outcome = evaluate_deployment_outcome(
+        _scale(),
+        _observation(observed_generation=6, conditions=(condition,)),
+    )
+
+    assert outcome.phase is DeploymentOutcomePhase.OBSERVING
 
 
 def test_same_name_replacement_never_completes() -> None:
@@ -297,6 +329,37 @@ def test_old_replica_set_pod_blocker_is_not_current_rollout_evidence() -> None:
     )
 
     assert observation.pods == ()
+
+
+def test_current_scale_to_zero_normalizes_omitted_status_counters() -> None:
+    deployment = {
+        "metadata": {"uid": "deploy-uid", "generation": 7},
+        "spec": {"replicas": 0},
+        "status": {"observedGeneration": 7},
+    }
+
+    observation = normalize_deployment_observation(
+        RawDeploymentOutcomeSnapshot(deployment, (), (), False)
+    )
+
+    assert observation.current_replicas == 0
+    assert observation.updated_replicas == 0
+    assert observation.ready_replicas == 0
+    assert observation.available_replicas == 0
+
+
+def test_current_scale_to_zero_does_not_default_malformed_counter() -> None:
+    deployment = {
+        "metadata": {"uid": "deploy-uid", "generation": 7},
+        "spec": {"replicas": 0},
+        "status": {"observedGeneration": 7, "readyReplicas": "invalid"},
+    }
+
+    observation = normalize_deployment_observation(
+        RawDeploymentOutcomeSnapshot(deployment, (), (), False)
+    )
+
+    assert observation.ready_replicas is None
 
 
 def test_unknown_replica_set_revision_marks_evidence_partial() -> None:

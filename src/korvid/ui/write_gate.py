@@ -23,6 +23,7 @@ from datetime import UTC, datetime
 from typing import Any, TypeVar
 
 from korvid.k8s.discovery import ResourceMeta
+from korvid.k8s.writes import WriteMutationResult
 
 _ResultT = TypeVar("_ResultT")
 
@@ -36,6 +37,7 @@ class AcceptedWriteReceipt:
     namespace: str | None
     name: str
     accepted_at: str
+    mutation: WriteMutationResult | None = None
 
     @classmethod
     def now(
@@ -45,6 +47,7 @@ class AcceptedWriteReceipt:
         meta: ResourceMeta,
         namespace: str | None,
         name: str,
+        mutation: WriteMutationResult | None = None,
     ) -> AcceptedWriteReceipt:
         """Build a UTC receipt at the accepted-write boundary."""
 
@@ -54,6 +57,7 @@ class AcceptedWriteReceipt:
             namespace=namespace,
             name=name,
             accepted_at=datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+            mutation=mutation,
         )
 
 
@@ -73,7 +77,7 @@ class WriteGate(ABC):
         meta: ResourceMeta,
         namespace: str | None,
         name: str,
-        op_factory: Callable[[], Awaitable[None]],
+        op_factory: Callable[[], Awaitable[object | None]],
         detail: str = "",
         require_name: str | None = None,
         preview: list[str] | None = None,
@@ -105,7 +109,7 @@ class WriteGate(ABC):
         namespace: str | None,
         name: str,
         epoch: int,
-        op_factory: Callable[[], Awaitable[None]],
+        op_factory: Callable[[], Awaitable[object | None]],
     ) -> None:
         """Approve an operation whose approved form is an interactive subprocess.
 
@@ -171,7 +175,7 @@ class WriteGate(ABC):
         meta: ResourceMeta,
         namespace: str | None,
         name: str,
-        op_factory: Callable[[], Awaitable[None]],
+        op_factory: Callable[[], Awaitable[object | None]],
         detail: str = "",
         *,
         precondition: Callable[[], Awaitable[bool]] | None = None,

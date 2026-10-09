@@ -48,6 +48,7 @@ from korvid.core.relationships import GraphResource
 from korvid.core.store import ALL_NAMESPACES
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.errors import ApiStatusError
+from korvid.k8s.writes import WriteMutationResult
 from korvid.ui.action_availability import AvailabilityCode, UnavailableReason
 from korvid.ui.impact_preview import render_impact_lines, render_unavailable_lines
 from korvid.ui.ui_surface import UiSurface
@@ -725,7 +726,7 @@ class WriteCoordinator(WriteGate):
         meta: ResourceMeta,
         namespace: str | None,
         name: str,
-        op_factory: Callable[[], Awaitable[None]],
+        op_factory: Callable[[], Awaitable[object | None]],
         detail: str = "",
         *,
         precondition: Callable[[], Awaitable[bool]] | None = None,
@@ -766,7 +767,7 @@ class WriteCoordinator(WriteGate):
         meta: ResourceMeta,
         namespace: str | None,
         name: str,
-        op_factory: Callable[[], Awaitable[None]],
+        op_factory: Callable[[], Awaitable[object | None]],
         detail: str,
         *,
         precondition: Callable[[], Awaitable[bool]] | None,
@@ -794,7 +795,7 @@ class WriteCoordinator(WriteGate):
         meta: ResourceMeta,
         namespace: str | None,
         name: str,
-        op_factory: Callable[[], Awaitable[None]],
+        op_factory: Callable[[], Awaitable[object | None]],
         detail: str,
         *,
         precondition: Callable[[], Awaitable[bool]] | None,
@@ -824,7 +825,7 @@ class WriteCoordinator(WriteGate):
             )
             return "blocked: audit log unavailable"
         try:
-            await op_factory()
+            result = await op_factory()
         except ApiStatusError as exc:
             with contextlib.suppress(Exception):
                 await self.audit_write(action, meta, namespace, name, detail, f"error: {exc}")
@@ -848,11 +849,12 @@ class WriteCoordinator(WriteGate):
                 await self.audit_write(action, meta, namespace, name, detail, f"error: {exc}")
             self._ui.notify(f"{action} {kind}/{name} failed: {exc}", severity="error")
             return f"failed: {exc}"
-        await self._finish_success(action, meta, namespace, name, detail, on_accepted)
+        mutation = result if isinstance(result, WriteMutationResult) else None
+        await self._finish(action, meta, namespace, name, detail, on_accepted, mutation)
         self._ui.notify(f"{action} {kind}/{name}: done", severity="information")
         return "done"
 
-    async def _finish_success(
+    async def _finish(
         self,
         action: str,
         meta: ResourceMeta,
@@ -860,6 +862,7 @@ class WriteCoordinator(WriteGate):
         name: str,
         detail: str,
         observer: AcceptedWriteObserver | None,
+        mutation: WriteMutationResult | None,
     ) -> None:
         try:
             await self.audit_write(action, meta, namespace, name, detail, "success")
@@ -870,7 +873,7 @@ class WriteCoordinator(WriteGate):
             )
             return
         if observer is not None:
-            await self._notify_accepted_observer(action, meta, namespace, name, observer)
+            await self._notify_accepted_observer(action, meta, namespace, name, observer, mutation)
 
     async def _notify_accepted_observer(
         self,
@@ -879,12 +882,14 @@ class WriteCoordinator(WriteGate):
         namespace: str | None,
         name: str,
         observer: AcceptedWriteObserver,
+        mutation: WriteMutationResult | None,
     ) -> None:
         receipt = AcceptedWriteReceipt.now(
             action=action,
             meta=meta,
             namespace=namespace,
             name=name,
+            mutation=mutation,
         )
         try:
             await observer(receipt)
@@ -902,7 +907,7 @@ class WriteCoordinator(WriteGate):
         meta: ResourceMeta,
         ns: str | None,
         name: str,
-        op_factory: Callable[[], Awaitable[None]],
+        op_factory: Callable[[], Awaitable[object | None]],
         *,
         detail: str,
     ) -> str:
@@ -1066,7 +1071,7 @@ class WriteCoordinator(WriteGate):
         meta: ResourceMeta,
         namespace: str | None,
         name: str,
-        op_factory: Callable[[], Awaitable[None]],
+        op_factory: Callable[[], Awaitable[object | None]],
         detail: str = "",
         require_name: str | None = None,
         preview: list[str] | None = None,
@@ -1160,7 +1165,7 @@ class WriteCoordinator(WriteGate):
         namespace: str | None,
         name: str,
         epoch: int,
-        op_factory: Callable[[], Awaitable[None]],
+        op_factory: Callable[[], Awaitable[object | None]],
     ) -> None:
         """Approval for an operation that runs as an interactive subprocess.
 

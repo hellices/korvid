@@ -11,11 +11,31 @@ the object was deleted and recreated under the same name meanwhile.
 from __future__ import annotations
 
 import abc
+import json
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.drain import DrainPlan
+
+
+@dataclass(frozen=True, slots=True)
+class WriteMutationResult:
+    """Bounded API response evidence available after an accepted mutation."""
+
+    generation: int | None = None
+
+    @classmethod
+    def from_response(cls, raw: bytes) -> WriteMutationResult:
+        """Extract non-sensitive correlation evidence from a write response."""
+
+        try:
+            generation = json.loads(raw).get("metadata", {}).get("generation")
+        except (AttributeError, json.JSONDecodeError, UnicodeDecodeError):
+            generation = None
+        valid = isinstance(generation, int) and not isinstance(generation, bool)
+        return cls(generation=generation if valid else None)
 
 
 def restart_stamp() -> str:
@@ -61,7 +81,7 @@ class WriteOps(abc.ABC):
         *,
         uid: str | None = None,
         restarted_at: str | None = None,
-    ) -> None:
+    ) -> WriteMutationResult:
         """Timestamp-aware restart hook for exact preview replay (issue #19).
         Non-abstract on purpose: subclasses implementing only the original
         ``rollout_restart`` signature keep working - the default drops
@@ -69,6 +89,7 @@ class WriteOps(abc.ABC):
         ``preview_rollout_restart`` should override this so the executed
         write sends the exact ``restarted_at`` value the preview showed."""
         await self.rollout_restart(meta, namespace, name, uid=uid)
+        return WriteMutationResult()
 
     @abc.abstractmethod
     async def replace_object(

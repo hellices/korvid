@@ -169,11 +169,18 @@ class DeploymentOutcomeController:
         target = self._target(epoch=epoch, namespace=namespace, name=name, uid=uid)
         if target is None:
             return None
-        intent = DeploymentRestartIntent(target=target, restarted_at=restarted_at)
 
         async def _accepted(receipt: AcceptedWriteReceipt) -> None:
             if receipt.action != "rollout_restart":
                 raise ValueError("restart observer received another write action")
+            generation = receipt.mutation.generation if receipt.mutation is not None else None
+            if generation is None:
+                raise ValueError("restart response did not include metadata.generation")
+            intent = DeploymentRestartIntent(
+                target=target,
+                restarted_at=restarted_at,
+                generation=generation,
+            )
             self._start(intent, receipt.accepted_at)
 
         return _accepted

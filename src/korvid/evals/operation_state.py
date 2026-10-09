@@ -33,7 +33,7 @@ from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.drain import DrainPlan
 from korvid.k8s.dryrun import diff_manifests
 from korvid.k8s.errors import ApiStatusError
-from korvid.k8s.writes import WriteOps, restart_stamp
+from korvid.k8s.writes import WriteMutationResult, WriteOps, restart_stamp
 
 __all__ = [
     "RESTART_ANNOTATION",
@@ -480,7 +480,7 @@ class StatefulFakeWriteOps(WriteOps):
         *,
         uid: str | None = None,
         restarted_at: str | None = None,
-    ) -> None:
+    ) -> WriteMutationResult:
         if meta.kind not in _RESTARTABLE_KINDS:
             self._unsupported(
                 "rollout_restart",
@@ -523,6 +523,7 @@ class StatefulFakeWriteOps(WriteOps):
             post_state={"metadata.generation": before + 1},
             result="success",
         )
+        return WriteMutationResult(generation=before + 1)
 
     # -- previews ------------------------------------------------------
 

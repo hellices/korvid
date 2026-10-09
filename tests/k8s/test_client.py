@@ -2200,14 +2200,16 @@ async def test_rollout_restart_with_stamp_pins_provided_stamp() -> None:
     stamp shown in the preview is the stamp the write sends."""
     client = KubeClient()
     api = _write_api()
+    api.call_api.return_value.read.return_value = b'{"metadata":{"generation":8}}'
     with patch.object(client, "_api", api):
-        await client.rollout_restart_with_stamp(
+        result = await client.rollout_restart_with_stamp(
             _deploy_meta(), "default", "web", uid="u-1", restarted_at="2026-07-26T00:00:00+00:00"
         )
     kwargs = api.call_api.call_args[1]
     annotations = kwargs["body"]["spec"]["template"]["metadata"]["annotations"]
     assert annotations["kubectl.kubernetes.io/restartedAt"] == "2026-07-26T00:00:00+00:00"
     assert kwargs["body"]["metadata"] == {"uid": "u-1"}
+    assert result.generation == 8
 
 
 async def test_create_object_requires_namespace_for_namespaced_kind() -> None:

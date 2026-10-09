@@ -38,7 +38,7 @@ separate milestone work.
   evidence classify completed, stalled, superseded, replaced, stopped, or
   incomplete outcomes; missing or denied evidence never becomes success.
 - Open the latest retained result with `:outcomes`,
-  `:deployment-outcomes`, or **Open latest Deployment outcome** in the Action
+  `:deployment-outcomes`, or **Deployment operation result** in the Action
   Palette. Up to three results are retained, and active observation is bounded
   to roughly five minutes.
 - Result-screen Pod actions revalidate the exact UID. Context switching stops

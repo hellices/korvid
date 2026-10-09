@@ -123,8 +123,8 @@ class TargetIdentityUnavailable(RuntimeError):
 #: `KorvidApp._get_manifest`: (kind alias, namespace, name) -> manifest.
 ManifestFetcher = Callable[[str, str | None, str], Awaitable[dict[str, Any]]]
 
-#: One validated write: (meta, namespace, op factory, operation line, audit detail).
-WriteOpBuild = tuple[ResourceMeta, str | None, Callable[[str | None], Awaitable[None]], str, str]
+WriteOperation = Callable[[str | None], Awaitable[object | None]]
+WriteOpBuild = tuple[ResourceMeta, str | None, WriteOperation, str, str]
 
 #: A (namespace, pod, container) log target.
 Triple = tuple[str, str, str]

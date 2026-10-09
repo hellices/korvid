@@ -1,14 +1,21 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from korvid.core.deployment_outcome import DeploymentOutcomePhase
+import pytest
+
+from korvid.core.deployment_outcome import (
+    DeploymentOutcomePhase,
+    DeploymentRestartIntent,
+)
 from korvid.k8s.deployment_outcomes import (
     DeploymentOutcomeReader,
     RawDeploymentOutcomeSnapshot,
 )
+from korvid.k8s.writes import WriteMutationResult
 from korvid.ui.deployment_outcome_controller import DeploymentOutcomeController
 from korvid.ui.widgets.deployment_outcome_screen import DeploymentOutcomeScreen
 from korvid.ui.write_gate import AcceptedWriteReceipt
@@ -76,6 +83,7 @@ def _receipt(action: str = "scale") -> AcceptedWriteReceipt:
         namespace="default",
         name="web",
         accepted_at="2026-10-09T12:00:00Z",
+        mutation=(WriteMutationResult(generation=2) if action == "rollout_restart" else None),
     )
 
 
@@ -260,7 +268,26 @@ async def test_restart_observer_carries_exact_restart_stamp() -> None:
 
     latest = controller.latest()
     assert latest is not None
+    assert isinstance(latest.intent, DeploymentRestartIntent)
+    assert latest.intent.generation == 2
     assert latest.outcome.phase is DeploymentOutcomePhase.COMPLETED
+
+
+async def test_restart_without_response_generation_does_not_start_tracker() -> None:
+    controller, _ui = _controller(_Reader([_raw()]))
+    observer = controller.restart_observer(
+        epoch=4,
+        namespace="default",
+        name="web",
+        uid="deploy-uid",
+        restarted_at="restart-stamp",
+    )
+    assert observer is not None
+
+    with pytest.raises(ValueError, match=r"metadata\.generation"):
+        await observer(dataclasses.replace(_receipt(), action="rollout_restart"))
+
+    assert controller.latest() is None
 
 
 async def test_context_change_stops_before_another_cluster_read() -> None:

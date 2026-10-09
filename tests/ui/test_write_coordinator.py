@@ -38,6 +38,7 @@ from korvid.core.store import ALL_NAMESPACES, Summary
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.models import GenericSummary
+from korvid.k8s.writes import WriteMutationResult
 from korvid.ui.action_availability import AvailabilityCode, UnavailableReason
 from korvid.ui.ui_surface import Severity, UiSurface
 from korvid.ui.view_state import ViewState
@@ -450,11 +451,13 @@ async def test_accepted_observer_runs_after_success_audit(tmp_path: Path) -> Non
     env = make_env(tmp_path)
     events: list[str] = []
 
-    async def mutate() -> None:
+    async def mutate() -> WriteMutationResult:
         events.append("mutation")
+        return WriteMutationResult(generation=8)
 
     async def observe(receipt: AcceptedWriteReceipt) -> None:
         assert env.audit_outcomes() == ["intent", "success"]
+        assert receipt.mutation == WriteMutationResult(generation=8)
         events.append(f"observer:{receipt.action}")
 
     result = await env.coordinator.run(

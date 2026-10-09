@@ -9,12 +9,16 @@ from korvid.ui.workspace_controller import ContextGuard, WorkspaceController
 
 
 class _Ui:
-    pass
+    def notify(self, *args: Any, **kwargs: Any) -> None:
+        return None
 
 
 class _Context:
+    def __init__(self) -> None:
+        self.changed = False
+
     def crossed(self, epoch: int) -> bool:
-        return False
+        return self.changed
 
 
 class _Workspace:
@@ -56,3 +60,36 @@ async def test_pod_reads_use_explicit_outcome_identity(verb: str) -> None:
         else ("logs", "workloads", "tracked-pod")
     )
     assert calls == [expected]
+
+
+async def test_context_change_during_uid_lookup_blocks_pod_action() -> None:
+    context = _Context()
+    jumps: list[str] = []
+
+    async def target_uid(kind: str, namespace: str | None, name: str) -> str:
+        context.changed = True
+        return "pod-uid"
+
+    class Workspace(_Workspace):
+        async def jump_to_object(self, *args: Any, **kwargs: Any) -> None:
+            jumps.append("jumped")
+
+    async def describe(namespace: str, name: str, uid: str) -> None:
+        raise AssertionError("describe must not run")
+
+    async def logs(namespace: str, name: str) -> None:
+        raise AssertionError("logs must not run")
+
+    actions = DeploymentOutcomePodActions(
+        ui=cast(UiSurface, _Ui()),
+        target_uid=target_uid,
+        context=cast(ContextGuard, context),
+        workspace=cast("Callable[[], WorkspaceController]", Workspace),
+        describe=describe,
+        logs=logs,
+        events=lambda: None,
+    )
+
+    await actions("describe", 4, "workloads", "tracked-pod", "pod-uid")
+
+    assert jumps == []

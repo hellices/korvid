@@ -50,10 +50,11 @@ class DeploymentScaleIntent:
 
 @dataclass(frozen=True, slots=True)
 class DeploymentRestartIntent:
-    """Accepted request carrying the exact rollout-restart annotation."""
+    """Accepted request carrying exact restart marker and resulting generation."""
 
     target: DeploymentOperationTarget
     restarted_at: str
+    generation: int
 
 
 DeploymentOperationIntent = DeploymentScaleIntent | DeploymentRestartIntent
@@ -140,6 +141,12 @@ def _entries(value: object) -> tuple[Mapping[str, Any], ...]:
 
 def _integer(value: object) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _replica_counter(status: Mapping[str, Any], key: str, *, zero_when_absent: bool) -> int | None:
+    if key not in status and zero_when_absent:
+        return 0
+    return _integer(status.get(key))
 
 
 def _bounded_text(value: object, path: str) -> str:
@@ -289,16 +296,31 @@ def normalize_deployment_observation(
     template = _mapping(spec.get("template"))
     template_metadata = _mapping(template.get("metadata"))
     annotations = _mapping(template_metadata.get("annotations"))
+    generation = _integer(metadata.get("generation"))
+    observed_generation = _integer(status.get("observedGeneration"))
+    desired_replicas = _integer(spec.get("replicas"))
+    zero_when_absent = (
+        desired_replicas == 0
+        and generation is not None
+        and observed_generation is not None
+        and observed_generation >= generation
+    )
     return DeploymentObservation(
         uid=live_uid,
-        generation=_integer(metadata.get("generation")),
-        observed_generation=_integer(status.get("observedGeneration")),
-        desired_replicas=_integer(spec.get("replicas")),
-        current_replicas=_integer(status.get("replicas")),
-        updated_replicas=_integer(status.get("updatedReplicas")),
-        ready_replicas=_integer(status.get("readyReplicas")),
-        available_replicas=_integer(status.get("availableReplicas")),
-        unavailable_replicas=_integer(status.get("unavailableReplicas")),
+        generation=generation,
+        observed_generation=observed_generation,
+        desired_replicas=desired_replicas,
+        current_replicas=_replica_counter(status, "replicas", zero_when_absent=zero_when_absent),
+        updated_replicas=_replica_counter(
+            status, "updatedReplicas", zero_when_absent=zero_when_absent
+        ),
+        ready_replicas=_replica_counter(status, "readyReplicas", zero_when_absent=zero_when_absent),
+        available_replicas=_replica_counter(
+            status, "availableReplicas", zero_when_absent=zero_when_absent
+        ),
+        unavailable_replicas=_replica_counter(
+            status, "unavailableReplicas", zero_when_absent=zero_when_absent
+        ),
         restart_stamp=(
             str(annotations[_RESTART_ANNOTATION]) if annotations.get(_RESTART_ANNOTATION) else None
         ),
@@ -411,7 +433,7 @@ def _evaluate_scale(
             pods=observation.pods,
             partial_evidence=observation.partial_evidence,
         )
-    stalled = _stalled_outcome(observation)
+    stalled = _stalled_outcome(observation) if _generation_current(observation) else None
     if stalled is not None:
         return stalled
     if (
@@ -439,7 +461,17 @@ def _evaluate_restart(
             pods=observation.pods,
             partial_evidence=observation.partial_evidence,
         )
-    stalled = _stalled_outcome(observation)
+    if observation.generation != intent.generation:
+        if observation.generation is not None and observation.generation > intent.generation:
+            return DeploymentOutcome(
+                phase=DeploymentOutcomePhase.SUPERSEDED,
+                summary="Rollout restart was superseded by a later Deployment generation",
+                evidence=_progress_evidence(observation),
+                pods=observation.pods,
+                partial_evidence=observation.partial_evidence,
+            )
+        return _observing_outcome(observation)
+    stalled = _stalled_outcome(observation) if _generation_current(observation) else None
     if stalled is not None:
         return stalled
     desired = observation.desired_replicas
