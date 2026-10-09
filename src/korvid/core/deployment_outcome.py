@@ -7,8 +7,13 @@ zero value or a successful rollout.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import Any
+
+from korvid.core.redaction import RedactionRecord, redact_text
+from korvid.k8s.deployment_outcomes import RawDeploymentOutcomeSnapshot
 
 
 class DeploymentOutcomePhase(StrEnum):
@@ -118,6 +123,170 @@ _POD_BLOCKERS = frozenset(
         "Unschedulable",
     }
 )
+_RESTART_ANNOTATION = "kubectl.kubernetes.io/restartedAt"
+_RELEVANT_CONDITIONS = frozenset({"Available", "Progressing", "ReplicaFailure"})
+_MAX_TEXT_CHARS = 240
+
+
+def _mapping(value: object) -> Mapping[str, Any]:
+    return value if isinstance(value, Mapping) else {}
+
+
+def _entries(value: object) -> tuple[Mapping[str, Any], ...]:
+    if not isinstance(value, (list, tuple)):
+        return ()
+    return tuple(item for item in value if isinstance(item, Mapping))
+
+
+def _integer(value: object) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _bounded_text(value: object, path: str) -> str:
+    records: list[RedactionRecord] = []
+    text = redact_text(str(value or ""), path, records)
+    return " ".join(text.split())[:_MAX_TEXT_CHARS]
+
+
+def _controller_owner_uid(manifest: Mapping[str, Any], kind: str) -> str | None:
+    metadata = _mapping(manifest.get("metadata"))
+    for owner in _entries(metadata.get("ownerReferences")):
+        if (
+            owner.get("kind") == kind
+            and owner.get("controller") is True
+            and owner.get("uid")
+        ):
+            return str(owner["uid"])
+    return None
+
+
+def _condition_entries(status: Mapping[str, Any]) -> tuple[DeploymentCondition, ...]:
+    conditions: list[DeploymentCondition] = []
+    for index, condition in enumerate(_entries(status.get("conditions"))):
+        condition_type = str(condition.get("type") or "")
+        if condition_type not in _RELEVANT_CONDITIONS:
+            continue
+        conditions.append(
+            DeploymentCondition(
+                type=condition_type,
+                status=str(condition.get("status") or ""),
+                reason=_bounded_text(
+                    condition.get("reason"), f"deployment.status.conditions[{index}].reason"
+                ),
+                message=_bounded_text(
+                    condition.get("message"), f"deployment.status.conditions[{index}].message"
+                ),
+            )
+        )
+    return tuple(conditions)
+
+
+def _pod_problem(status: Mapping[str, Any]) -> tuple[str, str]:
+    reason = _bounded_text(status.get("reason"), "pod.status.reason")
+    message = _bounded_text(status.get("message"), "pod.status.message")
+    if reason:
+        return reason, message
+    for condition in _entries(status.get("conditions")):
+        if condition.get("type") == "PodScheduled" and condition.get("status") == "False":
+            return (
+                _bounded_text(condition.get("reason"), "pod.status.conditions.reason")
+                or "PodScheduledFalse",
+                _bounded_text(condition.get("message"), "pod.status.conditions.message"),
+            )
+    for field in ("initContainerStatuses", "containerStatuses"):
+        for container in _entries(status.get(field)):
+            state = _mapping(container.get("state"))
+            waiting = _mapping(state.get("waiting"))
+            waiting_reason = _bounded_text(waiting.get("reason"), f"pod.status.{field}.reason")
+            if waiting_reason not in {"", "ContainerCreating", "PodInitializing"}:
+                return (
+                    waiting_reason,
+                    _bounded_text(waiting.get("message"), f"pod.status.{field}.message"),
+                )
+            terminated = _mapping(state.get("terminated"))
+            exit_code = _integer(terminated.get("exitCode"))
+            if exit_code not in {None, 0}:
+                return (
+                    _bounded_text(terminated.get("reason"), f"pod.status.{field}.reason")
+                    or f"ExitCode{exit_code}",
+                    _bounded_text(terminated.get("message"), f"pod.status.{field}.message"),
+                )
+    return "", ""
+
+
+def _pod_evidence(
+    pods: tuple[dict[str, Any], ...],
+    replica_set_uids: frozenset[str],
+) -> list[DeploymentPodEvidence]:
+    evidence: list[DeploymentPodEvidence] = []
+    for pod in pods:
+        if _controller_owner_uid(pod, "ReplicaSet") not in replica_set_uids:
+            continue
+        metadata = _mapping(pod.get("metadata"))
+        status = _mapping(pod.get("status"))
+        reason, message = _pod_problem(status)
+        if not reason:
+            continue
+        uid = str(metadata.get("uid") or "")
+        name = str(metadata.get("name") or "")
+        if not uid or not name:
+            continue
+        evidence.append(
+            DeploymentPodEvidence(
+                namespace=str(metadata.get("namespace") or ""),
+                name=name,
+                uid=uid,
+                phase=str(status.get("phase") or ""),
+                reason=reason,
+                message=message,
+            )
+        )
+    return sorted(evidence, key=lambda item: (item.namespace, item.name, item.uid))
+
+
+def normalize_deployment_observation(
+    raw: RawDeploymentOutcomeSnapshot,
+    *,
+    max_pod_evidence: int = 5,
+) -> DeploymentObservation:
+    """Normalize and redact one bounded Kubernetes snapshot."""
+
+    if max_pod_evidence < 1:
+        raise ValueError("max_pod_evidence must be positive")
+    deployment = raw.deployment
+    metadata = _mapping(deployment.get("metadata"))
+    spec = _mapping(deployment.get("spec"))
+    status = _mapping(deployment.get("status"))
+    live_uid = str(metadata.get("uid") or "")
+    replica_set_uids = frozenset(
+        str(_mapping(item.get("metadata")).get("uid"))
+        for item in raw.replica_sets
+        if _controller_owner_uid(item, "Deployment") == live_uid
+        and _mapping(item.get("metadata")).get("uid")
+    )
+    all_pod_evidence = _pod_evidence(raw.pods, replica_set_uids)
+    template = _mapping(spec.get("template"))
+    template_metadata = _mapping(template.get("metadata"))
+    annotations = _mapping(template_metadata.get("annotations"))
+    return DeploymentObservation(
+        uid=live_uid,
+        generation=_integer(metadata.get("generation")),
+        observed_generation=_integer(status.get("observedGeneration")),
+        desired_replicas=_integer(spec.get("replicas")),
+        current_replicas=_integer(status.get("replicas")),
+        updated_replicas=_integer(status.get("updatedReplicas")),
+        ready_replicas=_integer(status.get("readyReplicas")),
+        available_replicas=_integer(status.get("availableReplicas")),
+        unavailable_replicas=_integer(status.get("unavailableReplicas")),
+        restart_stamp=(
+            str(annotations[_RESTART_ANNOTATION])
+            if annotations.get(_RESTART_ANNOTATION)
+            else None
+        ),
+        conditions=_condition_entries(status),
+        pods=tuple(all_pod_evidence[:max_pod_evidence]),
+        partial_evidence=raw.partial or len(all_pod_evidence) > max_pod_evidence,
+    )
 
 
 def _condition_failure(

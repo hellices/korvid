@@ -737,6 +737,30 @@ class KubeClient(ReadOps, WriteOps, pulse.PulseReader):
         self._observe_read("list", path, payload=data, object_count=len(items))
         return [self._object_summary(meta, item) for item in items]
 
+    async def list_raw_objects(
+        self,
+        meta: ResourceMeta,
+        namespace: str | None,
+        *,
+        label_selector: str | None,
+        limit: int,
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """Return one bounded raw LIST page and whether more items exist."""
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+            raise ValueError("limit must be a positive integer")
+        path = self._list_path(meta, namespace)
+        query = [("limit", str(limit))]
+        if label_selector:
+            query.append(("labelSelector", label_selector))
+        try:
+            data = await self._request_json(path, query_params=query)
+            items, continuation = _parse_list_page(data)
+        except ApiStatusError as exc:
+            self._observe_read_error(path, exc)
+            raise
+        self._observe_read("list", path, payload=data, object_count=len(items))
+        return items, continuation is not None
+
     async def list_relationship_objects(
         self, meta: ResourceMeta, namespace: str | None
     ) -> list[GenericSummary]:
