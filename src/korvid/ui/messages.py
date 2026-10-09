@@ -119,6 +119,7 @@ class BuiltinOperation(Enum):
     PULSE = "pulse"
     KEYBINDINGS = "keys"
     NAMESPACE_SLOTS = "slots"
+    DEPLOYMENT_OUTCOMES = "outcomes"
 
 
 class BuiltinCommand(Message):

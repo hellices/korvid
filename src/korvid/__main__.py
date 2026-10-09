@@ -144,7 +144,10 @@ from korvid.ui.bridge_dispatch import AppContextDispatch
 from korvid.ui.command_router import CommandRouter
 from korvid.ui.context_switch_coordinator import ContextSwitchCoordinator, ContextSwitchResult
 from korvid.ui.debug import DebugController, DebugSettings
-from korvid.ui.deployment_outcome_controller import DeploymentOutcomeController
+from korvid.ui.deployment_outcome_controller import (
+    OUTCOMES_UNAVAILABLE,
+    DeploymentOutcomeController,
+)
 from korvid.ui.drain import DrainController
 from korvid.ui.forward_controller import ForwardController
 from korvid.ui.helm_controller import HelmController
@@ -165,6 +168,7 @@ from korvid.ui.resource_write_controller import ResourceWriteController
 from korvid.ui.session_timeline_controller import SessionTimelineController
 from korvid.ui.shell_controller import ShellController, ShellSettings
 from korvid.ui.transfer import TransferController
+from korvid.ui.widgets.hint_detail import HintDetailScreen
 from korvid.ui.widgets.keybinding_editor import KeybindingEditorScreen
 from korvid.ui.widgets.pulse import PulseSummary
 from korvid.ui.workspace_controller import WorkspaceController
@@ -1022,6 +1026,60 @@ def _make_switch_context(
     return switch_context
 
 
+async def _handle_outcome_pod_action(
+    verb: str,
+    epoch: int,
+    namespace: str,
+    name: str,
+    uid: str,
+    *,
+    app: KorvidApp,
+    inputs: AppRuntimeInputs,
+    context: ContextSwitchCoordinator,
+    workspace: WorkspaceController,
+    inspect: ResourceInspectController,
+    logs: LogController,
+) -> None:
+    """Run a Pod action only while the tracked incarnation still exists."""
+
+    if context.crossed(epoch) or await app._target_uid("pods", namespace, name) != uid:
+        app.notify(
+            "Pod identity changed; refresh the Deployment outcome",
+            severity="warning",
+            markup=False,
+        )
+        return
+    await workspace.jump_to_object(
+        "pods",
+        namespace,
+        name,
+        epoch=epoch,
+        expected_uid=uid,
+    )
+    if verb == "goto":
+        return
+    if context.crossed(epoch) or await app._target_uid("pods", namespace, name) != uid:
+        app.notify(
+            "Pod identity changed; refresh the Deployment outcome",
+            severity="warning",
+            markup=False,
+        )
+        return
+    if verb == "describe":
+        await inspect.describe_selected()
+    elif verb == "logs":
+        await logs.action_logs()
+    elif verb == "events":
+        get_events = inputs.get_events
+        if get_events is None:
+            app.notify("Events unavailable in this session", severity="warning")
+            return
+        events = await get_events.fetch(namespace, name, uid=uid)
+        await AppUiSurface(app).push_screen(
+            HintDetailScreen(f"Events for pod/{namespace}/{name}", (), events)
+        )
+
+
 def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRuntime:
     """Construct the complete session-scoped controller graph."""
     config = inputs.config
@@ -1132,6 +1190,19 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
             reader=inputs.deployment_outcome_reader,
             get_epoch=context.epoch,
             cluster_id=inputs.deployment_cluster_id,
+            pod_action=lambda verb, epoch, namespace, name, uid: _handle_outcome_pod_action(
+                verb,
+                epoch,
+                namespace,
+                name,
+                uid,
+                app=app,
+                inputs=inputs,
+                context=context,
+                workspace=workspace_ref.get(),
+                inspect=inspect_controller,
+                logs=logs_ref.get(),
+            ),
         )
         if inputs.deployment_outcome_reader is not None
         else None
@@ -1418,6 +1489,11 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
             port_forwards=forward_controller.list_unavailable_reason,
             keybindings=keybindings.unavailable_reason,
             slots=slots.unavailable_reason,
+            outcomes=(
+                deployment_outcomes.unavailable_reason
+                if deployment_outcomes is not None
+                else lambda: OUTCOMES_UNAVAILABLE
+            ),
         ),
     )
     commands = CommandRouter(
@@ -1430,6 +1506,7 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
         pulse=pulse,
         keybindings=keybindings,
         slots=slots,
+        outcomes=deployment_outcomes,
     )
     return AppRuntime(
         view=view,
@@ -1633,8 +1710,8 @@ async def _wire_and_run(config: KorvidConfig, kube: KubeClient, state: _RunState
             list_raw_objects=kube.list_raw_objects,
         ),
         deployment_cluster_id=lambda: (
-            "|".join(identity)
-            if (identity := current_cluster_identity(app.config.kube_context)) is not None
+            f"{app.config.kube_context or '(kubeconfig default)'}|{server}"
+            if (server := kube.connected_api_server()) is not None
             else None
         ),
     )

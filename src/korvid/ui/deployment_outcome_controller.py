@@ -8,7 +8,7 @@ import logging
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Protocol, TypeAlias
 
 from korvid.core.deployment_outcome import (
     DeploymentOperationIntent,
@@ -21,12 +21,17 @@ from korvid.core.deployment_outcome import (
     normalize_deployment_observation,
 )
 from korvid.k8s.deployment_outcomes import DeploymentOutcomeReader
+from korvid.ui.action_availability import AvailabilityCode, UnavailableReason
 from korvid.ui.ui_surface import Severity, UiSurface
 from korvid.ui.write_gate import AcceptedWriteObserver, AcceptedWriteReceipt
 
 logger = logging.getLogger(__name__)
 
 OUTCOME_WORKER_GROUP = "deployment-outcomes"
+OUTCOMES_UNAVAILABLE = UnavailableReason(
+    AvailabilityCode.NO_SELECTION,
+    "No Deployment outcome has been tracked yet",
+)
 DEFAULT_POLL_DELAYS: tuple[float, ...] = (
     0.0,
     1.0,
@@ -46,6 +51,9 @@ class CancellableWork(Protocol):
 
     def cancel(self) -> None:
         """Cancel this tracker worker."""
+
+
+OutcomePodAction: TypeAlias = Callable[[str, int, str, str, str], Awaitable[None]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,6 +101,7 @@ class DeploymentOutcomeController:
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         poll_delays: Sequence[float] = DEFAULT_POLL_DELAYS,
         max_trackers: int = 3,
+        pod_action: OutcomePodAction | None = None,
     ) -> None:
         if max_trackers < 1:
             raise ValueError("max_trackers must be positive")
@@ -110,6 +119,7 @@ class DeploymentOutcomeController:
         self._snapshots: OrderedDict[str, DeploymentTrackerSnapshot] = OrderedDict()
         self._workers: dict[str, CancellableWork] = {}
         self._next_id = 1
+        self._pod_action = pod_action
 
     def scale_observer(
         self,
@@ -303,6 +313,69 @@ class DeploymentOutcomeController:
         """Return the newest immutable tracker snapshot."""
 
         return next(reversed(self._snapshots.values()), None)
+
+    def unavailable_reason(self) -> UnavailableReason | None:
+        """Why the latest-outcome command cannot open, if anything."""
+
+        return None if self._snapshots else OUTCOMES_UNAVAILABLE
+
+    def open_latest(self) -> None:
+        """Present the newest retained Deployment outcome snapshot."""
+
+        snapshot = self.latest()
+        if snapshot is None:
+            self._ui.notify(
+                OUTCOMES_UNAVAILABLE.message,
+                severity=OUTCOMES_UNAVAILABLE.severity,
+                markup=False,
+            )
+            return
+        from korvid.ui.widgets.deployment_outcome_screen import DeploymentOutcomeScreen
+
+        self._ui.push_screen(DeploymentOutcomeScreen(snapshot), self._on_screen_result)
+
+    def _on_screen_result(self, result: object) -> None:
+        if not isinstance(result, tuple) or len(result) != 5:
+            return
+        verb, tracker_id, _namespace, _name, _uid = result
+        if verb == "stop" and isinstance(tracker_id, str):
+            self.stop(tracker_id)
+        elif verb == "refresh" and isinstance(tracker_id, str):
+            snapshot = self._snapshots.get(tracker_id)
+            if snapshot is not None:
+                from korvid.ui.widgets.deployment_outcome_screen import DeploymentOutcomeScreen
+
+                self._ui.push_screen(
+                    DeploymentOutcomeScreen(snapshot),
+                    self._on_screen_result,
+                )
+        elif (
+            verb in {"goto", "events", "describe", "logs"}
+            and isinstance(tracker_id, str)
+            and isinstance(_namespace, str)
+            and isinstance(_name, str)
+            and isinstance(_uid, str)
+        ):
+            snapshot = self._snapshots.get(tracker_id)
+            if snapshot is None:
+                return
+            if self._pod_action is None:
+                self._ui.notify(
+                    "Pod actions are unavailable in this session",
+                    severity="warning",
+                )
+                return
+            self._ui.run_worker(
+                self._pod_action(
+                    verb,
+                    snapshot.intent.target.epoch,
+                    _namespace,
+                    _name,
+                    _uid,
+                ),
+                group="deployment-outcome-pod-action",
+                exit_on_error=False,
+            )
 
     def snapshots(self) -> tuple[DeploymentTrackerSnapshot, ...]:
         """Return every retained tracker, oldest first."""

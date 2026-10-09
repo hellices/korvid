@@ -9,6 +9,7 @@ from korvid.k8s.deployment_outcomes import (
     RawDeploymentOutcomeSnapshot,
 )
 from korvid.ui.deployment_outcome_controller import DeploymentOutcomeController
+from korvid.ui.widgets.deployment_outcome_screen import DeploymentOutcomeScreen
 from korvid.ui.write_gate import AcceptedWriteReceipt
 from tests.ui.test_write_coordinator import FakeUi
 
@@ -25,11 +26,7 @@ _DEPLOYMENT = {
         "replicas": 3,
         "selector": {"matchLabels": {"app": "web"}},
         "template": {
-            "metadata": {
-                "annotations": {
-                    "kubectl.kubernetes.io/restartedAt": "restart-stamp"
-                }
-            }
+            "metadata": {"annotations": {"kubectl.kubernetes.io/restartedAt": "restart-stamp"}}
         },
     },
     "status": {
@@ -126,6 +123,84 @@ async def test_scale_observer_reads_immediately_and_completes() -> None:
     assert latest is not None
     assert latest.outcome.phase is DeploymentOutcomePhase.COMPLETED
     assert reader.calls == [("default", "web"), ("default", "web")]
+
+
+async def test_open_latest_presents_newest_retained_tracker() -> None:
+    reader = _Reader([_raw()])
+    controller, ui = _controller(reader)
+    observer = controller.scale_observer(
+        epoch=4,
+        namespace="default",
+        name="web",
+        uid="deploy-uid",
+        replicas=3,
+    )
+    assert observer is not None
+    await observer(_receipt())
+    await _drain(ui)
+
+    controller.open_latest()
+
+    screen, callback = ui.screens[-1]
+    assert isinstance(screen, DeploymentOutcomeScreen)
+    assert screen.snapshot is controller.latest()
+    assert callback is not None
+
+
+async def test_pod_result_dispatches_exact_tracker_identity() -> None:
+    calls: list[tuple[str, int, str, str, str]] = []
+
+    async def pod_action(
+        verb: str,
+        epoch: int,
+        namespace: str,
+        name: str,
+        uid: str,
+    ) -> None:
+        calls.append((verb, epoch, namespace, name, uid))
+
+    reader = _Reader([_raw()])
+    surface = FakeUi()
+    controller = DeploymentOutcomeController(
+        ui=surface,
+        reader=reader,
+        get_epoch=lambda: 4,
+        cluster_id=lambda: "cluster",
+        poll_delays=(0.0,),
+        pod_action=pod_action,
+    )
+    observer = controller.scale_observer(
+        epoch=4,
+        namespace="default",
+        name="web",
+        uid="deploy-uid",
+        replicas=3,
+    )
+    assert observer is not None
+    await observer(_receipt())
+    await _drain(surface)
+    controller.open_latest()
+    snapshot = controller.latest()
+    assert snapshot is not None
+    _screen, callback = surface.screens[-1]
+    assert callback is not None
+
+    callback(("logs", snapshot.tracker_id, "default", "web-pod", "pod-uid"))
+    await _drain(surface)
+
+    assert calls == [("logs", 4, "default", "web-pod", "pod-uid")]
+
+
+def test_open_latest_without_tracker_reports_unavailable() -> None:
+    controller, ui = _controller(_Reader([]))
+
+    controller.open_latest()
+
+    assert ui.screens == []
+    assert ui.notifications[-1] == (
+        "No Deployment outcome has been tracked yet",
+        "warning",
+    )
 
 
 async def test_restart_observer_carries_exact_restart_stamp() -> None:

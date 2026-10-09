@@ -216,11 +216,19 @@ class KubeClient(ReadOps, WriteOps, pulse.PulseReader):
         self._custom_columns: Mapping[str, tuple[CustomColumn, ...]] = {
             kind: columns for kind, columns in (custom_columns or {}).items() if kind != "secrets"
         }
+
         #: pods/resize discovery result; None until the first successful check.
         self._pod_resize_supported: bool | None = None
         #: cloud provider detection result; None until the first lookup.
         self._provider_info: ProviderInfo | None = None
         self._read_telemetry = read_telemetry
+
+    def connected_api_server(self) -> str | None:
+        """Return the active API server without rereading kubeconfig."""
+
+        if self._api is None:
+            return None
+        return self._api.configuration.host or None
 
     @staticmethod
     def _namespaces_path() -> str:

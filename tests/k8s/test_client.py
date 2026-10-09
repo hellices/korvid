@@ -27,6 +27,16 @@ from korvid.k8s.watch_events import WatchEvent, WatchProgress
 _T = TypeVar("_T")
 
 
+def test_connected_api_server_reads_active_client_without_kubeconfig_io() -> None:
+    kube = KubeClient()
+    assert kube.connected_api_server() is None
+    api = MagicMock()
+    api.configuration.host = "https://cluster.example"
+    kube._api = api
+
+    assert kube.connected_api_server() == "https://cluster.example"
+
+
 async def _watch_rows(events: AsyncIterator[WatchEvent[_T]]) -> list[tuple[str, _T]]:
     rows: list[tuple[str, _T]] = []
     async for event in events:

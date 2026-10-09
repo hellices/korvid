@@ -24,9 +24,28 @@ See the [v0.5.0 notes](v0.5.0.md) for the published release.
   remappable. Approval and fixed modal keys retain their protections.
 
 See the [keybinding guide](../keybindings.md#remap-an-app-action). This implements
-[#404](https://github.com/hellices/korvid/issues/404); automatic namespace
-assignment, post-action Deployment observation, and Pod comparison remain
-separate milestone work, not features delivered by this change.
+[#404](https://github.com/hellices/korvid/issues/404). Namespace assignment and
+Deployment observation are documented separately below; Pod comparison remains
+separate milestone work.
+
+## Deployment operation outcomes
+
+- An approved Deployment scale or rollout restart now starts bounded,
+  read-only convergence observation only after the mutation and its success
+  audit both complete.
+- API acceptance and controller convergence are shown separately. Exact
+  generation, replica, restart-marker, UID, condition, ReplicaSet, and Pod
+  evidence classify completed, stalled, superseded, replaced, stopped, or
+  incomplete outcomes; missing or denied evidence never becomes success.
+- Open the latest retained result with `:outcomes`,
+  `:deployment-outcomes`, or **Open latest Deployment outcome** in the Action
+  Palette. Up to three results are retained, and active observation is bounded
+  to roughly five minutes.
+- Result-screen Pod actions revalidate the exact UID. Context switching stops
+  old-cluster trackers before replacing the Kubernetes client, and app
+  shutdown reaps the tracker workers.
+
+This implements [#405](https://github.com/hellices/korvid/issues/405).
 
 ## Stable namespace shortcuts
 
