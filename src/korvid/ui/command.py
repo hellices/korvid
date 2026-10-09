@@ -95,7 +95,12 @@ COMMANDS: tuple[CommandDescriptor, ...] = (
     ),
     CommandDescriptor(
         aliases=("outcomes", "deployment-outcomes"),
-        help=((":outcomes", "Inspect newest Deployment scale/restart outcome"),),
+        help=(
+            (
+                ":outcomes|:deployment-outcomes",
+                "Inspect newest Deployment scale/restart outcome",
+            ),
+        ),
         operation=BuiltinOperation.DEPLOYMENT_OUTCOMES,
         maximum_arguments=0,
         palette=PaletteCommand(
