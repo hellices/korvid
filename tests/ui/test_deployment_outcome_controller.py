@@ -359,6 +359,7 @@ async def test_late_read_cannot_overwrite_user_stop() -> None:
                 await asyncio.Future()
             except asyncio.CancelledError:
                 return _raw()
+            raise AssertionError("unreachable")
 
     controller, ui = _controller(NonCooperativeReader())
     observer = controller.scale_observer(
