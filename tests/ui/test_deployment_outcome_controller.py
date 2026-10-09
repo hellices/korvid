@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from typing import Any
 
 from korvid.core.deployment_outcome import DeploymentOutcomePhase
 from korvid.k8s.deployment_outcomes import (
@@ -13,7 +14,7 @@ from korvid.ui.widgets.deployment_outcome_screen import DeploymentOutcomeScreen
 from korvid.ui.write_gate import AcceptedWriteReceipt
 from tests.ui.test_write_coordinator import FakeUi
 
-_DEPLOYMENT = {
+_DEPLOYMENT: dict[str, Any] = {
     "apiVersion": "apps/v1",
     "kind": "Deployment",
     "metadata": {
