@@ -18,11 +18,46 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable, Coroutine
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any, TypeVar
 
 from korvid.k8s.discovery import ResourceMeta
 
 _ResultT = TypeVar("_ResultT")
+
+
+@dataclass(frozen=True, slots=True)
+class AcceptedWriteReceipt:
+    """Facts available only after a mutation and its success audit."""
+
+    action: str
+    meta: ResourceMeta
+    namespace: str | None
+    name: str
+    accepted_at: str
+
+    @classmethod
+    def now(
+        cls,
+        *,
+        action: str,
+        meta: ResourceMeta,
+        namespace: str | None,
+        name: str,
+    ) -> AcceptedWriteReceipt:
+        """Build a UTC receipt at the accepted-write boundary."""
+
+        return cls(
+            action=action,
+            meta=meta,
+            namespace=namespace,
+            name=name,
+            accepted_at=datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        )
+
+
+AcceptedWriteObserver = Callable[[AcceptedWriteReceipt], Awaitable[None]]
 
 
 class WriteGate(ABC):
@@ -45,6 +80,7 @@ class WriteGate(ABC):
         preview_title: str = "server dry-run preview:",
         managed_note: str | None = None,
         precondition: Callable[[], Awaitable[bool]] | None = None,
+        on_accepted: AcceptedWriteObserver | None = None,
     ) -> None:
         """Ask the user to approve `operation`, then run it if they agree.
 
@@ -139,6 +175,7 @@ class WriteGate(ABC):
         detail: str = "",
         *,
         precondition: Callable[[], Awaitable[bool]] | None = None,
+        on_accepted: AcceptedWriteObserver | None = None,
     ) -> Coroutine[Any, Any, str]:
         """Build the coroutine for an already-approved, fail-closed write.
 

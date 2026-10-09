@@ -45,6 +45,7 @@ from korvid.ui.widgets.confirm_screen import ConfirmScreen
 from korvid.ui.workspace_controller import ContextGuard
 from korvid.ui.workspace_state import PaneState
 from korvid.ui.write_coordinator import WriteCoordinator, WriteOrigin, gvr_label, write_locus
+from korvid.ui.write_gate import AcceptedWriteReceipt
 
 _PODS_META = ResourceMeta("Pod", "pods", "", "v1", True, ("po",))
 _NODES_META = ResourceMeta("Node", "nodes", "", "v1", False)
@@ -443,6 +444,85 @@ async def test_the_perimeter_runs_its_steps_in_the_required_order(tmp_path: Path
         "audit:success",
         "timeline:success",
     ]
+
+
+async def test_accepted_observer_runs_after_success_audit(tmp_path: Path) -> None:
+    env = make_env(tmp_path)
+    events: list[str] = []
+
+    async def mutate() -> None:
+        events.append("mutation")
+
+    async def observe(receipt: AcceptedWriteReceipt) -> None:
+        assert env.audit_outcomes() == ["intent", "success"]
+        events.append(f"observer:{receipt.action}")
+
+    result = await env.coordinator.run(
+        "scale",
+        _PODS_META,
+        "default",
+        "web",
+        lambda: mutate(),
+        on_accepted=observe,
+    )
+
+    assert result == "done"
+    assert events == ["mutation", "observer:scale"]
+
+
+@pytest.mark.parametrize(
+    ("audit", "operation_error"),
+    [
+        ("broken", None),
+        ("working", ApiStatusError(500, "mutation failed")),
+    ],
+)
+async def test_accepted_observer_does_not_run_for_blocked_or_failed_write(
+    tmp_path: Path,
+    audit: str,
+    operation_error: BaseException | None,
+) -> None:
+    env = make_env(tmp_path, audit=audit)
+    observed: list[object] = []
+    recorder = Recorder(error=operation_error)
+
+    async def observe(receipt: object) -> None:
+        observed.append(receipt)
+
+    result = await env.coordinator.run(
+        "scale",
+        _PODS_META,
+        "default",
+        "web",
+        recorder.factory,
+        on_accepted=observe,
+    )
+
+    assert result.startswith(("blocked:", "failed:"))
+    assert observed == []
+
+
+async def test_accepted_observer_failure_does_not_rewrite_write_success(tmp_path: Path) -> None:
+    env = make_env(tmp_path)
+
+    async def observe(receipt: object) -> None:
+        raise RuntimeError("observer unavailable")
+
+    result = await env.coordinator.run(
+        "scale",
+        _PODS_META,
+        "default",
+        "web",
+        Recorder().factory,
+        on_accepted=observe,
+    )
+
+    assert result == "done"
+    assert env.audit_outcomes() == ["intent", "success"]
+    assert any(
+        "accepted, but outcome verification could not start" in message
+        for message, _severity in env.ui.notifications
+    )
     assert env.coordinator.active_writes() == 0
 
 
