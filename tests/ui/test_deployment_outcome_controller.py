@@ -85,6 +85,7 @@ def _controller(
     epoch: list[int] | None = None,
     ui: FakeUi | None = None,
     sleep: Callable[[float], Awaitable[None]] | None = None,
+    cluster: list[str] | None = None,
 ) -> tuple[DeploymentOutcomeController, FakeUi]:
     surface = ui or FakeUi()
     current_epoch = epoch or [4]
@@ -92,7 +93,7 @@ def _controller(
         ui=surface,
         reader=reader,
         get_epoch=lambda: current_epoch[0],
-        cluster_id=lambda: "context-a|https://cluster.example",
+        cluster_id=lambda: (cluster or ["context-a|https://cluster.example"])[0],
         sleep=sleep or asyncio.sleep,
         poll_delays=(0.0, 0.0),
         max_trackers=3,
@@ -140,12 +141,51 @@ async def test_open_latest_presents_newest_retained_tracker() -> None:
     await observer(_receipt())
     await _drain(ui)
 
+    assert isinstance(ui.screens[0][0], DeploymentOutcomeScreen)
     controller.open_latest()
-
     screen, callback = ui.screens[-1]
     assert isinstance(screen, DeploymentOutcomeScreen)
     assert screen.snapshot is controller.latest()
     assert callback is not None
+
+
+async def test_read_failure_preserves_last_confirmed_evidence() -> None:
+    reader = _Reader([_raw(ready=1), RuntimeError("offline")])
+    controller, ui = _controller(reader)
+    observer = controller.scale_observer(
+        epoch=4,
+        namespace="default",
+        name="web",
+        uid="deploy-uid",
+        replicas=3,
+    )
+    assert observer is not None
+    await observer(_receipt())
+    await _drain(ui)
+
+    latest = controller.latest()
+    assert latest is not None
+    assert latest.outcome.phase is DeploymentOutcomePhase.INCOMPLETE
+    assert latest.outcome.evidence
+
+
+async def test_stop_does_not_overwrite_terminal_outcome() -> None:
+    controller, ui = _controller(_Reader([_raw()]))
+    observer = controller.scale_observer(
+        epoch=4,
+        namespace="default",
+        name="web",
+        uid="deploy-uid",
+        replicas=3,
+    )
+    assert observer is not None
+    await observer(_receipt())
+    await _drain(ui)
+    latest = controller.latest()
+    assert latest is not None
+
+    assert controller.stop(latest.tracker_id) is False
+    assert controller.latest() == latest
 
 
 async def test_pod_result_dispatches_exact_tracker_identity() -> None:
@@ -307,3 +347,68 @@ async def test_registry_keeps_at_most_three_trackers() -> None:
     assert len(controller.snapshots()) == 3
     waiting.set()
     await _drain(ui)
+
+
+async def test_late_read_cannot_overwrite_user_stop() -> None:
+    started = asyncio.Event()
+
+    class NonCooperativeReader(DeploymentOutcomeReader):
+        async def snapshot(self, namespace: str, name: str) -> RawDeploymentOutcomeSnapshot:
+            started.set()
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                return _raw()
+
+    controller, ui = _controller(NonCooperativeReader())
+    observer = controller.scale_observer(
+        epoch=4,
+        namespace="default",
+        name="web",
+        uid="deploy-uid",
+        replicas=3,
+    )
+    assert observer is not None
+    await observer(_receipt())
+    await started.wait()
+    latest = controller.latest()
+    assert latest is not None
+
+    assert controller.stop(latest.tracker_id)
+    await _drain(ui)
+
+    final = controller.latest()
+    assert final is not None
+    assert final.outcome.phase is DeploymentOutcomePhase.STOPPED
+
+
+async def test_cluster_change_during_read_discards_returned_evidence() -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+    cluster = ["context-a|https://cluster.example"]
+
+    class DelayedReader(DeploymentOutcomeReader):
+        async def snapshot(self, namespace: str, name: str) -> RawDeploymentOutcomeSnapshot:
+            started.set()
+            await release.wait()
+            return _raw()
+
+    controller, ui = _controller(DelayedReader(), cluster=cluster)
+    observer = controller.scale_observer(
+        epoch=4,
+        namespace="default",
+        name="web",
+        uid="deploy-uid",
+        replicas=3,
+    )
+    assert observer is not None
+    await observer(_receipt())
+    await started.wait()
+
+    cluster[0] = "context-b|https://other.example"
+    release.set()
+    await _drain(ui)
+
+    final = controller.latest()
+    assert final is not None
+    assert final.outcome.phase is DeploymentOutcomePhase.STOPPED

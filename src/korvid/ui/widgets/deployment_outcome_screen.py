@@ -139,7 +139,8 @@ class DeploymentOutcomeScreen(ModalScreen[OutcomeScreenResult | None]):
         return (
             f"API request accepted: {request} at {self.snapshot.accepted_at}\n"
             f"Deployment convergence: {self.snapshot.outcome.phase.value} "
-            f"(reads={self.snapshot.attempts}){partial}"
+            f"(reads={self.snapshot.attempts}, "
+            f"elapsed={self.snapshot.elapsed_seconds:.1f}s){partial}"
         )
 
     def action_close(self) -> None:

@@ -5,7 +5,6 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 
 from korvid.ui.hints import EventsFetcher
-from korvid.ui.resource_inspect_controller import ResourceInspectController
 from korvid.ui.ui_surface import UiSurface
 from korvid.ui.widgets.hint_detail import HintDetailScreen
 from korvid.ui.workspace_controller import ContextGuard, WorkspaceController
@@ -21,15 +20,15 @@ class DeploymentOutcomePodActions:
         target_uid: Callable[[str, str | None, str], Awaitable[str | None]],
         context: ContextGuard,
         workspace: Callable[[], WorkspaceController],
-        inspect: Callable[[], ResourceInspectController],
-        logs: Callable[[], Awaitable[None]],
+        describe: Callable[[str, str, str], Awaitable[None]],
+        logs: Callable[[str, str], Awaitable[None]],
         events: Callable[[], EventsFetcher | None],
     ) -> None:
         self._ui = ui
         self._target_uid = target_uid
         self._context = context
         self._workspace = workspace
-        self._inspect = inspect
+        self._describe = describe
         self._logs = logs
         self._events = events
 
@@ -49,9 +48,9 @@ class DeploymentOutcomePodActions:
         if verb == "goto" or not await self._identity_intact(epoch, namespace, name, uid):
             return
         if verb == "describe":
-            await self._inspect().describe_selected()
+            await self._describe(namespace, name, uid)
         elif verb == "logs":
-            await self._logs()
+            await self._logs(namespace, name)
         elif verb == "events":
             await self._show_events(namespace, name, uid)
 

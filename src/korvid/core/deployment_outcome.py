@@ -240,6 +240,33 @@ def _pod_evidence(
     return sorted(evidence, key=lambda item: (item.namespace, item.name, item.uid))
 
 
+def _current_replica_set_uids(
+    replica_sets: tuple[dict[str, Any], ...],
+    deployment_uid: str,
+) -> tuple[frozenset[str], bool]:
+    owned: list[tuple[str, int | None]] = []
+    for item in replica_sets:
+        if _controller_owner_uid(item, "Deployment") != deployment_uid:
+            continue
+        metadata = _mapping(item.get("metadata"))
+        uid = str(metadata.get("uid") or "")
+        revision = _mapping(metadata.get("annotations")).get("deployment.kubernetes.io/revision")
+        try:
+            parsed_revision = int(revision) if revision is not None else None
+        except (TypeError, ValueError):
+            parsed_revision = None
+        if uid:
+            owned.append((uid, parsed_revision))
+    revisions = [revision for _, revision in owned if revision is not None]
+    if owned and len(revisions) != len(owned):
+        return frozenset(uid for uid, _revision in owned), True
+    newest = max(revisions) if revisions else None
+    return (
+        frozenset(uid for uid, revision in owned if newest is None or revision == newest),
+        bool(owned and newest is None),
+    )
+
+
 def normalize_deployment_observation(
     raw: RawDeploymentOutcomeSnapshot,
     *,
@@ -254,11 +281,9 @@ def normalize_deployment_observation(
     spec = _mapping(deployment.get("spec"))
     status = _mapping(deployment.get("status"))
     live_uid = str(metadata.get("uid") or "")
-    replica_set_uids = frozenset(
-        str(_mapping(item.get("metadata")).get("uid"))
-        for item in raw.replica_sets
-        if _controller_owner_uid(item, "Deployment") == live_uid
-        and _mapping(item.get("metadata")).get("uid")
+    replica_set_uids, ambiguous_replica_sets = _current_replica_set_uids(
+        raw.replica_sets,
+        live_uid,
     )
     all_pod_evidence = _pod_evidence(raw.pods, replica_set_uids)
     template = _mapping(spec.get("template"))
@@ -279,7 +304,9 @@ def normalize_deployment_observation(
         ),
         conditions=_condition_entries(status),
         pods=tuple(all_pod_evidence[:max_pod_evidence]),
-        partial_evidence=raw.partial or len(all_pod_evidence) > max_pod_evidence,
+        partial_evidence=(
+            raw.partial or ambiguous_replica_sets or len(all_pod_evidence) > max_pod_evidence
+        ),
     )
 
 
@@ -336,7 +363,7 @@ def _progress_evidence(observation: DeploymentObservation) -> tuple[str, ...]:
 
 def _stalled_outcome(observation: DeploymentObservation) -> DeploymentOutcome | None:
     condition = _condition_failure(observation.conditions)
-    pod = _pod_failure(observation.pods)
+    pod = None if observation.partial_evidence else _pod_failure(observation.pods)
     if condition is None and pod is None:
         return None
     if condition is not None:
@@ -387,7 +414,11 @@ def _evaluate_scale(
     stalled = _stalled_outcome(observation)
     if stalled is not None:
         return stalled
-    if _generation_current(observation) and _replicas_converged(observation, intent.replicas):
+    if (
+        not observation.partial_evidence
+        and _generation_current(observation)
+        and _replicas_converged(observation, intent.replicas)
+    ):
         return DeploymentOutcome(
             phase=DeploymentOutcomePhase.COMPLETED,
             summary=f"Deployment converged at {intent.replicas} replicas",
@@ -400,7 +431,7 @@ def _evaluate_scale(
 def _evaluate_restart(
     intent: DeploymentRestartIntent, observation: DeploymentObservation
 ) -> DeploymentOutcome:
-    if observation.restart_stamp is not None and observation.restart_stamp != intent.restarted_at:
+    if observation.restart_stamp != intent.restarted_at:
         return DeploymentOutcome(
             phase=DeploymentOutcomePhase.SUPERSEDED,
             summary="Rollout restart was superseded by a later restart marker",
@@ -414,6 +445,7 @@ def _evaluate_restart(
     desired = observation.desired_replicas
     if (
         observation.restart_stamp == intent.restarted_at
+        and not observation.partial_evidence
         and desired is not None
         and _generation_current(observation)
         and _replicas_converged(observation, desired)

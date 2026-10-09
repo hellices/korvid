@@ -472,6 +472,18 @@ class LogController:
             return [(namespace, name, ctr) for ctr in containers]
         return [(namespace, name, "")]
 
+    async def open_named_logs(self, namespace: str, name: str) -> None:
+        """Open live logs for an explicitly identified Pod name."""
+
+        self._mode = "l"
+        triples = self._pod_triples(namespace, name)
+        await self.open_pane(
+            namespace,
+            [(pod, container) for _, pod, container in triples],
+            triples=triples,
+            epoch=self._ctx_epoch(),
+        )
+
     async def _toggle_log_pod(self, namespace: str, name: str, epoch: int) -> None:
         """Add or remove *namespace/name* from the accumulated live-log panels."""
         existing = list(self._current_triples)

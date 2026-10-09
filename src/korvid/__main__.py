@@ -1107,8 +1107,10 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
             target_uid=app._target_uid,
             context=context,
             workspace=workspace_ref.get,
-            inspect=lambda: inspect_controller,
-            logs=lambda: logs_ref.get().action_logs(),
+            describe=lambda ns, name, uid: inspect_controller.describe_named(
+                "pods", ns, name, expected_uid=uid
+            ),
+            logs=lambda ns, name: logs_ref.get().open_named_logs(ns, name),
             events=lambda: outcome_events,
         ),
     )

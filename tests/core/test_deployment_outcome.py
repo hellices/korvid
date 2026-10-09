@@ -7,7 +7,9 @@ from korvid.core.deployment_outcome import (
     DeploymentRestartIntent,
     DeploymentScaleIntent,
     evaluate_deployment_outcome,
+    normalize_deployment_observation,
 )
+from korvid.k8s.deployment_outcomes import RawDeploymentOutcomeSnapshot
 
 
 def _target() -> DeploymentOperationTarget:
@@ -209,3 +211,137 @@ def test_partial_evidence_is_retained_on_observing_outcome() -> None:
 
     assert outcome.phase is DeploymentOutcomePhase.OBSERVING
     assert outcome.partial_evidence is True
+
+
+def test_partial_evidence_never_completes_converged_scale() -> None:
+    outcome = evaluate_deployment_outcome(
+        _scale(),
+        _observation(partial_evidence=True),
+    )
+
+    assert outcome.phase is DeploymentOutcomePhase.OBSERVING
+
+
+def test_partial_pod_blocker_does_not_stall_operation() -> None:
+    blocker = DeploymentPodEvidence(
+        namespace="default",
+        name="old-pod",
+        uid="old-pod-uid",
+        phase="Pending",
+        reason="ImagePullBackOff",
+        message="old rollout",
+    )
+
+    outcome = evaluate_deployment_outcome(
+        _scale(),
+        _observation(ready=1, available=1, pods=(blocker,), partial_evidence=True),
+    )
+
+    assert outcome.phase is DeploymentOutcomePhase.OBSERVING
+
+
+def test_restart_with_removed_marker_is_superseded() -> None:
+    outcome = evaluate_deployment_outcome(
+        _restart("accepted"),
+        _observation(restart_stamp=None),
+    )
+
+    assert outcome.phase is DeploymentOutcomePhase.SUPERSEDED
+
+
+def test_old_replica_set_pod_blocker_is_not_current_rollout_evidence() -> None:
+    deployment = {
+        "metadata": {"uid": "deploy-uid"},
+        "spec": {"replicas": 1},
+        "status": {},
+    }
+    replica_sets = (
+        {
+            "metadata": {
+                "uid": "old-rs",
+                "annotations": {"deployment.kubernetes.io/revision": "1"},
+                "ownerReferences": [
+                    {"kind": "Deployment", "uid": "deploy-uid", "controller": True}
+                ],
+            }
+        },
+        {
+            "metadata": {
+                "uid": "new-rs",
+                "annotations": {"deployment.kubernetes.io/revision": "2"},
+                "ownerReferences": [
+                    {"kind": "Deployment", "uid": "deploy-uid", "controller": True}
+                ],
+            }
+        },
+    )
+    pods = (
+        {
+            "metadata": {
+                "name": "old-pod",
+                "namespace": "default",
+                "uid": "old-pod-uid",
+                "ownerReferences": [{"kind": "ReplicaSet", "uid": "old-rs", "controller": True}],
+            },
+            "status": {
+                "phase": "Pending",
+                "containerStatuses": [
+                    {"state": {"waiting": {"reason": "ImagePullBackOff", "message": "old"}}}
+                ],
+            },
+        },
+    )
+
+    observation = normalize_deployment_observation(
+        RawDeploymentOutcomeSnapshot(deployment, replica_sets, pods, False)
+    )
+
+    assert observation.pods == ()
+
+
+def test_unknown_replica_set_revision_marks_evidence_partial() -> None:
+    deployment = {
+        "metadata": {"uid": "deploy-uid"},
+        "spec": {"replicas": 1},
+        "status": {},
+    }
+    replica_set = {
+        "metadata": {
+            "uid": "ambiguous-rs",
+            "ownerReferences": [{"kind": "Deployment", "uid": "deploy-uid", "controller": True}],
+        }
+    }
+
+    observation = normalize_deployment_observation(
+        RawDeploymentOutcomeSnapshot(deployment, (replica_set,), (), False)
+    )
+
+    assert observation.partial_evidence
+    assert observation.pods == ()
+
+
+def test_mixed_known_and_malformed_replica_set_revisions_are_partial() -> None:
+    deployment = {
+        "metadata": {"uid": "deploy-uid"},
+        "spec": {"replicas": 1},
+        "status": {},
+    }
+    replica_sets = tuple(
+        {
+            "metadata": {
+                "uid": uid,
+                "annotations": {"deployment.kubernetes.io/revision": revision},
+                "ownerReferences": [
+                    {"kind": "Deployment", "uid": "deploy-uid", "controller": True}
+                ],
+            }
+        }
+        for uid, revision in (("known-rs", "2"), ("unknown-rs", "not-an-integer"))
+    )
+
+    observation = normalize_deployment_observation(
+        RawDeploymentOutcomeSnapshot(deployment, replica_sets, (), False)
+    )
+
+    assert observation.partial_evidence
+    assert observation.pods == ()

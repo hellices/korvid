@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import logging
+import time
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
@@ -65,6 +66,7 @@ class DeploymentTrackerSnapshot:
     accepted_at: str
     outcome: DeploymentOutcome
     attempts: int = 0
+    elapsed_seconds: float = 0.0
 
 
 def _accepted_outcome() -> DeploymentOutcome:
@@ -81,10 +83,16 @@ def _stopped_outcome(reason: str) -> DeploymentOutcome:
     )
 
 
-def _incomplete_outcome(reason: str) -> DeploymentOutcome:
+def _incomplete_outcome(
+    reason: str,
+    previous: DeploymentOutcome | None = None,
+) -> DeploymentOutcome:
     return DeploymentOutcome(
         phase=DeploymentOutcomePhase.INCOMPLETE,
         summary=f"API request accepted, but outcome verification is incomplete: {reason}",
+        evidence=previous.evidence if previous is not None else (),
+        pods=previous.pods if previous is not None else (),
+        partial_evidence=previous.partial_evidence if previous is not None else False,
     )
 
 
@@ -102,6 +110,7 @@ class DeploymentOutcomeController:
         poll_delays: Sequence[float] = DEFAULT_POLL_DELAYS,
         max_trackers: int = 3,
         pod_action: OutcomePodAction | None = None,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         if max_trackers < 1:
             raise ValueError("max_trackers must be positive")
@@ -120,6 +129,8 @@ class DeploymentOutcomeController:
         self._workers: dict[str, CancellableWork] = {}
         self._next_id = 1
         self._pod_action = pod_action
+        self._clock = clock
+        self._started: dict[str, float] = {}
 
     def scale_observer(
         self,
@@ -198,9 +209,11 @@ class DeploymentOutcomeController:
             accepted_at=accepted_at,
             outcome=_accepted_outcome(),
         )
+        self._started[tracker_id] = self._clock()
         self._ui.notify(
             f"{intent.target.name}: API request accepted; verifying Deployment convergence"
         )
+        self.open_latest()
         self._workers[tracker_id] = self._ui.run_worker(
             self._observe(tracker_id),
             exclusive=False,
@@ -213,6 +226,7 @@ class DeploymentOutcomeController:
         if len(self._snapshots) < self._max_trackers:
             return
         tracker_id, _snapshot = self._snapshots.popitem(last=False)
+        self._started.pop(tracker_id, None)
         worker = self._workers.pop(tracker_id, None)
         if worker is not None:
             worker.cancel()
@@ -228,9 +242,13 @@ class DeploymentOutcomeController:
                     await self._sleep(delay)
                 if await self._observe_once(tracker_id, attempt):
                     return
+            snapshot = self._snapshots.get(tracker_id)
             self._update(
                 tracker_id,
-                _incomplete_outcome("the five-minute observation deadline elapsed"),
+                _incomplete_outcome(
+                    "the five-minute observation deadline elapsed",
+                    snapshot.outcome if snapshot is not None else None,
+                ),
                 len(self._poll_delays),
             )
         except asyncio.CancelledError:
@@ -252,7 +270,7 @@ class DeploymentOutcomeController:
         snapshot = self._snapshots.get(tracker_id)
         if snapshot is None:
             return True
-        if self._get_epoch() != snapshot.intent.target.epoch:
+        if not self._target_current(snapshot):
             self._update(tracker_id, _stopped_outcome("kube context changed"), attempt - 1)
             return True
         reader = self._reader
@@ -267,14 +285,15 @@ class DeploymentOutcomeController:
             raise
         except Exception as exc:
             logger.warning("Deployment outcome read failed: %s", type(exc).__name__)
-            self._update(tracker_id, _incomplete_outcome(type(exc).__name__), attempt)
+            if not self._can_apply_read(tracker_id, snapshot):
+                return True
+            self._update(
+                tracker_id,
+                _incomplete_outcome(type(exc).__name__, snapshot.outcome),
+                attempt,
+            )
             return True
-        current = self._snapshots.get(tracker_id)
-        if (
-            current is None
-            or current.intent.target.epoch != snapshot.intent.target.epoch
-            or self._get_epoch() != snapshot.intent.target.epoch
-        ):
+        if not self._can_apply_read(tracker_id, snapshot):
             return True
         outcome = evaluate_deployment_outcome(
             snapshot.intent,
@@ -282,6 +301,30 @@ class DeploymentOutcomeController:
         )
         self._update(tracker_id, outcome, attempt)
         return outcome.phase is not DeploymentOutcomePhase.OBSERVING
+
+    def _target_current(self, snapshot: DeploymentTrackerSnapshot) -> bool:
+        target = snapshot.intent.target
+        return self._get_epoch() == target.epoch and self._cluster_id() == target.cluster_id
+
+    def _can_apply_read(
+        self,
+        tracker_id: str,
+        expected: DeploymentTrackerSnapshot,
+    ) -> bool:
+        current = self._snapshots.get(tracker_id)
+        if current is not expected or current.outcome.phase not in {
+            DeploymentOutcomePhase.ACCEPTED,
+            DeploymentOutcomePhase.OBSERVING,
+        }:
+            return False
+        if self._target_current(current):
+            return True
+        self._update(
+            tracker_id,
+            _stopped_outcome("kube context changed"),
+            current.attempts,
+        )
+        return False
 
     def _update(
         self,
@@ -297,6 +340,10 @@ class DeploymentOutcomeController:
             snapshot,
             outcome=outcome,
             attempts=attempts,
+            elapsed_seconds=max(
+                0.0,
+                self._clock() - self._started.get(tracker_id, self._clock()),
+            ),
         )
         if outcome.phase != previous:
             severity: Severity = (
@@ -392,6 +439,11 @@ class DeploymentOutcomeController:
 
         snapshot = self._snapshots.get(tracker_id)
         if snapshot is None:
+            return False
+        if snapshot.outcome.phase not in {
+            DeploymentOutcomePhase.ACCEPTED,
+            DeploymentOutcomePhase.OBSERVING,
+        }:
             return False
         worker = self._workers.pop(tracker_id, None)
         if worker is not None:

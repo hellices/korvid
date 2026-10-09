@@ -254,7 +254,14 @@ class ResourceInspectController:
             return
         await self._push_describe(f"{kind}/{namespace}/{name}", manifest, events)
 
-    async def describe_named(self, kind: str, namespace: str, name: str) -> None:
+    async def describe_named(
+        self,
+        kind: str,
+        namespace: str,
+        name: str,
+        *,
+        expected_uid: str | None = None,
+    ) -> None:
         """Describe an object named by a hierarchy tree node (no table row
         to read the selection from - `describe_selected`'s selection-bound
         path does not apply)."""
@@ -277,6 +284,14 @@ class ResourceInspectController:
             self._ui.notify(str(exc), severity="error")
             return
         if self._context.crossed(epoch):
+            return
+        uid = str(manifest.get("metadata", {}).get("uid") or "")
+        if expected_uid is not None and uid != expected_uid:
+            self._ui.notify(
+                "Resource identity changed; refresh the observation",
+                severity="warning",
+                markup=False,
+            )
             return
         title = f"{kind}/{namespace}/{name}" if namespace else f"{kind}/{name}"
         await self._push_describe(title, manifest, [])
