@@ -37,6 +37,20 @@ class WriteMutationResult:
         valid = isinstance(generation, int) and not isinstance(generation, bool)
         return cls(generation=generation if valid else None)
 
+    @classmethod
+    def from_scale_snapshot(cls, current: dict[str, Any], replicas: int) -> WriteMutationResult:
+        """Derive the generation produced by an RV-pinned scale mutation."""
+        generation = (current.get("metadata") or {}).get("generation")
+        old_replicas = (current.get("spec") or {}).get("replicas")
+        if (
+            not isinstance(generation, int)
+            or isinstance(generation, bool)
+            or not isinstance(old_replicas, int)
+            or isinstance(old_replicas, bool)
+        ):
+            return cls()
+        return cls(generation=generation + int(old_replicas != replicas))
+
 
 def restart_stamp() -> str:
     """One restartedAt value per approval request. The caller generates it

@@ -1880,15 +1880,33 @@ async def test_delete_object_encodes_segments() -> None:
 async def test_scale_object_patches_scale_subresource() -> None:
     client = KubeClient()
     api = _write_api()
-    api.call_api.return_value.read.return_value = b'{"metadata":{"generation":8}}'
-    with patch.object(client, "_api", api):
+    api.call_api.return_value.read.return_value = (
+        b'{"apiVersion":"autoscaling/v1","kind":"Scale",'
+        b'"metadata":{"resourceVersion":"43"},"spec":{"replicas":5}}'
+    )
+    with (
+        patch.object(client, "_api", api),
+        patch.object(
+            client,
+            "_request_json",
+            AsyncMock(
+                return_value={
+                    "metadata": {"generation": 8, "resourceVersion": "42"},
+                    "spec": {"replicas": 3},
+                }
+            ),
+        ),
+    ):
         result = await client.scale_object(_deploy_meta(), "default", "web", 5)
     args, kwargs = api.call_api.call_args
     assert args[0] == "/apis/apps/v1/namespaces/default/deployments/web/scale"
     assert args[1] == "PATCH"
-    assert kwargs["body"] == {"spec": {"replicas": 5}}
+    assert kwargs["body"] == {
+        "spec": {"replicas": 5},
+        "metadata": {"resourceVersion": "42"},
+    }
     assert kwargs["header_params"]["Content-Type"] == "application/merge-patch+json"
-    assert result.generation == 8
+    assert result.generation == 9
 
 
 async def test_rollout_restart_patches_restartedAt_annotation() -> None:

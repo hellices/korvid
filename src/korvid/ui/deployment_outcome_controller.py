@@ -308,13 +308,18 @@ class DeploymentOutcomeController:
 
     def _mark_deadline_elapsed(self, tracker_id: str) -> None:
         snapshot = self._snapshots.get(tracker_id)
+        if snapshot is None or snapshot.outcome.phase not in {
+            DeploymentOutcomePhase.ACCEPTED,
+            DeploymentOutcomePhase.OBSERVING,
+        }:
+            return
         self._update(
             tracker_id,
             _incomplete_outcome(
                 "the five-minute observation deadline elapsed",
-                snapshot.outcome if snapshot is not None else None,
+                snapshot.outcome,
             ),
-            snapshot.attempts if snapshot is not None else len(self._poll_delays),
+            snapshot.attempts,
         )
 
     def _deadline_elapsed(self, tracker_id: str) -> bool:

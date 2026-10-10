@@ -1092,13 +1092,15 @@ class KubeClient(ReadOps, WriteOps, pulse.PulseReader):
         uid: str | None = None,
     ) -> WriteMutationResult:
         """Set spec.replicas via the /scale subresource (merge patch)."""
-        raw = await self._request_write(
-            f"{self._object_path(meta, namespace, name)}/scale",
+        path = self._object_path(meta, namespace, name)
+        current = await self._request_json(path)
+        await self._request_write(
+            f"{path}/scale",
             "PATCH",
-            body=self._scale_patch(replicas, uid),
+            body=self._pin_revision(self._scale_patch(replicas, uid), current),
             content_type="application/merge-patch+json",
         )
-        return WriteMutationResult.from_response(raw)
+        return WriteMutationResult.from_scale_snapshot(current, replicas)
 
     async def rollout_restart(
         self, meta: ResourceMeta, namespace: str | None, name: str, *, uid: str | None = None
@@ -1372,12 +1374,10 @@ class KubeClient(ReadOps, WriteOps, pulse.PulseReader):
 
     @staticmethod
     def _pin_revision(body: dict[str, Any], current: dict[str, Any]) -> dict[str, Any]:
-        """Bind a dry-run patch to the GET snapshot it will be diffed against:
+        """Bind a patch to the GET snapshot it was derived from:
         metadata.resourceVersion is an apiserver optimistic-concurrency
         precondition, so a concurrent update between the two requests turns
-        into a 409 (preview degrades to None) instead of a diff that mixes
-        two revisions the server never evaluated together. Preview-only: the
-        approved write is pinned by uid, not frozen to this revision."""
+        into a 409 instead of applying a patch to a different revision."""
         rv = (current.get("metadata") or {}).get("resourceVersion")
         if rv:
             body.setdefault("metadata", {})["resourceVersion"] = str(rv)

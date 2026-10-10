@@ -114,9 +114,12 @@ async def test_pod_action_is_refused_without_uid() -> None:
     async with app.run_test() as pilot:
         await app.push_screen(screen, lambda result: setattr(app, "result", result))
         await pilot.press("l")
-        await pilot.pause()
+        hint = screen.query_one("#deployment-outcome-hint", Static)
+        await until(
+            pilot, lambda: "identity" in str(hint.render()).lower(), label="identity warning"
+        )
 
-        status = str(screen.query_one("#deployment-outcome-hint", Static).render())
+        status = str(hint.render())
         assert app.result == "unset"
         assert "identity" in status.lower()
 

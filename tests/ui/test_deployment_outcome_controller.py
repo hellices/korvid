@@ -391,6 +391,7 @@ async def test_registry_keeps_at_most_three_trackers() -> None:
 
 async def test_late_read_cannot_overwrite_user_stop() -> None:
     started = asyncio.Event()
+    now = [0.0]
 
     class NonCooperativeReader(DeploymentOutcomeReader):
         async def snapshot(self, namespace: str, name: str) -> RawDeploymentOutcomeSnapshot:
@@ -401,7 +402,7 @@ async def test_late_read_cannot_overwrite_user_stop() -> None:
                 return _raw()
             raise AssertionError("unreachable")
 
-    controller, ui = _controller(NonCooperativeReader())
+    controller, ui = _controller(NonCooperativeReader(), clock=lambda: now[0])
     observer = controller.scale_observer(
         epoch=4,
         namespace="default",
@@ -415,6 +416,7 @@ async def test_late_read_cannot_overwrite_user_stop() -> None:
     latest = controller.latest()
     assert latest is not None
 
+    now[0] = 301.0
     assert controller.stop(latest.tracker_id)
     await _drain(ui)
 
