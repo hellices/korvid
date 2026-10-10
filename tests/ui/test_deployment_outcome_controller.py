@@ -141,6 +141,32 @@ async def test_scale_observer_reads_immediately_and_completes() -> None:
     assert reader.calls == [("default", "web"), ("default", "web")]
 
 
+async def test_presentation_failure_does_not_abort_observation() -> None:
+    class FailingPresentationUi(FakeUi):
+        def push_screen(self, screen: Any, callback: Any = None) -> Any:
+            assert self.workers
+            raise RuntimeError("screen unavailable")
+
+    reader = _Reader([_raw()])
+    controller, ui = _controller(reader, ui=FailingPresentationUi())
+    observer = controller.scale_observer(
+        epoch=4,
+        namespace="default",
+        name="web",
+        uid="deploy-uid",
+        replicas=3,
+    )
+    assert observer is not None
+
+    await observer(_receipt())
+    await _drain(ui)
+
+    latest = controller.latest()
+    assert latest is not None
+    assert latest.outcome.phase is DeploymentOutcomePhase.COMPLETED
+    assert ("Unable to open Deployment outcome details", "warning") in ui.notifications
+
+
 async def test_open_latest_presents_newest_retained_tracker() -> None:
     reader = _Reader([_raw()])
     controller, ui = _controller(reader)

@@ -459,11 +459,7 @@ def _evaluate_scale(
     stalled = _stalled_outcome(observation) if _generation_current(observation) else None
     if stalled is not None:
         return stalled
-    if (
-        not observation.partial_evidence
-        and _generation_current(observation)
-        and _replicas_converged(observation, intent.replicas)
-    ):
+    if _generation_current(observation) and _replicas_converged(observation, intent.replicas):
         return DeploymentOutcome(
             phase=DeploymentOutcomePhase.COMPLETED,
             summary=f"Deployment converged at {intent.replicas} replicas",
@@ -500,7 +496,6 @@ def _evaluate_restart(
     desired = observation.desired_replicas
     if (
         observation.restart_stamp == intent.restarted_at
-        and not observation.partial_evidence
         and desired is not None
         and _generation_current(observation)
         and _replicas_converged(observation, desired)

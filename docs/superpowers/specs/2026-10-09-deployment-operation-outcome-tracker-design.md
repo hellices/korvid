@@ -125,8 +125,10 @@ One snapshot performs:
 6. normalization into the core observation type.
 
 Reads are namespace-scoped and capped. Pod evidence is limited to the small
-set needed to explain non-ready progress. No Secret data, logs, or unbounded
-cross-namespace scan is performed.
+set needed to explain non-ready progress. Truncation marks diagnostic blocker
+coverage as partial, but does not override convergence proven by the exact
+Deployment GET. No Secret data, logs, or unbounded cross-namespace scan is
+performed.
 
 Reader errors remain typed:
 

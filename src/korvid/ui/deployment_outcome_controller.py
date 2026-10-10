@@ -258,7 +258,6 @@ class DeploymentOutcomeController:
         self._ui.notify(
             f"{intent.target.name}: API request accepted; verifying Deployment convergence"
         )
-        self.open_latest()
         self._workers[tracker_id] = self._ui.run_worker(
             self._observe(tracker_id),
             exclusive=False,
@@ -266,6 +265,7 @@ class DeploymentOutcomeController:
             name=tracker_id,
             exit_on_error=False,
         )
+        self.open_latest()
 
     def _evict_if_full(self) -> None:
         if len(self._snapshots) < self._max_trackers:
@@ -445,9 +445,12 @@ class DeploymentOutcomeController:
                 markup=False,
             )
             return
-        from korvid.ui.widgets.deployment_outcome_screen import DeploymentOutcomeScreen
+        try:
+            from korvid.ui.widgets.deployment_outcome_screen import DeploymentOutcomeScreen
 
-        self._ui.push_screen(DeploymentOutcomeScreen(snapshot), self._on_screen_result)
+            self._ui.push_screen(DeploymentOutcomeScreen(snapshot), self._on_screen_result)
+        except Exception:
+            self._ui.notify("Unable to open Deployment outcome details", severity="warning")
 
     def _on_screen_result(self, result: object) -> None:
         if not isinstance(result, tuple) or len(result) != 5:

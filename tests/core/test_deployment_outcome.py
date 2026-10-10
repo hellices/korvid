@@ -277,13 +277,24 @@ def test_partial_evidence_is_retained_on_observing_outcome() -> None:
     assert outcome.partial_evidence is True
 
 
-def test_partial_evidence_never_completes_converged_scale() -> None:
+def test_partial_related_evidence_allows_authoritative_scale_completion() -> None:
     outcome = evaluate_deployment_outcome(
         _scale(),
         _observation(partial_evidence=True),
     )
 
-    assert outcome.phase is DeploymentOutcomePhase.OBSERVING
+    assert outcome.phase is DeploymentOutcomePhase.COMPLETED
+    assert outcome.partial_evidence is True
+
+
+def test_partial_related_evidence_allows_authoritative_restart_completion() -> None:
+    outcome = evaluate_deployment_outcome(
+        _restart("accepted"),
+        _observation(restart_stamp="accepted", partial_evidence=True),
+    )
+
+    assert outcome.phase is DeploymentOutcomePhase.COMPLETED
+    assert outcome.partial_evidence is True
 
 
 def test_ambiguous_pod_blocker_does_not_stall_operation() -> None:
