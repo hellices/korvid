@@ -6,6 +6,8 @@ import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+import pytest
+
 from korvid.core.deployment_outcome import (
     DeploymentOutcomePhase,
     DeploymentRestartIntent,
@@ -165,6 +167,30 @@ async def test_presentation_failure_does_not_abort_observation() -> None:
     assert latest is not None
     assert latest.outcome.phase is DeploymentOutcomePhase.COMPLETED
     assert ("Unable to open Deployment outcome details", "warning") in ui.notifications
+
+
+async def test_worker_registration_failure_marks_tracker_incomplete() -> None:
+    class FailingWorkerUi(FakeUi):
+        def run_worker(self, work: Any, **kwargs: Any) -> Any:
+            raise RuntimeError("worker unavailable")
+
+    controller, _ui = _controller(_Reader([_raw()]), ui=FailingWorkerUi())
+    observer = controller.scale_observer(
+        epoch=4,
+        namespace="default",
+        name="web",
+        uid="deploy-uid",
+        replicas=3,
+    )
+    assert observer is not None
+
+    with pytest.raises(RuntimeError, match="worker unavailable"):
+        await observer(_receipt())
+
+    latest = controller.latest()
+    assert latest is not None
+    assert latest.outcome.phase is DeploymentOutcomePhase.INCOMPLETE
+    assert "worker" in latest.outcome.summary.lower()
 
 
 async def test_open_latest_presents_newest_retained_tracker() -> None:

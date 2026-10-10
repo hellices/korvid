@@ -261,13 +261,23 @@ class DeploymentOutcomeController:
         self._ui.notify(
             f"{intent.target.name}: API request accepted; verifying Deployment convergence"
         )
-        self._workers[tracker_id] = self._ui.run_worker(
-            self._observe(tracker_id),
-            exclusive=False,
-            group=OUTCOME_WORKER_GROUP,
-            name=tracker_id,
-            exit_on_error=False,
-        )
+        observation = self._observe(tracker_id)
+        try:
+            self._workers[tracker_id] = self._ui.run_worker(
+                observation,
+                exclusive=False,
+                group=OUTCOME_WORKER_GROUP,
+                name=tracker_id,
+                exit_on_error=False,
+            )
+        except Exception:
+            observation.close()
+            self._update(
+                tracker_id,
+                _incomplete_outcome("the observation worker failed to start"),
+                0,
+            )
+            raise
         self.open_latest()
 
     def _evict_if_full(self) -> None:
