@@ -10,7 +10,7 @@ import logging
 import re
 import ssl
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Mapping, Sequence
-from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from contextlib import AbstractAsyncContextManager, asynccontextmanager, suppress
 from datetime import datetime, timedelta
 from typing import Any, cast
 from urllib.parse import urlencode
@@ -1053,10 +1053,6 @@ class KubeClient(ReadOps, WriteOps, pulse.PulseReader):
 
     @staticmethod
     def _scale_patch(replicas: int, uid: str | None) -> dict[str, Any]:
-        """Merge-patch body for the /scale subresource. A ``uid`` in the
-        patched metadata is an apiserver precondition: the patch is rejected
-        with 409 when the object was recreated. Shared by the real write and
-        its dry-run preview so the two can never drift apart."""
         body: dict[str, Any] = {"spec": {"replicas": replicas}}
         if uid:
             body["metadata"] = {"uid": uid}
@@ -1093,17 +1089,23 @@ class KubeClient(ReadOps, WriteOps, pulse.PulseReader):
     ) -> WriteMutationResult:
         """Set spec.replicas via the /scale subresource (merge patch)."""
         path = self._object_path(meta, namespace, name)
-        try:
-            current = await self._request_json(path)
-        except Exception:
-            current = {}
-        await self._request_write(
+        correlate = meta.group == "apps" and meta.plural == "deployments"
+        current: dict[str, Any] = {}
+        if correlate:
+            with suppress(Exception):
+                current = await self._request_json(path)
+        body = self._scale_patch(replicas, uid)
+        if correlate:
+            body = self._pin_revision(body, current)
+        raw = await self._request_write(
             f"{path}/scale",
             "PATCH",
-            body=self._pin_revision(self._scale_patch(replicas, uid), current),
+            body=body,
             content_type="application/merge-patch+json",
         )
-        return WriteMutationResult.from_scale_snapshot(current, replicas)
+        if correlate:
+            return WriteMutationResult.from_scale_snapshot(current, replicas)
+        return WriteMutationResult.from_response(raw)
 
     async def rollout_restart(
         self, meta: ResourceMeta, namespace: str | None, name: str, *, uid: str | None = None

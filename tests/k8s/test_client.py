@@ -1977,6 +1977,31 @@ async def test_scale_object_treats_malformed_snapshot_as_missing_correlation() -
     assert result.generation is None
 
 
+async def test_non_deployment_scale_preserves_uid_only_mutation() -> None:
+    client = KubeClient()
+    read = AsyncMock(side_effect=AssertionError("correlation GET must not run"))
+    write = AsyncMock(return_value=b'{"kind":"Scale"}')
+    with (
+        patch.object(client, "_request_json", read),
+        patch.object(client, "_request_write", write),
+    ):
+        result = await client.scale_object(
+            ResourceMeta("StatefulSet", "statefulsets", "apps", "v1", True),
+            "default",
+            "db",
+            5,
+            uid="statefulset-uid",
+        )
+
+    assert read.await_count == 0
+    assert write.await_args is not None
+    assert write.await_args.kwargs["body"] == {
+        "spec": {"replicas": 5},
+        "metadata": {"uid": "statefulset-uid"},
+    }
+    assert result.generation is None
+
+
 async def test_rollout_restart_patches_restartedAt_annotation() -> None:
     client = KubeClient()
     api = _write_api()

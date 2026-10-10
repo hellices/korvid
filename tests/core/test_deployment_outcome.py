@@ -462,6 +462,46 @@ def test_unknown_replica_set_revision_marks_evidence_partial() -> None:
     assert observation.pods == ()
 
 
+def test_truncated_replica_set_page_omits_ambiguous_pod_evidence() -> None:
+    deployment = {
+        "metadata": {"uid": "deploy-uid"},
+        "spec": {"replicas": 1},
+        "status": {},
+    }
+    replica_set = {
+        "metadata": {
+            "uid": "returned-rs",
+            "annotations": {"deployment.kubernetes.io/revision": "2"},
+            "ownerReferences": [{"kind": "Deployment", "uid": "deploy-uid", "controller": True}],
+        }
+    }
+    pod = {
+        "metadata": {
+            "name": "possibly-old-pod",
+            "namespace": "default",
+            "uid": "possibly-old-pod-uid",
+            "ownerReferences": [{"kind": "ReplicaSet", "uid": "returned-rs", "controller": True}],
+        },
+        "status": {
+            "phase": "Pending",
+            "containerStatuses": [{"state": {"waiting": {"reason": "ImagePullBackOff"}}}],
+        },
+    }
+
+    observation = normalize_deployment_observation(
+        RawDeploymentOutcomeSnapshot(
+            deployment,
+            (replica_set,),
+            (pod,),
+            True,
+            pod_ownership_ambiguous=True,
+        )
+    )
+
+    assert observation.partial_evidence is True
+    assert observation.pods == ()
+
+
 def test_mixed_known_and_malformed_replica_set_revisions_are_partial() -> None:
     deployment = {
         "metadata": {"uid": "deploy-uid"},

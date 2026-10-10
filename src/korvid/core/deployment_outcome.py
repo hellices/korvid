@@ -294,7 +294,8 @@ def normalize_deployment_observation(
         raw.replica_sets,
         live_uid,
     )
-    all_pod_evidence = _pod_evidence(raw.pods, replica_set_uids)
+    pod_evidence_ambiguous = raw.pod_ownership_ambiguous or ambiguous_replica_sets
+    all_pod_evidence = () if pod_evidence_ambiguous else _pod_evidence(raw.pods, replica_set_uids)
     template = _mapping(spec.get("template"))
     template_metadata = _mapping(template.get("metadata"))
     annotations = _mapping(template_metadata.get("annotations"))
@@ -331,7 +332,7 @@ def normalize_deployment_observation(
         partial_evidence=(
             raw.partial or ambiguous_replica_sets or len(all_pod_evidence) > max_pod_evidence
         ),
-        pod_evidence_ambiguous=raw.pod_ownership_ambiguous or ambiguous_replica_sets,
+        pod_evidence_ambiguous=pod_evidence_ambiguous,
     )
 
 
