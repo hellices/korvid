@@ -1093,7 +1093,10 @@ class KubeClient(ReadOps, WriteOps, pulse.PulseReader):
     ) -> WriteMutationResult:
         """Set spec.replicas via the /scale subresource (merge patch)."""
         path = self._object_path(meta, namespace, name)
-        current = await self._request_json(path)
+        try:
+            current = await self._request_json(path)
+        except Exception:
+            current = {}
         await self._request_write(
             f"{path}/scale",
             "PATCH",
@@ -1374,10 +1377,7 @@ class KubeClient(ReadOps, WriteOps, pulse.PulseReader):
 
     @staticmethod
     def _pin_revision(body: dict[str, Any], current: dict[str, Any]) -> dict[str, Any]:
-        """Bind a patch to the GET snapshot it was derived from:
-        metadata.resourceVersion is an apiserver optimistic-concurrency
-        precondition, so a concurrent update between the two requests turns
-        into a 409 instead of applying a patch to a different revision."""
+        """Bind a patch to a GET revision using optimistic concurrency."""
         rv = (current.get("metadata") or {}).get("resourceVersion")
         if rv:
             body.setdefault("metadata", {})["resourceVersion"] = str(rv)

@@ -1909,6 +1909,23 @@ async def test_scale_object_patches_scale_subresource() -> None:
     assert result.generation == 9
 
 
+async def test_scale_object_writes_when_generation_read_is_unavailable() -> None:
+    client = KubeClient()
+    write = AsyncMock(return_value=b'{"kind":"Scale","metadata":{"resourceVersion":"43"}}')
+    with (
+        patch.object(client, "_request_json", AsyncMock(side_effect=RuntimeError("forbidden"))),
+        patch.object(client, "_request_write", write),
+    ):
+        result = await client.scale_object(_deploy_meta(), "default", "web", 5, uid="deploy-uid")
+
+    assert write.await_args is not None
+    assert write.await_args.kwargs["body"] == {
+        "spec": {"replicas": 5},
+        "metadata": {"uid": "deploy-uid"},
+    }
+    assert result.generation is None
+
+
 async def test_rollout_restart_patches_restartedAt_annotation() -> None:
     client = KubeClient()
     api = _write_api()
