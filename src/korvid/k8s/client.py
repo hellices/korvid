@@ -10,7 +10,7 @@ import logging
 import re
 import ssl
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Mapping, Sequence
-from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from contextlib import AbstractAsyncContextManager, asynccontextmanager, suppress
 from datetime import datetime, timedelta
 from typing import Any, cast
 from urllib.parse import urlencode
@@ -25,6 +25,7 @@ from korvid.k8s import pulse
 from korvid.k8s.columns import CustomColumn, evaluate_all
 from korvid.k8s.components import ComponentRef, manifest_components
 from korvid.k8s.csp import ProviderInfo, detect_provider
+from korvid.k8s.deployment_outcomes import iter_raw_object_pages, list_raw_object_page
 from korvid.k8s.discovery import PODS_META, ResourceMeta
 from korvid.k8s.drain import DrainPlan, build_drain_plan
 from korvid.k8s.dryrun import diff_manifests
@@ -50,7 +51,7 @@ from korvid.k8s.pulse import path_segment as _path_segment
 from korvid.k8s.reads import ReadOps
 from korvid.k8s.telemetry import ReadOperation, ReadTelemetry, ReadTelemetryEvent
 from korvid.k8s.watch_events import WatchEvent, WatchProgress
-from korvid.k8s.writes import WriteOps
+from korvid.k8s.writes import WriteMutationResult, WriteOps
 
 logger = logging.getLogger(__name__)
 _AIOHTTP_CLIENT_ERROR = (
@@ -216,11 +217,16 @@ class KubeClient(ReadOps, WriteOps, pulse.PulseReader):
         self._custom_columns: Mapping[str, tuple[CustomColumn, ...]] = {
             kind: columns for kind, columns in (custom_columns or {}).items() if kind != "secrets"
         }
+
         #: pods/resize discovery result; None until the first successful check.
         self._pod_resize_supported: bool | None = None
         #: cloud provider detection result; None until the first lookup.
         self._provider_info: ProviderInfo | None = None
         self._read_telemetry = read_telemetry
+
+    def connected_api_server(self) -> str | None:
+        """Return the active API server without rereading kubeconfig."""
+        return self._api.configuration.host or None if self._api is not None else None
 
     @staticmethod
     def _namespaces_path() -> str:
@@ -691,34 +697,17 @@ class KubeClient(ReadOps, WriteOps, pulse.PulseReader):
         """Read bounded LIST pages and project only summaries the caller consumes."""
         if self._api is None:
             raise RuntimeError("connect() first")
-        path = self._list_path(meta, namespace)
-        continuation = ""
-        seen_continuations: set[str] = set()
-        while True:
-            query = [("limit", str(LIST_PAGE_SIZE))]
-            if continuation:
-                query.append(("continue", continuation))
-            try:
-                data = await self._request_json(path, query_params=query)
-                items, next_token = _parse_list_page(data)
-            except ApiStatusError as exc:
-                self._observe_read_error(path, exc)
-                raise
-            except KubeClientError:
-                self._observe_read("error", path)
-                raise
-            self._observe_read("list", path, payload=data, object_count=len(items))
-            for item in items:
-                yield self._object_summary(meta, item)
-            if not next_token:
-                return
-            if next_token in seen_continuations:
-                self._observe_read("error", path)
-                raise KubeClientError("LIST continuation did not advance")
-            seen_continuations.add(next_token)
-            continuation = next_token
-            del data, items
-            await asyncio.sleep(0)
+        pages = iter_raw_object_pages(
+            meta,
+            namespace,
+            page_size=LIST_PAGE_SIZE,
+            list_path=self._list_path,
+            request_json=self._request_json,
+            observe=self._observe_read,
+            observe_error=self._observe_read_error,
+        )
+        async for item in pages:
+            yield self._object_summary(meta, item)
 
     async def list_objects(self, meta: ResourceMeta, namespace: str | None) -> list[GenericSummary]:
         """LIST any resource kind and return GenericSummary items.
@@ -736,6 +725,26 @@ class KubeClient(ReadOps, WriteOps, pulse.PulseReader):
         items = data.get("items", [])
         self._observe_read("list", path, payload=data, object_count=len(items))
         return [self._object_summary(meta, item) for item in items]
+
+    async def list_raw_objects(
+        self,
+        meta: ResourceMeta,
+        namespace: str | None,
+        *,
+        label_selector: str | None,
+        limit: int,
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """Return one bounded raw LIST page and whether more items exist."""
+        return await list_raw_object_page(
+            meta,
+            namespace,
+            label_selector,
+            limit,
+            list_path=self._list_path,
+            request_json=self._request_json,
+            observe=self._observe_read,
+            observe_error=self._observe_read_error,
+        )
 
     async def list_relationship_objects(
         self, meta: ResourceMeta, namespace: str | None
@@ -1044,10 +1053,6 @@ class KubeClient(ReadOps, WriteOps, pulse.PulseReader):
 
     @staticmethod
     def _scale_patch(replicas: int, uid: str | None) -> dict[str, Any]:
-        """Merge-patch body for the /scale subresource. A ``uid`` in the
-        patched metadata is an apiserver precondition: the patch is rejected
-        with 409 when the object was recreated. Shared by the real write and
-        its dry-run preview so the two can never drift apart."""
         body: dict[str, Any] = {"spec": {"replicas": replicas}}
         if uid:
             body["metadata"] = {"uid": uid}
@@ -1081,14 +1086,26 @@ class KubeClient(ReadOps, WriteOps, pulse.PulseReader):
         replicas: int,
         *,
         uid: str | None = None,
-    ) -> None:
+    ) -> WriteMutationResult:
         """Set spec.replicas via the /scale subresource (merge patch)."""
-        await self._request_write(
-            f"{self._object_path(meta, namespace, name)}/scale",
+        path = self._object_path(meta, namespace, name)
+        correlate = meta.group == "apps" and meta.plural == "deployments"
+        current: dict[str, Any] = {}
+        if correlate:
+            with suppress(Exception):
+                current = await self._request_json(path)
+        body = self._scale_patch(replicas, uid)
+        if correlate:
+            body = self._pin_revision(body, current)
+        raw = await self._request_write(
+            f"{path}/scale",
             "PATCH",
-            body=self._scale_patch(replicas, uid),
+            body=body,
             content_type="application/merge-patch+json",
         )
+        if correlate:
+            return WriteMutationResult.from_scale_snapshot(current, replicas)
+        return WriteMutationResult.from_response(raw)
 
     async def rollout_restart(
         self, meta: ResourceMeta, namespace: str | None, name: str, *, uid: str | None = None
@@ -1104,15 +1121,16 @@ class KubeClient(ReadOps, WriteOps, pulse.PulseReader):
         *,
         uid: str | None = None,
         restarted_at: str | None = None,
-    ) -> None:
+    ) -> WriteMutationResult:
         """Restart whose patch body carries the caller-provided stamp, so the
         approved write is byte-identical to the previewed dry run."""
-        await self._request_write(
+        raw = await self._request_write(
             self._object_path(meta, namespace, name),
             "PATCH",
             body=self._restart_patch(uid, restarted_at),
             content_type="application/strategic-merge-patch+json",
         )
+        return WriteMutationResult.from_response(raw)
 
     @staticmethod
     def _resize_patch(
@@ -1361,13 +1379,8 @@ class KubeClient(ReadOps, WriteOps, pulse.PulseReader):
 
     @staticmethod
     def _pin_revision(body: dict[str, Any], current: dict[str, Any]) -> dict[str, Any]:
-        """Bind a dry-run patch to the GET snapshot it will be diffed against:
-        metadata.resourceVersion is an apiserver optimistic-concurrency
-        precondition, so a concurrent update between the two requests turns
-        into a 409 (preview degrades to None) instead of a diff that mixes
-        two revisions the server never evaluated together. Preview-only: the
-        approved write is pinned by uid, not frozen to this revision."""
-        rv = (current.get("metadata") or {}).get("resourceVersion")
+        metadata = current.get("metadata")
+        rv = metadata.get("resourceVersion") if isinstance(metadata, dict) else None
         if rv:
             body.setdefault("metadata", {})["resourceVersion"] = str(rv)
         return body
@@ -1897,19 +1910,6 @@ def _resource_short_names(value: Any) -> tuple[str, ...]:
     if not isinstance(value, list):
         return ()
     return tuple(alias for alias in value if isinstance(alias, str) and alias)
-
-
-def _parse_list_page(data: dict[str, Any]) -> tuple[list[dict[str, Any]], str]:
-    items = data.get("items")
-    if not isinstance(items, list) or any(not isinstance(item, dict) for item in items):
-        raise _malformed_response_error()
-    metadata = data.get("metadata", {})
-    if not isinstance(metadata, Mapping):
-        raise _malformed_response_error()
-    continuation = metadata.get("continue", "")
-    if not isinstance(continuation, str):
-        raise _malformed_response_error()
-    return items, continuation
 
 
 def _parse_resource_list(data: dict[str, Any], *, group: str, version: str) -> list[ResourceMeta]:

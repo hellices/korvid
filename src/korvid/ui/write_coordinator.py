@@ -48,6 +48,7 @@ from korvid.core.relationships import GraphResource
 from korvid.core.store import ALL_NAMESPACES
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.errors import ApiStatusError
+from korvid.k8s.writes import WriteMutationResult
 from korvid.ui.action_availability import AvailabilityCode, UnavailableReason
 from korvid.ui.impact_preview import render_impact_lines, render_unavailable_lines
 from korvid.ui.ui_surface import UiSurface
@@ -56,7 +57,12 @@ from korvid.ui.widgets.confirm_screen import ConfirmScreen
 from korvid.ui.workspace_controller import ContextGuard
 from korvid.ui.workspace_ports import RelationshipLoading
 from korvid.ui.workspace_state import PaneState
-from korvid.ui.write_gate import ReservedWrite, WriteGate
+from korvid.ui.write_gate import (
+    AcceptedWriteObserver,
+    AcceptedWriteReceipt,
+    ReservedWrite,
+    WriteGate,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -720,10 +726,11 @@ class WriteCoordinator(WriteGate):
         meta: ResourceMeta,
         namespace: str | None,
         name: str,
-        op_factory: Callable[[], Awaitable[None]],
+        op_factory: Callable[[], Awaitable[object | None]],
         detail: str = "",
         *,
         precondition: Callable[[], Awaitable[bool]] | None = None,
+        on_accepted: AcceptedWriteObserver | None = None,
     ) -> Coroutine[Any, Any, str]:
         """Execute an approved write with fail-closed auditing (AGENTS.md):
         the intent record must persist *before* the mutation - if it cannot,
@@ -750,6 +757,7 @@ class WriteCoordinator(WriteGate):
                 op_factory,
                 detail,
                 precondition=precondition,
+                on_accepted=on_accepted,
             )
         )
 
@@ -759,10 +767,11 @@ class WriteCoordinator(WriteGate):
         meta: ResourceMeta,
         namespace: str | None,
         name: str,
-        op_factory: Callable[[], Awaitable[None]],
+        op_factory: Callable[[], Awaitable[object | None]],
         detail: str,
         *,
         precondition: Callable[[], Awaitable[bool]] | None,
+        on_accepted: AcceptedWriteObserver | None,
     ) -> str:
         """The reserved body: the whole span publishes an in-flight progress
         label (issue #143) — between approval and the outcome toast there was
@@ -777,6 +786,7 @@ class WriteCoordinator(WriteGate):
                 op_factory,
                 detail,
                 precondition=precondition,
+                on_accepted=on_accepted,
             )
 
     async def _run_write_inner(
@@ -785,10 +795,11 @@ class WriteCoordinator(WriteGate):
         meta: ResourceMeta,
         namespace: str | None,
         name: str,
-        op_factory: Callable[[], Awaitable[None]],
+        op_factory: Callable[[], Awaitable[object | None]],
         detail: str,
         *,
         precondition: Callable[[], Awaitable[bool]] | None,
+        on_accepted: AcceptedWriteObserver | None,
     ) -> str:
         kind = meta.plural
         if precondition is not None:
@@ -814,7 +825,7 @@ class WriteCoordinator(WriteGate):
             )
             return "blocked: audit log unavailable"
         try:
-            await op_factory()
+            result = await op_factory()
         except ApiStatusError as exc:
             with contextlib.suppress(Exception):
                 await self.audit_write(action, meta, namespace, name, detail, f"error: {exc}")
@@ -838,6 +849,21 @@ class WriteCoordinator(WriteGate):
                 await self.audit_write(action, meta, namespace, name, detail, f"error: {exc}")
             self._ui.notify(f"{action} {kind}/{name} failed: {exc}", severity="error")
             return f"failed: {exc}"
+        mutation = result if isinstance(result, WriteMutationResult) else None
+        await self._finish(action, meta, namespace, name, detail, on_accepted, mutation)
+        self._ui.notify(f"{action} {kind}/{name}: done", severity="information")
+        return "done"
+
+    async def _finish(
+        self,
+        action: str,
+        meta: ResourceMeta,
+        namespace: str | None,
+        name: str,
+        detail: str,
+        observer: AcceptedWriteObserver | None,
+        mutation: WriteMutationResult | None,
+    ) -> None:
         try:
             await self.audit_write(action, meta, namespace, name, detail, "success")
         except Exception:
@@ -845,8 +871,35 @@ class WriteCoordinator(WriteGate):
             self._ui.notify(
                 "Audit log write failed (operation already executed)", severity="warning"
             )
-        self._ui.notify(f"{action} {kind}/{name}: done", severity="information")
-        return "done"
+            return
+        if observer is not None:
+            await self._notify_accepted_observer(action, meta, namespace, name, observer, mutation)
+
+    async def _notify_accepted_observer(
+        self,
+        action: str,
+        meta: ResourceMeta,
+        namespace: str | None,
+        name: str,
+        observer: AcceptedWriteObserver,
+        mutation: WriteMutationResult | None,
+    ) -> None:
+        receipt = AcceptedWriteReceipt.now(
+            action=action,
+            meta=meta,
+            namespace=namespace,
+            name=name,
+            mutation=mutation,
+        )
+        try:
+            await observer(receipt)
+        except Exception as exc:
+            logger.exception("accepted-write observer failed: %s", exc)
+            self._ui.notify(
+                f"{action} {meta.plural}/{name} accepted, but outcome verification "
+                f"could not start: {exc}",
+                severity="warning",
+            )
 
     async def run_shielded(
         self,
@@ -854,7 +907,7 @@ class WriteCoordinator(WriteGate):
         meta: ResourceMeta,
         ns: str | None,
         name: str,
-        op_factory: Callable[[], Awaitable[None]],
+        op_factory: Callable[[], Awaitable[object | None]],
         *,
         detail: str,
     ) -> str:
@@ -1018,7 +1071,7 @@ class WriteCoordinator(WriteGate):
         meta: ResourceMeta,
         namespace: str | None,
         name: str,
-        op_factory: Callable[[], Awaitable[None]],
+        op_factory: Callable[[], Awaitable[object | None]],
         detail: str = "",
         require_name: str | None = None,
         preview: list[str] | None = None,
@@ -1027,6 +1080,7 @@ class WriteCoordinator(WriteGate):
         impact_lines: tuple[str, ...] | None = None,
         approval_guard: Callable[[], bool] | None = None,
         precondition: Callable[[], Awaitable[bool]] | None = None,
+        on_accepted: AcceptedWriteObserver | None = None,
     ) -> None:
         """The standard write-approval flow (issue #91 U1): push a confirm
         dialog and, on approval, launch `run` on a supervised worker.
@@ -1072,6 +1126,7 @@ class WriteCoordinator(WriteGate):
                     op_factory,
                     detail=detail,
                     precondition=precondition,
+                    on_accepted=on_accepted,
                 )
             )
 
@@ -1110,7 +1165,7 @@ class WriteCoordinator(WriteGate):
         namespace: str | None,
         name: str,
         epoch: int,
-        op_factory: Callable[[], Awaitable[None]],
+        op_factory: Callable[[], Awaitable[object | None]],
     ) -> None:
         """Approval for an operation that runs as an interactive subprocess.
 

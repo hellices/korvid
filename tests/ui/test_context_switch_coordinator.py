@@ -424,6 +424,9 @@ class Env:
                 raise self.restore_error
             return self.result
 
+        async def stop_deployment_outcomes() -> None:
+            self.log("outcomes-stop")
+
         self.coordinator = ContextSwitchCoordinator(
             ui=self.ui,
             surface=self.surface,
@@ -445,6 +448,7 @@ class Env:
             list_contexts=list_contexts if wire_collaborators else None,
             probe_context=probe if wire_collaborators else None,
             switch_context=swap if wire_collaborators else None,
+            stop_deployment_outcomes=stop_deployment_outcomes,
         )
 
     async def switch(self, name: str = "ctx-b") -> None:
@@ -470,6 +474,7 @@ _SUCCESSFUL_ORDER = [
     "probe:ctx-b",
     "mcp-shutdown",
     "proposals-expired",
+    "outcomes-stop",
     "logs-close",
     "describe-hide",
     "workspace-quiesce",

@@ -78,11 +78,16 @@ def _wiring(
 
 async def test_a_scale_is_visible_through_the_shared_read_path() -> None:
     kube, writes, _journal = _wiring()
-    await writes.scale_object(_DEPLOY, "shop-a", "checkout-a", 3, uid=_UID)
+    changed = await writes.scale_object(_DEPLOY, "shop-a", "checkout-a", 3, uid=_UID)
+    unchanged = await writes.scale_object(_DEPLOY, "shop-a", "checkout-a", 3, uid=_UID)
     fetched = await kube.get_object(_DEPLOY, "shop-a", "checkout-a")
     assert fetched["spec"]["replicas"] == 3
     assert fetched["status"]["readyReplicas"] == 3
     assert fetched["metadata"]["resourceVersion"] != "1001"
+    assert changed.generation == 5
+    assert unchanged.generation == 5
+    assert fetched["metadata"]["generation"] == 5
+    assert fetched["status"]["observedGeneration"] == 5
 
 
 async def test_reads_still_return_deep_copies() -> None:

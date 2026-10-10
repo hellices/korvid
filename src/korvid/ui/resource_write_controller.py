@@ -46,6 +46,8 @@ from korvid.k8s.drain import DrainPlan
 from korvid.k8s.olm import OPERATORS_GROUP
 from korvid.k8s.writes import WriteOps, restart_stamp
 from korvid.ui.action_availability import UnavailableReason
+from korvid.ui.deployment_outcome_controller import DeploymentOutcomeController
+from korvid.ui.deployment_outcome_writes import restart_observer, scale_observer
 from korvid.ui.drain import DrainController
 from korvid.ui.node_impact_preview import (
     compose_node_maintenance_lines,
@@ -229,6 +231,7 @@ class ResourceWriteController:
         helm_cli_unavailable_reason: Callable[[], UnavailableReason | None],
         helm_release_identity_reason: Callable[[], UnavailableReason | None],
         operators: OperatorUninstalls,
+        deployment_outcomes: DeploymentOutcomeController,
     ) -> None:
         self._writes = writes
         self._view = view
@@ -242,6 +245,7 @@ class ResourceWriteController:
         self._pod_resize_supported = pod_resize_supported
         self._helm_uninstall = helm_uninstall
         self._operators = operators
+        self._deployment_outcomes = deployment_outcomes
         #: The in-flight drain worker, if any - pressing the drain key again
         #: cancels it (evictions stop; the node stays cordoned).
         self._drain_worker: CancellableWork | None = None
@@ -511,6 +515,7 @@ class ResourceWriteController:
             preview=preview,
             managed_note=note,
             impact_lines=impact,
+            on_accepted=restart_observer(self._deployment_outcomes, target, stamp),
         )
 
     # ------------------------------------------------------------------
@@ -851,6 +856,7 @@ class ResourceWriteController:
             approval_guard=lambda: self._scale_intact(
                 target, current, phase="the confirmation dialog"
             ),
+            on_accepted=scale_observer(self._deployment_outcomes, target, replicas),
         )
 
     # ------------------------------------------------------------------

@@ -11,11 +11,50 @@ the object was deleted and recreated under the same name meanwhile.
 from __future__ import annotations
 
 import abc
+import json
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.drain import DrainPlan
+
+
+@dataclass(frozen=True, slots=True)
+class WriteMutationResult:
+    """Bounded API response evidence available after an accepted mutation."""
+
+    generation: int | None = None
+
+    @classmethod
+    def from_response(cls, raw: bytes) -> WriteMutationResult:
+        """Extract non-sensitive correlation evidence from a write response."""
+
+        try:
+            generation = json.loads(raw).get("metadata", {}).get("generation")
+        except (AttributeError, json.JSONDecodeError, UnicodeDecodeError):
+            generation = None
+        valid = isinstance(generation, int) and not isinstance(generation, bool)
+        return cls(generation=generation if valid else None)
+
+    @classmethod
+    def from_scale_snapshot(cls, current: dict[str, Any], replicas: int) -> WriteMutationResult:
+        """Derive the generation produced by an RV-pinned scale mutation."""
+        metadata = current.get("metadata")
+        spec = current.get("spec")
+        generation = metadata.get("generation") if isinstance(metadata, dict) else None
+        resource_version = metadata.get("resourceVersion") if isinstance(metadata, dict) else None
+        old_replicas = spec.get("replicas") if isinstance(spec, dict) else None
+        if (
+            not isinstance(resource_version, str)
+            or not resource_version
+            or not isinstance(generation, int)
+            or isinstance(generation, bool)
+            or not isinstance(old_replicas, int)
+            or isinstance(old_replicas, bool)
+        ):
+            return cls()
+        return cls(generation=generation + int(old_replicas != replicas))
 
 
 def restart_stamp() -> str:
@@ -44,7 +83,7 @@ class WriteOps(abc.ABC):
         replicas: int,
         *,
         uid: str | None = None,
-    ) -> None:
+    ) -> WriteMutationResult | None:
         """Set spec.replicas via the /scale subresource."""
 
     @abc.abstractmethod
@@ -61,7 +100,7 @@ class WriteOps(abc.ABC):
         *,
         uid: str | None = None,
         restarted_at: str | None = None,
-    ) -> None:
+    ) -> WriteMutationResult:
         """Timestamp-aware restart hook for exact preview replay (issue #19).
         Non-abstract on purpose: subclasses implementing only the original
         ``rollout_restart`` signature keep working - the default drops
@@ -69,6 +108,7 @@ class WriteOps(abc.ABC):
         ``preview_rollout_restart`` should override this so the executed
         write sends the exact ``restarted_at`` value the preview showed."""
         await self.rollout_restart(meta, namespace, name, uid=uid)
+        return WriteMutationResult()
 
     @abc.abstractmethod
     async def replace_object(

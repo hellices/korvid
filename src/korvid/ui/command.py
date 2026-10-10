@@ -94,6 +94,22 @@ COMMANDS: tuple[CommandDescriptor, ...] = (
         palette=PaletteCommand("Open Pulse / Problems", "pulse", ("problems", "warnings")),
     ),
     CommandDescriptor(
+        aliases=("outcomes", "deployment-outcomes"),
+        help=(
+            (
+                ":outcomes|:deployment-outcomes",
+                "Inspect newest Deployment scale/restart outcome",
+            ),
+        ),
+        operation=BuiltinOperation.DEPLOYMENT_OUTCOMES,
+        maximum_arguments=0,
+        palette=PaletteCommand(
+            "Deployment operation result",
+            "outcomes",
+            ("deployment", "scale", "restart", "rollout"),
+        ),
+    ),
+    CommandDescriptor(
         aliases=("q", "quit"),
         help=((":q", "Quit (also :quit)"),),
         operation=CommandParse.QUIT,

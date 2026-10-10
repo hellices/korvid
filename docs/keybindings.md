@@ -10,6 +10,7 @@ Korvid shows only the keys that act on the current view. Press `?` for the compl
 |---|---|
 | `:` | Open the command bar |
 | `:pulse` / `:problems` | Inspect [current problems, recent warnings, and coverage](pulse.md) |
+| `:outcomes` / `:deployment-outcomes` | Open the latest bounded Deployment scale/restart outcome |
 | `Ctrl-P` | Search app actions and built-in commands by intent |
 | `:keys` / `:keybindings` | Edit, review, and save app keybindings |
 | `:slots` / `:ns-slots` | Preview and repack the `1`–`9` namespace shortcuts |
@@ -78,6 +79,13 @@ still needs its own fresh keystroke.
 | Nodes | `c` cordon · `u` uncordon · `Shift-D` drain |
 | Helm releases | `i` install · `u` upgrade · `h` revisions |
 | Helm revisions | `r` rollback |
+
+Only Deployment scale and restart start a convergence tracker. The write
+confirmation still means only that the API accepted the request; `:outcomes`
+shows the separately observed controller result. In that modal, `Enter`, `e`,
+`d`, and `l` act on an evidence Pod only when its UID still matches; `r`
+reopens the latest snapshot, `x` stops observation, and `Esc` closes without
+stopping it.
 
 ## Remap an app action
 

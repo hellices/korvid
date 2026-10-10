@@ -11,6 +11,7 @@ from korvid.ui.widgets.action_palette import ActionPaletteScreen
 from korvid.ui.widgets.agent_setup_screen import AgentSetupScreen
 from korvid.ui.widgets.confirm_screen import ConfirmScreen, ImagePrompt, ReplicasPrompt
 from korvid.ui.widgets.containers_screen import ContainersScreen
+from korvid.ui.widgets.deployment_outcome_screen import DeploymentOutcomeScreen
 from korvid.ui.widgets.describe_screen import DescribeScreen
 from korvid.ui.widgets.helm_chart_search import HelmChartSearchScreen
 from korvid.ui.widgets.helm_install import ChartReadmeScreen, HelmInstallPrompt
@@ -42,6 +43,7 @@ _MODAL_SCREEN_TYPES: tuple[type[DOMNode], ...] = (
     ReplicasPrompt,
     ContainersScreen,
     DescribeScreen,
+    DeploymentOutcomeScreen,
     HelmChartSearchScreen,
     ChartReadmeScreen,
     HelmInstallPrompt,

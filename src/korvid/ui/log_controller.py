@@ -30,7 +30,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import datetime
 from typing import Protocol
 
@@ -65,6 +65,7 @@ _MAX_RECONNECT_ATTEMPTS = 5
 #: triple that also carries the namespace for reopen/toggle bookkeeping.
 Source = tuple[str, str]
 Triple = tuple[str, str, str]
+TargetUid = Callable[[str, str | None, str], Awaitable[str | None]]
 
 #: Actions that drive the *visible* log pane rather than the focused view.
 #: `ActionPolicy` gates their bindings on the same fact; this is the
@@ -222,6 +223,7 @@ class LogController:
         ui: UiSurface,
         get_log_pane: Callable[[], LogPaneView],
         get_stream_logs: Callable[[], StreamLogsFn | None],
+        target_uid: TargetUid,
         pod_containers: Callable[[str, str], tuple[str, ...]],
         selected_ns_name: SelectedNsName,
         visible_pod_keys: Callable[[], list[str]],
@@ -239,6 +241,7 @@ class LogController:
         self._ui = ui
         self._get_log_pane = get_log_pane
         self._get_stream_logs = get_stream_logs
+        self._target_uid = target_uid
         self._pod_containers = pod_containers
         self._selected_ns_name = selected_ns_name
         self._visible_pod_keys = visible_pod_keys
@@ -258,6 +261,8 @@ class LogController:
         self._error: bool = False
         #: (ns, pod, container) triples currently shown; drives toggle/reopen.
         self._current_triples: list[Triple] = []
+        #: Exact UID required by outcome-originated streams, including previous logs.
+        self._expected_uid: str | None = None
         #: Monotonic pane generation: bumped on every open and close so a
         #: slow agent open can detect a user pane change and stand down.
         self._pane_gen: int = 0
@@ -472,6 +477,22 @@ class LogController:
             return [(namespace, name, ctr) for ctr in containers]
         return [(namespace, name, "")]
 
+    async def open_named_logs(self, namespace: str, name: str, *, expected_uid: str) -> None:
+        """Open live logs for an explicitly identified Pod name and UID."""
+
+        if self._get_stream_logs() is None:
+            self._ui.notify("Log streaming unavailable", severity="warning")
+            return
+        self._mode = "l"
+        triples = self._pod_triples(namespace, name)
+        await self.open_pane(
+            namespace,
+            [(pod, container) for _, pod, container in triples],
+            triples=triples,
+            epoch=self._ctx_epoch(),
+            expected_uid=expected_uid,
+        )
+
     async def _toggle_log_pod(self, namespace: str, name: str, epoch: int) -> None:
         """Add or remove *namespace/name* from the accumulated live-log panels."""
         existing = list(self._current_triples)
@@ -580,6 +601,7 @@ class LogController:
         force_prefix: bool = False,
         previous: bool = False,
         epoch: int | None = None,
+        expected_uid: str | None = None,
     ) -> None:
         """Show the log pane and spawn one streaming task per (pod, container).
 
@@ -611,6 +633,7 @@ class LogController:
             sources = sources[:MAX_PANELS]
 
         self._current_triples = list(triples)
+        self._expected_uid = expected_uid
         self._force_prefix = force_prefix
         self._owner = self._focused_pane()
 
@@ -635,21 +658,38 @@ class LogController:
 
         for ns, pod, container in triples:
             task: asyncio.Task[None] = asyncio.create_task(
-                self._spawn_log_stream(ns, pod, container, previous=previous)
+                self._spawn_log_stream(
+                    ns, pod, container, previous=previous, expected_uid=expected_uid
+                )
             )
             self._tasks.add(task)
 
     async def _spawn_log_stream(
-        self, namespace: str, pod: str, container: str, *, previous: bool = False
+        self,
+        namespace: str,
+        pod: str,
+        container: str,
+        *,
+        previous: bool = False,
+        expected_uid: str | None = None,
     ) -> None:
         """Delegate to the appropriate streaming coroutine based on follow flag."""
         stream_logs = self._get_stream_logs()
         if stream_logs is None:
             return
         if previous:
+            if expected_uid is not None and not await self._pod_uid_matches(
+                namespace, pod, expected_uid
+            ):
+                self._error = True
+                self._get_log_pane().set_state("error")
+                self._discard_task(asyncio.current_task())
+                return
             await self._previous_log_stream(namespace, pod, container, stream_logs)
         else:
-            await self._live_log_stream(namespace, pod, container, stream_logs)
+            await self._live_log_stream(
+                namespace, pod, container, stream_logs, expected_uid=expected_uid
+            )
 
     async def _live_log_stream(
         self,
@@ -657,6 +697,8 @@ class LogController:
         pod: str,
         container: str,
         stream_logs: StreamLogsFn,
+        *,
+        expected_uid: str | None = None,
     ) -> None:
         """Retry loop for live (follow=True) streams.
 
@@ -672,6 +714,13 @@ class LogController:
         replay = _ReplayFilter()
 
         while True:
+            if expected_uid is not None and not await self._pod_uid_matches(
+                namespace, pod, expected_uid
+            ):
+                self._error = True
+                log_pane.set_state("error")
+                self._discard_task(current)
+                return
             replay.start_connection()
             try:
                 async for line in stream_logs(
@@ -703,6 +752,21 @@ class LogController:
             consecutive_failures += 1
             if not await self._pause_before_reconnect(log_pane, current, consecutive_failures):
                 return
+
+    async def _pod_uid_matches(self, namespace: str, pod: str, expected_uid: str) -> bool:
+        try:
+            live_uid = await self._target_uid("pods", namespace, pod)
+        except Exception:
+            live_uid = None
+        if live_uid == expected_uid:
+            return True
+        if not self._error:
+            self._ui.notify(
+                "Pod identity changed; refresh the Deployment outcome",
+                severity="warning",
+                markup=False,
+            )
+        return False
 
     def _mark_stream_healthy(self, log_pane: LogPaneView, consecutive_failures: int) -> None:
         """Restore the streaming indicator after a successful reconnect."""
@@ -817,6 +881,7 @@ class LogController:
         self._pane_gen += 1
         await self.cancel_tasks()
         self._current_triples = []
+        self._expected_uid = None
         self._force_prefix = False
         self._mode = ""
         self._owner = None
@@ -912,6 +977,7 @@ class LogController:
         epoch = self._ctx_epoch()
         triples = list(self._current_triples)
         force_prefix = self._force_prefix
+        expected_uid = self._expected_uid
         sources = [(pod, ctr) for _, pod, ctr in triples]
         # Cancel live tasks without hiding the pane.
         await self.cancel_tasks()
@@ -919,7 +985,13 @@ class LogController:
         # Re-open with previous=True (clears RichLog, writes banner, spawns tasks).
         ns0 = triples[0][0]
         await self.open_pane(
-            ns0, sources, triples=triples, force_prefix=force_prefix, previous=True, epoch=epoch
+            ns0,
+            sources,
+            triples=triples,
+            force_prefix=force_prefix,
+            previous=True,
+            epoch=epoch,
+            expected_uid=expected_uid,
         )
 
     def search_next(self) -> None:

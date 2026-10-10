@@ -27,6 +27,16 @@ from korvid.k8s.watch_events import WatchEvent, WatchProgress
 _T = TypeVar("_T")
 
 
+def test_connected_api_server_reads_active_client_without_kubeconfig_io() -> None:
+    kube = KubeClient()
+    assert kube.connected_api_server() is None
+    api = MagicMock()
+    api.configuration.host = "https://cluster.example"
+    kube._api = api
+
+    assert kube.connected_api_server() == "https://cluster.example"
+
+
 async def _watch_rows(events: AsyncIterator[WatchEvent[_T]]) -> list[tuple[str, _T]]:
     rows: list[tuple[str, _T]] = []
     async for event in events:
@@ -1870,13 +1880,126 @@ async def test_delete_object_encodes_segments() -> None:
 async def test_scale_object_patches_scale_subresource() -> None:
     client = KubeClient()
     api = _write_api()
-    with patch.object(client, "_api", api):
-        await client.scale_object(_deploy_meta(), "default", "web", 5)
+    api.call_api.return_value.read.return_value = (
+        b'{"apiVersion":"autoscaling/v1","kind":"Scale",'
+        b'"metadata":{"resourceVersion":"43"},"spec":{"replicas":5}}'
+    )
+    with (
+        patch.object(client, "_api", api),
+        patch.object(
+            client,
+            "_request_json",
+            AsyncMock(
+                return_value={
+                    "metadata": {"generation": 8, "resourceVersion": "42"},
+                    "spec": {"replicas": 3},
+                }
+            ),
+        ),
+    ):
+        result = await client.scale_object(_deploy_meta(), "default", "web", 5)
     args, kwargs = api.call_api.call_args
     assert args[0] == "/apis/apps/v1/namespaces/default/deployments/web/scale"
     assert args[1] == "PATCH"
-    assert kwargs["body"] == {"spec": {"replicas": 5}}
+    assert kwargs["body"] == {
+        "spec": {"replicas": 5},
+        "metadata": {"resourceVersion": "42"},
+    }
     assert kwargs["header_params"]["Content-Type"] == "application/merge-patch+json"
+    assert result.generation == 9
+
+
+async def test_scale_object_writes_when_generation_read_is_unavailable() -> None:
+    client = KubeClient()
+    write = AsyncMock(return_value=b'{"kind":"Scale","metadata":{"resourceVersion":"43"}}')
+    with (
+        patch.object(client, "_request_json", AsyncMock(side_effect=RuntimeError("forbidden"))),
+        patch.object(client, "_request_write", write),
+    ):
+        result = await client.scale_object(_deploy_meta(), "default", "web", 5, uid="deploy-uid")
+
+    assert write.await_args is not None
+    assert write.await_args.kwargs["body"] == {
+        "spec": {"replicas": 5},
+        "metadata": {"uid": "deploy-uid"},
+    }
+    assert result.generation is None
+
+
+async def test_scale_object_requires_resource_version_for_generation_correlation() -> None:
+    client = KubeClient()
+    with (
+        patch.object(
+            client,
+            "_request_json",
+            AsyncMock(return_value={"metadata": {"generation": 8}, "spec": {"replicas": 3}}),
+        ),
+        patch.object(client, "_request_write", AsyncMock(return_value=b'{"kind":"Scale"}')),
+    ):
+        result = await client.scale_object(_deploy_meta(), "default", "web", 5)
+
+    assert result.generation is None
+
+
+async def test_scale_object_writes_when_correlation_metadata_is_malformed() -> None:
+    client = KubeClient()
+    write = AsyncMock(return_value=b'{"kind":"Scale"}')
+    with (
+        patch.object(
+            client,
+            "_request_json",
+            AsyncMock(return_value={"metadata": "invalid", "spec": {"replicas": 3}}),
+        ),
+        patch.object(client, "_request_write", write),
+    ):
+        result = await client.scale_object(_deploy_meta(), "default", "web", 5, uid="deploy-uid")
+
+    assert write.await_args is not None
+    assert write.await_args.kwargs["body"] == {
+        "spec": {"replicas": 5},
+        "metadata": {"uid": "deploy-uid"},
+    }
+    assert result.generation is None
+
+
+async def test_scale_object_treats_malformed_snapshot_as_missing_correlation() -> None:
+    client = KubeClient()
+    with (
+        patch.object(
+            client,
+            "_request_json",
+            AsyncMock(return_value={"metadata": {"generation": 8}, "spec": "invalid"}),
+        ),
+        patch.object(client, "_request_write", AsyncMock(return_value=b'{"kind":"Scale"}')),
+    ):
+        result = await client.scale_object(_deploy_meta(), "default", "web", 5)
+
+    assert result.generation is None
+
+
+async def test_non_deployment_scale_preserves_uid_only_mutation() -> None:
+    client = KubeClient()
+    read = AsyncMock(side_effect=AssertionError("correlation GET must not run"))
+    write = AsyncMock(return_value=b'{"kind":"Scale"}')
+    with (
+        patch.object(client, "_request_json", read),
+        patch.object(client, "_request_write", write),
+    ):
+        result = await client.scale_object(
+            ResourceMeta("StatefulSet", "statefulsets", "apps", "v1", True),
+            "default",
+            "db",
+            5,
+            uid="statefulset-uid",
+        )
+
+    assert read.await_count == 0
+    assert write.await_args is not None
+    assert write.await_args.kwargs["body"] == {
+        "spec": {"replicas": 5},
+        "metadata": {"uid": "statefulset-uid"},
+    }
+    assert result.generation is None
 
 
 async def test_rollout_restart_patches_restartedAt_annotation() -> None:
@@ -2190,14 +2313,16 @@ async def test_rollout_restart_with_stamp_pins_provided_stamp() -> None:
     stamp shown in the preview is the stamp the write sends."""
     client = KubeClient()
     api = _write_api()
+    api.call_api.return_value.read.return_value = b'{"metadata":{"generation":8}}'
     with patch.object(client, "_api", api):
-        await client.rollout_restart_with_stamp(
+        result = await client.rollout_restart_with_stamp(
             _deploy_meta(), "default", "web", uid="u-1", restarted_at="2026-07-26T00:00:00+00:00"
         )
     kwargs = api.call_api.call_args[1]
     annotations = kwargs["body"]["spec"]["template"]["metadata"]["annotations"]
     assert annotations["kubectl.kubernetes.io/restartedAt"] == "2026-07-26T00:00:00+00:00"
     assert kwargs["body"]["metadata"] == {"uid": "u-1"}
+    assert result.generation == 8
 
 
 async def test_create_object_requires_namespace_for_namespaced_kind() -> None:

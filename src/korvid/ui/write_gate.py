@@ -18,11 +18,50 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable, Coroutine
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any, TypeVar
 
 from korvid.k8s.discovery import ResourceMeta
+from korvid.k8s.writes import WriteMutationResult
 
 _ResultT = TypeVar("_ResultT")
+
+
+@dataclass(frozen=True, slots=True)
+class AcceptedWriteReceipt:
+    """Facts available only after a mutation and its success audit."""
+
+    action: str
+    meta: ResourceMeta
+    namespace: str | None
+    name: str
+    accepted_at: str
+    mutation: WriteMutationResult | None = None
+
+    @classmethod
+    def now(
+        cls,
+        *,
+        action: str,
+        meta: ResourceMeta,
+        namespace: str | None,
+        name: str,
+        mutation: WriteMutationResult | None = None,
+    ) -> AcceptedWriteReceipt:
+        """Build a UTC receipt at the accepted-write boundary."""
+
+        return cls(
+            action=action,
+            meta=meta,
+            namespace=namespace,
+            name=name,
+            accepted_at=datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+            mutation=mutation,
+        )
+
+
+AcceptedWriteObserver = Callable[[AcceptedWriteReceipt], Awaitable[None]]
 
 
 class WriteGate(ABC):
@@ -38,13 +77,14 @@ class WriteGate(ABC):
         meta: ResourceMeta,
         namespace: str | None,
         name: str,
-        op_factory: Callable[[], Awaitable[None]],
+        op_factory: Callable[[], Awaitable[object | None]],
         detail: str = "",
         require_name: str | None = None,
         preview: list[str] | None = None,
         preview_title: str = "server dry-run preview:",
         managed_note: str | None = None,
         precondition: Callable[[], Awaitable[bool]] | None = None,
+        on_accepted: AcceptedWriteObserver | None = None,
     ) -> None:
         """Ask the user to approve `operation`, then run it if they agree.
 
@@ -69,7 +109,7 @@ class WriteGate(ABC):
         namespace: str | None,
         name: str,
         epoch: int,
-        op_factory: Callable[[], Awaitable[None]],
+        op_factory: Callable[[], Awaitable[object | None]],
     ) -> None:
         """Approve an operation whose approved form is an interactive subprocess.
 
@@ -135,10 +175,11 @@ class WriteGate(ABC):
         meta: ResourceMeta,
         namespace: str | None,
         name: str,
-        op_factory: Callable[[], Awaitable[None]],
+        op_factory: Callable[[], Awaitable[object | None]],
         detail: str = "",
         *,
         precondition: Callable[[], Awaitable[bool]] | None = None,
+        on_accepted: AcceptedWriteObserver | None = None,
     ) -> Coroutine[Any, Any, str]:
         """Build the coroutine for an already-approved, fail-closed write.
 
