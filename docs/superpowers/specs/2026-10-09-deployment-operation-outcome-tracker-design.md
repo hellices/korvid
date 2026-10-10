@@ -237,8 +237,10 @@ Scale completes only when all available evidence agrees:
 - `unavailableReplicas` is absent or zero;
 - no explicit `ReplicaFailure=True` or failed `Progressing` condition exists.
 
-Scale-to-zero uses the same predicate with zero counts. Missing status fields
-remain unknown; they do not default to zero.
+Scale-to-zero uses the same predicate with zero counts. Once the controller
+has observed the current generation, omitted replica counters are normalized
+to zero because Kubernetes commonly omits zero-valued JSON fields; present but
+malformed counters remain unknown.
 
 A different later `spec.replicas` becomes `superseded`, not failure or
 success.

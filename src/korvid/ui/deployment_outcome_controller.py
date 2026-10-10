@@ -147,22 +147,23 @@ class DeploymentOutcomeController:
     ) -> AcceptedWriteObserver | None:
         """Build the post-success observer for an exact Deployment scale."""
 
-        target = self._target(epoch=epoch, namespace=namespace, name=name, uid=uid)
-        if target is None:
-            return None
+        target, correlation_error = self._target(
+            epoch=epoch, namespace=namespace, name=name, uid=uid
+        )
 
         async def _accepted(receipt: AcceptedWriteReceipt) -> None:
             if receipt.action != "scale":
                 raise ValueError("scale observer received another write action")
             generation = receipt.mutation.generation if receipt.mutation is not None else None
+            error = correlation_error
             if generation is None:
-                raise ValueError("scale response did not include metadata.generation")
+                error = "scale response did not include metadata.generation"
             intent = DeploymentScaleIntent(
                 target=target,
                 replicas=replicas,
-                generation=generation,
+                generation=generation if generation is not None else -1,
             )
-            self._start(intent, receipt.accepted_at)
+            self._start(intent, receipt.accepted_at, incomplete_reason=error)
 
         return _accepted
 
@@ -177,22 +178,23 @@ class DeploymentOutcomeController:
     ) -> AcceptedWriteObserver | None:
         """Build the post-success observer for an exact Deployment restart."""
 
-        target = self._target(epoch=epoch, namespace=namespace, name=name, uid=uid)
-        if target is None:
-            return None
+        target, correlation_error = self._target(
+            epoch=epoch, namespace=namespace, name=name, uid=uid
+        )
 
         async def _accepted(receipt: AcceptedWriteReceipt) -> None:
             if receipt.action != "rollout_restart":
                 raise ValueError("restart observer received another write action")
             generation = receipt.mutation.generation if receipt.mutation is not None else None
+            error = correlation_error
             if generation is None:
-                raise ValueError("restart response did not include metadata.generation")
+                error = "restart response did not include metadata.generation"
             intent = DeploymentRestartIntent(
                 target=target,
                 restarted_at=restarted_at,
-                generation=generation,
+                generation=generation if generation is not None else -1,
             )
-            self._start(intent, receipt.accepted_at)
+            self._start(intent, receipt.accepted_at, incomplete_reason=error)
 
         return _accepted
 
@@ -203,21 +205,35 @@ class DeploymentOutcomeController:
         namespace: str | None,
         name: str,
         uid: str | None,
-    ) -> DeploymentOperationTarget | None:
-        if self._reader is None:
-            return None
+    ) -> tuple[DeploymentOperationTarget, str | None]:
         cluster_id = self._cluster_id()
-        if namespace is None or uid is None or cluster_id is None:
-            return None
-        return DeploymentOperationTarget(
+        missing = [
+            label
+            for value, label in (
+                (self._reader, "Deployment reader"),
+                (namespace, "namespace"),
+                (uid, "UID"),
+                (cluster_id, "cluster identity"),
+            )
+            if value is None
+        ]
+        target = DeploymentOperationTarget(
             epoch=epoch,
-            cluster_id=cluster_id,
-            namespace=namespace,
+            cluster_id=cluster_id or "",
+            namespace=namespace or "",
             name=name,
-            uid=uid,
+            uid=uid or "",
         )
+        reason = f"missing correlation evidence: {', '.join(missing)}" if missing else None
+        return target, reason
 
-    def _start(self, intent: DeploymentOperationIntent, accepted_at: str) -> None:
+    def _start(
+        self,
+        intent: DeploymentOperationIntent,
+        accepted_at: str,
+        *,
+        incomplete_reason: str | None = None,
+    ) -> None:
         tracker_id = f"deployment-outcome-{self._next_id}"
         self._next_id += 1
         self._evict_if_full()
@@ -225,9 +241,20 @@ class DeploymentOutcomeController:
             tracker_id=tracker_id,
             intent=intent,
             accepted_at=accepted_at,
-            outcome=_accepted_outcome(),
+            outcome=(
+                _incomplete_outcome(incomplete_reason)
+                if incomplete_reason is not None
+                else _accepted_outcome()
+            ),
         )
         self._started[tracker_id] = self._clock()
+        if incomplete_reason is not None:
+            self._ui.notify(
+                self._snapshots[tracker_id].outcome.summary,
+                severity="warning",
+            )
+            self.open_latest()
+            return
         self._ui.notify(
             f"{intent.target.name}: API request accepted; verifying Deployment convergence"
         )

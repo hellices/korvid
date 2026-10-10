@@ -5,8 +5,6 @@ import dataclasses
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-import pytest
-
 from korvid.core.deployment_outcome import (
     DeploymentOutcomePhase,
     DeploymentRestartIntent,
@@ -278,7 +276,7 @@ async def test_restart_observer_carries_exact_restart_stamp() -> None:
     assert latest.outcome.phase is DeploymentOutcomePhase.COMPLETED
 
 
-async def test_restart_without_response_generation_does_not_start_tracker() -> None:
+async def test_restart_without_response_generation_is_retained_incomplete() -> None:
     controller, _ui = _controller(_Reader([_raw()]))
     observer = controller.restart_observer(
         epoch=4,
@@ -289,10 +287,12 @@ async def test_restart_without_response_generation_does_not_start_tracker() -> N
     )
     assert observer is not None
 
-    with pytest.raises(ValueError, match=r"metadata\.generation"):
-        await observer(dataclasses.replace(_receipt(), action="rollout_restart", mutation=None))
+    await observer(dataclasses.replace(_receipt(), action="rollout_restart", mutation=None))
 
-    assert controller.latest() is None
+    latest = controller.latest()
+    assert latest is not None
+    assert latest.outcome.phase is DeploymentOutcomePhase.INCOMPLETE
+    assert "generation" in latest.outcome.summary
 
 
 async def test_context_change_stops_before_another_cluster_read() -> None:
@@ -341,7 +341,7 @@ async def test_reader_failure_is_incomplete_not_failed_write() -> None:
     assert "accepted" in latest.outcome.summary.lower()
 
 
-async def test_missing_identity_refuses_to_build_observer() -> None:
+async def test_missing_identity_retains_incomplete_outcome() -> None:
     controller, _ui = _controller(_Reader([_raw()]))
 
     observer = controller.scale_observer(
@@ -352,7 +352,12 @@ async def test_missing_identity_refuses_to_build_observer() -> None:
         replicas=3,
     )
 
-    assert observer is None
+    assert observer is not None
+    await observer(_receipt())
+    latest = controller.latest()
+    assert latest is not None
+    assert latest.outcome.phase is DeploymentOutcomePhase.INCOMPLETE
+    assert "UID" in latest.outcome.summary
 
 
 async def test_registry_keeps_at_most_three_trackers() -> None:

@@ -53,7 +53,7 @@ class DeploymentOutcomePodActions:
         elif verb == "logs":
             await self._logs(namespace, name)
         elif verb == "events":
-            await self._show_events(namespace, name, uid)
+            await self._show_events(epoch, namespace, name, uid)
 
     async def _identity_intact(self, epoch: int, namespace: str, name: str, uid: str) -> bool:
         intact = not self._context.crossed(epoch)
@@ -72,10 +72,12 @@ class DeploymentOutcomePodActions:
             )
         return intact
 
-    async def _show_events(self, namespace: str, name: str, uid: str) -> None:
+    async def _show_events(self, epoch: int, namespace: str, name: str, uid: str) -> None:
         events = self._events()
         if events is None:
             self._ui.notify("Events unavailable in this session", severity="warning")
             return
         rows = await events.fetch(namespace, name, uid=uid)
+        if self._context.crossed(epoch):
+            return
         await self._ui.push_screen(HintDetailScreen(f"Events for pod/{namespace}/{name}", (), rows))
