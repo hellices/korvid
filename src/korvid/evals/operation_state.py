@@ -447,10 +447,15 @@ class StatefulFakeWriteOps(WriteOps):
             pre_state={"spec.replicas": before},
             result="started",
         )
+        generation = int(manifest.get("metadata", {}).get("generation", 0))
+        if before != replicas:
+            generation += 1
+            manifest.setdefault("metadata", {})["generation"] = generation
         manifest.setdefault("spec", {})["replicas"] = replicas
         self._bump(manifest)
         if self._state.reconcile_status:
             status = manifest.setdefault("status", {})
+            status["observedGeneration"] = generation
             status["replicas"] = replicas
             status["readyReplicas"] = replicas
             status["availableReplicas"] = replicas
@@ -464,7 +469,6 @@ class StatefulFakeWriteOps(WriteOps):
             post_state={"spec.replicas": replicas},
             result="success",
         )
-        generation = int(manifest.get("metadata", {}).get("generation", 0))
         return WriteMutationResult(generation=generation)
 
     async def rollout_restart(

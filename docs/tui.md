@@ -69,8 +69,8 @@ Three keys answer three different questions, so none of them replaces another:
 
 After an approved Deployment scale or rollout restart, korvid separately
 tracks whether the controller converges. API acceptance is never presented as
-completion. Open the newest retained result with `:outcomes` or **Open latest
-Deployment outcome** in the Action Palette. The bounded tracker reports
+completion. Open the newest retained result with `:outcomes` or **Deployment
+operation result** in the Action Palette. The bounded tracker reports
 completed, stalled, superseded, replaced, stopped, or incomplete evidence and
 retains at most three results for roughly five minutes of observation.
 Context switching stops old-cluster trackers before the client is replaced.
