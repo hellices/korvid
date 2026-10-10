@@ -3,14 +3,18 @@ from typing import Any, cast
 
 import pytest
 
+from korvid.k8s.errors import ApiStatusError
 from korvid.ui.deployment_outcome_actions import DeploymentOutcomePodActions
 from korvid.ui.ui_surface import UiSurface
 from korvid.ui.workspace_controller import ContextGuard, WorkspaceController
 
 
 class _Ui:
-    def notify(self, *args: Any, **kwargs: Any) -> None:
-        return None
+    def __init__(self) -> None:
+        self.notifications: list[str] = []
+
+    def notify(self, message: str, *args: Any, **kwargs: Any) -> None:
+        self.notifications.append(message)
 
 
 class _Context:
@@ -60,6 +64,33 @@ async def test_pod_reads_use_explicit_outcome_identity(verb: str) -> None:
         else ("logs", "workloads", "tracked-pod")
     )
     assert calls == [expected]
+
+
+async def test_deleted_evidence_pod_reports_identity_change() -> None:
+    ui = _Ui()
+
+    async def target_uid(kind: str, namespace: str | None, name: str) -> str:
+        raise ApiStatusError(404, "Not Found")
+
+    async def describe(namespace: str, name: str, uid: str) -> None:
+        raise AssertionError("describe must not run")
+
+    async def logs(namespace: str, name: str) -> None:
+        raise AssertionError("logs must not run")
+
+    actions = DeploymentOutcomePodActions(
+        ui=cast(UiSurface, ui),
+        target_uid=target_uid,
+        context=cast(ContextGuard, _Context()),
+        workspace=cast("Callable[[], WorkspaceController]", _Workspace),
+        describe=describe,
+        logs=logs,
+        events=lambda: None,
+    )
+
+    await actions("describe", 4, "workloads", "deleted-pod", "pod-uid")
+
+    assert ui.notifications == ["Pod identity changed; refresh the Deployment outcome"]
 
 
 async def test_context_change_during_uid_lookup_blocks_pod_action() -> None:

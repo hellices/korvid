@@ -423,7 +423,7 @@ class StatefulFakeWriteOps(WriteOps):
         replicas: int,
         *,
         uid: str | None = None,
-    ) -> None:
+    ) -> WriteMutationResult:
         if meta.kind not in _SCALABLE_KINDS:
             self._unsupported(
                 "scale",
@@ -464,6 +464,8 @@ class StatefulFakeWriteOps(WriteOps):
             post_state={"spec.replicas": replicas},
             result="success",
         )
+        generation = int(manifest.get("metadata", {}).get("generation", 0))
+        return WriteMutationResult(generation=generation)
 
     async def rollout_restart(
         self, meta: ResourceMeta, namespace: str | None, name: str, *, uid: str | None = None

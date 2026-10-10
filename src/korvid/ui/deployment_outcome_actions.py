@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 
+from korvid.k8s.errors import ApiStatusError
 from korvid.ui.hints import EventsFetcher
 from korvid.ui.ui_surface import UiSurface
 from korvid.ui.widgets.hint_detail import HintDetailScreen
@@ -56,7 +57,12 @@ class DeploymentOutcomePodActions:
 
     async def _identity_intact(self, epoch: int, namespace: str, name: str, uid: str) -> bool:
         intact = not self._context.crossed(epoch)
-        live_uid = await self._target_uid("pods", namespace, name) if intact else None
+        try:
+            live_uid = await self._target_uid("pods", namespace, name) if intact else None
+        except ApiStatusError as exc:
+            if exc.status != 404:
+                raise
+            live_uid = None
         intact = intact and not self._context.crossed(epoch) and live_uid == uid
         if not intact:
             self._ui.notify(

@@ -104,9 +104,10 @@ class Recorder(WriteOps):
         replicas: int,
         *,
         uid: str | None = None,
-    ) -> None:
+    ) -> WriteMutationResult:
         self.uids.append(uid)
         self.calls.append(("scale", meta.plural, namespace, name, replicas))
+        return WriteMutationResult(generation=3)
 
     async def rollout_restart(
         self, meta: ResourceMeta, namespace: str | None, name: str, *, uid: str | None = None

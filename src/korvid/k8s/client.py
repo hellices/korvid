@@ -1090,14 +1090,15 @@ class KubeClient(ReadOps, WriteOps, pulse.PulseReader):
         replicas: int,
         *,
         uid: str | None = None,
-    ) -> None:
+    ) -> WriteMutationResult:
         """Set spec.replicas via the /scale subresource (merge patch)."""
-        await self._request_write(
+        raw = await self._request_write(
             f"{self._object_path(meta, namespace, name)}/scale",
             "PATCH",
             body=self._scale_patch(replicas, uid),
             content_type="application/merge-patch+json",
         )
+        return WriteMutationResult.from_response(raw)
 
     async def rollout_restart(
         self, meta: ResourceMeta, namespace: str | None, name: str, *, uid: str | None = None

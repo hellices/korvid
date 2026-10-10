@@ -1880,13 +1880,15 @@ async def test_delete_object_encodes_segments() -> None:
 async def test_scale_object_patches_scale_subresource() -> None:
     client = KubeClient()
     api = _write_api()
+    api.call_api.return_value.read.return_value = b'{"metadata":{"generation":8}}'
     with patch.object(client, "_api", api):
-        await client.scale_object(_deploy_meta(), "default", "web", 5)
+        result = await client.scale_object(_deploy_meta(), "default", "web", 5)
     args, kwargs = api.call_api.call_args
     assert args[0] == "/apis/apps/v1/namespaces/default/deployments/web/scale"
     assert args[1] == "PATCH"
     assert kwargs["body"] == {"spec": {"replicas": 5}}
     assert kwargs["header_params"]["Content-Type"] == "application/merge-patch+json"
+    assert result.generation == 8
 
 
 async def test_rollout_restart_patches_restartedAt_annotation() -> None:

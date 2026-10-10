@@ -64,7 +64,7 @@ class WriteOps(abc.ABC):
         replicas: int,
         *,
         uid: str | None = None,
-    ) -> None:
+    ) -> WriteMutationResult | None:
         """Set spec.replicas via the /scale subresource."""
 
     @abc.abstractmethod

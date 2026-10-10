@@ -10,6 +10,7 @@ import pytest
 from korvid.core.deployment_outcome import (
     DeploymentOutcomePhase,
     DeploymentRestartIntent,
+    DeploymentScaleIntent,
 )
 from korvid.k8s.deployment_outcomes import (
     DeploymentOutcomeReader,
@@ -83,7 +84,7 @@ def _receipt(action: str = "scale") -> AcceptedWriteReceipt:
         namespace="default",
         name="web",
         accepted_at="2026-10-09T12:00:00Z",
-        mutation=(WriteMutationResult(generation=2) if action == "rollout_restart" else None),
+        mutation=WriteMutationResult(generation=2),
     )
 
 
@@ -94,6 +95,7 @@ def _controller(
     ui: FakeUi | None = None,
     sleep: Callable[[float], Awaitable[None]] | None = None,
     cluster: list[str] | None = None,
+    deadline_seconds: float = 300.0,
 ) -> tuple[DeploymentOutcomeController, FakeUi]:
     surface = ui or FakeUi()
     current_epoch = epoch or [4]
@@ -105,6 +107,7 @@ def _controller(
         sleep=sleep or asyncio.sleep,
         poll_delays=(0.0, 0.0),
         max_trackers=3,
+        deadline_seconds=deadline_seconds,
     )
     return controller, surface
 
@@ -131,6 +134,8 @@ async def test_scale_observer_reads_immediately_and_completes() -> None:
 
     latest = controller.latest()
     assert latest is not None
+    assert isinstance(latest.intent, DeploymentScaleIntent)
+    assert latest.intent.generation == 2
     assert latest.outcome.phase is DeploymentOutcomePhase.COMPLETED
     assert reader.calls == [("default", "web"), ("default", "web")]
 
@@ -285,7 +290,7 @@ async def test_restart_without_response_generation_does_not_start_tracker() -> N
     assert observer is not None
 
     with pytest.raises(ValueError, match=r"metadata\.generation"):
-        await observer(dataclasses.replace(_receipt(), action="rollout_restart"))
+        await observer(dataclasses.replace(_receipt(), action="rollout_restart", mutation=None))
 
     assert controller.latest() is None
 
@@ -408,6 +413,30 @@ async def test_late_read_cannot_overwrite_user_stop() -> None:
     final = controller.latest()
     assert final is not None
     assert final.outcome.phase is DeploymentOutcomePhase.STOPPED
+
+
+async def test_absolute_deadline_marks_hung_read_incomplete() -> None:
+    class HungReader(DeploymentOutcomeReader):
+        async def snapshot(self, namespace: str, name: str) -> RawDeploymentOutcomeSnapshot:
+            await asyncio.Future()
+            raise AssertionError("unreachable")
+
+    controller, ui = _controller(HungReader(), deadline_seconds=0.0)
+    observer = controller.scale_observer(
+        epoch=4,
+        namespace="default",
+        name="web",
+        uid="deploy-uid",
+        replicas=3,
+    )
+    assert observer is not None
+    await observer(_receipt())
+    await _drain(ui)
+
+    latest = controller.latest()
+    assert latest is not None
+    assert latest.outcome.phase is DeploymentOutcomePhase.INCOMPLETE
+    assert "deadline" in latest.outcome.summary
 
 
 async def test_cluster_change_during_read_discards_returned_evidence() -> None:

@@ -22,8 +22,12 @@ def _target() -> DeploymentOperationTarget:
     )
 
 
-def _scale(replicas: int = 3) -> DeploymentScaleIntent:
-    return DeploymentScaleIntent(target=_target(), replicas=replicas)
+def _scale(replicas: int = 3, generation: int = 7) -> DeploymentScaleIntent:
+    return DeploymentScaleIntent(
+        target=_target(),
+        replicas=replicas,
+        generation=generation,
+    )
 
 
 def _restart(
@@ -116,6 +120,15 @@ def test_scale_to_zero_completes_without_defaulting_missing_fields() -> None:
 
     assert complete.phase is DeploymentOutcomePhase.COMPLETED
     assert incomplete.phase is DeploymentOutcomePhase.OBSERVING
+
+
+def test_scale_with_later_generation_is_superseded() -> None:
+    outcome = evaluate_deployment_outcome(
+        _scale(3, generation=7),
+        _observation(generation=8, observed_generation=8),
+    )
+
+    assert outcome.phase is DeploymentOutcomePhase.SUPERSEDED
 
 
 def test_scale_is_superseded_when_live_target_changes() -> None:

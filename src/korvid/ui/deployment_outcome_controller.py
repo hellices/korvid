@@ -43,7 +43,7 @@ DEFAULT_POLL_DELAYS: tuple[float, ...] = (
     30.0,
     60.0,
     90.0,
-    87.0,
+    82.0,
 )
 
 
@@ -111,6 +111,7 @@ class DeploymentOutcomeController:
         max_trackers: int = 3,
         pod_action: OutcomePodAction | None = None,
         clock: Callable[[], float] = time.monotonic,
+        deadline_seconds: float = 300.0,
     ) -> None:
         if max_trackers < 1:
             raise ValueError("max_trackers must be positive")
@@ -118,6 +119,8 @@ class DeploymentOutcomeController:
             raise ValueError("poll_delays must not be empty")
         if any(delay < 0 for delay in poll_delays):
             raise ValueError("poll delays must not be negative")
+        if deadline_seconds < 0:
+            raise ValueError("deadline_seconds must not be negative")
         self._ui = ui
         self._reader = reader
         self._get_epoch = get_epoch
@@ -130,6 +133,7 @@ class DeploymentOutcomeController:
         self._next_id = 1
         self._pod_action = pod_action
         self._clock = clock
+        self._deadline_seconds = deadline_seconds
         self._started: dict[str, float] = {}
 
     def scale_observer(
@@ -146,11 +150,18 @@ class DeploymentOutcomeController:
         target = self._target(epoch=epoch, namespace=namespace, name=name, uid=uid)
         if target is None:
             return None
-        intent = DeploymentScaleIntent(target=target, replicas=replicas)
 
         async def _accepted(receipt: AcceptedWriteReceipt) -> None:
             if receipt.action != "scale":
                 raise ValueError("scale observer received another write action")
+            generation = receipt.mutation.generation if receipt.mutation is not None else None
+            if generation is None:
+                raise ValueError("scale response did not include metadata.generation")
+            intent = DeploymentScaleIntent(
+                target=target,
+                replicas=replicas,
+                generation=generation,
+            )
             self._start(intent, receipt.accepted_at)
 
         return _accepted
@@ -244,20 +255,15 @@ class DeploymentOutcomeController:
 
     async def _observe(self, tracker_id: str) -> None:
         try:
-            for attempt, delay in enumerate(self._poll_delays, start=1):
-                if attempt > 1:
-                    await self._sleep(delay)
-                if await self._observe_once(tracker_id, attempt):
-                    return
-            snapshot = self._snapshots.get(tracker_id)
-            self._update(
-                tracker_id,
-                _incomplete_outcome(
-                    "the five-minute observation deadline elapsed",
-                    snapshot.outcome if snapshot is not None else None,
-                ),
-                len(self._poll_delays),
-            )
+            async with asyncio.timeout(self._deadline_seconds):
+                for attempt, delay in enumerate(self._poll_delays, start=1):
+                    if attempt > 1:
+                        await self._sleep(delay)
+                    if await self._observe_once(tracker_id, attempt):
+                        return
+                self._mark_deadline_elapsed(tracker_id)
+        except TimeoutError:
+            self._mark_deadline_elapsed(tracker_id)
         except asyncio.CancelledError:
             snapshot = self._snapshots.get(tracker_id)
             if snapshot is not None and snapshot.outcome.phase in {
@@ -272,6 +278,17 @@ class DeploymentOutcomeController:
             raise
         finally:
             self._workers.pop(tracker_id, None)
+
+    def _mark_deadline_elapsed(self, tracker_id: str) -> None:
+        snapshot = self._snapshots.get(tracker_id)
+        self._update(
+            tracker_id,
+            _incomplete_outcome(
+                "the five-minute observation deadline elapsed",
+                snapshot.outcome if snapshot is not None else None,
+            ),
+            snapshot.attempts if snapshot is not None else len(self._poll_delays),
+        )
 
     async def _observe_once(self, tracker_id: str, attempt: int) -> bool:
         snapshot = self._snapshots.get(tracker_id)

@@ -40,7 +40,7 @@ def _snapshot(
     )
     return DeploymentTrackerSnapshot(
         tracker_id="tracker-1",
-        intent=DeploymentScaleIntent(target=target, replicas=3),
+        intent=DeploymentScaleIntent(target=target, replicas=3, generation=2),
         accepted_at="2026-10-09T12:00:00Z",
         outcome=DeploymentOutcome(
             phase=phase,

@@ -42,10 +42,11 @@ class DeploymentOperationTarget:
 
 @dataclass(frozen=True, slots=True)
 class DeploymentScaleIntent:
-    """Accepted request to set a Deployment's replica count."""
+    """Accepted replica target and the Deployment generation it produced."""
 
     target: DeploymentOperationTarget
     replicas: int
+    generation: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -422,6 +423,16 @@ def _observing_outcome(observation: DeploymentObservation) -> DeploymentOutcome:
 def _evaluate_scale(
     intent: DeploymentScaleIntent, observation: DeploymentObservation
 ) -> DeploymentOutcome:
+    if observation.generation != intent.generation:
+        if observation.generation is not None and observation.generation > intent.generation:
+            return DeploymentOutcome(
+                phase=DeploymentOutcomePhase.SUPERSEDED,
+                summary="Scale request was superseded by a later Deployment generation",
+                evidence=_progress_evidence(observation),
+                pods=observation.pods,
+                partial_evidence=observation.partial_evidence,
+            )
+        return _observing_outcome(observation)
     if observation.desired_replicas is not None and observation.desired_replicas != intent.replicas:
         return DeploymentOutcome(
             phase=DeploymentOutcomePhase.SUPERSEDED,
