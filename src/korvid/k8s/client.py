@@ -1377,8 +1377,8 @@ class KubeClient(ReadOps, WriteOps, pulse.PulseReader):
 
     @staticmethod
     def _pin_revision(body: dict[str, Any], current: dict[str, Any]) -> dict[str, Any]:
-        """Bind a patch to a GET revision using optimistic concurrency."""
-        rv = (current.get("metadata") or {}).get("resourceVersion")
+        metadata = current.get("metadata")
+        rv = metadata.get("resourceVersion") if isinstance(metadata, dict) else None
         if rv:
             body.setdefault("metadata", {})["resourceVersion"] = str(rv)
         return body
