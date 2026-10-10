@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import dataclasses
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 
 import pytest
@@ -178,6 +178,10 @@ class _Harness:
     refreshes: list[bool]
 
 
+async def _target_uid(_plural: str, _namespace: str | None, name: str) -> str | None:
+    return f"{name}-uid"
+
+
 async def _hanging_stream(
     namespace: str, pod: str, container: str, **_: Any
 ) -> AsyncIterator[LogLine]:
@@ -198,6 +202,7 @@ def make_harness(
     ctx_reads_allowed: bool = True,
     buffer_max_lines: int = 5000,
     get_log_pane: Callable[[], FakeLogPane] | None = None,
+    target_uid: Callable[[str, str | None, str], Awaitable[str | None]] = _target_uid,
 ) -> _Harness:
     ui = FakeUiSurface()
     pane = FakeLogPane()
@@ -207,6 +212,7 @@ def make_harness(
         ui=ui,
         get_log_pane=get_log_pane or (lambda: pane),
         get_stream_logs=lambda: stream_logs,
+        target_uid=target_uid,
         pod_containers=pod_containers or (lambda ns, name: ("main",)),
         selected_ns_name=lambda *, notify=True: selected,
         visible_pod_keys=visible_pod_keys or (lambda: []),
@@ -364,6 +370,29 @@ async def test_live_stream_gives_up_visibly_after_max_reconnects() -> None:
     assert any(
         n.severity == "error" and "reconnect attempts" in n.message for n in h.ui.notifications
     )
+
+
+async def test_named_log_reconnect_stops_when_pod_uid_changes() -> None:
+    attempts = 0
+    uids = iter(("web-uid", "replacement-uid"))
+
+    async def target_uid(_plural: str, _namespace: str | None, _name: str) -> str | None:
+        return next(uids)
+
+    async def failing(namespace: str, pod: str, container: str, **_: Any) -> AsyncIterator[LogLine]:
+        nonlocal attempts
+        attempts += 1
+        raise RuntimeError("reconnect")
+        yield  # pragma: no cover - marks this an async generator
+
+    h = make_harness(stream_logs=failing, target_uid=target_uid)
+    h.controller.reconnect_sleep = 0.0
+    await h.controller.open_named_logs("default", "web", expected_uid="web-uid")
+    await asyncio.gather(*h.controller.tasks, return_exceptions=True)
+
+    assert attempts == 1
+    assert h.pane.states[-1] == "error"
+    assert any("identity changed" in item.message for item in h.ui.notifications)
 
 
 async def test_action_log_previous_transitions_to_previous_mode() -> None:
@@ -544,7 +573,7 @@ def test_log_availability_reports_a_missing_stream_source() -> None:
 async def test_open_named_logs_refuses_a_missing_stream_source() -> None:
     h = make_harness(stream_logs=None)
 
-    await h.controller.open_named_logs("default", "web")
+    await h.controller.open_named_logs("default", "web", expected_uid="web-uid")
 
     assert h.pane.display is False
     assert h.ui.notifications == [_Notification("Log streaming unavailable", "warning", True)]

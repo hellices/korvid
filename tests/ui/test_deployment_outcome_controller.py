@@ -347,6 +347,7 @@ async def test_context_change_stops_before_another_cluster_read() -> None:
     latest = controller.latest()
     assert latest is not None
     assert latest.outcome.phase is DeploymentOutcomePhase.STOPPED
+    assert latest.outcome.evidence
     assert reader.calls == [("default", "web")]
 
 

@@ -43,9 +43,12 @@ class WriteMutationResult:
         metadata = current.get("metadata")
         spec = current.get("spec")
         generation = metadata.get("generation") if isinstance(metadata, dict) else None
+        resource_version = metadata.get("resourceVersion") if isinstance(metadata, dict) else None
         old_replicas = spec.get("replicas") if isinstance(spec, dict) else None
         if (
-            not isinstance(generation, int)
+            not isinstance(resource_version, str)
+            or not resource_version
+            or not isinstance(generation, int)
             or isinstance(generation, bool)
             or not isinstance(old_replicas, int)
             or isinstance(old_replicas, bool)

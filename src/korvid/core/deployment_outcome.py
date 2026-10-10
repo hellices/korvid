@@ -268,7 +268,7 @@ def _current_replica_set_uids(
             owned.append((uid, parsed_revision))
     revisions = [revision for _, revision in owned if revision is not None]
     if owned and len(revisions) != len(owned):
-        return frozenset(uid for uid, _revision in owned), True
+        return frozenset(), True
     newest = max(revisions) if revisions else None
     return (
         frozenset(uid for uid, revision in owned if newest is None or revision == newest),

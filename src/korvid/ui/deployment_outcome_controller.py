@@ -76,10 +76,13 @@ def _accepted_outcome() -> DeploymentOutcome:
     )
 
 
-def _stopped_outcome(reason: str) -> DeploymentOutcome:
+def _stopped_outcome(reason: str, previous: DeploymentOutcome | None = None) -> DeploymentOutcome:
     return DeploymentOutcome(
         phase=DeploymentOutcomePhase.STOPPED,
         summary=f"Outcome observation stopped: {reason}",
+        evidence=previous.evidence if previous is not None else (),
+        pods=previous.pods if previous is not None else (),
+        partial_evidence=previous.partial_evidence if previous is not None else False,
     )
 
 
@@ -299,7 +302,7 @@ class DeploymentOutcomeController:
             }:
                 self._update(
                     tracker_id,
-                    _stopped_outcome("observation was cancelled"),
+                    _stopped_outcome("observation was cancelled", snapshot.outcome),
                     snapshot.attempts,
                 )
             raise
@@ -331,7 +334,11 @@ class DeploymentOutcomeController:
         if snapshot is None:
             return True
         if not self._target_current(snapshot):
-            self._update(tracker_id, _stopped_outcome("kube context changed"), attempt - 1)
+            self._update(
+                tracker_id,
+                _stopped_outcome("kube context changed", snapshot.outcome),
+                attempt - 1,
+            )
             return True
         reader = self._reader
         if reader is None:
@@ -384,7 +391,7 @@ class DeploymentOutcomeController:
             return True
         self._update(
             tracker_id,
-            _stopped_outcome("kube context changed"),
+            _stopped_outcome("kube context changed", current.outcome),
             current.attempts,
         )
         return False
@@ -514,7 +521,7 @@ class DeploymentOutcomeController:
         worker = self._workers.pop(tracker_id, None)
         if worker is not None:
             worker.cancel()
-        self._update(tracker_id, _stopped_outcome(reason), snapshot.attempts)
+        self._update(tracker_id, _stopped_outcome(reason, snapshot.outcome), snapshot.attempts)
         return True
 
     async def stop_all(self, reason: str) -> None:
@@ -525,7 +532,11 @@ class DeploymentOutcomeController:
                 DeploymentOutcomePhase.ACCEPTED,
                 DeploymentOutcomePhase.OBSERVING,
             }:
-                self._update(tracker_id, _stopped_outcome(reason), snapshot.attempts)
+                self._update(
+                    tracker_id,
+                    _stopped_outcome(reason, snapshot.outcome),
+                    snapshot.attempts,
+                )
         await self._ui.cancel_workers(OUTCOME_WORKER_GROUP)
         self._workers.clear()
 

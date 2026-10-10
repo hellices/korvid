@@ -442,8 +442,20 @@ def test_unknown_replica_set_revision_marks_evidence_partial() -> None:
         }
     }
 
+    pod = {
+        "metadata": {
+            "name": "ambiguous-pod",
+            "namespace": "default",
+            "uid": "ambiguous-pod-uid",
+            "ownerReferences": [{"kind": "ReplicaSet", "uid": "ambiguous-rs", "controller": True}],
+        },
+        "status": {
+            "phase": "Pending",
+            "containerStatuses": [{"state": {"waiting": {"reason": "ImagePullBackOff"}}}],
+        },
+    }
     observation = normalize_deployment_observation(
-        RawDeploymentOutcomeSnapshot(deployment, (replica_set,), (), False)
+        RawDeploymentOutcomeSnapshot(deployment, (replica_set,), (pod,), False)
     )
 
     assert observation.partial_evidence

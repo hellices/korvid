@@ -22,7 +22,7 @@ class DeploymentOutcomePodActions:
         context: ContextGuard,
         workspace: Callable[[], WorkspaceController],
         describe: Callable[[str, str, str], Awaitable[None]],
-        logs: Callable[[str, str], Awaitable[None]],
+        logs: Callable[[str, str, str], Awaitable[None]],
         events: Callable[[], EventsFetcher | None],
     ) -> None:
         self._ui = ui
@@ -51,7 +51,7 @@ class DeploymentOutcomePodActions:
         if verb == "describe":
             await self._describe(namespace, name, uid)
         elif verb == "logs":
-            await self._logs(namespace, name)
+            await self._logs(namespace, name, uid)
         elif verb == "events":
             await self._show_events(epoch, namespace, name, uid)
 

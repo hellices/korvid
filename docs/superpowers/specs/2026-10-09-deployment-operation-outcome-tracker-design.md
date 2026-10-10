@@ -122,7 +122,9 @@ One snapshot performs:
 4. bounded collection of Pods selected by the Deployment;
 5. filtering by the Deployment's current ReplicaSet ownership chain where
    identity evidence is available;
-6. normalization into the core observation type.
+6. a second exact Deployment GET that discards related evidence if UID,
+   generation, or resource version changed during collection;
+7. normalization into the core observation type.
 
 Reads are namespace-scoped and capped. Pod evidence is limited to the small
 set needed to explain non-ready progress. Truncation marks diagnostic blocker
@@ -214,7 +216,7 @@ Actions:
 - `enter`: navigate to the selected affected Pod;
 - `e`: open that Pod's events;
 - `d`: open its describe view;
-- `l`: open logs.
+- `l`: open logs, revalidating the Pod UID before every connection or reconnect.
 
 Navigation carries namespace, name, and UID. The existing navigation routes
 must revalidate the object identity before opening evidence. If no exact Pod

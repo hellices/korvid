@@ -1926,6 +1926,21 @@ async def test_scale_object_writes_when_generation_read_is_unavailable() -> None
     assert result.generation is None
 
 
+async def test_scale_object_requires_resource_version_for_generation_correlation() -> None:
+    client = KubeClient()
+    with (
+        patch.object(
+            client,
+            "_request_json",
+            AsyncMock(return_value={"metadata": {"generation": 8}, "spec": {"replicas": 3}}),
+        ),
+        patch.object(client, "_request_write", AsyncMock(return_value=b'{"kind":"Scale"}')),
+    ):
+        result = await client.scale_object(_deploy_meta(), "default", "web", 5)
+
+    assert result.generation is None
+
+
 async def test_scale_object_treats_malformed_snapshot_as_missing_correlation() -> None:
     client = KubeClient()
     with (

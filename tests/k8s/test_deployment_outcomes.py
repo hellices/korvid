@@ -29,6 +29,7 @@ def _deployment(*, uid: str = "deploy-uid") -> dict[str, Any]:
             "namespace": "default",
             "uid": uid,
             "generation": 7,
+            "resourceVersion": "10",
         },
         "spec": {
             "replicas": 3,
@@ -180,6 +181,30 @@ async def test_snapshot_reads_exact_deployment_and_caps_owned_pod_evidence() -> 
     assert observation.partial_evidence is True
     assert observation.pod_evidence_ambiguous is False
     assert all(namespace == "default" for _, namespace, _, _ in api.calls)
+
+
+async def test_snapshot_discards_related_evidence_when_deployment_changes_during_read() -> None:
+    class ChangingApi(_Api):
+        def __init__(self) -> None:
+            super().__init__(replica_sets=[_replica_set(uid="rs-current", owner_uid="deploy-uid")])
+            self.gets = 0
+
+        async def get_object(
+            self, meta: ResourceMeta, namespace: str | None, name: str
+        ) -> dict[str, Any]:
+            self.gets += 1
+            deployment = _deployment()
+            if self.gets == 2:
+                deployment["metadata"]["generation"] = 8
+                deployment["metadata"]["resourceVersion"] = "11"
+            return deployment
+
+    raw = await _reader(ChangingApi()).snapshot("default", "web")
+
+    assert raw.deployment["metadata"]["generation"] == 8
+    assert raw.replica_sets == ()
+    assert raw.pods == ()
+    assert raw.pod_ownership_ambiguous is True
 
 
 async def test_snapshot_uses_server_side_deployment_selector() -> None:

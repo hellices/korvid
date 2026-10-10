@@ -45,8 +45,8 @@ async def test_pod_reads_use_explicit_outcome_identity(verb: str) -> None:
     async def describe(namespace: str, name: str, uid: str) -> None:
         calls.append(("describe", namespace, name, uid))
 
-    async def logs(namespace: str, name: str) -> None:
-        calls.append(("logs", namespace, name))
+    async def logs(namespace: str, name: str, uid: str) -> None:
+        calls.append(("logs", namespace, name, uid))
 
     actions = DeploymentOutcomePodActions(
         ui=cast(UiSurface, _Ui()),
@@ -66,7 +66,7 @@ async def test_pod_reads_use_explicit_outcome_identity(verb: str) -> None:
     expected = (
         ("describe", "workloads", "tracked-pod", "pod-uid")
         if verb == "describe"
-        else ("logs", "workloads", "tracked-pod")
+        else ("logs", "workloads", "tracked-pod", "pod-uid")
     )
     assert calls == [expected]
 
@@ -80,7 +80,7 @@ async def test_deleted_evidence_pod_reports_identity_change() -> None:
     async def describe(namespace: str, name: str, uid: str) -> None:
         raise AssertionError("describe must not run")
 
-    async def logs(namespace: str, name: str) -> None:
+    async def logs(namespace: str, name: str, uid: str) -> None:
         raise AssertionError("logs must not run")
 
     actions = DeploymentOutcomePodActions(
@@ -113,7 +113,7 @@ async def test_context_change_during_event_fetch_discards_rows() -> None:
     async def describe(namespace: str, name: str, uid: str) -> None:
         raise AssertionError("describe must not run")
 
-    async def logs(namespace: str, name: str) -> None:
+    async def logs(namespace: str, name: str, uid: str) -> None:
         raise AssertionError("logs must not run")
 
     actions = DeploymentOutcomePodActions(
@@ -146,7 +146,7 @@ async def test_context_change_during_uid_lookup_blocks_pod_action() -> None:
     async def describe(namespace: str, name: str, uid: str) -> None:
         raise AssertionError("describe must not run")
 
-    async def logs(namespace: str, name: str) -> None:
+    async def logs(namespace: str, name: str, uid: str) -> None:
         raise AssertionError("logs must not run")
 
     actions = DeploymentOutcomePodActions(

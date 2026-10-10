@@ -1096,7 +1096,6 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
         protected_context=inputs.protected_context,
     )
     writes_ref.bind(writes)
-    outcome_events = inputs.get_events
     deployment_outcomes = DeploymentOutcomeController(
         ui=AppUiSurface(app),
         reader=inputs.deployment_outcome_reader,
@@ -1110,8 +1109,8 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
             describe=lambda ns, name, uid: inspect_controller.describe_named(
                 "pods", ns, name, expected_uid=uid
             ),
-            logs=lambda ns, name: logs_ref.get().open_named_logs(ns, name),
-            events=lambda: outcome_events,
+            logs=lambda ns, name, uid: logs_ref.get().open_named_logs(ns, name, expected_uid=uid),
+            events=lambda: inputs.get_events,
         ),
     )
     bridge_dispatch = AppContextDispatch()
@@ -1242,6 +1241,7 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
         ui=AppUiSurface(app),
         get_log_pane=lambda: app._log_pane,
         get_stream_logs=lambda: app._stream_logs,
+        target_uid=app._target_uid,
         pod_containers=inspect_controller.pod_containers,
         selected_ns_name=view.selected_ns_name,
         visible_pod_keys=lambda: [str(row.key.value) for row in app._focused_table().ordered_rows],
