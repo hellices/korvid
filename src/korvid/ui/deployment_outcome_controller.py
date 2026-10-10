@@ -452,6 +452,9 @@ class DeploymentOutcomeController:
                 markup=False,
             )
             return
+        self._present_snapshot(snapshot)
+
+    def _present_snapshot(self, snapshot: DeploymentTrackerSnapshot) -> None:
         try:
             from korvid.ui.widgets.deployment_outcome_screen import DeploymentOutcomeScreen
 
@@ -468,12 +471,7 @@ class DeploymentOutcomeController:
         elif verb == "refresh" and isinstance(tracker_id, str):
             snapshot = self._snapshots.get(tracker_id)
             if snapshot is not None:
-                from korvid.ui.widgets.deployment_outcome_screen import DeploymentOutcomeScreen
-
-                self._ui.push_screen(
-                    DeploymentOutcomeScreen(snapshot),
-                    self._on_screen_result,
-                )
+                self._ui.call_later(self._present_snapshot, snapshot)
         elif (
             verb in {"goto", "events", "describe", "logs"}
             and isinstance(tracker_id, str)

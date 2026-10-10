@@ -261,6 +261,8 @@ class LogController:
         self._error: bool = False
         #: (ns, pod, container) triples currently shown; drives toggle/reopen.
         self._current_triples: list[Triple] = []
+        #: Exact UID required by outcome-originated streams, including previous logs.
+        self._expected_uid: str | None = None
         #: Monotonic pane generation: bumped on every open and close so a
         #: slow agent open can detect a user pane change and stand down.
         self._pane_gen: int = 0
@@ -631,6 +633,7 @@ class LogController:
             sources = sources[:MAX_PANELS]
 
         self._current_triples = list(triples)
+        self._expected_uid = expected_uid
         self._force_prefix = force_prefix
         self._owner = self._focused_pane()
 
@@ -675,6 +678,13 @@ class LogController:
         if stream_logs is None:
             return
         if previous:
+            if expected_uid is not None and not await self._pod_uid_matches(
+                namespace, pod, expected_uid
+            ):
+                self._error = True
+                self._get_log_pane().set_state("error")
+                self._discard_task(asyncio.current_task())
+                return
             await self._previous_log_stream(namespace, pod, container, stream_logs)
         else:
             await self._live_log_stream(
@@ -871,6 +881,7 @@ class LogController:
         self._pane_gen += 1
         await self.cancel_tasks()
         self._current_triples = []
+        self._expected_uid = None
         self._force_prefix = False
         self._mode = ""
         self._owner = None
@@ -966,6 +977,7 @@ class LogController:
         epoch = self._ctx_epoch()
         triples = list(self._current_triples)
         force_prefix = self._force_prefix
+        expected_uid = self._expected_uid
         sources = [(pod, ctr) for _, pod, ctr in triples]
         # Cancel live tasks without hiding the pane.
         await self.cancel_tasks()
@@ -973,7 +985,13 @@ class LogController:
         # Re-open with previous=True (clears RichLog, writes banner, spawns tasks).
         ns0 = triples[0][0]
         await self.open_pane(
-            ns0, sources, triples=triples, force_prefix=force_prefix, previous=True, epoch=epoch
+            ns0,
+            sources,
+            triples=triples,
+            force_prefix=force_prefix,
+            previous=True,
+            epoch=epoch,
+            expected_uid=expected_uid,
         )
 
     def search_next(self) -> None:

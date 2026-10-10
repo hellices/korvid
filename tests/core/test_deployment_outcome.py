@@ -249,6 +249,40 @@ def test_progress_deadline_and_non_ready_pod_are_stalled() -> None:
     assert "ProgressDeadlineExceeded" in outcome.summary
 
 
+def test_malformed_boolean_condition_status_does_not_stall() -> None:
+    deployment = {
+        "metadata": {"uid": "deploy-uid", "generation": 7},
+        "spec": {"replicas": 3},
+        "status": {
+            "observedGeneration": 7,
+            "conditions": [{"type": "ReplicaFailure", "status": True, "reason": "FailedCreate"}],
+        },
+    }
+
+    observation = normalize_deployment_observation(
+        RawDeploymentOutcomeSnapshot(deployment, (), (), False)
+    )
+    outcome = evaluate_deployment_outcome(_scale(), observation)
+
+    assert outcome.phase is DeploymentOutcomePhase.OBSERVING
+
+
+def test_malformed_numeric_deployment_uid_is_incomplete() -> None:
+    deployment = {
+        "metadata": {"uid": 7, "generation": 7},
+        "spec": {"replicas": 3},
+        "status": {"observedGeneration": 7},
+    }
+
+    observation = normalize_deployment_observation(
+        RawDeploymentOutcomeSnapshot(deployment, (), (), False)
+    )
+    outcome = evaluate_deployment_outcome(_scale(), observation)
+
+    assert observation.uid == ""
+    assert outcome.phase is DeploymentOutcomePhase.INCOMPLETE
+
+
 def test_replica_failure_is_stalled_without_pod_evidence() -> None:
     condition = DeploymentCondition(
         type="ReplicaFailure",

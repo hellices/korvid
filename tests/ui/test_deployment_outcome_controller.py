@@ -189,6 +189,30 @@ async def test_open_latest_presents_newest_retained_tracker() -> None:
     assert callback is not None
 
 
+async def test_refresh_defers_modal_reopen_until_after_dismissal() -> None:
+    controller, ui = _controller(_Reader([_raw()]))
+    observer = controller.scale_observer(
+        epoch=4,
+        namespace="default",
+        name="web",
+        uid="deploy-uid",
+        replicas=3,
+    )
+    assert observer is not None
+    await observer(_receipt())
+    await _drain(ui)
+    snapshot = controller.latest()
+    assert snapshot is not None
+    screen_count = len(ui.screens)
+
+    controller._on_screen_result(("refresh", snapshot.tracker_id, "", "", ""))
+
+    assert len(ui.screens) == screen_count
+    callback, args = ui.deferred[-1]
+    callback(*args)
+    assert len(ui.screens) == screen_count + 1
+
+
 async def test_read_failure_preserves_last_confirmed_evidence() -> None:
     reader = _Reader([_raw(ready=1), RuntimeError("offline")])
     controller, ui = _controller(reader)

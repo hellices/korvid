@@ -171,10 +171,11 @@ def _condition_entries(status: Mapping[str, Any]) -> tuple[DeploymentCondition, 
         condition_type = str(condition.get("type") or "")
         if condition_type not in _RELEVANT_CONDITIONS:
             continue
+        raw_status = condition.get("status")
         conditions.append(
             DeploymentCondition(
                 type=condition_type,
-                status=str(condition.get("status") or ""),
+                status=raw_status if isinstance(raw_status, str) else "",
                 reason=_bounded_text(
                     condition.get("reason"), f"deployment.status.conditions[{index}].reason"
                 ),
@@ -289,7 +290,8 @@ def normalize_deployment_observation(
     metadata = _mapping(deployment.get("metadata"))
     spec = _mapping(deployment.get("spec"))
     status = _mapping(deployment.get("status"))
-    live_uid = str(metadata.get("uid") or "")
+    raw_uid = metadata.get("uid")
+    live_uid = raw_uid if isinstance(raw_uid, str) else ""
     replica_set_uids, ambiguous_replica_sets = _current_replica_set_uids(
         raw.replica_sets,
         live_uid,
