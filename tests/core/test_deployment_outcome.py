@@ -56,6 +56,7 @@ def _observation(
     conditions: tuple[DeploymentCondition, ...] = (),
     pods: tuple[DeploymentPodEvidence, ...] = (),
     partial_evidence: bool = False,
+    pod_evidence_ambiguous: bool = False,
 ) -> DeploymentObservation:
     return DeploymentObservation(
         uid=uid,
@@ -71,6 +72,7 @@ def _observation(
         conditions=conditions,
         pods=pods,
         partial_evidence=partial_evidence,
+        pod_evidence_ambiguous=pod_evidence_ambiguous,
     )
 
 
@@ -284,7 +286,7 @@ def test_partial_evidence_never_completes_converged_scale() -> None:
     assert outcome.phase is DeploymentOutcomePhase.OBSERVING
 
 
-def test_partial_pod_blocker_does_not_stall_operation() -> None:
+def test_ambiguous_pod_blocker_does_not_stall_operation() -> None:
     blocker = DeploymentPodEvidence(
         namespace="default",
         name="old-pod",
@@ -296,10 +298,34 @@ def test_partial_pod_blocker_does_not_stall_operation() -> None:
 
     outcome = evaluate_deployment_outcome(
         _scale(),
-        _observation(ready=1, available=1, pods=(blocker,), partial_evidence=True),
+        _observation(
+            ready=1,
+            available=1,
+            pods=(blocker,),
+            partial_evidence=True,
+            pod_evidence_ambiguous=True,
+        ),
     )
 
     assert outcome.phase is DeploymentOutcomePhase.OBSERVING
+
+
+def test_truncated_current_pod_blocker_stalls_operation() -> None:
+    blocker = DeploymentPodEvidence(
+        namespace="default",
+        name="current-pod",
+        uid="current-pod-uid",
+        phase="Pending",
+        reason="ImagePullBackOff",
+        message="current rollout",
+    )
+
+    outcome = evaluate_deployment_outcome(
+        _scale(),
+        _observation(ready=1, available=1, pods=(blocker,), partial_evidence=True),
+    )
+
+    assert outcome.phase is DeploymentOutcomePhase.STALLED
 
 
 def test_restart_with_removed_marker_is_superseded() -> None:

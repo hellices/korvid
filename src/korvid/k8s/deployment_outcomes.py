@@ -30,6 +30,7 @@ class RawDeploymentOutcomeSnapshot:
     replica_sets: tuple[dict[str, Any], ...]
     pods: tuple[dict[str, Any], ...]
     partial: bool
+    pod_ownership_ambiguous: bool = False
 
 
 class DeploymentOutcomeReader(ABC):
@@ -106,7 +107,7 @@ class KubeDeploymentOutcomeReader(DeploymentOutcomeReader):
         spec = _mapping(deployment.get("spec"))
         selector, selector_partial = _selector_text(spec.get("selector"))
         if selector is None:
-            return RawDeploymentOutcomeSnapshot(deployment, (), (), True)
+            return RawDeploymentOutcomeSnapshot(deployment, (), (), True, True)
         replica_sets, replica_sets_partial = await self._list_raw_objects(
             REPLICA_SET_META,
             namespace,
@@ -124,6 +125,7 @@ class KubeDeploymentOutcomeReader(DeploymentOutcomeReader):
             replica_sets=tuple(replica_sets),
             pods=tuple(pods),
             partial=selector_partial or replica_sets_partial or pods_partial,
+            pod_ownership_ambiguous=selector_partial or replica_sets_partial,
         )
 
 

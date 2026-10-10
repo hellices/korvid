@@ -100,6 +100,7 @@ class DeploymentObservation:
     conditions: tuple[DeploymentCondition, ...] = ()
     pods: tuple[DeploymentPodEvidence, ...] = ()
     partial_evidence: bool = False
+    pod_evidence_ambiguous: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -330,6 +331,7 @@ def normalize_deployment_observation(
         partial_evidence=(
             raw.partial or ambiguous_replica_sets or len(all_pod_evidence) > max_pod_evidence
         ),
+        pod_evidence_ambiguous=raw.pod_ownership_ambiguous or ambiguous_replica_sets,
     )
 
 
@@ -386,7 +388,7 @@ def _progress_evidence(observation: DeploymentObservation) -> tuple[str, ...]:
 
 def _stalled_outcome(observation: DeploymentObservation) -> DeploymentOutcome | None:
     condition = _condition_failure(observation.conditions)
-    pod = None if observation.partial_evidence else _pod_failure(observation.pods)
+    pod = None if observation.pod_evidence_ambiguous else _pod_failure(observation.pods)
     if condition is None and pod is None:
         return None
     condition_detail: str | None = None

@@ -541,6 +541,15 @@ def test_log_availability_reports_a_missing_stream_source() -> None:
     assert h.ui.notifications == []
 
 
+async def test_open_named_logs_refuses_a_missing_stream_source() -> None:
+    h = make_harness(stream_logs=None)
+
+    await h.controller.open_named_logs("default", "web")
+
+    assert h.pane.display is False
+    assert h.ui.notifications == [_Notification("Log streaming unavailable", "warning", True)]
+
+
 def test_log_availability_reports_a_context_switch() -> None:
     h = make_harness(ctx_reads_allowed=False)
     assert h.controller.unavailable_reason("logs") == UnavailableReason(

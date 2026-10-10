@@ -475,6 +475,9 @@ class LogController:
     async def open_named_logs(self, namespace: str, name: str) -> None:
         """Open live logs for an explicitly identified Pod name."""
 
+        if self._get_stream_logs() is None:
+            self._ui.notify("Log streaming unavailable", severity="warning")
+            return
         self._mode = "l"
         triples = self._pod_triples(namespace, name)
         await self.open_pane(

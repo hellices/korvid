@@ -74,6 +74,7 @@ def _replica_set(*, uid: str, owner_uid: str) -> dict[str, Any]:
             "name": f"web-{uid}",
             "namespace": "default",
             "uid": uid,
+            "annotations": {"deployment.kubernetes.io/revision": "1"},
             "ownerReferences": _owner("Deployment", owner_uid),
         },
     }
@@ -177,6 +178,7 @@ async def test_snapshot_reads_exact_deployment_and_caps_owned_pod_evidence() -> 
     assert observation.restart_stamp == "2026-10-09T12:00:00+00:00"
     assert [pod.uid for pod in observation.pods] == [f"pod-{index}" for index in range(5)]
     assert observation.partial_evidence is True
+    assert observation.pod_evidence_ambiguous is False
     assert all(namespace == "default" for _, namespace, _, _ in api.calls)
 
 
@@ -206,6 +208,7 @@ async def test_snapshot_marks_server_truncation_as_partial() -> None:
     )
 
     assert observation.partial_evidence is True
+    assert observation.pod_evidence_ambiguous is True
 
 
 async def test_snapshot_does_not_default_malformed_counts_to_zero() -> None:
