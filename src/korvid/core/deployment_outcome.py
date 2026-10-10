@@ -389,9 +389,15 @@ def _stalled_outcome(observation: DeploymentObservation) -> DeploymentOutcome | 
     pod = None if observation.partial_evidence else _pod_failure(observation.pods)
     if condition is None and pod is None:
         return None
+    condition_detail: str | None = None
     if condition is not None:
         detail = condition.reason or condition.type
         summary = f"Deployment rollout stalled: {detail}"
+        condition_detail = f"{condition.type}={condition.status}"
+        if condition.reason:
+            condition_detail += f" {condition.reason}"
+        if condition.message:
+            condition_detail += f": {condition.message}"
     elif pod is not None:
         summary = f"Deployment rollout stalled: Pod {pod.name} reports {pod.reason}"
     else:
@@ -399,7 +405,11 @@ def _stalled_outcome(observation: DeploymentObservation) -> DeploymentOutcome | 
     return DeploymentOutcome(
         phase=DeploymentOutcomePhase.STALLED,
         summary=summary,
-        evidence=_progress_evidence(observation),
+        evidence=(
+            (*_progress_evidence(observation), condition_detail)
+            if condition_detail is not None
+            else _progress_evidence(observation)
+        ),
         pods=observation.pods,
         partial_evidence=observation.partial_evidence,
     )

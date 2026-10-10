@@ -246,6 +246,7 @@ def test_replica_failure_is_stalled_without_pod_evidence() -> None:
 
     assert outcome.phase is DeploymentOutcomePhase.STALLED
     assert "FailedCreate" in outcome.summary
+    assert "ReplicaFailure=True FailedCreate: quota exceeded" in outcome.evidence
 
 
 def test_partial_evidence_is_retained_on_observing_outcome() -> None:

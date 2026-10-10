@@ -1022,6 +1022,11 @@ async def test_outcome_audit_failure_warns_but_keeps_the_executed_write(tmp_path
     real = env.audit
     assert real is not None
     calls: list[str] = []
+    observed = False
+
+    async def observe(receipt: AcceptedWriteReceipt) -> None:
+        nonlocal observed
+        observed = True
 
     def flaky(**kwargs: Any) -> None:
         calls.append(str(kwargs["outcome"]))
@@ -1030,9 +1035,17 @@ async def test_outcome_audit_failure_warns_but_keeps_the_executed_write(tmp_path
         AuditLog.append(real, **kwargs)
 
     real.append = flaky  # type: ignore[method-assign]  # narrow fake seam
-    outcome = await env.coordinator.run("delete", _PODS_META, "default", "web-1", rec.factory)
+    outcome = await env.coordinator.run(
+        "delete",
+        _PODS_META,
+        "default",
+        "web-1",
+        rec.factory,
+        on_accepted=observe,
+    )
     assert outcome == "done"
     assert rec.ran == 1
+    assert observed is False
     assert (
         "Audit log write failed (operation already executed)",
         "warning",

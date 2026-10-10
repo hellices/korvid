@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -94,6 +95,7 @@ def _controller(
     sleep: Callable[[float], Awaitable[None]] | None = None,
     cluster: list[str] | None = None,
     deadline_seconds: float = 300.0,
+    clock: Callable[[], float] | None = None,
 ) -> tuple[DeploymentOutcomeController, FakeUi]:
     surface = ui or FakeUi()
     current_epoch = epoch or [4]
@@ -106,6 +108,7 @@ def _controller(
         poll_delays=(0.0, 0.0),
         max_trackers=3,
         deadline_seconds=deadline_seconds,
+        clock=clock or time.monotonic,
     )
     return controller, surface
 
@@ -427,6 +430,32 @@ async def test_absolute_deadline_marks_hung_read_incomplete() -> None:
             raise AssertionError("unreachable")
 
     controller, ui = _controller(HungReader(), deadline_seconds=0.0)
+    observer = controller.scale_observer(
+        epoch=4,
+        namespace="default",
+        name="web",
+        uid="deploy-uid",
+        replicas=3,
+    )
+    assert observer is not None
+    await observer(_receipt())
+    await _drain(ui)
+
+    latest = controller.latest()
+    assert latest is not None
+    assert latest.outcome.phase is DeploymentOutcomePhase.INCOMPLETE
+    assert "deadline" in latest.outcome.summary
+
+
+async def test_late_snapshot_cannot_complete_after_absolute_deadline() -> None:
+    now = [0.0]
+
+    class LateReader(DeploymentOutcomeReader):
+        async def snapshot(self, namespace: str, name: str) -> RawDeploymentOutcomeSnapshot:
+            now[0] = 301.0
+            return _raw()
+
+    controller, ui = _controller(LateReader(), clock=lambda: now[0])
     observer = controller.scale_observer(
         epoch=4,
         namespace="default",

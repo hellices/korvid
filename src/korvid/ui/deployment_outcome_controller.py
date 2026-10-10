@@ -317,6 +317,10 @@ class DeploymentOutcomeController:
             snapshot.attempts if snapshot is not None else len(self._poll_delays),
         )
 
+    def _deadline_elapsed(self, tracker_id: str) -> bool:
+        started = self._started.get(tracker_id)
+        return started is not None and self._clock() - started >= self._deadline_seconds
+
     async def _observe_once(self, tracker_id: str, attempt: int) -> bool:
         snapshot = self._snapshots.get(tracker_id)
         if snapshot is None:
@@ -343,6 +347,9 @@ class DeploymentOutcomeController:
                 _incomplete_outcome(type(exc).__name__, snapshot.outcome),
                 attempt,
             )
+            return True
+        if self._deadline_elapsed(tracker_id):
+            self._mark_deadline_elapsed(tracker_id)
             return True
         if not self._can_apply_read(tracker_id, snapshot):
             return True
