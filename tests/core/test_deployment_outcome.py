@@ -188,13 +188,29 @@ def test_stale_failure_condition_does_not_stall_new_generation() -> None:
 
 
 def test_same_name_replacement_never_completes() -> None:
+    replacement_pod = DeploymentPodEvidence(
+        namespace="default",
+        name="replacement-pod",
+        uid="replacement-pod-uid",
+        phase="Running",
+        reason="",
+        message="",
+    )
     outcome = evaluate_deployment_outcome(
         _scale(),
-        _observation(uid="replacement-uid"),
+        _observation(uid="replacement-uid", pods=(replacement_pod,)),
     )
 
     assert outcome.phase is DeploymentOutcomePhase.REPLACED
     assert "replaced" in outcome.summary.lower()
+    assert outcome.pods == ()
+
+
+def test_missing_observed_uid_is_incomplete_not_replaced() -> None:
+    outcome = evaluate_deployment_outcome(_scale(), _observation(uid=""))
+
+    assert outcome.phase is DeploymentOutcomePhase.INCOMPLETE
+    assert "identity" in outcome.summary.lower()
 
 
 def test_progress_deadline_and_non_ready_pod_are_stalled() -> None:

@@ -518,12 +518,17 @@ def evaluate_deployment_outcome(
 ) -> DeploymentOutcome:
     """Evaluate one observation without inventing missing evidence."""
 
+    if not observation.uid:
+        return DeploymentOutcome(
+            phase=DeploymentOutcomePhase.INCOMPLETE,
+            summary="Deployment identity evidence is unavailable",
+            partial_evidence=True,
+        )
     if observation.uid != intent.target.uid:
         return DeploymentOutcome(
             phase=DeploymentOutcomePhase.REPLACED,
             summary="Deployment was replaced by a different object with the same name",
             evidence=(f"expected uid {intent.target.uid}", f"observed uid {observation.uid}"),
-            pods=observation.pods,
             partial_evidence=observation.partial_evidence,
         )
     if isinstance(intent, DeploymentScaleIntent):

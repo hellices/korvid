@@ -40,8 +40,10 @@ class WriteMutationResult:
     @classmethod
     def from_scale_snapshot(cls, current: dict[str, Any], replicas: int) -> WriteMutationResult:
         """Derive the generation produced by an RV-pinned scale mutation."""
-        generation = (current.get("metadata") or {}).get("generation")
-        old_replicas = (current.get("spec") or {}).get("replicas")
+        metadata = current.get("metadata")
+        spec = current.get("spec")
+        generation = metadata.get("generation") if isinstance(metadata, dict) else None
+        old_replicas = spec.get("replicas") if isinstance(spec, dict) else None
         if (
             not isinstance(generation, int)
             or isinstance(generation, bool)
