@@ -491,7 +491,7 @@ class DeploymentOutcomeController:
                 )
                 return
             self._ui.run_worker(
-                self._pod_action(
+                self._run_pod_action(
                     verb,
                     snapshot.intent.target.epoch,
                     _namespace,
@@ -501,6 +501,18 @@ class DeploymentOutcomeController:
                 group="deployment-outcome-pod-action",
                 exit_on_error=False,
             )
+
+    async def _run_pod_action(
+        self, verb: str, epoch: int, namespace: str, name: str, uid: str
+    ) -> None:
+        action = self._pod_action
+        if action is None:
+            return
+        try:
+            await action(verb, epoch, namespace, name, uid)
+        except Exception as exc:
+            logger.warning("Deployment outcome Pod action failed: %s", type(exc).__name__)
+            self._ui.notify("Deployment outcome Pod action failed", severity="warning")
 
     def snapshots(self) -> tuple[DeploymentTrackerSnapshot, ...]:
         """Return every retained tracker, oldest first."""

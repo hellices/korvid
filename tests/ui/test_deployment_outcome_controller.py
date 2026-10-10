@@ -272,6 +272,44 @@ async def test_pod_result_dispatches_exact_tracker_identity() -> None:
     assert calls == [("logs", 4, "default", "web-pod", "pod-uid")]
 
 
+async def test_pod_action_failure_is_reported() -> None:
+    async def pod_action(
+        verb: str,
+        epoch: int,
+        namespace: str,
+        name: str,
+        uid: str,
+    ) -> None:
+        raise RuntimeError("offline")
+
+    surface = FakeUi()
+    controller = DeploymentOutcomeController(
+        ui=surface,
+        reader=_Reader([_raw()]),
+        get_epoch=lambda: 4,
+        cluster_id=lambda: "cluster",
+        poll_delays=(0.0,),
+        pod_action=pod_action,
+    )
+    observer = controller.scale_observer(
+        epoch=4,
+        namespace="default",
+        name="web",
+        uid="deploy-uid",
+        replicas=3,
+    )
+    assert observer is not None
+    await observer(_receipt())
+    await _drain(surface)
+    snapshot = controller.latest()
+    assert snapshot is not None
+
+    controller._on_screen_result(("events", snapshot.tracker_id, "default", "web-pod", "pod-uid"))
+    await _drain(surface)
+
+    assert ("Deployment outcome Pod action failed", "warning") in surface.notifications
+
+
 def test_open_latest_without_tracker_reports_unavailable() -> None:
     controller, ui = _controller(_Reader([]))
 

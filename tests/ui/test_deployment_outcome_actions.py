@@ -1,3 +1,4 @@
+import asyncio
 from collections.abc import Callable
 from typing import Any, cast
 
@@ -31,6 +32,9 @@ class _Context:
 
 
 class _Workspace:
+    def __init__(self) -> None:
+        self.nav_lock = asyncio.Lock()
+
     async def jump_to_object(self, *args: Any, **kwargs: Any) -> None:
         return None
 
@@ -69,6 +73,33 @@ async def test_pod_reads_use_explicit_outcome_identity(verb: str) -> None:
         else ("logs", "workloads", "tracked-pod", "pod-uid")
     )
     assert calls == [expected]
+
+
+async def test_pod_read_is_serialized_with_context_switch() -> None:
+    workspace = _Workspace()
+
+    async def target_uid(kind: str, namespace: str | None, name: str) -> str:
+        return "pod-uid"
+
+    async def describe(namespace: str, name: str, uid: str) -> None:
+        raise AssertionError("describe must not run")
+
+    async def logs(namespace: str, name: str, uid: str) -> None:
+        assert workspace.nav_lock.locked()
+
+    actions = DeploymentOutcomePodActions(
+        ui=cast(UiSurface, _Ui()),
+        target_uid=target_uid,
+        context=cast(ContextGuard, _Context()),
+        workspace=lambda: cast(WorkspaceController, workspace),
+        describe=describe,
+        logs=logs,
+        events=lambda: None,
+    )
+
+    await actions("logs", 4, "workloads", "tracked-pod", "pod-uid")
+
+    assert workspace.nav_lock.locked() is False
 
 
 async def test_deleted_evidence_pod_reports_identity_change() -> None:

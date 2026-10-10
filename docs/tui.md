@@ -67,8 +67,8 @@ Three keys answer three different questions, so none of them replaces another:
   re-draws the row you were on whole at the new size instead of cutting its
   last words. `Esc` closes the palette.
 
-After an approved Deployment scale or rollout restart, korvid separately
-tracks whether the controller converges. API acceptance is never presented as
+After an approved direct-TUI Deployment scale or rollout restart, korvid
+separately tracks whether the controller converges. API acceptance is never presented as
 completion. Open the newest retained result with `:outcomes` or **Deployment
 operation result** in the Action Palette. The bounded tracker reports
 completed, stalled, superseded, replaced, stopped, or incomplete evidence and

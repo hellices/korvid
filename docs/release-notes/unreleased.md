@@ -30,7 +30,7 @@ separate milestone work.
 
 ## Deployment operation outcomes
 
-- An approved Deployment scale or rollout restart now starts bounded,
+- An approved direct-TUI Deployment scale or rollout restart now starts bounded,
   read-only convergence observation only after the mutation and its success
   audit both complete.
 - API acceptance and controller convergence are shown separately. Exact

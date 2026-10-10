@@ -43,17 +43,19 @@ class DeploymentOutcomePodActions:
     ) -> None:
         if not await self._identity_intact(epoch, namespace, name, uid):
             return
-        await self._workspace().jump_to_object(
-            "pods", namespace, name, epoch=epoch, expected_uid=uid
-        )
-        if verb == "goto" or not await self._identity_intact(epoch, namespace, name, uid):
+        workspace = self._workspace()
+        await workspace.jump_to_object("pods", namespace, name, epoch=epoch, expected_uid=uid)
+        if verb == "goto":
             return
-        if verb == "describe":
-            await self._describe(namespace, name, uid)
-        elif verb == "logs":
-            await self._logs(namespace, name, uid)
-        elif verb == "events":
-            await self._show_events(epoch, namespace, name, uid)
+        async with workspace.nav_lock:
+            if not await self._identity_intact(epoch, namespace, name, uid):
+                return
+            if verb == "describe":
+                await self._describe(namespace, name, uid)
+            elif verb == "logs":
+                await self._logs(namespace, name, uid)
+            elif verb == "events":
+                await self._show_events(epoch, namespace, name, uid)
 
     async def _identity_intact(self, epoch: int, namespace: str, name: str, uid: str) -> bool:
         intact = not self._context.crossed(epoch)
