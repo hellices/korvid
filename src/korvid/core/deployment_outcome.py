@@ -129,6 +129,7 @@ _POD_BLOCKERS = frozenset(
 )
 _RESTART_ANNOTATION = "kubectl.kubernetes.io/restartedAt"
 _RELEVANT_CONDITIONS = frozenset({"Available", "Progressing", "ReplicaFailure"})
+_MAX_CONDITION_EVIDENCE = 3
 _MAX_TEXT_CHARS = 240
 
 
@@ -412,7 +413,25 @@ def _replicas_converged(observation: DeploymentObservation, desired: int) -> boo
     )
 
 
-def _progress_evidence(observation: DeploymentObservation) -> tuple[str, ...]:
+def _condition_detail(condition: DeploymentCondition) -> str:
+    detail = f"{condition.type}={condition.status}"
+    if condition.reason:
+        detail += f" {condition.reason}"
+    if condition.message:
+        detail += f": {condition.message}"
+    return detail
+
+
+def _progress_evidence(
+    observation: DeploymentObservation,
+    *,
+    excluded_condition: DeploymentCondition | None = None,
+) -> tuple[str, ...]:
+    condition_evidence = tuple(
+        _condition_detail(condition)
+        for condition in observation.conditions
+        if condition is not excluded_condition
+    )[:_MAX_CONDITION_EVIDENCE]
     return (
         f"generation {observation.observed_generation}/{observation.generation}",
         (
@@ -423,6 +442,7 @@ def _progress_evidence(observation: DeploymentObservation) -> tuple[str, ...]:
             f"available={observation.available_replicas} "
             f"desired={observation.desired_replicas}"
         ),
+        *condition_evidence,
     )
 
 
@@ -441,11 +461,7 @@ def _stalled_outcome(
     if condition is not None:
         detail = condition.reason or condition.type
         summary = f"Deployment rollout stalled: {detail}"
-        condition_detail = f"{condition.type}={condition.status}"
-        if condition.reason:
-            condition_detail += f" {condition.reason}"
-        if condition.message:
-            condition_detail += f": {condition.message}"
+        condition_detail = _condition_detail(condition)
     elif pod is not None:
         summary = f"Deployment rollout stalled: Pod {pod.name} reports {pod.reason}"
     else:
@@ -454,7 +470,10 @@ def _stalled_outcome(
         phase=DeploymentOutcomePhase.STALLED,
         summary=summary,
         evidence=(
-            (*_progress_evidence(observation), condition_detail)
+            (
+                *_progress_evidence(observation, excluded_condition=condition),
+                condition_detail,
+            )
             if condition_detail is not None
             else _progress_evidence(observation)
         ),

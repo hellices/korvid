@@ -22,6 +22,7 @@ from korvid.core.deployment_outcome import (
     normalize_deployment_observation,
 )
 from korvid.k8s.deployment_outcomes import DeploymentOutcomeReader
+from korvid.k8s.errors import ApiStatusError
 from korvid.ui.action_availability import AvailabilityCode, UnavailableReason
 from korvid.ui.ui_surface import Severity, UiSurface
 from korvid.ui.write_gate import AcceptedWriteObserver, AcceptedWriteReceipt
@@ -97,6 +98,16 @@ def _incomplete_outcome(
         pods=previous.pods if previous is not None else (),
         partial_evidence=previous.partial_evidence if previous is not None else False,
     )
+
+
+def _read_failure_reason(exc: Exception) -> str:
+    if not isinstance(exc, ApiStatusError):
+        return type(exc).__name__
+    if exc.status in {401, 403}:
+        return f"API {exc.status}: Deployment outcome read access denied"
+    if exc.status in {404, 405}:
+        return f"API {exc.status}: Deployment unavailable"
+    return f"API {exc.status}: Deployment outcome read failed"
 
 
 class DeploymentOutcomeController:
@@ -375,12 +386,15 @@ class DeploymentOutcomeController:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            if self._deadline_elapsed(tracker_id):
+                self._mark_deadline_elapsed(tracker_id)
+                return True
             logger.warning("Deployment outcome read failed: %s", type(exc).__name__)
             if not self._can_apply_read(tracker_id, snapshot):
                 return True
             self._update(
                 tracker_id,
-                _incomplete_outcome(type(exc).__name__, snapshot.outcome),
+                _incomplete_outcome(_read_failure_reason(exc), snapshot.outcome),
                 attempt,
             )
             return True

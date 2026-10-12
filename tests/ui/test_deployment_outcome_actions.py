@@ -86,7 +86,8 @@ async def test_pod_reads_use_explicit_outcome_identity(verb: str) -> None:
     assert set(context.epochs) == {4}
 
 
-async def test_pod_read_is_serialized_with_context_switch() -> None:
+@pytest.mark.parametrize("verb", ["describe", "logs"])
+async def test_pod_read_is_serialized_with_context_switch(verb: str) -> None:
     workspace = _Workspace()
     uid_lock_states: list[bool] = []
 
@@ -95,7 +96,7 @@ async def test_pod_read_is_serialized_with_context_switch() -> None:
         return "pod-uid"
 
     async def describe(namespace: str, name: str, uid: str) -> None:
-        raise AssertionError("describe must not run")
+        assert workspace.nav_lock.locked()
 
     async def logs(namespace: str, name: str, uid: str) -> None:
         assert workspace.nav_lock.locked()
@@ -110,10 +111,46 @@ async def test_pod_read_is_serialized_with_context_switch() -> None:
         events=lambda: None,
     )
 
-    await actions("logs", 4, "workloads", "tracked-pod", "pod-uid")
+    await actions(verb, 4, "workloads", "tracked-pod", "pod-uid")
 
     assert uid_lock_states == [False, True]
     assert workspace.nav_lock.locked() is False
+
+
+@pytest.mark.parametrize("verb", ["describe", "logs", "events"])
+async def test_replaced_evidence_pod_blocks_all_actions(verb: str) -> None:
+    ui = _Ui()
+    calls: list[str] = []
+
+    async def target_uid(kind: str, namespace: str | None, name: str) -> str:
+        return "replacement-uid"
+
+    async def describe(namespace: str, name: str, uid: str) -> None:
+        calls.append("describe")
+
+    async def logs(namespace: str, name: str, uid: str) -> None:
+        calls.append("logs")
+
+    async def events(namespace: str, kind: str, name: str) -> list[Any]:
+        calls.append("events")
+        return []
+
+    workspace = _Workspace()
+    actions = DeploymentOutcomePodActions(
+        ui=cast(UiSurface, ui),
+        target_uid=target_uid,
+        context=cast(ContextGuard, _Context()),
+        workspace=lambda: cast(WorkspaceController, workspace),
+        describe=describe,
+        logs=logs,
+        events=lambda: cast(EventsFetcher, events),
+    )
+
+    await actions(verb, 4, "workloads", "tracked-pod", "evidence-uid")
+
+    assert calls == []
+    assert workspace.nav_lock.locked() is False
+    assert any("identity changed" in message.lower() for message in ui.notifications)
 
 
 async def test_deleted_evidence_pod_reports_identity_change() -> None:

@@ -324,6 +324,7 @@ git commit -m "feat(k8s): read bounded Deployment outcome evidence"
 ```python
 async def test_observer_runs_only_after_success_audit() -> None:
     events: list[str] = []
+    coordinator = make_coordinator(audit=RecordingAudit(events))
 
     async def operation() -> None:
         events.append("mutation")
@@ -341,8 +342,9 @@ async def test_observer_runs_only_after_success_audit() -> None:
         on_accepted=accepted,
     )
 
-    assert events == ["mutation", "observer"]
-    assert audit_outcomes() == ["intent", "success"]
+    # The test audit sink appends `intent` and `success` to this same ordered
+    # event list, so observer ordering cannot pass by comparing separate logs.
+    assert events == ["intent", "mutation", "success", "observer"]
 ```
 
 Add parameterized cases proving no observer call after intent-audit failure,
@@ -436,7 +438,9 @@ async def test_tracker_reads_immediately_and_completes() -> None:
     controller = make_controller(reader)
 
     await controller.accept(scale_intent(replicas=3))
-    await controller.poll_once_for_test()
+    await until(lambda: reader.calls == 1)
+    assert controller.latest().outcome.phase is DeploymentOutcomePhase.OBSERVING
+
     await controller.poll_once_for_test()
 
     assert controller.latest().outcome.phase is DeploymentOutcomePhase.COMPLETED

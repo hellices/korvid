@@ -1366,6 +1366,22 @@ async def test_the_completion_prefetch_is_cancelled_and_reaped_on_shutdown(
     assert env.coordinator._prefetch_task is None
 
 
+async def test_shutdown_stops_outcomes_when_prefetch_raises(tmp_path: Path) -> None:
+    env = Env(tmp_path)
+
+    async def failed_prefetch() -> None:
+        raise RuntimeError("prefetch failed")
+
+    task = asyncio.create_task(failed_prefetch())
+    await asyncio.sleep(0)
+    env.coordinator._prefetch_task = task
+
+    with pytest.raises(RuntimeError, match="prefetch failed"):
+        await env.coordinator.shutdown()
+
+    assert env.log.has("outcomes-stop")
+
+
 async def test_shutdown_without_a_prefetch_is_a_no_op(tmp_path: Path) -> None:
     env = Env(tmp_path, wire_collaborators=False)
     env.coordinator.start()

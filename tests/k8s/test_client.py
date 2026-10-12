@@ -1901,6 +1901,7 @@ async def test_scale_object_patches_scale_subresource() -> None:
         patch.object(client, "_request_json", read),
     ):
         result = await client.scale_object(_deploy_meta(), "default", "web", 5)
+    assert api.call_api.call_count == 1
     args, kwargs = api.call_api.call_args
     assert args[0] == "/apis/apps/v1/namespaces/default/deployments/web/scale"
     assert args[1] == "PATCH"

@@ -156,6 +156,30 @@ def test_restart_requires_exact_marker_and_current_generation() -> None:
     assert "converged" in outcome.summary.lower()
 
 
+def test_restart_exact_marker_waits_for_current_generation() -> None:
+    intent = _restart()
+    outcome = evaluate_deployment_outcome(
+        intent,
+        _observation(
+            generation=7,
+            observed_generation=6,
+            restart_stamp=intent.restarted_at,
+        ),
+    )
+
+    assert outcome.phase is DeploymentOutcomePhase.OBSERVING
+
+
+def test_restart_exact_marker_waits_for_replica_convergence() -> None:
+    intent = _restart()
+    outcome = evaluate_deployment_outcome(
+        intent,
+        _observation(restart_stamp=intent.restarted_at, ready=2, available=2),
+    )
+
+    assert outcome.phase is DeploymentOutcomePhase.OBSERVING
+
+
 def test_restart_with_later_marker_is_superseded() -> None:
     outcome = evaluate_deployment_outcome(
         _restart("accepted"),
@@ -307,6 +331,54 @@ def test_progress_deadline_and_non_ready_pod_are_stalled() -> None:
     assert outcome.phase is DeploymentOutcomePhase.STALLED
     assert outcome.pods == (pod,)
     assert "ProgressDeadlineExceeded" in outcome.summary
+
+
+def test_relevant_non_failure_condition_is_displayed_as_evidence() -> None:
+    condition = DeploymentCondition(
+        type="Available",
+        status="False",
+        reason="MinimumReplicasUnavailable",
+        message="one replica is unavailable",
+    )
+
+    outcome = evaluate_deployment_outcome(
+        _scale(),
+        _observation(ready=2, available=2, unavailable=1, conditions=(condition,)),
+    )
+
+    assert outcome.phase is DeploymentOutcomePhase.OBSERVING
+    assert (
+        "Available=False MinimumReplicasUnavailable: one replica is unavailable" in outcome.evidence
+    )
+
+
+def test_condition_evidence_is_bounded_without_repeating_selected_failure() -> None:
+    failure = DeploymentCondition(
+        type="Progressing",
+        status="False",
+        reason="ProgressDeadlineExceeded",
+        message="rollout timed out",
+    )
+    non_failures = tuple(
+        DeploymentCondition(
+            type="Available",
+            status="False",
+            reason=f"Unavailable{index}",
+            message=f"condition {index}",
+        )
+        for index in range(5)
+    )
+
+    outcome = evaluate_deployment_outcome(
+        _scale(),
+        _observation(conditions=(failure, *non_failures)),
+    )
+
+    assert outcome.phase is DeploymentOutcomePhase.STALLED
+    assert (
+        outcome.evidence.count("Progressing=False ProgressDeadlineExceeded: rollout timed out") == 1
+    )
+    assert len(outcome.evidence) == 6
 
 
 def test_malformed_boolean_condition_status_does_not_stall() -> None:
@@ -676,7 +748,15 @@ def test_current_scale_to_zero_does_not_default_malformed_counter(counter: str) 
     )
     outcome = evaluate_deployment_outcome(_scale(replicas=0), observation)
 
+    normalized_name = {
+        "replicas": "current_replicas",
+        "updatedReplicas": "updated_replicas",
+        "readyReplicas": "ready_replicas",
+        "availableReplicas": "available_replicas",
+        "unavailableReplicas": "unavailable_replicas",
+    }[counter]
     assert observation.replica_counters_malformed is True
+    assert getattr(observation, normalized_name) is None
     assert outcome.phase is DeploymentOutcomePhase.OBSERVING
 
 

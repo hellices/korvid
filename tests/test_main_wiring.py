@@ -1837,10 +1837,14 @@ async def test_wire_and_run_wires_relationship_lister_from_kube(
 async def test_wire_and_run_wires_deployment_outcome_reader_from_kube(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from unittest.mock import MagicMock
+
     import korvid.__main__ as main_mod
     from korvid.core.config import KorvidConfig
     from korvid.k8s.deployment_outcomes import KubeDeploymentOutcomeReader
 
+    reader_factory = MagicMock(side_effect=KubeDeploymentOutcomeReader)
+    monkeypatch.setattr(main_mod, "KubeDeploymentOutcomeReader", reader_factory)
     monkeypatch.setattr(main_mod, "KorvidApp", _FakeAppCapturesKwargs)
     monkeypatch.setattr(main_mod, "assemble_app_runtime", lambda app: app)
     _FakeAppCapturesKwargs.instances.clear()
@@ -1853,6 +1857,10 @@ async def test_wire_and_run_wires_deployment_outcome_reader_from_kube(
 
     captured = _FakeAppCapturesKwargs.instances[0].captured
     assert isinstance(captured["deployment_outcome_reader"], KubeDeploymentOutcomeReader)
+    reader_factory.assert_called_once()
+    reader_kwargs = reader_factory.call_args.kwargs
+    assert reader_kwargs["get_object"].__self__ is kube
+    assert reader_kwargs["list_raw_objects"].__self__ is kube
     assert captured["deployment_cluster_id"]() == "(kubeconfig default)|https://cluster.example"
 
 

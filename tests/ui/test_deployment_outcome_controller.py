@@ -18,6 +18,7 @@ from korvid.k8s.deployment_outcomes import (
     DeploymentOutcomeReader,
     RawDeploymentOutcomeSnapshot,
 )
+from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.writes import WriteMutationResult
 from korvid.ui.deployment_outcome_controller import DeploymentOutcomeController
 from korvid.ui.widgets.deployment_outcome_screen import DeploymentOutcomeScreen
@@ -284,6 +285,38 @@ async def test_read_failure_preserves_last_confirmed_evidence() -> None:
         "generation 2/2",
         "replicas current=3 updated=3 ready=1 available=3 desired=3",
     )
+
+
+@pytest.mark.parametrize(
+    ("status", "classification"),
+    [
+        (403, "API 403: Deployment outcome read access denied"),
+        (404, "API 404: Deployment unavailable"),
+        (503, "API 503: Deployment outcome read failed"),
+    ],
+)
+async def test_api_read_failure_exposes_safe_status_classification(
+    status: int,
+    classification: str,
+) -> None:
+    reader = _Reader([ApiStatusError(status, "token=secret", "credential=secret")])
+    controller, ui = _controller(reader)
+    observer = controller.scale_observer(
+        epoch=4,
+        namespace="default",
+        name="web",
+        uid="deploy-uid",
+        replicas=3,
+    )
+    assert observer is not None
+    await observer(_receipt())
+    await _drain(ui)
+
+    latest = controller.latest()
+    assert latest is not None
+    assert latest.outcome.phase is DeploymentOutcomePhase.INCOMPLETE
+    assert classification in latest.outcome.summary
+    assert "secret" not in latest.outcome.summary
 
 
 async def test_stop_does_not_overwrite_terminal_outcome() -> None:
@@ -703,6 +736,41 @@ async def test_absolute_deadline_marks_hung_read_incomplete() -> None:
     assert latest is not None
     assert latest.outcome.phase is DeploymentOutcomePhase.INCOMPLETE
     assert "deadline" in latest.outcome.summary
+
+
+async def test_deadline_wins_when_reader_translates_timeout_cancellation() -> None:
+    started = asyncio.Event()
+
+    class CancellationTranslatingReader(DeploymentOutcomeReader):
+        async def snapshot(self, namespace: str, name: str) -> RawDeploymentOutcomeSnapshot:
+            started.set()
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError as exc:
+                raise RuntimeError("translated cancellation") from exc
+            raise AssertionError("unreachable")
+
+    controller, ui = _controller(
+        CancellationTranslatingReader(),
+        deadline_seconds=0.05,
+    )
+    observer = controller.scale_observer(
+        epoch=4,
+        namespace="default",
+        name="web",
+        uid="deploy-uid",
+        replicas=3,
+    )
+    assert observer is not None
+    await observer(_receipt())
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+    await _drain(ui)
+
+    latest = controller.latest()
+    assert latest is not None
+    assert latest.outcome.phase is DeploymentOutcomePhase.INCOMPLETE
+    assert "deadline" in latest.outcome.summary
+    assert "RuntimeError" not in latest.outcome.summary
 
 
 async def test_late_snapshot_cannot_complete_after_absolute_deadline() -> None:
