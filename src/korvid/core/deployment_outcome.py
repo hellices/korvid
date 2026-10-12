@@ -101,6 +101,7 @@ class DeploymentObservation:
     pods: tuple[DeploymentPodEvidence, ...] = ()
     partial_evidence: bool = False
     pod_evidence_ambiguous: bool = False
+    replica_counters_malformed: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -254,7 +255,15 @@ def _pod_evidence(
                 message=message,
             )
         )
-    return sorted(evidence, key=lambda item: (item.namespace, item.name, item.uid))
+    return sorted(
+        evidence,
+        key=lambda item: (
+            item.reason not in _POD_BLOCKERS,
+            item.namespace,
+            item.name,
+            item.uid,
+        ),
+    )
 
 
 def _current_replica_set_uids(
@@ -342,6 +351,16 @@ def normalize_deployment_observation(
             raw.partial or pod_evidence_ambiguous or len(all_pod_evidence) > max_pod_evidence
         ),
         pod_evidence_ambiguous=pod_evidence_ambiguous,
+        replica_counters_malformed=any(
+            key in status and _integer(status.get(key)) is None
+            for key in (
+                "replicas",
+                "updatedReplicas",
+                "readyReplicas",
+                "availableReplicas",
+                "unavailableReplicas",
+            )
+        ),
     )
 
 
@@ -376,7 +395,8 @@ def _replicas_converged(observation: DeploymentObservation, desired: int) -> boo
         observation.available_replicas,
     )
     return (
-        observation.desired_replicas == desired
+        not observation.replica_counters_malformed
+        and observation.desired_replicas == desired
         and all(value == desired for value in required)
         and observation.unavailable_replicas in {None, 0}
     )

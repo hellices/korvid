@@ -1880,22 +1880,19 @@ async def test_delete_object_encodes_segments() -> None:
 async def test_scale_object_patches_scale_subresource() -> None:
     client = KubeClient()
     api = _write_api()
+    read = AsyncMock(
+        return_value={
+            "metadata": {"generation": 8, "resourceVersion": "42"},
+            "spec": {"replicas": 3},
+        }
+    )
     api.call_api.return_value.read.return_value = (
         b'{"apiVersion":"autoscaling/v1","kind":"Scale",'
         b'"metadata":{"resourceVersion":"43"},"spec":{"replicas":5}}'
     )
     with (
         patch.object(client, "_api", api),
-        patch.object(
-            client,
-            "_request_json",
-            AsyncMock(
-                return_value={
-                    "metadata": {"generation": 8, "resourceVersion": "42"},
-                    "spec": {"replicas": 3},
-                }
-            ),
-        ),
+        patch.object(client, "_request_json", read),
     ):
         result = await client.scale_object(_deploy_meta(), "default", "web", 5)
     args, kwargs = api.call_api.call_args
@@ -1907,6 +1904,27 @@ async def test_scale_object_patches_scale_subresource() -> None:
     }
     assert kwargs["header_params"]["Content-Type"] == "application/merge-patch+json"
     assert result.generation == 9
+    read.assert_awaited_once_with("/apis/apps/v1/namespaces/default/deployments/web")
+
+
+async def test_noop_scale_retains_current_generation() -> None:
+    client = KubeClient()
+    read = AsyncMock(
+        return_value={
+            "metadata": {"generation": 8, "resourceVersion": "42"},
+            "spec": {"replicas": 5},
+        }
+    )
+    write = AsyncMock(return_value=b'{"kind":"Scale"}')
+    with (
+        patch.object(client, "_request_json", read),
+        patch.object(client, "_request_write", write),
+    ):
+        result = await client.scale_object(_deploy_meta(), "default", "web", 5)
+
+    assert result.generation == 8
+    read.assert_awaited_once_with("/apis/apps/v1/namespaces/default/deployments/web")
+    assert write.await_count == 1
 
 
 async def test_scale_object_writes_when_generation_read_is_unavailable() -> None:

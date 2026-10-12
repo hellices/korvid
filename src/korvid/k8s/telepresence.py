@@ -63,8 +63,10 @@ def make_traffic_manager_probe(
         meta = ResourceMeta("Deployment", "deployments", "apps", "v1", True)
         try:
             await get_object(meta, TRAFFIC_MANAGER_NAMESPACE, TRAFFIC_MANAGER_NAME)
-        except ApiStatusError:
-            return False
+        except ApiStatusError as exc:
+            if exc.status == 404:
+                return False
+            raise
         return True
 
     return probe

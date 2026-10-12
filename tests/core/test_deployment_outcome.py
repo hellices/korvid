@@ -590,6 +590,29 @@ def test_current_scale_to_zero_normalizes_omitted_status_counters() -> None:
     )
 
 
+def test_malformed_unavailable_counter_prevents_false_completion() -> None:
+    deployment = {
+        "metadata": {"uid": "deploy-uid", "generation": 7},
+        "spec": {"replicas": 3},
+        "status": {
+            "observedGeneration": 7,
+            "replicas": 3,
+            "updatedReplicas": 3,
+            "readyReplicas": 3,
+            "availableReplicas": 3,
+            "unavailableReplicas": "invalid",
+        },
+    }
+
+    observation = normalize_deployment_observation(
+        RawDeploymentOutcomeSnapshot(deployment, (), (), False)
+    )
+    outcome = evaluate_deployment_outcome(_scale(), observation)
+
+    assert observation.unavailable_replicas is None
+    assert outcome.phase is DeploymentOutcomePhase.OBSERVING
+
+
 def test_current_scale_to_zero_does_not_default_malformed_counter() -> None:
     deployment = {
         "metadata": {"uid": "deploy-uid", "generation": 7},
@@ -602,6 +625,71 @@ def test_current_scale_to_zero_does_not_default_malformed_counter() -> None:
     )
 
     assert observation.ready_replicas is None
+
+
+def test_pod_evidence_limit_retains_blocker_before_ready_false_rows() -> None:
+    deployment = {
+        "metadata": {"uid": "deploy-uid", "generation": 7},
+        "spec": {"replicas": 6},
+        "status": {
+            "observedGeneration": 7,
+            "replicas": 6,
+            "updatedReplicas": 6,
+            "readyReplicas": 5,
+            "availableReplicas": 5,
+            "unavailableReplicas": 1,
+        },
+    }
+    replica_set = {
+        "metadata": {
+            "uid": "current-rs",
+            "annotations": {"deployment.kubernetes.io/revision": "7"},
+            "ownerReferences": [{"kind": "Deployment", "uid": "deploy-uid", "controller": True}],
+        }
+    }
+    pods = (
+        *(
+            {
+                "metadata": {
+                    "name": f"pod-{index}",
+                    "namespace": "default",
+                    "uid": f"pod-{index}-uid",
+                    "ownerReferences": [
+                        {"kind": "ReplicaSet", "uid": "current-rs", "controller": True}
+                    ],
+                },
+                "status": {
+                    "phase": "Running",
+                    "conditions": [{"type": "Ready", "status": "False"}],
+                },
+            }
+            for index in range(5)
+        ),
+        {
+            "metadata": {
+                "name": "pod-z-blocked",
+                "namespace": "default",
+                "uid": "pod-z-blocked-uid",
+                "ownerReferences": [
+                    {"kind": "ReplicaSet", "uid": "current-rs", "controller": True}
+                ],
+            },
+            "status": {
+                "phase": "Pending",
+                "containerStatuses": [{"state": {"waiting": {"reason": "CrashLoopBackOff"}}}],
+            },
+        },
+    )
+
+    observation = normalize_deployment_observation(
+        RawDeploymentOutcomeSnapshot(deployment, (replica_set,), pods, False),
+        max_pod_evidence=5,
+    )
+    outcome = evaluate_deployment_outcome(_scale(replicas=6), observation)
+
+    assert observation.partial_evidence is True
+    assert any(pod.reason == "CrashLoopBackOff" for pod in observation.pods)
+    assert outcome.phase is DeploymentOutcomePhase.STALLED
 
 
 def test_unknown_replica_set_revision_marks_evidence_partial() -> None:

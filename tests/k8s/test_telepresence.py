@@ -11,12 +11,14 @@ from unittest import mock
 
 import pytest
 
+from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.telepresence import (
     ActiveIntercept,
     TelepresenceCLI,
     TelepresenceError,
     TelepresenceStatus,
     find_telepresence,
+    make_traffic_manager_probe,
     parse_intercepts,
     parse_status,
 )
@@ -134,6 +136,20 @@ def test_parse_intercepts_tolerates_junk() -> None:
     assert parse_intercepts([]) == []
     assert parse_intercepts({"error": "not connected"}) == []
     assert parse_intercepts([{"intercept_info": "nope"}, "junk"]) == []
+
+
+# ---------------------------------------------------------------------------
+# traffic-manager probe
+# ---------------------------------------------------------------------------
+
+
+async def test_traffic_manager_probe_returns_false_only_for_not_found() -> None:
+    missing = mock.AsyncMock(side_effect=ApiStatusError(404, "Not Found"))
+    denied = mock.AsyncMock(side_effect=ApiStatusError(403, "Forbidden"))
+
+    assert await make_traffic_manager_probe(missing)() is False
+    with pytest.raises(ApiStatusError, match="Forbidden"):
+        await make_traffic_manager_probe(denied)()
 
 
 # ---------------------------------------------------------------------------

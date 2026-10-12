@@ -91,10 +91,10 @@ The module defines immutable, Textual-free types:
   - namespace, name, and Deployment UID
 - `DeploymentScaleIntent`
   - requested replica count
-  - accepted resource version and generation when available
+  - resulting Deployment generation when correlation evidence is available
 - `DeploymentRestartIntent`
   - exact `restartedAt` value sent by the accepted patch
-  - accepted generation and template hash/revision evidence when available
+  - resulting Deployment generation when correlation evidence is available
 - `DeploymentObservation`
   - current Deployment UID, generation, observed generation
   - desired, current, updated, ready, and available replica counts
@@ -158,9 +158,10 @@ rewrite audit history, or run when the operation was cancelled, blocked, or
 failed. Failure to start observation is reported separately as an incomplete
 observation.
 
-The receipt contains the action, target identity, context epoch, and accepted
-completion timestamp. Operation-specific intent remains captured by
-`ResourceWriteController`:
+The receipt contains the action, resource identity, accepted completion timestamp,
+and resulting mutation generation when correlation evidence is available. The
+`ResourceWriteController` callback captures the context epoch, stable cluster and
+Deployment identity, plus operation-specific intent:
 
 - scale supplies the requested replica count;
 - restart supplies the exact annotation stamp used for preview and execution.

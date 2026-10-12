@@ -746,3 +746,4 @@ async def test_cluster_change_during_read_discards_returned_evidence() -> None:
     final = controller.latest()
     assert final is not None
     assert final.outcome.phase is DeploymentOutcomePhase.STOPPED
+    assert final.outcome.evidence == ()

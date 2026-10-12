@@ -377,6 +377,7 @@ async def test_rollout_restart_starts_deployment_outcome_tracker(tmp_path: Path)
         assert snapshot is not None
         assert isinstance(snapshot.intent, DeploymentRestartIntent)
         assert snapshot.intent.target.uid == "deploy-uid-1"
+        assert snapshot.intent.generation == 3
         assert snapshot.intent.restarted_at
         assert rec.restart_stamps == [snapshot.intent.restarted_at]
         assert reader.calls == [("default", "web")]
@@ -490,6 +491,7 @@ async def test_scale_starts_deployment_outcome_tracker_with_exact_count(tmp_path
         assert snapshot is not None
         assert isinstance(snapshot.intent, DeploymentScaleIntent)
         assert snapshot.intent.target.uid == "deploy-uid-1"
+        assert snapshot.intent.generation == 3
         assert snapshot.intent.replicas == 5
         assert reader.calls == [("default", "web")]
 
