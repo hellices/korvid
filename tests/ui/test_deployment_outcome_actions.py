@@ -26,8 +26,10 @@ class _Ui:
 class _Context:
     def __init__(self) -> None:
         self.changed = False
+        self.epochs: list[int] = []
 
     def crossed(self, epoch: int) -> bool:
+        self.epochs.append(epoch)
         return self.changed
 
 
@@ -42,8 +44,11 @@ class _Workspace:
 @pytest.mark.parametrize("verb", ["describe", "logs"])
 async def test_pod_reads_use_explicit_outcome_identity(verb: str) -> None:
     calls: list[tuple[str, ...]] = []
+    uid_calls: list[tuple[str, str | None, str]] = []
+    context = _Context()
 
     async def target_uid(kind: str, namespace: str | None, name: str) -> str:
+        uid_calls.append((kind, namespace, name))
         return "pod-uid"
 
     async def describe(namespace: str, name: str, uid: str) -> None:
@@ -55,7 +60,7 @@ async def test_pod_reads_use_explicit_outcome_identity(verb: str) -> None:
     actions = DeploymentOutcomePodActions(
         ui=cast(UiSurface, _Ui()),
         target_uid=target_uid,
-        context=cast(ContextGuard, _Context()),
+        context=cast(ContextGuard, context),
         workspace=cast(
             "Callable[[], WorkspaceController]",
             _Workspace,
@@ -73,6 +78,12 @@ async def test_pod_reads_use_explicit_outcome_identity(verb: str) -> None:
         else ("logs", "workloads", "tracked-pod", "pod-uid")
     )
     assert calls == [expected]
+    assert uid_calls == [
+        ("pods", "workloads", "tracked-pod"),
+        ("pods", "workloads", "tracked-pod"),
+    ]
+    assert context.epochs
+    assert set(context.epochs) == {4}
 
 
 async def test_pod_read_is_serialized_with_context_switch() -> None:
@@ -104,8 +115,11 @@ async def test_pod_read_is_serialized_with_context_switch() -> None:
 
 async def test_deleted_evidence_pod_reports_identity_change() -> None:
     ui = _Ui()
+    context = _Context()
+    uid_calls: list[tuple[str, str | None, str]] = []
 
     async def target_uid(kind: str, namespace: str | None, name: str) -> str:
+        uid_calls.append((kind, namespace, name))
         raise ApiStatusError(404, "Not Found")
 
     async def describe(namespace: str, name: str, uid: str) -> None:
@@ -117,7 +131,7 @@ async def test_deleted_evidence_pod_reports_identity_change() -> None:
     actions = DeploymentOutcomePodActions(
         ui=cast(UiSurface, ui),
         target_uid=target_uid,
-        context=cast(ContextGuard, _Context()),
+        context=cast(ContextGuard, context),
         workspace=cast("Callable[[], WorkspaceController]", _Workspace),
         describe=describe,
         logs=logs,
@@ -127,13 +141,18 @@ async def test_deleted_evidence_pod_reports_identity_change() -> None:
     await actions("describe", 4, "workloads", "deleted-pod", "pod-uid")
 
     assert ui.notifications == ["Pod identity changed; refresh the Deployment outcome"]
+    assert uid_calls == [("pods", "workloads", "deleted-pod")]
+    assert context.epochs
+    assert set(context.epochs) == {4}
 
 
 async def test_context_change_during_event_fetch_discards_rows() -> None:
     context = _Context()
     ui = _Ui()
+    uid_calls: list[tuple[str, str | None, str]] = []
 
     async def target_uid(kind: str, namespace: str | None, name: str) -> str:
+        uid_calls.append((kind, namespace, name))
         return "pod-uid"
 
     class Events:
@@ -160,13 +179,21 @@ async def test_context_change_during_event_fetch_discards_rows() -> None:
     await actions("events", 4, "workloads", "tracked-pod", "pod-uid")
 
     assert ui.screens == []
+    assert uid_calls == [
+        ("pods", "workloads", "tracked-pod"),
+        ("pods", "workloads", "tracked-pod"),
+    ]
+    assert context.epochs
+    assert set(context.epochs) == {4}
 
 
 async def test_context_change_during_uid_lookup_blocks_pod_action() -> None:
     context = _Context()
     jumps: list[str] = []
+    uid_calls: list[tuple[str, str | None, str]] = []
 
     async def target_uid(kind: str, namespace: str | None, name: str) -> str:
+        uid_calls.append((kind, namespace, name))
         context.changed = True
         return "pod-uid"
 
@@ -193,3 +220,6 @@ async def test_context_change_during_uid_lookup_blocks_pod_action() -> None:
     await actions("describe", 4, "workloads", "tracked-pod", "pod-uid")
 
     assert jumps == []
+    assert uid_calls == [("pods", "workloads", "tracked-pod")]
+    assert context.epochs
+    assert set(context.epochs) == {4}

@@ -86,6 +86,7 @@ class Recorder(WriteOps):
     def __init__(self, fail_status: int | None = None) -> None:
         self.calls: list[tuple[object, ...]] = []
         self.uids: list[str | None] = []
+        self.restart_stamps: list[str | None] = []
         self.fail_status = fail_status
 
     async def delete_object(
@@ -124,6 +125,7 @@ class Recorder(WriteOps):
         uid: str | None = None,
         restarted_at: str | None = None,
     ) -> WriteMutationResult:
+        self.restart_stamps.append(restarted_at)
         await self.rollout_restart(meta, namespace, name, uid=uid)
         return WriteMutationResult(generation=3)
 
@@ -374,6 +376,7 @@ async def test_rollout_restart_starts_deployment_outcome_tracker(tmp_path: Path)
         assert isinstance(snapshot.intent, DeploymentRestartIntent)
         assert snapshot.intent.target.uid == "deploy-uid-1"
         assert snapshot.intent.restarted_at
+        assert rec.restart_stamps == [snapshot.intent.restarted_at]
 
 
 async def test_rollout_restart_rejected_on_pods(tmp_path: Path) -> None:

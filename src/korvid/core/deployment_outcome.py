@@ -339,7 +339,7 @@ def normalize_deployment_observation(
         conditions=_condition_entries(status),
         pods=tuple(all_pod_evidence[:max_pod_evidence]),
         partial_evidence=(
-            raw.partial or ambiguous_replica_sets or len(all_pod_evidence) > max_pod_evidence
+            raw.partial or pod_evidence_ambiguous or len(all_pod_evidence) > max_pod_evidence
         ),
         pod_evidence_ambiguous=pod_evidence_ambiguous,
     )
@@ -482,14 +482,6 @@ def _evaluate_scale(
 def _evaluate_restart(
     intent: DeploymentRestartIntent, observation: DeploymentObservation
 ) -> DeploymentOutcome:
-    if observation.restart_stamp != intent.restarted_at:
-        return DeploymentOutcome(
-            phase=DeploymentOutcomePhase.SUPERSEDED,
-            summary="Rollout restart was superseded by a later restart marker",
-            evidence=_progress_evidence(observation),
-            pods=observation.pods,
-            partial_evidence=observation.partial_evidence,
-        )
     if observation.generation != intent.generation:
         if observation.generation is not None and observation.generation > intent.generation:
             return DeploymentOutcome(
@@ -500,6 +492,22 @@ def _evaluate_restart(
                 partial_evidence=observation.partial_evidence,
             )
         return _observing_outcome(observation)
+    if observation.restart_stamp is None:
+        return DeploymentOutcome(
+            phase=DeploymentOutcomePhase.INCOMPLETE,
+            summary="Deployment restart marker evidence is unavailable",
+            evidence=_progress_evidence(observation),
+            pods=observation.pods,
+            partial_evidence=True,
+        )
+    if observation.restart_stamp != intent.restarted_at:
+        return DeploymentOutcome(
+            phase=DeploymentOutcomePhase.SUPERSEDED,
+            summary="Rollout restart was superseded by a later restart marker",
+            evidence=_progress_evidence(observation),
+            pods=observation.pods,
+            partial_evidence=observation.partial_evidence,
+        )
     stalled = _stalled_outcome(observation) if _generation_current(observation) else None
     if stalled is not None:
         return stalled

@@ -431,13 +431,22 @@ def test_truncated_current_pod_blocker_stalls_operation() -> None:
     assert outcome.phase is DeploymentOutcomePhase.STALLED
 
 
-def test_restart_with_removed_marker_is_superseded() -> None:
+def test_restart_with_missing_marker_is_incomplete_at_accepted_generation() -> None:
     outcome = evaluate_deployment_outcome(
         _restart("accepted"),
         _observation(restart_stamp=None),
     )
 
-    assert outcome.phase is DeploymentOutcomePhase.SUPERSEDED
+    assert outcome.phase is DeploymentOutcomePhase.INCOMPLETE
+
+
+def test_restart_with_missing_marker_keeps_observing_an_older_generation() -> None:
+    outcome = evaluate_deployment_outcome(
+        _restart("accepted", generation=7),
+        _observation(generation=6, observed_generation=6, restart_stamp=None),
+    )
+
+    assert outcome.phase is DeploymentOutcomePhase.OBSERVING
 
 
 def test_old_replica_set_pod_blocker_is_not_current_rollout_evidence() -> None:
@@ -552,6 +561,21 @@ def test_unknown_replica_set_revision_marks_evidence_partial() -> None:
 
     assert observation.partial_evidence
     assert observation.pods == ()
+
+
+def test_ambiguous_pod_ownership_marks_observation_partial() -> None:
+    observation = normalize_deployment_observation(
+        RawDeploymentOutcomeSnapshot(
+            {"metadata": {"uid": "deploy-uid"}, "spec": {}, "status": {}},
+            (),
+            (),
+            False,
+            pod_ownership_ambiguous=True,
+        )
+    )
+
+    assert observation.partial_evidence is True
+    assert observation.pod_evidence_ambiguous is True
 
 
 def test_truncated_replica_set_page_omits_ambiguous_pod_evidence() -> None:

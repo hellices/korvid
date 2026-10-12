@@ -120,8 +120,9 @@ One snapshot performs:
 2. UID comparison before any success decision;
 3. extraction of Deployment generation, conditions, and replica status;
 4. bounded collection of Pods selected by the Deployment;
-5. filtering by the Deployment's current ReplicaSet ownership chain where
-   identity evidence is available;
+5. retaining Pod blockers only when their owner UID chain is verified through
+   the Deployment's current ReplicaSet; missing or malformed ownership makes
+   Pod diagnostics partial and unavailable rather than authoritative;
 6. a second exact Deployment GET that discards related evidence if UID,
    generation, or resource version changed during collection;
 7. normalization into the core observation type.
@@ -177,7 +178,8 @@ The controller owns:
 - a bounded registry of at most three trackers;
 - one supervised Textual worker per active tracker;
 - a fixed observation deadline of five minutes;
-- polling with bounded backoff and an immediate first read;
+- polling with bounded backoff and an immediate first read, with schedule
+  exhaustion reported separately from deadline expiry;
 - explicit stop, context-switch, unmount, and shutdown behavior;
 - immutable snapshots consumed by the screen;
 - notifications only on meaningful phase transitions.
@@ -189,8 +191,9 @@ On a context switch, active trackers become `stopped` before the old client is
 closed. They do not resume against the new cluster. A tracker also refuses any
 observation whose captured epoch no longer matches.
 
-Starting a fourth tracker stops and evicts the oldest active tracker with a
-visible bounded-cap reason. Terminal trackers remain available until displaced
+Starting a fourth tracker evicts the oldest retained tracker with a visible
+bounded-cap reason, stopping its worker first only when it is still active.
+Terminal trackers remain available until they become the oldest entry displaced
 by the same cap.
 
 ### Outcome screen and navigation

@@ -471,6 +471,7 @@ async def test_accepted_observer_runs_after_success_audit(tmp_path: Path) -> Non
 
     assert result == "done"
     assert events == ["mutation", "observer:scale"]
+    assert env.coordinator.active_writes() == 0
 
 
 @pytest.mark.parametrize(

@@ -289,7 +289,7 @@ class DeploymentOutcomeController:
         if worker is not None:
             worker.cancel()
         self._ui.notify(
-            "Stopped the oldest Deployment outcome tracker at the three-tracker limit",
+            f"Stopped the oldest Deployment outcome tracker at the {self._max_trackers}-tracker limit",
             severity="warning",
         )
 
@@ -301,7 +301,9 @@ class DeploymentOutcomeController:
                         await self._sleep(delay)
                     if await self._observe_once(tracker_id, attempt):
                         return
-                self._mark_deadline_elapsed(tracker_id)
+                self._mark_observation_incomplete(
+                    tracker_id, "the observation polling schedule was exhausted"
+                )
         except TimeoutError:
             self._mark_deadline_elapsed(tracker_id)
         except asyncio.CancelledError:
@@ -320,6 +322,12 @@ class DeploymentOutcomeController:
             self._workers.pop(tracker_id, None)
 
     def _mark_deadline_elapsed(self, tracker_id: str) -> None:
+        self._mark_observation_incomplete(
+            tracker_id,
+            f"the {self._deadline_seconds:g}-second observation deadline elapsed",
+        )
+
+    def _mark_observation_incomplete(self, tracker_id: str, reason: str) -> None:
         snapshot = self._snapshots.get(tracker_id)
         if snapshot is None or snapshot.outcome.phase not in {
             DeploymentOutcomePhase.ACCEPTED,
@@ -328,10 +336,7 @@ class DeploymentOutcomeController:
             return
         self._update(
             tracker_id,
-            _incomplete_outcome(
-                "the five-minute observation deadline elapsed",
-                snapshot.outcome,
-            ),
+            _incomplete_outcome(reason, snapshot.outcome),
             snapshot.attempts,
         )
 

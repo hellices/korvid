@@ -193,6 +193,8 @@ async def iter_raw_object_pages(
 ) -> AsyncIterator[dict[str, Any]]:
     """Yield validated raw objects across bounded Kubernetes LIST pages."""
 
+    if isinstance(page_size, bool) or not isinstance(page_size, int) or page_size < 1:
+        raise ValueError("page_size must be a positive integer")
     path = list_path(meta, namespace)
     continuation = ""
     seen: set[str] = set()

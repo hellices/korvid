@@ -372,6 +372,23 @@ async def test_live_stream_gives_up_visibly_after_max_reconnects() -> None:
     )
 
 
+async def test_named_log_revalidates_pod_uid_before_first_line_is_shown() -> None:
+    uids = iter(("web-uid", "replacement-uid"))
+
+    async def target_uid(_plural: str, _namespace: str | None, _name: str) -> str | None:
+        return next(uids)
+
+    async def stream(namespace: str, pod: str, container: str, **_: Any) -> AsyncIterator[LogLine]:
+        yield LogLine(pod=pod, container=container, text="replacement log", timestamp=None)
+
+    h = make_harness(stream_logs=stream, target_uid=target_uid)
+    await h.controller.open_named_logs("default", "web", expected_uid="web-uid")
+    await asyncio.gather(*h.controller.tasks, return_exceptions=True)
+
+    assert h.pane.fed == []
+    assert h.pane.states[-1] == "error"
+
+
 async def test_named_log_reconnect_stops_when_pod_uid_changes() -> None:
     attempts = 0
     uids = iter(("web-uid", "replacement-uid"))

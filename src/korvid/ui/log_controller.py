@@ -715,25 +715,24 @@ class LogController:
         replay = _ReplayFilter()
 
         while True:
-            if expected_uid is not None and not await self._pod_uid_matches(
-                namespace, pod, expected_uid
+            if not await self._stream_identity_current(
+                namespace, pod, expected_uid, log_pane, current
             ):
-                self._error = True
-                log_pane.set_state("error")
-                self._discard_task(current)
                 return
             replay.start_connection()
+            connection_verified = expected_uid is None
             try:
                 async for line in stream_logs(
                     namespace, pod, container, previous=False, follow=True
                 ):
-                    if replay.is_replayed(line):
-                        continue  # replayed tail line already shown pre-reconnect
-                    replay.record(line)
-                    self._mark_stream_healthy(log_pane, consecutive_failures)
-                    consecutive_failures = 0
-                    log_pane.feed(line)
-                    self._buffer_line(log_pane, line)
+                    if not connection_verified and not await self._stream_identity_current(
+                        namespace, pod, expected_uid, log_pane, current
+                    ):
+                        return
+                    connection_verified = True
+                    consecutive_failures = self._display_live_line(
+                        log_pane, replay, line, consecutive_failures
+                    )
             except ApiStatusError as exc:
                 self._handle_stream_api_error(log_pane, current, namespace, exc)
                 return
@@ -754,6 +753,21 @@ class LogController:
             if not await self._pause_before_reconnect(log_pane, current, consecutive_failures):
                 return
 
+    async def _stream_identity_current(
+        self,
+        namespace: str,
+        pod: str,
+        expected_uid: str | None,
+        log_pane: LogPaneView,
+        current: asyncio.Task[None] | None,
+    ) -> bool:
+        if expected_uid is None or await self._pod_uid_matches(namespace, pod, expected_uid):
+            return True
+        self._error = True
+        log_pane.set_state("error")
+        self._discard_task(current)
+        return False
+
     async def _pod_uid_matches(self, namespace: str, pod: str, expected_uid: str) -> bool:
         try:
             live_uid = await self._target_uid("pods", namespace, pod)
@@ -773,6 +787,21 @@ class LogController:
         """Restore the streaming indicator after a successful reconnect."""
         if consecutive_failures > 0 and not self._error:
             log_pane.set_state("streaming")
+
+    def _display_live_line(
+        self,
+        log_pane: LogPaneView,
+        replay: _ReplayFilter,
+        line: LogLine,
+        consecutive_failures: int,
+    ) -> int:
+        if replay.is_replayed(line):
+            return consecutive_failures
+        replay.record(line)
+        self._mark_stream_healthy(log_pane, consecutive_failures)
+        log_pane.feed(line)
+        self._buffer_line(log_pane, line)
+        return 0
 
     async def _pause_before_reconnect(
         self,

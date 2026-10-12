@@ -1,10 +1,15 @@
 from collections.abc import Awaitable, Callable
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
 from korvid.core.deployment_outcome import normalize_deployment_observation
-from korvid.k8s.deployment_outcomes import KubeDeploymentOutcomeReader
+from korvid.k8s.deployment_outcomes import (
+    POD_META,
+    KubeDeploymentOutcomeReader,
+    iter_raw_object_pages,
+)
 from korvid.k8s.discovery import ResourceMeta
 
 
@@ -116,12 +121,14 @@ class _Api:
         deployment: dict[str, Any] | None = None,
         replica_sets: list[dict[str, Any]] | None = None,
         pods: list[dict[str, Any]] | None = None,
-        partial: bool = False,
+        replica_sets_partial: bool = False,
+        pods_partial: bool = False,
     ) -> None:
         self.deployment = deployment or _deployment()
         self.replica_sets = replica_sets or []
         self.pods = pods or []
-        self.partial = partial
+        self.replica_sets_partial = replica_sets_partial
+        self.pods_partial = pods_partial
         self.calls: list[tuple[str, str | None, str | None, int]] = []
 
     async def get_object(
@@ -142,12 +149,14 @@ class _Api:
     ) -> tuple[list[dict[str, Any]], bool]:
         self.calls.append((meta.kind, namespace, label_selector, limit))
         if meta.kind == "ReplicaSet":
-            return self.replica_sets, self.partial
+            return self.replica_sets[:limit], self.replica_sets_partial or len(
+                self.replica_sets
+            ) > limit
         assert meta.kind == "Pod"
-        return self.pods, self.partial
+        return self.pods[:limit], self.pods_partial or len(self.pods) > limit
 
 
-def _reader(api: _Api) -> KubeDeploymentOutcomeReader:
+def _reader(api: _Api, *, list_limit: int = 200) -> KubeDeploymentOutcomeReader:
     get_object: Callable[[ResourceMeta, str | None, str], Awaitable[dict[str, Any]]] = (
         api.get_object
     )
@@ -155,7 +164,26 @@ def _reader(api: _Api) -> KubeDeploymentOutcomeReader:
     return KubeDeploymentOutcomeReader(
         get_object=get_object,
         list_raw_objects=list_raw,
+        list_limit=list_limit,
     )
+
+
+@pytest.mark.parametrize("page_size", [0, -1, True, 1.5])
+async def test_raw_page_iterator_rejects_unbounded_page_sizes(page_size: Any) -> None:
+    request = AsyncMock()
+    pages = iter_raw_object_pages(
+        POD_META,
+        "default",
+        page_size=page_size,
+        list_path=lambda meta, namespace: "/api/v1/namespaces/default/pods",
+        request_json=request,
+        observe=lambda *args, **kwargs: None,
+        observe_error=lambda path, error: None,
+    )
+
+    with pytest.raises(ValueError, match="page_size must be a positive integer"):
+        await anext(pages)
+    request.assert_not_awaited()
 
 
 async def test_snapshot_reads_exact_deployment_and_caps_owned_pod_evidence() -> None:
@@ -170,7 +198,7 @@ async def test_snapshot_reads_exact_deployment_and_caps_owned_pod_evidence() -> 
         ],
     )
 
-    raw = await _reader(api).snapshot("default", "web")
+    raw = await _reader(api, list_limit=5).snapshot("default", "web")
     observation = normalize_deployment_observation(raw, max_pod_evidence=5)
 
     assert observation.uid == "deploy-uid"
@@ -180,6 +208,10 @@ async def test_snapshot_reads_exact_deployment_and_caps_owned_pod_evidence() -> 
     assert [pod.uid for pod in observation.pods] == [f"pod-{index}" for index in range(5)]
     assert observation.partial_evidence is True
     assert observation.pod_evidence_ambiguous is False
+    assert [(kind, limit) for kind, _, _, limit in api.calls] == [
+        ("ReplicaSet", 5),
+        ("Pod", 5),
+    ]
     assert all(namespace == "default" for _, namespace, _, _ in api.calls)
 
 
@@ -227,13 +259,26 @@ async def test_snapshot_retains_only_relevant_conditions() -> None:
     ]
 
 
-async def test_snapshot_marks_server_truncation_as_partial() -> None:
+@pytest.mark.parametrize(
+    ("replica_sets_partial", "pods_partial", "ownership_ambiguous"),
+    [(True, False, True), (False, True, False)],
+)
+async def test_snapshot_marks_each_server_truncation_as_partial(
+    replica_sets_partial: bool,
+    pods_partial: bool,
+    ownership_ambiguous: bool,
+) -> None:
     observation = normalize_deployment_observation(
-        await _reader(_Api(partial=True)).snapshot("default", "web")
+        await _reader(
+            _Api(
+                replica_sets_partial=replica_sets_partial,
+                pods_partial=pods_partial,
+            )
+        ).snapshot("default", "web")
     )
 
     assert observation.partial_evidence is True
-    assert observation.pod_evidence_ambiguous is True
+    assert observation.pod_evidence_ambiguous is ownership_ambiguous
 
 
 async def test_snapshot_does_not_default_malformed_counts_to_zero() -> None:

@@ -540,6 +540,67 @@ async def test_late_read_cannot_overwrite_user_stop() -> None:
     assert final.outcome.phase is DeploymentOutcomePhase.STOPPED
 
 
+async def test_exhausted_poll_schedule_is_not_reported_as_deadline() -> None:
+    controller, ui = _controller(_Reader([_raw(ready=1), _raw(ready=1)]))
+    observer = controller.scale_observer(
+        epoch=4,
+        namespace="default",
+        name="web",
+        uid="deploy-uid",
+        replicas=3,
+    )
+    assert observer is not None
+    await observer(_receipt())
+    await _drain(ui)
+
+    latest = controller.latest()
+    assert latest is not None
+    assert latest.outcome.phase is DeploymentOutcomePhase.INCOMPLETE
+    assert "schedule" in latest.outcome.summary
+    assert "deadline" not in latest.outcome.summary
+
+
+async def test_absolute_deadline_uses_configured_duration_in_summary() -> None:
+    controller, ui = _controller(_Reader([_raw(ready=1)]), deadline_seconds=0.0)
+    observer = controller.scale_observer(
+        epoch=4,
+        namespace="default",
+        name="web",
+        uid="deploy-uid",
+        replicas=3,
+    )
+    assert observer is not None
+    await observer(_receipt())
+    await _drain(ui)
+
+    latest = controller.latest()
+    assert latest is not None
+    assert "0-second observation deadline" in latest.outcome.summary
+
+
+async def test_eviction_notice_uses_configured_tracker_limit() -> None:
+    surface = FakeUi()
+    controller = DeploymentOutcomeController(
+        ui=surface,
+        reader=_Reader([]),
+        get_epoch=lambda: 4,
+        cluster_id=lambda: "cluster",
+        max_trackers=1,
+    )
+    for name in ("first", "second"):
+        observer = controller.scale_observer(
+            epoch=4,
+            namespace="default",
+            name=name,
+            uid=None,
+            replicas=3,
+        )
+        assert observer is not None
+        await observer(_receipt())
+
+    assert any("1-tracker limit" in message for message, _severity in surface.notifications)
+
+
 async def test_absolute_deadline_marks_hung_read_incomplete() -> None:
     class HungReader(DeploymentOutcomeReader):
         async def snapshot(self, namespace: str, name: str) -> RawDeploymentOutcomeSnapshot:
