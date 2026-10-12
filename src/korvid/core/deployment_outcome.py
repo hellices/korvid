@@ -217,6 +217,13 @@ def _pod_problem(status: Mapping[str, Any]) -> tuple[str, str]:
                     or f"ExitCode{exit_code}",
                     _bounded_text(terminated.get("message"), f"pod.status.{field}.message"),
                 )
+    for condition in _entries(status.get("conditions")):
+        if condition.get("type") == "Ready" and condition.get("status") == "False":
+            return (
+                _bounded_text(condition.get("reason"), "pod.status.conditions.reason")
+                or "ReadyFalse",
+                _bounded_text(condition.get("message"), "pod.status.conditions.message"),
+            )
     return "", ""
 
 
@@ -344,7 +351,7 @@ def _condition_failure(
     for condition in conditions:
         if condition.type == "ReplicaFailure" and condition.status == "True":
             return condition
-        if condition.type == "Progressing" and condition.status == "False" and condition.reason:
+        if condition.type == "Progressing" and condition.status == "False":
             return condition
     return None
 

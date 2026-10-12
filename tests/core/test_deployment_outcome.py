@@ -215,6 +215,64 @@ def test_missing_observed_uid_is_incomplete_not_replaced() -> None:
     assert "identity" in outcome.summary.lower()
 
 
+def test_progressing_false_without_reason_is_stalled() -> None:
+    condition = DeploymentCondition(
+        type="Progressing",
+        status="False",
+        reason="",
+        message="rollout stopped progressing",
+    )
+
+    outcome = evaluate_deployment_outcome(
+        _scale(),
+        _observation(conditions=(condition,)),
+    )
+
+    assert outcome.phase is DeploymentOutcomePhase.STALLED
+    assert "Progressing" in outcome.summary
+
+
+def test_running_unready_pod_is_retained_as_rollout_evidence() -> None:
+    deployment = {
+        "metadata": {"uid": "deploy-uid"},
+        "spec": {"replicas": 1},
+        "status": {},
+    }
+    replica_set = {
+        "metadata": {
+            "uid": "current-rs",
+            "annotations": {"deployment.kubernetes.io/revision": "2"},
+            "ownerReferences": [{"kind": "Deployment", "uid": "deploy-uid", "controller": True}],
+        }
+    }
+    pod = {
+        "metadata": {
+            "name": "unready-pod",
+            "namespace": "default",
+            "uid": "unready-pod-uid",
+            "ownerReferences": [{"kind": "ReplicaSet", "uid": "current-rs", "controller": True}],
+        },
+        "status": {
+            "phase": "Running",
+            "conditions": [
+                {
+                    "type": "Ready",
+                    "status": "False",
+                    "reason": "ReadinessGatesNotReady",
+                    "message": "gate is false",
+                }
+            ],
+        },
+    }
+
+    observation = normalize_deployment_observation(
+        RawDeploymentOutcomeSnapshot(deployment, (replica_set,), (pod,), False)
+    )
+
+    assert len(observation.pods) == 1
+    assert observation.pods[0].reason == "ReadinessGatesNotReady"
+
+
 def test_progress_deadline_and_non_ready_pod_are_stalled() -> None:
     pod = DeploymentPodEvidence(
         namespace="default",

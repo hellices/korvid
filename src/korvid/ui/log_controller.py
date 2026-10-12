@@ -483,6 +483,7 @@ class LogController:
         if self._get_stream_logs() is None:
             self._ui.notify("Log streaming unavailable", severity="warning")
             return
+        await self.cancel_tasks()
         self._mode = "l"
         triples = self._pod_triples(namespace, name)
         await self.open_pane(

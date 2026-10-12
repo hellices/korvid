@@ -603,6 +603,44 @@ def test_log_availability_reports_a_missing_stream_source() -> None:
     assert h.ui.notifications == []
 
 
+async def test_open_named_logs_awaits_existing_stream_cancellation() -> None:
+    old_started = asyncio.Event()
+    cancellation_received = asyncio.Event()
+    release_old = asyncio.Event()
+    new_started = asyncio.Event()
+
+    async def stream(namespace: str, pod: str, container: str, **_: Any) -> AsyncIterator[LogLine]:
+        if pod == "old":
+            old_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancellation_received.set()
+                await release_old.wait()
+                raise
+        else:
+            new_started.set()
+            await asyncio.Event().wait()
+        yield LogLine(pod=pod, container=container, text="", timestamp=None)  # pragma: no cover
+
+    h = make_harness(stream_logs=stream)
+    await h.controller.open_pane("default", [("old", "main")])
+    await old_started.wait()
+
+    reopening = asyncio.create_task(
+        h.controller.open_named_logs("default", "web", expected_uid="web-uid")
+    )
+    await cancellation_received.wait()
+    await asyncio.sleep(0)
+
+    assert reopening.done() is False
+    assert new_started.is_set() is False
+    release_old.set()
+    await reopening
+    await new_started.wait()
+    await h.controller.shutdown()
+
+
 async def test_open_named_logs_refuses_a_missing_stream_source() -> None:
     h = make_harness(stream_logs=None)
 
