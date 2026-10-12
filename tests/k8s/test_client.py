@@ -1929,9 +1929,10 @@ async def test_noop_scale_retains_current_generation() -> None:
 
 async def test_scale_object_writes_when_generation_read_is_unavailable() -> None:
     client = KubeClient()
+    read = AsyncMock(side_effect=RuntimeError("forbidden"))
     write = AsyncMock(return_value=b'{"kind":"Scale","metadata":{"resourceVersion":"43"}}')
     with (
-        patch.object(client, "_request_json", AsyncMock(side_effect=RuntimeError("forbidden"))),
+        patch.object(client, "_request_json", read),
         patch.object(client, "_request_write", write),
     ):
         result = await client.scale_object(_deploy_meta(), "default", "web", 5, uid="deploy-uid")
@@ -1942,6 +1943,7 @@ async def test_scale_object_writes_when_generation_read_is_unavailable() -> None
         "metadata": {"uid": "deploy-uid"},
     }
     assert result.generation is None
+    read.assert_awaited_once_with("/apis/apps/v1/namespaces/default/deployments/web")
 
 
 async def test_scale_object_requires_resource_version_for_generation_correlation() -> None:

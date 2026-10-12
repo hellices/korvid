@@ -476,16 +476,18 @@ async def test_accepted_observer_runs_after_success_audit(tmp_path: Path) -> Non
 
 
 @pytest.mark.parametrize(
-    ("audit", "operation_error"),
+    ("audit", "operation_error", "expected_prefix", "expected_runs"),
     [
-        ("broken", None),
-        ("working", ApiStatusError(500, "mutation failed")),
+        ("broken", None, "blocked:", 0),
+        ("working", ApiStatusError(500, "mutation failed"), "failed:", 1),
     ],
 )
 async def test_accepted_observer_does_not_run_for_blocked_or_failed_write(
     tmp_path: Path,
     audit: str,
     operation_error: BaseException | None,
+    expected_prefix: str,
+    expected_runs: int,
 ) -> None:
     env = make_env(tmp_path, audit=audit)
     observed: list[object] = []
@@ -503,7 +505,8 @@ async def test_accepted_observer_does_not_run_for_blocked_or_failed_write(
         on_accepted=observe,
     )
 
-    assert result.startswith(("blocked:", "failed:"))
+    assert result.startswith(expected_prefix)
+    assert recorder.ran == expected_runs
     assert observed == []
 
 

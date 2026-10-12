@@ -88,8 +88,10 @@ async def test_pod_reads_use_explicit_outcome_identity(verb: str) -> None:
 
 async def test_pod_read_is_serialized_with_context_switch() -> None:
     workspace = _Workspace()
+    uid_lock_states: list[bool] = []
 
     async def target_uid(kind: str, namespace: str | None, name: str) -> str:
+        uid_lock_states.append(workspace.nav_lock.locked())
         return "pod-uid"
 
     async def describe(namespace: str, name: str, uid: str) -> None:
@@ -110,6 +112,7 @@ async def test_pod_read_is_serialized_with_context_switch() -> None:
 
     await actions("logs", 4, "workloads", "tracked-pod", "pod-uid")
 
+    assert uid_lock_states == [False, True]
     assert workspace.nav_lock.locked() is False
 
 

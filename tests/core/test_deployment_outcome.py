@@ -519,6 +519,51 @@ def test_restart_with_missing_marker_keeps_observing_an_older_generation() -> No
     assert outcome.phase is DeploymentOutcomePhase.OBSERVING
 
 
+def test_container_blocker_wins_over_earlier_generic_termination() -> None:
+    deployment = {
+        "metadata": {"uid": "deploy-uid", "generation": 7},
+        "spec": {"replicas": 1},
+        "status": {
+            "observedGeneration": 7,
+            "replicas": 1,
+            "updatedReplicas": 1,
+            "readyReplicas": 0,
+            "availableReplicas": 0,
+            "unavailableReplicas": 1,
+        },
+    }
+    replica_set = {
+        "metadata": {
+            "uid": "current-rs",
+            "annotations": {"deployment.kubernetes.io/revision": "7"},
+            "ownerReferences": [{"kind": "Deployment", "uid": "deploy-uid", "controller": True}],
+        }
+    }
+    pod = {
+        "metadata": {
+            "name": "multi-container",
+            "namespace": "default",
+            "uid": "multi-container-uid",
+            "ownerReferences": [{"kind": "ReplicaSet", "uid": "current-rs", "controller": True}],
+        },
+        "status": {
+            "phase": "Pending",
+            "containerStatuses": [
+                {"state": {"terminated": {"reason": "Error", "exitCode": 1}}},
+                {"state": {"waiting": {"reason": "ImagePullBackOff"}}},
+            ],
+        },
+    }
+
+    observation = normalize_deployment_observation(
+        RawDeploymentOutcomeSnapshot(deployment, (replica_set,), (pod,), False)
+    )
+    outcome = evaluate_deployment_outcome(_scale(replicas=1), observation)
+
+    assert observation.pods[0].reason == "ImagePullBackOff"
+    assert outcome.phase is DeploymentOutcomePhase.STALLED
+
+
 def test_old_replica_set_pod_blocker_is_not_current_rollout_evidence() -> None:
     deployment = {
         "metadata": {"uid": "deploy-uid"},

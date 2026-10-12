@@ -453,7 +453,7 @@ class DeploymentOutcomeController:
                 }
                 else "information"
             )
-            self._ui.notify(outcome.summary, severity=severity)
+            self._ui.notify(outcome.summary, severity=severity, markup=False)
 
     def latest(self) -> DeploymentTrackerSnapshot | None:
         """Return the newest immutable tracker snapshot."""

@@ -51,11 +51,16 @@ _DEPLOYMENT: dict[str, Any] = {
 }
 
 
-def _raw(*, ready: int = 3) -> RawDeploymentOutcomeSnapshot:
+def _raw(*, ready: int = 3, restart_stamp: str = "restart-stamp") -> RawDeploymentOutcomeSnapshot:
     deployment = {
         **_DEPLOYMENT,
         "metadata": dict(_DEPLOYMENT["metadata"]),
-        "spec": dict(_DEPLOYMENT["spec"]),
+        "spec": dict(_DEPLOYMENT["spec"])
+        | {
+            "template": {
+                "metadata": {"annotations": {"kubectl.kubernetes.io/restartedAt": restart_stamp}}
+            }
+        },
         "status": dict(_DEPLOYMENT["status"]) | {"readyReplicas": ready},
     }
     return RawDeploymentOutcomeSnapshot(deployment, (), (), False)
@@ -148,6 +153,7 @@ async def test_scale_observer_reads_immediately_and_completes() -> None:
     assert latest.intent.generation == 2
     assert latest.outcome.phase is DeploymentOutcomePhase.COMPLETED
     assert reader.calls == [("default", "web"), ("default", "web")]
+    assert ui.notification_markup[-2:] == [False, False]
 
 
 async def test_presentation_failure_does_not_abort_observation() -> None:
@@ -391,13 +397,14 @@ def test_open_latest_without_tracker_reports_unavailable() -> None:
 
 
 async def test_restart_observer_carries_exact_restart_stamp() -> None:
-    controller, ui = _controller(_Reader([_raw()]))
+    supplied_stamp = "2026-10-12T18:30:00+00:00"
+    controller, ui = _controller(_Reader([_raw(restart_stamp=supplied_stamp)]))
     observer = controller.restart_observer(
         epoch=4,
         namespace="default",
         name="web",
         uid="deploy-uid",
-        restarted_at="restart-stamp",
+        restarted_at=supplied_stamp,
     )
 
     assert observer is not None
@@ -408,6 +415,7 @@ async def test_restart_observer_carries_exact_restart_stamp() -> None:
     assert latest is not None
     assert isinstance(latest.intent, DeploymentRestartIntent)
     assert latest.intent.generation == 2
+    assert latest.intent.restarted_at == supplied_stamp
     assert latest.outcome.phase is DeploymentOutcomePhase.COMPLETED
 
 

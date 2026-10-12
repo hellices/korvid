@@ -189,16 +189,18 @@ def _condition_entries(status: Mapping[str, Any]) -> tuple[DeploymentCondition, 
 
 
 def _pod_problem(status: Mapping[str, Any]) -> tuple[str, str]:
+    problems: list[tuple[str, str]] = []
     reason = _bounded_text(status.get("reason"), "pod.status.reason")
-    message = _bounded_text(status.get("message"), "pod.status.message")
     if reason:
-        return reason, message
+        problems.append((reason, _bounded_text(status.get("message"), "pod.status.message")))
     for condition in _entries(status.get("conditions")):
         if condition.get("type") == "PodScheduled" and condition.get("status") == "False":
-            return (
-                _bounded_text(condition.get("reason"), "pod.status.conditions.reason")
-                or "PodScheduledFalse",
-                _bounded_text(condition.get("message"), "pod.status.conditions.message"),
+            problems.append(
+                (
+                    _bounded_text(condition.get("reason"), "pod.status.conditions.reason")
+                    or "PodScheduledFalse",
+                    _bounded_text(condition.get("message"), "pod.status.conditions.message"),
+                )
             )
     for field in ("initContainerStatuses", "containerStatuses"):
         for container in _entries(status.get(field)):
@@ -206,26 +208,34 @@ def _pod_problem(status: Mapping[str, Any]) -> tuple[str, str]:
             waiting = _mapping(state.get("waiting"))
             waiting_reason = _bounded_text(waiting.get("reason"), f"pod.status.{field}.reason")
             if waiting_reason not in {"", "ContainerCreating", "PodInitializing"}:
-                return (
-                    waiting_reason,
-                    _bounded_text(waiting.get("message"), f"pod.status.{field}.message"),
+                problems.append(
+                    (
+                        waiting_reason,
+                        _bounded_text(waiting.get("message"), f"pod.status.{field}.message"),
+                    )
                 )
             terminated = _mapping(state.get("terminated"))
             exit_code = _integer(terminated.get("exitCode"))
             if exit_code not in {None, 0}:
-                return (
-                    _bounded_text(terminated.get("reason"), f"pod.status.{field}.reason")
-                    or f"ExitCode{exit_code}",
-                    _bounded_text(terminated.get("message"), f"pod.status.{field}.message"),
+                problems.append(
+                    (
+                        _bounded_text(terminated.get("reason"), f"pod.status.{field}.reason")
+                        or f"ExitCode{exit_code}",
+                        _bounded_text(terminated.get("message"), f"pod.status.{field}.message"),
+                    )
                 )
     for condition in _entries(status.get("conditions")):
         if condition.get("type") == "Ready" and condition.get("status") == "False":
-            return (
-                _bounded_text(condition.get("reason"), "pod.status.conditions.reason")
-                or "ReadyFalse",
-                _bounded_text(condition.get("message"), "pod.status.conditions.message"),
+            problems.append(
+                (
+                    _bounded_text(condition.get("reason"), "pod.status.conditions.reason")
+                    or "ReadyFalse",
+                    _bounded_text(condition.get("message"), "pod.status.conditions.message"),
+                )
             )
-    return "", ""
+    return next((problem for problem in problems if problem[0] in _POD_BLOCKERS), None) or (
+        problems[0] if problems else ("", "")
+    )
 
 
 def _pod_evidence(

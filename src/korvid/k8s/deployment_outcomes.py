@@ -214,6 +214,9 @@ async def iter_raw_object_pages(
         observe("list", path, payload=data, object_count=len(items))
         for item in items:
             yield item
+        if items:
+            del item
+        del data, items
         if not next_token:
             return
         if next_token in seen:
