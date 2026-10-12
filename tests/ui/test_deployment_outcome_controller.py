@@ -280,7 +280,10 @@ async def test_read_failure_preserves_last_confirmed_evidence() -> None:
     latest = controller.latest()
     assert latest is not None
     assert latest.outcome.phase is DeploymentOutcomePhase.INCOMPLETE
-    assert latest.outcome.evidence
+    assert latest.outcome.evidence == (
+        "generation 2/2",
+        "replicas current=3 updated=3 ready=1 available=3 desired=3",
+    )
 
 
 async def test_stop_does_not_overwrite_terminal_outcome() -> None:
@@ -525,7 +528,11 @@ async def test_registry_keeps_at_most_three_trackers() -> None:
         assert observer is not None
         await observer(_receipt())
 
-    assert len(controller.snapshots()) == 3
+    assert [snapshot.intent.target.name for snapshot in controller.snapshots()] == [
+        "web-1",
+        "web-2",
+        "web-3",
+    ]
     waiting.set()
     await _drain(ui, allow_cancelled=True)
 

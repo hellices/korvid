@@ -144,9 +144,11 @@ def test_parse_intercepts_tolerates_junk() -> None:
 
 
 async def test_traffic_manager_probe_returns_false_only_for_not_found() -> None:
+    found = mock.AsyncMock(return_value={"kind": "Deployment"})
     missing = mock.AsyncMock(side_effect=ApiStatusError(404, "Not Found"))
     denied = mock.AsyncMock(side_effect=ApiStatusError(403, "Forbidden"))
 
+    assert await make_traffic_manager_probe(found)() is True
     assert await make_traffic_manager_probe(missing)() is False
     with pytest.raises(ApiStatusError, match="Forbidden"):
         await make_traffic_manager_probe(denied)()

@@ -483,6 +483,7 @@ class LogController:
         if self._get_stream_logs() is None:
             self._ui.notify("Log streaming unavailable", severity="warning")
             return
+        epoch = self._ctx_epoch()
         await self.cancel_tasks()
         self._mode = "l"
         triples = self._pod_triples(namespace, name)
@@ -490,7 +491,7 @@ class LogController:
             namespace,
             [(pod, container) for _, pod, container in triples],
             triples=triples,
-            epoch=self._ctx_epoch(),
+            epoch=epoch,
             expected_uid=expected_uid,
         )
 

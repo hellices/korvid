@@ -9,8 +9,10 @@ from korvid.k8s.deployment_outcomes import (
     POD_META,
     KubeDeploymentOutcomeReader,
     iter_raw_object_pages,
+    list_raw_object_page,
 )
 from korvid.k8s.discovery import ResourceMeta
+from korvid.k8s.errors import KubeClientError
 
 
 def _owner(kind: str, uid: str) -> list[dict[str, object]]:
@@ -186,6 +188,24 @@ async def test_raw_page_iterator_rejects_unbounded_page_sizes(page_size: Any) ->
     request.assert_not_awaited()
 
 
+async def test_single_raw_page_observes_malformed_response_error() -> None:
+    observations: list[tuple[str, str]] = []
+
+    with pytest.raises(KubeClientError, match="malformed response"):
+        await list_raw_object_page(
+            POD_META,
+            "default",
+            None,
+            5,
+            list_path=lambda meta, namespace: "/api/v1/namespaces/default/pods",
+            request_json=AsyncMock(return_value={"items": "invalid"}),
+            observe=lambda action, path, **kwargs: observations.append((action, path)),
+            observe_error=lambda path, error: None,
+        )
+
+    assert observations == [("error", "/api/v1/namespaces/default/pods")]
+
+
 async def test_snapshot_reads_exact_deployment_and_caps_owned_pod_evidence() -> None:
     api = _Api(
         replica_sets=[
@@ -193,12 +213,12 @@ async def test_snapshot_reads_exact_deployment_and_caps_owned_pod_evidence() -> 
             _replica_set(uid="rs-other", owner_uid="other-deploy"),
         ],
         pods=[
-            *[_pod(index=index, owner_uid="rs-current") for index in range(8)],
             _pod(index=99, owner_uid="rs-other"),
+            *[_pod(index=index, owner_uid="rs-current") for index in range(8)],
         ],
     )
 
-    raw = await _reader(api, list_limit=5).snapshot("default", "web")
+    raw = await _reader(api, list_limit=10).snapshot("default", "web")
     observation = normalize_deployment_observation(raw, max_pod_evidence=5)
 
     assert observation.uid == "deploy-uid"
@@ -208,9 +228,10 @@ async def test_snapshot_reads_exact_deployment_and_caps_owned_pod_evidence() -> 
     assert [pod.uid for pod in observation.pods] == [f"pod-{index}" for index in range(5)]
     assert observation.partial_evidence is True
     assert observation.pod_evidence_ambiguous is False
+    assert all(pod.uid != "pod-99" for pod in observation.pods)
     assert [(kind, limit) for kind, _, _, limit in api.calls] == [
-        ("ReplicaSet", 5),
-        ("Pod", 5),
+        ("ReplicaSet", 10),
+        ("Pod", 10),
     ]
     assert all(namespace == "default" for _, namespace, _, _ in api.calls)
 

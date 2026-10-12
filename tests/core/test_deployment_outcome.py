@@ -1,3 +1,5 @@
+import pytest
+
 from korvid.core.deployment_outcome import (
     DeploymentCondition,
     DeploymentObservation,
@@ -658,18 +660,24 @@ def test_malformed_unavailable_counter_prevents_false_completion() -> None:
     assert outcome.phase is DeploymentOutcomePhase.OBSERVING
 
 
-def test_current_scale_to_zero_does_not_default_malformed_counter() -> None:
+@pytest.mark.parametrize(
+    "counter",
+    ["replicas", "updatedReplicas", "readyReplicas", "availableReplicas", "unavailableReplicas"],
+)
+def test_current_scale_to_zero_does_not_default_malformed_counter(counter: str) -> None:
     deployment = {
         "metadata": {"uid": "deploy-uid", "generation": 7},
         "spec": {"replicas": 0},
-        "status": {"observedGeneration": 7, "readyReplicas": "invalid"},
+        "status": {"observedGeneration": 7, counter: "invalid"},
     }
 
     observation = normalize_deployment_observation(
         RawDeploymentOutcomeSnapshot(deployment, (), (), False)
     )
+    outcome = evaluate_deployment_outcome(_scale(replicas=0), observation)
 
-    assert observation.ready_replicas is None
+    assert observation.replica_counters_malformed is True
+    assert outcome.phase is DeploymentOutcomePhase.OBSERVING
 
 
 def test_pod_evidence_limit_retains_blocker_before_ready_false_rows() -> None:
@@ -844,8 +852,20 @@ def test_mixed_known_and_malformed_replica_set_revisions_are_partial() -> None:
         for uid, revision in (("known-rs", "2"), ("unknown-rs", "not-an-integer"))
     )
 
+    pod = {
+        "metadata": {
+            "name": "known-pod",
+            "namespace": "default",
+            "uid": "known-pod-uid",
+            "ownerReferences": [{"kind": "ReplicaSet", "uid": "known-rs", "controller": True}],
+        },
+        "status": {
+            "phase": "Pending",
+            "containerStatuses": [{"state": {"waiting": {"reason": "ImagePullBackOff"}}}],
+        },
+    }
     observation = normalize_deployment_observation(
-        RawDeploymentOutcomeSnapshot(deployment, replica_sets, (), False)
+        RawDeploymentOutcomeSnapshot(deployment, replica_sets, (pod,), False)
     )
 
     assert observation.partial_evidence

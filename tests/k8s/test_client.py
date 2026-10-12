@@ -29,12 +29,18 @@ _T = TypeVar("_T")
 
 def test_connected_api_server_reads_active_client_without_kubeconfig_io() -> None:
     kube = KubeClient()
-    assert kube.connected_api_server() is None
-    api = MagicMock()
-    api.configuration.host = "https://cluster.example"
-    kube._api = api
+    with (
+        patch.object(k8s_config, "load_kube_config") as load_kube_config,
+        patch.object(k8s_config, "load_incluster_config") as load_incluster_config,
+    ):
+        assert kube.connected_api_server() is None
+        api = MagicMock()
+        api.configuration.host = "https://cluster.example"
+        kube._api = api
 
-    assert kube.connected_api_server() == "https://cluster.example"
+        assert kube.connected_api_server() == "https://cluster.example"
+    load_kube_config.assert_not_called()
+    load_incluster_config.assert_not_called()
 
 
 async def _watch_rows(events: AsyncIterator[WatchEvent[_T]]) -> list[tuple[str, _T]]:
@@ -1925,6 +1931,11 @@ async def test_noop_scale_retains_current_generation() -> None:
     assert result.generation == 8
     read.assert_awaited_once_with("/apis/apps/v1/namespaces/default/deployments/web")
     assert write.await_count == 1
+    assert write.await_args is not None
+    assert write.await_args.kwargs["body"] == {
+        "spec": {"replicas": 5},
+        "metadata": {"resourceVersion": "42"},
+    }
 
 
 async def test_scale_object_writes_when_generation_read_is_unavailable() -> None:

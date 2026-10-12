@@ -177,6 +177,9 @@ async def list_raw_object_page(
     except ApiStatusError as exc:
         observe_error(path, exc)
         raise
+    except KubeClientError:
+        observe("error", path)
+        raise
     observe("list", path, payload=data, object_count=len(items))
     return items, bool(continuation)
 

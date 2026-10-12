@@ -135,8 +135,9 @@ performed.
 
 Reader errors remain typed:
 
-- 404 after a previously accepted operation becomes `replaced` or
-  `incomplete`, depending on available UID evidence;
+- 404 after a previously accepted operation becomes `incomplete` because no
+  live UID is available to prove replacement;
+- a successful exact GET of the same name with a different UID becomes `replaced`;
 - 403, timeout, disconnect, and unsupported evidence become `incomplete`;
 - cancellation becomes `stopped`;
 - malformed fields are evidence gaps, not synthetic zeroes.

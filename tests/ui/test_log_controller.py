@@ -692,6 +692,45 @@ async def test_open_named_logs_awaits_existing_stream_cancellation() -> None:
     await h.controller.shutdown()
 
 
+async def test_open_named_logs_rejects_context_change_during_cancellation() -> None:
+    old_started = asyncio.Event()
+    cancellation_received = asyncio.Event()
+    release_old = asyncio.Event()
+    new_started = asyncio.Event()
+    epoch = [4]
+
+    async def stream(namespace: str, pod: str, container: str, **_: Any) -> AsyncIterator[LogLine]:
+        if pod == "old":
+            old_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancellation_received.set()
+                await release_old.wait()
+                raise
+        else:
+            new_started.set()
+            await asyncio.Event().wait()
+        yield LogLine(pod=pod, container=container, text="", timestamp=None)  # pragma: no cover
+
+    h = make_harness(stream_logs=stream)
+    h.controller._ctx_epoch = lambda: epoch[0]
+    h.controller._ctx_switch_crossed = lambda accepted: accepted != epoch[0]
+    await h.controller.open_pane("default", [("old", "main")])
+    await old_started.wait()
+
+    reopening = asyncio.create_task(
+        h.controller.open_named_logs("default", "web", expected_uid="web-uid")
+    )
+    await cancellation_received.wait()
+    epoch[0] = 5
+    release_old.set()
+    await reopening
+
+    assert new_started.is_set() is False
+    await h.controller.shutdown()
+
+
 async def test_open_named_logs_refuses_a_missing_stream_source() -> None:
     h = make_harness(stream_logs=None)
 
