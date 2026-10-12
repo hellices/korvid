@@ -431,6 +431,32 @@ def test_truncated_current_pod_blocker_stalls_operation() -> None:
     assert outcome.phase is DeploymentOutcomePhase.STALLED
 
 
+def test_scale_down_observes_excess_blocked_pod_until_removed() -> None:
+    blocker = DeploymentPodEvidence(
+        namespace="default",
+        name="terminating-pod",
+        uid="terminating-pod-uid",
+        phase="Pending",
+        reason="ImagePullBackOff",
+        message="waiting for deletion",
+    )
+
+    outcome = evaluate_deployment_outcome(
+        _scale(replicas=0),
+        _observation(
+            desired=0,
+            current=1,
+            updated=0,
+            ready=0,
+            available=0,
+            unavailable=1,
+            pods=(blocker,),
+        ),
+    )
+
+    assert outcome.phase is DeploymentOutcomePhase.OBSERVING
+
+
 def test_restart_with_missing_marker_is_incomplete_at_accepted_generation() -> None:
     outcome = evaluate_deployment_outcome(
         _restart("accepted"),

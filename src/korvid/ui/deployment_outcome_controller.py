@@ -289,7 +289,7 @@ class DeploymentOutcomeController:
         if worker is not None:
             worker.cancel()
         self._ui.notify(
-            f"Stopped the oldest Deployment outcome tracker at the {self._max_trackers}-tracker limit",
+            f"Evicted the oldest Deployment outcome at the {self._max_trackers}-tracker retention limit",
             severity="warning",
         )
 

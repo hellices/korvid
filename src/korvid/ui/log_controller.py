@@ -686,7 +686,9 @@ class LogController:
                 self._get_log_pane().set_state("error")
                 self._discard_task(asyncio.current_task())
                 return
-            await self._previous_log_stream(namespace, pod, container, stream_logs)
+            await self._previous_log_stream(
+                namespace, pod, container, stream_logs, expected_uid=expected_uid
+            )
         else:
             await self._live_log_stream(
                 namespace, pod, container, stream_logs, expected_uid=expected_uid
@@ -831,12 +833,20 @@ class LogController:
         pod: str,
         container: str,
         stream_logs: StreamLogsFn,
+        *,
+        expected_uid: str | None = None,
     ) -> None:
         """One-shot previous-container-log stream (follow=False, no reconnect)."""
         log_pane = self._get_log_pane()
         current = asyncio.current_task()
         try:
+            connection_verified = expected_uid is None
             async for line in stream_logs(namespace, pod, container, previous=True, follow=False):
+                if not connection_verified and not await self._stream_identity_current(
+                    namespace, pod, expected_uid, log_pane, current
+                ):
+                    return
+                connection_verified = True
                 log_pane.feed(line)
                 self._buffer_line(log_pane, line)
         except ApiStatusError as exc:

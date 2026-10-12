@@ -598,7 +598,8 @@ async def test_eviction_notice_uses_configured_tracker_limit() -> None:
         assert observer is not None
         await observer(_receipt())
 
-    assert any("1-tracker limit" in message for message, _severity in surface.notifications)
+    notices = [message for message, _severity in surface.notifications if "1-tracker" in message]
+    assert notices == ["Evicted the oldest Deployment outcome at the 1-tracker retention limit"]
 
 
 async def test_absolute_deadline_marks_hung_read_incomplete() -> None:

@@ -77,6 +77,18 @@ async def test_screen_keeps_api_acceptance_separate_from_convergence() -> None:
         assert "Waiting for replicas [not markup]" in summary
 
 
+async def test_screen_target_label_includes_captured_cluster_identity() -> None:
+    app = _HostApp()
+    screen = DeploymentOutcomeScreen(_snapshot())
+
+    async with app.run_test():
+        await app.push_screen(screen)
+        title = str(screen.query_one("#deployment-outcome-title", Static).render())
+
+        assert "cluster-a" in title
+        assert "default/web" in title
+
+
 async def test_screen_lists_bounded_pod_evidence_without_markup() -> None:
     app = _HostApp()
     screen = DeploymentOutcomeScreen(_snapshot(pods=(_pod(),)))

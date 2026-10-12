@@ -412,6 +412,28 @@ async def test_named_log_reconnect_stops_when_pod_uid_changes() -> None:
     assert any("identity changed" in item.message for item in h.ui.notifications)
 
 
+async def test_previous_logs_revalidate_pod_uid_before_first_line_is_shown() -> None:
+    uids = iter(("web-uid", "replacement-uid"))
+
+    async def target_uid(_plural: str, _namespace: str | None, _name: str) -> str | None:
+        return next(uids)
+
+    async def stream(namespace: str, pod: str, container: str, **_: Any) -> AsyncIterator[LogLine]:
+        yield LogLine(pod=pod, container=container, text="replacement log", timestamp=None)
+
+    h = make_harness(stream_logs=stream, target_uid=target_uid)
+    await h.controller.open_pane(
+        "default",
+        [("web", "main")],
+        previous=True,
+        expected_uid="web-uid",
+    )
+    await asyncio.gather(*h.controller.tasks, return_exceptions=True)
+
+    assert h.pane.fed == []
+    assert h.pane.states[-1] == "error"
+
+
 async def test_named_previous_logs_stop_when_pod_uid_changes() -> None:
     previous_attempts = 0
     uids = iter(("web-uid", "replacement-uid"))

@@ -396,9 +396,15 @@ def _progress_evidence(observation: DeploymentObservation) -> tuple[str, ...]:
     )
 
 
-def _stalled_outcome(observation: DeploymentObservation) -> DeploymentOutcome | None:
+def _stalled_outcome(
+    observation: DeploymentObservation, *, include_pod_blockers: bool = True
+) -> DeploymentOutcome | None:
     condition = _condition_failure(observation.conditions)
-    pod = None if observation.pod_evidence_ambiguous else _pod_failure(observation.pods)
+    pod = (
+        None
+        if observation.pod_evidence_ambiguous or not include_pod_blockers
+        else _pod_failure(observation.pods)
+    )
     if condition is None and pod is None:
         return None
     condition_detail: str | None = None
@@ -466,7 +472,14 @@ def _evaluate_scale(
             pods=observation.pods,
             partial_evidence=observation.partial_evidence,
         )
-    stalled = _stalled_outcome(observation) if _generation_current(observation) else None
+    include_pod_blockers = (
+        observation.current_replicas is None or observation.current_replicas <= intent.replicas
+    )
+    stalled = (
+        _stalled_outcome(observation, include_pod_blockers=include_pod_blockers)
+        if _generation_current(observation)
+        else None
+    )
     if stalled is not None:
         return stalled
     if _generation_current(observation) and _replicas_converged(observation, intent.replicas):

@@ -87,7 +87,7 @@ class DeploymentOutcomeScreen(ModalScreen[OutcomeScreenResult | None]):
         with VerticalScroll():
             yield Footer()
             yield Static(
-                f"Deployment outcome: {target.namespace}/{target.name}",
+                f"Deployment outcome: {target.cluster_id} · {target.namespace}/{target.name}",
                 id="deployment-outcome-title",
                 markup=False,
             )
