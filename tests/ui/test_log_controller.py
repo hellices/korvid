@@ -374,8 +374,10 @@ async def test_live_stream_gives_up_visibly_after_max_reconnects() -> None:
 
 async def test_named_log_revalidates_pod_uid_before_first_line_is_shown() -> None:
     uids = iter(("web-uid", "replacement-uid"))
+    uid_calls: list[tuple[str, str | None, str]] = []
 
-    async def target_uid(_plural: str, _namespace: str | None, _name: str) -> str | None:
+    async def target_uid(plural: str, namespace: str | None, name: str) -> str | None:
+        uid_calls.append((plural, namespace, name))
         return next(uids)
 
     async def stream(namespace: str, pod: str, container: str, **_: Any) -> AsyncIterator[LogLine]:
@@ -387,13 +389,16 @@ async def test_named_log_revalidates_pod_uid_before_first_line_is_shown() -> Non
 
     assert h.pane.fed == []
     assert h.pane.states[-1] == "error"
+    assert uid_calls == [("pods", "default", "web"), ("pods", "default", "web")]
 
 
 async def test_named_log_reconnect_stops_when_pod_uid_changes() -> None:
     attempts = 0
     uids = iter(("web-uid", "replacement-uid"))
+    uid_calls: list[tuple[str, str | None, str]] = []
 
-    async def target_uid(_plural: str, _namespace: str | None, _name: str) -> str | None:
+    async def target_uid(plural: str, namespace: str | None, name: str) -> str | None:
+        uid_calls.append((plural, namespace, name))
         return next(uids)
 
     async def failing(namespace: str, pod: str, container: str, **_: Any) -> AsyncIterator[LogLine]:
@@ -410,12 +415,15 @@ async def test_named_log_reconnect_stops_when_pod_uid_changes() -> None:
     assert attempts == 1
     assert h.pane.states[-1] == "error"
     assert any("identity changed" in item.message for item in h.ui.notifications)
+    assert uid_calls == [("pods", "default", "web"), ("pods", "default", "web")]
 
 
 async def test_previous_logs_revalidate_pod_uid_before_first_line_is_shown() -> None:
     uids = iter(("web-uid", "replacement-uid"))
+    uid_calls: list[tuple[str, str | None, str]] = []
 
-    async def target_uid(_plural: str, _namespace: str | None, _name: str) -> str | None:
+    async def target_uid(plural: str, namespace: str | None, name: str) -> str | None:
+        uid_calls.append((plural, namespace, name))
         return next(uids)
 
     async def stream(namespace: str, pod: str, container: str, **_: Any) -> AsyncIterator[LogLine]:
@@ -432,13 +440,16 @@ async def test_previous_logs_revalidate_pod_uid_before_first_line_is_shown() -> 
 
     assert h.pane.fed == []
     assert h.pane.states[-1] == "error"
+    assert uid_calls == [("pods", "default", "web"), ("pods", "default", "web")]
 
 
 async def test_named_previous_logs_stop_when_pod_uid_changes() -> None:
     previous_attempts = 0
     uids = iter(("web-uid", "replacement-uid"))
+    uid_calls: list[tuple[str, str | None, str]] = []
 
-    async def target_uid(_plural: str, _namespace: str | None, _name: str) -> str | None:
+    async def target_uid(plural: str, namespace: str | None, name: str) -> str | None:
+        uid_calls.append((plural, namespace, name))
         return next(uids)
 
     async def stream(
@@ -465,6 +476,7 @@ async def test_named_previous_logs_stop_when_pod_uid_changes() -> None:
     assert previous_attempts == 0
     assert h.pane.states[-1] == "error"
     assert any("identity changed" in item.message for item in h.ui.notifications)
+    assert uid_calls == [("pods", "default", "web"), ("pods", "default", "web")]
 
 
 async def test_action_log_previous_transitions_to_previous_mode() -> None:

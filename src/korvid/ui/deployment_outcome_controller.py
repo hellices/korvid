@@ -294,8 +294,17 @@ class DeploymentOutcomeController:
         )
 
     async def _observe(self, tracker_id: str) -> None:
+        started = self._started.get(tracker_id)
+        remaining = (
+            self._deadline_seconds
+            if started is None
+            else self._deadline_seconds - (self._clock() - started)
+        )
+        if remaining <= 0:
+            self._mark_deadline_elapsed(tracker_id)
+            return
         try:
-            async with asyncio.timeout(self._deadline_seconds):
+            async with asyncio.timeout(remaining):
                 for attempt, delay in enumerate(self._poll_delays, start=1):
                     if attempt > 1:
                         await self._sleep(delay)
@@ -469,6 +478,11 @@ class DeploymentOutcomeController:
             return
         self._present_snapshot(snapshot)
 
+    def _present_retained(self, tracker_id: str) -> None:
+        snapshot = self._snapshots.get(tracker_id)
+        if snapshot is not None:
+            self._present_snapshot(snapshot)
+
     def _present_snapshot(self, snapshot: DeploymentTrackerSnapshot) -> None:
         try:
             from korvid.ui.widgets.deployment_outcome_screen import DeploymentOutcomeScreen
@@ -484,9 +498,8 @@ class DeploymentOutcomeController:
         if verb == "stop" and isinstance(tracker_id, str):
             self.stop(tracker_id)
         elif verb == "refresh" and isinstance(tracker_id, str):
-            snapshot = self._snapshots.get(tracker_id)
-            if snapshot is not None:
-                self._ui.call_later(self._present_snapshot, snapshot)
+            if tracker_id in self._snapshots:
+                self._ui.call_later(self._present_retained, tracker_id)
         elif (
             verb in {"goto", "events", "describe", "logs"}
             and isinstance(tracker_id, str)

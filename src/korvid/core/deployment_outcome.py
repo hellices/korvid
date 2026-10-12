@@ -472,17 +472,34 @@ def _evaluate_scale(
             pods=observation.pods,
             partial_evidence=observation.partial_evidence,
         )
+    generation_current = _generation_current(observation)
+    condition_stalled = (
+        _stalled_outcome(observation, include_pod_blockers=False) if generation_current else None
+    )
+    if condition_stalled is not None:
+        return condition_stalled
+    if (
+        intent.replicas == 0
+        and generation_current
+        and _replicas_converged(observation, intent.replicas)
+    ):
+        return DeploymentOutcome(
+            phase=DeploymentOutcomePhase.COMPLETED,
+            summary="Deployment converged at 0 replicas",
+            evidence=_progress_evidence(observation),
+            partial_evidence=observation.partial_evidence,
+        )
     include_pod_blockers = (
         observation.current_replicas is None or observation.current_replicas <= intent.replicas
     )
     stalled = (
         _stalled_outcome(observation, include_pod_blockers=include_pod_blockers)
-        if _generation_current(observation)
+        if generation_current
         else None
     )
     if stalled is not None:
         return stalled
-    if _generation_current(observation) and _replicas_converged(observation, intent.replicas):
+    if generation_current and _replicas_converged(observation, intent.replicas):
         return DeploymentOutcome(
             phase=DeploymentOutcomePhase.COMPLETED,
             summary=f"Deployment converged at {intent.replicas} replicas",

@@ -457,6 +457,50 @@ def test_scale_down_observes_excess_blocked_pod_until_removed() -> None:
     assert outcome.phase is DeploymentOutcomePhase.OBSERVING
 
 
+def test_nonzero_scale_keeps_current_pod_blocker_precedence() -> None:
+    blocker = DeploymentPodEvidence(
+        namespace="default",
+        name="blocked-pod",
+        uid="blocked-pod-uid",
+        phase="Pending",
+        reason="ImagePullBackOff",
+        message="denied",
+    )
+
+    outcome = evaluate_deployment_outcome(
+        _scale(replicas=3),
+        _observation(pods=(blocker,)),
+    )
+
+    assert outcome.phase is DeploymentOutcomePhase.STALLED
+
+
+def test_scale_to_zero_completion_wins_over_residual_pod_blocker() -> None:
+    blocker = DeploymentPodEvidence(
+        namespace="default",
+        name="residual-pod",
+        uid="residual-pod-uid",
+        phase="Pending",
+        reason="CrashLoopBackOff",
+        message="terminating",
+    )
+
+    outcome = evaluate_deployment_outcome(
+        _scale(replicas=0),
+        _observation(
+            desired=0,
+            current=0,
+            updated=0,
+            ready=0,
+            available=0,
+            unavailable=0,
+            pods=(blocker,),
+        ),
+    )
+
+    assert outcome.phase is DeploymentOutcomePhase.COMPLETED
+
+
 def test_restart_with_missing_marker_is_incomplete_at_accepted_generation() -> None:
     outcome = evaluate_deployment_outcome(
         _restart("accepted"),
@@ -540,6 +584,10 @@ def test_current_scale_to_zero_normalizes_omitted_status_counters() -> None:
     assert observation.updated_replicas == 0
     assert observation.ready_replicas == 0
     assert observation.available_replicas == 0
+    assert observation.unavailable_replicas == 0
+    assert evaluate_deployment_outcome(_scale(replicas=0), observation).phase is (
+        DeploymentOutcomePhase.COMPLETED
+    )
 
 
 def test_current_scale_to_zero_does_not_default_malformed_counter() -> None:

@@ -695,7 +695,16 @@ uv run ruff check --fix \
   tests/ui/test_deployment_outcome_controller.py \
   tests/ui/test_deployment_outcome_screen.py \
   tests/ui/test_deployment_outcome_app.py
-uv run ruff format <same paths>
+uv run ruff format \
+  src/korvid/core/deployment_outcome.py \
+  src/korvid/k8s/deployment_outcomes.py \
+  src/korvid/ui/deployment_outcome_controller.py \
+  src/korvid/ui/widgets/deployment_outcome_screen.py \
+  tests/core/test_deployment_outcome.py \
+  tests/k8s/test_deployment_outcomes.py \
+  tests/ui/test_deployment_outcome_controller.py \
+  tests/ui/test_deployment_outcome_screen.py \
+  tests/ui/test_deployment_outcome_app.py
 uv run pytest -p no:tach \
   tests/core/test_deployment_outcome.py \
   tests/k8s/test_deployment_outcomes.py \

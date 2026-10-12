@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 
 from korvid.core.deployment_outcome import (
+    DeploymentOutcome,
     DeploymentOutcomePhase,
     DeploymentRestartIntent,
     DeploymentScaleIntent,
@@ -115,9 +116,15 @@ def _controller(
     return controller, surface
 
 
-async def _drain(ui: FakeUi) -> None:
-    if ui.workers:
-        await asyncio.gather(*ui.workers, return_exceptions=True)
+async def _drain(ui: FakeUi, *, allow_cancelled: bool = False) -> None:
+    if not ui.workers:
+        return
+    results = await asyncio.gather(*ui.workers, return_exceptions=True)
+    for result in results:
+        if isinstance(result, BaseException) and not (
+            allow_cancelled and isinstance(result, asyncio.CancelledError)
+        ):
+            raise result
 
 
 async def test_scale_observer_reads_immediately_and_completes() -> None:
@@ -232,11 +239,22 @@ async def test_refresh_defers_modal_reopen_until_after_dismissal() -> None:
     screen_count = len(ui.screens)
 
     controller._on_screen_result(("refresh", snapshot.tracker_id, "", "", ""))
+    controller._update(
+        snapshot.tracker_id,
+        DeploymentOutcome(
+            phase=DeploymentOutcomePhase.INCOMPLETE,
+            summary="newer retained outcome",
+        ),
+        snapshot.attempts + 1,
+    )
 
     assert len(ui.screens) == screen_count
     callback, args = ui.deferred[-1]
     callback(*args)
     assert len(ui.screens) == screen_count + 1
+    refreshed = ui.screens[-1][0]
+    assert isinstance(refreshed, DeploymentOutcomeScreen)
+    assert refreshed.snapshot.outcome.summary == "newer retained outcome"
 
 
 async def test_read_failure_preserves_last_confirmed_evidence() -> None:
@@ -501,7 +519,7 @@ async def test_registry_keeps_at_most_three_trackers() -> None:
 
     assert len(controller.snapshots()) == 3
     waiting.set()
-    await _drain(ui)
+    await _drain(ui, allow_cancelled=True)
 
 
 async def test_late_read_cannot_overwrite_user_stop() -> None:
@@ -600,6 +618,52 @@ async def test_eviction_notice_uses_configured_tracker_limit() -> None:
 
     notices = [message for message, _severity in surface.notifications if "1-tracker" in message]
     assert notices == ["Evicted the oldest Deployment outcome at the 1-tracker retention limit"]
+
+
+async def test_worker_delayed_past_deadline_does_not_start_a_read() -> None:
+    class DeferredWork:
+        def cancel(self) -> None:
+            pass
+
+    class DeferredUi(FakeUi):
+        def __init__(self) -> None:
+            super().__init__()
+            self.work: Awaitable[None] | None = None
+
+        def run_worker(
+            self,
+            work: Any,
+            *,
+            exclusive: bool = False,
+            group: str = "default",
+            name: str = "",
+            exit_on_error: bool = True,
+            thread: bool = False,
+        ) -> Any:
+            self.work = work
+            return DeferredWork()
+
+    now = [0.0]
+    reader = _Reader([_raw()])
+    ui = DeferredUi()
+    controller, _surface = _controller(reader, ui=ui, clock=lambda: now[0])
+    observer = controller.scale_observer(
+        epoch=4,
+        namespace="default",
+        name="web",
+        uid="deploy-uid",
+        replicas=3,
+    )
+    assert observer is not None
+    await observer(_receipt())
+    now[0] = 301.0
+    assert ui.work is not None
+    await ui.work
+
+    assert reader.calls == []
+    latest = controller.latest()
+    assert latest is not None
+    assert "deadline" in latest.outcome.summary
 
 
 async def test_absolute_deadline_marks_hung_read_incomplete() -> None:

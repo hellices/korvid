@@ -148,8 +148,10 @@ class _BlockingOutcomeReader(DeploymentOutcomeReader):
     def __init__(self) -> None:
         self.started = asyncio.Event()
         self.release = asyncio.Event()
+        self.calls: list[tuple[str, str]] = []
 
     async def snapshot(self, namespace: str, name: str) -> RawDeploymentOutcomeSnapshot:
+        self.calls.append((namespace, name))
         self.started.set()
         await self.release.wait()
         raise AssertionError("test reader should be cancelled before release")
@@ -377,6 +379,7 @@ async def test_rollout_restart_starts_deployment_outcome_tracker(tmp_path: Path)
         assert snapshot.intent.target.uid == "deploy-uid-1"
         assert snapshot.intent.restarted_at
         assert rec.restart_stamps == [snapshot.intent.restarted_at]
+        assert reader.calls == [("default", "web")]
 
 
 async def test_rollout_restart_rejected_on_pods(tmp_path: Path) -> None:
@@ -488,6 +491,7 @@ async def test_scale_starts_deployment_outcome_tracker_with_exact_count(tmp_path
         assert isinstance(snapshot.intent, DeploymentScaleIntent)
         assert snapshot.intent.target.uid == "deploy-uid-1"
         assert snapshot.intent.replicas == 5
+        assert reader.calls == [("default", "web")]
 
 
 async def test_failed_write_audits_error(tmp_path: Path) -> None:

@@ -150,15 +150,19 @@ async def test_context_change_during_event_fetch_discards_rows() -> None:
     context = _Context()
     ui = _Ui()
     uid_calls: list[tuple[str, str | None, str]] = []
+    fetch_calls: list[tuple[str, str, str | None]] = []
 
     async def target_uid(kind: str, namespace: str | None, name: str) -> str:
         uid_calls.append((kind, namespace, name))
         return "pod-uid"
 
     class Events:
-        async def fetch(self, namespace: str, name: str, *, uid: str | None = None) -> list[object]:
+        async def fetch(
+            self, namespace: str, name: str, *, uid: str | None = None
+        ) -> list[dict[str, Any]]:
+            fetch_calls.append((namespace, name, uid))
             context.changed = True
-            return []
+            return [{"reason": "Scheduled", "message": "assigned"}]
 
     async def describe(namespace: str, name: str, uid: str) -> None:
         raise AssertionError("describe must not run")
@@ -183,6 +187,7 @@ async def test_context_change_during_event_fetch_discards_rows() -> None:
         ("pods", "workloads", "tracked-pod"),
         ("pods", "workloads", "tracked-pod"),
     ]
+    assert fetch_calls == [("workloads", "tracked-pod", "pod-uid")]
     assert context.epochs
     assert set(context.epochs) == {4}
 

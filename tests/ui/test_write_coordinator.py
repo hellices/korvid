@@ -26,6 +26,7 @@ import json
 from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 from textual.await_complete import AwaitComplete
@@ -1023,11 +1024,7 @@ async def test_outcome_audit_failure_warns_but_keeps_the_executed_write(tmp_path
     real = env.audit
     assert real is not None
     calls: list[str] = []
-    observed = False
-
-    async def observe(receipt: AcceptedWriteReceipt) -> None:
-        nonlocal observed
-        observed = True
+    observe = AsyncMock()
 
     def flaky(**kwargs: Any) -> None:
         calls.append(str(kwargs["outcome"]))
@@ -1046,7 +1043,7 @@ async def test_outcome_audit_failure_warns_but_keeps_the_executed_write(tmp_path
     )
     assert outcome == "done"
     assert rec.ran == 1
-    assert observed is False
+    observe.assert_not_called()
     assert (
         "Audit log write failed (operation already executed)",
         "warning",
