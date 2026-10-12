@@ -1364,18 +1364,19 @@ def test_telepresence_wiring_respects_detection_and_kill_switch() -> None:
     kill-switch yields None; a detected binary yields a CLI wrapper."""
     from unittest import mock
 
-    from korvid.__main__ import _build_telepresence
+    import korvid.__main__ as main_mod
     from korvid.core.config import KorvidConfig
-    from korvid.k8s.telepresence import TelepresenceCLI
 
-    with mock.patch("korvid.k8s.telepresence.find_telepresence", return_value=None):
-        assert _build_telepresence(KorvidConfig()) is None
-    with mock.patch(
-        "korvid.k8s.telepresence.find_telepresence",
-        return_value="/x/telepresence",
+    with mock.patch("korvid.__main__.find_telepresence", return_value=None):
+        assert main_mod._build_telepresence(KorvidConfig()) is None
+    cli = object()
+    with (
+        mock.patch("korvid.__main__.find_telepresence", return_value="/x/telepresence"),
+        mock.patch("korvid.__main__.TelepresenceCLI", return_value=cli) as constructor,
     ):
-        assert isinstance(_build_telepresence(KorvidConfig()), TelepresenceCLI)
-        assert _build_telepresence(KorvidConfig(telepresence_enabled=False)) is None
+        assert main_mod._build_telepresence(KorvidConfig()) is cli
+        constructor.assert_called_once_with("/x/telepresence")
+        assert main_mod._build_telepresence(KorvidConfig(telepresence_enabled=False)) is None
 
 
 async def test_disconnect_agent_releases_the_provider(monkeypatch: object) -> None:

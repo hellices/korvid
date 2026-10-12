@@ -44,13 +44,6 @@ def find_telepresence() -> str | None:
     return shutil.which("telepresence")
 
 
-def build_telepresence(*, enabled: bool) -> TelepresenceCLI | None:
-    """Build the optional CLI wrapper when enabled and installed."""
-
-    binary = find_telepresence() if enabled else None
-    return TelepresenceCLI(binary) if binary is not None else None
-
-
 def make_traffic_manager_probe(
     get_object: Callable[
         [ResourceMeta, str | None, str],

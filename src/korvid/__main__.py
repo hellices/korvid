@@ -107,11 +107,7 @@ from korvid.k8s.helmcli import HelmCLI, find_helm
 from korvid.k8s.kubectl import KubectlPresence
 from korvid.k8s.metrics import MetricsPoller
 from korvid.k8s.models import reset_age_memo
-from korvid.k8s.telepresence import (
-    TelepresenceCLI,
-    build_telepresence,
-    make_traffic_manager_probe,
-)
+from korvid.k8s.telepresence import TelepresenceCLI, find_telepresence, make_traffic_manager_probe
 from korvid.tools.executor import (
     ToolExecutor,
     UIBridge,
@@ -930,7 +926,8 @@ def _build_helm(config: KorvidConfig) -> HelmCLI | None:
 
 
 def _build_telepresence(config: KorvidConfig) -> TelepresenceCLI | None:
-    return build_telepresence(enabled=config.telepresence_enabled)
+    binary = find_telepresence() if config.telepresence_enabled else None
+    return TelepresenceCLI(binary) if binary is not None else None
 
 
 def _protected_context_name(config: KorvidConfig, context: str | None) -> str | None:

@@ -774,8 +774,15 @@ class LogController:
     async def _pod_uid_matches(self, namespace: str, pod: str, expected_uid: str) -> bool:
         try:
             live_uid = await self._target_uid("pods", namespace, pod)
+        except ApiStatusError as exc:
+            if exc.status == 404:
+                live_uid = None
+            else:
+                self._notify_uid_verification_failed()
+                return False
         except Exception:
-            live_uid = None
+            self._notify_uid_verification_failed()
+            return False
         if live_uid == expected_uid:
             return True
         if not self._error:
@@ -785,6 +792,14 @@ class LogController:
                 markup=False,
             )
         return False
+
+    def _notify_uid_verification_failed(self) -> None:
+        if not self._error:
+            self._ui.notify(
+                "Unable to verify Pod identity; log stream was stopped",
+                severity="warning",
+                markup=False,
+            )
 
     def _mark_stream_healthy(self, log_pane: LogPaneView, consecutive_failures: int) -> None:
         """Restore the streaming indicator after a successful reconnect."""

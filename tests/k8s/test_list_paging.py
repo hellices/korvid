@@ -172,7 +172,8 @@ async def test_iter_objects_rejects_cyclic_continuation(
             _ = [summary async for summary in summaries]
 
     assert request.await_count == len(tokens)
-    assert len(telemetry) == len(tokens) + 1
+    assert [event.operation for event in telemetry].count("list") == len(tokens) - 1
+    assert len(telemetry) == len(tokens)
     assert telemetry[-1].operation == "error"
     assert telemetry[-1].status is None
 

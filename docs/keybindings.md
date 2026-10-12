@@ -80,9 +80,9 @@ still needs its own fresh keystroke.
 | Helm releases | `i` install · `u` upgrade · `h` revisions |
 | Helm revisions | `r` rollback |
 
-Only Deployment scale and restart start a convergence tracker. The write
-confirmation still means only that the API accepted the request; `:outcomes`
-shows the separately observed controller result. In that modal, `Enter`, `e`,
+Only Deployment scale and restart start a convergence tracker. After user
+approval, a successful write first records that the API accepted the request;
+`:outcomes` shows the separately observed controller result. In that modal, `Enter`, `e`,
 `d`, and `l` act on an evidence Pod only when its UID still matches; `r`
 reopens the latest snapshot, `x` stops observation, and `Esc` closes without
 stopping it.

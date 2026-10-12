@@ -392,6 +392,27 @@ async def test_named_log_revalidates_pod_uid_before_first_line_is_shown() -> Non
     assert uid_calls == [("pods", "default", "web"), ("pods", "default", "web")]
 
 
+async def test_named_log_reports_uid_lookup_failure_without_claiming_replacement() -> None:
+    attempts = 0
+
+    async def target_uid(plural: str, namespace: str | None, name: str) -> str | None:
+        raise ApiStatusError(403, "Forbidden")
+
+    async def stream(namespace: str, pod: str, container: str, **_: Any) -> AsyncIterator[LogLine]:
+        nonlocal attempts
+        attempts += 1
+        yield LogLine(pod=pod, container=container, text="must not display", timestamp=None)
+
+    h = make_harness(stream_logs=stream, target_uid=target_uid)
+    await h.controller.open_named_logs("default", "web", expected_uid="web-uid")
+    await asyncio.gather(*h.controller.tasks, return_exceptions=True)
+
+    assert attempts == 0
+    assert h.pane.states[-1] == "error"
+    assert any("unable to verify" in item.message.lower() for item in h.ui.notifications)
+    assert not any("identity changed" in item.message.lower() for item in h.ui.notifications)
+
+
 async def test_named_log_reconnect_stops_when_pod_uid_changes() -> None:
     attempts = 0
     uids = iter(("web-uid", "replacement-uid"))
