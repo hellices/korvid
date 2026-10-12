@@ -248,6 +248,8 @@ def _pod_evidence(
         if _controller_owner_uid(pod, "ReplicaSet") not in replica_set_uids:
             continue
         metadata = _mapping(pod.get("metadata"))
+        if metadata.get("deletionTimestamp") is not None:
+            continue
         status = _mapping(pod.get("status"))
         reason, message = _pod_problem(status)
         if not reason:

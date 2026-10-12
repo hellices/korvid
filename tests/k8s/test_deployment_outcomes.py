@@ -188,6 +188,33 @@ async def test_raw_page_iterator_rejects_unbounded_page_sizes(page_size: Any) ->
     request.assert_not_awaited()
 
 
+async def test_raw_page_iterator_rejects_repeated_page_before_yielding_its_items() -> None:
+    request = AsyncMock(
+        side_effect=[
+            {"items": [{"metadata": {"uid": "first"}}], "metadata": {"continue": "same"}},
+            {
+                "items": [{"metadata": {"uid": "repeated"}}],
+                "metadata": {"continue": "same"},
+            },
+        ]
+    )
+    pages = iter_raw_object_pages(
+        POD_META,
+        "default",
+        page_size=5,
+        list_path=lambda meta, namespace: "/api/v1/namespaces/default/pods",
+        request_json=request,
+        observe=lambda *args, **kwargs: None,
+        observe_error=lambda path, error: None,
+    )
+    yielded = [await anext(pages)]
+
+    with pytest.raises(KubeClientError, match="continuation did not advance"):
+        await anext(pages)
+
+    assert yielded == [{"metadata": {"uid": "first"}}]
+
+
 async def test_single_raw_page_observes_malformed_response_error() -> None:
     observations: list[tuple[str, str]] = []
 

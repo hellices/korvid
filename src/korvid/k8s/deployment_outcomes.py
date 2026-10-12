@@ -214,6 +214,9 @@ async def iter_raw_object_pages(
         except KubeClientError:
             observe("error", path)
             raise
+        if next_token and next_token in seen:
+            observe("error", path)
+            raise KubeClientError("LIST continuation did not advance")
         observe("list", path, payload=data, object_count=len(items))
         for item in items:
             yield item
@@ -222,9 +225,6 @@ async def iter_raw_object_pages(
         del data, items
         if not next_token:
             return
-        if next_token in seen:
-            observe("error", path)
-            raise KubeClientError("LIST continuation did not advance")
         seen.add(next_token)
         continuation = next_token
         await asyncio.sleep(0)

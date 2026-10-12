@@ -531,6 +531,53 @@ def test_scale_down_observes_excess_blocked_pod_until_removed() -> None:
     assert outcome.phase is DeploymentOutcomePhase.OBSERVING
 
 
+def test_converged_scale_down_ignores_deleting_surplus_pod_blocker() -> None:
+    deployment = {
+        "metadata": {"uid": "deploy-uid", "generation": 7},
+        "spec": {"replicas": 2},
+        "status": {
+            "observedGeneration": 7,
+            "replicas": 2,
+            "updatedReplicas": 2,
+            "readyReplicas": 2,
+            "availableReplicas": 2,
+            "unavailableReplicas": 0,
+        },
+    }
+    replica_set = {
+        "metadata": {
+            "uid": "current-rs",
+            "annotations": {"deployment.kubernetes.io/revision": "7"},
+            "ownerReferences": [{"kind": "Deployment", "uid": "deploy-uid", "controller": True}],
+        }
+    }
+    deleting_surplus_pod = {
+        "metadata": {
+            "name": "deleting-surplus-pod",
+            "namespace": "default",
+            "uid": "deleting-surplus-pod-uid",
+            "deletionTimestamp": "2026-10-13T00:00:00Z",
+            "ownerReferences": [{"kind": "ReplicaSet", "uid": "current-rs", "controller": True}],
+        },
+        "status": {
+            "phase": "Pending",
+            "containerStatuses": [{"state": {"waiting": {"reason": "CrashLoopBackOff"}}}],
+        },
+    }
+
+    observation = normalize_deployment_observation(
+        RawDeploymentOutcomeSnapshot(
+            deployment,
+            (replica_set,),
+            (deleting_surplus_pod,),
+            False,
+        )
+    )
+    outcome = evaluate_deployment_outcome(_scale(replicas=2), observation)
+
+    assert outcome.phase is DeploymentOutcomePhase.COMPLETED
+
+
 def test_nonzero_scale_keeps_current_pod_blocker_precedence() -> None:
     blocker = DeploymentPodEvidence(
         namespace="default",

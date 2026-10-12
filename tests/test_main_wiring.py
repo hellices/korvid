@@ -1860,7 +1860,9 @@ async def test_wire_and_run_wires_deployment_outcome_reader_from_kube(
     reader_factory.assert_called_once()
     reader_kwargs = reader_factory.call_args.kwargs
     assert reader_kwargs["get_object"].__self__ is kube
+    assert reader_kwargs["get_object"].__func__ is kube.get_object.__func__
     assert reader_kwargs["list_raw_objects"].__self__ is kube
+    assert reader_kwargs["list_raw_objects"].__func__ is kube.list_raw_objects.__func__
     assert captured["deployment_cluster_id"]() == "(kubeconfig default)|https://cluster.example"
 
 

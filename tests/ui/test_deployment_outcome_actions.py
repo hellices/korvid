@@ -232,6 +232,46 @@ async def test_context_change_during_event_fetch_discards_rows() -> None:
     assert set(context.epochs) == {4}
 
 
+async def test_context_change_while_waiting_for_nav_lock_blocks_pod_action() -> None:
+    context = _Context()
+    workspace = _Workspace()
+    jumped = asyncio.Event()
+    calls: list[str] = []
+
+    async def target_uid(kind: str, namespace: str | None, name: str) -> str:
+        return "pod-uid"
+
+    async def jump_to_object(*args: Any, **kwargs: Any) -> None:
+        jumped.set()
+
+    async def describe(namespace: str, name: str, uid: str) -> None:
+        calls.append("describe")
+
+    workspace.jump_to_object = jump_to_object  # type: ignore[method-assign]  # focused fake
+    actions = DeploymentOutcomePodActions(
+        ui=cast(UiSurface, _Ui()),
+        target_uid=target_uid,
+        context=cast(ContextGuard, context),
+        workspace=lambda: cast(WorkspaceController, workspace),
+        describe=describe,
+        logs=describe,
+        events=lambda: None,
+    )
+
+    await workspace.nav_lock.acquire()
+    task = asyncio.create_task(actions("describe", 4, "workloads", "tracked-pod", "pod-uid"))
+    try:
+        await jumped.wait()
+        context.changed = True
+    finally:
+        workspace.nav_lock.release()
+    await task
+
+    assert calls == []
+    assert context.epochs
+    assert set(context.epochs) == {4}
+
+
 async def test_context_change_during_uid_lookup_blocks_pod_action() -> None:
     context = _Context()
     jumps: list[str] = []

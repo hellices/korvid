@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import inspect
 import time
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -420,6 +421,58 @@ async def test_pod_action_failure_is_reported() -> None:
     assert ("Deployment outcome Pod action failed", "warning") in surface.notifications
 
 
+async def test_pod_action_worker_registration_failure_closes_coroutine() -> None:
+    class FailingPodActionWorkerUi(FakeUi):
+        fail_registration = False
+        rejected_work: Any = None
+
+        def run_worker(self, work: Any, **kwargs: Any) -> Any:
+            if self.fail_registration:
+                self.rejected_work = work
+                raise RuntimeError("worker unavailable")
+            return super().run_worker(work, **kwargs)
+
+    async def pod_action(
+        verb: str,
+        epoch: int,
+        namespace: str,
+        name: str,
+        uid: str,
+    ) -> None:
+        raise AssertionError("closed coroutine must not run")
+
+    surface = FailingPodActionWorkerUi()
+    controller = DeploymentOutcomeController(
+        ui=surface,
+        reader=_Reader([_raw()]),
+        get_epoch=lambda: 4,
+        cluster_id=lambda: "cluster",
+        poll_delays=(0.0,),
+        pod_action=pod_action,
+    )
+    observer = controller.scale_observer(
+        epoch=4,
+        namespace="default",
+        name="web",
+        uid="deploy-uid",
+        replicas=3,
+    )
+    assert observer is not None
+    await observer(_receipt())
+    await _drain(surface)
+    snapshot = controller.latest()
+    assert snapshot is not None
+    surface.fail_registration = True
+
+    controller._on_screen_result(("events", snapshot.tracker_id, "default", "web-pod", "pod-uid"))
+
+    assert inspect.getcoroutinestate(surface.rejected_work) == inspect.CORO_CLOSED
+    assert surface.notifications[-1] == (
+        "Deployment outcome Pod action failed",
+        "warning",
+    )
+
+
 def test_open_latest_without_tracker_reports_unavailable() -> None:
     controller, ui = _controller(_Reader([]))
 
@@ -752,6 +805,7 @@ async def test_deadline_wins_when_reader_translates_timeout_cancellation() -> No
 
     controller, ui = _controller(
         CancellationTranslatingReader(),
+        clock=lambda: 0.0,
         deadline_seconds=0.05,
     )
     observer = controller.scale_observer(

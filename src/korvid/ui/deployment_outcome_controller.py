@@ -315,11 +315,11 @@ class DeploymentOutcomeController:
             self._mark_deadline_elapsed(tracker_id)
             return
         try:
-            async with asyncio.timeout(remaining):
+            async with asyncio.timeout(remaining) as deadline:
                 for attempt, delay in enumerate(self._poll_delays, start=1):
                     if attempt > 1:
                         await self._sleep(delay)
-                    if await self._observe_once(tracker_id, attempt):
+                    if await self._observe_once(tracker_id, attempt, deadline):
                         return
                 self._mark_observation_incomplete(
                     tracker_id, "the observation polling schedule was exhausted"
@@ -364,7 +364,12 @@ class DeploymentOutcomeController:
         started = self._started.get(tracker_id)
         return started is not None and self._clock() - started >= self._deadline_seconds
 
-    async def _observe_once(self, tracker_id: str, attempt: int) -> bool:
+    async def _observe_once(
+        self,
+        tracker_id: str,
+        attempt: int,
+        deadline: asyncio.Timeout,
+    ) -> bool:
         snapshot = self._snapshots.get(tracker_id)
         if snapshot is None:
             return True
@@ -386,7 +391,7 @@ class DeploymentOutcomeController:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            if self._deadline_elapsed(tracker_id):
+            if deadline.expired() or self._deadline_elapsed(tracker_id):
                 self._mark_deadline_elapsed(tracker_id)
                 return True
             logger.warning("Deployment outcome read failed: %s", type(exc).__name__)
@@ -530,17 +535,29 @@ class DeploymentOutcomeController:
                     severity="warning",
                 )
                 return
-            self._ui.run_worker(
-                self._run_pod_action(
-                    verb,
-                    snapshot.intent.target.epoch,
-                    _namespace,
-                    _name,
-                    _uid,
-                ),
-                group="deployment-outcome-pod-action",
-                exit_on_error=False,
+            action = self._run_pod_action(
+                verb,
+                snapshot.intent.target.epoch,
+                _namespace,
+                _name,
+                _uid,
             )
+            try:
+                self._ui.run_worker(
+                    action,
+                    group="deployment-outcome-pod-action",
+                    exit_on_error=False,
+                )
+            except Exception as exc:
+                action.close()
+                logger.warning(
+                    "Deployment outcome Pod action failed to start: %s",
+                    type(exc).__name__,
+                )
+                self._ui.notify(
+                    "Deployment outcome Pod action failed",
+                    severity="warning",
+                )
 
     async def _run_pod_action(
         self, verb: str, epoch: int, namespace: str, name: str, uid: str
