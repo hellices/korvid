@@ -474,8 +474,8 @@ _SUCCESSFUL_ORDER = [
     "timeline:started@0",
     "probe:ctx-b",
     "mcp-shutdown",
-    "proposals-expired",
     "outcomes-stop",
+    "proposals-expired",
     "logs-close",
     "describe-hide",
     "workspace-quiesce",
@@ -1183,6 +1183,7 @@ async def test_undrained_outcome_read_aborts_switch_before_client_retarget(
 
     assert env.swaps == []
     assert not env.log.has("logs-close")
+    assert env.proposals.reasons == []
     assert env.timeline.phases[-1] == (
         0,
         "failed",

@@ -643,13 +643,14 @@ class ContextSwitchCoordinator(ContextGuard):
                     note="embedded MCP server did not stop in time",
                 )
                 return
+            await self._ensure_outcome_reads_drained(epoch, old, name, mcp_restart)
             # Old-context proposals are stale the moment this committed
             # transition begins: the old MCP run (and its capability) is
             # already stopped, and both the teardown below and the retarget
             # perform fallible awaits — expire them now, not at a later
             # point that an exception could keep from ever being reached.
             await self._proposals().expire_all("kube context switched")
-            await self._teardown_before_retarget(epoch, old, name, mcp_restart)
+            await self._teardown_before_retarget()
             ok, applied = await self._retarget(name, old, old_namespace)
             if not ok:
                 if mcp_restart:
@@ -764,6 +765,19 @@ class ContextSwitchCoordinator(ContextGuard):
                 return False
         return True
 
+    async def _ensure_outcome_reads_drained(
+        self,
+        epoch: int,
+        old: str | None,
+        name: str,
+        restart_mcp: bool,
+    ) -> None:
+        stop = self._stop_deployment_outcomes
+        if stop is None or await stop():
+            return
+        await self._abort_undrained_outcomes(epoch, old, name, restart_mcp)
+        raise _ContextSwitchAborted
+
     async def _abort_undrained_outcomes(
         self,
         epoch: int,
@@ -788,40 +802,26 @@ class ContextSwitchCoordinator(ContextGuard):
                 severity="error" if message.startswith("ERROR") else "information",
             )
 
-    async def _teardown_before_retarget(
-        self,
-        epoch: int = 0,
-        old: str | None = None,
-        name: str = "",
-        restart_mcp: bool = False,
-    ) -> None:
+    async def _teardown_before_retarget(self) -> None:
         """Restore Pulse after an abort that never touched the shared client."""
         pulse = self._pulse() if self._pulse is not None else None
         was_suspended = pulse.suspended if pulse is not None else True
         try:
             if pulse is not None:
                 await pulse.suspend()
-            drained = await self._teardown()
-            if not drained:
-                await self._abort_undrained_outcomes(epoch, old, name, restart_mcp)
-                raise _ContextSwitchAborted
+            await self._teardown()
         except (Exception, asyncio.CancelledError):
             if pulse is not None and not was_suspended:
                 pulse.resume_unchanged()
             raise
 
-    async def _teardown(self) -> bool:
+    async def _teardown(self) -> None:
         """Stop every consumer of the old cluster before the client swaps.
 
         Order matters: streams and pollers first (they hold the old
         connection), then session state that would otherwise leak old-cluster
         rows, breadcrumbs, or hints into the new one.
         """
-        if (
-            self._stop_deployment_outcomes is not None
-            and not await self._stop_deployment_outcomes()
-        ):
-            return False
         await self._logs().close()
         self._surface.hide_describe()
         # The workspace controller folds the split back to one pane, stops and
@@ -861,7 +861,6 @@ class ContextSwitchCoordinator(ContextGuard):
         self._surface.cancel_worker_group(HINT_EVENTS_GROUP)
         self._hints().teardown()
         await self._timeline().stop()
-        return True
 
     async def _retarget(
         self, name: str, old: str | None, old_namespace: str
