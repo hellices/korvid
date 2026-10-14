@@ -184,7 +184,7 @@ async def test_stale_uid_lookup_error_is_discarded_after_context_switch() -> Non
     await actions("goto", 4, "workloads", "tracked-pod", "pod-uid")
 
     assert workspace.jumps == []
-    assert ui.notifications == ["Pod identity changed; refresh the Deployment outcome"]
+    assert ui.notifications == []
 
 
 async def test_deleted_evidence_pod_reports_identity_change() -> None:

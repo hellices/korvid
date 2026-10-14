@@ -2032,7 +2032,7 @@ async def test_noop_scale_retains_current_generation() -> None:
 
 async def test_scale_object_writes_when_generation_read_is_unavailable() -> None:
     client = KubeClient()
-    read = AsyncMock(side_effect=RuntimeError("forbidden"))
+    read = AsyncMock(side_effect=ApiStatusError(403, "Forbidden"))
     write = AsyncMock(return_value=b'{"kind":"Scale","metadata":{"resourceVersion":"43"}}')
     with (
         patch.object(client, "_request_json", read),
@@ -2047,6 +2047,20 @@ async def test_scale_object_writes_when_generation_read_is_unavailable() -> None
     }
     assert result.generation is None
     assert read.await_count == 2
+
+
+async def test_scale_object_does_not_write_after_unexpected_correlation_failure() -> None:
+    client = KubeClient()
+    read = AsyncMock(side_effect=RuntimeError("programming error"))
+    write = AsyncMock(return_value=b'{"kind":"Scale"}')
+    with (
+        patch.object(client, "_request_json", read),
+        patch.object(client, "_request_write", write),
+        pytest.raises(RuntimeError, match="programming error"),
+    ):
+        await client.scale_object(_deploy_meta(), "default", "web", 5)
+
+    assert write.await_count == 0
 
 
 async def test_scale_object_requires_resource_version_for_generation_correlation() -> None:

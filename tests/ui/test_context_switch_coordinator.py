@@ -1406,6 +1406,18 @@ async def test_shutdown_stops_outcomes_when_prefetch_raises(tmp_path: Path) -> N
     assert env.log.has("outcomes-stop")
 
 
+async def test_shutdown_fails_when_outcome_reads_do_not_stop(tmp_path: Path) -> None:
+    env = Env(tmp_path)
+
+    async def stop_deployment_outcomes() -> bool:
+        return False
+
+    env.coordinator._stop_deployment_outcomes = stop_deployment_outcomes
+
+    with pytest.raises(RuntimeError, match="Deployment outcome reads did not stop"):
+        await env.coordinator.shutdown()
+
+
 async def test_shutdown_without_a_prefetch_is_a_no_op(tmp_path: Path) -> None:
     env = Env(tmp_path, wire_collaborators=False)
     env.coordinator.start()

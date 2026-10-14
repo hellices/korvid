@@ -497,7 +497,9 @@ class ContextSwitchCoordinator(ContextGuard):
                     await task
         finally:
             if self._stop_deployment_outcomes is not None:
-                await self._stop_deployment_outcomes()
+                stopped = await self._stop_deployment_outcomes()
+                if not stopped:
+                    raise RuntimeError("Deployment outcome reads did not stop during shutdown")
 
     # ------------------------------------------------------------------
     # Entry points — the app's `:ctx` handlers delegate straight to these

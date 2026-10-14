@@ -20,6 +20,7 @@ from typing import Any
 
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.drain import DrainPlan
+from korvid.k8s.errors import ApiStatusError, KubeClientError
 
 _SCALE_CORRELATION_TIMEOUT_SECONDS = 10.0
 
@@ -30,7 +31,7 @@ async def read_scale_snapshot(
     """Best-effort bounded Deployment snapshot for scale correlation."""
     try:
         return await asyncio.wait_for(read(path), _SCALE_CORRELATION_TIMEOUT_SECONDS)
-    except Exception:
+    except (TimeoutError, ApiStatusError, KubeClientError):
         return {}
 
 

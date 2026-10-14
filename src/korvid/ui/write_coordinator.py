@@ -49,6 +49,7 @@ from korvid.core.store import ALL_NAMESPACES
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.writes import WriteMutationResult
+from korvid.ui.accepted_write_observer import notify_accepted_observer
 from korvid.ui.action_availability import AvailabilityCode, UnavailableReason
 from korvid.ui.impact_preview import render_impact_lines, render_unavailable_lines
 from korvid.ui.ui_surface import UiSurface
@@ -59,7 +60,6 @@ from korvid.ui.workspace_ports import RelationshipLoading
 from korvid.ui.workspace_state import PaneState
 from korvid.ui.write_gate import (
     AcceptedWriteObserver,
-    AcceptedWriteReceipt,
     ReservedWrite,
     WriteGate,
 )
@@ -873,32 +873,14 @@ class WriteCoordinator(WriteGate):
             )
             return
         if observer is not None:
-            await self._notify_accepted_observer(action, meta, namespace, name, observer, mutation)
-
-    async def _notify_accepted_observer(
-        self,
-        action: str,
-        meta: ResourceMeta,
-        namespace: str | None,
-        name: str,
-        observer: AcceptedWriteObserver,
-        mutation: WriteMutationResult | None,
-    ) -> None:
-        receipt = AcceptedWriteReceipt.now(
-            action=action,
-            meta=meta,
-            namespace=namespace,
-            name=name,
-            mutation=mutation,
-        )
-        try:
-            await observer(receipt)
-        except (Exception, asyncio.CancelledError) as exc:
-            logger.exception("accepted-write observer failed: %s", exc)
-            self._ui.notify(
-                f"{action} {meta.plural}/{name} accepted, but outcome verification "
-                f"could not start: {str(exc) or type(exc).__name__}",
-                severity="warning",
+            await notify_accepted_observer(
+                self._ui,
+                action,
+                meta,
+                namespace,
+                name,
+                observer,
+                mutation,
             )
 
     async def run_shielded(
