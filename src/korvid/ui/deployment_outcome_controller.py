@@ -21,7 +21,10 @@ from korvid.core.deployment_outcome import (
     evaluate_deployment_outcome,
     normalize_deployment_observation,
 )
-from korvid.k8s.deployment_outcomes import DeploymentOutcomeReader
+from korvid.k8s.deployment_outcomes import (
+    DeploymentOutcomeReader,
+    RawDeploymentOutcomeSnapshot,
+)
 from korvid.k8s.errors import ApiStatusError
 from korvid.ui.action_availability import AvailabilityCode, UnavailableReason
 from korvid.ui.ui_surface import Severity, UiSurface
@@ -384,7 +387,8 @@ class DeploymentOutcomeController:
         if reader is None:
             return True
         try:
-            raw = await reader.snapshot(
+            raw = await self._read_snapshot(
+                reader,
                 snapshot.intent.target.namespace,
                 snapshot.intent.target.name,
             )
@@ -414,6 +418,29 @@ class DeploymentOutcomeController:
         )
         self._update(tracker_id, outcome, attempt)
         return outcome.phase is not DeploymentOutcomePhase.OBSERVING
+
+    async def _read_snapshot(
+        self,
+        reader: DeploymentOutcomeReader,
+        namespace: str,
+        name: str,
+    ) -> RawDeploymentOutcomeSnapshot:
+        read = asyncio.create_task(
+            reader.snapshot(namespace, name),
+            name=f"deployment-outcome-read:{namespace}/{name}",
+        )
+        try:
+            return await asyncio.shield(read)
+        except asyncio.CancelledError:
+            if not read.done():
+                read.cancel()
+                await asyncio.sleep(0)
+                if not read.done():
+                    read.cancel()
+            await asyncio.gather(read, return_exceptions=True)
+            if read.cancelled():
+                raise
+            return read.result()
 
     def _target_current(self, snapshot: DeploymentTrackerSnapshot) -> bool:
         target = snapshot.intent.target

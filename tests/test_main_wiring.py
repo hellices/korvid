@@ -1377,6 +1377,7 @@ def test_telepresence_wiring_respects_detection_and_kill_switch() -> None:
         assert main_mod._build_telepresence(KorvidConfig()) is cli
         constructor.assert_called_once_with("/x/telepresence")
         assert main_mod._build_telepresence(KorvidConfig(telepresence_enabled=False)) is None
+        constructor.assert_called_once_with("/x/telepresence")
 
 
 async def test_disconnect_agent_releases_the_provider(monkeypatch: object) -> None:

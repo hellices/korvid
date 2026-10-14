@@ -868,6 +868,7 @@ def test_pod_evidence_limit_retains_blocker_before_ready_false_rows() -> None:
     outcome = evaluate_deployment_outcome(_scale(replicas=6), observation)
 
     assert observation.partial_evidence is True
+    assert len(observation.pods) == 5
     assert any(pod.reason == "CrashLoopBackOff" for pod in observation.pods)
     assert outcome.phase is DeploymentOutcomePhase.STALLED
 

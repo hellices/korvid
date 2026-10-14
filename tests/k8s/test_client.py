@@ -1883,7 +1883,7 @@ async def test_delete_object_encodes_segments() -> None:
     assert "team/a" not in path
 
 
-async def test_scale_object_patches_scale_subresource() -> None:
+async def test_scale_object_uses_snapshot_for_correlation_without_pinning_patch() -> None:
     client = KubeClient()
     api = _write_api()
     read = AsyncMock(
@@ -1905,10 +1905,7 @@ async def test_scale_object_patches_scale_subresource() -> None:
     args, kwargs = api.call_api.call_args
     assert args[0] == "/apis/apps/v1/namespaces/default/deployments/web/scale"
     assert args[1] == "PATCH"
-    assert kwargs["body"] == {
-        "spec": {"replicas": 5},
-        "metadata": {"resourceVersion": "42"},
-    }
+    assert kwargs["body"] == {"spec": {"replicas": 5}}
     assert kwargs["header_params"]["Content-Type"] == "application/merge-patch+json"
     assert result.generation == 9
     read.assert_awaited_once_with("/apis/apps/v1/namespaces/default/deployments/web")
@@ -1933,10 +1930,7 @@ async def test_noop_scale_retains_current_generation() -> None:
     read.assert_awaited_once_with("/apis/apps/v1/namespaces/default/deployments/web")
     assert write.await_count == 1
     assert write.await_args is not None
-    assert write.await_args.kwargs["body"] == {
-        "spec": {"replicas": 5},
-        "metadata": {"resourceVersion": "42"},
-    }
+    assert write.await_args.kwargs["body"] == {"spec": {"replicas": 5}}
 
 
 async def test_scale_object_writes_when_generation_read_is_unavailable() -> None:

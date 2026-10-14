@@ -261,11 +261,13 @@ async def test_context_change_while_waiting_for_nav_lock_blocks_pod_action() -> 
     await workspace.nav_lock.acquire()
     task = asyncio.create_task(actions("describe", 4, "workloads", "tracked-pod", "pod-uid"))
     try:
-        await jumped.wait()
+        await asyncio.wait_for(jumped.wait(), timeout=1)
+        await asyncio.sleep(0)
+        assert not task.done()
         context.changed = True
     finally:
         workspace.nav_lock.release()
-    await task
+    await asyncio.wait_for(task, timeout=1)
 
     assert calls == []
     assert context.epochs

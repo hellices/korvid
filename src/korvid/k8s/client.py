@@ -1095,8 +1095,6 @@ class KubeClient(ReadOps, WriteOps, pulse.PulseReader):
             with suppress(Exception):
                 current = await self._request_json(path)
         body = self._scale_patch(replicas, uid)
-        if correlate:
-            body = self._pin_revision(body, current)
         raw = await self._request_write(
             f"{path}/scale",
             "PATCH",

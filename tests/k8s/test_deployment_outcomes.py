@@ -213,6 +213,10 @@ async def test_raw_page_iterator_rejects_repeated_page_before_yielding_its_items
         await anext(pages)
 
     assert yielded == [{"metadata": {"uid": "first"}}]
+    assert request.await_args_list[1].kwargs["query_params"] == [
+        ("limit", "5"),
+        ("continue", "same"),
+    ]
 
 
 async def test_single_raw_page_observes_malformed_response_error() -> None:

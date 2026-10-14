@@ -767,13 +767,24 @@ async def test_worker_delayed_past_deadline_does_not_start_a_read() -> None:
     assert "deadline" in latest.outcome.summary
 
 
-async def test_absolute_deadline_marks_hung_read_incomplete() -> None:
+async def test_absolute_deadline_reaps_reader_that_suppresses_cancellation() -> None:
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+    reaped = asyncio.Event()
+
     class HungReader(DeploymentOutcomeReader):
         async def snapshot(self, namespace: str, name: str) -> RawDeploymentOutcomeSnapshot:
-            await asyncio.Future()
+            started.set()
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                cancelled.set()
+                await asyncio.Future()
+            finally:
+                reaped.set()
             raise AssertionError("unreachable")
 
-    controller, ui = _controller(HungReader(), deadline_seconds=0.0)
+    controller, ui = _controller(HungReader(), deadline_seconds=0.01)
     observer = controller.scale_observer(
         epoch=4,
         namespace="default",
@@ -783,12 +794,15 @@ async def test_absolute_deadline_marks_hung_read_incomplete() -> None:
     )
     assert observer is not None
     await observer(_receipt())
-    await _drain(ui)
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+    await asyncio.wait_for(_drain(ui), timeout=1.0)
 
     latest = controller.latest()
     assert latest is not None
     assert latest.outcome.phase is DeploymentOutcomePhase.INCOMPLETE
     assert "deadline" in latest.outcome.summary
+    assert cancelled.is_set()
+    assert reaped.is_set()
 
 
 async def test_deadline_wins_when_reader_translates_timeout_cancellation() -> None:
