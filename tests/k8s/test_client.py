@@ -2031,6 +2031,20 @@ async def test_scale_object_treats_malformed_snapshot_as_missing_correlation() -
     assert result.generation is None
 
 
+async def test_scale_cancellation_after_patch_returns_accepted_without_correlation() -> None:
+    client = KubeClient()
+    read = AsyncMock(side_effect=asyncio.CancelledError)
+    write = AsyncMock(return_value=b'{"kind":"Scale","metadata":{"resourceVersion":"43"}}')
+    with (
+        patch.object(client, "_request_json", read),
+        patch.object(client, "_request_write", write),
+    ):
+        result = await client.scale_object(_deploy_meta(), "default", "web", 5)
+
+    assert write.await_count == 1
+    assert result.generation is None
+
+
 async def test_non_deployment_scale_preserves_uid_only_mutation() -> None:
     client = KubeClient()
     read = AsyncMock(side_effect=AssertionError("correlation GET must not run"))

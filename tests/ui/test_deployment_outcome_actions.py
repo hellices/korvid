@@ -36,9 +36,10 @@ class _Context:
 class _Workspace:
     def __init__(self) -> None:
         self.nav_lock = asyncio.Lock()
+        self.jumps: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
 
     async def jump_to_object(self, *args: Any, **kwargs: Any) -> None:
-        return None
+        self.jumps.append((args, kwargs))
 
 
 @pytest.mark.parametrize("verb", ["describe", "logs"])
@@ -57,14 +58,12 @@ async def test_pod_reads_use_explicit_outcome_identity(verb: str) -> None:
     async def logs(namespace: str, name: str, uid: str) -> None:
         calls.append(("logs", namespace, name, uid))
 
+    workspace = _Workspace()
     actions = DeploymentOutcomePodActions(
         ui=cast(UiSurface, _Ui()),
         target_uid=target_uid,
         context=cast(ContextGuard, context),
-        workspace=cast(
-            "Callable[[], WorkspaceController]",
-            _Workspace,
-        ),
+        workspace=lambda: cast(WorkspaceController, workspace),
         describe=describe,
         logs=logs,
         events=lambda: None,
@@ -78,6 +77,12 @@ async def test_pod_reads_use_explicit_outcome_identity(verb: str) -> None:
         else ("logs", "workloads", "tracked-pod", "pod-uid")
     )
     assert calls == [expected]
+    assert workspace.jumps == [
+        (
+            ("pods", "workloads", "tracked-pod"),
+            {"epoch": 4, "expected_uid": "pod-uid"},
+        )
+    ]
     assert uid_calls == [
         ("pods", "workloads", "tracked-pod"),
         ("pods", "workloads", "tracked-pod"),

@@ -275,8 +275,10 @@ becomes `replaced`.
 evidence can produce `stalled`. A deadline without positive failure evidence
 produces `incomplete`, not `failed`.
 
-RBAC denial, read timeout, lost connection, context change, missing fields, or
-read-budget exhaustion can never produce `completed`.
+RBAC denial, read timeout, lost connection, context change, missing required
+fields, or read-budget exhaustion can never produce `completed`. The supported
+exception is omitted zero-valued replica counters for a current scale-to-zero
+observation, which normalize to zero as described above.
 
 Deployment convergence is labelled exactly as Deployment convergence. It does
 not claim Service reachability, application health, or SLO success.

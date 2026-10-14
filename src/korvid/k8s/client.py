@@ -10,7 +10,7 @@ import logging
 import re
 import ssl
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Mapping, Sequence
-from contextlib import AbstractAsyncContextManager, asynccontextmanager, suppress
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from datetime import datetime, timedelta
 from typing import Any, cast
 from urllib.parse import urlencode
@@ -1099,8 +1099,12 @@ class KubeClient(ReadOps, WriteOps, pulse.PulseReader):
         )
         if correlate:
             current: dict[str, Any] = {}
-            with suppress(Exception):
+            try:
                 current = await self._request_json(path)
+            except asyncio.CancelledError:
+                return WriteMutationResult()
+            except Exception:
+                pass
             return WriteMutationResult.from_scale_receipt(raw, current)
         return WriteMutationResult.from_response(raw)
 
