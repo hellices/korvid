@@ -509,7 +509,8 @@ async def test_restart_observer_carries_exact_restart_stamp() -> None:
 
 
 async def test_restart_without_response_generation_is_retained_incomplete() -> None:
-    controller, _ui = _controller(_Reader([_raw()]))
+    reader = _Reader([_raw()])
+    controller, ui = _controller(reader)
     observer = controller.restart_observer(
         epoch=4,
         namespace="default",
@@ -520,11 +521,14 @@ async def test_restart_without_response_generation_is_retained_incomplete() -> N
     assert observer is not None
 
     await observer(dataclasses.replace(_receipt(), action="rollout_restart", mutation=None))
+    await _drain(ui)
 
     latest = controller.latest()
     assert latest is not None
     assert latest.outcome.phase is DeploymentOutcomePhase.INCOMPLETE
     assert "generation" in latest.outcome.summary
+    assert ui.workers == []
+    assert reader.calls == []
 
 
 async def test_context_change_stops_before_another_cluster_read() -> None:

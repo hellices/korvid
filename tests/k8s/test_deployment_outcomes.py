@@ -6,6 +6,7 @@ import pytest
 
 from korvid.core.deployment_outcome import normalize_deployment_observation
 from korvid.k8s.deployment_outcomes import (
+    DEPLOYMENT_META,
     POD_META,
     KubeDeploymentOutcomeReader,
     iter_raw_object_pages,
@@ -273,12 +274,14 @@ async def test_snapshot_discards_related_evidence_when_deployment_changes_during
         def __init__(self) -> None:
             super().__init__(replica_sets=[_replica_set(uid="rs-current", owner_uid="deploy-uid")])
             self.gets = 0
+            self.get_calls: list[tuple[ResourceMeta, str | None, str]] = []
             self.operations: list[str] = []
 
         async def get_object(
             self, meta: ResourceMeta, namespace: str | None, name: str
         ) -> dict[str, Any]:
             self.gets += 1
+            self.get_calls.append((meta, namespace, name))
             self.operations.append("get")
             deployment = _deployment()
             if self.gets == 2:
@@ -306,6 +309,10 @@ async def test_snapshot_discards_related_evidence_when_deployment_changes_during
     raw = await _reader(api).snapshot("default", "web")
 
     assert api.operations == ["get", "list:ReplicaSet", "list:Pod", "get"]
+    assert api.get_calls == [
+        (DEPLOYMENT_META, "default", "web"),
+        (DEPLOYMENT_META, "default", "web"),
+    ]
     assert raw.deployment["metadata"]["generation"] == 8
     assert raw.replica_sets == ()
     assert raw.pods == ()

@@ -752,6 +752,11 @@ async def test_open_named_logs_rejects_context_change_during_cancellation() -> N
     release_old = asyncio.Event()
     new_started = asyncio.Event()
     epoch = [4]
+    uid_calls: list[tuple[str, str | None, str]] = []
+
+    async def target_uid(plural: str, namespace: str | None, name: str) -> str | None:
+        uid_calls.append((plural, namespace, name))
+        return f"{name}-uid"
 
     async def stream(namespace: str, pod: str, container: str, **_: Any) -> AsyncIterator[LogLine]:
         if pod == "old":
@@ -767,21 +772,22 @@ async def test_open_named_logs_rejects_context_change_during_cancellation() -> N
             await asyncio.Event().wait()
         yield LogLine(pod=pod, container=container, text="", timestamp=None)  # pragma: no cover
 
-    h = make_harness(stream_logs=stream)
+    h = make_harness(stream_logs=stream, target_uid=target_uid)
     h.controller._ctx_epoch = lambda: epoch[0]
     h.controller._ctx_switch_crossed = lambda accepted: accepted != epoch[0]
     await h.controller.open_pane("default", [("old", "main")])
-    await old_started.wait()
+    await asyncio.wait_for(old_started.wait(), timeout=1)
 
     reopening = asyncio.create_task(
         h.controller.open_named_logs("default", "web", expected_uid="web-uid")
     )
-    await cancellation_received.wait()
+    await asyncio.wait_for(cancellation_received.wait(), timeout=1)
     epoch[0] = 5
     release_old.set()
-    await reopening
+    await asyncio.wait_for(reopening, timeout=1)
 
     assert new_started.is_set() is False
+    assert uid_calls == []
     await h.controller.shutdown()
 
 

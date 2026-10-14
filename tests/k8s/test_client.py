@@ -23,6 +23,7 @@ from korvid.k8s.helm import HELM_RELEASES_META
 from korvid.k8s.models import GenericSummary, ReplicaSetSummary
 from korvid.k8s.telemetry import ReadTelemetryEvent
 from korvid.k8s.watch_events import WatchEvent, WatchProgress
+from korvid.k8s.writes import WriteMutationResult
 
 _T = TypeVar("_T")
 
@@ -1928,6 +1929,29 @@ async def test_scale_object_correlates_matching_snapshots_around_patch() -> None
         call("/apis/apps/v1/namespaces/default/deployments/web"),
     ]
     assert operations == ["get", "patch", "get"]
+
+
+@pytest.mark.parametrize(
+    ("live_generation", "live_replicas"),
+    [(1.0, 1), (True, 1), (1, 1.0), (1, True)],
+)
+def test_scale_snapshots_reject_non_integer_live_values(
+    live_generation: object,
+    live_replicas: object,
+) -> None:
+    result = WriteMutationResult.from_scale_snapshots(
+        {
+            "metadata": {"uid": "deploy-uid", "generation": 0},
+            "spec": {"replicas": 0},
+        },
+        {
+            "metadata": {"uid": "deploy-uid", "generation": live_generation},
+            "spec": {"replicas": live_replicas},
+        },
+        replicas=1,
+    )
+
+    assert result.generation is None
 
 
 async def test_scale_object_ignores_status_only_resource_version_churn() -> None:

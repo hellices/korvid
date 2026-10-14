@@ -77,6 +77,10 @@ class WriteMutationResult:
             or isinstance(generation, bool)
             or not isinstance(old_replicas, int)
             or isinstance(old_replicas, bool)
+            or not isinstance(live_generation, int)
+            or isinstance(live_generation, bool)
+            or not isinstance(live_replicas, int)
+            or isinstance(live_replicas, bool)
             or live_generation != generation + int(old_replicas != replicas)
             or live_replicas != replicas
         ):
