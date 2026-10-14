@@ -334,7 +334,9 @@ async def test_api_read_failure_exposes_safe_status_classification(
     assert latest is not None
     assert latest.outcome.phase is DeploymentOutcomePhase.INCOMPLETE
     assert classification in latest.outcome.summary
-    assert "secret" not in latest.outcome.summary
+    exposed = (latest.outcome.summary, *latest.outcome.evidence)
+    assert all("secret" not in text for text in exposed)
+    assert all("secret" not in message for message, _severity in ui.notifications)
 
 
 async def test_stop_does_not_overwrite_terminal_outcome() -> None:

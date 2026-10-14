@@ -18,7 +18,7 @@ from kubernetes_asyncio.client.exceptions import ApiException
 from korvid.k8s import client as client_mod
 from korvid.k8s.client import KubeClient
 from korvid.k8s.discovery import PODS_META, ResourceMeta
-from korvid.k8s.errors import ApiStatusError
+from korvid.k8s.errors import ApiStatusError, KubeClientError
 from korvid.k8s.helm import HELM_RELEASES_META
 from korvid.k8s.models import GenericSummary, ReplicaSetSummary
 from korvid.k8s.telemetry import ReadTelemetryEvent
@@ -2138,6 +2138,34 @@ async def test_scale_post_patch_correlation_timeout_returns_accepted() -> None:
             client.scale_object(_deploy_meta(), "default", "web", 5),
             timeout=1.0,
         )
+
+    assert write.await_count == 1
+    assert result.generation is None
+
+
+@pytest.mark.parametrize(
+    "read_error",
+    [ApiStatusError(503, "Unavailable"), KubeClientError("connection reset")],
+)
+async def test_scale_post_patch_read_failure_returns_accepted_without_correlation(
+    read_error: Exception,
+) -> None:
+    client = KubeClient()
+    read = AsyncMock(
+        side_effect=[
+            {
+                "metadata": {"uid": "deploy-uid", "generation": 8},
+                "spec": {"replicas": 3},
+            },
+            read_error,
+        ]
+    )
+    write = AsyncMock(return_value=b'{"kind":"Scale","metadata":{"resourceVersion":"43"}}')
+    with (
+        patch.object(client, "_request_json", read),
+        patch.object(client, "_request_write", write),
+    ):
+        result = await client.scale_object(_deploy_meta(), "default", "web", 5)
 
     assert write.await_count == 1
     assert result.generation is None
