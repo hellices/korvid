@@ -8,7 +8,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, TypeVar
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 from kubernetes_asyncio import client as k8s_client
@@ -1883,7 +1883,7 @@ async def test_delete_object_encodes_segments() -> None:
     assert "team/a" not in path
 
 
-async def test_scale_object_correlates_matching_post_write_receipt() -> None:
+async def test_scale_object_correlates_matching_snapshots_around_patch() -> None:
     client = KubeClient()
     api = _write_api()
     operations: list[str] = []
@@ -1895,8 +1895,13 @@ async def test_scale_object_correlates_matching_post_write_receipt() -> None:
 
     async def read_deployment(path: str) -> dict[str, Any]:
         operations.append("get")
+        if operations == ["get"]:
+            return {
+                "metadata": {"uid": "deploy-uid", "generation": 8},
+                "spec": {"replicas": 3},
+            }
         return {
-            "metadata": {"generation": 9, "resourceVersion": "43"},
+            "metadata": {"uid": "deploy-uid", "generation": 9},
             "spec": {"replicas": 5},
         }
 
@@ -1918,17 +1923,50 @@ async def test_scale_object_correlates_matching_post_write_receipt() -> None:
     assert kwargs["body"] == {"spec": {"replicas": 5}}
     assert kwargs["header_params"]["Content-Type"] == "application/merge-patch+json"
     assert result.generation == 9
-    read.assert_awaited_once_with("/apis/apps/v1/namespaces/default/deployments/web")
-    assert operations == ["patch", "get"]
+    assert read.await_args_list == [
+        call("/apis/apps/v1/namespaces/default/deployments/web"),
+        call("/apis/apps/v1/namespaces/default/deployments/web"),
+    ]
+    assert operations == ["get", "patch", "get"]
+
+
+async def test_scale_object_ignores_status_only_resource_version_churn() -> None:
+    client = KubeClient()
+    read = AsyncMock(
+        side_effect=[
+            {
+                "metadata": {"uid": "deploy-uid", "generation": 8, "resourceVersion": "42"},
+                "spec": {"replicas": 3},
+            },
+            {
+                "metadata": {"uid": "deploy-uid", "generation": 9, "resourceVersion": "44"},
+                "spec": {"replicas": 5},
+            },
+        ]
+    )
+    write = AsyncMock(return_value=b'{"kind":"Scale","metadata":{"resourceVersion":"43"}}')
+    with (
+        patch.object(client, "_request_json", read),
+        patch.object(client, "_request_write", write),
+    ):
+        result = await client.scale_object(_deploy_meta(), "default", "web", 5)
+
+    assert result.generation == 9
 
 
 async def test_scale_object_leaves_generation_unknown_after_concurrent_update() -> None:
     client = KubeClient()
     read = AsyncMock(
-        return_value={
-            "metadata": {"generation": 10, "resourceVersion": "44"},
-            "spec": {"replicas": 5},
-        }
+        side_effect=[
+            {
+                "metadata": {"uid": "deploy-uid", "generation": 8},
+                "spec": {"replicas": 3},
+            },
+            {
+                "metadata": {"uid": "deploy-uid", "generation": 10},
+                "spec": {"replicas": 5},
+            },
+        ]
     )
     write = AsyncMock(
         return_value=(b'{"kind":"Scale","metadata":{"resourceVersion":"43"},"spec":{"replicas":5}}')
@@ -1946,7 +1984,7 @@ async def test_noop_scale_retains_current_generation() -> None:
     client = KubeClient()
     read = AsyncMock(
         return_value={
-            "metadata": {"generation": 8, "resourceVersion": "42"},
+            "metadata": {"uid": "deploy-uid", "generation": 8},
             "spec": {"replicas": 5},
         }
     )
@@ -1958,7 +1996,11 @@ async def test_noop_scale_retains_current_generation() -> None:
         result = await client.scale_object(_deploy_meta(), "default", "web", 5)
 
     assert result.generation == 8
-    read.assert_awaited_once_with("/apis/apps/v1/namespaces/default/deployments/web")
+    assert read.await_count == 2
+    assert all(
+        args == call("/apis/apps/v1/namespaces/default/deployments/web")
+        for args in read.await_args_list
+    )
     assert write.await_count == 1
     assert write.await_args is not None
     assert write.await_args.kwargs["body"] == {"spec": {"replicas": 5}}
@@ -1980,7 +2022,7 @@ async def test_scale_object_writes_when_generation_read_is_unavailable() -> None
         "metadata": {"uid": "deploy-uid"},
     }
     assert result.generation is None
-    read.assert_awaited_once_with("/apis/apps/v1/namespaces/default/deployments/web")
+    assert read.await_count == 2
 
 
 async def test_scale_object_requires_resource_version_for_generation_correlation() -> None:
@@ -2042,9 +2084,47 @@ async def test_scale_object_treats_malformed_snapshot_as_missing_correlation() -
     assert result.generation is None
 
 
+async def test_scale_post_patch_correlation_timeout_returns_accepted() -> None:
+    client = KubeClient()
+
+    calls = [0]
+
+    async def read(path: str) -> dict[str, Any]:
+        if calls[0] == 0:
+            calls[0] += 1
+            return {
+                "metadata": {"uid": "deploy-uid", "generation": 8},
+                "spec": {"replicas": 3},
+            }
+        await asyncio.Future()
+        raise AssertionError("unreachable")
+
+    write = AsyncMock(return_value=b'{"kind":"Scale"}')
+    with (
+        patch("korvid.k8s.writes._SCALE_CORRELATION_TIMEOUT_SECONDS", 0.01),
+        patch.object(client, "_request_json", read),
+        patch.object(client, "_request_write", write),
+    ):
+        result = await asyncio.wait_for(
+            client.scale_object(_deploy_meta(), "default", "web", 5),
+            timeout=1.0,
+        )
+
+    assert write.await_count == 1
+    assert result.generation is None
+
+
 async def test_scale_cancellation_after_patch_returns_accepted_without_correlation() -> None:
     client = KubeClient()
-    read = AsyncMock(side_effect=asyncio.CancelledError)
+    read = AsyncMock(
+        side_effect=[
+            {
+                "metadata": {"uid": "deploy-uid", "generation": 8},
+                "spec": {"replicas": 3},
+            },
+            asyncio.CancelledError,
+        ]
+    )
     write = AsyncMock(return_value=b'{"kind":"Scale","metadata":{"resourceVersion":"43"}}')
     with (
         patch.object(client, "_request_json", read),

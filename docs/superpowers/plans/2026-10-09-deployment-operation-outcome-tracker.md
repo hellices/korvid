@@ -138,6 +138,8 @@ def evaluate_deployment_outcome(
     intent: DeploymentScaleIntent | DeploymentRestartIntent,
     observation: DeploymentObservation,
 ) -> DeploymentOutcome:
+    if not observation.uid:
+        return DeploymentOutcome.observing("Deployment UID is unavailable")
     if observation.uid != intent.target.uid:
         return DeploymentOutcome.replaced(observation.uid)
     if isinstance(intent, DeploymentScaleIntent):

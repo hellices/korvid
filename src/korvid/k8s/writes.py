@@ -11,13 +11,27 @@ the object was deleted and recreated under the same name meanwhile.
 from __future__ import annotations
 
 import abc
+import asyncio
 import json
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.drain import DrainPlan
+
+_SCALE_CORRELATION_TIMEOUT_SECONDS = 10.0
+
+
+async def read_scale_snapshot(
+    read: Callable[[str], Awaitable[dict[str, Any]]], path: str
+) -> dict[str, Any]:
+    """Best-effort bounded Deployment snapshot for scale correlation."""
+    try:
+        return await asyncio.wait_for(read(path), _SCALE_CORRELATION_TIMEOUT_SECONDS)
+    except Exception:
+        return {}
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,24 +52,36 @@ class WriteMutationResult:
         return cls(generation=generation if valid else None)
 
     @classmethod
-    def from_scale_receipt(cls, raw: bytes, deployment: dict[str, Any]) -> WriteMutationResult:
-        """Retain generation only when the post-write GET matches the scale receipt."""
-        try:
-            receipt_version = json.loads(raw).get("metadata", {}).get("resourceVersion")
-        except (AttributeError, json.JSONDecodeError, UnicodeDecodeError):
-            return cls()
-        metadata = deployment.get("metadata")
-        generation = metadata.get("generation") if isinstance(metadata, dict) else None
-        live_version = metadata.get("resourceVersion") if isinstance(metadata, dict) else None
+    def from_scale_snapshots(
+        cls,
+        before: dict[str, Any],
+        after: dict[str, Any],
+        replicas: int,
+    ) -> WriteMutationResult:
+        """Retain generation only when snapshots prove the accepted target."""
+        before_meta = before.get("metadata")
+        before_spec = before.get("spec")
+        after_meta = after.get("metadata")
+        after_spec = after.get("spec")
+        before_uid = before_meta.get("uid") if isinstance(before_meta, dict) else None
+        after_uid = after_meta.get("uid") if isinstance(after_meta, dict) else None
+        generation = before_meta.get("generation") if isinstance(before_meta, dict) else None
+        old_replicas = before_spec.get("replicas") if isinstance(before_spec, dict) else None
+        live_generation = after_meta.get("generation") if isinstance(after_meta, dict) else None
+        live_replicas = after_spec.get("replicas") if isinstance(after_spec, dict) else None
         if (
-            not isinstance(receipt_version, str)
-            or not receipt_version
-            or live_version != receipt_version
+            not isinstance(before_uid, str)
+            or not before_uid
+            or after_uid != before_uid
             or not isinstance(generation, int)
             or isinstance(generation, bool)
+            or not isinstance(old_replicas, int)
+            or isinstance(old_replicas, bool)
+            or live_generation != generation + int(old_replicas != replicas)
+            or live_replicas != replicas
         ):
             return cls()
-        return cls(generation=generation)
+        return cls(generation=live_generation)
 
 
 def restart_stamp() -> str:

@@ -273,19 +273,39 @@ async def test_snapshot_discards_related_evidence_when_deployment_changes_during
         def __init__(self) -> None:
             super().__init__(replica_sets=[_replica_set(uid="rs-current", owner_uid="deploy-uid")])
             self.gets = 0
+            self.operations: list[str] = []
 
         async def get_object(
             self, meta: ResourceMeta, namespace: str | None, name: str
         ) -> dict[str, Any]:
             self.gets += 1
+            self.operations.append("get")
             deployment = _deployment()
             if self.gets == 2:
                 deployment["metadata"]["generation"] = 8
                 deployment["metadata"]["resourceVersion"] = "11"
             return deployment
 
-    raw = await _reader(ChangingApi()).snapshot("default", "web")
+        async def list_raw_objects(
+            self,
+            meta: ResourceMeta,
+            namespace: str | None,
+            *,
+            label_selector: str | None,
+            limit: int,
+        ) -> tuple[list[dict[str, Any]], bool]:
+            self.operations.append(f"list:{meta.kind}")
+            return await super().list_raw_objects(
+                meta,
+                namespace,
+                label_selector=label_selector,
+                limit=limit,
+            )
 
+    api = ChangingApi()
+    raw = await _reader(api).snapshot("default", "web")
+
+    assert api.operations == ["get", "list:ReplicaSet", "list:Pod", "get"]
     assert raw.deployment["metadata"]["generation"] == 8
     assert raw.replica_sets == ()
     assert raw.pods == ()

@@ -51,7 +51,7 @@ from korvid.k8s.pulse import path_segment as _path_segment
 from korvid.k8s.reads import ReadOps
 from korvid.k8s.telemetry import ReadOperation, ReadTelemetry, ReadTelemetryEvent
 from korvid.k8s.watch_events import WatchEvent, WatchProgress
-from korvid.k8s.writes import WriteMutationResult, WriteOps
+from korvid.k8s.writes import WriteMutationResult, WriteOps, read_scale_snapshot
 
 logger = logging.getLogger(__name__)
 _AIOHTTP_CLIENT_ERROR = (
@@ -65,7 +65,6 @@ LIST_POLL_INTERVAL = 30.0
 LIST_PAGE_SIZE = 100
 _DISCOVERY_CONCURRENCY = 8
 _DISCOVERY_TIMEOUT_SECONDS = 10.0
-
 
 _DNS1123_NAME = re.compile(r"^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$")
 _API_VERSION_NAME = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
@@ -1090,6 +1089,7 @@ class KubeClient(ReadOps, WriteOps, pulse.PulseReader):
         """Set spec.replicas via the /scale subresource (merge patch)."""
         path = self._object_path(meta, namespace, name)
         correlate = meta.group == "apps" and meta.plural == "deployments"
+        before = await read_scale_snapshot(self._request_json, path) if correlate else {}
         body = self._scale_patch(replicas, uid)
         raw = await self._request_write(
             f"{path}/scale",
@@ -1099,10 +1099,10 @@ class KubeClient(ReadOps, WriteOps, pulse.PulseReader):
         )
         if correlate:
             try:
-                current = await self._request_json(path)
-            except (asyncio.CancelledError, Exception):
+                current = await read_scale_snapshot(self._request_json, path)
+            except asyncio.CancelledError:
                 return WriteMutationResult()
-            return WriteMutationResult.from_scale_receipt(raw, current)
+            return WriteMutationResult.from_scale_snapshots(before, current, replicas)
         return WriteMutationResult.from_response(raw)
 
     async def rollout_restart(
