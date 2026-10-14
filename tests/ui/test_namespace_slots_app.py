@@ -219,7 +219,11 @@ async def test_quitting_writes_the_slot_maps_still_queued(
         async def recording() -> None:
             drained.append(bool(slots._pending))
             workers_stopped.append(
-                all(worker.is_cancelled or worker.is_finished for worker in app.workers)
+                all(
+                    worker.is_cancelled or worker.is_finished
+                    for worker in app.workers
+                    if worker.group == "namespace-slot-save"
+                )
             )
             slots._save_lock.release()
             await shutdown()

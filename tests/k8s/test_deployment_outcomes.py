@@ -328,6 +328,34 @@ async def test_snapshot_discards_related_evidence_when_deployment_changes_during
     assert raw.pod_ownership_ambiguous is True
 
 
+async def test_snapshot_keeps_related_evidence_across_status_only_update() -> None:
+    class StatusChangingApi(_Api):
+        def __init__(self) -> None:
+            super().__init__(
+                replica_sets=[_replica_set(uid="rs-current", owner_uid="deploy-uid")],
+                pods=[_pod(index=1, owner_uid="rs-current")],
+            )
+            self.gets = 0
+
+        async def get_object(
+            self, meta: ResourceMeta, namespace: str | None, name: str
+        ) -> dict[str, Any]:
+            self.gets += 1
+            deployment = _deployment()
+            if self.gets == 2:
+                deployment["metadata"]["resourceVersion"] = "11"
+                deployment["status"]["readyReplicas"] = 3
+            return deployment
+
+    raw = await _reader(StatusChangingApi()).snapshot("default", "web")
+
+    assert raw.deployment["metadata"]["resourceVersion"] == "11"
+    assert len(raw.replica_sets) == 1
+    assert len(raw.pods) == 1
+    assert raw.partial is False
+    assert raw.pod_ownership_ambiguous is False
+
+
 async def test_snapshot_uses_server_side_deployment_selector() -> None:
     api = _Api()
 

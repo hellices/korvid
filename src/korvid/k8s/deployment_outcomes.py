@@ -131,7 +131,7 @@ class KubeDeploymentOutcomeReader(DeploymentOutcomeReader):
         current = await self._get_object(DEPLOYMENT_META, namespace, name)
         before = _mapping(deployment.get("metadata"))
         after = _mapping(current.get("metadata"))
-        revision_keys = ("uid", "generation", "resourceVersion")
+        revision_keys = ("uid", "generation")
         if any(before.get(key) != after.get(key) for key in revision_keys):
             return RawDeploymentOutcomeSnapshot(current, (), (), True, True)
         return RawDeploymentOutcomeSnapshot(
