@@ -207,6 +207,7 @@ async def test_quitting_writes_the_slot_maps_still_queued(
 ) -> None:
     app, slot_store = _app(Cluster(["alpha"]), tmp_path, config=KorvidConfig(namespace="default"))
     drained: list[bool] = []
+    workers_stopped: list[bool] = []
     async with app.run_test(size=(120, 40)) as pilot:
         await _ready(pilot, app, ["alpha"])
         slots = app._workspace_ctl.slots
@@ -217,12 +218,16 @@ async def test_quitting_writes_the_slot_maps_still_queued(
 
         async def recording() -> None:
             drained.append(bool(slots._pending))
+            workers_stopped.append(
+                all(worker.is_cancelled or worker.is_finished for worker in app.workers)
+            )
             slots._save_lock.release()
             await shutdown()
 
         monkeypatch.setattr(slots, "shutdown", recording)
 
     assert drained == [True]
+    assert workers_stopped == [True]
     assert slot_store.load(IDENTITY) == {1: SlotEntry("alpha", SlotOrigin.AUTO)}
 
 

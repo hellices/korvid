@@ -157,8 +157,34 @@ async def test_replaced_evidence_pod_blocks_all_actions(verb: str) -> None:
     await actions(verb, 4, "workloads", "tracked-pod", "evidence-uid")
 
     assert calls == []
+    assert workspace.jumps == []
     assert workspace.nav_lock.locked() is False
     assert any("identity changed" in message.lower() for message in ui.notifications)
+
+
+async def test_stale_uid_lookup_error_is_discarded_after_context_switch() -> None:
+    ui = _Ui()
+    context = _Context()
+    workspace = _Workspace()
+
+    async def target_uid(kind: str, namespace: str | None, name: str) -> str:
+        context.changed = True
+        raise ApiStatusError(403, "Forbidden")
+
+    actions = DeploymentOutcomePodActions(
+        ui=cast(UiSurface, ui),
+        target_uid=target_uid,
+        context=cast(ContextGuard, context),
+        workspace=lambda: cast(WorkspaceController, workspace),
+        describe=lambda namespace, name, uid: asyncio.sleep(0),
+        logs=lambda namespace, name, uid: asyncio.sleep(0),
+        events=lambda: None,
+    )
+
+    await actions("goto", 4, "workloads", "tracked-pod", "pod-uid")
+
+    assert workspace.jumps == []
+    assert ui.notifications == ["Pod identity changed; refresh the Deployment outcome"]
 
 
 async def test_deleted_evidence_pod_reports_identity_change() -> None:

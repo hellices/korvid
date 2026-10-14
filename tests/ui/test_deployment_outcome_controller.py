@@ -198,10 +198,14 @@ async def test_presentation_failure_does_not_abort_observation() -> None:
 
 async def test_worker_registration_failure_marks_tracker_incomplete() -> None:
     class FailingWorkerUi(FakeUi):
+        rejected_work: Any = None
+
         def run_worker(self, work: Any, **kwargs: Any) -> Any:
+            self.rejected_work = work
             raise RuntimeError("worker unavailable")
 
-    controller, _ui = _controller(_Reader([_raw()]), ui=FailingWorkerUi())
+    surface = FailingWorkerUi()
+    controller, _ui = _controller(_Reader([_raw()]), ui=surface)
     observer = controller.scale_observer(
         epoch=4,
         namespace="default",
@@ -218,6 +222,7 @@ async def test_worker_registration_failure_marks_tracker_incomplete() -> None:
     assert latest is not None
     assert latest.outcome.phase is DeploymentOutcomePhase.INCOMPLETE
     assert "worker" in latest.outcome.summary.lower()
+    assert inspect.getcoroutinestate(surface.rejected_work) == inspect.CORO_CLOSED
 
 
 async def test_open_latest_presents_newest_retained_tracker() -> None:

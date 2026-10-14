@@ -62,7 +62,7 @@ class DeploymentOutcomePodActions:
         try:
             live_uid = await self._target_uid("pods", namespace, name) if intact else None
         except ApiStatusError as exc:
-            if exc.status != 404:
+            if not self._context.crossed(epoch) and exc.status != 404:
                 raise
             live_uid = None
         intact = intact and not self._context.crossed(epoch) and live_uid == uid
