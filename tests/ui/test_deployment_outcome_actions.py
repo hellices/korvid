@@ -92,22 +92,24 @@ async def test_pod_reads_use_explicit_outcome_identity(verb: str) -> None:
 
 
 @pytest.mark.parametrize("verb", ["describe", "logs"])
-async def test_pod_read_is_serialized_with_context_switch(verb: str) -> None:
+async def test_pod_read_enforces_second_uid_lookup_inside_nav_lock(verb: str) -> None:
     workspace = _Workspace()
+    ui = _Ui()
     uid_lock_states: list[bool] = []
+    uids = iter(("pod-uid", "replacement-uid"))
 
     async def target_uid(kind: str, namespace: str | None, name: str) -> str:
         uid_lock_states.append(workspace.nav_lock.locked())
-        return "pod-uid"
+        return next(uids)
 
     async def describe(namespace: str, name: str, uid: str) -> None:
-        assert workspace.nav_lock.locked()
+        raise AssertionError("describe must not run for a replacement Pod")
 
     async def logs(namespace: str, name: str, uid: str) -> None:
-        assert workspace.nav_lock.locked()
+        raise AssertionError("logs must not run for a replacement Pod")
 
     actions = DeploymentOutcomePodActions(
-        ui=cast(UiSurface, _Ui()),
+        ui=cast(UiSurface, ui),
         target_uid=target_uid,
         context=cast(ContextGuard, _Context()),
         workspace=lambda: cast(WorkspaceController, workspace),
@@ -120,6 +122,7 @@ async def test_pod_read_is_serialized_with_context_switch(verb: str) -> None:
 
     assert uid_lock_states == [False, True]
     assert workspace.nav_lock.locked() is False
+    assert ui.notifications == ["Pod identity changed; refresh the Deployment outcome"]
 
 
 @pytest.mark.parametrize("verb", ["describe", "logs", "events"])

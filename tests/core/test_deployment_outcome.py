@@ -906,6 +906,46 @@ def test_unknown_replica_set_revision_marks_evidence_partial() -> None:
     assert observation.pods == ()
 
 
+def test_duplicate_newest_replica_set_revision_marks_evidence_ambiguous() -> None:
+    deployment = {
+        "metadata": {"uid": "deploy-uid"},
+        "spec": {"replicas": 1},
+        "status": {},
+    }
+    replica_sets = tuple(
+        {
+            "metadata": {
+                "uid": uid,
+                "annotations": {"deployment.kubernetes.io/revision": revision},
+                "ownerReferences": [
+                    {"kind": "Deployment", "uid": "deploy-uid", "controller": True}
+                ],
+            }
+        }
+        for uid, revision in (("old-rs", "1"), ("new-rs-a", "2"), ("new-rs-b", "2"))
+    )
+    pod = {
+        "metadata": {
+            "name": "stale-blocker",
+            "namespace": "default",
+            "uid": "stale-blocker-uid",
+            "ownerReferences": [{"kind": "ReplicaSet", "uid": "new-rs-a", "controller": True}],
+        },
+        "status": {
+            "phase": "Pending",
+            "containerStatuses": [{"state": {"waiting": {"reason": "ImagePullBackOff"}}}],
+        },
+    }
+
+    observation = normalize_deployment_observation(
+        RawDeploymentOutcomeSnapshot(deployment, replica_sets, (pod,), False)
+    )
+
+    assert observation.partial_evidence is True
+    assert observation.pod_evidence_ambiguous is True
+    assert observation.pods == ()
+
+
 def test_ambiguous_pod_ownership_marks_observation_partial() -> None:
     observation = normalize_deployment_observation(
         RawDeploymentOutcomeSnapshot(

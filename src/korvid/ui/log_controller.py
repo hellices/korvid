@@ -865,6 +865,10 @@ class LogController:
                 connection_verified = True
                 log_pane.feed(line)
                 self._buffer_line(log_pane, line)
+            if not connection_verified and not await self._stream_identity_current(
+                namespace, pod, expected_uid, log_pane, current
+            ):
+                return
         except ApiStatusError as exc:
             self._handle_stream_api_error(log_pane, current, namespace, exc)
             return

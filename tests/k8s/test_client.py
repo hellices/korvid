@@ -1886,13 +1886,23 @@ async def test_delete_object_encodes_segments() -> None:
 async def test_scale_object_correlates_matching_post_write_receipt() -> None:
     client = KubeClient()
     api = _write_api()
-    read = AsyncMock(
-        return_value={
+    operations: list[str] = []
+    response = api.call_api.return_value
+
+    async def patch_scale(*args: Any, **kwargs: Any) -> Any:
+        operations.append("patch")
+        return response
+
+    async def read_deployment(path: str) -> dict[str, Any]:
+        operations.append("get")
+        return {
             "metadata": {"generation": 9, "resourceVersion": "43"},
             "spec": {"replicas": 5},
         }
-    )
-    api.call_api.return_value.read.return_value = (
+
+    api.call_api.side_effect = patch_scale
+    read = AsyncMock(side_effect=read_deployment)
+    response.read.return_value = (
         b'{"apiVersion":"autoscaling/v1","kind":"Scale",'
         b'"metadata":{"resourceVersion":"43"},"spec":{"replicas":5}}'
     )
@@ -1909,6 +1919,7 @@ async def test_scale_object_correlates_matching_post_write_receipt() -> None:
     assert kwargs["header_params"]["Content-Type"] == "application/merge-patch+json"
     assert result.generation == 9
     read.assert_awaited_once_with("/apis/apps/v1/namespaces/default/deployments/web")
+    assert operations == ["patch", "get"]
 
 
 async def test_scale_object_leaves_generation_unknown_after_concurrent_update() -> None:

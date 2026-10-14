@@ -300,10 +300,10 @@ def _current_replica_set_uids(
     if owned and len(revisions) != len(owned):
         return frozenset(), True
     newest = max(revisions) if revisions else None
-    return (
-        frozenset(uid for uid, revision in owned if newest is None or revision == newest),
-        bool(owned and newest is None),
-    )
+    current_uids = frozenset(uid for uid, revision in owned if revision == newest)
+    if len(current_uids) > 1:
+        return frozenset(), True
+    return current_uids, False
 
 
 def normalize_deployment_observation(

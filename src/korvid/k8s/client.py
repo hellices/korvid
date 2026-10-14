@@ -1098,13 +1098,10 @@ class KubeClient(ReadOps, WriteOps, pulse.PulseReader):
             content_type="application/merge-patch+json",
         )
         if correlate:
-            current: dict[str, Any] = {}
             try:
                 current = await self._request_json(path)
-            except asyncio.CancelledError:
+            except (asyncio.CancelledError, Exception):
                 return WriteMutationResult()
-            except Exception:
-                pass
             return WriteMutationResult.from_scale_receipt(raw, current)
         return WriteMutationResult.from_response(raw)
 
