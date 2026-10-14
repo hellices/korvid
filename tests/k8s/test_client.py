@@ -1883,13 +1883,13 @@ async def test_delete_object_encodes_segments() -> None:
     assert "team/a" not in path
 
 
-async def test_scale_object_uses_snapshot_for_correlation_without_pinning_patch() -> None:
+async def test_scale_object_correlates_matching_post_write_receipt() -> None:
     client = KubeClient()
     api = _write_api()
     read = AsyncMock(
         return_value={
-            "metadata": {"generation": 8, "resourceVersion": "42"},
-            "spec": {"replicas": 3},
+            "metadata": {"generation": 9, "resourceVersion": "43"},
+            "spec": {"replicas": 5},
         }
     )
     api.call_api.return_value.read.return_value = (
@@ -1911,6 +1911,26 @@ async def test_scale_object_uses_snapshot_for_correlation_without_pinning_patch(
     read.assert_awaited_once_with("/apis/apps/v1/namespaces/default/deployments/web")
 
 
+async def test_scale_object_leaves_generation_unknown_after_concurrent_update() -> None:
+    client = KubeClient()
+    read = AsyncMock(
+        return_value={
+            "metadata": {"generation": 10, "resourceVersion": "44"},
+            "spec": {"replicas": 5},
+        }
+    )
+    write = AsyncMock(
+        return_value=(b'{"kind":"Scale","metadata":{"resourceVersion":"43"},"spec":{"replicas":5}}')
+    )
+    with (
+        patch.object(client, "_request_json", read),
+        patch.object(client, "_request_write", write),
+    ):
+        result = await client.scale_object(_deploy_meta(), "default", "web", 5)
+
+    assert result.generation is None
+
+
 async def test_noop_scale_retains_current_generation() -> None:
     client = KubeClient()
     read = AsyncMock(
@@ -1919,7 +1939,7 @@ async def test_noop_scale_retains_current_generation() -> None:
             "spec": {"replicas": 5},
         }
     )
-    write = AsyncMock(return_value=b'{"kind":"Scale"}')
+    write = AsyncMock(return_value=b'{"kind":"Scale","metadata":{"resourceVersion":"42"}}')
     with (
         patch.object(client, "_request_json", read),
         patch.object(client, "_request_write", write),
@@ -2165,8 +2185,11 @@ async def test_scale_object_sends_uid_precondition() -> None:
     api = _write_api()
     with patch.object(client, "_api", api):
         await client.scale_object(_deploy_meta(), "default", "web", 5, uid="abc-123")
-    kwargs = api.call_api.call_args[1]
-    assert kwargs["body"] == {"spec": {"replicas": 5}, "metadata": {"uid": "abc-123"}}
+    patch_call = next(call for call in api.call_api.call_args_list if call.args[1] == "PATCH")
+    assert patch_call.kwargs["body"] == {
+        "spec": {"replicas": 5},
+        "metadata": {"uid": "abc-123"},
+    }
 
 
 async def test_rollout_restart_sends_uid_precondition() -> None:

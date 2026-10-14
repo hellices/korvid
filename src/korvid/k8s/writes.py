@@ -38,23 +38,24 @@ class WriteMutationResult:
         return cls(generation=generation if valid else None)
 
     @classmethod
-    def from_scale_snapshot(cls, current: dict[str, Any], replicas: int) -> WriteMutationResult:
-        """Derive the generation produced by an RV-pinned scale mutation."""
-        metadata = current.get("metadata")
-        spec = current.get("spec")
+    def from_scale_receipt(cls, raw: bytes, deployment: dict[str, Any]) -> WriteMutationResult:
+        """Retain generation only when the post-write GET matches the scale receipt."""
+        try:
+            receipt_version = json.loads(raw).get("metadata", {}).get("resourceVersion")
+        except (AttributeError, json.JSONDecodeError, UnicodeDecodeError):
+            return cls()
+        metadata = deployment.get("metadata")
         generation = metadata.get("generation") if isinstance(metadata, dict) else None
-        resource_version = metadata.get("resourceVersion") if isinstance(metadata, dict) else None
-        old_replicas = spec.get("replicas") if isinstance(spec, dict) else None
+        live_version = metadata.get("resourceVersion") if isinstance(metadata, dict) else None
         if (
-            not isinstance(resource_version, str)
-            or not resource_version
+            not isinstance(receipt_version, str)
+            or not receipt_version
+            or live_version != receipt_version
             or not isinstance(generation, int)
             or isinstance(generation, bool)
-            or not isinstance(old_replicas, int)
-            or isinstance(old_replicas, bool)
         ):
             return cls()
-        return cls(generation=generation + int(old_replicas != replicas))
+        return cls(generation=generation)
 
 
 def restart_stamp() -> str:

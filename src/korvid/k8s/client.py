@@ -1090,10 +1090,6 @@ class KubeClient(ReadOps, WriteOps, pulse.PulseReader):
         """Set spec.replicas via the /scale subresource (merge patch)."""
         path = self._object_path(meta, namespace, name)
         correlate = meta.group == "apps" and meta.plural == "deployments"
-        current: dict[str, Any] = {}
-        if correlate:
-            with suppress(Exception):
-                current = await self._request_json(path)
         body = self._scale_patch(replicas, uid)
         raw = await self._request_write(
             f"{path}/scale",
@@ -1102,7 +1098,10 @@ class KubeClient(ReadOps, WriteOps, pulse.PulseReader):
             content_type="application/merge-patch+json",
         )
         if correlate:
-            return WriteMutationResult.from_scale_snapshot(current, replicas)
+            current: dict[str, Any] = {}
+            with suppress(Exception):
+                current = await self._request_json(path)
+            return WriteMutationResult.from_scale_receipt(raw, current)
         return WriteMutationResult.from_response(raw)
 
     async def rollout_restart(
