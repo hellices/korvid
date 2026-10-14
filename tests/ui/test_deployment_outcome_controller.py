@@ -106,6 +106,7 @@ def _controller(
     cluster: list[str] | None = None,
     deadline_seconds: float = 300.0,
     clock: Callable[[], float] | None = None,
+    max_trackers: int = 3,
 ) -> tuple[DeploymentOutcomeController, FakeUi]:
     surface = ui or FakeUi()
     current_epoch = epoch or [4]
@@ -116,7 +117,7 @@ def _controller(
         cluster_id=lambda: (cluster or ["context-a|https://cluster.example"])[0],
         sleep=sleep or asyncio.sleep,
         poll_delays=(0.0, 0.0),
-        max_trackers=3,
+        max_trackers=max_trackers,
         deadline_seconds=deadline_seconds,
         clock=clock or time.monotonic,
     )
@@ -937,6 +938,83 @@ async def test_stop_all_is_bounded_when_reader_repeatedly_suppresses_cancellatio
 
     assert stopped_promptly
     assert cancellation_count == 2
+
+
+async def test_detached_read_blocks_new_reads_at_capacity() -> None:
+    started = asyncio.Event()
+    second_started = asyncio.Event()
+    detached = asyncio.Event()
+    release = asyncio.Event()
+    reaped = asyncio.Event()
+    calls = 0
+
+    class SuppressingReader(DeploymentOutcomeReader):
+        async def snapshot(self, namespace: str, name: str) -> RawDeploymentOutcomeSnapshot:
+            nonlocal calls
+            calls += 1
+            started.set()
+            if calls == 2:
+                second_started.set()
+            cancellations = 0
+            try:
+                while True:
+                    try:
+                        await release.wait()
+                        return _raw()
+                    except asyncio.CancelledError:
+                        cancellations += 1
+                        if cancellations == 2:
+                            detached.set()
+            finally:
+                reaped.set()
+
+    class CancellingUi(FakeUi):
+        async def cancel_workers(self, group: str) -> None:
+            assert group == "deployment-outcomes"
+            for worker in self.workers:
+                worker.cancel()
+            await asyncio.gather(*self.workers, return_exceptions=True)
+
+    controller, ui = _controller(
+        SuppressingReader(),
+        ui=CancellingUi(),
+        max_trackers=1,
+    )
+    observer = controller.scale_observer(
+        epoch=4,
+        namespace="default",
+        name="web",
+        uid="deploy-uid",
+        replicas=3,
+    )
+    assert observer is not None
+    await observer(_receipt())
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+
+    stopping = asyncio.create_task(controller.stop_all("context changed"))
+    await asyncio.wait_for(detached.wait(), timeout=1.0)
+    await asyncio.wait_for(stopping, timeout=1.0)
+
+    await observer(_receipt())
+    second_call = asyncio.create_task(second_started.wait())
+    newest_worker = ui.workers[-1]
+    done, _pending = await asyncio.wait(
+        {newest_worker, second_call},
+        return_when=asyncio.FIRST_COMPLETED,
+    )
+    release.set()
+    await asyncio.gather(*ui.workers, return_exceptions=True)
+    second_call.cancel()
+    await asyncio.gather(second_call, return_exceptions=True)
+
+    assert newest_worker in done
+    assert calls == 1
+    latest = controller.latest()
+    assert latest is not None
+    assert latest.outcome.phase is DeploymentOutcomePhase.INCOMPLETE
+    assert "still stopping" in latest.outcome.summary
+
+    await asyncio.wait_for(reaped.wait(), timeout=1.0)
 
 
 async def test_deadline_wins_when_reader_translates_timeout_cancellation() -> None:

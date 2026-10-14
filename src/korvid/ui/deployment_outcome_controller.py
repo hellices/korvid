@@ -103,7 +103,13 @@ def _incomplete_outcome(
     )
 
 
+class _ReadCapacityError(RuntimeError):
+    pass
+
+
 def _read_failure_reason(exc: Exception) -> str:
+    if isinstance(exc, _ReadCapacityError):
+        return str(exc)
     if not isinstance(exc, ApiStatusError):
         return type(exc).__name__
     if exc.status in {401, 403}:
@@ -159,6 +165,7 @@ class DeploymentOutcomeController:
         self._clock = clock
         self._deadline_seconds = deadline_seconds
         self._started: dict[str, float] = {}
+        self._read_tasks: set[asyncio.Task[RawDeploymentOutcomeSnapshot]] = set()
 
     def scale_observer(
         self,
@@ -435,10 +442,15 @@ class DeploymentOutcomeController:
         namespace: str,
         name: str,
     ) -> RawDeploymentOutcomeSnapshot:
+        self._discard_finished_reads()
+        if len(self._read_tasks) >= self._max_trackers:
+            raise _ReadCapacityError("a previous Deployment outcome read is still stopping")
         read = asyncio.create_task(
             reader.snapshot(namespace, name),
             name=f"deployment-outcome-read:{namespace}/{name}",
         )
+        self._read_tasks.add(read)
+        read.add_done_callback(self._finish_read)
         try:
             return await asyncio.shield(read)
         except asyncio.CancelledError:
@@ -450,9 +462,16 @@ class DeploymentOutcomeController:
                     await asyncio.sleep(0)
             if read.done():
                 await asyncio.gather(read, return_exceptions=True)
-            else:
-                read.add_done_callback(_consume_read_result)
             raise
+
+    def _discard_finished_reads(self) -> None:
+        for read in tuple(self._read_tasks):
+            if read.done():
+                self._finish_read(read)
+
+    def _finish_read(self, read: asyncio.Task[RawDeploymentOutcomeSnapshot]) -> None:
+        self._read_tasks.discard(read)
+        _consume_read_result(read)
 
     def _target_current(self, snapshot: DeploymentTrackerSnapshot) -> bool:
         target = snapshot.intent.target
