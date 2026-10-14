@@ -324,6 +324,39 @@ async def test_snapshot_uses_server_side_deployment_selector() -> None:
     ]
 
 
+@pytest.mark.parametrize(
+    ("field", "malformed", "expected_selector"),
+    [
+        ("matchLabels", ["app", "web"], "track in (stable,canary)"),
+        ("matchExpressions", {"key": "track"}, "app=web"),
+        ("matchExpressions", ["malformed"], "app=web"),
+    ],
+)
+async def test_snapshot_does_not_trust_pods_selected_by_malformed_selector_shapes(
+    field: str,
+    malformed: object,
+    expected_selector: str,
+) -> None:
+    deployment = _deployment()
+    deployment["spec"]["selector"][field] = malformed
+    api = _Api(
+        deployment=deployment,
+        replica_sets=[_replica_set(uid="rs-current", owner_uid="deploy-uid")],
+        pods=[_pod(index=0, owner_uid="rs-current")],
+    )
+
+    raw = await _reader(api).snapshot("default", "web")
+    observation = normalize_deployment_observation(raw)
+
+    assert [selector for _, _, selector, _ in api.calls] == [
+        expected_selector,
+        expected_selector,
+    ]
+    assert raw.partial is True
+    assert observation.pod_evidence_ambiguous is True
+    assert observation.pods == ()
+
+
 async def test_snapshot_retains_only_relevant_conditions() -> None:
     observation = normalize_deployment_observation(await _reader(_Api()).snapshot("default", "web"))
 

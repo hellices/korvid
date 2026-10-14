@@ -541,7 +541,7 @@ def _evaluate_scale(
             partial_evidence=observation.partial_evidence,
         )
     include_pod_blockers = (
-        observation.current_replicas is None or observation.current_replicas <= intent.replicas
+        observation.current_replicas is not None and observation.current_replicas <= intent.replicas
     )
     stalled = (
         _stalled_outcome(observation, include_pod_blockers=include_pod_blockers)

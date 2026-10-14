@@ -531,6 +531,32 @@ def test_scale_down_observes_excess_blocked_pod_until_removed() -> None:
     assert outcome.phase is DeploymentOutcomePhase.OBSERVING
 
 
+def test_nonzero_scale_down_with_unknown_current_ignores_pod_blocker() -> None:
+    blocker = DeploymentPodEvidence(
+        namespace="default",
+        name="possibly-surplus-pod",
+        uid="possibly-surplus-pod-uid",
+        phase="Pending",
+        reason="ImagePullBackOff",
+        message="may be waiting for deletion",
+    )
+
+    outcome = evaluate_deployment_outcome(
+        _scale(replicas=2),
+        _observation(
+            desired=2,
+            current=None,
+            updated=2,
+            ready=1,
+            available=1,
+            unavailable=1,
+            pods=(blocker,),
+        ),
+    )
+
+    assert outcome.phase is DeploymentOutcomePhase.OBSERVING
+
+
 def test_converged_scale_down_ignores_deleting_surplus_pod_blocker() -> None:
     deployment = {
         "metadata": {"uid": "deploy-uid", "generation": 7},

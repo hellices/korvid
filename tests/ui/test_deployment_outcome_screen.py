@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.widgets import DataTable, Static
 
@@ -98,7 +99,10 @@ async def test_screen_lists_bounded_pod_evidence_without_markup() -> None:
         table = screen.query_one("#deployment-outcome-pods", DataTable)
 
         assert table.row_count == 1
-        assert "registry [unavailable]" in str(table.get_row_at(0)[4])
+        message = table.get_row_at(0)[4]
+        assert isinstance(message, Text)
+        assert message.plain == "registry [unavailable]"
+        assert message.spans == []
 
 
 async def test_enter_returns_uid_bearing_pod_navigation() -> None:

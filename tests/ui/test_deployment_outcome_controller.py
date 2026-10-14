@@ -652,11 +652,38 @@ async def test_late_read_cannot_overwrite_user_stop() -> None:
 
     now[0] = 301.0
     assert controller.stop(latest.tracker_id)
-    await _drain(ui)
+    await _drain(ui, allow_cancelled=True)
 
     final = controller.latest()
     assert final is not None
     assert final.outcome.phase is DeploymentOutcomePhase.STOPPED
+
+
+async def test_read_snapshot_reraises_caller_cancellation_when_reader_returns() -> None:
+    started = asyncio.Event()
+    reaped = asyncio.Event()
+
+    class CancellationReturningReader(DeploymentOutcomeReader):
+        async def snapshot(self, namespace: str, name: str) -> RawDeploymentOutcomeSnapshot:
+            started.set()
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                return _raw()
+            finally:
+                reaped.set()
+            raise AssertionError("unreachable")
+
+    reader = CancellationReturningReader()
+    controller, _ui = _controller(reader)
+    read = asyncio.create_task(controller._read_snapshot(reader, "default", "web"))
+    await started.wait()
+
+    read.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await read
+
+    assert reaped.is_set()
 
 
 async def test_exhausted_poll_schedule_is_not_reported_as_deadline() -> None:
@@ -803,6 +830,60 @@ async def test_absolute_deadline_reaps_reader_that_suppresses_cancellation() -> 
     assert "deadline" in latest.outcome.summary
     assert cancelled.is_set()
     assert reaped.is_set()
+
+
+async def test_stop_all_is_bounded_when_reader_repeatedly_suppresses_cancellation() -> None:
+    started = asyncio.Event()
+    second_cancellation = asyncio.Event()
+    release = asyncio.Event()
+    reaped = asyncio.Event()
+    cancellation_count = 0
+
+    class RepeatedlySuppressingReader(DeploymentOutcomeReader):
+        async def snapshot(self, namespace: str, name: str) -> RawDeploymentOutcomeSnapshot:
+            nonlocal cancellation_count
+            started.set()
+            try:
+                while True:
+                    try:
+                        await release.wait()
+                        return _raw()
+                    except asyncio.CancelledError:
+                        cancellation_count += 1
+                        if cancellation_count == 2:
+                            second_cancellation.set()
+            finally:
+                reaped.set()
+
+    class CancellingUi(FakeUi):
+        async def cancel_workers(self, group: str) -> None:
+            assert group == "deployment-outcomes"
+            for worker in self.workers:
+                worker.cancel()
+            await asyncio.gather(*self.workers, return_exceptions=True)
+
+    controller, _ui = _controller(RepeatedlySuppressingReader(), ui=CancellingUi())
+    observer = controller.scale_observer(
+        epoch=4,
+        namespace="default",
+        name="web",
+        uid="deploy-uid",
+        replicas=3,
+    )
+    assert observer is not None
+    await observer(_receipt())
+    await started.wait()
+
+    stopping = asyncio.create_task(controller.stop_all("context changed"))
+    await asyncio.wait_for(second_cancellation.wait(), timeout=1.0)
+    done, _pending = await asyncio.wait({stopping}, timeout=0.1)
+    stopped_promptly = stopping in done
+    release.set()
+    await asyncio.wait_for(reaped.wait(), timeout=1.0)
+    await asyncio.wait_for(stopping, timeout=1.0)
+
+    assert stopped_promptly
+    assert cancellation_count == 2
 
 
 async def test_deadline_wins_when_reader_translates_timeout_cancellation() -> None:

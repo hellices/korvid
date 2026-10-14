@@ -56,10 +56,18 @@ def _selector_text(raw: object) -> tuple[str | None, bool]:
     if not selector:
         return None, True
     parts: list[str] = []
-    labels = _mapping(selector.get("matchLabels"))
+    raw_labels = selector.get("matchLabels")
+    labels = _mapping(raw_labels)
     parts.extend(f"{key}={value}" for key, value in sorted(labels.items()))
-    partial = False
-    for expression in _entries(selector.get("matchExpressions")):
+    raw_expressions = selector.get("matchExpressions")
+    partial = ("matchLabels" in selector and not isinstance(raw_labels, Mapping)) or (
+        "matchExpressions" in selector
+        and (
+            not isinstance(raw_expressions, list)
+            or any(not isinstance(item, Mapping) for item in raw_expressions)
+        )
+    )
+    for expression in _entries(raw_expressions):
         key = str(expression.get("key") or "")
         operator = str(expression.get("operator") or "")
         values = expression.get("values")

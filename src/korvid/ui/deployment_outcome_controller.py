@@ -113,6 +113,11 @@ def _read_failure_reason(exc: Exception) -> str:
     return f"API {exc.status}: Deployment outcome read failed"
 
 
+def _consume_read_result(read: asyncio.Task[RawDeploymentOutcomeSnapshot]) -> None:
+    if not read.cancelled():
+        read.exception()
+
+
 class DeploymentOutcomeController:
     """Own bounded tracker state and supervised polling workers."""
 
@@ -437,10 +442,12 @@ class DeploymentOutcomeController:
                 await asyncio.sleep(0)
                 if not read.done():
                     read.cancel()
-            await asyncio.gather(read, return_exceptions=True)
-            if read.cancelled():
-                raise
-            return read.result()
+                    await asyncio.sleep(0)
+            if read.done():
+                await asyncio.gather(read, return_exceptions=True)
+            else:
+                read.add_done_callback(_consume_read_result)
+            raise
 
     def _target_current(self, snapshot: DeploymentTrackerSnapshot) -> bool:
         target = snapshot.intent.target
