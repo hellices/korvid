@@ -993,7 +993,7 @@ async def test_detached_read_blocks_new_reads_at_capacity() -> None:
 
     stopping = asyncio.create_task(controller.stop_all("context changed"))
     await asyncio.wait_for(detached.wait(), timeout=1.0)
-    await asyncio.wait_for(stopping, timeout=1.0)
+    drained = await asyncio.wait_for(stopping, timeout=1.0)
 
     await observer(_receipt())
     second_call = asyncio.create_task(second_started.wait())
@@ -1008,6 +1008,7 @@ async def test_detached_read_blocks_new_reads_at_capacity() -> None:
     await asyncio.gather(second_call, return_exceptions=True)
 
     assert newest_worker in done
+    assert drained is False
     assert calls == 1
     latest = controller.latest()
     assert latest is not None

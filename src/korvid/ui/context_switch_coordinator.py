@@ -85,6 +85,10 @@ _SWITCHING_UNAVAILABLE = UnavailableReason(
 )
 
 
+class _ContextSwitchAborted(RuntimeError):
+    pass
+
+
 @dataclasses.dataclass(frozen=True)
 class ContextSwitchResult:
     """What the composition root re-derived for the new cluster (issue #36).
@@ -375,7 +379,7 @@ class ContextSwitchCoordinator(ContextGuard):
         probe_context: Callable[[str], Awaitable[None]] | None = None,
         switch_context: Callable[[str | None], Awaitable[ContextSwitchResult]] | None = None,
         pulse: Callable[[], SwitchPulse] | None = None,
-        stop_deployment_outcomes: Callable[[], Awaitable[None]] | None = None,
+        stop_deployment_outcomes: Callable[[], Awaitable[bool]] | None = None,
     ) -> None:
         self._ui = ui
         self._surface = surface
@@ -566,7 +570,10 @@ class ContextSwitchCoordinator(ContextGuard):
             return
         self._switching = True
         try:
-            await self._switch_locked(name)
+            try:
+                await self._switch_locked(name)
+            except _ContextSwitchAborted:
+                return
         finally:
             self._switching = False
 
@@ -642,7 +649,7 @@ class ContextSwitchCoordinator(ContextGuard):
             # perform fallible awaits — expire them now, not at a later
             # point that an exception could keep from ever being reached.
             await self._proposals().expire_all("kube context switched")
-            await self._teardown_before_retarget()
+            await self._teardown_before_retarget(epoch, old, name, mcp_restart)
             ok, applied = await self._retarget(name, old, old_namespace)
             if not ok:
                 if mcp_restart:
@@ -757,28 +764,64 @@ class ContextSwitchCoordinator(ContextGuard):
                 return False
         return True
 
-    async def _teardown_before_retarget(self) -> None:
+    async def _abort_undrained_outcomes(
+        self,
+        epoch: int,
+        old: str | None,
+        name: str,
+        restart_mcp: bool,
+    ) -> None:
+        reason = "Deployment outcome reads did not stop in time"
+        self._timeline().record_context_switch(
+            epoch=epoch,
+            phase="failed",
+            from_context=old,
+            to_context=name,
+            note=reason,
+        )
+        self._ui.notify(f"{reason}; context switch aborted", severity="error")
+        mcp = self._mcp()
+        if restart_mcp and mcp is not None:
+            message = await mcp.start()
+            self._ui.notify(
+                message,
+                severity="error" if message.startswith("ERROR") else "information",
+            )
+
+    async def _teardown_before_retarget(
+        self,
+        epoch: int = 0,
+        old: str | None = None,
+        name: str = "",
+        restart_mcp: bool = False,
+    ) -> None:
         """Restore Pulse after an abort that never touched the shared client."""
         pulse = self._pulse() if self._pulse is not None else None
         was_suspended = pulse.suspended if pulse is not None else True
         try:
             if pulse is not None:
                 await pulse.suspend()
-            await self._teardown()
+            drained = await self._teardown()
+            if not drained:
+                await self._abort_undrained_outcomes(epoch, old, name, restart_mcp)
+                raise _ContextSwitchAborted
         except (Exception, asyncio.CancelledError):
             if pulse is not None and not was_suspended:
                 pulse.resume_unchanged()
             raise
 
-    async def _teardown(self) -> None:
+    async def _teardown(self) -> bool:
         """Stop every consumer of the old cluster before the client swaps.
 
         Order matters: streams and pollers first (they hold the old
         connection), then session state that would otherwise leak old-cluster
         rows, breadcrumbs, or hints into the new one.
         """
-        if self._stop_deployment_outcomes is not None:
-            await self._stop_deployment_outcomes()
+        if (
+            self._stop_deployment_outcomes is not None
+            and not await self._stop_deployment_outcomes()
+        ):
+            return False
         await self._logs().close()
         self._surface.hide_describe()
         # The workspace controller folds the split back to one pane, stops and
@@ -818,6 +861,7 @@ class ContextSwitchCoordinator(ContextGuard):
         self._surface.cancel_worker_group(HINT_EVENTS_GROUP)
         self._hints().teardown()
         await self._timeline().stop()
+        return True
 
     async def _retarget(
         self, name: str, old: str | None, old_namespace: str

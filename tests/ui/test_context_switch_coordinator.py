@@ -424,8 +424,9 @@ class Env:
                 raise self.restore_error
             return self.result
 
-        async def stop_deployment_outcomes() -> None:
+        async def stop_deployment_outcomes() -> bool:
             self.log("outcomes-stop")
+            return True
 
         self.coordinator = ContextSwitchCoordinator(
             ui=self.ui,
@@ -1165,6 +1166,28 @@ async def test_an_undrainable_mcp_server_aborts_the_switch_before_teardown(
     assert not env.log.has("logs-close")
     assert env.proposals.reasons == []
     assert env.timeline.phases[-1] == (0, "failed", "embedded MCP server did not stop in time")
+    assert any("context switch aborted" in message for message in env.ui.messages())
+
+
+async def test_undrained_outcome_read_aborts_switch_before_client_retarget(
+    tmp_path: Path,
+) -> None:
+    env = Env(tmp_path)
+
+    async def stop_deployment_outcomes() -> bool:
+        env.log("outcomes-stop")
+        return False
+
+    env.coordinator._stop_deployment_outcomes = stop_deployment_outcomes
+    await env.switch()
+
+    assert env.swaps == []
+    assert not env.log.has("logs-close")
+    assert env.timeline.phases[-1] == (
+        0,
+        "failed",
+        "Deployment outcome reads did not stop in time",
+    )
     assert any("context switch aborted" in message for message in env.ui.messages())
 
 

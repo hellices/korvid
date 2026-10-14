@@ -651,8 +651,8 @@ class DeploymentOutcomeController:
         self._update(tracker_id, _stopped_outcome(reason, snapshot.outcome), snapshot.attempts)
         return True
 
-    async def stop_all(self, reason: str) -> None:
-        """Stop all trackers before a context client is replaced."""
+    async def stop_all(self, reason: str) -> bool:
+        """Stop all trackers and report whether every read drained."""
 
         for tracker_id, snapshot in tuple(self._snapshots.items()):
             if snapshot.outcome.phase in {
@@ -666,6 +666,8 @@ class DeploymentOutcomeController:
                 )
         await self._ui.cancel_workers(OUTCOME_WORKER_GROUP)
         self._workers.clear()
+        self._discard_finished_reads()
+        return not self._read_tasks
 
     async def shutdown(self) -> None:
         """Cancel all active observation workers during app shutdown."""
