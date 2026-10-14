@@ -86,6 +86,15 @@ def _replica_set(*, uid: str, owner_uid: str) -> dict[str, Any]:
             "annotations": {"deployment.kubernetes.io/revision": "1"},
             "ownerReferences": _owner("Deployment", owner_uid),
         },
+        "spec": {
+            "template": {
+                "metadata": {
+                    "annotations": {
+                        "kubectl.kubernetes.io/restartedAt": "2026-10-09T12:00:00+00:00"
+                    }
+                }
+            }
+        },
     }
 
 

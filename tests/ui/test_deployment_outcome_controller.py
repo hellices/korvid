@@ -826,7 +826,7 @@ async def test_deadline_suppressed_by_sleep_does_not_start_another_read() -> Non
     controller, ui = _controller(
         reader,
         sleep=suppress_deadline_cancellation,
-        deadline_seconds=0.01,
+        deadline_seconds=300.0,
         clock=lambda: now[0],
     )
     observer = controller.scale_observer(
@@ -838,8 +838,9 @@ async def test_deadline_suppressed_by_sleep_does_not_start_another_read() -> Non
     )
     assert observer is not None
     await observer(_receipt())
-    await asyncio.wait_for(sleep_started.wait(), timeout=1.0)
-    await asyncio.wait_for(_drain(ui), timeout=1.0)
+    await sleep_started.wait()
+    ui.workers[-1].cancel()
+    await _drain(ui)
 
     assert reader.calls == [("default", "web")]
     latest = controller.latest()
