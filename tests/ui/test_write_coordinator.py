@@ -557,6 +557,7 @@ async def test_accepted_observer_cancellation_does_not_rewrite_write_success(
         "accepted, but outcome verification could not start" in message
         for message, _severity in env.ui.notifications
     )
+    assert any("CancelledError" in message for message, _severity in env.ui.notifications)
     assert env.coordinator.active_writes() == 0
 
 
@@ -568,6 +569,7 @@ async def test_accepted_observer_cancellation_does_not_rewrite_write_success(
 async def test_declined_confirmation_constructs_no_operation(tmp_path: Path) -> None:
     env = make_env(tmp_path)
     rec = Recorder()
+    observe = AsyncMock()
     await env.coordinator.confirm(
         "Delete pods/web-1?",
         "DELETE pods/web-1",
@@ -576,12 +578,14 @@ async def test_declined_confirmation_constructs_no_operation(tmp_path: Path) -> 
         namespace="default",
         name="web-1",
         op_factory=rec.factory,
+        on_accepted=observe,
     )
     env.ui.answer(False)
     await env.ui.settle()
     assert rec.built == 0, "a declined dialog must never construct the mutation"
     assert env.ui.workers == []
     assert env.audit_outcomes() == []
+    observe.assert_not_called()
 
 
 async def test_dismissed_confirmation_constructs_no_operation(tmp_path: Path) -> None:
@@ -653,6 +657,7 @@ async def test_confirm_runs_async_precondition_before_intent_audit(tmp_path: Pat
 async def test_false_precondition_creates_no_audit_or_mutation(tmp_path: Path) -> None:
     env = make_env(tmp_path)
     mutated = False
+    observe = AsyncMock()
 
     async def precondition() -> bool:
         return False
@@ -670,12 +675,14 @@ async def test_false_precondition_creates_no_audit_or_mutation(tmp_path: Path) -
         name="web",
         op_factory=operation,
         precondition=precondition,
+        on_accepted=observe,
     )
     env.ui.answer(True)
     await env.ui.settle()
 
     assert mutated is False
     assert env.audit_outcomes() == []
+    observe.assert_not_called()
 
 
 async def test_raised_precondition_creates_no_audit_or_mutation(tmp_path: Path) -> None:
@@ -1083,8 +1090,16 @@ async def test_cancelled_mutation_leaves_the_intent_record_and_propagates(tmp_pa
     env = make_env(tmp_path)
     rec = Recorder()
     rec.release = asyncio.Event()
+    observe = AsyncMock()
     task = asyncio.ensure_future(
-        env.coordinator.run("delete", _PODS_META, "default", "web-1", rec.factory)
+        env.coordinator.run(
+            "delete",
+            _PODS_META,
+            "default",
+            "web-1",
+            rec.factory,
+            on_accepted=observe,
+        )
     )
     await rec.started.wait()
     task.cancel()
@@ -1092,6 +1107,7 @@ async def test_cancelled_mutation_leaves_the_intent_record_and_propagates(tmp_pa
         await task
     assert env.audit_outcomes() == ["intent"]
     assert env.coordinator.active_writes() == 0
+    observe.assert_not_called()
 
 
 async def test_shielded_write_finishes_after_an_interrupted_turn(tmp_path: Path) -> None:

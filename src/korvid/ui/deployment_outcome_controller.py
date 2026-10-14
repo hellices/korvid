@@ -141,6 +141,8 @@ class DeploymentOutcomeController:
             raise ValueError("poll_delays must not be empty")
         if any(delay < 0 for delay in poll_delays):
             raise ValueError("poll delays must not be negative")
+        if poll_delays[0] != 0:
+            raise ValueError("first poll delay must be zero")
         if deadline_seconds < 0:
             raise ValueError("deadline_seconds must not be negative")
         self._ui = ui
@@ -327,6 +329,9 @@ class DeploymentOutcomeController:
                 for attempt, delay in enumerate(self._poll_delays, start=1):
                     if attempt > 1:
                         await self._sleep(delay)
+                        if deadline.expired() or self._deadline_elapsed(tracker_id):
+                            self._mark_deadline_elapsed(tracker_id)
+                            return
                     if await self._observe_once(tracker_id, attempt, deadline):
                         return
                 self._mark_observation_incomplete(

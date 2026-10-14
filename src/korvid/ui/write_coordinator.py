@@ -897,7 +897,7 @@ class WriteCoordinator(WriteGate):
             logger.exception("accepted-write observer failed: %s", exc)
             self._ui.notify(
                 f"{action} {meta.plural}/{name} accepted, but outcome verification "
-                f"could not start: {exc}",
+                f"could not start: {str(exc) or type(exc).__name__}",
                 severity="warning",
             )
 

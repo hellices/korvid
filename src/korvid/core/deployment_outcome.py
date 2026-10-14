@@ -282,28 +282,41 @@ def _pod_evidence(
 def _current_replica_set_uids(
     replica_sets: tuple[dict[str, Any], ...],
     deployment_uid: str,
+    restart_stamp: str | None,
 ) -> tuple[frozenset[str], bool]:
-    owned: list[tuple[str, int | None]] = []
+    owned: list[tuple[str, int | None, str | None]] = []
     for item in replica_sets:
         if _controller_owner_uid(item, "Deployment") != deployment_uid:
             continue
         metadata = _mapping(item.get("metadata"))
         uid = str(metadata.get("uid") or "")
         revision = _mapping(metadata.get("annotations")).get("deployment.kubernetes.io/revision")
+        template = _mapping(_mapping(item.get("spec")).get("template"))
+        template_metadata = _mapping(template.get("metadata"))
+        raw_restart_stamp = _mapping(template_metadata.get("annotations")).get(_RESTART_ANNOTATION)
+        replica_set_restart_stamp = (
+            raw_restart_stamp if isinstance(raw_restart_stamp, str) else None
+        )
         try:
             parsed_revision = int(revision) if revision is not None else None
         except (TypeError, ValueError):
             parsed_revision = None
         if uid:
-            owned.append((uid, parsed_revision))
-    revisions = [revision for _, revision in owned if revision is not None]
+            owned.append((uid, parsed_revision, replica_set_restart_stamp))
+    revisions = [revision for _, revision, _ in owned if revision is not None]
     if owned and len(revisions) != len(owned):
         return frozenset(), True
     newest = max(revisions) if revisions else None
-    current_uids = frozenset(uid for uid, revision in owned if revision == newest)
-    if len(current_uids) > 1:
+    current = [
+        (uid, replica_set_restart_stamp)
+        for uid, revision, replica_set_restart_stamp in owned
+        if revision == newest
+    ]
+    if len(current) > 1:
         return frozenset(), True
-    return current_uids, False
+    if current and restart_stamp is not None and current[0][1] != restart_stamp:
+        return frozenset(), True
+    return frozenset(uid for uid, _ in current), False
 
 
 def normalize_deployment_observation(
@@ -321,15 +334,18 @@ def normalize_deployment_observation(
     status = _mapping(deployment.get("status"))
     raw_uid = metadata.get("uid")
     live_uid = raw_uid if isinstance(raw_uid, str) else ""
-    replica_set_uids, ambiguous_replica_sets = _current_replica_set_uids(
-        raw.replica_sets,
-        live_uid,
-    )
-    pod_evidence_ambiguous = raw.pod_ownership_ambiguous or ambiguous_replica_sets
-    all_pod_evidence = () if pod_evidence_ambiguous else _pod_evidence(raw.pods, replica_set_uids)
     template = _mapping(spec.get("template"))
     template_metadata = _mapping(template.get("metadata"))
     annotations = _mapping(template_metadata.get("annotations"))
+    raw_restart_stamp = annotations.get(_RESTART_ANNOTATION)
+    restart_stamp = raw_restart_stamp if isinstance(raw_restart_stamp, str) else None
+    replica_set_uids, ambiguous_replica_sets = _current_replica_set_uids(
+        raw.replica_sets,
+        live_uid,
+        restart_stamp,
+    )
+    pod_evidence_ambiguous = raw.pod_ownership_ambiguous or ambiguous_replica_sets
+    all_pod_evidence = () if pod_evidence_ambiguous else _pod_evidence(raw.pods, replica_set_uids)
     generation = _integer(metadata.get("generation"))
     observed_generation = _integer(status.get("observedGeneration"))
     desired_replicas = _integer(spec.get("replicas"))
@@ -355,9 +371,7 @@ def normalize_deployment_observation(
         unavailable_replicas=_replica_counter(
             status, "unavailableReplicas", zero_when_absent=zero_when_absent
         ),
-        restart_stamp=(
-            str(annotations[_RESTART_ANNOTATION]) if annotations.get(_RESTART_ANNOTATION) else None
-        ),
+        restart_stamp=restart_stamp,
         conditions=_condition_entries(status),
         pods=tuple(all_pod_evidence[:max_pod_evidence]),
         partial_evidence=(

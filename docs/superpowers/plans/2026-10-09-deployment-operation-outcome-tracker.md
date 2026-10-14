@@ -132,6 +132,7 @@ class DeploymentOperationTarget:
 class DeploymentScaleIntent:
     target: DeploymentOperationTarget
     replicas: int
+    generation: int
 
 
 def evaluate_deployment_outcome(
@@ -369,6 +370,7 @@ class AcceptedWriteReceipt:
     namespace: str | None
     name: str
     accepted_at: str
+    mutation: WriteMutationResult | None
 
 
 AcceptedWriteObserver = Callable[[AcceptedWriteReceipt], Awaitable[None]]
@@ -390,6 +392,13 @@ on_accepted=self._deployment_outcomes.accept_scale(
     replicas=replicas,
 )
 ```
+
+The scale and restart mutations return a `WriteMutationResult` containing the
+accepted Deployment generation when it can be correlated safely. The
+coordinator stores that result on `AcceptedWriteReceipt`; the observer copies
+the exact generation into the operation intent and does not start polling when
+generation evidence is unavailable. The evaluator only completes the exact
+accepted generation.
 
 For restart, carry the exact `stamp` already shared by preview and mutation.
 Do not start a tracker for StatefulSet, DaemonSet, or ReplicaSet.

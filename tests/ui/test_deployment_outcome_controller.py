@@ -123,6 +123,17 @@ def _controller(
     return controller, surface
 
 
+def test_poll_schedule_requires_immediate_first_observation() -> None:
+    with pytest.raises(ValueError, match="first poll delay must be zero"):
+        DeploymentOutcomeController(
+            ui=FakeUi(),
+            reader=_Reader([_raw()]),
+            get_epoch=lambda: 4,
+            cluster_id=lambda: "context-a|https://cluster.example",
+            poll_delays=(5.0,),
+        )
+
+
 async def _drain(ui: FakeUi, *, allow_cancelled: bool = False) -> None:
     if not ui.workers:
         return
@@ -795,6 +806,44 @@ async def test_worker_delayed_past_deadline_does_not_start_a_read() -> None:
     assert reader.calls == []
     latest = controller.latest()
     assert latest is not None
+    assert latest.outcome.phase is DeploymentOutcomePhase.INCOMPLETE
+    assert "deadline" in latest.outcome.summary
+
+
+async def test_deadline_suppressed_by_sleep_does_not_start_another_read() -> None:
+    now = [0.0]
+    sleep_started = asyncio.Event()
+
+    async def suppress_deadline_cancellation(delay: float) -> None:
+        sleep_started.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            now[0] = 301.0
+
+    reader = _Reader([_raw(ready=2), _raw()])
+    controller, ui = _controller(
+        reader,
+        sleep=suppress_deadline_cancellation,
+        deadline_seconds=0.01,
+        clock=lambda: now[0],
+    )
+    observer = controller.scale_observer(
+        epoch=4,
+        namespace="default",
+        name="web",
+        uid="deploy-uid",
+        replicas=3,
+    )
+    assert observer is not None
+    await observer(_receipt())
+    await asyncio.wait_for(sleep_started.wait(), timeout=1.0)
+    await asyncio.wait_for(_drain(ui), timeout=1.0)
+
+    assert reader.calls == [("default", "web")]
+    latest = controller.latest()
+    assert latest is not None
+    assert latest.outcome.phase is DeploymentOutcomePhase.INCOMPLETE
     assert "deadline" in latest.outcome.summary
 
 

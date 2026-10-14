@@ -2056,7 +2056,12 @@ async def test_scale_object_requires_resource_version_for_generation_correlation
         patch.object(
             client,
             "_request_json",
-            AsyncMock(return_value={"metadata": {"generation": 8}, "spec": {"replicas": 3}}),
+            AsyncMock(
+                return_value={
+                    "metadata": {"uid": "deploy-uid", "generation": 8},
+                    "spec": {"replicas": 3},
+                }
+            ),
         ),
         patch.object(client, "_request_write", write),
     ):
@@ -2314,7 +2319,10 @@ async def test_scale_object_sends_uid_precondition() -> None:
     api = _write_api()
     with patch.object(client, "_api", api):
         await client.scale_object(_deploy_meta(), "default", "web", 5, uid="abc-123")
-    patch_call = next(call for call in api.call_api.call_args_list if call.args[1] == "PATCH")
+    patch_calls = [call for call in api.call_api.call_args_list if call.args[1] == "PATCH"]
+    assert len(patch_calls) == 1
+    patch_call = patch_calls[0]
+    assert patch_call.args[0] == "/apis/apps/v1/namespaces/default/deployments/web/scale"
     assert patch_call.kwargs["body"] == {
         "spec": {"replicas": 5},
         "metadata": {"uid": "abc-123"},

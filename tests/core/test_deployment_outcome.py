@@ -1024,7 +1024,70 @@ def test_truncated_replica_set_page_omits_ambiguous_pod_evidence() -> None:
     )
 
     assert observation.partial_evidence is True
+    assert observation.pod_evidence_ambiguous is True
     assert observation.pods == ()
+
+
+def test_restart_ignores_pod_blockers_from_replica_set_before_current_marker() -> None:
+    stamp = "2026-10-09T12:00:00+00:00"
+    deployment = {
+        "metadata": {"uid": "deploy-uid", "generation": 7},
+        "spec": {
+            "replicas": 1,
+            "template": {"metadata": {"annotations": {"kubectl.kubernetes.io/restartedAt": stamp}}},
+        },
+        "status": {
+            "observedGeneration": 7,
+            "replicas": 1,
+            "updatedReplicas": 0,
+            "readyReplicas": 0,
+            "availableReplicas": 0,
+            "unavailableReplicas": 1,
+        },
+    }
+    old_replica_set = {
+        "metadata": {
+            "uid": "old-rs",
+            "annotations": {"deployment.kubernetes.io/revision": "4"},
+            "ownerReferences": [{"kind": "Deployment", "uid": "deploy-uid", "controller": True}],
+        },
+        "spec": {
+            "template": {
+                "metadata": {
+                    "annotations": {
+                        "kubectl.kubernetes.io/restartedAt": "2026-10-08T12:00:00+00:00"
+                    }
+                }
+            }
+        },
+    }
+    old_pod = {
+        "metadata": {
+            "name": "old-web",
+            "namespace": "default",
+            "uid": "old-pod",
+            "ownerReferences": [{"kind": "ReplicaSet", "uid": "old-rs", "controller": True}],
+        },
+        "status": {
+            "phase": "Running",
+            "containerStatuses": [{"state": {"waiting": {"reason": "CrashLoopBackOff"}}}],
+        },
+    }
+
+    observation = normalize_deployment_observation(
+        RawDeploymentOutcomeSnapshot(
+            deployment,
+            (old_replica_set,),
+            (old_pod,),
+            False,
+        )
+    )
+    outcome = evaluate_deployment_outcome(_restart(stamp), observation)
+
+    assert observation.partial_evidence is True
+    assert observation.pod_evidence_ambiguous is True
+    assert observation.pods == ()
+    assert outcome.phase is DeploymentOutcomePhase.OBSERVING
 
 
 def test_mixed_known_and_malformed_replica_set_revisions_are_partial() -> None:

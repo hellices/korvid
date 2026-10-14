@@ -1852,6 +1852,8 @@ async def test_wire_and_run_wires_deployment_outcome_reader_from_kube(
     _FakeAppCapturesKwargs.instances.clear()
 
     kube = _FakeKubeForWiring()
+    connected_api_server = MagicMock(return_value="https://cluster.example")
+    kube.connected_api_server = connected_api_server  # type: ignore[method-assign]  # test seam
     state = main_mod._RunState()
     await main_mod._wire_and_run(KorvidConfig(readonly=True), cast("Any", kube), state)
     if state.discovery_box:
@@ -1866,6 +1868,9 @@ async def test_wire_and_run_wires_deployment_outcome_reader_from_kube(
     assert reader_kwargs["list_raw_objects"].__self__ is kube
     assert reader_kwargs["list_raw_objects"].__func__ is kube.list_raw_objects.__func__
     assert captured["deployment_cluster_id"]() == "(kubeconfig default)|https://cluster.example"
+    connected_api_server.assert_called_once_with()
+    connected_api_server.return_value = "https://replacement.example"
+    assert captured["deployment_cluster_id"]() == "(kubeconfig default)|https://replacement.example"
 
 
 async def test_wire_and_run_wires_helm_release_identity_reader_from_kube(

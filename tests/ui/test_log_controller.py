@@ -729,21 +729,29 @@ async def test_open_named_logs_awaits_existing_stream_cancellation() -> None:
         yield LogLine(pod=pod, container=container, text="", timestamp=None)  # pragma: no cover
 
     h = make_harness(stream_logs=stream)
-    await h.controller.open_pane("default", [("old", "main")])
-    await old_started.wait()
+    reopening: asyncio.Task[None] | None = None
+    try:
+        await h.controller.open_pane("default", [("old", "main")])
+        await asyncio.wait_for(old_started.wait(), timeout=1.0)
 
-    reopening = asyncio.create_task(
-        h.controller.open_named_logs("default", "web", expected_uid="web-uid")
-    )
-    await cancellation_received.wait()
-    await asyncio.sleep(0)
+        reopening = asyncio.create_task(
+            h.controller.open_named_logs("default", "web", expected_uid="web-uid")
+        )
+        await asyncio.wait_for(cancellation_received.wait(), timeout=1.0)
+        await asyncio.sleep(0)
 
-    assert reopening.done() is False
-    assert new_started.is_set() is False
-    release_old.set()
-    await reopening
-    await new_started.wait()
-    await h.controller.shutdown()
+        assert reopening.done() is False
+        assert new_started.is_set() is False
+        release_old.set()
+        await asyncio.wait_for(reopening, timeout=1.0)
+        await asyncio.wait_for(new_started.wait(), timeout=1.0)
+    finally:
+        release_old.set()
+        if reopening is not None and not reopening.done():
+            reopening.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await reopening
+        await h.controller.shutdown()
 
 
 async def test_open_named_logs_rejects_context_change_during_cancellation() -> None:
