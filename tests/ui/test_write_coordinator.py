@@ -534,6 +534,32 @@ async def test_accepted_observer_failure_does_not_rewrite_write_success(tmp_path
     assert env.coordinator.active_writes() == 0
 
 
+async def test_accepted_observer_cancellation_does_not_rewrite_write_success(
+    tmp_path: Path,
+) -> None:
+    env = make_env(tmp_path)
+
+    async def observe(receipt: object) -> None:
+        raise asyncio.CancelledError
+
+    result = await env.coordinator.run(
+        "scale",
+        _PODS_META,
+        "default",
+        "web",
+        Recorder().factory,
+        on_accepted=observe,
+    )
+
+    assert result == "done"
+    assert env.audit_outcomes() == ["intent", "success"]
+    assert any(
+        "accepted, but outcome verification could not start" in message
+        for message, _severity in env.ui.notifications
+    )
+    assert env.coordinator.active_writes() == 0
+
+
 # ---------------------------------------------------------------------------
 # 1. Approval: a declined dialog constructs and runs nothing
 # ---------------------------------------------------------------------------

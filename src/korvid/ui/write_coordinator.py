@@ -893,7 +893,7 @@ class WriteCoordinator(WriteGate):
         )
         try:
             await observer(receipt)
-        except Exception as exc:
+        except (Exception, asyncio.CancelledError) as exc:
             logger.exception("accepted-write observer failed: %s", exc)
             self._ui.notify(
                 f"{action} {meta.plural}/{name} accepted, but outcome verification "
