@@ -561,6 +561,30 @@ async def test_accepted_observer_cancellation_does_not_rewrite_write_success(
     assert env.coordinator.active_writes() == 0
 
 
+async def test_synchronous_accepted_observer_failure_does_not_rewrite_success(
+    tmp_path: Path,
+) -> None:
+    env = make_env(tmp_path)
+
+    def observe(receipt: object) -> Awaitable[None]:
+        raise RuntimeError("observer construction failed")
+
+    result = await env.coordinator.run(
+        "scale",
+        _PODS_META,
+        "default",
+        "web",
+        Recorder().factory,
+        on_accepted=observe,
+    )
+
+    assert result == "done"
+    assert env.audit_outcomes() == ["intent", "success"]
+    assert any(
+        "observer construction failed" in message for message, _severity in env.ui.notifications
+    )
+
+
 async def test_external_cancellation_during_accepted_observer_propagates(
     tmp_path: Path,
 ) -> None:

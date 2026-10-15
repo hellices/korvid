@@ -271,10 +271,12 @@ class KubeDeploymentOutcomeReader(DeploymentOutcomeReader):
 ```
 
 Add a private `KubeClient.list_raw_objects` method that accepts a fixed
-namespace and optional label selector, records read telemetry, and returns raw
-manifests. The adapter lists only `apps/v1 ReplicaSet` and core `v1 Pod`
-objects in the target namespace and filters controller owner UIDs before
-normalization.
+namespace, optional label selector, and server-side page size, records read
+telemetry, and returns raw manifests. Follow continuation tokens only within an
+explicit object/page cap; repeated tokens or a cap hit stop the read and mark
+the observation partial. The adapter lists only `apps/v1 ReplicaSet` and core
+`v1 Pod` objects in the target namespace and filters controller owner UIDs
+before normalization.
 
 - [ ] **Step 4: Add failure and malformed-payload tests**
 

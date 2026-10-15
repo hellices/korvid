@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import abc
 import asyncio
+import contextlib
 import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -25,13 +26,29 @@ from korvid.k8s.errors import ApiStatusError, KubeClientError
 _SCALE_CORRELATION_TIMEOUT_SECONDS = 10.0
 
 
+def _consume_scale_read(task: asyncio.Future[dict[str, Any]]) -> None:
+    with contextlib.suppress(asyncio.CancelledError):
+        task.exception()
+
+
 async def read_scale_snapshot(
     read: Callable[[str], Awaitable[dict[str, Any]]], path: str
 ) -> dict[str, Any]:
     """Best-effort bounded Deployment snapshot for scale correlation."""
+    task: asyncio.Future[dict[str, Any]] = asyncio.ensure_future(read(path))
     try:
-        return await asyncio.wait_for(read(path), _SCALE_CORRELATION_TIMEOUT_SECONDS)
-    except (TimeoutError, ApiStatusError, KubeClientError):
+        done, _pending = await asyncio.wait({task}, timeout=_SCALE_CORRELATION_TIMEOUT_SECONDS)
+    except asyncio.CancelledError:
+        task.cancel()
+        task.add_done_callback(_consume_scale_read)
+        raise
+    if not done:
+        task.cancel()
+        task.add_done_callback(_consume_scale_read)
+        return {}
+    try:
+        return task.result()
+    except (ApiStatusError, KubeClientError):
         return {}
 
 

@@ -471,12 +471,15 @@ async def test_previous_logs_revalidate_pod_uid_before_first_line_is_shown() -> 
 async def test_empty_previous_logs_revalidate_pod_uid_after_connect() -> None:
     uids = iter(("web-uid", "replacement-uid"))
     uid_calls: list[tuple[str, str | None, str]] = []
+    sequence: list[str] = []
 
     async def target_uid(plural: str, namespace: str | None, name: str) -> str | None:
         uid_calls.append((plural, namespace, name))
+        sequence.append("uid")
         return next(uids)
 
     async def stream(namespace: str, pod: str, container: str, **_: Any) -> AsyncIterator[LogLine]:
+        sequence.append("stream")
         return
         yield LogLine(pod=pod, container=container, text="", timestamp=None)  # pragma: no cover
 
@@ -492,6 +495,7 @@ async def test_empty_previous_logs_revalidate_pod_uid_after_connect() -> None:
     assert h.pane.fed == []
     assert h.pane.states[-1] == "error"
     assert uid_calls == [("pods", "default", "web"), ("pods", "default", "web")]
+    assert sequence == ["uid", "stream", "uid"]
     assert [item.message for item in h.ui.notifications] == [
         "Pod identity changed; refresh the Deployment outcome"
     ]

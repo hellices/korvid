@@ -30,7 +30,11 @@ async def notify_accepted_observer(
         name=name,
         mutation=mutation,
     )
-    observing = asyncio.ensure_future(observer(receipt))
+    try:
+        observing = asyncio.ensure_future(observer(receipt))
+    except (Exception, asyncio.CancelledError) as exc:
+        _warn(ui, action, meta, name, exc)
+        return
     try:
         await asyncio.shield(observing)
     except asyncio.CancelledError as exc:

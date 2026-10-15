@@ -2185,6 +2185,51 @@ async def test_scale_post_patch_read_failure_returns_accepted_without_correlatio
     assert result.generation is None
 
 
+async def test_scale_correlation_timeout_does_not_wait_for_cancellation_suppression() -> None:
+    client = KubeClient()
+    cancelled = asyncio.Event()
+    release = asyncio.Event()
+    reaped = asyncio.Event()
+    calls = 0
+
+    async def read(path: str) -> dict[str, Any]:
+        nonlocal calls
+        calls += 1
+        if calls > 1:
+            return {
+                "metadata": {"uid": "deploy-uid", "generation": 9},
+                "spec": {"replicas": 5},
+            }
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            cancelled.set()
+            try:
+                await release.wait()
+            finally:
+                reaped.set()
+        return {}
+
+    write = AsyncMock(return_value=b'{"kind":"Scale"}')
+    try:
+        with (
+            patch("korvid.k8s.writes._SCALE_CORRELATION_TIMEOUT_SECONDS", 0.01),
+            patch.object(client, "_request_json", read),
+            patch.object(client, "_request_write", write),
+        ):
+            result = await asyncio.wait_for(
+                client.scale_object(_deploy_meta(), "default", "web", 5),
+                timeout=1.0,
+            )
+
+        assert cancelled.is_set()
+        assert write.await_count == 1
+        assert result.generation is None
+    finally:
+        release.set()
+        await asyncio.wait_for(reaped.wait(), timeout=1.0)
+
+
 async def test_scale_cancellation_after_patch_returns_accepted_without_correlation() -> None:
     client = KubeClient()
     read = AsyncMock(

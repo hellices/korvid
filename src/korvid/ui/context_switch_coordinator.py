@@ -49,6 +49,7 @@ import asyncio
 import contextlib
 import dataclasses
 import logging
+import sys
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from typing import Literal, Protocol
@@ -496,9 +497,12 @@ class ContextSwitchCoordinator(ContextGuard):
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
         finally:
+            active_error = sys.exception()
             if self._stop_deployment_outcomes is not None:
                 stopped = await self._stop_deployment_outcomes()
-                if not stopped:
+                if not stopped and active_error is not None:
+                    logger.error("Deployment outcome reads did not stop during shutdown")
+                elif not stopped:
                     raise RuntimeError("Deployment outcome reads did not stop during shutdown")
 
     # ------------------------------------------------------------------

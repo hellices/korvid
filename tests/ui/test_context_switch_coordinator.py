@@ -1418,6 +1418,29 @@ async def test_shutdown_fails_when_outcome_reads_do_not_stop(tmp_path: Path) -> 
         await env.coordinator.shutdown()
 
 
+async def test_shutdown_preserves_prefetch_failure_when_outcome_stop_also_fails(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    env = Env(tmp_path)
+
+    async def failed_prefetch() -> None:
+        raise ValueError("prefetch failed first")
+
+    async def stop_deployment_outcomes() -> bool:
+        return False
+
+    task = asyncio.create_task(failed_prefetch())
+    await asyncio.sleep(0)
+    env.coordinator._prefetch_task = task
+    env.coordinator._stop_deployment_outcomes = stop_deployment_outcomes
+
+    with pytest.raises(ValueError, match="prefetch failed first"):
+        await env.coordinator.shutdown()
+
+    assert "Deployment outcome reads did not stop during shutdown" in caplog.text
+
+
 async def test_shutdown_without_a_prefetch_is_a_no_op(tmp_path: Path) -> None:
     env = Env(tmp_path, wire_collaborators=False)
     env.coordinator.start()
