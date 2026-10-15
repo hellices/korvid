@@ -192,12 +192,21 @@ def test_restart_waits_for_surplus_old_replica_removal() -> None:
 
 def test_restart_with_later_marker_is_superseded() -> None:
     outcome = evaluate_deployment_outcome(
-        _restart("accepted"),
-        _observation(restart_stamp="later"),
+        _restart("2026-10-09T12:00:00+00:00"),
+        _observation(restart_stamp="2026-10-09T12:01:00+00:00"),
     )
 
     assert outcome.phase is DeploymentOutcomePhase.SUPERSEDED
     assert "restart" in outcome.summary.lower()
+
+
+def test_restart_with_older_marker_remains_observing() -> None:
+    outcome = evaluate_deployment_outcome(
+        _restart("2026-10-09T12:00:00+00:00"),
+        _observation(restart_stamp="2026-10-09T11:59:00+00:00"),
+    )
+
+    assert outcome.phase is DeploymentOutcomePhase.OBSERVING
 
 
 def test_restart_with_later_generation_is_superseded() -> None:

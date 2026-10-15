@@ -401,6 +401,20 @@ async def test_snapshot_does_not_trust_pods_selected_by_malformed_selector_shape
     assert observation.pods == ()
 
 
+async def test_snapshot_marks_pod_with_unseen_replica_set_owner_as_ambiguous() -> None:
+    api = _Api(
+        replica_sets=[_replica_set(uid="rs-before", owner_uid="deploy-uid")],
+        pods=[_pod(index=0, owner_uid="rs-created-between-lists")],
+    )
+
+    raw = await _reader(api).snapshot("default", "web")
+    observation = normalize_deployment_observation(raw)
+
+    assert raw.pod_ownership_ambiguous is True
+    assert observation.partial_evidence is True
+    assert observation.pods == ()
+
+
 async def test_snapshot_retains_only_relevant_conditions() -> None:
     observation = normalize_deployment_observation(await _reader(_Api()).snapshot("default", "web"))
 

@@ -804,7 +804,10 @@ async def test_open_named_logs_rejects_context_change_during_cancellation() -> N
 
 
 async def test_open_named_logs_refuses_a_missing_stream_source() -> None:
-    h = make_harness(stream_logs=None)
+    async def unexpected_uid_lookup(kind: str, namespace: str | None, name: str) -> str:
+        raise AssertionError("UID lookup must not run without a stream source")
+
+    h = make_harness(stream_logs=None, target_uid=unexpected_uid_lookup)
 
     await h.controller.open_named_logs("default", "web", expected_uid="web-uid")
 

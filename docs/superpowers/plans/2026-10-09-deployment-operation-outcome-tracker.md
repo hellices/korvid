@@ -194,8 +194,10 @@ def test_progress_deadline_and_non_ready_pod_are_stalled() -> None:
 - [ ] **Step 5: Implement restart and failure predicates**
 
 Normalize only `Progressing`, `ReplicaFailure`, and `Available` conditions.
-Treat a changed requested field as superseded, an explicit controller failure
-as stalled, and missing evidence as observing or incomplete.
+Treat a requested field as superseded only when its generation or ordered
+restart marker proves a later mutation. Older observations remain observing.
+Treat an explicit controller failure as stalled and missing evidence as
+observing or incomplete.
 
 - [ ] **Step 6: Run core tests and lint**
 

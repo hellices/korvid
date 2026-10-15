@@ -51,6 +51,32 @@ def _entries(value: object) -> tuple[Mapping[str, Any], ...]:
     return tuple(item for item in value if isinstance(item, Mapping))
 
 
+def _controller_owner_uid(item: Mapping[str, Any], kind: str) -> str | None:
+    metadata = _mapping(item.get("metadata"))
+    for owner in _entries(metadata.get("ownerReferences")):
+        uid = owner.get("uid")
+        if owner.get("controller") is True and owner.get("kind") == kind:
+            return uid if isinstance(uid, str) and uid else None
+    return None
+
+
+def _pod_ownership_is_ambiguous(
+    replica_sets: list[dict[str, Any]], pods: list[dict[str, Any]]
+) -> bool:
+    replica_set_uids = {
+        uid
+        for item in replica_sets
+        if (uid := _mapping(item.get("metadata")).get("uid")) is not None
+        and isinstance(uid, str)
+        and uid
+    }
+    return any(
+        owner_uid not in replica_set_uids
+        for pod in pods
+        if (owner_uid := _controller_owner_uid(pod, "ReplicaSet")) is not None
+    )
+
+
 def _selector_text(raw: object) -> tuple[str | None, bool]:
     selector = _mapping(raw)
     if not selector:
@@ -134,12 +160,15 @@ class KubeDeploymentOutcomeReader(DeploymentOutcomeReader):
         revision_keys = ("uid", "generation")
         if any(before.get(key) != after.get(key) for key in revision_keys):
             return RawDeploymentOutcomeSnapshot(current, (), (), True, True)
+        ownership_ambiguous = _pod_ownership_is_ambiguous(replica_sets, pods)
         return RawDeploymentOutcomeSnapshot(
             deployment=current,
             replica_sets=tuple(replica_sets),
             pods=tuple(pods),
             partial=selector_partial or replica_sets_partial or pods_partial,
-            pod_ownership_ambiguous=selector_partial or replica_sets_partial,
+            pod_ownership_ambiguous=(
+                selector_partial or replica_sets_partial or ownership_ambiguous
+            ),
         )
 
 

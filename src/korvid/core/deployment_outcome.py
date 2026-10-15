@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import datetime
 from enum import StrEnum
 from typing import Any
 
@@ -574,6 +575,13 @@ def _evaluate_scale(
     return _observing_outcome(observation)
 
 
+def _restart_marker_is_later(observed: str, accepted: str) -> bool:
+    try:
+        return datetime.fromisoformat(observed) > datetime.fromisoformat(accepted)
+    except (TypeError, ValueError):
+        return False
+
+
 def _evaluate_restart(
     intent: DeploymentRestartIntent, observation: DeploymentObservation
 ) -> DeploymentOutcome:
@@ -596,13 +604,15 @@ def _evaluate_restart(
             partial_evidence=True,
         )
     if observation.restart_stamp != intent.restarted_at:
-        return DeploymentOutcome(
-            phase=DeploymentOutcomePhase.SUPERSEDED,
-            summary="Rollout restart was superseded by a later restart marker",
-            evidence=_progress_evidence(observation),
-            pods=observation.pods,
-            partial_evidence=observation.partial_evidence,
-        )
+        if _restart_marker_is_later(observation.restart_stamp, intent.restarted_at):
+            return DeploymentOutcome(
+                phase=DeploymentOutcomePhase.SUPERSEDED,
+                summary="Rollout restart was superseded by a later restart marker",
+                evidence=_progress_evidence(observation),
+                pods=observation.pods,
+                partial_evidence=observation.partial_evidence,
+            )
+        return _observing_outcome(observation)
     stalled = _stalled_outcome(observation) if _generation_current(observation) else None
     if stalled is not None:
         return stalled
