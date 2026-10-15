@@ -20,6 +20,7 @@ _OBSERVABILITY = _ROOT / "docs" / "observability.md"
 _MKDOCS = _ROOT / "mkdocs.yml"
 _RUNBOOK = _ROOT / "docs" / "release.md"
 _SECURITY = _ROOT / "SECURITY.md"
+_V0_5_RELEASE_NOTE = _ROOT / "docs" / "release-notes" / "v0.5.0.md"
 _UNPUBLISHED_RELEASE_NOTE = _ROOT / "docs" / "release-notes" / "v0.4.0.md"
 _FIRST_PUBLISHED_0_4_VERSION = "0.4.1"
 _FIRST_PUBLISHED_0_4_NOTE = _ROOT / "docs" / "release-notes" / f"v{_FIRST_PUBLISHED_0_4_VERSION}.md"
@@ -46,6 +47,10 @@ def _release_notes(version: str) -> str:
     path = _ROOT / "docs" / "release-notes" / f"v{version}.md"
     assert path.is_file(), f"{path.name} is missing; the release stages notes from this file"
     return path.read_text(encoding="utf-8")
+
+
+def _v0_5_release_notes() -> str:
+    return _V0_5_RELEASE_NOTE.read_text(encoding="utf-8")
 
 
 def _normalized(text: str) -> str:
@@ -535,7 +540,7 @@ def test_current_release_docs_only_name_allowed_versions() -> None:
     )
 
 
-def test_current_release_note_is_a_concise_user_facing_summary() -> None:
+def test_current_release_note_is_a_concise_v0_6_summary() -> None:
     notes = _release_notes(_project_version())
     expected_sections = [
         "Why upgrade",
@@ -550,18 +555,13 @@ def test_current_release_note_is_a_concise_user_facing_summary() -> None:
     assert len(notes.splitlines()) <= 180
 
     flat = _normalized(notes)
-    assert "Pulse / Problems" in flat
-    assert re.search(r"`Ctrl-P`.{0,40}Action Palette", flat)
-    assert re.search(
-        r"write actions? still require a fresh approval keystroke",
-        flat,
-        re.I,
-    )
-    assert "(https://hellices.github.io/korvid/agent/#connect-a-provider)" in notes
-
-    assert "[milestone 6](https://github.com/hellices/korvid/milestone/6)" in notes
+    assert "Keybinding editor" in flat
+    assert "Namespace shortcuts" in flat
+    assert "Deployment operation outcomes" in flat
+    assert "fresh approval keystroke" in flat
+    assert "[milestone 8](https://github.com/hellices/korvid/milestone/8)" in notes
     assert not re.search(r"(?<!\w)#\d+\b", notes), (
-        "link milestone 6 instead of listing issue-by-issue history"
+        "link milestone 8 instead of listing issue-by-issue history"
     )
     assert "github.com/hellices/korvid/issues/" not in notes
 
@@ -569,10 +569,8 @@ def test_current_release_note_is_a_concise_user_facing_summary() -> None:
 def test_current_release_note_uses_canonical_public_guide_urls() -> None:
     notes = _release_notes(_project_version())
     canonical_urls = (
-        "https://hellices.github.io/korvid/tui/#change-scope-without-losing-context",
-        "https://hellices.github.io/korvid/agent/#connect-a-provider",
-        "https://hellices.github.io/korvid/provider-plugins/",
-        "https://hellices.github.io/korvid/agent/#self-hosted-endpoints-and-proxies",
+        "https://hellices.github.io/korvid/keybindings/#remap-an-app-action",
+        "https://hellices.github.io/korvid/tui/#namespace-shortcuts",
     )
 
     missing = [url for url in canonical_urls if f"]({url})" not in notes]
@@ -588,10 +586,8 @@ def test_current_release_note_rejects_relative_markdown_guide_links() -> None:
     )
 
 
-def test_current_release_note_names_legacy_namespace_scope_migration() -> None:
-    migration = markdown_section(
-        _release_notes(_project_version()), "Breaking changes and migration"
-    )
+def test_v0_5_release_note_names_legacy_namespace_scope_migration() -> None:
+    migration = markdown_section(_v0_5_release_notes(), "Breaking changes and migration")
 
     for key in ("`namespaces:`", "`namespace:`", "`favorite_namespaces:`"):
         assert key in migration
@@ -600,8 +596,8 @@ def test_current_release_note_names_legacy_namespace_scope_migration() -> None:
     )
 
 
-def test_current_release_note_ollama_example_preserves_v041_native_transport() -> None:
-    notes = _release_notes(_project_version())
+def test_v0_5_release_note_ollama_example_preserves_v041_native_transport() -> None:
+    notes = _v0_5_release_notes()
     migration = markdown_section(notes, "Breaking changes and migration")
     examples = re.findall(r"(?ms)^[ ]*```yaml\n(.*?)^[ ]*```", notes)
 
@@ -623,10 +619,8 @@ def test_current_release_note_ollama_example_preserves_v041_native_transport() -
     ) in _normalized(migration)
 
 
-def test_current_release_note_names_persisted_v041_azure_profile_migration() -> None:
-    migration = markdown_section(
-        _release_notes(_project_version()), "Breaking changes and migration"
-    )
+def test_v0_5_release_note_names_persisted_v041_azure_profile_migration() -> None:
+    migration = markdown_section(_v0_5_release_notes(), "Breaking changes and migration")
     expected = (
         "If v0.4.1 already persisted an Azure profile with resource-root "
         "`endpoint: https://<resource>.openai.azure.com` plus "
@@ -639,10 +633,8 @@ def test_current_release_note_names_persisted_v041_azure_profile_migration() -> 
     assert expected in _section_bullets(migration)
 
 
-def test_current_release_note_requires_v041_ollama_numeric_normalization() -> None:
-    migration = markdown_section(
-        _release_notes(_project_version()), "Breaking changes and migration"
-    )
+def test_v0_5_release_note_requires_v041_ollama_numeric_normalization() -> None:
+    migration = markdown_section(_v0_5_release_notes(), "Breaking changes and migration")
     expected = (
         "Preserve v0.4.1's normalized Ollama numeric types when moving "
         "`agent.ollama` into profile `options`; do not copy quoted numbers or "
