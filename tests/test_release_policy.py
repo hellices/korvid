@@ -833,10 +833,10 @@ def test_publish_step_requires_reviewed_commit_version_guard() -> None:
         _assert_release_runbook_contracts(runbook.replace(publish, mutated))
 
 
-def test_v0_5_release_metadata_uses_the_last_published_minor() -> None:
-    assert _project_version() == "0.5.0"
-    assert UPGRADE_SOURCE_VERSION == "0.4.1"
-    assert __version__ == "0.5.0"
+def test_v0_6_release_metadata_uses_v0_5_as_upgrade_source() -> None:
+    assert _project_version() == "0.6.0"
+    assert UPGRADE_SOURCE_VERSION == "0.5.0"
+    assert __version__ == "0.6.0"
 
 
 def test_upgrade_source_is_the_previous_minor_release() -> None:
