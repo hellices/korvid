@@ -18,7 +18,7 @@ controllers, so the router imports none of them.
 
 from __future__ import annotations
 
-from typing import Protocol, assert_never
+from typing import Protocol
 
 from korvid.ui.messages import BuiltinCommand, BuiltinOperation, UnknownCommand
 from korvid.ui.ui_surface import UiSurface
@@ -86,6 +86,12 @@ class SlotCommands(Protocol):
     def open_reallocation(self) -> None: ...
 
 
+class OutcomeCommands(Protocol):
+    """The latest Deployment operation outcome owner."""
+
+    def open_latest(self) -> None: ...
+
+
 class CommandRouter:
     """Dispatches typed commands to the owner that implements them."""
 
@@ -101,6 +107,7 @@ class CommandRouter:
         pulse: PulseCommands,
         keybindings: KeybindingCommands,
         slots: SlotCommands,
+        outcomes: OutcomeCommands | None = None,
     ) -> None:
         self._ui = ui
         self._agent = agent
@@ -111,11 +118,24 @@ class CommandRouter:
         self._pulse = pulse
         self._keybindings = keybindings
         self._slots = slots
+        self._outcomes = outcomes
 
     def route_builtin(self, command: BuiltinCommand) -> None:
         """Dispatch an app-owned command by canonical operation identity."""
         arguments = list(command.arguments)
         operation = command.operation
+        no_argument_handlers = {
+            BuiltinOperation.PROPOSALS: self._proposals.open_review,
+            BuiltinOperation.PORT_FORWARDS: self._forwards.open_list,
+            BuiltinOperation.PULSE: self._pulse.open_detail,
+            BuiltinOperation.KEYBINDINGS: self._keybindings.open_editor,
+            BuiltinOperation.NAMESPACE_SLOTS: self._slots.open_reallocation,
+            BuiltinOperation.DEPLOYMENT_OUTCOMES: self._open_outcomes,
+        }
+        handler = no_argument_handlers.get(operation)
+        if handler is not None:
+            handler()
+            return
         if operation in (BuiltinOperation.AI, BuiltinOperation.MODEL):
             self._route_agent(command)
             return
@@ -125,22 +145,16 @@ class CommandRouter:
         if operation is BuiltinOperation.TELEPRESENCE:
             self._integrations.handle_telepresence_command()
             return
-        if operation is BuiltinOperation.PROPOSALS:
-            self._proposals.open_review()
+        raise AssertionError(f"Unhandled built-in operation: {operation}")
+
+    def _open_outcomes(self) -> None:
+        if self._outcomes is None:
+            self._ui.notify(
+                "Deployment outcome tracking is unavailable in this session",
+                severity="warning",
+            )
             return
-        if operation is BuiltinOperation.PORT_FORWARDS:
-            self._forwards.open_list()
-            return
-        if operation is BuiltinOperation.PULSE:
-            self._pulse.open_detail()
-            return
-        if operation is BuiltinOperation.KEYBINDINGS:
-            self._keybindings.open_editor()
-            return
-        if operation is BuiltinOperation.NAMESPACE_SLOTS:
-            self._slots.open_reallocation()
-            return
-        assert_never(operation)
+        self._outcomes.open_latest()
 
     def _route_agent(self, command: BuiltinCommand) -> None:
         if not self._agent.available:

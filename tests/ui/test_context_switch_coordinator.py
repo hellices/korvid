@@ -424,6 +424,10 @@ class Env:
                 raise self.restore_error
             return self.result
 
+        async def stop_deployment_outcomes() -> bool:
+            self.log("outcomes-stop")
+            return True
+
         self.coordinator = ContextSwitchCoordinator(
             ui=self.ui,
             surface=self.surface,
@@ -445,6 +449,7 @@ class Env:
             list_contexts=list_contexts if wire_collaborators else None,
             probe_context=probe if wire_collaborators else None,
             switch_context=swap if wire_collaborators else None,
+            stop_deployment_outcomes=stop_deployment_outcomes,
         )
 
     async def switch(self, name: str = "ctx-b") -> None:
@@ -469,6 +474,7 @@ _SUCCESSFUL_ORDER = [
     "timeline:started@0",
     "probe:ctx-b",
     "mcp-shutdown",
+    "outcomes-stop",
     "proposals-expired",
     "logs-close",
     "describe-hide",
@@ -1163,6 +1169,29 @@ async def test_an_undrainable_mcp_server_aborts_the_switch_before_teardown(
     assert any("context switch aborted" in message for message in env.ui.messages())
 
 
+async def test_undrained_outcome_read_aborts_switch_before_client_retarget(
+    tmp_path: Path,
+) -> None:
+    env = Env(tmp_path)
+
+    async def stop_deployment_outcomes() -> bool:
+        env.log("outcomes-stop")
+        return False
+
+    env.coordinator._stop_deployment_outcomes = stop_deployment_outcomes
+    await env.switch()
+
+    assert env.swaps == []
+    assert not env.log.has("logs-close")
+    assert env.proposals.reasons == []
+    assert env.timeline.phases[-1] == (
+        0,
+        "failed",
+        "Deployment outcome reads did not stop in time",
+    )
+    assert any("context switch aborted" in message for message in env.ui.messages())
+
+
 async def test_a_stopped_mcp_server_is_reported_when_the_session_cannot_reconnect(
     tmp_path: Path,
 ) -> None:
@@ -1359,6 +1388,57 @@ async def test_the_completion_prefetch_is_cancelled_and_reaped_on_shutdown(
     await env.coordinator.shutdown()
     assert task.done()
     assert env.coordinator._prefetch_task is None
+
+
+async def test_shutdown_stops_outcomes_when_prefetch_raises(tmp_path: Path) -> None:
+    env = Env(tmp_path)
+
+    async def failed_prefetch() -> None:
+        raise RuntimeError("prefetch failed")
+
+    task = asyncio.create_task(failed_prefetch())
+    await asyncio.sleep(0)
+    env.coordinator._prefetch_task = task
+
+    with pytest.raises(RuntimeError, match="prefetch failed"):
+        await env.coordinator.shutdown()
+
+    assert env.log.has("outcomes-stop")
+
+
+async def test_shutdown_fails_when_outcome_reads_do_not_stop(tmp_path: Path) -> None:
+    env = Env(tmp_path)
+
+    async def stop_deployment_outcomes() -> bool:
+        return False
+
+    env.coordinator._stop_deployment_outcomes = stop_deployment_outcomes
+
+    with pytest.raises(RuntimeError, match="Deployment outcome reads did not stop"):
+        await env.coordinator.shutdown()
+
+
+async def test_shutdown_preserves_prefetch_failure_when_outcome_stop_also_fails(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    env = Env(tmp_path)
+
+    async def failed_prefetch() -> None:
+        raise ValueError("prefetch failed first")
+
+    async def stop_deployment_outcomes() -> bool:
+        return False
+
+    task = asyncio.create_task(failed_prefetch())
+    await asyncio.sleep(0)
+    env.coordinator._prefetch_task = task
+    env.coordinator._stop_deployment_outcomes = stop_deployment_outcomes
+
+    with pytest.raises(ValueError, match="prefetch failed first"):
+        await env.coordinator.shutdown()
+
+    assert "Deployment outcome reads did not stop during shutdown" in caplog.text
 
 
 async def test_shutdown_without_a_prefetch_is_a_no_op(tmp_path: Path) -> None:

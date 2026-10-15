@@ -43,6 +43,7 @@ from korvid.core.watch import WatchManager
 from korvid.k8s.components import (
     ComponentRef,
 )
+from korvid.k8s.deployment_outcomes import DeploymentOutcomeReader
 from korvid.k8s.discovery import PODS_META, ResourceMeta, canonical_resource_alias
 from korvid.k8s.helm import HelmReleaseIdentity
 from korvid.k8s.helmcli import HelmCLI
@@ -192,6 +193,8 @@ class KorvidApp(App[None]):
         watch_warning_events: (Callable[[str | None], AsyncIterator[dict[str, Any]]] | None) = None,
         pulse_reader: PulseReader | None = None,
         approval_timeout_seconds: float | None = None,
+        deployment_outcome_reader: DeploymentOutcomeReader | None = None,
+        deployment_cluster_id: Callable[[], str | None] = lambda: None,
     ) -> None:
         super().__init__()
         if approval_timeout_seconds is not None and (
@@ -244,6 +247,8 @@ class KorvidApp(App[None]):
             watch_warning_events=watch_warning_events,
             pulse_reader=pulse_reader,
             approval_timeout_seconds=approval_timeout_seconds,
+            deployment_outcome_reader=deployment_outcome_reader,
+            deployment_cluster_id=deployment_cluster_id,
         )
         self._runtime_bound = False
         self._runtime_inputs = runtime_inputs

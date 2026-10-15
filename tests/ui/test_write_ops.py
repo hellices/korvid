@@ -23,6 +23,7 @@ from textual.widgets import Input
 
 from korvid.core.audit import AuditLog
 from korvid.core.config import KorvidConfig
+from korvid.core.deployment_outcome import DeploymentRestartIntent, DeploymentScaleIntent
 from korvid.core.portforward import OWNER_CHAIN_PLURALS, WORKLOAD_PLURALS
 from korvid.core.session_timeline import (
     AppendResult,
@@ -33,10 +34,11 @@ from korvid.core.session_timeline import (
 )
 from korvid.core.store import ResourceStore, Summary
 from korvid.core.watch import WatchManager
+from korvid.k8s.deployment_outcomes import DeploymentOutcomeReader, RawDeploymentOutcomeSnapshot
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.models import GenericSummary, PodSummary
-from korvid.k8s.writes import WriteOps
+from korvid.k8s.writes import WriteMutationResult, WriteOps
 from korvid.ui.action_availability import ActionAvailability, AvailabilityCode, UnavailableReason
 from korvid.ui.app import KorvidApp
 from korvid.ui.resource_write_controller import _yaml_equal
@@ -84,6 +86,7 @@ class Recorder(WriteOps):
     def __init__(self, fail_status: int | None = None) -> None:
         self.calls: list[tuple[object, ...]] = []
         self.uids: list[str | None] = []
+        self.restart_stamps: list[str | None] = []
         self.fail_status = fail_status
 
     async def delete_object(
@@ -102,15 +105,29 @@ class Recorder(WriteOps):
         replicas: int,
         *,
         uid: str | None = None,
-    ) -> None:
+    ) -> WriteMutationResult:
         self.uids.append(uid)
         self.calls.append(("scale", meta.plural, namespace, name, replicas))
+        return WriteMutationResult(generation=3)
 
     async def rollout_restart(
         self, meta: ResourceMeta, namespace: str | None, name: str, *, uid: str | None = None
     ) -> None:
         self.uids.append(uid)
         self.calls.append(("restart", meta.plural, namespace, name))
+
+    async def rollout_restart_with_stamp(
+        self,
+        meta: ResourceMeta,
+        namespace: str | None,
+        name: str,
+        *,
+        uid: str | None = None,
+        restarted_at: str | None = None,
+    ) -> WriteMutationResult:
+        self.restart_stamps.append(restarted_at)
+        await self.rollout_restart(meta, namespace, name, uid=uid)
+        return WriteMutationResult(generation=3)
 
     async def replace_object(
         self,
@@ -127,6 +144,19 @@ class Recorder(WriteOps):
         self.calls.append(("replace", meta.plural, namespace, name, manifest))
 
 
+class _BlockingOutcomeReader(DeploymentOutcomeReader):
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        self.calls: list[tuple[str, str]] = []
+
+    async def snapshot(self, namespace: str, name: str) -> RawDeploymentOutcomeSnapshot:
+        self.calls.append((namespace, name))
+        self.started.set()
+        await self.release.wait()
+        raise AssertionError("test reader should be cancelled before release")
+
+
 def make_app(
     recorder: Recorder,
     audit_path: Path,
@@ -139,6 +169,7 @@ def make_app(
     extra_pods: list[Summary] | None = None,
     session_timeline: SessionTimeline | None = None,
     aliases: dict[str, ResourceMeta] | None = None,
+    deployment_outcome_reader: DeploymentOutcomeReader | None = None,
 ) -> KorvidApp:
     store = ResourceStore()
     data: dict[str, list[Summary]] = {
@@ -192,6 +223,8 @@ def make_app(
         audit=AuditLog(audit_path),
         check_permission=None if permitted is None else check_permission,
         session_timeline=session_timeline,
+        deployment_outcome_reader=deployment_outcome_reader,
+        deployment_cluster_id=lambda: "test-cluster",
     )
 
 
@@ -325,6 +358,32 @@ async def test_rollout_restart_on_deployment(tmp_path: Path) -> None:
         assert rec.calls == [("restart", "deployments", "default", "web")]
 
 
+async def test_rollout_restart_starts_deployment_outcome_tracker(tmp_path: Path) -> None:
+    rec = Recorder()
+    reader = _BlockingOutcomeReader()
+    app = make_app(rec, tmp_path / "audit.jsonl", deployment_outcome_reader=reader)
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: _selected_name(app) == "web-1", label="pod row selected")
+        await _to_view(pilot, "deployments")
+        await pilot.press("r")
+        await until(
+            pilot, lambda: isinstance(app.screen, ConfirmScreen), label="confirmation dialog opened"
+        )
+        await pilot.press("y")
+        await until(pilot, reader.started.is_set, label="outcome reader started")
+        controller = app._resource_writes._deployment_outcomes
+        assert controller is not None
+        snapshot = controller.latest()
+        assert snapshot is not None
+        assert isinstance(snapshot.intent, DeploymentRestartIntent)
+        assert snapshot.intent.target.uid == "deploy-uid-1"
+        assert snapshot.intent.target.cluster_id == "test-cluster"
+        assert snapshot.intent.generation == 3
+        assert snapshot.intent.restarted_at
+        assert rec.restart_stamps == [snapshot.intent.restarted_at]
+        assert reader.calls == [("default", "web")]
+
+
 async def test_rollout_restart_rejected_on_pods(tmp_path: Path) -> None:
     rec = Recorder()
     app = make_app(rec, tmp_path / "audit.jsonl")
@@ -407,6 +466,36 @@ async def test_scale_flow_prompts_then_confirms(tmp_path: Path) -> None:
         await pilot.press("y")
         await until(pilot, lambda: rec.calls, label="write call recorded")
         assert rec.calls == [("scale", "deployments", "default", "web", 5)]
+
+
+async def test_scale_starts_deployment_outcome_tracker_with_exact_count(tmp_path: Path) -> None:
+    rec = Recorder()
+    reader = _BlockingOutcomeReader()
+    app = make_app(rec, tmp_path / "audit.jsonl", deployment_outcome_reader=reader)
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: _selected_name(app) == "web-1", label="pod row selected")
+        await _to_view(pilot, "deployments")
+        await pilot.press("S")
+        await until(
+            pilot, lambda: isinstance(app.screen, ReplicasPrompt), label="replicas prompt opened"
+        )
+        await pilot.press("5")
+        await pilot.press("enter")
+        await until(
+            pilot, lambda: isinstance(app.screen, ConfirmScreen), label="confirmation dialog opened"
+        )
+        await pilot.press("y")
+        await until(pilot, reader.started.is_set, label="outcome reader started")
+        controller = app._resource_writes._deployment_outcomes
+        assert controller is not None
+        snapshot = controller.latest()
+        assert snapshot is not None
+        assert isinstance(snapshot.intent, DeploymentScaleIntent)
+        assert snapshot.intent.target.uid == "deploy-uid-1"
+        assert snapshot.intent.target.cluster_id == "test-cluster"
+        assert snapshot.intent.generation == 3
+        assert snapshot.intent.replicas == 5
+        assert reader.calls == [("default", "web")]
 
 
 async def test_failed_write_audits_error(tmp_path: Path) -> None:

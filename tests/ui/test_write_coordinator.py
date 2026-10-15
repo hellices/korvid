@@ -26,6 +26,7 @@ import json
 from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 from textual.await_complete import AwaitComplete
@@ -38,6 +39,7 @@ from korvid.core.store import ALL_NAMESPACES, Summary
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.models import GenericSummary
+from korvid.k8s.writes import WriteMutationResult
 from korvid.ui.action_availability import AvailabilityCode, UnavailableReason
 from korvid.ui.ui_surface import Severity, UiSurface
 from korvid.ui.view_state import ViewState
@@ -45,6 +47,7 @@ from korvid.ui.widgets.confirm_screen import ConfirmScreen
 from korvid.ui.workspace_controller import ContextGuard
 from korvid.ui.workspace_state import PaneState
 from korvid.ui.write_coordinator import WriteCoordinator, WriteOrigin, gvr_label, write_locus
+from korvid.ui.write_gate import AcceptedWriteReceipt
 
 _PODS_META = ResourceMeta("Pod", "pods", "", "v1", True, ("po",))
 _NODES_META = ResourceMeta("Node", "nodes", "", "v1", False)
@@ -443,6 +446,198 @@ async def test_the_perimeter_runs_its_steps_in_the_required_order(tmp_path: Path
         "audit:success",
         "timeline:success",
     ]
+
+
+async def test_accepted_observer_runs_after_success_audit(tmp_path: Path) -> None:
+    env = make_env(tmp_path)
+    events: list[str] = []
+
+    async def mutate() -> WriteMutationResult:
+        events.append("mutation")
+        return WriteMutationResult(generation=8)
+
+    async def observe(receipt: AcceptedWriteReceipt) -> None:
+        assert env.audit_outcomes() == ["intent", "success"]
+        assert receipt.mutation == WriteMutationResult(generation=8)
+        events.append(f"observer:{receipt.action}")
+
+    result = await env.coordinator.run(
+        "scale",
+        _PODS_META,
+        "default",
+        "web",
+        lambda: mutate(),
+        on_accepted=observe,
+    )
+
+    assert result == "done"
+    assert events == ["mutation", "observer:scale"]
+    assert env.coordinator.active_writes() == 0
+
+
+@pytest.mark.parametrize(
+    ("audit", "operation_error", "expected_prefix", "expected_runs"),
+    [
+        ("broken", None, "blocked:", 0),
+        ("working", ApiStatusError(500, "mutation failed"), "failed:", 1),
+    ],
+)
+async def test_accepted_observer_does_not_run_for_blocked_or_failed_write(
+    tmp_path: Path,
+    audit: str,
+    operation_error: BaseException | None,
+    expected_prefix: str,
+    expected_runs: int,
+) -> None:
+    env = make_env(tmp_path, audit=audit)
+    observed: list[object] = []
+    recorder = Recorder(error=operation_error)
+
+    async def observe(receipt: object) -> None:
+        observed.append(receipt)
+
+    result = await env.coordinator.run(
+        "scale",
+        _PODS_META,
+        "default",
+        "web",
+        recorder.factory,
+        on_accepted=observe,
+    )
+
+    assert result.startswith(expected_prefix)
+    assert recorder.ran == expected_runs
+    assert observed == []
+
+
+async def test_accepted_observer_failure_does_not_rewrite_write_success(tmp_path: Path) -> None:
+    env = make_env(tmp_path)
+
+    async def observe(receipt: object) -> None:
+        raise RuntimeError("observer unavailable")
+
+    result = await env.coordinator.run(
+        "scale",
+        _PODS_META,
+        "default",
+        "web",
+        Recorder().factory,
+        on_accepted=observe,
+    )
+
+    assert result == "done"
+    assert env.audit_outcomes() == ["intent", "success"]
+    assert any(
+        "accepted, but outcome verification could not start" in message
+        for message, _severity in env.ui.notifications
+    )
+    assert env.coordinator.active_writes() == 0
+
+
+async def test_accepted_observer_cancellation_does_not_rewrite_write_success(
+    tmp_path: Path,
+) -> None:
+    env = make_env(tmp_path)
+
+    async def observe(receipt: object) -> None:
+        raise asyncio.CancelledError
+
+    result = await env.coordinator.run(
+        "scale",
+        _PODS_META,
+        "default",
+        "web",
+        Recorder().factory,
+        on_accepted=observe,
+    )
+
+    assert result == "done"
+    assert env.audit_outcomes() == ["intent", "success"]
+    assert any(
+        "accepted, but outcome verification could not start" in message
+        for message, _severity in env.ui.notifications
+    )
+    assert any("CancelledError" in message for message, _severity in env.ui.notifications)
+    assert env.coordinator.active_writes() == 0
+
+
+async def test_synchronous_accepted_observer_failure_does_not_rewrite_success(
+    tmp_path: Path,
+) -> None:
+    env = make_env(tmp_path)
+
+    def observe(receipt: object) -> Awaitable[None]:
+        raise RuntimeError("observer construction failed")
+
+    result = await env.coordinator.run(
+        "scale",
+        _PODS_META,
+        "default",
+        "web",
+        Recorder().factory,
+        on_accepted=observe,
+    )
+
+    assert result == "done"
+    assert env.audit_outcomes() == ["intent", "success"]
+    assert any(
+        "observer construction failed" in message for message, _severity in env.ui.notifications
+    )
+
+
+async def test_external_cancellation_during_accepted_observer_propagates(
+    tmp_path: Path,
+) -> None:
+    env = make_env(tmp_path)
+    observing = asyncio.Event()
+
+    async def observe(receipt: object) -> None:
+        observing.set()
+        await asyncio.Future()
+
+    running = asyncio.create_task(
+        env.coordinator.run(
+            "scale",
+            _PODS_META,
+            "default",
+            "web",
+            Recorder().factory,
+            on_accepted=observe,
+        )
+    )
+    await observing.wait()
+    running.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await running
+
+    assert env.audit_outcomes() == ["intent", "success"]
+    assert env.coordinator.active_writes() == 0
+
+
+async def test_external_cancellation_wins_observer_cancellation_race(tmp_path: Path) -> None:
+    env = make_env(tmp_path)
+    running: asyncio.Task[str]
+
+    async def observe(receipt: object) -> None:
+        running.cancel()
+        raise asyncio.CancelledError
+
+    running = asyncio.create_task(
+        env.coordinator.run(
+            "scale",
+            _PODS_META,
+            "default",
+            "web",
+            Recorder().factory,
+            on_accepted=observe,
+        )
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await running
+
+    assert env.audit_outcomes() == ["intent", "success"]
     assert env.coordinator.active_writes() == 0
 
 
@@ -454,6 +649,7 @@ async def test_the_perimeter_runs_its_steps_in_the_required_order(tmp_path: Path
 async def test_declined_confirmation_constructs_no_operation(tmp_path: Path) -> None:
     env = make_env(tmp_path)
     rec = Recorder()
+    observe = AsyncMock()
     await env.coordinator.confirm(
         "Delete pods/web-1?",
         "DELETE pods/web-1",
@@ -462,12 +658,14 @@ async def test_declined_confirmation_constructs_no_operation(tmp_path: Path) -> 
         namespace="default",
         name="web-1",
         op_factory=rec.factory,
+        on_accepted=observe,
     )
     env.ui.answer(False)
     await env.ui.settle()
     assert rec.built == 0, "a declined dialog must never construct the mutation"
     assert env.ui.workers == []
     assert env.audit_outcomes() == []
+    observe.assert_not_called()
 
 
 async def test_dismissed_confirmation_constructs_no_operation(tmp_path: Path) -> None:
@@ -539,6 +737,7 @@ async def test_confirm_runs_async_precondition_before_intent_audit(tmp_path: Pat
 async def test_false_precondition_creates_no_audit_or_mutation(tmp_path: Path) -> None:
     env = make_env(tmp_path)
     mutated = False
+    observe = AsyncMock()
 
     async def precondition() -> bool:
         return False
@@ -556,12 +755,14 @@ async def test_false_precondition_creates_no_audit_or_mutation(tmp_path: Path) -
         name="web",
         op_factory=operation,
         precondition=precondition,
+        on_accepted=observe,
     )
     env.ui.answer(True)
     await env.ui.settle()
 
     assert mutated is False
     assert env.audit_outcomes() == []
+    observe.assert_not_called()
 
 
 async def test_raised_precondition_creates_no_audit_or_mutation(tmp_path: Path) -> None:
@@ -939,6 +1140,7 @@ async def test_outcome_audit_failure_warns_but_keeps_the_executed_write(tmp_path
     real = env.audit
     assert real is not None
     calls: list[str] = []
+    observe = AsyncMock()
 
     def flaky(**kwargs: Any) -> None:
         calls.append(str(kwargs["outcome"]))
@@ -947,9 +1149,17 @@ async def test_outcome_audit_failure_warns_but_keeps_the_executed_write(tmp_path
         AuditLog.append(real, **kwargs)
 
     real.append = flaky  # type: ignore[method-assign]  # narrow fake seam
-    outcome = await env.coordinator.run("delete", _PODS_META, "default", "web-1", rec.factory)
+    outcome = await env.coordinator.run(
+        "delete",
+        _PODS_META,
+        "default",
+        "web-1",
+        rec.factory,
+        on_accepted=observe,
+    )
     assert outcome == "done"
     assert rec.ran == 1
+    observe.assert_not_called()
     assert (
         "Audit log write failed (operation already executed)",
         "warning",
@@ -960,8 +1170,16 @@ async def test_cancelled_mutation_leaves_the_intent_record_and_propagates(tmp_pa
     env = make_env(tmp_path)
     rec = Recorder()
     rec.release = asyncio.Event()
+    observe = AsyncMock()
     task = asyncio.ensure_future(
-        env.coordinator.run("delete", _PODS_META, "default", "web-1", rec.factory)
+        env.coordinator.run(
+            "delete",
+            _PODS_META,
+            "default",
+            "web-1",
+            rec.factory,
+            on_accepted=observe,
+        )
     )
     await rec.started.wait()
     task.cancel()
@@ -969,6 +1187,7 @@ async def test_cancelled_mutation_leaves_the_intent_record_and_propagates(tmp_pa
         await task
     assert env.audit_outcomes() == ["intent"]
     assert env.coordinator.active_writes() == 0
+    observe.assert_not_called()
 
 
 async def test_shielded_write_finishes_after_an_interrupted_turn(tmp_path: Path) -> None:

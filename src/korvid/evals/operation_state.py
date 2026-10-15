@@ -33,7 +33,7 @@ from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.drain import DrainPlan
 from korvid.k8s.dryrun import diff_manifests
 from korvid.k8s.errors import ApiStatusError
-from korvid.k8s.writes import WriteOps, restart_stamp
+from korvid.k8s.writes import WriteMutationResult, WriteOps, restart_stamp
 
 __all__ = [
     "RESTART_ANNOTATION",
@@ -423,7 +423,7 @@ class StatefulFakeWriteOps(WriteOps):
         replicas: int,
         *,
         uid: str | None = None,
-    ) -> None:
+    ) -> WriteMutationResult:
         if meta.kind not in _SCALABLE_KINDS:
             self._unsupported(
                 "scale",
@@ -447,10 +447,15 @@ class StatefulFakeWriteOps(WriteOps):
             pre_state={"spec.replicas": before},
             result="started",
         )
+        generation = int(manifest.get("metadata", {}).get("generation", 0))
+        if before != replicas:
+            generation += 1
+            manifest.setdefault("metadata", {})["generation"] = generation
         manifest.setdefault("spec", {})["replicas"] = replicas
         self._bump(manifest)
         if self._state.reconcile_status:
             status = manifest.setdefault("status", {})
+            status["observedGeneration"] = generation
             status["replicas"] = replicas
             status["readyReplicas"] = replicas
             status["availableReplicas"] = replicas
@@ -464,6 +469,7 @@ class StatefulFakeWriteOps(WriteOps):
             post_state={"spec.replicas": replicas},
             result="success",
         )
+        return WriteMutationResult(generation=generation)
 
     async def rollout_restart(
         self, meta: ResourceMeta, namespace: str | None, name: str, *, uid: str | None = None
@@ -480,7 +486,7 @@ class StatefulFakeWriteOps(WriteOps):
         *,
         uid: str | None = None,
         restarted_at: str | None = None,
-    ) -> None:
+    ) -> WriteMutationResult:
         if meta.kind not in _RESTARTABLE_KINDS:
             self._unsupported(
                 "rollout_restart",
@@ -523,6 +529,7 @@ class StatefulFakeWriteOps(WriteOps):
             post_state={"metadata.generation": before + 1},
             result="success",
         )
+        return WriteMutationResult(generation=before + 1)
 
     # -- previews ------------------------------------------------------
 

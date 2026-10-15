@@ -90,8 +90,22 @@ class FakeSlots:
         self.opens += 1
 
 
+class FakeOutcomes:
+    def __init__(self) -> None:
+        self.opens = 0
+
+    def open_latest(self) -> None:
+        self.opens += 1
+
+
 class Harness:
-    def __init__(self, *, agent_available: bool = True, catalog_missing: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        agent_available: bool = True,
+        catalog_missing: bool = False,
+        outcomes: FakeOutcomes | None = None,
+    ) -> None:
         self.ui = FakeUi()
         self.agent = FakeAgent(agent_available)
         self.integrations = FakeIntegrations()
@@ -111,6 +125,7 @@ class Harness:
             pulse=self.pulse,
             keybindings=self.keybindings,
             slots=self.slots,
+            outcomes=outcomes,
         )
 
 
@@ -137,6 +152,26 @@ def test_pulse_reaches_its_owner_once() -> None:
     harness.router.route_builtin(_builtin(BuiltinOperation.PULSE))
     assert harness.pulse.opens == 1
     assert harness.ui.notifications == []
+
+
+def test_deployment_outcomes_reaches_its_owner_once() -> None:
+    outcomes = FakeOutcomes()
+    harness = Harness(outcomes=outcomes)
+
+    harness.router.route_builtin(_builtin(BuiltinOperation.DEPLOYMENT_OUTCOMES))
+
+    assert outcomes.opens == 1
+    assert harness.ui.notifications == []
+
+
+def test_deployment_outcomes_without_owner_warns_unavailable() -> None:
+    harness = Harness()
+
+    harness.router.route_builtin(_builtin(BuiltinOperation.DEPLOYMENT_OUTCOMES))
+
+    assert harness.ui.notifications == [
+        ("Deployment outcome tracking is unavailable in this session", "warning")
+    ]
 
 
 def test_ai_and_agent_reach_the_agent_owner() -> None:

@@ -1364,15 +1364,20 @@ def test_telepresence_wiring_respects_detection_and_kill_switch() -> None:
     kill-switch yields None; a detected binary yields a CLI wrapper."""
     from unittest import mock
 
-    from korvid.__main__ import _build_telepresence
+    import korvid.__main__ as main_mod
     from korvid.core.config import KorvidConfig
-    from korvid.k8s.telepresence import TelepresenceCLI
 
     with mock.patch("korvid.__main__.find_telepresence", return_value=None):
-        assert _build_telepresence(KorvidConfig()) is None
-    with mock.patch("korvid.__main__.find_telepresence", return_value="/x/telepresence"):
-        assert isinstance(_build_telepresence(KorvidConfig()), TelepresenceCLI)
-        assert _build_telepresence(KorvidConfig(telepresence_enabled=False)) is None
+        assert main_mod._build_telepresence(KorvidConfig()) is None
+    cli = object()
+    with (
+        mock.patch("korvid.__main__.find_telepresence", return_value="/x/telepresence"),
+        mock.patch("korvid.__main__.TelepresenceCLI", return_value=cli) as constructor,
+    ):
+        assert main_mod._build_telepresence(KorvidConfig()) is cli
+        constructor.assert_called_once_with("/x/telepresence")
+        assert main_mod._build_telepresence(KorvidConfig(telepresence_enabled=False)) is None
+        constructor.assert_called_once_with("/x/telepresence")
 
 
 async def test_disconnect_agent_releases_the_provider(monkeypatch: object) -> None:
@@ -1686,6 +1691,7 @@ class _FakeAppCapturesKwargs:
 
     def __init__(self, **kwargs: Any) -> None:
         self.captured = kwargs
+        self.config = kwargs["config"]
         # `AppUIBridge(app)` reads exactly these two collaborators right
         # after construction: the agent controller it delegates every UI
         # tool to, and the dispatcher that marshals the call onto the app
@@ -1733,6 +1739,15 @@ class _FakeKubeForWiring:
     async def list_relationship_objects(self, meta: Any, namespace: str | None) -> list[Any]:
         self.relationship_list_calls.append((meta, namespace))
         return []
+
+    async def get_object(self, *a: Any, **k: Any) -> dict[str, Any]:
+        return {}
+
+    async def list_raw_objects(self, *a: Any, **k: Any) -> tuple[list[dict[str, Any]], bool]:
+        return [], False
+
+    def connected_api_server(self) -> str:
+        return "https://cluster.example"
 
     def list_namespaces(self) -> Any: ...
     def get_helm_release_components(self, *a: Any, **k: Any) -> Any: ...
@@ -1819,6 +1834,43 @@ async def test_wire_and_run_wires_relationship_lister_from_kube(
     assert result == []
     assert kube.relationship_list_calls == [("meta", "ns")]
     assert kube.list_calls == []
+
+
+async def test_wire_and_run_wires_deployment_outcome_reader_from_kube(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from unittest.mock import MagicMock
+
+    import korvid.__main__ as main_mod
+    from korvid.core.config import KorvidConfig
+    from korvid.k8s.deployment_outcomes import KubeDeploymentOutcomeReader
+
+    reader_factory = MagicMock(side_effect=KubeDeploymentOutcomeReader)
+    monkeypatch.setattr(main_mod, "KubeDeploymentOutcomeReader", reader_factory)
+    monkeypatch.setattr(main_mod, "KorvidApp", _FakeAppCapturesKwargs)
+    monkeypatch.setattr(main_mod, "assemble_app_runtime", lambda app: app)
+    _FakeAppCapturesKwargs.instances.clear()
+
+    kube = _FakeKubeForWiring()
+    connected_api_server = MagicMock(return_value="https://cluster.example")
+    kube.connected_api_server = connected_api_server  # type: ignore[method-assign]  # test seam
+    state = main_mod._RunState()
+    await main_mod._wire_and_run(KorvidConfig(readonly=True), cast("Any", kube), state)
+    if state.discovery_box:
+        await state.discovery_box[0]
+
+    captured = _FakeAppCapturesKwargs.instances[0].captured
+    assert isinstance(captured["deployment_outcome_reader"], KubeDeploymentOutcomeReader)
+    reader_factory.assert_called_once()
+    reader_kwargs = reader_factory.call_args.kwargs
+    assert reader_kwargs["get_object"].__self__ is kube
+    assert reader_kwargs["get_object"].__func__ is kube.get_object.__func__
+    assert reader_kwargs["list_raw_objects"].__self__ is kube
+    assert reader_kwargs["list_raw_objects"].__func__ is kube.list_raw_objects.__func__
+    assert captured["deployment_cluster_id"]() == "(kubeconfig default)|https://cluster.example"
+    connected_api_server.assert_called_once_with()
+    connected_api_server.return_value = "https://replacement.example"
+    assert captured["deployment_cluster_id"]() == "(kubeconfig default)|https://replacement.example"
 
 
 async def test_wire_and_run_wires_helm_release_identity_reader_from_kube(

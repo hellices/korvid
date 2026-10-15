@@ -209,6 +209,7 @@ def compose_command_reasons(
     port_forwards: Callable[[], UnavailableReason | None],
     keybindings: Callable[[], UnavailableReason | None] | None = None,
     slots: Callable[[], UnavailableReason | None] | None = None,
+    outcomes: Callable[[], UnavailableReason | None] | None = None,
 ) -> dict[str, Callable[[], UnavailableReason | None]]:
     """Build `ActionPolicy(reason_by_command=...)` from its owners.
 
@@ -279,6 +280,7 @@ def compose_command_reasons(
         "pf": port_forwards,
         **({"keys": keybindings} if keybindings is not None else {}),
         **({"slots": slots} if slots is not None else {}),
+        **({"outcomes": outcomes} if outcomes is not None else {}),
     }
 
 

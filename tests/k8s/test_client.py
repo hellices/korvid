@@ -8,7 +8,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, TypeVar
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 from kubernetes_asyncio import client as k8s_client
@@ -18,13 +18,30 @@ from kubernetes_asyncio.client.exceptions import ApiException
 from korvid.k8s import client as client_mod
 from korvid.k8s.client import KubeClient
 from korvid.k8s.discovery import PODS_META, ResourceMeta
-from korvid.k8s.errors import ApiStatusError
+from korvid.k8s.errors import ApiStatusError, KubeClientError
 from korvid.k8s.helm import HELM_RELEASES_META
 from korvid.k8s.models import GenericSummary, ReplicaSetSummary
 from korvid.k8s.telemetry import ReadTelemetryEvent
 from korvid.k8s.watch_events import WatchEvent, WatchProgress
+from korvid.k8s.writes import WriteMutationResult
 
 _T = TypeVar("_T")
+
+
+def test_connected_api_server_reads_active_client_without_kubeconfig_io() -> None:
+    kube = KubeClient()
+    with (
+        patch.object(k8s_config, "load_kube_config") as load_kube_config,
+        patch.object(k8s_config, "load_incluster_config") as load_incluster_config,
+    ):
+        assert kube.connected_api_server() is None
+        api = MagicMock()
+        api.configuration.host = "https://cluster.example"
+        kube._api = api
+
+        assert kube.connected_api_server() == "https://cluster.example"
+    load_kube_config.assert_not_called()
+    load_incluster_config.assert_not_called()
 
 
 async def _watch_rows(events: AsyncIterator[WatchEvent[_T]]) -> list[tuple[str, _T]]:
@@ -1867,16 +1884,403 @@ async def test_delete_object_encodes_segments() -> None:
     assert "team/a" not in path
 
 
-async def test_scale_object_patches_scale_subresource() -> None:
+async def test_scale_object_correlates_matching_snapshots_around_patch() -> None:
     client = KubeClient()
     api = _write_api()
-    with patch.object(client, "_api", api):
-        await client.scale_object(_deploy_meta(), "default", "web", 5)
+    operations: list[str] = []
+    response = api.call_api.return_value
+
+    async def patch_scale(*args: Any, **kwargs: Any) -> Any:
+        operations.append("patch")
+        return response
+
+    async def read_deployment(path: str) -> dict[str, Any]:
+        operations.append("get")
+        if operations == ["get"]:
+            return {
+                "metadata": {"uid": "deploy-uid", "generation": 8},
+                "spec": {"replicas": 3},
+            }
+        return {
+            "metadata": {"uid": "deploy-uid", "generation": 9},
+            "spec": {"replicas": 5},
+        }
+
+    api.call_api.side_effect = patch_scale
+    read = AsyncMock(side_effect=read_deployment)
+    response.read.return_value = (
+        b'{"apiVersion":"autoscaling/v1","kind":"Scale",'
+        b'"metadata":{"resourceVersion":"43"},"spec":{"replicas":5}}'
+    )
+    with (
+        patch.object(client, "_api", api),
+        patch.object(client, "_request_json", read),
+    ):
+        result = await client.scale_object(_deploy_meta(), "default", "web", 5)
+    assert api.call_api.call_count == 1
     args, kwargs = api.call_api.call_args
     assert args[0] == "/apis/apps/v1/namespaces/default/deployments/web/scale"
     assert args[1] == "PATCH"
     assert kwargs["body"] == {"spec": {"replicas": 5}}
     assert kwargs["header_params"]["Content-Type"] == "application/merge-patch+json"
+    assert result.generation == 9
+    assert read.await_args_list == [
+        call("/apis/apps/v1/namespaces/default/deployments/web"),
+        call("/apis/apps/v1/namespaces/default/deployments/web"),
+    ]
+    assert operations == ["get", "patch", "get"]
+
+
+@pytest.mark.parametrize(
+    ("live_generation", "live_replicas"),
+    [(1.0, 1), (True, 1), (1, 1.0), (1, True)],
+)
+def test_scale_snapshots_reject_non_integer_live_values(
+    live_generation: object,
+    live_replicas: object,
+) -> None:
+    result = WriteMutationResult.from_scale_snapshots(
+        {
+            "metadata": {"uid": "deploy-uid", "generation": 0},
+            "spec": {"replicas": 0},
+        },
+        {
+            "metadata": {"uid": "deploy-uid", "generation": live_generation},
+            "spec": {"replicas": live_replicas},
+        },
+        replicas=1,
+    )
+
+    assert result.generation is None
+
+
+async def test_scale_object_ignores_status_only_resource_version_churn() -> None:
+    client = KubeClient()
+    read = AsyncMock(
+        side_effect=[
+            {
+                "metadata": {"uid": "deploy-uid", "generation": 8, "resourceVersion": "42"},
+                "spec": {"replicas": 3},
+            },
+            {
+                "metadata": {"uid": "deploy-uid", "generation": 9, "resourceVersion": "44"},
+                "spec": {"replicas": 5},
+            },
+        ]
+    )
+    write = AsyncMock(return_value=b'{"kind":"Scale","metadata":{"resourceVersion":"43"}}')
+    with (
+        patch.object(client, "_request_json", read),
+        patch.object(client, "_request_write", write),
+    ):
+        result = await client.scale_object(_deploy_meta(), "default", "web", 5)
+
+    assert result.generation == 9
+
+
+async def test_scale_object_leaves_generation_unknown_after_concurrent_update() -> None:
+    client = KubeClient()
+    read = AsyncMock(
+        side_effect=[
+            {
+                "metadata": {"uid": "deploy-uid", "generation": 8},
+                "spec": {"replicas": 3},
+            },
+            {
+                "metadata": {"uid": "deploy-uid", "generation": 10},
+                "spec": {"replicas": 5},
+            },
+        ]
+    )
+    write = AsyncMock(
+        return_value=(b'{"kind":"Scale","metadata":{"resourceVersion":"43"},"spec":{"replicas":5}}')
+    )
+    with (
+        patch.object(client, "_request_json", read),
+        patch.object(client, "_request_write", write),
+    ):
+        result = await client.scale_object(_deploy_meta(), "default", "web", 5)
+
+    assert result.generation is None
+
+
+async def test_noop_scale_retains_current_generation() -> None:
+    client = KubeClient()
+    read = AsyncMock(
+        return_value={
+            "metadata": {"uid": "deploy-uid", "generation": 8},
+            "spec": {"replicas": 5},
+        }
+    )
+    write = AsyncMock(return_value=b'{"kind":"Scale","metadata":{"resourceVersion":"42"}}')
+    with (
+        patch.object(client, "_request_json", read),
+        patch.object(client, "_request_write", write),
+    ):
+        result = await client.scale_object(_deploy_meta(), "default", "web", 5)
+
+    assert result.generation == 8
+    assert read.await_count == 2
+    assert all(
+        args == call("/apis/apps/v1/namespaces/default/deployments/web")
+        for args in read.await_args_list
+    )
+    assert write.await_count == 1
+    assert write.await_args is not None
+    assert write.await_args.kwargs["body"] == {"spec": {"replicas": 5}}
+
+
+async def test_scale_object_writes_when_generation_read_is_unavailable() -> None:
+    client = KubeClient()
+    read = AsyncMock(side_effect=ApiStatusError(403, "Forbidden"))
+    write = AsyncMock(return_value=b'{"kind":"Scale","metadata":{"resourceVersion":"43"}}')
+    with (
+        patch.object(client, "_request_json", read),
+        patch.object(client, "_request_write", write),
+    ):
+        result = await client.scale_object(_deploy_meta(), "default", "web", 5, uid="deploy-uid")
+
+    assert write.await_args is not None
+    assert write.await_args.kwargs["body"] == {
+        "spec": {"replicas": 5},
+        "metadata": {"uid": "deploy-uid"},
+    }
+    assert result.generation is None
+    assert read.await_count == 2
+
+
+async def test_scale_object_does_not_write_after_unexpected_correlation_failure() -> None:
+    client = KubeClient()
+    read = AsyncMock(side_effect=RuntimeError("programming error"))
+    write = AsyncMock(return_value=b'{"kind":"Scale"}')
+    with (
+        patch.object(client, "_request_json", read),
+        patch.object(client, "_request_write", write),
+        pytest.raises(RuntimeError, match="programming error"),
+    ):
+        await client.scale_object(_deploy_meta(), "default", "web", 5)
+
+    assert write.await_count == 0
+
+
+async def test_scale_object_correlates_matching_snapshots_without_resource_versions() -> None:
+    client = KubeClient()
+    write = AsyncMock(return_value=b'{"kind":"Scale"}')
+    with (
+        patch.object(
+            client,
+            "_request_json",
+            AsyncMock(
+                side_effect=[
+                    {
+                        "metadata": {"uid": "deploy-uid", "generation": 8},
+                        "spec": {"replicas": 3},
+                    },
+                    {
+                        "metadata": {"uid": "deploy-uid", "generation": 9},
+                        "spec": {"replicas": 5},
+                    },
+                ]
+            ),
+        ),
+        patch.object(client, "_request_write", write),
+    ):
+        result = await client.scale_object(_deploy_meta(), "default", "web", 5)
+
+    assert write.await_count == 1
+    assert write.await_args is not None
+    assert write.await_args.kwargs["body"] == {"spec": {"replicas": 5}}
+    assert result.generation == 9
+
+
+async def test_scale_object_writes_when_correlation_metadata_is_malformed() -> None:
+    client = KubeClient()
+    write = AsyncMock(return_value=b'{"kind":"Scale"}')
+    with (
+        patch.object(
+            client,
+            "_request_json",
+            AsyncMock(return_value={"metadata": "invalid", "spec": {"replicas": 3}}),
+        ),
+        patch.object(client, "_request_write", write),
+    ):
+        result = await client.scale_object(_deploy_meta(), "default", "web", 5, uid="deploy-uid")
+
+    assert write.await_args is not None
+    assert write.await_args.kwargs["body"] == {
+        "spec": {"replicas": 5},
+        "metadata": {"uid": "deploy-uid"},
+    }
+    assert result.generation is None
+
+
+async def test_scale_object_treats_malformed_snapshot_as_missing_correlation() -> None:
+    client = KubeClient()
+    write = AsyncMock(return_value=b'{"kind":"Scale"}')
+    with (
+        patch.object(
+            client,
+            "_request_json",
+            AsyncMock(return_value={"metadata": {"generation": 8}, "spec": "invalid"}),
+        ),
+        patch.object(client, "_request_write", write),
+    ):
+        result = await client.scale_object(_deploy_meta(), "default", "web", 5)
+
+    assert write.await_count == 1
+    assert write.await_args is not None
+    assert write.await_args.kwargs["body"] == {"spec": {"replicas": 5}}
+    assert result.generation is None
+
+
+async def test_scale_post_patch_correlation_timeout_returns_accepted() -> None:
+    client = KubeClient()
+
+    calls = [0]
+
+    async def read(path: str) -> dict[str, Any]:
+        if calls[0] == 0:
+            calls[0] += 1
+            return {
+                "metadata": {"uid": "deploy-uid", "generation": 8},
+                "spec": {"replicas": 3},
+            }
+        await asyncio.Future()
+        raise AssertionError("unreachable")
+
+    write = AsyncMock(return_value=b'{"kind":"Scale"}')
+    with (
+        patch("korvid.k8s.writes._SCALE_CORRELATION_TIMEOUT_SECONDS", 0.01),
+        patch.object(client, "_request_json", read),
+        patch.object(client, "_request_write", write),
+    ):
+        result = await asyncio.wait_for(
+            client.scale_object(_deploy_meta(), "default", "web", 5),
+            timeout=1.0,
+        )
+
+    assert write.await_count == 1
+    assert result.generation is None
+
+
+@pytest.mark.parametrize(
+    "read_error",
+    [ApiStatusError(503, "Unavailable"), KubeClientError("connection reset")],
+)
+async def test_scale_post_patch_read_failure_returns_accepted_without_correlation(
+    read_error: Exception,
+) -> None:
+    client = KubeClient()
+    read = AsyncMock(
+        side_effect=[
+            {
+                "metadata": {"uid": "deploy-uid", "generation": 8},
+                "spec": {"replicas": 3},
+            },
+            read_error,
+        ]
+    )
+    write = AsyncMock(return_value=b'{"kind":"Scale","metadata":{"resourceVersion":"43"}}')
+    with (
+        patch.object(client, "_request_json", read),
+        patch.object(client, "_request_write", write),
+    ):
+        result = await client.scale_object(_deploy_meta(), "default", "web", 5)
+
+    assert write.await_count == 1
+    assert result.generation is None
+
+
+async def test_scale_correlation_timeout_does_not_wait_for_cancellation_suppression() -> None:
+    client = KubeClient()
+    cancelled = asyncio.Event()
+    release = asyncio.Event()
+    reaped = asyncio.Event()
+    calls = 0
+
+    async def read(path: str) -> dict[str, Any]:
+        nonlocal calls
+        calls += 1
+        if calls > 1:
+            return {
+                "metadata": {"uid": "deploy-uid", "generation": 9},
+                "spec": {"replicas": 5},
+            }
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            cancelled.set()
+            try:
+                await release.wait()
+            finally:
+                reaped.set()
+        return {}
+
+    write = AsyncMock(return_value=b'{"kind":"Scale"}')
+    try:
+        with (
+            patch("korvid.k8s.writes._SCALE_CORRELATION_TIMEOUT_SECONDS", 0.01),
+            patch.object(client, "_request_json", read),
+            patch.object(client, "_request_write", write),
+        ):
+            result = await asyncio.wait_for(
+                client.scale_object(_deploy_meta(), "default", "web", 5),
+                timeout=1.0,
+            )
+
+        assert cancelled.is_set()
+        assert write.await_count == 1
+        assert result.generation is None
+    finally:
+        release.set()
+        await asyncio.wait_for(reaped.wait(), timeout=1.0)
+
+
+async def test_scale_cancellation_after_patch_returns_accepted_without_correlation() -> None:
+    client = KubeClient()
+    read = AsyncMock(
+        side_effect=[
+            {
+                "metadata": {"uid": "deploy-uid", "generation": 8},
+                "spec": {"replicas": 3},
+            },
+            asyncio.CancelledError,
+        ]
+    )
+    write = AsyncMock(return_value=b'{"kind":"Scale","metadata":{"resourceVersion":"43"}}')
+    with (
+        patch.object(client, "_request_json", read),
+        patch.object(client, "_request_write", write),
+    ):
+        result = await client.scale_object(_deploy_meta(), "default", "web", 5)
+
+    assert write.await_count == 1
+    assert result.generation is None
+
+
+async def test_non_deployment_scale_preserves_uid_only_mutation() -> None:
+    client = KubeClient()
+    read = AsyncMock(side_effect=AssertionError("correlation GET must not run"))
+    write = AsyncMock(return_value=b'{"kind":"Scale"}')
+    with (
+        patch.object(client, "_request_json", read),
+        patch.object(client, "_request_write", write),
+    ):
+        result = await client.scale_object(
+            ResourceMeta("StatefulSet", "statefulsets", "apps", "v1", True),
+            "default",
+            "db",
+            5,
+            uid="statefulset-uid",
+        )
+
+    assert read.await_count == 0
+    assert write.await_args is not None
+    assert write.await_args.kwargs["body"] == {
+        "spec": {"replicas": 5},
+        "metadata": {"uid": "statefulset-uid"},
+    }
+    assert result.generation is None
 
 
 async def test_rollout_restart_patches_restartedAt_annotation() -> None:
@@ -2008,8 +2412,14 @@ async def test_scale_object_sends_uid_precondition() -> None:
     api = _write_api()
     with patch.object(client, "_api", api):
         await client.scale_object(_deploy_meta(), "default", "web", 5, uid="abc-123")
-    kwargs = api.call_api.call_args[1]
-    assert kwargs["body"] == {"spec": {"replicas": 5}, "metadata": {"uid": "abc-123"}}
+    patch_calls = [call for call in api.call_api.call_args_list if call.args[1] == "PATCH"]
+    assert len(patch_calls) == 1
+    patch_call = patch_calls[0]
+    assert patch_call.args[0] == "/apis/apps/v1/namespaces/default/deployments/web/scale"
+    assert patch_call.kwargs["body"] == {
+        "spec": {"replicas": 5},
+        "metadata": {"uid": "abc-123"},
+    }
 
 
 async def test_rollout_restart_sends_uid_precondition() -> None:
@@ -2190,14 +2600,16 @@ async def test_rollout_restart_with_stamp_pins_provided_stamp() -> None:
     stamp shown in the preview is the stamp the write sends."""
     client = KubeClient()
     api = _write_api()
+    api.call_api.return_value.read.return_value = b'{"metadata":{"generation":8}}'
     with patch.object(client, "_api", api):
-        await client.rollout_restart_with_stamp(
+        result = await client.rollout_restart_with_stamp(
             _deploy_meta(), "default", "web", uid="u-1", restarted_at="2026-07-26T00:00:00+00:00"
         )
     kwargs = api.call_api.call_args[1]
     annotations = kwargs["body"]["spec"]["template"]["metadata"]["annotations"]
     assert annotations["kubectl.kubernetes.io/restartedAt"] == "2026-07-26T00:00:00+00:00"
     assert kwargs["body"]["metadata"] == {"uid": "u-1"}
+    assert result.generation == 8
 
 
 async def test_create_object_requires_namespace_for_namespaced_kind() -> None:

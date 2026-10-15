@@ -735,7 +735,7 @@ class ProposalController(AgentProposals):
         proposal: WriteProposal,
         meta: ResourceMeta,
         ns: str | None,
-        op: Callable[[str | None], Awaitable[None]],
+        op: Callable[[str | None], Awaitable[object | None]],
     ) -> None:
         """Claim and execute an approved proposal under the nav lock so a
         context switch or `:mcp off` cannot interleave: the claim itself is

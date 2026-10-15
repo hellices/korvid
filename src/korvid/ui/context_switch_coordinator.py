@@ -49,6 +49,7 @@ import asyncio
 import contextlib
 import dataclasses
 import logging
+import sys
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from typing import Literal, Protocol
@@ -83,6 +84,10 @@ CURRENT_CONTEXT_SUFFIX = " (current)"
 _SWITCHING_UNAVAILABLE = UnavailableReason(
     AvailabilityCode.MISSING_CAPABILITY, "Context switching unavailable in this build"
 )
+
+
+class _ContextSwitchAborted(RuntimeError):
+    pass
 
 
 @dataclasses.dataclass(frozen=True)
@@ -375,6 +380,7 @@ class ContextSwitchCoordinator(ContextGuard):
         probe_context: Callable[[str], Awaitable[None]] | None = None,
         switch_context: Callable[[str | None], Awaitable[ContextSwitchResult]] | None = None,
         pulse: Callable[[], SwitchPulse] | None = None,
+        stop_deployment_outcomes: Callable[[], Awaitable[bool]] | None = None,
     ) -> None:
         self._ui = ui
         self._surface = surface
@@ -397,6 +403,7 @@ class ContextSwitchCoordinator(ContextGuard):
         self._probe_context = probe_context
         self._switch_context = switch_context
         self._pulse = pulse
+        self._stop_deployment_outcomes = stop_deployment_outcomes
         #: True while a switch is probing, tearing down or retargeting;
         #: refuses concurrent switches and marks every captured epoch stale.
         self._switching = False
@@ -482,13 +489,21 @@ class ContextSwitchCoordinator(ContextGuard):
         Reaped rather than abandoned: the task publishes into a widget, and
         an unmounting app must not leave that landing behind it.
         """
-        task = self._prefetch_task
-        if task is None:
-            return
-        self._prefetch_task = None
-        task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await task
+        try:
+            task = self._prefetch_task
+            if task is not None:
+                self._prefetch_task = None
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+        finally:
+            active_error = sys.exception()
+            if self._stop_deployment_outcomes is not None:
+                stopped = await self._stop_deployment_outcomes()
+                if not stopped and active_error is not None:
+                    logger.error("Deployment outcome reads did not stop during shutdown")
+                elif not stopped:
+                    raise RuntimeError("Deployment outcome reads did not stop during shutdown")
 
     # ------------------------------------------------------------------
     # Entry points — the app's `:ctx` handlers delegate straight to these
@@ -561,7 +576,10 @@ class ContextSwitchCoordinator(ContextGuard):
             return
         self._switching = True
         try:
-            await self._switch_locked(name)
+            try:
+                await self._switch_locked(name)
+            except _ContextSwitchAborted:
+                return
         finally:
             self._switching = False
 
@@ -631,6 +649,7 @@ class ContextSwitchCoordinator(ContextGuard):
                     note="embedded MCP server did not stop in time",
                 )
                 return
+            await self._ensure_outcome_reads_drained(epoch, old, name, mcp_restart)
             # Old-context proposals are stale the moment this committed
             # transition begins: the old MCP run (and its capability) is
             # already stopped, and both the teardown below and the retarget
@@ -751,6 +770,43 @@ class ContextSwitchCoordinator(ContextGuard):
                 )
                 return False
         return True
+
+    async def _ensure_outcome_reads_drained(
+        self,
+        epoch: int,
+        old: str | None,
+        name: str,
+        restart_mcp: bool,
+    ) -> None:
+        stop = self._stop_deployment_outcomes
+        if stop is None or await stop():
+            return
+        await self._abort_undrained_outcomes(epoch, old, name, restart_mcp)
+        raise _ContextSwitchAborted
+
+    async def _abort_undrained_outcomes(
+        self,
+        epoch: int,
+        old: str | None,
+        name: str,
+        restart_mcp: bool,
+    ) -> None:
+        reason = "Deployment outcome reads did not stop in time"
+        self._timeline().record_context_switch(
+            epoch=epoch,
+            phase="failed",
+            from_context=old,
+            to_context=name,
+            note=reason,
+        )
+        self._ui.notify(f"{reason}; context switch aborted", severity="error")
+        mcp = self._mcp()
+        if restart_mcp and mcp is not None:
+            message = await mcp.start()
+            self._ui.notify(
+                message,
+                severity="error" if message.startswith("ERROR") else "information",
+            )
 
     async def _teardown_before_retarget(self) -> None:
         """Restore Pulse after an abort that never touched the shared client."""

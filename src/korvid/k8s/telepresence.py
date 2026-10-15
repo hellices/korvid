@@ -22,8 +22,12 @@ import json
 import logging
 import re
 import shutil
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
+
+from korvid.k8s.discovery import ResourceMeta
+from korvid.k8s.errors import ApiStatusError
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +42,27 @@ _STDERR_TAIL_LINES = 3
 def find_telepresence() -> str | None:
     """Absolute path of the `telepresence` binary on PATH, or None."""
     return shutil.which("telepresence")
+
+
+def make_traffic_manager_probe(
+    get_object: Callable[
+        [ResourceMeta, str | None, str],
+        Awaitable[dict[str, Any]],
+    ],
+) -> Callable[[], Awaitable[bool]]:
+    """Build the pure API probe for traffic-manager's conventional home."""
+
+    async def probe() -> bool:
+        meta = ResourceMeta("Deployment", "deployments", "apps", "v1", True)
+        try:
+            await get_object(meta, TRAFFIC_MANAGER_NAMESPACE, TRAFFIC_MANAGER_NAME)
+        except ApiStatusError as exc:
+            if exc.status == 404:
+                return False
+            raise
+        return True
+
+    return probe
 
 
 class TelepresenceError(Exception):

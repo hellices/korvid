@@ -20,7 +20,7 @@ from korvid.core.watch import WatchManager
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.models import GenericSummary
-from korvid.k8s.writes import WriteOps
+from korvid.k8s.writes import WriteMutationResult, WriteOps
 from korvid.ui.app import KorvidApp
 from korvid.ui.widgets.agent_panel import AgentPanel
 from korvid.ui.widgets.confirm_screen import ConfirmScreen, ReplicasPrompt
@@ -113,8 +113,9 @@ class PreviewOps(WriteOps):
         *,
         uid: str | None = None,
         restarted_at: str | None = None,
-    ) -> None:
+    ) -> WriteMutationResult:
         self.calls.append(("restart", namespace, name, restarted_at))
+        return WriteMutationResult(generation=2)
 
     async def replace_object(
         self,
