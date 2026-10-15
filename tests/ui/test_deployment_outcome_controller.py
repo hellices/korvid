@@ -792,8 +792,10 @@ async def test_eviction_notice_uses_configured_tracker_limit() -> None:
         assert observer is not None
         await observer(_receipt())
 
-    notices = [message for message, _severity in surface.notifications if "1-tracker" in message]
-    assert notices == ["Evicted the oldest Deployment outcome at the 1-tracker retention limit"]
+    notices = [item for item in surface.notifications if item[0].startswith("Evicted")]
+    assert notices == [
+        ("Evicted the oldest Deployment outcome at the 1-tracker retention limit", "warning")
+    ]
 
 
 async def test_worker_delayed_past_deadline_does_not_start_a_read() -> None:

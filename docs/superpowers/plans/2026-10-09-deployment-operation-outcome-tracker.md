@@ -488,7 +488,8 @@ OUTCOME_WORKER_GROUP = "deployment-outcomes"
 
 Use `UiSurface.run_worker`; do not create bare asyncio tasks. Each read checks
 tracker ID and epoch before applying a result. 403, timeout, disconnect, and
-404 map to explicit incomplete/replaced outcomes and preserve prior evidence.
+404 map to explicit incomplete outcomes and preserve prior evidence. Only a
+confirmed live UID mismatch maps to replaced.
 
 - [ ] **Step 4: Add cap, cancellation, late-result, and shutdown tests**
 
