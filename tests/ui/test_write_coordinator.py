@@ -615,6 +615,32 @@ async def test_external_cancellation_during_accepted_observer_propagates(
     assert env.coordinator.active_writes() == 0
 
 
+async def test_external_cancellation_wins_observer_cancellation_race(tmp_path: Path) -> None:
+    env = make_env(tmp_path)
+    running: asyncio.Task[str]
+
+    async def observe(receipt: object) -> None:
+        running.cancel()
+        raise asyncio.CancelledError
+
+    running = asyncio.create_task(
+        env.coordinator.run(
+            "scale",
+            _PODS_META,
+            "default",
+            "web",
+            Recorder().factory,
+            on_accepted=observe,
+        )
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await running
+
+    assert env.audit_outcomes() == ["intent", "success"]
+    assert env.coordinator.active_writes() == 0
+
+
 # ---------------------------------------------------------------------------
 # 1. Approval: a declined dialog constructs and runs nothing
 # ---------------------------------------------------------------------------

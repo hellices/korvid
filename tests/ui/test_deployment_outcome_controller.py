@@ -98,7 +98,7 @@ def _receipt(action: str = "scale") -> AcceptedWriteReceipt:
 
 
 def _controller(
-    reader: DeploymentOutcomeReader,
+    reader: DeploymentOutcomeReader | None,
     *,
     epoch: list[int] | None = None,
     ui: FakeUi | None = None,
@@ -614,6 +614,27 @@ async def test_missing_identity_retains_incomplete_outcome() -> None:
     assert latest is not None
     assert latest.outcome.phase is DeploymentOutcomePhase.INCOMPLETE
     assert "UID" in latest.outcome.summary
+
+
+async def test_missing_generation_preserves_all_correlation_failures() -> None:
+    controller, _ui = _controller(None)
+    observer = controller.scale_observer(
+        epoch=4,
+        namespace="default",
+        name="web",
+        uid=None,
+        replicas=3,
+    )
+    assert observer is not None
+
+    await observer(dataclasses.replace(_receipt(), mutation=None))
+
+    latest = controller.latest()
+    assert latest is not None
+    assert latest.outcome.phase is DeploymentOutcomePhase.INCOMPLETE
+    assert "Deployment reader" in latest.outcome.summary
+    assert "UID" in latest.outcome.summary
+    assert "generation" in latest.outcome.summary
 
 
 async def test_registry_keeps_at_most_three_trackers() -> None:

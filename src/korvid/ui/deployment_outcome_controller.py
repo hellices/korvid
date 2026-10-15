@@ -103,6 +103,17 @@ def _incomplete_outcome(
     )
 
 
+def _correlation_failure(
+    existing: str | None,
+    generation: int | None,
+    action: str,
+) -> str | None:
+    reasons = [existing] if existing is not None else []
+    if generation is None:
+        reasons.append(f"{action} response did not include metadata.generation")
+    return "; ".join(reasons) or None
+
+
 class _ReadCapacityError(RuntimeError):
     pass
 
@@ -186,9 +197,7 @@ class DeploymentOutcomeController:
             if receipt.action != "scale":
                 raise ValueError("scale observer received another write action")
             generation = receipt.mutation.generation if receipt.mutation is not None else None
-            error = correlation_error
-            if generation is None:
-                error = "scale response did not include metadata.generation"
+            error = _correlation_failure(correlation_error, generation, "scale")
             intent = DeploymentScaleIntent(
                 target=target,
                 replicas=replicas,
@@ -217,9 +226,7 @@ class DeploymentOutcomeController:
             if receipt.action != "rollout_restart":
                 raise ValueError("restart observer received another write action")
             generation = receipt.mutation.generation if receipt.mutation is not None else None
-            error = correlation_error
-            if generation is None:
-                error = "restart response did not include metadata.generation"
+            error = _correlation_failure(correlation_error, generation, "restart")
             intent = DeploymentRestartIntent(
                 target=target,
                 restarted_at=restarted_at,

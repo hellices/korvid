@@ -38,8 +38,11 @@ async def notify_accepted_observer(
     try:
         await asyncio.shield(observing)
     except asyncio.CancelledError as exc:
-        if not observing.cancelled():
-            observing.cancel()
+        current = asyncio.current_task()
+        externally_cancelled = current is not None and current.cancelling() > 0
+        if externally_cancelled or not observing.cancelled():
+            if not observing.done():
+                observing.cancel()
             await asyncio.gather(observing, return_exceptions=True)
             raise
         _warn(ui, action, meta, name, exc)

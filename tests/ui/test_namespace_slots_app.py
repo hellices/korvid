@@ -207,33 +207,31 @@ async def test_quitting_writes_the_slot_maps_still_queued(
 ) -> None:
     app, slot_store = _app(Cluster(["alpha"]), tmp_path, config=KorvidConfig(namespace="default"))
     drained: list[bool] = []
-    save_workers_seen: list[bool] = []
-    workers_stopped: list[bool] = []
+    deferred_saves: list[Any] = []
     async with app.run_test(size=(120, 40)) as pilot:
         await _ready(pilot, app, ["alpha"])
         slots = app._workspace_ctl.slots
         shutdown = slots.shutdown
-        await slots._save_lock.acquire()  # an earlier write still holds the lock...
+
+        def defer_save(work: Any, **kwargs: Any) -> object:
+            assert kwargs["group"] == "namespace-slot-save"
+            deferred_saves.append(work)
+            return object()
+
+        monkeypatch.setattr(slots._ui, "run_worker", defer_save)
         app.post_message(NavigateCommand(None, namespace="alpha"))
         await until(pilot, partial(_mapped, app, "alpha"), label="alpha took a slot")
 
         async def recording() -> None:
             drained.append(bool(slots._pending))
-            save_workers = [
-                worker for worker in app.workers if worker.group == "namespace-slot-save"
-            ]
-            save_workers_seen.append(bool(save_workers))
-            workers_stopped.append(
-                all(worker.is_cancelled or worker.is_finished for worker in save_workers)
-            )
-            slots._save_lock.release()
             await shutdown()
+            for work in deferred_saves:
+                work.close()
 
         monkeypatch.setattr(slots, "shutdown", recording)
 
     assert drained == [True]
-    assert save_workers_seen == [True]
-    assert workers_stopped == [True]
+    assert len(deferred_saves) == 1
     assert slot_store.load(IDENTITY) == {1: SlotEntry("alpha", SlotOrigin.AUTO)}
 
 

@@ -752,13 +752,28 @@ def test_old_replica_set_pod_blocker_is_not_current_rollout_evidence() -> None:
                 ],
             },
         },
+        {
+            "metadata": {
+                "name": "new-pod",
+                "namespace": "default",
+                "uid": "new-pod-uid",
+                "ownerReferences": [{"kind": "ReplicaSet", "uid": "new-rs", "controller": True}],
+            },
+            "status": {
+                "phase": "Pending",
+                "containerStatuses": [
+                    {"state": {"waiting": {"reason": "CrashLoopBackOff", "message": "new"}}}
+                ],
+            },
+        },
     )
 
     observation = normalize_deployment_observation(
         RawDeploymentOutcomeSnapshot(deployment, replica_sets, pods, False)
     )
 
-    assert observation.pods == ()
+    assert [pod.uid for pod in observation.pods] == ["new-pod-uid"]
+    assert observation.pods[0].reason == "CrashLoopBackOff"
 
 
 def test_current_scale_to_zero_normalizes_omitted_status_counters() -> None:
