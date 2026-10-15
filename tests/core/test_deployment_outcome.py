@@ -180,6 +180,16 @@ def test_restart_exact_marker_waits_for_replica_convergence() -> None:
     assert outcome.phase is DeploymentOutcomePhase.OBSERVING
 
 
+def test_restart_waits_for_surplus_old_replica_removal() -> None:
+    intent = _restart()
+    outcome = evaluate_deployment_outcome(
+        intent,
+        _observation(restart_stamp=intent.restarted_at, current=4),
+    )
+
+    assert outcome.phase is DeploymentOutcomePhase.OBSERVING
+
+
 def test_restart_with_later_marker_is_superseded() -> None:
     outcome = evaluate_deployment_outcome(
         _restart("accepted"),

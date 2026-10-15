@@ -2063,7 +2063,7 @@ async def test_scale_object_does_not_write_after_unexpected_correlation_failure(
     assert write.await_count == 0
 
 
-async def test_scale_object_requires_resource_version_for_generation_correlation() -> None:
+async def test_scale_object_correlates_matching_snapshots_without_resource_versions() -> None:
     client = KubeClient()
     write = AsyncMock(return_value=b'{"kind":"Scale"}')
     with (
@@ -2071,10 +2071,16 @@ async def test_scale_object_requires_resource_version_for_generation_correlation
             client,
             "_request_json",
             AsyncMock(
-                return_value={
-                    "metadata": {"uid": "deploy-uid", "generation": 8},
-                    "spec": {"replicas": 3},
-                }
+                side_effect=[
+                    {
+                        "metadata": {"uid": "deploy-uid", "generation": 8},
+                        "spec": {"replicas": 3},
+                    },
+                    {
+                        "metadata": {"uid": "deploy-uid", "generation": 9},
+                        "spec": {"replicas": 5},
+                    },
+                ]
             ),
         ),
         patch.object(client, "_request_write", write),
@@ -2084,7 +2090,7 @@ async def test_scale_object_requires_resource_version_for_generation_correlation
     assert write.await_count == 1
     assert write.await_args is not None
     assert write.await_args.kwargs["body"] == {"spec": {"replicas": 5}}
-    assert result.generation is None
+    assert result.generation == 9
 
 
 async def test_scale_object_writes_when_correlation_metadata_is_malformed() -> None:

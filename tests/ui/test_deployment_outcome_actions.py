@@ -190,6 +190,7 @@ async def test_stale_uid_lookup_error_is_discarded_after_context_switch() -> Non
 async def test_deleted_evidence_pod_reports_identity_change() -> None:
     ui = _Ui()
     context = _Context()
+    workspace = _Workspace()
     uid_calls: list[tuple[str, str | None, str]] = []
 
     async def target_uid(kind: str, namespace: str | None, name: str) -> str:
@@ -206,7 +207,7 @@ async def test_deleted_evidence_pod_reports_identity_change() -> None:
         ui=cast(UiSurface, ui),
         target_uid=target_uid,
         context=cast(ContextGuard, context),
-        workspace=cast("Callable[[], WorkspaceController]", _Workspace),
+        workspace=lambda: cast(WorkspaceController, workspace),
         describe=describe,
         logs=logs,
         events=lambda: None,
@@ -216,6 +217,7 @@ async def test_deleted_evidence_pod_reports_identity_change() -> None:
 
     assert ui.notifications == ["Pod identity changed; refresh the Deployment outcome"]
     assert uid_calls == [("pods", "workloads", "deleted-pod")]
+    assert workspace.jumps == []
     assert context.epochs
     assert set(context.epochs) == {4}
 

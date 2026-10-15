@@ -261,7 +261,7 @@ Restart completes only when:
 - live UID equals the accepted Deployment UID;
 - the pod template still contains the exact accepted `restartedAt` stamp;
 - the controller has observed the resulting Deployment generation;
-- updated, ready, and available replicas reach the desired count;
+- total, updated, ready, and available replicas reach the desired count;
 - unavailable replicas are absent or zero;
 - no explicit rollout failure condition exists.
 

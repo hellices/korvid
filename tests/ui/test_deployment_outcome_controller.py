@@ -598,7 +598,8 @@ async def test_reader_failure_is_incomplete_not_failed_write() -> None:
 
 
 async def test_missing_identity_retains_incomplete_outcome() -> None:
-    controller, _ui = _controller(_Reader([_raw()]))
+    reader = _Reader([_raw()])
+    controller, ui = _controller(reader)
 
     observer = controller.scale_observer(
         epoch=4,
@@ -614,6 +615,8 @@ async def test_missing_identity_retains_incomplete_outcome() -> None:
     assert latest is not None
     assert latest.outcome.phase is DeploymentOutcomePhase.INCOMPLETE
     assert "UID" in latest.outcome.summary
+    assert ui.workers == []
+    assert reader.calls == []
 
 
 async def test_missing_generation_preserves_all_correlation_failures() -> None:
@@ -765,6 +768,7 @@ async def test_absolute_deadline_uses_configured_duration_in_summary() -> None:
 
     latest = controller.latest()
     assert latest is not None
+    assert latest.outcome.phase is DeploymentOutcomePhase.INCOMPLETE
     assert "0-second observation deadline" in latest.outcome.summary
 
 
