@@ -11,4 +11,4 @@ tracks the remaining release work. See the
 ## Current configuration and extension contracts
 
 Existing migration links continue in the
-[v0.6.0 migration notes](v0.6.0.md#breaking-changes-and-migration).
+[v0.5.0 migration notes](v0.5.0.md#breaking-changes-and-migration).

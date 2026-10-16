@@ -559,6 +559,16 @@ def test_current_release_note_is_a_concise_v0_6_summary() -> None:
     assert "Namespace shortcuts" in flat
     assert "Deployment operation outcomes" in flat
     assert "fresh approval keystroke" in flat
+    assert "bounded convergence observation" in flat
+    assert "Deployment operation result screen" in flat
+    assert "at most three results" in flat
+    assert "roughly five minutes" in flat
+    assert "independently persisted state" in flat
+    assert "reserved digits `1` through `9`" in flat
+    assert "partial or unavailable evidence" in flat
+    assert "does not autonomously write" in flat
+    assert "through completion" not in flat
+    assert "chat, confirmations, and the audit log" not in flat
     assert "[milestone 8](https://github.com/hellices/korvid/milestone/8)" in notes
     assert not re.search(r"(?<!\w)#\d+\b", notes), (
         "link milestone 8 instead of listing issue-by-issue history"
