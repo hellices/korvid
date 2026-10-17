@@ -580,17 +580,51 @@ def test_current_release_note_is_a_concise_v0_6_summary() -> None:
     assert "github.com/hellices/korvid/issues/" not in notes
 
 
+_RELEASE_DISPATCH_CHECK = (
+    "RELEASE_RUNS=$(gh run list --repo hellices/korvid --workflow Release "
+    "--branch agents/release-v0.6.0 --event workflow_dispatch "
+    "--limit 100 --json databaseId --jq length)"
+)
+
+
+def _assert_release_dispatch_before_handoff(plan: str) -> None:
+    message = "dispatch check must precede handoff in one contiguous command block"
+    boundary = re.search(
+        r"(?ms)^- \[ \] \*\*Step 4: Verify the source-only boundary\*\*\n"
+        r"(.*?)(?=^- \[ \] \*\*Step |\Z)",
+        plan,
+    )
+    assert boundary is not None, message
+    block = re.search(r"(?ms)^```bash\n(.*?)\n```", boundary.group(1))
+    assert block is not None, message
+    assert _RELEASE_DISPATCH_CHECK + ' &&\ntest "$RELEASE_RUNS" -eq 0' in block.group(1), message
+    handoff = plan.find("- [ ] **Step 6: Report the handoff**")
+    assert handoff > boundary.start(1) + block.end(), message
+
+
 def test_release_preparation_checks_branch_dispatch_before_handoff() -> None:
     plan = (_ROOT / "docs/superpowers/plans/2026-10-16-v0.6.0-release-preparation.md").read_text(
         encoding="utf-8"
     )
 
-    assert (
-        "RELEASE_RUNS=$(gh run list --repo hellices/korvid --workflow Release "
-        "--branch agents/release-v0.6.0 --event workflow_dispatch "
-        "--limit 100 --json databaseId --jq length)"
-    ) in plan
-    assert '&&\ntest "$RELEASE_RUNS" -eq 0' in plan
+    _assert_release_dispatch_before_handoff(plan)
+
+
+@pytest.mark.parametrize("mutation", ["after-handoff", "split-check"])
+def test_release_dispatch_contract_rejects_misplaced_commands(mutation: str) -> None:
+    plan = (_ROOT / "docs/superpowers/plans/2026-10-16-v0.6.0-release-preparation.md").read_text(
+        encoding="utf-8"
+    )
+    command = _RELEASE_DISPATCH_CHECK + ' &&\ntest "$RELEASE_RUNS" -eq 0'
+    if mutation == "after-handoff":
+        plan = plan.replace(command, "") + f"\n```bash\n{command}\n```\n"
+    else:
+        plan = plan.replace(
+            command, _RELEASE_DISPATCH_CHECK + '\necho unrelated &&\ntest "$RELEASE_RUNS" -eq 0'
+        )
+
+    with pytest.raises(AssertionError, match="dispatch check must precede handoff"):
+        _assert_release_dispatch_before_handoff(plan)
 
 
 def test_v0_6_release_note_explains_stricter_priority_key_validation() -> None:
