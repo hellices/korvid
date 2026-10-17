@@ -565,7 +565,11 @@ def test_current_release_note_is_a_concise_v0_6_summary() -> None:
     assert "roughly five minutes" in flat
     assert "independently persisted state" in flat
     assert "reserved digits `1` through `9`" in flat
-    assert "partial or unavailable evidence" in flat
+    assert "missing required convergence evidence" in flat
+    assert "Partial Pod/ReplicaSet evidence" in flat
+    assert "completed result with a partial-evidence warning" in flat
+    assert "Help (`?`) and the namespace picker" in flat
+    assert "digits visible in the status bar" not in flat
     assert "does not autonomously write" in flat
     assert "through completion" not in flat
     assert "chat, confirmations, and the audit log" not in flat
@@ -574,6 +578,19 @@ def test_current_release_note_is_a_concise_v0_6_summary() -> None:
         "link milestone 8 instead of listing issue-by-issue history"
     )
     assert "github.com/hellices/korvid/issues/" not in notes
+
+
+def test_release_preparation_checks_branch_dispatch_before_handoff() -> None:
+    plan = (_ROOT / "docs/superpowers/plans/2026-10-16-v0.6.0-release-preparation.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert (
+        "RELEASE_RUNS=$(gh run list --repo hellices/korvid --workflow Release "
+        "--branch agents/release-v0.6.0 --event workflow_dispatch "
+        "--limit 100 --json databaseId --jq length)"
+    ) in plan
+    assert '&&\ntest "$RELEASE_RUNS" -eq 0' in plan
 
 
 def test_current_release_note_uses_canonical_public_guide_urls() -> None:
