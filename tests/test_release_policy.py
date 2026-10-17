@@ -20,6 +20,7 @@ _OBSERVABILITY = _ROOT / "docs" / "observability.md"
 _MKDOCS = _ROOT / "mkdocs.yml"
 _RUNBOOK = _ROOT / "docs" / "release.md"
 _SECURITY = _ROOT / "SECURITY.md"
+_V0_5_RELEASE_NOTE = _ROOT / "docs" / "release-notes" / "v0.5.0.md"
 _UNPUBLISHED_RELEASE_NOTE = _ROOT / "docs" / "release-notes" / "v0.4.0.md"
 _FIRST_PUBLISHED_0_4_VERSION = "0.4.1"
 _FIRST_PUBLISHED_0_4_NOTE = _ROOT / "docs" / "release-notes" / f"v{_FIRST_PUBLISHED_0_4_VERSION}.md"
@@ -46,6 +47,10 @@ def _release_notes(version: str) -> str:
     path = _ROOT / "docs" / "release-notes" / f"v{version}.md"
     assert path.is_file(), f"{path.name} is missing; the release stages notes from this file"
     return path.read_text(encoding="utf-8")
+
+
+def _v0_5_release_notes() -> str:
+    return _V0_5_RELEASE_NOTE.read_text(encoding="utf-8")
 
 
 def _normalized(text: str) -> str:
@@ -535,7 +540,7 @@ def test_current_release_docs_only_name_allowed_versions() -> None:
     )
 
 
-def test_current_release_note_is_a_concise_user_facing_summary() -> None:
+def test_current_release_note_is_a_concise_v0_6_summary() -> None:
     notes = _release_notes(_project_version())
     expected_sections = [
         "Why upgrade",
@@ -550,29 +555,96 @@ def test_current_release_note_is_a_concise_user_facing_summary() -> None:
     assert len(notes.splitlines()) <= 180
 
     flat = _normalized(notes)
-    assert "Pulse / Problems" in flat
-    assert re.search(r"`Ctrl-P`.{0,40}Action Palette", flat)
-    assert re.search(
-        r"write actions? still require a fresh approval keystroke",
-        flat,
-        re.I,
-    )
-    assert "(https://hellices.github.io/korvid/agent/#connect-a-provider)" in notes
-
-    assert "[milestone 6](https://github.com/hellices/korvid/milestone/6)" in notes
+    assert "Keybinding editor" in flat
+    assert "Namespace shortcuts" in flat
+    assert "Deployment operation outcomes" in flat
+    assert "fresh approval keystroke" in flat
+    assert "bounded convergence observation" in flat
+    assert "Deployment operation result screen" in flat
+    assert "at most three results" in flat
+    assert "roughly five minutes" in flat
+    assert "independently persisted state" in flat
+    assert "reserved digits `1` through `9`" in flat
+    assert "missing required convergence evidence" in flat
+    assert "Partial Pod/ReplicaSet evidence" in flat
+    assert "completed result with a partial-evidence warning" in flat
+    assert "Help (`?`) and the namespace picker" in flat
+    assert "digits visible in the status bar" not in flat
+    assert "does not autonomously write" in flat
+    assert "through completion" not in flat
+    assert "chat, confirmations, and the audit log" not in flat
+    assert "[milestone 8](https://github.com/hellices/korvid/milestone/8)" in notes
     assert not re.search(r"(?<!\w)#\d+\b", notes), (
-        "link milestone 6 instead of listing issue-by-issue history"
+        "link milestone 8 instead of listing issue-by-issue history"
     )
     assert "github.com/hellices/korvid/issues/" not in notes
+
+
+_RELEASE_DISPATCH_CHECK = (
+    "RELEASE_RUNS=$(gh run list --repo hellices/korvid --workflow Release "
+    "--branch agents/release-v0.6.0 --event workflow_dispatch "
+    "--limit 100 --json databaseId --jq length)"
+)
+
+
+def _assert_release_dispatch_before_handoff(plan: str) -> None:
+    message = "dispatch check must precede handoff in one contiguous command block"
+    boundary = re.search(
+        r"(?ms)^- \[ \] \*\*Step 4: Verify the source-only boundary\*\*\n"
+        r"(.*?)(?=^- \[ \] \*\*Step |\Z)",
+        plan,
+    )
+    assert boundary is not None, message
+    block = re.search(r"(?ms)^```bash\n(.*?)\n```", boundary.group(1))
+    assert block is not None, message
+    assert _RELEASE_DISPATCH_CHECK + ' &&\ntest "$RELEASE_RUNS" -eq 0' in block.group(1), message
+    handoff = plan.find("- [ ] **Step 6: Report the handoff**")
+    assert handoff > boundary.start(1) + block.end(), message
+
+
+def test_release_preparation_checks_branch_dispatch_before_handoff() -> None:
+    plan = (_ROOT / "docs/superpowers/plans/2026-10-16-v0.6.0-release-preparation.md").read_text(
+        encoding="utf-8"
+    )
+
+    _assert_release_dispatch_before_handoff(plan)
+
+
+@pytest.mark.parametrize("mutation", ["after-handoff", "split-check"])
+def test_release_dispatch_contract_rejects_misplaced_commands(mutation: str) -> None:
+    plan = (_ROOT / "docs/superpowers/plans/2026-10-16-v0.6.0-release-preparation.md").read_text(
+        encoding="utf-8"
+    )
+    command = _RELEASE_DISPATCH_CHECK + ' &&\ntest "$RELEASE_RUNS" -eq 0'
+    if mutation == "after-handoff":
+        plan = plan.replace(command, "") + f"\n```bash\n{command}\n```\n"
+    else:
+        plan = plan.replace(
+            command, _RELEASE_DISPATCH_CHECK + '\necho unrelated &&\ntest "$RELEASE_RUNS" -eq 0'
+        )
+
+    with pytest.raises(AssertionError, match="dispatch check must precede handoff"):
+        _assert_release_dispatch_before_handoff(plan)
+
+
+def test_v0_6_release_note_explains_stricter_priority_key_validation() -> None:
+    notes = _normalized(
+        markdown_section(_release_notes(_project_version()), "Breaking changes and migration")
+    )
+
+    assert "configuration format is unchanged" in notes
+    assert "global priority actions cannot use printable-key overrides" in notes
+    assert "`interrupt_agent: Z`" in notes
+    assert "warns and restores the affected actions' default keys" in notes
+    assert "available Ctrl/Alt combination or function key" in notes
+    assert "Existing keybindings and namespace settings continue to work" not in notes
 
 
 def test_current_release_note_uses_canonical_public_guide_urls() -> None:
     notes = _release_notes(_project_version())
     canonical_urls = (
-        "https://hellices.github.io/korvid/tui/#change-scope-without-losing-context",
-        "https://hellices.github.io/korvid/agent/#connect-a-provider",
-        "https://hellices.github.io/korvid/provider-plugins/",
-        "https://hellices.github.io/korvid/agent/#self-hosted-endpoints-and-proxies",
+        "https://hellices.github.io/korvid/keybindings/#remap-an-app-action",
+        "https://hellices.github.io/korvid/tui/#namespace-shortcuts",
     )
 
     missing = [url for url in canonical_urls if f"]({url})" not in notes]
@@ -588,10 +660,8 @@ def test_current_release_note_rejects_relative_markdown_guide_links() -> None:
     )
 
 
-def test_current_release_note_names_legacy_namespace_scope_migration() -> None:
-    migration = markdown_section(
-        _release_notes(_project_version()), "Breaking changes and migration"
-    )
+def test_v0_5_release_note_names_legacy_namespace_scope_migration() -> None:
+    migration = markdown_section(_v0_5_release_notes(), "Breaking changes and migration")
 
     for key in ("`namespaces:`", "`namespace:`", "`favorite_namespaces:`"):
         assert key in migration
@@ -600,8 +670,8 @@ def test_current_release_note_names_legacy_namespace_scope_migration() -> None:
     )
 
 
-def test_current_release_note_ollama_example_preserves_v041_native_transport() -> None:
-    notes = _release_notes(_project_version())
+def test_v0_5_release_note_ollama_example_preserves_v041_native_transport() -> None:
+    notes = _v0_5_release_notes()
     migration = markdown_section(notes, "Breaking changes and migration")
     examples = re.findall(r"(?ms)^[ ]*```yaml\n(.*?)^[ ]*```", notes)
 
@@ -623,10 +693,8 @@ def test_current_release_note_ollama_example_preserves_v041_native_transport() -
     ) in _normalized(migration)
 
 
-def test_current_release_note_names_persisted_v041_azure_profile_migration() -> None:
-    migration = markdown_section(
-        _release_notes(_project_version()), "Breaking changes and migration"
-    )
+def test_v0_5_release_note_names_persisted_v041_azure_profile_migration() -> None:
+    migration = markdown_section(_v0_5_release_notes(), "Breaking changes and migration")
     expected = (
         "If v0.4.1 already persisted an Azure profile with resource-root "
         "`endpoint: https://<resource>.openai.azure.com` plus "
@@ -639,10 +707,8 @@ def test_current_release_note_names_persisted_v041_azure_profile_migration() -> 
     assert expected in _section_bullets(migration)
 
 
-def test_current_release_note_requires_v041_ollama_numeric_normalization() -> None:
-    migration = markdown_section(
-        _release_notes(_project_version()), "Breaking changes and migration"
-    )
+def test_v0_5_release_note_requires_v041_ollama_numeric_normalization() -> None:
+    migration = markdown_section(_v0_5_release_notes(), "Breaking changes and migration")
     expected = (
         "Preserve v0.4.1's normalized Ollama numeric types when moving "
         "`agent.ollama` into profile `options`; do not copy quoted numbers or "
@@ -833,10 +899,10 @@ def test_publish_step_requires_reviewed_commit_version_guard() -> None:
         _assert_release_runbook_contracts(runbook.replace(publish, mutated))
 
 
-def test_v0_5_release_metadata_uses_the_last_published_minor() -> None:
-    assert _project_version() == "0.5.0"
-    assert UPGRADE_SOURCE_VERSION == "0.4.1"
-    assert __version__ == "0.5.0"
+def test_v0_6_release_metadata_uses_v0_5_as_upgrade_source() -> None:
+    assert _project_version() == "0.6.0"
+    assert UPGRADE_SOURCE_VERSION == "0.5.0"
+    assert __version__ == "0.6.0"
 
 
 def test_upgrade_source_is_the_previous_minor_release() -> None:

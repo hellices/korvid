@@ -898,7 +898,7 @@ def test_unreleased_note_forwards_existing_migration_links() -> None:
     notes = _source("release-notes/unreleased.md")
 
     assert "## Current configuration and extension contracts" in notes
-    assert f"(v{__version__}.md#breaking-changes-and-migration)" in notes
+    assert "(v0.5.0.md#breaking-changes-and-migration)" in notes
 
 
 def test_agent_guide_tells_a_self_hosted_operator_how_to_diagnose_a_refused_stream() -> None:

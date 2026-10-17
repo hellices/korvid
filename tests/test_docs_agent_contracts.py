@@ -40,6 +40,7 @@ from korvid.ui.widgets.model_search_screen import _REFRESH_MESSAGES
 
 _REPO_ROOT = Path(__file__).parents[1]
 _CURRENT_RELEASE_NOTE = f"docs/release-notes/v{__version__}.md"
+_V0_5_RELEASE_NOTE = "docs/release-notes/v0.5.0.md"
 
 _HISTORICAL_DOC_PREFIXES = (
     "docs/dev/specs/",
@@ -200,7 +201,7 @@ def test_no_current_page_claims_every_surface_describes_tools_identically(
     assert not _IDENTICAL_TOOL_WORDING_OVERCLAIM.search(normalized), _relative(path)
 
 
-@pytest.mark.parametrize("page", [_CURRENT_RELEASE_NOTE])
+@pytest.mark.parametrize("page", [_V0_5_RELEASE_NOTE])
 def test_the_tool_description_removal_note_names_which_arm_uses_which_wording(
     page: str,
 ) -> None:
@@ -419,7 +420,7 @@ def test_flat_profile_migration_preserves_v041_mixed_shape_precedence() -> None:
 
 def test_release_note_preserves_v041_mixed_shape_precedence() -> None:
     """The concise upgrade checklist must not tell profile users to re-migrate."""
-    notes = " ".join(_text(_CURRENT_RELEASE_NOTE).split())
+    notes = " ".join(_text(_V0_5_RELEASE_NOTE).split())
 
     assert (
         "If `agent.profiles` was already present in v0.4.1, keep its `active` "
@@ -741,7 +742,7 @@ def test_provider_acknowledgement_docstrings_allow_custom_adapters(docstring: st
 
 
 def test_agent_api_removals_are_marked_as_breaking_in_release_notes() -> None:
-    notes = _text(_CURRENT_RELEASE_NOTE)
+    notes = _text(_V0_5_RELEASE_NOTE)
     breaking = [
         " ".join(match.split())
         for match in re.findall(
@@ -973,7 +974,7 @@ def test_the_release_notes_record_the_truncation_marker_the_model_reads() -> Non
     """
     from korvid.tools.executor import _MIDDLE_TRUNCATION_MARKER
 
-    notes = _text(_CURRENT_RELEASE_NOTE)
+    notes = _text(_V0_5_RELEASE_NOTE)
     marker = _MIDDLE_TRUNCATION_MARKER.strip()
 
     assert marker in notes, f"the release notes do not record {marker!r}"
@@ -1085,7 +1086,7 @@ def test_the_threat_model_lists_every_litellm_lockdown_flag() -> None:
 
 
 def test_the_release_notes_describe_the_current_plugin_entry_point() -> None:
-    notes_path = _REPO_ROOT / _CURRENT_RELEASE_NOTE
+    notes_path = _REPO_ROOT / _V0_5_RELEASE_NOTE
     assert notes_path.is_file(), "the plugin migration must ship in versioned release notes"
     notes = notes_path.read_text(encoding="utf-8")
     assert "`SpecialFlow`" in notes
