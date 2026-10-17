@@ -593,6 +593,19 @@ def test_release_preparation_checks_branch_dispatch_before_handoff() -> None:
     assert '&&\ntest "$RELEASE_RUNS" -eq 0' in plan
 
 
+def test_v0_6_release_note_explains_stricter_priority_key_validation() -> None:
+    notes = _normalized(
+        markdown_section(_release_notes(_project_version()), "Breaking changes and migration")
+    )
+
+    assert "configuration format is unchanged" in notes
+    assert "global priority actions cannot use printable-key overrides" in notes
+    assert "`interrupt_agent: Z`" in notes
+    assert "warns and restores the affected actions' default keys" in notes
+    assert "available Ctrl/Alt combination or function key" in notes
+    assert "Existing keybindings and namespace settings continue to work" not in notes
+
+
 def test_current_release_note_uses_canonical_public_guide_urls() -> None:
     notes = _release_notes(_project_version())
     canonical_urls = (
