@@ -1,0 +1,63 @@
+name: Feature request
+description: Suggest an improvement or a new capability.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Start with the problem: the best design may differ from the first
+        idea. For a large change, agree on the design here before opening a
+        pull request.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What are you trying to do, and what gets in the way today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: What korvid should do, including the keys, commands, or screens you imagine.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives and workarounds
+      description: What you do today, or how other tools solve this.
+  - type: dropdown
+    id: writes
+    attributes:
+      label: Does this change the cluster?
+      description: >-
+        Every cluster write needs a keystroke approval and a fail-closed audit
+        entry, so read-only features are simpler to land.
+      options:
+        - No, it only reads or changes the UI
+        - Yes, it adds or changes a cluster write
+        - Not sure
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Keyboard TUI (tables, logs, panes)
+        - Cluster writes and approvals
+        - Embedded agent
+        - MCP server or stdio adapter
+        - Helm or operators
+        - Observability (Prometheus, Loki)
+        - Configuration or keybindings
+        - Installation or packaging
+        - Documentation
+        - Not sure
+  - type: checkboxes
+    id: contribute
+    attributes:
+      label: Contribution
+      options:
+        - label: I would like to implement this myself.

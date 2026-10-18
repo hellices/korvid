@@ -1222,13 +1222,13 @@ Add a module-level `reserved_call(...)` function in `ui/write_gate.py`. It canno
   - Move `ConfigError` and `_atomic_write_text` into `config_store` (public `atomic_write_text`). `config.py` then imports them from there, and `config_store` no longer imports `config`.
   - Keep `korvid.core.config.ConfigError` importable for its many importers, either as a re-export of the moved name or by editing them; decide in the 2.2 plan. This pulls Phase 3.2's `_atomic_write_text` move forward.
 - Align the two readers' wording while there: `read_config_document` reuses `_unreadable` for the line/column, and one capitalisation is used. Decide whether a `null`/`~` document reads as `{}` in both (today startup accepts it and the savers refuse it).
-- Add `QueryScope.masked()` to replace the two `_masked_scope` copies, at `obs/loki.py:173-182` and `obs/prometheus.py:175-184`.
+- Add `QueryScope.masked()` to replace the two `_masked_scope` copies, at `obs/loki.py:173-182` and `obs/prometheus.py:175-184`. Open for contributors as [#442](https://github.com/hellices/korvid/issues/442).
 
 **Size:** S. **Risk:** low.
 
 ### 2.3 UI wiring hygiene
 
-- Remove the dead `pattern` parameter of `ResourceTable.show` end to end: 31 occurrences, about 22 test edits. `app.py:620-627` passes `pattern=""` with the comment "no name pattern remains".
+- Remove the dead `pattern` parameter of `ResourceTable.show` end to end: 31 occurrences, about 22 test edits. `app.py:620-627` passes `pattern=""` with the comment "no name pattern remains". Open for contributors as [#445](https://github.com/hellices/korvid/issues/445).
 - Give `LogController` and `HintController` one `context: ContextGuard` instead of bound methods. This frees 4 lines in `__main__.py:1269-1272`.
 
 **Size:** S. **Risk:** low.
@@ -1307,9 +1307,13 @@ Each package ends by lowering, or deleting, the module's `MODULE_LIMITS` entry. 
   - `composition_support.py:312`
 - `mcp/server.py:139-140` and `tests/mcp/test_server.py:585` cite the deleted `agent/tools.py`.
 - `agent/provider.py:319-322` and `providers/litellm_provider.py:121` name modules deleted in #364/#377.
+  [#444](https://github.com/hellices/korvid/issues/444) covers `mcp/server.py`, `tests/mcp/test_server.py`
+  and `providers/litellm_provider.py` for contributors.
 - `config.py`: `_AgentOptionCounters.root`'s unused default; the `_AgentOptionsError` and `_parse_bounded_options` docstrings.
 
 **Delete (grep-verified unreferenced or test-only):**
+
+The six rows without test references (`_is_unparsed_name`, `_storage_class_is_default`, `_unpaired`, `overlay_ids`, `AGENT_EXTRA`, `_AUTH_ENV_KEY_SETTING`) are open for contributors as [#443](https://github.com/hellices/korvid/issues/443).
 
 | Symbol | Location |
 |---|---|

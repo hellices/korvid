@@ -41,6 +41,10 @@ design document states the original intent.
 
 If you are looking for how to *use* korvid, start at the
 [project README](https://github.com/hellices/korvid/blob/main/README.md).
+To contribute, read
+[CONTRIBUTING.md](https://github.com/hellices/korvid/blob/main/CONTRIBUTING.md)
+and pick a
+[good first issue](https://github.com/hellices/korvid/labels/good%20first%20issue).
 
 ## Publishing the documentation site
 
