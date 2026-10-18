@@ -6,7 +6,7 @@
 
 > A tool-using bird for your cluster.
 
-**A keyboard-first Kubernetes TUI with an AI agent that works in the same
+**A keyboard-first Kubernetes TUI with an AI agent that works on the same
 screen as you.** Browse and operate from the keyboard, let the embedded agent
 investigate alongside you, or connect your editor's assistant over MCP.
 All three drive the same cockpit; **you approve every cluster write**.
@@ -27,8 +27,9 @@ calls. The ending explains approval policy; no cluster write is shown.*
 ## Why korvid
 
 - **Useful without AI.** Browse resources, follow logs, inspect relationships,
-  and operate workloads from a keyboard-first TUI. If you know k9s, `:`, `/`,
-  `d`, `l`, and `s` already do what you expect.
+  and operate workloads from a keyboard-first TUI. If you know k9s, the pod
+  keys will feel familiar: `:` for commands, `/` to filter, `d` to describe,
+  `l` for logs, and `s` for a shell.
 - **An agent that shares your screen.** It sees the current view and selection,
   gathers evidence through structured tools, and opens the same panes you use.
   Normal keyboard input stays available.
@@ -46,11 +47,11 @@ korvid overlaps with several good tools. In short:
 | --- | --- | --- |
 | [k9s](https://github.com/derailed/k9s) | A mature keyboard TUI with plugins, skins, and a read-only mode | The same style of cockpit, plus an agent and an MCP bridge that work inside it. If you never want AI, k9s is the more mature choice. |
 | [kubectl-ai](https://github.com/GoogleCloudPlatform/kubectl-ai) | A chat assistant that turns requests into `kubectl` operations, confirms modifying commands by default, and can run as an MCP server | korvid's agent has no shell or `kubectl` tool. It reads through bounded, structured tools, opens the panes you use, and its writes wait for an approval dialog that only your keystroke confirms. |
-| [k8sgpt](https://github.com/k8sgpt-ai/k8sgpt) | Scanning a cluster with built-in analyzers and explaining findings with an LLM, from a CLI, an in-cluster operator, or an MCP server | korvid is interactive: you and the agent work from what is on screen, then act from the same cockpit. |
-| [HolmesGPT](https://github.com/HolmesGPT/holmesgpt) | Investigating alerts and incidents across Kubernetes and many other data sources, from a CLI, Slack, or a 24/7 operator | korvid is the hands-on cockpit for the operator at the terminal. Its optional Prometheus and Loki queries are bounded and read-only. |
+| [k8sgpt](https://github.com/k8sgpt-ai/k8sgpt) | Scanning a cluster with built-in analyzers and explaining findings with an LLM, from a CLI, an in-cluster operator, or an MCP server | korvid starts from a live view rather than a scan report: you and the agent work from what is on screen, then act from the same cockpit. |
+| [HolmesGPT](https://github.com/HolmesGPT/holmesgpt) | Investigating alerts and incidents across Kubernetes and many other data sources, from a CLI, Slack, or an in-cluster operator that runs checks in the background | HolmesGPT reaches far more data sources and can run unattended. korvid is the hands-on cockpit for whoever is at the terminal, and its own observability is limited to optional Prometheus and Loki queries. |
 
 korvid's MCP server is the running TUI itself: every external read shows up
-on your screen, and write proposals wait for your approval there. The tools
+on your screen, and opt-in write proposals wait for your approval there. The tools
 also combine well: a scanner or an alert agent can tell you something is
 wrong, and korvid is where you look and act. Descriptions follow each
 project's README as of October 2026;
@@ -84,7 +85,7 @@ you should use `uv tool`, `pipx`, or a venv.
 
 No cluster you can experiment on?
 [Practice on a throwaway kind cluster](https://hellices.github.io/korvid/getting-started/#practice-on-a-throwaway-cluster)
-with three deliberately broken workloads, then delete it with one command.
+with one healthy and two deliberately broken workloads, then delete it with one command.
 Pointing korvid at a cluster that matters? Start with `korvid --readonly`:
 write keybindings are rejected and the agent is never offered a write tool.
 

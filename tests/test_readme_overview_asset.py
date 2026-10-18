@@ -47,6 +47,7 @@ def test_readme_overview_thumbnail_links_to_hd_video() -> None:
     ]
 
     assert len(thumbnails) == 1, "the overview GIF must be one clickable MP4 preview"
+    assert hero.count(GIF_URL) == 1, "the overview GIF must appear only as that preview"
     thumbnail = thumbnails[0]
     assert thumbnail.group("video") == MP4_URL
     for driver in ("keyboard", "agent", "mcp"):
