@@ -117,7 +117,12 @@ def test_korvid_ships_no_shell_tool_to_the_agent() -> None:
     assert not [name for name in TOOLS_BY_NAME if "kubectl" in name or "shell" in name]
 
 
-@pytest.mark.parametrize("path", _MARKDOWN_FILES, ids=_relative)
+#: Contributor-facing rule files. Coding agents read `AGENTS.md` as their
+#: instructions, so a control claimed there is as load-bearing as one in a guide.
+_CONTRIBUTOR_RULE_FILES = [_REPO_ROOT / "AGENTS.md", _REPO_ROOT / "CONTRIBUTING.md"]
+
+
+@pytest.mark.parametrize("path", [*_MARKDOWN_FILES, *_CONTRIBUTOR_RULE_FILES], ids=_relative)
 def test_no_current_page_claims_a_shell_tool_validation(path: Path) -> None:
     """`run_kubectl` was never armed on this surface.
 

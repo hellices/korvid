@@ -190,5 +190,5 @@ For each review round on a PR:
 ## Security Invariants (from the design doc — never weaken these in code)
 
 - Agent write tools always pass the approval gate; approval dialogs are confirmed only by user keystrokes.
-- `run_kubectl` validates (verb × resource × flags); sensitive reads go through the masking pipeline.
+- The agent has no shell or free-form `kubectl` tool: its cluster surface is the structured tool registry (`tools/registry.py`), and sensitive reads go through the masking pipeline.
 - Audit logging is fail-closed: if the audit entry cannot be written, the write action is blocked.
