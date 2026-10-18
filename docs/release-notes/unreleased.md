@@ -13,9 +13,9 @@ tracks the next release scope.
   cluster with three small workloads, one healthy and two deliberately broken,
   to try the problems view, logs, relationships, an approved write, and the
   agent without risking a real cluster.
-- The manifest is applied only to the `kind-korvid-playground` context, needs
-  no host access or API token, and the whole cluster is deleted with one
-  command.
+- The walkthrough runs in its own kubeconfig file, so its `kubectl` and korvid
+  commands cannot reach your other clusters. The workloads need no host access
+  or API token, and the whole cluster is deleted with one command.
 
 See [Practice on a throwaway cluster](../getting-started.md#practice-on-a-throwaway-cluster).
 

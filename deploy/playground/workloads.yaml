@@ -1,8 +1,10 @@
 # Practice workloads for a throwaway cluster. See "Practice on a throwaway
 # cluster" in docs/getting-started.md.
 #
-# Apply only to a disposable cluster, naming its context explicitly:
+# Apply only to a disposable cluster, from a terminal whose kubeconfig holds
+# nothing else:
 #
+#   export KUBECONFIG="$PWD/korvid-playground.kubeconfig"
 #   kind create cluster --name korvid-playground
 #   kubectl --context kind-korvid-playground apply -f workloads.yaml
 #
@@ -90,10 +92,14 @@ spec:
           command:
             - sh
             - -c
-            - >-
-              echo "checkout: connecting to the orders database";
-              echo "FATAL: DATABASE_URL is not set" >&2;
-              exit 1
+            - |
+              echo "checkout: connecting to the orders database"
+              if [ -z "$DATABASE_URL" ]; then
+                echo "FATAL: DATABASE_URL is not set" >&2
+                exit 1
+              fi
+              echo "checkout: connected"
+              while true; do sleep 3600; done
 ---
 apiVersion: apps/v1
 kind: Deployment
