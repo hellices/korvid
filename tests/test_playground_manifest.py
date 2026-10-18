@@ -29,12 +29,25 @@ CLUSTER = "korvid-playground"
 CONTEXT = f"kind-{CLUSTER}"
 DEDICATED_KUBECONFIG = f'export KUBECONFIG="$PWD/{CLUSTER}.kubeconfig"'
 
-#: The only fields the workloads may set. An allowlist rather than a denylist,
-#: so a new field that grants host access (`hostPort`, an init container, a
-#: pod `securityContext`, a Service `type`) fails here instead of slipping by.
+#: The only pod fields the workloads may set. An allowlist rather than a
+#: denylist, so a new field that grants host access (`hostNetwork`, an init
+#: container, a pod `securityContext`) fails here instead of slipping by.
 ALLOWED_POD_FIELDS = {"automountServiceAccountToken", "containers"}
-ALLOWED_CONTAINER_FIELDS = {"name", "image", "ports", "command"}
-ALLOWED_SERVICE_FIELDS = {"selector", "ports"}
+
+#: Each workload's state is a promise the guide makes, so the containers are
+#: pinned exactly: a `command`, `args`, or probe added to `web` or `payments`
+#: would change the state the reader is told to find. Only `checkout` runs a
+#: script, and `test_checkout_crashes_only_while_database_url_is_unset` runs it.
+EXPECTED_CONTAINERS = {
+    "web": {"name": "web", "image": "nginx:1.27", "ports": [{"containerPort": 80}]},
+    "payments": {"name": "payments", "image": "nginx:1.27-alpne"},
+}
+CHECKOUT_FIELDS = {"name", "image", "command"}
+EXPECTED_REPLICAS = {"web": 2, "checkout": 1, "payments": 1}
+EXPECTED_SERVICE_SPEC = {
+    "selector": {"app": "web"},
+    "ports": [{"name": "http", "port": 80, "targetPort": 80}],
+}
 
 
 def _documents() -> list[dict[str, Any]]:
@@ -102,30 +115,25 @@ def test_workloads_set_only_reviewed_fields() -> None:
     for name, deployment in _deployments().items():
         spec = deployment["spec"]
         assert set(spec) == {"replicas", "selector", "template"}, name
+        assert spec["replicas"] == EXPECTED_REPLICAS[name], name
         selector = spec["selector"]["matchLabels"]
         assert selector.items() <= spec["template"]["metadata"]["labels"].items(), name
         pod = _pod_spec(name)
         assert set(pod) == ALLOWED_POD_FIELDS, name
         assert pod["automountServiceAccountToken"] is False, name
         assert len(pod["containers"]) == 1, name
-        container = pod["containers"][0]
-        assert set(container) <= ALLOWED_CONTAINER_FIELDS, name
-        for port in container.get("ports", []):
-            assert set(port) == {"containerPort"}, name
-
-    service = next(document for document in _documents() if document["kind"] == "Service")
-    assert set(service["spec"]) == ALLOWED_SERVICE_FIELDS, "the Service stays a plain ClusterIP"
 
 
 def test_each_workload_shows_the_state_the_guide_promises() -> None:
-    images = {name: _pod_spec(name)["containers"][0]["image"] for name in _deployments()}
+    containers = {name: _pod_spec(name)["containers"][0] for name in _deployments()}
 
-    assert images == {
-        "web": "nginx:1.27",
-        "checkout": "busybox:1.36",
-        "payments": "nginx:1.27-alpne",
-    }, "payments must keep its deliberately misspelled tag; the others must stay pullable"
+    for name, expected in EXPECTED_CONTAINERS.items():
+        assert containers[name] == expected, f"{name} must keep exactly its reviewed container"
+    checkout = containers["checkout"]
+    assert set(checkout) == CHECKOUT_FIELDS
+    assert (checkout["name"], checkout["image"]) == ("checkout", "busybox:1.36")
     service = next(document for document in _documents() if document["kind"] == "Service")
+    assert service["spec"] == EXPECTED_SERVICE_SPEC, "the Service stays a plain ClusterIP"
     assert service["spec"]["selector"] == _deployments()["web"]["spec"]["selector"]["matchLabels"]
 
 
