@@ -36,6 +36,8 @@ uv run korvid --version
 Keep `--frozen`, and do not commit a re-locked `uv.lock` unless the change is
 about dependencies. A lock resolved through a private package mirror pins
 hundreds of URLs that nobody else can reach, and a pre-commit hook rejects it.
+[Working behind a package mirror](docs/dev/quality-gates.md#working-behind-a-corporate-package-mirror)
+explains how to re-lock safely.
 
 On Windows, read the
 [Windows contributor notes](docs/windows.md) first.
@@ -66,8 +68,11 @@ explains the reasons.
   imports. Only `ui/` may import Textual. Dependencies are passed through
   constructors and wired once, in `src/korvid/__main__.py`.
 - **Security invariants.** Never weaken these, in code or in tests:
-  - every write requested by the agent or an MCP host goes through the
-    approval dialog, which only a user keystroke confirms;
+  - every cluster write, whether it comes from a key, the agent, or an MCP
+    proposal, goes through an approval dialog that only a user keystroke
+    confirms;
+  - the agent has no shell or free-form `kubectl` tool; its cluster surface is
+    the structured tool registry;
   - sensitive reads go through the masking pipeline;
   - audit logging is fail-closed: if the audit entry cannot be written, the
     write is blocked.

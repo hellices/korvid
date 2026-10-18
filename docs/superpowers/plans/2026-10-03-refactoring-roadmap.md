@@ -1313,7 +1313,7 @@ Each package ends by lowering, or deleting, the module's `MODULE_LIMITS` entry. 
 
 **Delete (grep-verified unreferenced or test-only):**
 
-The six rows without test references (`_is_unparsed_name`, `_storage_class_is_default`, `_unpaired`, `overlay_ids`, `AGENT_EXTRA`, `_AUTH_ENV_KEY_SETTING`) are open for contributors as [#443](https://github.com/hellices/korvid/issues/443).
+Six of these rows (`_is_unparsed_name`, `_storage_class_is_default`, `_unpaired`, `overlay_ids`, `AGENT_EXTRA`, `_AUTH_ENV_KEY_SETTING`) are open for contributors as [#443](https://github.com/hellices/korvid/issues/443); `KeyEvent` waits on 3.3.
 
 | Symbol | Location |
 |---|---|

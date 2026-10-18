@@ -10,7 +10,9 @@ body:
         [Security advisories](https://github.com/hellices/korvid/security/advisories/new).
 
         Before you paste anything, remove secrets, tokens, kubeconfig
-        contents, and hostnames you do not want to make public.
+        contents, and hostnames you do not want to make public. `audit.jsonl`
+        entries and saved log or describe captures hold raw cluster data, so
+        check them too.
   - type: textarea
     id: what-happened
     attributes:
@@ -35,7 +37,9 @@ body:
     id: version
     attributes:
       label: korvid version
-      description: The output of `korvid --version`.
+      description: >-
+        The output of `korvid --version`. For a source checkout or a git
+        install, add the commit as well (`git rev-parse --short HEAD`).
       placeholder: korvid 0.6.0
     validations:
       required: true
@@ -91,9 +95,14 @@ body:
   - type: textarea
     id: output
     attributes:
-      label: Error output or screenshots
-      description: Tracebacks, notifications, or a screenshot. Redact secrets first.
+      label: Error output
+      description: Tracebacks or notification text. Redact secrets first.
       render: text
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: Screenshots
+      description: Attach screenshots or recordings here. Check them for secrets first.
   - type: checkboxes
     id: redacted
     attributes:
@@ -101,5 +110,6 @@ body:
       options:
         - label: >-
             I removed secrets, tokens, kubeconfig contents, and private
-            hostnames from this report.
+            hostnames from this report, including any audit entries, logs,
+            and screenshots.
           required: true
