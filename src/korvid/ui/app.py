@@ -629,9 +629,6 @@ class KorvidApp(App[None]):
             plural,
             rows,
             all_namespaces=all_namespaces,
-            # Filtering happened upstream (issue #44: labels/regex/fuzzy need
-            # the full summaries, not just names) — no name pattern remains.
-            pattern="",
             metrics=metrics,
             group=group,
             synthetic=synthetic,

@@ -80,7 +80,7 @@ async def test_seeding_does_not_rebuild_every_row_to_measure_it() -> None:
         await pilot.pause()
         seen = _spy_row_renderables(table)
         rows = _pods([f"pod-{i:04d}" for i in range(400)])
-        table.show("pods", rows, all_namespaces=False, pattern="")
+        table.show("pods", rows, all_namespaces=False)
         await pilot.pause()
         assert table._require_update_dimensions is False, "dimension pass did not run"
         touched = {index for index in seen if index >= 0}
@@ -100,7 +100,7 @@ async def test_absorbed_widths_match_what_textual_would_measure() -> None:
     async with app.run_test(size=(120, 12)) as pilot:
         table = app.query_one(ResourceTable)
         await pilot.pause()
-        table.show("pods", _pods(names), all_namespaces=True, pattern="")
+        table.show("pods", _pods(names), all_namespaces=True)
         await pilot.pause()
 
         control: DataTable[Any] = DataTable()
@@ -120,7 +120,7 @@ async def test_rows_added_outside_show_are_still_measured() -> None:
     async with app.run_test(size=(120, 12)) as pilot:
         table = app.query_one(ResourceTable)
         await pilot.pause()
-        table.show("pods", _pods(["short"]), all_namespaces=False, pattern="")
+        table.show("pods", _pods(["short"]), all_namespaces=False)
         await pilot.pause()
         long_value = "a-value-added-without-going-through-show"
         table.add_row(long_value, key="extra")
@@ -136,7 +136,7 @@ async def test_unabsorbed_row_added_before_the_dimension_pass_is_measured() -> N
         table = app.query_one(ResourceTable)
         await pilot.pause()
         long_value = "a-value-added-between-show-and-idle-00000"
-        table.show("pods", _pods(["short"]), all_namespaces=False, pattern="")
+        table.show("pods", _pods(["short"]), all_namespaces=False)
         table.add_row(long_value, key="extra")
         await pilot.pause()
         assert table.ordered_columns[0].content_width >= len(long_value)
@@ -148,11 +148,11 @@ async def test_row_appearing_in_place_widens_its_column() -> None:
     async with app.run_test(size=(120, 12)) as pilot:
         table = app.query_one(ResourceTable)
         await pilot.pause()
-        table.show("pods", _pods(["aaa"]), all_namespaces=False, pattern="")
+        table.show("pods", _pods(["aaa"]), all_namespaces=False)
         await pilot.pause()
         narrow = table.ordered_columns[0].content_width
         appeared = "zzz-a-much-longer-pod-name-than-before"
-        table.show("pods", _pods(["aaa", appeared]), all_namespaces=False, pattern="")
+        table.show("pods", _pods(["aaa", appeared]), all_namespaces=False)
         await pilot.pause()
         assert table.ordered_columns[0].content_width > narrow
         assert table.ordered_columns[0].content_width >= len(appeared)
@@ -194,7 +194,6 @@ async def test_widening_new_row_does_not_trigger_a_full_column_rescan() -> None:
             "pods",
             _pods_with_phase([("alpha", "Running"), ("beta", "Running")]),
             all_namespaces=False,
-            pattern="",
         )
         await pilot.pause()
         rescans = _spy_column_rescan(table)
@@ -208,7 +207,6 @@ async def test_widening_new_row_does_not_trigger_a_full_column_rescan() -> None:
                 ]
             ),
             all_namespaces=False,
-            pattern="",
         )
         await pilot.pause()
         assert rescans == [], f"rescanned {len(rescans)} column(s)"
@@ -233,7 +231,6 @@ async def test_absorption_never_skips_a_labelled_or_auto_height_row() -> None:
             "pods",
             _pods(["alpha", "beta"]),
             all_namespaces=False,
-            pattern="",
         )
         await pilot.pause()
 
@@ -262,7 +259,7 @@ async def test_a_repaint_that_widens_nothing_leaves_no_stale_skip() -> None:
     async with app.run_test(size=(120, 12)) as pilot:
         table = app.query_one(ResourceTable)
         await pilot.pause()
-        table.show("pods", _pods(["alpha", "beta"]), all_namespaces=False, pattern="")
+        table.show("pods", _pods(["alpha", "beta"]), all_namespaces=False)
         await pilot.pause()
 
         # A repaint that changes a cell but widens nothing: absorption runs,
@@ -271,7 +268,6 @@ async def test_a_repaint_that_widens_nothing_leaves_no_stale_skip() -> None:
             "pods",
             _pods_with_phase([("alpha", "Pending"), ("beta", "Running")]),
             all_namespaces=False,
-            pattern="",
         )
 
         name_column = table.ordered_columns[1]

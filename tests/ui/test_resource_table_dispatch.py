@@ -35,16 +35,15 @@ def test_row_renderer_selects_specialized_and_fallback_renderers(
 
 def test_adapt_standard_renderer_uses_factory_and_display_name() -> None:
     """_adapt_standard_renderer resolves the bound method at call time via the factory."""
-    received: list[tuple[list[Summary], bool, str, bool]] = []
+    received: list[tuple[list[Summary], bool, bool]] = []
 
     def bound_renderer(
         rows: list[Summary],
         *,
         all_namespaces: bool,
-        pattern: str,
         presorted: bool = False,
     ) -> None:
-        received.append((rows, all_namespaces, pattern, presorted))
+        received.append((rows, all_namespaces, presorted))
 
     table = resource_table.ResourceTable()
 
@@ -59,12 +58,11 @@ def test_adapt_standard_renderer_uses_factory_and_display_name() -> None:
         table,
         rows,
         all_namespaces=True,
-        pattern="widgets",
         metrics=None,
         presorted=True,
     )
 
-    assert received == [(rows, True, "widgets", True)]
+    assert received == [(rows, True, True)]
 
 
 def test_specialized_renderer_honors_subclass_override_of_add_rows() -> None:
@@ -72,23 +70,21 @@ def test_specialized_renderer_honors_subclass_override_of_add_rows() -> None:
     table instance so that a subclass override of _add_replicaset_rows is honored,
     not bypassed by an import-time capture of the unbound base-class function.
     """
-    override_calls: list[tuple[object, list[Summary], bool, str, bool]] = []
-
+    override_calls: list[tuple[object, list[Summary], bool, bool]] = []
     class _SubTable(resource_table.ResourceTable):
         def _add_replicaset_rows(
             self,
             rows: list[Summary],
             *,
             all_namespaces: bool,
-            pattern: str,
             presorted: bool = False,
         ) -> None:
-            override_calls.append((self, rows, all_namespaces, pattern, presorted))
+            override_calls.append((self, rows, all_namespaces, presorted))
 
     table = _SubTable()
     rows: list[Summary] = []
     renderer = resource_table._row_renderer("replicasets", group="apps")
-    renderer(table, rows, all_namespaces=False, pattern="x", metrics=None, presorted=True)
+    renderer(table, rows, all_namespaces=False,metrics=None, presorted=True)
 
     assert len(override_calls) == 1, (
         "subclass override of _add_replicaset_rows was not called; "
@@ -97,16 +93,14 @@ def test_specialized_renderer_honors_subclass_override_of_add_rows() -> None:
     assert override_calls[0][0] is table
     assert override_calls[0][1] is rows
     assert override_calls[0][2] is False  # all_namespaces
-    assert override_calls[0][3] == "x"  # pattern
-    assert override_calls[0][4] is True  # presorted
+    assert override_calls[0][3] is True  # presorted
 
 
 def test_render_pod_rows_forwards_exact_metrics_sentinel_and_all_arguments() -> None:
     """_render_pod_rows must pass the metrics lookup, presorted, all_namespaces, and
     pattern through to _add_pod_rows unchanged (subclass override as the witness).
     """
-    received: list[tuple[list[Summary], bool, str, resource_table.MetricsLookup | None, bool]] = []
-
+    received: list[tuple[list[Summary], bool, resource_table.MetricsLookup | None, bool]] = []
     def metrics_sentinel(_namespace: str, _name: str) -> PodMetrics | None:
         return None
 
@@ -116,11 +110,10 @@ def test_render_pod_rows_forwards_exact_metrics_sentinel_and_all_arguments() -> 
             rows: list[Summary],
             *,
             all_namespaces: bool,
-            pattern: str,
             metrics: resource_table.MetricsLookup | None,
             presorted: bool = False,
         ) -> None:
-            received.append((rows, all_namespaces, pattern, metrics, presorted))
+            received.append((rows, all_namespaces, metrics, presorted))
 
     table = _SubTable()
     rows: list[Summary] = []
@@ -128,9 +121,8 @@ def test_render_pod_rows_forwards_exact_metrics_sentinel_and_all_arguments() -> 
         table,
         rows,
         all_namespaces=True,
-        pattern="mypod",
         metrics=metrics_sentinel,
         presorted=True,
     )
 
-    assert received == [(rows, True, "mypod", metrics_sentinel, True)]
+    assert received == [(rows, True, metrics_sentinel, True)]

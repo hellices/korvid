@@ -94,7 +94,6 @@ async def test_foreign_same_plural_resources_render_as_generic_rows(
             plural,
             rows,
             all_namespaces=False,
-            pattern="",
             group=group,
             synthetic=synthetic,
         )

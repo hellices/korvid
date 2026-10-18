@@ -50,7 +50,6 @@ class _RowRenderer(Protocol):
         __rows: list[Summary],
         *,
         all_namespaces: bool,
-        pattern: str,
         metrics: MetricsLookup | None,
         presorted: bool,
     ) -> None: ...
@@ -64,7 +63,6 @@ class _BoundStandardRowRenderer(Protocol):
         __rows: list[Summary],
         *,
         all_namespaces: bool,
-        pattern: str,
         presorted: bool = False,
     ) -> None: ...
 
@@ -72,7 +70,8 @@ class _BoundStandardRowRenderer(Protocol):
 #: Callable that resolves the correct bound renderer from the actual table
 #: instance at call time, so subclass overrides of `_add_*_rows` are honored.
 class _StandardRendererFactory(Protocol):
-    def __call__(self, __table: ResourceTable) -> _BoundStandardRowRenderer: ...
+    def __call__(
+        self, __table: ResourceTable) -> _BoundStandardRowRenderer: ...
 
 
 #: `_emit_row(stamp=...)` sentinel: this row opts out of the memo. Distinct
@@ -99,11 +98,13 @@ _RS_COLS = ("NAME", "REVISION", "DESIRED", "CURRENT", "READY", "AGE")
 _RS_COLS_ALL_NS = ("NAMESPACE", *_RS_COLS)
 _HELM_COLS = ("NAME", "REVISION", "STATUS", "CHART", "APP VERSION", "AGE")
 _HELM_COLS_ALL_NS = ("NAMESPACE", *_HELM_COLS)
-_HELM_REV_COLS = ("NAME", "REVISION", "STATUS", "CHART", "APP VERSION", "DESCRIPTION", "AGE")
+_HELM_REV_COLS = ("NAME", "REVISION", "STATUS", "CHART",
+                  "APP VERSION", "DESCRIPTION", "AGE")
 _HELM_REV_COLS_ALL_NS = ("NAMESPACE", *_HELM_REV_COLS)
 _GENERIC_COLS = ("NAME", "AGE")
 _GENERIC_COLS_ALL_NS = ("NAMESPACE", "NAME", "AGE")
-_PKG_COLS = ("NAME", "CATALOG", "DEFAULT CHANNEL", "CHANNELS", "DESCRIPTION", "AGE")
+_PKG_COLS = ("NAME", "CATALOG", "DEFAULT CHANNEL",
+             "CHANNELS", "DESCRIPTION", "AGE")
 _PKG_COLS_ALL_NS = ("NAMESPACE", *_PKG_COLS)
 _SUB_COLS = ("NAME", "CHANNEL", "SOURCE", "INSTALLED CSV", "STATE", "AGE")
 _SUB_COLS_ALL_NS = ("NAMESPACE", *_SUB_COLS)
@@ -112,12 +113,14 @@ _CSV_COLS_ALL_NS = ("NAMESPACE", *_CSV_COLS)
 
 #: Helm release/revision status colors: steady-state good is green, hard
 #: failure red, history entries dim, anything transitional yellow.
-_HELM_STATUS_STYLE = {"deployed": "green", "failed": "bold red", "superseded": "dim"}
+_HELM_STATUS_STYLE = {"deployed": "green",
+    "failed": "bold red", "superseded": "dim"}
 
 # Eviction order reversed: pods evicted last render first.
 _QOS_RANK = {"Guaranteed": 0, "Burstable": 1, "BestEffort": 2}
 # Red is too aggressive for a steady-state view: green → chartreuse → yellow.
-_QOS_STYLE = {"Guaranteed": "green", "Burstable": "chartreuse2", "BestEffort": "yellow"}
+_QOS_STYLE = {"Guaranteed": "green",
+    "Burstable": "chartreuse2", "BestEffort": "yellow"}
 
 
 def _pod_sort_key(pod: PodSummary) -> tuple[int, str]:
@@ -144,14 +147,12 @@ def _render_pod_rows(
     rows: list[Summary],
     *,
     all_namespaces: bool,
-    pattern: str,
     metrics: MetricsLookup | None,
     presorted: bool,
 ) -> None:
     table._add_pod_rows(
         rows,
         all_namespaces=all_namespaces,
-        pattern=pattern,
         metrics=metrics,
         presorted=presorted,
     )
@@ -163,7 +164,6 @@ def _adapt_standard_renderer(factory: _StandardRendererFactory, name: str) -> _R
         rows: list[Summary],
         *,
         all_namespaces: bool,
-        pattern: str,
         metrics: MetricsLookup | None,
         presorted: bool,
     ) -> None:
@@ -171,7 +171,6 @@ def _adapt_standard_renderer(factory: _StandardRendererFactory, name: str) -> _R
         factory(table)(
             rows,
             all_namespaces=all_namespaces,
-            pattern=pattern,
             presorted=presorted,
         )
 
@@ -194,7 +193,8 @@ _render_package_rows = _adapt_standard_renderer(
 _render_subscription_rows = _adapt_standard_renderer(
     lambda table: table._add_subscription_rows, "_render_subscription_rows"
 )
-_render_csv_rows = _adapt_standard_renderer(lambda table: table._add_csv_rows, "_render_csv_rows")
+_render_csv_rows = _adapt_standard_renderer(
+    lambda table: table._add_csv_rows, "_render_csv_rows")
 _render_generic_rows = _adapt_standard_renderer(
     lambda table: table._add_generic_rows, "_render_generic_rows"
 )
@@ -291,7 +291,8 @@ def _renders_as(rendered: object, expected: str | Text) -> bool:
     at all. Style is already settled by `_cells_equal` on the way in.
     """
     expected_plain = (
-        expected.plain if isinstance(expected, Text) else Text.from_markup(expected, end="").plain
+        expected.plain if isinstance(
+            expected, Text) else Text.from_markup(expected, end="").plain
     )
     if isinstance(rendered, Text):
         return rendered.plain == expected_plain
@@ -435,13 +436,15 @@ def validate_selected_view(
     warnings: list[str] = []
     for index, column in enumerate(view.columns):
         if column.name.lower() in builtin:
-            warnings.append(f"views.{plural}.{column.name}: shadows a built-in column of this kind")
+            warnings.append(
+                f"views.{plural}.{column.name}: shadows a built-in column of this kind")
             continue
         kept.append(column)
         kept_indices.append(index)
     if not kept:
         return None, tuple(warnings)
-    effective = view if len(kept) == len(view.columns) else ViewConfig(columns=tuple(kept))
+    effective = view if len(kept) == len(
+        view.columns) else ViewConfig(columns=tuple(kept))
     return SelectedView(effective, tuple(kept_indices)), tuple(warnings)
 
 
@@ -466,11 +469,13 @@ def _max_container_pct(
     Limits are enforced per container by the kubelet, so the danger signal
     is the worst individual ratio - a pod-aggregate sum hides a sidecar
     sitting at its own 100Mi limit next to an idle 900Mi neighbour."""
-    by_name = {c.name: (c.cpu_cores if key == "cpu" else c.mem_bytes) for c in limits}
+    by_name = {c.name: (c.cpu_cores if key == "cpu" else c.mem_bytes)
+                        for c in limits}
     worst: float | None = None
     all_limited = bool(metrics.containers)
     for sample in metrics.containers:
-        usage = sample.cpu_cores if key == "cpu" else float(sample.memory_bytes)
+        usage = sample.cpu_cores if key == "cpu" else float(
+            sample.memory_bytes)
         limit = by_name.get(sample.name)
         if limit is None or limit <= 0:
             all_limited = False
@@ -498,7 +503,8 @@ def _usage_severity(
     pod_limit = pod.cpu_limit_cores if key == "cpu" else pod.mem_limit_bytes
     if pod_limit is not None and pod_limit <= 0:
         pod_limit = None
-    worst_pct, all_limited = _max_container_pct(metrics, pod.container_limits, key)
+    worst_pct, all_limited = _max_container_pct(
+        metrics, pod.container_limits, key)
     styles: list[str] = []
     if pod_limit is not None:
         styles.append(usage_style(round(usage / float(pod_limit) * 100)))
@@ -534,11 +540,13 @@ def _usage_cells(pod: PodSummary, metrics: PodMetrics | None) -> tuple[Text, Tex
         return (dash, dash.copy(), dash.copy(), dash.copy())
     return (
         Text(format_cpu(metrics.cpu_cores)),
-        _percent_of_request(metrics.cpu_cores, pod.cpu_request_cores, pod, metrics, "cpu"),
+        _percent_of_request(metrics.cpu_cores,
+                            pod.cpu_request_cores, pod, metrics, "cpu"),
         Text(format_memory(metrics.memory_bytes)),
         _percent_of_request(
             float(metrics.memory_bytes),
-            None if pod.mem_request_bytes is None else float(pod.mem_request_bytes),
+            None if pod.mem_request_bytes is None else float(
+                pod.mem_request_bytes),
             pod,
             metrics,
             "memory",
@@ -564,7 +572,8 @@ def _decorate_columns(
     """Append ▲/▼ to the sorted column's header; untouched when inactive."""
     if sort is None:
         return columns
-    label = sort.column if sort.column in custom_names else _SORT_LABELS.get(sort.column)
+    label = sort.column if sort.column in custom_names else _SORT_LABELS.get(
+        sort.column)
     arrow = "▼" if sort.descending else "▲"
     return tuple(f"{col} {arrow}" if col == label else col for col in columns)
 
@@ -595,9 +604,11 @@ class ResourceTable(DataTable[str | Text]):
         self._pending_rows: list[tuple[str, list[str | Text]]] = []
         #: Per-row cell memo (issue #208): row key -> (summary, stamp, row).
         #: Keeps a repaint proportional to the rows that actually changed.
-        self._row_memo: dict[str, tuple[Summary, object, tuple[str, list[str | Text]]]] = {}
+        self._row_memo: dict[str, tuple[Summary,
+            object, tuple[str, list[str | Text]]]] = {}
         #: Cell-set shape the memo was built for; a change invalidates it.
-        self._memo_signature: tuple[tuple[str, str, bool], bool, SelectedView | None] | None = None
+        self._memo_signature: tuple[tuple[str, str, bool],
+            bool, SelectedView | None] | None = None
         #: Cells currently in the table, so the diff never has to read them
         #: back out of the DataTable one `get_row` at a time.
         self._emitted: dict[str, list[str | Text]] = {}
@@ -616,7 +627,6 @@ class ResourceTable(DataTable[str | Text]):
         rows: list[Summary],
         *,
         all_namespaces: bool,
-        pattern: str,
         metrics: MetricsLookup | None = None,
         group: str = "",
         synthetic: bool = False,
@@ -631,7 +641,8 @@ class ResourceTable(DataTable[str | Text]):
         validated custom column config (issue #45), if any.
         """
         identity = (group, kind, synthetic)
-        presentation = _presentation_for(kind, group=group, synthetic=synthetic)
+        presentation = _presentation_for(
+            kind, group=group, synthetic=synthetic)
         effective_view = view.config if view is not None else None
         # Same logical view (kind/scope/columns) means the cursor should
         # survive the re-render — including a sort change, where the selected
@@ -663,7 +674,6 @@ class ResourceTable(DataTable[str | Text]):
             presentation.renderer,
             rows,
             all_namespaces=all_namespaces,
-            pattern=pattern,
             metrics=metrics,
             sort=sort,
         )
@@ -728,7 +738,8 @@ class ResourceTable(DataTable[str | Text]):
             # call_after_refresh, and scrollbar visibility (overflow: auto)
             # may not be recomputed yet right after clear() — the user had
             # already reached this offset, so restore it unconditionally.
-            self.scroll_to(*viewport, animate=False, immediate=True, force=True)
+            self.scroll_to(*viewport, animate=False,
+                           immediate=True, force=True)
             # Even with scroll=False, `watch_cursor_coordinate` schedules a
             # deferred `_scroll_cursor_into_view` whenever the cursor index
             # changed (e.g. a row inserted above it) — which would override
@@ -841,7 +852,8 @@ class ResourceTable(DataTable[str | Text]):
         """
         fixed_count = min(self.fixed_rows, self.row_count)
         header_height = self.header_height if self.show_header else 0
-        viewport_height = max(self.size.height - header_height - fixed_count, 0)
+        viewport_height = max(
+            self.size.height - header_height - fixed_count, 0)
         first = fixed_count + self.scroll_offset.y
         return _VisibleRows(fixed_count, first, first + viewport_height - 1)
 
@@ -908,7 +920,8 @@ class ResourceTable(DataTable[str | Text]):
         self._cell_batching_verified = True
         if self._batched_write_holds(row_key, column, new_cell):
             return True
-        self._retire_cell_batching("the render path did not see the private write")
+        self._retire_cell_batching(
+            "the render path did not see the private write")
         return False
 
     def _retire_cell_batching(self, reason: str) -> None:
@@ -947,7 +960,8 @@ class ResourceTable(DataTable[str | Text]):
                 # Unverified or no-longer-trusted Textual internals: pay one
                 # refresh per cell rather than write a store whose shape may
                 # have moved.
-                self.update_cell(row_key, column.key, new_cell, update_width=False)
+                self.update_cell(row_key, column.key,
+                                 new_cell, update_width=False)
             changed = True
         if changed and batched:
             # One cache generation for the whole row: `_update_count` is what
@@ -1013,7 +1027,8 @@ class ResourceTable(DataTable[str | Text]):
         content this widget never measured, so it must not stay on the skip
         list.
         """
-        self._absorbed.discard(row_key.value if isinstance(row_key, RowKey) else row_key)
+        self._absorbed.discard(row_key.value if isinstance(
+            row_key, RowKey) else row_key)
         super().remove_row(row_key)
 
     def clear(self, columns: bool = False) -> Self:
@@ -1032,7 +1047,8 @@ class ResourceTable(DataTable[str | Text]):
         """
         absorbed = self._absorbed_keys
         if absorbed:
-            new_rows = [key for key in new_rows if not self._is_absorbed(key, absorbed)]
+            new_rows = [
+                key for key in new_rows if not self._is_absorbed(key, absorbed)]
             absorbed.clear()
         super()._update_dimensions(new_rows)
 
@@ -1060,13 +1076,15 @@ class ResourceTable(DataTable[str | Text]):
         if len(self._row_memo) <= 4 * len(pending) + 1024:
             return
         live = {key for key, _ in pending}
-        self._row_memo = {key: entry for key, entry in self._row_memo.items() if key in live}
+        self._row_memo = {key: entry for key,
+            entry in self._row_memo.items() if key in live}
 
     def _cursor_snapshot(self) -> tuple[str, int] | None:
         """(row key, row index) under the cursor, or None on an empty table."""
         if self.row_count == 0 or self.cursor_row < 0:
             return None
-        key = self.coordinate_to_cell_key(Coordinate(self.cursor_row, 0)).row_key.value
+        key = self.coordinate_to_cell_key(
+            Coordinate(self.cursor_row, 0)).row_key.value
         return (key, self.cursor_row) if key is not None else None
 
     def _restore_cursor(self, key: str, index: int, *, scroll: bool = True) -> None:
@@ -1110,7 +1128,8 @@ class ResourceTable(DataTable[str | Text]):
                 _custom_cell(values[index]) if index < len(values) else MISSING
                 for index in view.value_indices
             ]
-            cells = [cells[0], *extras] if view.config.replace else [*cells, *extras]
+            cells = [cells[0], *
+                extras] if view.config.replace else [*cells, *extras]
         if all_namespaces:
             cells.insert(0, obj.namespace)
         row = (f"{obj.namespace}/{obj.name}", cells)
@@ -1151,7 +1170,6 @@ class ResourceTable(DataTable[str | Text]):
         rows: list[Summary],
         *,
         all_namespaces: bool,
-        pattern: str,
         metrics: MetricsLookup | None,
         sort: SortSpec | None = None,
     ) -> None:
@@ -1161,7 +1179,8 @@ class ResourceTable(DataTable[str | Text]):
             # every row path renders in the same order.
             custom_names: tuple[str, ...] = ()
             if self._active_view is not None:
-                aligned = [""] * (max(self._active_view.value_indices, default=-1) + 1)
+                aligned = [""] * \
+                    (max(self._active_view.value_indices, default=-1) + 1)
                 for column, index in zip(
                     self._active_view.config.columns,
                     self._active_view.value_indices,
@@ -1169,12 +1188,12 @@ class ResourceTable(DataTable[str | Text]):
                 ):
                     aligned[index] = column.name
                 custom_names = tuple(aligned)
-            rows = sort_rows(rows, sort, metrics=metrics, custom_columns=custom_names)
+            rows = sort_rows(rows, sort, metrics=metrics,
+                             custom_columns=custom_names)
         renderer(
             self,
             rows,
             all_namespaces=all_namespaces,
-            pattern=pattern,
             metrics=metrics,
             presorted=sort is not None,
         )
@@ -1184,7 +1203,6 @@ class ResourceTable(DataTable[str | Text]):
         rows: list[Summary],
         *,
         all_namespaces: bool,
-        pattern: str,
         metrics: MetricsLookup | None,
         presorted: bool = False,
     ) -> None:
@@ -1193,9 +1211,8 @@ class ResourceTable(DataTable[str | Text]):
             pods = sorted(pods, key=_pod_sort_key)
         now = self._render_now
         for pod in pods:
-            if pattern and pattern.lower() not in pod.name.lower():
-                continue
-            usage = metrics(pod.namespace, pod.name) if metrics is not None else None
+            usage = metrics(
+                pod.namespace, pod.name) if metrics is not None else None
             age = pod.age(now)
             # Everything else on this row is derived from the frozen summary,
             # so the live metrics sample and the age are the whole stamp.
@@ -1214,10 +1231,11 @@ class ResourceTable(DataTable[str | Text]):
                 age,
                 pod.node or "-",
             ]
-            self._emit_row(pod, cells, all_namespaces=all_namespaces, stamp=stamp)
+            self._emit_row(
+                pod, cells, all_namespaces=all_namespaces, stamp=stamp)
 
     def _add_replicaset_rows(
-        self, rows: list[Summary], *, all_namespaces: bool, pattern: str, presorted: bool = False
+        self, rows: list[Summary], *, all_namespaces: bool, presorted: bool = False
     ) -> None:
         # With a user sort active the incoming order is final: render it in
         # one pass so fallback rows interleave in sorted position instead of
@@ -1238,8 +1256,6 @@ class ResourceTable(DataTable[str | Text]):
             )
             ordered = [*replicasets, *fallbacks]
         for obj in ordered:
-            if pattern and pattern.lower() not in obj.name.lower():
-                continue
             if isinstance(obj, ReplicaSetSummary):
                 age = obj.age(self._render_now)
                 stamp = self._stamp(age)
@@ -1262,14 +1278,12 @@ class ResourceTable(DataTable[str | Text]):
             self._emit_row(obj, cells, all_namespaces=all_namespaces, stamp=stamp)
 
     def _add_helm_release_rows(
-        self, rows: list[Summary], *, all_namespaces: bool, pattern: str, presorted: bool = False
+        self, rows: list[Summary], *, all_namespaces: bool, presorted: bool = False
     ) -> None:
         releases = [r for r in rows if isinstance(r, HelmReleaseSummary)]
         if not presorted:
             releases = sorted(releases, key=lambda r: (r.namespace, r.name))
         for rel in releases:
-            if pattern and pattern.lower() not in rel.name.lower():
-                continue
             age = rel.age(self._render_now)
             stamp = self._stamp(age)
             if self._reuse_row(rel, stamp):
@@ -1285,15 +1299,13 @@ class ResourceTable(DataTable[str | Text]):
             self._emit_row(rel, cells, all_namespaces=all_namespaces, stamp=stamp)
 
     def _add_helm_revision_rows(
-        self, rows: list[Summary], *, all_namespaces: bool, pattern: str, presorted: bool = False
+        self, rows: list[Summary], *, all_namespaces: bool, presorted: bool = False
     ) -> None:
         revisions = [r for r in rows if isinstance(r, HelmRevisionSummary)]
         # Newest revision first: helm history order, matching replicaset views.
         if not presorted:
             revisions = sorted(revisions, key=lambda r: (r.namespace, r.release, -r.revision))
         for rev in revisions:
-            if pattern and pattern.lower() not in rev.name.lower():
-                continue
             age = rev.age(self._render_now)
             stamp = self._stamp(age)
             if self._reuse_row(rev, stamp):
@@ -1314,7 +1326,6 @@ class ResourceTable(DataTable[str | Text]):
         rows: list[Summary],
         *,
         all_namespaces: bool,
-        pattern: str,
         width: int,
         presorted: bool = False,
     ) -> None:
@@ -1324,8 +1335,6 @@ class ResourceTable(DataTable[str | Text]):
         if not presorted:
             rows = sorted(rows, key=lambda o: (o.namespace, o.name))
         for obj in rows:
-            if pattern and pattern.lower() not in obj.name.lower():
-                continue
             age = obj.age(self._render_now) if isinstance(obj, GenericSummary) else ""
             stamp = self._stamp(age)
             if self._reuse_row(obj, stamp):
@@ -1334,14 +1343,12 @@ class ResourceTable(DataTable[str | Text]):
             self._emit_row(obj, cells, all_namespaces=all_namespaces, stamp=stamp)
 
     def _add_package_rows(
-        self, rows: list[Summary], *, all_namespaces: bool, pattern: str, presorted: bool = False
+        self, rows: list[Summary], *, all_namespaces: bool, presorted: bool = False
     ) -> None:
         packages = [r for r in rows if isinstance(r, PackageManifestSummary)]
         if not presorted:
             packages = sorted(packages, key=lambda p: (p.namespace, p.name))
         for pkg in packages:
-            if pattern and pattern.lower() not in pkg.name.lower():
-                continue
             age = pkg.age(self._render_now)
             stamp = self._stamp(age)
             if self._reuse_row(pkg, stamp):
@@ -1359,20 +1366,17 @@ class ResourceTable(DataTable[str | Text]):
         self._add_fallback_rows(
             fallbacks,
             all_namespaces=all_namespaces,
-            pattern=pattern,
             width=len(_PKG_COLS),
             presorted=presorted,
         )
 
     def _add_subscription_rows(
-        self, rows: list[Summary], *, all_namespaces: bool, pattern: str, presorted: bool = False
+        self, rows: list[Summary], *, all_namespaces: bool, presorted: bool = False
     ) -> None:
         subs = [r for r in rows if isinstance(r, OLMSubscriptionSummary)]
         if not presorted:
             subs = sorted(subs, key=lambda s: (s.namespace, s.name))
         for sub in subs:
-            if pattern and pattern.lower() not in sub.name.lower():
-                continue
             age = sub.age(self._render_now)
             stamp = self._stamp(age)
             if self._reuse_row(sub, stamp):
@@ -1390,20 +1394,17 @@ class ResourceTable(DataTable[str | Text]):
         self._add_fallback_rows(
             fallbacks,
             all_namespaces=all_namespaces,
-            pattern=pattern,
             width=len(_SUB_COLS),
             presorted=presorted,
         )
 
     def _add_csv_rows(
-        self, rows: list[Summary], *, all_namespaces: bool, pattern: str, presorted: bool = False
+        self, rows: list[Summary], *, all_namespaces: bool,presorted: bool = False
     ) -> None:
         csvs = [r for r in rows if isinstance(r, CSVSummary)]
         if not presorted:
             csvs = sorted(csvs, key=lambda c: (c.namespace, c.name))
         for csv in csvs:
-            if pattern and pattern.lower() not in csv.name.lower():
-                continue
             age = csv.age(self._render_now)
             stamp = self._stamp(age)
             if self._reuse_row(csv, stamp):
@@ -1420,20 +1421,17 @@ class ResourceTable(DataTable[str | Text]):
         self._add_fallback_rows(
             fallbacks,
             all_namespaces=all_namespaces,
-            pattern=pattern,
             width=len(_CSV_COLS),
             presorted=presorted,
         )
 
     def _add_generic_rows(
-        self, rows: list[Summary], *, all_namespaces: bool, pattern: str, presorted: bool = False
-    ) -> None:
+    self, rows: list[Summary], *, all_namespaces: bool, presorted: bool = False
+) -> None:
         generics = cast(list[GenericSummary], rows)
         if not presorted:
             generics = sorted(generics, key=lambda o: (o.namespace, o.name))
         for obj in generics:
-            if pattern and pattern.lower() not in obj.name.lower():
-                continue
             age = obj.age(self._render_now)
             stamp = self._stamp(age)
             if self._reuse_row(obj, stamp):
