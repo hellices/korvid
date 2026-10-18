@@ -78,14 +78,18 @@ def _shell_blocks(section: str) -> list[list[str]]:
 
 
 def test_manifest_creates_only_the_playground_namespace_and_its_workloads() -> None:
-    created = sorted((document["kind"], document["metadata"]["name"]) for document in _documents())
+    created = sorted(
+        (document["kind"], document.get("apiVersion"), document["metadata"]["name"])
+        for document in _documents()
+    )
 
+    # Pin the API version too: without it `kubectl apply` rejects the document.
     assert created == [
-        ("Deployment", "checkout"),
-        ("Deployment", "payments"),
-        ("Deployment", "web"),
-        ("Namespace", NAMESPACE),
-        ("Service", "web"),
+        ("Deployment", "apps/v1", "checkout"),
+        ("Deployment", "apps/v1", "payments"),
+        ("Deployment", "apps/v1", "web"),
+        ("Namespace", "v1", NAMESPACE),
+        ("Service", "v1", "web"),
     ]
     for document in _documents():
         if document["kind"] == "Namespace":
