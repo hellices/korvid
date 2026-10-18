@@ -298,6 +298,15 @@ not covered by that manifest or its attestation.
 
 ## Publish and verify the Homebrew tap
 
+On Intel macOS, the generated formula uses the tap's build-only `korvid-rust`
+dependency: official, SHA-256-pinned prebuilt compiler/Cargo/standard-library
+archives, installed keg-only. This avoids building LLVM and Rust when upstream
+Homebrew no longer supplies Intel compiler bottles. ARM macOS and Linux retain
+Homebrew's `rust` dependency. Introduce the supporting tap formula before
+releasing a source revision that generates this dependency. The compiler must
+pass its native compile/run test in the Intel bottle job; this does not replace
+korvid's source, native-import, or bottle-install checks.
+
 The release workflow attaches `korvid.rb` to the GitHub Release with the source
 repository `GITHUB_TOKEN`. It then requires `HOMEBREW_APP_ID` and
 `HOMEBREW_APP_PRIVATE_KEY`, mints a short-lived GitHub App token scoped to
