@@ -48,12 +48,12 @@ korvid overlaps with several good tools. In short:
 | [k9s](https://github.com/derailed/k9s) | A mature keyboard TUI with plugins, skins, and a read-only mode | The same style of cockpit, plus an agent and an MCP bridge that work inside it. If you never want AI, k9s is the more mature choice. |
 | [kubectl-ai](https://github.com/GoogleCloudPlatform/kubectl-ai) | A chat assistant that turns requests into `kubectl` operations, confirms modifying commands by default, and can run as an MCP server | korvid's agent has no shell or `kubectl` tool. It reads through bounded, structured tools, opens the panes you use, and its writes wait for an approval dialog that only your keystroke confirms. |
 | [k8sgpt](https://github.com/k8sgpt-ai/k8sgpt) | Scanning a cluster with built-in analyzers and explaining findings with an LLM, from a CLI, an in-cluster operator, or an MCP server | korvid starts from a live view rather than a scan report: you and the agent work from what is on screen, then act from the same cockpit. |
-| [HolmesGPT](https://github.com/HolmesGPT/holmesgpt) | Investigating alerts and incidents across Kubernetes and many other data sources, from a CLI, Slack, or an in-cluster operator that runs checks in the background | HolmesGPT reaches far more data sources and can run unattended. korvid is the hands-on cockpit for whoever is at the terminal, and beyond the Kubernetes API it reaches only optional Prometheus and Loki queries. |
+| [HolmesGPT](https://github.com/HolmesGPT/holmesgpt) | Investigating alerts and incidents across Kubernetes and many other data sources, from a CLI, Slack, or an in-cluster operator that runs checks in the background | HolmesGPT reaches far more data sources and can run unattended. korvid is the hands-on cockpit for whoever is at the terminal, and beyond the Kubernetes API it queries only optional Prometheus and Loki backends. |
 
 korvid's MCP server is the running TUI itself: every external read shows up
-on your screen, and opt-in write proposals wait for your approval there. The tools
-also combine well: a scanner or an alert agent can tell you something is
-wrong, and korvid is where you look and act. Descriptions follow each
+on your screen, and opt-in write proposals wait for your approval there. The
+tools also combine well: a scanner or an alert agent can tell you something
+is wrong, and korvid is where you look and act. Descriptions follow each
 project's README as of October 2026;
 [corrections are welcome](https://github.com/hellices/korvid/issues).
 
