@@ -121,6 +121,41 @@ uv tool install 'korvid[all] @ git+https://github.com/hellices/korvid'
 The full, always-current key reference — grouped by context, including
 node, Helm, and operator actions — lives in [keybindings.md](keybindings.md).
 
+## Practice on a throwaway cluster
+
+To try writes and the agent without risking a real cluster, create a
+disposable one with [kind](https://kind.sigs.k8s.io/) (it needs Docker or
+Podman) and load three small workloads: one healthy, two broken.
+
+```sh
+kind create cluster --name korvid-playground
+kubectl --context kind-korvid-playground apply \
+  -f https://raw.githubusercontent.com/hellices/korvid/main/deploy/playground/workloads.yaml
+korvid -n playground
+```
+
+Naming the context keeps the workloads off every other cluster, and kind
+makes `kind-korvid-playground` your current context, which is where korvid
+opens. The
+[manifest](https://github.com/hellices/korvid/blob/main/deploy/playground/workloads.yaml)
+creates only a `playground` namespace, three Deployments, and one Service.
+None of them needs host access, privileges, or an API token.
+
+| Try | How |
+| --- | --- |
+| Find what is wrong | Type `:pulse`: the [problems view](pulse.md) lists the crash loop and the failed image pull, with their evidence |
+| Read why `checkout` crashes | Select its pod and press `l`; in the log pane, `p` shows the previous container's output |
+| See why `payments` never starts | Select its pod and press `d`; the events name the image that cannot be pulled |
+| Trace `web` | Select a `web` pod and press `g` for the ReplicaSet that owns it, the Node it runs on, and the Service that selects it |
+| Approve a write | Type `:deploy`, select `web`, press `S`, and scale to 3. Nothing changes until you confirm, and `:outcomes` then shows what the Deployment controller did ([operations](ops.md)) |
+| Ask the agent | With the `[agent]` extra and a model from `:ai`, press `Ctrl-A` and ask why `checkout` is failing ([agent](agent.md)) |
+
+When you are done, delete the cluster and everything in it:
+
+```sh
+kind delete cluster --name korvid-playground
+```
+
 ## Where to next
 
 - **Learn the cockpit:** [Browsing the cluster](tui.md) covers tables,
