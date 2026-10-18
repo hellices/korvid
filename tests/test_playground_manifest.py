@@ -156,21 +156,25 @@ def test_checkout_crashes_only_while_database_url_is_unset() -> None:
 def test_the_guide_keeps_the_playground_in_its_own_kubeconfig() -> None:
     section = _guide_section()
     blocks = _shell_blocks(section)
-    assert len(blocks) == 2, "the guide has one setup block and one cleanup block"
-    setup, cleanup = blocks
+    assert len(blocks) == 3, "the guide has a setup, an apply, and a cleanup block"
+    setup, apply, cleanup = blocks
 
     assert setup[0] == DEDICATED_KUBECONFIG, "isolate the kubeconfig before any other command"
-    assert setup[1:] == [
-        f"kind create cluster --name {CLUSTER}",
-        f"curl -fsSLO {RAW_URL}",
+    assert setup[1:] == [f"kind create cluster --name {CLUSTER}", f"curl -fsSLO {RAW_URL}"]
+    assert apply == [
         f"kubectl --context {CONTEXT} apply -f workloads.yaml",
         f"korvid -n {NAMESPACE}",
     ]
     assert RAW_URL.endswith(MANIFEST.relative_to(ROOT).as_posix())
+    fences = [match.start() for match in re.finditer(r"```sh\n", section)]
+    review = section.index("Read `workloads.yaml` before you apply it")
+    assert fences[0] < review < fences[1], "ask for the review between download and apply"
     kubectl = [line for block in blocks for line in block if line.startswith("kubectl")]
     assert kubectl
     assert all(f"--context {CONTEXT}" in line for line in kubectl)
     assert cleanup[0] == f"kind delete cluster --name {CLUSTER}"
-    assert "unset KUBECONFIG" in section
+    assert "open a new terminal" in section.lower(), (
+        "only a new terminal restores a KUBECONFIG the reader had set before"
+    )
     for name in ("web", "checkout", "payments"):
         assert f"`{name}`" in section, f"the guide must say what to look for in {name}"

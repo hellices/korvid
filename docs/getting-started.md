@@ -132,22 +132,25 @@ workloads: one healthy, two broken. You need Docker or Podman, `kind`, and
 export KUBECONFIG="$PWD/korvid-playground.kubeconfig"
 kind create cluster --name korvid-playground
 curl -fsSLO https://raw.githubusercontent.com/hellices/korvid/main/deploy/playground/workloads.yaml
-kubectl --context kind-korvid-playground apply -f workloads.yaml
-korvid -n playground
 ```
 
 The first line gives this terminal its own kubeconfig file. kind writes the
 new context there, so `kubectl` and korvid in this terminal see only the
-playground cluster, and your usual kubeconfig is not touched. korvid's status
-row at the bottom shows the context, `kind-korvid-playground`.
-
-Read `workloads.yaml` before you apply it. It creates only a `playground`
-namespace, three Deployments, and one Service, and none of them needs host
-access, privileges, or an API token. Creating the cluster takes a minute or
-two. If the cluster already exists, run
+playground cluster, and your usual kubeconfig is not touched. Creating the
+cluster takes a minute or two. If the cluster already exists, run
 `kind export kubeconfig --name korvid-playground` to write its context into
 the file again.
 
+Read `workloads.yaml` before you apply it. It creates only a `playground`
+namespace, three Deployments, and one Service, and none of them needs host
+access, privileges, or an API token. Then apply it and start korvid:
+
+```sh
+kubectl --context kind-korvid-playground apply -f workloads.yaml
+korvid -n playground
+```
+
+korvid's status row at the bottom shows the context, `kind-korvid-playground`.
 These commands are for bash or zsh. In PowerShell, set the variable with
 `$env:KUBECONFIG = "$PWD\korvid-playground.kubeconfig"`, download with
 `curl.exe`, and delete files with `Remove-Item`.
@@ -168,8 +171,8 @@ kind delete cluster --name korvid-playground
 rm -f korvid-playground.kubeconfig workloads.yaml
 ```
 
-Then run `unset KUBECONFIG`, or close the terminal, to return to your usual
-clusters.
+Then open a new terminal to return to your usual clusters: `KUBECONFIG` was
+set only in this one.
 
 ## Where to next
 
