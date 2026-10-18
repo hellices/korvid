@@ -302,10 +302,59 @@ def test_a_rust_built_resource_declares_the_rust_toolchain(name: str) -> None:
         resources=[Resource(name=name, url="https://files.pythonhosted.org/x", sha256="b" * 64)],
     )
     assert 'depends_on "rust" => :build' in ruby
-    declared = [line.strip() for line in ruby.splitlines() if line.startswith("  depends_on ")]
-    assert declared[0].startswith('depends_on "rust"'), (
-        f"brew wants build dependencies first: {declared}"
+    assert 'depends_on "hellices/korvid/korvid-rust" => :build' in ruby
+
+
+@pytest.mark.parametrize(
+    ("platform", "arch", "toolchain"),
+    [
+        ("macos", "intel", "hellices/korvid/korvid-rust"),
+        ("macos", "arm", "rust"),
+        ("linux", "intel", "rust"),
+        ("linux", "arm", "rust"),
+    ],
+)
+def test_rust_dependency_selects_prebuilt_toolchain_only_on_intel_macos(
+    platform: str, arch: str, toolchain: str
+) -> None:
+    if not _ruby_available():
+        pytest.skip("ruby is not installed")
+    ruby = render_formula(
+        version="0.6.0",
+        url="https://files.pythonhosted.org/korvid-0.6.0.tar.gz",
+        sha256="a" * 64,
+        resources=[
+            Resource(name="tokenizers", url="https://files.pythonhosted.org/x", sha256="b" * 64)
+        ],
     )
+    harness = """
+require "json"
+module Language; module Python; module Virtualenv; end; end; end
+class Formula
+  def self.dependencies; @dependencies ||= []; end
+  def self.depends_on(value); dependencies << value; end
+  def self.on_macos; yield if ARGV[0] == "macos"; end
+  def self.on_linux; yield if ARGV[0] == "linux"; end
+  def self.on_intel; yield if ARGV[1] == "intel"; end
+  def self.on_arm; yield if ARGV[1] == "arm"; end
+  def self.test; end
+  def self.method_missing(*); end
+end
+eval(STDIN.read)
+print JSON.generate(Korvid.dependencies)
+"""
+    result = subprocess.run(
+        ["ruby", "-e", harness, platform, arch],
+        input=ruby,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    dependencies = json.loads(result.stdout)
+    build = [dep for dep in dependencies if isinstance(dep, dict)]
+    assert build == [{toolchain: "build"}]
+    assert "python@3.13" in dependencies
 
 
 def test_a_formula_without_pyyaml_does_not_declare_libyaml() -> None:

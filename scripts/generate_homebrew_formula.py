@@ -65,6 +65,19 @@ NATIVE_SMOKE_IMPORTS = {
     "litellm": "litellm.rust_bridge._native",
     "tokenizers": "tokenizers.tokenizers",
 }
+RUST_DEPENDENCIES = """  on_macos do
+    on_intel do
+      depends_on "hellices/korvid/korvid-rust" => :build
+    end
+    on_arm do
+      depends_on "rust" => :build
+    end
+  end
+
+  on_linux do
+    depends_on "rust" => :build
+  end
+"""
 
 
 @dataclass(frozen=True)
@@ -283,6 +296,7 @@ def render_formula(
     required = {PYTHON_FORMULA: ""}
     for resource in resources:
         required.update(SYSTEM_DEPENDENCIES.get(resource.name, {}))
+    rust_dependencies = "\n" + RUST_DEPENDENCIES if required.pop("rust", None) else ""
     # brew orders build-time dependencies ahead of runtime ones, and
     # sorts alphabetically within each group.
     depends_on = "".join(
@@ -311,7 +325,7 @@ class Korvid < Formula
   sha256 "{sha256}"
   license "{license}"
 
-{depends_on}
+{depends_on}{rust_dependencies}
 {stanzas}
   def install
 {_install_commands(resources)}
