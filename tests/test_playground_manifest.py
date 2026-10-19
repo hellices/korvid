@@ -196,9 +196,32 @@ def test_the_guide_keeps_the_playground_in_its_own_kubeconfig() -> None:
     kubectl = [line for block in blocks for line in block if line.startswith("kubectl")]
     assert kubectl
     assert all(f"--context {CONTEXT}" in line for line in kubectl)
-    assert cleanup[0] == f"kind delete cluster --name {CLUSTER}"
+    assert cleanup == [
+        f"kind delete cluster --name {CLUSTER}",
+        f"rm -f {CLUSTER}.kubeconfig workloads.yaml",
+    ], "the cleanup block deletes only the throwaway cluster and the guide's two files"
     assert "open a new terminal" in section.lower(), (
         "only a new terminal restores a KUBECONFIG the reader had set before"
     )
     for name in ("web", "checkout", "payments"):
         assert f"`{name}`" in section, f"the guide must say what to look for in {name}"
+
+
+def test_every_command_in_the_guide_targets_only_the_playground() -> None:
+    """Inline commands are commands too: the re-run tip and the PowerShell line
+    are run by readers, so like the code blocks they may name only the
+    throwaway cluster, its context, and its own kubeconfig file."""
+    section = _guide_section()
+    names = re.findall(r"--name[ =]([\w.-]+)", section)
+    contexts = re.findall(r"--context[ =]([\w.-]+)", section)
+    kubeconfigs = re.findall(r'KUBECONFIG\s*=\s*"([^"]+)"', section)
+
+    assert names, "the guide must name its kind cluster"
+    assert set(names) == {CLUSTER}, names
+    assert contexts, "the guide must pin kubectl to the playground context"
+    assert set(contexts) == {CONTEXT}, contexts
+    assert kubeconfigs, "the guide must set a dedicated KUBECONFIG"
+    for path in kubeconfigs:
+        assert re.fullmatch(rf"\$PWD[/\\]{CLUSTER}\.kubeconfig", path), path
+    assert "--kubeconfig" not in section, "a flag would bypass the dedicated KUBECONFIG"
+    assert "use-context" not in section, "switching contexts would leave the playground"
