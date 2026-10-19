@@ -104,6 +104,29 @@ def _shell_blocks(section: str) -> list[list[str]]:
     return [[line.strip() for line in block.splitlines() if line.strip()] for block in blocks]
 
 
+#: Inline code in the prose that a reader could paste into a shell. Pinned
+#: exactly, like the command blocks, so any new command in the prose (an
+#: unquoted `KUBECONFIG=...` prefix, a `kubectl` aimed elsewhere) is a
+#: reviewed change. A span counts as a command when it has an argument or an
+#: assignment and names a shell tool; single words like `kubectl` are names.
+INLINE_COMMANDS = {
+    f"kind export kubeconfig --name {CLUSTER}",
+    f'$env:KUBECONFIG = "$PWD\\{CLUSTER}.kubeconfig"',
+}
+_SHELL_WORD = re.compile(
+    r"\b(?:kubectl|kind|korvid|curl|rm|export|unset|helm|KUBECONFIG)\b|\$env:|--"
+)
+#: Every way the guide could assign KUBECONFIG: double-quoted, single-quoted,
+#: or bare (`KUBECONFIG=$HOME/.kube/config kubectl ...`).
+_KUBECONFIG_VALUE = re.compile(r"""KUBECONFIG\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s`'"]+))""")
+
+
+def _inline_commands(section: str) -> set[str]:
+    prose = re.sub(r"```sh\n.*?```", "", section, flags=re.DOTALL)
+    spans = re.findall(r"`([^`\n]+)`", prose)
+    return {span for span in spans if re.search(r"[\s=]", span) and _SHELL_WORD.search(span)}
+
+
 def test_manifest_creates_only_the_playground_namespace_and_its_workloads() -> None:
     created = sorted(
         (document["kind"], document.get("apiVersion"), document["metadata"]["name"])
@@ -209,13 +232,14 @@ def test_the_guide_keeps_the_playground_in_its_own_kubeconfig() -> None:
 
 def test_every_command_in_the_guide_targets_only_the_playground() -> None:
     """Inline commands are commands too: the re-run tip and the PowerShell line
-    are run by readers, so like the code blocks they may name only the
-    throwaway cluster, its context, and its own kubeconfig file."""
+    are run by readers, so like the code blocks they are pinned, and they may
+    name only the throwaway cluster, its context, and its own kubeconfig file."""
     section = _guide_section()
     names = re.findall(r"--name[ =]([\w.-]+)", section)
     contexts = re.findall(r"--context[ =]([\w.-]+)", section)
-    kubeconfigs = re.findall(r'KUBECONFIG\s*=\s*"([^"]+)"', section)
+    kubeconfigs = ["".join(value) for value in _KUBECONFIG_VALUE.findall(section)]
 
+    assert _inline_commands(section) == INLINE_COMMANDS
     assert names, "the guide must name its kind cluster"
     assert set(names) == {CLUSTER}, names
     assert contexts, "the guide must pin kubectl to the playground context"
