@@ -63,6 +63,29 @@ EXPECTED_SERVICE_SPEC = {
     "ports": [{"name": "http", "port": 80, "targetPort": 80}],
 }
 
+#: Every document's metadata, pinned like the specs. An unreviewed label or
+#: annotation changes what readers apply: a Pod Security `enforce: privileged`
+#: label on the Namespace, say. The API server silently clears a `namespace`
+#: on the cluster-scoped Namespace rather than rejecting it, so this pin, not
+#: `kubectl apply`, is what catches one.
+PART_OF = {"app.kubernetes.io/part-of": CLUSTER}
+EXPECTED_METADATA: dict[tuple[str, str], dict[str, Any]] = {
+    ("Namespace", NAMESPACE): {"name": NAMESPACE, "labels": PART_OF},
+    ("Service", "web"): {
+        "name": "web",
+        "namespace": NAMESPACE,
+        "labels": {"app": "web", **PART_OF},
+    },
+    **{
+        ("Deployment", name): {
+            "name": name,
+            "namespace": NAMESPACE,
+            "labels": {"app": name, **PART_OF},
+        }
+        for name in EXPECTED_REPLICAS
+    },
+}
+
 
 def _documents() -> list[dict[str, Any]]:
     loaded = list(yaml.safe_load_all(MANIFEST.read_text(encoding="utf-8")))
@@ -142,10 +165,12 @@ def test_manifest_creates_only_the_playground_namespace_and_its_workloads() -> N
         ("Service", "v1", "web"),
     ]
     for document in _documents():
-        if document["kind"] == "Namespace":
-            assert "spec" not in document
-        else:
-            assert document["metadata"]["namespace"] == NAMESPACE
+        key = (document["kind"], document["metadata"]["name"])
+        assert document["metadata"] == EXPECTED_METADATA[key], key
+        top_level = {"apiVersion", "kind", "metadata"}
+        if document["kind"] != "Namespace":
+            top_level.add("spec")
+        assert set(document) == top_level, key
 
 
 def test_workloads_set_only_reviewed_fields() -> None:
@@ -153,8 +178,8 @@ def test_workloads_set_only_reviewed_fields() -> None:
         spec = deployment["spec"]
         assert set(spec) == {"replicas", "selector", "template"}, name
         assert spec["replicas"] == EXPECTED_REPLICAS[name], name
-        selector = spec["selector"]["matchLabels"]
-        assert selector.items() <= spec["template"]["metadata"]["labels"].items(), name
+        assert spec["selector"] == {"matchLabels": {"app": name}}, name
+        assert spec["template"]["metadata"] == {"labels": {"app": name, **PART_OF}}, name
         pod = _pod_spec(name)
         assert set(pod) == ALLOWED_POD_FIELDS, name
         assert pod["automountServiceAccountToken"] is False, name
