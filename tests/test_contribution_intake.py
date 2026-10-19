@@ -23,6 +23,30 @@ FORMS = ROOT / ".github" / "ISSUE_TEMPLATE"
 TRIAGE_LABEL = "status: needs-triage"
 
 
+#: The rule's load-bearing sentences, pinned whole: checking single words such
+#: as "assigns" would accept a sentence that means something else ("a
+#: maintainer assigns a reviewer").
+CONTRIBUTING_RULE = (
+    "Every change starts as an issue. If you do not have write access to this repository, "
+    "open a pull request only for an issue that a maintainer has assigned to you.",
+    "New issues from the forms get the `status: needs-triage` label until a maintainer "
+    "accepts or closes them.",
+    "A maintainer assigns the issue to you, one at a time until your first pull request is merged.",
+    "If an assigned issue sees no pull request or update for 14 days, a maintainer may "
+    "release it to someone else.",
+    "Put `Closes #N` at the top of the description, where `N` is the assigned issue.",
+    "A pull request from someone without write access that does not close an issue "
+    "assigned to its author is closed without review, however good the change.",
+)
+FEATURE_FORM_RULE = (
+    "A maintainer reviews each request. Wait until one accepts it and assigns it to you "
+    "before opening a pull request."
+)
+PR_TEMPLATE_CHECK = (
+    "- [ ] This closes an issue that a maintainer assigned to me, or I have write access."
+)
+
+
 def _text(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
@@ -39,7 +63,9 @@ def _form(name: str) -> dict[str, Any]:
 
 def test_every_issue_form_waits_for_triage() -> None:
     for name in ("bug_report.yml", "feature_request.yml"):
-        assert TRIAGE_LABEL in _form(name)["labels"], name
+        labels = _form(name)["labels"]
+        assert isinstance(labels, list), f"{name}: issue forms take a list of labels"
+        assert TRIAGE_LABEL in labels, name
 
 
 def test_the_feature_form_says_work_waits_for_an_assignment() -> None:
@@ -49,8 +75,7 @@ def test_the_feature_form_says_work_waits_for_an_assignment() -> None:
         if item["type"] == "markdown"
     )
 
-    assert "assigns" in notes
-    assert "before opening a pull request" in notes
+    assert FEATURE_FORM_RULE in notes
 
 
 def test_the_pull_request_template_starts_with_the_assigned_issue() -> None:
@@ -61,18 +86,11 @@ def test_the_pull_request_template_starts_with_the_assigned_issue() -> None:
     ]
 
     assert lines[0] == "Closes #", "the template must ask for the issue before anything else"
-    assert "a maintainer assigned to me" in _flat(PR_TEMPLATE)
+    assert PR_TEMPLATE_CHECK in lines
 
 
 def test_contributing_states_the_intake_rule() -> None:
     assert "\n## From issue to pull request\n" in _text(CONTRIBUTING)
     text = _flat(CONTRIBUTING)
-    for phrase in (
-        TRIAGE_LABEL,
-        "without write access",
-        "assigns",
-        "Closes #",
-        "closed without review",
-        "14 days",
-    ):
-        assert phrase in text, f"CONTRIBUTING.md must state the intake rule: {phrase!r}"
+    for sentence in CONTRIBUTING_RULE:
+        assert sentence in text, f"CONTRIBUTING.md must state the intake rule: {sentence!r}"
