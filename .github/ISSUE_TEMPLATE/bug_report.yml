@@ -1,6 +1,6 @@
 name: Bug report
 description: Something in korvid does not work as documented.
-labels: ["bug"]
+labels: ["bug", "status: needs-triage"]
 body:
   - type: markdown
     attributes:

@@ -1,13 +1,13 @@
 name: Feature request
 description: Suggest an improvement or a new capability.
-labels: ["enhancement"]
+labels: ["enhancement", "status: needs-triage"]
 body:
   - type: markdown
     attributes:
       value: |
         Start with the problem: the best design may differ from the first
-        idea. For a large change, agree on the design here before opening a
-        pull request.
+        idea. A maintainer reviews each request. Wait until one accepts it
+        and assigns it to you before opening a pull request.
   - type: textarea
     id: problem
     attributes:
