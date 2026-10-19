@@ -35,14 +35,28 @@ DEDICATED_KUBECONFIG = f'export KUBECONFIG="$PWD/{CLUSTER}.kubeconfig"'
 ALLOWED_POD_FIELDS = {"automountServiceAccountToken", "containers"}
 
 #: Each workload's state is a promise the guide makes, so the containers are
-#: pinned exactly: a `command`, `args`, or probe added to `web` or `payments`
-#: would change the state the reader is told to find. Only `checkout` runs a
-#: script, and `test_checkout_crashes_only_while_database_url_is_unset` runs it.
+#: pinned exactly, `checkout`'s script included: a `command`, `args`, or probe
+#: added to `web` or `payments`, or a script that stops sleeping, would change
+#: the state the reader is told to find. Like the reviewed README media, a
+#: deliberate change updates the pin here.
+CHECKOUT_SCRIPT = (
+    'echo "checkout: connecting to the orders database"\n'
+    'if [ -z "$DATABASE_URL" ]; then\n'
+    '  echo "FATAL: DATABASE_URL is not set" >&2\n'
+    "  exit 1\n"
+    "fi\n"
+    'echo "checkout: connected"\n'
+    "while true; do sleep 3600; done\n"
+)
 EXPECTED_CONTAINERS = {
     "web": {"name": "web", "image": "nginx:1.27", "ports": [{"containerPort": 80}]},
+    "checkout": {
+        "name": "checkout",
+        "image": "busybox:1.36",
+        "command": ["sh", "-c", CHECKOUT_SCRIPT],
+    },
     "payments": {"name": "payments", "image": "nginx:1.27-alpne"},
 }
-CHECKOUT_FIELDS = {"name", "image", "command"}
 EXPECTED_REPLICAS = {"web": 2, "checkout": 1, "payments": 1}
 EXPECTED_SERVICE_SPEC = {
     "selector": {"app": "web"},
@@ -127,11 +141,7 @@ def test_workloads_set_only_reviewed_fields() -> None:
 def test_each_workload_shows_the_state_the_guide_promises() -> None:
     containers = {name: _pod_spec(name)["containers"][0] for name in _deployments()}
 
-    for name, expected in EXPECTED_CONTAINERS.items():
-        assert containers[name] == expected, f"{name} must keep exactly its reviewed container"
-    checkout = containers["checkout"]
-    assert set(checkout) == CHECKOUT_FIELDS
-    assert (checkout["name"], checkout["image"]) == ("checkout", "busybox:1.36")
+    assert containers == EXPECTED_CONTAINERS, "each workload must keep its reviewed container"
     service = next(document for document in _documents() if document["kind"] == "Service")
     assert service["spec"] == EXPECTED_SERVICE_SPEC, "the Service stays a plain ClusterIP"
     assert service["spec"]["selector"] == _deployments()["web"]["spec"]["selector"]["matchLabels"]
@@ -141,10 +151,12 @@ def test_each_workload_shows_the_state_the_guide_promises() -> None:
 def test_checkout_crashes_only_while_database_url_is_unset() -> None:
     """The manifest says checkout exits *because* DATABASE_URL is not set.
 
-    A stub `sleep` ends the script's keep-alive loop, so the configured run
-    finishes instead of waiting forever and proves it got past the check.
+    A stub `sleep` returns twice and ends the run on its third call, so the
+    configured run finishes instead of waiting forever, and only a script that
+    keeps sleeping gets there: one that sleeps once and then exits is caught.
     """
-    script = f"sleep() {{ exit 7; }}\n{_checkout_script()}"
+    stub = 'n=0\nsleep() { n=$((n + 1)); [ "$n" -lt 3 ] || exit 7; }\n'
+    script = stub + _checkout_script()
     path = {"PATH": os.environ.get("PATH", "")}
 
     unset = subprocess.run(
