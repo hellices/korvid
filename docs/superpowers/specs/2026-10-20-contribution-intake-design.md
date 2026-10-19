@@ -114,7 +114,10 @@ enforcement does not depend on a maintainer noticing:
   `COLLABORATOR` can hold only read or triage access, and the rule turns on
   write access.
 - Otherwise it reads the pull request's `closingIssuesReferences` through
-  GraphQL, and passes if any linked issue is open and assigned to the author.
+  GraphQL. It passes if any linked issue is open, assigned to the author, and
+  accepted, meaning it no longer carries `status: needs-triage`. An issue that
+  was assigned by mistake while still in triage does not let a pull request
+  through.
 - On failure it adds `status: needs-issue` and posts the reply above once.
   Closing stays a maintainer's decision until the check has run without false
   positives for a while.

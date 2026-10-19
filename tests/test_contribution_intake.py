@@ -52,14 +52,25 @@ def _text(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
-def _flat(path: Path) -> str:
-    return " ".join(_text(path).split())
+def _rendered(markdown: str) -> str:
+    """The text GitHub shows a reader: HTML comments of any length are invisible."""
+    return re.sub(r"<!--.*?-->", "", markdown, flags=re.DOTALL)
+
+
+def _flat(text: str) -> str:
+    return " ".join(text.split())
 
 
 def _form(name: str) -> dict[str, Any]:
     form = yaml.safe_load(_text(FORMS / name))
     assert isinstance(form, dict)
     return form
+
+
+def test_rendered_text_drops_single_and_multi_line_comments() -> None:
+    hidden = "keep <!-- gone --> this\n<!--\nalso gone\n-->\nand this"
+
+    assert _flat(_rendered(hidden)) == "keep this and this"
 
 
 def test_every_issue_form_waits_for_triage() -> None:
@@ -71,9 +82,9 @@ def test_every_issue_form_waits_for_triage() -> None:
 
 def test_the_feature_form_says_work_waits_for_an_assignment() -> None:
     # Each markdown item renders as its own block, so the rule has to sit
-    # whole inside one of them, not straddle a field between two.
+    # whole and visible inside one of them, not straddle a field between two.
     notes = [
-        " ".join(item["attributes"]["value"].split())
+        _flat(_rendered(item["attributes"]["value"]))
         for item in _form("feature_request.yml")["body"]
         if item["type"] == "markdown"
     ]
@@ -82,16 +93,15 @@ def test_the_feature_form_says_work_waits_for_an_assignment() -> None:
 
 
 def test_the_pull_request_template_starts_with_the_assigned_issue() -> None:
-    # Only what GitHub renders counts: comments of any length are invisible.
-    rendered = re.sub(r"<!--.*?-->", "", _text(PR_TEMPLATE), flags=re.DOTALL)
-    lines = [line for line in rendered.splitlines() if line.strip()]
+    lines = [line for line in _rendered(_text(PR_TEMPLATE)).splitlines() if line.strip()]
 
     assert lines[0] == "Closes #", "the template must ask for the issue before anything else"
     assert PR_TEMPLATE_CHECK in lines
 
 
 def test_contributing_states_the_intake_rule() -> None:
-    assert "\n## From issue to pull request\n" in _text(CONTRIBUTING)
-    text = _flat(CONTRIBUTING)
+    rendered = _rendered(_text(CONTRIBUTING))
+    assert "\n## From issue to pull request\n" in rendered
+    text = _flat(rendered)
     for sentence in CONTRIBUTING_RULE:
         assert sentence in text, f"CONTRIBUTING.md must state the intake rule: {sentence!r}"
