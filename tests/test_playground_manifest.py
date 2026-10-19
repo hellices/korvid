@@ -10,6 +10,7 @@ any cluster other than the throwaway one.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import subprocess
@@ -28,6 +29,18 @@ NAMESPACE = "playground"
 CLUSTER = "korvid-playground"
 CONTEXT = f"kind-{CLUSTER}"
 DEDICATED_KUBECONFIG = f'export KUBECONFIG="$PWD/{CLUSTER}.kubeconfig"'
+
+#: SHA-256 of the practice section as reviewed in #447. Readers paste these
+#: commands into a terminal, so like the reviewed README media, any edit, even
+#: to prose, is a deliberate change: re-check that every command still reaches
+#: only the throwaway cluster (the tests below encode what to check), then
+#: update this value. The section is read with universal newlines, so a CRLF
+#: checkout hashes the same.
+REVIEWED_SECTION_SHA256 = "16c54c1857f588aa17e1b09fc27794ceee0e330a00c57bb7b527e238e71c9f2c"
+
+#: kubectl flags and commands that point it somewhere other than the dedicated
+#: KUBECONFIG's single context.
+RETARGETING = ("--kubeconfig", "--server", "--cluster", "use-context")
 
 #: The only pod fields the workloads may set. An allowlist rather than a
 #: denylist, so a new field that grants host access (`hostNetwork`, an init
@@ -260,10 +273,12 @@ def test_every_command_in_the_guide_targets_only_the_playground() -> None:
     are run by readers, so like the code blocks they are pinned, and they may
     name only the throwaway cluster, its context, and its own kubeconfig file."""
     section = _guide_section()
-    names = re.findall(r"--name[ =]([\w.-]+)", section)
-    contexts = re.findall(r"--context[ =]([\w.-]+)", section)
+    fences = re.findall(r"^[ \t]*(?:`{3,}|~{3,}).*$", section, flags=re.MULTILINE)
+    names = re.findall(r"""--name[ =]["']?([^\s"'`]+)""", section)
+    contexts = re.findall(r"""--context[ =]["']?([^\s"'`]+)""", section)
     kubeconfigs = ["".join(value) for value in _KUBECONFIG_VALUE.findall(section)]
 
+    assert fences == ["```sh", "```"] * 3, "only the three pinned sh blocks may hold commands"
     assert _inline_commands(section) == INLINE_COMMANDS
     assert names, "the guide must name its kind cluster"
     assert set(names) == {CLUSTER}, names
@@ -272,5 +287,14 @@ def test_every_command_in_the_guide_targets_only_the_playground() -> None:
     assert kubeconfigs, "the guide must set a dedicated KUBECONFIG"
     for path in kubeconfigs:
         assert re.fullmatch(rf"\$PWD[/\\]{CLUSTER}\.kubeconfig", path), path
-    assert "--kubeconfig" not in section, "a flag would bypass the dedicated KUBECONFIG"
-    assert "use-context" not in section, "switching contexts would leave the playground"
+    for flag in RETARGETING:
+        assert flag not in section, f"{flag} would point kubectl away from the playground"
+
+
+def test_the_practice_section_is_the_reviewed_text() -> None:
+    digest = hashlib.sha256(_guide_section().encode("utf-8")).hexdigest()
+
+    assert digest == REVIEWED_SECTION_SHA256, (
+        "the practice section changed: re-check that every command still reaches only "
+        "the throwaway cluster, then update REVIEWED_SECTION_SHA256"
+    )
