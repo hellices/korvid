@@ -107,8 +107,12 @@ enforcement does not depend on a maintainer noticing:
   untrusted title and body only through environment variables, never through
   shell interpolation.
 - Permissions are `pull-requests: write` and `issues: read`, nothing else.
-- It passes immediately when the author association is `OWNER`, `MEMBER`, or
-  `COLLABORATOR`.
+- It passes immediately only when the author can write to the repository. It
+  reads the author's permission level on the repository and lets `admin`,
+  `maintain`, or `write` through. `authorAssociation` is not enough, because
+  `MEMBER` can be an organization member without write access and
+  `COLLABORATOR` can hold only read or triage access, and the rule turns on
+  write access.
 - Otherwise it reads the pull request's `closingIssuesReferences` through
   GraphQL, and passes if any linked issue is open and assigned to the author.
 - On failure it adds `status: needs-issue` and posts the reply above once.

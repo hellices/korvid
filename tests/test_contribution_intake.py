@@ -11,6 +11,7 @@ CONTRIBUTING.md saying the same thing.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -69,21 +70,21 @@ def test_every_issue_form_waits_for_triage() -> None:
 
 
 def test_the_feature_form_says_work_waits_for_an_assignment() -> None:
-    notes = " ".join(
+    # Each markdown item renders as its own block, so the rule has to sit
+    # whole inside one of them, not straddle a field between two.
+    notes = [
         " ".join(item["attributes"]["value"].split())
         for item in _form("feature_request.yml")["body"]
         if item["type"] == "markdown"
-    )
+    ]
 
-    assert FEATURE_FORM_RULE in notes
+    assert any(FEATURE_FORM_RULE in note for note in notes)
 
 
 def test_the_pull_request_template_starts_with_the_assigned_issue() -> None:
-    lines = [
-        line
-        for line in _text(PR_TEMPLATE).splitlines()
-        if line.strip() and not line.lstrip().startswith("<!--")
-    ]
+    # Only what GitHub renders counts: comments of any length are invisible.
+    rendered = re.sub(r"<!--.*?-->", "", _text(PR_TEMPLATE), flags=re.DOTALL)
+    lines = [line for line in rendered.splitlines() if line.strip()]
 
     assert lines[0] == "Closes #", "the template must ask for the issue before anything else"
     assert PR_TEMPLATE_CHECK in lines
