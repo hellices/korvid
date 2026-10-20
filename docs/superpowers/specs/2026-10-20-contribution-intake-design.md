@@ -193,10 +193,12 @@ does not depend on a maintainer noticing:
   unassigned, labeled, unlabeled), and re-evaluates every open pull request
   whose `closingIssuesReferences` include that issue.
 - Some changes leave nothing to follow. A deleted issue drops out of every
-  pull request's closing references, and an event that GitHub fails to
-  deliver never runs the workflow. So a full pass re-evaluates every open
-  pull request: on `issues` `deleted`, on a daily `schedule`, and by hand
-  through `workflow_dispatch`, which a maintainer runs right before merging.
+  pull request's closing references, an issue transferred to another
+  repository no longer belongs to this one, and an event that GitHub fails
+  to deliver never runs the workflow. So a full pass re-evaluates every open
+  pull request: on `issues` `deleted` and `transferred`, on a daily
+  `schedule`, and by hand through `workflow_dispatch`, which a maintainer
+  runs right before merging.
 - Evaluations of one pull request run one at a time. Each evaluation job
   joins a concurrency group named after its pull request, and an issue event
   or a full pass starts one job per pull request it re-evaluates. The group
@@ -246,7 +248,8 @@ does not depend on a maintainer noticing:
   - Two evaluations of one pull request that finish out of order, such as
     one started by `closed` that is still running when `reopened` arrives,
     leave the label that the issue's current state calls for.
-  - A full pass fails a pull request whose only issue was deleted.
+  - A full pass fails a pull request whose only issue was deleted, or
+    transferred to another repository.
 
 Because it adds privileged triggers, this phase lands as its own pull
 request, and only with the maintainer's explicit approval.
