@@ -11,6 +11,7 @@ CONTRIBUTING.md saying the same thing.
 
 from __future__ import annotations
 
+import re
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
@@ -52,35 +53,49 @@ INTAKE_SECTION = (
     "issue first; once a maintainer assigns it, the pull request can be reopened. Security "
     "fixes go through SECURITY.md instead of an issue.",
 )
-#: The feature form's note, pinned whole for the same reason.
+#: The feature form's only markdown item, pinned whole for the same reason.
 FEATURE_FORM_NOTE = (
     "Start with the problem: the best design may differ from the first idea. A maintainer "
     "reviews each request. Wait until one accepts it and assigns it to you before opening "
     "a pull request."
 )
-PR_TEMPLATE_TASK = "This closes an issue that a maintainer assigned to me, or I have write access."
+#: The pull request template as a reader sees it, also pinned whole: the
+#: issue it closes comes first, and every box starts unticked.
+PR_TEMPLATE_HEAD = ("Closes #", "Summary", "Verification", "Checklist")
+PR_TEMPLATE_TASKS = (
+    "This closes an issue that a maintainer assigned to me, or I have write access.",
+    "Tests cover the change, written to fail first where behavior changed.",
+    "make check passes locally.",
+    "User-facing docs and the README match the change, or nothing user-facing changed.",
+    "No security invariant is weakened: writes still need a keystroke approval and a "
+    "fail-closed audit entry, and sensitive reads are still masked.",
+)
 
 #: CommonMark with raw HTML on, as GitHub parses it, plus the GFM extensions
 #: that change what a reader sees: tables, strikethrough, and task lists.
 _MARKDOWN = MarkdownIt("commonmark").enable(["table", "strikethrough"]).use(tasklists_plugin)
 _HTML = RendererHTML()
-_HEADINGS = frozenset({"h1", "h2", "h3", "h4", "h5", "h6"})
-#: The elements markdown syntax renders text into. Only text nodes count, so
-#: comments, link titles, and unused reference definitions never do. Neither
-#: does text inside any other element: raw HTML can collapse it (`<details>`)
-#: or have GitHub drop it (`<script>`), and ~~struck~~ text reads as withdrawn.
-_SHOWN = frozenset(
-    {"a", "blockquote", "code", "em", "li", "ol", "p", "pre", "strong", "ul"}
-    | _HEADINGS
-    | {"table", "tbody", "td", "th", "thead", "tr"}
-)
+#: Raw HTML other than comments is refused. GitHub drops some of it with its
+#: content (`<script>`), collapses some (`<details>`), and shows the rest, so
+#: what a reader sees of it cannot be pinned. This parser leaves out the task
+#: list plugin, whose checkboxes are HTML that markdown itself produces.
+_PLAIN = MarkdownIt("commonmark").enable(["table", "strikethrough"])
+#: Struck text reads as withdrawn, so it does not count as stating anything.
+_STRUCK = frozenset({"del", "s", "strike"})
 #: The elements that start a new block of text.
-_BLOCKS = frozenset({"blockquote", "li", "ol", "p", "pre", "td", "th", "tr", "ul"} | _HEADINGS)
+_BLOCKS = frozenset(
+    {"blockquote", "li", "ol", "p", "pre", "td", "th", "tr", "ul"}
+    | {"h1", "h2", "h3", "h4", "h5", "h6"}
+)
 _VOID = frozenset({"br", "hr", "img", "input"})
 
 
 class _Reader(HTMLParser):
-    """Collects the text a reader sees, block by block, with each block's element."""
+    """Collects the text a reader sees, block by block, with each block's element.
+
+    Comments, link titles, and unused reference definitions never become text
+    nodes, so they never count.
+    """
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
@@ -98,7 +113,7 @@ class _Reader(HTMLParser):
         self._break(tag, "")
 
     def handle_data(self, data: str) -> None:
-        if all(tag in _SHOWN for tag in self._open):
+        if not _STRUCK.intersection(self._open):
             self.blocks[-1][1].append(data)
 
     def _break(self, tag: str, element: str) -> None:
@@ -114,6 +129,20 @@ def _text(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def _raw_html(markdown: str) -> list[str]:
+    """The raw HTML in `markdown`, with comments taken out."""
+    tokens = _PLAIN.parse(markdown)
+    snippets = [token.content for token in tokens if token.type == "html_block"]
+    snippets += [
+        child.content
+        for token in tokens
+        for child in token.children or []
+        if child.type == "html_inline"
+    ]
+    bare = (re.sub(r"<!--.*?-->", "", snippet, flags=re.DOTALL).strip() for snippet in snippets)
+    return [snippet for snippet in bare if snippet]
+
+
 def _visible(html: str) -> list[tuple[str, str]]:
     reader = _Reader()
     reader.feed(html)
@@ -121,14 +150,20 @@ def _visible(html: str) -> list[tuple[str, str]]:
     return [(element, text) for element, parts in reader.blocks if (text := _flat("".join(parts)))]
 
 
+def _render(markdown: str) -> list[tuple[str, str]]:
+    raw = _raw_html(markdown)
+    assert not raw, f"raw HTML other than comments: {raw}"
+    return _visible(_MARKDOWN.render(markdown))
+
+
 def _blocks(markdown: str) -> list[str]:
     """The blocks of text GitHub shows a reader of `markdown`, each on one line."""
-    return [text for _, text in _visible(_MARKDOWN.render(markdown))]
+    return [text for _, text in _render(markdown)]
 
 
 def _section(markdown: str, heading: str) -> list[str]:
     """The blocks a reader sees under the h2 `heading`, up to the next h1 or h2."""
-    blocks = _visible(_MARKDOWN.render(markdown))
+    blocks = _render(markdown)
     assert ("h2", heading) in blocks, f"no visible h2 {heading!r}"
     start = blocks.index(("h2", heading)) + 1
     ends = [index for index, (element, _) in enumerate(blocks) if element in {"h1", "h2"}]
@@ -186,22 +221,28 @@ def test_rendered_text_keeps_what_a_reader_sees() -> None:
         "<!--\nthe rule\n-->",
         '[unused]: https://example.invalid "the rule"',
         '[](https://example.invalid "the rule")',
-        "<details>\n\nthe rule\n\n</details>",
-        "<script>the rule</script>",
         "~~the rule~~",
     ],
-    ids=[
-        "comment",
-        "long-comment",
-        "reference-definition",
-        "link-title",
-        "collapsed",
-        "script",
-        "struck",
-    ],
+    ids=["comment", "long-comment", "reference-definition", "link-title", "struck"],
 )
 def test_rendered_text_drops_what_a_reader_does_not_see(hidden: str) -> None:
     assert _blocks(f"before\n\n{hidden}\n\nafter") == ["before", "after"]
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "<details>\n\nthe rule\n\n</details>",
+        "<script>the rule</script>",
+        "<div>the rule</div>",
+        "text <span>the rule</span>",
+        "<!-- a comment --><div>the rule</div>",
+    ],
+    ids=["collapsed", "dropped", "shown-block", "shown-inline", "after-a-comment"],
+)
+def test_raw_html_other_than_comments_is_refused(raw: str) -> None:
+    with pytest.raises(AssertionError, match="raw HTML other than comments"):
+        _blocks(f"before\n\n{raw}\n\nafter")
 
 
 def test_sections_and_tasks_come_from_markdown_a_reader_sees() -> None:
@@ -209,28 +250,18 @@ def test_sections_and_tasks_come_from_markdown_a_reader_sees() -> None:
         "## Shown <!-- note -->\n\n"
         "body\n\n"
         "<!--\n## Hidden\n-->\n\n"
-        "<details>\n\n## Collapsed\n\n</details>\n\n"
         "### Lower\n\n"
         "- [ ] open <!-- note -->\n"
         "- [x] ticked\n"
         "- not a task\n\n"
-        "<ul><li>[ ] raw HTML</li></ul>\n\n"
         "## Next\n\n"
         "after\n"
     )
 
-    assert _section(markdown, "Shown") == [
-        "body",
-        "Lower",
-        "open",
-        "ticked",
-        "not a task",
-        "[ ] raw HTML",
-    ]
+    assert _section(markdown, "Shown") == ["body", "Lower", "open", "ticked", "not a task"]
     assert _section(markdown, "Next") == ["after"]
-    for hidden in ("Hidden", "Collapsed"):
-        with pytest.raises(AssertionError, match="no visible h2"):
-            _section(markdown, hidden)
+    with pytest.raises(AssertionError, match="no visible h2"):
+        _section(markdown, "Hidden")
     assert _tasks(markdown) == [(False, "open"), (True, "ticked")]
 
 
@@ -242,26 +273,22 @@ def test_every_issue_form_waits_for_triage() -> None:
 
 
 def test_the_feature_form_says_work_waits_for_an_assignment() -> None:
-    # Each markdown item renders on its own, so the note has to be one of
-    # them, whole and visible, not straddle a field between two.
+    # Every markdown item is pinned, in order: the note has to be one of them,
+    # whole and visible, and no other item may qualify it.
     notes = [
         _blocks(item["attributes"]["value"])
         for item in _form("feature_request.yml")["body"]
         if item["type"] == "markdown"
     ]
 
-    assert [FEATURE_FORM_NOTE] in notes
+    assert notes == [[FEATURE_FORM_NOTE]]
 
 
 def test_the_pull_request_template_starts_with_the_assigned_issue() -> None:
     template = _text(PR_TEMPLATE)
 
-    assert _blocks(template)[0] == "Closes #", (
-        "the template must ask for the issue before anything else"
-    )
-    assert (False, PR_TEMPLATE_TASK) in _tasks(template), (
-        "an unticked box must ask the author to confirm the assignment"
-    )
+    assert _blocks(template) == [*PR_TEMPLATE_HEAD, *PR_TEMPLATE_TASKS]
+    assert _tasks(template) == [(False, task) for task in PR_TEMPLATE_TASKS]
 
 
 def test_contributing_states_the_intake_rule() -> None:
