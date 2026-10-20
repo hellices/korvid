@@ -114,15 +114,33 @@ enforcement does not depend on a maintainer noticing:
   `COLLABORATOR` can hold only read or triage access, and the rule turns on
   write access.
 - Otherwise it reads the pull request's `closingIssuesReferences` through
-  GraphQL. It passes if any linked issue is open, assigned to the author, and
-  accepted, meaning it no longer carries `status: needs-triage`. An issue that
-  was assigned by mistake while still in triage does not let a pull request
-  through.
+  GraphQL. It passes only if one linked issue meets every condition:
+  - It belongs to this repository: its `repository.id` equals the pull
+    request's `baseRepository.id`. A closing reference such as
+    `Closes other/repo#N` can name an issue in a repository the author
+    controls, where they can open, accept, and assign issues themselves.
+    Comparing node IDs rather than `nameWithOwner` strings leaves no room
+    for letter case or a rename to confuse the comparison.
+  - It is open.
+  - It is assigned to the author.
+  - It is accepted, meaning it no longer carries `status: needs-triage`. An
+    issue that was assigned by mistake while still in triage does not let a
+    pull request through.
 - On failure it adds `status: needs-issue` and posts the reply above once.
   Closing stays a maintainer's decision until the check has run without false
   positives for a while.
 - It ships with tests in the existing workflow-contract style: trigger set,
-  permissions, no checkout, no interpolation of pull request fields.
+  permissions, no checkout, no interpolation of pull request fields. The
+  decision itself is a pure function of the author's permission and the
+  linked issues, tested case by case:
+  - `admin`, `maintain`, or `write` passes with no linked issue.
+  - `triage`, `read`, or no access with no linked issue fails.
+  - An open, accepted issue in this repository assigned to the author passes.
+  - The same issue in another repository (`Closes other/repo#N`) fails,
+    however it is labelled and assigned there.
+  - A closed issue fails, as does an issue assigned to someone else or to
+    no one, and an issue still labelled `status: needs-triage`.
+  - One passing issue among failing ones passes.
 
 Because it adds a privileged trigger, this phase lands as its own pull
 request, and only with the maintainer's explicit approval.
