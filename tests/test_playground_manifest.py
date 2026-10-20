@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from markdown_it import MarkdownIt
 
 from tests.platforms import posix_only
 
@@ -307,6 +308,23 @@ def test_every_command_in_the_guide_targets_only_the_playground() -> None:
         assert re.fullmatch(rf"\$PWD[/\\]{CLUSTER}\.kubeconfig", path), path
     for flag in RETARGETING:
         assert flag not in section, f"{flag} would point kubectl away from the playground"
+
+
+def test_the_practice_section_holds_commands_only_in_its_three_blocks() -> None:
+    """Every form of code block counts. An indented block, or raw HTML such as
+    `<pre>`, would show readers commands that the checks above never read."""
+    tokens = MarkdownIt("commonmark").parse(_guide_section())
+    blocks = [(token.type, token.info) for token in tokens if token.type in {"fence", "code_block"}]
+    raw = [token.content for token in tokens if token.type == "html_block"]
+    raw += [
+        child.content
+        for token in tokens
+        for child in token.children or []
+        if child.type == "html_inline"
+    ]
+
+    assert blocks == [("fence", "sh")] * 3, "only the three pinned sh blocks may hold commands"
+    assert raw == [], "raw HTML could show commands that these checks never read"
 
 
 def test_the_practice_section_is_the_reviewed_text() -> None:
