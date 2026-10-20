@@ -26,10 +26,11 @@ Report security vulnerabilities privately, never in an issue: see
 
 ## From issue to pull request
 
-Every change starts as an issue. If you do not have write access to this
-repository, open a pull request only for an issue that a maintainer has
-assigned to you. Review time goes to changes the project has agreed to make,
-and two people do not build the same thing.
+Every change starts as an issue, and every pull request closes an issue in
+this repository that is assigned to its author. The rule is the same for
+maintainers: they accept and assign issues themselves, and everyone else
+asks. Review time goes to changes the project has agreed to make, and two
+people do not build the same thing.
 
 1. **Find or open an issue.** New issues from the forms get the
    `status: needs-triage` label until a maintainer accepts or closes them.
@@ -41,13 +42,14 @@ and two people do not build the same thing.
    pull request or update for 14 days, a maintainer may release it to someone
    else.
 4. **Open the pull request.** Put `Closes #N` at the top of the description,
-   where `N` is the assigned issue.
+   where `N` is the assigned issue. Work that needs more than one pull request
+   is split into sub-issues, one for each.
 
-A pull request from someone without write access that does not close an
-issue assigned to its author is closed without review, however good the
-change. Ask for the issue first; once a maintainer assigns it, the pull
-request can be reopened. Security fixes go through [SECURITY.md](SECURITY.md)
-instead of an issue.
+A pull request that does not close an issue assigned to its author is closed
+without review, however good the change. Ask for the issue first; once a
+maintainer assigns it, the pull request can be reopened. The only exceptions
+are pull requests opened by Dependabot or the Relock workflow, and security
+fixes, which go through [SECURITY.md](SECURITY.md) instead of an issue.
 
 ## Set up
 

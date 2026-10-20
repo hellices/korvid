@@ -1,12 +1,12 @@
-"""Contracts for how outside contributions are accepted.
+"""Contracts for how contributions are accepted.
 
 Without a written intake rule, a pull request can arrive for work nobody
 agreed to: #446 was opened for #445 before anyone assigned it, and it did not
-link the issue. The rule is that every change starts as an issue, a
-maintainer accepts it, and someone without write access opens a pull request
-only for an issue a maintainer assigned to them, linked with `Closes #N`.
-These tests keep the issue forms, the pull request template, and
-CONTRIBUTING.md saying the same thing.
+link the issue. The rule is that every change starts as an issue, and every
+pull request closes an issue in this repository that is assigned to its
+author, maintainers included: maintainers accept and assign issues
+themselves, and everyone else asks. These tests keep the issue forms, the
+pull request template, and CONTRIBUTING.md saying the same thing.
 """
 
 from __future__ import annotations
@@ -51,10 +51,10 @@ FORM_LABELS = {
 #: keeps them but adds a clause or a block that retracts the rule.
 INTAKE_HEADING = "From issue to pull request"
 INTAKE_SECTION = (
-    "Every change starts as an issue. If you do not have write access to this repository, "
-    "open a pull request only for an issue that a maintainer has assigned to you. Review "
-    "time goes to changes the project has agreed to make, and two people do not build the "
-    "same thing.",
+    "Every change starts as an issue, and every pull request closes an issue in this "
+    "repository that is assigned to its author. The rule is the same for maintainers: they "
+    "accept and assign issues themselves, and everyone else asks. Review time goes to "
+    "changes the project has agreed to make, and two people do not build the same thing.",
     "Find or open an issue. New issues from the forms get the status: needs-triage label "
     "until a maintainer accepts or closes them. Accepted work that is open to contributors "
     "is labelled help wanted or good first issue.",
@@ -63,11 +63,13 @@ INTAKE_SECTION = (
     "first pull request is merged. If an assigned issue sees no pull request or update for "
     "14 days, a maintainer may release it to someone else.",
     "Open the pull request. Put Closes #N at the top of the description, where N is the "
-    "assigned issue.",
-    "A pull request from someone without write access that does not close an issue "
-    "assigned to its author is closed without review, however good the change. Ask for the "
-    "issue first; once a maintainer assigns it, the pull request can be reopened. Security "
-    "fixes go through SECURITY.md instead of an issue.",
+    "assigned issue. Work that needs more than one pull request is split into sub-issues, "
+    "one for each.",
+    "A pull request that does not close an issue assigned to its author is closed without "
+    "review, however good the change. Ask for the issue first; once a maintainer assigns it, "
+    "the pull request can be reopened. The only exceptions are pull requests opened by "
+    "Dependabot or the Relock workflow, and security fixes, which go through SECURITY.md "
+    "instead of an issue.",
 )
 #: The feature form's only markdown item, pinned whole for the same reason.
 FEATURE_FORM_NOTE = (
@@ -79,7 +81,7 @@ FEATURE_FORM_NOTE = (
 #: issue it closes comes first, and every box starts unticked.
 PR_TEMPLATE_HEAD = ("Closes #", "Summary", "Verification", "Checklist")
 PR_TEMPLATE_TASKS = (
-    "This closes an issue that a maintainer assigned to me, or I have write access.",
+    "This closes an issue in this repository that is assigned to me.",
     "Tests cover the change, written to fail first where behavior changed.",
     "make check passes locally.",
     "User-facing docs and the README match the change, or nothing user-facing changed.",
