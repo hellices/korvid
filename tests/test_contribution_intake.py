@@ -218,6 +218,20 @@ def _opening_line(markdown: str) -> list[tuple[str, str]]:
     return [(child.type, child.content) for child in tokens[1].children or []]
 
 
+def _opening_source(markdown: str) -> str:
+    """The source of the first block a reader sees, if it is a paragraph.
+
+    Parsing unescapes `\\#` and decodes `&#35;`, so tokens alone accept a
+    line that GitHub does not read as a closing keyword. Its source must be
+    the literal text too.
+    """
+    tokens = [token for token in _MARKDOWN.parse(markdown) if token.type != "html_block"]
+    if not tokens or tokens[0].type != "paragraph_open" or tokens[0].map is None:
+        return ""
+    start, end = tokens[0].map
+    return "\n".join(markdown.splitlines()[start:end])
+
+
 def _tasks(markdown: str) -> list[tuple[bool, str]]:
     """Each markdown task list item: whether its box is ticked, and its text."""
     tokens = _MARKDOWN.parse(markdown)
@@ -343,6 +357,20 @@ def test_the_opening_line_is_read_from_markdown_tokens(
     assert _opening_line(markdown) == expected
 
 
+@pytest.mark.parametrize(
+    ("markdown", "expected"),
+    [
+        ("<!-- a note -->\nCloses #\n", "Closes #"),
+        ("Closes \\#\n", "Closes \\#"),
+        ("Closes &#35;\n", "Closes &#35;"),
+        ("# Closes #\n", ""),
+    ],
+    ids=["plain", "escaped", "entity", "heading"],
+)
+def test_the_opening_source_is_the_literal_text(markdown: str, expected: str) -> None:
+    assert _opening_source(markdown) == expected
+
+
 def test_every_issue_form_waits_for_triage() -> None:
     # Pinned exactly, for every form: a form that also applied `help wanted`
     # or `good first issue` would mark work nobody has accepted as open to
@@ -385,6 +413,9 @@ def test_the_pull_request_template_starts_with_the_assigned_issue() -> None:
     assert _blocks(template) == [*PR_TEMPLATE_HEAD, *PR_TEMPLATE_TASKS]
     assert _opening_line(template) == [("text", "Closes #")], (
         "GitHub reads a closing keyword only in plain text, not in code, a link, or emphasis"
+    )
+    assert _opening_source(template) == "Closes #", (
+        "an escaped or entity-encoded line renders the same but closes nothing"
     )
     assert _tasks(template) == [(False, task) for task in PR_TEMPLATE_TASKS]
 
