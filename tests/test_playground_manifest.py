@@ -30,6 +30,10 @@ NAMESPACE = "playground"
 CLUSTER = "korvid-playground"
 CONTEXT = f"kind-{CLUSTER}"
 DEDICATED_KUBECONFIG = f'export KUBECONFIG="$PWD/{CLUSTER}.kubeconfig"'
+#: The guide works in a directory nobody else uses: the download cannot
+#: overwrite a reader's own `workloads.yaml`, the kubeconfig file is new, so
+#: it holds no other context, and the cleanup removes only that directory.
+SCRATCH_DIRECTORY = ('playground="$(mktemp -d)" &&', 'cd "$playground" &&')
 
 #: SHA-256 of the practice section as reviewed in #447. Readers paste these
 #: commands into a terminal, so like the reviewed README media, any edit, even
@@ -37,7 +41,7 @@ DEDICATED_KUBECONFIG = f'export KUBECONFIG="$PWD/{CLUSTER}.kubeconfig"'
 #: only the throwaway cluster (the tests below encode what to check), then
 #: update this value. The section is read with universal newlines, so a CRLF
 #: checkout hashes the same.
-REVIEWED_SECTION_SHA256 = "16c54c1857f588aa17e1b09fc27794ceee0e330a00c57bb7b527e238e71c9f2c"
+REVIEWED_SECTION_SHA256 = "7f910f8e9adf3c13e86e8b6cf41117af60c9fc5b8905b57edc5ad3f0a187f8eb"
 
 #: kubectl flags and commands that point it somewhere other than the dedicated
 #: KUBECONFIG's single context.
@@ -148,7 +152,7 @@ def _shell_blocks(section: str) -> list[list[str]]:
 #: reviewed change. A span counts as a command when it has an argument or an
 #: assignment and names a shell tool; single words like `kubectl` are names.
 INLINE_COMMANDS = {
-    f"kind export kubeconfig --name {CLUSTER}",
+    f"kind delete cluster --name {CLUSTER}",
     f'$env:KUBECONFIG = "$PWD\\{CLUSTER}.kubeconfig"',
 }
 _SHELL_WORD = re.compile(
@@ -248,8 +252,14 @@ def test_the_guide_keeps_the_playground_in_its_own_kubeconfig() -> None:
     assert len(blocks) == 3, "the guide has a setup, an apply, and a cleanup block"
     setup, apply, cleanup = blocks
 
-    assert setup[0] == DEDICATED_KUBECONFIG, "isolate the kubeconfig before any other command"
-    assert setup[1:] == [f"kind create cluster --name {CLUSTER}", f"curl -fsSLO {RAW_URL}"]
+    # One chain: each step runs only if the one before it succeeded, so no
+    # command can reach a real cluster or a reader's files after a failure.
+    assert setup == [
+        *SCRATCH_DIRECTORY,
+        f"{DEDICATED_KUBECONFIG} &&",
+        f"kind create cluster --name {CLUSTER} &&",
+        f"curl -fsSLO {RAW_URL}",
+    ], "enter a fresh directory and isolate the kubeconfig before any other command"
     assert apply == [
         f"kubectl --context {CONTEXT} apply -f workloads.yaml",
         f"korvid -n {NAMESPACE}",
@@ -263,8 +273,8 @@ def test_the_guide_keeps_the_playground_in_its_own_kubeconfig() -> None:
     assert all(f"--context {CONTEXT}" in line for line in kubectl)
     assert cleanup == [
         f"kind delete cluster --name {CLUSTER}",
-        f"rm -f {CLUSTER}.kubeconfig workloads.yaml",
-    ], "the cleanup block deletes only the throwaway cluster and the guide's two files"
+        'cd && rm -r "${playground:?}"',
+    ], "the cleanup deletes only the throwaway cluster and the guide's own directory"
     assert "open a new terminal" in section.lower(), (
         "only a new terminal restores a KUBECONFIG the reader had set before"
     )

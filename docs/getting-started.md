@@ -129,21 +129,26 @@ workloads: one healthy, two broken. You need Docker or Podman, `kind`, and
 `kubectl`.
 
 ```sh
-export KUBECONFIG="$PWD/korvid-playground.kubeconfig"
-kind create cluster --name korvid-playground
-curl -fsSLO https://raw.githubusercontent.com/hellices/korvid/main/deploy/playground/workloads.yaml
+playground="$(mktemp -d)" &&
+  cd "$playground" &&
+  export KUBECONFIG="$PWD/korvid-playground.kubeconfig" &&
+  kind create cluster --name korvid-playground &&
+  curl -fsSLO https://raw.githubusercontent.com/hellices/korvid/main/deploy/playground/workloads.yaml
 ```
 
-The first line gives this terminal its own kubeconfig file. kind writes the
-new context there, so `kubectl` and korvid in this terminal see only the
-playground cluster, and your usual kubeconfig is not touched. Creating the
-cluster takes a minute or two. If the cluster already exists, run
-`kind export kubeconfig --name korvid-playground` to write its context into
-the file again.
+The block works in a new, empty directory, so the download cannot overwrite
+a file of yours, and gives this terminal its own kubeconfig file there. kind
+writes the new context into that file, so `kubectl` and korvid in this
+terminal see only the playground cluster, and your usual kubeconfig is not
+touched. Each step runs only if the one before it succeeded. Creating the
+cluster takes a minute or two. If a cluster with this name is left from an
+earlier try, the block stops there: delete it with
+`kind delete cluster --name korvid-playground`, then run the block again.
 
 Read `workloads.yaml` before you apply it. It creates only a `playground`
 namespace, three Deployments, and one Service, and none of them needs host
-access, privileges, or an API token. Then apply it and start korvid:
+access, privileges, or an API token. Then, in the same terminal, apply it
+and start korvid:
 
 ```sh
 kubectl --context kind-korvid-playground apply -f workloads.yaml
@@ -151,9 +156,11 @@ korvid -n playground
 ```
 
 korvid's status row at the bottom shows the context, `kind-korvid-playground`.
-These commands are for bash or zsh. In PowerShell, set the variable with
+These commands are for bash or zsh. In PowerShell, run them from a new, empty
+directory, set the variable with
 `$env:KUBECONFIG = "$PWD\korvid-playground.kubeconfig"`, download with
-`curl.exe`, and delete files with `Remove-Item`.
+`curl.exe`, and remove that directory with `Remove-Item -Recurse` when you
+are done.
 
 | Try | How |
 | --- | --- |
@@ -164,11 +171,11 @@ These commands are for bash or zsh. In PowerShell, set the variable with
 | Approve a write | Type `:deploy`, select `web`, press `S`, and scale to 3. Nothing changes until you confirm, and `:outcomes` then shows what the Deployment controller did ([operations](ops.md)) |
 | Ask the agent | With the `[agent]` extra and a model from `:ai`, press `Ctrl-A` and ask why `checkout` is failing ([agent](agent.md)) |
 
-When you are done, delete the cluster and the two files:
+When you are done, delete the cluster and the directory with its two files:
 
 ```sh
 kind delete cluster --name korvid-playground
-rm -f korvid-playground.kubeconfig workloads.yaml
+cd && rm -r "${playground:?}"
 ```
 
 Then open a new terminal to return to your usual clusters: `KUBECONFIG` was
