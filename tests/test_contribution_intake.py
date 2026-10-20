@@ -161,6 +161,20 @@ def _raw_html(markdown: str) -> list[str]:
     return [snippet for snippet in bare if snippet]
 
 
+def _images(markdown: str) -> list[str]:
+    """The alt text of each markdown image in `markdown`.
+
+    An image shows pixels, or its alt text when it does not load, so what a
+    reader sees of it cannot be pinned either.
+    """
+    return [
+        child.content
+        for token in _PLAIN.parse(markdown)
+        for child in token.children or []
+        if child.type == "image"
+    ]
+
+
 def _visible(html: str) -> list[tuple[str, str]]:
     reader = _Reader()
     reader.feed(html)
@@ -171,6 +185,8 @@ def _visible(html: str) -> list[tuple[str, str]]:
 def _render(markdown: str) -> list[tuple[str, str]]:
     raw = _raw_html(markdown)
     assert not raw, f"raw HTML other than comments: {raw}"
+    images = _images(markdown)
+    assert not images, f"images: {images}"
     return _visible(_MARKDOWN.render(markdown))
 
 
@@ -274,6 +290,20 @@ def test_rendered_text_drops_what_a_reader_does_not_see(hidden: str) -> None:
 def test_raw_html_other_than_comments_is_refused(raw: str) -> None:
     with pytest.raises(AssertionError, match="raw HTML other than comments"):
         _blocks(f"before\n\n{raw}\n\nafter")
+
+
+@pytest.mark.parametrize(
+    "image",
+    [
+        "![the rule](https://example.invalid/rule.png)",
+        "[![the rule](rule.png)](https://example.invalid)",
+        "text ![the rule](rule.png) inline",
+    ],
+    ids=["image", "linked-image", "inline-image"],
+)
+def test_images_are_refused(image: str) -> None:
+    with pytest.raises(AssertionError, match="images"):
+        _blocks(f"before\n\n{image}\n\nafter")
 
 
 def test_sections_and_tasks_come_from_markdown_a_reader_sees() -> None:
