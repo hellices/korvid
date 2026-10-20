@@ -140,9 +140,10 @@ be kept in sync:
   `is:issue state:open has:assignee -linked:pr sort:updated-asc`, and release
   one after 14 days without a pull request or update.
 - Find pull requests that link no issue with
-  `is:pr state:open -linked:issue -author:app/dependabot -author:app/github-actions`.
-  Link the issue in your own. Close anyone else's that does not close an
-  issue assigned to its author, with this reply:
+  `is:pr state:open -linked:issue -author:app/dependabot`. A Relock pull
+  request shows up here too, and is exempt. Link the issue in your own.
+  Close anyone else's that does not close an issue assigned to its author,
+  with this reply:
 
   > Thanks for the pull request. Every pull request in korvid closes an issue
   > in this repository that is assigned to its author; see "From issue to
@@ -165,9 +166,14 @@ does not depend on a maintainer noticing:
   variables, never through shell interpolation.
 - Permissions are `pull-requests: write` and `issues: read`, nothing else.
 - It passes immediately only for a pull request opened by Dependabot or the
-  Relock workflow: the payload's `pull_request.user.login` is exactly
-  `dependabot[bot]` or `github-actions[bot]`. A person's login cannot contain
-  `[` or `]`, so no one can borrow the exemption.
+  Relock workflow. Dependabot's is one whose `pull_request.user.login` is
+  exactly `dependabot[bot]`. The Relock workflow opens its pull request with
+  `GITHUB_TOKEN`, and every workflow that does so appears as
+  `github-actions[bot]`, so that login alone does not identify it: the
+  exemption also needs a head branch in this repository whose name starts
+  with `relock/`, as only that workflow names its branches. Pushing a branch
+  here takes write access, and a person's login cannot contain `[` or `]`,
+  so no one else can borrow either exemption.
 - Every other author, the maintainer included, needs a linked issue, and the
   check reads no permission. Only someone with triage access or more can
   assign an issue or remove `status: needs-triage`, so an assigned, accepted
@@ -230,9 +236,11 @@ does not depend on a maintainer noticing:
   progress, permissions, no checkout, no interpolation of pull request
   fields. The decision itself is a pure function of the author's login and
   the linked issues' current state, tested case by case:
-  - A pull request from `dependabot[bot]` or `github-actions[bot]` passes
-    with no linked issue. A person whose login merely contains `dependabot`
-    gets no exemption.
+  - A pull request from `dependabot[bot]` passes with no linked issue, and
+    so does one from `github-actions[bot]` whose head is a `relock/` branch
+    in this repository. A `github-actions[bot]` pull request from any other
+    branch gets no exemption, and neither does a person whose login merely
+    contains `dependabot`.
   - Any other author with no linked issue fails, whatever their permission,
     `admin` included.
   - An open, accepted issue in this repository assigned to the author
