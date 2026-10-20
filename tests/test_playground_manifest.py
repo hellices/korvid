@@ -192,7 +192,9 @@ def test_workloads_set_only_reviewed_fields() -> None:
         assert set(spec) == {"replicas", "selector", "template"}, name
         assert spec["replicas"] == EXPECTED_REPLICAS[name], name
         assert spec["selector"] == {"matchLabels": {"app": name}}, name
-        assert spec["template"]["metadata"] == {"labels": {"app": name, **PART_OF}}, name
+        template = spec["template"]
+        assert set(template) == {"metadata", "spec"}, name
+        assert template["metadata"] == {"labels": {"app": name, **PART_OF}}, name
         pod = _pod_spec(name)
         assert set(pod) == ALLOWED_POD_FIELDS, name
         assert pod["automountServiceAccountToken"] is False, name
