@@ -162,11 +162,12 @@ send korvid to your usual clusters, and korvid starts only after the apply
 succeeds.
 
 korvid's status row at the bottom shows the context, `kind-korvid-playground`.
-These commands are for bash or zsh. In PowerShell, run them from a new, empty
-directory, set the variable with
-`$env:KUBECONFIG = "$PWD\korvid-playground.kubeconfig"`, download with
-`curl.exe`, and remove that directory with `Remove-Item -Recurse` when you
-are done.
+These commands are for bash or zsh. In PowerShell, first create a new, empty
+directory and enter it, then set the variable with
+`$env:KUBECONFIG = "$PWD\korvid-playground.kubeconfig"` and download with
+`curl.exe`. Before you apply the manifest or start korvid, check that
+`$env:KUBECONFIG` still names the file in that directory. When you are done,
+delete the cluster, leave the directory, and remove it.
 
 | Try | How |
 | --- | --- |
