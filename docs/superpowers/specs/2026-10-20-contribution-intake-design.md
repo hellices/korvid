@@ -131,6 +131,15 @@ enforcement does not depend on a maintainer noticing:
   workflow also runs on `issues` events (closed, reopened, assigned,
   unassigned, labeled, unlabeled), and re-evaluates every open pull request
   whose `closingIssuesReferences` include that issue.
+- Evaluations of one pull request run one at a time. Each evaluation job
+  joins a concurrency group named after its pull request, and an issue event
+  starts one job per affected pull request. The group does not cancel the
+  run in progress, which could stop it halfway through an update: GitHub
+  queues the newest run and drops any older one still waiting, so the last
+  evaluation to run is the newest. Each evaluation also reads the author's
+  permission and the issues' state just before it changes the label, never
+  from the event payload, so the last label written matches the current
+  state, whatever order the events arrived or finished in.
 - The answer lives on the pull request, never on its commit. A failing
   evaluation adds `status: needs-issue` and posts the reply above once, and
   a passing one removes the label. Two open pull requests can share a head
@@ -144,10 +153,11 @@ enforcement does not depend on a maintainer noticing:
 - Closing stays a maintainer's decision until the check has run without
   false positives for a while.
 - It ships with tests in the existing workflow-contract style: trigger set,
-  including the issue events, permissions, no checkout, no interpolation of
-  pull request fields. The decision itself is a pure function of the
-  author's permission and the linked issues' current state, tested case by
-  case:
+  including the issue events, a concurrency group per pull request that
+  does not cancel a run in progress, permissions, no checkout, no
+  interpolation of pull request fields. The decision itself is a pure
+  function of the author's permission and the linked issues' current state,
+  tested case by case:
   - `admin`, `maintain`, or `write` passes with no linked issue.
   - `triage`, `read`, or no access with no linked issue fails.
   - An open, accepted issue in this repository assigned to the author passes.
@@ -162,6 +172,9 @@ enforcement does not depend on a maintainer noticing:
     that issue, and leaves the others alone.
   - Two open pull requests that share a head commit but close different
     issues each keep their own answer: one labelled, the other not.
+  - Two evaluations of one pull request that finish out of order, such as
+    one started by `closed` that is still running when `reopened` arrives,
+    leave the label that the issue's current state calls for.
 
 Because it adds privileged triggers, this phase lands as its own pull
 request, and only with the maintainer's explicit approval.
