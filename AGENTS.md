@@ -109,13 +109,13 @@ This table is the readable copy of `tach.toml`, and
 ## Pull Requests
 
 - Do NOT open a pull request without explicit human instruction.
-- Every pull request closes an issue in this repository that is assigned to
-  its author, the maintainer's included (CONTRIBUTING.md, "From issue to pull
-  request"). When told to open one, first find the issue or create it with
-  `gh issue create --assignee @me`, with its type and area labels and the
-  milestone it ships in, then put `Closes #N` on the first line of the
-  description. Work that needs more than one pull request gets one sub-issue
-  per pull request.
+- Every pull request closes an accepted issue in this repository that is
+  assigned to its author, the maintainer's included (CONTRIBUTING.md, "From
+  issue to pull request"). When told to open one, first find the issue or
+  create it with `gh issue create --assignee @me`, with its type and area
+  labels, `status: accepted`, and the milestone it ships in, then put
+  `Closes #N` on the first line of the description. Work that needs more than
+  one pull request gets one sub-issue per pull request.
 - **The maintainer merges. You never do.** This is not a default you may
   override when a PR looks ready, when every check is green, when the change is
   trivial, or when you were told to "finish" something. Merging is a separate
