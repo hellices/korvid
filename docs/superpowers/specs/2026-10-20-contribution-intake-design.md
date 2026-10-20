@@ -184,14 +184,18 @@ does not depend on a maintainer noticing:
     for letter case or a rename to confuse the comparison.
   - It is open.
   - It is assigned to the author.
-  - It is accepted, meaning it no longer carries `status: needs-triage`. An
-    issue that was assigned by mistake while still in triage does not let a
-    pull request through.
-- A pass can go stale. After it, the issue can be closed, unassigned, or put
-  back into triage, and none of that is a pull request event. So the
-  workflow also runs on `issues` events (closed, reopened, assigned,
-  unassigned, labeled, unlabeled), and re-evaluates every open pull request
-  whose `closingIssuesReferences` include that issue.
+  - It is accepted: it does not carry `status: needs-triage`, and it does
+    carry a mark of acceptance from the issue states above, a milestone or
+    one of `status: backlog`, `status: tbd`, `help wanted`, and
+    `good first issue`. A missing triage label alone is not enough, because
+    a blank issue never had one. An issue assigned by mistake while still in
+    triage, labelled or blank, does not let a pull request through.
+- A pass can go stale. After it, the issue can be closed, unassigned, put
+  back into triage, or lose its milestone, and none of that is a pull
+  request event. So the workflow also runs on `issues` events (closed,
+  reopened, assigned, unassigned, labeled, unlabeled, milestoned,
+  demilestoned), and re-evaluates every open pull request whose
+  `closingIssuesReferences` include that issue.
 - Some changes leave nothing to follow. A deleted issue drops out of every
   pull request's closing references, an issue transferred to another
   repository no longer belongs to this one, and an event that GitHub fails
@@ -238,9 +242,12 @@ does not depend on a maintainer noticing:
     however it is labelled and assigned there.
   - A closed issue fails, as does an issue assigned to someone else or to
     no one, and an issue still labelled `status: needs-triage`.
+  - A blank issue assigned to the author fails while it has no milestone
+    and no acceptance label, and passes once it has either.
   - One passing issue among failing ones passes.
   - A pull request that passed fails on re-evaluation once its issue is
-    closed, unassigned, or labelled `status: needs-triage` again.
+    closed, unassigned, labelled `status: needs-triage` again, or left with
+    no mark of acceptance.
   - An issue event re-evaluates exactly the open pull requests that close
     that issue, and leaves the others alone.
   - Two open pull requests that share a head commit but close different
