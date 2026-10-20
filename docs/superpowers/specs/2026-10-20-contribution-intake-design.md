@@ -101,12 +101,13 @@ Repository settings for the maintainer (Settings > General > Pull requests):
 A workflow that checks each outside pull request against the rule, so
 enforcement does not depend on a maintainer noticing:
 
-- It is triggered by `pull_request_target` (opened, edited, reopened), so it
-  runs for first-time contributors without approval. It never checks out or
-  runs pull request code, uses no third-party actions, and passes the
-  untrusted title and body only through environment variables, never through
-  shell interpolation.
-- Permissions are `pull-requests: write` and `issues: read`, nothing else.
+- It is triggered by `pull_request_target` (opened, edited, reopened,
+  synchronize), so it runs for first-time contributors without approval. It
+  never checks out or runs pull request code, uses no third-party actions,
+  and passes the untrusted title and body only through environment
+  variables, never through shell interpolation.
+- Permissions are `pull-requests: write`, `issues: read`, and
+  `statuses: write`, nothing else.
 - It passes immediately only when the author can write to the repository. It
   reads the author's permission level on the repository and lets `admin`,
   `maintain`, or `write` through. `authorAssociation` is not enough, because
@@ -126,13 +127,23 @@ enforcement does not depend on a maintainer noticing:
   - It is accepted, meaning it no longer carries `status: needs-triage`. An
     issue that was assigned by mistake while still in triage does not let a
     pull request through.
-- On failure it adds `status: needs-issue` and posts the reply above once.
-  Closing stays a maintainer's decision until the check has run without false
-  positives for a while.
+- A pass can go stale. After it, the issue can be closed, unassigned, or put
+  back into triage, and none of that is a pull request event. So the
+  workflow also runs on `issues` events (closed, reopened, assigned,
+  unassigned, labeled, unlabeled), and re-evaluates every open pull request
+  whose `closingIssuesReferences` include that issue.
+- Each evaluation, whatever triggered it, sets a commit status named `intake`
+  on the pull request's head commit, so the latest one replaces any earlier
+  result. The maintainer who merges by hand sees the live answer, not the
+  one from when the pull request was opened.
+- On failure it also adds `status: needs-issue` and posts the reply above
+  once, and a later pass removes the label. Closing stays a maintainer's
+  decision until the check has run without false positives for a while.
 - It ships with tests in the existing workflow-contract style: trigger set,
-  permissions, no checkout, no interpolation of pull request fields. The
-  decision itself is a pure function of the author's permission and the
-  linked issues, tested case by case:
+  including the issue events, permissions, no checkout, no interpolation of
+  pull request fields. The decision itself is a pure function of the
+  author's permission and the linked issues' current state, tested case by
+  case:
   - `admin`, `maintain`, or `write` passes with no linked issue.
   - `triage`, `read`, or no access with no linked issue fails.
   - An open, accepted issue in this repository assigned to the author passes.
@@ -141,8 +152,12 @@ enforcement does not depend on a maintainer noticing:
   - A closed issue fails, as does an issue assigned to someone else or to
     no one, and an issue still labelled `status: needs-triage`.
   - One passing issue among failing ones passes.
+  - A pull request that passed fails on re-evaluation once its issue is
+    closed, unassigned, or labelled `status: needs-triage` again.
+  - An issue event re-evaluates exactly the open pull requests that close
+    that issue, and leaves the others alone.
 
-Because it adds a privileged trigger, this phase lands as its own pull
+Because it adds privileged triggers, this phase lands as its own pull
 request, and only with the maintainer's explicit approval.
 
 ## Current cases
