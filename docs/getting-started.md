@@ -151,9 +151,15 @@ access, privileges, or an API token. Then, in the same terminal, apply it
 and start korvid:
 
 ```sh
-kubectl --context kind-korvid-playground apply -f workloads.yaml
-korvid -n playground
+cd "${playground:?}" && test "$KUBECONFIG" = "$PWD/korvid-playground.kubeconfig" &&
+  kubectl --context kind-korvid-playground apply -f workloads.yaml &&
+  korvid -n playground
 ```
+
+The first line stops the block unless this terminal is still in the
+playground directory with its own kubeconfig, so a setup that failed cannot
+send korvid to your usual clusters, and korvid starts only after the apply
+succeeds.
 
 korvid's status row at the bottom shows the context, `kind-korvid-playground`.
 These commands are for bash or zsh. In PowerShell, run them from a new, empty
@@ -171,12 +177,16 @@ are done.
 | Approve a write | Type `:deploy`, select `web`, press `S`, and scale to 3. Nothing changes until you confirm, and `:outcomes` then shows what the Deployment controller did ([operations](ops.md)) |
 | Ask the agent | With the `[agent]` extra and a model from `:ai`, press `Ctrl-A` and ask why `checkout` is failing ([agent](agent.md)) |
 
-When you are done, delete the cluster and the directory with its two files:
+When you are done, delete the cluster and then the directory with its two
+files:
 
 ```sh
-kind delete cluster --name korvid-playground
-cd && rm -r "${playground:?}"
+kind delete cluster --name korvid-playground &&
+  cd && rm -r "${playground:?}"
 ```
+
+If deleting the cluster fails, the directory stays, so you can try again
+with the same kubeconfig.
 
 Then open a new terminal to return to your usual clusters: `KUBECONFIG` was
 set only in this one.

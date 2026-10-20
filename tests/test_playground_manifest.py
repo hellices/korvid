@@ -41,7 +41,7 @@ SCRATCH_DIRECTORY = ('playground="$(mktemp -d)" &&', 'cd "$playground" &&')
 #: only the throwaway cluster (the tests below encode what to check), then
 #: update this value. The section is read with universal newlines, so a CRLF
 #: checkout hashes the same.
-REVIEWED_SECTION_SHA256 = "7f910f8e9adf3c13e86e8b6cf41117af60c9fc5b8905b57edc5ad3f0a187f8eb"
+REVIEWED_SECTION_SHA256 = "c9b42dd590861dbb56921e2c10994dc25a2a40f5da0c1bb7a7e3890252b3807a"
 
 #: kubectl flags and commands that point it somewhere other than the dedicated
 #: KUBECONFIG's single context.
@@ -260,8 +260,12 @@ def test_the_guide_keeps_the_playground_in_its_own_kubeconfig() -> None:
         f"kind create cluster --name {CLUSTER} &&",
         f"curl -fsSLO {RAW_URL}",
     ], "enter a fresh directory and isolate the kubeconfig before any other command"
+    # The apply block checks again that this terminal is in the scratch
+    # directory with its own kubeconfig: a reader may carry on after a failed
+    # setup, and korvid must never start on their usual clusters.
     assert apply == [
-        f"kubectl --context {CONTEXT} apply -f workloads.yaml",
+        f'cd "${{playground:?}}" && test "$KUBECONFIG" = "$PWD/{CLUSTER}.kubeconfig" &&',
+        f"kubectl --context {CONTEXT} apply -f workloads.yaml &&",
         f"korvid -n {NAMESPACE}",
     ]
     assert RAW_URL.endswith(MANIFEST.relative_to(ROOT).as_posix())
@@ -272,9 +276,9 @@ def test_the_guide_keeps_the_playground_in_its_own_kubeconfig() -> None:
     assert kubectl
     assert all(f"--context {CONTEXT}" in line for line in kubectl)
     assert cleanup == [
-        f"kind delete cluster --name {CLUSTER}",
+        f"kind delete cluster --name {CLUSTER} &&",
         'cd && rm -r "${playground:?}"',
-    ], "the cleanup deletes only the throwaway cluster and the guide's own directory"
+    ], "the cleanup deletes the guide's own directory only once the cluster is gone"
     assert "open a new terminal" in section.lower(), (
         "only a new terminal restores a KUBECONFIG the reader had set before"
     )
