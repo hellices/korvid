@@ -11,6 +11,7 @@ CONTRIBUTING.md saying the same thing.
 
 from __future__ import annotations
 
+import hashlib
 import re
 from html.parser import HTMLParser
 from pathlib import Path
@@ -27,6 +28,17 @@ CONTRIBUTING = ROOT / "CONTRIBUTING.md"
 PR_TEMPLATE = ROOT / ".github" / "pull_request_template.md"
 FORMS = ROOT / ".github" / "ISSUE_TEMPLATE"
 TRIAGE_LABEL = "status: needs-triage"
+#: SHA-256 of every file in .github/ISSUE_TEMPLATE, read with universal
+#: newlines. A form shows more than its markdown items: labels, descriptions,
+#: and options are text a reader sees too, and so is the chooser's
+#: config.yml. Like the reviewed practice section, any edit or new file is a
+#: deliberate change: re-check that each form still applies the triage label
+#: and that nothing a reader sees qualifies the intake rule, then update this.
+ISSUE_TEMPLATE_SHA256 = {
+    "bug_report.yml": "7e9c3cacb7f80dec9756f6e507badae25c872d8a704e4282d2a7e6c90db43713",
+    "config.yml": "8407efa53b745f1f8589006ac0b82391929294859bef5bb50c6c3254125f3a59",
+    "feature_request.yml": "9246e136f5f45436e9bab5aae1e474c73b992c46afcd1ef00f740c40d38b3d60",
+}
 FORM_LABELS = {
     "bug_report.yml": ["bug", TRIAGE_LABEL],
     "feature_request.yml": ["enhancement", TRIAGE_LABEL],
@@ -168,7 +180,8 @@ def _blocks(markdown: str) -> list[str]:
 def _section(markdown: str, heading: str) -> list[str]:
     """The blocks a reader sees under the h2 `heading`, up to the next h1 or h2."""
     blocks = _render(markdown)
-    assert ("h2", heading) in blocks, f"no visible h2 {heading!r}"
+    # Exactly once: a second section with the same heading would never be read.
+    assert blocks.count(("h2", heading)) == 1, f"expected exactly one visible h2 {heading!r}"
     start = blocks.index(("h2", heading)) + 1
     ends = [index for index, (element, _) in enumerate(blocks) if element in {"h1", "h2"}]
     end = next((index for index in ends if index >= start), len(blocks))
@@ -264,8 +277,10 @@ def test_sections_and_tasks_come_from_markdown_a_reader_sees() -> None:
 
     assert _section(markdown, "Shown") == ["body", "Lower", "open", "ticked", "not a task"]
     assert _section(markdown, "Next") == ["after"]
-    with pytest.raises(AssertionError, match="no visible h2"):
+    with pytest.raises(AssertionError, match="exactly one visible h2"):
         _section(markdown, "Hidden")
+    with pytest.raises(AssertionError, match="exactly one visible h2"):
+        _section(markdown + "\n## Shown\n\nagain\n", "Shown")
     assert _tasks(markdown) == [(False, "open"), (True, "ticked")]
 
 
@@ -278,6 +293,19 @@ def test_every_issue_form_waits_for_triage() -> None:
     assert forms == sorted(FORM_LABELS), "every issue form needs its labels pinned"
     for name, labels in FORM_LABELS.items():
         assert _form(name)["labels"] == labels, name
+
+
+def test_the_issue_templates_are_the_reviewed_text() -> None:
+    digests = {
+        path.name: hashlib.sha256(path.read_text(encoding="utf-8").encode("utf-8")).hexdigest()
+        for path in FORMS.iterdir()
+    }
+
+    assert digests == ISSUE_TEMPLATE_SHA256, (
+        "an issue template changed or was added: re-check that every form applies the "
+        "triage label and that nothing a reader sees qualifies the intake rule, then "
+        "update ISSUE_TEMPLATE_SHA256"
+    )
 
 
 def test_the_feature_form_says_work_waits_for_an_assignment() -> None:
