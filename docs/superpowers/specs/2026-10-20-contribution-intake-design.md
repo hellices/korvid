@@ -1,8 +1,10 @@
-# Contribution intake: an issue first, an assignment before a pull request
+# Contribution intake: an issue first, a decision before a pull request
 
 Date: 2026-10-20. Status: phase 1 is in #447; phase 2 is proposed and needs
 the maintainer's approval. Revised the same day: the rule covers the
-maintainer's own pull requests too.
+maintainer's own pull requests too. Revised on 2026-10-21: the decision on
+an issue, a confirmed bug or an accepted feature, is recorded as
+`status: accepted`, and no pull request limit is used.
 
 ## Problem
 
@@ -35,6 +37,8 @@ negotiation.
 
 Goals:
 
+- An outside change is discussed on its issue and decided there, as a
+  confirmed bug or an accepted feature, before anyone writes it.
 - Every pull request, the maintainer's included, closes an accepted issue in
   this repository that is assigned to its author. Only pull requests opened
   by Dependabot or the Relock workflow are exempt.
@@ -46,6 +50,8 @@ Goals:
 Non-goals:
 
 - No merge automation of any kind (AGENTS.md).
+- No limit on how many pull requests are open. The rule turns on whether a
+  pull request has an accepted issue behind it, not on how many there are.
 - No project board for now. At 17 open issues, the saved searches below show
   the same state without a second copy to keep in sync.
 - No closing the door on outside contributions.
@@ -55,11 +61,15 @@ Non-goals:
 | Option | What it does | Verdict |
 | --- | --- | --- |
 | A. Written rule only | CONTRIBUTING.md, the forms, and the pull request template state the rule; maintainers enforce it by hand | Necessary but not enough as volume grows |
-| B. Written rule, GitHub limits, and an intake check | A, plus the open pull request limit for users without write access, plus an automated check that labels pull requests without an assigned issue | **Chosen**, in two phases |
+| B. Written rule and an intake check | A, plus an automated check that labels pull requests without an accepted, assigned issue | **Chosen**, in two phases |
 | C. Pull requests from collaborators only | The [February 2026 setting](https://github.blog/changelog/2026-02-13-new-repository-settings-for-configuring-pull-request-access/) lets only users with write access open pull requests | Rejected as the default: every contributor would need write access to a repository that holds release and Homebrew automation. Kept as an emergency lever |
 
-GitHub has no built-in rule that a pull request must close an assigned issue.
-The repository has to state it and, at scale, check it.
+GitHub's [June 2026 setting](https://github.blog/changelog/2026-06-17-limit-open-pull-requests-for-users-without-write-access/)
+that limits open pull requests for users without write access is not used:
+counting pull requests does not tell agreed work from unagreed work.
+
+GitHub has no built-in rule that a pull request must close an accepted,
+assigned issue. The repository has to state it and, at scale, check it.
 
 ## Who the rule covers
 
@@ -67,7 +77,7 @@ The repository has to state it and, at scale, check it.
 | --- | --- | --- |
 | Outside contributors only; write access is exempt | No change for the maintainer, but most of the work, the maintainer's, stays outside issues and milestones | Rejected |
 | Everyone links an issue; write access needs no assignment | Every change is tracked, but the assignee field stops saying who is doing what, and the check has to read each author's permission | Rejected |
-| Everyone closes an issue assigned to them; write access only means accepting and assigning one's own | One rule. The assignee field says who is doing what, and the check reads no permission | **Chosen** |
+| Everyone closes an accepted issue assigned to them; write access only means accepting and assigning one's own | One rule. The assignee field says who is doing what, and the check reads no permission | **Chosen** |
 
 The cost is an issue for each of the maintainer's changes. Coding agents do
 most of that work, so AGENTS.md has them open the issue first.
@@ -75,40 +85,43 @@ most of that work, so AGENTS.md has them open the issue first.
 ## Phase 1: the written rule (this pull request)
 
 - CONTRIBUTING.md gains "From issue to pull request":
-  1. find or open an issue; form issues are labelled `status: needs-triage`
-     until a maintainer accepts or closes them;
-  2. ask for it with a short plan;
-  3. wait to be assigned, one issue at a time until a first pull request is
-     merged; an assignment with no pull request or update for 14 days may be
+  1. open an issue first, with the forms, which label it
+     `status: needs-triage`;
+  2. discuss it on the issue: whether a bug is real, usually by reproducing
+     it, and whether a feature fits and how it should work;
+  3. wait for the decision: a maintainer confirms the bug or accepts the
+     feature by replacing `status: needs-triage` with `status: accepted`, or
+     closes the issue with the reason; whoever offered to make the change is
+     assigned, one issue at a time until a first pull request is merged, and
+     an assignment with no pull request or update for 14 days may be
      released;
   4. open the pull request with `Closes #N` at the top.
 
   The rule is the same for maintainers, who accept and assign issues
-  themselves. A pull request that does not close an issue assigned to its
-  author is closed without review. It can be reopened once the issue is
-  assigned. Pull requests opened by Dependabot or the Relock workflow are
-  exempt, and security fixes go through SECURITY.md.
-- Both issue forms add `status: needs-triage`. The feature form says to wait
-  for acceptance and assignment.
+  themselves. A pull request that does not close an accepted issue assigned
+  to its author is closed without review. It can be reopened once the issue
+  is accepted and assigned. Pull requests opened by Dependabot or the Relock
+  workflow are exempt, and security fixes go through SECURITY.md.
+- Both issue forms add `status: needs-triage`. The bug form says a
+  maintainer confirms each report, usually by reproducing it, and that a fix
+  waits for confirmation and assignment. The feature form says the design is
+  worked out on the issue, and that work waits for acceptance and
+  assignment. Each has a checkbox for offering to make the change.
 - The pull request template starts with `Closes #` and has a checklist item
   for it.
-- AGENTS.md tells coding agents to find or create the issue, assigned to the
-  maintainer, before they open a pull request.
-- The `status: needs-triage` label exists. The existing `status: tbd` and
-  `status: backlog` mean deferred work, not untriaged work.
+- AGENTS.md tells coding agents to find or create the issue, accepted and
+  assigned to the maintainer, before they open a pull request.
+- The `status: needs-triage` and `status: accepted` labels exist. The
+  existing `status: tbd` and `status: backlog` mean valid work that is
+  deferred, not untriaged work.
 - The open good first issues (#442–#445) tell claimants to wait for
   assignment.
 - `tests/test_contribution_intake.py` keeps the forms, the template, and
   CONTRIBUTING.md stating the same rule.
 - #447 follows the rule itself: it closes #449.
 
-Repository settings for the maintainer (Settings > General > Pull requests):
-
-- Limit open pull requests for users without write access to 1, with a bypass
-  list for trusted contributors
-  ([June 2026 setting](https://github.blog/changelog/2026-06-17-limit-open-pull-requests-for-users-without-write-access/)).
-  Draft pull requests do not count.
-- Keep requiring approval before Actions run for first-time contributors.
+Repository settings for the maintainer: keep requiring approval before
+Actions run for first-time contributors (Settings > Actions > General).
 
 ## Issue states
 
@@ -117,24 +130,29 @@ be kept in sync:
 
 | State | What shows it |
 | --- | --- |
-| New | `status: needs-triage`, added by the forms; a blank issue has no label at all |
-| Accepted and scheduled | No triage label, and a milestone |
-| Accepted, not scheduled | `status: backlog`, or `status: tbd` for work deferred from the current release |
-| Open to contributors | `help wanted` or `good first issue`, and no assignee |
+| New, under discussion | `status: needs-triage`, added by the forms; a blank issue has no status label at all |
+| Accepted: a confirmed bug or an accepted feature | `status: accepted`, and a milestone once it is scheduled |
+| Valid but deferred | `status: backlog`, or `status: tbd` for work deferred from the current release; it needs `status: accepted` before a pull request |
+| Open to contributors | `status: accepted` with `help wanted` or `good first issue`, and no assignee |
 | In progress | An assignee, then a linked pull request |
+| Declined | Closed as not planned, with the reason |
 | Done | Closed by the pull request that names it in `Closes #N` |
 
 ## Maintainer routine
 
-- Open an issue for your own work before the pull request, assigned to
-  yourself and in the milestone it ships in. Coding agents do this for you
-  (AGENTS.md).
+- Open an issue for your own work before the pull request, labelled
+  `status: accepted`, assigned to yourself, and in the milestone it ships
+  in. Coding agents do this for you (AGENTS.md).
 - Triage weekly with
-  `is:issue state:open (label:"status: needs-triage" OR no:label)`. Accept an
-  issue by scheduling it, labelling it `status: backlog`, or labelling it
-  `help wanted` or `good first issue`, then remove the triage label.
-  Otherwise close it with the reason. Give a blank issue its type label as
-  well, so that it leaves the queue.
+  `is:issue state:open -label:"status: accepted" -label:"status: backlog" -label:"status: tbd"`,
+  which lists every open issue without a decision, blank issues included.
+  Discuss each on its issue. Confirm a bug, usually by reproducing it, or
+  accept a feature once its design is agreed: replace
+  `status: needs-triage` with `status: accepted`, and add a milestone if it
+  is scheduled, or `help wanted` or `good first issue` if it is open to
+  contributors. If the reporter offered to make the change, assign it to
+  them at the same time. Defer valid work with `status: backlog` instead,
+  and close everything else as not planned, with the reason.
 - Assign on request. Before the assignee's first merge, give them one issue at
   a time. Check assignments with
   `is:issue state:open has:assignee -linked:pr sort:updated-asc`, and release
@@ -142,17 +160,18 @@ be kept in sync:
 - Find pull requests that link no issue with
   `is:pr state:open -linked:issue -author:app/dependabot`. A Relock pull
   request shows up here too, and is exempt. Link the issue in your own.
-  Close anyone else's that does not close an issue assigned to its author,
-  with this reply:
+  Close anyone else's that does not close an accepted issue assigned to its
+  author, with this reply:
 
-  > Thanks for the pull request. Every pull request in korvid closes an issue
-  > in this repository that is assigned to its author; see "From issue to
-  > pull request" in CONTRIBUTING.md. Please ask for the issue there. Once it
-  > is assigned to you, reopen this pull request and add `Closes #N` at the
+  > Thanks for the pull request. Every pull request in korvid closes an
+  > accepted issue in this repository that is assigned to its author; see
+  > "From issue to pull request" in CONTRIBUTING.md. Please open or find the
+  > issue and discuss the change there. Once a maintainer accepts it and
+  > assigns it to you, reopen this pull request and add `Closes #N` at the
   > top.
 
 These searches use GitHub's issue search syntax as the web interface runs
-it; `has:assignee` and the parentheses depend on it.
+it; `has:assignee` depends on it.
 
 ## Phase 2: an intake check (proposed)
 
@@ -176,8 +195,8 @@ does not depend on a maintainer noticing:
   so no one else can borrow either exemption.
 - Every other author, the maintainer included, needs a linked issue, and the
   check reads no permission. Only someone with triage access or more can
-  assign an issue or remove `status: needs-triage`, so an assigned, accepted
-  issue already carries a maintainer's decision. That also keeps
+  assign an issue or add `status: accepted`, so an assigned, accepted issue
+  already carries a maintainer's decision. That also keeps
   `authorAssociation` and later permission changes out of the decision.
 - It reads the pull request's `closingIssuesReferences` through GraphQL. It
   passes only if one linked issue meets every condition:
@@ -189,18 +208,18 @@ does not depend on a maintainer noticing:
     for letter case or a rename to confuse the comparison.
   - It is open.
   - It is assigned to the author.
-  - It is accepted: it does not carry `status: needs-triage`, and it does
-    carry a mark of acceptance from the issue states above, a milestone or
-    one of `status: backlog`, `status: tbd`, `help wanted`, and
-    `good first issue`. A missing triage label alone is not enough, because
-    a blank issue never had one. An issue assigned by mistake while still in
-    triage, labelled or blank, does not let a pull request through.
-- A pass can go stale. After it, the issue can be closed, unassigned, put
-  back into triage, or lose its milestone, and none of that is a pull
-  request event. So the workflow also runs on `issues` events (closed,
-  reopened, assigned, unassigned, labeled, unlabeled, milestoned,
-  demilestoned), and re-evaluates every open pull request whose
-  `closingIssuesReferences` include that issue.
+  - It is accepted: it carries `status: accepted` and not
+    `status: needs-triage`. A maintainer who accepts an issue replaces one
+    label with the other, so an issue with both has not finished triage, and
+    a blank issue, with neither, has not been decided. A milestone,
+    `help wanted`, or `status: backlog` is not a decision either. An issue
+    assigned by mistake before the decision does not let a pull request
+    through.
+- A pass can go stale. After it, the issue can be closed, unassigned, or
+  lose `status: accepted`, and none of that is a pull request event. So the
+  workflow also runs on `issues` events (closed, reopened, assigned,
+  unassigned, labeled, unlabeled), and re-evaluates every open pull request
+  whose `closingIssuesReferences` include that issue.
 - Some changes leave nothing to follow. A deleted issue drops out of every
   pull request's closing references, an issue transferred to another
   repository no longer belongs to this one, and an event that GitHub fails
@@ -248,13 +267,15 @@ does not depend on a maintainer noticing:
   - The same issue in another repository (`Closes other/repo#N`) fails,
     however it is labelled and assigned there.
   - A closed issue fails, as does an issue assigned to someone else or to
-    no one, and an issue still labelled `status: needs-triage`.
-  - A blank issue assigned to the author fails while it has no milestone
-    and no acceptance label, and passes once it has either.
+    no one, and an issue without `status: accepted` or still labelled
+    `status: needs-triage`.
+  - An issue assigned to the author fails until a maintainer labels it
+    `status: accepted`, whatever else it carries: a milestone,
+    `help wanted`, or `status: backlog` alone does not pass.
   - One passing issue among failing ones passes.
   - A pull request that passed fails on re-evaluation once its issue is
-    closed, unassigned, labelled `status: needs-triage` again, or left with
-    no mark of acceptance.
+    closed, unassigned, loses `status: accepted`, or is labelled
+    `status: needs-triage` again.
   - An issue event re-evaluates exactly the open pull requests that close
     that issue, and leaves the others alone.
   - Two open pull requests that share a head commit but close different
