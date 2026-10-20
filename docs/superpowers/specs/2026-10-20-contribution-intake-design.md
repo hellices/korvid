@@ -100,8 +100,7 @@ most of that work, so AGENTS.md has them open the issue first.
   assignment.
 - `tests/test_contribution_intake.py` keeps the forms, the template, and
   CONTRIBUTING.md stating the same rule.
-- #447 follows the rule itself: it closes #449, the work, and #450, the
-  aiohttp update it carries.
+- #447 follows the rule itself: it closes #449.
 
 Repository settings for the maintainer (Settings > General > Pull requests):
 
@@ -271,9 +270,9 @@ request, and only with the maintainer's explicit approval.
   and the unrelated reformatting uses up most of the headroom the issue was
   meant to free. Close the pull request only if the author does not respond.
 - #447: it introduced the rule before the rule covered maintainers, so it
-  linked no issue at first. It now closes #449, the work, and #450, the
-  aiohttp update it carries.
+  linked no issue at first. It now closes #449. It also carried an aiohttp
+  update for #450 until #448 landed one on `main`, and dropped it when it
+  was rebased onto `main`.
 - #448: Dependabot's aiohttp 3.14.4 update, exempt as a Dependabot pull
-  request. It also meets #450, but does not close it, so close #450 by hand
-  if #448 merges first. #447 and #448 both change `uv.lock`, so whichever
-  merges second needs a fresh lock.
+  request, merged first. A Dependabot pull request names no issue, so it
+  fixed #450 without closing it, and #450 is closed by hand.
