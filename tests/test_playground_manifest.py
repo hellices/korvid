@@ -42,7 +42,7 @@ SCRATCH_DIRECTORY = ('playground="$(mktemp -d)" &&', 'cd "$playground" &&')
 #: only the throwaway cluster (the tests below encode what to check), then
 #: update this value. The section is read with universal newlines, so a CRLF
 #: checkout hashes the same.
-REVIEWED_SECTION_SHA256 = "3e062db0fbf5fc31a9e0dea731383d2525de99a4e067aac05aa3e657d029ae01"
+REVIEWED_SECTION_SHA256 = "66e2ea8eae1f4c26d416e737f65792a18dbdafd3a906079468587fdf10563752"
 
 #: kubectl flags and commands that point it somewhere other than the dedicated
 #: KUBECONFIG's single context.

@@ -156,10 +156,10 @@ cd "${playground:?}" && test "$KUBECONFIG" = "$PWD/korvid-playground.kubeconfig"
   korvid -n playground
 ```
 
-The first line stops the block unless this terminal is still in the
-playground directory with its own kubeconfig, so a setup that failed cannot
-send korvid to your usual clusters, and korvid starts only after the apply
-succeeds.
+The first line returns to the playground directory and stops the block
+unless `KUBECONFIG` still names the kubeconfig file there, so a setup that
+failed cannot send korvid to your usual clusters. korvid starts only after
+the apply succeeds.
 
 korvid's status row at the bottom shows the context, `kind-korvid-playground`.
 These commands are for bash or zsh. In PowerShell, first create a new, empty
