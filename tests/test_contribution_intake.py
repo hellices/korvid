@@ -11,9 +11,7 @@ CONTRIBUTING.md saying the same thing.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from html.parser import HTMLParser
-from itertools import pairwise
 from pathlib import Path
 from typing import Any
 
@@ -21,7 +19,6 @@ import pytest
 import yaml
 from markdown_it import MarkdownIt
 from markdown_it.renderer import RendererHTML
-from markdown_it.token import Token
 from mdit_py_plugins.tasklists import tasklists_plugin
 
 ROOT = Path(__file__).parents[1]
@@ -31,25 +28,35 @@ FORMS = ROOT / ".github" / "ISSUE_TEMPLATE"
 TRIAGE_LABEL = "status: needs-triage"
 
 
-#: The rule's load-bearing sentences, pinned whole and as a reader sees them
-#: (inline code renders without its backticks): checking single words such
-#: as "assigns" would accept a sentence that means something else ("a
-#: maintainer assigns a reviewer").
-CONTRIBUTING_RULE = (
+#: The intake section of CONTRIBUTING.md as a reader sees it, block by block
+#: (inline code renders without its backticks). It is pinned whole: a check
+#: for single words, or even whole sentences, would accept a section that
+#: keeps them but adds a clause or a block that retracts the rule.
+INTAKE_HEADING = "From issue to pull request"
+INTAKE_SECTION = (
     "Every change starts as an issue. If you do not have write access to this repository, "
-    "open a pull request only for an issue that a maintainer has assigned to you.",
-    "New issues from the forms get the status: needs-triage label until a maintainer "
-    "accepts or closes them.",
-    "A maintainer assigns the issue to you, one at a time until your first pull request is merged.",
-    "If an assigned issue sees no pull request or update for 14 days, a maintainer may "
-    "release it to someone else.",
-    "Put Closes #N at the top of the description, where N is the assigned issue.",
+    "open a pull request only for an issue that a maintainer has assigned to you. Review "
+    "time goes to changes the project has agreed to make, and two people do not build the "
+    "same thing.",
+    "Find or open an issue. New issues from the forms get the status: needs-triage label "
+    "until a maintainer accepts or closes them. Accepted work that is open to contributors "
+    "is labelled help wanted or good first issue.",
+    "Ask for it. Comment on the issue with a short plan.",
+    "Wait to be assigned. A maintainer assigns the issue to you, one at a time until your "
+    "first pull request is merged. If an assigned issue sees no pull request or update for "
+    "14 days, a maintainer may release it to someone else.",
+    "Open the pull request. Put Closes #N at the top of the description, where N is the "
+    "assigned issue.",
     "A pull request from someone without write access that does not close an issue "
-    "assigned to its author is closed without review, however good the change.",
+    "assigned to its author is closed without review, however good the change. Ask for the "
+    "issue first; once a maintainer assigns it, the pull request can be reopened. Security "
+    "fixes go through SECURITY.md instead of an issue.",
 )
-FEATURE_FORM_RULE = (
-    "A maintainer reviews each request. Wait until one accepts it and assigns it to you "
-    "before opening a pull request."
+#: The feature form's note, pinned whole for the same reason.
+FEATURE_FORM_NOTE = (
+    "Start with the problem: the best design may differ from the first idea. A maintainer "
+    "reviews each request. Wait until one accepts it and assigns it to you before opening "
+    "a pull request."
 )
 PR_TEMPLATE_TASK = "This closes an issue that a maintainer assigned to me, or I have write access."
 
@@ -57,66 +64,76 @@ PR_TEMPLATE_TASK = "This closes an issue that a maintainer assigned to me, or I 
 #: that change what a reader sees: tables, strikethrough, and task lists.
 _MARKDOWN = MarkdownIt("commonmark").enable(["table", "strikethrough"]).use(tasklists_plugin)
 _HTML = RendererHTML()
+_HEADINGS = frozenset({"h1", "h2", "h3", "h4", "h5", "h6"})
 #: The elements markdown syntax renders text into. Only text nodes count, so
 #: comments, link titles, and unused reference definitions never do. Neither
 #: does text inside any other element: raw HTML can collapse it (`<details>`)
 #: or have GitHub drop it (`<script>`), and ~~struck~~ text reads as withdrawn.
 _SHOWN = frozenset(
     {"a", "blockquote", "code", "em", "li", "ol", "p", "pre", "strong", "ul"}
-    | {"h1", "h2", "h3", "h4", "h5", "h6"}
+    | _HEADINGS
     | {"table", "tbody", "td", "th", "thead", "tr"}
 )
+#: The elements that start a new block of text.
+_BLOCKS = frozenset({"blockquote", "li", "ol", "p", "pre", "td", "th", "tr", "ul"} | _HEADINGS)
 _VOID = frozenset({"br", "hr", "img", "input"})
 
 
 class _Reader(HTMLParser):
-    """Collects the text nodes a reader sees in rendered markdown."""
+    """Collects the text a reader sees, block by block, with each block's element."""
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
-        self.parts: list[str] = []
+        self.blocks: list[tuple[str, list[str]]] = [("", [])]
         self._open: list[str] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self._break(tag, tag)
         if tag not in _VOID:
             self._open.append(tag)
 
     def handle_endtag(self, tag: str) -> None:
         if tag in self._open:
             del self._open[len(self._open) - 1 - self._open[::-1].index(tag) :]
+        self._break(tag, "")
 
     def handle_data(self, data: str) -> None:
         if all(tag in _SHOWN for tag in self._open):
-            self.parts.append(data)
+            self.blocks[-1][1].append(data)
+
+    def _break(self, tag: str, element: str) -> None:
+        if tag not in _BLOCKS:
+            return
+        if "".join(self.blocks[-1][1]).strip():
+            self.blocks.append((element, []))
+        else:
+            self.blocks[-1] = (element, [])
 
 
 def _text(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
-def _shown(html: str) -> str:
+def _visible(html: str) -> list[tuple[str, str]]:
     reader = _Reader()
     reader.feed(html)
     reader.close()
-    return "".join(reader.parts)
+    return [(element, text) for element, parts in reader.blocks if (text := _flat("".join(parts)))]
 
 
-def _rendered(markdown: str) -> str:
-    """The text GitHub shows a reader of `markdown`."""
-    return _shown(_MARKDOWN.render(markdown))
+def _blocks(markdown: str) -> list[str]:
+    """The blocks of text GitHub shows a reader of `markdown`, each on one line."""
+    return [text for _, text in _visible(_MARKDOWN.render(markdown))]
 
 
-def _inline(tokens: Sequence[Token]) -> str:
-    return _flat(_shown(_HTML.renderInline(tokens, _MARKDOWN.options, {})))
-
-
-def _headings(markdown: str, tag: str) -> list[str]:
-    """The text a reader sees in each `tag` heading."""
-    return [
-        _inline(inline.children or [])
-        for heading, inline in pairwise(_MARKDOWN.parse(markdown))
-        if heading.type == "heading_open" and heading.tag == tag
-    ]
+def _section(markdown: str, heading: str) -> list[str]:
+    """The blocks a reader sees under the h2 `heading`, up to the next h1 or h2."""
+    blocks = _visible(_MARKDOWN.render(markdown))
+    assert ("h2", heading) in blocks, f"no visible h2 {heading!r}"
+    start = blocks.index(("h2", heading)) + 1
+    ends = [index for index, (element, _) in enumerate(blocks) if element in {"h1", "h2"}]
+    end = next((index for index in ends if index >= start), len(blocks))
+    return [text for _, text in blocks[start:end]]
 
 
 def _tasks(markdown: str) -> list[tuple[bool, str]]:
@@ -126,7 +143,10 @@ def _tasks(markdown: str) -> list[tuple[bool, str]]:
     for item, inline in zip(tokens, tokens[2:], strict=False):
         if item.type == "list_item_open" and "task-list-item" in str(item.attrGet("class")):
             box, *label = inline.children or []
-            tasks.append(('checked="checked"' in box.content, _inline(label)))
+            html = _HTML.renderInline(label, _MARKDOWN.options, {})
+            tasks.append(
+                ('checked="checked"' in box.content, " ".join(t for _, t in _visible(html)))
+            )
     return tasks
 
 
@@ -148,9 +168,15 @@ def test_rendered_text_keeps_what_a_reader_sees() -> None:
         "| a | table |\n| --- | --- |\n| x | y |\n"
     )
 
-    assert _flat(_rendered(shown)) == (
-        "A heading a task with code and a link quoted & escaped a table x y"
-    )
+    assert _blocks(shown) == [
+        "A heading",
+        "a task with code and a link",
+        "quoted & escaped",
+        "a",
+        "table",
+        "x",
+        "y",
+    ]
 
 
 @pytest.mark.parametrize(
@@ -159,7 +185,7 @@ def test_rendered_text_keeps_what_a_reader_sees() -> None:
         "<!-- the rule -->",
         "<!--\nthe rule\n-->",
         '[unused]: https://example.invalid "the rule"',
-        'a [link](https://example.invalid "the rule")',
+        '[](https://example.invalid "the rule")',
         "<details>\n\nthe rule\n\n</details>",
         "<script>the rule</script>",
         "~~the rule~~",
@@ -175,25 +201,36 @@ def test_rendered_text_keeps_what_a_reader_sees() -> None:
     ],
 )
 def test_rendered_text_drops_what_a_reader_does_not_see(hidden: str) -> None:
-    text = _flat(_rendered(f"before\n\n{hidden}\n\nafter"))
-
-    assert "the rule" not in text
-    assert text.startswith("before ")
-    assert text.endswith(" after")
+    assert _blocks(f"before\n\n{hidden}\n\nafter") == ["before", "after"]
 
 
-def test_headings_and_tasks_come_from_markdown_a_reader_sees() -> None:
+def test_sections_and_tasks_come_from_markdown_a_reader_sees() -> None:
     markdown = (
         "## Shown <!-- note -->\n\n"
+        "body\n\n"
         "<!--\n## Hidden\n-->\n\n"
+        "<details>\n\n## Collapsed\n\n</details>\n\n"
         "### Lower\n\n"
         "- [ ] open <!-- note -->\n"
         "- [x] ticked\n"
         "- not a task\n\n"
-        "<ul><li>[ ] raw HTML</li></ul>\n"
+        "<ul><li>[ ] raw HTML</li></ul>\n\n"
+        "## Next\n\n"
+        "after\n"
     )
 
-    assert _headings(markdown, "h2") == ["Shown"]
+    assert _section(markdown, "Shown") == [
+        "body",
+        "Lower",
+        "open",
+        "ticked",
+        "not a task",
+        "[ ] raw HTML",
+    ]
+    assert _section(markdown, "Next") == ["after"]
+    for hidden in ("Hidden", "Collapsed"):
+        with pytest.raises(AssertionError, match="no visible h2"):
+            _section(markdown, hidden)
     assert _tasks(markdown) == [(False, "open"), (True, "ticked")]
 
 
@@ -205,30 +242,27 @@ def test_every_issue_form_waits_for_triage() -> None:
 
 
 def test_the_feature_form_says_work_waits_for_an_assignment() -> None:
-    # Each markdown item renders as its own block, so the rule has to sit
-    # whole and visible inside one of them, not straddle a field between two.
+    # Each markdown item renders on its own, so the note has to be one of
+    # them, whole and visible, not straddle a field between two.
     notes = [
-        _flat(_rendered(item["attributes"]["value"]))
+        _blocks(item["attributes"]["value"])
         for item in _form("feature_request.yml")["body"]
         if item["type"] == "markdown"
     ]
 
-    assert any(FEATURE_FORM_RULE in note for note in notes)
+    assert [FEATURE_FORM_NOTE] in notes
 
 
 def test_the_pull_request_template_starts_with_the_assigned_issue() -> None:
     template = _text(PR_TEMPLATE)
-    lines = [line for line in _rendered(template).splitlines() if line.strip()]
 
-    assert lines[0] == "Closes #", "the template must ask for the issue before anything else"
+    assert _blocks(template)[0] == "Closes #", (
+        "the template must ask for the issue before anything else"
+    )
     assert (False, PR_TEMPLATE_TASK) in _tasks(template), (
         "an unticked box must ask the author to confirm the assignment"
     )
 
 
 def test_contributing_states_the_intake_rule() -> None:
-    contributing = _text(CONTRIBUTING)
-    assert "From issue to pull request" in _headings(contributing, "h2")
-    text = _flat(_rendered(contributing))
-    for sentence in CONTRIBUTING_RULE:
-        assert sentence in text, f"CONTRIBUTING.md must state the intake rule: {sentence!r}"
+    assert _section(_text(CONTRIBUTING), INTAKE_HEADING) == list(INTAKE_SECTION)
