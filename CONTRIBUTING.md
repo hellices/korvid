@@ -26,30 +26,37 @@ Report security vulnerabilities privately, never in an issue: see
 
 ## From issue to pull request
 
-Every change starts as an issue, and every pull request closes an issue in
-this repository that is assigned to its author. The rule is the same for
+Every change starts as an issue, and is discussed and decided there before
+anyone writes code. A pull request closes an accepted issue in this
+repository that is assigned to its author. The rule is the same for
 maintainers: they accept and assign issues themselves, and everyone else
 asks. Review time goes to changes the project has agreed to make, and two
 people do not build the same thing.
 
-1. **Find or open an issue.** New issues from the forms get the
-   `status: needs-triage` label until a maintainer accepts or closes them.
-   Accepted work that is open to contributors is labelled `help wanted` or
-   `good first issue`.
-2. **Ask for it.** Comment on the issue with a short plan.
-3. **Wait to be assigned.** A maintainer assigns the issue to you, one at a
-   time until your first pull request is merged. If an assigned issue sees no
-   pull request or update for 14 days, a maintainer may release it to someone
-   else.
+1. **Open an issue first.** Report a bug or propose a feature with the issue
+   forms before you write the change. They label new issues
+   `status: needs-triage`. To take on an issue that is already accepted and
+   labelled `help wanted` or `good first issue`, comment on it as in step 3.
+2. **Discuss it on the issue.** A maintainer works out with you whether a
+   bug is real, usually by reproducing it, and whether a feature fits korvid
+   and how it should work.
+3. **Wait for the decision.** A maintainer confirms the bug or accepts the
+   feature by replacing `status: needs-triage` with `status: accepted`, or
+   closes the issue with the reason. If you would like to make the change,
+   say so on the issue with a short plan, and a maintainer assigns it to
+   you, one issue at a time until your first pull request is merged. If an
+   assigned issue sees no pull request or update for 14 days, a maintainer
+   may release it to someone else.
 4. **Open the pull request.** Put `Closes #N` at the top of the description,
-   where `N` is the assigned issue. Work that needs more than one pull request
-   is split into sub-issues, one for each.
+   where `N` is the accepted issue assigned to you. Work that needs more than
+   one pull request is split into sub-issues, one for each.
 
-A pull request that does not close an issue assigned to its author is closed
-without review, however good the change. Ask for the issue first; once a
-maintainer assigns it, the pull request can be reopened. The only exceptions
-are pull requests opened by Dependabot or the Relock workflow, and security
-fixes, which go through [SECURITY.md](SECURITY.md) instead of an issue.
+A pull request that does not close an accepted issue assigned to its author
+is closed without review, however good the change. Ask for the issue first;
+once it is accepted and assigned to you, the pull request can be reopened.
+The only exceptions are pull requests opened by Dependabot or the Relock
+workflow, and security fixes, which go through [SECURITY.md](SECURITY.md)
+instead of an issue.
 
 ## Set up
 

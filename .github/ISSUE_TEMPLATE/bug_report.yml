@@ -13,6 +13,10 @@ body:
         contents, and hostnames you do not want to make public. `audit.jsonl`
         entries and saved log or describe captures hold raw cluster data, so
         check them too.
+
+        A maintainer confirms each report, usually by reproducing it. If you
+        would like to fix it yourself, say so below, and wait until the bug
+        is confirmed and assigned to you before opening a pull request.
   - type: textarea
     id: what-happened
     attributes:
@@ -103,6 +107,12 @@ body:
     attributes:
       label: Screenshots
       description: Attach screenshots or recordings here. Check them for secrets first.
+  - type: checkboxes
+    id: contribute
+    attributes:
+      label: Contribution
+      options:
+        - label: I would like to fix this myself once the bug is confirmed.
   - type: checkboxes
     id: redacted
     attributes:

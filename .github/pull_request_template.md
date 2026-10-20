@@ -1,4 +1,4 @@
-<!-- Link the issue in this repository that is assigned to you. Pull requests without one are closed. See CONTRIBUTING.md. -->
+<!-- Link the accepted issue in this repository that is assigned to you. Pull requests without one are closed. See CONTRIBUTING.md. -->
 Closes #
 
 ## Summary
@@ -11,7 +11,7 @@ Closes #
 
 ## Checklist
 
-- [ ] This closes an issue in this repository that is assigned to me.
+- [ ] This closes an accepted issue in this repository that is assigned to me.
 - [ ] Tests cover the change, written to fail first where behavior changed.
 - [ ] `make check` passes locally.
 - [ ] User-facing docs and the README match the change, or nothing user-facing changed.

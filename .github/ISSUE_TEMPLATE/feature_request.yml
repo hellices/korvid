@@ -6,8 +6,9 @@ body:
     attributes:
       value: |
         Start with the problem: the best design may differ from the first
-        idea. A maintainer reviews each request. Wait until one accepts it
-        and assigns it to you before opening a pull request.
+        idea, and it is worked out here with a maintainer. Wait until a
+        maintainer accepts the request and assigns it to you before opening
+        a pull request.
   - type: textarea
     id: problem
     attributes:
@@ -60,4 +61,4 @@ body:
     attributes:
       label: Contribution
       options:
-        - label: I would like to implement this myself.
+        - label: I would like to implement this myself once the request is accepted.

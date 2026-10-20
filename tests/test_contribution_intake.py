@@ -2,11 +2,12 @@
 
 Without a written intake rule, a pull request can arrive for work nobody
 agreed to: #446 was opened for #445 before anyone assigned it, and it did not
-link the issue. The rule is that every change starts as an issue, and every
-pull request closes an issue in this repository that is assigned to its
-author, maintainers included: maintainers accept and assign issues
-themselves, and everyone else asks. These tests keep the issue forms, the
-pull request template, and CONTRIBUTING.md saying the same thing.
+link the issue. The rule is that every change starts as an issue and is
+discussed there until a maintainer confirms the bug or accepts the feature,
+and that every pull request closes an accepted issue in this repository that
+is assigned to its author, maintainers included: maintainers accept and
+assign issues themselves, and everyone else asks. These tests keep the issue
+forms, the pull request template, and CONTRIBUTING.md saying the same thing.
 """
 
 from __future__ import annotations
@@ -35,9 +36,9 @@ TRIAGE_LABEL = "status: needs-triage"
 #: deliberate change: re-check that each form still applies the triage label
 #: and that nothing a reader sees qualifies the intake rule, then update this.
 ISSUE_TEMPLATE_SHA256 = {
-    "bug_report.yml": "7e9c3cacb7f80dec9756f6e507badae25c872d8a704e4282d2a7e6c90db43713",
+    "bug_report.yml": "721bc1a1fbe4b823a3397584c6f75d31e58f0f15971871b7f72bba222c418488",
     "config.yml": "8407efa53b745f1f8589006ac0b82391929294859bef5bb50c6c3254125f3a59",
-    "feature_request.yml": "9246e136f5f45436e9bab5aae1e474c73b992c46afcd1ef00f740c40d38b3d60",
+    "feature_request.yml": "77826508f54c209bf3651676f650523045236147121e367cdae56ded35ee1d8c",
 }
 FORM_LABELS = {
     "bug_report.yml": ["bug", TRIAGE_LABEL],
@@ -51,37 +52,55 @@ FORM_LABELS = {
 #: keeps them but adds a clause or a block that retracts the rule.
 INTAKE_HEADING = "From issue to pull request"
 INTAKE_SECTION = (
-    "Every change starts as an issue, and every pull request closes an issue in this "
-    "repository that is assigned to its author. The rule is the same for maintainers: they "
-    "accept and assign issues themselves, and everyone else asks. Review time goes to "
-    "changes the project has agreed to make, and two people do not build the same thing.",
-    "Find or open an issue. New issues from the forms get the status: needs-triage label "
-    "until a maintainer accepts or closes them. Accepted work that is open to contributors "
-    "is labelled help wanted or good first issue.",
-    "Ask for it. Comment on the issue with a short plan.",
-    "Wait to be assigned. A maintainer assigns the issue to you, one at a time until your "
-    "first pull request is merged. If an assigned issue sees no pull request or update for "
-    "14 days, a maintainer may release it to someone else.",
+    "Every change starts as an issue, and is discussed and decided there before anyone "
+    "writes code. A pull request closes an accepted issue in this repository that is "
+    "assigned to its author. The rule is the same for maintainers: they accept and assign "
+    "issues themselves, and everyone else asks. Review time goes to changes the project has "
+    "agreed to make, and two people do not build the same thing.",
+    "Open an issue first. Report a bug or propose a feature with the issue forms before you "
+    "write the change. They label new issues status: needs-triage. To take on an issue that "
+    "is already accepted and labelled help wanted or good first issue, comment on it as in "
+    "step 3.",
+    "Discuss it on the issue. A maintainer works out with you whether a bug is real, usually "
+    "by reproducing it, and whether a feature fits korvid and how it should work.",
+    "Wait for the decision. A maintainer confirms the bug or accepts the feature by "
+    "replacing status: needs-triage with status: accepted, or closes the issue with the "
+    "reason. If you would like to make the change, say so on the issue with a short plan, "
+    "and a maintainer assigns it to you, one issue at a time until your first pull request "
+    "is merged. If an assigned issue sees no pull request or update for 14 days, a "
+    "maintainer may release it to someone else.",
     "Open the pull request. Put Closes #N at the top of the description, where N is the "
-    "assigned issue. Work that needs more than one pull request is split into sub-issues, "
-    "one for each.",
-    "A pull request that does not close an issue assigned to its author is closed without "
-    "review, however good the change. Ask for the issue first; once a maintainer assigns it, "
-    "the pull request can be reopened. The only exceptions are pull requests opened by "
-    "Dependabot or the Relock workflow, and security fixes, which go through SECURITY.md "
-    "instead of an issue.",
+    "accepted issue assigned to you. Work that needs more than one pull request is split "
+    "into sub-issues, one for each.",
+    "A pull request that does not close an accepted issue assigned to its author is closed "
+    "without review, however good the change. Ask for the issue first; once it is accepted "
+    "and assigned to you, the pull request can be reopened. The only exceptions are pull "
+    "requests opened by Dependabot or the Relock workflow, and security fixes, which go "
+    "through SECURITY.md instead of an issue.",
 )
 #: The feature form's only markdown item, pinned whole for the same reason.
 FEATURE_FORM_NOTE = (
-    "Start with the problem: the best design may differ from the first idea. A maintainer "
-    "reviews each request. Wait until one accepts it and assigns it to you before opening "
-    "a pull request."
+    "Start with the problem: the best design may differ from the first idea, and it is "
+    "worked out here with a maintainer. Wait until a maintainer accepts the request and "
+    "assigns it to you before opening a pull request."
+)
+#: The bug form's only markdown item, block by block: where security reports
+#: go, what to redact, and that a fix waits for the bug to be confirmed.
+BUG_FORM_NOTES = (
+    "Thanks for reporting. Security vulnerabilities do not belong here: report them "
+    "privately through Security advisories.",
+    "Before you paste anything, remove secrets, tokens, kubeconfig contents, and hostnames "
+    "you do not want to make public. audit.jsonl entries and saved log or describe captures "
+    "hold raw cluster data, so check them too.",
+    "A maintainer confirms each report, usually by reproducing it. If you would like to fix "
+    "it yourself, say so below, and wait until the bug is confirmed and assigned to you "
+    "before opening a pull request.",
 )
 #: The pull request template as a reader sees it, also pinned whole: the
 #: issue it closes comes first, and every box starts unticked.
 PR_TEMPLATE_HEAD = ("Closes #", "Summary", "Verification", "Checklist")
 PR_TEMPLATE_TASKS = (
-    "This closes an issue in this repository that is assigned to me.",
+    "This closes an accepted issue in this repository that is assigned to me.",
     "Tests cover the change, written to fail first where behavior changed.",
     "make check passes locally.",
     "User-facing docs and the README match the change, or nothing user-facing changed.",
@@ -405,6 +424,16 @@ def test_the_feature_form_says_work_waits_for_an_assignment() -> None:
     ]
 
     assert notes == [[FEATURE_FORM_NOTE]]
+
+
+def test_the_bug_form_says_a_fix_waits_for_confirmation() -> None:
+    notes = [
+        _blocks(item["attributes"]["value"])
+        for item in _form("bug_report.yml")["body"]
+        if item["type"] == "markdown"
+    ]
+
+    assert notes == [list(BUG_FORM_NOTES)]
 
 
 def test_the_pull_request_template_starts_with_the_assigned_issue() -> None:
