@@ -106,8 +106,7 @@ enforcement does not depend on a maintainer noticing:
   never checks out or runs pull request code, uses no third-party actions,
   and passes the untrusted title and body only through environment
   variables, never through shell interpolation.
-- Permissions are `pull-requests: write`, `issues: read`, and
-  `statuses: write`, nothing else.
+- Permissions are `pull-requests: write` and `issues: read`, nothing else.
 - It passes immediately only when the author can write to the repository. It
   reads the author's permission level on the repository and lets `admin`,
   `maintain`, or `write` through. `authorAssociation` is not enough, because
@@ -132,13 +131,18 @@ enforcement does not depend on a maintainer noticing:
   workflow also runs on `issues` events (closed, reopened, assigned,
   unassigned, labeled, unlabeled), and re-evaluates every open pull request
   whose `closingIssuesReferences` include that issue.
-- Each evaluation, whatever triggered it, sets a commit status named `intake`
-  on the pull request's head commit, so the latest one replaces any earlier
-  result. The maintainer who merges by hand sees the live answer, not the
-  one from when the pull request was opened.
-- On failure it also adds `status: needs-issue` and posts the reply above
-  once, and a later pass removes the label. Closing stays a maintainer's
-  decision until the check has run without false positives for a while.
+- The answer lives on the pull request, never on its commit. A failing
+  evaluation adds `status: needs-issue` and posts the reply above once, and
+  a passing one removes the label. Two open pull requests can share a head
+  commit while closing different issues; a commit status belongs to the
+  commit, so one pull request's answer would overwrite the other's, but a
+  label belongs to one pull request. Whatever triggered the latest
+  evaluation, its label is what the maintainer who merges by hand sees: the
+  live answer, not the one from when the pull request was opened. The
+  workflow run itself succeeds whenever it evaluated, so its own check never
+  stands in for the answer.
+- Closing stays a maintainer's decision until the check has run without
+  false positives for a while.
 - It ships with tests in the existing workflow-contract style: trigger set,
   including the issue events, permissions, no checkout, no interpolation of
   pull request fields. The decision itself is a pure function of the
@@ -156,6 +160,8 @@ enforcement does not depend on a maintainer noticing:
     closed, unassigned, or labelled `status: needs-triage` again.
   - An issue event re-evaluates exactly the open pull requests that close
     that issue, and leaves the others alone.
+  - Two open pull requests that share a head commit but close different
+    issues each keep their own answer: one labelled, the other not.
 
 Because it adds privileged triggers, this phase lands as its own pull
 request, and only with the maintainer's explicit approval.
