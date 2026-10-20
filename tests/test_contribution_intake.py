@@ -190,6 +190,18 @@ def _section(markdown: str, heading: str) -> list[str]:
     return [text for _, text in blocks[start:end]]
 
 
+def _opening_line(markdown: str) -> list[tuple[str, str]]:
+    """The inline tokens of the first block a reader sees, if it is a paragraph.
+
+    Rendered text cannot tell `Closes #` from a code span, a link, or
+    emphasis, and GitHub reads a closing keyword only in plain text.
+    """
+    tokens = [token for token in _MARKDOWN.parse(markdown) if token.type != "html_block"]
+    if len(tokens) < 2 or tokens[0].type != "paragraph_open":
+        return []
+    return [(child.type, child.content) for child in tokens[1].children or []]
+
+
 def _tasks(markdown: str) -> list[tuple[bool, str]]:
     """Each markdown task list item: whether its box is ticked, and its text."""
     tokens = _MARKDOWN.parse(markdown)
@@ -286,6 +298,21 @@ def test_sections_and_tasks_come_from_markdown_a_reader_sees() -> None:
     assert _tasks(markdown) == [(False, "open"), (True, "ticked")]
 
 
+@pytest.mark.parametrize(
+    ("markdown", "expected"),
+    [
+        ("<!-- a note -->\nCloses #\n", [("text", "Closes #")]),
+        ("`Closes #`\n", [("code_inline", "Closes #")]),
+        ("# Closes #\n", []),
+    ],
+    ids=["plain", "code-span", "heading"],
+)
+def test_the_opening_line_is_read_from_markdown_tokens(
+    markdown: str, expected: list[tuple[str, str]]
+) -> None:
+    assert _opening_line(markdown) == expected
+
+
 def test_every_issue_form_waits_for_triage() -> None:
     # Pinned exactly, for every form: a form that also applied `help wanted`
     # or `good first issue` would mark work nobody has accepted as open to
@@ -326,6 +353,9 @@ def test_the_pull_request_template_starts_with_the_assigned_issue() -> None:
     template = _text(PR_TEMPLATE)
 
     assert _blocks(template) == [*PR_TEMPLATE_HEAD, *PR_TEMPLATE_TASKS]
+    assert _opening_line(template) == [("text", "Closes #")], (
+        "GitHub reads a closing keyword only in plain text, not in code, a link, or emphasis"
+    )
     assert _tasks(template) == [(False, task) for task in PR_TEMPLATE_TASKS]
 
 
