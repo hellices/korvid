@@ -24,6 +24,7 @@ from tests.platforms import posix_only
 ROOT = Path(__file__).parents[1]
 MANIFEST = ROOT / "deploy" / "playground" / "workloads.yaml"
 GUIDE = ROOT / "docs" / "getting-started.md"
+PRACTICE_HEADING = "## Practice on a throwaway cluster"
 RAW_URL = "https://raw.githubusercontent.com/hellices/korvid/main/deploy/playground/workloads.yaml"
 NAMESPACE = "playground"
 CLUSTER = "korvid-playground"
@@ -131,8 +132,9 @@ def _checkout_script() -> str:
 
 def _guide_section() -> str:
     guide = GUIDE.read_text(encoding="utf-8")
-    assert "## Practice on a throwaway cluster" in guide
-    return guide.split("## Practice on a throwaway cluster", 1)[1].split("\n## ", 1)[0]
+    # Exactly once: a second copy after the first would never be checked.
+    assert guide.count(PRACTICE_HEADING) == 1, "the guide needs exactly one practice section"
+    return guide.split(PRACTICE_HEADING, 1)[1].split("\n## ", 1)[0]
 
 
 def _shell_blocks(section: str) -> list[list[str]]:
