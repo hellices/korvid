@@ -27,6 +27,10 @@ CONTRIBUTING = ROOT / "CONTRIBUTING.md"
 PR_TEMPLATE = ROOT / ".github" / "pull_request_template.md"
 FORMS = ROOT / ".github" / "ISSUE_TEMPLATE"
 TRIAGE_LABEL = "status: needs-triage"
+FORM_LABELS = {
+    "bug_report.yml": ["bug", TRIAGE_LABEL],
+    "feature_request.yml": ["enhancement", TRIAGE_LABEL],
+}
 
 
 #: The intake section of CONTRIBUTING.md as a reader sees it, block by block
@@ -266,10 +270,14 @@ def test_sections_and_tasks_come_from_markdown_a_reader_sees() -> None:
 
 
 def test_every_issue_form_waits_for_triage() -> None:
-    for name in ("bug_report.yml", "feature_request.yml"):
-        labels = _form(name)["labels"]
-        assert isinstance(labels, list), f"{name}: issue forms take a list of labels"
-        assert TRIAGE_LABEL in labels, name
+    # Pinned exactly, for every form: a form that also applied `help wanted`
+    # or `good first issue` would mark work nobody has accepted as open to
+    # contributors, and a new form would skip triage unless it is listed here.
+    forms = sorted(path.name for path in FORMS.glob("*.yml") if path.name != "config.yml")
+
+    assert forms == sorted(FORM_LABELS), "every issue form needs its labels pinned"
+    for name, labels in FORM_LABELS.items():
+        assert _form(name)["labels"] == labels, name
 
 
 def test_the_feature_form_says_work_waits_for_an_assignment() -> None:
