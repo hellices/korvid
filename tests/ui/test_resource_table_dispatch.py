@@ -71,6 +71,7 @@ def test_specialized_renderer_honors_subclass_override_of_add_rows() -> None:
     not bypassed by an import-time capture of the unbound base-class function.
     """
     override_calls: list[tuple[object, list[Summary], bool, bool]] = []
+
     class _SubTable(resource_table.ResourceTable):
         def _add_replicaset_rows(
             self,
@@ -84,7 +85,7 @@ def test_specialized_renderer_honors_subclass_override_of_add_rows() -> None:
     table = _SubTable()
     rows: list[Summary] = []
     renderer = resource_table._row_renderer("replicasets", group="apps")
-    renderer(table, rows, all_namespaces=False,metrics=None, presorted=True)
+    renderer(table, rows, all_namespaces=False, metrics=None, presorted=True)
 
     assert len(override_calls) == 1, (
         "subclass override of _add_replicaset_rows was not called; "
@@ -101,6 +102,7 @@ def test_render_pod_rows_forwards_exact_metrics_sentinel_and_all_arguments() -> 
     pattern through to _add_pod_rows unchanged (subclass override as the witness).
     """
     received: list[tuple[list[Summary], bool, resource_table.MetricsLookup | None, bool]] = []
+
     def metrics_sentinel(_namespace: str, _name: str) -> PodMetrics | None:
         return None
 
