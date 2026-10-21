@@ -40,6 +40,13 @@ ISSUE_TEMPLATE_SHA256 = {
     "config.yml": "8407efa53b745f1f8589006ac0b82391929294859bef5bb50c6c3254125f3a59",
     "feature_request.yml": "77826508f54c209bf3651676f650523045236147121e367cdae56ded35ee1d8c",
 }
+#: SHA-256 of CONTRIBUTING.md, read with universal newlines. The intake
+#: section is pinned block by block below, but a reader takes the whole page
+#: as the rule, so a section elsewhere ("## Exceptions") or a line in "Ways
+#: to help" could qualify it. Like the issue templates, any edit is a
+#: deliberate change: re-check that nothing on the page qualifies the intake
+#: rule, then update this.
+CONTRIBUTING_SHA256 = "a5d5fb4e6ddfc52ffdf6f74e78ff3c746cd5c2776432296d01dcb510cd500e8b"
 FORM_LABELS = {
     "bug_report.yml": ["bug", TRIAGE_LABEL],
     "feature_request.yml": ["enhancement", TRIAGE_LABEL],
@@ -447,6 +454,15 @@ def test_the_pull_request_template_starts_with_the_assigned_issue() -> None:
         "an escaped or entity-encoded line renders the same but closes nothing"
     )
     assert _tasks(template) == [(False, task) for task in PR_TEMPLATE_TASKS]
+
+
+def test_contributing_is_the_reviewed_text() -> None:
+    digest = hashlib.sha256(_text(CONTRIBUTING).encode("utf-8")).hexdigest()
+
+    assert digest == CONTRIBUTING_SHA256, (
+        "CONTRIBUTING.md changed: re-check that nothing on the page qualifies the intake "
+        "rule, then update CONTRIBUTING_SHA256"
+    )
 
 
 def test_contributing_states_the_intake_rule() -> None:
