@@ -36,13 +36,19 @@ def _readme_hero() -> str:
 
 def test_readme_overview_thumbnail_links_to_hd_video() -> None:
     hero = _readme_hero()
-    thumbnail = re.search(
-        r"\[!\[(?P<alt>[^\]]+)\]\((?P<image>[^)]+)\)\]\((?P<video>[^)]+)\)",
-        hero,
-    )
+    # Badges are linked images too, so pick the overview out by its GIF URL.
+    thumbnails = [
+        match
+        for match in re.finditer(
+            r"\[!\[(?P<alt>[^\]]+)\]\((?P<image>[^)]+)\)\]\((?P<video>[^)]+)\)",
+            hero,
+        )
+        if match.group("image") == GIF_URL
+    ]
 
-    assert thumbnail is not None, "the overview GIF must be a clickable MP4 preview"
-    assert thumbnail.group("image") == GIF_URL
+    assert len(thumbnails) == 1, "the overview GIF must be one clickable MP4 preview"
+    assert hero.count(GIF_URL) == 1, "the overview GIF must appear only as that preview"
+    thumbnail = thumbnails[0]
     assert thumbnail.group("video") == MP4_URL
     for driver in ("keyboard", "agent", "mcp"):
         assert driver in thumbnail.group("alt").lower()

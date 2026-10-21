@@ -1,0 +1,125 @@
+name: Bug report
+description: Something in korvid does not work as documented.
+labels: ["bug", "status: needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. Security vulnerabilities do not belong here:
+        report them privately through
+        [Security advisories](https://github.com/hellices/korvid/security/advisories/new).
+
+        Before you paste anything, remove secrets, tokens, kubeconfig
+        contents, and hostnames you do not want to make public. `audit.jsonl`
+        entries and saved log or describe captures hold raw cluster data, so
+        check them too.
+
+        A maintainer confirms each report, usually by reproducing it. If you
+        would like to fix it yourself, say so below, and wait until the bug
+        is confirmed and assigned to you before opening a pull request.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: >-
+        Keys pressed, commands typed, and the view you were in. A reproduction
+        on the throwaway cluster from Getting Started is ideal.
+      placeholder: |
+        1. korvid -n playground
+        2. :deploy, select web, press S
+        3. ...
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: korvid version
+      description: >-
+        The output of `korvid --version`. For a source checkout or a git
+        install, add the commit as well (`git rev-parse --short HEAD`).
+      placeholder: korvid 0.6.0
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: How did you install korvid?
+      options:
+        - uv tool install
+        - pipx install
+        - Homebrew
+        - pip in a virtual environment
+        - Source checkout (uv sync)
+        - Other
+    validations:
+      required: true
+  - type: checkboxes
+    id: extras
+    attributes:
+      label: Installed extras
+      options:
+        - label: agent
+        - label: mcp
+        - label: observability
+        - label: entra
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Operating system, terminal, and Python version.
+      placeholder: macOS 15, iTerm2, Python 3.12
+  - type: input
+    id: cluster
+    attributes:
+      label: Kubernetes cluster
+      description: Server version and distribution, when it matters.
+      placeholder: v1.33 on kind
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Keyboard TUI (tables, logs, panes)
+        - Cluster writes and approvals
+        - Embedded agent
+        - MCP server or stdio adapter
+        - Helm or operators
+        - Observability (Prometheus, Loki)
+        - Configuration or keybindings
+        - Installation or packaging
+        - Documentation
+        - Not sure
+  - type: textarea
+    id: output
+    attributes:
+      label: Error output
+      description: Tracebacks or notification text. Redact secrets first.
+      render: text
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: Screenshots
+      description: Attach screenshots or recordings here. Check them for secrets first.
+  - type: checkboxes
+    id: contribute
+    attributes:
+      label: Contribution
+      options:
+        - label: I would like to fix this myself once the bug is confirmed.
+  - type: checkboxes
+    id: redacted
+    attributes:
+      label: Before submitting
+      options:
+        - label: >-
+            I removed secrets, tokens, kubeconfig contents, and private
+            hostnames from this report, including any audit entries, logs,
+            and screenshots.
+          required: true

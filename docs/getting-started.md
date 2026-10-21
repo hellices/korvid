@@ -121,6 +121,77 @@ uv tool install 'korvid[all] @ git+https://github.com/hellices/korvid'
 The full, always-current key reference — grouped by context, including
 node, Helm, and operator actions — lives in [keybindings.md](keybindings.md).
 
+## Practice on a throwaway cluster
+
+To try writes and the agent without risking a real cluster, create a
+disposable one with [kind](https://kind.sigs.k8s.io/) and load three small
+workloads: one healthy, two broken. You need Docker or Podman, `kind`, and
+`kubectl`.
+
+```sh
+playground="$(mktemp -d)" &&
+  cd "$playground" &&
+  export KUBECONFIG="$PWD/korvid-playground.kubeconfig" &&
+  kind create cluster --name korvid-playground &&
+  curl -fsSLO https://raw.githubusercontent.com/hellices/korvid/main/deploy/playground/workloads.yaml
+```
+
+The block works in a new, empty directory, so the download cannot overwrite
+a file of yours, and gives this terminal its own kubeconfig file there. kind
+writes the new context into that file, so `kubectl` and korvid in this
+terminal see only the playground cluster, and your usual kubeconfig is not
+touched. Each step runs only if the one before it succeeded. Creating the
+cluster takes a minute or two. If a cluster with this name is left from an
+earlier try, the block stops there: delete it with
+`kind delete cluster --name korvid-playground`, then run the block again.
+
+Read `workloads.yaml` before you apply it. It creates only a `playground`
+namespace, three Deployments, and one Service, and none of them needs host
+access, privileges, or an API token. Then, in the same terminal, apply it
+and start korvid:
+
+```sh
+cd "${playground:?}" && test "$KUBECONFIG" = "$PWD/korvid-playground.kubeconfig" &&
+  kubectl --context kind-korvid-playground apply -f workloads.yaml &&
+  korvid -n playground
+```
+
+The first line returns to the playground directory and stops the block
+unless `KUBECONFIG` still names the kubeconfig file there, so a setup that
+failed cannot send korvid to your usual clusters. korvid starts only after
+the apply succeeds.
+
+korvid's status row at the bottom shows the context, `kind-korvid-playground`.
+These commands are for bash or zsh. In PowerShell, first create a new, empty
+directory and enter it, then set the variable with
+`$env:KUBECONFIG = "$PWD\korvid-playground.kubeconfig"` and download with
+`curl.exe`. Before you apply the manifest or start korvid, check that
+`$env:KUBECONFIG` still names the file in that directory. When you are done,
+delete the cluster, leave the directory, and remove it.
+
+| Try | How |
+| --- | --- |
+| Find what is wrong | Type `:pulse`: the [problems view](pulse.md) lists the crash loop and the failed image pull, with their evidence |
+| Read why `checkout` crashes | Select its pod and press `l`; in the log pane, `p` shows the previous container's output |
+| See why `payments` never starts | Select its pod and press `d`; the events name the image that cannot be pulled |
+| Trace `web` | Select a `web` pod and press `g` for the ReplicaSet that owns it, the Node it runs on, and the Service that selects it |
+| Approve a write | Type `:deploy`, select `web`, press `S`, and scale to 3. Nothing changes until you confirm, and `:outcomes` then shows what the Deployment controller did ([operations](ops.md)) |
+| Ask the agent | With the `[agent]` extra and a model from `:ai`, press `Ctrl-A` and ask why `checkout` is failing ([agent](agent.md)) |
+
+When you are done, delete the cluster and then the directory with its two
+files:
+
+```sh
+kind delete cluster --name korvid-playground &&
+  cd && rm -r "${playground:?}"
+```
+
+If deleting the cluster fails, the directory stays, so you can try again
+with the same kubeconfig.
+
+Then open a new terminal to return to your usual clusters: `KUBECONFIG` was
+set only in this one.
+
 ## Where to next
 
 - **Learn the cockpit:** [Browsing the cluster](tui.md) covers tables,
