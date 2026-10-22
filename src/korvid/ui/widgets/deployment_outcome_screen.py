@@ -9,6 +9,7 @@ from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import VerticalScroll
+from textual.css.query import NoMatches
 from textual.screen import ModalScreen
 from textual.widgets import DataTable, Footer, Static
 
@@ -111,7 +112,12 @@ class DeploymentOutcomeScreen(ModalScreen[OutcomeScreenResult | None]):
             )
 
     def on_mount(self) -> None:
-        table = self.query_one(DataTable)
+        try:
+            table = self.query_one(DataTable)
+        except NoMatches:
+            # Pushed while the app shuts down: Textual mounts none of the
+            # composed widgets for a screen being pruned, but still sends Mount.
+            return
         table.cursor_type = "row"
         table.add_columns(*_COLUMNS)
         for index, pod in enumerate(self.snapshot.outcome.pods):
