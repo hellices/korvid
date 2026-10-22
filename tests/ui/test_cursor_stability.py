@@ -72,12 +72,11 @@ async def test_view_change_resets_cursor_to_top() -> None:
         await pilot.press("down")
         await until(pilot, lambda: _cursor_key(table) == "default/beta", label="cursor on beta")
         # Different logical view (kind changed): reset-to-top is correct.
-        table.show("deployments", [], all_namespaces=False, pattern="")
+        table.show("deployments", [], all_namespaces=False)
         table.show(
             "pods",
             app.store.get("pods", "default"),
             all_namespaces=False,
-            pattern="",
         )
         await pilot.pause()
         assert table.cursor_row == 0

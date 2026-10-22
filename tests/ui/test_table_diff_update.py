@@ -174,7 +174,7 @@ async def test_unchanged_repaint_rebuilds_nothing() -> None:
         await until(pilot, lambda: table.row_count == 2, label="pods loaded")
         built = _spy_emit(table)
 
-        table.show("pods", app.store.get("pods", "default"), all_namespaces=False, pattern="")
+        table.show("pods", app.store.get("pods", "default"), all_namespaces=False)
 
         assert built == []
 
@@ -190,7 +190,7 @@ async def test_metrics_refresh_for_an_unchanged_summary() -> None:
         table = app.query_one(ResourceTable)
         await until(pilot, lambda: table.row_count == 1, label="pod loaded")
         rows = app.store.get("pods", "default")
-        table.show("pods", rows, all_namespaces=False, pattern="", metrics=lookup)
+        table.show("pods", rows, all_namespaces=False, metrics=lookup)
         assert str(table.get_row("default/alpha")[4]) == "-"
 
         samples[("default", "alpha")] = PodMetrics(
@@ -199,7 +199,7 @@ async def test_metrics_refresh_for_an_unchanged_summary() -> None:
             cpu_cores=0.5,
             memory_bytes=1024 * 1024,
         )
-        table.show("pods", rows, all_namespaces=False, pattern="", metrics=lookup)
+        table.show("pods", rows, all_namespaces=False, metrics=lookup)
 
         assert str(table.get_row("default/alpha")[4]) != "-"
 
@@ -220,7 +220,7 @@ async def test_age_refreshes_for_an_unchanged_summary_as_time_passes() -> None:
         table = app.query_one(ResourceTable)
         await until(pilot, lambda: table.row_count == 1, label="pod loaded")
         rows: list[Summary] = [pod]
-        table.show("pods", rows, all_namespaces=False, pattern="")
+        table.show("pods", rows, all_namespaces=False)
         assert str(table.get_row("default/alpha")[-2]) == "5m"
 
         with mock.patch.object(
@@ -228,7 +228,7 @@ async def test_age_refreshes_for_an_unchanged_summary_as_time_passes() -> None:
             "datetime",
             _FrozenClock(datetime.now(UTC) + timedelta(minutes=1)),
         ):
-            table.show("pods", rows, all_namespaces=False, pattern="")
+            table.show("pods", rows, all_namespaces=False)
 
         assert str(table.get_row("default/alpha")[-2]) == "6m"
 

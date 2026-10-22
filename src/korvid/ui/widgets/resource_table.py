@@ -50,7 +50,6 @@ class _RowRenderer(Protocol):
         __rows: list[Summary],
         *,
         all_namespaces: bool,
-        pattern: str,
         metrics: MetricsLookup | None,
         presorted: bool,
     ) -> None: ...
@@ -64,7 +63,6 @@ class _BoundStandardRowRenderer(Protocol):
         __rows: list[Summary],
         *,
         all_namespaces: bool,
-        pattern: str,
         presorted: bool = False,
     ) -> None: ...
 
@@ -144,14 +142,12 @@ def _render_pod_rows(
     rows: list[Summary],
     *,
     all_namespaces: bool,
-    pattern: str,
     metrics: MetricsLookup | None,
     presorted: bool,
 ) -> None:
     table._add_pod_rows(
         rows,
         all_namespaces=all_namespaces,
-        pattern=pattern,
         metrics=metrics,
         presorted=presorted,
     )
@@ -163,7 +159,6 @@ def _adapt_standard_renderer(factory: _StandardRendererFactory, name: str) -> _R
         rows: list[Summary],
         *,
         all_namespaces: bool,
-        pattern: str,
         metrics: MetricsLookup | None,
         presorted: bool,
     ) -> None:
@@ -171,7 +166,6 @@ def _adapt_standard_renderer(factory: _StandardRendererFactory, name: str) -> _R
         factory(table)(
             rows,
             all_namespaces=all_namespaces,
-            pattern=pattern,
             presorted=presorted,
         )
 
@@ -616,7 +610,6 @@ class ResourceTable(DataTable[str | Text]):
         rows: list[Summary],
         *,
         all_namespaces: bool,
-        pattern: str,
         metrics: MetricsLookup | None = None,
         group: str = "",
         synthetic: bool = False,
@@ -663,7 +656,6 @@ class ResourceTable(DataTable[str | Text]):
             presentation.renderer,
             rows,
             all_namespaces=all_namespaces,
-            pattern=pattern,
             metrics=metrics,
             sort=sort,
         )
@@ -1151,7 +1143,6 @@ class ResourceTable(DataTable[str | Text]):
         rows: list[Summary],
         *,
         all_namespaces: bool,
-        pattern: str,
         metrics: MetricsLookup | None,
         sort: SortSpec | None = None,
     ) -> None:
@@ -1174,7 +1165,6 @@ class ResourceTable(DataTable[str | Text]):
             self,
             rows,
             all_namespaces=all_namespaces,
-            pattern=pattern,
             metrics=metrics,
             presorted=sort is not None,
         )
@@ -1184,7 +1174,6 @@ class ResourceTable(DataTable[str | Text]):
         rows: list[Summary],
         *,
         all_namespaces: bool,
-        pattern: str,
         metrics: MetricsLookup | None,
         presorted: bool = False,
     ) -> None:
@@ -1193,8 +1182,6 @@ class ResourceTable(DataTable[str | Text]):
             pods = sorted(pods, key=_pod_sort_key)
         now = self._render_now
         for pod in pods:
-            if pattern and pattern.lower() not in pod.name.lower():
-                continue
             usage = metrics(pod.namespace, pod.name) if metrics is not None else None
             age = pod.age(now)
             # Everything else on this row is derived from the frozen summary,
@@ -1217,7 +1204,7 @@ class ResourceTable(DataTable[str | Text]):
             self._emit_row(pod, cells, all_namespaces=all_namespaces, stamp=stamp)
 
     def _add_replicaset_rows(
-        self, rows: list[Summary], *, all_namespaces: bool, pattern: str, presorted: bool = False
+        self, rows: list[Summary], *, all_namespaces: bool, presorted: bool = False
     ) -> None:
         # With a user sort active the incoming order is final: render it in
         # one pass so fallback rows interleave in sorted position instead of
@@ -1238,8 +1225,6 @@ class ResourceTable(DataTable[str | Text]):
             )
             ordered = [*replicasets, *fallbacks]
         for obj in ordered:
-            if pattern and pattern.lower() not in obj.name.lower():
-                continue
             if isinstance(obj, ReplicaSetSummary):
                 age = obj.age(self._render_now)
                 stamp = self._stamp(age)
@@ -1262,14 +1247,12 @@ class ResourceTable(DataTable[str | Text]):
             self._emit_row(obj, cells, all_namespaces=all_namespaces, stamp=stamp)
 
     def _add_helm_release_rows(
-        self, rows: list[Summary], *, all_namespaces: bool, pattern: str, presorted: bool = False
+        self, rows: list[Summary], *, all_namespaces: bool, presorted: bool = False
     ) -> None:
         releases = [r for r in rows if isinstance(r, HelmReleaseSummary)]
         if not presorted:
             releases = sorted(releases, key=lambda r: (r.namespace, r.name))
         for rel in releases:
-            if pattern and pattern.lower() not in rel.name.lower():
-                continue
             age = rel.age(self._render_now)
             stamp = self._stamp(age)
             if self._reuse_row(rel, stamp):
@@ -1285,15 +1268,13 @@ class ResourceTable(DataTable[str | Text]):
             self._emit_row(rel, cells, all_namespaces=all_namespaces, stamp=stamp)
 
     def _add_helm_revision_rows(
-        self, rows: list[Summary], *, all_namespaces: bool, pattern: str, presorted: bool = False
+        self, rows: list[Summary], *, all_namespaces: bool, presorted: bool = False
     ) -> None:
         revisions = [r for r in rows if isinstance(r, HelmRevisionSummary)]
         # Newest revision first: helm history order, matching replicaset views.
         if not presorted:
             revisions = sorted(revisions, key=lambda r: (r.namespace, r.release, -r.revision))
         for rev in revisions:
-            if pattern and pattern.lower() not in rev.name.lower():
-                continue
             age = rev.age(self._render_now)
             stamp = self._stamp(age)
             if self._reuse_row(rev, stamp):
@@ -1314,7 +1295,6 @@ class ResourceTable(DataTable[str | Text]):
         rows: list[Summary],
         *,
         all_namespaces: bool,
-        pattern: str,
         width: int,
         presorted: bool = False,
     ) -> None:
@@ -1324,8 +1304,6 @@ class ResourceTable(DataTable[str | Text]):
         if not presorted:
             rows = sorted(rows, key=lambda o: (o.namespace, o.name))
         for obj in rows:
-            if pattern and pattern.lower() not in obj.name.lower():
-                continue
             age = obj.age(self._render_now) if isinstance(obj, GenericSummary) else ""
             stamp = self._stamp(age)
             if self._reuse_row(obj, stamp):
@@ -1334,14 +1312,12 @@ class ResourceTable(DataTable[str | Text]):
             self._emit_row(obj, cells, all_namespaces=all_namespaces, stamp=stamp)
 
     def _add_package_rows(
-        self, rows: list[Summary], *, all_namespaces: bool, pattern: str, presorted: bool = False
+        self, rows: list[Summary], *, all_namespaces: bool, presorted: bool = False
     ) -> None:
         packages = [r for r in rows if isinstance(r, PackageManifestSummary)]
         if not presorted:
             packages = sorted(packages, key=lambda p: (p.namespace, p.name))
         for pkg in packages:
-            if pattern and pattern.lower() not in pkg.name.lower():
-                continue
             age = pkg.age(self._render_now)
             stamp = self._stamp(age)
             if self._reuse_row(pkg, stamp):
@@ -1359,20 +1335,17 @@ class ResourceTable(DataTable[str | Text]):
         self._add_fallback_rows(
             fallbacks,
             all_namespaces=all_namespaces,
-            pattern=pattern,
             width=len(_PKG_COLS),
             presorted=presorted,
         )
 
     def _add_subscription_rows(
-        self, rows: list[Summary], *, all_namespaces: bool, pattern: str, presorted: bool = False
+        self, rows: list[Summary], *, all_namespaces: bool, presorted: bool = False
     ) -> None:
         subs = [r for r in rows if isinstance(r, OLMSubscriptionSummary)]
         if not presorted:
             subs = sorted(subs, key=lambda s: (s.namespace, s.name))
         for sub in subs:
-            if pattern and pattern.lower() not in sub.name.lower():
-                continue
             age = sub.age(self._render_now)
             stamp = self._stamp(age)
             if self._reuse_row(sub, stamp):
@@ -1390,20 +1363,17 @@ class ResourceTable(DataTable[str | Text]):
         self._add_fallback_rows(
             fallbacks,
             all_namespaces=all_namespaces,
-            pattern=pattern,
             width=len(_SUB_COLS),
             presorted=presorted,
         )
 
     def _add_csv_rows(
-        self, rows: list[Summary], *, all_namespaces: bool, pattern: str, presorted: bool = False
+        self, rows: list[Summary], *, all_namespaces: bool, presorted: bool = False
     ) -> None:
         csvs = [r for r in rows if isinstance(r, CSVSummary)]
         if not presorted:
             csvs = sorted(csvs, key=lambda c: (c.namespace, c.name))
         for csv in csvs:
-            if pattern and pattern.lower() not in csv.name.lower():
-                continue
             age = csv.age(self._render_now)
             stamp = self._stamp(age)
             if self._reuse_row(csv, stamp):
@@ -1420,20 +1390,17 @@ class ResourceTable(DataTable[str | Text]):
         self._add_fallback_rows(
             fallbacks,
             all_namespaces=all_namespaces,
-            pattern=pattern,
             width=len(_CSV_COLS),
             presorted=presorted,
         )
 
     def _add_generic_rows(
-        self, rows: list[Summary], *, all_namespaces: bool, pattern: str, presorted: bool = False
+        self, rows: list[Summary], *, all_namespaces: bool, presorted: bool = False
     ) -> None:
         generics = cast(list[GenericSummary], rows)
         if not presorted:
             generics = sorted(generics, key=lambda o: (o.namespace, o.name))
         for obj in generics:
-            if pattern and pattern.lower() not in obj.name.lower():
-                continue
             age = obj.age(self._render_now)
             stamp = self._stamp(age)
             if self._reuse_row(obj, stamp):
