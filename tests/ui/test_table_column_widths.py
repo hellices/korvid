@@ -222,6 +222,11 @@ async def test_absorption_never_skips_a_labelled_or_auto_height_row() -> None:
     *widths*, so a row carrying either of those must still reach the
     superclass — otherwise a future `height=None` row would render zero rows
     tall and a labelled row would never size its label column.
+
+    Both rows arrive through `add_row`, as such a row would in production.
+    `DataTable` caches each row's renderables until a row change bumps its
+    update count, so a label written onto an already rendered `Row` would be
+    measured from the cache as no label at all (#458).
     """
     app = _TableApp()
     async with app.run_test(size=(120, 12)) as pilot:
@@ -233,16 +238,18 @@ async def test_absorption_never_skips_a_labelled_or_auto_height_row() -> None:
             all_namespaces=False,
         )
         await pilot.pause()
+        # A slow runner may render before the dimension pass; make it certain.
+        table.refresh()
+        await pilot.pause()
 
-        first, second = table.ordered_rows
-        first.auto_height = True
-        first.height = 0
-        second.label = Text("a-very-long-row-label")
+        cells = [""] * len(table.ordered_columns)
+        auto_height = table.add_row(*cells, height=None, key="auto-height-row")
+        labelled = table.add_row(*cells, label=Text("a-very-long-row-label"), key="labelled-row")
 
-        table._absorbed.update(key for key in (first.key.value, second.key.value) if key)
-        table._update_dimensions([first.key, second.key])
+        table._absorbed.update({"auto-height-row", "labelled-row"})
+        table._update_dimensions([auto_height, labelled])
 
-        assert first.height > 0, "auto-height row was skipped and stayed 0 tall"
+        assert table.rows[auto_height].height > 0, "auto-height row was skipped and stayed 0 tall"
         assert table._label_column.content_width >= len("a-very-long-row-label")
 
 
