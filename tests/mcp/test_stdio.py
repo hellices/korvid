@@ -50,6 +50,13 @@ def _parameters(state: Path, *args: str, relay: bool = False) -> StdioServerPara
             "stdio.cancellable_stdin = _relay_stdin\n"
             "from korvid.mcp import _stdio_output\n"
             "_stdio_output._posix_stdout = _stdio_output._relay_stdout\n"
+            # The child-watcher race (#472) is rare on its own; emit its line
+            # every time, so every relay test that reads the server's stderr
+            # proves it filters it rather than passing on a lucky run.
+            "import logging\n"
+            "logging.getLogger('asyncio').warning(\n"
+            "    'child process pid %d exit status already read:  will report returncode 255', 0\n"
+            ")\n"
             "from korvid.cli import main",
         )
     return StdioServerParameters(
@@ -71,11 +78,12 @@ _RELAY_WATCHER_RACE = re.compile(
 )
 
 
-def _server_stderr(err: bytes) -> str:
+def _server_stderr(err: bytes | str) -> str:
     """The stdio server's stderr, without the relay child-watcher race."""
+    text = err.decode() if isinstance(err, bytes) else err
     return "".join(
         line
-        for line in err.decode().splitlines(keepends=True)
+        for line in text.splitlines(keepends=True)
         if not _RELAY_WATCHER_RACE.fullmatch(line.rstrip("\r\n"))
     )
 
@@ -724,7 +732,7 @@ async def test_stdio_delivers_large_utf8_output_without_truncation(
                 assert not result.is_error
                 assert getattr(result.content[0], "text", None) == executor.result
             errors.seek(0)
-            assert errors.read() == ""
+            assert _server_stderr(errors.read()) == ""
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX nonblocking partial writes")
