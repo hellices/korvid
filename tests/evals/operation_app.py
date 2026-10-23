@@ -106,11 +106,11 @@ __all__ = [
 _ALIASES = builtin_aliases()
 _APPROVAL_KEYS = {"approved": "y", "denied": "ctrl+n"}
 _APPROVED_ERROR = re.compile(r"ERROR: \S+ \S+ (?:blocked|failed): ")
-#: The shortest approval window the harness accepts. `until` polls at
-#: 0.05s and `_await_user_approval` re-checks its remaining budget right
-#: after `push_screen`, so a sub-second window can be created and expired
-#: between two polls — an intermittent pass, not a test. The requirement
-#: is only that it is not the shipped 120 seconds.
+#: The shortest approval window the harness accepts. The driver notes each
+#: dialog when Textual pushes it (#451), but `_await_user_approval`
+#: re-checks its remaining budget right after `push_screen`, so a
+#: sub-second window can expire as soon as it opens. The requirement is
+#: only that it is not the shipped 120 seconds.
 MIN_APPROVAL_TIMEOUT = 1.0
 #: The one read that can earn state credit: it returns the target's own
 #: sanitized YAML document, so the result can be parsed and walked.
@@ -657,9 +657,21 @@ class _ApprovalDriver:
         self._dialog_seen = False
 
     def note_dialog_open(self) -> None:
-        """Remember that polling observed an approval dialog."""
+        """Remember that an approval dialog opened."""
         if self._remaining > 0:
             self._dialog_seen = True
+
+    def watch_dialogs(self) -> None:
+        """Note each approval dialog as Textual pushes it.
+
+        Polling alone can miss a dialog whose whole approval window passes
+        between two polls on a loaded runner (#451). Call once the app runs.
+        """
+        self._app.screen_change_signal.subscribe(self._app, self._on_screen_change, immediate=True)
+
+    def _on_screen_change(self, screen: object) -> None:
+        if isinstance(screen, ConfirmScreen):
+            self.note_dialog_open()
 
     def _expected_title(self) -> str:
         target = self._journey.target
@@ -1340,6 +1352,7 @@ async def run_operation_journey(
     )
     try:
         async with app.run_test() as pilot:
+            driver.watch_dialogs()
             app.query_one(AgentPanel).display = True
             if journey.initial_selection == "neutral":
                 await ui_proxy.agent_navigate(journey.target.plural, ALL_NAMESPACES)

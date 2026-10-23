@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
@@ -1296,6 +1296,30 @@ async def test_a_denied_restart_is_terminal_and_mutates_nothing(tmp_path: Path) 
 
 
 async def test_an_expired_approval_is_terminal_and_mutates_nothing(tmp_path: Path) -> None:
+    run = await run_scripted_journey(
+        "restart-approval-expired", tmp_path, approval_timeout_seconds=MIN_APPROVAL_TIMEOUT
+    )
+    approvals = [entry for entry in run.journal if entry["event"] == "approval_observed"]
+    assert [entry["approval"] for entry in approvals] == ["expired"]
+    assert [entry for entry in run.journal if entry["event"] == "mutation_started"] == []
+    assert run.grade.hard_failures == ()
+    assert run.grade.outcome == "rejected"
+    assert run.audit == ()
+
+
+async def test_an_expired_dialog_that_no_poll_saw_is_still_recorded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On a loaded runner the whole approval window can pass between two of
+    the driver's polls (#451). Polls that never see the dialog open must
+    still leave one `expired` approval in the journal."""
+
+    def polls_that_miss_every_dialog(
+        app: object, ended: Callable[[], bool], driver: object
+    ) -> Callable[[], bool]:
+        return ended
+
+    monkeypatch.setattr(operation_app, "_dialog_or_turn_end", polls_that_miss_every_dialog)
     run = await run_scripted_journey(
         "restart-approval-expired", tmp_path, approval_timeout_seconds=MIN_APPROVAL_TIMEOUT
     )
