@@ -593,15 +593,16 @@ def _runs_uv_unfrozen(words: list[str]) -> bool:
 def _bare_uv_runs(text: str) -> list[str]:
     """The Makefile recipe lines that run `uv run` without `--frozen`.
 
-    Each line is split into words the way a POSIX shell splits them - blanks,
-    quotes, escapes and `#` comments - so a respaced or quoted `uv run` is
-    still found, a comment is not, and `--frozen` only counts as a word of its
-    own. A line that does not split is reported rather than skipped.
+    Make first strips a recipe's `@`, `-` and `+` prefixes; the shell then
+    splits the rest into words - blanks, quotes, escapes and `#` comments.
+    So a prefixed, respaced or quoted `uv run` is still found, a comment is
+    not, and `--frozen` only counts as a word of its own. A line that does
+    not split is reported rather than skipped.
     """
     bare: list[str] = []
     for line in text.splitlines():
         try:
-            words = shlex.split(line, comments=True)
+            words = shlex.split(re.sub(r"^[\s@+-]*", "", line), comments=True)
         except ValueError:
             bare.append(line.strip())
             continue
@@ -709,6 +710,9 @@ def test_the_hook_check_reads_entries_as_pre_commit_does(
         ("\t'uv' run --frozen mypy", False),
         ('\tuv run "mypy', True),
         ("\t# uv run mypy is what a bare hook would do", False),
+        ("\t@uv run mypy", True),
+        ("\t-uv run mypy", True),
+        ("\t@-uv run --frozen mypy", False),
     ],
     ids=[
         "frozen",
@@ -725,6 +729,9 @@ def test_the_hook_check_reads_entries_as_pre_commit_does(
         "quoted-and-frozen",
         "unsplittable",
         "comment",
+        "silent-prefix",
+        "ignore-errors-prefix",
+        "prefixes-and-frozen",
     ],
 )
 def test_the_bare_uv_run_check_reads_commands_as_the_shell_does(line: str, bare: bool) -> None:
