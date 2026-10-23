@@ -583,15 +583,21 @@ def test_repository_declares_no_uv_configuration_file() -> None:
 
 
 def _runs_uv_unfrozen(words: list[str]) -> bool:
-    """Whether a split command runs `uv run` without `--frozen` right after it."""
+    """Whether a split command runs uv as anything but `uv run --frozen ...`.
+
+    An allowlist, so it fails closed: a bare `uv run`, a global option before
+    the subcommand (`uv --quiet run`), or another subcommand (`uv sync`) is
+    reported for review instead of being interpreted. Every hook and target
+    is written `uv run --frozen`, so nothing the gates run needs more.
+    """
     return any(
-        words[index : index + 2] == ["uv", "run"] and words[index + 2 : index + 3] != ["--frozen"]
-        for index in range(len(words))
+        word == "uv" and words[index + 1 : index + 3] != ["run", "--frozen"]
+        for index, word in enumerate(words)
     )
 
 
 def _bare_uv_runs(text: str) -> list[str]:
-    """The Makefile recipe lines that run `uv run` without `--frozen`.
+    """The Makefile recipe lines that run uv as anything but `uv run --frozen`.
 
     Make first strips a recipe's `@`, `-` and `+` prefixes; the shell then
     splits the rest into words and operators - blanks, quotes, escapes, `#`
@@ -617,7 +623,7 @@ def _bare_uv_runs(text: str) -> list[str]:
 
 
 def _bare_hook_entries(text: str) -> list[str]:
-    """The pre-commit hook entries that run `uv run` without `--frozen`.
+    """The pre-commit hook entries that run uv as anything but `uv run --frozen`.
 
     pre-commit decodes `entry` as YAML, so quotes there belong to YAML, and
     runs the decoded string split with shlex. A `pygrep` entry is a pattern
@@ -679,6 +685,8 @@ def _hook_config(entry: str, language: str = "system") -> str:
         ("'uv run mypy'", "system", True),
         (">-\n          uv run\n          mypy", "system", True),
         ("'(url|registry) = \"(?!https://)'", "pygrep", False),
+        ("uv --quiet run mypy", "system", True),
+        ("uv --quiet run --frozen mypy", "system", True),
     ],
     ids=[
         "frozen",
@@ -688,6 +696,8 @@ def _hook_config(entry: str, language: str = "system") -> str:
         "single-quoted",
         "folded",
         "pygrep-pattern",
+        "global-option",
+        "global-option-then-frozen",
     ],
 )
 def test_the_hook_check_reads_entries_as_pre_commit_does(
@@ -722,6 +732,9 @@ def test_the_hook_check_reads_entries_as_pre_commit_does(
         ("\ttrue&&uv run mypy", True),
         ("\tfalse||uv run mypy", True),
         ("\tuv run --frozen mypy|cat", False),
+        ("\tuv --quiet run mypy", True),
+        ("\tuv --quiet run --frozen mypy", True),
+        ("\tuv sync", True),
     ],
     ids=[
         "frozen",
@@ -745,6 +758,9 @@ def test_the_hook_check_reads_entries_as_pre_commit_does(
         "after-and",
         "after-or",
         "frozen-into-pipe",
+        "global-option",
+        "global-option-then-frozen",
+        "other-subcommand",
     ],
 )
 def test_the_bare_uv_run_check_reads_commands_as_the_shell_does(line: str, bare: bool) -> None:
