@@ -597,22 +597,49 @@ def _runs_uv_unfrozen(words: list[str]) -> bool:
     )
 
 
+def _without_shell_comment(line: str) -> str:
+    """`line` up to its shell comment: a `#` that starts a word, outside quotes.
+
+    shlex ends a word at any `#`, but a POSIX shell starts a comment only where
+    a word could start, so `foo#bar; uv run mypy` runs both commands.
+    """
+    quote = ""
+    escaped = False
+    previous = " "
+    for index, char in enumerate(line):
+        if escaped:
+            escaped = False
+        elif char == "\\" and quote != "'":
+            escaped = True
+        elif quote:
+            quote = "" if char == quote else quote
+        elif char in "'\"":
+            quote = char
+        elif char == "#" and (previous.isspace() or previous in ";&|()<>"):
+            return line[:index]
+        previous = char
+    return line
+
+
 def _bare_uv_runs(text: str) -> list[str]:
     """The Makefile recipe lines that run uv as anything but `uv run --frozen`.
 
     Make first strips a recipe's `@`, `-` and `+` prefixes; the shell then
-    splits the rest into words and operators - blanks, quotes, escapes, `#`
-    comments, and `;`, `&&`, `||` and `|` with or without spaces. So a
-    prefixed, respaced, quoted or chained `uv run` is still found, a comment
-    is not, and `--frozen` only counts as a word of its own. A line that does
-    not split is reported rather than skipped. The check reads each recipe as
-    a simple command list: it does not expand Make variables or look inside a
-    nested shell (`sh -c '...'`), so a recipe written that way needs review.
+    splits the rest into words and operators - blanks, quotes, escapes, a `#`
+    comment where a word starts, and `;`, `&&`, `||` and `|` with or without
+    spaces. So a prefixed, respaced, quoted or chained `uv run` is still
+    found, a comment is not, and `--frozen` only counts as a word of its own.
+    A line that does not split is reported rather than skipped. The check
+    reads each recipe as a simple command list: it does not expand Make
+    variables or look inside a nested shell (`sh -c '...'`), so a recipe
+    written that way needs review.
     """
     bare: list[str] = []
     for line in text.splitlines():
-        lexer = shlex.shlex(re.sub(r"^[\s@+-]*", "", line), posix=True, punctuation_chars=True)
+        recipe = _without_shell_comment(re.sub(r"^[\s@+-]*", "", line))
+        lexer = shlex.shlex(recipe, posix=True, punctuation_chars=True)
         lexer.whitespace_split = True
+        lexer.commenters = ""
         try:
             words = list(lexer)
         except ValueError:
@@ -738,6 +765,9 @@ def test_the_hook_check_reads_entries_as_pre_commit_does(
         ("\tuv sync", True),
         ("\t/usr/local/bin/uv run mypy", True),
         ("\t$(HOME)/.local/bin/uv run --frozen mypy", False),
+        ("\techo foo#bar; uv run mypy", True),
+        ('\techo "#x"; uv run mypy', True),
+        ("\tuv run --frozen mypy # uv run mypy", False),
     ],
     ids=[
         "frozen",
@@ -766,6 +796,9 @@ def test_the_hook_check_reads_entries_as_pre_commit_does(
         "other-subcommand",
         "path-qualified",
         "path-qualified-and-frozen",
+        "hash-inside-word",
+        "quoted-hash",
+        "trailing-comment",
     ],
 )
 def test_the_bare_uv_run_check_reads_commands_as_the_shell_does(line: str, bare: bool) -> None:
