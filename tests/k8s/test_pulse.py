@@ -247,6 +247,9 @@ async def test_request_preserves_auth_refresh_cookie_and_configured_transport(
         ("gzip", gzip.compress(b'{"items": []}') + b"trailing"),
         ("br", b"unsupported"),
     ],
+    # Named, not derived from the payload: a gzip header carries the time it
+    # was written, and xdist aborts when its workers collect different IDs.
+    ids=["gzip-not-compressed", "gzip-truncated", "gzip-trailing-bytes", "br-unsupported"],
 )
 async def test_invalid_compression_fails_closed_and_closes_response(
     pulse: ModuleType, encoding: str, payload: bytes

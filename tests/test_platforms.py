@@ -233,7 +233,7 @@ def test_ci_workflow_defines_the_required_windows_test_job() -> None:
     assert "uv sync --locked --dev --all-extras" in runs
     audit_regression = "tests/core/test_audit.py::test_concurrent_appends_across_instances"
     full_suite = (
-        "uv run pytest -q --ignore=tests/windows/test_native_terminal.py"
+        "uv run pytest -n 4 -q --ignore=tests/windows/test_native_terminal.py"
         " --ignore=tests/test_docs_landing_behavior.py"
         f" --deselect={audit_regression}"
         " --randomly-seed=${{ github.run_id }}"
@@ -268,7 +268,7 @@ def test_ci_windows_docs_harness_runs_once_in_fresh_process() -> None:
         f"uv run pytest -p no:tach tests/windows/test_native_terminal.py {audit_regression} -q"
     )
     full_suite = (
-        "uv run pytest -q --ignore=tests/windows/test_native_terminal.py"
+        "uv run pytest -n 4 -q --ignore=tests/windows/test_native_terminal.py"
         " --ignore=tests/test_docs_landing_behavior.py"
         f" --deselect={audit_regression}"
         " --randomly-seed=${{ github.run_id }}"
