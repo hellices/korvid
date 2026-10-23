@@ -8,12 +8,30 @@ from pathlib import Path
 import pytest
 
 from korvid.ui.agent_ui_controller import APPROVAL_TIMEOUT as AGENT_APPROVAL_TIMEOUT
+from korvid.ui.app import KorvidApp
 from korvid.ui.app_surfaces import AppUIBridge
 from korvid.ui.proposal_controller import APPROVAL_TIMEOUT as PROPOSAL_APPROVAL_TIMEOUT
 from korvid.ui.widgets.confirm_screen import ConfirmScreen
 
 from .agent_write_support import Recorder, _expand_panel, make_app
 from .waits import until
+
+
+def _note_confirm_screens(app: KorvidApp) -> list[ConfirmScreen]:
+    """Every ConfirmScreen the app pushes, noted as Textual pushes it.
+
+    Polling `app.screen` can miss a dialog whose whole approval window passes
+    between two polls on a loaded runner (#470, as #451 found in the eval
+    driver). Call once the app runs.
+    """
+    pushed: list[ConfirmScreen] = []
+
+    def note(screen: object) -> None:
+        if isinstance(screen, ConfirmScreen):
+            pushed.append(screen)
+
+    app.screen_change_signal.subscribe(app, note, immediate=True)
+    return pushed
 
 
 def test_the_default_reproduces_the_shipped_approval_timeout(tmp_path: Path) -> None:
@@ -44,18 +62,39 @@ async def test_an_injected_short_timeout_expires_an_agent_write(tmp_path: Path) 
     recorder = Recorder()
     app = make_app(recorder, tmp_path / "audit.jsonl", approval_timeout_seconds=1.0)
     async with app.run_test() as pilot:
+        dialogs = _note_confirm_screens(app)
         _expand_panel(app)
         task = asyncio.ensure_future(
             AppUIBridge(app).agent_request_write(
                 "scale", "deployments", "web", namespace="default", replicas=4
             )
         )
-        await until(
-            pilot,
-            lambda: isinstance(app.screen, ConfirmScreen),
-            label="agent approval dialog opened",
-        )
+        await until(pilot, lambda: dialogs, label="agent approval dialog opened")
         await until(pilot, task.done, timeout=10.0, label="approval request expired")
         result = await task
         assert "expired" in result
         assert recorder.calls == []
+
+
+async def test_a_window_that_runs_out_while_the_dialog_mounts_still_expires_it(
+    tmp_path: Path,
+) -> None:
+    """A loaded runner can spend the whole window mounting the dialog. The
+    controller then expires the request and dismisses the dialog before any
+    later poll of `app.screen` could see it (#470); a one-millisecond window
+    makes that happen every time."""
+    recorder = Recorder()
+    app = make_app(recorder, tmp_path / "audit.jsonl", approval_timeout_seconds=0.001)
+    async with app.run_test() as pilot:
+        dialogs = _note_confirm_screens(app)
+        _expand_panel(app)
+        task = asyncio.ensure_future(
+            AppUIBridge(app).agent_request_write(
+                "scale", "deployments", "web", namespace="default", replicas=4
+            )
+        )
+        await until(pilot, lambda: dialogs, label="agent approval dialog opened")
+        await until(pilot, task.done, label="approval request expired")
+        assert "expired" in await task
+        assert recorder.calls == []
+        assert not isinstance(app.screen, ConfirmScreen)
