@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 from rich.text import Text
 from textual.app import App, ComposeResult
+from textual.widget import Widget
 from textual.widgets import DataTable, Static
 
 from korvid.core.deployment_outcome import (
@@ -24,6 +25,11 @@ class _HostApp(App[None]):
 
     def compose(self) -> ComposeResult:
         yield Static("host")
+
+
+class _NothingMounted(DeploymentOutcomeScreen):
+    async def mount_composed_widgets(self, widgets: list[Widget]) -> None:
+        """Mount nothing, as `Widget.mount` does for a screen being pruned."""
 
 
 def _snapshot(
@@ -158,3 +164,18 @@ async def test_stop_and_refresh_return_typed_actions(
         await pilot.press(key)
         await until(pilot, lambda: app.result != "unset", label=f"{key} result")
     assert app.result == expected
+
+
+async def test_screen_whose_composed_widgets_never_mount_does_not_raise() -> None:
+    """The controller pushes this screen as soon as a scale is accepted, so it
+    can arrive while the app shuts down (#455). Shutdown prunes the screen
+    before it composes, and `Widget.mount` then mounts nothing for it, but
+    Textual still sends `Mount`."""
+    app = _HostApp()
+    screen = _NothingMounted(_snapshot(pods=(_pod(),)))
+
+    async with app.run_test() as pilot:
+        await app.push_screen(screen)
+        await pilot.pause()
+
+        assert not screen.query(DataTable)
