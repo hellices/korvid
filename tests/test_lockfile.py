@@ -601,23 +601,25 @@ def _without_shell_comment(line: str) -> str:
     """`line` up to its shell comment: a `#` that starts a word, outside quotes.
 
     shlex ends a word at any `#`, but a POSIX shell starts a comment only where
-    a word could start, so `foo#bar; uv run mypy` runs both commands.
+    a word could start - after an unescaped blank or operator - so
+    `foo#bar; uv run mypy` and `foo\\ #bar; uv run mypy` both run `uv run`.
     """
     quote = ""
     escaped = False
-    previous = " "
+    word_can_start = True
     for index, char in enumerate(line):
-        if escaped:
-            escaped = False
-        elif char == "\\" and quote != "'":
-            escaped = True
-        elif quote:
-            quote = "" if char == quote else quote
-        elif char in "'\"":
-            quote = char
-        elif char == "#" and (previous.isspace() or previous in ";&|()<>"):
+        if escaped or quote:
+            # An escaped character, or one inside quotes, continues the word.
+            if quote and not escaped and char == quote:
+                quote = ""
+            escaped = char == "\\" and quote == '"' and not escaped
+            word_can_start = False
+        elif char == "#" and word_can_start:
             return line[:index]
-        previous = char
+        else:
+            escaped = char == "\\"
+            quote = char if char in "'\"" else ""
+            word_can_start = char.isspace() or char in ";&|()<>"
     return line
 
 
@@ -630,9 +632,11 @@ def _bare_uv_runs(text: str) -> list[str]:
     spaces. So a prefixed, respaced, quoted or chained `uv run` is still
     found, a comment is not, and `--frozen` only counts as a word of its own.
     A line that does not split is reported rather than skipped. The check
-    reads each recipe as a simple command list: it does not expand Make
-    variables or look inside a nested shell (`sh -c '...'`), so a recipe
-    written that way needs review.
+    reads each recipe as a simple command list: it catches the ways a bare
+    `uv run` gets written by accident, not a deliberately obscured one, so it
+    does not expand Make variables, look inside a nested shell (`sh -c
+    '...'`), or reassemble a split word (`u""v`). A recipe written that way
+    needs review.
     """
     bare: list[str] = []
     for line in text.splitlines():
@@ -689,6 +693,35 @@ def test_local_gates_never_relock_the_lockfile(
     """
     bare = bare_commands((_ROOT / name).read_text(encoding="utf-8"))
     assert bare == [], f"{name} runs uv without --frozen, which can re-lock uv.lock"
+
+
+@pytest.mark.parametrize(
+    ("line", "kept"),
+    [
+        ("# all of it", ""),
+        ("uv run --frozen mypy # note", "uv run --frozen mypy "),
+        ("true;# note", "true;"),
+        ("echo foo#bar", "echo foo#bar"),
+        ("echo foo\\ #bar", "echo foo\\ #bar"),
+        ('echo "a\\"#b" # note', 'echo "a\\"#b" '),
+        ("echo 'a\\'#b", "echo 'a\\'#b"),
+        ('echo "a"#b', 'echo "a"#b'),
+        ("echo a\\\\#b", "echo a\\\\#b"),
+    ],
+    ids=[
+        "whole-line",
+        "after-blank",
+        "after-operator",
+        "inside-word",
+        "after-escaped-blank",
+        "after-escaped-double-quote",
+        "single-quotes-take-no-escape",
+        "after-closing-quote",
+        "after-escaped-backslash",
+    ],
+)
+def test_a_recipe_comment_starts_only_where_a_word_can(line: str, kept: str) -> None:
+    assert _without_shell_comment(line) == kept
 
 
 def _hook_config(entry: str, language: str = "system") -> str:
@@ -768,6 +801,8 @@ def test_the_hook_check_reads_entries_as_pre_commit_does(
         ("\techo foo#bar; uv run mypy", True),
         ('\techo "#x"; uv run mypy', True),
         ("\tuv run --frozen mypy # uv run mypy", False),
+        ("\techo foo\\ #bar; uv run mypy", True),
+        ("\ttrue;# uv run mypy", False),
     ],
     ids=[
         "frozen",
@@ -799,6 +834,8 @@ def test_the_hook_check_reads_entries_as_pre_commit_does(
         "hash-inside-word",
         "quoted-hash",
         "trailing-comment",
+        "hash-after-escaped-blank",
+        "comment-after-operator",
     ],
 )
 def test_the_bare_uv_run_check_reads_commands_as_the_shell_does(line: str, bare: bool) -> None:
