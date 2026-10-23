@@ -25,11 +25,7 @@ from korvid.ui.deployment_outcome_controller import DeploymentOutcomeController
 from korvid.ui.widgets.deployment_outcome_screen import DeploymentOutcomeScreen
 from korvid.ui.write_gate import AcceptedWriteReceipt
 from tests.ui.test_write_coordinator import FakeUi
-
-#: How long a test waits for a worker, reader, or stop to finish. The bound
-#: only keeps a broken test from hanging, so it matches `until()`'s default:
-#: one second was not always enough on a loaded Windows runner (#452).
-_HANG_GUARD_SECONDS = 5.0
+from tests.ui.waits import HANG_GUARD_SECONDS
 
 _DEPLOYMENT: dict[str, Any] = {
     "apiVersion": "apps/v1",
@@ -915,8 +911,8 @@ async def test_absolute_deadline_reaps_reader_that_suppresses_cancellation() -> 
     )
     assert observer is not None
     await observer(_receipt())
-    await asyncio.wait_for(started.wait(), timeout=_HANG_GUARD_SECONDS)
-    await asyncio.wait_for(_drain(ui), timeout=_HANG_GUARD_SECONDS)
+    await asyncio.wait_for(started.wait(), timeout=HANG_GUARD_SECONDS)
+    await asyncio.wait_for(_drain(ui), timeout=HANG_GUARD_SECONDS)
 
     latest = controller.latest()
     assert latest is not None
@@ -969,16 +965,16 @@ async def test_stop_all_is_bounded_when_reader_repeatedly_suppresses_cancellatio
     await started.wait()
 
     stopping = asyncio.create_task(controller.stop_all("context changed"))
-    await asyncio.wait_for(second_cancellation.wait(), timeout=_HANG_GUARD_SECONDS)
+    await asyncio.wait_for(second_cancellation.wait(), timeout=HANG_GUARD_SECONDS)
     # Only `release` lets the reader finish, so stop_all has to return before
     # it. `asyncio.wait` does not cancel `stopping` when it gives up, so a
     # stop_all that waited for the reader fails the assertion below instead of
     # hanging the test.
-    done, _pending = await asyncio.wait({stopping}, timeout=_HANG_GUARD_SECONDS)
+    done, _pending = await asyncio.wait({stopping}, timeout=HANG_GUARD_SECONDS)
     stopped_before_release = stopping in done
     release.set()
-    await asyncio.wait_for(reaped.wait(), timeout=_HANG_GUARD_SECONDS)
-    await asyncio.wait_for(stopping, timeout=_HANG_GUARD_SECONDS)
+    await asyncio.wait_for(reaped.wait(), timeout=HANG_GUARD_SECONDS)
+    await asyncio.wait_for(stopping, timeout=HANG_GUARD_SECONDS)
 
     assert stopped_before_release
     assert cancellation_count == 2
@@ -1033,11 +1029,11 @@ async def test_detached_read_blocks_new_reads_at_capacity() -> None:
     )
     assert observer is not None
     await observer(_receipt())
-    await asyncio.wait_for(started.wait(), timeout=_HANG_GUARD_SECONDS)
+    await asyncio.wait_for(started.wait(), timeout=HANG_GUARD_SECONDS)
 
     stopping = asyncio.create_task(controller.stop_all("context changed"))
-    await asyncio.wait_for(detached.wait(), timeout=_HANG_GUARD_SECONDS)
-    drained = await asyncio.wait_for(stopping, timeout=_HANG_GUARD_SECONDS)
+    await asyncio.wait_for(detached.wait(), timeout=HANG_GUARD_SECONDS)
+    drained = await asyncio.wait_for(stopping, timeout=HANG_GUARD_SECONDS)
 
     await observer(_receipt())
     second_call = asyncio.create_task(second_started.wait())
@@ -1059,7 +1055,7 @@ async def test_detached_read_blocks_new_reads_at_capacity() -> None:
     assert latest.outcome.phase is DeploymentOutcomePhase.INCOMPLETE
     assert "still stopping" in latest.outcome.summary
 
-    await asyncio.wait_for(reaped.wait(), timeout=_HANG_GUARD_SECONDS)
+    await asyncio.wait_for(reaped.wait(), timeout=HANG_GUARD_SECONDS)
 
 
 async def test_deadline_wins_when_reader_translates_timeout_cancellation() -> None:
@@ -1088,7 +1084,7 @@ async def test_deadline_wins_when_reader_translates_timeout_cancellation() -> No
     )
     assert observer is not None
     await observer(_receipt())
-    await asyncio.wait_for(started.wait(), timeout=_HANG_GUARD_SECONDS)
+    await asyncio.wait_for(started.wait(), timeout=HANG_GUARD_SECONDS)
     await _drain(ui)
 
     latest = controller.latest()

@@ -20,10 +20,17 @@ class WaitTimeout(Exception):
     """
 
 
+#: How long `until` polls by default before giving up. The bound only keeps
+#: a broken test from hanging - a wait that passes returns as soon as its
+#: condition holds - so it is sized for a loaded CI runner, where a wait that
+#: spans a durable audit append can sit behind a multi-second `fsync` (#464).
+HANG_GUARD_SECONDS = 30.0
+
+
 async def until(
     pilot: Any,
     cond: Callable[[], object],
-    timeout: float = 5.0,
+    timeout: float = HANG_GUARD_SECONDS,
     label: str = "condition",
 ) -> None:
     """Advance the app until `cond()` is truthy, or fail after `timeout` seconds.
