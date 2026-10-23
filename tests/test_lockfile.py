@@ -587,11 +587,12 @@ def _runs_uv_unfrozen(words: list[str]) -> bool:
 
     An allowlist, so it fails closed: a bare `uv run`, a global option before
     the subcommand (`uv --quiet run`), or another subcommand (`uv sync`) is
-    reported for review instead of being interpreted. Every hook and target
-    is written `uv run --frozen`, so nothing the gates run needs more.
+    reported for review instead of being interpreted. `uv` is matched by its
+    last path component, so `/usr/local/bin/uv` counts too. Every hook and
+    target is written `uv run --frozen`, so nothing the gates run needs more.
     """
     return any(
-        word == "uv" and words[index + 1 : index + 3] != ["run", "--frozen"]
+        word.rsplit("/", 1)[-1] == "uv" and words[index + 1 : index + 3] != ["run", "--frozen"]
         for index, word in enumerate(words)
     )
 
@@ -735,6 +736,8 @@ def test_the_hook_check_reads_entries_as_pre_commit_does(
         ("\tuv --quiet run mypy", True),
         ("\tuv --quiet run --frozen mypy", True),
         ("\tuv sync", True),
+        ("\t/usr/local/bin/uv run mypy", True),
+        ("\t$(HOME)/.local/bin/uv run --frozen mypy", False),
     ],
     ids=[
         "frozen",
@@ -761,6 +764,8 @@ def test_the_hook_check_reads_entries_as_pre_commit_does(
         "global-option",
         "global-option-then-frozen",
         "other-subcommand",
+        "path-qualified",
+        "path-qualified-and-frozen",
     ],
 )
 def test_the_bare_uv_run_check_reads_commands_as_the_shell_does(line: str, bare: bool) -> None:
