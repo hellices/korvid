@@ -725,7 +725,25 @@ class _ApprovalDriver:
                 f"{self._journey.id}: dialog_intervention replacement did not apply"
             )
 
+    async def _await_dialog_composed(self, pilot: Any) -> None:
+        """Wait until a current approval dialog has its widgets, or closes.
+
+        Textual makes a pushed screen current before it composes the screen's
+        widgets, and a loaded runner can poll in between (#478): reading the
+        title then would find none. A dialog that closes first is left to
+        `handle`, which already treats it as closed before a decision.
+        """
+        screen = self._app.screen
+        if not isinstance(screen, ConfirmScreen):
+            return
+        await until(
+            pilot,
+            lambda: self._app.screen is not screen or bool(screen.query(".confirm-title")),
+            label="approval dialog composed",
+        )
+
     async def handle(self, pilot: Any) -> None:
+        await self._await_dialog_composed(pilot)
         screen = self._app.screen
         if not isinstance(screen, ConfirmScreen):
             if self._remaining <= 0 or not self._dialog_seen:
