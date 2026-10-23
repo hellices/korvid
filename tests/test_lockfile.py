@@ -602,9 +602,9 @@ def _bare_uv_runs(text: str) -> list[str]:
 
     Make first strips a recipe's `@`, `-` and `+` prefixes; the shell then
     splits the rest into words and operators - blanks, quotes, escapes, and
-    `;`, `&&`, `||` and `|` with or without spaces. So a prefixed, respaced,
-    quoted or chained `uv run` is still found, and `--frozen` only counts as
-    a word of its own. Only a whole-line comment is skipped: anywhere else a
+    `;`, `&&`, `||`, `|`, `$(` and backticks with or without spaces. So a
+    prefixed, respaced, quoted, chained or substituted `uv run` is still
+    found, and `--frozen` only counts as a word of its own. Only a whole-line comment is skipped: anywhere else a
     `#` is read as code, because where a shell comment starts depends on
     substitutions and quoting this check does not model, and guessing wrong
     would hide the command after it. A trailing comment that mentions uv is
@@ -620,7 +620,7 @@ def _bare_uv_runs(text: str) -> list[str]:
         recipe = re.sub(r"^[\s@+-]*", "", line)
         if recipe.startswith("#"):
             continue
-        lexer = shlex.shlex(recipe, posix=True, punctuation_chars=True)
+        lexer = shlex.shlex(recipe, posix=True, punctuation_chars="();<>|&`")
         lexer.whitespace_split = True
         lexer.commenters = ""
         try:
@@ -754,6 +754,8 @@ def test_the_hook_check_reads_entries_as_pre_commit_does(
         ("\techo foo\\ #bar; uv run mypy", True),
         ("\ttrue;# uv run mypy", True),
         ("\techo $(date)#tag; uv run mypy", True),
+        ("\techo `uv run mypy`", True),
+        ("\techo `uv run --frozen mypy`", False),
     ],
     ids=[
         "frozen",
@@ -788,6 +790,8 @@ def test_the_hook_check_reads_entries_as_pre_commit_does(
         "hash-after-escaped-blank",
         "comment-after-operator-is-read",
         "substitution-then-hash",
+        "backtick-substitution",
+        "backtick-substitution-frozen",
     ],
 )
 def test_the_bare_uv_run_check_reads_commands_as_the_shell_does(line: str, bare: bool) -> None:
