@@ -21,6 +21,7 @@ import re
 import shlex
 import tempfile
 import tomllib
+from collections.abc import Callable
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -581,8 +582,16 @@ def test_repository_declares_no_uv_configuration_file() -> None:
     )
 
 
+def _runs_uv_unfrozen(words: list[str]) -> bool:
+    """Whether a split command runs `uv run` without `--frozen` right after it."""
+    return any(
+        words[index : index + 2] == ["uv", "run"] and words[index + 2 : index + 3] != ["--frozen"]
+        for index in range(len(words))
+    )
+
+
 def _bare_uv_runs(text: str) -> list[str]:
-    """The lines of `text` that run `uv run` without `--frozen` right after it.
+    """The Makefile recipe lines that run `uv run` without `--frozen`.
 
     Each line is split into words the way a POSIX shell splits them - blanks,
     quotes, escapes and `#` comments - so a respaced or quoted `uv run` is
@@ -596,24 +605,91 @@ def _bare_uv_runs(text: str) -> list[str]:
         except ValueError:
             bare.append(line.strip())
             continue
-        if any(
-            words[index : index + 2] == ["uv", "run"]
-            and words[index + 2 : index + 3] != ["--frozen"]
-            for index in range(len(words))
-        ):
+        if _runs_uv_unfrozen(words):
             bare.append(line.strip())
     return bare
 
 
-@pytest.mark.parametrize("name", [".pre-commit-config.yaml", "Makefile"])
-def test_local_gates_never_relock_the_lockfile(name: str) -> None:
+def _bare_hook_entries(text: str) -> list[str]:
+    """The pre-commit hook entries that run `uv run` without `--frozen`.
+
+    pre-commit decodes `entry` as YAML, so quotes there belong to YAML, and
+    runs the decoded string split with shlex. A `pygrep` entry is a pattern
+    and a `fail` entry a message, so neither is a command. An entry that does
+    not split is reported rather than skipped.
+    """
+    bare: list[str] = []
+    for repo in yaml.safe_load(text)["repos"]:
+        for hook in repo["hooks"]:
+            entry = hook.get("entry")
+            if entry is None or hook.get("language") in {"pygrep", "fail"}:
+                continue
+            try:
+                words = shlex.split(entry)
+            except ValueError:
+                bare.append(entry)
+                continue
+            if _runs_uv_unfrozen(words):
+                bare.append(entry)
+    return bare
+
+
+@pytest.mark.parametrize(
+    ("name", "bare_commands"),
+    [(".pre-commit-config.yaml", _bare_hook_entries), ("Makefile", _bare_uv_runs)],
+    ids=["pre-commit", "make"],
+)
+def test_local_gates_never_relock_the_lockfile(
+    name: str, bare_commands: Callable[[str], list[str]]
+) -> None:
     """A bare `uv run` re-locks when the lock looks stale to it, and behind a
     package mirror it does: the configured index is not the one the lock
     records, so every URL is rewritten to the mirror. The hooks and the
     `make` targets are what a contributor runs before every commit (#466).
     """
-    bare = _bare_uv_runs((_ROOT / name).read_text(encoding="utf-8"))
+    bare = bare_commands((_ROOT / name).read_text(encoding="utf-8"))
     assert bare == [], f"{name} runs uv without --frozen, which can re-lock uv.lock"
+
+
+def _hook_config(entry: str, language: str = "system") -> str:
+    return (
+        "repos:\n"
+        "  - repo: local\n"
+        "    hooks:\n"
+        "      - id: probe\n"
+        "        name: probe\n"
+        f"        language: {language}\n"
+        f"        entry: {entry}\n"
+    )
+
+
+@pytest.mark.parametrize(
+    ("entry", "language", "bare"),
+    [
+        ("uv run --frozen mypy", "system", False),
+        ('"uv run --frozen mypy"', "system", False),
+        ("uv run mypy", "system", True),
+        ('"uv run mypy"', "system", True),
+        ("'uv run mypy'", "system", True),
+        (">-\n          uv run\n          mypy", "system", True),
+        ("'(url|registry) = \"(?!https://)'", "pygrep", False),
+    ],
+    ids=[
+        "frozen",
+        "quoted-frozen",
+        "bare",
+        "double-quoted",
+        "single-quoted",
+        "folded",
+        "pygrep-pattern",
+    ],
+)
+def test_the_hook_check_reads_entries_as_pre_commit_does(
+    entry: str, language: str, bare: bool
+) -> None:
+    """pre-commit decodes `entry` as YAML, so its quotes are YAML's, and then
+    splits the string with shlex; a pygrep entry is a pattern, not a command."""
+    assert bool(_bare_hook_entries(_hook_config(entry, language))) is bare
 
 
 @pytest.mark.parametrize(
