@@ -597,50 +597,29 @@ def _runs_uv_unfrozen(words: list[str]) -> bool:
     )
 
 
-def _without_shell_comment(line: str) -> str:
-    """`line` up to its shell comment: a `#` that starts a word, outside quotes.
-
-    shlex ends a word at any `#`, but a POSIX shell starts a comment only where
-    a word could start - after an unescaped blank or operator - so
-    `foo#bar; uv run mypy` and `foo\\ #bar; uv run mypy` both run `uv run`.
-    """
-    quote = ""
-    escaped = False
-    word_can_start = True
-    for index, char in enumerate(line):
-        if escaped or quote:
-            # An escaped character, or one inside quotes, continues the word.
-            if quote and not escaped and char == quote:
-                quote = ""
-            escaped = char == "\\" and quote == '"' and not escaped
-            word_can_start = False
-        elif char == "#" and word_can_start:
-            return line[:index]
-        else:
-            escaped = char == "\\"
-            quote = char if char in "'\"" else ""
-            word_can_start = char.isspace() or char in ";&|()<>"
-    return line
-
-
 def _bare_uv_runs(text: str) -> list[str]:
     """The Makefile recipe lines that run uv as anything but `uv run --frozen`.
 
     Make first strips a recipe's `@`, `-` and `+` prefixes; the shell then
-    splits the rest into words and operators - blanks, quotes, escapes, a `#`
-    comment where a word starts, and `;`, `&&`, `||` and `|` with or without
-    spaces. So a prefixed, respaced, quoted or chained `uv run` is still
-    found, a comment is not, and `--frozen` only counts as a word of its own.
-    A line that does not split is reported rather than skipped. The check
-    reads each recipe as a simple command list: it catches the ways a bare
-    `uv run` gets written by accident, not a deliberately obscured one, so it
-    does not expand Make variables, look inside a nested shell (`sh -c
-    '...'`), or reassemble a split word (`u""v`). A recipe written that way
-    needs review.
+    splits the rest into words and operators - blanks, quotes, escapes, and
+    `;`, `&&`, `||` and `|` with or without spaces. So a prefixed, respaced,
+    quoted or chained `uv run` is still found, and `--frozen` only counts as
+    a word of its own. Only a whole-line comment is skipped: anywhere else a
+    `#` is read as code, because where a shell comment starts depends on
+    substitutions and quoting this check does not model, and guessing wrong
+    would hide the command after it. A trailing comment that mentions uv is
+    therefore reported; keep such comments on their own line. A line that
+    does not split is reported rather than skipped. The check catches the
+    ways a bare `uv run` gets written by accident, not a deliberately
+    obscured one, so it does not expand Make variables, look inside a nested
+    shell (`sh -c '...'`), or reassemble a split word (`u""v`). A recipe
+    written that way needs review.
     """
     bare: list[str] = []
     for line in text.splitlines():
-        recipe = _without_shell_comment(re.sub(r"^[\s@+-]*", "", line))
+        recipe = re.sub(r"^[\s@+-]*", "", line)
+        if recipe.startswith("#"):
+            continue
         lexer = shlex.shlex(recipe, posix=True, punctuation_chars=True)
         lexer.whitespace_split = True
         lexer.commenters = ""
@@ -693,35 +672,6 @@ def test_local_gates_never_relock_the_lockfile(
     """
     bare = bare_commands((_ROOT / name).read_text(encoding="utf-8"))
     assert bare == [], f"{name} runs uv without --frozen, which can re-lock uv.lock"
-
-
-@pytest.mark.parametrize(
-    ("line", "kept"),
-    [
-        ("# all of it", ""),
-        ("uv run --frozen mypy # note", "uv run --frozen mypy "),
-        ("true;# note", "true;"),
-        ("echo foo#bar", "echo foo#bar"),
-        ("echo foo\\ #bar", "echo foo\\ #bar"),
-        ('echo "a\\"#b" # note', 'echo "a\\"#b" '),
-        ("echo 'a\\'#b", "echo 'a\\'#b"),
-        ('echo "a"#b', 'echo "a"#b'),
-        ("echo a\\\\#b", "echo a\\\\#b"),
-    ],
-    ids=[
-        "whole-line",
-        "after-blank",
-        "after-operator",
-        "inside-word",
-        "after-escaped-blank",
-        "after-escaped-double-quote",
-        "single-quotes-take-no-escape",
-        "after-closing-quote",
-        "after-escaped-backslash",
-    ],
-)
-def test_a_recipe_comment_starts_only_where_a_word_can(line: str, kept: str) -> None:
-    assert _without_shell_comment(line) == kept
 
 
 def _hook_config(entry: str, language: str = "system") -> str:
@@ -800,9 +750,10 @@ def test_the_hook_check_reads_entries_as_pre_commit_does(
         ("\t$(HOME)/.local/bin/uv run --frozen mypy", False),
         ("\techo foo#bar; uv run mypy", True),
         ('\techo "#x"; uv run mypy', True),
-        ("\tuv run --frozen mypy # uv run mypy", False),
+        ("\tuv run --frozen mypy # uv run mypy", True),
         ("\techo foo\\ #bar; uv run mypy", True),
-        ("\ttrue;# uv run mypy", False),
+        ("\ttrue;# uv run mypy", True),
+        ("\techo $(date)#tag; uv run mypy", True),
     ],
     ids=[
         "frozen",
@@ -833,9 +784,10 @@ def test_the_hook_check_reads_entries_as_pre_commit_does(
         "path-qualified-and-frozen",
         "hash-inside-word",
         "quoted-hash",
-        "trailing-comment",
+        "trailing-comment-is-read",
         "hash-after-escaped-blank",
-        "comment-after-operator",
+        "comment-after-operator-is-read",
+        "substitution-then-hash",
     ],
 )
 def test_the_bare_uv_run_check_reads_commands_as_the_shell_does(line: str, bare: bool) -> None:
