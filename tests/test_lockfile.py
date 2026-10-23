@@ -580,6 +580,16 @@ def test_repository_declares_no_uv_configuration_file() -> None:
     )
 
 
+def _bare_uv_runs(text: str) -> list[str]:
+    """The lines of `text` that run `uv run` without `--frozen`.
+
+    Blanks are matched as the shell splits words - any run of spaces or tabs
+    - and `--frozen` only counts as a whole word.
+    """
+    bare_run = re.compile(r"\buv\s+run\b(?!\s+--frozen(?:\s|$))")
+    return [line.strip() for line in text.splitlines() if bare_run.search(line)]
+
+
 @pytest.mark.parametrize("name", [".pre-commit-config.yaml", "Makefile"])
 def test_local_gates_never_relock_the_lockfile(name: str) -> None:
     """A bare `uv run` re-locks when the lock looks stale to it, and behind a
@@ -587,8 +597,36 @@ def test_local_gates_never_relock_the_lockfile(name: str) -> None:
     records, so every URL is rewritten to the mirror. The hooks and the
     `make` targets are what a contributor runs before every commit (#466).
     """
-    text = (_ROOT / name).read_text(encoding="utf-8")
-    bare = [
-        line.strip() for line in text.splitlines() if re.search(r"\buv run\b(?! --frozen\b)", line)
-    ]
+    bare = _bare_uv_runs((_ROOT / name).read_text(encoding="utf-8"))
     assert bare == [], f"{name} runs uv without --frozen, which can re-lock uv.lock"
+
+
+@pytest.mark.parametrize(
+    ("line", "bare"),
+    [
+        ("\tuv run --frozen mypy", False),
+        ("\tuv run --frozen --group docs mkdocs serve", False),
+        ("\tuv run --frozen\tmypy", False),
+        ("\tuv run mypy", True),
+        ("\tuv  run mypy", True),
+        ("\tuv\trun mypy", True),
+        ("\tuv run  mypy --frozen", True),
+        ("\tuv run --frozen-lockfile mypy", True),
+        ("\tuv run --frozen ruff check && uv run ruff format", True),
+    ],
+    ids=[
+        "frozen",
+        "frozen-before-group",
+        "frozen-then-tab",
+        "bare",
+        "two-spaces",
+        "tab",
+        "flag-after-command",
+        "lookalike-flag",
+        "second-command",
+    ],
+)
+def test_the_bare_uv_run_check_reads_commands_as_the_shell_does(line: str, bare: bool) -> None:
+    """The shell splits words on any run of blanks, so the check must too, or a
+    re-spaced recipe would re-lock while the pin above stays green."""
+    assert bool(_bare_uv_runs(line)) is bare
