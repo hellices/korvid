@@ -169,7 +169,7 @@ only for this choice, run even if it fails, falling back to `ubuntu-latest`,
 because a required job skipped by a failed `needs` reports as passing. CodeQL
 keeps `ubuntu-latest` for every pull request. Change classification and
 dependency review always use `ubuntu-latest`; Windows always uses
-`windows-latest`. Every job also has an explicit 10–45 minute deadline so a
+`windows-latest`. Every job also has an explicit 10–60 minute deadline so a
 wedged runner cannot consume capacity indefinitely.
 
 That selection routes runs that are already allowed to start; it is not what

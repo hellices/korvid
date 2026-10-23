@@ -72,7 +72,8 @@ PULL_REQUEST_CALL = "api repos/hellices/korvid/pulls/7 --jq " + (
 WINDOWS_SEED = "${{ github.run_id }}"
 CI_JOB_TIMEOUTS = {
     "changes": 10,
-    "test": 45,
+    # The full suite under coverage takes 39-46 minutes on Python 3.12 (#454).
+    "test": 60,
     "windows-test": 45,
     "pre-commit": 20,
     "security": 15,
