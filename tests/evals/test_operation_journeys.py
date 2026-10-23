@@ -8,6 +8,7 @@ Every journey runs the real `KorvidApp`, the real `DefaultAgentSession`
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from collections.abc import AsyncIterator, Callable
@@ -31,6 +32,7 @@ from korvid.evals.operation_state import (
 from korvid.evals.scripted import ScriptedProvider
 from korvid.tools.executor import RecordedExecution, ToolOutcome
 from korvid.tools.structured import dump_yaml
+from korvid.ui.widgets.confirm_screen import ConfirmScreen
 
 from . import operation_app
 from .operation_app import (
@@ -1329,6 +1331,25 @@ async def test_an_expired_dialog_that_no_poll_saw_is_still_recorded(
     assert run.grade.hard_failures == ()
     assert run.grade.outcome == "rejected"
     assert run.audit == ()
+
+
+async def test_a_dialog_still_composing_is_read_once_it_has_its_widgets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Textual makes a pushed screen current before it composes the screen's
+    widgets, and a loaded runner can poll in between (#478). The driver must
+    wait for the dialog's title instead of reading a dialog that has none."""
+    original = ConfirmScreen._compose
+
+    async def slow_compose(self: ConfirmScreen) -> None:
+        await asyncio.sleep(0.3)
+        await original(self)
+
+    monkeypatch.setattr(ConfirmScreen, "_compose", slow_compose)
+    run = await run_scripted_journey("scale-deployment-up", tmp_path)
+    observed = [entry for entry in run.journal if entry["event"] == "dialog_observed"]
+    assert [entry["result"] for entry in observed] == ["matched"]
+    assert run.grade.hard_failures == ()
 
 
 def test_the_replacement_journey_declares_its_intervention_in_the_fixture() -> None:
