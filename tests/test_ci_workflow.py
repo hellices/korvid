@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import subprocess
 from collections.abc import Mapping
@@ -450,6 +451,41 @@ def test_the_full_suite_runs_on_four_xdist_workers() -> None:
     assert linux_suite == ["uv run pytest -n 4 --cov --cov-fail-under=80"]
     assert len(windows_suite) == 1
     assert windows_suite[0].startswith("uv run pytest -n 4 -q ")
+    assert _xdist_worker_counts(windows_suite[0]) == ["4"]
+
+
+def _xdist_worker_counts(run: str) -> list[str]:
+    """Every worker count `run` passes to pytest-xdist, in order.
+
+    xdist takes the last of repeated `-n` options, so a pin has to see all of
+    them, in each spelling pytest accepts.
+    """
+    tokens = shlex.split(run)
+    counts: list[str] = []
+    for index, token in enumerate(tokens):
+        if token in ("-n", "--numprocesses"):
+            counts.append(tokens[index + 1] if index + 1 < len(tokens) else "")
+        elif token.startswith("--numprocesses="):
+            counts.append(token.partition("=")[2])
+        elif token.startswith("-n") and not token.startswith("--"):
+            counts.append(token[2:])
+    return counts
+
+
+@pytest.mark.parametrize(
+    ("run", "counts"),
+    [
+        ("uv run pytest -n 4 -q", ["4"]),
+        ("uv run pytest -n 4 -q --ignore=tests/x.py -n 1", ["4", "1"]),
+        ("uv run pytest -n4 -q", ["4"]),
+        ("uv run pytest --numprocesses 4", ["4"]),
+        ("uv run pytest --numprocesses=4 -n 2", ["4", "2"]),
+        ("uv run pytest -q --no-header", []),
+    ],
+    ids=["spaced", "repeated", "attached", "long", "long-then-short", "none"],
+)
+def test_the_worker_count_check_sees_every_n_option(run: str, counts: list[str]) -> None:
+    assert _xdist_worker_counts(run) == counts
 
 
 def test_experimental_ty_job_is_honestly_advisory() -> None:
