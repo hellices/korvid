@@ -21,7 +21,7 @@ from tests.ui.test_agent_wiring import StubSession, make_app
 
 from .agent_write_support import Recorder, _expand_panel
 from .agent_write_support import make_app as make_write_app
-from .waits import until
+from .waits import HANG_GUARD_SECONDS, until
 
 
 def test_fake_session_interrupt_usage_matches_live_cumulative_totals() -> None:
@@ -333,6 +333,48 @@ async def test_stop_then_immediate_shutdown_injects_cancellation_once() -> None:
         app.action_interrupt_agent()
         # exit immediately — shutdown runs while the stop is still draining
     assert session.cleanup_done
+
+
+async def test_a_turn_that_settles_after_the_panel_is_pruned_does_not_raise(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Textual removes every widget before it sends the App its Unmount, which
+    is where the agent session is marked down. A turn interrupted just before
+    quitting can settle in between, after the panel's children are gone, and
+    must not raise from shutdown (#476)."""
+    pruned = asyncio.Event()
+
+    def note_unmount(self: AgentPanel) -> None:
+        pruned.set()
+
+    monkeypatch.setattr(AgentPanel, "on_unmount", note_unmount, raising=False)
+
+    class PrunedPanelSession(BlockingSession):
+        def __init__(self) -> None:
+            super().__init__()
+            self.settled_after_prune = False
+
+        def run_turn(self, user_text: str) -> AsyncIterator[AgentEvent]:
+            self.prompts.append(user_text)
+            return self._until_pruned()
+
+        async def _until_pruned(self) -> AsyncIterator[AgentEvent]:
+            try:
+                yield TextDelta(text="let me check")
+                await asyncio.Event().wait()
+            finally:
+                # Settle the interrupted turn as soon as Textual has pruned the
+                # panel: after `_close_all` removed it, before the App's Unmount.
+                await asyncio.wait_for(pruned.wait(), timeout=HANG_GUARD_SECONDS)
+                self.settled_after_prune = True
+
+    session = PrunedPanelSession()
+    app = make_app(session)
+    async with app.run_test() as pilot:
+        await _start_turn(app, pilot, "check")
+        await until(pilot, lambda: bool(session.prompts), label="turn running")
+        app.action_interrupt_agent()
+    assert session.settled_after_prune
 
 
 async def test_unmount_marks_the_agent_down_before_its_first_await(
