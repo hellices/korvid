@@ -137,7 +137,7 @@ gate wastes more time than it saves.
 | job | what it establishes |
 |---|---|
 | `changes` | classifies the diff so a docs-only change skips redundant test legs |
-| `test` (3.11, 3.12, 3.13) | ruff, `ruff format --check`, mypy, `tach`, `deptry`, `pytest --cov --cov-fail-under=80` |
+| `test` (3.11, 3.12, 3.13) | ruff, `ruff format --check`, mypy, `tach`, `deptry`, `pytest -n 4 --cov --cov-fail-under=80` (four xdist workers; coverage is combined across them) |
 | `windows-test` (3.12) | OS-specific behaviour — path handling, terminal, keyring |
 | `pre-commit` | the layer-1 hooks over every file |
 | `security` | `pip-audit` on the locked runtime resolution **including every extra**, `zizmor` on the workflows |
