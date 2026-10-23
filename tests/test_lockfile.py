@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import importlib.util
 import re
+import shlex
 import tempfile
 import tomllib
 from pathlib import Path
@@ -581,13 +582,27 @@ def test_repository_declares_no_uv_configuration_file() -> None:
 
 
 def _bare_uv_runs(text: str) -> list[str]:
-    """The lines of `text` that run `uv run` without `--frozen`.
+    """The lines of `text` that run `uv run` without `--frozen` right after it.
 
-    Blanks are matched as the shell splits words - any run of spaces or tabs
-    - and `--frozen` only counts as a whole word.
+    Each line is split into words the way a POSIX shell splits them - blanks,
+    quotes, escapes and `#` comments - so a respaced or quoted `uv run` is
+    still found, a comment is not, and `--frozen` only counts as a word of its
+    own. A line that does not split is reported rather than skipped.
     """
-    bare_run = re.compile(r"\buv\s+run\b(?!\s+--frozen(?:\s|$))")
-    return [line.strip() for line in text.splitlines() if bare_run.search(line)]
+    bare: list[str] = []
+    for line in text.splitlines():
+        try:
+            words = shlex.split(line, comments=True)
+        except ValueError:
+            bare.append(line.strip())
+            continue
+        if any(
+            words[index : index + 2] == ["uv", "run"]
+            and words[index + 2 : index + 3] != ["--frozen"]
+            for index in range(len(words))
+        ):
+            bare.append(line.strip())
+    return bare
 
 
 @pytest.mark.parametrize("name", [".pre-commit-config.yaml", "Makefile"])
@@ -613,6 +628,11 @@ def test_local_gates_never_relock_the_lockfile(name: str) -> None:
         ("\tuv run  mypy --frozen", True),
         ("\tuv run --frozen-lockfile mypy", True),
         ("\tuv run --frozen ruff check && uv run ruff format", True),
+        ('\t"uv" run mypy', True),
+        ('\tuv "run" mypy', True),
+        ("\t'uv' run --frozen mypy", False),
+        ('\tuv run "mypy', True),
+        ("\t# uv run mypy is what a bare hook would do", False),
     ],
     ids=[
         "frozen",
@@ -624,6 +644,11 @@ def test_local_gates_never_relock_the_lockfile(name: str) -> None:
         "flag-after-command",
         "lookalike-flag",
         "second-command",
+        "quoted-uv",
+        "quoted-run",
+        "quoted-and-frozen",
+        "unsplittable",
+        "comment",
     ],
 )
 def test_the_bare_uv_run_check_reads_commands_as_the_shell_does(line: str, bare: bool) -> None:
