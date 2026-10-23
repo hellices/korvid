@@ -594,15 +594,20 @@ def _bare_uv_runs(text: str) -> list[str]:
     """The Makefile recipe lines that run `uv run` without `--frozen`.
 
     Make first strips a recipe's `@`, `-` and `+` prefixes; the shell then
-    splits the rest into words - blanks, quotes, escapes and `#` comments.
-    So a prefixed, respaced or quoted `uv run` is still found, a comment is
-    not, and `--frozen` only counts as a word of its own. A line that does
-    not split is reported rather than skipped.
+    splits the rest into words and operators - blanks, quotes, escapes, `#`
+    comments, and `;`, `&&`, `||` and `|` with or without spaces. So a
+    prefixed, respaced, quoted or chained `uv run` is still found, a comment
+    is not, and `--frozen` only counts as a word of its own. A line that does
+    not split is reported rather than skipped. The check reads each recipe as
+    a simple command list: it does not expand Make variables or look inside a
+    nested shell (`sh -c '...'`), so a recipe written that way needs review.
     """
     bare: list[str] = []
     for line in text.splitlines():
+        lexer = shlex.shlex(re.sub(r"^[\s@+-]*", "", line), posix=True, punctuation_chars=True)
+        lexer.whitespace_split = True
         try:
-            words = shlex.split(re.sub(r"^[\s@+-]*", "", line), comments=True)
+            words = list(lexer)
         except ValueError:
             bare.append(line.strip())
             continue
@@ -713,6 +718,10 @@ def test_the_hook_check_reads_entries_as_pre_commit_does(
         ("\t@uv run mypy", True),
         ("\t-uv run mypy", True),
         ("\t@-uv run --frozen mypy", False),
+        ("\ttrue;uv run mypy", True),
+        ("\ttrue&&uv run mypy", True),
+        ("\tfalse||uv run mypy", True),
+        ("\tuv run --frozen mypy|cat", False),
     ],
     ids=[
         "frozen",
@@ -732,6 +741,10 @@ def test_the_hook_check_reads_entries_as_pre_commit_does(
         "silent-prefix",
         "ignore-errors-prefix",
         "prefixes-and-frozen",
+        "after-semicolon",
+        "after-and",
+        "after-or",
+        "frozen-into-pipe",
     ],
 )
 def test_the_bare_uv_run_check_reads_commands_as_the_shell_does(line: str, bare: bool) -> None:
