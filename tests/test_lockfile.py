@@ -578,3 +578,17 @@ def test_repository_declares_no_uv_configuration_file() -> None:
         "uv.toml overrides [tool.uv] in pyproject.toml; if it is introduced,"
         " assert here that it pins no alternate index"
     )
+
+
+@pytest.mark.parametrize("name", [".pre-commit-config.yaml", "Makefile"])
+def test_local_gates_never_relock_the_lockfile(name: str) -> None:
+    """A bare `uv run` re-locks when the lock looks stale to it, and behind a
+    package mirror it does: the configured index is not the one the lock
+    records, so every URL is rewritten to the mirror. The hooks and the
+    `make` targets are what a contributor runs before every commit (#466).
+    """
+    text = (_ROOT / name).read_text(encoding="utf-8")
+    bare = [
+        line.strip() for line in text.splitlines() if re.search(r"\buv run\b(?! --frozen\b)", line)
+    ]
+    assert bare == [], f"{name} runs uv without --frozen, which can re-lock uv.lock"
