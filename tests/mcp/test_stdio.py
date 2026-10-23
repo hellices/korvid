@@ -7,6 +7,7 @@ import errno
 import io
 import json
 import os
+import re
 import signal
 import sys
 from collections.abc import AsyncIterator
@@ -56,6 +57,54 @@ def _parameters(state: Path, *args: str, relay: bool = False) -> StdioServerPara
         args=["-c", entrypoint, "mcp", "stdio", *args],
         env={"PYTHONPATH": str(_ROOT / "src"), "XDG_STATE_HOME": str(state)},
     )
+
+
+#: asyncio's child-watcher warning when a child it watches was reaped first
+#: (#472). The tests force the Windows-only relays onto POSIX, where killing a
+#: relay that just exited on its own runs `Popen.send_signal`'s poll
+#: (bpo-38630); that `waitpid` reaps the relay before the event loop's watcher
+#: does, and the watcher logs this line. On Windows nothing reaps, so
+#: production never writes it. Pidfd watcher first, then the threaded one.
+_RELAY_WATCHER_RACE = re.compile(
+    r"child process pid \d+ exit status already read: +will report returncode 255"
+    r"|Unknown child process pid \d+, will report returncode 255"
+)
+
+
+def _server_stderr(err: bytes) -> str:
+    """The stdio server's stderr, without the relay child-watcher race."""
+    return "".join(
+        line
+        for line in err.decode().splitlines(keepends=True)
+        if not _RELAY_WATCHER_RACE.fullmatch(line.rstrip("\r\n"))
+    )
+
+
+@pytest.mark.parametrize(
+    "warning",
+    [
+        "child process pid 3098 exit status already read:  will report returncode 255",
+        "Unknown child process pid 3098, will report returncode 255",
+    ],
+    ids=["pidfd-watcher", "threaded-watcher"],
+)
+def test_server_stderr_drops_the_relay_child_watcher_race(warning: str) -> None:
+    """Forcing the Windows-only relays onto POSIX lets asyncio's child watcher
+    lose a race with `Popen.send_signal`'s poll (#472). Its warning is the
+    interpreter racing itself, not output the server chose to write."""
+    err = f"fd-handler-noise\n{warning}\nkorvid: MCP stdio connection interrupted.\n"
+    assert _server_stderr(err.encode()) == (
+        "fd-handler-noise\nkorvid: MCP stdio connection interrupted.\n"
+    )
+
+
+def test_server_stderr_keeps_every_other_line() -> None:
+    err = (
+        "korvid: MCP stdio connection interrupted.\n"
+        "relay: Unknown child process pid 7, will report returncode 255\n"
+        "child process pid 7 exit status already read\n"
+    )
+    assert _server_stderr(err.encode()) == err
 
 
 @asynccontextmanager
@@ -572,7 +621,7 @@ async def test_sigint_exits_without_host_stdin_eof(
             err = await process.stderr.read()
             assert process.returncode == 1, err.decode()
             assert all(json.loads(line)["jsonrpc"] == "2.0" for line in out.splitlines())
-            assert err.decode() == "korvid: MCP stdio connection interrupted.\n"
+            assert _server_stderr(err) == "korvid: MCP stdio connection interrupted.\n"
         finally:
             executor.release.set()
 
@@ -621,7 +670,7 @@ async def test_shutdown_exits_without_draining_stdout(
                 assert process.stderr is not None
                 assert process.returncode == (1 if interrupt else 0)
                 expected = b"korvid: MCP stdio connection interrupted.\n" if interrupt else b""
-                assert await process.stderr.read() == expected
+                assert _server_stderr(await process.stderr.read()) == expected.decode()
             finally:
                 host.close()
 
@@ -872,7 +921,10 @@ finally:
         out, err = await asyncio.wait_for(process.communicate(), 5)
         assert process.returncode == 0, err.decode()
         assert json.loads(out) == {"restored": True}
-        assert sorted(err.decode().splitlines()) == ["fd-handler-noise", "python-handler-noise"]
+        assert sorted(_server_stderr(err).splitlines()) == [
+            "fd-handler-noise",
+            "python-handler-noise",
+        ]
 
 
 @pytest.mark.parametrize("relay", [False, True])
