@@ -18,8 +18,10 @@ from __future__ import annotations
 
 import importlib.util
 import re
+import shlex
 import tempfile
 import tomllib
+from collections.abc import Callable
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -578,3 +580,221 @@ def test_repository_declares_no_uv_configuration_file() -> None:
         "uv.toml overrides [tool.uv] in pyproject.toml; if it is introduced,"
         " assert here that it pins no alternate index"
     )
+
+
+def _runs_uv_unfrozen(words: list[str]) -> bool:
+    """Whether a split command runs uv as anything but `uv run --frozen ...`.
+
+    An allowlist, so it fails closed: a bare `uv run`, a global option before
+    the subcommand (`uv --quiet run`), or another subcommand (`uv sync`) is
+    reported for review instead of being interpreted. `uv` is matched by its
+    last path component, so `/usr/local/bin/uv` counts too. Every hook and
+    target is written `uv run --frozen`, so nothing the gates run needs more.
+    """
+    return any(
+        word.rsplit("/", 1)[-1] == "uv" and words[index + 1 : index + 3] != ["run", "--frozen"]
+        for index, word in enumerate(words)
+    )
+
+
+def _bare_uv_runs(text: str) -> list[str]:
+    """The Makefile recipe lines that run uv as anything but `uv run --frozen`.
+
+    Make first strips a recipe's `@`, `-` and `+` prefixes; the shell then
+    splits the rest into words and operators - blanks, quotes, escapes, and
+    `;`, `&&`, `||`, `|`, `$(` and backticks with or without spaces. So a
+    prefixed, respaced, quoted, chained or substituted `uv run` is still
+    found, and `--frozen` only counts as a word of its own. Only a whole-line comment is skipped: anywhere else a
+    `#` is read as code, because where a shell comment starts depends on
+    substitutions and quoting this check does not model, and guessing wrong
+    would hide the command after it. A trailing comment that mentions uv is
+    therefore reported; keep such comments on their own line. A line that
+    does not split is reported rather than skipped. The check catches the
+    ways a bare `uv run` gets written by accident, not a deliberately
+    obscured one, so it does not expand Make variables, look inside a nested
+    shell (`sh -c '...'`), or reassemble a split word (`u""v`). A recipe
+    written that way needs review.
+    """
+    bare: list[str] = []
+    for line in text.splitlines():
+        recipe = re.sub(r"^[\s@+-]*", "", line)
+        if recipe.startswith("#"):
+            continue
+        lexer = shlex.shlex(recipe, posix=True, punctuation_chars="();<>|&`")
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        try:
+            words = list(lexer)
+        except ValueError:
+            bare.append(line.strip())
+            continue
+        if _runs_uv_unfrozen(words):
+            bare.append(line.strip())
+    return bare
+
+
+def _bare_hook_entries(text: str) -> list[str]:
+    """The pre-commit hook entries that run uv as anything but `uv run --frozen`.
+
+    pre-commit decodes `entry` as YAML, so quotes there belong to YAML, and
+    runs the decoded string split with shlex. A `pygrep` entry is a pattern
+    and a `fail` entry a message, so neither is a command. An entry that does
+    not split is reported rather than skipped.
+    """
+    bare: list[str] = []
+    for repo in yaml.safe_load(text)["repos"]:
+        for hook in repo["hooks"]:
+            entry = hook.get("entry")
+            if entry is None or hook.get("language") in {"pygrep", "fail"}:
+                continue
+            try:
+                words = shlex.split(entry)
+            except ValueError:
+                bare.append(entry)
+                continue
+            if _runs_uv_unfrozen(words):
+                bare.append(entry)
+    return bare
+
+
+@pytest.mark.parametrize(
+    ("name", "bare_commands"),
+    [(".pre-commit-config.yaml", _bare_hook_entries), ("Makefile", _bare_uv_runs)],
+    ids=["pre-commit", "make"],
+)
+def test_local_gates_never_relock_the_lockfile(
+    name: str, bare_commands: Callable[[str], list[str]]
+) -> None:
+    """A bare `uv run` re-locks when the lock looks stale to it, and behind a
+    package mirror it does: the configured index is not the one the lock
+    records, so every URL is rewritten to the mirror. The hooks and the
+    `make` targets are what a contributor runs before every commit (#466).
+    """
+    bare = bare_commands((_ROOT / name).read_text(encoding="utf-8"))
+    assert bare == [], f"{name} runs uv without --frozen, which can re-lock uv.lock"
+
+
+def _hook_config(entry: str, language: str = "system") -> str:
+    return (
+        "repos:\n"
+        "  - repo: local\n"
+        "    hooks:\n"
+        "      - id: probe\n"
+        "        name: probe\n"
+        f"        language: {language}\n"
+        f"        entry: {entry}\n"
+    )
+
+
+@pytest.mark.parametrize(
+    ("entry", "language", "bare"),
+    [
+        ("uv run --frozen mypy", "system", False),
+        ('"uv run --frozen mypy"', "system", False),
+        ("uv run mypy", "system", True),
+        ('"uv run mypy"', "system", True),
+        ("'uv run mypy'", "system", True),
+        (">-\n          uv run\n          mypy", "system", True),
+        ("'(url|registry) = \"(?!https://)'", "pygrep", False),
+        ("uv --quiet run mypy", "system", True),
+        ("uv --quiet run --frozen mypy", "system", True),
+    ],
+    ids=[
+        "frozen",
+        "quoted-frozen",
+        "bare",
+        "double-quoted",
+        "single-quoted",
+        "folded",
+        "pygrep-pattern",
+        "global-option",
+        "global-option-then-frozen",
+    ],
+)
+def test_the_hook_check_reads_entries_as_pre_commit_does(
+    entry: str, language: str, bare: bool
+) -> None:
+    """pre-commit decodes `entry` as YAML, so its quotes are YAML's, and then
+    splits the string with shlex; a pygrep entry is a pattern, not a command."""
+    assert bool(_bare_hook_entries(_hook_config(entry, language))) is bare
+
+
+@pytest.mark.parametrize(
+    ("line", "bare"),
+    [
+        ("\tuv run --frozen mypy", False),
+        ("\tuv run --frozen --group docs mkdocs serve", False),
+        ("\tuv run --frozen\tmypy", False),
+        ("\tuv run mypy", True),
+        ("\tuv  run mypy", True),
+        ("\tuv\trun mypy", True),
+        ("\tuv run  mypy --frozen", True),
+        ("\tuv run --frozen-lockfile mypy", True),
+        ("\tuv run --frozen ruff check && uv run ruff format", True),
+        ('\t"uv" run mypy', True),
+        ('\tuv "run" mypy', True),
+        ("\t'uv' run --frozen mypy", False),
+        ('\tuv run "mypy', True),
+        ("\t# uv run mypy is what a bare hook would do", False),
+        ("\t@uv run mypy", True),
+        ("\t-uv run mypy", True),
+        ("\t@-uv run --frozen mypy", False),
+        ("\ttrue;uv run mypy", True),
+        ("\ttrue&&uv run mypy", True),
+        ("\tfalse||uv run mypy", True),
+        ("\tuv run --frozen mypy|cat", False),
+        ("\tuv --quiet run mypy", True),
+        ("\tuv --quiet run --frozen mypy", True),
+        ("\tuv sync", True),
+        ("\t/usr/local/bin/uv run mypy", True),
+        ("\t$(HOME)/.local/bin/uv run --frozen mypy", False),
+        ("\techo foo#bar; uv run mypy", True),
+        ('\techo "#x"; uv run mypy', True),
+        ("\tuv run --frozen mypy # uv run mypy", True),
+        ("\techo foo\\ #bar; uv run mypy", True),
+        ("\ttrue;# uv run mypy", True),
+        ("\techo $(date)#tag; uv run mypy", True),
+        ("\techo `uv run mypy`", True),
+        ("\techo `uv run --frozen mypy`", False),
+    ],
+    ids=[
+        "frozen",
+        "frozen-before-group",
+        "frozen-then-tab",
+        "bare",
+        "two-spaces",
+        "tab",
+        "flag-after-command",
+        "lookalike-flag",
+        "second-command",
+        "quoted-uv",
+        "quoted-run",
+        "quoted-and-frozen",
+        "unsplittable",
+        "comment",
+        "silent-prefix",
+        "ignore-errors-prefix",
+        "prefixes-and-frozen",
+        "after-semicolon",
+        "after-and",
+        "after-or",
+        "frozen-into-pipe",
+        "global-option",
+        "global-option-then-frozen",
+        "other-subcommand",
+        "path-qualified",
+        "path-qualified-and-frozen",
+        "hash-inside-word",
+        "quoted-hash",
+        "trailing-comment-is-read",
+        "hash-after-escaped-blank",
+        "comment-after-operator-is-read",
+        "substitution-then-hash",
+        "backtick-substitution",
+        "backtick-substitution-frozen",
+    ],
+)
+def test_the_bare_uv_run_check_reads_commands_as_the_shell_does(line: str, bare: bool) -> None:
+    """The shell splits words on any run of blanks, so the check must too, or a
+    re-spaced recipe would re-lock while the pin above stays green."""
+    assert bool(_bare_uv_runs(line)) is bare

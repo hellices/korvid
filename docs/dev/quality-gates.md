@@ -47,7 +47,10 @@ are guarded:
 | a repository-level `uv.toml` | `test_repository_declares_no_uv_configuration_file` |
 
 Behind a mirror, work with `uv sync --frozen --dev --all-extras` and do not
-re-lock. If a lock genuinely must change:
+re-lock. A bare `uv run` re-locks too, so every hook and `make` target passes
+`--frozen` (`test_local_gates_never_relock_the_lockfile` keeps it that way);
+give an ad-hoc `uv run` the same flag, or set `UV_FROZEN=1`. If a lock
+genuinely must change:
 
 ```sh
 git checkout uv.lock          # discard the rewritten lock
