@@ -7,6 +7,7 @@ import errno
 import io
 import json
 import os
+import re
 import signal
 import sys
 from collections.abc import AsyncIterator
@@ -49,6 +50,13 @@ def _parameters(state: Path, *args: str, relay: bool = False) -> StdioServerPara
             "stdio.cancellable_stdin = _relay_stdin\n"
             "from korvid.mcp import _stdio_output\n"
             "_stdio_output._posix_stdout = _stdio_output._relay_stdout\n"
+            # The child-watcher race (#472) is rare on its own; emit its line
+            # every time, so every relay test that reads the server's stderr
+            # proves it filters it rather than passing on a lucky run.
+            "import logging\n"
+            "logging.getLogger('asyncio').warning(\n"
+            "    'child process pid %d exit status already read:  will report returncode 255', 0\n"
+            ")\n"
             "from korvid.cli import main",
         )
     return StdioServerParameters(
@@ -56,6 +64,55 @@ def _parameters(state: Path, *args: str, relay: bool = False) -> StdioServerPara
         args=["-c", entrypoint, "mcp", "stdio", *args],
         env={"PYTHONPATH": str(_ROOT / "src"), "XDG_STATE_HOME": str(state)},
     )
+
+
+#: asyncio's child-watcher warning when a child it watches was reaped first
+#: (#472). The tests force the Windows-only relays onto POSIX, where killing a
+#: relay that just exited on its own runs `Popen.send_signal`'s poll
+#: (bpo-38630); that `waitpid` reaps the relay before the event loop's watcher
+#: does, and the watcher logs this line. On Windows nothing reaps, so
+#: production never writes it. Pidfd watcher first, then the threaded one.
+_RELAY_WATCHER_RACE = re.compile(
+    r"child process pid \d+ exit status already read: +will report returncode 255"
+    r"|Unknown child process pid \d+, will report returncode 255"
+)
+
+
+def _server_stderr(err: bytes | str) -> str:
+    """The stdio server's stderr, without the relay child-watcher race."""
+    text = err.decode() if isinstance(err, bytes) else err
+    return "".join(
+        line
+        for line in text.splitlines(keepends=True)
+        if not _RELAY_WATCHER_RACE.fullmatch(line.rstrip("\r\n"))
+    )
+
+
+@pytest.mark.parametrize(
+    "warning",
+    [
+        "child process pid 3098 exit status already read:  will report returncode 255",
+        "Unknown child process pid 3098, will report returncode 255",
+    ],
+    ids=["pidfd-watcher", "threaded-watcher"],
+)
+def test_server_stderr_drops_the_relay_child_watcher_race(warning: str) -> None:
+    """Forcing the Windows-only relays onto POSIX lets asyncio's child watcher
+    lose a race with `Popen.send_signal`'s poll (#472). Its warning is the
+    interpreter racing itself, not output the server chose to write."""
+    err = f"fd-handler-noise\n{warning}\nkorvid: MCP stdio connection interrupted.\n"
+    assert _server_stderr(err.encode()) == (
+        "fd-handler-noise\nkorvid: MCP stdio connection interrupted.\n"
+    )
+
+
+def test_server_stderr_keeps_every_other_line() -> None:
+    err = (
+        "korvid: MCP stdio connection interrupted.\n"
+        "relay: Unknown child process pid 7, will report returncode 255\n"
+        "child process pid 7 exit status already read\n"
+    )
+    assert _server_stderr(err.encode()) == err
 
 
 @asynccontextmanager
@@ -572,7 +629,7 @@ async def test_sigint_exits_without_host_stdin_eof(
             err = await process.stderr.read()
             assert process.returncode == 1, err.decode()
             assert all(json.loads(line)["jsonrpc"] == "2.0" for line in out.splitlines())
-            assert err.decode() == "korvid: MCP stdio connection interrupted.\n"
+            assert _server_stderr(err) == "korvid: MCP stdio connection interrupted.\n"
         finally:
             executor.release.set()
 
@@ -621,7 +678,7 @@ async def test_shutdown_exits_without_draining_stdout(
                 assert process.stderr is not None
                 assert process.returncode == (1 if interrupt else 0)
                 expected = b"korvid: MCP stdio connection interrupted.\n" if interrupt else b""
-                assert await process.stderr.read() == expected
+                assert _server_stderr(await process.stderr.read()) == expected.decode()
             finally:
                 host.close()
 
@@ -675,7 +732,7 @@ async def test_stdio_delivers_large_utf8_output_without_truncation(
                 assert not result.is_error
                 assert getattr(result.content[0], "text", None) == executor.result
             errors.seek(0)
-            assert errors.read() == ""
+            assert _server_stderr(errors.read()) == ""
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX nonblocking partial writes")
@@ -872,7 +929,10 @@ finally:
         out, err = await asyncio.wait_for(process.communicate(), 5)
         assert process.returncode == 0, err.decode()
         assert json.loads(out) == {"restored": True}
-        assert sorted(err.decode().splitlines()) == ["fd-handler-noise", "python-handler-noise"]
+        assert sorted(_server_stderr(err).splitlines()) == [
+            "fd-handler-noise",
+            "python-handler-noise",
+        ]
 
 
 @pytest.mark.parametrize("relay", [False, True])
