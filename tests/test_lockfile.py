@@ -569,7 +569,16 @@ def _run_propose_steps(
 ) -> None:
     """Run every `run` step of the propose job, as GitHub would, in order."""
     prelude = (
-        'gh() { printf "%s\\n" "$*" >> "$FAKE_GH_CALLS"; }\n'
+        # Each call's exact argv, NUL-separated, in its own numbered file, and
+        # only the two calls the job is meant to make succeed: anything else,
+        # such as a `gh pr merge`, fails the step and is still on record.
+        "gh() {\n"
+        '  printf "%s\\0" "$@" > "$FAKE_GH_DIR/$(ls "$FAKE_GH_DIR" | wc -l | tr -d " ")"\n'
+        '  case "$1 $2" in\n'
+        '    "auth setup-git" | "pr create") return 0 ;;\n'
+        '    *) echo "unexpected gh call: $*" >&2; return 1 ;;\n'
+        "  esac\n"
+        "}\n"
         # macOS ships a BSD sha256sum without --check/--strict; the runner's
         # is GNU coreutils, and shasum accepts the same options.
         "if ! sha256sum --version 2>/dev/null | grep -q GNU; then\n"
@@ -632,13 +641,14 @@ def test_the_verified_lock_is_committed_onto_any_base(
     runner_temp.mkdir()
     verified = (_ROOT / "uv.lock").read_bytes()
     _download_artifact(steps, work, runner_temp, verified)
-    gh_calls = tmp_path / "gh-calls.txt"
+    gh_calls = tmp_path / "gh-calls"
+    gh_calls.mkdir()
     env = {
         "PATH": f"{Path(sys.executable).parent}{os.pathsep}{os.environ.get('PATH', '')}",
         "HOME": tmp_path.as_posix(),
         "GIT_CONFIG_NOSYSTEM": "1",
         "RUNNER_TEMP": runner_temp.as_posix(),
-        "FAKE_GH_CALLS": gh_calls.as_posix(),
+        "FAKE_GH_DIR": gh_calls.as_posix(),
     }
     expressions = {
         "${{ needs.relock.outputs.digest }}": hashlib.sha256(verified).hexdigest(),
@@ -664,11 +674,15 @@ def test_the_verified_lock_is_committed_onto_any_base(
         ["git", *remote, "show", f"{pushed}:uv.lock"], capture_output=True, check=True
     ).stdout
     assert committed == verified, "the committed lock is not the verified artifact"
-    calls = gh_calls.read_text(encoding="utf-8").splitlines()
-    # The multi-line --body spreads one call over several recorded lines.
-    created = [line for line in calls if line.startswith("pr create ")]
-    assert len(created) == 1, calls
-    assert created[0].startswith(f"pr create --base {base} --head {pushed} "), created
+    calls = [
+        (gh_calls / name).read_bytes().decode("utf-8").split("\0")[:-1]
+        for name in sorted(os.listdir(gh_calls), key=int)
+    ]
+    # The whole call set, not just the one that matters: the job authenticates
+    # git, then opens the pull request, and calls gh for nothing else.
+    assert [call[:2] for call in calls] == [["auth", "setup-git"], ["pr", "create"]], calls
+    assert calls[0] == ["auth", "setup-git"]
+    assert calls[1][2:6] == ["--base", base, "--head", pushed], calls[1]
 
 
 def test_the_relock_pull_request_does_not_promise_codeql_it_cannot_deliver() -> None:
