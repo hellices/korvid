@@ -246,9 +246,13 @@ def test_a_stale_status_downgrade_is_partial_and_never_conclusive() -> None:
     assert not conclusive(observation, FreshnessPolicy(), NOW)
 
 
-def test_only_available_evidence_can_be_downgraded() -> None:
+@pytest.mark.parametrize(
+    ("state", "basis"),
+    [(state, basis) for state, basis in ALLOWED_PAIRS if state is not EvidenceState.AVAILABLE],
+)
+def test_only_available_evidence_can_be_downgraded(state: EvidenceState, basis: Basis) -> None:
     with pytest.raises(ValueError, match="only available evidence"):
-        downgrade_stale_status(_observation(EvidenceState.PARTIAL, Basis.TRUNCATED), "lags")
+        downgrade_stale_status(_observation(state, basis), "lags")
 
 
 @pytest.mark.parametrize("max_age", [timedelta(0), timedelta(seconds=-1)])
