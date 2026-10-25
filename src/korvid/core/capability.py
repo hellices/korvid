@@ -284,6 +284,8 @@ class DiscoverySource:
 class ProviderSource:
     """One query to a configured provider, such as a metrics backend.
 
+    Its scope is what the query covers: the provider as a whole, or one
+    namespace or node, such as the CPU usage of one namespace's pods.
     Vocabulary only for now: no collector reads one until a diagnostic needs it.
     """
 

@@ -366,7 +366,11 @@ def test_a_provider_source_names_its_provider_and_query(provider_id: str, query_
         ProviderSource(provider_id, query_kind, SourceScope.provider("prometheus"))
 
 
-def test_a_provider_observation_is_read_at_the_provider_scope() -> None:
-    source = ProviderSource("prometheus", "series", SourceScope.provider("prometheus"))
+@pytest.mark.parametrize(
+    "scope",
+    [SourceScope.provider("prometheus"), SourceScope.namespace("team-a")],
+)
+def test_a_provider_query_keeps_the_scope_it_covers(scope: SourceScope) -> None:
+    source = ProviderSource("prometheus", "series", scope)
 
-    assert _observation(source=source).source.scope.kind is ScopeKind.PROVIDER
+    assert _observation(source=source).source.scope == scope
