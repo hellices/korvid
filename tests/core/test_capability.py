@@ -149,8 +149,8 @@ def test_observation_times_are_utc(observed_at: datetime) -> None:
         Observation(PODS, EvidenceState.AVAILABLE, Basis.OBSERVED, observed_at)
 
 
-@pytest.mark.parametrize("items", [-1, True])
-def test_an_item_count_is_a_non_negative_integer(items: int) -> None:
+@pytest.mark.parametrize("items", [-1, True, 1.5, "3"])
+def test_an_item_count_is_a_non_negative_integer(items: Any) -> None:
     with pytest.raises(ValueError, match="item count"):
         _observation(items=items)
 

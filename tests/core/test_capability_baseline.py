@@ -58,8 +58,15 @@ def test_complete_evidence_is_available() -> None:
     assert evidence.baseline((QUOTAS, LIMITS, EVENTS), NOW) == Baseline(EvidenceState.AVAILABLE)
 
 
-def test_a_confirming_source_never_needs_to_be_conclusive() -> None:
-    evidence = EvidenceSet({"events": _seen()})
+@pytest.mark.parametrize(
+    "events",
+    [
+        pytest.param(_seen(), id="observed"),
+        pytest.param(_seen(basis=Basis.NO_DATA), id="no-data"),
+    ],
+)
+def test_a_confirming_source_never_needs_to_be_conclusive(events: Observation) -> None:
+    evidence = EvidenceSet({"events": events})
 
     assert evidence.baseline((EVENTS,), NOW) == Baseline(EvidenceState.AVAILABLE)
 

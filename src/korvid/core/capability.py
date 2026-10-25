@@ -89,7 +89,8 @@ _UNAVAILABLE_BASES = frozenset(
 )
 #: A read that fails after at least one accepted page keeps what it read and
 #: is `PARTIAL` with the failure's own basis. Discovery reads have no pages, so
-#: their bases never appear here.
+#: the two bases only they produce never appear here. `DISCOVERY_STALE` does:
+#: it is what a LIST gets when a 404 or 405 contradicts discovery.
 _FAILURE_AFTER_A_PAGE = frozenset(
     (_DENIED_BASES | _UNAVAILABLE_BASES | {Basis.PROJECTION_UNSUPPORTED})
     - {Basis.DISCOVERY_FORBIDDEN, Basis.DISCOVERY_FAILED}
@@ -398,7 +399,7 @@ class Observation:
             raise ValueError("an observation has a time exactly when its state is known")
         if self.observed_at is not None and self.observed_at.utcoffset() != timedelta(0):
             raise ValueError("observation times are UTC")
-        if isinstance(self.items, bool) or self.items < 0:
+        if isinstance(self.items, bool) or not isinstance(self.items, int) or self.items < 0:
             raise ValueError("an item count is a non-negative integer")
         if len(self.detail) > _DETAIL_LIMIT:
             object.__setattr__(self, "detail", self.detail[: _DETAIL_LIMIT - 1] + "…")

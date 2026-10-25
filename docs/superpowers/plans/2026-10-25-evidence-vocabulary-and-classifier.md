@@ -219,18 +219,21 @@ def test_an_invalid_list_page_is_malformed() -> None:
 
 
 async def test_a_repeated_continuation_is_malformed() -> None:
+    request = AsyncMock(return_value={"items": [], "metadata": {"continue": "same"}})
     pages = iter_raw_object_pages(
         PODS_META,
         "default",
         page_size=5,
         list_path=lambda meta, namespace: "/api/v1/namespaces/default/pods",
-        request_json=AsyncMock(return_value={"items": [], "metadata": {"continue": "same"}}),
+        request_json=request,
         observe=lambda *args, **kwargs: None,
         observe_error=lambda path, error: None,
     )
 
     with pytest.raises(KubeMalformedError, match="continuation did not advance"):
         await anext(pages)
+
+    assert request.await_count == 2
 ```
 
 - [ ] **Step 2: Run the test to verify it fails**
@@ -572,8 +575,8 @@ def test_observation_times_are_utc(observed_at: datetime) -> None:
         Observation(PODS, EvidenceState.AVAILABLE, Basis.OBSERVED, observed_at)
 
 
-@pytest.mark.parametrize("items", [-1, True])
-def test_an_item_count_is_a_non_negative_integer(items: int) -> None:
+@pytest.mark.parametrize("items", [-1, True, 1.5, "3"])
+def test_an_item_count_is_a_non_negative_integer(items: Any) -> None:
     with pytest.raises(ValueError, match="item count"):
         _observation(items=items)
 
@@ -873,7 +876,8 @@ _UNAVAILABLE_BASES = frozenset(
 )
 #: A read that fails after at least one accepted page keeps what it read and
 #: is `PARTIAL` with the failure's own basis. Discovery reads have no pages, so
-#: their bases never appear here.
+#: the two bases only they produce never appear here. `DISCOVERY_STALE` does:
+#: it is what a LIST gets when a 404 or 405 contradicts discovery.
 _FAILURE_AFTER_A_PAGE = frozenset(
     (_DENIED_BASES | _UNAVAILABLE_BASES | {Basis.PROJECTION_UNSUPPORTED})
     - {Basis.DISCOVERY_FORBIDDEN, Basis.DISCOVERY_FAILED}
@@ -1182,7 +1186,7 @@ class Observation:
             raise ValueError("an observation has a time exactly when its state is known")
         if self.observed_at is not None and self.observed_at.utcoffset() != timedelta(0):
             raise ValueError("observation times are UTC")
-        if isinstance(self.items, bool) or self.items < 0:
+        if isinstance(self.items, bool) or not isinstance(self.items, int) or self.items < 0:
             raise ValueError("an item count is a non-negative integer")
         if len(self.detail) > _DETAIL_LIMIT:
             object.__setattr__(self, "detail", self.detail[: _DETAIL_LIMIT - 1] + "…")
@@ -1328,8 +1332,15 @@ def test_complete_evidence_is_available() -> None:
     assert evidence.baseline((QUOTAS, LIMITS, EVENTS), NOW) == Baseline(EvidenceState.AVAILABLE)
 
 
-def test_a_confirming_source_never_needs_to_be_conclusive() -> None:
-    evidence = EvidenceSet({"events": _seen()})
+@pytest.mark.parametrize(
+    "events",
+    [
+        pytest.param(_seen(), id="observed"),
+        pytest.param(_seen(basis=Basis.NO_DATA), id="no-data"),
+    ],
+)
+def test_a_confirming_source_never_needs_to_be_conclusive(events: Observation) -> None:
+    evidence = EvidenceSet({"events": events})
 
     assert evidence.baseline((EVENTS,), NOW) == Baseline(EvidenceState.AVAILABLE)
 
@@ -2268,6 +2279,7 @@ FAILURES = [
 class _Reader(PulseReader):
     def __init__(self, *outcomes: PulsePage | Exception) -> None:
         self._outcomes = list(outcomes)
+        self.continuations: list[str] = []
 
     async def read_pulse_page(
         self,
@@ -2277,15 +2289,17 @@ class _Reader(PulseReader):
         limit: int,
         max_bytes: int,
     ) -> PulsePage:
+        self.continuations.append(continuation)
         outcome = self._outcomes.pop(0)
         if isinstance(outcome, Exception):
             raise outcome
         return outcome
 
 
-async def _collect(*outcomes: PulsePage | Exception) -> PulseSourceResult:
-    (result,) = await PulseCollector(_Reader(*outcomes), (PODS,)).collect("team-a")
-    return result
+async def _collect(*outcomes: PulsePage | Exception) -> tuple[PulseSourceResult, list[str]]:
+    reader = _Reader(*outcomes)
+    (result,) = await PulseCollector(reader, (PODS,)).collect("team-a")
+    return result, reader.continuations
 
 
 def _mapped(result: PulseSourceResult) -> EvidenceState:
@@ -2302,7 +2316,7 @@ def test_the_default_maximum_age_is_pulses_staleness_window() -> None:
 
 
 async def test_a_complete_pulse_source_is_available() -> None:
-    result = await _collect(PulsePage(({},)))
+    result, _continuations = await _collect(PulsePage(({},)))
 
     assert result.coverage.state == "complete"
     assert _mapped(result) is EvidenceState.AVAILABLE
@@ -2310,8 +2324,9 @@ async def test_a_complete_pulse_source_is_available() -> None:
 
 @pytest.mark.parametrize("failure", FAILURES)
 async def test_a_first_page_failure_maps_to_the_classifiers_state(failure: Exception) -> None:
-    result = await _collect(failure)
+    result, continuations = await _collect(failure)
 
+    assert continuations == [""]
     assert not result.objects
     assert _mapped(result) is classify(failure, LIST).state
 
@@ -2320,8 +2335,9 @@ async def test_a_first_page_failure_maps_to_the_classifiers_state(failure: Excep
 async def test_a_failure_after_kept_objects_maps_to_the_classifiers_state(
     failure: Exception,
 ) -> None:
-    result = await _collect(PulsePage(({},), "next"), failure)
+    result, continuations = await _collect(PulsePage(({},), "next"), failure)
 
+    assert continuations == ["", "next"]
     assert result.objects
     assert _mapped(result) is classify(failure, CONTINUATION).state
 ```

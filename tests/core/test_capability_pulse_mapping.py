@@ -67,6 +67,7 @@ FAILURES = [
 class _Reader(PulseReader):
     def __init__(self, *outcomes: PulsePage | Exception) -> None:
         self._outcomes = list(outcomes)
+        self.continuations: list[str] = []
 
     async def read_pulse_page(
         self,
@@ -76,15 +77,17 @@ class _Reader(PulseReader):
         limit: int,
         max_bytes: int,
     ) -> PulsePage:
+        self.continuations.append(continuation)
         outcome = self._outcomes.pop(0)
         if isinstance(outcome, Exception):
             raise outcome
         return outcome
 
 
-async def _collect(*outcomes: PulsePage | Exception) -> PulseSourceResult:
-    (result,) = await PulseCollector(_Reader(*outcomes), (PODS,)).collect("team-a")
-    return result
+async def _collect(*outcomes: PulsePage | Exception) -> tuple[PulseSourceResult, list[str]]:
+    reader = _Reader(*outcomes)
+    (result,) = await PulseCollector(reader, (PODS,)).collect("team-a")
+    return result, reader.continuations
 
 
 def _mapped(result: PulseSourceResult) -> EvidenceState:
@@ -101,7 +104,7 @@ def test_the_default_maximum_age_is_pulses_staleness_window() -> None:
 
 
 async def test_a_complete_pulse_source_is_available() -> None:
-    result = await _collect(PulsePage(({},)))
+    result, _continuations = await _collect(PulsePage(({},)))
 
     assert result.coverage.state == "complete"
     assert _mapped(result) is EvidenceState.AVAILABLE
@@ -109,8 +112,9 @@ async def test_a_complete_pulse_source_is_available() -> None:
 
 @pytest.mark.parametrize("failure", FAILURES)
 async def test_a_first_page_failure_maps_to_the_classifiers_state(failure: Exception) -> None:
-    result = await _collect(failure)
+    result, continuations = await _collect(failure)
 
+    assert continuations == [""]
     assert not result.objects
     assert _mapped(result) is classify(failure, LIST).state
 
@@ -119,7 +123,8 @@ async def test_a_first_page_failure_maps_to_the_classifiers_state(failure: Excep
 async def test_a_failure_after_kept_objects_maps_to_the_classifiers_state(
     failure: Exception,
 ) -> None:
-    result = await _collect(PulsePage(({},), "next"), failure)
+    result, continuations = await _collect(PulsePage(({},), "next"), failure)
 
+    assert continuations == ["", "next"]
     assert result.objects
     assert _mapped(result) is classify(failure, CONTINUATION).state

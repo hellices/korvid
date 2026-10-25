@@ -135,15 +135,18 @@ def test_an_invalid_list_page_is_malformed() -> None:
 
 
 async def test_a_repeated_continuation_is_malformed() -> None:
+    request = AsyncMock(return_value={"items": [], "metadata": {"continue": "same"}})
     pages = iter_raw_object_pages(
         PODS_META,
         "default",
         page_size=5,
         list_path=lambda meta, namespace: "/api/v1/namespaces/default/pods",
-        request_json=AsyncMock(return_value={"items": [], "metadata": {"continue": "same"}}),
+        request_json=request,
         observe=lambda *args, **kwargs: None,
         observe_error=lambda path, error: None,
     )
 
     with pytest.raises(KubeMalformedError, match="continuation did not advance"):
         await anext(pages)
+
+    assert request.await_count == 2
