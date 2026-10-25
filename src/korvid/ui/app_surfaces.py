@@ -184,6 +184,11 @@ class AppAgentPanel(AgentPanelPort):
         self._app._agent_panel.echo_user(text)
 
     def apply_event(self, event: AgentEvent) -> None:
+        if not self._app.is_running:
+            # Textual prunes every widget before it sends the App its Unmount,
+            # which is where the agent session is marked down. A turn that
+            # settles in between has no panel left to update (#476).
+            return
         self._app._agent_panel.apply_event(event)
 
 
