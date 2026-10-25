@@ -256,7 +256,9 @@ An **`Observation`** carries:
 - the source, state and basis;
 - `observed_at`: UTC, and `None` while `UNKNOWN`;
 - `items`: how many objects were read;
-- `observed_uid`: the UID a GET actually returned;
+- `observed_uid`: the UID a GET actually returned. It is required when the
+  object was observed and the source expects a UID, so that an observation's
+  incarnation is never unknown;
 - `detail`: at most 200 characters, built from fixed templates and resource
   identities, never from response bodies or field values;
 - `token`: the run token the read started under (see below).

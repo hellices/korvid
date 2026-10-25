@@ -165,8 +165,13 @@ def test_a_long_detail_is_shortened_to_200_characters() -> None:
 def test_a_different_uid_marks_a_recreated_object() -> None:
     assert _observation(source=CONFIG, observed_uid="uid-2").recreated
     assert not _observation(source=CONFIG, observed_uid="uid-1").recreated
-    assert not _observation(source=CONFIG).recreated
+    assert not _observation(source=CONFIG, basis=Basis.OBJECT_ABSENT).recreated
     assert not _observation(observed_uid="uid-2").recreated
+
+
+def test_an_observed_object_with_an_expected_uid_records_the_uid_it_saw() -> None:
+    with pytest.raises(ValueError, match="records the UID it saw"):
+        _observation(source=CONFIG)
 
 
 def test_an_observation_carries_the_token_its_read_started_under() -> None:

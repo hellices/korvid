@@ -594,8 +594,13 @@ def test_a_long_detail_is_shortened_to_200_characters() -> None:
 def test_a_different_uid_marks_a_recreated_object() -> None:
     assert _observation(source=CONFIG, observed_uid="uid-2").recreated
     assert not _observation(source=CONFIG, observed_uid="uid-1").recreated
-    assert not _observation(source=CONFIG).recreated
+    assert not _observation(source=CONFIG, basis=Basis.OBJECT_ABSENT).recreated
     assert not _observation(observed_uid="uid-2").recreated
+
+
+def test_an_observed_object_with_an_expected_uid_records_the_uid_it_saw() -> None:
+    with pytest.raises(ValueError, match="records the UID it saw"):
+        _observation(source=CONFIG)
 
 
 def test_an_observation_carries_the_token_its_read_started_under() -> None:
@@ -1173,6 +1178,10 @@ _DETAIL_LIMIT = 200
 _CONCLUSIVE_BASES = frozenset({Basis.OBSERVED, Basis.OBJECT_ABSENT})
 
 
+def _expected_uid(source: Source) -> str | None:
+    return source.expected_uid if isinstance(source, ApiSource) else None
+
+
 @dataclass(frozen=True, slots=True)
 class Observation:
     """What one read established about one source.
@@ -1183,7 +1192,9 @@ class Observation:
         basis: Why that state holds; one of the state's `ALLOWED_BASES`.
         observed_at: When, in UTC. `None` exactly while the state is `UNKNOWN`.
         items: How many objects the read returned.
-        observed_uid: The UID a GET actually returned.
+        observed_uid: The UID a GET actually returned. Required when the
+            object was observed and the source expects a UID, so that the
+            observation's incarnation is always known.
         detail: Fixed template text and resource identities, never response
             bodies or field values. Text over 200 characters is shortened.
         token: The run token the read started under.
@@ -1207,6 +1218,12 @@ class Observation:
             raise ValueError("observation times are UTC")
         if isinstance(self.items, bool) or not isinstance(self.items, int) or self.items < 0:
             raise ValueError("an item count is a non-negative integer")
+        if (
+            self.basis is Basis.OBSERVED
+            and self.observed_uid is None
+            and _expected_uid(self.source)
+        ):
+            raise ValueError("an observed object with an expected UID records the UID it saw")
         if len(self.detail) > _DETAIL_LIMIT:
             object.__setattr__(self, "detail", self.detail[: _DETAIL_LIMIT - 1] + "…")
 
@@ -1216,9 +1233,10 @@ class Observation:
 
         A recreated object never inherits the old one's evidence (#410).
         """
-        if not isinstance(self.source, ApiSource) or self.source.expected_uid is None:
+        expected = _expected_uid(self.source)
+        if expected is None or self.observed_uid is None:
             return False
-        return self.observed_uid is not None and self.observed_uid != self.source.expected_uid
+        return self.observed_uid != expected
 
 
 def is_fresh(observation: Observation, policy: FreshnessPolicy, now: datetime) -> bool:
