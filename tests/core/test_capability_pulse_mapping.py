@@ -105,8 +105,12 @@ def test_the_default_maximum_age_is_pulses_staleness_window() -> None:
     assert DEFAULT_MAX_AGE == pulse._STALE_AFTER
 
 
-async def test_a_complete_pulse_source_is_available() -> None:
-    result, _calls = await _collect(PulsePage(({},)))
+@pytest.mark.parametrize(
+    "page",
+    [pytest.param(PulsePage(({},)), id="objects"), pytest.param(PulsePage(()), id="empty")],
+)
+async def test_a_complete_pulse_source_is_available(page: PulsePage) -> None:
+    result, _calls = await _collect(page)
 
     assert result.coverage.state == "complete"
     assert _mapped(result) is EvidenceState.AVAILABLE

@@ -239,6 +239,14 @@ def test_every_classification_can_be_recorded(failure: BaseException, read: Read
     assert (observation.state, observation.basis) == (result.state, result.basis)
 
 
+@pytest.mark.parametrize("read", [CONTINUATION, METADATA_CONTINUATION])
+@pytest.mark.parametrize("failure", FAILURES)
+def test_every_failure_on_a_continuation_keeps_its_pages(
+    failure: BaseException, read: ReadRequest
+) -> None:
+    assert classify(failure, read).state is EvidenceState.PARTIAL
+
+
 @pytest.mark.parametrize(
     ("failure", "detail"),
     [

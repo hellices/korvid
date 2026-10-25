@@ -284,8 +284,9 @@ class DiscoverySource:
 class ProviderSource:
     """One query to a configured provider, such as a metrics backend.
 
-    Its scope is what the query covers: the provider as a whole, or one
-    namespace or node, such as the CPU usage of one namespace's pods.
+    Its scope is what the query covers: the provider as a whole, the cluster,
+    or one namespace or node, such as the CPU usage of one namespace's pods.
+    A provider-wide scope names the queried provider itself.
     Vocabulary only for now: no collector reads one until a diagnostic needs it.
     """
 
@@ -296,6 +297,8 @@ class ProviderSource:
     def __post_init__(self) -> None:
         if not self.provider_id or not self.query_kind:
             raise ValueError("a provider source names its provider and query kind")
+        if self.scope.kind is ScopeKind.PROVIDER and self.scope.name != self.provider_id:
+            raise ValueError("a provider-wide query is scoped to its own provider")
 
 
 Source = ApiSource | DiscoverySource | ProviderSource

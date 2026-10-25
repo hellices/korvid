@@ -797,12 +797,22 @@ def test_a_provider_source_names_its_provider_and_query(provider_id: str, query_
 
 @pytest.mark.parametrize(
     "scope",
-    [SourceScope.provider("prometheus"), SourceScope.namespace("team-a")],
+    [
+        SourceScope.provider("prometheus"),
+        SourceScope.cluster(),
+        SourceScope.namespace("team-a"),
+        SourceScope.node("node-1"),
+    ],
 )
 def test_a_provider_query_keeps_the_scope_it_covers(scope: SourceScope) -> None:
     source = ProviderSource("prometheus", "series", scope)
 
     assert _observation(source=source).source.scope == scope
+
+
+def test_a_provider_wide_query_is_scoped_to_its_own_provider() -> None:
+    with pytest.raises(ValueError, match="scoped to its own provider"):
+        ProviderSource("prometheus", "series", SourceScope.provider("loki"))
 ```
 
 - [ ] **Step 2: Run the test to verify it fails**
@@ -1100,8 +1110,9 @@ class DiscoverySource:
 class ProviderSource:
     """One query to a configured provider, such as a metrics backend.
 
-    Its scope is what the query covers: the provider as a whole, or one
-    namespace or node, such as the CPU usage of one namespace's pods.
+    Its scope is what the query covers: the provider as a whole, the cluster,
+    or one namespace or node, such as the CPU usage of one namespace's pods.
+    A provider-wide scope names the queried provider itself.
     Vocabulary only for now: no collector reads one until a diagnostic needs it.
     """
 
@@ -1112,6 +1123,8 @@ class ProviderSource:
     def __post_init__(self) -> None:
         if not self.provider_id or not self.query_kind:
             raise ValueError("a provider source names its provider and query kind")
+        if self.scope.kind is ScopeKind.PROVIDER and self.scope.name != self.provider_id:
+            raise ValueError("a provider-wide query is scoped to its own provider")
 
 
 Source = ApiSource | DiscoverySource | ProviderSource
@@ -1943,6 +1956,14 @@ def test_every_classification_can_be_recorded(failure: BaseException, read: Read
     assert (observation.state, observation.basis) == (result.state, result.basis)
 
 
+@pytest.mark.parametrize("read", [CONTINUATION, METADATA_CONTINUATION])
+@pytest.mark.parametrize("failure", FAILURES)
+def test_every_failure_on_a_continuation_keeps_its_pages(
+    failure: BaseException, read: ReadRequest
+) -> None:
+    assert classify(failure, read).state is EvidenceState.PARTIAL
+
+
 @pytest.mark.parametrize(
     ("failure", "detail"),
     [
@@ -2426,8 +2447,12 @@ def test_the_default_maximum_age_is_pulses_staleness_window() -> None:
     assert DEFAULT_MAX_AGE == pulse._STALE_AFTER
 
 
-async def test_a_complete_pulse_source_is_available() -> None:
-    result, _calls = await _collect(PulsePage(({},)))
+@pytest.mark.parametrize(
+    "page",
+    [pytest.param(PulsePage(({},)), id="objects"), pytest.param(PulsePage(()), id="empty")],
+)
+async def test_a_complete_pulse_source_is_available(page: PulsePage) -> None:
+    result, _calls = await _collect(page)
 
     assert result.coverage.state == "complete"
     assert _mapped(result) is EvidenceState.AVAILABLE

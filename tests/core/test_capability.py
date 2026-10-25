@@ -368,9 +368,19 @@ def test_a_provider_source_names_its_provider_and_query(provider_id: str, query_
 
 @pytest.mark.parametrize(
     "scope",
-    [SourceScope.provider("prometheus"), SourceScope.namespace("team-a")],
+    [
+        SourceScope.provider("prometheus"),
+        SourceScope.cluster(),
+        SourceScope.namespace("team-a"),
+        SourceScope.node("node-1"),
+    ],
 )
 def test_a_provider_query_keeps_the_scope_it_covers(scope: SourceScope) -> None:
     source = ProviderSource("prometheus", "series", scope)
 
     assert _observation(source=source).source.scope == scope
+
+
+def test_a_provider_wide_query_is_scoped_to_its_own_provider() -> None:
+    with pytest.raises(ValueError, match="scoped to its own provider"):
+        ProviderSource("prometheus", "series", SourceScope.provider("loki"))
