@@ -155,9 +155,10 @@ Make `PulseCoverage` the shared type and route diagnostics through Pulse.
 
 | Unit | Module | May import | Purpose |
 | --- | --- | --- | --- |
-| Vocabulary | `korvid.core.capability` (new) | stdlib, `korvid.k8s.errors` | states, bases, sources, observations, combining rules, the classifier, run tokens |
+| Vocabulary | `korvid.core.capability` (new) | stdlib | states, bases, sources, observations, combining rules, run tokens |
+| Classifier | `korvid.core.capability_classifier` (new) | `korvid.core.capability`, `korvid.k8s.errors` | read requests, `Status` parsing, outcome classification |
 | Version resolution | `korvid.core.api_versions` (new) | `korvid.core.capability`, `korvid.k8s.discovery` | turns the client's raw discovery outcomes into observations; logical-source resolution |
-| Evidence reads | `korvid.core.evidence_reads` (new) | the two above, `korvid.k8s` | bounded, cancellable LIST and GET that return observations |
+| Evidence reads | `korvid.core.evidence_reads` (new) | the three above, `korvid.k8s` | bounded, cancellable LIST and GET that return observations |
 | Client additions | `korvid.k8s.client`, `korvid.k8s.discovery`, `korvid.k8s.errors` | — | the raw discovery snapshot (per-endpoint outcomes and verbs), byte-bounded responses, metadata projections, error categories, the session generation |
 
 `tach.toml` already allows `ui`, `tools` and `agent` to import `core`, so
@@ -683,7 +684,7 @@ are not complete until S5 has also landed.
 
 | Slice | Content |
 | --- | --- |
-| S1 | `core/capability`: states, bases, sources (API, discovery and provider) and roles, freshness policies and declarations, observations and the `RunToken` value they carry, `EvidenceSet` rules, `ReadRequest` and the classifier with `Status` parsing, `KubeClientError` categories, the Pulse mapping test |
+| S1 | `core/capability`: states, bases, sources (API, discovery and provider) and roles, freshness policies and declarations, observations and the `RunToken` value they carry, `EvidenceSet` rules, `ReadRequest` and the classifier with `Status` parsing (in `core/capability_classifier`), `KubeClientError` categories, the Pulse mapping test |
 | S2 | the session generation and the raw discovery snapshot in `KubeClient` (separate `/api` and `/apis` outcomes, group-version outcomes with verbs, TTL, refresh triggers), with `discover_resources()` projected from it; `core/api_versions`: the observation snapshot and logical-source resolution |
 | S3 | `core/evidence_reads`: `read_list` and `read_object`, byte budgets, metadata projections and their reduction, the configuration-payload guard |
 | S4 | the run generation and the late-result helper that applies a result only under the current token |
