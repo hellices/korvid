@@ -233,6 +233,10 @@ The source types:
   unresolved), optional subresource, scope, projection (`object` or
   `metadata`), and for a GET the target object's name and the expected UID,
   if the caller holds one.
+- **`DiscoverySource`**: one discovery endpoint, which is the core root
+  `/api`, the group root `/apis`, or one group version (`/api/v1` or
+  `/apis/<group>/<version>`). It lets every discovery outcome be an
+  `Observation` like any other.
 - **`ProviderSource`**: provider id, query kind and scope. It is vocabulary
   only in v0.7.0.
 
@@ -291,8 +295,8 @@ a state, a basis and a detail template. The request carries what the
 exception cannot:
 
 - the read kind: `LIST`, `GET`, `DISCOVERY` or `PROVIDER`;
-- the requested group and resource and, for a GET, the object name;
-- the projection;
+- the source: an `ApiSource` names the group, resource, projection and, for
+  a GET, the object, and a `DiscoverySource` names the endpoint;
 - whether the request was a continuation.
 
 Where the status code alone is ambiguous, the classifier reads a bounded part
@@ -347,11 +351,12 @@ they are reconciled.
 
 A **`DiscoverySnapshot`** is cached per session generation. It holds:
 
-- **`root`**: the outcome of `/api` and `/apis`;
-- **`groups`**: for each advertised group version, its outcome (an
-  `Observation`), and on success the resources it serves with their verbs.
-  A malformed or skipped entry counts as a failed group version, not as an
-  absent resource;
+- **`core_root`** and **`group_root`**: the outcomes of `/api` and `/apis`,
+  kept apart because either can fail while the other succeeds;
+- **`groups`**: for each advertised group version, core `v1` included, its
+  outcome (an `Observation` of its `DiscoverySource`), and on success the
+  resources it serves with their verbs. A malformed or skipped entry counts
+  as a failed group version, not as an absent resource;
 - **`generation`** and **`fetched_at`**: the snapshot expires after 5
   minutes. It is refreshed then, on a context switch, on an explicit refresh,
   and when a read reports `DISCOVERY_STALE`.
@@ -372,10 +377,12 @@ each one returns the first case that applies:
    and that lists the verb the read needs. The version may be non-preferred
    (#345). A positive answer does not depend on other group versions, so a
    broken one does not block a working one.
-2. **Incomplete discovery.** If the root discovery, or any advertised group
-   version of the candidate's group, was forbidden or failed, the candidate
-   is `DENIED`/`DISCOVERY_FORBIDDEN` or `UNAVAILABLE`/`DISCOVERY_FAILED`. Any
-   negative conclusion would need the part korvid could not read.
+2. **Incomplete discovery.** If the candidate's own root (`/api` for a core
+   candidate, `/apis` for a named group), or any advertised version of the
+   candidate's group, was forbidden or failed, the candidate is
+   `DENIED`/`DISCOVERY_FORBIDDEN` or `UNAVAILABLE`/`DISCOVERY_FAILED`. Any
+   negative conclusion would need the part korvid could not read. A failure
+   of the other root does not affect the candidate.
 3. **Served without the needed verb.** `UNSUPPORTED`/`OPERATION_UNSUPPORTED`.
 4. **Only unknown versions are served.** `UNSUPPORTED`/`NO_KNOWN_VERSION`:
    an unfamiliar schema is never read as a known one.
@@ -583,7 +590,12 @@ version runs the same read-only scenarios:
   - Only unknown versions are served.
   - The needed verb is missing.
   - Nothing is served.
-  - Root discovery failed.
+  - `/api` failed or was forbidden while `/apis` succeeded, and the reverse:
+    each failure affects only its own candidates, so complete core discovery
+    is never `DENIED` because of `/apis`, and a named group is never
+    `NOT_SERVED` because `/api` succeeded.
+  - Every discovery request, successful or not, yields an `Observation` of
+    its `DiscoverySource`.
   - A known version resolves even when a sibling group version failed
     discovery.
   - A group version was forbidden or failed while another succeeded, which
@@ -627,8 +639,8 @@ are not complete until S5 has also landed.
 
 | Slice | Content |
 | --- | --- |
-| S1 | `core/capability`: states, bases, sources and roles, observations and the `RunToken` value they carry, `EvidenceSet` rules, `ReadRequest` and the classifier with `Status` parsing, `KubeClientError` categories, the Pulse mapping test |
-| S2 | the session generation in `KubeClient`; the discovery snapshot keyed by it (root and group outcomes, verbs, generation, TTL, refresh triggers); `core/api_versions` logical-source resolution |
+| S1 | `core/capability`: states, bases, sources (API, discovery and provider) and roles, observations and the `RunToken` value they carry, `EvidenceSet` rules, `ReadRequest` and the classifier with `Status` parsing, `KubeClientError` categories, the Pulse mapping test |
+| S2 | the session generation in `KubeClient`; the discovery snapshot keyed by it (separate `/api` and `/apis` outcomes, group-version outcomes, verbs, generation, TTL, refresh triggers); `core/api_versions` logical-source resolution |
 | S3 | `core/evidence_reads`: `read_list` and `read_object`, byte budgets, metadata projections and their reduction, the configuration-payload guard |
 | S4 | the run generation and the late-result helper that applies a result only under the current token |
 | S5 | the Kubernetes support document and the kind version-matrix workflow |
