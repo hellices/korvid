@@ -218,6 +218,21 @@ def test_fresh_events_are_never_conclusive_about_absence() -> None:
     assert not conclusive(observation, retention, NOW)
 
 
+def test_an_observation_timed_after_now_is_neither_fresh_nor_conclusive() -> None:
+    observation = _observation(at=NOW + timedelta(seconds=1))
+
+    assert not is_fresh(observation, FreshnessPolicy(), NOW)
+    assert not conclusive(observation, FreshnessPolicy(), NOW)
+
+
+def test_a_recreated_object_is_never_conclusive() -> None:
+    recreated = _observation(source=CONFIG, observed_uid="uid-2")
+
+    assert recreated.recreated
+    assert not conclusive(recreated, FreshnessPolicy(), NOW)
+    assert conclusive(_observation(source=CONFIG, observed_uid="uid-1"), FreshnessPolicy(), NOW)
+
+
 def test_a_stale_status_downgrade_is_partial_and_never_conclusive() -> None:
     observation = downgrade_stale_status(_observation(), "status.hard lags spec.hard")
 
@@ -339,9 +354,10 @@ def test_discovery_sources_are_well_formed(fields: dict[str, Any]) -> None:
         DiscoverySource(**fields)
 
 
-def test_a_provider_source_names_its_provider_and_query() -> None:
+@pytest.mark.parametrize(("provider_id", "query_kind"), [("", "series"), ("prometheus", "")])
+def test_a_provider_source_names_its_provider_and_query(provider_id: str, query_kind: str) -> None:
     with pytest.raises(ValueError, match="provider and query kind"):
-        ProviderSource("", "series", SourceScope.provider("prometheus"))
+        ProviderSource(provider_id, query_kind, SourceScope.provider("prometheus"))
 
 
 def test_a_provider_observation_is_read_at_the_provider_scope() -> None:

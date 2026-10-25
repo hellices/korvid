@@ -233,7 +233,10 @@ async def test_a_repeated_continuation_is_malformed() -> None:
     with pytest.raises(KubeMalformedError, match="continuation did not advance"):
         await anext(pages)
 
-    assert request.await_count == 2
+    assert [call.kwargs["query_params"] for call in request.await_args_list] == [
+        [("limit", "5")],
+        [("limit", "5"), ("continue", "same")],
+    ]
 ```
 
 - [ ] **Step 2: Run the test to verify it fails**
@@ -644,6 +647,21 @@ def test_fresh_events_are_never_conclusive_about_absence() -> None:
     assert not conclusive(observation, retention, NOW)
 
 
+def test_an_observation_timed_after_now_is_neither_fresh_nor_conclusive() -> None:
+    observation = _observation(at=NOW + timedelta(seconds=1))
+
+    assert not is_fresh(observation, FreshnessPolicy(), NOW)
+    assert not conclusive(observation, FreshnessPolicy(), NOW)
+
+
+def test_a_recreated_object_is_never_conclusive() -> None:
+    recreated = _observation(source=CONFIG, observed_uid="uid-2")
+
+    assert recreated.recreated
+    assert not conclusive(recreated, FreshnessPolicy(), NOW)
+    assert conclusive(_observation(source=CONFIG, observed_uid="uid-1"), FreshnessPolicy(), NOW)
+
+
 def test_a_stale_status_downgrade_is_partial_and_never_conclusive() -> None:
     observation = downgrade_stale_status(_observation(), "status.hard lags spec.hard")
 
@@ -765,9 +783,10 @@ def test_discovery_sources_are_well_formed(fields: dict[str, Any]) -> None:
         DiscoverySource(**fields)
 
 
-def test_a_provider_source_names_its_provider_and_query() -> None:
+@pytest.mark.parametrize(("provider_id", "query_kind"), [("", "series"), ("prometheus", "")])
+def test_a_provider_source_names_its_provider_and_query(provider_id: str, query_kind: str) -> None:
     with pytest.raises(ValueError, match="provider and query kind"):
-        ProviderSource("", "series", SourceScope.provider("prometheus"))
+        ProviderSource(provider_id, query_kind, SourceScope.provider("prometheus"))
 
 
 def test_a_provider_observation_is_read_at_the_provider_scope() -> None:
@@ -1203,21 +1222,27 @@ class Observation:
 
 
 def is_fresh(observation: Observation, policy: FreshnessPolicy, now: datetime) -> bool:
-    """Whether the observation is no older than the policy's maximum age."""
+    """Whether the observation is no older than the policy's maximum age.
+
+    An observation timed after `now` is not fresh: a clock that disagrees with
+    itself proves nothing.
+    """
     observed_at = observation.observed_at
-    return observed_at is not None and now - observed_at <= policy.max_age
+    return observed_at is not None and timedelta(0) <= now - observed_at <= policy.max_age
 
 
 def conclusive(observation: Observation, policy: FreshnessPolicy, now: datetime) -> bool:
     """Whether a diagnostic may treat absence in this observation as a fact.
 
     That takes complete, observed evidence (`NO_DATA` never counts: a provider
-    that returns no series has not shown that a value is zero), read recently
-    enough, from a source whose entries do not expire.
+    that returns no series has not shown that a value is zero) about the
+    expected incarnation, read recently enough, from a source whose entries do
+    not expire.
     """
     return (
         observation.state is EvidenceState.AVAILABLE
         and observation.basis in _CONCLUSIVE_BASES
+        and not observation.recreated
         and not policy.retention_limited
         and is_fresh(observation, policy, now)
     )
@@ -1294,6 +1319,7 @@ from korvid.core.capability import (
     Role,
     ScopeKind,
     SourceScope,
+    Verb,
 )
 
 NOW = datetime(2026, 10, 25, 12, 0, tzinfo=UTC)
@@ -1363,6 +1389,19 @@ def test_a_confirming_source_must_be_fresh() -> None:
     evidence = EvidenceSet({"events": _seen(age=STALE)})
 
     assert evidence.baseline((EVENTS,), NOW) == Baseline(EvidenceState.PARTIAL, ("events",))
+
+
+@pytest.mark.parametrize("role", [Role.RULES_OUT, Role.CONFIRMS])
+def test_a_recreated_object_never_completes_the_baseline(role: Role) -> None:
+    expected = ApiSource("", "configmaps", TEAM, "v1", Verb.GET, name="app", expected_uid="uid-1")
+    recreated = Observation(
+        expected, EvidenceState.AVAILABLE, Basis.OBSERVED, NOW, observed_uid="uid-2"
+    )
+    config = Declaration("config", required=True, role=role)
+
+    assert EvidenceSet({"config": recreated}).baseline((config,), NOW) == Baseline(
+        EvidenceState.PARTIAL, ("config",)
+    )
 
 
 def test_any_contributed_evidence_makes_an_incomplete_baseline_partial() -> None:
@@ -1581,7 +1620,7 @@ class EvidenceSet:
 
     def _complete(self, declaration: Declaration, now: datetime) -> bool:
         observation = self._observations.get(declaration.key)
-        if observation is None:
+        if observation is None or observation.recreated:
             return False
         if declaration.role is Role.RULES_OUT:
             return conclusive(observation, declaration.policy, now)

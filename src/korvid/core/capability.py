@@ -416,21 +416,27 @@ class Observation:
 
 
 def is_fresh(observation: Observation, policy: FreshnessPolicy, now: datetime) -> bool:
-    """Whether the observation is no older than the policy's maximum age."""
+    """Whether the observation is no older than the policy's maximum age.
+
+    An observation timed after `now` is not fresh: a clock that disagrees with
+    itself proves nothing.
+    """
     observed_at = observation.observed_at
-    return observed_at is not None and now - observed_at <= policy.max_age
+    return observed_at is not None and timedelta(0) <= now - observed_at <= policy.max_age
 
 
 def conclusive(observation: Observation, policy: FreshnessPolicy, now: datetime) -> bool:
     """Whether a diagnostic may treat absence in this observation as a fact.
 
     That takes complete, observed evidence (`NO_DATA` never counts: a provider
-    that returns no series has not shown that a value is zero), read recently
-    enough, from a source whose entries do not expire.
+    that returns no series has not shown that a value is zero) about the
+    expected incarnation, read recently enough, from a source whose entries do
+    not expire.
     """
     return (
         observation.state is EvidenceState.AVAILABLE
         and observation.basis in _CONCLUSIVE_BASES
+        and not observation.recreated
         and not policy.retention_limited
         and is_fresh(observation, policy, now)
     )
@@ -537,7 +543,7 @@ class EvidenceSet:
 
     def _complete(self, declaration: Declaration, now: datetime) -> bool:
         observation = self._observations.get(declaration.key)
-        if observation is None:
+        if observation is None or observation.recreated:
             return False
         if declaration.role is Role.RULES_OUT:
             return conclusive(observation, declaration.policy, now)

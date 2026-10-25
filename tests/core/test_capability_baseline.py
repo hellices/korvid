@@ -20,6 +20,7 @@ from korvid.core.capability import (
     Role,
     ScopeKind,
     SourceScope,
+    Verb,
 )
 
 NOW = datetime(2026, 10, 25, 12, 0, tzinfo=UTC)
@@ -89,6 +90,19 @@ def test_a_confirming_source_must_be_fresh() -> None:
     evidence = EvidenceSet({"events": _seen(age=STALE)})
 
     assert evidence.baseline((EVENTS,), NOW) == Baseline(EvidenceState.PARTIAL, ("events",))
+
+
+@pytest.mark.parametrize("role", [Role.RULES_OUT, Role.CONFIRMS])
+def test_a_recreated_object_never_completes_the_baseline(role: Role) -> None:
+    expected = ApiSource("", "configmaps", TEAM, "v1", Verb.GET, name="app", expected_uid="uid-1")
+    recreated = Observation(
+        expected, EvidenceState.AVAILABLE, Basis.OBSERVED, NOW, observed_uid="uid-2"
+    )
+    config = Declaration("config", required=True, role=role)
+
+    assert EvidenceSet({"config": recreated}).baseline((config,), NOW) == Baseline(
+        EvidenceState.PARTIAL, ("config",)
+    )
 
 
 def test_any_contributed_evidence_makes_an_incomplete_baseline_partial() -> None:

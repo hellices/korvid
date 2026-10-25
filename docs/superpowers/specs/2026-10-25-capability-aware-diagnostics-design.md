@@ -201,7 +201,11 @@ one (see API version resolution). Conclusiveness requires all of these:
 - the state is `AVAILABLE` and the basis is `OBSERVED` or `OBJECT_ABSENT`.
   `NO_DATA` is never conclusive: a provider that returns no series has not
   shown that a value is zero;
-- the observation is fresh: younger than the policy's maximum age;
+- the observation describes the expected incarnation. An observation whose
+  `observed_uid` differs from the expected UID is about a recreated object,
+  so it never completes a baseline;
+- the observation is fresh: no later than now, and younger than the policy's
+  maximum age. A time after now means a clock that cannot be trusted;
 - the policy is not retention-limited. A retention-limited source, such as
   Events, can confirm a recorded fact but never the absence of one, because
   old entries expire.

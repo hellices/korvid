@@ -149,4 +149,7 @@ async def test_a_repeated_continuation_is_malformed() -> None:
     with pytest.raises(KubeMalformedError, match="continuation did not advance"):
         await anext(pages)
 
-    assert request.await_count == 2
+    assert [call.kwargs["query_params"] for call in request.await_args_list] == [
+        [("limit", "5")],
+        [("limit", "5"), ("continue", "same")],
+    ]
