@@ -16,13 +16,18 @@ nothing fails until somebody re-locks.
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
+import os
 import re
 import shlex
+import subprocess
+import sys
 import tempfile
 import tomllib
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlsplit
 
 import pytest
@@ -31,6 +36,7 @@ from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
 from packaging.version import Version
 
+from tests.platforms import bash_executable
 from tests.release_contracts import run_scripts, workflow_jobs
 
 #: The only hosts the lockfile may name.
@@ -373,6 +379,19 @@ def test_the_committed_bytes_are_the_bytes_that_were_verified() -> None:
     assert "sha256sum --check --strict" in propose_scripts, (
         "the committing job trusts the artifact's shape but not its identity"
     )
+    # The verified lock waits outside the checkout and is copied in only
+    # after the base revision is checked out (#481), so the bytes that get
+    # staged are matched to the digest after that copy, not just before it.
+    commit = next(
+        step["run"] for step in propose["steps"] if "git add --sparse" in step.get("run", "")
+    )
+    copy = 'cp "$RUNNER_TEMP/relocked-lock/uv.lock" uv.lock'
+    recheck = 'echo "$DIGEST  uv.lock" | sha256sum --check --strict'
+    assert copy in commit, "the verified lock never enters the checkout from outside it"
+    assert recheck in commit, "the lock is staged without matching the copied file to the digest"
+    assert commit.index(copy) < commit.index(recheck) < commit.index("git add --sparse uv.lock"), (
+        "the digest must be matched after the copy and before the lock is staged"
+    )
 
 
 def test_the_validator_comes_from_a_revision_that_is_not_under_review() -> None:
@@ -485,6 +504,171 @@ def test_the_lock_can_actually_be_staged_from_the_sparse_checkout() -> None:
         assert "git add --sparse uv.lock" in commit["run"], (
             "a sparse checkout cannot stage uv.lock without --sparse"
         )
+
+
+def _git(cwd: Path, *args: str) -> str:
+    result = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, check=False)
+    assert result.returncode == 0, f"git {' '.join(args)} failed: {result.stderr}"
+    return result.stdout.strip()
+
+
+def _relock_origin(tmp_path: Path, *, base_lock: str | None) -> tuple[Path, str]:
+    """A bare origin with `main` and, unless `base_lock` is None, a `feature`
+    branch one commit ahead of it that locks `base_lock`.
+
+    Returns the origin and the revision the relock job checked out and
+    tested: the `feature` tip, or `main` itself when there is no branch.
+    """
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    _git(seed, "init", "-q", "-b", "main")
+    _git(seed, "config", "user.name", "seed")
+    _git(seed, "config", "user.email", "seed@example.invalid")
+    (seed / "scripts").mkdir()
+    checker = (_ROOT / "scripts" / "check_lock_hosts.py").read_text(encoding="utf-8")
+    (seed / "scripts" / "check_lock_hosts.py").write_text(checker, encoding="utf-8")
+    (seed / "uv.lock").write_text("main's lock\n", encoding="utf-8")
+    _git(seed, "add", ".")
+    _git(seed, "commit", "-q", "-m", "main")
+    if base_lock is not None:
+        _git(seed, "checkout", "-q", "-b", "feature")
+        (seed / "feature.txt").write_text("the change under review\n", encoding="utf-8")
+        (seed / "uv.lock").write_text(base_lock, encoding="utf-8")
+        _git(seed, "add", ".")
+        _git(seed, "commit", "-q", "-m", "feature")
+    origin = tmp_path / "origin.git"
+    _git(tmp_path, "clone", "-q", "--bare", str(seed), str(origin))
+    return origin, _git(seed, "rev-parse", "HEAD")
+
+
+def _checkout_main_sparsely(origin: Path, work: Path) -> None:
+    """What `actions/checkout` does for `ref: main` with the validator only."""
+    _git(origin.parent, "clone", "-q", "--no-checkout", origin.as_uri(), str(work))
+    _git(work, "sparse-checkout", "set", "--no-cone", "scripts/check_lock_hosts.py")
+    _git(work, "checkout", "-q", "main")
+
+
+def _download_artifact(
+    steps: list[dict[str, Any]], work: Path, runner_temp: Path, lock: bytes
+) -> None:
+    """Place the artifact where the workflow's `download-artifact` step puts it."""
+    download = next(
+        step for step in steps if str(step.get("uses", "")).startswith("actions/download-artifact")
+    )
+    path = download.get("with", {}).get("path")
+    target = (
+        work if path is None else Path(path.replace("${{ runner.temp }}", runner_temp.as_posix()))
+    )
+    assert "${{" not in str(target), f"unresolved expression in the artifact path {path!r}"
+    target.mkdir(parents=True, exist_ok=True)
+    (target / "uv.lock").write_bytes(lock)
+
+
+def _run_propose_steps(
+    steps: list[dict[str, Any]], work: Path, env: dict[str, str], expressions: dict[str, str]
+) -> None:
+    """Run every `run` step of the propose job, as GitHub would, in order."""
+    prelude = (
+        'gh() { printf "%s\\n" "$*" >> "$FAKE_GH_CALLS"; }\n'
+        # macOS ships a BSD sha256sum without --check/--strict; the runner's
+        # is GNU coreutils, and shasum accepts the same options.
+        "if ! sha256sum --version 2>/dev/null | grep -q GNU; then\n"
+        '  sha256sum() { shasum -a 256 "$@"; }\n'
+        "fi\n"
+    )
+
+    def resolve(value: str) -> str:
+        for expression, actual in expressions.items():
+            value = value.replace(expression, actual)
+        assert "${{" not in value, f"unresolved expression in {value!r}"
+        return value
+
+    for step in steps:
+        if "run" not in step:
+            continue
+        step_env = {name: resolve(str(value)) for name, value in step.get("env", {}).items()}
+        result = subprocess.run(
+            [
+                bash_executable(),
+                "--noprofile",
+                "--norc",
+                "-e",
+                "-c",
+                prelude + resolve(step["run"]),
+            ],
+            cwd=work,
+            env={**env, **step_env},
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, f"{step.get('name')!r} failed:\n{result.stderr}"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the Relock workflow runs on Linux runners")
+@pytest.mark.parametrize(
+    ("base", "base_lock"),
+    [("main", None), ("feature", "main's lock\n"), ("feature", "the branch's own lock\n")],
+    ids=["base-is-main", "branch-shares-main-lock", "branch-has-its-own-lock"],
+)
+def test_the_verified_lock_is_committed_onto_any_base(
+    tmp_path: Path, base: str, base_lock: str | None
+) -> None:
+    """`base` may be any branch, not just `main`.
+
+    Run 40155755520 relocked filelock onto a branch with its own `uv.lock`,
+    and `propose` died at `git checkout`: the verified lock it had downloaded
+    over the sparse `main` checkout counted as a local change git would not
+    carry onto another revision (#481). Every earlier run used `main`, whose
+    tip is the tested revision, so the checkout changed nothing. This runs
+    the job's own steps against a sparse checkout of `main` and expects the
+    verified bytes, and nothing else, committed onto the tested revision.
+    """
+    steps = workflow_jobs(_RELOCK_WORKFLOW)["propose"]["steps"]
+    origin, base_sha = _relock_origin(tmp_path, base_lock=base_lock)
+    work = tmp_path / "work"
+    _checkout_main_sparsely(origin, work)
+    runner_temp = tmp_path / "runner-temp"
+    runner_temp.mkdir()
+    verified = (_ROOT / "uv.lock").read_bytes()
+    _download_artifact(steps, work, runner_temp, verified)
+    gh_calls = tmp_path / "gh-calls.txt"
+    env = {
+        "PATH": f"{Path(sys.executable).parent}{os.pathsep}{os.environ.get('PATH', '')}",
+        "HOME": tmp_path.as_posix(),
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "RUNNER_TEMP": runner_temp.as_posix(),
+        "FAKE_GH_CALLS": gh_calls.as_posix(),
+    }
+    expressions = {
+        "${{ needs.relock.outputs.digest }}": hashlib.sha256(verified).hexdigest(),
+        "${{ needs.relock.outputs.base_sha }}": base_sha,
+        "${{ inputs.package }}": "filelock",
+        "${{ inputs.base }}": base,
+        "${{ github.token }}": "not-a-token",
+    }
+
+    _run_propose_steps(steps, work, env, expressions)
+
+    # `--git-dir`, not the bare repository as the working directory: git can
+    # be configured to refuse implicit bare repositories (safe.bareRepository).
+    remote = ("--git-dir", str(origin))
+    pushed = _git(
+        tmp_path, *remote, "for-each-ref", "--format=%(refname:short)", "refs/heads/relock/"
+    )
+    assert len(pushed.splitlines()) == 1, f"expected one relock branch, got {pushed!r}"
+    assert _git(tmp_path, *remote, "rev-parse", f"{pushed}^") == base_sha
+    changed = _git(tmp_path, *remote, "diff", "--name-only", base_sha, pushed)
+    assert changed.splitlines() == ["uv.lock"]
+    committed = subprocess.run(
+        ["git", *remote, "show", f"{pushed}:uv.lock"], capture_output=True, check=True
+    ).stdout
+    assert committed == verified, "the committed lock is not the verified artifact"
+    calls = gh_calls.read_text(encoding="utf-8").splitlines()
+    # The multi-line --body spreads one call over several recorded lines.
+    created = [line for line in calls if line.startswith("pr create ")]
+    assert len(created) == 1, calls
+    assert created[0].startswith(f"pr create --base {base} --head {pushed} "), created
 
 
 def test_the_relock_pull_request_does_not_promise_codeql_it_cannot_deliver() -> None:

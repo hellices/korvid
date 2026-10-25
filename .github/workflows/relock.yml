@@ -159,9 +159,14 @@ jobs:
           persist-credentials: false
           sparse-checkout: scripts/check_lock_hosts.py
           sparse-checkout-cone-mode: false
+      # Outside the checkout, not over it: on top of `main` the lock is a
+      # local change, and git will not carry a local change onto a base
+      # revision whose own uv.lock differs (#481). It is copied in only
+      # after the base revision is checked out, in the last step.
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
           name: relocked-lock
+          path: ${{ runner.temp }}/relocked-lock
 
       # Re-check what actually arrived. The other job validated the lock
       # before running the suite, and code from the dependencies it just
@@ -170,7 +175,7 @@ jobs:
       # ran none of that code, and before the token is exposed. The checker
       # comes from this clean checkout, not from the artifact.
       - name: Refuse a lock that names anything but PyPI
-        run: python scripts/check_lock_hosts.py uv.lock
+        run: python scripts/check_lock_hosts.py "$RUNNER_TEMP/relocked-lock/uv.lock"
 
       # The digest was taken before any resolved code ran. Matching it here
       # is what makes "verified" mean these bytes rather than some other
@@ -178,7 +183,7 @@ jobs:
       - name: Confirm these are the bytes the other job verified
         env:
           DIGEST: ${{ needs.relock.outputs.digest }}
-        run: echo "$DIGEST  uv.lock" | sha256sum --check --strict
+        run: echo "$DIGEST  $RUNNER_TEMP/relocked-lock/uv.lock" | sha256sum --check --strict
 
       - name: Open a pull request with the verified lock
         env:
@@ -186,6 +191,7 @@ jobs:
           PACKAGE: ${{ inputs.package }}
           BASE: ${{ inputs.base }}
           BASE_SHA: ${{ needs.relock.outputs.base_sha }}
+          DIGEST: ${{ needs.relock.outputs.digest }}
         run: |
           target="${PACKAGE:-all dependencies}"
           branch="relock/$(date +%Y%m%d-%H%M%S)"
@@ -196,6 +202,11 @@ jobs:
           # against, not from whatever the base branch points at now.
           git fetch --depth 1 origin "$BASE_SHA"
           git checkout -b "$branch" "$BASE_SHA"
+          # Only now does the verified lock enter the checkout, and the
+          # file that is about to be committed is matched to the digest
+          # once more.
+          cp "$RUNNER_TEMP/relocked-lock/uv.lock" uv.lock
+          echo "$DIGEST  uv.lock" | sha256sum --check --strict
           # --sparse: the checkout includes only the validator, so uv.lock
           # is outside the sparse definition and a plain `git add` refuses
           # to stage it.

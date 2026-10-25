@@ -102,7 +102,11 @@ repository rejects that. Three paths out, in order of preference:
      re-runs the host check with that trusted copy, and matches the digest
      before the token is exposed. Nothing that ran during verification can
      reach its credential, plant a `pre-push` hook, or substitute a
-     different lock that merely looks acceptable.
+     different lock that merely looks acceptable. The lock waits outside the
+     checkout until the tested base revision is checked out, so the base can
+     be any branch, including one whose own `uv.lock` differs from `main`'s.
+     It is then copied in and matched to the digest once more right before
+     it is staged.
 
    One repository setting is a prerequisite: **Settings → Actions → "Allow
    GitHub Actions to create and approve pull requests"**. With it off,
