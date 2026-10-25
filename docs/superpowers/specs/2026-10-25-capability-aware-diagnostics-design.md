@@ -185,7 +185,7 @@ Textual or an optional extra.
 | --- | --- |
 | `UNKNOWN` | `NOT_STARTED`, `IN_FLIGHT` |
 | `AVAILABLE` | `OBSERVED`, `OBJECT_ABSENT`, `NO_DATA` |
-| `PARTIAL` | `TRUNCATED`, `DEADLINE`, `TOO_LARGE`, `CONTINUATION_EXPIRED`, `SUBSCOPE_FAILED`, `STALE_STATUS`, plus, when the failure came after at least one accepted page, any other basis the classifier gives a failure: a `DENIED` or `UNAVAILABLE` basis, `OPERATION_UNSUPPORTED` or `PROJECTION_UNSUPPORTED` |
+| `PARTIAL` | `TRUNCATED`, `DEADLINE`, `TOO_LARGE`, `CONTINUATION_EXPIRED`, `SUBSCOPE_FAILED`, `STALE_STATUS`, plus, when the failure came after at least one accepted page, any other basis the classifier gives a failure: a `DENIED` or `UNAVAILABLE` basis, or `PROJECTION_UNSUPPORTED` |
 | `UNSUPPORTED` | `NOT_SERVED`, `OPERATION_UNSUPPORTED`, `NO_KNOWN_VERSION`, `PROJECTION_UNSUPPORTED`, `PROVIDER_NOT_CONFIGURED`, `FEATURE_DISABLED` |
 | `DENIED` | `FORBIDDEN`, `UNAUTHENTICATED`, `DISCOVERY_FORBIDDEN` |
 | `UNAVAILABLE` | `THROTTLED`, `SERVER_ERROR`, `UNEXPECTED_STATUS`, `TRANSPORT`, `MALFORMED`, `DEADLINE`, `TOO_LARGE`, `DISCOVERY_FAILED`, `DISCOVERY_STALE` |
@@ -213,19 +213,21 @@ this when a `ResourceQuota`'s `status.hard` disagrees with its `spec.hard`.
 
 Rules that keep a failure from being reported as "unsupported":
 
-- `NOT_SERVED`, `NO_KNOWN_VERSION`, and an `OPERATION_UNSUPPORTED` derived
-  from discovery require complete discovery, as defined under API version
-  resolution. Otherwise the source is `DENIED` or `UNAVAILABLE` with a
-  discovery basis. A 405 from the read itself is the server's own answer and
-  needs no such check.
+- `NOT_SERVED`, `NO_KNOWN_VERSION` and `OPERATION_UNSUPPORTED` come only
+  from resolution, and only from complete discovery, as defined under API
+  version resolution. Otherwise the source is `DENIED` or `UNAVAILABLE` with
+  a discovery basis.
 - `NOT_SERVED` does not name a cause (a feature gate, a version, a missing
   CRD). It records only that the server did not serve the resource.
   `FEATURE_DISABLED` is used only when an observed field or condition says so
   explicitly.
 - A read that contradicts discovery is `UNAVAILABLE`/`DISCOVERY_STALE`, and
-  it schedules a discovery refresh. An example is a 404 on a resource that
-  discovery listed as served. The source becomes `UNSUPPORTED` only after the
-  refreshed discovery shows it absent.
+  it schedules a discovery refresh. Readers accept only a resolved source,
+  and resolution only returns one whose resource and verb discovery listed.
+  So a 404 that does not name the requested object, or any 405, is such a
+  contradiction. The source becomes `UNSUPPORTED` only when the refreshed
+  discovery no longer lists the resource or the verb. If it still does, the
+  source stays `UNAVAILABLE`.
 
 The source types:
 
@@ -312,7 +314,7 @@ body for this.
 | 403 | `DENIED`/`FORBIDDEN` | same | `DENIED`/`DISCOVERY_FORBIDDEN` |
 | 404 whose `NotFound` details name the requested object (name, group and resource) | — | `AVAILABLE`/`OBJECT_ABSENT` | — |
 | any other 404 | `UNAVAILABLE`/`DISCOVERY_STALE` (refresh discovery) | same | `UNAVAILABLE`/`DISCOVERY_FAILED` |
-| 405 | `UNSUPPORTED`/`OPERATION_UNSUPPORTED` | same | `UNAVAILABLE`/`DISCOVERY_FAILED` |
+| 405 | `UNAVAILABLE`/`DISCOVERY_STALE` (refresh discovery: resolution had found the verb listed) | same | `UNAVAILABLE`/`DISCOVERY_FAILED` |
 | 406 for a metadata projection | `UNSUPPORTED`/`PROJECTION_UNSUPPORTED` | same | — |
 | 410 `Expired` on a continuation | `PARTIAL`/`CONTINUATION_EXPIRED` (a continuation always follows an accepted page) | — | — |
 | 429 | `UNAVAILABLE`/`THROTTLED`, after at most one retry that fits the deadline | same | same |
@@ -473,6 +475,9 @@ Their behaviour:
   Every annotation is dropped, since any of them can carry configuration
   data. A consumer that needs another field adds it to that allowlist with a
   test.
+- **Resolved sources only.** Both functions refuse an `ApiSource` whose
+  version is unset, and only `resolve` sets it. So every read uses a
+  resource and verb that discovery listed.
 - **Read-only.** The reader protocol the functions depend on has only GET and
   LIST methods.
 
@@ -595,8 +600,8 @@ version runs the same read-only scenarios:
   error category for every read kind, including:
   - 404 with a `NotFound` naming the requested object, naming another
     object, and with no parseable body;
-  - 405, and 406 and 410 both inside and outside a metadata projection or a
-    continuation;
+  - 405, always `DISCOVERY_STALE` for a LIST or GET, and 406 and 410 both
+    inside and outside a metadata projection or a continuation;
   - an error body over its 16 KiB budget;
   - cancellation propagating.
 - **Resolution.**
@@ -619,6 +624,9 @@ version runs the same read-only scenarios:
   - Candidate fall-through, for Events through either group, both groups,
     a denied group and absence.
   - Snapshot expiry and refresh after `DISCOVERY_STALE`.
+  - A 405 followed by a refresh: if the refresh drops the verb, the result is
+    `OPERATION_UNSUPPORTED`; if the verb is still listed, the source stays
+    `UNAVAILABLE`.
   - `discover_resources()`, projected from the raw snapshot, returns what it
     returns today for the same discovery answers.
 - **Evidence reads.** With a fake reader:
@@ -639,6 +647,7 @@ version runs the same read-only scenarios:
   replacement, a newer run or a selection change, and applied otherwise.
 - **Guards.**
   - The reader protocol has no write method.
+  - Both functions refuse an unresolved `ApiSource`.
   - An object-projection read of a ConfigMap or a Secret fails, through both
     functions.
   - Through both GET and LIST, ConfigMap and Secret metadata reaches the
