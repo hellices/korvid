@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from korvid.k8s.discovery import ResourceMeta
-from korvid.k8s.errors import ApiStatusError, KubeClientError
+from korvid.k8s.errors import ApiStatusError, KubeClientError, KubeMalformedError
 
 DEPLOYMENT_META = ResourceMeta(
     "Deployment", "deployments", "apps", "v1", True, ("deploy", "deployment")
@@ -183,7 +183,7 @@ def parse_list_page(data: dict[str, Any]) -> tuple[list[dict[str, Any]], str]:
         or any(not isinstance(item, dict) for item in items)
         or not isinstance(continuation, str)
     ):
-        raise KubeClientError(
+        raise KubeMalformedError(
             "Kubernetes API returned a malformed response; retry, then check the API server"
         )
     return items, continuation
@@ -253,7 +253,7 @@ async def iter_raw_object_pages(
             raise
         if next_token and next_token in seen:
             observe("error", path)
-            raise KubeClientError("LIST continuation did not advance")
+            raise KubeMalformedError("LIST continuation did not advance")
         observe("list", path, payload=data, object_count=len(items))
         for item in items:
             yield item

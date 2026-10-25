@@ -6,9 +6,47 @@ the kubernetes_asyncio implementation never leaks past the k8s layer.
 
 from __future__ import annotations
 
+from typing import ClassVar, Literal
+
+#: What went wrong with a request that produced no usable HTTP answer, so that
+#: a caller can classify the failure without parsing its message.
+KubeErrorCategory = Literal["timeout", "transport", "malformed", "too_large"]
+
 
 class KubeClientError(Exception):
-    """Raised when a Kubernetes request fails without an HTTP API status."""
+    """Raised when a Kubernetes request fails without an HTTP API status.
+
+    Raise the subclass that names what went wrong, so that `category` says it.
+    The base class leaves `category` as `None`: the request produced no
+    usable answer for a reason no subclass describes, such as a client that
+    was never connected.
+    """
+
+    category: ClassVar[KubeErrorCategory | None] = None
+
+
+class KubeTimeoutError(KubeClientError):
+    """A Kubernetes request did not finish before its deadline."""
+
+    category: ClassVar[KubeErrorCategory | None] = "timeout"
+
+
+class KubeTransportError(KubeClientError):
+    """A Kubernetes request failed below HTTP: the connection, TLS or socket."""
+
+    category: ClassVar[KubeErrorCategory | None] = "transport"
+
+
+class KubeMalformedError(KubeClientError):
+    """A Kubernetes response could not be decoded, or had the wrong shape."""
+
+    category: ClassVar[KubeErrorCategory | None] = "malformed"
+
+
+class KubeTooLargeError(KubeClientError):
+    """A Kubernetes response exceeded its byte or object budget."""
+
+    category: ClassVar[KubeErrorCategory | None] = "too_large"
 
 
 class ApiStatusError(Exception):

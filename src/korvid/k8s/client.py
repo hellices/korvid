@@ -29,7 +29,13 @@ from korvid.k8s.deployment_outcomes import iter_raw_object_pages, list_raw_objec
 from korvid.k8s.discovery import PODS_META, ResourceMeta
 from korvid.k8s.drain import DrainPlan, build_drain_plan
 from korvid.k8s.dryrun import diff_manifests
-from korvid.k8s.errors import ApiStatusError, KubeClientError
+from korvid.k8s.errors import (
+    ApiStatusError,
+    KubeClientError,
+    KubeMalformedError,
+    KubeTimeoutError,
+    KubeTransportError,
+)
 from korvid.k8s.helm import (
     HELM_RELEASES_META,
     HELM_REVISIONS_META,
@@ -1735,7 +1741,7 @@ class KubeClient(ReadOps, WriteOps, pulse.PulseReader):
             async with asyncio.timeout(_DISCOVERY_TIMEOUT_SECONDS):
                 return await self._request_json(path)
         except TimeoutError:
-            raise KubeClientError(
+            raise KubeTimeoutError(
                 "Kubernetes API discovery timed out; check cluster connectivity and retry"
             ) from None
 
@@ -1755,7 +1761,7 @@ class KubeClient(ReadOps, WriteOps, pulse.PulseReader):
         groups = await self._request_discovery_json("/apis")
         advertised = groups.get("groups", [])
         if not isinstance(advertised, list):
-            raise KubeClientError("Kubernetes API discovery returned an invalid group list")
+            raise KubeMalformedError("Kubernetes API discovery returned an invalid group list")
         versions = list(
             dict.fromkeys(version for group in advertised for version in _group_versions(group))
         )
@@ -1810,19 +1816,15 @@ async def _request_dict(request: Awaitable[Any]) -> dict[str, Any]:
             body=body_text,
         ) from exc
     except TimeoutError:
-        raise KubeClientError(
+        raise KubeTimeoutError(
             "Kubernetes API request timed out; check cluster connectivity and retry"
         ) from None
     except ssl.SSLError:
-        raise KubeClientError(
+        raise KubeTransportError(
             "Kubernetes API TLS validation failed; check cluster certificates and retry"
         ) from None
-    except _AIOHTTP_CLIENT_ERROR:
-        raise KubeClientError(
-            "Kubernetes API connection failed; check cluster connectivity and retry"
-        ) from None
-    except OSError:
-        raise KubeClientError(
+    except (_AIOHTTP_CLIENT_ERROR, OSError):
+        raise KubeTransportError(
             "Kubernetes API connection failed; check cluster connectivity and retry"
         ) from None
     except (ValueError, RecursionError):
@@ -1845,7 +1847,7 @@ async def _response_dict(resp: Any) -> dict[str, Any]:
     try:
         result = json.loads(body)
     except (ValueError, RecursionError):
-        raise KubeClientError(
+        raise KubeMalformedError(
             "Kubernetes API returned malformed JSON; retry, then check the API server"
         ) from None
     if not isinstance(result, dict):
@@ -1853,8 +1855,8 @@ async def _response_dict(resp: Any) -> dict[str, Any]:
     return result
 
 
-def _malformed_response_error() -> KubeClientError:
-    return KubeClientError(
+def _malformed_response_error() -> KubeMalformedError:
+    return KubeMalformedError(
         "Kubernetes API returned a malformed response; retry, then check the API server"
     )
 
@@ -1914,7 +1916,7 @@ def _parse_resource_list(data: dict[str, Any], *, group: str, version: str) -> l
     out = []
     resources = data.get("resources", [])
     if not isinstance(resources, list):
-        raise KubeClientError("Kubernetes API discovery returned an invalid resource list")
+        raise KubeMalformedError("Kubernetes API discovery returned an invalid resource list")
     for resource in resources:
         if not isinstance(resource, Mapping):
             continue
