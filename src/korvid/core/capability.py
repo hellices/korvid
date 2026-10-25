@@ -214,6 +214,8 @@ class ApiSource:
             raise ValueError("a GET source names its object")
         if self.expected_uid is not None and not self.name:
             raise ValueError("an expected UID needs an object name")
+        if self.expected_uid == "":
+            raise ValueError("an expected UID is never empty")
 
     @property
     def resolved(self) -> bool:
@@ -410,7 +412,7 @@ class Observation:
         if (
             self.basis is Basis.OBSERVED
             and self.observed_uid is None
-            and _expected_uid(self.source)
+            and _expected_uid(self.source) is not None
         ):
             raise ValueError("an observed object with an expected UID records the UID it saw")
         if len(self.detail) > _DETAIL_LIMIT:

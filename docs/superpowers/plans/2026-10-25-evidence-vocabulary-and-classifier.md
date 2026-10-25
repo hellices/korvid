@@ -745,6 +745,7 @@ def test_only_a_cluster_scope_is_unnamed(kind: ScopeKind, name: str) -> None:
         ({"version": "v1", "verb": Verb.LIST, "name": "app"}, "LIST source names no object"),
         ({"version": "v1", "verb": Verb.GET}, "GET source names its object"),
         ({"expected_uid": "uid-1"}, "expected UID needs an object name"),
+        ({"name": "app", "expected_uid": ""}, "expected UID is never empty"),
     ],
 )
 def test_api_sources_are_well_formed(fields: dict[str, Any], message: str) -> None:
@@ -1025,6 +1026,8 @@ class ApiSource:
             raise ValueError("a GET source names its object")
         if self.expected_uid is not None and not self.name:
             raise ValueError("an expected UID needs an object name")
+        if self.expected_uid == "":
+            raise ValueError("an expected UID is never empty")
 
     @property
     def resolved(self) -> bool:
@@ -1221,7 +1224,7 @@ class Observation:
         if (
             self.basis is Basis.OBSERVED
             and self.observed_uid is None
-            and _expected_uid(self.source)
+            and _expected_uid(self.source) is not None
         ):
             raise ValueError("an observed object with an expected UID records the UID it saw")
         if len(self.detail) > _DETAIL_LIMIT:
@@ -1993,10 +1996,41 @@ def test_a_body_that_is_not_a_status_reads_as_none(body: str) -> None:
     assert parse_status(body) is None
 
 
-def test_status_fields_of_the_wrong_type_read_as_empty() -> None:
-    body = '{"kind": "Status", "reason": 3, "details": "app"}'
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param('{"kind": "Status", "reason": 3}', id="reason"),
+        pytest.param('{"kind": "Status", "details": "app"}', id="details"),
+        pytest.param('{"kind": "Status", "details": {"name": ["app"]}}', id="name"),
+        pytest.param('{"kind": "Status", "details": {"group": 123}}', id="group"),
+        pytest.param('{"kind": "Status", "details": {"kind": {}}}', id="kind"),
+    ],
+)
+def test_a_status_with_a_wrongly_typed_field_is_unreadable(body: str) -> None:
+    assert parse_status(body) is None
 
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param('{"kind": "Status"}', id="omitted"),
+        pytest.param('{"kind": "Status", "reason": null, "details": null}', id="null"),
+        pytest.param('{"kind": "Status", "details": {"group": null}}', id="null-group"),
+    ],
+)
+def test_an_omitted_or_null_status_field_reads_as_empty(body: str) -> None:
     assert parse_status(body) == StatusDetails("", "", "", "")
+
+
+def test_a_not_found_with_an_invalid_group_never_proves_absence() -> None:
+    body = {
+        "kind": "Status",
+        "reason": "NotFound",
+        "details": {"name": "app", "group": 123, "kind": "configmaps"},
+    }
+    failure = ApiStatusError(404, "Not Found", json.dumps(body))
+
+    assert classify(failure, GET).basis is Basis.DISCOVERY_STALE
 
 
 def test_a_status_body_over_the_budget_is_not_parsed() -> None:
@@ -2136,9 +2170,27 @@ _BASIS_STATE: Mapping[Basis, EvidenceState] = MappingProxyType(
 def parse_status(body: str) -> StatusDetails | None:
     """Read `reason` and `details` from a Kubernetes `Status` body.
 
-    Returns `None` for a body over `STATUS_BODY_LIMIT` UTF-8 bytes, or one that
-    is not a `Status` object. A field that is not a string reads as `""`.
+    Returns `None` for a body over `STATUS_BODY_LIMIT` UTF-8 bytes, one that
+    is not a `Status` object, or one with a wrongly typed field: a group of
+    `123` must not read as the core group. An omitted or null field reads as
+    `""`.
     """
+    document = _status_document(body)
+    if document is None:
+        return None
+    details = document.get("details")
+    if details is None:
+        details = {}
+    if not isinstance(details, dict):
+        return None
+    reason = _text(document.get("reason"))
+    name, group, kind = (_text(details.get(key)) for key in ("name", "group", "kind"))
+    if reason is None or name is None or group is None or kind is None:
+        return None
+    return StatusDetails(reason, name, group, kind)
+
+
+def _status_document(body: str) -> dict[str, object] | None:
     if len(body) > STATUS_BODY_LIMIT or len(body.encode("utf-8", "replace")) > STATUS_BODY_LIMIT:
         return None
     try:
@@ -2147,15 +2199,7 @@ def parse_status(body: str) -> StatusDetails | None:
         return None
     if not isinstance(document, dict) or document.get("kind") != "Status":
         return None
-    details = document.get("details")
-    if not isinstance(details, dict):
-        details = {}
-    return StatusDetails(
-        reason=_text(document.get("reason")),
-        name=_text(details.get("name")),
-        group=_text(details.get("group")),
-        kind=_text(details.get("kind")),
-    )
+    return document
 
 
 def classify(failure: BaseException, request: ReadRequest) -> Classification:
@@ -2223,8 +2267,10 @@ def _reason(failure: ApiStatusError) -> str:
     return "" if status is None else status.reason
 
 
-def _text(value: object) -> str:
-    return value if isinstance(value, str) else ""
+def _text(value: object) -> str | None:
+    if value is None:
+        return ""
+    return value if isinstance(value, str) else None
 ```
 
 - [ ] **Step 4: Cover the new modules in the extras guard**

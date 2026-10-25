@@ -107,9 +107,27 @@ _BASIS_STATE: Mapping[Basis, EvidenceState] = MappingProxyType(
 def parse_status(body: str) -> StatusDetails | None:
     """Read `reason` and `details` from a Kubernetes `Status` body.
 
-    Returns `None` for a body over `STATUS_BODY_LIMIT` UTF-8 bytes, or one that
-    is not a `Status` object. A field that is not a string reads as `""`.
+    Returns `None` for a body over `STATUS_BODY_LIMIT` UTF-8 bytes, one that
+    is not a `Status` object, or one with a wrongly typed field: a group of
+    `123` must not read as the core group. An omitted or null field reads as
+    `""`.
     """
+    document = _status_document(body)
+    if document is None:
+        return None
+    details = document.get("details")
+    if details is None:
+        details = {}
+    if not isinstance(details, dict):
+        return None
+    reason = _text(document.get("reason"))
+    name, group, kind = (_text(details.get(key)) for key in ("name", "group", "kind"))
+    if reason is None or name is None or group is None or kind is None:
+        return None
+    return StatusDetails(reason, name, group, kind)
+
+
+def _status_document(body: str) -> dict[str, object] | None:
     if len(body) > STATUS_BODY_LIMIT or len(body.encode("utf-8", "replace")) > STATUS_BODY_LIMIT:
         return None
     try:
@@ -118,15 +136,7 @@ def parse_status(body: str) -> StatusDetails | None:
         return None
     if not isinstance(document, dict) or document.get("kind") != "Status":
         return None
-    details = document.get("details")
-    if not isinstance(details, dict):
-        details = {}
-    return StatusDetails(
-        reason=_text(document.get("reason")),
-        name=_text(details.get("name")),
-        group=_text(details.get("group")),
-        kind=_text(details.get("kind")),
-    )
+    return document
 
 
 def classify(failure: BaseException, request: ReadRequest) -> Classification:
@@ -194,5 +204,7 @@ def _reason(failure: ApiStatusError) -> str:
     return "" if status is None else status.reason
 
 
-def _text(value: object) -> str:
-    return value if isinstance(value, str) else ""
+def _text(value: object) -> str | None:
+    if value is None:
+        return ""
+    return value if isinstance(value, str) else None

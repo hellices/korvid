@@ -316,6 +316,7 @@ def test_only_a_cluster_scope_is_unnamed(kind: ScopeKind, name: str) -> None:
         ({"version": "v1", "verb": Verb.LIST, "name": "app"}, "LIST source names no object"),
         ({"version": "v1", "verb": Verb.GET}, "GET source names its object"),
         ({"expected_uid": "uid-1"}, "expected UID needs an object name"),
+        ({"name": "app", "expected_uid": ""}, "expected UID is never empty"),
     ],
 )
 def test_api_sources_are_well_formed(fields: dict[str, Any], message: str) -> None:

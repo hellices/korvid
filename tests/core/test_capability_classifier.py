@@ -298,10 +298,41 @@ def test_a_body_that_is_not_a_status_reads_as_none(body: str) -> None:
     assert parse_status(body) is None
 
 
-def test_status_fields_of_the_wrong_type_read_as_empty() -> None:
-    body = '{"kind": "Status", "reason": 3, "details": "app"}'
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param('{"kind": "Status", "reason": 3}', id="reason"),
+        pytest.param('{"kind": "Status", "details": "app"}', id="details"),
+        pytest.param('{"kind": "Status", "details": {"name": ["app"]}}', id="name"),
+        pytest.param('{"kind": "Status", "details": {"group": 123}}', id="group"),
+        pytest.param('{"kind": "Status", "details": {"kind": {}}}', id="kind"),
+    ],
+)
+def test_a_status_with_a_wrongly_typed_field_is_unreadable(body: str) -> None:
+    assert parse_status(body) is None
 
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param('{"kind": "Status"}', id="omitted"),
+        pytest.param('{"kind": "Status", "reason": null, "details": null}', id="null"),
+        pytest.param('{"kind": "Status", "details": {"group": null}}', id="null-group"),
+    ],
+)
+def test_an_omitted_or_null_status_field_reads_as_empty(body: str) -> None:
     assert parse_status(body) == StatusDetails("", "", "", "")
+
+
+def test_a_not_found_with_an_invalid_group_never_proves_absence() -> None:
+    body = {
+        "kind": "Status",
+        "reason": "NotFound",
+        "details": {"name": "app", "group": 123, "kind": "configmaps"},
+    }
+    failure = ApiStatusError(404, "Not Found", json.dumps(body))
+
+    assert classify(failure, GET).basis is Basis.DISCOVERY_STALE
 
 
 def test_a_status_body_over_the_budget_is_not_parsed() -> None:
