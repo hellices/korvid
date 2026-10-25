@@ -158,7 +158,7 @@ Make `PulseCoverage` the shared type and route diagnostics through Pulse.
 | Vocabulary | `korvid.core.capability` (new) | stdlib, `korvid.k8s.errors` | states, bases, sources, observations, combining rules, the classifier, run tokens |
 | Version resolution | `korvid.core.api_versions` (new) | `korvid.core.capability`, `korvid.k8s.discovery` | the discovery snapshot and logical-source resolution |
 | Evidence reads | `korvid.core.evidence_reads` (new) | the two above, `korvid.k8s` | bounded, cancellable LIST and GET that return observations |
-| Client additions | `korvid.k8s.client`, `korvid.k8s.discovery`, `korvid.k8s.errors` | — | discovery outcomes and verbs, metadata projections, error categories, the session generation |
+| Client additions | `korvid.k8s.client`, `korvid.k8s.discovery`, `korvid.k8s.errors` | — | discovery outcomes and verbs, byte-bounded responses, metadata projections, error categories, the session generation |
 
 `tach.toml` already allows `ui`, `tools` and `agent` to import `core`, so
 consumers there read the types without new layer rules. None of the new
@@ -175,7 +175,7 @@ modules imports Textual or an optional extra.
 | `PARTIAL` | some evidence, known to be incomplete |
 | `UNSUPPORTED` | evidence establishes that the source or operation is not served, or not configured, here |
 | `DENIED` | the server or provider refused this principal |
-| `UNAVAILABLE` | could not be determined: transport, timeout, throttling, server error, a malformed answer, or discovery that contradicts the read |
+| `UNAVAILABLE` | could not be determined: transport, timeout, throttling, a server error, an unexpected, oversized or malformed answer, or discovery that contradicts the read |
 
 `Basis` says why a state holds, and each state allows only some bases:
 
@@ -183,10 +183,10 @@ modules imports Textual or an optional extra.
 | --- | --- |
 | `UNKNOWN` | `NOT_STARTED`, `IN_FLIGHT` |
 | `AVAILABLE` | `OBSERVED`, `OBJECT_ABSENT`, `NO_DATA` |
-| `PARTIAL` | `TRUNCATED`, `DEADLINE`, `CONTINUATION_EXPIRED`, `SUBSCOPE_FAILED`, `STALE_STATUS`, plus a failure basis when the failure came after some items were read |
+| `PARTIAL` | `TRUNCATED`, `DEADLINE`, `TOO_LARGE`, `CONTINUATION_EXPIRED`, `SUBSCOPE_FAILED`, `STALE_STATUS`, plus any other `DENIED` or `UNAVAILABLE` basis when that failure came after at least one accepted page |
 | `UNSUPPORTED` | `NOT_SERVED`, `OPERATION_UNSUPPORTED`, `NO_KNOWN_VERSION`, `PROJECTION_UNSUPPORTED`, `PROVIDER_NOT_CONFIGURED`, `FEATURE_DISABLED` |
 | `DENIED` | `FORBIDDEN`, `UNAUTHENTICATED`, `DISCOVERY_FORBIDDEN` |
-| `UNAVAILABLE` | `THROTTLED`, `SERVER_ERROR`, `TRANSPORT`, `MALFORMED`, `DEADLINE`, `CONTINUATION_EXPIRED`, `DISCOVERY_FAILED`, `DISCOVERY_STALE` |
+| `UNAVAILABLE` | `THROTTLED`, `SERVER_ERROR`, `UNEXPECTED_STATUS`, `TRANSPORT`, `MALFORMED`, `DEADLINE`, `TOO_LARGE`, `DISCOVERY_FAILED`, `DISCOVERY_STALE` |
 
 **Conclusiveness.** A diagnostic may treat absence as a fact, for example "no
 quota constrains this workload", only when `conclusive(observation, now)` is
@@ -286,36 +286,61 @@ one answer.
 
 ### Outcome classification
 
-`classify(exc, read)` maps a raised exception and the kind of read (`LIST`,
-`GET`, `DISCOVERY` or `PROVIDER`) to a state, a basis and a detail template.
-It reads a bounded part of the Kubernetes `Status` body (`reason` and
-`details.name`/`details.kind`) where the status code alone is ambiguous.
+`classify(failure, request)` maps a raised exception and a `ReadRequest` to
+a state, a basis and a detail template. The request carries what the
+exception cannot:
+
+- the read kind: `LIST`, `GET`, `DISCOVERY` or `PROVIDER`;
+- the requested group and resource and, for a GET, the object name;
+- the projection;
+- whether the request was a continuation.
+
+Where the status code alone is ambiguous, the classifier reads a bounded part
+of the Kubernetes `Status` body: `reason`, and `details.name`,
+`details.group` and `details.kind`. Readers keep at most 16 KiB of an error
+body for this.
 
 | Outcome | `LIST` | `GET` | `DISCOVERY` |
 | --- | --- | --- | --- |
 | 401 | `DENIED`/`UNAUTHENTICATED` | same | same |
 | 403 | `DENIED`/`FORBIDDEN` | same | `DENIED`/`DISCOVERY_FORBIDDEN` |
-| 404 with `NotFound` naming the requested object | — | `AVAILABLE`/`OBJECT_ABSENT` | — |
+| 404 whose `NotFound` details name the requested object (name, group and resource) | — | `AVAILABLE`/`OBJECT_ABSENT` | — |
 | any other 404 | `UNAVAILABLE`/`DISCOVERY_STALE` (refresh discovery) | same | `UNAVAILABLE`/`DISCOVERY_FAILED` |
 | 405 | `UNSUPPORTED`/`OPERATION_UNSUPPORTED` | same | `UNAVAILABLE`/`DISCOVERY_FAILED` |
 | 406 for a metadata projection | `UNSUPPORTED`/`PROJECTION_UNSUPPORTED` | same | — |
-| 410 `Expired` on a continuation | `PARTIAL` (items read) or `UNAVAILABLE`, `CONTINUATION_EXPIRED` | — | — |
+| 410 `Expired` on a continuation | `PARTIAL`/`CONTINUATION_EXPIRED` (a continuation always follows an accepted page) | — | — |
 | 429 | `UNAVAILABLE`/`THROTTLED`, after at most one retry that fits the deadline | same | same |
 | 5xx | `UNAVAILABLE`/`SERVER_ERROR` | same | `UNAVAILABLE`/`DISCOVERY_FAILED` |
+| any other status, including a 406 or 410 outside the cases above | `UNAVAILABLE`/`UNEXPECTED_STATUS` | same | `UNAVAILABLE`/`DISCOVERY_FAILED` |
+| response over its byte or object budget | `UNAVAILABLE`/`TOO_LARGE` | same | — |
 | timeout, TLS or connection failure | `UNAVAILABLE`/`TRANSPORT` | same | `UNAVAILABLE`/`DISCOVERY_FAILED` |
 | malformed body, cyclic continuation | `UNAVAILABLE`/`MALFORMED` | same | `UNAVAILABLE`/`DISCOVERY_FAILED` |
 | `asyncio.CancelledError` | re-raised, never classified | same | same |
 
-`KubeClientError` gains a category (`timeout`, `transport` or `malformed`),
-set where the error is raised, so that the classifier never parses messages.
-A failure that comes after some items were read keeps those items and yields
-`PARTIAL` with the failure's basis.
+`KubeClientError` gains a category (`timeout`, `transport`, `malformed` or
+`too_large`), set where the error is raised, so that the classifier never
+parses messages.
 
-Pulse keeps its own collector for now. A table test maps every
-`PulseCoverageState` to the new vocabulary (`loading`→`UNKNOWN`,
-`complete`→`AVAILABLE`, `partial` and `capped`→`PARTIAL`,
-`forbidden`→`DENIED`, `unavailable`→`UNSUPPORTED`, `failed`→`UNAVAILABLE`,
-with `stale` as freshness). If either side changes, that test fails until
+The table gives the outcome of a failure before any page was accepted. A
+failure after at least one accepted page keeps what was read and yields
+`PARTIAL` with the same basis, even when those pages held no items.
+
+Pulse keeps its own collector for now. A table test pins how each
+`PulseCoverageState` maps to the new vocabulary. The mapping is lossy, so
+where a Pulse state is ambiguous it maps to the weaker claim:
+
+| Pulse state | New state |
+| --- | --- |
+| `loading` | `UNKNOWN` |
+| `complete` | `AVAILABLE` |
+| `partial`, `capped` | `PARTIAL` when the result kept objects; otherwise `UNAVAILABLE`, because Pulse also reports a byte cap hit on the first page as `capped` |
+| `forbidden` | `DENIED` |
+| `unavailable` | `UNAVAILABLE`: Pulse folds a 405 together with a 404 that may only mean stale discovery, so it never becomes `UNSUPPORTED` |
+| `failed` | `UNAVAILABLE` |
+| `stale` | `UNAVAILABLE`: the state it replaced is not kept |
+
+Telling `UNSUPPORTED` apart takes the structured outcome that the
+convergence follow-up brings. If either side changes, the test fails until
 they are reconciled.
 
 ### API version resolution
@@ -380,20 +405,52 @@ Their behaviour:
   most 2 pages, and a 5-second deadline. A consumer may raise them up to the
   hard maxima of 10 pages (1,000 objects) and 15 seconds. Page size times
   pages is the object cap.
-- **Truncation.** A cap or deadline reached after reading items gives
-  `PARTIAL`/`TRUNCATED` or `PARTIAL`/`DEADLINE`. Reached before any item, the
-  deadline gives `UNAVAILABLE`/`DEADLINE`, and any other outcome is
-  classified as in the table above.
+- **Byte budgets.** As in Pulse, each response is read through a byte budget
+  before any JSON is parsed. The budget applies to the bytes on the wire and
+  again after decompression. It defaults to Pulse's 256 KiB per response and
+  may be raised to a hard maximum of 2 MiB. An error body is kept to 16 KiB.
+  A response over budget, or a page with more items than requested, is
+  closed unparsed and classified `TOO_LARGE`. With the page cap, this bounds
+  both the memory a read holds and the time spent parsing it.
+- **Completeness.** A LIST is `AVAILABLE` only when the server returned an
+  empty continue token. Kubernetes may return a page with no items and a
+  continue token, so zero items with a token pending never counts as an
+  empty collection. After at least one accepted page, whatever its item
+  count:
+  - the page cap, reached with a continue token still pending, gives
+    `PARTIAL`/`TRUNCATED`;
+  - the deadline gives `PARTIAL`/`DEADLINE`;
+  - the byte budget gives `PARTIAL`/`TOO_LARGE`.
+
+  Before the first accepted page, the deadline and the byte budget give
+  `UNAVAILABLE` with the same basis. Any other outcome is classified as in
+  the table above.
 - **Cancellation** propagates. There are no retries except one for 429,
   honouring `Retry-After` only within the deadline.
 - **Metadata projection.** A `metadata` source asks for
   `PartialObjectMetadata` (GET) or `PartialObjectMetadataList` (LIST). If the
   server refuses it, the source is `UNSUPPORTED`/`PROJECTION_UNSUPPORTED`,
-  and there is no fallback to an object read.
+  and there is no fallback to an object read. A projection carries no
+  top-level fields, so a ConfigMap's or Secret's `immutable` flag and a
+  Secret's `type` are not available. A consumer reports them as not
+  established and does not read the object for them.
 - **Configuration payloads stay out.** The reader refuses the `object`
   projection for `configmaps` and `secrets`, so a diagnostic can read their
   metadata but never their data (#410). A test pins this for both resources
   and both functions.
+- **Metadata reduction.** The metadata on the wire is not what a diagnostic
+  receives. For every resource, the reader removes `managedFields` and the
+  `kubectl.kubernetes.io/last-applied-configuration` annotation, which embeds
+  the whole object, as `mask_secret_manifest` already does for Secrets. For
+  ConfigMaps and Secrets it keeps only:
+  - the identity: name, namespace, UID and resource version;
+  - the creation and deletion timestamps;
+  - labels;
+  - owner references.
+
+  Every annotation is dropped, since any of them can carry configuration
+  data. A consumer that needs another field adds it to that allowlist with a
+  test.
 - **Read-only.** The reader protocol the functions depend on has only GET and
   LIST methods.
 
@@ -445,8 +502,11 @@ This lands with the first consumer.
 
 ### Security and privacy
 
-- **No payloads.** ConfigMap and Secret data are never read by diagnostics,
-  only their metadata.
+- **No payloads.** Diagnostics never request a ConfigMap or Secret object,
+  only its metadata. Metadata can still carry the payload, through the
+  `last-applied-configuration` annotation, so what crosses the wire is not
+  what a diagnostic receives: the reader reduces it first, as described
+  under Evidence reads.
 - **No sensitive text.** Details come from fixed templates and resource
   identities, never from response bodies, field values or configuration
   data. The classifier reads only a Status body's `reason` and `details`.
@@ -491,7 +551,8 @@ version runs the same read-only scenarios:
 - a resource served only in a version no adapter knows, using a test CRD;
 - an optional API present (a test CRD installed) and absent;
 - an aggregated API that is registered but unavailable;
-- metadata-only LIST and GET of ConfigMaps and Secrets;
+- metadata-only LIST and GET of ConfigMaps and Secrets created with
+  `kubectl apply`, so that the server returns `last-applied-configuration`;
 - a principal denied a list, and another denied discovery of one group;
 - Events through either group alone and through both.
 
@@ -510,8 +571,11 @@ version runs the same read-only scenarios:
   - A `STALE_STATUS` downgrade is never conclusive.
 - **Classifier.** One table test covers every status, `Status` reason and
   error category for every read kind, including:
-  - 404 with and without a matching `NotFound`;
-  - 405, 406 and 410;
+  - 404 with a `NotFound` naming the requested object, naming another
+    object, and with no parseable body;
+  - 405, and 406 and 410 both inside and outside a metadata projection or a
+    continuation;
+  - an error body over its 16 KiB budget;
   - cancellation propagating.
 - **Resolution.**
   - A preferred version is served.
@@ -530,7 +594,11 @@ version runs the same read-only scenarios:
   - Snapshot expiry and refresh after `DISCOVERY_STALE`.
 - **Evidence reads.** With a fake reader:
   - page and deadline caps;
-  - a failure after items were read;
+  - empty pages with a continue token pending, which stay `PARTIAL` and are
+    never `AVAILABLE`;
+  - a failure after an accepted page, with and without items;
+  - an oversized response and a gzip expansion past the budget, both closed
+    unparsed, and a page with more items than requested;
   - a 429 retry inside and outside the deadline;
   - an expired continuation;
   - cancellation;
@@ -542,6 +610,9 @@ version runs the same read-only scenarios:
   - The reader protocol has no write method.
   - An object-projection read of a ConfigMap or a Secret fails, through both
     functions.
+  - Through both GET and LIST, ConfigMap and Secret metadata reaches the
+    diagnostic with no annotation and no `managedFields`. No metadata of any
+    resource carries `last-applied-configuration`.
   - `tests/test_optional_extras.py` covers the new modules.
   - `tach check` passes.
   - The Pulse mapping table test fails on drift.
@@ -556,9 +627,9 @@ are not complete until S5 has also landed.
 
 | Slice | Content |
 | --- | --- |
-| S1 | `core/capability`: states, bases, sources and roles, observations and the `RunToken` value they carry, `EvidenceSet` rules, the classifier with `Status` parsing, `KubeClientError` categories, the Pulse mapping test |
+| S1 | `core/capability`: states, bases, sources and roles, observations and the `RunToken` value they carry, `EvidenceSet` rules, `ReadRequest` and the classifier with `Status` parsing, `KubeClientError` categories, the Pulse mapping test |
 | S2 | the session generation in `KubeClient`; the discovery snapshot keyed by it (root and group outcomes, verbs, generation, TTL, refresh triggers); `core/api_versions` logical-source resolution |
-| S3 | `core/evidence_reads`: `read_list` and `read_object`, metadata projections, the configuration-payload guard |
+| S3 | `core/evidence_reads`: `read_list` and `read_object`, byte budgets, metadata projections and their reduction, the configuration-payload guard |
 | S4 | the run generation and the late-result helper that applies a result only under the current token |
 | S5 | the Kubernetes support document and the kind version-matrix workflow |
 | S6 | the shared UI evidence renderer, in the first consumer's pull request |
