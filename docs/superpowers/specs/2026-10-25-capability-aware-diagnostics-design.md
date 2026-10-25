@@ -156,13 +156,15 @@ Make `PulseCoverage` the shared type and route diagnostics through Pulse.
 | Unit | Module | May import | Purpose |
 | --- | --- | --- | --- |
 | Vocabulary | `korvid.core.capability` (new) | stdlib, `korvid.k8s.errors` | states, bases, sources, observations, combining rules, the classifier, run tokens |
-| Version resolution | `korvid.core.api_versions` (new) | `korvid.core.capability`, `korvid.k8s.discovery` | the discovery snapshot and logical-source resolution |
+| Version resolution | `korvid.core.api_versions` (new) | `korvid.core.capability`, `korvid.k8s.discovery` | turns the client's raw discovery outcomes into observations; logical-source resolution |
 | Evidence reads | `korvid.core.evidence_reads` (new) | the two above, `korvid.k8s` | bounded, cancellable LIST and GET that return observations |
-| Client additions | `korvid.k8s.client`, `korvid.k8s.discovery`, `korvid.k8s.errors` | — | discovery outcomes and verbs, byte-bounded responses, metadata projections, error categories, the session generation |
+| Client additions | `korvid.k8s.client`, `korvid.k8s.discovery`, `korvid.k8s.errors` | — | the raw discovery snapshot (per-endpoint outcomes and verbs), byte-bounded responses, metadata projections, error categories, the session generation |
 
 `tach.toml` already allows `ui`, `tools` and `agent` to import `core`, so
-consumers there read the types without new layer rules. None of the new
-modules imports Textual or an optional extra.
+consumers there read the types without new layer rules. Nothing in `k8s`
+imports `core`: the client's discovery snapshot holds plain outcomes, and
+`core` turns them into observations. None of the new modules imports
+Textual or an optional extra.
 
 ### Evidence vocabulary
 
@@ -183,7 +185,7 @@ modules imports Textual or an optional extra.
 | --- | --- |
 | `UNKNOWN` | `NOT_STARTED`, `IN_FLIGHT` |
 | `AVAILABLE` | `OBSERVED`, `OBJECT_ABSENT`, `NO_DATA` |
-| `PARTIAL` | `TRUNCATED`, `DEADLINE`, `TOO_LARGE`, `CONTINUATION_EXPIRED`, `SUBSCOPE_FAILED`, `STALE_STATUS`, plus any other `DENIED` or `UNAVAILABLE` basis when that failure came after at least one accepted page |
+| `PARTIAL` | `TRUNCATED`, `DEADLINE`, `TOO_LARGE`, `CONTINUATION_EXPIRED`, `SUBSCOPE_FAILED`, `STALE_STATUS`, plus, when the failure came after at least one accepted page, any other basis the classifier gives a failure: a `DENIED` or `UNAVAILABLE` basis, `OPERATION_UNSUPPORTED` or `PROJECTION_UNSUPPORTED` |
 | `UNSUPPORTED` | `NOT_SERVED`, `OPERATION_UNSUPPORTED`, `NO_KNOWN_VERSION`, `PROJECTION_UNSUPPORTED`, `PROVIDER_NOT_CONFIGURED`, `FEATURE_DISABLED` |
 | `DENIED` | `FORBIDDEN`, `UNAUTHENTICATED`, `DISCOVERY_FORBIDDEN` |
 | `UNAVAILABLE` | `THROTTLED`, `SERVER_ERROR`, `UNEXPECTED_STATUS`, `TRANSPORT`, `MALFORMED`, `DEADLINE`, `TOO_LARGE`, `DISCOVERY_FAILED`, `DISCOVERY_STALE` |
@@ -349,20 +351,33 @@ they are reconciled.
 
 ### API version resolution
 
-A **`DiscoverySnapshot`** is cached per session generation. It holds:
+Discovery is split along the layer boundary, because `k8s` may not import
+`core`.
 
-- **`core_root`** and **`group_root`**: the outcomes of `/api` and `/apis`,
-  kept apart because either can fail while the other succeeds;
-- **`groups`**: for each advertised group version, core `v1` included, its
-  outcome (an `Observation` of its `DiscoverySource`), and on success the
-  resources it serves with their verbs. A malformed or skipped entry counts
-  as a failed group version, not as an absent resource;
-- **`generation`** and **`fetched_at`**: the snapshot expires after 5
-  minutes. It is refreshed then, on a context switch, on an explicit refresh,
-  and when a read reports `DISCOVERY_STALE`.
+**In `k8s`**, `KubeClient` keeps a raw discovery snapshot for each session
+generation:
 
-`discover_resources()` keeps its signature for existing callers and is
-derived from the snapshot.
+- the outcomes of `/api`, of `/apis`, and of each advertised group version,
+  core `v1` included. Each outcome is either the resources served, with their
+  verbs, or the error the request raised. A malformed or skipped entry is a
+  failure, never an absent resource;
+- when it was fetched. The snapshot expires after 5 minutes. It is refreshed
+  then, on an explicit refresh, and when a read reports `DISCOVERY_STALE`, and
+  a new session generation starts a new one.
+
+The raw snapshot knows nothing of observations. `discover_resources()` keeps
+its signature for existing callers and is projected from it into
+`ResourceMeta`.
+
+**In `core`**, `api_versions` classifies each raw outcome into an
+`Observation` of its `DiscoverySource` and builds the **`DiscoverySnapshot`**
+that resolution reads:
+
+- **`core_root`** and **`group_root`**: the observations of `/api` and
+  `/apis`, kept apart because either can fail while the other succeeds;
+- **`groups`**: for each advertised group version, its observation, and on
+  success the resources it serves with their verbs;
+- **`generation`**: the session generation the raw snapshot belongs to.
 
 A diagnostic declares a **logical source**: an ordered list of
 **candidates**, each with a group, a resource, the versions korvid can parse
@@ -604,11 +619,15 @@ version runs the same read-only scenarios:
   - Candidate fall-through, for Events through either group, both groups,
     a denied group and absence.
   - Snapshot expiry and refresh after `DISCOVERY_STALE`.
+  - `discover_resources()`, projected from the raw snapshot, returns what it
+    returns today for the same discovery answers.
 - **Evidence reads.** With a fake reader:
   - page and deadline caps;
   - empty pages with a continue token pending, which stay `PARTIAL` and are
     never `AVAILABLE`;
-  - a failure after an accepted page, with and without items;
+  - a failure after an accepted page, with and without items, including a
+    405 on a continuation and a 406 on a metadata continuation, which keep
+    the accepted pages as `PARTIAL`;
   - an oversized response and a gzip expansion past the budget, both closed
     unparsed, and a page with more items than requested;
   - a 429 retry inside and outside the deadline;
@@ -640,7 +659,7 @@ are not complete until S5 has also landed.
 | Slice | Content |
 | --- | --- |
 | S1 | `core/capability`: states, bases, sources (API, discovery and provider) and roles, observations and the `RunToken` value they carry, `EvidenceSet` rules, `ReadRequest` and the classifier with `Status` parsing, `KubeClientError` categories, the Pulse mapping test |
-| S2 | the session generation in `KubeClient`; the discovery snapshot keyed by it (separate `/api` and `/apis` outcomes, group-version outcomes, verbs, generation, TTL, refresh triggers); `core/api_versions` logical-source resolution |
+| S2 | the session generation and the raw discovery snapshot in `KubeClient` (separate `/api` and `/apis` outcomes, group-version outcomes with verbs, TTL, refresh triggers), with `discover_resources()` projected from it; `core/api_versions`: the observation snapshot and logical-source resolution |
 | S3 | `core/evidence_reads`: `read_list` and `read_object`, byte budgets, metadata projections and their reduction, the configuration-payload guard |
 | S4 | the run generation and the late-result helper that applies a result only under the current token |
 | S5 | the Kubernetes support document and the kind version-matrix workflow |
