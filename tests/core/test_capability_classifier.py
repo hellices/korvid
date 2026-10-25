@@ -65,6 +65,8 @@ def _status(code: int, reason: str = "", **details: str) -> ApiStatusError:
 
 
 NOT_FOUND = _status(404, "NotFound", name="app", kind="configmaps")
+#: The one failure a continuation classifies differently from a first page.
+EXPIRED = _status(410, "Expired")
 FAILURES = [
     _status(401, "Unauthorized"),
     _status(403, "Forbidden"),
@@ -73,7 +75,7 @@ FAILURES = [
     ApiStatusError(404, "Not Found", "404 page not found"),
     _status(405, "MethodNotAllowed"),
     _status(406, "NotAcceptable"),
-    _status(410, "Expired"),
+    EXPIRED,
     _status(429, "TooManyRequests"),
     _status(503, "ServiceUnavailable"),
     _status(400, "BadRequest"),
@@ -245,6 +247,16 @@ def test_every_failure_on_a_continuation_keeps_its_pages(
     failure: BaseException, read: ReadRequest
 ) -> None:
     assert classify(failure, read).state is EvidenceState.PARTIAL
+
+
+@pytest.mark.parametrize(
+    ("read", "first_page"), [(CONTINUATION, LIST), (METADATA_CONTINUATION, METADATA_LIST)]
+)
+@pytest.mark.parametrize("failure", [failure for failure in FAILURES if failure is not EXPIRED])
+def test_a_continuation_keeps_the_basis_of_the_same_first_page_failure(
+    failure: BaseException, read: ReadRequest, first_page: ReadRequest
+) -> None:
+    assert classify(failure, read).basis is classify(failure, first_page).basis
 
 
 @pytest.mark.parametrize(

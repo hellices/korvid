@@ -750,6 +750,7 @@ def test_only_a_cluster_scope_is_unnamed(kind: ScopeKind, name: str) -> None:
         ({"version": "v1", "verb": Verb.GET}, "GET source names its object"),
         ({"expected_uid": "uid-1"}, "expected UID needs an object name"),
         ({"name": "app", "expected_uid": ""}, "expected UID is never empty"),
+        ({"version": "", "verb": Verb.LIST}, "resolved version is never empty"),
     ],
 )
 def test_api_sources_are_well_formed(fields: dict[str, Any], message: str) -> None:
@@ -1038,6 +1039,8 @@ class ApiSource:
             raise ValueError("an API source names a resource")
         if (self.version is None) != (self.verb is None):
             raise ValueError("a resolved API source names both a version and a verb")
+        if self.version == "":
+            raise ValueError("a resolved version is never empty")
         if self.verb is Verb.LIST and self.name:
             raise ValueError("a LIST source names no object")
         if self.verb is Verb.GET and not self.name:
@@ -1786,6 +1789,8 @@ def _status(code: int, reason: str = "", **details: str) -> ApiStatusError:
 
 
 NOT_FOUND = _status(404, "NotFound", name="app", kind="configmaps")
+#: The one failure a continuation classifies differently from a first page.
+EXPIRED = _status(410, "Expired")
 FAILURES = [
     _status(401, "Unauthorized"),
     _status(403, "Forbidden"),
@@ -1794,7 +1799,7 @@ FAILURES = [
     ApiStatusError(404, "Not Found", "404 page not found"),
     _status(405, "MethodNotAllowed"),
     _status(406, "NotAcceptable"),
-    _status(410, "Expired"),
+    EXPIRED,
     _status(429, "TooManyRequests"),
     _status(503, "ServiceUnavailable"),
     _status(400, "BadRequest"),
@@ -1966,6 +1971,16 @@ def test_every_failure_on_a_continuation_keeps_its_pages(
     failure: BaseException, read: ReadRequest
 ) -> None:
     assert classify(failure, read).state is EvidenceState.PARTIAL
+
+
+@pytest.mark.parametrize(
+    ("read", "first_page"), [(CONTINUATION, LIST), (METADATA_CONTINUATION, METADATA_LIST)]
+)
+@pytest.mark.parametrize("failure", [failure for failure in FAILURES if failure is not EXPIRED])
+def test_a_continuation_keeps_the_basis_of_the_same_first_page_failure(
+    failure: BaseException, read: ReadRequest, first_page: ReadRequest
+) -> None:
+    assert classify(failure, read).basis is classify(failure, first_page).basis
 
 
 @pytest.mark.parametrize(

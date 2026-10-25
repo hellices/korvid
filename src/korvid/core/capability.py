@@ -208,6 +208,8 @@ class ApiSource:
             raise ValueError("an API source names a resource")
         if (self.version is None) != (self.verb is None):
             raise ValueError("a resolved API source names both a version and a verb")
+        if self.version == "":
+            raise ValueError("a resolved version is never empty")
         if self.verb is Verb.LIST and self.name:
             raise ValueError("a LIST source names no object")
         if self.verb is Verb.GET and not self.name:
