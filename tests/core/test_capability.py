@@ -23,6 +23,7 @@ from korvid.core.capability import (
     Role,
     RunToken,
     ScopeKind,
+    Source,
     SourceScope,
     Verb,
     conclusive,
@@ -104,7 +105,7 @@ def _observation(
     basis: Basis = Basis.OBSERVED,
     *,
     at: datetime = NOW,
-    source: ApiSource = PODS,
+    source: Source = PODS,
     **fields: Any,
 ) -> Observation:
     observed_at = None if state is EvidenceState.UNKNOWN else at
@@ -341,3 +342,9 @@ def test_discovery_sources_are_well_formed(fields: dict[str, Any]) -> None:
 def test_a_provider_source_names_its_provider_and_query() -> None:
     with pytest.raises(ValueError, match="provider and query kind"):
         ProviderSource("", "series", SourceScope.provider("prometheus"))
+
+
+def test_a_provider_observation_is_read_at_the_provider_scope() -> None:
+    source = ProviderSource("prometheus", "series", SourceScope.provider("prometheus"))
+
+    assert _observation(source=source).source.scope.kind is ScopeKind.PROVIDER
