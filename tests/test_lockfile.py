@@ -682,7 +682,15 @@ def test_the_verified_lock_is_committed_onto_any_base(
     # git, then opens the pull request, and calls gh for nothing else.
     assert [call[:2] for call in calls] == [["auth", "setup-git"], ["pr", "create"]], calls
     assert calls[0] == ["auth", "setup-git"]
-    assert calls[1][2:6] == ["--base", base, "--head", pushed], calls[1]
+    # Every option of the pull request, in order, so an added `--repo` or a
+    # stray argument cannot ride along on a call whose start still matches.
+    options = calls[1][2:]
+    assert options[0::2] == ["--base", "--head", "--title", "--body"], options
+    created = dict(zip(options[0::2], options[1::2], strict=True))
+    assert created["--base"] == base
+    assert created["--head"] == pushed
+    assert created["--title"] == "build: relock filelock"
+    assert base_sha in created["--body"], "the body must name the tested revision"
 
 
 def test_the_relock_pull_request_does_not_promise_codeql_it_cannot_deliver() -> None:
