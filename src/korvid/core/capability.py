@@ -13,7 +13,8 @@ into this vocabulary. The design is
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Mapping
+from collections import Counter
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import StrEnum
@@ -449,3 +450,106 @@ def downgrade_stale_status(observation: Observation, detail: str) -> Observation
     return dataclasses.replace(
         observation, state=EvidenceState.PARTIAL, basis=Basis.STALE_STATUS, detail=detail
     )
+
+
+#: When no required source contributed evidence, the baseline is the first of
+#: these states that one of them is in, so a failure is never summarized as a
+#: missing capability.
+_FAILURE_PRECEDENCE = (
+    EvidenceState.DENIED,
+    EvidenceState.UNAVAILABLE,
+    EvidenceState.UNKNOWN,
+    EvidenceState.UNSUPPORTED,
+)
+_CONTRIBUTED = frozenset({EvidenceState.AVAILABLE, EvidenceState.PARTIAL})
+
+
+@dataclass(frozen=True, slots=True)
+class Baseline:
+    """A diagnostic's overall evidence state, and what keeps it from being complete.
+
+    `blocking` holds the sorted keys of every required source that keeps the
+    baseline from `AVAILABLE`, not only the one the precedence picked.
+    """
+
+    state: EvidenceState
+    blocking: tuple[str, ...] = ()
+
+
+class EvidenceSet:
+    """An immutable collection of observations, keyed by declaration key."""
+
+    __slots__ = ("_observations",)
+
+    def __init__(self, observations: Mapping[str, Observation] | None = None) -> None:
+        self._observations: Mapping[str, Observation] = MappingProxyType(dict(observations or {}))
+
+    def get(self, key: str) -> Observation | None:
+        """The observation kept under `key`, if any."""
+        return self._observations.get(key)
+
+    def with_observation(self, key: str, observation: Observation) -> EvidenceSet:
+        """A copy with `observation` kept under `key`."""
+        return EvidenceSet({**self._observations, key: observation})
+
+    def baseline(self, declarations: Iterable[Declaration], now: datetime) -> Baseline:
+        """Combine the required sources into one state, in any declaration order.
+
+        - `AVAILABLE` when every required `RULES_OUT` source is conclusive and
+          every required `CONFIRMS` source is available and fresh.
+        - `PARTIAL` when a required source still contributed evidence.
+        - Otherwise the first of `DENIED`, `UNAVAILABLE`, `UNKNOWN` and
+          `UNSUPPORTED` that a required source is in.
+
+        Optional sources never lower the baseline, and a source with no
+        observation is `UNKNOWN`.
+
+        Raises:
+            ValueError: if two declarations share a key, or none is required.
+        """
+        required = _required(declarations)
+        blocking = tuple(sorted(item.key for item in required if not self._complete(item, now)))
+        if not blocking:
+            return Baseline(EvidenceState.AVAILABLE)
+        states = {self._state(item.key) for item in required}
+        if states & _CONTRIBUTED:
+            return Baseline(EvidenceState.PARTIAL, blocking)
+        return Baseline(next(state for state in _FAILURE_PRECEDENCE if state in states), blocking)
+
+    def by_scope(self, kind: ScopeKind) -> Mapping[EvidenceState, int]:
+        """Count the states of the observations read at one kind of scope.
+
+        "Available on 3 of 5 nodes" is `by_scope(ScopeKind.NODE)`: a mixed
+        cluster is counted, never collapsed into one answer.
+        """
+        return dict(
+            Counter(
+                observation.state
+                for observation in self._observations.values()
+                if observation.source.scope.kind is kind
+            )
+        )
+
+    def _state(self, key: str) -> EvidenceState:
+        observation = self._observations.get(key)
+        return EvidenceState.UNKNOWN if observation is None else observation.state
+
+    def _complete(self, declaration: Declaration, now: datetime) -> bool:
+        observation = self._observations.get(declaration.key)
+        if observation is None:
+            return False
+        if declaration.role is Role.RULES_OUT:
+            return conclusive(observation, declaration.policy, now)
+        return observation.state is EvidenceState.AVAILABLE and is_fresh(
+            observation, declaration.policy, now
+        )
+
+
+def _required(declarations: Iterable[Declaration]) -> tuple[Declaration, ...]:
+    items = tuple(declarations)
+    if len({item.key for item in items}) != len(items):
+        raise ValueError("each declaration has its own key")
+    required = tuple(item for item in items if item.required)
+    if not required:
+        raise ValueError("a baseline needs at least one required source")
+    return required
