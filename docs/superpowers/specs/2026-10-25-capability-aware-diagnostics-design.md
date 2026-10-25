@@ -191,17 +191,19 @@ Textual or an optional extra.
 | `UNAVAILABLE` | `THROTTLED`, `SERVER_ERROR`, `UNEXPECTED_STATUS`, `TRANSPORT`, `MALFORMED`, `DEADLINE`, `TOO_LARGE`, `DISCOVERY_FAILED`, `DISCOVERY_STALE` |
 
 **Conclusiveness.** A diagnostic may treat absence as a fact, for example "no
-quota constrains this workload", only when `conclusive(observation, now)` is
-true. That requires all of these:
+quota constrains this workload", only when
+`conclusive(observation, policy, now)` is true. `policy` is the source's
+**`FreshnessPolicy`**: a maximum age, which defaults to Pulse's 30 seconds,
+and whether the source is retention-limited. Each logical source carries
+one (see API version resolution). Conclusiveness requires all of these:
 
 - the state is `AVAILABLE` and the basis is `OBSERVED` or `OBJECT_ABSENT`.
   `NO_DATA` is never conclusive: a provider that returns no series has not
   shown that a value is zero;
-- the observation is fresh: younger than the source's maximum age, which
-  defaults to Pulse's 30 seconds;
-- the source is not retention-limited. A source declared retention-limited,
-  such as Events, can confirm a recorded fact but never the absence of one,
-  because old entries expire.
+- the observation is fresh: younger than the policy's maximum age;
+- the policy is not retention-limited. A retention-limited source, such as
+  Events, can confirm a recorded fact but never the absence of one, because
+  old entries expire.
 
 Staleness is not a state. A stale `AVAILABLE` observation is shown as stale
 and is not conclusive.
@@ -234,9 +236,9 @@ The source types:
 - **`SourceScope`**: `cluster`, `namespace(name)`, `node(name)` or
   `provider(id)`.
 - **`ApiSource`**: group, resource, the selected version (`None` while
-  unresolved), optional subresource, scope, projection (`object` or
-  `metadata`), and for a GET the target object's name and the expected UID,
-  if the caller holds one.
+  unresolved) and the verb it was resolved for, optional subresource, scope,
+  projection (`object` or `metadata`), and for a GET the target object's name
+  and the expected UID, if the caller holds one.
 - **`DiscoverySource`**: one discovery endpoint, which is the core root
   `/api`, the group root `/apis`, or one group version (`/api/v1` or
   `/apis/<group>/<version>`). It lets every discovery outcome be an
@@ -261,17 +263,20 @@ carries the old one's evidence over (#410).
 ### Combining observations
 
 An **`EvidenceSet`** is an immutable collection of observations, keyed by
-source. A diagnostic declares each source it reads as `required` or
+source. A diagnostic declares each logical source it reads as `required` or
 `optional`, and with a role:
 
 - **`rules_out`**: the diagnostic may conclude something from the source's
   absence, for example "no quota constrains this workload".
 - **`confirms`**: only what the source contains matters, for example a
-  recorded rejection event. Retention-limited sources are always `confirms`.
+  recorded rejection event. Building a declaration that gives a
+  retention-limited source the `rules_out` role fails, so such a source is
+  always `confirms`.
 
-`baseline(declarations, now)` takes those declarations, is
-order-independent, and returns a state together with every observation that
-keeps the baseline from being complete:
+`baseline(declarations, now)` takes those declarations, judges each
+observation with its source's `FreshnessPolicy`, is order-independent, and
+returns a state together with every observation that keeps the baseline from
+being complete:
 
 1. **`AVAILABLE`** when every required `rules_out` source is conclusive and
    every required `confirms` source is `AVAILABLE` and fresh.
@@ -383,24 +388,26 @@ that resolution reads:
 
 A diagnostic declares a **logical source**: an ordered list of
 **candidates**, each with a group, a resource, the versions korvid can parse
-and a parser. Events are one logical source with two candidates,
-`events.k8s.io/v1` and then core `v1`.
+and a parser, plus the source's `FreshnessPolicy`. Events are one logical
+source with two candidates, `events.k8s.io/v1` and then core `v1`, and a
+retention-limited policy.
 
-`resolve(logical_source, snapshot)` takes the candidates in order, and for
-each one returns the first case that applies:
+`resolve(logical_source, verb, snapshot)`, where `verb` is the operation the
+read will use (`list` or `get`), takes the candidates in order, and for each
+one returns the first case that applies:
 
 1. **A known version is served.** An `ApiSource` with the most preferred
    version that was discovered successfully, that the candidate can parse,
-   and that lists the verb the read needs. The version may be non-preferred
-   (#345). A positive answer does not depend on other group versions, so a
-   broken one does not block a working one.
+   and that lists `verb`. The `ApiSource` records `verb`. The version may be
+   non-preferred (#345). A positive answer does not depend on other group
+   versions, so a broken one does not block a working one.
 2. **Incomplete discovery.** If the candidate's own root (`/api` for a core
    candidate, `/apis` for a named group), or any advertised version of the
    candidate's group, was forbidden or failed, the candidate is
    `DENIED`/`DISCOVERY_FORBIDDEN` or `UNAVAILABLE`/`DISCOVERY_FAILED`. Any
    negative conclusion would need the part korvid could not read. A failure
    of the other root does not affect the candidate.
-3. **Served without the needed verb.** `UNSUPPORTED`/`OPERATION_UNSUPPORTED`.
+3. **Served without `verb`.** `UNSUPPORTED`/`OPERATION_UNSUPPORTED`.
 4. **Only unknown versions are served.** `UNSUPPORTED`/`NO_KNOWN_VERSION`:
    an unfamiliar schema is never read as a known one.
 5. **Not served.** `UNSUPPORTED`/`NOT_SERVED`.
@@ -476,8 +483,10 @@ Their behaviour:
   data. A consumer that needs another field adds it to that allowlist with a
   test.
 - **Resolved sources only.** Both functions refuse an `ApiSource` whose
-  version is unset, and only `resolve` sets it. So every read uses a
-  resource and verb that discovery listed.
+  version is unset, and only `resolve` sets it. `read_list` also refuses a
+  source resolved for any verb but `list`, and `read_object` one resolved
+  for any verb but `get`. So every read uses a resource and verb that
+  discovery listed.
 - **Read-only.** The reader protocol the functions depend on has only GET and
   LIST methods.
 
@@ -589,6 +598,10 @@ version runs the same read-only scenarios:
   - Every state allows only its bases.
   - `conclusive` is false for `NO_DATA`, for stale observations and for
     retention-limited sources.
+  - `conclusive` honours each source's own maximum age. A fresh
+    `AVAILABLE`/`OBSERVED` Events observation is never conclusive about
+    absence.
+  - Building a `rules_out` declaration for a retention-limited source fails.
   - `baseline` returns the same result for every permutation of the
     declarations.
   - A required `confirms` source never needs to be conclusive, and a
@@ -609,6 +622,8 @@ version runs the same read-only scenarios:
   - Only a non-preferred version is served.
   - Only unknown versions are served.
   - The needed verb is missing.
+  - A resource that advertises only `get`, or only `list`, resolves for that
+    verb alone.
   - Nothing is served.
   - `/api` failed or was forbidden while `/apis` succeeded, and the reverse:
     each failure affects only its own candidates, so complete core discovery
@@ -647,7 +662,8 @@ version runs the same read-only scenarios:
   replacement, a newer run or a selection change, and applied otherwise.
 - **Guards.**
   - The reader protocol has no write method.
-  - Both functions refuse an unresolved `ApiSource`.
+  - Both functions refuse an unresolved `ApiSource`, and each refuses a
+    source resolved for the other verb.
   - An object-projection read of a ConfigMap or a Secret fails, through both
     functions.
   - Through both GET and LIST, ConfigMap and Secret metadata reaches the
@@ -667,7 +683,7 @@ are not complete until S5 has also landed.
 
 | Slice | Content |
 | --- | --- |
-| S1 | `core/capability`: states, bases, sources (API, discovery and provider) and roles, observations and the `RunToken` value they carry, `EvidenceSet` rules, `ReadRequest` and the classifier with `Status` parsing, `KubeClientError` categories, the Pulse mapping test |
+| S1 | `core/capability`: states, bases, sources (API, discovery and provider) and roles, freshness policies and declarations, observations and the `RunToken` value they carry, `EvidenceSet` rules, `ReadRequest` and the classifier with `Status` parsing, `KubeClientError` categories, the Pulse mapping test |
 | S2 | the session generation and the raw discovery snapshot in `KubeClient` (separate `/api` and `/apis` outcomes, group-version outcomes with verbs, TTL, refresh triggers), with `discover_resources()` projected from it; `core/api_versions`: the observation snapshot and logical-source resolution |
 | S3 | `core/evidence_reads`: `read_list` and `read_object`, byte budgets, metadata projections and their reduction, the configuration-payload guard |
 | S4 | the run generation and the late-result helper that applies a result only under the current token |
