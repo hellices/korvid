@@ -430,11 +430,6 @@ class GroupVersionOutcome:
     complete: bool = True
     error: DiscoveryFailure | None = None
 
-    @property
-    def path(self) -> str:
-        """The group version's discovery path."""
-        return _group_version_path(self.group, self.version)
-
 
 @dataclass(frozen=True, slots=True)
 class RawDiscovery:
@@ -528,13 +523,13 @@ async def _read_group_version(
 ) -> GroupVersionOutcome:
     path = _group_version_path(group, version)
     try:
-        document = await _request(request_json, path, timeout)
-        resources, complete = _served_resources(document)
-        metas = _parse_resource_list(document, group=group, version=version)
+        entries = _resource_entries(await _request(request_json, path, timeout))
     except (ApiStatusError, KubeClientError) as error:
         if group:
             logger.warning("API discovery skipped %s: %s", path, error)
         return GroupVersionOutcome(group, version, error=error)
+    resources, complete = _served_resources(entries)
+    metas = _parse_resource_list(entries, group=group, version=version)
     return GroupVersionOutcome(group, version, resources, tuple(metas), complete)
 
 
@@ -616,10 +611,14 @@ def _discovery_version(name: str, candidate: Any) -> str | None:
     return version
 
 
-def _served_resources(document: Mapping[str, Any]) -> tuple[tuple[ServedResource, ...], bool]:
+def _resource_entries(document: Mapping[str, Any]) -> list[Any]:
     entries = document.get("resources", [])
     if not isinstance(entries, list):
         raise KubeMalformedError("Kubernetes API discovery returned an invalid resource list")
+    return entries
+
+
+def _served_resources(entries: list[Any]) -> tuple[tuple[ServedResource, ...], bool]:
     served = tuple(
         resource for entry in entries if (resource := _served_resource(entry)) is not None
     )
@@ -645,14 +644,9 @@ def _resource_short_names(value: Any) -> tuple[str, ...]:
     return tuple(alias for alias in value if isinstance(alias, str) and alias)
 
 
-def _parse_resource_list(
-    data: Mapping[str, Any], *, group: str, version: str
-) -> list[ResourceMeta]:
+def _parse_resource_list(entries: list[Any], *, group: str, version: str) -> list[ResourceMeta]:
     out = []
-    resources = data.get("resources", [])
-    if not isinstance(resources, list):
-        raise KubeMalformedError("Kubernetes API discovery returned an invalid resource list")
-    for resource in resources:
+    for resource in entries:
         if not isinstance(resource, Mapping):
             continue
         name = resource.get("name")
