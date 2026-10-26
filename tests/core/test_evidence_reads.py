@@ -420,6 +420,22 @@ async def test_an_object_that_arrives_after_the_deadline_is_not_accepted() -> No
     assert _state(result.observation) == (EvidenceState.UNAVAILABLE, Basis.DEADLINE)
 
 
+async def test_an_absence_reported_after_the_deadline_proves_nothing() -> None:
+    late_absence = Late(_status(404, "NotFound", name="web-0", kind="pods"))
+
+    result = await read_object(FakeReader(late_absence), POD, deadline=0.05, clock=_clock)
+
+    assert _state(result.observation) == (EvidenceState.UNAVAILABLE, Basis.DEADLINE)
+
+
+async def test_a_failure_reported_after_the_deadline_is_the_deadline() -> None:
+    late_refusal = Late(ApiStatusError(403, "Forbidden"))
+
+    result = await read_list(FakeReader(late_refusal), PODS, deadline=0.05, clock=_clock)
+
+    assert _state(result.observation) == (EvidenceState.UNAVAILABLE, Basis.DEADLINE)
+
+
 async def test_cancelling_a_read_cancels_it() -> None:
     reader = FakeReader(STALL)
     task = asyncio.create_task(read_list(reader, PODS))

@@ -196,8 +196,7 @@ class _Attempts:
         A timeout interrupts a request only where it waits, so a result can
         still be ready after the deadline.
         """
-        if asyncio.get_running_loop().time() >= self.deadline_at:
-            raise _DeadlineReachedError
+        _refuse_late(self.deadline_at)
 
 
 @dataclass(slots=True)
@@ -278,6 +277,16 @@ async def _before_deadline(deadline_at: float, request: Awaitable[_T]) -> _T:
         if timeout.expired():
             raise _DeadlineReachedError from None
         raise
+    except (ApiStatusError, KubeClientError):
+        # A failure reported after the deadline proves no more than a late
+        # success would: a late `NotFound` must not establish absence.
+        _refuse_late(deadline_at)
+        raise
+
+
+def _refuse_late(deadline_at: float) -> None:
+    if asyncio.get_running_loop().time() >= deadline_at:
+        raise _DeadlineReachedError
 
 
 def _target(source: ApiSource, verb: Verb) -> EvidenceTarget:

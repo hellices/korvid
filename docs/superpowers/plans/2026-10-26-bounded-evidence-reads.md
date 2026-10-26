@@ -49,7 +49,7 @@
 - **`read_object` checks that the object it got is the one it asked for.** A missing UID, or another name, is `MALFORMED`.
 - **A 429 with no usable `Retry-After` waits one second.** An HTTP-date counts as no `Retry-After`.
 - **Embedded metadata is reduced too.** A pod template's metadata, or any other that an object embeds, loses `managedFields` and `last-applied-configuration` as the object's own does. An object nested too deeply to walk is `MALFORMED`.
-- **A result read or processed after the deadline is not accepted.** A timeout interrupts a request only where it waits, so the reads check the deadline once a page or an object has been processed.
+- **A result read or processed after the deadline is not accepted.** A timeout interrupts a request only where it waits, so the reads check the deadline once a page or an object has been processed. A failure reported after the deadline is the deadline as well: a late `NotFound` must not establish absence.
 - **A budget is exact at its boundary.** The transport asks for one byte past a full budget, on the wire and after decompression, rather than trusting that the end of a chunked body has already arrived. JSON's non-standard `NaN` and `Infinity` are `MALFORMED`.
 - **A credential refresh that fails is a client failure.** An exec credential plugin that fails while refreshing a token raises `ConfigException` or `RuntimeError`, with its output in the message. The transport raises an uncategorized `KubeClientError` instead, without that output, so the reads classify it rather than leaking it.
 - **Both reads take `max_bytes`, `token` and `clock` besides the design's parameters.** `token` is recorded on the observation. S4 (#488) adds the run generation that makes it useful.
@@ -1631,6 +1631,22 @@ async def test_an_object_that_arrives_after_the_deadline_is_not_accepted() -> No
     assert _state(result.observation) == (EvidenceState.UNAVAILABLE, Basis.DEADLINE)
 
 
+async def test_an_absence_reported_after_the_deadline_proves_nothing() -> None:
+    late_absence = Late(_status(404, "NotFound", name="web-0", kind="pods"))
+
+    result = await read_object(FakeReader(late_absence), POD, deadline=0.05, clock=_clock)
+
+    assert _state(result.observation) == (EvidenceState.UNAVAILABLE, Basis.DEADLINE)
+
+
+async def test_a_failure_reported_after_the_deadline_is_the_deadline() -> None:
+    late_refusal = Late(ApiStatusError(403, "Forbidden"))
+
+    result = await read_list(FakeReader(late_refusal), PODS, deadline=0.05, clock=_clock)
+
+    assert _state(result.observation) == (EvidenceState.UNAVAILABLE, Basis.DEADLINE)
+
+
 async def test_cancelling_a_read_cancels_it() -> None:
     reader = FakeReader(STALL)
     task = asyncio.create_task(read_list(reader, PODS))
@@ -2176,8 +2192,7 @@ class _Attempts:
         A timeout interrupts a request only where it waits, so a result can
         still be ready after the deadline.
         """
-        if asyncio.get_running_loop().time() >= self.deadline_at:
-            raise _DeadlineReachedError
+        _refuse_late(self.deadline_at)
 
 
 @dataclass(slots=True)
@@ -2258,6 +2273,16 @@ async def _before_deadline(deadline_at: float, request: Awaitable[_T]) -> _T:
         if timeout.expired():
             raise _DeadlineReachedError from None
         raise
+    except (ApiStatusError, KubeClientError):
+        # A failure reported after the deadline proves no more than a late
+        # success would: a late `NotFound` must not establish absence.
+        _refuse_late(deadline_at)
+        raise
+
+
+def _refuse_late(deadline_at: float) -> None:
+    if asyncio.get_running_loop().time() >= deadline_at:
+        raise _DeadlineReachedError
 
 
 def _target(source: ApiSource, verb: Verb) -> EvidenceTarget:
