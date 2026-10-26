@@ -21,7 +21,7 @@ from kubernetes_asyncio import watch as k8s_watch
 from kubernetes_asyncio.client import rest as k8s_rest
 from kubernetes_asyncio.stream import WsApiClient
 
-from korvid.k8s import pulse
+from korvid.k8s import evidence_requests, pulse
 from korvid.k8s.bounded_transport import path_segment as _path_segment
 from korvid.k8s.columns import CustomColumn, evaluate_all
 from korvid.k8s.components import ComponentRef, manifest_components
@@ -201,7 +201,7 @@ async def load_refreshable_kube_config(
     client_configuration.refresh_api_key_hook = _refresh
 
 
-class KubeClient(ReadOps, WriteOps, pulse.PulseReader):
+class KubeClient(ReadOps, WriteOps, pulse.PulseReader, evidence_requests.EvidenceReader):
     """Thin wrapper over kubernetes_asyncio; returns typed summaries."""
 
     def __init__(
@@ -1728,6 +1728,25 @@ class KubeClient(ReadOps, WriteOps, pulse.PulseReader):
     ) -> pulse.PulsePage:
         return await pulse.read_pulse_page(
             self._api, source, namespace, continuation, limit, max_bytes
+        )
+
+    async def list_evidence_page(
+        self,
+        target: evidence_requests.EvidenceTarget,
+        *,
+        limit: int,
+        continuation: str,
+        max_bytes: int,
+    ) -> evidence_requests.EvidencePage:
+        return await evidence_requests.read_evidence_page(
+            self._api, target, limit=limit, continuation=continuation, max_bytes=max_bytes
+        )
+
+    async def get_evidence_object(
+        self, target: evidence_requests.EvidenceTarget, name: str, *, max_bytes: int
+    ) -> dict[str, Any]:
+        return await evidence_requests.read_evidence_object(
+            self._api, target, name, max_bytes=max_bytes
         )
 
     async def _request_json(
