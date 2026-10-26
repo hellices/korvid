@@ -118,11 +118,14 @@ def _run_subprocess_probe(probe: str) -> None:
         "korvid.tools.executor",
         "korvid.agent.session",
         "korvid.agent.outbound",
+        "korvid.core.capability",
+        "korvid.core.capability_classifier",
     ],
 )
 def test_base_import_does_not_require_optional_extras(module: str) -> None:
-    """The composition root, UI, tool layer, agent session, and outbound
-    policy are all importable without the [mcp]/[agent] extras installed."""
+    """The composition root, UI, tool layer, agent session, outbound policy
+    and evidence vocabulary are all importable without the [mcp]/[agent]
+    extras installed."""
     _assert_import_is_extra_free(module)
 
 
