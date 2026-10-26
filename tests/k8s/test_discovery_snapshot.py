@@ -218,10 +218,18 @@ async def test_the_preferred_version_is_read_first_wherever_it_is_listed() -> No
 
 async def test_a_preferred_version_a_full_version_list_omits_is_never_read() -> None:
     group = {**APPS_GROUP, "preferredVersion": {"groupVersion": "apps/v2", "version": "v2"}}
-    raw = await _fetch(
+    answer = _answering(
         {**DOCUMENTS, "/apis": {"groups": [group]}, "/apis/apps/v2": {"resources": []}}
     )
+    requested: list[str] = []
 
+    async def request(path: str) -> dict[str, Any]:
+        requested.append(path)
+        return await answer(path)
+
+    raw = await fetch_discovery(request, generation=3, timeout=1.0, concurrency=4)
+
+    assert sorted(requested) == ["/api", "/api/v1", "/apis", "/apis/apps/v1"]
     assert raw.group_root == RootOutcome("/apis", (("apps", "v1"),))
     assert [(outcome.group, outcome.version) for outcome in raw.group_versions] == [
         ("", "v1"),
@@ -319,8 +327,18 @@ async def test_a_snapshot_expires_after_five_minutes(monkeypatch: pytest.MonkeyP
     assert raw.expired()
 
 
-def test_a_snapshot_starts_with_core_v1() -> None:
+@pytest.mark.parametrize(
+    "group_versions",
+    [
+        pytest.param((), id="empty"),
+        pytest.param((GroupVersionOutcome("apps", "v1"),), id="named-group-first"),
+        pytest.param(
+            (GroupVersionOutcome("", "v2"), GroupVersionOutcome("", "v1")), id="other-core-first"
+        ),
+    ],
+)
+def test_a_snapshot_starts_with_core_v1(group_versions: tuple[GroupVersionOutcome, ...]) -> None:
     now = datetime(2026, 10, 26, tzinfo=UTC)
 
     with pytest.raises(ValueError, match="starts with core v1"):
-        RawDiscovery(1, now, 0.0, RootOutcome("/api"), RootOutcome("/apis"), ())
+        RawDiscovery(1, now, 0.0, RootOutcome("/api"), RootOutcome("/apis"), group_versions)
