@@ -16,11 +16,12 @@ from enum import StrEnum
 from types import MappingProxyType
 
 from korvid.core.capability import ApiSource, Basis, DiscoverySource, EvidenceState, Projection
+from korvid.k8s.bounded_transport import ERROR_BODY_LIMIT
 from korvid.k8s.errors import ApiStatusError, KubeClientError, KubeErrorCategory
 
 #: Readers keep at most this many bytes of an error body, and the classifier
 #: parses no more.
-STATUS_BODY_LIMIT = 16 * 1024
+STATUS_BODY_LIMIT = ERROR_BODY_LIMIT
 
 
 class ReadKind(StrEnum):
