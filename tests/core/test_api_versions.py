@@ -59,6 +59,7 @@ def _version(
     complete: bool = True,
     error: DiscoveryFailure | None = None,
 ) -> GroupVersionOutcome:
+    complete = complete and error is None
     return GroupVersionOutcome(group, version, resources, complete=complete, error=error)
 
 
@@ -150,7 +151,8 @@ def test_a_failed_discovery_request_is_classified(
     error: DiscoveryFailure, state: EvidenceState, basis: Basis
 ) -> None:
     snapshot = _snapshot(
-        _version("apps", "v1", error=error), core_root=RootOutcome("/api", error=error)
+        _version("apps", "v1", error=error),
+        core_root=RootOutcome("/api", complete=False, error=error),
     )
     apps = snapshot.versions[("apps", "v1")]
 
@@ -264,7 +266,7 @@ def test_an_unadvertised_group_is_not_served() -> None:
             CONFIGMAPS,
             _snapshot(
                 core=_version("", "v1", _served("pods")),
-                core_root=RootOutcome("/api", error=FORBIDDEN),
+                core_root=RootOutcome("/api", complete=False, error=FORBIDDEN),
             ),
             "discovery of /api is incomplete",
             id="core-root-failed",
@@ -407,6 +409,10 @@ async def test_discovery_read_in_full_can_answer_unsupported() -> None:
     [
         pytest.param({"/apis": {}}, id="no-group-list"),
         pytest.param(
+            {"/apis": {"groups": [{**EXAMPLE_GROUP, "versions": [{"version": "v1"}]}]}},
+            id="no-group-version",
+        ),
+        pytest.param(
             {"/apis": {"groups": [{**EXAMPLE_GROUP, "versions": None}]}}, id="no-version-list"
         ),
         pytest.param({"/apis/example.io/v1": {}}, id="no-resource-list"),
@@ -434,7 +440,7 @@ async def test_discovery_not_read_in_full_never_answers_unsupported(
 def test_a_failed_core_root_blocks_only_negative_core_answers(
     error: ApiStatusError, state: EvidenceState
 ) -> None:
-    snapshot = _snapshot(core_root=RootOutcome("/api", error=error))
+    snapshot = _snapshot(core_root=RootOutcome("/api", complete=False, error=error))
 
     assert _failure(_resolve(SECRETS, snapshot))[0] is state
     assert _resolve(CONFIGMAPS, snapshot).sources
@@ -445,7 +451,7 @@ def test_a_failed_core_root_blocks_only_negative_core_answers(
 
 
 def test_a_failed_group_root_blocks_only_named_groups() -> None:
-    snapshot = _snapshot(group_root=RootOutcome("/apis", error=FORBIDDEN))
+    snapshot = _snapshot(group_root=RootOutcome("/apis", complete=False, error=FORBIDDEN))
 
     assert _failure(_resolve(WIDGETS, snapshot)) == (
         EvidenceState.DENIED,

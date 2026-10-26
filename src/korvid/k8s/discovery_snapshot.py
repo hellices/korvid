@@ -50,13 +50,17 @@ class RootOutcome:
 
     `advertised` lists `(group, version)` pairs in advertisement order, each
     group's preferred version first; the core group is `""`. `complete` is
-    false when an entry could not be read, or `/apis` had no group list.
+    false when the request failed, an entry could not be read, or `/apis` had
+    no group list.
     """
 
     path: str
     advertised: _Advertised = ()
     complete: bool = True
     error: DiscoveryFailure | None = None
+
+    def __post_init__(self) -> None:
+        _check_failure_is_incomplete(self.complete, self.error)
 
     def versions(self, group: str) -> tuple[str, ...]:
         """The versions advertised for `group`, preferred first."""
@@ -74,13 +78,17 @@ class ServedResource:
     verbs: frozenset[str]
 
 
+#: A resource entry korvid could read, with what it serves.
+_ReadableResource = tuple[Mapping[str, Any], ServedResource]
+
+
 @dataclass(frozen=True, slots=True)
 class GroupVersionOutcome:
     """What one group version served, or the error reading it raised.
 
     `metas` are the kinds `discover_resources()` reports from it. `complete`
-    is false when a resource entry could not be read, or the document had no
-    resource list.
+    is false when the request failed, a resource entry could not be read, or
+    the document had no resource list.
     """
 
     group: str
@@ -89,6 +97,14 @@ class GroupVersionOutcome:
     metas: tuple[ResourceMeta, ...] = ()
     complete: bool = True
     error: DiscoveryFailure | None = None
+
+    def __post_init__(self) -> None:
+        _check_failure_is_incomplete(self.complete, self.error)
+
+
+def _check_failure_is_incomplete(complete: bool, error: DiscoveryFailure | None) -> None:
+    if complete and error is not None:
+        raise ValueError("an outcome with an error is never complete")
 
 
 @dataclass(frozen=True, slots=True)
@@ -174,7 +190,7 @@ async def _read_root(
     try:
         advertised, complete = parse(await _request(request_json, path, timeout))
     except (ApiStatusError, KubeClientError) as error:
-        return RootOutcome(path, error=error)
+        return RootOutcome(path, complete=False, error=error)
     return RootOutcome(path, advertised, complete)
 
 
@@ -187,10 +203,12 @@ async def _read_group_version(
     except (ApiStatusError, KubeClientError) as error:
         if group:
             logger.warning("API discovery skipped %s: %s", path, error)
-        return GroupVersionOutcome(group, version, error=error)
-    resources, readable = _served_resources(entries)
-    metas = _parse_resource_list(entries, group=group, version=version)
-    return GroupVersionOutcome(group, version, resources, tuple(metas), listed and readable)
+        return GroupVersionOutcome(group, version, complete=False, error=error)
+    readable = _readable_resources(entries)
+    resources = tuple(served for _, served in readable)
+    metas = _parse_resource_list(readable, group=group, version=version)
+    complete = listed and len(readable) == len(entries)
+    return GroupVersionOutcome(group, version, resources, tuple(metas), complete)
 
 
 async def _read_group_versions(
@@ -245,7 +263,8 @@ def _group_versions(group: Any) -> tuple[list[tuple[str, str]], bool]:
     A `versions` list read in full says which versions exist, so a preferred
     version it does not name is ignored. Without such a list, the preferred
     version is still read, as discovery always has. An unusable preferred
-    version only loses its place at the front.
+    version only loses its place at the front. A listed version that omits its
+    `groupVersion` is still read, as before, but the list is not read in full.
     """
     if not isinstance(group, Mapping):
         return [], False
@@ -258,7 +277,11 @@ def _group_versions(group: Any) -> tuple[list[tuple[str, str]], bool]:
         version for entry in entries if (version := _discovery_version(name, entry)) is not None
     ]
     preferred = _discovery_version(name, group.get("preferredVersion"))
-    readable = isinstance(listed, list) and len(versions) == len(entries)
+    readable = (
+        isinstance(listed, list)
+        and len(versions) == len(entries)
+        and all("groupVersion" in entry for entry in entries)
+    )
     if preferred is not None and (preferred in versions or not readable):
         versions = [preferred, *versions]
     return [(name, version) for version in versions], readable
@@ -288,11 +311,13 @@ def _resource_entries(document: Mapping[str, Any]) -> tuple[list[Any], bool]:
     return entries, "resources" in document
 
 
-def _served_resources(entries: list[Any]) -> tuple[tuple[ServedResource, ...], bool]:
-    served = tuple(
-        resource for entry in entries if (resource := _served_resource(entry)) is not None
-    )
-    return served, len(served) == len(entries)
+def _readable_resources(entries: list[Any]) -> list[_ReadableResource]:
+    """Each resource entry korvid could read, with what it serves.
+
+    The projection reads only these, so it never reports an entry that the
+    snapshot counts as unreadable.
+    """
+    return [(entry, served) for entry in entries if (served := _served_resource(entry)) is not None]
 
 
 def _served_resource(entry: Any) -> ServedResource | None:
@@ -314,32 +339,24 @@ def _resource_short_names(value: Any) -> tuple[str, ...]:
     return tuple(alias for alias in value if isinstance(alias, str) and alias)
 
 
-def _parse_resource_list(entries: list[Any], *, group: str, version: str) -> list[ResourceMeta]:
+def _parse_resource_list(
+    readable: list[_ReadableResource], *, group: str, version: str
+) -> list[ResourceMeta]:
     out = []
-    for resource in entries:
-        if not isinstance(resource, Mapping):
-            continue
-        name = resource.get("name")
-        kind = resource.get("kind")
-        namespaced = resource.get("namespaced")
-        verbs = resource.get("verbs", [])
-        if not isinstance(name, str) or not isinstance(kind, str):
-            continue  # malformed entry must not kill discovery
-        if not isinstance(namespaced, bool):
-            continue  # "false" would otherwise read as namespaced
-        if "/" in name or not isinstance(verbs, list) or "list" not in verbs:
-            continue
+    for entry, served in readable:
+        if "/" in served.name or "list" not in served.verbs:
+            continue  # subresources, and kinds that cannot be listed
         out.append(
             ResourceMeta(
-                kind,
-                name,
+                entry["kind"],
+                served.name,
                 group,
                 version,
-                namespaced,
-                _resource_short_names(resource.get("shortNames")),
+                entry["namespaced"],
+                _resource_short_names(entry.get("shortNames")),
                 # list-only aggregated APIs (OLM's packageserver) stay
                 # discoverable; the watch source polls them (issue #141).
-                watchable="watch" in verbs,
+                watchable="watch" in served.verbs,
             )
         )
     return out

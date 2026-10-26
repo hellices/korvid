@@ -11,6 +11,7 @@ import pytest
 
 from korvid.k8s import discovery_snapshot
 from korvid.k8s.discovery_snapshot import (
+    DiscoveryFailure,
     GroupVersionOutcome,
     RawDiscovery,
     RootOutcome,
@@ -90,13 +91,22 @@ async def test_every_served_resource_keeps_its_verbs() -> None:
     assert [meta.plural for meta in core.metas] == ["pods"]
 
 
+async def test_a_subresource_is_served_but_never_projected() -> None:
+    metrics = {"name": "pods/metrics", "kind": "PodMetrics", "namespaced": True, "verbs": ["list"]}
+    resources = [*DOCUMENTS["/api/v1"]["resources"], metrics]
+    core = (await _fetch({**DOCUMENTS, "/api/v1": {"resources": resources}})).group_versions[0]
+
+    assert "pods/metrics" in [resource.name for resource in core.resources]
+    assert [meta.plural for meta in core.metas] == ["pods"]
+
+
 @pytest.mark.parametrize("failed", ["/api", "/apis"])
 async def test_a_failed_root_is_kept_without_affecting_the_other(failed: str) -> None:
     error = ApiStatusError(403, "Forbidden")
     raw = await _fetch(failures={failed: error})
     roots = {"/api": raw.core_root, "/apis": raw.group_root}
 
-    assert roots[failed] == RootOutcome(failed, error=error)
+    assert roots[failed] == RootOutcome(failed, complete=False, error=error)
     assert all(root.error is None for path, root in roots.items() if path != failed)
 
 
@@ -111,8 +121,22 @@ async def test_a_failed_group_version_is_kept_and_skipped() -> None:
     error = ApiStatusError(503, "Service Unavailable")
     raw = await _fetch(failures={"/apis/apps/v1": error})
 
-    assert raw.group_versions[1] == GroupVersionOutcome("apps", "v1", error=error)
+    assert raw.group_versions[1] == GroupVersionOutcome("apps", "v1", complete=False, error=error)
     assert [meta.plural for meta in project_resources(raw)] == ["pods"]
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        pytest.param(lambda error: RootOutcome("/apis", error=error), id="root"),
+        pytest.param(lambda error: GroupVersionOutcome("apps", "v1", error=error), id="version"),
+    ],
+)
+def test_an_outcome_with_an_error_is_never_complete(
+    outcome: Callable[[DiscoveryFailure], object],
+) -> None:
+    with pytest.raises(ValueError, match="never complete"):
+        outcome(ApiStatusError(503, "Service Unavailable"))
 
 
 @pytest.mark.parametrize("path", ["/api/v1", "/apis"])
@@ -166,6 +190,7 @@ async def test_the_roots_and_core_v1_are_requested_together() -> None:
             id="version-entry",
         ),
         pytest.param([{**APPS_GROUP, "versions": None}], id="no-version-list"),
+        pytest.param([{**APPS_GROUP, "versions": [{"version": "v1"}]}], id="no-group-version"),
     ],
 )
 async def test_an_unreadable_group_root_entry_makes_the_root_incomplete(groups: list[Any]) -> None:
@@ -244,12 +269,14 @@ async def test_a_group_root_without_a_group_list_is_incomplete() -> None:
         ),
     ],
 )
-async def test_an_unreadable_resource_entry_makes_its_version_incomplete(entry: Any) -> None:
+async def test_an_unreadable_resource_entry_is_neither_served_nor_projected(entry: Any) -> None:
     resources = [entry, *DOCUMENTS["/apis/apps/v1"]["resources"]]
     raw = await _fetch({**DOCUMENTS, "/apis/apps/v1": {"resources": resources}})
+    apps = raw.group_versions[1]
 
-    assert not raw.group_versions[1].complete
-    assert "deployments" in [meta.plural for meta in raw.group_versions[1].metas]
+    assert not apps.complete
+    assert [resource.name for resource in apps.resources] == ["deployments"]
+    assert [meta.plural for meta in apps.metas] == ["deployments"]
 
 
 @pytest.mark.parametrize("scope", ["false", 0, 1])

@@ -37,8 +37,9 @@
 - **`discover_resources()` always reads afresh, as it always has, and keeps the result as the session's snapshot.** Diagnostics call `discovery_snapshot()`, which reuses that snapshot for five minutes.
 - **Discovery now also requests `/api`, which the design's `core_root` needs.** The two roots and core `v1` are requested together, so a stalled server costs one deadline rather than three. Core `v1` is read whatever `/api` says.
 - **A root with any unreadable entry blocks every negative answer under it.** This applies to an unreadable group entry and to an unreadable version entry. korvid cannot always tell which group such an entry named, so it reports `UNAVAILABLE`/`DISCOVERY_FAILED` rather than "unsupported". An unusable `preferredVersion` only loses its place at the front.
-- **A `versions` list read in full says which versions exist.** A `preferredVersion` that such a list does not name is never read. client-go also reads only the listed versions. Without a readable list, the preferred version is still read, as `discover_resources()` always has, and the root is incomplete.
-- **A resource's `namespaced` must be a boolean.** Any other value makes the entry unreadable. The projection skips it rather than reading `"false"` as namespaced.
+- **A `versions` list read in full says which versions exist.** A `preferredVersion` that such a list does not name is never read. client-go also reads only the listed versions. Without a readable list, the preferred version is still read, as `discover_resources()` always has, and the root is incomplete. A listed version that omits its `groupVersion` is still read, as before, but the list does not count as read in full.
+- **The projection reads only the entries the snapshot could read.** One check decides whether a resource entry is readable. A non-boolean `namespaced`, or a verb that is not text, makes the entry unreadable, and the projection never reports it. Before, `"false"` read as namespaced.
+- **An outcome with an error is never complete.** `RootOutcome` and `GroupVersionOutcome` refuse to be built with both.
 - **A document that leaves out a list it must carry is incomplete, not empty.** This covers `/apis` without `groups`, a group version without `resources`, and a resource entry without `verbs`. The API server always sends these fields, so only a non-conforming server or proxy omits them. The projection is unchanged: it reads the first two as empty and skips the third, as `discover_resources()` always has.
 - **A candidate carries no parser yet.** Nothing reads objects until S3 (#487), which attaches parsing where the reader returns them.
 - **Falling through after a read is S3's job.** The design falls through to the next candidate when a read is `DENIED` or `UNSUPPORTED`. `Resolution` exposes the resolved sources in order and the failure the baseline precedence picks, and S3's reader does the falling through.
@@ -103,6 +104,7 @@ import pytest
 
 from korvid.k8s import discovery_snapshot
 from korvid.k8s.discovery_snapshot import (
+    DiscoveryFailure,
     GroupVersionOutcome,
     RawDiscovery,
     RootOutcome,
@@ -182,13 +184,22 @@ async def test_every_served_resource_keeps_its_verbs() -> None:
     assert [meta.plural for meta in core.metas] == ["pods"]
 
 
+async def test_a_subresource_is_served_but_never_projected() -> None:
+    metrics = {"name": "pods/metrics", "kind": "PodMetrics", "namespaced": True, "verbs": ["list"]}
+    resources = [*DOCUMENTS["/api/v1"]["resources"], metrics]
+    core = (await _fetch({**DOCUMENTS, "/api/v1": {"resources": resources}})).group_versions[0]
+
+    assert "pods/metrics" in [resource.name for resource in core.resources]
+    assert [meta.plural for meta in core.metas] == ["pods"]
+
+
 @pytest.mark.parametrize("failed", ["/api", "/apis"])
 async def test_a_failed_root_is_kept_without_affecting_the_other(failed: str) -> None:
     error = ApiStatusError(403, "Forbidden")
     raw = await _fetch(failures={failed: error})
     roots = {"/api": raw.core_root, "/apis": raw.group_root}
 
-    assert roots[failed] == RootOutcome(failed, error=error)
+    assert roots[failed] == RootOutcome(failed, complete=False, error=error)
     assert all(root.error is None for path, root in roots.items() if path != failed)
 
 
@@ -203,8 +214,22 @@ async def test_a_failed_group_version_is_kept_and_skipped() -> None:
     error = ApiStatusError(503, "Service Unavailable")
     raw = await _fetch(failures={"/apis/apps/v1": error})
 
-    assert raw.group_versions[1] == GroupVersionOutcome("apps", "v1", error=error)
+    assert raw.group_versions[1] == GroupVersionOutcome("apps", "v1", complete=False, error=error)
     assert [meta.plural for meta in project_resources(raw)] == ["pods"]
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        pytest.param(lambda error: RootOutcome("/apis", error=error), id="root"),
+        pytest.param(lambda error: GroupVersionOutcome("apps", "v1", error=error), id="version"),
+    ],
+)
+def test_an_outcome_with_an_error_is_never_complete(
+    outcome: Callable[[DiscoveryFailure], object],
+) -> None:
+    with pytest.raises(ValueError, match="never complete"):
+        outcome(ApiStatusError(503, "Service Unavailable"))
 
 
 @pytest.mark.parametrize("path", ["/api/v1", "/apis"])
@@ -258,6 +283,7 @@ async def test_the_roots_and_core_v1_are_requested_together() -> None:
             id="version-entry",
         ),
         pytest.param([{**APPS_GROUP, "versions": None}], id="no-version-list"),
+        pytest.param([{**APPS_GROUP, "versions": [{"version": "v1"}]}], id="no-group-version"),
     ],
 )
 async def test_an_unreadable_group_root_entry_makes_the_root_incomplete(groups: list[Any]) -> None:
@@ -336,12 +362,14 @@ async def test_a_group_root_without_a_group_list_is_incomplete() -> None:
         ),
     ],
 )
-async def test_an_unreadable_resource_entry_makes_its_version_incomplete(entry: Any) -> None:
+async def test_an_unreadable_resource_entry_is_neither_served_nor_projected(entry: Any) -> None:
     resources = [entry, *DOCUMENTS["/apis/apps/v1"]["resources"]]
     raw = await _fetch({**DOCUMENTS, "/apis/apps/v1": {"resources": resources}})
+    apps = raw.group_versions[1]
 
-    assert not raw.group_versions[1].complete
-    assert "deployments" in [meta.plural for meta in raw.group_versions[1].metas]
+    assert not apps.complete
+    assert [resource.name for resource in apps.resources] == ["deployments"]
+    assert [meta.plural for meta in apps.metas] == ["deployments"]
 
 
 @pytest.mark.parametrize("scope", ["false", 0, 1])
@@ -506,13 +534,17 @@ class RootOutcome:
 
     `advertised` lists `(group, version)` pairs in advertisement order, each
     group's preferred version first; the core group is `""`. `complete` is
-    false when an entry could not be read, or `/apis` had no group list.
+    false when the request failed, an entry could not be read, or `/apis` had
+    no group list.
     """
 
     path: str
     advertised: _Advertised = ()
     complete: bool = True
     error: DiscoveryFailure | None = None
+
+    def __post_init__(self) -> None:
+        _check_failure_is_incomplete(self.complete, self.error)
 
     def versions(self, group: str) -> tuple[str, ...]:
         """The versions advertised for `group`, preferred first."""
@@ -530,13 +562,17 @@ class ServedResource:
     verbs: frozenset[str]
 
 
+#: A resource entry korvid could read, with what it serves.
+_ReadableResource = tuple[Mapping[str, Any], ServedResource]
+
+
 @dataclass(frozen=True, slots=True)
 class GroupVersionOutcome:
     """What one group version served, or the error reading it raised.
 
     `metas` are the kinds `discover_resources()` reports from it. `complete`
-    is false when a resource entry could not be read, or the document had no
-    resource list.
+    is false when the request failed, a resource entry could not be read, or
+    the document had no resource list.
     """
 
     group: str
@@ -545,6 +581,14 @@ class GroupVersionOutcome:
     metas: tuple[ResourceMeta, ...] = ()
     complete: bool = True
     error: DiscoveryFailure | None = None
+
+    def __post_init__(self) -> None:
+        _check_failure_is_incomplete(self.complete, self.error)
+
+
+def _check_failure_is_incomplete(complete: bool, error: DiscoveryFailure | None) -> None:
+    if complete and error is not None:
+        raise ValueError("an outcome with an error is never complete")
 
 
 @dataclass(frozen=True, slots=True)
@@ -630,7 +674,7 @@ async def _read_root(
     try:
         advertised, complete = parse(await _request(request_json, path, timeout))
     except (ApiStatusError, KubeClientError) as error:
-        return RootOutcome(path, error=error)
+        return RootOutcome(path, complete=False, error=error)
     return RootOutcome(path, advertised, complete)
 
 
@@ -643,10 +687,12 @@ async def _read_group_version(
     except (ApiStatusError, KubeClientError) as error:
         if group:
             logger.warning("API discovery skipped %s: %s", path, error)
-        return GroupVersionOutcome(group, version, error=error)
-    resources, readable = _served_resources(entries)
-    metas = _parse_resource_list(entries, group=group, version=version)
-    return GroupVersionOutcome(group, version, resources, tuple(metas), listed and readable)
+        return GroupVersionOutcome(group, version, complete=False, error=error)
+    readable = _readable_resources(entries)
+    resources = tuple(served for _, served in readable)
+    metas = _parse_resource_list(readable, group=group, version=version)
+    complete = listed and len(readable) == len(entries)
+    return GroupVersionOutcome(group, version, resources, tuple(metas), complete)
 
 
 async def _read_group_versions(
@@ -701,7 +747,8 @@ def _group_versions(group: Any) -> tuple[list[tuple[str, str]], bool]:
     A `versions` list read in full says which versions exist, so a preferred
     version it does not name is ignored. Without such a list, the preferred
     version is still read, as discovery always has. An unusable preferred
-    version only loses its place at the front.
+    version only loses its place at the front. A listed version that omits its
+    `groupVersion` is still read, as before, but the list is not read in full.
     """
     if not isinstance(group, Mapping):
         return [], False
@@ -714,7 +761,11 @@ def _group_versions(group: Any) -> tuple[list[tuple[str, str]], bool]:
         version for entry in entries if (version := _discovery_version(name, entry)) is not None
     ]
     preferred = _discovery_version(name, group.get("preferredVersion"))
-    readable = isinstance(listed, list) and len(versions) == len(entries)
+    readable = (
+        isinstance(listed, list)
+        and len(versions) == len(entries)
+        and all("groupVersion" in entry for entry in entries)
+    )
     if preferred is not None and (preferred in versions or not readable):
         versions = [preferred, *versions]
     return [(name, version) for version in versions], readable
@@ -744,11 +795,13 @@ def _resource_entries(document: Mapping[str, Any]) -> tuple[list[Any], bool]:
     return entries, "resources" in document
 
 
-def _served_resources(entries: list[Any]) -> tuple[tuple[ServedResource, ...], bool]:
-    served = tuple(
-        resource for entry in entries if (resource := _served_resource(entry)) is not None
-    )
-    return served, len(served) == len(entries)
+def _readable_resources(entries: list[Any]) -> list[_ReadableResource]:
+    """Each resource entry korvid could read, with what it serves.
+
+    The projection reads only these, so it never reports an entry that the
+    snapshot counts as unreadable.
+    """
+    return [(entry, served) for entry in entries if (served := _served_resource(entry)) is not None]
 
 
 def _served_resource(entry: Any) -> ServedResource | None:
@@ -770,32 +823,24 @@ def _resource_short_names(value: Any) -> tuple[str, ...]:
     return tuple(alias for alias in value if isinstance(alias, str) and alias)
 
 
-def _parse_resource_list(entries: list[Any], *, group: str, version: str) -> list[ResourceMeta]:
+def _parse_resource_list(
+    readable: list[_ReadableResource], *, group: str, version: str
+) -> list[ResourceMeta]:
     out = []
-    for resource in entries:
-        if not isinstance(resource, Mapping):
-            continue
-        name = resource.get("name")
-        kind = resource.get("kind")
-        namespaced = resource.get("namespaced")
-        verbs = resource.get("verbs", [])
-        if not isinstance(name, str) or not isinstance(kind, str):
-            continue  # malformed entry must not kill discovery
-        if not isinstance(namespaced, bool):
-            continue  # "false" would otherwise read as namespaced
-        if "/" in name or not isinstance(verbs, list) or "list" not in verbs:
-            continue
+    for entry, served in readable:
+        if "/" in served.name or "list" not in served.verbs:
+            continue  # subresources, and kinds that cannot be listed
         out.append(
             ResourceMeta(
-                kind,
-                name,
+                entry["kind"],
+                served.name,
                 group,
                 version,
-                namespaced,
-                _resource_short_names(resource.get("shortNames")),
+                entry["namespaced"],
+                _resource_short_names(entry.get("shortNames")),
                 # list-only aggregated APIs (OLM's packageserver) stay
                 # discoverable; the watch source polls them (issue #141).
-                watchable="watch" in verbs,
+                watchable="watch" in served.verbs,
             )
         )
     return out
@@ -1252,6 +1297,7 @@ def _version(
     complete: bool = True,
     error: DiscoveryFailure | None = None,
 ) -> GroupVersionOutcome:
+    complete = complete and error is None
     return GroupVersionOutcome(group, version, resources, complete=complete, error=error)
 
 
@@ -1343,7 +1389,8 @@ def test_a_failed_discovery_request_is_classified(
     error: DiscoveryFailure, state: EvidenceState, basis: Basis
 ) -> None:
     snapshot = _snapshot(
-        _version("apps", "v1", error=error), core_root=RootOutcome("/api", error=error)
+        _version("apps", "v1", error=error),
+        core_root=RootOutcome("/api", complete=False, error=error),
     )
     apps = snapshot.versions[("apps", "v1")]
 
@@ -1457,7 +1504,7 @@ def test_an_unadvertised_group_is_not_served() -> None:
             CONFIGMAPS,
             _snapshot(
                 core=_version("", "v1", _served("pods")),
-                core_root=RootOutcome("/api", error=FORBIDDEN),
+                core_root=RootOutcome("/api", complete=False, error=FORBIDDEN),
             ),
             "discovery of /api is incomplete",
             id="core-root-failed",
@@ -1600,6 +1647,10 @@ async def test_discovery_read_in_full_can_answer_unsupported() -> None:
     [
         pytest.param({"/apis": {}}, id="no-group-list"),
         pytest.param(
+            {"/apis": {"groups": [{**EXAMPLE_GROUP, "versions": [{"version": "v1"}]}]}},
+            id="no-group-version",
+        ),
+        pytest.param(
             {"/apis": {"groups": [{**EXAMPLE_GROUP, "versions": None}]}}, id="no-version-list"
         ),
         pytest.param({"/apis/example.io/v1": {}}, id="no-resource-list"),
@@ -1627,7 +1678,7 @@ async def test_discovery_not_read_in_full_never_answers_unsupported(
 def test_a_failed_core_root_blocks_only_negative_core_answers(
     error: ApiStatusError, state: EvidenceState
 ) -> None:
-    snapshot = _snapshot(core_root=RootOutcome("/api", error=error))
+    snapshot = _snapshot(core_root=RootOutcome("/api", complete=False, error=error))
 
     assert _failure(_resolve(SECRETS, snapshot))[0] is state
     assert _resolve(CONFIGMAPS, snapshot).sources
@@ -1638,7 +1689,7 @@ def test_a_failed_core_root_blocks_only_negative_core_answers(
 
 
 def test_a_failed_group_root_blocks_only_named_groups() -> None:
-    snapshot = _snapshot(group_root=RootOutcome("/apis", error=FORBIDDEN))
+    snapshot = _snapshot(group_root=RootOutcome("/apis", complete=False, error=FORBIDDEN))
 
     assert _failure(_resolve(WIDGETS, snapshot)) == (
         EvidenceState.DENIED,
