@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
@@ -136,3 +137,54 @@ async def test_discover_resources_reads_afresh_and_keeps_the_snapshot() -> None:
     assert [meta.plural for meta in metas] == ["pods"]
     assert fetch.await_count == 6
     assert snapshot.generation == client.session_generation
+
+
+async def test_a_snapshot_waits_for_discovery_under_way_and_shares_it() -> None:
+    client = KubeClient()
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def answer(path: str) -> dict[str, Any]:
+        if path == "/api":
+            started.set()
+            await release.wait()
+        return DOCUMENTS[path]
+
+    with patch.object(client, "_request_json", AsyncMock(side_effect=answer)) as fetch:
+        discovering = asyncio.create_task(client.discover_resources())
+        await started.wait()
+        waiting = asyncio.create_task(client.discovery_snapshot())
+        # One loop turn lets the waiting call reach its cache check before the
+        # read under way can finish.
+        await asyncio.sleep(0)
+        release.set()
+        await discovering
+        shared = await waiting
+        kept = await client.discovery_snapshot()
+
+    assert fetch.await_count == 3
+    assert kept is shared
+
+
+@pytest.mark.parametrize(
+    "read",
+    [
+        pytest.param(KubeClient.discover_resources, id="discover-resources"),
+        pytest.param(KubeClient.discovery_snapshot, id="discovery-snapshot"),
+    ],
+)
+async def test_a_read_under_way_when_discovery_is_invalidated_is_not_kept(
+    read: Callable[[KubeClient], Awaitable[object]],
+) -> None:
+    client = KubeClient()
+
+    async def answer(path: str) -> dict[str, Any]:
+        if path == "/api":
+            client.invalidate_discovery()
+        return DOCUMENTS[path]
+
+    with patch.object(client, "_request_json", AsyncMock(side_effect=answer)) as fetch:
+        await read(client)
+        fetch.side_effect = _answer
+        await client.discovery_snapshot()
+
+    assert fetch.await_count == 6

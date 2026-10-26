@@ -230,6 +230,9 @@ class KubeClient(ReadOps, WriteOps, pulse.PulseReader):
         #: Changes on every connect and context switch: anything read under an
         #: older generation describes another session (#409).
         self._session_generation = 0
+        #: Changes whenever cached discovery must go: an invalidation or a new
+        #: session. A read that began under an older revision is never kept.
+        self._discovery_revision = 0
         self._discovery: RawDiscovery | None = None
         self._discovery_lock = asyncio.Lock()
 
@@ -398,7 +401,7 @@ class KubeClient(ReadOps, WriteOps, pulse.PulseReader):
         self._session_generation += 1
         self._pod_resize_supported = None
         self._provider_info = None
-        self._discovery = None
+        self.invalidate_discovery()
 
     @property
     def session_generation(self) -> int:
@@ -1757,38 +1760,43 @@ class KubeClient(ReadOps, WriteOps, pulse.PulseReader):
 
         Every served version is fetched by a bounded worker pool. Preferred
         versions win per resource identity, regardless of response order.
-        Discovery is always read afresh and kept as the session's snapshot.
+        Discovery is always read afresh, once any read under way is done, and
+        kept as the session's snapshot unless it is invalidated meanwhile.
         """
-        snapshot = self._discovery = await self._fetch_discovery()
+        async with self._discovery_lock:
+            snapshot = await self._read_discovery()
         return project_resources(snapshot)
 
     async def discovery_snapshot(self) -> RawDiscovery:
-        """This session's raw discovery, read again once it is five minutes old."""
+        """This session's raw discovery, read again once it is five minutes old.
+
+        One read runs at a time, so a call made during a read waits for it.
+        """
         async with self._discovery_lock:
-            snapshot = self._current_discovery()
-            if snapshot is None:
-                snapshot = self._discovery = await self._fetch_discovery()
+            snapshot = self._discovery
+            if snapshot is None or snapshot.expired():
+                snapshot = await self._read_discovery()
             return snapshot
 
     def invalidate_discovery(self) -> None:
         """Read discovery again next time: an explicit refresh, or a read that
-        found discovery stale."""
+        found discovery stale. A read already under way is not kept."""
+        self._discovery_revision += 1
         self._discovery = None
 
-    async def _fetch_discovery(self) -> RawDiscovery:
-        return await fetch_discovery(
+    async def _read_discovery(self) -> RawDiscovery:
+        # Callers hold `_discovery_lock`, so reads never overlap and a later
+        # read never loses its snapshot to an earlier one.
+        revision = self._discovery_revision
+        snapshot = await fetch_discovery(
             self._request_json,
             generation=self._session_generation,
             timeout=_DISCOVERY_TIMEOUT_SECONDS,
             concurrency=_DISCOVERY_CONCURRENCY,
         )
-
-    def _current_discovery(self) -> RawDiscovery | None:
-        # A snapshot read across a session change describes the old session.
-        snapshot = self._discovery
-        if snapshot is None or snapshot.generation != self._session_generation:
-            return None
-        return None if snapshot.expired() else snapshot
+        if revision == self._discovery_revision:
+            self._discovery = snapshot
+        return snapshot
 
     async def close(self) -> None:
         if self._api is not None:

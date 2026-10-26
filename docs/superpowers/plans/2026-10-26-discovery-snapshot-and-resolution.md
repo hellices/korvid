@@ -7,7 +7,7 @@
 **Architecture:**
 - **`k8s`:** a new `discovery_snapshot` module reads `/api`, `/apis` and every advertised group version, and keeps each outcome, whether a success or the error raised. `KubeClient` gains:
   - a session generation, bumped on connect and on every context switch;
-  - a five-minute cached snapshot;
+  - a five-minute cached snapshot, with one read at a time. A read that began before an invalidation or a session change is returned to its caller but never cached;
   - a `discover_resources()` that is projected from a fresh snapshot.
 - **`core`:** a new `api_versions` module turns the raw snapshot into observations and resolves logical sources candidate by candidate. A negative answer needs complete discovery.
 
@@ -748,6 +748,7 @@ Create `tests/k8s/test_discovery_session.py`:
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
@@ -881,6 +882,57 @@ async def test_discover_resources_reads_afresh_and_keeps_the_snapshot() -> None:
     assert [meta.plural for meta in metas] == ["pods"]
     assert fetch.await_count == 6
     assert snapshot.generation == client.session_generation
+
+
+async def test_a_snapshot_waits_for_discovery_under_way_and_shares_it() -> None:
+    client = KubeClient()
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def answer(path: str) -> dict[str, Any]:
+        if path == "/api":
+            started.set()
+            await release.wait()
+        return DOCUMENTS[path]
+
+    with patch.object(client, "_request_json", AsyncMock(side_effect=answer)) as fetch:
+        discovering = asyncio.create_task(client.discover_resources())
+        await started.wait()
+        waiting = asyncio.create_task(client.discovery_snapshot())
+        # One loop turn lets the waiting call reach its cache check before the
+        # read under way can finish.
+        await asyncio.sleep(0)
+        release.set()
+        await discovering
+        shared = await waiting
+        kept = await client.discovery_snapshot()
+
+    assert fetch.await_count == 3
+    assert kept is shared
+
+
+@pytest.mark.parametrize(
+    "read",
+    [
+        pytest.param(KubeClient.discover_resources, id="discover-resources"),
+        pytest.param(KubeClient.discovery_snapshot, id="discovery-snapshot"),
+    ],
+)
+async def test_a_read_under_way_when_discovery_is_invalidated_is_not_kept(
+    read: Callable[[KubeClient], Awaitable[object]],
+) -> None:
+    client = KubeClient()
+
+    async def answer(path: str) -> dict[str, Any]:
+        if path == "/api":
+            client.invalidate_discovery()
+        return DOCUMENTS[path]
+
+    with patch.object(client, "_request_json", AsyncMock(side_effect=answer)) as fetch:
+        await read(client)
+        fetch.side_effect = _answer
+        await client.discovery_snapshot()
+
+    assert fetch.await_count == 6
 ```
 
 - [ ] **Step 2: Update the existing discovery tests to the new request pattern**
@@ -915,6 +967,9 @@ In `src/korvid/k8s/client.py`:
         #: Changes on every connect and context switch: anything read under an
         #: older generation describes another session (#409).
         self._session_generation = 0
+        #: Changes whenever cached discovery must go: an invalidation or a new
+        #: session. A read that began under an older revision is never kept.
+        self._discovery_revision = 0
         self._discovery: RawDiscovery | None = None
         self._discovery_lock = asyncio.Lock()
 ```
@@ -928,7 +983,7 @@ In `src/korvid/k8s/client.py`:
         self._session_generation += 1
         self._pod_resize_supported = None
         self._provider_info = None
-        self._discovery = None
+        self.invalidate_discovery()
 
     @property
     def session_generation(self) -> int:
@@ -948,38 +1003,43 @@ In `src/korvid/k8s/client.py`:
 
         Every served version is fetched by a bounded worker pool. Preferred
         versions win per resource identity, regardless of response order.
-        Discovery is always read afresh and kept as the session's snapshot.
+        Discovery is always read afresh, once any read under way is done, and
+        kept as the session's snapshot unless it is invalidated meanwhile.
         """
-        snapshot = self._discovery = await self._fetch_discovery()
+        async with self._discovery_lock:
+            snapshot = await self._read_discovery()
         return project_resources(snapshot)
 
     async def discovery_snapshot(self) -> RawDiscovery:
-        """This session's raw discovery, read again once it is five minutes old."""
+        """This session's raw discovery, read again once it is five minutes old.
+
+        One read runs at a time, so a call made during a read waits for it.
+        """
         async with self._discovery_lock:
-            snapshot = self._current_discovery()
-            if snapshot is None:
-                snapshot = self._discovery = await self._fetch_discovery()
+            snapshot = self._discovery
+            if snapshot is None or snapshot.expired():
+                snapshot = await self._read_discovery()
             return snapshot
 
     def invalidate_discovery(self) -> None:
         """Read discovery again next time: an explicit refresh, or a read that
-        found discovery stale."""
+        found discovery stale. A read already under way is not kept."""
+        self._discovery_revision += 1
         self._discovery = None
 
-    async def _fetch_discovery(self) -> RawDiscovery:
-        return await fetch_discovery(
+    async def _read_discovery(self) -> RawDiscovery:
+        # Callers hold `_discovery_lock`, so reads never overlap and a later
+        # read never loses its snapshot to an earlier one.
+        revision = self._discovery_revision
+        snapshot = await fetch_discovery(
             self._request_json,
             generation=self._session_generation,
             timeout=_DISCOVERY_TIMEOUT_SECONDS,
             concurrency=_DISCOVERY_CONCURRENCY,
         )
-
-    def _current_discovery(self) -> RawDiscovery | None:
-        # A snapshot read across a session change describes the old session.
-        snapshot = self._discovery
-        if snapshot is None or snapshot.generation != self._session_generation:
-            return None
-        return None if snapshot.expired() else snapshot
+        if revision == self._discovery_revision:
+            self._discovery = snapshot
+        return snapshot
 ```
 
 - [ ] **Step 5: Run the tests to verify they pass**
