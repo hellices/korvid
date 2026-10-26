@@ -71,14 +71,19 @@ def retry_after(value: str | None) -> float | None:
 
 
 async def read_body(response: Any, max_bytes: int) -> bytes:
-    """Read at most `max_bytes` of a body; a longer one is over budget."""
+    """Read at most `max_bytes` of a body; a longer one is over budget.
+
+    Once the budget is full, one more byte is asked for: the end of a chunked
+    body can arrive after its last byte, so only data past the budget proves
+    the body is too long.
+    """
     body = bytearray()
     while len(body) < max_bytes:
         chunk = await response.content.read(min(READ_BUFFER_BYTES, max_bytes - len(body)))
         if not chunk:
             return bytes(body)
         body.extend(chunk)
-    if not response.content.at_eof():
+    if await response.content.read(1):
         raise KubeTooLargeError("Kubernetes API response byte cap reached")
     return bytes(body)
 
@@ -91,10 +96,11 @@ def decode_body(body: bytes, encoding: str, max_bytes: int) -> bytes:
         raise KubeMalformedError("Kubernetes API returned an unsupported content encoding")
     decompressor = zlib.decompressobj(wbits=31)
     try:
-        decoded = decompressor.decompress(body, max_length=max_bytes)
+        # One byte past the budget is what shows the body is too long.
+        decoded = decompressor.decompress(body, max_length=max_bytes + 1)
     except zlib.error:
         raise KubeMalformedError("Kubernetes API returned invalid compressed data") from None
-    if not decompressor.eof and len(decoded) == max_bytes:
+    if len(decoded) > max_bytes:
         raise KubeTooLargeError("Kubernetes API decoded response byte cap reached")
     if not decompressor.eof or decompressor.unused_data:
         raise KubeMalformedError("Kubernetes API returned incomplete or trailing compressed data")
@@ -230,12 +236,16 @@ async def _error_body(response: Any, limit: int) -> str:
 
 def _json_object(body: bytes) -> dict[str, Any]:
     try:
-        document = json.loads(body)
+        document = json.loads(body, parse_constant=_reject_constant)
     except (ValueError, UnicodeError, RecursionError):
         raise KubeMalformedError("Kubernetes API returned invalid JSON") from None
     if not isinstance(document, dict):
         raise KubeMalformedError("Kubernetes API returned an invalid response document")
     return document
+
+
+def _reject_constant(name: str) -> None:
+    raise ValueError(f"{name} is not JSON")
 
 
 def decode_list_page(

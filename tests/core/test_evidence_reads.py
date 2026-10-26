@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import json
+import time
 from datetime import UTC, datetime
 from typing import Any
 
@@ -102,6 +103,14 @@ def _names(items: tuple[dict[str, Any], ...]) -> list[str]:
     return [item["metadata"]["name"] for item in items]
 
 
+@dataclasses.dataclass(frozen=True)
+class Late:
+    """An answer that arrives `seconds` later, past any deadline the tests set."""
+
+    result: object
+    seconds: float = 0.1
+
+
 class FakeReader(EvidenceReader):
     """Answers each request with the next scripted outcome, and records the requests."""
 
@@ -130,6 +139,10 @@ class FakeReader(EvidenceReader):
         outcome = self.outcomes.pop(0)
         if outcome is STALL:
             await asyncio.Event().wait()
+        if isinstance(outcome, Late):
+            # Blocks without yielding, so no timeout can interrupt it.
+            time.sleep(outcome.seconds)
+            outcome = outcome.result
         if isinstance(outcome, BaseException):
             raise outcome
         return outcome
@@ -282,7 +295,7 @@ async def test_a_failure_detail_never_carries_the_response_body() -> None:
 
     result = await read_list(FakeReader(failure), PODS, clock=_clock)
 
-    assert "secret-token" not in result.observation.detail
+    assert result.observation.detail == "HTTP 403"
 
 
 async def test_a_list_whose_metadata_projection_is_refused_is_unsupported() -> None:
@@ -381,6 +394,32 @@ async def test_the_deadline_after_a_page_keeps_it() -> None:
     assert _names(result.items) == ["a"]
 
 
+async def test_a_page_that_arrives_after_the_deadline_is_not_accepted() -> None:
+    reader = FakeReader(Late(EvidencePage((_pod("a"),), "next")), EvidencePage((_pod("b"),)))
+
+    result = await read_list(reader, PODS, deadline=0.05, clock=_clock)
+
+    assert _state(result.observation) == (EvidenceState.UNAVAILABLE, Basis.DEADLINE)
+    assert result.items == ()
+    assert len(reader.lists) == 1
+
+
+async def test_a_later_page_that_arrives_after_the_deadline_is_not_accepted() -> None:
+    reader = FakeReader(EvidencePage((_pod("a"),), "next"), Late(EvidencePage((_pod("b"),))))
+
+    result = await read_list(reader, PODS, deadline=0.05, clock=_clock)
+
+    assert _state(result.observation) == (EvidenceState.PARTIAL, Basis.DEADLINE)
+    assert _names(result.items) == ["a"]
+
+
+async def test_an_object_that_arrives_after_the_deadline_is_not_accepted() -> None:
+    result = await read_object(FakeReader(Late(_pod("web-0"))), POD, deadline=0.05, clock=_clock)
+
+    assert result.item is None
+    assert _state(result.observation) == (EvidenceState.UNAVAILABLE, Basis.DEADLINE)
+
+
 async def test_cancelling_a_read_cancels_it() -> None:
     reader = FakeReader(STALL)
     task = asyncio.create_task(read_list(reader, PODS))
@@ -471,6 +510,48 @@ async def test_no_metadata_keeps_the_last_applied_configuration_or_managed_field
         "metadata": {"name": "web-0", "uid": "uid-web-0", "annotations": {"team": "a"}},
         "spec": {"nodeName": "n1"},
     }
+
+
+TEMPLATE_METADATA = {
+    "labels": {"app": "web"},
+    "annotations": {LAST_APPLIED_ANNOTATION: '{"password": "hunter2"}', "team": "a"},
+    "managedFields": [{"manager": "kubectl"}],
+}
+DEPLOYMENT = {
+    "metadata": {"name": "web", "uid": "uid-web"},
+    "spec": {"template": {"metadata": TEMPLATE_METADATA, "spec": {"containers": []}}},
+}
+SCRUBBED_TEMPLATE = {"labels": {"app": "web"}, "annotations": {"team": "a"}}
+
+
+async def test_no_embedded_metadata_keeps_the_last_applied_configuration_through_a_list() -> None:
+    source = ApiSource("apps", "deployments", TEAM, version="v1", verb=Verb.LIST)
+
+    result = await read_list(FakeReader(EvidencePage((DEPLOYMENT,))), source, clock=_clock)
+
+    (item,) = result.items
+    assert item["spec"]["template"]["metadata"] == SCRUBBED_TEMPLATE
+    assert "hunter2" not in json.dumps(result.items)
+
+
+async def test_no_embedded_metadata_keeps_the_last_applied_configuration_through_a_get() -> None:
+    source = ApiSource("apps", "deployments", TEAM, version="v1", verb=Verb.GET, name="web")
+
+    result = await read_object(FakeReader(DEPLOYMENT), source, clock=_clock)
+
+    assert result.item is not None
+    assert result.item["spec"]["template"]["metadata"] == SCRUBBED_TEMPLATE
+    assert result.item["spec"]["template"]["spec"] == {"containers": []}
+
+
+async def test_an_object_too_deep_to_scrub_is_malformed() -> None:
+    nested: dict[str, Any] = {}
+    for _ in range(5000):
+        nested = {"nested": nested}
+
+    result = await read_list(FakeReader(EvidencePage(({**_pod("a"), "spec": nested},))), PODS)
+
+    assert _state(result.observation) == (EvidenceState.UNAVAILABLE, Basis.MALFORMED)
 
 
 @pytest.mark.parametrize(

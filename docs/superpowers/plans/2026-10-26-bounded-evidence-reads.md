@@ -48,6 +48,9 @@
 - **A repeated continue token is `MALFORMED`.** That is the design's "cyclic continuation". The page that repeated it is not kept.
 - **`read_object` checks that the object it got is the one it asked for.** A missing UID, or another name, is `MALFORMED`.
 - **A 429 with no usable `Retry-After` waits one second.** An HTTP-date counts as no `Retry-After`.
+- **Embedded metadata is reduced too.** A pod template's metadata, or any other that an object embeds, loses `managedFields` and `last-applied-configuration` as the object's own does. An object nested too deeply to walk is `MALFORMED`.
+- **A result read or processed after the deadline is not accepted.** A timeout interrupts a request only where it waits, so the reads check the deadline once a page or an object has been processed.
+- **A budget is exact at its boundary.** The transport asks for one byte past a full budget, on the wire and after decompression, rather than trusting that the end of a chunked body has already arrived. JSON's non-standard `NaN` and `Infinity` are `MALFORMED`.
 - **A credential refresh that fails is a client failure.** An exec credential plugin that fails while refreshing a token raises `ConfigException` or `RuntimeError`, with its output in the message. The transport raises an uncategorized `KubeClientError` instead, without that output, so the reads classify it rather than leaking it.
 - **Both reads take `max_bytes`, `token` and `clock` besides the design's parameters.** `token` is recorded on the observation. S4 (#488) adds the run generation that makes it useful.
 
@@ -165,6 +168,7 @@ Create `tests/k8s/test_bounded_transport.py`:
 from __future__ import annotations
 
 import gzip
+import hashlib
 import json
 from typing import Any
 
@@ -181,7 +185,7 @@ from korvid.k8s.bounded_transport import (
     retry_after,
 )
 from korvid.k8s.errors import ApiStatusError, KubeClientError, KubeTooLargeError
-from tests.k8s.fake_http import Response, fake_api, sent
+from tests.k8s.fake_http import Response, Stream, fake_api, sent
 
 
 @pytest.fixture(autouse=True)
@@ -200,6 +204,30 @@ async def test_a_body_within_its_budget_is_one_json_object() -> None:
 
     assert await _read(response) == {"kind": "PodList"}
     assert response.closed
+
+
+class LateEndStream(Stream):
+    """A body whose end is only seen when one more byte is asked for, as chunked bodies are."""
+
+    def at_eof(self) -> bool:
+        return False
+
+
+async def test_a_body_of_exactly_the_budget_is_accepted_before_its_end_arrives() -> None:
+    payload = b'{"kind": "PodList"}'
+    response = Response(payload)
+    response.content = LateEndStream(payload)
+
+    assert await _read(response, max_bytes=len(payload)) == {"kind": "PodList"}
+
+
+@pytest.mark.parametrize("kind", ["repetitive", "incompressible"])
+async def test_gzip_that_decodes_to_exactly_the_budget_is_accepted(kind: str) -> None:
+    filler = " " * 4000 if kind == "repetitive" else hashlib.shake_256(b"korvid").hexdigest(2000)
+    payload = json.dumps({"pad": filler}).encode()
+    response = Response(gzip.compress(payload, mtime=0), headers={"Content-Encoding": "gzip"})
+
+    assert await _read(response, max_bytes=len(payload)) == {"pad": filler}
 
 
 async def test_the_requested_media_type_wins_over_the_client_default() -> None:
@@ -232,7 +260,7 @@ async def test_an_error_body_over_its_limit_is_dropped() -> None:
         await _read(response, error_body_limit=ERROR_BODY_LIMIT)
 
     assert failure.value.body == ""
-    assert response.content.position <= ERROR_BODY_LIMIT
+    assert response.content.position <= ERROR_BODY_LIMIT + 1
 
 
 async def test_an_error_body_is_not_read_without_a_budget_for_it() -> None:
@@ -286,6 +314,9 @@ def test_retry_after_is_a_finite_number_of_seconds(
         ),
         pytest.param(Response(b"not json"), "malformed", id="invalid-json"),
         pytest.param(Response(b"[]"), "malformed", id="not-an-object"),
+        pytest.param(Response(b'{"value": NaN}'), "malformed", id="nan"),
+        pytest.param(Response(b'{"value": Infinity}'), "malformed", id="infinity"),
+        pytest.param(Response(b'{"value": -Infinity}'), "malformed", id="negative-infinity"),
         pytest.param(
             Response(b"{}", headers={"Content-Encoding": "br"}),
             "malformed",
@@ -304,6 +335,7 @@ async def test_a_bad_body_is_categorized_and_closed(response: Response, category
 
     assert failure.value.category == category
     assert response.closed
+    assert response.content.position <= 64 + 1
 
 
 @pytest.mark.parametrize(
@@ -503,14 +535,19 @@ def retry_after(value: str | None) -> float | None:
 
 
 async def read_body(response: Any, max_bytes: int) -> bytes:
-    """Read at most `max_bytes` of a body; a longer one is over budget."""
+    """Read at most `max_bytes` of a body; a longer one is over budget.
+
+    Once the budget is full, one more byte is asked for: the end of a chunked
+    body can arrive after its last byte, so only data past the budget proves
+    the body is too long.
+    """
     body = bytearray()
     while len(body) < max_bytes:
         chunk = await response.content.read(min(READ_BUFFER_BYTES, max_bytes - len(body)))
         if not chunk:
             return bytes(body)
         body.extend(chunk)
-    if not response.content.at_eof():
+    if await response.content.read(1):
         raise KubeTooLargeError("Kubernetes API response byte cap reached")
     return bytes(body)
 
@@ -523,10 +560,11 @@ def decode_body(body: bytes, encoding: str, max_bytes: int) -> bytes:
         raise KubeMalformedError("Kubernetes API returned an unsupported content encoding")
     decompressor = zlib.decompressobj(wbits=31)
     try:
-        decoded = decompressor.decompress(body, max_length=max_bytes)
+        # One byte past the budget is what shows the body is too long.
+        decoded = decompressor.decompress(body, max_length=max_bytes + 1)
     except zlib.error:
         raise KubeMalformedError("Kubernetes API returned invalid compressed data") from None
-    if not decompressor.eof and len(decoded) == max_bytes:
+    if len(decoded) > max_bytes:
         raise KubeTooLargeError("Kubernetes API decoded response byte cap reached")
     if not decompressor.eof or decompressor.unused_data:
         raise KubeMalformedError("Kubernetes API returned incomplete or trailing compressed data")
@@ -662,12 +700,16 @@ async def _error_body(response: Any, limit: int) -> str:
 
 def _json_object(body: bytes) -> dict[str, Any]:
     try:
-        document = json.loads(body)
+        document = json.loads(body, parse_constant=_reject_constant)
     except (ValueError, UnicodeError, RecursionError):
         raise KubeMalformedError("Kubernetes API returned invalid JSON") from None
     if not isinstance(document, dict):
         raise KubeMalformedError("Kubernetes API returned an invalid response document")
     return document
+
+
+def _reject_constant(name: str) -> None:
+    raise ValueError(f"{name} is not JSON")
 
 
 def decode_list_page(
@@ -1174,6 +1216,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import json
+import time
 from datetime import UTC, datetime
 from typing import Any
 
@@ -1271,6 +1314,14 @@ def _names(items: tuple[dict[str, Any], ...]) -> list[str]:
     return [item["metadata"]["name"] for item in items]
 
 
+@dataclasses.dataclass(frozen=True)
+class Late:
+    """An answer that arrives `seconds` later, past any deadline the tests set."""
+
+    result: object
+    seconds: float = 0.1
+
+
 class FakeReader(EvidenceReader):
     """Answers each request with the next scripted outcome, and records the requests."""
 
@@ -1299,6 +1350,10 @@ class FakeReader(EvidenceReader):
         outcome = self.outcomes.pop(0)
         if outcome is STALL:
             await asyncio.Event().wait()
+        if isinstance(outcome, Late):
+            # Blocks without yielding, so no timeout can interrupt it.
+            time.sleep(outcome.seconds)
+            outcome = outcome.result
         if isinstance(outcome, BaseException):
             raise outcome
         return outcome
@@ -1451,7 +1506,7 @@ async def test_a_failure_detail_never_carries_the_response_body() -> None:
 
     result = await read_list(FakeReader(failure), PODS, clock=_clock)
 
-    assert "secret-token" not in result.observation.detail
+    assert result.observation.detail == "HTTP 403"
 
 
 async def test_a_list_whose_metadata_projection_is_refused_is_unsupported() -> None:
@@ -1550,6 +1605,32 @@ async def test_the_deadline_after_a_page_keeps_it() -> None:
     assert _names(result.items) == ["a"]
 
 
+async def test_a_page_that_arrives_after_the_deadline_is_not_accepted() -> None:
+    reader = FakeReader(Late(EvidencePage((_pod("a"),), "next")), EvidencePage((_pod("b"),)))
+
+    result = await read_list(reader, PODS, deadline=0.05, clock=_clock)
+
+    assert _state(result.observation) == (EvidenceState.UNAVAILABLE, Basis.DEADLINE)
+    assert result.items == ()
+    assert len(reader.lists) == 1
+
+
+async def test_a_later_page_that_arrives_after_the_deadline_is_not_accepted() -> None:
+    reader = FakeReader(EvidencePage((_pod("a"),), "next"), Late(EvidencePage((_pod("b"),))))
+
+    result = await read_list(reader, PODS, deadline=0.05, clock=_clock)
+
+    assert _state(result.observation) == (EvidenceState.PARTIAL, Basis.DEADLINE)
+    assert _names(result.items) == ["a"]
+
+
+async def test_an_object_that_arrives_after_the_deadline_is_not_accepted() -> None:
+    result = await read_object(FakeReader(Late(_pod("web-0"))), POD, deadline=0.05, clock=_clock)
+
+    assert result.item is None
+    assert _state(result.observation) == (EvidenceState.UNAVAILABLE, Basis.DEADLINE)
+
+
 async def test_cancelling_a_read_cancels_it() -> None:
     reader = FakeReader(STALL)
     task = asyncio.create_task(read_list(reader, PODS))
@@ -1640,6 +1721,48 @@ async def test_no_metadata_keeps_the_last_applied_configuration_or_managed_field
         "metadata": {"name": "web-0", "uid": "uid-web-0", "annotations": {"team": "a"}},
         "spec": {"nodeName": "n1"},
     }
+
+
+TEMPLATE_METADATA = {
+    "labels": {"app": "web"},
+    "annotations": {LAST_APPLIED_ANNOTATION: '{"password": "hunter2"}', "team": "a"},
+    "managedFields": [{"manager": "kubectl"}],
+}
+DEPLOYMENT = {
+    "metadata": {"name": "web", "uid": "uid-web"},
+    "spec": {"template": {"metadata": TEMPLATE_METADATA, "spec": {"containers": []}}},
+}
+SCRUBBED_TEMPLATE = {"labels": {"app": "web"}, "annotations": {"team": "a"}}
+
+
+async def test_no_embedded_metadata_keeps_the_last_applied_configuration_through_a_list() -> None:
+    source = ApiSource("apps", "deployments", TEAM, version="v1", verb=Verb.LIST)
+
+    result = await read_list(FakeReader(EvidencePage((DEPLOYMENT,))), source, clock=_clock)
+
+    (item,) = result.items
+    assert item["spec"]["template"]["metadata"] == SCRUBBED_TEMPLATE
+    assert "hunter2" not in json.dumps(result.items)
+
+
+async def test_no_embedded_metadata_keeps_the_last_applied_configuration_through_a_get() -> None:
+    source = ApiSource("apps", "deployments", TEAM, version="v1", verb=Verb.GET, name="web")
+
+    result = await read_object(FakeReader(DEPLOYMENT), source, clock=_clock)
+
+    assert result.item is not None
+    assert result.item["spec"]["template"]["metadata"] == SCRUBBED_TEMPLATE
+    assert result.item["spec"]["template"]["spec"] == {"containers": []}
+
+
+async def test_an_object_too_deep_to_scrub_is_malformed() -> None:
+    nested: dict[str, Any] = {}
+    for _ in range(5000):
+        nested = {"nested": nested}
+
+    result = await read_list(FakeReader(EvidencePage(({**_pod("a"), "spec": nested},))), PODS)
+
+    assert _state(result.observation) == (EvidenceState.UNAVAILABLE, Basis.MALFORMED)
 
 
 @pytest.mark.parametrize(
@@ -1868,7 +1991,8 @@ What a diagnostic receives is not what crossed the wire:
 - a ConfigMap or Secret is never read as an object, so its data never is;
 - its metadata keeps only `PAYLOAD_METADATA_FIELDS`;
 - no metadata keeps `managedFields` or the `LAST_APPLIED_ANNOTATION`, which
-  embeds the whole object.
+  embeds the whole object: neither an object's own, nor any it embeds, such
+  as a pod template's.
 """
 
 from __future__ import annotations
@@ -2014,6 +2138,7 @@ async def read_object(
             lambda: reader.get_evidence_object(target, source.name, max_bytes=max_bytes),
         )
         item, uid = _named_object(source, document)
+        attempts.check()
     except _DeadlineReachedError:
         outcome = Classification(EvidenceState.UNAVAILABLE, Basis.DEADLINE, _DEADLINE)
     except (ApiStatusError, KubeClientError) as failure:
@@ -2045,6 +2170,15 @@ class _Attempts:
             return None
         return delay
 
+    def check(self) -> None:
+        """Refuse a result read or processed after the deadline.
+
+        A timeout interrupts a request only where it waits, so a result can
+        still be ready after the deadline.
+        """
+        if asyncio.get_running_loop().time() >= self.deadline_at:
+            raise _DeadlineReachedError
+
 
 @dataclass(slots=True)
 class _ListRun:
@@ -2069,6 +2203,7 @@ class _ListRun:
             if page.continuation in seen:
                 raise KubeMalformedError("Kubernetes API repeated a continue token")
             items = [_reduce_item(self.source, item) for item in page.items]
+            self.attempts.check()
             self.items.extend(items)
             self.pages += 1
             self.continuation = page.continuation
@@ -2166,7 +2301,24 @@ def _reduce_item(source: ApiSource, item: Mapping[str, Any]) -> dict[str, Any]:
     reduced = _reduce_metadata(source.resource, metadata)
     if source.projection is Projection.METADATA:
         return {"metadata": reduced}
-    return {**item, "metadata": reduced}
+    try:
+        scrubbed = _scrub(item)
+    except RecursionError:
+        raise KubeMalformedError("Kubernetes API returned an object nested too deeply") from None
+    return {**scrubbed, "metadata": reduced}
+
+
+def _scrub(value: Any) -> Any:
+    """`value` with every metadata it embeds reduced, as any resource's is."""
+    if isinstance(value, list):
+        return [_scrub(item) for item in value]
+    if not isinstance(value, Mapping):
+        return value
+    scrubbed = {key: _scrub(item) for key, item in value.items()}
+    metadata = scrubbed.get("metadata")
+    if isinstance(metadata, Mapping):
+        scrubbed["metadata"] = _reduce_metadata("", metadata)
+    return scrubbed
 
 
 def _reduce_metadata(resource: str, metadata: Mapping[str, Any]) -> dict[str, Any]:

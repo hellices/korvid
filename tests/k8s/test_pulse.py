@@ -113,7 +113,7 @@ async def test_page_byte_cap_stops_stream_before_parsing_and_closes(pulse: Modul
         await client.read_pulse_page(
             pulse.PulseSource("pods", "", "v1", "pods"), None, "", 100, 128
         )
-    assert response.content.position <= 128
+    assert response.content.position <= 128 + 1
     assert response.closed
 
 

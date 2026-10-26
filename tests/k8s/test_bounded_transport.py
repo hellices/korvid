@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import gzip
+import hashlib
 import json
 from typing import Any
 
@@ -19,7 +20,7 @@ from korvid.k8s.bounded_transport import (
     retry_after,
 )
 from korvid.k8s.errors import ApiStatusError, KubeClientError, KubeTooLargeError
-from tests.k8s.fake_http import Response, fake_api, sent
+from tests.k8s.fake_http import Response, Stream, fake_api, sent
 
 
 @pytest.fixture(autouse=True)
@@ -38,6 +39,30 @@ async def test_a_body_within_its_budget_is_one_json_object() -> None:
 
     assert await _read(response) == {"kind": "PodList"}
     assert response.closed
+
+
+class LateEndStream(Stream):
+    """A body whose end is only seen when one more byte is asked for, as chunked bodies are."""
+
+    def at_eof(self) -> bool:
+        return False
+
+
+async def test_a_body_of_exactly_the_budget_is_accepted_before_its_end_arrives() -> None:
+    payload = b'{"kind": "PodList"}'
+    response = Response(payload)
+    response.content = LateEndStream(payload)
+
+    assert await _read(response, max_bytes=len(payload)) == {"kind": "PodList"}
+
+
+@pytest.mark.parametrize("kind", ["repetitive", "incompressible"])
+async def test_gzip_that_decodes_to_exactly_the_budget_is_accepted(kind: str) -> None:
+    filler = " " * 4000 if kind == "repetitive" else hashlib.shake_256(b"korvid").hexdigest(2000)
+    payload = json.dumps({"pad": filler}).encode()
+    response = Response(gzip.compress(payload, mtime=0), headers={"Content-Encoding": "gzip"})
+
+    assert await _read(response, max_bytes=len(payload)) == {"pad": filler}
 
 
 async def test_the_requested_media_type_wins_over_the_client_default() -> None:
@@ -70,7 +95,7 @@ async def test_an_error_body_over_its_limit_is_dropped() -> None:
         await _read(response, error_body_limit=ERROR_BODY_LIMIT)
 
     assert failure.value.body == ""
-    assert response.content.position <= ERROR_BODY_LIMIT
+    assert response.content.position <= ERROR_BODY_LIMIT + 1
 
 
 async def test_an_error_body_is_not_read_without_a_budget_for_it() -> None:
@@ -124,6 +149,9 @@ def test_retry_after_is_a_finite_number_of_seconds(
         ),
         pytest.param(Response(b"not json"), "malformed", id="invalid-json"),
         pytest.param(Response(b"[]"), "malformed", id="not-an-object"),
+        pytest.param(Response(b'{"value": NaN}'), "malformed", id="nan"),
+        pytest.param(Response(b'{"value": Infinity}'), "malformed", id="infinity"),
+        pytest.param(Response(b'{"value": -Infinity}'), "malformed", id="negative-infinity"),
         pytest.param(
             Response(b"{}", headers={"Content-Encoding": "br"}),
             "malformed",
@@ -142,6 +170,7 @@ async def test_a_bad_body_is_categorized_and_closed(response: Response, category
 
     assert failure.value.category == category
     assert response.closed
+    assert response.content.position <= 64 + 1
 
 
 @pytest.mark.parametrize(

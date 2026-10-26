@@ -11,7 +11,8 @@ What a diagnostic receives is not what crossed the wire:
 - a ConfigMap or Secret is never read as an object, so its data never is;
 - its metadata keeps only `PAYLOAD_METADATA_FIELDS`;
 - no metadata keeps `managedFields` or the `LAST_APPLIED_ANNOTATION`, which
-  embeds the whole object.
+  embeds the whole object: neither an object's own, nor any it embeds, such
+  as a pod template's.
 """
 
 from __future__ import annotations
@@ -157,6 +158,7 @@ async def read_object(
             lambda: reader.get_evidence_object(target, source.name, max_bytes=max_bytes),
         )
         item, uid = _named_object(source, document)
+        attempts.check()
     except _DeadlineReachedError:
         outcome = Classification(EvidenceState.UNAVAILABLE, Basis.DEADLINE, _DEADLINE)
     except (ApiStatusError, KubeClientError) as failure:
@@ -188,6 +190,15 @@ class _Attempts:
             return None
         return delay
 
+    def check(self) -> None:
+        """Refuse a result read or processed after the deadline.
+
+        A timeout interrupts a request only where it waits, so a result can
+        still be ready after the deadline.
+        """
+        if asyncio.get_running_loop().time() >= self.deadline_at:
+            raise _DeadlineReachedError
+
 
 @dataclass(slots=True)
 class _ListRun:
@@ -212,6 +223,7 @@ class _ListRun:
             if page.continuation in seen:
                 raise KubeMalformedError("Kubernetes API repeated a continue token")
             items = [_reduce_item(self.source, item) for item in page.items]
+            self.attempts.check()
             self.items.extend(items)
             self.pages += 1
             self.continuation = page.continuation
@@ -309,7 +321,24 @@ def _reduce_item(source: ApiSource, item: Mapping[str, Any]) -> dict[str, Any]:
     reduced = _reduce_metadata(source.resource, metadata)
     if source.projection is Projection.METADATA:
         return {"metadata": reduced}
-    return {**item, "metadata": reduced}
+    try:
+        scrubbed = _scrub(item)
+    except RecursionError:
+        raise KubeMalformedError("Kubernetes API returned an object nested too deeply") from None
+    return {**scrubbed, "metadata": reduced}
+
+
+def _scrub(value: Any) -> Any:
+    """`value` with every metadata it embeds reduced, as any resource's is."""
+    if isinstance(value, list):
+        return [_scrub(item) for item in value]
+    if not isinstance(value, Mapping):
+        return value
+    scrubbed = {key: _scrub(item) for key, item in value.items()}
+    metadata = scrubbed.get("metadata")
+    if isinstance(metadata, Mapping):
+        scrubbed["metadata"] = _reduce_metadata("", metadata)
+    return scrubbed
 
 
 def _reduce_metadata(resource: str, metadata: Mapping[str, Any]) -> dict[str, Any]:
