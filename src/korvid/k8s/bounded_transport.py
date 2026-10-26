@@ -18,6 +18,7 @@ from typing import Any, cast
 from urllib.parse import quote, urlencode
 
 from kubernetes_asyncio.client import ApiClient, ApiException, rest
+from kubernetes_asyncio.config import ConfigException
 
 from korvid.k8s.errors import (
     ApiStatusError,
@@ -145,7 +146,12 @@ async def request_once(
     if api.cookie:
         headers["Cookie"] = api.cookie
     headers.update({"Accept": accept, "Accept-Encoding": "identity"})
-    await api.update_params_for_auth(headers, query, ["BearerToken"])
+    try:
+        await api.update_params_for_auth(headers, query, ["BearerToken"])
+    except (ConfigException, RuntimeError):
+        # An exec credential plugin that fails while refreshing a token
+        # raises these, with the plugin's output in the message.
+        raise KubeClientError("Kubernetes API credentials could not be refreshed") from None
     transport = api.rest_client
     options: dict[str, Any] = {
         "method": "GET",

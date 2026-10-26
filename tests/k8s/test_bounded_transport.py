@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 from kubernetes_asyncio.client.exceptions import ApiException
+from kubernetes_asyncio.config import ConfigException
 
 from korvid.k8s import bounded_transport
 from korvid.k8s.bounded_transport import (
@@ -171,6 +172,25 @@ async def test_an_api_exception_keeps_only_its_status() -> None:
         await read_bounded_json(api, "/api/v1/pods", [], max_bytes=64)
 
     assert "secret" not in str(failure.value)
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        pytest.param(ConfigException("exec: process returned 1: token=secret"), id="exec-failed"),
+        pytest.param(RuntimeError("exec: token=secret"), id="exec-unreadable"),
+    ],
+)
+async def test_a_credential_refresh_that_fails_is_a_client_failure(failure: Exception) -> None:
+    api = fake_api(Response(b"{}"))
+    api.update_params_for_auth.side_effect = failure
+
+    with pytest.raises(KubeClientError, match="credentials") as raised:
+        await read_bounded_json(api, "/api/v1/pods", [], max_bytes=64)
+
+    assert raised.value.category is None
+    assert "secret" not in str(raised.value)
+    assert api.rest_client.pool_manager.request.await_count == 0
 
 
 @pytest.mark.parametrize("max_bytes", [0, -1, True])
