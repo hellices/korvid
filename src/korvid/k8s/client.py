@@ -22,6 +22,7 @@ from kubernetes_asyncio.client import rest as k8s_rest
 from kubernetes_asyncio.stream import WsApiClient
 
 from korvid.k8s import pulse
+from korvid.k8s.bounded_transport import path_segment as _path_segment
 from korvid.k8s.columns import CustomColumn, evaluate_all
 from korvid.k8s.components import ComponentRef, manifest_components
 from korvid.k8s.csp import ProviderInfo, detect_provider
@@ -54,7 +55,6 @@ from korvid.k8s.helm import (
 from korvid.k8s.logs import LogLine
 from korvid.k8s.metrics import PodMetrics, parse_pod_metrics_list
 from korvid.k8s.models import GenericSummary, PodSummary, summary_for
-from korvid.k8s.pulse import path_segment as _path_segment
 from korvid.k8s.reads import ReadOps
 from korvid.k8s.telemetry import ReadOperation, ReadTelemetry, ReadTelemetryEvent
 from korvid.k8s.watch_events import WatchEvent, WatchProgress

@@ -8,8 +8,8 @@ import pytest
 
 from korvid.core.pulse import PulseCoverage, PulseModel
 from korvid.core.pulse_rules import PodPulseRule
-from korvid.k8s.errors import ApiStatusError, KubeClientError
-from korvid.k8s.pulse import PulseLimitError, PulsePage, PulseReader, PulseSource
+from korvid.k8s.errors import ApiStatusError, KubeClientError, KubeTooLargeError
+from korvid.k8s.pulse import PulsePage, PulseReader, PulseSource
 
 NOW = datetime(2026, 9, 13, tzinfo=UTC)
 PODS = PulseSource("pods", "", "v1", "pods")
@@ -20,7 +20,7 @@ PAGE_FAILURES = (
     ApiStatusError(503, "offline"),
     KubeClientError("token=secret"),
     TimeoutError(),
-    PulseLimitError("byte cap"),
+    KubeTooLargeError("byte cap"),
 )
 
 
@@ -130,7 +130,7 @@ async def test_repeated_continuation_is_not_success() -> None:
         (ApiStatusError(404, "missing"), "unavailable"),
         (ApiStatusError(503, "offline"), "failed"),
         (KubeClientError("token=secret"), "failed"),
-        (PulseLimitError("byte cap"), "capped"),
+        (KubeTooLargeError("byte cap"), "capped"),
     ],
 )
 async def test_failure_does_not_hide_other_sources_or_expose_error_body(
@@ -201,7 +201,7 @@ async def test_later_page_failure_keeps_observed_problem_in_model(failure: Excep
         ("seen", "CrashLoopBackOff")
     ]
     coverage = next(item for item in snapshot.coverage if item.source == "pods")
-    assert coverage.state == ("capped" if isinstance(failure, PulseLimitError) else "partial")
+    assert coverage.state == ("capped" if isinstance(failure, KubeTooLargeError) else "partial")
     assert coverage.detail == result.coverage.detail
     assert "secret" not in coverage.detail
 
@@ -225,7 +225,7 @@ async def test_later_page_failure_resolves_only_observed_recovery(failure: Excep
     snapshot = model.snapshot(NOW)
     assert [item.target.name for item in snapshot.current] == ["unseen"]
     coverage = next(item for item in snapshot.coverage if item.source == "pods")
-    assert coverage.state == ("capped" if isinstance(failure, PulseLimitError) else "partial")
+    assert coverage.state == ("capped" if isinstance(failure, KubeTooLargeError) else "partial")
     assert coverage.detail == result.coverage.detail
 
 
@@ -260,7 +260,7 @@ async def test_later_page_failure_keeps_unknown_warning_observation(failure: Exc
         ("Widget", "UnfamiliarControllerReason")
     ]
     assert snapshot.coverage[0].state == (
-        "capped" if isinstance(failure, PulseLimitError) else "partial"
+        "capped" if isinstance(failure, KubeTooLargeError) else "partial"
     )
     assert snapshot.coverage[0].detail == result.coverage.detail
 
@@ -283,7 +283,7 @@ async def test_undated_warning_keeps_later_page_failure_explanation(failure: Exc
     snapshot = model.snapshot(NOW)
     assert snapshot.recent == ()
     assert snapshot.coverage[0].state == (
-        "capped" if isinstance(failure, PulseLimitError) else "partial"
+        "capped" if isinstance(failure, KubeTooLargeError) else "partial"
     )
     assert result.coverage.detail in snapshot.coverage[0].detail
     assert "timestamp" in snapshot.coverage[0].detail

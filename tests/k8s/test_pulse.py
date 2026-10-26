@@ -11,7 +11,7 @@ import pytest
 from kubernetes_asyncio.client.exceptions import ApiException
 
 from korvid.k8s.client import KubeClient
-from korvid.k8s.errors import ApiStatusError, KubeClientError
+from korvid.k8s.errors import ApiStatusError, KubeClientError, KubeTooLargeError
 
 
 class ChunkStream:
@@ -48,7 +48,8 @@ class Response:
 def pulse(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
     assert hasattr(KubeClient, "read_pulse_page"), "bounded Pulse reads are missing"
     module = importlib.import_module("korvid.k8s.pulse")
-    monkeypatch.setattr(module, "_bounded_session", lambda shared: shared)
+    transport = importlib.import_module("korvid.k8s.bounded_transport")
+    monkeypatch.setattr(transport, "bounded_session", lambda shared: shared)
     return module
 
 
@@ -108,7 +109,7 @@ async def test_warning_source_applies_selector_without_scoping_all_namespaces(
 async def test_page_byte_cap_stops_stream_before_parsing_and_closes(pulse: ModuleType) -> None:
     response = Response(b'{"items": [' + b" " * 2000)
     client, _api = client_with(response)
-    with pytest.raises(pulse.PulseLimitError, match="byte"):
+    with pytest.raises(KubeTooLargeError, match="byte"):
         await client.read_pulse_page(
             pulse.PulseSource("pods", "", "v1", "pods"), None, "", 100, 128
         )
@@ -172,7 +173,9 @@ async def test_interrupted_body_always_closes(pulse: ModuleType, failure: BaseEx
     expected = (
         asyncio.CancelledError if isinstance(failure, asyncio.CancelledError) else KubeClientError
     )
-    with pytest.raises(expected, match=r"^$" if expected is asyncio.CancelledError else "Pulse"):
+    with pytest.raises(
+        expected, match=r"^$" if expected is asyncio.CancelledError else "Kubernetes API"
+    ):
         await client.read_pulse_page(
             pulse.PulseSource("pods", "", "v1", "pods"), None, "", 100, 1024
         )
@@ -194,7 +197,7 @@ async def test_api_exception_is_normalized(pulse: ModuleType) -> None:
 async def test_server_ignoring_row_limit_is_explicitly_capped(pulse: ModuleType) -> None:
     response = Response(json.dumps({"items": [{}, {}, {}]}).encode())
     client, _api = client_with(response)
-    with pytest.raises(pulse.PulseLimitError, match="object"):
+    with pytest.raises(KubeTooLargeError, match="object"):
         await client.read_pulse_page(pulse.PulseSource("pods", "", "v1", "pods"), None, "", 2, 1024)
     assert response.closed
 
@@ -257,7 +260,7 @@ async def test_invalid_compression_fails_closed_and_closes_response(
     response = Response(payload)
     response.headers["Content-Encoding"] = encoding
     client, _api = client_with(response)
-    with pytest.raises(KubeClientError, match="Pulse returned"):
+    with pytest.raises(KubeClientError, match="Kubernetes API returned"):
         await client.read_pulse_page(
             pulse.PulseSource("pods", "", "v1", "pods"), None, "", 100, 1024
         )

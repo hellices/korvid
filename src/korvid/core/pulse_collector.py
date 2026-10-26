@@ -10,8 +10,8 @@ from datetime import UTC, datetime
 from typing import Any
 
 from korvid.core.pulse import PulseCoverage, PulseCoverageState
-from korvid.k8s.errors import ApiStatusError, KubeClientError
-from korvid.k8s.pulse import PulseLimitError, PulseReader, PulseSource
+from korvid.k8s.errors import ApiStatusError, KubeClientError, KubeTooLargeError
+from korvid.k8s.pulse import PulseReader, PulseSource
 
 #: The three inputs korvid's ambient attention model is fed from, as the
 #: composition root registers them. Declared beside the collector that
@@ -44,7 +44,7 @@ def _now() -> datetime:
 
 
 def _failure_state(failure: ApiStatusError | KubeClientError) -> tuple[PulseCoverageState, str]:
-    if isinstance(failure, PulseLimitError):
+    if isinstance(failure, KubeTooLargeError):
         return "capped", "Response byte or object cap reached"
     if isinstance(failure, ApiStatusError):
         if failure.status in {401, 403}:

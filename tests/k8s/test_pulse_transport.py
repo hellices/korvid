@@ -12,9 +12,10 @@ import pytest
 from kubernetes_asyncio.client import ApiClient, Configuration, rest
 
 from korvid.core.pulse_collector import PulseCollector
+from korvid.k8s.bounded_transport import bounded_session
 from korvid.k8s.client import KubeClient
-from korvid.k8s.errors import KubeClientError
-from korvid.k8s.pulse import PulseLimitError, PulseSource, _bounded_session, read_pulse_page
+from korvid.k8s.errors import KubeClientError, KubeTooLargeError
+from korvid.k8s.pulse import PulseSource, read_pulse_page
 from tests.local_endpoint import disconnecting_endpoint
 
 
@@ -73,7 +74,7 @@ async def test_gzip_expansion_is_bounded_before_sdk_response_buffering() -> None
 
         with (
             patch.object(type(shared), "request", new=capture),
-            pytest.raises(PulseLimitError, match="byte"),
+            pytest.raises(KubeTooLargeError, match="byte"),
         ):
             await read_pulse_page(api, PulseSource("pods", "", "v1", "pods"), None, "", 100, 262144)
         assert len(responses) == 1
@@ -159,7 +160,7 @@ async def _check_attempt_budget(
         results = await PulseCollector(client, sources).collect("default")
     assert len(received) == 3
     assert all(count == 1 for count in attempts.values())
-    assert all(result.coverage.state in {"failed", "capped"} for result in results)
+    assert all(result.coverage.state == "failed" for result in results)
     connector = api.rest_client.pool_manager.connector
     assert connector is not None
     assert not connector._acquired
@@ -182,7 +183,7 @@ async def test_closed_transport_cannot_create_an_unconfigured_connection() -> No
 async def test_budget_guard_uses_only_cleanup_safe_trace_boundaries() -> None:
     async with (
         ApiClient(Configuration(host="http://127.0.0.1:1")) as api,
-        _bounded_session(api.rest_client.pool_manager) as session,
+        bounded_session(api.rest_client.pool_manager) as session,
     ):
         budget = session.trace_configs[0]
         assert len(budget.on_request_start) == 1
