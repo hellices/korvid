@@ -13,7 +13,7 @@ from korvid.k8s import client as client_module
 from korvid.k8s import discovery_snapshot
 from korvid.k8s.client import KubeClient
 
-DOCUMENTS: dict[str, Any] = {
+DOCUMENTS: dict[str, dict[str, Any]] = {
     "/api": {"versions": ["v1"]},
     "/api/v1": {
         "resources": [{"name": "pods", "kind": "Pod", "namespaced": True, "verbs": ["list"]}]

@@ -25,7 +25,7 @@ APPS_GROUP = {
     "preferredVersion": {"groupVersion": "apps/v1", "version": "v1"},
     "versions": [{"groupVersion": "apps/v1", "version": "v1"}],
 }
-DOCUMENTS: dict[str, Any] = {
+DOCUMENTS: dict[str, dict[str, Any]] = {
     "/api": {"versions": ["v1"]},
     "/api/v1": {
         "resources": [
@@ -44,7 +44,7 @@ DOCUMENTS: dict[str, Any] = {
 
 
 def _answering(
-    documents: dict[str, Any], failures: dict[str, Exception] | None = None
+    documents: dict[str, dict[str, Any]], failures: dict[str, Exception] | None = None
 ) -> Callable[[str], Awaitable[dict[str, Any]]]:
     async def request(path: str) -> dict[str, Any]:
         if failures is not None and path in failures:
@@ -55,7 +55,7 @@ def _answering(
 
 
 async def _fetch(
-    documents: dict[str, Any] = DOCUMENTS, failures: dict[str, Exception] | None = None
+    documents: dict[str, dict[str, Any]] = DOCUMENTS, failures: dict[str, Exception] | None = None
 ) -> RawDiscovery:
     request = _answering(documents, failures)
     return await fetch_discovery(request, generation=3, timeout=1.0, concurrency=4)
