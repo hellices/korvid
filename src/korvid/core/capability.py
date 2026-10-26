@@ -481,10 +481,11 @@ def downgrade_stale_status(observation: Observation, detail: str) -> Observation
     )
 
 
-#: When no required source contributed evidence, the baseline is the first of
-#: these states that one of them is in, so a failure is never summarized as a
-#: missing capability.
-_FAILURE_PRECEDENCE = (
+#: How failures are summarized: as the first of these states that one of them
+#: is in, so a failure is never summarized as a missing capability. The
+#: baseline summarizes its required sources this way, and API version
+#: resolution its candidates.
+FAILURE_PRECEDENCE = (
     EvidenceState.DENIED,
     EvidenceState.UNAVAILABLE,
     EvidenceState.UNKNOWN,
@@ -543,7 +544,7 @@ class EvidenceSet:
         states = {self._state(item.key) for item in required}
         if states & _CONTRIBUTED:
             return Baseline(EvidenceState.PARTIAL, blocking)
-        return Baseline(next(state for state in _FAILURE_PRECEDENCE if state in states), blocking)
+        return Baseline(next(state for state in FAILURE_PRECEDENCE if state in states), blocking)
 
     def by_scope(self, kind: ScopeKind) -> Mapping[EvidenceState, int]:
         """Count the states of the observations read at one kind of scope.
