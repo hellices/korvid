@@ -2,11 +2,29 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TypeVar
 
 _T = TypeVar("_T")
+
+_DNS1123_LABEL = "[a-z0-9](?:[-a-z0-9]*[a-z0-9])?"
+_DNS1123_SUBDOMAIN = re.compile(rf"{_DNS1123_LABEL}(?:\.{_DNS1123_LABEL})*")
+_DNS1123_SUBDOMAIN_MAX_LENGTH = 253
+
+
+def is_dns1123_subdomain(value: str) -> bool:
+    """Whether `value` is a DNS-1123 subdomain, as API group names and most
+    object names must be.
+
+    This is Kubernetes' own check (`IsDNS1123Subdomain`): dot-separated labels
+    of lowercase letters, digits and inner hyphens, 253 characters at most.
+    """
+    return (
+        len(value) <= _DNS1123_SUBDOMAIN_MAX_LENGTH
+        and _DNS1123_SUBDOMAIN.fullmatch(value) is not None
+    )
 
 
 @dataclass(frozen=True)

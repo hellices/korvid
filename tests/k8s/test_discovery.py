@@ -15,7 +15,7 @@ from aiohttp import ClientConnectionError, InvalidURL
 
 from korvid.k8s import errors as errors_mod
 from korvid.k8s.client import KubeClient
-from korvid.k8s.discovery import PODS_META, ResourceMeta, build_alias_map
+from korvid.k8s.discovery import PODS_META, ResourceMeta, build_alias_map, is_dns1123_subdomain
 from korvid.k8s.errors import ApiStatusError, KubeClientError
 
 
@@ -23,6 +23,33 @@ def test_api_base_core_and_group() -> None:
     assert PODS_META.api_base == "/api/v1"
     deploy = ResourceMeta("Deployment", "deployments", "apps", "v1", True, ("deploy",))
     assert deploy.api_base == "/apis/apps/v1"
+
+
+@pytest.mark.parametrize(
+    ("value", "valid"),
+    [
+        ("a", True),
+        ("0", True),
+        ("example.io", True),
+        ("a-b.c-d", True),
+        pytest.param("a" * 253, True, id="253-characters"),
+        pytest.param("a" * 254, False, id="254-characters"),
+        ("", False),
+        ("Apps", False),
+        ("a..b", False),
+        (".a", False),
+        ("a.", False),
+        ("-a", False),
+        ("a-", False),
+        ("a.-b", False),
+        ("a-.b", False),
+        ("a_b", False),
+        ("a,b", False),
+        pytest.param("a\n", False, id="trailing-newline"),
+    ],
+)
+def test_a_dns1123_subdomain_is_validated_as_kubernetes_does(value: str, valid: bool) -> None:
+    assert is_dns1123_subdomain(value) is valid
 
 
 def test_kube_client_error_is_a_k8s_layer_exception() -> None:
@@ -157,6 +184,7 @@ _APPS: dict[str, Any] = {
 async def test_discover_resources_filters_subresources_and_non_watchable() -> None:
     client = KubeClient()
     responses: dict[str, dict[str, Any]] = {
+        "/api": {"versions": ["v1"]},
         "/api/v1": _CORE,
         "/apis": _APIS,
         "/apis/apps/v1": _APPS,
@@ -192,6 +220,7 @@ async def test_discover_resources_keeps_list_only_kinds_as_unwatchable() -> None
         ]
     }
     responses: dict[str, dict[str, Any]] = {
+        "/api": {"versions": ["v1"]},
         "/api/v1": _CORE,
         "/apis": {
             "groups": [
@@ -267,6 +296,8 @@ async def test_discover_resources_skips_group_without_name() -> None:
     client = KubeClient()
 
     async def fake_request(path: str) -> dict[str, Any]:
+        if path == "/api":
+            return {"versions": ["v1"]}
         if path == "/api/v1":
             return _CORE
         if path == "/apis":

@@ -120,6 +120,8 @@ def _run_subprocess_probe(probe: str) -> None:
         "korvid.agent.outbound",
         "korvid.core.capability",
         "korvid.core.capability_classifier",
+        "korvid.core.api_versions",
+        "korvid.k8s.discovery_snapshot",
     ],
 )
 def test_base_import_does_not_require_optional_extras(module: str) -> None:

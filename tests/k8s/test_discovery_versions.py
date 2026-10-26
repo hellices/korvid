@@ -34,6 +34,7 @@ def _group(name: str, *versions: str, preferred: str = "v1") -> dict[str, Any]:
 async def test_discovery_keeps_kinds_from_non_preferred_versions() -> None:
     client = KubeClient()
     responses = {
+        "/api": {"versions": ["v1"]},
         "/api/v1": _resources("pods"),
         "/apis": {"groups": [_group("example.io", "v1beta1", "v1", "v1beta1")]},
         "/apis/example.io/v1": _resources("widgets"),
@@ -53,7 +54,7 @@ async def test_discovery_keeps_kinds_from_non_preferred_versions() -> None:
         ("widgets", "v1"),
         ("gadgets", "v1beta1"),
     ]
-    assert fetch.await_count == 4
+    assert fetch.await_count == 5
 
 
 @pytest.mark.parametrize("preferred", [None, {}, "broken", {"version": ""}])
@@ -62,6 +63,7 @@ async def test_valid_versions_survive_an_unusable_preferred_version(preferred: A
     group = _group("example.io", "v1beta1")
     group["preferredVersion"] = preferred
     responses = {
+        "/api": {"versions": ["v1"]},
         "/api/v1": _resources(),
         "/apis": {"groups": [group]},
         "/apis/example.io/v1beta1": _resources("gadgets"),
@@ -87,6 +89,7 @@ async def test_discovery_skips_malformed_and_duplicate_version_advertisements() 
         ]
     )
     responses = {
+        "/api": {"versions": ["v1"]},
         "/api/v1": _resources(),
         "/apis": {"groups": [None, "bad", _group("../bad", "v1"), group, group]},
         "/apis/example.io/v1": _resources("widgets"),
@@ -98,12 +101,13 @@ async def test_discovery_skips_malformed_and_duplicate_version_advertisements() 
         metas = await client.discover_resources()
 
     assert [meta.plural for meta in metas] == ["widgets", "gadgets"]
-    assert fetch.await_count == 4
+    assert fetch.await_count == 5
 
 
 async def test_a_broken_preferred_version_does_not_hide_other_versions() -> None:
     client = KubeClient()
     responses = {
+        "/api": {"versions": ["v1"]},
         "/api/v1": _resources("pods"),
         "/apis": {"groups": [_group("example.io", "v1", "v1beta1")]},
         "/apis/example.io/v1beta1": _resources("gadgets"),
@@ -130,6 +134,8 @@ async def test_discovery_bounds_concurrent_version_requests(
 
     async def request(path: str) -> dict[str, Any]:
         nonlocal active, peak
+        if path == "/api":
+            return {"versions": ["v1"]}
         if path == "/api/v1":
             return _resources()
         if path == "/apis":
@@ -155,6 +161,7 @@ async def test_a_stalled_version_times_out_without_losing_healthy_versions(
     client = KubeClient()
     cancelled = asyncio.Event()
     responses = {
+        "/api": {"versions": ["v1"]},
         "/api/v1": _resources("pods"),
         "/apis": {"groups": [_group("example.io", "v1", "v1beta1")]},
         "/apis/example.io/v1beta1": _resources("gadgets"),
@@ -180,6 +187,7 @@ async def test_a_stalled_version_times_out_without_losing_healthy_versions(
 async def test_an_unusable_version_document_does_not_break_discovery(broken_resources: Any) -> None:
     client = KubeClient()
     responses = {
+        "/api": {"versions": ["v1"]},
         "/api/v1": _resources("pods"),
         "/apis": {"groups": [_group("example.io", "v1", "v1beta1")]},
         "/apis/example.io/v1": {"resources": broken_resources},
@@ -203,6 +211,7 @@ async def test_malformed_short_names_do_not_break_discovery_or_aliases(
     version_resources = _resources("widgets", "gadgets")
     version_resources["resources"][0]["shortNames"] = short_names
     responses = {
+        "/api": {"versions": ["v1"]},
         "/api/v1": _resources("pods"),
         "/apis": {"groups": [_group("example.io", "v1")]},
         "/apis/example.io/v1": version_resources,
@@ -240,8 +249,7 @@ async def test_bootstrap_discovery_requests_have_a_deadline(
         await asyncio.wait_for(client.discover_resources(), timeout=1)
 
     assert cancelled.is_set()
-    assert fetch.await_args is not None
-    assert fetch.await_args.args == (stalled_path,)
+    assert (stalled_path,) in [call.args for call in fetch.await_args_list]
 
 
 async def test_oversized_json_integer_in_one_version_preserves_healthy_discovery(
@@ -250,6 +258,7 @@ async def test_oversized_json_integer_in_one_version_preserves_healthy_discovery
     responses = {
         path: json.dumps(document).encode()
         for path, document in {
+            "/api": {"versions": ["v1"]},
             "/api/v1": _resources("pods"),
             "/apis": {"groups": [_group("example.io", "v1", "v1beta1")]},
             "/apis/example.io/v1": _resources("widgets"),
@@ -279,7 +288,7 @@ async def test_oversized_json_integer_in_one_version_preserves_healthy_discovery
         sys.set_int_max_str_digits(original_limit)
 
     assert [(meta.plural, meta.version) for meta in metas] == [("pods", "v1"), ("widgets", "v1")]
-    assert transport.call_api.await_count == 4
+    assert transport.call_api.await_count == 5
     assert "API discovery skipped /apis/example.io/v1beta1" in caplog.text
     assert "malformed JSON" in caplog.text
     assert "1" * 641 not in caplog.text
