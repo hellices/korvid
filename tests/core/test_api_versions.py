@@ -33,6 +33,7 @@ from korvid.k8s.discovery_snapshot import (
     RawDiscovery,
     RootOutcome,
     ServedResource,
+    fetch_discovery,
 )
 from korvid.k8s.errors import ApiStatusError, KubeMalformedError, KubeTimeoutError
 
@@ -363,6 +364,64 @@ def test_an_unreadable_root_entry_blocks_every_named_negative_answer() -> None:
 
     assert _resolve(WIDGETS, snapshot).sources
     assert _failure(_resolve(GADGETS, snapshot)) == (
+        EvidenceState.UNAVAILABLE,
+        Basis.DISCOVERY_FAILED,
+    )
+
+
+EXAMPLE_GROUP = {
+    "name": "example.io",
+    "preferredVersion": {"groupVersion": "example.io/v1", "version": "v1"},
+    "versions": [{"groupVersion": "example.io/v1", "version": "v1"}],
+}
+WIDGET_ENTRY = {"name": "widgets", "kind": "Widget", "namespaced": True}
+#: Discovery a server answered in full: widgets are served, but cannot be listed.
+SERVED_DOCUMENTS: dict[str, dict[str, Any]] = {
+    "/api": {"versions": ["v1"]},
+    "/api/v1": {"resources": []},
+    "/apis": {"groups": [EXAMPLE_GROUP]},
+    "/apis/example.io/v1": {"resources": [{**WIDGET_ENTRY, "verbs": ["get"]}]},
+}
+
+
+async def _resolve_documents(changes: dict[str, dict[str, Any]]) -> tuple[EvidenceState, Basis]:
+    """Read discovery from `SERVED_DOCUMENTS` with `changes`, then resolve widgets."""
+    documents = {**SERVED_DOCUMENTS, **changes}
+
+    async def request(path: str) -> dict[str, Any]:
+        return documents[path]
+
+    raw = await fetch_discovery(request, generation=1, timeout=1.0, concurrency=2)
+    return _failure(_resolve(WIDGETS, observe_discovery(raw)))
+
+
+async def test_discovery_read_in_full_can_answer_unsupported() -> None:
+    assert await _resolve_documents({}) == (
+        EvidenceState.UNSUPPORTED,
+        Basis.OPERATION_UNSUPPORTED,
+    )
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        pytest.param({"/apis": {}}, id="no-group-list"),
+        pytest.param(
+            {"/apis": {"groups": [{**EXAMPLE_GROUP, "versions": None}]}}, id="no-version-list"
+        ),
+        pytest.param({"/apis/example.io/v1": {}}, id="no-resource-list"),
+        pytest.param({"/apis/example.io/v1": {"resources": None}}, id="null-resource-list"),
+        pytest.param({"/apis/example.io/v1": {"resources": [WIDGET_ENTRY]}}, id="no-verbs"),
+        pytest.param(
+            {"/apis/example.io/v1": {"resources": [{**WIDGET_ENTRY, "verbs": None}]}},
+            id="null-verbs",
+        ),
+    ],
+)
+async def test_discovery_not_read_in_full_never_answers_unsupported(
+    changes: dict[str, dict[str, Any]],
+) -> None:
+    assert await _resolve_documents(changes) == (
         EvidenceState.UNAVAILABLE,
         Basis.DISCOVERY_FAILED,
     )

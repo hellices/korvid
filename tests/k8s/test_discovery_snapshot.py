@@ -190,6 +190,13 @@ async def test_a_core_root_without_a_version_list_is_malformed() -> None:
     assert [meta.plural for meta in project_resources(raw)] == ["pods", "deployments"]
 
 
+async def test_a_group_root_without_a_group_list_is_incomplete() -> None:
+    raw = await _fetch({**DOCUMENTS, "/apis": {}})
+
+    assert raw.group_root == RootOutcome("/apis", complete=False)
+    assert [meta.plural for meta in project_resources(raw)] == ["pods"]
+
+
 @pytest.mark.parametrize(
     "entry",
     [
@@ -197,6 +204,7 @@ async def test_a_core_root_without_a_version_list_is_malformed() -> None:
         pytest.param({"kind": "Pod", "namespaced": True, "verbs": ["list"]}, id="no-name"),
         pytest.param({"name": "pods", "namespaced": True, "verbs": ["list"]}, id="no-kind"),
         pytest.param({"name": "pods", "kind": "Pod", "verbs": ["list"]}, id="no-scope"),
+        pytest.param({"name": "pods", "kind": "Pod", "namespaced": True}, id="no-verbs"),
         pytest.param(
             {"name": "pods", "kind": "Pod", "namespaced": True, "verbs": "list"}, id="verbs-text"
         ),
@@ -212,6 +220,23 @@ async def test_an_unreadable_resource_entry_makes_its_version_incomplete(entry: 
 
     assert not raw.group_versions[1].complete
     assert "deployments" in [meta.plural for meta in raw.group_versions[1].metas]
+
+
+@pytest.mark.parametrize(
+    ("path", "index", "projected"),
+    [
+        pytest.param("/api/v1", 0, ["deployments"], id="core"),
+        pytest.param("/apis/apps/v1", 1, ["pods"], id="named"),
+    ],
+)
+async def test_a_version_without_a_resource_list_is_incomplete(
+    path: str, index: int, projected: list[str]
+) -> None:
+    raw = await _fetch({**DOCUMENTS, path: {}})
+    outcome = raw.group_versions[index]
+
+    assert (outcome.resources, outcome.complete, outcome.error) == ((), False, None)
+    assert [meta.plural for meta in project_resources(raw)] == projected
 
 
 async def test_a_snapshot_expires_after_five_minutes(monkeypatch: pytest.MonkeyPatch) -> None:

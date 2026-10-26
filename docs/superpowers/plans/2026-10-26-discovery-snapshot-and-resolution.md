@@ -37,6 +37,7 @@
 - **`discover_resources()` always reads afresh, as it always has, and keeps the result as the session's snapshot.** Diagnostics call `discovery_snapshot()`, which reuses that snapshot for five minutes.
 - **Discovery now also requests `/api`, which the design's `core_root` needs.** The two roots and core `v1` are requested together, so a stalled server costs one deadline rather than three. Core `v1` is read whatever `/api` says.
 - **A root with any unreadable entry blocks every negative answer under it.** This applies to an unreadable group entry and to an unreadable version entry. korvid cannot always tell which group such an entry named, so it reports `UNAVAILABLE`/`DISCOVERY_FAILED` rather than "unsupported". An unusable `preferredVersion` only loses its place at the front, because the `versions` list says which versions exist.
+- **A document that leaves out a list it must carry is incomplete, not empty.** This covers `/apis` without `groups`, a group version without `resources`, and a resource entry without `verbs`. The API server always sends these fields, so only a non-conforming server or proxy omits them. The projection is unchanged: it reads the first two as empty and skips the third, as `discover_resources()` always has.
 - **A candidate carries no parser yet.** Nothing reads objects until S3 (#487), which attaches parsing where the reader returns them.
 - **Falling through after a read is S3's job.** The design falls through to the next candidate when a read is `DENIED` or `UNSUPPORTED`. `Resolution` exposes the resolved sources in order and the failure the baseline precedence picks, and S3's reader does the falling through.
 - **A blocked candidate keeps its discovery basis:** `DISCOVERY_FORBIDDEN`, `UNAUTHENTICATED`, `DISCOVERY_FAILED` or `THROTTLED`. A partly unreadable document blocks as `UNAVAILABLE`/`DISCOVERY_FAILED`.
@@ -77,7 +78,7 @@
   - `monotonic() -> float`;
   - `RootOutcome(path, advertised=(), complete=True, error=None)`, with `versions(group)`;
   - `ServedResource(name, verbs)`;
-  - `GroupVersionOutcome(group, version, resources=(), metas=(), complete=True, error=None)`, with `.path`;
+  - `GroupVersionOutcome(group, version, resources=(), metas=(), complete=True, error=None)`;
   - `RawDiscovery(generation, fetched_at, started, core_root, group_root, group_versions)`, with `expired()`;
   - `async fetch_discovery(request_json, *, generation, timeout, concurrency) -> RawDiscovery`;
   - `project_resources(snapshot) -> list[ResourceMeta]`.
@@ -279,6 +280,13 @@ async def test_a_core_root_without_a_version_list_is_malformed() -> None:
     assert [meta.plural for meta in project_resources(raw)] == ["pods", "deployments"]
 
 
+async def test_a_group_root_without_a_group_list_is_incomplete() -> None:
+    raw = await _fetch({**DOCUMENTS, "/apis": {}})
+
+    assert raw.group_root == RootOutcome("/apis", complete=False)
+    assert [meta.plural for meta in project_resources(raw)] == ["pods"]
+
+
 @pytest.mark.parametrize(
     "entry",
     [
@@ -286,6 +294,7 @@ async def test_a_core_root_without_a_version_list_is_malformed() -> None:
         pytest.param({"kind": "Pod", "namespaced": True, "verbs": ["list"]}, id="no-name"),
         pytest.param({"name": "pods", "namespaced": True, "verbs": ["list"]}, id="no-kind"),
         pytest.param({"name": "pods", "kind": "Pod", "verbs": ["list"]}, id="no-scope"),
+        pytest.param({"name": "pods", "kind": "Pod", "namespaced": True}, id="no-verbs"),
         pytest.param(
             {"name": "pods", "kind": "Pod", "namespaced": True, "verbs": "list"}, id="verbs-text"
         ),
@@ -301,6 +310,23 @@ async def test_an_unreadable_resource_entry_makes_its_version_incomplete(entry: 
 
     assert not raw.group_versions[1].complete
     assert "deployments" in [meta.plural for meta in raw.group_versions[1].metas]
+
+
+@pytest.mark.parametrize(
+    ("path", "index", "projected"),
+    [
+        pytest.param("/api/v1", 0, ["deployments"], id="core"),
+        pytest.param("/apis/apps/v1", 1, ["pods"], id="named"),
+    ],
+)
+async def test_a_version_without_a_resource_list_is_incomplete(
+    path: str, index: int, projected: list[str]
+) -> None:
+    raw = await _fetch({**DOCUMENTS, path: {}})
+    outcome = raw.group_versions[index]
+
+    assert (outcome.resources, outcome.complete, outcome.error) == ((), False, None)
+    assert [meta.plural for meta in project_resources(raw)] == projected
 
 
 async def test_a_snapshot_expires_after_five_minutes(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -346,6 +372,7 @@ Create `src/korvid/k8s/discovery_snapshot.py`:
 advertise, and keeps each request's outcome: what it served, or the error it
 raised. An entry that cannot be read marks its document incomplete, because it
 might have named anything; it never makes a group, version or resource absent.
+So does a document that leaves out the list it must carry.
 The snapshot knows nothing of evidence states: `korvid.core.api_versions`
 turns it into observations. `project_resources` is what
 `KubeClient.discover_resources()` returns.
@@ -391,7 +418,7 @@ class RootOutcome:
 
     `advertised` lists `(group, version)` pairs in advertisement order, each
     group's preferred version first; the core group is `""`. `complete` is
-    false when an entry could not be read.
+    false when an entry could not be read, or `/apis` had no group list.
     """
 
     path: str
@@ -420,7 +447,8 @@ class GroupVersionOutcome:
     """What one group version served, or the error reading it raised.
 
     `metas` are the kinds `discover_resources()` reports from it. `complete`
-    is false when a resource entry could not be read.
+    is false when a resource entry could not be read, or the document had no
+    resource list.
     """
 
     group: str
@@ -523,14 +551,14 @@ async def _read_group_version(
 ) -> GroupVersionOutcome:
     path = _group_version_path(group, version)
     try:
-        entries = _resource_entries(await _request(request_json, path, timeout))
+        entries, listed = _resource_entries(await _request(request_json, path, timeout))
     except (ApiStatusError, KubeClientError) as error:
         if group:
             logger.warning("API discovery skipped %s: %s", path, error)
         return GroupVersionOutcome(group, version, error=error)
-    resources, complete = _served_resources(entries)
+    resources, readable = _served_resources(entries)
     metas = _parse_resource_list(entries, group=group, version=version)
-    return GroupVersionOutcome(group, version, resources, tuple(metas), complete)
+    return GroupVersionOutcome(group, version, resources, tuple(metas), listed and readable)
 
 
 async def _read_group_versions(
@@ -569,7 +597,9 @@ def _named_group_versions(document: Mapping[str, Any]) -> tuple[_Advertised, boo
     if not isinstance(groups, list):
         raise KubeMalformedError("Kubernetes API discovery returned an invalid group list")
     pairs: list[tuple[str, str]] = []
-    complete = True
+    # Without its group list, `/apis` reads as empty, as discovery always has,
+    # but it cannot show that a group is absent.
+    complete = "groups" in document
     for group in groups:
         versions, readable = _group_versions(group)
         pairs.extend(versions)
@@ -611,11 +641,16 @@ def _discovery_version(name: str, candidate: Any) -> str | None:
     return version
 
 
-def _resource_entries(document: Mapping[str, Any]) -> list[Any]:
+def _resource_entries(document: Mapping[str, Any]) -> tuple[list[Any], bool]:
+    """A group version's resource entries, and whether the document listed them.
+
+    A document without its resource list reads as empty, as discovery always
+    has, but it cannot show that a resource is absent.
+    """
     entries = document.get("resources", [])
     if not isinstance(entries, list):
         raise KubeMalformedError("Kubernetes API discovery returned an invalid resource list")
-    return entries
+    return entries, "resources" in document
 
 
 def _served_resources(entries: list[Any]) -> tuple[tuple[ServedResource, ...], bool]:
@@ -628,7 +663,7 @@ def _served_resources(entries: list[Any]) -> tuple[tuple[ServedResource, ...], b
 def _served_resource(entry: Any) -> ServedResource | None:
     if not isinstance(entry, Mapping):
         return None
-    name, verbs = entry.get("name"), entry.get("verbs", [])
+    name, verbs = entry.get("name"), entry.get("verbs")
     if not isinstance(name, str) or not name or not isinstance(entry.get("kind"), str):
         return None
     if entry.get("namespaced") is None or not isinstance(verbs, list):
@@ -1025,6 +1060,7 @@ from korvid.k8s.discovery_snapshot import (
     RawDiscovery,
     RootOutcome,
     ServedResource,
+    fetch_discovery,
 )
 from korvid.k8s.errors import ApiStatusError, KubeMalformedError, KubeTimeoutError
 
@@ -1355,6 +1391,64 @@ def test_an_unreadable_root_entry_blocks_every_named_negative_answer() -> None:
 
     assert _resolve(WIDGETS, snapshot).sources
     assert _failure(_resolve(GADGETS, snapshot)) == (
+        EvidenceState.UNAVAILABLE,
+        Basis.DISCOVERY_FAILED,
+    )
+
+
+EXAMPLE_GROUP = {
+    "name": "example.io",
+    "preferredVersion": {"groupVersion": "example.io/v1", "version": "v1"},
+    "versions": [{"groupVersion": "example.io/v1", "version": "v1"}],
+}
+WIDGET_ENTRY = {"name": "widgets", "kind": "Widget", "namespaced": True}
+#: Discovery a server answered in full: widgets are served, but cannot be listed.
+SERVED_DOCUMENTS: dict[str, dict[str, Any]] = {
+    "/api": {"versions": ["v1"]},
+    "/api/v1": {"resources": []},
+    "/apis": {"groups": [EXAMPLE_GROUP]},
+    "/apis/example.io/v1": {"resources": [{**WIDGET_ENTRY, "verbs": ["get"]}]},
+}
+
+
+async def _resolve_documents(changes: dict[str, dict[str, Any]]) -> tuple[EvidenceState, Basis]:
+    """Read discovery from `SERVED_DOCUMENTS` with `changes`, then resolve widgets."""
+    documents = {**SERVED_DOCUMENTS, **changes}
+
+    async def request(path: str) -> dict[str, Any]:
+        return documents[path]
+
+    raw = await fetch_discovery(request, generation=1, timeout=1.0, concurrency=2)
+    return _failure(_resolve(WIDGETS, observe_discovery(raw)))
+
+
+async def test_discovery_read_in_full_can_answer_unsupported() -> None:
+    assert await _resolve_documents({}) == (
+        EvidenceState.UNSUPPORTED,
+        Basis.OPERATION_UNSUPPORTED,
+    )
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        pytest.param({"/apis": {}}, id="no-group-list"),
+        pytest.param(
+            {"/apis": {"groups": [{**EXAMPLE_GROUP, "versions": None}]}}, id="no-version-list"
+        ),
+        pytest.param({"/apis/example.io/v1": {}}, id="no-resource-list"),
+        pytest.param({"/apis/example.io/v1": {"resources": None}}, id="null-resource-list"),
+        pytest.param({"/apis/example.io/v1": {"resources": [WIDGET_ENTRY]}}, id="no-verbs"),
+        pytest.param(
+            {"/apis/example.io/v1": {"resources": [{**WIDGET_ENTRY, "verbs": None}]}},
+            id="null-verbs",
+        ),
+    ],
+)
+async def test_discovery_not_read_in_full_never_answers_unsupported(
+    changes: dict[str, dict[str, Any]],
+) -> None:
+    assert await _resolve_documents(changes) == (
         EvidenceState.UNAVAILABLE,
         Basis.DISCOVERY_FAILED,
     )

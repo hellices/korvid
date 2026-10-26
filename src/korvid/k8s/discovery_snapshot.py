@@ -4,6 +4,7 @@
 advertise, and keeps each request's outcome: what it served, or the error it
 raised. An entry that cannot be read marks its document incomplete, because it
 might have named anything; it never makes a group, version or resource absent.
+So does a document that leaves out the list it must carry.
 The snapshot knows nothing of evidence states: `korvid.core.api_versions`
 turns it into observations. `project_resources` is what
 `KubeClient.discover_resources()` returns.
@@ -49,7 +50,7 @@ class RootOutcome:
 
     `advertised` lists `(group, version)` pairs in advertisement order, each
     group's preferred version first; the core group is `""`. `complete` is
-    false when an entry could not be read.
+    false when an entry could not be read, or `/apis` had no group list.
     """
 
     path: str
@@ -78,7 +79,8 @@ class GroupVersionOutcome:
     """What one group version served, or the error reading it raised.
 
     `metas` are the kinds `discover_resources()` reports from it. `complete`
-    is false when a resource entry could not be read.
+    is false when a resource entry could not be read, or the document had no
+    resource list.
     """
 
     group: str
@@ -181,14 +183,14 @@ async def _read_group_version(
 ) -> GroupVersionOutcome:
     path = _group_version_path(group, version)
     try:
-        entries = _resource_entries(await _request(request_json, path, timeout))
+        entries, listed = _resource_entries(await _request(request_json, path, timeout))
     except (ApiStatusError, KubeClientError) as error:
         if group:
             logger.warning("API discovery skipped %s: %s", path, error)
         return GroupVersionOutcome(group, version, error=error)
-    resources, complete = _served_resources(entries)
+    resources, readable = _served_resources(entries)
     metas = _parse_resource_list(entries, group=group, version=version)
-    return GroupVersionOutcome(group, version, resources, tuple(metas), complete)
+    return GroupVersionOutcome(group, version, resources, tuple(metas), listed and readable)
 
 
 async def _read_group_versions(
@@ -227,7 +229,9 @@ def _named_group_versions(document: Mapping[str, Any]) -> tuple[_Advertised, boo
     if not isinstance(groups, list):
         raise KubeMalformedError("Kubernetes API discovery returned an invalid group list")
     pairs: list[tuple[str, str]] = []
-    complete = True
+    # Without its group list, `/apis` reads as empty, as discovery always has,
+    # but it cannot show that a group is absent.
+    complete = "groups" in document
     for group in groups:
         versions, readable = _group_versions(group)
         pairs.extend(versions)
@@ -269,11 +273,16 @@ def _discovery_version(name: str, candidate: Any) -> str | None:
     return version
 
 
-def _resource_entries(document: Mapping[str, Any]) -> list[Any]:
+def _resource_entries(document: Mapping[str, Any]) -> tuple[list[Any], bool]:
+    """A group version's resource entries, and whether the document listed them.
+
+    A document without its resource list reads as empty, as discovery always
+    has, but it cannot show that a resource is absent.
+    """
     entries = document.get("resources", [])
     if not isinstance(entries, list):
         raise KubeMalformedError("Kubernetes API discovery returned an invalid resource list")
-    return entries
+    return entries, "resources" in document
 
 
 def _served_resources(entries: list[Any]) -> tuple[tuple[ServedResource, ...], bool]:
@@ -286,7 +295,7 @@ def _served_resources(entries: list[Any]) -> tuple[tuple[ServedResource, ...], b
 def _served_resource(entry: Any) -> ServedResource | None:
     if not isinstance(entry, Mapping):
         return None
-    name, verbs = entry.get("name"), entry.get("verbs", [])
+    name, verbs = entry.get("name"), entry.get("verbs")
     if not isinstance(name, str) or not name or not isinstance(entry.get("kind"), str):
         return None
     if entry.get("namespaced") is None or not isinstance(verbs, list):
