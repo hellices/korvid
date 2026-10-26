@@ -26,7 +26,8 @@ from korvid.k8s.columns import CustomColumn, evaluate_all
 from korvid.k8s.components import ComponentRef, manifest_components
 from korvid.k8s.csp import ProviderInfo, detect_provider
 from korvid.k8s.deployment_outcomes import iter_raw_object_pages, list_raw_object_page
-from korvid.k8s.discovery import PODS_META, ResourceMeta
+from korvid.k8s.discovery import DNS1123_SUBDOMAIN, PODS_META, ResourceMeta
+from korvid.k8s.discovery_snapshot import RawDiscovery, fetch_discovery, project_resources
 from korvid.k8s.drain import DrainPlan, build_drain_plan
 from korvid.k8s.dryrun import diff_manifests
 from korvid.k8s.errors import (
@@ -72,8 +73,6 @@ LIST_PAGE_SIZE = 100
 _DISCOVERY_CONCURRENCY = 8
 _DISCOVERY_TIMEOUT_SECONDS = 10.0
 
-_DNS1123_NAME = re.compile(r"^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$")
-_API_VERSION_NAME = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
 _UID_RE = re.compile(r"^[a-fA-F0-9-]+$")
 
 
@@ -228,6 +227,11 @@ class KubeClient(ReadOps, WriteOps, pulse.PulseReader):
         #: cloud provider detection result; None until the first lookup.
         self._provider_info: ProviderInfo | None = None
         self._read_telemetry = read_telemetry
+        #: Changes on every connect and context switch: anything read under an
+        #: older generation describes another session (#409).
+        self._session_generation = 0
+        self._discovery: RawDiscovery | None = None
+        self._discovery_lock = asyncio.Lock()
 
     def connected_api_server(self) -> str | None:
         """Return the active API server without rereading kubeconfig."""
@@ -314,10 +318,7 @@ class KubeClient(ReadOps, WriteOps, pulse.PulseReader):
         k8s_client.Configuration.set_default(configuration)
         self._api = k8s_client.ApiClient(configuration)
         self._core_v1 = k8s_client.CoreV1Api(self._api)
-        # A new connection may target a different cluster; discard any
-        # capability discovered against the previous one.
-        self._pod_resize_supported = None
-        self._provider_info = None
+        self._new_session()
 
     async def probe_context(self, context: str) -> None:
         """Validate that *context* resolves and authenticates (issue #36).
@@ -387,11 +388,22 @@ class KubeClient(ReadOps, WriteOps, pulse.PulseReader):
         k8s_client.Configuration.set_default(configuration)
         self._api = k8s_client.ApiClient(configuration)
         self._core_v1 = k8s_client.CoreV1Api(self._api)
-        # Per-connection caches describe the previous cluster.
-        self._pod_resize_supported = None
-        self._provider_info = None
+        self._new_session()
         if old_api is not None:
             await old_api.close()
+
+    def _new_session(self) -> None:
+        """Start a session generation: the connection may now reach another
+        cluster or principal, so nothing read for the last one carries over."""
+        self._session_generation += 1
+        self._pod_resize_supported = None
+        self._provider_info = None
+        self._discovery = None
+
+    @property
+    def session_generation(self) -> int:
+        """An opaque counter that changes on every connect and context switch."""
+        return self._session_generation
 
     async def list_namespaces(self) -> list[str]:
         if self._core_v1 is None:
@@ -1599,7 +1611,7 @@ class KubeClient(ReadOps, WriteOps, pulse.PulseReader):
             raise RuntimeError("connect() first")
         # fieldSelector has no escaping mechanism; a name with "," would
         # inject extra selectors. Valid k8s names can't fail this check.
-        if not _DNS1123_NAME.match(name):
+        if not DNS1123_SUBDOMAIN.match(name):
             return []
         selector = f"involvedObject.name={name}"
         if kind and kind.isalnum():
@@ -1736,15 +1748,6 @@ class KubeClient(ReadOps, WriteOps, pulse.PulseReader):
             )
         )
 
-    async def _request_discovery_json(self, path: str) -> dict[str, Any]:
-        try:
-            async with asyncio.timeout(_DISCOVERY_TIMEOUT_SECONDS):
-                return await self._request_json(path)
-        except TimeoutError:
-            raise KubeTimeoutError(
-                "Kubernetes API discovery timed out; check cluster connectivity and retry"
-            ) from None
-
     async def discover_resources(self) -> list[ResourceMeta]:
         """Return every LIST-able resource from /api/v1 and /apis.
 
@@ -1754,42 +1757,38 @@ class KubeClient(ReadOps, WriteOps, pulse.PulseReader):
 
         Every served version is fetched by a bounded worker pool. Preferred
         versions win per resource identity, regardless of response order.
+        Discovery is always read afresh and kept as the session's snapshot.
         """
-        metas: list[ResourceMeta] = []
-        core = await self._request_discovery_json("/api/v1")
-        metas += _parse_resource_list(core, group="", version="v1")
-        groups = await self._request_discovery_json("/apis")
-        advertised = groups.get("groups", [])
-        if not isinstance(advertised, list):
-            raise KubeMalformedError("Kubernetes API discovery returned an invalid group list")
-        versions = list(
-            dict.fromkeys(version for group in advertised for version in _group_versions(group))
+        snapshot = self._discovery = await self._fetch_discovery()
+        return project_resources(snapshot)
+
+    async def discovery_snapshot(self) -> RawDiscovery:
+        """This session's raw discovery, read again once it is five minutes old."""
+        async with self._discovery_lock:
+            snapshot = self._current_discovery()
+            if snapshot is None:
+                snapshot = self._discovery = await self._fetch_discovery()
+            return snapshot
+
+    def invalidate_discovery(self) -> None:
+        """Read discovery again next time: an explicit refresh, or a read that
+        found discovery stale."""
+        self._discovery = None
+
+    async def _fetch_discovery(self) -> RawDiscovery:
+        return await fetch_discovery(
+            self._request_json,
+            generation=self._session_generation,
+            timeout=_DISCOVERY_TIMEOUT_SECONDS,
+            concurrency=_DISCOVERY_CONCURRENCY,
         )
-        results: list[list[ResourceMeta]] = [[] for _ in versions]
-        jobs = iter(enumerate(versions))
 
-        async def _fetch(name: str, version: str) -> list[ResourceMeta]:
-            path = f"/apis/{name}/{version}"
-            try:
-                resource_list = await self._request_discovery_json(path)
-                return _parse_resource_list(resource_list, group=name, version=version)
-            except (ApiStatusError, KubeClientError) as exc:
-                logger.warning("API discovery skipped %s: %s", path, exc)
-                return []
-
-        async def _worker() -> None:
-            for index, (name, version) in jobs:
-                results[index] = await _fetch(name, version)
-
-        await asyncio.gather(
-            *(_worker() for _ in range(min(_DISCOVERY_CONCURRENCY, len(versions))))
-        )
-        for group_metas in results:
-            metas += group_metas
-        unique: dict[tuple[str, str, bool], ResourceMeta] = {}
-        for meta in metas:
-            unique.setdefault(meta.identity, meta)
-        return list(unique.values())
+    def _current_discovery(self) -> RawDiscovery | None:
+        # A snapshot read across a session change describes the old session.
+        snapshot = self._discovery
+        if snapshot is None or snapshot.generation != self._session_generation:
+            return None
+        return None if snapshot.expired() else snapshot
 
     async def close(self) -> None:
         if self._api is not None:
@@ -1875,70 +1874,3 @@ def _raise_for_status(resp: Any, body: bytes) -> None:
             str(getattr(resp, "reason", "") or ""),
             body=body.decode("utf-8", errors="replace"),
         )
-
-
-def _discovery_version(name: str, candidate: Any) -> str | None:
-    if not isinstance(candidate, Mapping):
-        return None
-    version = candidate.get("version")
-    if not isinstance(version, str) or not _API_VERSION_NAME.fullmatch(version):
-        return None
-    expected = f"{name}/{version}"
-    if candidate.get("groupVersion", expected) != expected:
-        return None
-    return version
-
-
-def _group_versions(group: Any) -> list[tuple[str, str]]:
-    if not isinstance(group, Mapping):
-        return []
-    name = group.get("name")
-    if not isinstance(name, str) or not _DNS1123_NAME.fullmatch(name):
-        return []
-    candidates = [group.get("preferredVersion")]
-    advertised = group.get("versions")
-    if isinstance(advertised, list):
-        candidates.extend(advertised)
-    return [
-        (name, version)
-        for candidate in candidates
-        if (version := _discovery_version(name, candidate)) is not None
-    ]
-
-
-def _resource_short_names(value: Any) -> tuple[str, ...]:
-    if not isinstance(value, list):
-        return ()
-    return tuple(alias for alias in value if isinstance(alias, str) and alias)
-
-
-def _parse_resource_list(data: dict[str, Any], *, group: str, version: str) -> list[ResourceMeta]:
-    out = []
-    resources = data.get("resources", [])
-    if not isinstance(resources, list):
-        raise KubeMalformedError("Kubernetes API discovery returned an invalid resource list")
-    for resource in resources:
-        if not isinstance(resource, Mapping):
-            continue
-        name = resource.get("name")
-        kind = resource.get("kind")
-        namespaced = resource.get("namespaced")
-        verbs = resource.get("verbs", [])
-        if not isinstance(name, str) or not isinstance(kind, str) or namespaced is None:
-            continue  # malformed entry must not kill discovery
-        if "/" in name or not isinstance(verbs, list) or "list" not in verbs:
-            continue
-        out.append(
-            ResourceMeta(
-                kind,
-                name,
-                group,
-                version,
-                bool(namespaced),
-                _resource_short_names(resource.get("shortNames")),
-                # list-only aggregated APIs (OLM's packageserver) stay
-                # discoverable; the watch source polls them (issue #141).
-                watchable="watch" in verbs,
-            )
-        )
-    return out

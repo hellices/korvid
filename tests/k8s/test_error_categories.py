@@ -105,12 +105,22 @@ async def test_a_discovery_timeout_is_a_timeout() -> None:
     ("documents", "message"),
     [
         pytest.param(
-            {"/api/v1": {"resources": []}, "/apis": {"groups": "invalid"}},
+            {
+                "/api": {"versions": ["v1"]},
+                "/api/v1": {"resources": []},
+                "/apis": {"groups": "invalid"},
+            },
             "invalid group list",
             id="group-list",
         ),
         pytest.param(
-            {"/api/v1": {"resources": "invalid"}}, "invalid resource list", id="resource-list"
+            {
+                "/api": {"versions": ["v1"]},
+                "/api/v1": {"resources": "invalid"},
+                "/apis": {"groups": []},
+            },
+            "invalid resource list",
+            id="resource-list",
         ),
     ],
 )

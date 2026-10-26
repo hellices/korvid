@@ -157,6 +157,7 @@ _APPS: dict[str, Any] = {
 async def test_discover_resources_filters_subresources_and_non_watchable() -> None:
     client = KubeClient()
     responses: dict[str, dict[str, Any]] = {
+        "/api": {"versions": ["v1"]},
         "/api/v1": _CORE,
         "/apis": _APIS,
         "/apis/apps/v1": _APPS,
@@ -192,6 +193,7 @@ async def test_discover_resources_keeps_list_only_kinds_as_unwatchable() -> None
         ]
     }
     responses: dict[str, dict[str, Any]] = {
+        "/api": {"versions": ["v1"]},
         "/api/v1": _CORE,
         "/apis": {
             "groups": [
@@ -267,6 +269,8 @@ async def test_discover_resources_skips_group_without_name() -> None:
     client = KubeClient()
 
     async def fake_request(path: str) -> dict[str, Any]:
+        if path == "/api":
+            return {"versions": ["v1"]}
         if path == "/api/v1":
             return _CORE
         if path == "/apis":
