@@ -14,11 +14,10 @@ from korvid.k8s import client as client_module
 from korvid.k8s import discovery_snapshot
 from korvid.k8s.client import KubeClient
 
+POD_RESOURCES = [{"name": "pods", "kind": "Pod", "namespaced": True, "verbs": ["list"]}]
 DOCUMENTS: dict[str, dict[str, Any]] = {
     "/api": {"versions": ["v1"]},
-    "/api/v1": {
-        "resources": [{"name": "pods", "kind": "Pod", "namespaced": True, "verbs": ["list"]}]
-    },
+    "/api/v1": {"resources": POD_RESOURCES},
     "/apis": {"groups": []},
 }
 
@@ -129,14 +128,25 @@ async def test_a_snapshot_read_across_a_session_change_is_not_kept() -> None:
 
 async def test_discover_resources_reads_afresh_and_keeps_the_snapshot() -> None:
     client = KubeClient()
+    configmaps = {"name": "configmaps", "kind": "ConfigMap", "namespaced": True, "verbs": ["list"]}
+    refreshed = {**DOCUMENTS, "/api/v1": {"resources": [*POD_RESOURCES, configmaps]}}
+
+    async def answer_refreshed(path: str) -> dict[str, Any]:
+        return refreshed[path]
+
     with patch.object(client, "_request_json", AsyncMock(side_effect=_answer)) as fetch:
-        await client.discovery_snapshot()
+        first = await client.discovery_snapshot()
+        fetch.side_effect = answer_refreshed
         metas = await client.discover_resources()
         snapshot = await client.discovery_snapshot()
 
-    assert [meta.plural for meta in metas] == ["pods"]
+    assert [meta.plural for meta in metas] == ["pods", "configmaps"]
     assert fetch.await_count == 6
-    assert snapshot.generation == client.session_generation
+    assert snapshot is not first
+    assert [resource.name for resource in snapshot.group_versions[0].resources] == [
+        "pods",
+        "configmaps",
+    ]
 
 
 async def test_a_snapshot_waits_for_discovery_under_way_and_shares_it() -> None:

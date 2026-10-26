@@ -26,7 +26,7 @@ from korvid.k8s.columns import CustomColumn, evaluate_all
 from korvid.k8s.components import ComponentRef, manifest_components
 from korvid.k8s.csp import ProviderInfo, detect_provider
 from korvid.k8s.deployment_outcomes import iter_raw_object_pages, list_raw_object_page
-from korvid.k8s.discovery import DNS1123_SUBDOMAIN, PODS_META, ResourceMeta
+from korvid.k8s.discovery import PODS_META, ResourceMeta, is_dns1123_subdomain
 from korvid.k8s.discovery_snapshot import RawDiscovery, fetch_discovery, project_resources
 from korvid.k8s.drain import DrainPlan, build_drain_plan
 from korvid.k8s.dryrun import diff_manifests
@@ -1614,7 +1614,7 @@ class KubeClient(ReadOps, WriteOps, pulse.PulseReader):
             raise RuntimeError("connect() first")
         # fieldSelector has no escaping mechanism; a name with "," would
         # inject extra selectors. Valid k8s names can't fail this check.
-        if not DNS1123_SUBDOMAIN.match(name):
+        if not is_dns1123_subdomain(name):
             return []
         selector = f"involvedObject.name={name}"
         if kind and kind.isalnum():
@@ -1771,6 +1771,9 @@ class KubeClient(ReadOps, WriteOps, pulse.PulseReader):
         """This session's raw discovery, read again once it is five minutes old.
 
         One read runs at a time, so a call made during a read waits for it.
+        The snapshot carries the generation it was read under. A read that an
+        invalidation or a session change overtakes still goes to its caller,
+        but it is never kept, so the next call reads again.
         """
         async with self._discovery_lock:
             snapshot = self._discovery

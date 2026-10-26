@@ -158,7 +158,12 @@ class Candidate:
 
 @dataclass(frozen=True, slots=True)
 class LogicalSource:
-    """One kind of evidence, read from the first of its candidates that serves it."""
+    """One kind of evidence, and the candidates that can supply it, in order.
+
+    The first candidate that resolves is read. The next is tried only when
+    that read is denied or unsupported: RBAC can allow one API and deny
+    another that serves the same evidence.
+    """
 
     key: str
     candidates: tuple[Candidate, ...]
@@ -209,7 +214,11 @@ class Resolution:
 
     @property
     def sources(self) -> tuple[ApiSource, ...]:
-        """The resolved sources, in the order to read them."""
+        """The resolved sources, in candidate order.
+
+        Read the first. Each later one is a fallback, read only when the read
+        before it is `DENIED` or `UNSUPPORTED` (#487).
+        """
         return tuple(outcome.source for outcome in self.outcomes if outcome.observation is None)
 
     @property

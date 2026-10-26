@@ -33,10 +33,12 @@
 
 ## Departures from the design
 
-- **Discovery moves to `k8s/discovery_snapshot.py`.** `client.py` keeps thin methods. Its line cap leaves no room otherwise, and the parsing belongs with the snapshot. The DNS-1123 name pattern moves to `k8s/discovery.py` so that both modules share it.
+- **Discovery moves to `k8s/discovery_snapshot.py`.** `client.py` keeps thin methods. Its line cap leaves no room otherwise, and the parsing belongs with the snapshot. The DNS-1123 check moves to `k8s/discovery.py` as `is_dns1123_subdomain`, so that both modules share it. It is now Kubernetes' own `IsDNS1123Subdomain`. The pattern it replaces accepted `a..b` and `a.-b`, and had no length limit.
 - **`discover_resources()` always reads afresh, as it always has, and keeps the result as the session's snapshot.** Diagnostics call `discovery_snapshot()`, which reuses that snapshot for five minutes.
 - **Discovery now also requests `/api`, which the design's `core_root` needs.** The two roots and core `v1` are requested together, so a stalled server costs one deadline rather than three. Core `v1` is read whatever `/api` says.
-- **A root with any unreadable entry blocks every negative answer under it.** This applies to an unreadable group entry and to an unreadable version entry. korvid cannot always tell which group such an entry named, so it reports `UNAVAILABLE`/`DISCOVERY_FAILED` rather than "unsupported". An unusable `preferredVersion` only loses its place at the front, because the `versions` list says which versions exist.
+- **A root with any unreadable entry blocks every negative answer under it.** This applies to an unreadable group entry and to an unreadable version entry. korvid cannot always tell which group such an entry named, so it reports `UNAVAILABLE`/`DISCOVERY_FAILED` rather than "unsupported". An unusable `preferredVersion` only loses its place at the front.
+- **A `versions` list read in full says which versions exist.** A `preferredVersion` that such a list does not name is never read. client-go also reads only the listed versions. Without a readable list, the preferred version is still read, as `discover_resources()` always has, and the root is incomplete.
+- **A resource's `namespaced` must be a boolean.** Any other value makes the entry unreadable. The projection skips it rather than reading `"false"` as namespaced.
 - **A document that leaves out a list it must carry is incomplete, not empty.** This covers `/apis` without `groups`, a group version without `resources`, and a resource entry without `verbs`. The API server always sends these fields, so only a non-conforming server or proxy omits them. The projection is unchanged: it reads the first two as empty and skips the third, as `discover_resources()` always has.
 - **A candidate carries no parser yet.** Nothing reads objects until S3 (#487), which attaches parsing where the reader returns them.
 - **Falling through after a read is S3's job.** The design falls through to the next candidate when a read is `DENIED` or `UNSUPPORTED`. `Resolution` exposes the resolved sources in order and the failure the baseline precedence picks, and S3's reader does the falling through.
@@ -50,7 +52,7 @@
 
 | File | Change | Responsibility |
 | --- | --- | --- |
-| `src/korvid/k8s/discovery.py` | modify | `DNS1123_SUBDOMAIN`, shared by discovery and the event field selector |
+| `src/korvid/k8s/discovery.py` | modify | `is_dns1123_subdomain`, shared by discovery and the event field selector |
 | `src/korvid/k8s/discovery_snapshot.py` | create | the raw snapshot: fetching, parsing, completeness, expiry, projection |
 | `src/korvid/k8s/client.py` | modify | session generation, the cached snapshot, a thin `discover_resources()` |
 | `src/korvid/core/capability.py` | modify | `FAILURE_PRECEDENCE` made public |
@@ -71,7 +73,7 @@
 - Test: `tests/k8s/test_discovery_snapshot.py`
 
 **Interfaces:**
-- Produces in `korvid.k8s.discovery`: `DNS1123_SUBDOMAIN: re.Pattern[str]`.
+- Produces in `korvid.k8s.discovery`: `is_dns1123_subdomain(value: str) -> bool`.
 - Produces in `korvid.k8s.discovery_snapshot`:
   - `DISCOVERY_TTL_SECONDS = 300.0` and `CORE_VERSION = "v1"`;
   - `DiscoveryFailure = ApiStatusError | KubeClientError`;
@@ -115,6 +117,7 @@ APPS_GROUP = {
     "preferredVersion": {"groupVersion": "apps/v1", "version": "v1"},
     "versions": [{"groupVersion": "apps/v1", "version": "v1"}],
 }
+APPS_V1BETA1 = {"groupVersion": "apps/v1beta1", "version": "v1beta1"}
 DOCUMENTS: dict[str, dict[str, Any]] = {
     "/api": {"versions": ["v1"]},
     "/api/v1": {
@@ -152,14 +155,18 @@ async def _fetch(
 
 
 async def test_both_roots_and_every_advertised_version_are_kept() -> None:
-    raw = await _fetch()
+    apps = {**APPS_GROUP, "versions": [*APPS_GROUP["versions"], APPS_V1BETA1]}
+    raw = await _fetch(
+        {**DOCUMENTS, "/apis": {"groups": [apps]}, "/apis/apps/v1beta1": {"resources": []}}
+    )
 
     assert raw.generation == 3
     assert raw.core_root == RootOutcome("/api", (("", "v1"),))
-    assert raw.group_root == RootOutcome("/apis", (("apps", "v1"),))
+    assert raw.group_root == RootOutcome("/apis", (("apps", "v1"), ("apps", "v1beta1")))
     assert [(outcome.group, outcome.version) for outcome in raw.group_versions] == [
         ("", "v1"),
         ("apps", "v1"),
+        ("apps", "v1beta1"),
     ]
 
 
@@ -243,6 +250,9 @@ async def test_the_roots_and_core_v1_are_requested_together() -> None:
     [
         pytest.param([None, APPS_GROUP], id="not-a-group"),
         pytest.param([{"name": "../bad", "versions": []}, APPS_GROUP], id="invalid-name"),
+        pytest.param([{"name": "apps..example", "versions": []}, APPS_GROUP], id="empty-label"),
+        pytest.param([{"name": "apps.-x", "versions": []}, APPS_GROUP], id="hyphen-led-label"),
+        pytest.param([{"name": "a" * 254, "versions": []}, APPS_GROUP], id="name-too-long"),
         pytest.param(
             [{**APPS_GROUP, "versions": [*APPS_GROUP["versions"], {"version": 42}]}],
             id="version-entry",
@@ -262,6 +272,28 @@ async def test_an_unusable_preferred_version_only_loses_its_place() -> None:
     raw = await _fetch({**DOCUMENTS, "/apis": {"groups": [group]}})
 
     assert raw.group_root == RootOutcome("/apis", (("apps", "v1"),))
+
+
+async def test_the_preferred_version_is_read_first_wherever_it_is_listed() -> None:
+    group = {**APPS_GROUP, "versions": [APPS_V1BETA1, *APPS_GROUP["versions"]]}
+    raw = await _fetch(
+        {**DOCUMENTS, "/apis": {"groups": [group]}, "/apis/apps/v1beta1": {"resources": []}}
+    )
+
+    assert raw.group_root == RootOutcome("/apis", (("apps", "v1"), ("apps", "v1beta1")))
+
+
+async def test_a_preferred_version_a_full_version_list_omits_is_never_read() -> None:
+    group = {**APPS_GROUP, "preferredVersion": {"groupVersion": "apps/v2", "version": "v2"}}
+    raw = await _fetch(
+        {**DOCUMENTS, "/apis": {"groups": [group]}, "/apis/apps/v2": {"resources": []}}
+    )
+
+    assert raw.group_root == RootOutcome("/apis", (("apps", "v1"),))
+    assert [(outcome.group, outcome.version) for outcome in raw.group_versions] == [
+        ("", "v1"),
+        ("apps", "v1"),
+    ]
 
 
 @pytest.mark.parametrize("versions", [["v1", 7], ["v1", "../v2"]])
@@ -312,6 +344,18 @@ async def test_an_unreadable_resource_entry_makes_its_version_incomplete(entry: 
     assert "deployments" in [meta.plural for meta in raw.group_versions[1].metas]
 
 
+@pytest.mark.parametrize("scope", ["false", 0, 1])
+async def test_a_resource_whose_scope_is_not_a_boolean_is_unreadable(scope: object) -> None:
+    entry = {"name": "widgets", "kind": "Widget", "namespaced": scope, "verbs": ["list"]}
+    resources = [entry, *DOCUMENTS["/apis/apps/v1"]["resources"]]
+    raw = await _fetch({**DOCUMENTS, "/apis/apps/v1": {"resources": resources}})
+    apps = raw.group_versions[1]
+
+    assert not apps.complete
+    assert [resource.name for resource in apps.resources] == ["deployments"]
+    assert [meta.plural for meta in apps.metas] == ["deployments"]
+
+
 @pytest.mark.parametrize(
     ("path", "index", "projected"),
     [
@@ -352,13 +396,57 @@ def test_a_snapshot_starts_with_core_v1() -> None:
 Run: `uv run --frozen pytest -p no:tach tests/k8s/test_discovery_snapshot.py -q`
 Expected: a collection error, `ImportError: cannot import name 'discovery_snapshot' from 'korvid.k8s'`.
 
-- [ ] **Step 3: Share the DNS-1123 pattern**
+- [ ] **Step 3: Share the DNS-1123 check**
 
-In `src/korvid/k8s/discovery.py`, add `import re` to the imports, and after `_T = TypeVar("_T")` add:
+In `src/korvid/k8s/discovery.py`, add `import re` to the imports, and after `_T = TypeVar("_T")` add Kubernetes' own subdomain check. The pattern `client.py` used accepted `a..b`, `a.-b` and names of any length:
 
 ```python
-#: A DNS-1123 subdomain, as API group and object names must be.
-DNS1123_SUBDOMAIN = re.compile(r"^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$")
+_DNS1123_LABEL = "[a-z0-9](?:[-a-z0-9]*[a-z0-9])?"
+_DNS1123_SUBDOMAIN = re.compile(rf"{_DNS1123_LABEL}(?:\.{_DNS1123_LABEL})*")
+_DNS1123_SUBDOMAIN_MAX_LENGTH = 253
+
+
+def is_dns1123_subdomain(value: str) -> bool:
+    """Whether `value` is a DNS-1123 subdomain, as API group names and most
+    object names must be.
+
+    This is Kubernetes' own check (`IsDNS1123Subdomain`): dot-separated labels
+    of lowercase letters, digits and inner hyphens, 253 characters at most.
+    """
+    return (
+        len(value) <= _DNS1123_SUBDOMAIN_MAX_LENGTH
+        and _DNS1123_SUBDOMAIN.fullmatch(value) is not None
+    )
+```
+
+In `tests/k8s/test_discovery.py`, import `is_dns1123_subdomain` and pin it against the names Kubernetes accepts and rejects:
+
+```python
+@pytest.mark.parametrize(
+    ("value", "valid"),
+    [
+        ("a", True),
+        ("0", True),
+        ("example.io", True),
+        ("a-b.c-d", True),
+        pytest.param("a" * 253, True, id="253-characters"),
+        pytest.param("a" * 254, False, id="254-characters"),
+        ("", False),
+        ("Apps", False),
+        ("a..b", False),
+        (".a", False),
+        ("a.", False),
+        ("-a", False),
+        ("a-", False),
+        ("a.-b", False),
+        ("a-.b", False),
+        ("a_b", False),
+        ("a,b", False),
+        pytest.param("a\n", False, id="trailing-newline"),
+    ],
+)
+def test_a_dns1123_subdomain_is_validated_as_kubernetes_does(value: str, valid: bool) -> None:
+    assert is_dns1123_subdomain(value) is valid
 ```
 
 - [ ] **Step 4: Write the snapshot module**
@@ -389,7 +477,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from korvid.k8s.discovery import DNS1123_SUBDOMAIN, ResourceMeta
+from korvid.k8s.discovery import ResourceMeta, is_dns1123_subdomain
 from korvid.k8s.errors import ApiStatusError, KubeClientError, KubeMalformedError, KubeTimeoutError
 
 logger = logging.getLogger(__name__)
@@ -610,13 +698,15 @@ def _named_group_versions(document: Mapping[str, Any]) -> tuple[_Advertised, boo
 def _group_versions(group: Any) -> tuple[list[tuple[str, str]], bool]:
     """One group entry's versions, preferred first, and whether all were readable.
 
-    An unusable preferred version only loses its place at the front: the
-    `versions` list is what says which versions exist.
+    A `versions` list read in full says which versions exist, so a preferred
+    version it does not name is ignored. Without such a list, the preferred
+    version is still read, as discovery always has. An unusable preferred
+    version only loses its place at the front.
     """
     if not isinstance(group, Mapping):
         return [], False
     name = group.get("name")
-    if not isinstance(name, str) or not DNS1123_SUBDOMAIN.fullmatch(name):
+    if not isinstance(name, str) or not is_dns1123_subdomain(name):
         return [], False
     listed = group.get("versions")
     entries = listed if isinstance(listed, list) else []
@@ -624,9 +714,10 @@ def _group_versions(group: Any) -> tuple[list[tuple[str, str]], bool]:
         version for entry in entries if (version := _discovery_version(name, entry)) is not None
     ]
     preferred = _discovery_version(name, group.get("preferredVersion"))
-    ordered = ([preferred] if preferred is not None else []) + versions
     readable = isinstance(listed, list) and len(versions) == len(entries)
-    return [(name, version) for version in ordered], readable
+    if preferred is not None and (preferred in versions or not readable):
+        versions = [preferred, *versions]
+    return [(name, version) for version in versions], readable
 
 
 def _discovery_version(name: str, candidate: Any) -> str | None:
@@ -666,7 +757,7 @@ def _served_resource(entry: Any) -> ServedResource | None:
     name, verbs = entry.get("name"), entry.get("verbs")
     if not isinstance(name, str) or not name or not isinstance(entry.get("kind"), str):
         return None
-    if entry.get("namespaced") is None or not isinstance(verbs, list):
+    if not isinstance(entry.get("namespaced"), bool) or not isinstance(verbs, list):
         return None
     if not all(isinstance(verb, str) for verb in verbs):
         return None
@@ -688,8 +779,10 @@ def _parse_resource_list(entries: list[Any], *, group: str, version: str) -> lis
         kind = resource.get("kind")
         namespaced = resource.get("namespaced")
         verbs = resource.get("verbs", [])
-        if not isinstance(name, str) or not isinstance(kind, str) or namespaced is None:
+        if not isinstance(name, str) or not isinstance(kind, str):
             continue  # malformed entry must not kill discovery
+        if not isinstance(namespaced, bool):
+            continue  # "false" would otherwise read as namespaced
         if "/" in name or not isinstance(verbs, list) or "list" not in verbs:
             continue
         out.append(
@@ -698,7 +791,7 @@ def _parse_resource_list(entries: list[Any], *, group: str, version: str) -> lis
                 name,
                 group,
                 version,
-                bool(namespaced),
+                namespaced,
                 _resource_short_names(resource.get("shortNames")),
                 # list-only aggregated APIs (OLM's packageserver) stay
                 # discoverable; the watch source polls them (issue #141).
@@ -731,7 +824,7 @@ git commit -m "k8s: keep every discovery outcome in a raw snapshot"
 - Test: `tests/k8s/test_discovery_session.py`
 
 **Interfaces:**
-- Consumes: from Task 1, `RawDiscovery`, `fetch_discovery`, `project_resources` and `DNS1123_SUBDOMAIN`.
+- Consumes: from Task 1, `RawDiscovery`, `fetch_discovery`, `project_resources` and `is_dns1123_subdomain`.
 - Produces on `KubeClient`:
   - `session_generation: int` (property);
   - `async discovery_snapshot() -> RawDiscovery`;
@@ -759,11 +852,10 @@ from korvid.k8s import client as client_module
 from korvid.k8s import discovery_snapshot
 from korvid.k8s.client import KubeClient
 
+POD_RESOURCES = [{"name": "pods", "kind": "Pod", "namespaced": True, "verbs": ["list"]}]
 DOCUMENTS: dict[str, dict[str, Any]] = {
     "/api": {"versions": ["v1"]},
-    "/api/v1": {
-        "resources": [{"name": "pods", "kind": "Pod", "namespaced": True, "verbs": ["list"]}]
-    },
+    "/api/v1": {"resources": POD_RESOURCES},
     "/apis": {"groups": []},
 }
 
@@ -874,14 +966,25 @@ async def test_a_snapshot_read_across_a_session_change_is_not_kept() -> None:
 
 async def test_discover_resources_reads_afresh_and_keeps_the_snapshot() -> None:
     client = KubeClient()
+    configmaps = {"name": "configmaps", "kind": "ConfigMap", "namespaced": True, "verbs": ["list"]}
+    refreshed = {**DOCUMENTS, "/api/v1": {"resources": [*POD_RESOURCES, configmaps]}}
+
+    async def answer_refreshed(path: str) -> dict[str, Any]:
+        return refreshed[path]
+
     with patch.object(client, "_request_json", AsyncMock(side_effect=_answer)) as fetch:
-        await client.discovery_snapshot()
+        first = await client.discovery_snapshot()
+        fetch.side_effect = answer_refreshed
         metas = await client.discover_resources()
         snapshot = await client.discovery_snapshot()
 
-    assert [meta.plural for meta in metas] == ["pods"]
+    assert [meta.plural for meta in metas] == ["pods", "configmaps"]
     assert fetch.await_count == 6
-    assert snapshot.generation == client.session_generation
+    assert snapshot is not first
+    assert [resource.name for resource in snapshot.group_versions[0].resources] == [
+        "pods",
+        "configmaps",
+    ]
 
 
 async def test_a_snapshot_waits_for_discovery_under_way_and_shares_it() -> None:
@@ -958,8 +1061,8 @@ Expected:
 
 In `src/korvid/k8s/client.py`:
 
-1. Import `DNS1123_SUBDOMAIN` with `PODS_META, ResourceMeta` from `korvid.k8s.discovery`, and add `from korvid.k8s.discovery_snapshot import RawDiscovery, fetch_discovery, project_resources`.
-2. Delete `_DNS1123_NAME` and `_API_VERSION_NAME`, and use `DNS1123_SUBDOMAIN.match(name)` in the events field-selector guard.
+1. Import `is_dns1123_subdomain` with `PODS_META, ResourceMeta` from `korvid.k8s.discovery`, and add `from korvid.k8s.discovery_snapshot import RawDiscovery, fetch_discovery, project_resources`.
+2. Delete `_DNS1123_NAME` and `_API_VERSION_NAME`, and use `is_dns1123_subdomain(name)` in the events field-selector guard. In `tests/k8s/test_client.py`, parametrize `test_list_events_for_rejects_invalid_name` with the names the stricter check now rejects: `pod..a`, `pod.-a`, `pod\n` and a 254-character name, beside the existing selector injection.
 3. Delete `_request_discovery_json` and the module functions `_discovery_version`, `_group_versions`, `_resource_short_names` and `_parse_resource_list`. Task 1 moved them. Keep `_DISCOVERY_CONCURRENCY` and `_DISCOVERY_TIMEOUT_SECONDS`, because tests patch them on this module.
 4. At the end of `KubeClient.__init__`, add:
 
@@ -1014,6 +1117,9 @@ In `src/korvid/k8s/client.py`:
         """This session's raw discovery, read again once it is five minutes old.
 
         One read runs at a time, so a call made during a read waits for it.
+        The snapshot carries the generation it was read under. A read that an
+        invalidation or a session change overtakes still goes to its caller,
+        but it is never kept, so the next call reads again.
         """
         async with self._discovery_lock:
             snapshot = self._discovery
@@ -1857,7 +1963,12 @@ class Candidate:
 
 @dataclass(frozen=True, slots=True)
 class LogicalSource:
-    """One kind of evidence, read from the first of its candidates that serves it."""
+    """One kind of evidence, and the candidates that can supply it, in order.
+
+    The first candidate that resolves is read. The next is tried only when
+    that read is denied or unsupported: RBAC can allow one API and deny
+    another that serves the same evidence.
+    """
 
     key: str
     candidates: tuple[Candidate, ...]
@@ -1908,7 +2019,11 @@ class Resolution:
 
     @property
     def sources(self) -> tuple[ApiSource, ...]:
-        """The resolved sources, in the order to read them."""
+        """The resolved sources, in candidate order.
+
+        Read the first. Each later one is a fallback, read only when the read
+        before it is `DENIED` or `UNSUPPORTED` (#487).
+        """
         return tuple(outcome.source for outcome in self.outcomes if outcome.observation is None)
 
     @property

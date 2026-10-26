@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from korvid.k8s.discovery import DNS1123_SUBDOMAIN, ResourceMeta
+from korvid.k8s.discovery import ResourceMeta, is_dns1123_subdomain
 from korvid.k8s.errors import ApiStatusError, KubeClientError, KubeMalformedError, KubeTimeoutError
 
 logger = logging.getLogger(__name__)
@@ -242,13 +242,15 @@ def _named_group_versions(document: Mapping[str, Any]) -> tuple[_Advertised, boo
 def _group_versions(group: Any) -> tuple[list[tuple[str, str]], bool]:
     """One group entry's versions, preferred first, and whether all were readable.
 
-    An unusable preferred version only loses its place at the front: the
-    `versions` list is what says which versions exist.
+    A `versions` list read in full says which versions exist, so a preferred
+    version it does not name is ignored. Without such a list, the preferred
+    version is still read, as discovery always has. An unusable preferred
+    version only loses its place at the front.
     """
     if not isinstance(group, Mapping):
         return [], False
     name = group.get("name")
-    if not isinstance(name, str) or not DNS1123_SUBDOMAIN.fullmatch(name):
+    if not isinstance(name, str) or not is_dns1123_subdomain(name):
         return [], False
     listed = group.get("versions")
     entries = listed if isinstance(listed, list) else []
@@ -256,9 +258,10 @@ def _group_versions(group: Any) -> tuple[list[tuple[str, str]], bool]:
         version for entry in entries if (version := _discovery_version(name, entry)) is not None
     ]
     preferred = _discovery_version(name, group.get("preferredVersion"))
-    ordered = ([preferred] if preferred is not None else []) + versions
     readable = isinstance(listed, list) and len(versions) == len(entries)
-    return [(name, version) for version in ordered], readable
+    if preferred is not None and (preferred in versions or not readable):
+        versions = [preferred, *versions]
+    return [(name, version) for version in versions], readable
 
 
 def _discovery_version(name: str, candidate: Any) -> str | None:
@@ -298,7 +301,7 @@ def _served_resource(entry: Any) -> ServedResource | None:
     name, verbs = entry.get("name"), entry.get("verbs")
     if not isinstance(name, str) or not name or not isinstance(entry.get("kind"), str):
         return None
-    if entry.get("namespaced") is None or not isinstance(verbs, list):
+    if not isinstance(entry.get("namespaced"), bool) or not isinstance(verbs, list):
         return None
     if not all(isinstance(verb, str) for verb in verbs):
         return None
@@ -320,8 +323,10 @@ def _parse_resource_list(entries: list[Any], *, group: str, version: str) -> lis
         kind = resource.get("kind")
         namespaced = resource.get("namespaced")
         verbs = resource.get("verbs", [])
-        if not isinstance(name, str) or not isinstance(kind, str) or namespaced is None:
+        if not isinstance(name, str) or not isinstance(kind, str):
             continue  # malformed entry must not kill discovery
+        if not isinstance(namespaced, bool):
+            continue  # "false" would otherwise read as namespaced
         if "/" in name or not isinstance(verbs, list) or "list" not in verbs:
             continue
         out.append(
@@ -330,7 +335,7 @@ def _parse_resource_list(entries: list[Any], *, group: str, version: str) -> lis
                 name,
                 group,
                 version,
-                bool(namespaced),
+                namespaced,
                 _resource_short_names(resource.get("shortNames")),
                 # list-only aggregated APIs (OLM's packageserver) stay
                 # discoverable; the watch source polls them (issue #141).

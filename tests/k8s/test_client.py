@@ -1681,13 +1681,23 @@ async def test_get_object_encodes_namespace_and_name() -> None:
     assert "team/a" not in called_path
 
 
-async def test_list_events_for_rejects_invalid_name() -> None:
+@pytest.mark.parametrize(
+    "name",
+    [
+        pytest.param("pod,involvedObject.kind=Secret", id="selector-injection"),
+        pytest.param("pod..a", id="empty-label"),
+        pytest.param("pod.-a", id="hyphen-led-label"),
+        pytest.param("pod\n", id="trailing-newline"),
+        pytest.param("p" * 254, id="too-long"),
+    ],
+)
+async def test_list_events_for_rejects_invalid_name(name: str) -> None:
     """A name failing DNS-1123 validation short-circuits to [] (no fieldSelector injection)."""
     client = KubeClient()
     fake_v1 = AsyncMock()
 
     with patch.object(client, "_core_v1", fake_v1):
-        events = await client.list_events_for("default", "pod,involvedObject.kind=Secret")
+        events = await client.list_events_for("default", name)
 
     assert events == []
     fake_v1.list_namespaced_event.assert_not_awaited()

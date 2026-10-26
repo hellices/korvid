@@ -25,6 +25,7 @@ APPS_GROUP = {
     "preferredVersion": {"groupVersion": "apps/v1", "version": "v1"},
     "versions": [{"groupVersion": "apps/v1", "version": "v1"}],
 }
+APPS_V1BETA1 = {"groupVersion": "apps/v1beta1", "version": "v1beta1"}
 DOCUMENTS: dict[str, dict[str, Any]] = {
     "/api": {"versions": ["v1"]},
     "/api/v1": {
@@ -62,14 +63,18 @@ async def _fetch(
 
 
 async def test_both_roots_and_every_advertised_version_are_kept() -> None:
-    raw = await _fetch()
+    apps = {**APPS_GROUP, "versions": [*APPS_GROUP["versions"], APPS_V1BETA1]}
+    raw = await _fetch(
+        {**DOCUMENTS, "/apis": {"groups": [apps]}, "/apis/apps/v1beta1": {"resources": []}}
+    )
 
     assert raw.generation == 3
     assert raw.core_root == RootOutcome("/api", (("", "v1"),))
-    assert raw.group_root == RootOutcome("/apis", (("apps", "v1"),))
+    assert raw.group_root == RootOutcome("/apis", (("apps", "v1"), ("apps", "v1beta1")))
     assert [(outcome.group, outcome.version) for outcome in raw.group_versions] == [
         ("", "v1"),
         ("apps", "v1"),
+        ("apps", "v1beta1"),
     ]
 
 
@@ -153,6 +158,9 @@ async def test_the_roots_and_core_v1_are_requested_together() -> None:
     [
         pytest.param([None, APPS_GROUP], id="not-a-group"),
         pytest.param([{"name": "../bad", "versions": []}, APPS_GROUP], id="invalid-name"),
+        pytest.param([{"name": "apps..example", "versions": []}, APPS_GROUP], id="empty-label"),
+        pytest.param([{"name": "apps.-x", "versions": []}, APPS_GROUP], id="hyphen-led-label"),
+        pytest.param([{"name": "a" * 254, "versions": []}, APPS_GROUP], id="name-too-long"),
         pytest.param(
             [{**APPS_GROUP, "versions": [*APPS_GROUP["versions"], {"version": 42}]}],
             id="version-entry",
@@ -172,6 +180,28 @@ async def test_an_unusable_preferred_version_only_loses_its_place() -> None:
     raw = await _fetch({**DOCUMENTS, "/apis": {"groups": [group]}})
 
     assert raw.group_root == RootOutcome("/apis", (("apps", "v1"),))
+
+
+async def test_the_preferred_version_is_read_first_wherever_it_is_listed() -> None:
+    group = {**APPS_GROUP, "versions": [APPS_V1BETA1, *APPS_GROUP["versions"]]}
+    raw = await _fetch(
+        {**DOCUMENTS, "/apis": {"groups": [group]}, "/apis/apps/v1beta1": {"resources": []}}
+    )
+
+    assert raw.group_root == RootOutcome("/apis", (("apps", "v1"), ("apps", "v1beta1")))
+
+
+async def test_a_preferred_version_a_full_version_list_omits_is_never_read() -> None:
+    group = {**APPS_GROUP, "preferredVersion": {"groupVersion": "apps/v2", "version": "v2"}}
+    raw = await _fetch(
+        {**DOCUMENTS, "/apis": {"groups": [group]}, "/apis/apps/v2": {"resources": []}}
+    )
+
+    assert raw.group_root == RootOutcome("/apis", (("apps", "v1"),))
+    assert [(outcome.group, outcome.version) for outcome in raw.group_versions] == [
+        ("", "v1"),
+        ("apps", "v1"),
+    ]
 
 
 @pytest.mark.parametrize("versions", [["v1", 7], ["v1", "../v2"]])
@@ -220,6 +250,18 @@ async def test_an_unreadable_resource_entry_makes_its_version_incomplete(entry: 
 
     assert not raw.group_versions[1].complete
     assert "deployments" in [meta.plural for meta in raw.group_versions[1].metas]
+
+
+@pytest.mark.parametrize("scope", ["false", 0, 1])
+async def test_a_resource_whose_scope_is_not_a_boolean_is_unreadable(scope: object) -> None:
+    entry = {"name": "widgets", "kind": "Widget", "namespaced": scope, "verbs": ["list"]}
+    resources = [entry, *DOCUMENTS["/apis/apps/v1"]["resources"]]
+    raw = await _fetch({**DOCUMENTS, "/apis/apps/v1": {"resources": resources}})
+    apps = raw.group_versions[1]
+
+    assert not apps.complete
+    assert [resource.name for resource in apps.resources] == ["deployments"]
+    assert [meta.plural for meta in apps.metas] == ["deployments"]
 
 
 @pytest.mark.parametrize(
