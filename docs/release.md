@@ -208,6 +208,15 @@ test ! -e "$runtime_root"
 Record the run ID, exact commit, and command result with the release evidence.
 Do not create or push the release tag until this gate passes.
 
+## List the verified Kubernetes versions
+
+Every release's notes name the Kubernetes versions verified for it. Take them
+from the latest run of the **Kubernetes version matrix** workflow on the
+reviewed commit, or start one with `gh workflow run k8s-version-matrix.yml
+--ref main` if none has run since the last change it covers. List only the
+versions whose job passed, as recorded in the run's summary. The policy is in
+[Kubernetes support](kubernetes-support.md).
+
 ## Publish `$TAG`
 
 Create the annotated tag from the reviewed commit, then push only that tag:
