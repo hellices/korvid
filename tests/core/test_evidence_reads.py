@@ -25,7 +25,12 @@ from korvid.core.capability import (
     Verb,
     conclusive,
 )
-from korvid.core.capability_classifier import STATUS_BODY_LIMIT
+from korvid.core.capability_classifier import (
+    STATUS_BODY_LIMIT,
+    Classification,
+    ReadRequest,
+    classify,
+)
 from korvid.core.evidence_reads import (
     DEFAULT_MAX_BYTES,
     LAST_APPLIED_ANNOTATION,
@@ -494,6 +499,27 @@ async def test_an_item_found_malformed_only_after_the_deadline_is_the_deadline(
         observation = (await read_list(reader, source, deadline=0.05, clock=_clock)).observation
     else:
         observation = (await read_object(reader, source, deadline=0.05, clock=_clock)).observation
+
+    assert _state(observation) == (EvidenceState.UNAVAILABLE, Basis.DEADLINE)
+
+
+@pytest.mark.parametrize("read", ["list", "object"])
+async def test_a_failure_whose_classification_ends_after_the_deadline_is_the_deadline(
+    monkeypatch: pytest.MonkeyPatch, read: str
+) -> None:
+    def slow_classify(failure: BaseException, request: ReadRequest) -> Classification:
+        time.sleep(0.1)
+        return classify(failure, request)
+
+    monkeypatch.setattr(evidence_reads, "classify", slow_classify)
+    absence = _status(404, "NotFound", name="web-0", kind="pods")
+
+    if read == "list":
+        result = await read_list(FakeReader(absence), PODS, deadline=0.05, clock=_clock)
+        observation = result.observation
+    else:
+        found = await read_object(FakeReader(absence), POD, deadline=0.05, clock=_clock)
+        observation = found.observation
 
     assert _state(observation) == (EvidenceState.UNAVAILABLE, Basis.DEADLINE)
 

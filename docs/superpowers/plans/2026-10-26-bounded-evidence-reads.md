@@ -381,14 +381,15 @@ async def test_a_failed_stream_is_categorized_without_its_message(
 
 async def test_an_api_exception_keeps_only_its_status() -> None:
     api = fake_api(Response(b""))
-    api.rest_client.pool_manager.request.side_effect = ApiException(
-        status=403, reason="token=secret"
-    )
+    failure_with_body = ApiException(status=403, reason="token=secret")
+    failure_with_body.body = '{"message": "token=secret"}'
+    api.rest_client.pool_manager.request.side_effect = failure_with_body
 
     with pytest.raises(ApiStatusError, match="API 403") as failure:
         await read_bounded_json(api, "/api/v1/pods", [], max_bytes=64)
 
     assert "secret" not in str(failure.value)
+    assert failure.value.body == ""
 
 
 @pytest.mark.parametrize(
@@ -1282,7 +1283,12 @@ from korvid.core.capability import (
     Verb,
     conclusive,
 )
-from korvid.core.capability_classifier import STATUS_BODY_LIMIT
+from korvid.core.capability_classifier import (
+    STATUS_BODY_LIMIT,
+    Classification,
+    ReadRequest,
+    classify,
+)
 from korvid.core.evidence_reads import (
     DEFAULT_MAX_BYTES,
     LAST_APPLIED_ANNOTATION,
@@ -1751,6 +1757,27 @@ async def test_an_item_found_malformed_only_after_the_deadline_is_the_deadline(
         observation = (await read_list(reader, source, deadline=0.05, clock=_clock)).observation
     else:
         observation = (await read_object(reader, source, deadline=0.05, clock=_clock)).observation
+
+    assert _state(observation) == (EvidenceState.UNAVAILABLE, Basis.DEADLINE)
+
+
+@pytest.mark.parametrize("read", ["list", "object"])
+async def test_a_failure_whose_classification_ends_after_the_deadline_is_the_deadline(
+    monkeypatch: pytest.MonkeyPatch, read: str
+) -> None:
+    def slow_classify(failure: BaseException, request: ReadRequest) -> Classification:
+        time.sleep(0.1)
+        return classify(failure, request)
+
+    monkeypatch.setattr(evidence_reads, "classify", slow_classify)
+    absence = _status(404, "NotFound", name="web-0", kind="pods")
+
+    if read == "list":
+        result = await read_list(FakeReader(absence), PODS, deadline=0.05, clock=_clock)
+        observation = result.observation
+    else:
+        found = await read_object(FakeReader(absence), POD, deadline=0.05, clock=_clock)
+        observation = found.observation
 
     assert _state(observation) == (EvidenceState.UNAVAILABLE, Basis.DEADLINE)
 
@@ -2292,10 +2319,11 @@ async def read_list(
     except _DeadlineReachedError:
         outcome = run.at_deadline()
     except (ApiStatusError, KubeClientError) as failure:
-        # Processing that ran past the deadline proves nothing either.
-        late = _is_late(attempts.deadline_at)
         request = ReadRequest(ReadKind.LIST, source, continuation=run.pages > 0)
-        outcome = run.at_deadline() if late else classify(failure, request)
+        outcome = classify(failure, request)
+        # A failure processed or classified past the deadline proves nothing either.
+        if _is_late(attempts.deadline_at):
+            outcome = run.at_deadline()
     else:
         outcome = run.finished()
     items = tuple(run.items)
@@ -2334,8 +2362,9 @@ async def read_object(
     except _DeadlineReachedError:
         outcome = _PAST_DEADLINE
     except (ApiStatusError, KubeClientError) as failure:
-        late = _is_late(attempts.deadline_at)
-        outcome = _PAST_DEADLINE if late else classify(failure, ReadRequest(ReadKind.GET, source))
+        outcome = classify(failure, ReadRequest(ReadKind.GET, source))
+        if _is_late(attempts.deadline_at):
+            outcome = _PAST_DEADLINE
     else:
         observed = Classification(EvidenceState.AVAILABLE, Basis.OBSERVED, "")
         return ObjectEvidence(item, _observe(source, observed, clock(), 1, token, uid))

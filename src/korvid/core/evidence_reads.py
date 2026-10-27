@@ -126,10 +126,11 @@ async def read_list(
     except _DeadlineReachedError:
         outcome = run.at_deadline()
     except (ApiStatusError, KubeClientError) as failure:
-        # Processing that ran past the deadline proves nothing either.
-        late = _is_late(attempts.deadline_at)
         request = ReadRequest(ReadKind.LIST, source, continuation=run.pages > 0)
-        outcome = run.at_deadline() if late else classify(failure, request)
+        outcome = classify(failure, request)
+        # A failure processed or classified past the deadline proves nothing either.
+        if _is_late(attempts.deadline_at):
+            outcome = run.at_deadline()
     else:
         outcome = run.finished()
     items = tuple(run.items)
@@ -168,8 +169,9 @@ async def read_object(
     except _DeadlineReachedError:
         outcome = _PAST_DEADLINE
     except (ApiStatusError, KubeClientError) as failure:
-        late = _is_late(attempts.deadline_at)
-        outcome = _PAST_DEADLINE if late else classify(failure, ReadRequest(ReadKind.GET, source))
+        outcome = classify(failure, ReadRequest(ReadKind.GET, source))
+        if _is_late(attempts.deadline_at):
+            outcome = _PAST_DEADLINE
     else:
         observed = Classification(EvidenceState.AVAILABLE, Basis.OBSERVED, "")
         return ObjectEvidence(item, _observe(source, observed, clock(), 1, token, uid))

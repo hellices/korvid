@@ -215,14 +215,15 @@ async def test_a_failed_stream_is_categorized_without_its_message(
 
 async def test_an_api_exception_keeps_only_its_status() -> None:
     api = fake_api(Response(b""))
-    api.rest_client.pool_manager.request.side_effect = ApiException(
-        status=403, reason="token=secret"
-    )
+    failure_with_body = ApiException(status=403, reason="token=secret")
+    failure_with_body.body = '{"message": "token=secret"}'
+    api.rest_client.pool_manager.request.side_effect = failure_with_body
 
     with pytest.raises(ApiStatusError, match="API 403") as failure:
         await read_bounded_json(api, "/api/v1/pods", [], max_bytes=64)
 
     assert "secret" not in str(failure.value)
+    assert failure.value.body == ""
 
 
 @pytest.mark.parametrize(
