@@ -14,6 +14,7 @@ on:
       - src/korvid/core/evidence_reads.py
       - src/korvid/core/run_tokens.py
       - src/korvid/k8s/bounded_transport.py
+      - src/korvid/k8s/client.py
       - src/korvid/k8s/discovery.py
       - src/korvid/k8s/discovery_snapshot.py
       - src/korvid/k8s/errors.py
@@ -29,6 +30,7 @@ on:
       - src/korvid/core/evidence_reads.py
       - src/korvid/core/run_tokens.py
       - src/korvid/k8s/bounded_transport.py
+      - src/korvid/k8s/client.py
       - src/korvid/k8s/discovery.py
       - src/korvid/k8s/discovery_snapshot.py
       - src/korvid/k8s/errors.py
