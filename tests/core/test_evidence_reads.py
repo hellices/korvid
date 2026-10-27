@@ -380,7 +380,10 @@ async def test_a_read_retries_only_one_429() -> None:
 
     assert _state(result.observation) == (EvidenceState.PARTIAL, Basis.THROTTLED)
     assert _names(result.items) == ["a", "b"]
-    assert len(reader.lists) == 4
+    assert reader.lists == [
+        (POD_TARGET, LIST_PAGE_SIZE, continuation, DEFAULT_MAX_BYTES)
+        for continuation in ("", "p2", "p2", "p3")
+    ]
 
 
 @pytest.mark.parametrize(("default", "requests"), [(0.0, 2), (60.0, 1)])

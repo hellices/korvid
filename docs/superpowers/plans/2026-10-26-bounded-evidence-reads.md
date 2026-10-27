@@ -222,6 +222,15 @@ async def test_a_body_of_exactly_the_budget_is_accepted_before_its_end_arrives()
     assert await _read(response, max_bytes=len(payload)) == {"kind": "PodList"}
 
 
+async def test_a_body_one_byte_past_the_budget_is_over_it_before_its_end_arrives() -> None:
+    payload = b'{"kind": "PodList"}'
+    response = Response(payload)
+    response.content = LateEndStream(payload)
+
+    with pytest.raises(KubeTooLargeError, match="byte cap"):
+        await _read(response, max_bytes=len(payload) - 1)
+
+
 @pytest.mark.parametrize("kind", ["repetitive", "incompressible"])
 async def test_gzip_that_decodes_to_exactly_the_budget_is_accepted(kind: str) -> None:
     filler = " " * 4000 if kind == "repetitive" else hashlib.shake_256(b"korvid").hexdigest(2000)
@@ -469,7 +478,10 @@ Pulse and diagnostic evidence read through it, so that neither can hold more
 than its budget. A response is streamed through a byte budget before any JSON
 is parsed, and the budget applies again after decompression. The request is
 sent once: no redirect or connection retry can repeat it. Every failure is an
-`ApiStatusError` or a `KubeClientError` whose `category` says what went wrong.
+`ApiStatusError` or a `KubeClientError`. A failure of the request or its body
+carries a `category` saying what went wrong. A client that is not set up to
+send one, never connected or unable to refresh its credentials, leaves it
+`None`.
 """
 
 from __future__ import annotations
@@ -919,7 +931,7 @@ def _accept(api: Any) -> str:
     return str(headers["Accept"])
 
 
-def test_the_evidence_reader_can_only_read() -> None:
+def test_the_evidence_reader_declares_only_reads() -> None:
     assert EvidenceReader.__abstractmethods__ == frozenset(
         {"list_evidence_page", "get_evidence_object"}
     )
@@ -949,6 +961,20 @@ async def test_a_first_page_sends_no_continue_token() -> None:
 
     assert page == EvidencePage(())
     assert _url(api)[1] == [("limit", "1")]
+
+
+async def test_the_caller_s_byte_budget_bounds_a_list_page() -> None:
+    client, _api = _client(Response(b'{"items": [], "metadata": {}}'))
+
+    with pytest.raises(KubeTooLargeError, match="byte cap"):
+        await client.list_evidence_page(DEPLOYMENTS, limit=1, continuation="", max_bytes=8)
+
+
+async def test_the_caller_s_byte_budget_bounds_an_object() -> None:
+    client, _api = _client(Response(b'{"metadata": {"name": "web"}}'))
+
+    with pytest.raises(KubeTooLargeError, match="byte cap"):
+        await client.get_evidence_object(DEPLOYMENTS, "web", max_bytes=8)
 
 
 async def test_an_object_read_names_its_object() -> None:
@@ -1087,7 +1113,11 @@ class EvidencePage:
 
 
 class EvidenceReader(ABC):
-    """Reads evidence and nothing else: a LIST page and a GET are its only operations."""
+    """What evidence reads depend on: a LIST page and a GET, and nothing that writes.
+
+    The reads can only call these two. An implementation such as `KubeClient`
+    may offer more, but nothing that takes an `EvidenceReader` can reach it.
+    """
 
     @abstractmethod
     async def list_evidence_page(
@@ -1593,7 +1623,10 @@ async def test_a_read_retries_only_one_429() -> None:
 
     assert _state(result.observation) == (EvidenceState.PARTIAL, Basis.THROTTLED)
     assert _names(result.items) == ["a", "b"]
-    assert len(reader.lists) == 4
+    assert reader.lists == [
+        (POD_TARGET, LIST_PAGE_SIZE, continuation, DEFAULT_MAX_BYTES)
+        for continuation in ("", "p2", "p2", "p3")
+    ]
 
 
 @pytest.mark.parametrize(("default", "requests"), [(0.0, 2), (60.0, 1)])
@@ -2505,5 +2538,5 @@ Expected: every command exits 0. Plain `mypy` checks `tests/` as well as `src/`.
 | Cancellation | `test_cancelling_a_read_cancels_it`, `test_a_cancelled_request_is_never_classified` |
 | UID mismatch | `test_a_recreated_object_is_never_conclusive` |
 | No ConfigMap or Secret data, and no `last-applied-configuration`, reaches a diagnostic | `test_no_configuration_payload_reaches_a_diagnostic_through_a_list`, `..._through_a_get`, `test_a_configuration_payload_is_never_read_as_an_object`, `test_no_metadata_keeps_the_last_applied_configuration_or_managed_fields` |
-| Resolved sources and verbs only; a reader that can only read | `test_an_unresolved_source_is_never_read`, `test_each_read_refuses_a_source_resolved_for_the_other_verb`, `test_the_evidence_reader_can_only_read` |
+| Resolved sources and verbs only; a reader that can only read | `test_an_unresolved_source_is_never_read`, `test_each_read_refuses_a_source_resolved_for_the_other_verb`, `test_the_evidence_reader_declares_only_reads` |
 | Bounded-transport error categories, Pulse's included | `test_a_bad_body_is_categorized_and_closed`, `test_a_failed_stream_is_categorized_without_its_message`, `test_implicit_http_attempts_cannot_exceed_refresh_budget` |

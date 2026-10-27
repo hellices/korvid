@@ -48,7 +48,7 @@ def _accept(api: Any) -> str:
     return str(headers["Accept"])
 
 
-def test_the_evidence_reader_can_only_read() -> None:
+def test_the_evidence_reader_declares_only_reads() -> None:
     assert EvidenceReader.__abstractmethods__ == frozenset(
         {"list_evidence_page", "get_evidence_object"}
     )
@@ -78,6 +78,20 @@ async def test_a_first_page_sends_no_continue_token() -> None:
 
     assert page == EvidencePage(())
     assert _url(api)[1] == [("limit", "1")]
+
+
+async def test_the_caller_s_byte_budget_bounds_a_list_page() -> None:
+    client, _api = _client(Response(b'{"items": [], "metadata": {}}'))
+
+    with pytest.raises(KubeTooLargeError, match="byte cap"):
+        await client.list_evidence_page(DEPLOYMENTS, limit=1, continuation="", max_bytes=8)
+
+
+async def test_the_caller_s_byte_budget_bounds_an_object() -> None:
+    client, _api = _client(Response(b'{"metadata": {"name": "web"}}'))
+
+    with pytest.raises(KubeTooLargeError, match="byte cap"):
+        await client.get_evidence_object(DEPLOYMENTS, "web", max_bytes=8)
 
 
 async def test_an_object_read_names_its_object() -> None:

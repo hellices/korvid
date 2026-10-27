@@ -49,7 +49,11 @@ class EvidencePage:
 
 
 class EvidenceReader(ABC):
-    """Reads evidence and nothing else: a LIST page and a GET are its only operations."""
+    """What evidence reads depend on: a LIST page and a GET, and nothing that writes.
+
+    The reads can only call these two. An implementation such as `KubeClient`
+    may offer more, but nothing that takes an `EvidenceReader` can reach it.
+    """
 
     @abstractmethod
     async def list_evidence_page(

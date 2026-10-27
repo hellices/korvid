@@ -56,6 +56,15 @@ async def test_a_body_of_exactly_the_budget_is_accepted_before_its_end_arrives()
     assert await _read(response, max_bytes=len(payload)) == {"kind": "PodList"}
 
 
+async def test_a_body_one_byte_past_the_budget_is_over_it_before_its_end_arrives() -> None:
+    payload = b'{"kind": "PodList"}'
+    response = Response(payload)
+    response.content = LateEndStream(payload)
+
+    with pytest.raises(KubeTooLargeError, match="byte cap"):
+        await _read(response, max_bytes=len(payload) - 1)
+
+
 @pytest.mark.parametrize("kind", ["repetitive", "incompressible"])
 async def test_gzip_that_decodes_to_exactly_the_budget_is_accepted(kind: str) -> None:
     filler = " " * 4000 if kind == "repetitive" else hashlib.shake_256(b"korvid").hexdigest(2000)

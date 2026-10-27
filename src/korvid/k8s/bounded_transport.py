@@ -4,7 +4,10 @@ Pulse and diagnostic evidence read through it, so that neither can hold more
 than its budget. A response is streamed through a byte budget before any JSON
 is parsed, and the budget applies again after decompression. The request is
 sent once: no redirect or connection retry can repeat it. Every failure is an
-`ApiStatusError` or a `KubeClientError` whose `category` says what went wrong.
+`ApiStatusError` or a `KubeClientError`. A failure of the request or its body
+carries a `category` saying what went wrong. A client that is not set up to
+send one, never connected or unable to refresh its credentials, leaves it
+`None`.
 """
 
 from __future__ import annotations

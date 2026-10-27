@@ -160,7 +160,7 @@ async def _check_attempt_budget(
         results = await PulseCollector(client, sources).collect("default")
     assert len(received) == 3
     assert all(count == 1 for count in attempts.values())
-    assert all(result.coverage.state == "failed" for result in results)
+    assert [result.coverage.state for result in results] == ["failed"] * len(sources)
     connector = api.rest_client.pool_manager.connector
     assert connector is not None
     assert not connector._acquired
