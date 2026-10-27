@@ -39,7 +39,7 @@ def _client(response: Response) -> tuple[KubeClient, Any]:
 
 def _url(api: Any) -> tuple[str, list[tuple[str, str]]]:
     url = urlsplit(str(sent(api)["url"]))
-    return url.path, parse_qsl(url.query)
+    return url.path, parse_qsl(url.query, keep_blank_values=True)
 
 
 def _accept(api: Any) -> str:

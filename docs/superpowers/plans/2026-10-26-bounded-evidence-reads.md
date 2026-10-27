@@ -47,6 +47,7 @@
 - **Evidence reads refuse subresources, and node or provider scopes.** No consumer needs them yet, and a node-scoped API read would need a field selector that `ApiSource` cannot express.
 - **A repeated continue token is `MALFORMED`.** That is the design's "cyclic continuation". The page that repeated it is not kept.
 - **`read_object` checks that the object it got is the one it asked for.** A missing UID, or another name, is `MALFORMED`.
+- **A namespaced read accepts only objects from its namespace.** An item from another namespace, or with none, is `MALFORMED`, so it is never attributed to the namespace read.
 - **A 429 with no usable `Retry-After` waits one second.** An HTTP-date counts as no `Retry-After`.
 - **Embedded metadata is reduced too.** A pod template's metadata, or any other that an object embeds, loses `managedFields` and `last-applied-configuration` as the object's own does. An object nested too deeply to walk is `MALFORMED`.
 - **A result read or processed after the deadline is not accepted.** A timeout interrupts a request only where it waits, so the reads check the deadline once a page or an object has been processed. A failure reported after the deadline is the deadline as well: a late `NotFound` must not establish absence. A 429 retry whose wait ends after the deadline is never sent.
@@ -909,7 +910,7 @@ def _client(response: Response) -> tuple[KubeClient, Any]:
 
 def _url(api: Any) -> tuple[str, list[tuple[str, str]]]:
     url = urlsplit(str(sent(api)["url"]))
-    return url.path, parse_qsl(url.query)
+    return url.path, parse_qsl(url.query, keep_blank_values=True)
 
 
 def _accept(api: Any) -> str:
@@ -1297,7 +1298,8 @@ def _clock() -> datetime:
 
 
 def _pod(name: str, uid: str = "") -> dict[str, Any]:
-    return {"metadata": {"name": name, "uid": uid or f"uid-{name}"}, "spec": {"nodeName": "n1"}}
+    metadata = {"name": name, "namespace": "team-a", "uid": uid or f"uid-{name}"}
+    return {"metadata": metadata, "spec": {"nodeName": "n1"}}
 
 
 def _status(
@@ -1704,10 +1706,37 @@ async def test_a_page_with_an_item_without_metadata_is_never_accepted() -> None:
     assert result.items == ()
 
 
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        pytest.param({"name": "a", "namespace": "team-b", "uid": "uid-a"}, id="another-namespace"),
+        pytest.param({"name": "a", "uid": "uid-a"}, id="no-namespace"),
+    ],
+)
+async def test_an_item_from_outside_the_namespace_read_is_malformed(
+    metadata: dict[str, Any],
+) -> None:
+    reader = FakeReader(EvidencePage((_pod("b"), {"metadata": metadata})))
+
+    result = await read_list(reader, PODS, clock=_clock)
+
+    assert _state(result.observation) == (EvidenceState.UNAVAILABLE, Basis.MALFORMED)
+    assert result.items == ()
+
+
+async def test_a_cluster_wide_read_keeps_items_from_every_namespace() -> None:
+    every_namespace = ApiSource("", "pods", SourceScope.cluster(), version="v1", verb=Verb.LIST)
+    other = {"metadata": {"name": "b", "namespace": "team-b", "uid": "uid-b"}}
+
+    result = await read_list(FakeReader(EvidencePage((_pod("a"), other))), every_namespace)
+
+    assert _names(result.items) == ["a", "b"]
+
+
 async def test_a_metadata_read_returns_only_metadata() -> None:
     result = await read_list(FakeReader(EvidencePage((_pod("a"),))), METADATA_PODS, clock=_clock)
 
-    assert result.items == ({"metadata": {"name": "a", "uid": "uid-a"}},)
+    assert result.items == ({"metadata": _pod("a")["metadata"]},)
 
 
 @pytest.mark.parametrize("resource", ["configmaps", "secrets"])
@@ -1757,7 +1786,7 @@ async def test_no_metadata_keeps_the_last_applied_configuration_or_managed_field
     result = await read_object(reader, POD, clock=_clock)
 
     assert result.item == {
-        "metadata": {"name": "web-0", "uid": "uid-web-0", "annotations": {"team": "a"}},
+        "metadata": {**_pod("web-0")["metadata"], "annotations": {"team": "a"}},
         "spec": {"nodeName": "n1"},
     }
 
@@ -1768,7 +1797,7 @@ TEMPLATE_METADATA = {
     "managedFields": [{"manager": "kubectl"}],
 }
 DEPLOYMENT = {
-    "metadata": {"name": "web", "uid": "uid-web"},
+    "metadata": {"name": "web", "namespace": "team-a", "uid": "uid-web"},
     "spec": {"template": {"metadata": TEMPLATE_METADATA, "spec": {"containers": []}}},
 }
 SCRUBBED_TEMPLATE = {"labels": {"app": "web"}, "annotations": {"team": "a"}}
@@ -1822,7 +1851,7 @@ async def test_annotations_with_nothing_left_to_keep_are_dropped(annotations: ob
 
     result = await read_list(FakeReader(EvidencePage((item,))), PODS, clock=_clock)
 
-    assert result.items == ({"metadata": {"name": "a", "uid": "uid-a"}},)
+    assert result.items == ({"metadata": _pod("a")["metadata"]},)
 
 
 async def test_an_unresolved_source_is_never_read() -> None:
@@ -1964,9 +1993,16 @@ async def test_a_404_that_names_another_object_suggests_stale_discovery() -> Non
     "document",
     [
         pytest.param({"spec": {}}, id="no-metadata"),
-        pytest.param({"metadata": {"name": "web-0"}}, id="no-uid"),
-        pytest.param({"metadata": {"name": "web-0", "uid": ""}}, id="empty-uid"),
-        pytest.param({"metadata": {"name": "web-1", "uid": "uid-web-1"}}, id="another-object"),
+        pytest.param({"metadata": {"name": "web-0", "namespace": "team-a"}}, id="no-uid"),
+        pytest.param(
+            {"metadata": {"name": "web-0", "namespace": "team-a", "uid": ""}}, id="empty-uid"
+        ),
+        pytest.param(_pod("web-1"), id="another-object"),
+        pytest.param(
+            {"metadata": {"name": "web-0", "namespace": "team-b", "uid": "uid-web-0"}},
+            id="another-namespace",
+        ),
+        pytest.param({"metadata": {"name": "web-0", "uid": "uid-web-0"}}, id="no-namespace"),
     ],
 )
 async def test_an_object_that_is_not_the_one_asked_for_is_malformed(
@@ -2356,6 +2392,9 @@ def _reduce_item(source: ApiSource, item: Mapping[str, Any]) -> dict[str, Any]:
     metadata = item.get("metadata")
     if not isinstance(metadata, Mapping):
         raise KubeMalformedError("Kubernetes API returned an object without metadata")
+    scope = source.scope
+    if scope.kind is ScopeKind.NAMESPACE and metadata.get("namespace") != scope.name:
+        raise KubeMalformedError("Kubernetes API returned an object from another namespace")
     reduced = _reduce_metadata(source.resource, metadata)
     if source.projection is Projection.METADATA:
         return {"metadata": reduced}

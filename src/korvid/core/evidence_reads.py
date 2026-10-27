@@ -331,6 +331,9 @@ def _reduce_item(source: ApiSource, item: Mapping[str, Any]) -> dict[str, Any]:
     metadata = item.get("metadata")
     if not isinstance(metadata, Mapping):
         raise KubeMalformedError("Kubernetes API returned an object without metadata")
+    scope = source.scope
+    if scope.kind is ScopeKind.NAMESPACE and metadata.get("namespace") != scope.name:
+        raise KubeMalformedError("Kubernetes API returned an object from another namespace")
     reduced = _reduce_metadata(source.resource, metadata)
     if source.projection is Projection.METADATA:
         return {"metadata": reduced}
