@@ -285,12 +285,14 @@ async def test_an_error_body_is_not_read_without_a_budget_for_it() -> None:
 
 async def test_an_unreadable_error_body_keeps_the_status() -> None:
     response = Response(b"{}", 503)
-    response.content.failure = OSError("connection reset")
+    response.content.failure = OSError("connection reset: token=secret")
 
     with pytest.raises(ApiStatusError, match="API 503") as failure:
         await _read(response, error_body_limit=ERROR_BODY_LIMIT)
 
     assert failure.value.body == ""
+    assert "secret" not in str(failure.value)
+    assert response.closed
 
 
 @pytest.mark.parametrize(
@@ -1708,6 +1710,40 @@ async def test_an_object_that_arrives_after_the_deadline_is_not_accepted() -> No
     assert _state(result.observation) == (EvidenceState.UNAVAILABLE, Basis.DEADLINE)
 
 
+async def test_a_malformed_page_that_arrives_after_the_deadline_is_the_deadline() -> None:
+    reader = FakeReader(Late(EvidencePage(({"spec": {}},))))
+
+    result = await read_list(reader, PODS, deadline=0.05, clock=_clock)
+
+    assert _state(result.observation) == (EvidenceState.UNAVAILABLE, Basis.DEADLINE)
+
+
+async def test_a_malformed_object_that_arrives_after_the_deadline_is_the_deadline() -> None:
+    result = await read_object(FakeReader(Late({"spec": {}})), POD, deadline=0.05, clock=_clock)
+
+    assert _state(result.observation) == (EvidenceState.UNAVAILABLE, Basis.DEADLINE)
+
+
+@pytest.mark.parametrize("read", ["list", "object"])
+async def test_an_item_found_malformed_only_after_the_deadline_is_the_deadline(
+    monkeypatch: pytest.MonkeyPatch, read: str
+) -> None:
+    def slow_and_malformed(_source: ApiSource, _item: object) -> dict[str, Any]:
+        time.sleep(0.1)
+        raise KubeMalformedError("found malformed late")
+
+    monkeypatch.setattr(evidence_reads, "_reduce_item", slow_and_malformed)
+    reader = FakeReader(EvidencePage((_pod("a"),)) if read == "list" else _pod("web-0"))
+    source = PODS if read == "list" else POD
+
+    if read == "list":
+        observation = (await read_list(reader, source, deadline=0.05, clock=_clock)).observation
+    else:
+        observation = (await read_object(reader, source, deadline=0.05, clock=_clock)).observation
+
+    assert _state(observation) == (EvidenceState.UNAVAILABLE, Basis.DEADLINE)
+
+
 async def test_an_absence_reported_after_the_deadline_proves_nothing() -> None:
     late_absence = Late(_status(404, "NotFound", name="web-0", kind="pods"))
 
@@ -2187,6 +2223,7 @@ PAYLOAD_METADATA_FIELDS = (
 #: Embeds the whole object as it was last applied, data included.
 LAST_APPLIED_ANNOTATION = "kubectl.kubernetes.io/last-applied-configuration"
 _DEADLINE = "deadline reached"
+_PAST_DEADLINE = Classification(EvidenceState.UNAVAILABLE, Basis.DEADLINE, _DEADLINE)
 #: How a read waits out a 429 before retrying it.
 _pause = asyncio.sleep
 
@@ -2244,7 +2281,10 @@ async def read_list(
     except _DeadlineReachedError:
         outcome = run.at_deadline()
     except (ApiStatusError, KubeClientError) as failure:
-        outcome = classify(failure, ReadRequest(ReadKind.LIST, source, continuation=run.pages > 0))
+        # Processing that ran past the deadline proves nothing either.
+        late = _is_late(attempts.deadline_at)
+        request = ReadRequest(ReadKind.LIST, source, continuation=run.pages > 0)
+        outcome = run.at_deadline() if late else classify(failure, request)
     else:
         outcome = run.finished()
     items = tuple(run.items)
@@ -2281,9 +2321,10 @@ async def read_object(
         item, uid = _named_object(source, document)
         attempts.check()
     except _DeadlineReachedError:
-        outcome = Classification(EvidenceState.UNAVAILABLE, Basis.DEADLINE, _DEADLINE)
+        outcome = _PAST_DEADLINE
     except (ApiStatusError, KubeClientError) as failure:
-        outcome = classify(failure, ReadRequest(ReadKind.GET, source))
+        late = _is_late(attempts.deadline_at)
+        outcome = _PAST_DEADLINE if late else classify(failure, ReadRequest(ReadKind.GET, source))
     else:
         observed = Classification(EvidenceState.AVAILABLE, Basis.OBSERVED, "")
         return ObjectEvidence(item, _observe(source, observed, clock(), 1, token, uid))
@@ -2410,8 +2451,12 @@ async def _before_deadline(deadline_at: float, request: Awaitable[_T]) -> _T:
         raise
 
 
+def _is_late(deadline_at: float) -> bool:
+    return asyncio.get_running_loop().time() >= deadline_at
+
+
 def _refuse_late(deadline_at: float) -> None:
-    if asyncio.get_running_loop().time() >= deadline_at:
+    if _is_late(deadline_at):
         raise _DeadlineReachedError
 
 

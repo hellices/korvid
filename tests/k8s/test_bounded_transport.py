@@ -119,12 +119,14 @@ async def test_an_error_body_is_not_read_without_a_budget_for_it() -> None:
 
 async def test_an_unreadable_error_body_keeps_the_status() -> None:
     response = Response(b"{}", 503)
-    response.content.failure = OSError("connection reset")
+    response.content.failure = OSError("connection reset: token=secret")
 
     with pytest.raises(ApiStatusError, match="API 503") as failure:
         await _read(response, error_body_limit=ERROR_BODY_LIMIT)
 
     assert failure.value.body == ""
+    assert "secret" not in str(failure.value)
+    assert response.closed
 
 
 @pytest.mark.parametrize(

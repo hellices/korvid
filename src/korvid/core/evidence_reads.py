@@ -68,6 +68,7 @@ PAYLOAD_METADATA_FIELDS = (
 #: Embeds the whole object as it was last applied, data included.
 LAST_APPLIED_ANNOTATION = "kubectl.kubernetes.io/last-applied-configuration"
 _DEADLINE = "deadline reached"
+_PAST_DEADLINE = Classification(EvidenceState.UNAVAILABLE, Basis.DEADLINE, _DEADLINE)
 #: How a read waits out a 429 before retrying it.
 _pause = asyncio.sleep
 
@@ -125,7 +126,10 @@ async def read_list(
     except _DeadlineReachedError:
         outcome = run.at_deadline()
     except (ApiStatusError, KubeClientError) as failure:
-        outcome = classify(failure, ReadRequest(ReadKind.LIST, source, continuation=run.pages > 0))
+        # Processing that ran past the deadline proves nothing either.
+        late = _is_late(attempts.deadline_at)
+        request = ReadRequest(ReadKind.LIST, source, continuation=run.pages > 0)
+        outcome = run.at_deadline() if late else classify(failure, request)
     else:
         outcome = run.finished()
     items = tuple(run.items)
@@ -162,9 +166,10 @@ async def read_object(
         item, uid = _named_object(source, document)
         attempts.check()
     except _DeadlineReachedError:
-        outcome = Classification(EvidenceState.UNAVAILABLE, Basis.DEADLINE, _DEADLINE)
+        outcome = _PAST_DEADLINE
     except (ApiStatusError, KubeClientError) as failure:
-        outcome = classify(failure, ReadRequest(ReadKind.GET, source))
+        late = _is_late(attempts.deadline_at)
+        outcome = _PAST_DEADLINE if late else classify(failure, ReadRequest(ReadKind.GET, source))
     else:
         observed = Classification(EvidenceState.AVAILABLE, Basis.OBSERVED, "")
         return ObjectEvidence(item, _observe(source, observed, clock(), 1, token, uid))
@@ -291,8 +296,12 @@ async def _before_deadline(deadline_at: float, request: Awaitable[_T]) -> _T:
         raise
 
 
+def _is_late(deadline_at: float) -> bool:
+    return asyncio.get_running_loop().time() >= deadline_at
+
+
 def _refuse_late(deadline_at: float) -> None:
-    if asyncio.get_running_loop().time() >= deadline_at:
+    if _is_late(deadline_at):
         raise _DeadlineReachedError
 
 
