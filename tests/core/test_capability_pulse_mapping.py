@@ -22,9 +22,10 @@ from korvid.k8s.errors import (
     KubeClientError,
     KubeMalformedError,
     KubeTimeoutError,
+    KubeTooLargeError,
     KubeTransportError,
 )
-from korvid.k8s.pulse import PulseLimitError, PulsePage, PulseReader, PulseSource
+from korvid.k8s.pulse import PulsePage, PulseReader, PulseSource
 
 #: Pulse state -> (the state when the result kept objects, when it kept none).
 #: An ambiguous Pulse state maps to the weaker claim: `unavailable` folds a 405
@@ -60,7 +61,7 @@ FAILURES = [
     KubeTransportError("connection failed"),
     KubeMalformedError("malformed"),
     KubeClientError("not connected"),
-    PulseLimitError("byte cap"),
+    KubeTooLargeError("byte cap"),
 ]
 
 
