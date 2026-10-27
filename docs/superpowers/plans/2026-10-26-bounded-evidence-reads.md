@@ -210,6 +210,15 @@ async def test_a_body_within_its_budget_is_one_json_object() -> None:
 class LateEndStream(Stream):
     """A body whose end is only seen when one more byte is asked for, as chunked bodies are."""
 
+    def __init__(self, payload: bytes) -> None:
+        super().__init__(payload)
+        self.reads: list[bytes] = []
+
+    async def read(self, size: int) -> bytes:
+        chunk = await super().read(size)
+        self.reads.append(chunk)
+        return chunk
+
     def at_eof(self) -> bool:
         return False
 
@@ -217,9 +226,11 @@ class LateEndStream(Stream):
 async def test_a_body_of_exactly_the_budget_is_accepted_before_its_end_arrives() -> None:
     payload = b'{"kind": "PodList"}'
     response = Response(payload)
-    response.content = LateEndStream(payload)
+    stream = LateEndStream(payload)
+    response.content = stream
 
     assert await _read(response, max_bytes=len(payload)) == {"kind": "PodList"}
+    assert stream.reads[-1] == b""
 
 
 async def test_a_body_one_byte_past_the_budget_is_over_it_before_its_end_arrives() -> None:
