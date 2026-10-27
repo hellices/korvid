@@ -12,6 +12,7 @@ from korvid.core.capability import (
     EvidenceState,
     Observation,
     Projection,
+    RunToken,
     SourceScope,
     Verb,
 )
@@ -177,6 +178,36 @@ async def test_when_no_candidate_answers_the_strongest_failure_is_reported() -> 
         (EvidenceState.DENIED, Basis.FORBIDDEN),
         (EvidenceState.UNSUPPORTED, Basis.NOT_SERVED),
     ]
+
+
+async def test_a_failure_after_a_fall_through_reports_the_strongest_failure() -> None:
+    reader = FakeReader(FORBIDDEN, ApiStatusError(503, "Service Unavailable"))
+
+    result = await read_logical_list(reader, _events(_snapshot()), clock=_clock)
+
+    assert reader.groups == ["events.k8s.io", ""]
+    assert result.items == ()
+    assert _state(result.observation) == (EvidenceState.DENIED, Basis.FORBIDDEN)
+    assert [_state(outcome) for outcome in result.outcomes] == [
+        (EvidenceState.DENIED, Basis.FORBIDDEN),
+        (EvidenceState.UNAVAILABLE, Basis.SERVER_ERROR),
+    ]
+
+
+async def test_a_skipped_candidate_carries_the_run_token_and_keeps_its_time() -> None:
+    token = RunToken(3, 2, 1)
+    later = datetime(2026, 10, 28, 9, 5, tzinfo=UTC)
+
+    result = await read_logical_list(
+        FakeReader(),
+        _events(_snapshot(events_group=False, core_events=False)),
+        token=token,
+        clock=lambda: later,
+    )
+
+    assert result.observation.token == token
+    assert [outcome.token for outcome in result.outcomes] == [token, token]
+    assert [outcome.observed_at for outcome in result.outcomes] == [NOW, NOW]
 
 
 async def test_when_no_candidate_resolves_nothing_is_read() -> None:

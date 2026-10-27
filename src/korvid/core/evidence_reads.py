@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Any, TypeVar
 
@@ -184,6 +184,8 @@ async def read_object(
 #: states: RBAC can refuse one API group and allow another that serves the
 #: same evidence, and one API can refuse a projection that another serves.
 _FALL_THROUGH = frozenset({EvidenceState.DENIED, EvidenceState.UNSUPPORTED})
+#: A read in one of these states is a logical source's answer.
+_ANSWERED = frozenset({EvidenceState.AVAILABLE, EvidenceState.PARTIAL})
 
 
 @dataclass(frozen=True, slots=True)
@@ -192,8 +194,9 @@ class LogicalListEvidence:
 
     `observation` is the read that answered, or, when none did, the failure
     the baseline precedence picks. `outcomes` holds each candidate's outcome
-    in order, up to the one that answered: why discovery did not resolve it,
-    or what its read established.
+    in order, up to the last one tried: why discovery did not resolve it, or
+    what its read established. Each carries the run's token; a candidate
+    discovery did not resolve keeps the time discovery observed it.
     """
 
     items: tuple[dict[str, Any], ...]
@@ -215,14 +218,17 @@ async def read_logical_list(
     """LIST a logical source through its candidates, in order.
 
     A candidate discovery did not resolve is skipped. A read that is `DENIED`
-    or `UNSUPPORTED` falls through to the next candidate. Any other outcome,
-    `PARTIAL` and `UNAVAILABLE` included, is the answer. Each read has its own
-    budgets, those given here.
+    or `UNSUPPORTED` falls through to the next candidate. An `AVAILABLE` or
+    `PARTIAL` read is the answer. Any other read stops the search, and then,
+    as when every candidate is refused, the failure the baseline precedence
+    picks among every outcome is reported: a `DENIED` first candidate wins
+    over an `UNAVAILABLE` fallback. Each read has its own budgets, those
+    given here.
     """
     outcomes: list[Observation] = []
     for outcome in resolution.outcomes:
         if outcome.observation is not None:
-            outcomes.append(outcome.observation)
+            outcomes.append(replace(outcome.observation, token=token))
             continue
         result = await read_list(
             reader,
@@ -235,8 +241,10 @@ async def read_logical_list(
             clock=clock,
         )
         outcomes.append(result.observation)
-        if result.observation.state not in _FALL_THROUGH:
+        if result.observation.state in _ANSWERED:
             return LogicalListEvidence(result.items, result.observation, tuple(outcomes))
+        if result.observation.state not in _FALL_THROUGH:
+            break
     failure = min(outcomes, key=lambda failed: FAILURE_PRECEDENCE.index(failed.state))
     return LogicalListEvidence((), failure, tuple(outcomes))
 

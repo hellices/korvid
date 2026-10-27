@@ -78,6 +78,7 @@ from korvid.core.capability import (
     EvidenceState,
     Observation,
     Projection,
+    RunToken,
     SourceScope,
     Verb,
 )
@@ -245,6 +246,36 @@ async def test_when_no_candidate_answers_the_strongest_failure_is_reported() -> 
     ]
 
 
+async def test_a_failure_after_a_fall_through_reports_the_strongest_failure() -> None:
+    reader = FakeReader(FORBIDDEN, ApiStatusError(503, "Service Unavailable"))
+
+    result = await read_logical_list(reader, _events(_snapshot()), clock=_clock)
+
+    assert reader.groups == ["events.k8s.io", ""]
+    assert result.items == ()
+    assert _state(result.observation) == (EvidenceState.DENIED, Basis.FORBIDDEN)
+    assert [_state(outcome) for outcome in result.outcomes] == [
+        (EvidenceState.DENIED, Basis.FORBIDDEN),
+        (EvidenceState.UNAVAILABLE, Basis.SERVER_ERROR),
+    ]
+
+
+async def test_a_skipped_candidate_carries_the_run_token_and_keeps_its_time() -> None:
+    token = RunToken(3, 2, 1)
+    later = datetime(2026, 10, 28, 9, 5, tzinfo=UTC)
+
+    result = await read_logical_list(
+        FakeReader(),
+        _events(_snapshot(events_group=False, core_events=False)),
+        token=token,
+        clock=lambda: later,
+    )
+
+    assert result.observation.token == token
+    assert [outcome.token for outcome in result.outcomes] == [token, token]
+    assert [outcome.observed_at for outcome in result.outcomes] == [NOW, NOW]
+
+
 async def test_when_no_candidate_resolves_nothing_is_read() -> None:
     reader = FakeReader()
 
@@ -275,13 +306,15 @@ Expected: collection error, `ImportError: cannot import name 'read_logical_list'
 
 - [ ] **Step 3: Add the reader**
 
-In `src/korvid/core/evidence_reads.py`, import `Resolution` from `korvid.core.api_versions` and `FAILURE_PRECEDENCE` from `korvid.core.capability`, then add after `read_object`:
+In `src/korvid/core/evidence_reads.py`, import `replace` from `dataclasses`, `Resolution` from `korvid.core.api_versions` and `FAILURE_PRECEDENCE` from `korvid.core.capability`, then add after `read_object`:
 
 ```python
 #: A logical source tries its next candidate after a read in one of these
 #: states: RBAC can refuse one API group and allow another that serves the
 #: same evidence, and one API can refuse a projection that another serves.
 _FALL_THROUGH = frozenset({EvidenceState.DENIED, EvidenceState.UNSUPPORTED})
+#: A read in one of these states is a logical source's answer.
+_ANSWERED = frozenset({EvidenceState.AVAILABLE, EvidenceState.PARTIAL})
 
 
 @dataclass(frozen=True, slots=True)
@@ -290,8 +323,9 @@ class LogicalListEvidence:
 
     `observation` is the read that answered, or, when none did, the failure
     the baseline precedence picks. `outcomes` holds each candidate's outcome
-    in order, up to the one that answered: why discovery did not resolve it,
-    or what its read established.
+    in order, up to the last one tried: why discovery did not resolve it, or
+    what its read established. Each carries the run's token; a candidate
+    discovery did not resolve keeps the time discovery observed it.
     """
 
     items: tuple[dict[str, Any], ...]
@@ -313,14 +347,17 @@ async def read_logical_list(
     """LIST a logical source through its candidates, in order.
 
     A candidate discovery did not resolve is skipped. A read that is `DENIED`
-    or `UNSUPPORTED` falls through to the next candidate. Any other outcome,
-    `PARTIAL` and `UNAVAILABLE` included, is the answer. Each read has its own
-    budgets, those given here.
+    or `UNSUPPORTED` falls through to the next candidate. An `AVAILABLE` or
+    `PARTIAL` read is the answer. Any other read stops the search, and then,
+    as when every candidate is refused, the failure the baseline precedence
+    picks among every outcome is reported: a `DENIED` first candidate wins
+    over an `UNAVAILABLE` fallback. Each read has its own budgets, those
+    given here.
     """
     outcomes: list[Observation] = []
     for outcome in resolution.outcomes:
         if outcome.observation is not None:
-            outcomes.append(outcome.observation)
+            outcomes.append(replace(outcome.observation, token=token))
             continue
         result = await read_list(
             reader,
@@ -333,8 +370,10 @@ async def read_logical_list(
             clock=clock,
         )
         outcomes.append(result.observation)
-        if result.observation.state not in _FALL_THROUGH:
+        if result.observation.state in _ANSWERED:
             return LogicalListEvidence(result.items, result.observation, tuple(outcomes))
+        if result.observation.state not in _FALL_THROUGH:
+            break
     failure = min(outcomes, key=lambda failed: FAILURE_PRECEDENCE.index(failed.state))
     return LogicalListEvidence((), failure, tuple(outcomes))
 ```
@@ -342,9 +381,9 @@ async def read_logical_list(
 - [ ] **Step 4: Run the tests to verify they pass, and check the mutations**
 
 Run: `uv run --frozen pytest -p no:tach tests/core/test_logical_reads.py -q`
-Expected: `9 passed`.
+Expected: `11 passed`.
 
-Each of these changes to `evidence_reads.py` must make at least one test fail: drop `EvidenceState.UNSUPPORTED` from `_FALL_THROUGH`; replace `min(` with `max(` in the failure pick; remove the `continue` after an unresolved candidate.
+Each of these changes to `evidence_reads.py` must make at least one test fail: drop `EvidenceState.UNSUPPORTED` from `_FALL_THROUGH`; replace `min(` with `max(` in the failure pick; remove the `continue` after an unresolved candidate; append a skipped candidate's observation without the run's token; `continue` instead of `break` after a read that is neither answered nor refused; return any read that is not refused as the answer.
 
 - [ ] **Step 5: Commit**
 
@@ -968,6 +1007,7 @@ on:
       - src/korvid/core/evidence_reads.py
       - src/korvid/core/run_tokens.py
       - src/korvid/k8s/bounded_transport.py
+      - src/korvid/k8s/client.py
       - src/korvid/k8s/discovery.py
       - src/korvid/k8s/discovery_snapshot.py
       - src/korvid/k8s/errors.py
@@ -983,6 +1023,7 @@ on:
       - src/korvid/core/evidence_reads.py
       - src/korvid/core/run_tokens.py
       - src/korvid/k8s/bounded_transport.py
+      - src/korvid/k8s/client.py
       - src/korvid/k8s/discovery.py
       - src/korvid/k8s/discovery_snapshot.py
       - src/korvid/k8s/errors.py
