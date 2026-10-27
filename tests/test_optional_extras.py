@@ -125,6 +125,7 @@ def _run_subprocess_probe(probe: str) -> None:
         "korvid.core.evidence_reads",
         "korvid.k8s.bounded_transport",
         "korvid.k8s.evidence_requests",
+        "korvid.core.run_tokens",
     ],
 )
 def test_base_import_does_not_require_optional_extras(module: str) -> None:
