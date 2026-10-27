@@ -50,7 +50,7 @@
 - **A namespaced read accepts only objects from its namespace.** An item from another namespace, or with none, is `MALFORMED`, so it is never attributed to the namespace read.
 - **A 429 with no usable `Retry-After` waits one second.** An HTTP-date counts as no `Retry-After`.
 - **Embedded metadata is reduced too.** A pod template's metadata, or any other that an object embeds, loses `managedFields` and `last-applied-configuration` as the object's own does. An object nested too deeply to walk is `MALFORMED`.
-- **A result read or processed after the deadline is not accepted.** A timeout interrupts a request only where it waits, so the reads check the deadline once a page or an object has been processed. A failure reported after the deadline is the deadline as well: a late `NotFound` must not establish absence. A 429 retry whose wait ends after the deadline is never sent.
+- **A result read or processed after the deadline is not accepted.** A timeout interrupts a request only where it waits, so the reads check the deadline once a page or an object has been processed. A failure reported after the deadline is the deadline as well: a late `NotFound` must not establish absence. No request is sent once the deadline has passed, a 429 retry included.
 - **A budget is exact at its boundary.** The transport asks for one byte past a full budget, on the wire and after decompression, rather than trusting that the end of a chunked body has already arrived. JSON's non-standard `NaN` and `Infinity` are `MALFORMED`.
 - **A credential refresh that fails is a client failure.** An exec credential plugin that fails while refreshing a token raises `ConfigException` or `RuntimeError`, with its output in the message. The transport raises an uncategorized `KubeClientError` instead, without that output, so the reads classify it rather than leaking it.
 - **Both reads take `max_bytes`, `token` and `clock` besides the design's parameters.** `token` is recorded on the observation. S4 (#488) adds the run generation that makes it useful.
@@ -1115,8 +1115,9 @@ class EvidencePage:
 class EvidenceReader(ABC):
     """What evidence reads depend on: a LIST page and a GET, and nothing that writes.
 
-    The reads can only call these two. An implementation such as `KubeClient`
-    may offer more, but nothing that takes an `EvidenceReader` can reach it.
+    This is a typed dependency, not a runtime boundary. Code typed against it
+    calls only these two, though an implementation such as `KubeClient` also
+    has write methods.
     """
 
     @abstractmethod
@@ -1572,7 +1573,7 @@ async def test_a_429_is_retried_once_within_the_deadline() -> None:
     result = await read_list(reader, PODS, clock=_clock)
 
     assert _state(result.observation) == (EvidenceState.AVAILABLE, Basis.OBSERVED)
-    assert len(reader.lists) == 2
+    assert reader.lists == [(POD_TARGET, LIST_PAGE_SIZE, "", DEFAULT_MAX_BYTES)] * 2
 
 
 async def test_a_second_429_is_throttled() -> None:
@@ -1584,7 +1585,7 @@ async def test_a_second_429_is_throttled() -> None:
     result = await read_list(reader, PODS, clock=_clock)
 
     assert _state(result.observation) == (EvidenceState.UNAVAILABLE, Basis.THROTTLED)
-    assert len(reader.lists) == 2
+    assert reader.lists == [(POD_TARGET, LIST_PAGE_SIZE, "", DEFAULT_MAX_BYTES)] * 2
 
 
 async def test_a_429_whose_wait_outlasts_the_deadline_is_not_retried() -> None:
@@ -1609,6 +1610,30 @@ async def test_a_retry_that_wakes_after_the_deadline_is_never_sent(
 
     assert _state(result.observation) == (EvidenceState.UNAVAILABLE, Basis.DEADLINE)
     assert len(reader.lists) == 1
+
+
+async def test_a_list_whose_deadline_passed_before_it_began_sends_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(evidence_reads, "_deadline_at", lambda _seconds: 0.0)
+    reader = FakeReader(EvidencePage(()))
+
+    result = await read_list(reader, PODS, clock=_clock)
+
+    assert _state(result.observation) == (EvidenceState.UNAVAILABLE, Basis.DEADLINE)
+    assert reader.lists == []
+
+
+async def test_an_object_read_whose_deadline_passed_before_it_began_sends_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(evidence_reads, "_deadline_at", lambda _seconds: 0.0)
+    reader = FakeReader(_pod("web-0"))
+
+    result = await read_object(reader, POD, clock=_clock)
+
+    assert _state(result.observation) == (EvidenceState.UNAVAILABLE, Basis.DEADLINE)
+    assert reader.gets == []
 
 
 async def test_a_read_retries_only_one_429() -> None:
@@ -2352,8 +2377,13 @@ def _deadline_at(deadline: float) -> float:
 
 
 async def _call(attempts: _Attempts, request: Callable[[], Awaitable[_T]]) -> _T:
-    """Make `request` before the deadline, retrying one 429 whose wait fits in it."""
+    """Make `request` before the deadline, retrying one 429 whose wait fits in it.
+
+    No request is made once the deadline has passed, not even a retry whose
+    wait ended later than asked.
+    """
     while True:
+        _refuse_late(attempts.deadline_at)
         try:
             return await _before_deadline(attempts.deadline_at, request())
         except ApiStatusError as failure:
@@ -2362,8 +2392,6 @@ async def _call(attempts: _Attempts, request: Callable[[], Awaitable[_T]]) -> _T
                 raise
             attempts.retried = True
             await _pause(delay)
-            # The wait can end later than asked: never send the retry late.
-            _refuse_late(attempts.deadline_at)
 
 
 async def _before_deadline(deadline_at: float, request: Awaitable[_T]) -> _T:

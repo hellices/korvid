@@ -258,8 +258,13 @@ def _deadline_at(deadline: float) -> float:
 
 
 async def _call(attempts: _Attempts, request: Callable[[], Awaitable[_T]]) -> _T:
-    """Make `request` before the deadline, retrying one 429 whose wait fits in it."""
+    """Make `request` before the deadline, retrying one 429 whose wait fits in it.
+
+    No request is made once the deadline has passed, not even a retry whose
+    wait ended later than asked.
+    """
     while True:
+        _refuse_late(attempts.deadline_at)
         try:
             return await _before_deadline(attempts.deadline_at, request())
         except ApiStatusError as failure:
@@ -268,8 +273,6 @@ async def _call(attempts: _Attempts, request: Callable[[], Awaitable[_T]]) -> _T
                 raise
             attempts.retried = True
             await _pause(delay)
-            # The wait can end later than asked: never send the retry late.
-            _refuse_late(attempts.deadline_at)
 
 
 async def _before_deadline(deadline_at: float, request: Awaitable[_T]) -> _T:

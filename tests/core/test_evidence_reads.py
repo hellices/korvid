@@ -329,7 +329,7 @@ async def test_a_429_is_retried_once_within_the_deadline() -> None:
     result = await read_list(reader, PODS, clock=_clock)
 
     assert _state(result.observation) == (EvidenceState.AVAILABLE, Basis.OBSERVED)
-    assert len(reader.lists) == 2
+    assert reader.lists == [(POD_TARGET, LIST_PAGE_SIZE, "", DEFAULT_MAX_BYTES)] * 2
 
 
 async def test_a_second_429_is_throttled() -> None:
@@ -341,7 +341,7 @@ async def test_a_second_429_is_throttled() -> None:
     result = await read_list(reader, PODS, clock=_clock)
 
     assert _state(result.observation) == (EvidenceState.UNAVAILABLE, Basis.THROTTLED)
-    assert len(reader.lists) == 2
+    assert reader.lists == [(POD_TARGET, LIST_PAGE_SIZE, "", DEFAULT_MAX_BYTES)] * 2
 
 
 async def test_a_429_whose_wait_outlasts_the_deadline_is_not_retried() -> None:
@@ -366,6 +366,30 @@ async def test_a_retry_that_wakes_after_the_deadline_is_never_sent(
 
     assert _state(result.observation) == (EvidenceState.UNAVAILABLE, Basis.DEADLINE)
     assert len(reader.lists) == 1
+
+
+async def test_a_list_whose_deadline_passed_before_it_began_sends_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(evidence_reads, "_deadline_at", lambda _seconds: 0.0)
+    reader = FakeReader(EvidencePage(()))
+
+    result = await read_list(reader, PODS, clock=_clock)
+
+    assert _state(result.observation) == (EvidenceState.UNAVAILABLE, Basis.DEADLINE)
+    assert reader.lists == []
+
+
+async def test_an_object_read_whose_deadline_passed_before_it_began_sends_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(evidence_reads, "_deadline_at", lambda _seconds: 0.0)
+    reader = FakeReader(_pod("web-0"))
+
+    result = await read_object(reader, POD, clock=_clock)
+
+    assert _state(result.observation) == (EvidenceState.UNAVAILABLE, Basis.DEADLINE)
+    assert reader.gets == []
 
 
 async def test_a_read_retries_only_one_429() -> None:

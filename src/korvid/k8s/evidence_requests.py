@@ -51,8 +51,9 @@ class EvidencePage:
 class EvidenceReader(ABC):
     """What evidence reads depend on: a LIST page and a GET, and nothing that writes.
 
-    The reads can only call these two. An implementation such as `KubeClient`
-    may offer more, but nothing that takes an `EvidenceReader` can reach it.
+    This is a typed dependency, not a runtime boundary. Code typed against it
+    calls only these two, though an implementation such as `KubeClient` also
+    has write methods.
     """
 
     @abstractmethod
