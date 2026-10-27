@@ -87,6 +87,7 @@ async def test_an_object_read_names_its_object() -> None:
 
     assert item == {"metadata": {"name": "web"}}
     assert _url(api) == ("/apis/apps/v1/namespaces/team-a/deployments/web", [])
+    assert _accept(api) == "application/json"
 
 
 async def test_a_metadata_list_asks_for_partial_object_metadata() -> None:

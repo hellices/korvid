@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import dataclasses
 import json
 import time
@@ -351,6 +352,21 @@ async def test_a_429_whose_wait_outlasts_the_deadline_is_not_retried() -> None:
     assert len(reader.lists) == 1
 
 
+async def test_a_retry_that_wakes_after_the_deadline_is_never_sent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def oversleep(_delay: float) -> None:
+        time.sleep(0.1)
+
+    monkeypatch.setattr(evidence_reads, "_pause", oversleep)
+    reader = FakeReader(_status(429, "TooManyRequests", retry_after=0.0), EvidencePage(()))
+
+    result = await read_list(reader, PODS, deadline=0.05, clock=_clock)
+
+    assert _state(result.observation) == (EvidenceState.UNAVAILABLE, Basis.DEADLINE)
+    assert len(reader.lists) == 1
+
+
 async def test_a_read_retries_only_one_429() -> None:
     reader = FakeReader(
         EvidencePage((_pod("a"),), "p2"),
@@ -488,10 +504,13 @@ async def test_no_configuration_payload_reaches_a_diagnostic_through_a_list(reso
         "", resource, TEAM, version="v1", verb=Verb.LIST, projection=Projection.METADATA
     )
 
-    result = await read_list(FakeReader(EvidencePage((PAYLOAD_ITEM,))), source, clock=_clock)
+    payload = copy.deepcopy(PAYLOAD_ITEM)
+
+    result = await read_list(FakeReader(EvidencePage((payload,))), source, clock=_clock)
 
     assert result.items == ({"metadata": KEPT_PAYLOAD_METADATA},)
     assert "hunter2" not in json.dumps(result.items)
+    assert payload == PAYLOAD_ITEM
 
 
 @pytest.mark.parametrize("resource", ["configmaps", "secrets"])
@@ -506,10 +525,13 @@ async def test_no_configuration_payload_reaches_a_diagnostic_through_a_get(resou
         projection=Projection.METADATA,
     )
 
-    result = await read_object(FakeReader(PAYLOAD_ITEM), source, clock=_clock)
+    payload = copy.deepcopy(PAYLOAD_ITEM)
+
+    result = await read_object(FakeReader(payload), source, clock=_clock)
 
     assert result.item == {"metadata": KEPT_PAYLOAD_METADATA}
     assert "hunter2" not in json.dumps(result.item)
+    assert payload == PAYLOAD_ITEM
 
 
 async def test_no_metadata_keeps_the_last_applied_configuration_or_managed_fields() -> None:
@@ -543,21 +565,27 @@ SCRUBBED_TEMPLATE = {"labels": {"app": "web"}, "annotations": {"team": "a"}}
 async def test_no_embedded_metadata_keeps_the_last_applied_configuration_through_a_list() -> None:
     source = ApiSource("apps", "deployments", TEAM, version="v1", verb=Verb.LIST)
 
-    result = await read_list(FakeReader(EvidencePage((DEPLOYMENT,))), source, clock=_clock)
+    deployment = copy.deepcopy(DEPLOYMENT)
+
+    result = await read_list(FakeReader(EvidencePage((deployment,))), source, clock=_clock)
 
     (item,) = result.items
     assert item["spec"]["template"]["metadata"] == SCRUBBED_TEMPLATE
     assert "hunter2" not in json.dumps(result.items)
+    assert deployment == DEPLOYMENT
 
 
 async def test_no_embedded_metadata_keeps_the_last_applied_configuration_through_a_get() -> None:
     source = ApiSource("apps", "deployments", TEAM, version="v1", verb=Verb.GET, name="web")
 
-    result = await read_object(FakeReader(DEPLOYMENT), source, clock=_clock)
+    deployment = copy.deepcopy(DEPLOYMENT)
+
+    result = await read_object(FakeReader(deployment), source, clock=_clock)
 
     assert result.item is not None
     assert result.item["spec"]["template"]["metadata"] == SCRUBBED_TEMPLATE
     assert result.item["spec"]["template"]["spec"] == {"containers": []}
+    assert deployment == DEPLOYMENT
 
 
 async def test_an_object_too_deep_to_scrub_is_malformed() -> None:

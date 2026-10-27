@@ -68,6 +68,8 @@ PAYLOAD_METADATA_FIELDS = (
 #: Embeds the whole object as it was last applied, data included.
 LAST_APPLIED_ANNOTATION = "kubectl.kubernetes.io/last-applied-configuration"
 _DEADLINE = "deadline reached"
+#: How a read waits out a 429 before retrying it.
+_pause = asyncio.sleep
 
 
 @dataclass(frozen=True, slots=True)
@@ -265,7 +267,9 @@ async def _call(attempts: _Attempts, request: Callable[[], Awaitable[_T]]) -> _T
             if delay is None:
                 raise
             attempts.retried = True
-            await asyncio.sleep(delay)
+            await _pause(delay)
+            # The wait can end later than asked: never send the retry late.
+            _refuse_late(attempts.deadline_at)
 
 
 async def _before_deadline(deadline_at: float, request: Awaitable[_T]) -> _T:

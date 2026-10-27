@@ -49,7 +49,7 @@
 - **`read_object` checks that the object it got is the one it asked for.** A missing UID, or another name, is `MALFORMED`.
 - **A 429 with no usable `Retry-After` waits one second.** An HTTP-date counts as no `Retry-After`.
 - **Embedded metadata is reduced too.** A pod template's metadata, or any other that an object embeds, loses `managedFields` and `last-applied-configuration` as the object's own does. An object nested too deeply to walk is `MALFORMED`.
-- **A result read or processed after the deadline is not accepted.** A timeout interrupts a request only where it waits, so the reads check the deadline once a page or an object has been processed. A failure reported after the deadline is the deadline as well: a late `NotFound` must not establish absence.
+- **A result read or processed after the deadline is not accepted.** A timeout interrupts a request only where it waits, so the reads check the deadline once a page or an object has been processed. A failure reported after the deadline is the deadline as well: a late `NotFound` must not establish absence. A 429 retry whose wait ends after the deadline is never sent.
 - **A budget is exact at its boundary.** The transport asks for one byte past a full budget, on the wire and after decompression, rather than trusting that the end of a chunked body has already arrived. JSON's non-standard `NaN` and `Infinity` are `MALFORMED`.
 - **A credential refresh that fails is a client failure.** An exec credential plugin that fails while refreshing a token raises `ConfigException` or `RuntimeError`, with its output in the message. The transport raises an uncategorized `KubeClientError` instead, without that output, so the reads classify it rather than leaking it.
 - **Both reads take `max_bytes`, `token` and `clock` besides the design's parameters.** `token` is recorded on the observation. S4 (#488) adds the run generation that makes it useful.
@@ -957,6 +957,7 @@ async def test_an_object_read_names_its_object() -> None:
 
     assert item == {"metadata": {"name": "web"}}
     assert _url(api) == ("/apis/apps/v1/namespaces/team-a/deployments/web", [])
+    assert _accept(api) == "application/json"
 
 
 async def test_a_metadata_list_asks_for_partial_object_metadata() -> None:
@@ -1214,6 +1215,7 @@ Create `tests/core/test_evidence_reads.py`:
 from __future__ import annotations
 
 import asyncio
+import copy
 import dataclasses
 import json
 import time
@@ -1562,6 +1564,21 @@ async def test_a_429_whose_wait_outlasts_the_deadline_is_not_retried() -> None:
     assert len(reader.lists) == 1
 
 
+async def test_a_retry_that_wakes_after_the_deadline_is_never_sent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def oversleep(_delay: float) -> None:
+        time.sleep(0.1)
+
+    monkeypatch.setattr(evidence_reads, "_pause", oversleep)
+    reader = FakeReader(_status(429, "TooManyRequests", retry_after=0.0), EvidencePage(()))
+
+    result = await read_list(reader, PODS, deadline=0.05, clock=_clock)
+
+    assert _state(result.observation) == (EvidenceState.UNAVAILABLE, Basis.DEADLINE)
+    assert len(reader.lists) == 1
+
+
 async def test_a_read_retries_only_one_429() -> None:
     reader = FakeReader(
         EvidencePage((_pod("a"),), "p2"),
@@ -1699,10 +1716,13 @@ async def test_no_configuration_payload_reaches_a_diagnostic_through_a_list(reso
         "", resource, TEAM, version="v1", verb=Verb.LIST, projection=Projection.METADATA
     )
 
-    result = await read_list(FakeReader(EvidencePage((PAYLOAD_ITEM,))), source, clock=_clock)
+    payload = copy.deepcopy(PAYLOAD_ITEM)
+
+    result = await read_list(FakeReader(EvidencePage((payload,))), source, clock=_clock)
 
     assert result.items == ({"metadata": KEPT_PAYLOAD_METADATA},)
     assert "hunter2" not in json.dumps(result.items)
+    assert payload == PAYLOAD_ITEM
 
 
 @pytest.mark.parametrize("resource", ["configmaps", "secrets"])
@@ -1717,10 +1737,13 @@ async def test_no_configuration_payload_reaches_a_diagnostic_through_a_get(resou
         projection=Projection.METADATA,
     )
 
-    result = await read_object(FakeReader(PAYLOAD_ITEM), source, clock=_clock)
+    payload = copy.deepcopy(PAYLOAD_ITEM)
+
+    result = await read_object(FakeReader(payload), source, clock=_clock)
 
     assert result.item == {"metadata": KEPT_PAYLOAD_METADATA}
     assert "hunter2" not in json.dumps(result.item)
+    assert payload == PAYLOAD_ITEM
 
 
 async def test_no_metadata_keeps_the_last_applied_configuration_or_managed_fields() -> None:
@@ -1754,21 +1777,27 @@ SCRUBBED_TEMPLATE = {"labels": {"app": "web"}, "annotations": {"team": "a"}}
 async def test_no_embedded_metadata_keeps_the_last_applied_configuration_through_a_list() -> None:
     source = ApiSource("apps", "deployments", TEAM, version="v1", verb=Verb.LIST)
 
-    result = await read_list(FakeReader(EvidencePage((DEPLOYMENT,))), source, clock=_clock)
+    deployment = copy.deepcopy(DEPLOYMENT)
+
+    result = await read_list(FakeReader(EvidencePage((deployment,))), source, clock=_clock)
 
     (item,) = result.items
     assert item["spec"]["template"]["metadata"] == SCRUBBED_TEMPLATE
     assert "hunter2" not in json.dumps(result.items)
+    assert deployment == DEPLOYMENT
 
 
 async def test_no_embedded_metadata_keeps_the_last_applied_configuration_through_a_get() -> None:
     source = ApiSource("apps", "deployments", TEAM, version="v1", verb=Verb.GET, name="web")
 
-    result = await read_object(FakeReader(DEPLOYMENT), source, clock=_clock)
+    deployment = copy.deepcopy(DEPLOYMENT)
+
+    result = await read_object(FakeReader(deployment), source, clock=_clock)
 
     assert result.item is not None
     assert result.item["spec"]["template"]["metadata"] == SCRUBBED_TEMPLATE
     assert result.item["spec"]["template"]["spec"] == {"containers": []}
+    assert deployment == DEPLOYMENT
 
 
 async def test_an_object_too_deep_to_scrub_is_malformed() -> None:
@@ -2064,6 +2093,8 @@ PAYLOAD_METADATA_FIELDS = (
 #: Embeds the whole object as it was last applied, data included.
 LAST_APPLIED_ANNOTATION = "kubectl.kubernetes.io/last-applied-configuration"
 _DEADLINE = "deadline reached"
+#: How a read waits out a 429 before retrying it.
+_pause = asyncio.sleep
 
 
 @dataclass(frozen=True, slots=True)
@@ -2261,7 +2292,9 @@ async def _call(attempts: _Attempts, request: Callable[[], Awaitable[_T]]) -> _T
             if delay is None:
                 raise
             attempts.retried = True
-            await asyncio.sleep(delay)
+            await _pause(delay)
+            # The wait can end later than asked: never send the retry late.
+            _refuse_late(attempts.deadline_at)
 
 
 async def _before_deadline(deadline_at: float, request: Awaitable[_T]) -> _T:
