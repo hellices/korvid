@@ -23,7 +23,9 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, TypeVar
 
+from korvid.core.api_versions import Resolution
 from korvid.core.capability import (
+    FAILURE_PRECEDENCE,
     ApiSource,
     Basis,
     EvidenceState,
@@ -176,6 +178,67 @@ async def read_object(
         observed = Classification(EvidenceState.AVAILABLE, Basis.OBSERVED, "")
         return ObjectEvidence(item, _observe(source, observed, clock(), 1, token, uid))
     return ObjectEvidence(None, _observe(source, outcome, clock(), 0, token))
+
+
+#: A logical source tries its next candidate after a read in one of these
+#: states: RBAC can refuse one API group and allow another that serves the
+#: same evidence, and one API can refuse a projection that another serves.
+_FALL_THROUGH = frozenset({EvidenceState.DENIED, EvidenceState.UNSUPPORTED})
+
+
+@dataclass(frozen=True, slots=True)
+class LogicalListEvidence:
+    """What a logical source's LIST read, and how each candidate it tried fared.
+
+    `observation` is the read that answered, or, when none did, the failure
+    the baseline precedence picks. `outcomes` holds each candidate's outcome
+    in order, up to the one that answered: why discovery did not resolve it,
+    or what its read established.
+    """
+
+    items: tuple[dict[str, Any], ...]
+    observation: Observation
+    outcomes: tuple[Observation, ...]
+
+
+async def read_logical_list(
+    reader: EvidenceReader,
+    resolution: Resolution,
+    *,
+    page_size: int = LIST_PAGE_SIZE,
+    max_pages: int = DEFAULT_MAX_PAGES,
+    deadline: float = DEFAULT_DEADLINE,
+    max_bytes: int = DEFAULT_MAX_BYTES,
+    token: RunToken | None = None,
+    clock: Callable[[], datetime] = _now,
+) -> LogicalListEvidence:
+    """LIST a logical source through its candidates, in order.
+
+    A candidate discovery did not resolve is skipped. A read that is `DENIED`
+    or `UNSUPPORTED` falls through to the next candidate. Any other outcome,
+    `PARTIAL` and `UNAVAILABLE` included, is the answer. Each read has its own
+    budgets, those given here.
+    """
+    outcomes: list[Observation] = []
+    for outcome in resolution.outcomes:
+        if outcome.observation is not None:
+            outcomes.append(outcome.observation)
+            continue
+        result = await read_list(
+            reader,
+            outcome.source,
+            page_size=page_size,
+            max_pages=max_pages,
+            deadline=deadline,
+            max_bytes=max_bytes,
+            token=token,
+            clock=clock,
+        )
+        outcomes.append(result.observation)
+        if result.observation.state not in _FALL_THROUGH:
+            return LogicalListEvidence(result.items, result.observation, tuple(outcomes))
+    failure = min(outcomes, key=lambda failed: FAILURE_PRECEDENCE.index(failed.state))
+    return LogicalListEvidence((), failure, tuple(outcomes))
 
 
 class _DeadlineReachedError(Exception):
