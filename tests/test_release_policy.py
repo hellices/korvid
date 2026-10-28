@@ -6,6 +6,7 @@ import tomllib
 from pathlib import Path
 
 import pytest
+from packaging.version import Version
 
 from korvid import __version__
 from tests.release_contracts import UPGRADE_SOURCE_VERSION, markdown_section
@@ -21,6 +22,7 @@ _MKDOCS = _ROOT / "mkdocs.yml"
 _RUNBOOK = _ROOT / "docs" / "release.md"
 _SECURITY = _ROOT / "SECURITY.md"
 _V0_5_RELEASE_NOTE = _ROOT / "docs" / "release-notes" / "v0.5.0.md"
+_V0_6_RELEASE_NOTE = _ROOT / "docs" / "release-notes" / "v0.6.0.md"
 _UNPUBLISHED_RELEASE_NOTE = _ROOT / "docs" / "release-notes" / "v0.4.0.md"
 _FIRST_PUBLISHED_0_4_VERSION = "0.4.1"
 _FIRST_PUBLISHED_0_4_NOTE = _ROOT / "docs" / "release-notes" / f"v{_FIRST_PUBLISHED_0_4_VERSION}.md"
@@ -540,8 +542,8 @@ def test_current_release_docs_only_name_allowed_versions() -> None:
     )
 
 
-def test_current_release_note_is_a_concise_v0_6_summary() -> None:
-    notes = _release_notes(_project_version())
+def test_v0_6_0_release_note_is_a_concise_summary() -> None:
+    notes = _V0_6_RELEASE_NOTE.read_text(encoding="utf-8")
     expected_sections = [
         "Why upgrade",
         "Breaking changes and migration",
@@ -629,7 +631,9 @@ def test_release_dispatch_contract_rejects_misplaced_commands(mutation: str) -> 
 
 def test_v0_6_release_note_explains_stricter_priority_key_validation() -> None:
     notes = _normalized(
-        markdown_section(_release_notes(_project_version()), "Breaking changes and migration")
+        markdown_section(
+            _V0_6_RELEASE_NOTE.read_text(encoding="utf-8"), "Breaking changes and migration"
+        )
     )
 
     assert "configuration format is unchanged" in notes
@@ -640,11 +644,35 @@ def test_v0_6_release_note_explains_stricter_priority_key_validation() -> None:
     assert "Existing keybindings and namespace settings continue to work" not in notes
 
 
-def test_current_release_note_uses_canonical_public_guide_urls() -> None:
-    notes = _release_notes(_project_version())
-    canonical_urls = (
-        "https://hellices.github.io/korvid/keybindings/#remap-an-app-action",
-        "https://hellices.github.io/korvid/tui/#namespace-shortcuts",
+@pytest.mark.parametrize(
+    ("notes_path", "canonical_urls"),
+    [
+        pytest.param(
+            _V0_6_RELEASE_NOTE,
+            (
+                "https://hellices.github.io/korvid/keybindings/#remap-an-app-action",
+                "https://hellices.github.io/korvid/tui/#namespace-shortcuts",
+            ),
+            id="v0.6.0",
+        ),
+        pytest.param(
+            None,
+            (
+                "https://hellices.github.io/korvid/release-notes/v0.6.0/",
+                "https://hellices.github.io/korvid/getting-started/#practice-on-a-throwaway-cluster",
+                "https://hellices.github.io/korvid/kubernetes-support/",
+            ),
+            id="current",
+        ),
+    ],
+)
+def test_release_notes_use_canonical_public_guide_urls(
+    notes_path: Path | None, canonical_urls: tuple[str, ...]
+) -> None:
+    notes = (
+        _release_notes(_project_version())
+        if notes_path is None
+        else notes_path.read_text(encoding="utf-8")
     )
 
     missing = [url for url in canonical_urls if f"]({url})" not in notes]
@@ -899,10 +927,57 @@ def test_publish_step_requires_reviewed_commit_version_guard() -> None:
         _assert_release_runbook_contracts(runbook.replace(publish, mutated))
 
 
-def test_v0_6_release_metadata_uses_v0_5_as_upgrade_source() -> None:
-    assert _project_version() == "0.6.0"
+def test_v0_6_1_release_metadata_keeps_v0_5_as_upgrade_source() -> None:
+    assert _project_version() == "0.6.1"
     assert UPGRADE_SOURCE_VERSION == "0.5.0"
-    assert __version__ == "0.6.0"
+    assert __version__ == "0.6.1"
+
+
+#: The runtime dependencies v0.6.1 updates for advisories against the
+#: versions v0.6.0 was packaged with, each with the first version that fixes
+#: every one of them (GHSA-6q48-6c7w-9gw2; the aiohttp 3.14.4 set;
+#: GHSA-v4x8-3wr5-3wq8 and the two low filelock ones; GHSA-7hp6-4w63-5g45;
+#: GHSA-xcq7-p3pf-p88h).
+_V0_6_1_SECURITY_FLOORS = {
+    "certifi": "2026.10.18",
+    "aiohttp": "3.14.4",
+    "filelock": "4.2.1",
+    "litellm": "1.100.4",
+    "opentelemetry-api": "1.45.1",
+}
+
+
+def _locked_version(package: str) -> str:
+    lock = tomllib.loads((_ROOT / "uv.lock").read_text(encoding="utf-8"))
+    (version,) = [entry["version"] for entry in lock["package"] if entry["name"] == package]
+    assert isinstance(version, str)
+    return version
+
+
+def test_current_release_note_is_a_v0_6_1_security_patch() -> None:
+    notes = _release_notes(_project_version())
+
+    assert re.findall(r"^## (.+)$", notes, re.MULTILINE) == [
+        "Why upgrade",
+        "Security fixes",
+        "Reliability fixes",
+        "Documentation",
+        "Kubernetes versions verified",
+        "Install or upgrade",
+        "Verify",
+        "Known limits",
+    ]
+    assert len(notes.splitlines()) <= 120
+    security = markdown_section(notes, "Security fixes")
+    for package, floor in _V0_6_1_SECURITY_FLOORS.items():
+        locked = _locked_version(package)
+        assert Version(locked) >= Version(floor), f"{package} {locked} predates the fix {floor}"
+        assert f"| `{package}` | {locked} |" in security, package
+    flat = _normalized(notes)
+    assert "changes no feature" in flat
+    assert "proxy server, which korvid never runs or imports" in flat
+    assert "1.33, 1.34, 1.35 and 1.36" in markdown_section(notes, "Kubernetes versions verified")
+    assert not re.search(r"(?<!\w)#\d+\b", notes), "link pages, not issue numbers"
 
 
 def test_upgrade_source_is_the_previous_minor_release() -> None:
