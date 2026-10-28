@@ -1061,11 +1061,19 @@ from typing import Any
 
 import pytest
 
+from korvid.core import config_propagation
 from korvid.core.api_versions import DiscoverySnapshot, observe_discovery
 from korvid.core.capability import Basis, EvidenceState, Observation, RunToken
 from korvid.core.config_consumers import ConsumptionMode
 from korvid.core.config_propagation import ConfigTarget, explain_propagation
-from korvid.core.evidence_reads import DEFAULT_MAX_BYTES, LIST_PAGE_SIZE, MAX_BYTES, MAX_PAGES
+from korvid.core.evidence_reads import (
+    DEFAULT_MAX_BYTES,
+    LIST_PAGE_SIZE,
+    MAX_BYTES,
+    MAX_DEADLINE,
+    MAX_PAGES,
+    read_list,
+)
 from korvid.k8s.discovery_snapshot import (
     GroupVersionOutcome,
     RawDiscovery,
@@ -1192,6 +1200,27 @@ async def test_the_object_is_read_as_metadata_and_only_the_pods_at_the_maximum_b
     )
     assert max_bytes == DEFAULT_MAX_BYTES
     assert reader.lists == [(EvidenceTarget("", "v1", "pods", "team-a"), LIST_PAGE_SIZE, MAX_BYTES)]
+
+
+async def test_the_pod_list_gets_every_maximum_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    budgets: list[dict[str, Any]] = []
+
+    async def spy(*args: Any, **kwargs: Any) -> Any:
+        budgets.append({k: v for k, v in kwargs.items() if k not in ("token", "clock")})
+        return await read_list(*args, **kwargs)
+
+    monkeypatch.setattr(config_propagation, "read_list", spy)
+
+    await _explain(FakeReader())
+
+    assert budgets == [
+        {
+            "page_size": LIST_PAGE_SIZE,
+            "max_pages": MAX_PAGES,
+            "deadline": MAX_DEADLINE,
+            "max_bytes": MAX_BYTES,
+        }
+    ]
 
 
 async def test_a_secret_is_read_from_secrets() -> None:
@@ -1501,7 +1530,7 @@ In `tests/test_optional_extras.py`, after `"korvid.core.run_tokens",` add:
 Run: `uv run --frozen pytest -p no:tach tests/core/test_config_propagation.py tests/test_optional_extras.py -q`
 Expected: all pass.
 
-Each of these changes must make a test fail: drop `max_pages=MAX_PAGES` or `max_bytes=MAX_BYTES` from the Pod read; return an unresolved observation without the run's token; make `consumers_conclusive` always true; call any available object absent; drop `expected_uid`.
+Each of these changes must make a test fail: drop `max_pages=MAX_PAGES`, `max_bytes=MAX_BYTES` or `deadline=MAX_DEADLINE` from the Pod read; give the metadata GET the maximum byte budget; return an unresolved observation without the run's token; make `consumers_conclusive` always true; call any available object absent; drop `expected_uid`.
 
 - [ ] **Step 6: Commit**
 
