@@ -96,9 +96,11 @@ Not established: whether the object is immutable (only its metadata is read)
 - **A row** names the Pod, the container and its category (container, init
   container, sidecar, ephemeral), and the reference path. An environment
   row names the variable and key; a volume row names the volume and mount
-  path. An image pull row is the one Pod-level row: `imagePullSecrets` is a
-  field of the Pod, not of a container, so it names the Pod and the path
-  and no container. Values are never shown, because they are never read.
+  path. Two kinds of row are Pod-level and name no container: an image
+  pull reference, since `imagePullSecrets` is a field of the Pod, and an
+  unmounted volume, which names the volume but no mount. Values are never
+  shown or kept: the Pod list arrives whole, but the worker projects it
+  before building the result, so no value leaves it.
 - **Enter** on a row opens that Pod in the resource table, through the
   navigation the relationship view already uses.
 - **Restart is a suggestion, not an action.** The environment and `subPath`
@@ -116,7 +118,7 @@ the selected object. It is pure and reads only these fields:
 | `containers[].env[].valueFrom.configMapKeyRef`/`secretKeyRef` | `ENV_KEY` | read at start; needs a restart |
 | a `configMap`/`secret` volume, or a `projected` source, mounted without `subPath` | `VOLUME` | updated eventually if the object is mutable; reload not verified |
 | the same volume mounted with `subPath` or `subPathExpr` | `SUBPATH` | never updated; needs a restart |
-| the same volume, mounted by no container | `UNMOUNTED` | nothing reads it |
+| the same volume, mounted by no container (Pod-level, no container or mount) | `UNMOUNTED` | nothing reads it |
 | `imagePullSecrets[]` (Pod-level, no container) | `IMAGE_PULL` | used only when an image is pulled |
 
 - **Container category** comes from the list a container is in. An init
@@ -133,7 +135,7 @@ the selected object. It is pure and reads only these fields:
   handled, as the graph's extraction already does.
 - **Kept fields:** the Pod's name, namespace and UID, its controlling
   owner's kind and name, and for each reference the container name and
-  category (absent for `IMAGE_PULL`, which belongs to the Pod), the
+  category (absent for the Pod-level `IMAGE_PULL` and `UNMOUNTED`), the
   reference path, the mode, `optional`, the variable name and
   key (environment), or the volume name, mount path and `subPath`
   (volumes). Nothing else of the Pod is kept: not `env[].value`, not
@@ -233,8 +235,11 @@ relationship view:
 
 - **No payloads.** ConfigMaps and Secrets are read as metadata only; the
   #409 reader refuses anything else.
-- **No values from Pods.** The projection keeps references, never
-  `env[].value`, annotations or status.
+- **No values kept from Pods.** The Pod list is read whole, so values such
+  as `env[].value` are in the worker's memory while it projects them. The
+  projection keeps references only, never values, annotations or status;
+  the whole list is dropped in the worker, and only the projection reaches
+  the result, the UI or a log.
 - **No new write path.** The restart suggestion is text; the existing
   approval-gated action is the only way to restart.
 - **No hidden scan.** One namespace, the one the object is in.
@@ -279,8 +284,8 @@ start, and times within the skew allowance.
 
 ## Testing
 
-- **Projection:** every row of the modes table, an image pull row with no
-  container, init, sidecar and ephemeral containers, `subPathExpr`, `optional`, projected sources, a volume no
+- **Projection:** every row of the modes table, image pull and unmounted
+  rows with no container, init, sidecar and ephemeral containers, `subPathExpr`, `optional`, projected sources, a volume no
   container mounts, a Pod referencing another object, malformed specs, and a
   Pod with literal values that must not reach the result.
 - **Evidence:** a denied Pod list, a truncated one, a 404 that names the
