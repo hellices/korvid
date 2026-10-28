@@ -20,6 +20,12 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
+from korvid.k8s.config_references import (
+    ConfigReference,
+    container_references,
+    image_pull_secret_references,
+    volume_references,
+)
 from korvid.k8s.selectors import LabelSelector, parse_label_selector
 
 
@@ -182,6 +188,19 @@ def _owner_references(meta: Mapping[str, Any], namespace: str) -> list[Reference
     return references
 
 
+def _config_facts(references: list[ConfigReference], namespace: str) -> list[ReferenceFact]:
+    """Shared `ConfigReference`s -> `USES_CONFIG` facts in `namespace`."""
+    return [
+        ReferenceFact(
+            relation=RelationKind.USES_CONFIG,
+            target=TargetReference("", reference.kind, namespace, reference.name),
+            confidence=FactConfidence.DECLARED,
+            field=reference.field,
+        )
+        for reference in references
+    ]
+
+
 def _container_refs(
     containers: object, namespace: str, base: str, list_field: str
 ) -> list[ReferenceFact]:
@@ -190,50 +209,10 @@ def _container_refs(
         return []
     references: list[ReferenceFact] = []
     for ci, container in enumerate(containers):
-        if not isinstance(container, Mapping):
-            continue
-        env_from = container.get("envFrom")
-        if isinstance(env_from, list):
-            for ei, entry in enumerate(env_from):
-                if not isinstance(entry, Mapping):
-                    continue
-                field = f"{base}.{list_field}[{ci}].envFrom[{ei}]"
-                references.extend(_config_reference(entry, "secretRef", "Secret", namespace, field))
-                references.extend(
-                    _config_reference(entry, "configMapRef", "ConfigMap", namespace, field)
-                )
-        env = container.get("env")
-        if isinstance(env, list):
-            for vi, var in enumerate(env):
-                if not isinstance(var, Mapping):
-                    continue
-                value_from = _mapping(var.get("valueFrom"))
-                field = f"{base}.{list_field}[{ci}].env[{vi}].valueFrom"
-                references.extend(
-                    _config_reference(value_from, "secretKeyRef", "Secret", namespace, field)
-                )
-                references.extend(
-                    _config_reference(value_from, "configMapKeyRef", "ConfigMap", namespace, field)
-                )
+        if isinstance(container, Mapping):
+            field = f"{base}.{list_field}[{ci}]"
+            references.extend(_config_facts(container_references(container, field), namespace))
     return references
-
-
-def _config_reference(
-    container: Mapping[str, Any], key: str, kind: str, namespace: str, field: str
-) -> list[ReferenceFact]:
-    """One `secretRef`/`configMapRef`-shaped `{"name": ...}` reference, if valid."""
-    ref = _mapping(container.get(key))
-    name = ref.get("name")
-    if not isinstance(name, str) or not name:
-        return []
-    return [
-        ReferenceFact(
-            relation=RelationKind.USES_CONFIG,
-            target=TargetReference("", kind, namespace, name),
-            confidence=FactConfidence.DECLARED,
-            field=f"{field}.{key}",
-        )
-    ]
 
 
 def _volume_refs(volumes: object, namespace: str, base: str) -> list[ReferenceFact]:
@@ -256,87 +235,13 @@ def _volume_refs(volumes: object, namespace: str, base: str) -> list[ReferenceFa
                     field=f"{field}.persistentVolumeClaim",
                 )
             )
-        config_map = _mapping(volume.get("configMap"))
-        cm_name = config_map.get("name")
-        if isinstance(cm_name, str) and cm_name:
-            references.append(
-                ReferenceFact(
-                    relation=RelationKind.USES_CONFIG,
-                    target=TargetReference("", "ConfigMap", namespace, cm_name),
-                    confidence=FactConfidence.DECLARED,
-                    field=f"{field}.configMap",
-                )
-            )
-        secret = _mapping(volume.get("secret"))
-        secret_name = secret.get("secretName")
-        if isinstance(secret_name, str) and secret_name:
-            references.append(
-                ReferenceFact(
-                    relation=RelationKind.USES_CONFIG,
-                    target=TargetReference("", "Secret", namespace, secret_name),
-                    confidence=FactConfidence.DECLARED,
-                    field=f"{field}.secret",
-                )
-            )
-        references.extend(_projected_volume_refs(volume.get("projected"), namespace, field))
-    return references
-
-
-def _projected_volume_refs(projected: object, namespace: str, field: str) -> list[ReferenceFact]:
-    """`volume.projected.sources[]` -> `USES_CONFIG` facts."""
-    sources = _mapping(projected).get("sources")
-    if not isinstance(sources, list):
-        return []
-    references: list[ReferenceFact] = []
-    for index, source in enumerate(sources):
-        if not isinstance(source, Mapping):
-            continue
-        source_field = f"{field}.projected.sources[{index}]"
-        config_map = _mapping(source.get("configMap"))
-        cm_name = config_map.get("name")
-        if isinstance(cm_name, str) and cm_name:
-            references.append(
-                ReferenceFact(
-                    relation=RelationKind.USES_CONFIG,
-                    target=TargetReference("", "ConfigMap", namespace, cm_name),
-                    confidence=FactConfidence.DECLARED,
-                    field=f"{source_field}.configMap",
-                )
-            )
-        secret = _mapping(source.get("secret"))
-        secret_name = secret.get("name")
-        if isinstance(secret_name, str) and secret_name:
-            references.append(
-                ReferenceFact(
-                    relation=RelationKind.USES_CONFIG,
-                    target=TargetReference("", "Secret", namespace, secret_name),
-                    confidence=FactConfidence.DECLARED,
-                    field=f"{source_field}.secret",
-                )
-            )
+        references.extend(_config_facts(volume_references(volume, field), namespace))
     return references
 
 
 def _image_pull_secret_refs(pull_secrets: object, namespace: str, base: str) -> list[ReferenceFact]:
     """`spec.imagePullSecrets` -> `USES_CONFIG` facts."""
-    if not isinstance(pull_secrets, list):
-        return []
-    references: list[ReferenceFact] = []
-    for index, entry in enumerate(pull_secrets):
-        if not isinstance(entry, Mapping):
-            continue
-        name = entry.get("name")
-        if not isinstance(name, str) or not name:
-            continue
-        references.append(
-            ReferenceFact(
-                relation=RelationKind.USES_CONFIG,
-                target=TargetReference("", "Secret", namespace, name),
-                confidence=FactConfidence.DECLARED,
-                field=f"{base}.imagePullSecrets[{index}]",
-            )
-        )
-    return references
+    return _config_facts(image_pull_secret_references(pull_secrets, base), namespace)
 
 
 def _pod_spec(pod_spec: Mapping[str, Any], namespace: str, base: str) -> list[ReferenceFact]:
