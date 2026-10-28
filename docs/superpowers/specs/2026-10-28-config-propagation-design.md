@@ -139,8 +139,9 @@ the selected object. It is pure and reads only these fields:
   reference path, the mode, `optional`, the variable name and
   key (environment), or the volume name, mount path and `subPath`
   (volumes). Nothing else of the Pod is kept: not `env[].value`, not
-  annotations, not status. A test feeds a Pod with literal values and
-  asserts none reaches the result.
+  annotations, and in P1 nothing of its status. P2 adds one status field,
+  each container's start time (see P2). A test feeds a Pod with literal
+  values and asserts none reaches the result.
 - **Unrecognised forms.** Only the forms in the table are recognised. A
   Secret used through a CSI driver or an in-tree volume plugin's
   `secretRef` is not listed, and the view says that only these forms are
@@ -237,9 +238,10 @@ relationship view:
   #409 reader refuses anything else.
 - **No values kept from Pods.** The Pod list is read whole, so values such
   as `env[].value` are in the worker's memory while it projects them. The
-  projection keeps references only, never values, annotations or status;
-  the whole list is dropped in the worker, and only the projection reaches
-  the result, the UI or a log.
+  projection keeps references only, never values or annotations, and of
+  the status only each container's start time, from P2 on; the whole list
+  is dropped in the worker, and only the projection reaches the result, the
+  UI or a log.
 - **No new write path.** The restart suggestion is text; the existing
   approval-gated action is the only way to restart.
 - **No hidden scan.** One namespace, the one the object is in.
@@ -256,6 +258,23 @@ Each slice gets a sub-issue under #410 and its own pull request:
 | P2 | session-observed changes: a bounded, UID-scoped record of the object's resource-version changes seen this session, compared with each container's start time for environment and `subPath` rows (see below) |
 
 ### P2: when a change is known to follow a start
+
+**Start times.** P2 extends the projection with one field per container,
+its current start time, and nothing else of the status:
+
+| Container category | Status list | Start time |
+| --- | --- | --- |
+| container | `status.containerStatuses[]` | `state.running.startedAt` |
+| init container, sidecar | `status.initContainerStatuses[]` | `state.running.startedAt` |
+| ephemeral | `status.ephemeralContainerStatuses[]` | `state.running.startedAt` |
+
+A status is matched to its container by name within its own list. Only a
+running container has a start time: one that is waiting or terminated, or
+has no status yet, has none, and its rows say the ordering is not
+established. `state.terminated.startedAt` is not used, because a finished
+container no longer reads anything, and `lastState` is never read. After a
+restart, `running.startedAt` is the current instance's start, which is the
+one that matters. The projection still drops every other status field.
 
 korvid sees a change only as two sightings with different resource
 versions. A sighting is not an instant: the server answered at some point
@@ -280,7 +299,9 @@ so the two are compared only with a fixed one-minute allowance for skew:
 Resource versions are compared only for equality, never ordered, and
 `creationTimestamp` is never used as a change time. P2's tests include the
 straddling case, a delayed old-version response that arrives after the
-start, and times within the skew allowance.
+start, times within the skew allowance, each status list's mapping, a
+waiting, terminated and status-less container, a restarted one, and a
+status whose other fields must not reach the result.
 
 ## Testing
 
