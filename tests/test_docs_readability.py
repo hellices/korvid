@@ -3,11 +3,10 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from korvid import __version__
-
 ROOT = Path(__file__).parent.parent
 DOCS = ROOT / "docs"
-CURRENT_RELEASE_NOTE = f"release-notes/v{__version__}.md"
+#: The note that announced the Action Palette and the connection-test change.
+V0_6_RELEASE_NOTE = "release-notes/v0.6.0.md"
 
 
 def _source(name: str) -> str:
@@ -879,8 +878,8 @@ def test_tui_presents_the_three_discovery_surfaces_as_complementary() -> None:
 def test_release_note_promises_the_palette_without_weakening_the_approval_rule() -> None:
     """The note that announces a new way to *reach* a write must say, in the
     same breath, that it does not change how a write is approved."""
-    flat = " ".join(_source(CURRENT_RELEASE_NOTE).split())
-    assert "`Ctrl-P`" in flat, "the current release note must announce the Action Palette"
+    flat = " ".join(_source(V0_6_RELEASE_NOTE).split())
+    assert "`Ctrl-P`" in flat, "the v0.6.0 release note must announce the Action Palette"
     assert re.search(r"remapped key|effective key", flat, re.I), (
         "the note must say results show the effective (remapped) key"
     )
@@ -952,7 +951,7 @@ def test_agent_guide_tells_a_self_hosted_operator_how_to_diagnose_a_refused_stre
 def test_the_release_note_sends_a_broken_gateway_to_that_section() -> None:
     """A behaviour change an operator can hit needs its recovery linked
     from the note that announces it, not only from the guide."""
-    notes = _source(CURRENT_RELEASE_NOTE)
+    notes = _source(V0_6_RELEASE_NOTE)
 
     assert "https://hellices.github.io/korvid/agent/#self-hosted-endpoints-and-proxies" in notes, (
         "the release note must link the agent guide's troubleshooting anchor"
