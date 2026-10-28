@@ -6,6 +6,7 @@ import tomllib
 from pathlib import Path
 
 import pytest
+from packaging.version import Version
 
 from korvid import __version__
 from tests.release_contracts import UPGRADE_SOURCE_VERSION, markdown_section
@@ -933,8 +934,17 @@ def test_v0_6_1_release_metadata_keeps_v0_5_as_upgrade_source() -> None:
 
 
 #: The runtime dependencies v0.6.1 updates for advisories against the
-#: versions v0.6.0 was packaged with.
-_V0_6_1_SECURITY_UPDATES = ("certifi", "aiohttp", "filelock", "litellm", "opentelemetry-api")
+#: versions v0.6.0 was packaged with, each with the first version that fixes
+#: every one of them (GHSA-6q48-6c7w-9gw2; the aiohttp 3.14.4 set;
+#: GHSA-v4x8-3wr5-3wq8 and the two low filelock ones; GHSA-7hp6-4w63-5g45;
+#: GHSA-xcq7-p3pf-p88h).
+_V0_6_1_SECURITY_FLOORS = {
+    "certifi": "2026.10.18",
+    "aiohttp": "3.14.4",
+    "filelock": "4.2.1",
+    "litellm": "1.100.4",
+    "opentelemetry-api": "1.45.1",
+}
 
 
 def _locked_version(package: str) -> str:
@@ -959,8 +969,10 @@ def test_current_release_note_is_a_v0_6_1_security_patch() -> None:
     ]
     assert len(notes.splitlines()) <= 120
     security = markdown_section(notes, "Security fixes")
-    for package in _V0_6_1_SECURITY_UPDATES:
-        assert f"| `{package}` | {_locked_version(package)} |" in security, package
+    for package, floor in _V0_6_1_SECURITY_FLOORS.items():
+        locked = _locked_version(package)
+        assert Version(locked) >= Version(floor), f"{package} {locked} predates the fix {floor}"
+        assert f"| `{package}` | {locked} |" in security, package
     flat = _normalized(notes)
     assert "changes no feature" in flat
     assert "proxy server, which korvid never runs or imports" in flat
