@@ -45,7 +45,7 @@ and reads only versions korvid knows how to read:
   unavailable or denied, never as unsupported.
 
 So a feature that needs a newer API keeps working on any supported cluster
-that serves it, and says why it cannot run on one that does not.
+that serves it in a version korvid knows how to read, and says why it cannot run on one that does not.
 
 ## How versions are verified
 
@@ -61,11 +61,13 @@ read-only scenarios against each:
   which must never return their data or the `last-applied-configuration`
   annotation;
 - a principal denied a list, and a principal denied discovery;
-- Events read through `events.k8s.io` alone, through core `v1` alone, and
-  through both.
+- Events read by a principal allowed both API groups, which reads
+  `events.k8s.io`; by one allowed only `events.k8s.io`; and by one allowed
+  only core `v1`, which falls through to core after `events.k8s.io` is
+  denied.
 
 The workflow runs on demand, and whenever a pull request or a push to `main`
-changes the modules those scenarios exercise. Each passing job records the
+changes the modules those scenarios exercise or the project's dependencies. Each passing job records the
 API server version it verified in the run's summary.
 
 The matrix runs every minor version from the oldest supported one up. 1.35 is

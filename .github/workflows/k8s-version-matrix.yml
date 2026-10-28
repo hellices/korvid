@@ -8,6 +8,8 @@ on:
   workflow_dispatch:
   pull_request:
     paths:
+      - pyproject.toml
+      - uv.lock
       - src/korvid/core/api_versions.py
       - src/korvid/core/capability.py
       - src/korvid/core/capability_classifier.py
@@ -24,6 +26,8 @@ on:
   push:
     branches: [main]
     paths:
+      - pyproject.toml
+      - uv.lock
       - src/korvid/core/api_versions.py
       - src/korvid/core/capability.py
       - src/korvid/core/capability_classifier.py
@@ -123,6 +127,7 @@ jobs:
           mkdir -p diag
           kubectl --context "kind-$CLUSTER" get apiservices,crds -o wide > diag/apis.txt || true
           kubectl --context "kind-$CLUSTER" -n korvid-matrix get all,events -o wide > diag/fixtures.txt || true
+          kubectl --context "kind-$CLUSTER" version -o json > diag/version.json || true
           kind export logs --name "$CLUSTER" diag/kind || true
 
       - name: Upload diagnostics
