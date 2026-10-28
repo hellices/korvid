@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from korvid.k8s.config_references import (
     ConfigReference,
     ReferenceSource,
@@ -164,7 +166,7 @@ def test_a_volume_without_a_name_still_names_its_object() -> None:
 
 
 def test_a_volume_that_names_no_object_has_no_reference() -> None:
-    volumes = [
+    volumes: list[dict[str, Any]] = [
         {"name": "data", "persistentVolumeClaim": {"claimName": "data"}},
         {"name": "x", "secret": {"name": "wrong-field"}},
         {"name": "y", "projected": {"sources": "settings"}},
