@@ -12,7 +12,7 @@
 
 - **Design:** `docs/superpowers/specs/2026-10-28-config-propagation-design.md`. Where this plan departs from it, the section below says why.
 - **No payloads:** ConfigMaps and Secrets are read as metadata only; the #409 reader refuses anything else.
-- **No values kept from Pods:** the Pod list is read whole, but only references, names and the controlling owner leave the run. Never `env[].value`, annotations or status.
+- **No values kept from Pods:** the Pod list is read whole, but only identities and reference evidence leave the run: the Pod's name, namespace, UID and controlling owner, and for each reference its path, mode, `optional` flag, container name and category, variable name and key, and volume name, mount path and `subPath`. Never `env[].value`, a ConfigMap's or Secret's payload, annotations or status.
 - **One namespace:** the object's own. Nothing is read cluster-wide.
 - **Conclusions from absence:** "no Pod consumes it" only when the Pod list is conclusive.
 - **Layers:** `core` imports no Textual and no optional extra; `core` may import `k8s`; `k8s` imports no `core`.
@@ -1228,7 +1228,13 @@ async def test_a_secret_is_read_from_secrets() -> None:
 
     await _explain(reader, ConfigTarget("Secret", "team-a", "creds"))
 
-    assert reader.gets[0][0].resource == "secrets"
+    assert reader.gets == [
+        (
+            EvidenceTarget("", "v1", "secrets", "team-a", metadata_only=True),
+            "creds",
+            DEFAULT_MAX_BYTES,
+        )
+    ]
 
 
 async def test_every_observation_carries_the_run_token() -> None:

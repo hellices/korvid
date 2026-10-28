@@ -175,7 +175,13 @@ async def test_a_secret_is_read_from_secrets() -> None:
 
     await _explain(reader, ConfigTarget("Secret", "team-a", "creds"))
 
-    assert reader.gets[0][0].resource == "secrets"
+    assert reader.gets == [
+        (
+            EvidenceTarget("", "v1", "secrets", "team-a", metadata_only=True),
+            "creds",
+            DEFAULT_MAX_BYTES,
+        )
+    ]
 
 
 async def test_every_observation_carries_the_run_token() -> None:
