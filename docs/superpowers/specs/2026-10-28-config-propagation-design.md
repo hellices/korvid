@@ -14,7 +14,7 @@ reference graph does not say:
 - environment variables, from `envFrom` or `env[].valueFrom`, are read once,
   when the container starts;
 - a ConfigMap or Secret volume, plain or projected, is updated in place by
-  the kubelet, eventually;
+  the kubelet, eventually, as long as the object is not immutable;
 - a volume mounted with `subPath` or `subPathExpr` is never updated;
 - whether the application rereads an updated file is not visible to
   Kubernetes at all.
@@ -80,7 +80,7 @@ Environment variables — read when the container starts; a change needs a resta
   Pod api-7d9f-x2kq   container app    envFrom[0].configMapRef
   Pod api-7d9f-x2kq   container app    env[3] LOG_LEVEL ← key log-level
 
-Volumes — updated in place by the kubelet, eventually; the application rereading it is not verified
+Volumes — updated in place by the kubelet, eventually, unless the object is immutable; the application rereading it is not verified
   Pod api-7d9f-x2kq   container app    volume settings → /etc/app
 
 subPath mounts — never updated; a change needs a restart
@@ -96,7 +96,9 @@ Not established: whether the object is immutable (only its metadata is read)
 - **A row** names the Pod, the container and its category (container, init
   container, sidecar, ephemeral), and the reference path. An environment
   row names the variable and key; a volume row names the volume and mount
-  path. Values are never shown, because they are never read.
+  path. An image pull row is the one Pod-level row: `imagePullSecrets` is a
+  field of the Pod, not of a container, so it names the Pod and the path
+  and no container. Values are never shown, because they are never read.
 - **Enter** on a row opens that Pod in the resource table, through the
   navigation the relationship view already uses.
 - **Restart is a suggestion, not an action.** The environment and `subPath`
@@ -112,10 +114,10 @@ the selected object. It is pure and reads only these fields:
 | --- | --- | --- |
 | `containers[].envFrom[].configMapRef`/`secretRef` | `ENV_FROM` | read at start; needs a restart |
 | `containers[].env[].valueFrom.configMapKeyRef`/`secretKeyRef` | `ENV_KEY` | read at start; needs a restart |
-| a `configMap`/`secret` volume, or a `projected` source, mounted without `subPath` | `VOLUME` | updated eventually; reload not verified |
+| a `configMap`/`secret` volume, or a `projected` source, mounted without `subPath` | `VOLUME` | updated eventually if the object is mutable; reload not verified |
 | the same volume mounted with `subPath` or `subPathExpr` | `SUBPATH` | never updated; needs a restart |
 | the same volume, mounted by no container | `UNMOUNTED` | nothing reads it |
-| `imagePullSecrets[]` | `IMAGE_PULL` | used only when an image is pulled |
+| `imagePullSecrets[]` (Pod-level, no container) | `IMAGE_PULL` | used only when an image is pulled |
 
 - **Container category** comes from the list a container is in. An init
   container with `restartPolicy: Always` is a sidecar and is treated like a
@@ -131,7 +133,8 @@ the selected object. It is pure and reads only these fields:
   handled, as the graph's extraction already does.
 - **Kept fields:** the Pod's name, namespace and UID, its controlling
   owner's kind and name, and for each reference the container name and
-  category, the reference path, the mode, `optional`, the variable name and
+  category (absent for `IMAGE_PULL`, which belongs to the Pod), the
+  reference path, the mode, `optional`, the variable name and
   key (environment), or the volume name, mount path and `subPath`
   (volumes). Nothing else of the Pod is kept: not `env[].value`, not
   annotations, not status. A test feeds a Pod with literal values and
@@ -164,6 +167,9 @@ The view declares two sources, both required:
 - **Incarnation.** The selected row's UID is compared with the
   `observed_uid` the GET returned. A different UID means the object was
   recreated; the view says so and reports the new one's evidence only.
+  Whether existing volume mounts see a recreated object is not established:
+  if the old one was immutable, the kubelet does not refresh them. The
+  `VOLUME` section says so for a recreated object.
 - **Absence.** The object is called gone only when `config-object` is
   classified `OBJECT_ABSENT`, which the #409 classifier returns only for a
   404 that names the requested object. Any other 404 is
@@ -246,15 +252,21 @@ Each slice gets a sub-issue under #410 and its own pull request:
 
 ### P2: when a change is known to follow a start
 
-korvid sees a change only as two observations with different resource
-versions, at `t_old` (last seen with the old version) and `t_new` (first
-seen with the new one). The change happened somewhere in `(t_old, t_new]`.
-So:
+korvid sees a change only as two sightings with different resource
+versions. A sighting is not an instant: the server answered at some point
+between the request being sent and the response arriving, and
+`observed_at` is only the arrival. So each sighting keeps both times, and
+the change is bounded by the old sighting's **send** time, `sent_old`, and
+the new sighting's **arrival**, `arrived_new`. A delayed old-version
+response therefore cannot push the interval past the change.
+
+`started_at` comes from the node's clock, and korvid's times from its own,
+so the two are compared only with a fixed one-minute allowance for skew:
 
 - "**changed after this container started**" is shown only when
-  `t_old >= started_at`: the whole interval follows the start;
+  `sent_old >= started_at + 1 minute`: the whole interval follows the start;
 - "**changed before this container started**" is shown only when
-  `t_new <= started_at`;
+  `arrived_new <= started_at - 1 minute`;
 - an interval that straddles the start, for example observations at 09:00
   and 11:00 around a 10:00 start, is "not established";
 - the wording is "the object changed", never "the configuration changed":
@@ -262,17 +274,18 @@ So:
 
 Resource versions are compared only for equality, never ordered, and
 `creationTimestamp` is never used as a change time. P2's tests include the
-straddling case.
+straddling case, a delayed old-version response that arrives after the
+start, and times within the skew allowance.
 
 ## Testing
 
-- **Projection:** every row of the modes table, init, sidecar and ephemeral
-  containers, `subPathExpr`, `optional`, projected sources, a volume no
+- **Projection:** every row of the modes table, an image pull row with no
+  container, init, sidecar and ephemeral containers, `subPathExpr`, `optional`, projected sources, a volume no
   container mounts, a Pod referencing another object, malformed specs, and a
   Pod with literal values that must not reach the result.
 - **Evidence:** a denied Pod list, a truncated one, a 404 that names the
   object and one that does not (which must not read as a deletion), a
-  recreated object, a refused metadata projection, and the conclusion from
+  recreated object (whose `VOLUME` rows say refresh is not established), a refused metadata projection, and the conclusion from
   absence shown only when `pods` is conclusive.
 - **Renderer:** a sentence for every `Basis`, distinct sentences per state,
   stale and age text under two policies with different maximum ages, and a
