@@ -54,3 +54,17 @@ async def until(
     if cond():
         return
     raise WaitTimeout(f"{label} not met within {timeout}s")
+
+
+def screen_ready(app: Any, screen_type: type) -> bool:
+    """Whether `app` shows a `screen_type` whose every widget has finished mounting.
+
+    A screen is current as soon as it is pushed, before its widgets run their
+    Mount handlers. A test that leaves `run_test` at that point can tear a
+    widget down mid-handler: Textual's `Select` looks up its overlay in
+    `_on_mount`, and fails if the overlay is already gone (#504).
+    """
+    if not isinstance(app.screen, screen_type):
+        return False
+    screen: Any = app.screen
+    return bool(screen.is_mounted) and all(widget.is_mounted for widget in screen.query("*"))

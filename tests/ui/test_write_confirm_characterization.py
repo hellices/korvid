@@ -83,7 +83,7 @@ from .test_olm_view import make_app as make_olm_app
 from .test_resize_flow import ResizeRecorder
 from .test_resize_flow import make_app as make_resize_app
 from .test_write_ops import Recorder, _edit_fixtures, _to_view, make_app
-from .waits import until
+from .waits import screen_ready, until
 
 
 async def _row_listed(pilot, kind: str) -> None:  # type: ignore[no-untyped-def]  # Pilot's app type isn't exposed
@@ -266,9 +266,7 @@ async def test_install_cancelled_when_catalog_entry_changes_during_approval(
         table = app.query_one(ResourceTable)
         await until(pilot, lambda: table.row_count == 1, label="package listed")
         await pilot.press("I")
-        await until(
-            pilot, lambda: isinstance(app.screen, OperatorInstallPrompt), label="wizard open"
-        )
+        await until(pilot, lambda: screen_ready(app, OperatorInstallPrompt), label="wizard open")
         await pilot.press("enter")  # accept defaults
         await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="confirm open")
         # Same name, different incarnation lands while the dialog is open.

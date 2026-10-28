@@ -27,7 +27,7 @@ from korvid.ui.widgets.operator_install import OperatorInstallPrompt
 from korvid.ui.widgets.resource_table import ResourceTable
 from tests.app_factory import build_test_app
 
-from .waits import until
+from .waits import screen_ready, until
 
 _PODS_META = ResourceMeta("Pod", "pods", "", "v1", True, ("po",))
 PKG_META = ResourceMeta("PackageManifest", "packagemanifests", PACKAGES_GROUP, "v1", True)
@@ -356,9 +356,7 @@ async def test_install_key_walks_wizard_confirm_and_creates_subscription(
         table = app.query_one(ResourceTable)
         await until(pilot, lambda: table.row_count == 1, label="package listed")
         await pilot.press("I")
-        await until(
-            pilot, lambda: isinstance(app.screen, OperatorInstallPrompt), label="wizard open"
-        )
+        await until(pilot, lambda: screen_ready(app, OperatorInstallPrompt), label="wizard open")
         await pilot.press("enter")  # accept defaults: operators/stable/Automatic
         await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="confirm open")
         body = app.screen.query_one(".confirm-operation").render()
@@ -595,9 +593,7 @@ async def test_install_fetches_manifest_by_canonical_view_kind(tmp_path: Path) -
         table = app.query_one(ResourceTable)
         await until(pilot, lambda: table.row_count == 1, label="package listed")
         await pilot.press("I")
-        await until(
-            pilot, lambda: isinstance(app.screen, OperatorInstallPrompt), label="wizard open"
-        )
+        await until(pilot, lambda: screen_ready(app, OperatorInstallPrompt), label="wizard open")
         assert fetch_log == [qualified]
 
 
@@ -675,9 +671,7 @@ async def test_install_wizard_prefills_default_namespace_with_zero_config(
         table = app.query_one(ResourceTable)
         await until(pilot, lambda: table.row_count == 1, label="package listed")
         await pilot.press("I")
-        await until(
-            pilot, lambda: isinstance(app.screen, OperatorInstallPrompt), label="wizard open"
-        )
+        await until(pilot, lambda: screen_ready(app, OperatorInstallPrompt), label="wizard open")
         ns_input = app.screen.query_one("#install-namespace")
         assert getattr(ns_input, "value", "") == "default"
 
@@ -729,9 +723,7 @@ async def test_install_permission_precheck_omits_object_name(tmp_path: Path) -> 
         table = app.query_one(ResourceTable)
         await until(pilot, lambda: table.row_count == 1, label="package listed")
         await pilot.press("I")
-        await until(
-            pilot, lambda: isinstance(app.screen, OperatorInstallPrompt), label="wizard open"
-        )
+        await until(pilot, lambda: screen_ready(app, OperatorInstallPrompt), label="wizard open")
         await pilot.press("enter")
         await until(pilot, lambda: bool(checks), label="permission pre-check ran")
         assert checks[0] == ("create", "subscriptions", "")
@@ -761,7 +753,7 @@ async def test_the_controller_routes_the_install_key_to_the_package_wizard(
         await app._olm.install_selected()
         await until(
             pilot,
-            lambda: isinstance(app.screen, OperatorInstallPrompt),
+            lambda: screen_ready(app, OperatorInstallPrompt),
             label="install wizard",
         )
         assert rec.calls == []
