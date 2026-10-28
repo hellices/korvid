@@ -119,9 +119,11 @@ the selected object. It is pure and reads only these fields:
 
 - **Container category** comes from the list a container is in. An init
   container with `restartPolicy: Always` is a sidecar and is treated like a
-  container. Any other init container ran once before the Pod started, so
-  even a `VOLUME` mount of its own does not affect the running Pod, and its
-  row says so.
+  container. Any other init container keeps its mode's meaning, since the
+  projection drops status and the Pod may still be initializing: a `VOLUME`
+  mount is updated while the init container runs. Its row adds that it runs
+  to completion before the other containers start, so once it has finished
+  a change reaches it only when the Pod restarts.
 - **`optional: true`** on a reference is shown, since the Pod runs whether
   or not the object exists.
 - **Matching** is by kind, namespace and name. A Secret volume names its
@@ -161,8 +163,12 @@ The view declares two sources, both required:
   it. Only the projection reaches the UI.
 - **Incarnation.** The selected row's UID is compared with the
   `observed_uid` the GET returned. A different UID means the object was
-  recreated; the view says so and reports the new one's evidence only. A
-  404 means the object is gone, and the Pods that still reference it are
+  recreated; the view says so and reports the new one's evidence only.
+- **Absence.** The object is called gone only when `config-object` is
+  classified `OBJECT_ABSENT`, which the #409 classifier returns only for a
+  404 that names the requested object. Any other 404 is
+  `UNAVAILABLE`/`DISCOVERY_STALE` and is rendered as such, never as a
+  deletion. When the object is gone, the Pods that still reference it are
   listed under that heading.
 - **Conclusions from absence.** "No Pod in team-a consumes this ConfigMap"
   is shown only when `pods` is conclusive. Otherwise the view says the
@@ -175,9 +181,12 @@ The view declares two sources, both required:
 
 `ui/evidence_text.py` is the one place that turns evidence into text:
 
-- `observation_line(observation, now) -> Text`:
+- `observation_line(observation, policy, now) -> Text`:
   `<resource> <group/version> in <scope>: <state> — <basis sentence> · observed <age>`.
-  Stale evidence adds "stale".
+  It adds "stale" when `is_fresh(observation, policy, now)` is false. The
+  caller passes the source's own `FreshnessPolicy`, the one its declaration
+  and `conclusive` use, so the line and the baseline never disagree about a
+  source with a non-default maximum age.
 - A **basis sentence for every `Basis`**, in one table. A test enumerates
   `Basis` so a new member cannot ship without one. `DENIED`, `UNSUPPORTED`
   and `UNAVAILABLE` sentences are distinct, and so are the `PARTIAL` ones
@@ -233,7 +242,27 @@ Each slice gets a sub-issue under #410 and its own pull request:
 | Slice | Content |
 | --- | --- |
 | P1 | `core/config_consumers.py` (modes and projection), the shared extraction helpers in `k8s/relationship_facts.py`, the run in `core/`, the S6 renderer (#486), the controller, the view and its palette entry |
-| P2 | session-observed changes: a bounded, UID-scoped record of the object's resource-version changes seen this session, compared with each container's start time to say "changed after this container started" for environment and `subPath` rows. It never orders resource versions and never uses `creationTimestamp` as a change time. |
+| P2 | session-observed changes: a bounded, UID-scoped record of the object's resource-version changes seen this session, compared with each container's start time for environment and `subPath` rows (see below) |
+
+### P2: when a change is known to follow a start
+
+korvid sees a change only as two observations with different resource
+versions, at `t_old` (last seen with the old version) and `t_new` (first
+seen with the new one). The change happened somewhere in `(t_old, t_new]`.
+So:
+
+- "**changed after this container started**" is shown only when
+  `t_old >= started_at`: the whole interval follows the start;
+- "**changed before this container started**" is shown only when
+  `t_new <= started_at`;
+- an interval that straddles the start, for example observations at 09:00
+  and 11:00 around a 10:00 start, is "not established";
+- the wording is "the object changed", never "the configuration changed":
+  a new resource version can carry only a metadata change.
+
+Resource versions are compared only for equality, never ordered, and
+`creationTimestamp` is never used as a change time. P2's tests include the
+straddling case.
 
 ## Testing
 
@@ -241,11 +270,13 @@ Each slice gets a sub-issue under #410 and its own pull request:
   containers, `subPathExpr`, `optional`, projected sources, a volume no
   container mounts, a Pod referencing another object, malformed specs, and a
   Pod with literal values that must not reach the result.
-- **Evidence:** a denied Pod list, a truncated one, a 404 and a recreated
-  object, a refused metadata projection, and the conclusion from absence
-  shown only when `pods` is conclusive.
+- **Evidence:** a denied Pod list, a truncated one, a 404 that names the
+  object and one that does not (which must not read as a deletion), a
+  recreated object, a refused metadata projection, and the conclusion from
+  absence shown only when `pods` is conclusive.
 - **Renderer:** a sentence for every `Basis`, distinct sentences per state,
-  stale and age text, and a name with markup shown literally.
+  stale and age text under two policies with different maximum ages, and a
+  name with markup shown literally.
 - **Lifecycle:** a result after a context switch or a newer run is
   dropped, and the palette entry's availability.
 - **Live:** a version-matrix scenario (S5) with a Pod that mounts a
