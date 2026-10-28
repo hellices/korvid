@@ -224,6 +224,7 @@ async def test_events_are_read_through_events_k8s_io_alone(connect: Connect) -> 
 
     result = await read_logical_list(kube, resolution)
 
+    assert [_group(outcome) for outcome in result.outcomes] == ["events.k8s.io"]
     assert _group(result.observation) == "events.k8s.io"
     assert _state(result.observation) == (EvidenceState.AVAILABLE, Basis.OBSERVED)
     assert "matrix-scenario" in [item["metadata"]["name"] for item in result.items]

@@ -9,6 +9,13 @@
 set -euo pipefail
 
 admin=${1:?usage: setup.sh ADMIN_CONTEXT}
+case "$admin" in
+  kind-*) ;;
+  *)
+    echo "setup.sh: refusing $admin; it only seeds a kind cluster (kind-*)" >&2
+    exit 2
+    ;;
+esac
 here=$(cd "$(dirname "$0")" && pwd)
 kube=(kubectl --context "$admin")
 cluster=$("${kube[@]}" config view -o jsonpath="{.contexts[?(@.name=='$admin')].context.cluster}")

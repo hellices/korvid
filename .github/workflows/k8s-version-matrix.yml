@@ -107,6 +107,14 @@ jobs:
           MINOR: ${{ matrix.kubernetes }}
         run: |
           server=$(kubectl --context "kind-$CLUSTER" version -o json | jq -r .serverVersion.gitVersion)
+          # A node image pinned to the wrong release would verify another version.
+          case "$server" in
+            "v$MINOR".*) ;;
+            *)
+              echo "::error::expected Kubernetes $MINOR, but the API server is $server"
+              exit 1
+              ;;
+          esac
           echo "Kubernetes $MINOR verified: API server $server" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Collect diagnostics

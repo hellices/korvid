@@ -15,7 +15,7 @@
 - **Fixture-compatible:** unit tests only, against recorded or hand-written discovery and API responses.
 - **Release notes:** each release lists the versions verified for it.
 - **Read-only:** the scenarios only read. The fixtures they read are created by `setup.sh` before the suite runs, on a cluster that exists only for the job.
-- **Never against a real cluster:** the suite is skipped unless `KORVID_VERSION_MATRIX_CONTEXT` names a context, and only the workflow sets it.
+- **Opt-in, disposable clusters only:** the suite is skipped unless `KORVID_VERSION_MATRIX_CONTEXT` names a context, and it reads whatever cluster that context names, so only a disposable one may be named. The workflow sets it to a kind cluster it created; `setup.sh`, which writes fixtures and RBAC, refuses any context not named `kind-*`.
 - **Workflow security:** `permissions: contents: read`, actions pinned by commit SHA, `persist-credentials: false`, the kind binary and node images pinned by digest.
 - **Layers:** `core` imports no Textual and no optional extra; `core` may import `k8s`.
 - **Code rules:** no `assert` in `src/`; every `pytest.raises` takes `match=`; maximum complexity 10; Google-style docstrings.
@@ -611,6 +611,13 @@ Create `tests/version_matrix/setup.sh` with:
 set -euo pipefail
 
 admin=${1:?usage: setup.sh ADMIN_CONTEXT}
+case "$admin" in
+  kind-*) ;;
+  *)
+    echo "setup.sh: refusing $admin; it only seeds a kind cluster (kind-*)" >&2
+    exit 2
+    ;;
+esac
 here=$(cd "$(dirname "$0")" && pwd)
 kube=(kubectl --context "$admin")
 cluster=$("${kube[@]}" config view -o jsonpath="{.contexts[?(@.name=='$admin')].context.cluster}")
@@ -652,7 +659,8 @@ The suite is opt-in: without `KORVID_VERSION_MATRIX_CONTEXT`, every test is
 skipped at collection, so the ordinary test run never reaches a cluster. The
 workflow sets it to the admin context of a kind cluster it created for the
 run, after `setup.sh` has installed the fixtures and the principals'
-contexts.
+contexts. The suite reads whatever cluster the variable names, so name only
+a disposable one; `setup.sh` refuses any context that is not a kind one.
 """
 
 from __future__ import annotations
@@ -939,6 +947,7 @@ async def test_events_are_read_through_events_k8s_io_alone(connect: Connect) -> 
 
     result = await read_logical_list(kube, resolution)
 
+    assert [_group(outcome) for outcome in result.outcomes] == ["events.k8s.io"]
     assert _group(result.observation) == "events.k8s.io"
     assert _state(result.observation) == (EvidenceState.AVAILABLE, Basis.OBSERVED)
     assert "matrix-scenario" in [item["metadata"]["name"] for item in result.items]
@@ -1106,6 +1115,14 @@ jobs:
           MINOR: ${{ matrix.kubernetes }}
         run: |
           server=$(kubectl --context "kind-$CLUSTER" version -o json | jq -r .serverVersion.gitVersion)
+          # A node image pinned to the wrong release would verify another version.
+          case "$server" in
+            "v$MINOR".*) ;;
+            *)
+              echo "::error::expected Kubernetes $MINOR, but the API server is $server"
+              exit 1
+              ;;
+          esac
           echo "Kubernetes $MINOR verified: API server $server" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Collect diagnostics
@@ -1202,8 +1219,8 @@ and reads only versions korvid knows how to read:
 - when discovery itself fails or is refused, korvid reports the evidence as
   unavailable or denied, never as unsupported.
 
-So a feature that needs a newer API keeps working on any cluster that serves
-it, and says why it cannot run on one that does not.
+So a feature that needs a newer API keeps working on any supported cluster
+that serves it, and says why it cannot run on one that does not.
 
 ## How versions are verified
 

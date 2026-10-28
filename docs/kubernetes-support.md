@@ -44,8 +44,8 @@ and reads only versions korvid knows how to read:
 - when discovery itself fails or is refused, korvid reports the evidence as
   unavailable or denied, never as unsupported.
 
-So a feature that needs a newer API keeps working on any cluster that serves
-it, and says why it cannot run on one that does not.
+So a feature that needs a newer API keeps working on any supported cluster
+that serves it, and says why it cannot run on one that does not.
 
 ## How versions are verified
 

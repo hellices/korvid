@@ -4,7 +4,8 @@ The suite is opt-in: without `KORVID_VERSION_MATRIX_CONTEXT`, every test is
 skipped at collection, so the ordinary test run never reaches a cluster. The
 workflow sets it to the admin context of a kind cluster it created for the
 run, after `setup.sh` has installed the fixtures and the principals'
-contexts.
+contexts. The suite reads whatever cluster the variable names, so name only
+a disposable one; `setup.sh` refuses any context that is not a kind one.
 """
 
 from __future__ import annotations
