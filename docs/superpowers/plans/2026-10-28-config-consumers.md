@@ -1065,7 +1065,7 @@ from korvid.core.api_versions import DiscoverySnapshot, observe_discovery
 from korvid.core.capability import Basis, EvidenceState, Observation, RunToken
 from korvid.core.config_consumers import ConsumptionMode
 from korvid.core.config_propagation import ConfigTarget, explain_propagation
-from korvid.core.evidence_reads import LIST_PAGE_SIZE, MAX_BYTES, MAX_PAGES
+from korvid.core.evidence_reads import DEFAULT_MAX_BYTES, LIST_PAGE_SIZE, MAX_BYTES, MAX_PAGES
 from korvid.k8s.discovery_snapshot import (
     GroupVersionOutcome,
     RawDiscovery,
@@ -1130,11 +1130,13 @@ class FakeReader(EvidenceReader):
         self.pages = list(pages) or [EvidencePage(())]
         self.gets: list[tuple[EvidenceTarget, str, int]] = []
         self.lists: list[tuple[EvidenceTarget, int, int]] = []
+        self.continuations: list[str] = []
 
     async def list_evidence_page(
         self, target: EvidenceTarget, *, limit: int, continuation: str, max_bytes: int
     ) -> EvidencePage:
         self.lists.append((target, limit, max_bytes))
+        self.continuations.append(continuation)
         page = self.pages.pop(0)
         if isinstance(page, BaseException):
             raise page
@@ -1178,16 +1180,17 @@ async def test_consumers_are_read_from_the_namespaces_pods() -> None:
     assert "s3cr3t-literal" not in repr(report)
 
 
-async def test_the_object_is_read_as_metadata_and_the_pods_at_the_maximum_budgets() -> None:
+async def test_the_object_is_read_as_metadata_and_only_the_pods_at_the_maximum_budgets() -> None:
     reader = FakeReader()
 
     await _explain(reader)
 
-    ((get_target, name, _bytes),) = reader.gets
+    ((get_target, name, max_bytes),) = reader.gets
     assert (get_target, name) == (
         EvidenceTarget("", "v1", "configmaps", "team-a", metadata_only=True),
         "settings",
     )
+    assert max_bytes == DEFAULT_MAX_BYTES
     assert reader.lists == [(EvidenceTarget("", "v1", "pods", "team-a"), LIST_PAGE_SIZE, MAX_BYTES)]
 
 
@@ -1217,8 +1220,11 @@ async def test_a_denied_pod_list_establishes_no_consumer_set() -> None:
 async def test_a_truncated_pod_list_keeps_what_it_read_but_is_not_conclusive() -> None:
     pages = tuple(EvidencePage((_pod(f"api-{n}"),), f"p{n + 1}") for n in range(MAX_PAGES))
 
-    report = await _explain(FakeReader(pages=pages))
+    reader = FakeReader(pages=pages)
 
+    report = await _explain(reader)
+
+    assert reader.continuations == ["", *(f"p{n}" for n in range(1, MAX_PAGES))]
     assert _state(report.pods) == (EvidenceState.PARTIAL, Basis.TRUNCATED)
     assert len(report.consumers) == MAX_PAGES
     assert not report.consumers_conclusive(NOW)
