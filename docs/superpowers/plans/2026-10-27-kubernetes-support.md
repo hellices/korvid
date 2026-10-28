@@ -122,18 +122,20 @@ def _snapshot(*, events_group: bool = True, core_events: bool = True) -> Discove
 
 
 class FakeReader(EvidenceReader):
-    """Answers each LIST with the next scripted outcome, and records which group was read."""
+    """Answers each LIST with the next scripted outcome, and records what was asked."""
 
     def __init__(self, *outcomes: object) -> None:
         self.outcomes = list(outcomes)
         self.groups: list[str] = []
         self.limits: list[int] = []
+        self.continuations: list[str] = []
 
     async def list_evidence_page(
         self, target: EvidenceTarget, *, limit: int, continuation: str, max_bytes: int
     ) -> EvidencePage:
         self.groups.append(target.group)
         self.limits.append(limit)
+        self.continuations.append(continuation)
         outcome = self.outcomes.pop(0)
         if isinstance(outcome, BaseException):
             raise outcome
@@ -215,6 +217,7 @@ async def test_a_partial_read_does_not_fall_through() -> None:
     result = await read_logical_list(reader, _events(_snapshot()), clock=_clock)
 
     assert reader.groups == ["events.k8s.io", "events.k8s.io"]
+    assert reader.continuations == ["", "p2"]
     assert _state(result.observation) == (EvidenceState.PARTIAL, Basis.TRUNCATED)
     assert len(result.items) == 2
 
@@ -289,14 +292,15 @@ async def test_when_no_candidate_resolves_nothing_is_read() -> None:
 
 
 async def test_every_read_gets_the_budgets_given() -> None:
-    reader = FakeReader(FORBIDDEN, EvidencePage(()))
+    reader = FakeReader(FORBIDDEN, EvidencePage((EVENT,), "p2"), EvidencePage(()))
 
     result = await read_logical_list(
         reader, _events(_snapshot()), page_size=10, max_pages=1, clock=_clock
     )
 
-    assert _state(result.observation) == (EvidenceState.AVAILABLE, Basis.OBSERVED)
+    assert reader.groups == ["events.k8s.io", ""]
     assert reader.limits == [10, 10]
+    assert _state(result.observation) == (EvidenceState.PARTIAL, Basis.TRUNCATED)
 ```
 
 - [ ] **Step 2: Run them to verify they fail**
@@ -627,7 +631,9 @@ for account in events-core events-group; do
 done
 
 # A principal with no credentials: the API server treats it as anonymous,
-# which may read no discovery at all.
+# which may read no discovery at all. set-credentials merges into an
+# existing user, so remove any earlier one to be sure it carries nothing.
+kubectl config delete-user matrix-anonymous >/dev/null 2>&1 || true
 kubectl config set-credentials matrix-anonymous >/dev/null
 kubectl config set-context matrix-anonymous --cluster="$cluster" \
   --user=matrix-anonymous >/dev/null
@@ -653,6 +659,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import AsyncExitStack
 
 import pytest
 
@@ -685,17 +692,15 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
 @pytest.fixture
 async def connect() -> AsyncIterator[Connect]:
     """Connect a client to one of the matrix contexts; every one is closed afterwards."""
-    clients: list[KubeClient] = []
+    async with AsyncExitStack() as clients:
 
-    async def open_client(context: str) -> KubeClient:
-        kube = KubeClient()
-        await kube.connect(context)
-        clients.append(kube)
-        return kube
+        async def open_client(context: str) -> KubeClient:
+            kube = KubeClient()
+            clients.push_async_callback(kube.close)
+            await kube.connect(context)
+            return kube
 
-    yield open_client
-    for kube in clients:
-        await kube.close()
+        yield open_client
 
 
 async def snapshot_of(kube: KubeClient) -> DiscoverySnapshot:
@@ -817,6 +822,7 @@ async def test_a_resource_served_only_in_an_unknown_version_is_never_read(
 
     resolution = resolve(GADGETS, Verb.LIST, await snapshot_of(kube), scope=SCOPE)
 
+    assert resolution.sources == ()
     assert _failure(resolution) == (EvidenceState.UNSUPPORTED, Basis.NO_KNOWN_VERSION)
 
 
@@ -1233,7 +1239,7 @@ In `mkdocs.yml`, under Administration, before `Air-gapped operation`, add:
       - Kubernetes support: kubernetes-support.md
 ```
 
-In `docs/release.md`, before `## Publish $TAG`, add a section "List the verified Kubernetes versions" telling the release manager to take the versions whose job passed from the latest version-matrix run on the reviewed commit, starting one with `gh workflow run k8s-version-matrix.yml --ref main` when none has run since the last change it covers.
+In `docs/release.md`, before `## Publish $TAG`, add a section "List the verified Kubernetes versions" telling the release manager to take the versions whose job passed from a version-matrix run whose `headSha` is the reviewed commit (`gh run list --workflow k8s-version-matrix.yml --commit "$COMMIT"`), dispatching one on `main` only while `origin/main` is still that commit, since a dispatch runs on a branch's head, not on a SHA.
 
 In `docs/release-notes/unreleased.md`, add a "Kubernetes support" section naming the page, 1.33 as the oldest supported version, and the versions the matrix verifies.
 

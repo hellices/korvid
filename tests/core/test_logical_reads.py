@@ -56,18 +56,20 @@ def _snapshot(*, events_group: bool = True, core_events: bool = True) -> Discove
 
 
 class FakeReader(EvidenceReader):
-    """Answers each LIST with the next scripted outcome, and records which group was read."""
+    """Answers each LIST with the next scripted outcome, and records what was asked."""
 
     def __init__(self, *outcomes: object) -> None:
         self.outcomes = list(outcomes)
         self.groups: list[str] = []
         self.limits: list[int] = []
+        self.continuations: list[str] = []
 
     async def list_evidence_page(
         self, target: EvidenceTarget, *, limit: int, continuation: str, max_bytes: int
     ) -> EvidencePage:
         self.groups.append(target.group)
         self.limits.append(limit)
+        self.continuations.append(continuation)
         outcome = self.outcomes.pop(0)
         if isinstance(outcome, BaseException):
             raise outcome
@@ -149,6 +151,7 @@ async def test_a_partial_read_does_not_fall_through() -> None:
     result = await read_logical_list(reader, _events(_snapshot()), clock=_clock)
 
     assert reader.groups == ["events.k8s.io", "events.k8s.io"]
+    assert reader.continuations == ["", "p2"]
     assert _state(result.observation) == (EvidenceState.PARTIAL, Basis.TRUNCATED)
     assert len(result.items) == 2
 
@@ -223,11 +226,12 @@ async def test_when_no_candidate_resolves_nothing_is_read() -> None:
 
 
 async def test_every_read_gets_the_budgets_given() -> None:
-    reader = FakeReader(FORBIDDEN, EvidencePage(()))
+    reader = FakeReader(FORBIDDEN, EvidencePage((EVENT,), "p2"), EvidencePage(()))
 
     result = await read_logical_list(
         reader, _events(_snapshot()), page_size=10, max_pages=1, clock=_clock
     )
 
-    assert _state(result.observation) == (EvidenceState.AVAILABLE, Basis.OBSERVED)
+    assert reader.groups == ["events.k8s.io", ""]
     assert reader.limits == [10, 10]
+    assert _state(result.observation) == (EvidenceState.PARTIAL, Basis.TRUNCATED)

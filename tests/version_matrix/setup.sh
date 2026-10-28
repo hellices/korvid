@@ -29,7 +29,9 @@ for account in events-core events-group; do
 done
 
 # A principal with no credentials: the API server treats it as anonymous,
-# which may read no discovery at all.
+# which may read no discovery at all. set-credentials merges into an
+# existing user, so remove any earlier one to be sure it carries nothing.
+kubectl config delete-user matrix-anonymous >/dev/null 2>&1 || true
 kubectl config set-credentials matrix-anonymous >/dev/null
 kubectl config set-context matrix-anonymous --cluster="$cluster" \
   --user=matrix-anonymous >/dev/null

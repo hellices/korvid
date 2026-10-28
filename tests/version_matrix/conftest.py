@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import AsyncExitStack
 
 import pytest
 
@@ -43,17 +44,15 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
 @pytest.fixture
 async def connect() -> AsyncIterator[Connect]:
     """Connect a client to one of the matrix contexts; every one is closed afterwards."""
-    clients: list[KubeClient] = []
+    async with AsyncExitStack() as clients:
 
-    async def open_client(context: str) -> KubeClient:
-        kube = KubeClient()
-        await kube.connect(context)
-        clients.append(kube)
-        return kube
+        async def open_client(context: str) -> KubeClient:
+            kube = KubeClient()
+            clients.push_async_callback(kube.close)
+            await kube.connect(context)
+            return kube
 
-    yield open_client
-    for kube in clients:
-        await kube.close()
+        yield open_client
 
 
 async def snapshot_of(kube: KubeClient) -> DiscoverySnapshot:

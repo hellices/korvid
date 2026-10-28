@@ -107,6 +107,7 @@ async def test_a_resource_served_only_in_an_unknown_version_is_never_read(
 
     resolution = resolve(GADGETS, Verb.LIST, await snapshot_of(kube), scope=SCOPE)
 
+    assert resolution.sources == ()
     assert _failure(resolution) == (EvidenceState.UNSUPPORTED, Basis.NO_KNOWN_VERSION)
 
 
