@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
+import pytest
+
 from korvid.core.api_versions import EVENTS, DiscoverySnapshot, observe_discovery, resolve
 from korvid.core.capability import (
     ApiSource,
@@ -63,6 +65,8 @@ class FakeReader(EvidenceReader):
         self.groups: list[str] = []
         self.limits: list[int] = []
         self.continuations: list[str] = []
+        self.targets: list[EvidenceTarget] = []
+        self.max_bytes: list[int] = []
 
     async def list_evidence_page(
         self, target: EvidenceTarget, *, limit: int, continuation: str, max_bytes: int
@@ -70,6 +74,8 @@ class FakeReader(EvidenceReader):
         self.groups.append(target.group)
         self.limits.append(limit)
         self.continuations.append(continuation)
+        self.targets.append(target)
+        self.max_bytes.append(max_bytes)
         outcome = self.outcomes.pop(0)
         if isinstance(outcome, BaseException):
             raise outcome
@@ -100,7 +106,7 @@ async def test_the_first_candidate_that_answers_is_the_only_one_read() -> None:
 
     result = await read_logical_list(reader, _events(_snapshot()), clock=_clock)
 
-    assert reader.groups == ["events.k8s.io"]
+    assert reader.targets == [EvidenceTarget("events.k8s.io", "v1", "events", "team-a")]
     assert _state(result.observation) == (EvidenceState.AVAILABLE, Basis.OBSERVED)
     assert _group(result.observation) == "events.k8s.io"
     assert len(result.items) == 1
@@ -112,7 +118,10 @@ async def test_a_denied_read_falls_through_to_the_next_candidate() -> None:
 
     result = await read_logical_list(reader, _events(_snapshot()), clock=_clock)
 
-    assert reader.groups == ["events.k8s.io", ""]
+    assert reader.targets == [
+        EvidenceTarget("events.k8s.io", "v1", "events", "team-a"),
+        EvidenceTarget("", "v1", "events", "team-a"),
+    ]
     assert _state(result.observation) == (EvidenceState.AVAILABLE, Basis.OBSERVED)
     assert _group(result.observation) == ""
     assert [_state(outcome) for outcome in result.outcomes] == [
@@ -229,9 +238,15 @@ async def test_every_read_gets_the_budgets_given() -> None:
     reader = FakeReader(FORBIDDEN, EvidencePage((EVENT,), "p2"), EvidencePage(()))
 
     result = await read_logical_list(
-        reader, _events(_snapshot()), page_size=10, max_pages=1, clock=_clock
+        reader, _events(_snapshot()), page_size=10, max_pages=1, max_bytes=4096, clock=_clock
     )
 
     assert reader.groups == ["events.k8s.io", ""]
     assert reader.limits == [10, 10]
+    assert reader.max_bytes == [4096, 4096]
     assert _state(result.observation) == (EvidenceState.PARTIAL, Basis.TRUNCATED)
+
+
+async def test_the_deadline_given_is_the_one_each_read_checks() -> None:
+    with pytest.raises(ValueError, match="deadline is more than 0"):
+        await read_logical_list(FakeReader(), _events(_snapshot()), deadline=0, clock=_clock)

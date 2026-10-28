@@ -15,7 +15,7 @@
 - **Fixture-compatible:** unit tests only, against recorded or hand-written discovery and API responses.
 - **Release notes:** each release lists the versions verified for it.
 - **Read-only:** the scenarios only read. The fixtures they read are created by `setup.sh` before the suite runs, on a cluster that exists only for the job.
-- **Opt-in, disposable clusters only:** the suite is skipped unless `KORVID_VERSION_MATRIX_CONTEXT` names a context, and it reads whatever cluster that context names, so only a disposable one may be named. The workflow sets it to a kind cluster it created; `setup.sh`, which writes fixtures and RBAC, refuses any context not named `kind-*`.
+- **Opt-in, disposable clusters only:** the suite is skipped unless `KORVID_VERSION_MATRIX_CONTEXT` names a context, and it reads whatever cluster that context names, so only a disposable one may be named. The workflow sets it to a kind cluster it created; `setup.sh`, which writes fixtures and RBAC, refuses any context that does not name an existing kind cluster and point at that cluster's API server.
 - **Workflow security:** `permissions: contents: read`, actions pinned by commit SHA, `persist-credentials: false`, the kind binary and node images pinned by digest.
 - **Layers:** `core` imports no Textual and no optional extra; `core` may import `k8s`.
 - **Code rules:** no `assert` in `src/`; every `pytest.raises` takes `match=`; maximum complexity 10; Google-style docstrings.
@@ -70,6 +70,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import Any
+
+import pytest
 
 from korvid.core.api_versions import EVENTS, DiscoverySnapshot, observe_discovery, resolve
 from korvid.core.capability import (
@@ -129,6 +131,8 @@ class FakeReader(EvidenceReader):
         self.groups: list[str] = []
         self.limits: list[int] = []
         self.continuations: list[str] = []
+        self.targets: list[EvidenceTarget] = []
+        self.max_bytes: list[int] = []
 
     async def list_evidence_page(
         self, target: EvidenceTarget, *, limit: int, continuation: str, max_bytes: int
@@ -136,6 +140,8 @@ class FakeReader(EvidenceReader):
         self.groups.append(target.group)
         self.limits.append(limit)
         self.continuations.append(continuation)
+        self.targets.append(target)
+        self.max_bytes.append(max_bytes)
         outcome = self.outcomes.pop(0)
         if isinstance(outcome, BaseException):
             raise outcome
@@ -166,7 +172,7 @@ async def test_the_first_candidate_that_answers_is_the_only_one_read() -> None:
 
     result = await read_logical_list(reader, _events(_snapshot()), clock=_clock)
 
-    assert reader.groups == ["events.k8s.io"]
+    assert reader.targets == [EvidenceTarget("events.k8s.io", "v1", "events", "team-a")]
     assert _state(result.observation) == (EvidenceState.AVAILABLE, Basis.OBSERVED)
     assert _group(result.observation) == "events.k8s.io"
     assert len(result.items) == 1
@@ -178,7 +184,10 @@ async def test_a_denied_read_falls_through_to_the_next_candidate() -> None:
 
     result = await read_logical_list(reader, _events(_snapshot()), clock=_clock)
 
-    assert reader.groups == ["events.k8s.io", ""]
+    assert reader.targets == [
+        EvidenceTarget("events.k8s.io", "v1", "events", "team-a"),
+        EvidenceTarget("", "v1", "events", "team-a"),
+    ]
     assert _state(result.observation) == (EvidenceState.AVAILABLE, Basis.OBSERVED)
     assert _group(result.observation) == ""
     assert [_state(outcome) for outcome in result.outcomes] == [
@@ -295,12 +304,18 @@ async def test_every_read_gets_the_budgets_given() -> None:
     reader = FakeReader(FORBIDDEN, EvidencePage((EVENT,), "p2"), EvidencePage(()))
 
     result = await read_logical_list(
-        reader, _events(_snapshot()), page_size=10, max_pages=1, clock=_clock
+        reader, _events(_snapshot()), page_size=10, max_pages=1, max_bytes=4096, clock=_clock
     )
 
     assert reader.groups == ["events.k8s.io", ""]
     assert reader.limits == [10, 10]
+    assert reader.max_bytes == [4096, 4096]
     assert _state(result.observation) == (EvidenceState.PARTIAL, Basis.TRUNCATED)
+
+
+async def test_the_deadline_given_is_the_one_each_read_checks() -> None:
+    with pytest.raises(ValueError, match="deadline is more than 0"):
+        await read_logical_list(FakeReader(), _events(_snapshot()), deadline=0, clock=_clock)
 ```
 
 - [ ] **Step 2: Run them to verify they fail**
@@ -385,7 +400,7 @@ async def read_logical_list(
 - [ ] **Step 4: Run the tests to verify they pass, and check the mutations**
 
 Run: `uv run --frozen pytest -p no:tach tests/core/test_logical_reads.py -q`
-Expected: `11 passed`.
+Expected: `12 passed`.
 
 Each of these changes to `evidence_reads.py` must make at least one test fail: drop `EvidenceState.UNSUPPORTED` from `_FALL_THROUGH`; replace `min(` with `max(` in the failure pick; remove the `continue` after an unresolved candidate; append a skipped candidate's observation without the run's token; `continue` instead of `break` after a read that is neither answered nor refused; return any read that is not refused as the answer.
 
@@ -607,20 +622,33 @@ Create `tests/version_matrix/setup.sh` with:
 # Usage: setup.sh ADMIN_CONTEXT
 #
 # Only ever run against a cluster created for the run: it installs CRDs, an
-# APIService and RBAC, and writes contexts into the current kubeconfig.
+# APIService and RBAC, and writes contexts into the current kubeconfig. It
+# refuses a context unless it names a kind cluster that exists and points at
+# that cluster's API server, since a context's name alone proves nothing.
 set -euo pipefail
+
+refuse() {
+  echo "setup.sh: refusing $admin: $1" >&2
+  exit 2
+}
 
 admin=${1:?usage: setup.sh ADMIN_CONTEXT}
 case "$admin" in
-  kind-*) ;;
-  *)
-    echo "setup.sh: refusing $admin; it only seeds a kind cluster (kind-*)" >&2
-    exit 2
-    ;;
+  kind-*) name=${admin#kind-} ;;
+  *) refuse "it only seeds a kind cluster (kind-NAME)" ;;
 esac
+kind get clusters 2>/dev/null | grep -qxF "$name" || refuse "no kind cluster named $name"
+
 here=$(cd "$(dirname "$0")" && pwd)
 kube=(kubectl --context "$admin")
 cluster=$("${kube[@]}" config view -o jsonpath="{.contexts[?(@.name=='$admin')].context.cluster}")
+server=$(kubectl config view -o jsonpath="{.clusters[?(@.name=='$cluster')].cluster.server}")
+own=$(mktemp)
+trap 'rm -f "$own"' EXIT
+kind get kubeconfig --name "$name" >"$own"
+expected=$(kubectl config view --kubeconfig "$own" -o jsonpath='{.clusters[0].cluster.server}')
+[ -n "$server" ] && [ "$server" = "$expected" ] ||
+  refuse "its server ${server:-(none)} is not kind cluster $name's ($expected)"
 
 "${kube[@]}" apply -f "$here/fixtures.yaml"
 "${kube[@]}" wait --for=condition=Established --timeout=120s \
@@ -1016,6 +1044,8 @@ on:
   workflow_dispatch:
   pull_request:
     paths:
+      - pyproject.toml
+      - uv.lock
       - src/korvid/core/api_versions.py
       - src/korvid/core/capability.py
       - src/korvid/core/capability_classifier.py
@@ -1032,6 +1062,8 @@ on:
   push:
     branches: [main]
     paths:
+      - pyproject.toml
+      - uv.lock
       - src/korvid/core/api_versions.py
       - src/korvid/core/capability.py
       - src/korvid/core/capability_classifier.py
@@ -1131,6 +1163,7 @@ jobs:
           mkdir -p diag
           kubectl --context "kind-$CLUSTER" get apiservices,crds -o wide > diag/apis.txt || true
           kubectl --context "kind-$CLUSTER" -n korvid-matrix get all,events -o wide > diag/fixtures.txt || true
+          kubectl --context "kind-$CLUSTER" version -o json > diag/version.json || true
           kind export logs --name "$CLUSTER" diag/kind || true
 
       - name: Upload diagnostics
@@ -1156,7 +1189,7 @@ git add .github/workflows/k8s-version-matrix.yml
 git commit -m "ci: verify each supported Kubernetes version on kind"
 ```
 
-The workflow's own path filter includes it, so the PR runs every version. A job that fails there is fixed before review: its `version-matrix-<version>` artifact holds the cluster's events, the APIService and the server version.
+The workflow's own path filter includes it, so the PR runs every version. A job that fails there is fixed before review: its `version-matrix-<version>` artifact holds the cluster's events, the APIService, the server version (`version.json`) and kind's logs.
 
 ### Task 4: The support policy
 
@@ -1220,7 +1253,7 @@ and reads only versions korvid knows how to read:
   unavailable or denied, never as unsupported.
 
 So a feature that needs a newer API keeps working on any supported cluster
-that serves it, and says why it cannot run on one that does not.
+that serves it in a version korvid knows how to read, and says why it cannot run on one that does not.
 
 ## How versions are verified
 
@@ -1236,11 +1269,13 @@ read-only scenarios against each:
   which must never return their data or the `last-applied-configuration`
   annotation;
 - a principal denied a list, and a principal denied discovery;
-- Events read through `events.k8s.io` alone, through core `v1` alone, and
-  through both.
+- Events read by a principal allowed both API groups, which reads
+  `events.k8s.io`; by one allowed only `events.k8s.io`; and by one allowed
+  only core `v1`, which falls through to core after `events.k8s.io` is
+  denied.
 
 The workflow runs on demand, and whenever a pull request or a push to `main`
-changes the modules those scenarios exercise. Each passing job records the
+changes the modules those scenarios exercise or the project's dependencies. Each passing job records the
 API server version it verified in the run's summary.
 
 The matrix runs every minor version from the oldest supported one up. 1.35 is
