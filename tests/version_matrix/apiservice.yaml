@@ -1,0 +1,16 @@
+# An aggregated API that is registered but never available: its backing
+# Service does not exist, so discovery of its group version fails with 503.
+# Applied after fixtures.yaml, once kubectl no longer needs full discovery.
+apiVersion: apiregistration.k8s.io/v1
+kind: APIService
+metadata:
+  name: v1.unavailable.korvid.dev
+spec:
+  group: unavailable.korvid.dev
+  version: v1
+  groupPriorityMinimum: 1000
+  versionPriority: 15
+  insecureSkipTLSVerify: true
+  service:
+    name: missing-backend
+    namespace: korvid-matrix

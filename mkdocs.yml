@@ -55,6 +55,7 @@ nav:
       - MCP server: mcp.md
       - Provider plugins: provider-plugins.md
   - Administration:
+      - Kubernetes support: kubernetes-support.md
       - Air-gapped operation: airgap.md
       - Performance and scale: performance.md
       - Threat model: threat-model.md

@@ -208,6 +208,31 @@ test ! -e "$runtime_root"
 Record the run ID, exact commit, and command result with the release evidence.
 Do not create or push the release tag until this gate passes.
 
+## List the verified Kubernetes versions
+
+Every release's notes name the Kubernetes versions verified for it, taken
+from a run of the **Kubernetes version matrix** workflow on the reviewed
+commit itself:
+
+```sh
+: "${COMMIT:?set COMMIT to the reviewed origin/main SHA}"
+gh run list --workflow k8s-version-matrix.yml --commit "$COMMIT" \
+  --json databaseId,headSha,conclusion,createdAt
+```
+
+If none ran on `$COMMIT`, start one. A dispatch runs on a branch's current
+head, not on a SHA, so dispatch on `main` only while the remote `main` is
+still `$COMMIT`, then list the runs again and use the one whose `headSha` is
+`$COMMIT`:
+
+```sh
+test "$(git ls-remote origin refs/heads/main | cut -f1)" = "$COMMIT"
+gh workflow run k8s-version-matrix.yml --ref main
+```
+
+List only the versions whose job passed in that run, as recorded in its
+summary. The policy is in [Kubernetes support](kubernetes-support.md).
+
 ## Publish `$TAG`
 
 Create the annotated tag from the reviewed commit, then push only that tag:

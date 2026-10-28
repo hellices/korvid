@@ -19,6 +19,16 @@ tracks the next release scope.
 
 See [Practice on a throwaway cluster](../getting-started.md#practice-on-a-throwaway-cluster).
 
+## Kubernetes support
+
+- A new [Kubernetes support](../kubernetes-support.md) page defines which
+  Kubernetes versions korvid supports and what "verified" means. The oldest
+  supported version is 1.33.
+- A version matrix verifies 1.33, 1.34, 1.35 and 1.36 on throwaway kind
+  clusters, with read-only scenarios for API version resolution, unavailable
+  APIs, denied principals, and ConfigMap and Secret metadata that must never
+  carry their data.
+
 ## Current configuration and extension contracts
 
 Existing migration links continue in the

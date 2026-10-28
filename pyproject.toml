@@ -173,6 +173,7 @@ testpaths = ["tests"]
 filterwarnings = ["error"]
 markers = [
     "contract: live-cluster contract tests (opt-in via KORVID_CONTRACT_RUN_ID)",
+    "version_matrix: read-only scenarios against a kind cluster (opt-in via KORVID_VERSION_MATRIX_CONTEXT)",
 ]
 
 [tool.coverage.run]

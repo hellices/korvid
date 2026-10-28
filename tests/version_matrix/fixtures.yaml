@@ -1,0 +1,160 @@
+# Read-only fixtures for the Kubernetes version matrix (#409, slice S5).
+#
+# Applied with `kubectl apply` by setup.sh, so the ConfigMap and the Secret
+# carry the `last-applied-configuration` annotation, payload included, that
+# metadata reads must never pass on. Everything lives in one namespace or
+# under the korvid.dev API groups, in a kind cluster that exists only for
+# the workflow run.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: korvid-matrix
+---
+# Served in a preferred (v1) and a non-preferred (v1beta1) version.
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: widgets.matrix.korvid.dev
+spec:
+  group: matrix.korvid.dev
+  scope: Namespaced
+  names:
+    plural: widgets
+    singular: widget
+    kind: Widget
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          x-kubernetes-preserve-unknown-fields: true
+    - name: v1beta1
+      served: true
+      storage: false
+      schema:
+        openAPIV3Schema:
+          type: object
+          x-kubernetes-preserve-unknown-fields: true
+---
+# Served only in a version no adapter knows.
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: gadgets.future.korvid.dev
+spec:
+  group: future.korvid.dev
+  scope: Namespaced
+  names:
+    plural: gadgets
+    singular: gadget
+    kind: Gadget
+  versions:
+    - name: v9
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          x-kubernetes-preserve-unknown-fields: true
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: settings
+  namespace: korvid-matrix
+  labels:
+    app: matrix
+  annotations:
+    note: configuration-payload
+data:
+  password: matrix-configmap-payload
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: credentials
+  namespace: korvid-matrix
+  labels:
+    app: matrix
+type: Opaque
+stringData:
+  password: matrix-secret-payload
+---
+# A recorded event, readable through events.k8s.io/v1 and core v1 alike.
+apiVersion: v1
+kind: Event
+metadata:
+  name: matrix-scenario
+  namespace: korvid-matrix
+involvedObject:
+  apiVersion: v1
+  kind: ConfigMap
+  name: settings
+  namespace: korvid-matrix
+reason: MatrixScenario
+message: Recorded by the Kubernetes version matrix.
+type: Normal
+---
+# Principals for the denial scenarios. Every authenticated principal can
+# read discovery through the cluster's own system:discovery binding.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: events-core
+  namespace: korvid-matrix
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: events-group
+  namespace: korvid-matrix
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: events-core
+  namespace: korvid-matrix
+rules:
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: events-group
+  namespace: korvid-matrix
+rules:
+  - apiGroups: [events.k8s.io]
+    resources: [events]
+    verbs: [list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: events-core
+  namespace: korvid-matrix
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: events-core
+subjects:
+  - kind: ServiceAccount
+    name: events-core
+    namespace: korvid-matrix
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: events-group
+  namespace: korvid-matrix
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: events-group
+subjects:
+  - kind: ServiceAccount
+    name: events-group
+    namespace: korvid-matrix
