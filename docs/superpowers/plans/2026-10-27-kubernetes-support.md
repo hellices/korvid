@@ -660,6 +660,8 @@ expected=$(kubectl config view --kubeconfig "$own" -o jsonpath='{.clusters[0].cl
 
 for account in events-core events-group; do
   token=$("${kube[@]}" -n korvid-matrix create token "$account" --duration=1h)
+  # set-credentials merges into an existing user; start from an empty one.
+  kubectl config delete-user "matrix-$account" >/dev/null 2>&1 || true
   kubectl config set-credentials "matrix-$account" --token="$token" >/dev/null
   kubectl config set-context "matrix-$account" --cluster="$cluster" \
     --user="matrix-$account" --namespace=korvid-matrix >/dev/null
@@ -1038,7 +1040,8 @@ name: Kubernetes version matrix
 # Read-only capability scenarios against kind clusters of several Kubernetes
 # minor versions (#409, slice S5). A version is "verified" only when its job
 # passes here; see docs/kubernetes-support.md. GitHub-hosted runners and kind
-# only: no cloud resources, no secrets, nothing persistent.
+# only: no cloud resources and no secrets. The clusters last only as long as
+# the job; a failed job's diagnostics are kept as an artifact for 14 days.
 
 on:
   workflow_dispatch:
@@ -1252,8 +1255,10 @@ and reads only versions korvid knows how to read:
 - when discovery itself fails or is refused, korvid reports the evidence as
   unavailable or denied, never as unsupported.
 
-So a feature that needs a newer API keeps working on any supported cluster
-that serves it in a version korvid knows how to read, and says why it cannot run on one that does not.
+So a feature that needs a newer API works on a supported cluster that serves
+it in a version korvid knows how to read, while that API is available and the
+user may discover and read it. Otherwise korvid reports the evidence as
+unsupported, unavailable or denied, and says why.
 
 ## How versions are verified
 
@@ -1291,7 +1296,7 @@ In `mkdocs.yml`, under Administration, before `Air-gapped operation`, add:
       - Kubernetes support: kubernetes-support.md
 ```
 
-In `docs/release.md`, before `## Publish $TAG`, add a section "List the verified Kubernetes versions" telling the release manager to take the versions whose job passed from a version-matrix run whose `headSha` is the reviewed commit (`gh run list --workflow k8s-version-matrix.yml --commit "$COMMIT"`), dispatching one on `main` only while `origin/main` is still that commit, since a dispatch runs on a branch's head, not on a SHA.
+In `docs/release.md`, before `## Publish $TAG`, add a section "List the verified Kubernetes versions" telling the release manager to take the versions whose job passed from a version-matrix run whose `headSha` is the reviewed commit (`gh run list --workflow k8s-version-matrix.yml --commit "$COMMIT"`), dispatching one on `main` only while the remote `main` (`git ls-remote origin refs/heads/main`) is still that commit, since a dispatch runs on a branch's head, not on a SHA.
 
 In `docs/release-notes/unreleased.md`, add a "Kubernetes support" section naming the page, 1.33 as the oldest supported version, and the versions the matrix verifies.
 

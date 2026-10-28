@@ -2,7 +2,8 @@ name: Kubernetes version matrix
 # Read-only capability scenarios against kind clusters of several Kubernetes
 # minor versions (#409, slice S5). A version is "verified" only when its job
 # passes here; see docs/kubernetes-support.md. GitHub-hosted runners and kind
-# only: no cloud resources, no secrets, nothing persistent.
+# only: no cloud resources and no secrets. The clusters last only as long as
+# the job; a failed job's diagnostics are kept as an artifact for 14 days.
 
 on:
   workflow_dispatch:

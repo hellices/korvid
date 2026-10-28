@@ -221,12 +221,12 @@ gh run list --workflow k8s-version-matrix.yml --commit "$COMMIT" \
 ```
 
 If none ran on `$COMMIT`, start one. A dispatch runs on a branch's current
-head, not on a SHA, so dispatch on `main` only while `origin/main` is still
-`$COMMIT`, then list the runs again and use the one whose `headSha` is
+head, not on a SHA, so dispatch on `main` only while the remote `main` is
+still `$COMMIT`, then list the runs again and use the one whose `headSha` is
 `$COMMIT`:
 
 ```sh
-test "$(git rev-parse origin/main)" = "$COMMIT"
+test "$(git ls-remote origin refs/heads/main | cut -f1)" = "$COMMIT"
 gh workflow run k8s-version-matrix.yml --ref main
 ```
 

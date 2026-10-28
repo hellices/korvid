@@ -43,6 +43,8 @@ expected=$(kubectl config view --kubeconfig "$own" -o jsonpath='{.clusters[0].cl
 
 for account in events-core events-group; do
   token=$("${kube[@]}" -n korvid-matrix create token "$account" --duration=1h)
+  # set-credentials merges into an existing user; start from an empty one.
+  kubectl config delete-user "matrix-$account" >/dev/null 2>&1 || true
   kubectl config set-credentials "matrix-$account" --token="$token" >/dev/null
   kubectl config set-context "matrix-$account" --cluster="$cluster" \
     --user="matrix-$account" --namespace=korvid-matrix >/dev/null
