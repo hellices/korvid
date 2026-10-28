@@ -996,6 +996,7 @@ async def test_events_fall_through_to_core_when_events_k8s_io_is_denied(
         (EvidenceState.AVAILABLE, Basis.OBSERVED),
     ]
     assert _group(result.observation) == ""
+    assert _state(result.observation) == (EvidenceState.AVAILABLE, Basis.OBSERVED)
     assert "matrix-scenario" in [item["metadata"]["name"] for item in result.items]
 ```
 
