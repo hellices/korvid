@@ -6,7 +6,7 @@ from collections.abc import Awaitable, Mapping
 from datetime import UTC, datetime
 from typing import Any
 
-from korvid.core.config_consumers import Consumer, ConsumptionMode, PodIdentity
+from korvid.core.config_consumers import ConsumptionMode, PodIdentity
 from korvid.core.config_propagation import ConfigTarget
 from korvid.core.evidence_reads import DEFAULT_MAX_BYTES, LIST_PAGE_SIZE, MAX_BYTES
 from korvid.k8s.discovery import ResourceMeta
@@ -206,8 +206,8 @@ async def test_opening_reads_the_selected_object_and_shows_its_consumers() -> No
     (screen,) = harness.ui.screens
     assert isinstance(screen, ConfigPropagationScreen)
     assert screen.report.target == ConfigTarget("ConfigMap", "team-a", "settings", "uid-settings")
-    assert [(c.pod.name, c.mode) for c in screen.report.consumers] == [
-        ("api-1", ConsumptionMode.ENV_FROM)
+    assert [(c.pod, c.mode) for c in screen.report.consumers] == [
+        (PodIdentity("team-a", "api-1", "uid-api-1"), ConsumptionMode.ENV_FROM)
     ]
     assert harness.client.gets == [
         (
@@ -275,9 +275,9 @@ async def test_choosing_a_consumer_opens_its_pod_in_the_run_epoch() -> None:
     harness = Harness()
     harness.controller.open_selected()
     await harness.run()
-    consumer = Consumer(
-        PodIdentity("team-a", "api-1", "uid-api-1"), ConsumptionMode.ENV_FROM, "spec.x"
-    )
+    (screen,) = harness.ui.screens
+    assert isinstance(screen, ConfigPropagationScreen)
+    (consumer,) = screen.report.consumers
 
     assert harness.ui.screen_callback is not None
     harness.ui.screen_callback(None)

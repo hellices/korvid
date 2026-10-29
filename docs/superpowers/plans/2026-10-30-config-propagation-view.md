@@ -660,8 +660,19 @@ def test_an_ephemeral_container_row_explains_a_restart_will_not_help() -> None:
         ContainerCategory.EPHEMERAL,
     )
 
+    mounted = Consumer(
+        POD,
+        ConsumptionMode.VOLUME,
+        "spec.volumes[0].configMap",
+        False,
+        "debugger",
+        ContainerCategory.EPHEMERAL,
+        volume="config",
+        mount_path="/etc/app",
+    )
+
     with_ephemeral = _plain(report_notes(_report(debugger), NOW))
-    without = _plain(report_notes(_report(ENV), NOW))
+    without = _plain(report_notes(_report(ENV), NOW)) + _plain(report_notes(_report(mounted), NOW))
 
     (note,) = [n for n in with_ephemeral if n.startswith("An ephemeral container")]
     assert "cannot be restarted" in note
@@ -831,7 +842,12 @@ _INIT_NOTE = (
 )
 _EPHEMERAL_NOTE = (
     "An ephemeral container cannot be restarted, and a rollout restart creates Pods "
-    "without it: to read a change, add a new ephemeral container."
+    "without it: to read a change to its environment or subPath mount, add a new "
+    "ephemeral container."
+)
+#: The modes an ephemeral container cannot pick a change up through.
+_READ_AT_START = frozenset(
+    {ConsumptionMode.ENV_FROM, ConsumptionMode.ENV_KEY, ConsumptionMode.SUBPATH}
 )
 
 
@@ -950,10 +966,12 @@ def _completeness_note(report: PropagationReport, now: datetime) -> Text | None:
 def report_notes(report: PropagationReport, now: datetime) -> list[Text]:
     """What the evidence says about the object, and what it does not establish."""
     notes = _object_notes(report, now)
-    categories = {consumer.category for consumer in report.consumers}
-    if ContainerCategory.INIT in categories:
+    if any(consumer.category is ContainerCategory.INIT for consumer in report.consumers):
         notes.append(Text(_INIT_NOTE))
-    if ContainerCategory.EPHEMERAL in categories:
+    if any(
+        consumer.category is ContainerCategory.EPHEMERAL and consumer.mode in _READ_AT_START
+        for consumer in report.consumers
+    ):
         notes.append(Text(_EPHEMERAL_NOTE))
     completeness = _completeness_note(report, now)
     if completeness is not None:
@@ -1112,7 +1130,7 @@ from collections.abc import Awaitable, Mapping
 from datetime import UTC, datetime
 from typing import Any
 
-from korvid.core.config_consumers import Consumer, ConsumptionMode, PodIdentity
+from korvid.core.config_consumers import ConsumptionMode, PodIdentity
 from korvid.core.config_propagation import ConfigTarget
 from korvid.core.evidence_reads import DEFAULT_MAX_BYTES, LIST_PAGE_SIZE, MAX_BYTES
 from korvid.k8s.discovery import ResourceMeta
@@ -1312,8 +1330,8 @@ async def test_opening_reads_the_selected_object_and_shows_its_consumers() -> No
     (screen,) = harness.ui.screens
     assert isinstance(screen, ConfigPropagationScreen)
     assert screen.report.target == ConfigTarget("ConfigMap", "team-a", "settings", "uid-settings")
-    assert [(c.pod.name, c.mode) for c in screen.report.consumers] == [
-        ("api-1", ConsumptionMode.ENV_FROM)
+    assert [(c.pod, c.mode) for c in screen.report.consumers] == [
+        (PodIdentity("team-a", "api-1", "uid-api-1"), ConsumptionMode.ENV_FROM)
     ]
     assert harness.client.gets == [
         (
@@ -1381,9 +1399,9 @@ async def test_choosing_a_consumer_opens_its_pod_in_the_run_epoch() -> None:
     harness = Harness()
     harness.controller.open_selected()
     await harness.run()
-    consumer = Consumer(
-        PodIdentity("team-a", "api-1", "uid-api-1"), ConsumptionMode.ENV_FROM, "spec.x"
-    )
+    (screen,) = harness.ui.screens
+    assert isinstance(screen, ConfigPropagationScreen)
+    (consumer,) = screen.report.consumers
 
     assert harness.ui.screen_callback is not None
     harness.ui.screen_callback(None)

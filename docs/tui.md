@@ -131,7 +131,8 @@ container in its namespace that uses it, grouped by how:
 
 Init and ephemeral containers get notes of their own: a finished init
 container sees a change only when its Pod restarts, and an ephemeral
-container cannot be restarted, so a rollout leaves it behind.
+container cannot be restarted, so a rollout leaves it behind: a new one is
+needed for it to read a changed environment variable or `subPath` file.
 
 The view reads the object's metadata and the namespace's Pods when it opens,
 never the object's data. Pods arrive whole, so their literal `env[].value`

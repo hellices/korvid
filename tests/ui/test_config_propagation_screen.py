@@ -238,8 +238,19 @@ def test_an_ephemeral_container_row_explains_a_restart_will_not_help() -> None:
         ContainerCategory.EPHEMERAL,
     )
 
+    mounted = Consumer(
+        POD,
+        ConsumptionMode.VOLUME,
+        "spec.volumes[0].configMap",
+        False,
+        "debugger",
+        ContainerCategory.EPHEMERAL,
+        volume="config",
+        mount_path="/etc/app",
+    )
+
     with_ephemeral = _plain(report_notes(_report(debugger), NOW))
-    without = _plain(report_notes(_report(ENV), NOW))
+    without = _plain(report_notes(_report(ENV), NOW)) + _plain(report_notes(_report(mounted), NOW))
 
     (note,) = [n for n in with_ephemeral if n.startswith("An ephemeral container")]
     assert "cannot be restarted" in note

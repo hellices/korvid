@@ -65,7 +65,12 @@ _INIT_NOTE = (
 )
 _EPHEMERAL_NOTE = (
     "An ephemeral container cannot be restarted, and a rollout restart creates Pods "
-    "without it: to read a change, add a new ephemeral container."
+    "without it: to read a change to its environment or subPath mount, add a new "
+    "ephemeral container."
+)
+#: The modes an ephemeral container cannot pick a change up through.
+_READ_AT_START = frozenset(
+    {ConsumptionMode.ENV_FROM, ConsumptionMode.ENV_KEY, ConsumptionMode.SUBPATH}
 )
 
 
@@ -184,10 +189,12 @@ def _completeness_note(report: PropagationReport, now: datetime) -> Text | None:
 def report_notes(report: PropagationReport, now: datetime) -> list[Text]:
     """What the evidence says about the object, and what it does not establish."""
     notes = _object_notes(report, now)
-    categories = {consumer.category for consumer in report.consumers}
-    if ContainerCategory.INIT in categories:
+    if any(consumer.category is ContainerCategory.INIT for consumer in report.consumers):
         notes.append(Text(_INIT_NOTE))
-    if ContainerCategory.EPHEMERAL in categories:
+    if any(
+        consumer.category is ContainerCategory.EPHEMERAL and consumer.mode in _READ_AT_START
+        for consumer in report.consumers
+    ):
         notes.append(Text(_EPHEMERAL_NOTE))
     completeness = _completeness_note(report, now)
     if completeness is not None:
