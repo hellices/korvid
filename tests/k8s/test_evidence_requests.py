@@ -173,6 +173,7 @@ async def test_an_object_failure_keeps_the_status_for_the_classifier() -> None:
 def test_the_kubernetes_client_is_an_evidence_client() -> None:
     """A diagnostic needs reads, discovery and the session generation from one client."""
     assert issubclass(KubeClient, EvidenceClient)
+    assert not KubeClient.__abstractmethods__
     assert issubclass(EvidenceClient, EvidenceReader)
     assert {"list_evidence_page", "get_evidence_object"} <= EvidenceClient.__abstractmethods__
     assert {"session_generation", "discovery_snapshot"} <= EvidenceClient.__abstractmethods__
