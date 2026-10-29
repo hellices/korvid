@@ -138,6 +138,7 @@ from korvid.ui.app_surfaces import (
 )
 from korvid.ui.bridge_dispatch import AppContextDispatch
 from korvid.ui.command_router import CommandRouter
+from korvid.ui.config_propagation_controller import ConfigPropagationController
 from korvid.ui.context_switch_coordinator import ContextSwitchCoordinator, ContextSwitchResult
 from korvid.ui.debug import DebugController, DebugSettings
 from korvid.ui.deployment_outcome_actions import DeploymentOutcomePodActions
@@ -982,6 +983,15 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
             events=lambda: app._get_events,
         ),
     )
+    config_propagation = ConfigPropagationController(
+        ui=AppUiSurface(app),
+        view=view,
+        context=context,
+        client=inputs.evidence_client,
+        navigate=lambda namespace, name, epoch, uid: workspace_ref.get().jump_to_object(
+            "pods", namespace, name, epoch=epoch, expected_uid=uid
+        ),
+    )
     bridge_dispatch = AppContextDispatch()
     inspect_surface = AppInspectSurface(app)
     inspect_controller = ResourceInspectController(
@@ -1265,6 +1275,7 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
             keybindings=keybindings.unavailable_reason,
             slots=slots.unavailable_reason,
             outcomes=deployment_outcomes.unavailable_reason,
+            propagation=config_propagation.unavailable_reason,
         ),
     )
     commands = CommandRouter(
@@ -1278,6 +1289,7 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
         keybindings=keybindings,
         slots=slots,
         outcomes=deployment_outcomes,
+        propagation=config_propagation,
     )
     return AppRuntime(
         view=view,
@@ -1484,6 +1496,7 @@ async def _wire_and_run(config: KorvidConfig, kube: KubeClient, state: _RunState
             if (server := kube.connected_api_server()) is not None
             else None
         ),
+        evidence_client=kube,
     )
     app = assemble_app_runtime(app)
     app_box.append(app)

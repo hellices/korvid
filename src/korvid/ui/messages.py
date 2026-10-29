@@ -120,6 +120,7 @@ class BuiltinOperation(Enum):
     KEYBINDINGS = "keys"
     NAMESPACE_SLOTS = "slots"
     DEPLOYMENT_OUTCOMES = "outcomes"
+    CONFIG_PROPAGATION = "consumers"
 
 
 class BuiltinCommand(Message):

@@ -45,6 +45,7 @@ from korvid.k8s.components import (
 )
 from korvid.k8s.deployment_outcomes import DeploymentOutcomeReader
 from korvid.k8s.discovery import PODS_META, ResourceMeta, canonical_resource_alias
+from korvid.k8s.evidence_requests import EvidenceClient
 from korvid.k8s.helm import HelmReleaseIdentity
 from korvid.k8s.helmcli import HelmCLI
 from korvid.k8s.logs import LogLine
@@ -195,6 +196,7 @@ class KorvidApp(App[None]):
         approval_timeout_seconds: float | None = None,
         deployment_outcome_reader: DeploymentOutcomeReader | None = None,
         deployment_cluster_id: Callable[[], str | None] = lambda: None,
+        evidence_client: EvidenceClient | None = None,
     ) -> None:
         super().__init__()
         if approval_timeout_seconds is not None and (
@@ -249,6 +251,7 @@ class KorvidApp(App[None]):
             approval_timeout_seconds=approval_timeout_seconds,
             deployment_outcome_reader=deployment_outcome_reader,
             deployment_cluster_id=deployment_cluster_id,
+            evidence_client=evidence_client,
         )
         self._runtime_bound = False
         self._runtime_inputs = runtime_inputs

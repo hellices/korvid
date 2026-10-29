@@ -593,6 +593,28 @@ def test_composed_command_reasons_route_the_forward_list_command() -> None:
     assert reasons["pf"]() == missing
 
 
+def test_composed_command_reasons_ask_the_propagation_owner_about_consumers() -> None:
+    """`:consumers` is greyed out by its owner's own answer: no connection,
+    the wrong view, or no selected ConfigMap or Secret."""
+    wrong_view = UnavailableReason(AvailabilityCode.WRONG_VIEW, "Open ConfigMaps or Secrets")
+    answer: UnavailableReason | None = wrong_view
+    reasons = compose_command_reasons(
+        agent_available=lambda: True,
+        agent_setup_available=lambda: True,
+        agent_session_configured=lambda: True,
+        mcp=lambda: None,
+        telepresence=lambda: None,
+        proposals=lambda: None,
+        namespace=lambda: None,
+        context=lambda: None,
+        port_forwards=lambda: None,
+        propagation=lambda: answer,
+    )
+    assert reasons["consumers"]() == wrong_view
+    answer = None
+    assert reasons["consumers"]() is None
+
+
 def test_composed_command_reasons_share_one_agent_answer() -> None:
     """`:ai` and `:model` have no owner at all without the [agent] extra,
     which is the same absence the bound Ctrl-A key refuses with - so both

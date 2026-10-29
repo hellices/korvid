@@ -98,6 +98,14 @@ class FakeOutcomes:
         self.opens += 1
 
 
+class FakePropagation:
+    def __init__(self) -> None:
+        self.opens = 0
+
+    def open_selected(self) -> None:
+        self.opens += 1
+
+
 class Harness:
     def __init__(
         self,
@@ -105,6 +113,7 @@ class Harness:
         agent_available: bool = True,
         catalog_missing: bool = False,
         outcomes: FakeOutcomes | None = None,
+        propagation: FakePropagation | None = None,
     ) -> None:
         self.ui = FakeUi()
         self.agent = FakeAgent(agent_available)
@@ -126,6 +135,7 @@ class Harness:
             keybindings=self.keybindings,
             slots=self.slots,
             outcomes=outcomes,
+            propagation=propagation,
         )
 
 
@@ -267,3 +277,23 @@ def test_an_empty_command_is_reported_not_routed() -> None:
     assert h.agent.commands == []
     assert h.integrations.mcp == []
     assert len(h.ui.notifications) == 1
+
+
+def test_configuration_propagation_reaches_its_owner_once() -> None:
+    propagation = FakePropagation()
+    harness = Harness(propagation=propagation)
+
+    harness.router.route_builtin(_builtin(BuiltinOperation.CONFIG_PROPAGATION))
+
+    assert propagation.opens == 1
+    assert harness.ui.notifications == []
+
+
+def test_configuration_propagation_without_owner_warns_unavailable() -> None:
+    harness = Harness()
+
+    harness.router.route_builtin(_builtin(BuiltinOperation.CONFIG_PROPAGATION))
+
+    assert harness.ui.notifications == [
+        ("Configuration propagation is unavailable in this session", "warning")
+    ]

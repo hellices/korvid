@@ -93,7 +93,7 @@ class ConfigPropagationController:
         """Explain the selected ConfigMap or Secret in a worker."""
         reason = self.unavailable_reason()
         if reason is not None:
-            self._ui.notify(reason.message, severity="warning")
+            self._ui.notify(reason.message, severity="warning", markup=False)
             return
         kind = self._selected_kind()
         namespace, name = self._view.selected_ns_name()

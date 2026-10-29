@@ -110,6 +110,22 @@ COMMANDS: tuple[CommandDescriptor, ...] = (
         ),
     ),
     CommandDescriptor(
+        aliases=("consumers", "config-consumers"),
+        help=(
+            (
+                ":consumers|:config-consumers",
+                "ConfigMap or Secret consumers: Pods, mount modes, and what a change means",
+            ),
+        ),
+        operation=BuiltinOperation.CONFIG_PROPAGATION,
+        maximum_arguments=0,
+        palette=PaletteCommand(
+            "Explain configuration propagation",
+            "consumers",
+            ("propagation", "configmap", "secret", "mount", "subpath", "restart"),
+        ),
+    ),
+    CommandDescriptor(
         aliases=("q", "quit"),
         help=((":q", "Quit (also :quit)"),),
         operation=CommandParse.QUIT,
