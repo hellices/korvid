@@ -229,6 +229,10 @@ def test_an_observation_never_made_is_not_called_stale() -> None:
     ("seconds", "text"),
     [
         (0.4, "observed just now"),
+        (1, "observed 1s ago"),
+        (60, "observed 1m ago"),
+        (3600, "observed 1h ago"),
+        (86400, "observed 1d ago"),
         (59, "observed 59s ago"),
         (61, "observed 1m ago"),
         (2 * 3600 + 5, "observed 2h ago"),
@@ -397,7 +401,7 @@ def not_established(what: str) -> Text:
 
 - [ ] **Step 4: Run the tests, and check the mutations**
 
-Expected: `22 passed`. Each change must fail a test: mark stale without an observation; never mark stale; parse the line as markup; drop the group from a grouped version; use `>` for unit boundaries.
+Expected: `26 passed`. Each change must fail a test: mark stale without an observation; never mark stale; parse the line as markup; drop the group from a grouped version; use `>` for unit boundaries.
 
 - [ ] **Step 5: Commit**
 
