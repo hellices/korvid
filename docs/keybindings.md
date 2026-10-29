@@ -11,6 +11,7 @@ Korvid shows only the keys that act on the current view. Press `?` for the compl
 | `:` | Open the command bar |
 | `:pulse` / `:problems` | Inspect [current problems, recent warnings, and coverage](pulse.md) |
 | `:outcomes` / `:deployment-outcomes` | Open the latest bounded Deployment scale/restart outcome |
+| `:consumers` / `:config-consumers` | Show which Pods use the selected ConfigMap or Secret, and [what a change means](tui.md#configuration-propagation) for each |
 | `Ctrl-P` | Search app actions and built-in commands by intent |
 | `:keys` / `:keybindings` | Edit, review, and save app keybindings |
 | `:slots` / `:ns-slots` | Preview and repack the `1`–`9` namespace shortcuts |

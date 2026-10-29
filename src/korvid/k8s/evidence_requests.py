@@ -21,6 +21,7 @@ from korvid.k8s.bounded_transport import (
     decode_list_page,
     read_bounded_json,
 )
+from korvid.k8s.discovery_snapshot import RawDiscovery
 
 METADATA_LIST = "application/json;as=PartialObjectMetadataList;g=meta.k8s.io;v=v1"
 METADATA_OBJECT = "application/json;as=PartialObjectMetadata;g=meta.k8s.io;v=v1"
@@ -67,6 +68,24 @@ class EvidenceReader(ABC):
         self, target: EvidenceTarget, name: str, *, max_bytes: int
     ) -> dict[str, Any]:
         """The object `name`, read within `max_bytes`."""
+
+
+class EvidenceClient(EvidenceReader):
+    """What a diagnostic needs of its client: evidence reads, discovery and the session.
+
+    `KubeClient` is the implementation. A diagnostic resolves its sources from
+    `discovery_snapshot()` and records `session_generation` in its run token,
+    so a result read under other credentials is dropped.
+    """
+
+    @property
+    @abstractmethod
+    def session_generation(self) -> int:
+        """An opaque counter that changes on every connect and context switch."""
+
+    @abstractmethod
+    async def discovery_snapshot(self) -> RawDiscovery:
+        """This session's raw discovery."""
 
 
 async def read_evidence_page(

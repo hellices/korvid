@@ -92,6 +92,12 @@ class OutcomeCommands(Protocol):
     def open_latest(self) -> None: ...
 
 
+class PropagationCommands(Protocol):
+    """The configuration propagation view's owner."""
+
+    def open_selected(self) -> None: ...
+
+
 class CommandRouter:
     """Dispatches typed commands to the owner that implements them."""
 
@@ -108,6 +114,7 @@ class CommandRouter:
         keybindings: KeybindingCommands,
         slots: SlotCommands,
         outcomes: OutcomeCommands | None = None,
+        propagation: PropagationCommands | None = None,
     ) -> None:
         self._ui = ui
         self._agent = agent
@@ -119,6 +126,7 @@ class CommandRouter:
         self._keybindings = keybindings
         self._slots = slots
         self._outcomes = outcomes
+        self._propagation = propagation
 
     def route_builtin(self, command: BuiltinCommand) -> None:
         """Dispatch an app-owned command by canonical operation identity."""
@@ -131,6 +139,7 @@ class CommandRouter:
             BuiltinOperation.KEYBINDINGS: self._keybindings.open_editor,
             BuiltinOperation.NAMESPACE_SLOTS: self._slots.open_reallocation,
             BuiltinOperation.DEPLOYMENT_OUTCOMES: self._open_outcomes,
+            BuiltinOperation.CONFIG_PROPAGATION: self._open_propagation,
         }
         handler = no_argument_handlers.get(operation)
         if handler is not None:
@@ -155,6 +164,14 @@ class CommandRouter:
             )
             return
         self._outcomes.open_latest()
+
+    def _open_propagation(self) -> None:
+        if self._propagation is None:
+            self._ui.notify(
+                "Configuration propagation is unavailable in this session", severity="warning"
+            )
+            return
+        self._propagation.open_selected()
 
     def _route_agent(self, command: BuiltinCommand) -> None:
         if not self._agent.available:

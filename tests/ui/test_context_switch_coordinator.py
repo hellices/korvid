@@ -30,6 +30,7 @@ from korvid.core.pulse_rules import PodPulseRule
 from korvid.core.session_timeline import SessionTimeline
 from korvid.k8s.errors import KubeClientError
 from korvid.ui.action_availability import AvailabilityCode
+from korvid.ui.config_propagation_controller import CONFIG_PROPAGATION_GROUP
 from korvid.ui.context_switch_coordinator import (
     HINT_EVENTS_GROUP,
     ContextSurface,
@@ -479,6 +480,7 @@ _SUCCESSFUL_ORDER = [
     "logs-close",
     "describe-hide",
     "workspace-quiesce",
+    f"workers-cancelled:{CONFIG_PROPAGATION_GROUP}",
     "ns-prefetch-cancelled",
     "ns-words-cleared",
     "watch-stop-all",

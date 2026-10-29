@@ -45,6 +45,7 @@ from korvid.k8s.components import (
 )
 from korvid.k8s.deployment_outcomes import DeploymentOutcomeReader
 from korvid.k8s.discovery import PODS_META, ResourceMeta, canonical_resource_alias
+from korvid.k8s.evidence_requests import EvidenceClient
 from korvid.k8s.helm import HelmReleaseIdentity
 from korvid.k8s.helmcli import HelmCLI
 from korvid.k8s.logs import LogLine
@@ -97,10 +98,6 @@ from korvid.ui.messages import (
     UnknownCommand,
 )
 from korvid.ui.navigation import NavigationStack
-from korvid.ui.session_timeline_controller import (
-    TIMELINE_EVENT_GROUP,
-    TIMELINE_NAVIGATION_GROUP,
-)
 from korvid.ui.widgets.action_palette import ActionPaletteScreen
 from korvid.ui.widgets.agent_panel import AgentPanel
 from korvid.ui.widgets.command_bar import CommandBar
@@ -116,9 +113,7 @@ from korvid.ui.widgets.pulse import PulseSummary
 from korvid.ui.widgets.resource_table import ResourceTable, validate_selected_view
 from korvid.ui.widgets.status_bar import StatusBar
 from korvid.ui.widgets.top_bar import KeyEntry, TopBar
-from korvid.ui.workspace_controller import (
-    RELATIONSHIP_GROUP,
-)
+from korvid.ui.worker_failures import REPORTED_WORKER_GROUPS
 from korvid.ui.workspace_state import PaneState, filtered_rows
 
 _DEFAULT_ALIASES: dict[str, ResourceMeta] = {
@@ -195,6 +190,7 @@ class KorvidApp(App[None]):
         approval_timeout_seconds: float | None = None,
         deployment_outcome_reader: DeploymentOutcomeReader | None = None,
         deployment_cluster_id: Callable[[], str | None] = lambda: None,
+        evidence_client: EvidenceClient | None = None,
     ) -> None:
         super().__init__()
         if approval_timeout_seconds is not None and (
@@ -249,6 +245,7 @@ class KorvidApp(App[None]):
             approval_timeout_seconds=approval_timeout_seconds,
             deployment_outcome_reader=deployment_outcome_reader,
             deployment_cluster_id=deployment_cluster_id,
+            evidence_client=evidence_client,
         )
         self._runtime_bound = False
         self._runtime_inputs = runtime_inputs
@@ -905,22 +902,18 @@ class KorvidApp(App[None]):
         self._workspace_ctl.show_relationships()
 
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
-        """Report a failed timeline or relationship worker instead of exiting.
+        """Report a failed worker of a `REPORTED_WORKER_GROUPS` group instead of exiting.
 
-        Scoped to this app's own `relationships`, `timeline-warning-events`,
-        and `timeline` (goto) workers, which are the only ones started with
-        `exit_on_error=False`: every other group keeps Textual's default
-        crash-on-error behaviour, and a cancelled worker never reaches
-        `WorkerState.ERROR`, so it is never reported.
+        Those are this app's own workers started with `exit_on_error=False`:
+        every other group keeps Textual's default crash-on-error behaviour,
+        and a cancelled worker never reaches `WorkerState.ERROR`, so it is
+        never reported.
         """
         if event.worker.node is not self or event.state is not WorkerState.ERROR:
             return
-        if event.worker.group == TIMELINE_EVENT_GROUP:
-            self._notify_worker_error("Warning-event timeline feed failed", event.worker)
-        elif event.worker.group == RELATIONSHIP_GROUP:
-            self._notify_worker_error("Relationships failed", event.worker)
-        elif event.worker.group == TIMELINE_NAVIGATION_GROUP:
-            self._notify_worker_error("Timeline navigation failed", event.worker)
+        label = REPORTED_WORKER_GROUPS.get(event.worker.group)
+        if label is not None:
+            self._notify_worker_error(label, event.worker)
 
     def _notify_worker_error(self, label: str, worker: Worker[Any]) -> None:
         """One visible report for a worker that failed instead of crashing."""

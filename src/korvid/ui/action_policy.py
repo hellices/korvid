@@ -210,6 +210,7 @@ def compose_command_reasons(
     keybindings: Callable[[], UnavailableReason | None] | None = None,
     slots: Callable[[], UnavailableReason | None] | None = None,
     outcomes: Callable[[], UnavailableReason | None] | None = None,
+    propagation: Callable[[], UnavailableReason | None] | None = None,
 ) -> dict[str, Callable[[], UnavailableReason | None]]:
     """Build `ActionPolicy(reason_by_command=...)` from its owners.
 
@@ -254,6 +255,9 @@ def compose_command_reasons(
         keybindings: The keybinding editor's protected-surface and persistence probe.
         slots: `NamespaceSlotController.unavailable_reason` - whether `:slots`
             has a listing to reallocate from and a surface to preview on.
+        propagation: `ConfigPropagationController.unavailable_reason` -
+            whether `:consumers` has a connection and a selected ConfigMap or
+            Secret to explain.
 
     Returns:
         The canonical command text -> reason-resolver map.
@@ -281,6 +285,7 @@ def compose_command_reasons(
         **({"keys": keybindings} if keybindings is not None else {}),
         **({"slots": slots} if slots is not None else {}),
         **({"outcomes": outcomes} if outcomes is not None else {}),
+        **({"consumers": propagation} if propagation is not None else {}),
     }
 
 

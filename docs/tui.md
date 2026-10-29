@@ -114,6 +114,37 @@ dropped. Streams reconnect automatically on a transient error or an
 unexpected EOF; after five consecutive failed attempts the header shows an
 error state and a notification is raised.
 
+### Configuration propagation
+
+Changing a ConfigMap or Secret does not always change what a running
+container sees. Select one in its table and run `:consumers` (or
+**Explain configuration propagation** in the Action Palette) to see each Pod
+container in its namespace that uses it, grouped by how:
+
+| How it is used | What a change means |
+|---|---|
+| Environment variables (`envFrom`, `env[].valueFrom`) | Read when the container starts; a change needs a rollout restart, which asks for your approval |
+| A mounted volume, plain or projected | Updated in place by the kubelet, eventually, unless the object is immutable; whether the application rereads it is not verified |
+| A `subPath` or `subPathExpr` mount | Never updated; a change needs a rollout restart |
+| A volume no container mounts | Nothing reads it |
+| An image pull secret | Used only when an image is pulled |
+
+Init and ephemeral containers get notes of their own: a finished init
+container sees a change only when its Pod restarts, and an ephemeral
+container cannot be restarted, so a rollout leaves it behind: a new one is
+needed for it to read a changed environment variable or `subPath` file.
+
+The view reads the object's metadata and the namespace's Pods when it opens,
+never the object's data. Pods arrive whole, so their literal `env[].value`
+fields reach korvid too, but the view keeps and shows only references, never
+a value. Each source gets a
+line saying what was read, its state and how old it is, and an open view
+marks it stale once it ages. "No Pod references it" appears only when every
+Pod could be listed; a denied, truncated or stale list says why the set of
+consumers is not established. CSI and other volume plugins are not checked. Whether the object is
+immutable is never claimed, because only its metadata is read. Enter on a
+row opens that Pod.
+
 ## Change scope without losing context
 
 korvid always watches exactly one explicit scope. The startup namespace

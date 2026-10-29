@@ -201,7 +201,7 @@ async def load_refreshable_kube_config(
     client_configuration.refresh_api_key_hook = _refresh
 
 
-class KubeClient(ReadOps, WriteOps, pulse.PulseReader, evidence_requests.EvidenceReader):
+class KubeClient(ReadOps, WriteOps, pulse.PulseReader, evidence_requests.EvidenceClient):
     """Thin wrapper over kubernetes_asyncio; returns typed summaries."""
 
     def __init__(

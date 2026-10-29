@@ -1873,6 +1873,26 @@ async def test_wire_and_run_wires_deployment_outcome_reader_from_kube(
     assert captured["deployment_cluster_id"]() == "(kubeconfig default)|https://replacement.example"
 
 
+async def test_wire_and_run_hands_the_kube_client_to_diagnostics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The configuration propagation view reads through the session's own client."""
+    import korvid.__main__ as main_mod
+    from korvid.core.config import KorvidConfig
+
+    monkeypatch.setattr(main_mod, "KorvidApp", _FakeAppCapturesKwargs)
+    monkeypatch.setattr(main_mod, "assemble_app_runtime", lambda app: app)
+    _FakeAppCapturesKwargs.instances.clear()
+
+    kube = _FakeKubeForWiring()
+    state = main_mod._RunState()
+    await main_mod._wire_and_run(KorvidConfig(readonly=True), cast("Any", kube), state)
+    if state.discovery_box:
+        await state.discovery_box[0]
+
+    assert _FakeAppCapturesKwargs.instances[0].captured["evidence_client"] is kube
+
+
 async def test_wire_and_run_wires_helm_release_identity_reader_from_kube(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

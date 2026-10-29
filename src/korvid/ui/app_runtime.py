@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from korvid.k8s.components import ComponentRef
     from korvid.k8s.deployment_outcomes import DeploymentOutcomeReader
     from korvid.k8s.discovery import ResourceMeta
+    from korvid.k8s.evidence_requests import EvidenceClient
     from korvid.k8s.helm import HelmReleaseIdentity
     from korvid.k8s.helmcli import HelmCLI
     from korvid.k8s.logs import LogLine
@@ -134,6 +135,8 @@ class AppRuntimeInputs:
     approval_timeout_seconds: float | None
     deployment_outcome_reader: DeploymentOutcomeReader | None
     deployment_cluster_id: Callable[[], str | None]
+    #: Diagnostics' client: evidence reads, discovery and the session generation.
+    evidence_client: EvidenceClient | None = None
 
 
 @dataclasses.dataclass(frozen=True)

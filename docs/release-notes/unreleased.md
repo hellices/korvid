@@ -8,6 +8,16 @@ remains the stable install until v0.6.1's publication is verified. See the
 [current release milestone, v0.7.0](https://github.com/hellices/korvid/milestone/9)
 tracks the next release scope.
 
+## Configuration propagation
+
+- `:consumers` (or **Explain configuration propagation** in the Action
+  Palette) shows which Pods use the selected ConfigMap or Secret: through
+  environment variables, a mounted volume, a `subPath` mount, an unmounted
+  volume or an image pull secret, and what a change means for each. It reads
+  only the object's metadata and the namespace's Pods, and says when the set
+  of consumers is not established. See
+  [Configuration propagation](../tui.md#configuration-propagation).
+
 ## Current configuration and extension contracts
 
 Existing migration links continue in the
