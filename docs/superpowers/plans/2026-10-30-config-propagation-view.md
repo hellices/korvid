@@ -27,6 +27,7 @@
 - **The command is `:consumers`, not `:propagation`.** `:propagation` would make `prop` ambiguous with `:proposals` in the command bar's first-word completion, which a test pins. The palette entry is still **Explain configuration propagation**, and `propagation` is one of its search terms.
 - **The context switch cancels the group by name.** The design names a `cancel_config_propagation_workers()` hook; the coordinator already cancels `hint-events` by name with `cancel_worker_group`, so it does the same here and needs no new constructor argument. The controller's `cancel_workers()` remains for other callers.
 - **`EvidenceClient` lives in `k8s`.** The controller needs evidence reads, discovery and the session generation from one client; naming that in `k8s/evidence_requests.py` lets `KubeClient` declare it and the UI depend on the boundary instead of `KubeClient`.
+- **The view is not yet bindable in the keybinding editor.** Design decision 5 keeps it off every default key and makes it bindable in `:keys`, but the editor only remaps `APP_BINDINGS` entries, each of which has a default key. Supporting an action that ships unbound changes the keymap contract, so it is its own change, #510. Until then the view is reached with `:consumers` and the palette.
 - **The observability builders move to `composition_support.py`** to make room in `__main__.py`, which was three lines under its limit.
 
 ## File structure
@@ -636,6 +637,19 @@ def test_a_gone_or_recreated_object_is_said() -> None:
     assert not any("was recreated" in n for n in _plain(report_notes(_report(VOLUME), NOW)))
 
 
+def test_an_absence_that_has_aged_is_no_longer_called_a_deletion() -> None:
+    report = _report(ENV, object_basis=Basis.OBJECT_ABSENT)
+
+    fresh = _plain(report_notes(report, NOW))
+    aged = _plain(report_notes(report, NOW + timedelta(minutes=5)))
+
+    assert any("no longer exists" in n for n in fresh)
+    assert not any("no longer exists" in n for n in aged)
+    assert any(
+        "did not exist when it was read" in n and "may have been created since" in n for n in aged
+    )
+
+
 def test_an_init_container_row_explains_when_it_runs() -> None:
     with_init = _plain(report_notes(_report(SUBPATH), NOW))
     without = _plain(report_notes(_report(ENV), NOW))
@@ -872,9 +886,13 @@ def evidence_lines(report: PropagationReport, now: datetime) -> list[Text]:
     ]
 
 
-def _object_notes(report: PropagationReport) -> list[Text]:
+def _object_notes(report: PropagationReport, now: datetime) -> list[Text]:
     kind = report.target.kind
     if report.object_absent:
+        if not is_fresh(report.object, declarations(report.target)[0].policy, now):
+            return [
+                Text(f"The {kind} did not exist when it was read; it may have been created since.")
+            ]
         tail = " The Pods below still reference it." if report.consumers else ""
         return [Text(f"The {kind} no longer exists.{tail}")]
     if report.recreated:
@@ -908,7 +926,7 @@ def _completeness_note(report: PropagationReport, now: datetime) -> Text | None:
 
 def report_notes(report: PropagationReport, now: datetime) -> list[Text]:
     """What the evidence says about the object, and what it does not establish."""
-    notes = _object_notes(report)
+    notes = _object_notes(report, now)
     if any(consumer.category is ContainerCategory.INIT for consumer in report.consumers):
         notes.append(Text(_INIT_NOTE))
     completeness = _completeness_note(report, now)
@@ -1070,7 +1088,7 @@ from typing import Any
 
 from korvid.core.config_consumers import Consumer, ConsumptionMode, PodIdentity
 from korvid.core.config_propagation import ConfigTarget
-from korvid.core.evidence_reads import LIST_PAGE_SIZE, MAX_BYTES
+from korvid.core.evidence_reads import DEFAULT_MAX_BYTES, LIST_PAGE_SIZE, MAX_BYTES
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.discovery_snapshot import (
     GroupVersionOutcome,
@@ -1169,7 +1187,7 @@ class FakeContext(ContextGuard):
 class FakeClient(EvidenceClient):
     def __init__(self) -> None:
         self.generation = 3
-        self.gets: list[tuple[EvidenceTarget, str]] = []
+        self.gets: list[tuple[EvidenceTarget, str, int]] = []
         self.lists: list[tuple[EvidenceTarget, int, str, int]] = []
 
     @property
@@ -1199,7 +1217,7 @@ class FakeClient(EvidenceClient):
     async def get_evidence_object(
         self, target: EvidenceTarget, name: str, *, max_bytes: int
     ) -> dict[str, Any]:
-        self.gets.append((target, name))
+        self.gets.append((target, name, max_bytes))
         return {"metadata": {"name": name, "namespace": "team-a", "uid": f"uid-{name}"}}
 
 
@@ -1272,7 +1290,11 @@ async def test_opening_reads_the_selected_object_and_shows_its_consumers() -> No
         ("api-1", ConsumptionMode.ENV_FROM)
     ]
     assert harness.client.gets == [
-        (EvidenceTarget("", "v1", "configmaps", "team-a", metadata_only=True), "settings")
+        (
+            EvidenceTarget("", "v1", "configmaps", "team-a", metadata_only=True),
+            "settings",
+            DEFAULT_MAX_BYTES,
+        )
     ]
     assert harness.client.lists == [
         (EvidenceTarget("", "v1", "pods", "team-a"), LIST_PAGE_SIZE, "", MAX_BYTES)
