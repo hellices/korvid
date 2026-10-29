@@ -21,7 +21,12 @@ from korvid.agent.interaction import (
     UiAction,
     UiActionResult,
 )
-from korvid.core.config import KorvidConfig, ModelConnectionConfig, context_is_protected
+from korvid.core.config import (
+    KorvidConfig,
+    ModelConnectionConfig,
+    ObservabilityBackend,
+    context_is_protected,
+)
 from korvid.core.mcp import MCPControllerBase
 from korvid.core.store import ALL_NAMESPACES, Summary
 from korvid.k8s.client import KubeClient
@@ -108,6 +113,138 @@ class ObservabilityWiring:
         finally:
             if self.logs is not None:
                 await self.logs.aclose()
+
+
+#: The observability connectors need only an HTTP client.
+_OBSERVABILITY_EXTRA_ROOTS = frozenset({"httpx"})
+_OBSERVABILITY_INSTALL_HINT = (
+    "an observability backend is configured (observability.prometheus/loki in "
+    f"config.yaml) but its dependencies are not installed — {isolated_install_hint(feature='observability')}"
+)
+
+
+def _build_observability(config: KorvidConfig) -> ObservabilityWiring:
+    """Build the configured read-only observability connectors (issue #193).
+
+    Nothing configured means nothing imported: a base installation never
+    pulls in the HTTP stack for a feature it is not using. A configured
+    backend without the extra fails with an install hint rather than
+    degrading, because the user asked for it explicitly.
+
+    Every client comes from the providers' trust builder, so one
+    `network.ca_bundle` governs every korvid-owned HTTPS client and an
+    unloadable bundle fails startup instead of falling back to default
+    trust.
+
+    Raises:
+        SystemExit: when a backend is configured but the extra or the
+            configured CA bundle is unusable.
+    """
+    prometheus = config.observability_prometheus
+    loki = config.observability_loki
+    if prometheus is None and loki is None:
+        return ObservabilityWiring()
+    if _missing_extra_packages(_OBSERVABILITY_EXTRA_ROOTS):
+        raise SystemExit(f"korvid: {_OBSERVABILITY_INSTALL_HINT}")
+
+    from korvid.obs.connector import ConnectorError, QueryLimits
+    from korvid.providers import net
+
+    def limits(backend: ObservabilityBackend) -> QueryLimits:
+        return QueryLimits(
+            timeout_seconds=backend.timeout_seconds,
+            default_window_minutes=backend.default_window_minutes,
+            max_window_minutes=backend.max_window_minutes,
+            max_series=backend.max_series,
+            max_lines=backend.max_lines,
+            max_response_bytes=backend.max_response_bytes,
+            max_concurrency=backend.max_concurrency,
+        )
+
+    def client(backend: ObservabilityBackend) -> Any:
+        # Looked up through the module so a test (and a future refactor)
+        # sees one trust builder rather than a captured function.
+        try:
+            return net.make_client(config.network_ca_bundle, timeout=backend.timeout_seconds)
+        except ValueError as exc:
+            raise SystemExit(f"korvid: {exc}") from exc
+
+    try:
+        _validate_observability(prometheus, loki)
+        # Built before any client: `QueryLimits` validates as well, and it
+        # was evaluated *after* the client in the constructor's argument
+        # list — so a bad limit stranded a client nobody could close.
+        prometheus_limits = limits(prometheus) if prometheus is not None else None
+        loki_limits = limits(loki) if loki is not None else None
+        return _connectors(prometheus, loki, prometheus_limits, loki_limits, client)
+    except (ConnectorError, ValueError) as exc:
+        # Two refusal types, one outcome: a connector-level invariant
+        # (`ConnectorError`) and an unusable limit (`ValueError` from
+        # `QueryLimits`). Neither should reach the user as a traceback,
+        # and both mean the same thing to them.
+        raise SystemExit(f"korvid: observability configuration is unusable: {exc}") from exc
+
+
+def _validate_observability(
+    prometheus: ObservabilityBackend | None, loki: ObservabilityBackend | None
+) -> None:
+    """Refuse an unusable configuration before any client is allocated.
+
+    The connectors validate in their constructors, but their arguments —
+    the HTTP client among them — are evaluated first, so a refusal there
+    would strand a client nobody can close.
+
+    Raises:
+        ConnectorError: `config` for anything a connector would refuse.
+    """
+    from korvid.obs import loki as loki_module
+    from korvid.obs.http import validate_endpoint
+
+    if prometheus is not None:
+        validate_endpoint(prometheus.url, "prometheus")
+    if loki is not None:
+        validate_endpoint(loki.url, "loki")
+        loki_module.validate_options(tenant=loki.tenant, label_mappings=loki.label_mappings)
+
+
+def _connectors(
+    prometheus: ObservabilityBackend | None,
+    loki: ObservabilityBackend | None,
+    prometheus_limits: Any,
+    loki_limits: Any,
+    client: Callable[[ObservabilityBackend], Any],
+) -> ObservabilityWiring:
+    """Construct whichever connectors are configured (see `_build_observability`)."""
+    from korvid.obs.loki import LokiConnector
+    from korvid.obs.prometheus import PrometheusConnector
+
+    metrics = (
+        PrometheusConnector(
+            prometheus.url,
+            client=client(prometheus),
+            limits=prometheus_limits,
+            token_env=prometheus.token_env,
+            token_file=prometheus.token_file,
+            mask_labels=frozenset(prometheus.mask_labels),
+        )
+        if prometheus is not None
+        else None
+    )
+    logs = (
+        LokiConnector(
+            loki.url,
+            client=client(loki),
+            limits=loki_limits,
+            token_env=loki.token_env,
+            token_file=loki.token_file,
+            tenant=loki.tenant,
+            label_mappings=loki.label_mappings,
+            mask_labels=frozenset(loki.mask_labels),
+        )
+        if loki is not None
+        else None
+    )
+    return ObservabilityWiring(metrics=metrics, logs=logs)
 
 
 def _custom_column_names(config: KorvidConfig) -> dict[str, tuple[str, ...]]:

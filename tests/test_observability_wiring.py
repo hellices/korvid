@@ -174,9 +174,9 @@ class TestMissingExtra:
     async def test_a_configured_backend_without_the_extra_fails_actionably(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        import korvid.__main__ as main
+        import korvid.composition_support as support
 
-        monkeypatch.setattr(main, "_missing_extra_packages", lambda roots: ["httpx"])
+        monkeypatch.setattr(support, "_missing_extra_packages", lambda roots: ["httpx"])
         requirement = f"korvid[all,entra]=={__version__}"
         with pytest.raises(
             SystemExit,
@@ -194,9 +194,9 @@ class TestMissingExtra:
     async def test_no_configured_backend_without_the_extra_is_silent(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        import korvid.__main__ as main
+        import korvid.composition_support as support
 
-        monkeypatch.setattr(main, "_missing_extra_packages", lambda roots: ["httpx"])
+        monkeypatch.setattr(support, "_missing_extra_packages", lambda roots: ["httpx"])
         wiring = _build_observability(_config())
         assert wiring.backends == frozenset()
 
