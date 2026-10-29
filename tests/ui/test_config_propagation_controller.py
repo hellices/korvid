@@ -8,6 +8,7 @@ from typing import Any
 
 from korvid.core.config_consumers import Consumer, ConsumptionMode, PodIdentity
 from korvid.core.config_propagation import ConfigTarget
+from korvid.core.evidence_reads import LIST_PAGE_SIZE, MAX_BYTES
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.discovery_snapshot import (
     GroupVersionOutcome,
@@ -41,6 +42,7 @@ SETTINGS_POD = {
 class FakeView(ViewState):
     def __init__(self, kind: str = "configmaps", selected: tuple[str, str] | None = None) -> None:
         self.kind = kind
+        self.scope = "team-a"
         self.selected = selected
         self.alias_map = {
             "configmaps": CONFIG_MAPS,
@@ -65,7 +67,7 @@ class FakeView(ViewState):
         return f"uid-{name}"
 
     def current_scope(self) -> str:
-        return "team-a"  # pragma: no cover
+        return self.scope
 
     def resources(self, kind: str, scope: str) -> list[Any]:
         return []  # pragma: no cover
@@ -106,6 +108,7 @@ class FakeClient(EvidenceClient):
     def __init__(self) -> None:
         self.generation = 3
         self.gets: list[tuple[EvidenceTarget, str]] = []
+        self.lists: list[tuple[EvidenceTarget, int, str, int]] = []
 
     @property
     def session_generation(self) -> int:
@@ -128,6 +131,7 @@ class FakeClient(EvidenceClient):
     async def list_evidence_page(
         self, target: EvidenceTarget, *, limit: int, continuation: str, max_bytes: int
     ) -> EvidencePage:
+        self.lists.append((target, limit, continuation, max_bytes))
         return EvidencePage((SETTINGS_POD,))
 
     async def get_evidence_object(
@@ -205,8 +209,11 @@ async def test_opening_reads_the_selected_object_and_shows_its_consumers() -> No
     assert [(c.pod.name, c.mode) for c in screen.report.consumers] == [
         ("api-1", ConsumptionMode.ENV_FROM)
     ]
-    assert [(target.resource, name) for target, name in harness.client.gets] == [
-        ("configmaps", "settings")
+    assert harness.client.gets == [
+        (EvidenceTarget("", "v1", "configmaps", "team-a", metadata_only=True), "settings")
+    ]
+    assert harness.client.lists == [
+        (EvidenceTarget("", "v1", "pods", "team-a"), LIST_PAGE_SIZE, "", MAX_BYTES)
     ]
 
 
@@ -286,6 +293,22 @@ async def test_a_dialog_opened_during_the_reads_keeps_the_view_closed() -> None:
     await harness.run()
 
     assert harness.ui.screens == []
+
+
+async def test_leaving_the_view_or_the_selection_keeps_the_result_closed() -> None:
+    moved = Harness()
+    rescoped = Harness()
+    reselected = Harness()
+
+    for harness in (moved, rescoped, reselected):
+        harness.controller.open_selected()
+    moved.view.kind = "pods"
+    rescoped.view.scope = "team-b"
+    reselected.view.selected = ("team-a", "other")
+    for harness in (moved, rescoped, reselected):
+        await harness.run()
+
+    assert (moved.ui.screens, rescoped.ui.screens, reselected.ui.screens) == ([], [], [])
 
 
 async def test_the_worker_group_is_cancelled_on_request() -> None:

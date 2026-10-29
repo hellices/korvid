@@ -37,6 +37,8 @@ _NO_SELECTION = UnavailableReason(AvailabilityCode.NO_SELECTION, "Select a Confi
 
 #: Opens a consumer's Pod: (namespace, name, epoch, expected UID).
 PodNavigator = Callable[[str, str, int, str | None], Awaitable[None]]
+#: The view, scope and (namespace, name) selection a run was started from.
+_Origin = tuple[str, str, tuple[str | None, str | None]]
 
 
 def _now() -> datetime:
@@ -102,21 +104,32 @@ class ConfigPropagationController:
         target = ConfigTarget(kind, namespace, name, self._view.selected_uid(namespace, name))
         token = self._tracker.next_run()
         self._ui.run_worker(
-            self._explain(target, token, self._context.epoch()),
+            self._explain(target, token, self._context.epoch(), self._origin()),
             exclusive=True,
             group=CONFIG_PROPAGATION_GROUP,
             exit_on_error=False,
         )
 
-    async def _explain(self, target: ConfigTarget, token: RunToken, epoch: int) -> None:
+    def _origin(self) -> _Origin:
+        """The view, scope and selected row a run explains."""
+        return (
+            self._view.current_kind(),
+            self._view.current_scope(),
+            self._view.selected_ns_name(notify=False),
+        )
+
+    async def _explain(
+        self, target: ConfigTarget, token: RunToken, epoch: int, origin: _Origin
+    ) -> None:
         client = self._client
         if client is None:
             return
         snapshot = observe_discovery(await client.discovery_snapshot())
         report = await explain_propagation(client, snapshot, target, token=token, clock=self._clock)
-        if self._ui.screen_depth() > 1:  # another dialog opened during the reads
+        # Another dialog opened, or the user moved on, during the reads.
+        if self._ui.screen_depth() > 1 or self._origin() != origin:
             return
-        screen = ConfigPropagationScreen(report, self._clock())
+        screen = ConfigPropagationScreen(report, self._clock)
         self._tracker.apply_if_current(
             token,
             lambda: self._ui.push_screen(screen, lambda chosen: self._open_pod(chosen, epoch)),
