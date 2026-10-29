@@ -68,8 +68,9 @@ read-only scenarios against each:
   only core `v1`, which falls through to core after `events.k8s.io` is
   denied.
 - a Pod that consumes a ConfigMap as environment variables, as a mounted
-  volume and through a `subPath` mount, each found in its own mode without
-  reading the ConfigMap's data or the Pod's literal values.
+  volume and through a `subPath` mount, each found in its own mode, without
+  reading the ConfigMap's data and without the Pod's literal environment
+  values reaching the report.
 
 The workflow runs on demand, and whenever a pull request or a push to `main`
 changes the modules those scenarios exercise or the project's dependencies. Each passing job records the

@@ -129,6 +129,10 @@ container in its namespace that uses it, grouped by how:
 | A volume no container mounts | Nothing reads it |
 | An image pull secret | Used only when an image is pulled |
 
+Init and ephemeral containers get notes of their own: a finished init
+container sees a change only when its Pod restarts, and an ephemeral
+container cannot be restarted, so a rollout leaves it behind.
+
 The view reads the object's metadata and the namespace's Pods when it opens,
 never the object's data. Pods arrive whole, so their literal `env[].value`
 fields reach korvid too, but the view keeps and shows only references, never

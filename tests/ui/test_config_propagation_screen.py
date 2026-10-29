@@ -228,6 +228,25 @@ def test_an_absence_that_has_aged_is_no_longer_called_a_deletion() -> None:
     )
 
 
+def test_an_ephemeral_container_row_explains_a_restart_will_not_help() -> None:
+    debugger = Consumer(
+        POD,
+        ConsumptionMode.ENV_FROM,
+        "spec.ephemeralContainers[0].envFrom[0].configMapRef",
+        False,
+        "debugger",
+        ContainerCategory.EPHEMERAL,
+    )
+
+    with_ephemeral = _plain(report_notes(_report(debugger), NOW))
+    without = _plain(report_notes(_report(ENV), NOW))
+
+    (note,) = [n for n in with_ephemeral if n.startswith("An ephemeral container")]
+    assert "cannot be restarted" in note
+    assert "add a new ephemeral container" in note
+    assert not any(n.startswith("An ephemeral container") for n in without)
+
+
 def test_an_init_container_row_explains_when_it_runs() -> None:
     with_init = _plain(report_notes(_report(SUBPATH), NOW))
     without = _plain(report_notes(_report(ENV), NOW))

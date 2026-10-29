@@ -650,6 +650,25 @@ def test_an_absence_that_has_aged_is_no_longer_called_a_deletion() -> None:
     )
 
 
+def test_an_ephemeral_container_row_explains_a_restart_will_not_help() -> None:
+    debugger = Consumer(
+        POD,
+        ConsumptionMode.ENV_FROM,
+        "spec.ephemeralContainers[0].envFrom[0].configMapRef",
+        False,
+        "debugger",
+        ContainerCategory.EPHEMERAL,
+    )
+
+    with_ephemeral = _plain(report_notes(_report(debugger), NOW))
+    without = _plain(report_notes(_report(ENV), NOW))
+
+    (note,) = [n for n in with_ephemeral if n.startswith("An ephemeral container")]
+    assert "cannot be restarted" in note
+    assert "add a new ephemeral container" in note
+    assert not any(n.startswith("An ephemeral container") for n in without)
+
+
 def test_an_init_container_row_explains_when_it_runs() -> None:
     with_init = _plain(report_notes(_report(SUBPATH), NOW))
     without = _plain(report_notes(_report(ENV), NOW))
@@ -810,6 +829,10 @@ _INIT_NOTE = (
     "An init container runs to completion before the other containers start; once it "
     "has finished, a change reaches it only when the Pod restarts."
 )
+_EPHEMERAL_NOTE = (
+    "An ephemeral container cannot be restarted, and a rollout restart creates Pods "
+    "without it: to read a change, add a new ephemeral container."
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -927,8 +950,11 @@ def _completeness_note(report: PropagationReport, now: datetime) -> Text | None:
 def report_notes(report: PropagationReport, now: datetime) -> list[Text]:
     """What the evidence says about the object, and what it does not establish."""
     notes = _object_notes(report, now)
-    if any(consumer.category is ContainerCategory.INIT for consumer in report.consumers):
+    categories = {consumer.category for consumer in report.consumers}
+    if ContainerCategory.INIT in categories:
         notes.append(Text(_INIT_NOTE))
+    if ContainerCategory.EPHEMERAL in categories:
+        notes.append(Text(_EPHEMERAL_NOTE))
     completeness = _completeness_note(report, now)
     if completeness is not None:
         notes.append(completeness)
@@ -1030,7 +1056,7 @@ class ConfigPropagationScreen(ModalScreen[Consumer | None]):
 
 - [ ] **Step 4: Run the tests, and check the mutations**
 
-Expected: `13 passed`. Each change must fail a test: show empty sections; treat any Pod list as conclusive; dismiss on a heading; always add the init note; always call the object recreated; render the title as markup.
+Expected: `14 passed`. Each change must fail a test: show empty sections; treat any Pod list as conclusive; dismiss on a heading; always add the init note; always call the object recreated; render the title as markup.
 
 - [ ] **Step 5: Commit**
 
@@ -1575,7 +1601,7 @@ git commit -m "ui: run the propagation diagnostic for the selected object"
 ### Task 5: The command and the wiring
 
 **Files:**
-- Modify: `src/korvid/ui/messages.py`, `ui/command.py`, `ui/command_router.py`, `ui/action_policy.py`, `ui/context_switch_coordinator.py`, `ui/app.py`, `ui/app_runtime.py`, `src/korvid/__main__.py`
+- Modify: `src/korvid/ui/messages.py`, `src/korvid/ui/command.py`, `src/korvid/ui/command_router.py`, `src/korvid/ui/action_policy.py`, `src/korvid/ui/context_switch_coordinator.py`, `src/korvid/ui/app.py`, `src/korvid/ui/app_runtime.py`, `src/korvid/__main__.py`
 - Test: `tests/ui/test_command_router.py`, `tests/ui/test_action_policy.py`, `tests/ui/test_context_switch_coordinator.py`, `tests/test_main_wiring.py`, `tests/ui/test_config_propagation_workflow.py`
 
 - [ ] **Step 1: Write the failing tests**

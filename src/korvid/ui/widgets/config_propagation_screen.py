@@ -63,6 +63,10 @@ _INIT_NOTE = (
     "An init container runs to completion before the other containers start; once it "
     "has finished, a change reaches it only when the Pod restarts."
 )
+_EPHEMERAL_NOTE = (
+    "An ephemeral container cannot be restarted, and a rollout restart creates Pods "
+    "without it: to read a change, add a new ephemeral container."
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -180,8 +184,11 @@ def _completeness_note(report: PropagationReport, now: datetime) -> Text | None:
 def report_notes(report: PropagationReport, now: datetime) -> list[Text]:
     """What the evidence says about the object, and what it does not establish."""
     notes = _object_notes(report, now)
-    if any(consumer.category is ContainerCategory.INIT for consumer in report.consumers):
+    categories = {consumer.category for consumer in report.consumers}
+    if ContainerCategory.INIT in categories:
         notes.append(Text(_INIT_NOTE))
+    if ContainerCategory.EPHEMERAL in categories:
+        notes.append(Text(_EPHEMERAL_NOTE))
     completeness = _completeness_note(report, now)
     if completeness is not None:
         notes.append(completeness)
