@@ -42,7 +42,7 @@ class Client(EvidenceClient):
     """Serves configmaps, secrets and pods, and one Pod that reads `settings`."""
 
     def __init__(self) -> None:
-        self.reads: list[str] = []
+        self.reads: list[tuple[str, EvidenceTarget, str]] = []
 
     @property
     def session_generation(self) -> int:
@@ -65,14 +65,14 @@ class Client(EvidenceClient):
     async def list_evidence_page(
         self, target: EvidenceTarget, *, limit: int, continuation: str, max_bytes: int
     ) -> EvidencePage:
-        self.reads.append(f"list {target.resource}")
-        return EvidencePage((SETTINGS_POD,))
+        self.reads.append(("list", target, continuation))
+        return EvidencePage((SETTINGS_POD,) if target.namespace == "default" else ())
 
     async def get_evidence_object(
         self, target: EvidenceTarget, name: str, *, max_bytes: int
     ) -> dict[str, Any]:
-        self.reads.append(f"get {target.resource}/{name} metadata={target.metadata_only}")
-        return {"metadata": {"name": name, "namespace": "default", "uid": "uid-settings"}}
+        self.reads.append(("get", target, name))
+        return {"metadata": {"name": name, "namespace": target.namespace, "uid": "uid-settings"}}
 
 
 async def _source(kind: str, scope: str) -> AsyncIterator[tuple[str, Summary]]:
@@ -113,7 +113,14 @@ async def test_consumers_of_a_config_map_lead_to_their_pod() -> None:
         assert isinstance(screen, ConfigPropagationScreen)
         assert [c.pod.name for c in screen.report.consumers] == ["api-1"]
         assert "s3cr3t-literal" not in repr(screen.report)
-        assert client.reads == ["get configmaps/settings metadata=True", "list pods"]
+        assert sorted(client.reads, key=lambda read: read[0]) == [
+            (
+                "get",
+                EvidenceTarget("", "v1", "configmaps", "default", metadata_only=True),
+                "settings",
+            ),
+            ("list", EvidenceTarget("", "v1", "pods", "default"), ""),
+        ]
 
         await pilot.press("enter")
         await until(pilot, lambda: app.current_kind == "pods", label="Pod view")
@@ -142,3 +149,38 @@ async def test_consumers_on_another_view_says_what_to_open() -> None:
             label="reason shown",
         )
         assert not isinstance(app.screen, ConfigPropagationScreen)
+
+
+class BrokenClient(Client):
+    async def discovery_snapshot(self) -> RawDiscovery:
+        raise RuntimeError("discovery exploded")
+
+
+async def test_a_failed_run_is_reported_instead_of_vanishing() -> None:
+    store = ResourceStore()
+    app = build_test_app(
+        config=KorvidConfig(namespace="default"),
+        store=store,
+        watch_manager=WatchManager(store, _source),
+        aliases=build_alias_map([PODS_META, CONFIG_MAPS]),
+        agent_available=False,
+        evidence_client=BrokenClient(),
+    )
+    async with app.run_test() as pilot:
+        await _command(pilot, "configmaps")
+        await until(
+            pilot,
+            lambda: app._view.selected_ns_name(notify=False) == ("default", "settings"),
+            label="ConfigMap selected",
+        )
+        await _command(pilot, "consumers")
+        await until(
+            pilot,
+            lambda: any(
+                "Configuration propagation failed" in n.message
+                and "discovery exploded" in n.message
+                for n in app._notifications
+            ),
+            label="failure reported",
+        )
+        assert app.is_running
