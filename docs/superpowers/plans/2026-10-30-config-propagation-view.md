@@ -16,7 +16,7 @@
 - **Literal names:** every cluster-provided name is a plain `Text`, never parsed as markup.
 - **Conclusions from absence:** "no Pod references it" only when the Pod list is conclusive; otherwise "Not established" with the reason.
 - **Availability:** the entry is unavailable only without a connection, on the wrong view, or without a selection.
-- **Late results:** dropped after a context switch, new credentials or a newer run; the context switch cancels the worker group.
+- **Late results:** dropped after a context switch, new credentials or a newer run, or when the user has left the view, scope or selection the run started from; the context switch cancels the worker group, and a failed worker is reported, not dropped.
 - **No values, no writes:** the view shows references only; restarting is a suggestion.
 - **Size limits:** `scripts/check_source_size.py` is not edited; `__main__.py` and `ui/app.py` make room by moving code.
 - **Code rules:** no `assert` in `src/`; every `pytest.raises` takes `match=`; maximum complexity 10; Google-style docstrings.
@@ -40,6 +40,7 @@
 | `src/korvid/ui/evidence_text.py` | create | basis sentences, ages, source text, observation lines |
 | `src/korvid/ui/widgets/config_propagation_screen.py` | create | rows by mode, notes, the modal screen |
 | `src/korvid/ui/config_propagation_controller.py` | create | availability, the run, late results, Pod navigation |
+| `src/korvid/ui/worker_failures.py` | create | the worker groups whose failures the app reports, `config-propagation` among them |
 | `src/korvid/ui/messages.py`, `ui/command.py`, `ui/command_router.py`, `ui/action_policy.py` | modify | `:consumers` and its palette availability |
 | `src/korvid/ui/context_switch_coordinator.py` | modify | cancel the worker group before the swap |
 | `src/korvid/ui/app.py`, `ui/app_runtime.py` | modify | the `evidence_client` input |
@@ -411,7 +412,7 @@ git commit -m "ui: render evidence observations with one shared renderer"
 
 **Interfaces:**
 - Consumes: `PropagationReport`, `declarations` (#503); `observation_line`, `not_established`, `basis_sentence` (Task 2).
-- Produces: `Heading`, `ConsumerRow`, `table_rows(consumers)`, `evidence_lines(report, now)`, `report_notes(report, now)`, `ConfigPropagationScreen(report, now)`, a `ModalScreen[Consumer | None]`.
+- Produces: `Heading`, `ConsumerRow`, `table_rows(consumers)`, `evidence_lines(report, now)`, `report_notes(report, now)`, `ConfigPropagationScreen(report, clock, *, refresh_seconds=5.0)`, a `ModalScreen[Consumer | None]` that re-renders its evidence lines and notes against `clock` while open, so aged evidence is marked stale and stops proving absence.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -606,6 +607,9 @@ def test_no_consumer_is_said_only_when_the_pod_list_is_conclusive() -> None:
     assert any(
         n.startswith("No Pod in namespace team-a references this ConfigMap") for n in complete
     )
+    (none,) = [n for n in complete if n.startswith("No Pod")]
+    assert "configMap, secret or projected volumes" in none
+    assert "CSI and other volume plugins are not checked" in none
     assert not any(n.startswith("No Pod") for n in truncated + denied)
     assert (
         "Not established: whether every consumer is listed: stopped at the page limit" in truncated
@@ -651,7 +655,7 @@ class _Host(App[None]):
 
 
 async def test_enter_on_a_consumer_row_returns_that_consumer() -> None:
-    app = _Host(ConfigPropagationScreen(_report(ENV, VOLUME), NOW))
+    app = _Host(ConfigPropagationScreen(_report(ENV, VOLUME), lambda: NOW))
     async with app.run_test() as pilot:
         await until(pilot, lambda: screen_ready(app, ConfigPropagationScreen), label="view open")
         table = app.screen.query_one(DataTable)
@@ -663,7 +667,7 @@ async def test_enter_on_a_consumer_row_returns_that_consumer() -> None:
 
 
 async def test_enter_on_a_heading_does_nothing_and_escape_closes() -> None:
-    app = _Host(ConfigPropagationScreen(_report(ENV), NOW))
+    app = _Host(ConfigPropagationScreen(_report(ENV), lambda: NOW))
     async with app.run_test() as pilot:
         await until(pilot, lambda: screen_ready(app, ConfigPropagationScreen), label="view open")
         await pilot.press("up", "enter")
@@ -684,11 +688,38 @@ async def test_the_title_shows_cluster_names_literally() -> None:
         (),
         Baseline(EvidenceState.AVAILABLE),
     )
-    app = _Host(ConfigPropagationScreen(report, NOW))
+    app = _Host(ConfigPropagationScreen(report, lambda: NOW))
     async with app.run_test() as pilot:
         await until(pilot, lambda: screen_ready(app, ConfigPropagationScreen), label="view open")
         title = app.screen.query_one("#propagation-title", Static)
         assert "[bold]settings[/bold]" in str(title.render())
+
+
+def test_a_list_that_has_aged_past_its_policy_no_longer_proves_absence() -> None:
+    later = NOW + timedelta(minutes=5)
+
+    notes = _plain(report_notes(_report(), later))
+
+    assert not any(n.startswith("No Pod") for n in notes)
+    assert "Not established: whether every consumer is listed: the Pod list is stale" in notes
+
+
+async def test_an_open_view_ages_its_evidence_without_reading_again() -> None:
+    now = [NOW]
+    app = _Host(ConfigPropagationScreen(_report(), lambda: now[0], refresh_seconds=0.05))
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: screen_ready(app, ConfigPropagationScreen), label="view open")
+        evidence = app.screen.query_one("#propagation-evidence", Static)
+        notes = app.screen.query_one("#propagation-notes", Static)
+        assert "stale" not in str(evidence.render())
+        assert "No Pod in namespace team-a" in str(notes.render())
+
+        now[0] = NOW + timedelta(minutes=5)
+        await until(pilot, lambda: "· stale" in str(evidence.render()), label="evidence aged")
+
+        assert "observed 5m ago" in str(evidence.render())
+        assert "No Pod in namespace team-a" not in str(notes.render())
+        assert "the Pod list is stale" in str(notes.render())
 ```
 
 - [ ] **Step 2: Run them to verify they fail**
@@ -705,7 +736,9 @@ Create `src/korvid/ui/widgets/config_propagation_screen.py` with:
 `ConfigPropagationScreen` shows one `PropagationReport`: a line per evidence
 source from the shared renderer, then the consumers grouped by how they
 consume the object, then what the evidence does not establish. It performs
-no I/O. Enter on a consumer row dismisses with that `Consumer`, so the
+no I/O, but re-renders the evidence lines and notes against its clock while
+it is open, so evidence that ages past its policy is marked stale and stops
+proving that no Pod references the object. Enter on a consumer row dismisses with that `Consumer`, so the
 caller can open its Pod; Escape dismisses with `None`.
 
 Every cell is a plain `Text`, so a cluster-provided name containing markup
@@ -715,7 +748,7 @@ is shown literally.
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import ClassVar
@@ -861,8 +894,9 @@ def _completeness_note(report: PropagationReport, now: datetime) -> Text | None:
         if report.consumers:
             return None
         return Text(
-            f"No Pod in namespace {target.namespace} references this {target.kind} "
-            "through environment variables, volumes or image pull secrets."
+            f"No Pod in namespace {target.namespace} references this {target.kind} through "
+            "envFrom, env valueFrom, configMap, secret or projected volumes, or "
+            "imagePullSecrets. CSI and other volume plugins are not checked."
         )
     pods = report.pods
     stale = pods.state is EvidenceState.AVAILABLE and not is_fresh(
@@ -914,10 +948,17 @@ class ConfigPropagationScreen(ModalScreen[Consumer | None]):
     }
     """
 
-    def __init__(self, report: PropagationReport, now: datetime) -> None:
+    def __init__(
+        self,
+        report: PropagationReport,
+        clock: Callable[[], datetime],
+        *,
+        refresh_seconds: float = 5.0,
+    ) -> None:
         super().__init__()
         self.report = report
-        self._now = now
+        self._clock = clock
+        self._refresh_seconds = refresh_seconds
         self._rows: dict[str, Consumer] = {}
 
     def compose(self) -> ComposeResult:
@@ -928,13 +969,20 @@ class ConfigPropagationScreen(ModalScreen[Consumer | None]):
             id="propagation-title",
             markup=False,
         )
-        yield Static(
-            Text("\n").join(evidence_lines(self.report, self._now)), id="propagation-evidence"
-        )
+        yield Static(id="propagation-evidence")
         yield DataTable[Text](id="propagation-table")
-        yield Static(Text("\n").join(report_notes(self.report, self._now)), id="propagation-notes")
+        yield Static(id="propagation-notes")
+
+    def _render_text(self) -> None:
+        now = self._clock()
+        evidence = Text("\n").join(evidence_lines(self.report, now))
+        self.query_one("#propagation-evidence", Static).update(evidence)
+        notes = Text("\n").join(report_notes(self.report, now))
+        self.query_one("#propagation-notes", Static).update(notes)
 
     def on_mount(self) -> None:
+        self._render_text()
+        self.set_interval(self._refresh_seconds, self._render_text)
         table: DataTable[Text] = self.query_one(DataTable)
         table.cursor_type = "row"
         table.add_columns(*_COLUMNS)
@@ -1022,6 +1070,7 @@ from typing import Any
 
 from korvid.core.config_consumers import Consumer, ConsumptionMode, PodIdentity
 from korvid.core.config_propagation import ConfigTarget
+from korvid.core.evidence_reads import LIST_PAGE_SIZE, MAX_BYTES
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.discovery_snapshot import (
     GroupVersionOutcome,
@@ -1055,6 +1104,7 @@ SETTINGS_POD = {
 class FakeView(ViewState):
     def __init__(self, kind: str = "configmaps", selected: tuple[str, str] | None = None) -> None:
         self.kind = kind
+        self.scope = "team-a"
         self.selected = selected
         self.alias_map = {
             "configmaps": CONFIG_MAPS,
@@ -1079,7 +1129,7 @@ class FakeView(ViewState):
         return f"uid-{name}"
 
     def current_scope(self) -> str:
-        return "team-a"  # pragma: no cover
+        return self.scope
 
     def resources(self, kind: str, scope: str) -> list[Any]:
         return []  # pragma: no cover
@@ -1120,6 +1170,7 @@ class FakeClient(EvidenceClient):
     def __init__(self) -> None:
         self.generation = 3
         self.gets: list[tuple[EvidenceTarget, str]] = []
+        self.lists: list[tuple[EvidenceTarget, int, str, int]] = []
 
     @property
     def session_generation(self) -> int:
@@ -1142,6 +1193,7 @@ class FakeClient(EvidenceClient):
     async def list_evidence_page(
         self, target: EvidenceTarget, *, limit: int, continuation: str, max_bytes: int
     ) -> EvidencePage:
+        self.lists.append((target, limit, continuation, max_bytes))
         return EvidencePage((SETTINGS_POD,))
 
     async def get_evidence_object(
@@ -1219,8 +1271,11 @@ async def test_opening_reads_the_selected_object_and_shows_its_consumers() -> No
     assert [(c.pod.name, c.mode) for c in screen.report.consumers] == [
         ("api-1", ConsumptionMode.ENV_FROM)
     ]
-    assert [(target.resource, name) for target, name in harness.client.gets] == [
-        ("configmaps", "settings")
+    assert harness.client.gets == [
+        (EvidenceTarget("", "v1", "configmaps", "team-a", metadata_only=True), "settings")
+    ]
+    assert harness.client.lists == [
+        (EvidenceTarget("", "v1", "pods", "team-a"), LIST_PAGE_SIZE, "", MAX_BYTES)
     ]
 
 
@@ -1302,6 +1357,22 @@ async def test_a_dialog_opened_during_the_reads_keeps_the_view_closed() -> None:
     assert harness.ui.screens == []
 
 
+async def test_leaving_the_view_or_the_selection_keeps_the_result_closed() -> None:
+    moved = Harness()
+    rescoped = Harness()
+    reselected = Harness()
+
+    for harness in (moved, rescoped, reselected):
+        harness.controller.open_selected()
+    moved.view.kind = "pods"
+    rescoped.view.scope = "team-b"
+    reselected.view.selected = ("team-a", "other")
+    for harness in (moved, rescoped, reselected):
+        await harness.run()
+
+    assert (moved.ui.screens, rescoped.ui.screens, reselected.ui.screens) == ([], [], [])
+
+
 async def test_the_worker_group_is_cancelled_on_request() -> None:
     harness = Harness()
 
@@ -1354,6 +1425,8 @@ _NO_SELECTION = UnavailableReason(AvailabilityCode.NO_SELECTION, "Select a Confi
 
 #: Opens a consumer's Pod: (namespace, name, epoch, expected UID).
 PodNavigator = Callable[[str, str, int, str | None], Awaitable[None]]
+#: The view, scope and (namespace, name) selection a run was started from.
+_Origin = tuple[str, str, tuple[str | None, str | None]]
 
 
 def _now() -> datetime:
@@ -1419,21 +1492,32 @@ class ConfigPropagationController:
         target = ConfigTarget(kind, namespace, name, self._view.selected_uid(namespace, name))
         token = self._tracker.next_run()
         self._ui.run_worker(
-            self._explain(target, token, self._context.epoch()),
+            self._explain(target, token, self._context.epoch(), self._origin()),
             exclusive=True,
             group=CONFIG_PROPAGATION_GROUP,
             exit_on_error=False,
         )
 
-    async def _explain(self, target: ConfigTarget, token: RunToken, epoch: int) -> None:
+    def _origin(self) -> _Origin:
+        """The view, scope and selected row a run explains."""
+        return (
+            self._view.current_kind(),
+            self._view.current_scope(),
+            self._view.selected_ns_name(notify=False),
+        )
+
+    async def _explain(
+        self, target: ConfigTarget, token: RunToken, epoch: int, origin: _Origin
+    ) -> None:
         client = self._client
         if client is None:
             return
         snapshot = observe_discovery(await client.discovery_snapshot())
         report = await explain_propagation(client, snapshot, target, token=token, clock=self._clock)
-        if self._ui.screen_depth() > 1:  # another dialog opened during the reads
+        # Another dialog opened, or the user moved on, during the reads.
+        if self._ui.screen_depth() > 1 or self._origin() != origin:
             return
-        screen = ConfigPropagationScreen(report, self._clock())
+        screen = ConfigPropagationScreen(report, self._clock)
         self._tracker.apply_if_current(
             token,
             lambda: self._ui.push_screen(screen, lambda chosen: self._open_pod(chosen, epoch)),
@@ -1537,12 +1621,16 @@ In `ContextSwitchCoordinator._teardown`, right after `await self._workspace().qu
 
 and pass `propagation=config_propagation.unavailable_reason` to `compose_command_reasons`, `propagation=config_propagation` to `CommandRouter`, and `evidence_client=kube` to `KorvidApp` in `_wire_and_run`. The controller shows its unavailable reason with `markup=False`, as every owner does.
 
-- [ ] **Step 6: Run the UI suite and the size check**
+- [ ] **Step 6: Report a failed run**
+
+`ui/worker_failures.py` maps each `exit_on_error=False` worker group to its failure label, `config-propagation` included, and `KorvidApp.on_worker_state_changed` looks the label up there instead of an `if`/`elif` chain. A workflow test makes discovery raise and expects "Configuration propagation failed" with the error. This also frees ten lines in `ui/app.py`.
+
+- [ ] **Step 7: Run the UI suite and the size check**
 
 Run: `uv run --frozen pytest -p no:tach -n 8 tests/ui/ tests/test_main_wiring.py -q` and `python scripts/check_source_size.py`
-Expected: all pass; `ui/app.py` is at its 1,500-line limit, not over it.
+Expected: all pass, and `python scripts/check_source_size.py` passes.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 git commit -m "ui: open the propagation view with :consumers"

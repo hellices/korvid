@@ -131,9 +131,10 @@ container in its namespace that uses it, grouped by how:
 
 The view reads the object's metadata and the namespace's Pods when it opens,
 never the object's data or a Pod's environment values. Each source gets a
-line saying what was read, its state and how old it is. "No Pod references
-it" appears only when every Pod could be listed; a denied or truncated list
-says why the set of consumers is not established. Whether the object is
+line saying what was read, its state and how old it is, and an open view
+marks it stale once it ages. "No Pod references it" appears only when every
+Pod could be listed; a denied, truncated or stale list says why the set of
+consumers is not established. CSI and other volume plugins are not checked. Whether the object is
 immutable is never claimed, because only its metadata is read. Enter on a
 row opens that Pod.
 
