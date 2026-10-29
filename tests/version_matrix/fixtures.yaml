@@ -71,6 +71,35 @@ metadata:
 data:
   password: matrix-configmap-payload
 ---
+# Consumes `settings` three ways: every key as environment variables, a
+# mounted volume, and one key mounted with subPath. It only has to exist;
+# the pause image is already on every kind node.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: consumer
+  namespace: korvid-matrix
+spec:
+  containers:
+    - name: app
+      image: registry.k8s.io/pause:3.10
+      envFrom:
+        - configMapRef:
+            name: settings
+      env:
+        - name: LITERAL
+          value: matrix-pod-literal
+      volumeMounts:
+        - name: settings
+          mountPath: /etc/settings
+        - name: settings
+          mountPath: /etc/app/password
+          subPath: password
+  volumes:
+    - name: settings
+      configMap:
+        name: settings
+---
 apiVersion: v1
 kind: Secret
 metadata:

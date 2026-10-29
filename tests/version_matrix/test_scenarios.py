@@ -9,6 +9,7 @@ group. They read; the only writes are the fixtures `setup.sh` installed.
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 
 import pytest
 
@@ -22,6 +23,8 @@ from korvid.core.capability import (
     SourceScope,
     Verb,
 )
+from korvid.core.config_consumers import ConsumptionMode
+from korvid.core.config_propagation import ConfigTarget, explain_propagation
 from korvid.core.evidence_reads import (
     LAST_APPLIED_ANNOTATION,
     read_list,
@@ -245,3 +248,22 @@ async def test_events_fall_through_to_core_when_events_k8s_io_is_denied(
     assert _group(result.observation) == ""
     assert _state(result.observation) == (EvidenceState.AVAILABLE, Basis.OBSERVED)
     assert "matrix-scenario" in [item["metadata"]["name"] for item in result.items]
+
+
+async def test_a_config_maps_consumers_are_read_by_mode(connect: Connect) -> None:
+    kube = await connect(ADMIN_CONTEXT)
+
+    report = await explain_propagation(
+        kube, await snapshot_of(kube), ConfigTarget("ConfigMap", NAMESPACE, "settings")
+    )
+
+    assert _state(report.object) == (EvidenceState.AVAILABLE, Basis.OBSERVED)
+    assert _state(report.pods) == (EvidenceState.AVAILABLE, Basis.OBSERVED)
+    assert sorted((c.pod.name, c.container, c.mode) for c in report.consumers) == [
+        ("consumer", "app", ConsumptionMode.ENV_FROM),
+        ("consumer", "app", ConsumptionMode.SUBPATH),
+        ("consumer", "app", ConsumptionMode.VOLUME),
+    ]
+    assert report.consumers_conclusive(datetime.now(UTC))
+    assert "matrix-configmap-payload" not in repr(report)
+    assert "matrix-pod-literal" not in repr(report)

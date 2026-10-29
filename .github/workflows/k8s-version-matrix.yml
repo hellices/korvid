@@ -14,10 +14,13 @@ on:
       - src/korvid/core/api_versions.py
       - src/korvid/core/capability.py
       - src/korvid/core/capability_classifier.py
+      - src/korvid/core/config_consumers.py
+      - src/korvid/core/config_propagation.py
       - src/korvid/core/evidence_reads.py
       - src/korvid/core/run_tokens.py
       - src/korvid/k8s/bounded_transport.py
       - src/korvid/k8s/client.py
+      - src/korvid/k8s/config_references.py
       - src/korvid/k8s/discovery.py
       - src/korvid/k8s/discovery_snapshot.py
       - src/korvid/k8s/errors.py
@@ -32,10 +35,13 @@ on:
       - src/korvid/core/api_versions.py
       - src/korvid/core/capability.py
       - src/korvid/core/capability_classifier.py
+      - src/korvid/core/config_consumers.py
+      - src/korvid/core/config_propagation.py
       - src/korvid/core/evidence_reads.py
       - src/korvid/core/run_tokens.py
       - src/korvid/k8s/bounded_transport.py
       - src/korvid/k8s/client.py
+      - src/korvid/k8s/config_references.py
       - src/korvid/k8s/discovery.py
       - src/korvid/k8s/discovery_snapshot.py
       - src/korvid/k8s/errors.py
