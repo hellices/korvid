@@ -215,6 +215,19 @@ def test_a_gone_or_recreated_object_is_said() -> None:
     assert not any("was recreated" in n for n in _plain(report_notes(_report(VOLUME), NOW)))
 
 
+def test_an_absence_that_has_aged_is_no_longer_called_a_deletion() -> None:
+    report = _report(ENV, object_basis=Basis.OBJECT_ABSENT)
+
+    fresh = _plain(report_notes(report, NOW))
+    aged = _plain(report_notes(report, NOW + timedelta(minutes=5)))
+
+    assert any("no longer exists" in n for n in fresh)
+    assert not any("no longer exists" in n for n in aged)
+    assert any(
+        "did not exist when it was read" in n and "may have been created since" in n for n in aged
+    )
+
+
 def test_an_init_container_row_explains_when_it_runs() -> None:
     with_init = _plain(report_notes(_report(SUBPATH), NOW))
     without = _plain(report_notes(_report(ENV), NOW))

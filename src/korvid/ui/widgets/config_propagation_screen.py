@@ -139,9 +139,13 @@ def evidence_lines(report: PropagationReport, now: datetime) -> list[Text]:
     ]
 
 
-def _object_notes(report: PropagationReport) -> list[Text]:
+def _object_notes(report: PropagationReport, now: datetime) -> list[Text]:
     kind = report.target.kind
     if report.object_absent:
+        if not is_fresh(report.object, declarations(report.target)[0].policy, now):
+            return [
+                Text(f"The {kind} did not exist when it was read; it may have been created since.")
+            ]
         tail = " The Pods below still reference it." if report.consumers else ""
         return [Text(f"The {kind} no longer exists.{tail}")]
     if report.recreated:
@@ -175,7 +179,7 @@ def _completeness_note(report: PropagationReport, now: datetime) -> Text | None:
 
 def report_notes(report: PropagationReport, now: datetime) -> list[Text]:
     """What the evidence says about the object, and what it does not establish."""
-    notes = _object_notes(report)
+    notes = _object_notes(report, now)
     if any(consumer.category is ContainerCategory.INIT for consumer in report.consumers):
         notes.append(Text(_INIT_NOTE))
     completeness = _completeness_note(report, now)

@@ -8,7 +8,7 @@ from typing import Any
 
 from korvid.core.config_consumers import Consumer, ConsumptionMode, PodIdentity
 from korvid.core.config_propagation import ConfigTarget
-from korvid.core.evidence_reads import LIST_PAGE_SIZE, MAX_BYTES
+from korvid.core.evidence_reads import DEFAULT_MAX_BYTES, LIST_PAGE_SIZE, MAX_BYTES
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.discovery_snapshot import (
     GroupVersionOutcome,
@@ -107,7 +107,7 @@ class FakeContext(ContextGuard):
 class FakeClient(EvidenceClient):
     def __init__(self) -> None:
         self.generation = 3
-        self.gets: list[tuple[EvidenceTarget, str]] = []
+        self.gets: list[tuple[EvidenceTarget, str, int]] = []
         self.lists: list[tuple[EvidenceTarget, int, str, int]] = []
 
     @property
@@ -137,7 +137,7 @@ class FakeClient(EvidenceClient):
     async def get_evidence_object(
         self, target: EvidenceTarget, name: str, *, max_bytes: int
     ) -> dict[str, Any]:
-        self.gets.append((target, name))
+        self.gets.append((target, name, max_bytes))
         return {"metadata": {"name": name, "namespace": "team-a", "uid": f"uid-{name}"}}
 
 
@@ -210,7 +210,11 @@ async def test_opening_reads_the_selected_object_and_shows_its_consumers() -> No
         ("api-1", ConsumptionMode.ENV_FROM)
     ]
     assert harness.client.gets == [
-        (EvidenceTarget("", "v1", "configmaps", "team-a", metadata_only=True), "settings")
+        (
+            EvidenceTarget("", "v1", "configmaps", "team-a", metadata_only=True),
+            "settings",
+            DEFAULT_MAX_BYTES,
+        )
     ]
     assert harness.client.lists == [
         (EvidenceTarget("", "v1", "pods", "team-a"), LIST_PAGE_SIZE, "", MAX_BYTES)
