@@ -3,7 +3,9 @@
 `ConfigPropagationScreen` shows one `PropagationReport`: a line per evidence
 source from the shared renderer, then the consumers grouped by how they
 consume the object, then what the evidence does not establish. It performs
-no I/O. Enter on a consumer row dismisses with that `Consumer`, so the
+no I/O, but re-renders the evidence lines and notes against its clock while
+it is open, so evidence that ages past its policy is marked stale and stops
+proving that no Pod references the object. Enter on a consumer row dismisses with that `Consumer`, so the
 caller can open its Pod; Escape dismisses with `None`.
 
 Every cell is a plain `Text`, so a cluster-provided name containing markup
@@ -13,7 +15,7 @@ is shown literally.
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import ClassVar
@@ -159,8 +161,9 @@ def _completeness_note(report: PropagationReport, now: datetime) -> Text | None:
         if report.consumers:
             return None
         return Text(
-            f"No Pod in namespace {target.namespace} references this {target.kind} "
-            "through environment variables, volumes or image pull secrets."
+            f"No Pod in namespace {target.namespace} references this {target.kind} through "
+            "envFrom, env valueFrom, configMap, secret or projected volumes, or "
+            "imagePullSecrets. CSI and other volume plugins are not checked."
         )
     pods = report.pods
     stale = pods.state is EvidenceState.AVAILABLE and not is_fresh(
@@ -212,10 +215,17 @@ class ConfigPropagationScreen(ModalScreen[Consumer | None]):
     }
     """
 
-    def __init__(self, report: PropagationReport, now: datetime) -> None:
+    def __init__(
+        self,
+        report: PropagationReport,
+        clock: Callable[[], datetime],
+        *,
+        refresh_seconds: float = 5.0,
+    ) -> None:
         super().__init__()
         self.report = report
-        self._now = now
+        self._clock = clock
+        self._refresh_seconds = refresh_seconds
         self._rows: dict[str, Consumer] = {}
 
     def compose(self) -> ComposeResult:
@@ -226,13 +236,20 @@ class ConfigPropagationScreen(ModalScreen[Consumer | None]):
             id="propagation-title",
             markup=False,
         )
-        yield Static(
-            Text("\n").join(evidence_lines(self.report, self._now)), id="propagation-evidence"
-        )
+        yield Static(id="propagation-evidence")
         yield DataTable[Text](id="propagation-table")
-        yield Static(Text("\n").join(report_notes(self.report, self._now)), id="propagation-notes")
+        yield Static(id="propagation-notes")
+
+    def _render_text(self) -> None:
+        now = self._clock()
+        evidence = Text("\n").join(evidence_lines(self.report, now))
+        self.query_one("#propagation-evidence", Static).update(evidence)
+        notes = Text("\n").join(report_notes(self.report, now))
+        self.query_one("#propagation-notes", Static).update(notes)
 
     def on_mount(self) -> None:
+        self._render_text()
+        self.set_interval(self._refresh_seconds, self._render_text)
         table: DataTable[Text] = self.query_one(DataTable)
         table.cursor_type = "row"
         table.add_columns(*_COLUMNS)

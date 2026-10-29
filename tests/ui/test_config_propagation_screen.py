@@ -186,6 +186,9 @@ def test_no_consumer_is_said_only_when_the_pod_list_is_conclusive() -> None:
     assert any(
         n.startswith("No Pod in namespace team-a references this ConfigMap") for n in complete
     )
+    (none,) = [n for n in complete if n.startswith("No Pod")]
+    assert "configMap, secret or projected volumes" in none
+    assert "CSI and other volume plugins are not checked" in none
     assert not any(n.startswith("No Pod") for n in truncated + denied)
     assert (
         "Not established: whether every consumer is listed: stopped at the page limit" in truncated
@@ -231,7 +234,7 @@ class _Host(App[None]):
 
 
 async def test_enter_on_a_consumer_row_returns_that_consumer() -> None:
-    app = _Host(ConfigPropagationScreen(_report(ENV, VOLUME), NOW))
+    app = _Host(ConfigPropagationScreen(_report(ENV, VOLUME), lambda: NOW))
     async with app.run_test() as pilot:
         await until(pilot, lambda: screen_ready(app, ConfigPropagationScreen), label="view open")
         table = app.screen.query_one(DataTable)
@@ -243,7 +246,7 @@ async def test_enter_on_a_consumer_row_returns_that_consumer() -> None:
 
 
 async def test_enter_on_a_heading_does_nothing_and_escape_closes() -> None:
-    app = _Host(ConfigPropagationScreen(_report(ENV), NOW))
+    app = _Host(ConfigPropagationScreen(_report(ENV), lambda: NOW))
     async with app.run_test() as pilot:
         await until(pilot, lambda: screen_ready(app, ConfigPropagationScreen), label="view open")
         await pilot.press("up", "enter")
@@ -264,8 +267,35 @@ async def test_the_title_shows_cluster_names_literally() -> None:
         (),
         Baseline(EvidenceState.AVAILABLE),
     )
-    app = _Host(ConfigPropagationScreen(report, NOW))
+    app = _Host(ConfigPropagationScreen(report, lambda: NOW))
     async with app.run_test() as pilot:
         await until(pilot, lambda: screen_ready(app, ConfigPropagationScreen), label="view open")
         title = app.screen.query_one("#propagation-title", Static)
         assert "[bold]settings[/bold]" in str(title.render())
+
+
+def test_a_list_that_has_aged_past_its_policy_no_longer_proves_absence() -> None:
+    later = NOW + timedelta(minutes=5)
+
+    notes = _plain(report_notes(_report(), later))
+
+    assert not any(n.startswith("No Pod") for n in notes)
+    assert "Not established: whether every consumer is listed: the Pod list is stale" in notes
+
+
+async def test_an_open_view_ages_its_evidence_without_reading_again() -> None:
+    now = [NOW]
+    app = _Host(ConfigPropagationScreen(_report(), lambda: now[0], refresh_seconds=0.05))
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: screen_ready(app, ConfigPropagationScreen), label="view open")
+        evidence = app.screen.query_one("#propagation-evidence", Static)
+        notes = app.screen.query_one("#propagation-notes", Static)
+        assert "stale" not in str(evidence.render())
+        assert "No Pod in namespace team-a" in str(notes.render())
+
+        now[0] = NOW + timedelta(minutes=5)
+        await until(pilot, lambda: "· stale" in str(evidence.render()), label="evidence aged")
+
+        assert "observed 5m ago" in str(evidence.render())
+        assert "No Pod in namespace team-a" not in str(notes.render())
+        assert "the Pod list is stale" in str(notes.render())
