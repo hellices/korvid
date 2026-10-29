@@ -901,7 +901,12 @@ async def test_absolute_deadline_reaps_reader_that_suppresses_cancellation() -> 
                 reaped.set()
             raise AssertionError("unreachable")
 
-    controller, ui = _controller(HungReader(), deadline_seconds=0.01)
+    # A frozen clock gives the run its whole deadline however late its worker
+    # starts (#511): with the real one, a runner slower than the deadline
+    # marked it elapsed before the reader was ever called. The deadline is
+    # still enforced by the run's real asyncio timeout, so it must outlast the
+    # read task's start on a coarse Windows timer.
+    controller, ui = _controller(HungReader(), deadline_seconds=0.5, clock=lambda: 0.0)
     observer = controller.scale_observer(
         epoch=4,
         namespace="default",
