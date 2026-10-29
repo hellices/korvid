@@ -3,9 +3,10 @@
 One exclusive worker reads the object's metadata and its namespace's Pods
 through `explain_propagation`, under a run token. The view opens only while
 that token is current: a context switch, new credentials or a newer run
-drops the result, as `RunTracker` decides, and so does a dialog that opened
-meanwhile. The context-switch coordinator cancels the worker group before
-it swaps the client.
+drops the result, as `RunTracker` decides. So does another dialog that is
+open when the reads finish, or a change of view, scope or selection since
+they started, as the relationship view does. The context-switch coordinator
+cancels the worker group before it swaps the client.
 """
 
 from __future__ import annotations
@@ -126,7 +127,7 @@ class ConfigPropagationController:
             return
         snapshot = observe_discovery(await client.discovery_snapshot())
         report = await explain_propagation(client, snapshot, target, token=token, clock=self._clock)
-        # Another dialog opened, or the user moved on, during the reads.
+        # Another dialog is open, or the user has moved on, as the reads finish.
         if self._ui.screen_depth() > 1 or self._origin() != origin:
             return
         screen = ConfigPropagationScreen(report, self._clock)

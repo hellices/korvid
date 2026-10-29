@@ -130,7 +130,9 @@ container in its namespace that uses it, grouped by how:
 | An image pull secret | Used only when an image is pulled |
 
 The view reads the object's metadata and the namespace's Pods when it opens,
-never the object's data or a Pod's environment values. Each source gets a
+never the object's data. Pods arrive whole, so their literal `env[].value`
+fields reach korvid too, but the view keeps and shows only references, never
+a value. Each source gets a
 line saying what was read, its state and how old it is, and an open view
 marks it stale once it ages. "No Pod references it" appears only when every
 Pod could be listed; a denied, truncated or stale list says why the set of

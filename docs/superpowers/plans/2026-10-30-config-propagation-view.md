@@ -1030,7 +1030,7 @@ class ConfigPropagationScreen(ModalScreen[Consumer | None]):
 
 - [ ] **Step 4: Run the tests, and check the mutations**
 
-Expected: `10 passed`. Each change must fail a test: show empty sections; treat any Pod list as conclusive; dismiss on a heading; always add the init note; always call the object recreated; render the title as markup.
+Expected: `13 passed`. Each change must fail a test: show empty sections; treat any Pod list as conclusive; dismiss on a heading; always add the init note; always call the object recreated; render the title as markup.
 
 - [ ] **Step 5: Commit**
 
@@ -1413,9 +1413,10 @@ Create `src/korvid/ui/config_propagation_controller.py` with:
 One exclusive worker reads the object's metadata and its namespace's Pods
 through `explain_propagation`, under a run token. The view opens only while
 that token is current: a context switch, new credentials or a newer run
-drops the result, as `RunTracker` decides, and so does a dialog that opened
-meanwhile. The context-switch coordinator cancels the worker group before
-it swaps the client.
+drops the result, as `RunTracker` decides. So does another dialog that is
+open when the reads finish, or a change of view, scope or selection since
+they started, as the relationship view does. The context-switch coordinator
+cancels the worker group before it swaps the client.
 """
 
 from __future__ import annotations
@@ -1536,7 +1537,7 @@ class ConfigPropagationController:
             return
         snapshot = observe_discovery(await client.discovery_snapshot())
         report = await explain_propagation(client, snapshot, target, token=token, clock=self._clock)
-        # Another dialog opened, or the user moved on, during the reads.
+        # Another dialog is open, or the user has moved on, as the reads finish.
         if self._ui.screen_depth() > 1 or self._origin() != origin:
             return
         screen = ConfigPropagationScreen(report, self._clock)
@@ -1562,7 +1563,7 @@ class ConfigPropagationController:
 
 - [ ] **Step 4: Run the tests, and check the mutations**
 
-Expected: `11 passed`. Each change must fail a test: accept a ConfigMap kind from another group; ignore an open dialog; apply a result without the run token; track a fixed session generation; navigate in the current epoch rather than the run's.
+Expected: `12 passed`. Each change must fail a test: accept a ConfigMap kind from another group; ignore an open dialog; apply a result without the run token; track a fixed session generation; navigate in the current epoch rather than the run's.
 
 - [ ] **Step 5: Commit**
 
