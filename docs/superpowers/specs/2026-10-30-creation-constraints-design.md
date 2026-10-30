@@ -341,7 +341,11 @@ does:
   container or init container does not specify it, even after defaults,
   matching `must specify`. Only these keys require a field; a hugepages or
   extended-resource quota does not. The check is per container, so the
-  projection keeps which container lacks what, not only the Pod's sum;
+  projection keeps which container lacks what, not only the Pod's sum.
+  With the `PodLevelResources` feature, the quota evaluator skips this
+  check for a resource the Pod-level `resources` set. Whether the feature
+  is enabled is not observed, so for a template that sets that resource at
+  Pod level, "requires a field" is not established rather than reported;
 - "at its limit" for the `pods` and `count/pods` counts when `used >= hard`.
 
 For each LimitRange, the Pod's per-container and per-Pod values are checked
@@ -433,7 +437,8 @@ Each slice gets a sub-issue under #411 and its own pull request:
   each scope row in the table, including a PriorityClass selector with no
   `priorityClassName`; "would exceed" at,
   just under and just over the limit; "requires a field" for one container
-  of several, and not for a hugepages quota; LimitRange
+  of several, not for a hugepages quota, and not established when the
+  Pod-level `resources` set that resource; LimitRange
   min, max and ratio per container, Pod and claim; remaining amounts
   formatted exactly.
 
