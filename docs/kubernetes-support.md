@@ -71,6 +71,9 @@ read-only scenarios against each:
   volume and through a `subPath` mount, each found in its own mode, without
   reading the ConfigMap's data and without the Pod's literal environment
   values reaching the report.
+- a Deployment whose namespace's quota admits no Pod, whose ReplicaSet's
+  recorded rejection is read next to the quota and a LimitRange, without the
+  template's literal environment values reaching the report.
 
 The workflow runs on demand, and whenever a pull request or a push to `main`
 changes the modules those scenarios exercise or the project's dependencies. Each passing job records the
