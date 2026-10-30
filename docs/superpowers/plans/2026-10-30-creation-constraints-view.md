@@ -409,8 +409,15 @@ def test_earlier_incarnations_are_counted() -> None:
     notes = _plain(report_notes(_report(earlier_failures=2), NOW))
 
     assert (
-        "2 creation failures recorded about an earlier Deployment named api are not shown." in notes
+        "2 creation failures recorded about earlier incarnations of this Deployment or its "
+        "ReplicaSets are not shown."
+    ) in notes
+    job = _report(
+        target=CreationTarget("Job", "shop", "j"), earlier_failures=1, children_observation=None
     )
+    assert (
+        "1 creation failures recorded about earlier incarnations of this Job are not shown."
+    ) in _plain(report_notes(job, NOW))
 
 
 def test_a_gone_or_recreated_workload_is_said() -> None:
@@ -502,6 +509,45 @@ def test_without_the_workload_there_are_no_counters_to_explain() -> None:
     denied = _report(workload=None, workload_observation=_seen(WORKLOAD_SOURCE, Basis.FORBIDDEN))
 
     assert not any("counters" in n for n in _plain(report_notes(denied, NOW)))
+
+
+def test_a_policy_that_could_not_be_read_in_full_never_claims_to_be_empty() -> None:
+    quota = replace(QUOTA, entries=(), scopes=(), scope_selector=(), complete=False)
+    partial = replace(QUOTA, name="partial", scopes=(), scope_selector=(), complete=False)
+    limit_range = replace(LIMITS, values=(), complete=False)
+
+    rows = [
+        row.cells
+        for row in _rows(_report(failures=(), quotas=(quota, partial), limit_ranges=(limit_range,)))
+    ]
+
+    assert ("compute", "constraints could not be read", "", "") in rows
+    assert ("", "constraints could not be read", "", "") in rows
+    assert ("defaults", "constraints could not be read", "", "") in rows
+    assert not any(cells[1] in ("no hard limits", "no constraints") for cells in rows)
+
+
+async def test_an_open_view_ages_its_table_cells_too() -> None:
+    now = [NOW]
+    report = _report(quotas=(), limit_ranges=())
+    app = _Host(CreationConstraintsScreen(report, lambda: now[0], refresh_seconds=0.05))
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: screen_ready(app, CreationConstraintsScreen), label="view open")
+        table = app.screen.query_one(DataTable)
+        assert str(table.get_row_at(1)[1]) == "12 times · last 2m ago"
+        assert str(table.get_row_at(1)[2]) == "quota compute (no longer present) — quota exceeded"
+
+        now[0] = NOW + timedelta(minutes=5)
+        await until(
+            pilot,
+            lambda: str(table.get_row_at(1)[1]) == "12 times · last 7m ago",
+            label="age refreshed",
+        )
+
+        assert str(table.get_row_at(1)[2]) == (
+            "quota compute (not in the quotas read) — quota exceeded"
+        )
+        assert table.cursor_row == 1
 ```
 
 Create `src/korvid/ui/widgets/creation_constraints_screen.py` with:
@@ -534,6 +580,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.screen import ModalScreen
 from textual.widgets import DataTable, Footer, Static
+from textual.widgets.data_table import ColumnKey
 
 from korvid.core.capability import Basis, EvidenceState, Observation, conclusive, is_fresh
 from korvid.core.creation_constraints import CreationReport, declarations
@@ -549,6 +596,7 @@ from korvid.ui.evidence_text import (
 )
 
 _COLUMNS = ("Object", "What", "Value", "Note")
+_UNREADABLE = ("", "constraints could not be read", "", "")
 _FAILURES = "Recorded creation failures — what the controller recorded, when it was recorded"
 _QUOTAS = "ResourceQuotas — current values; not a reservation, and the next create may still differ"
 _LIMIT_RANGES = "LimitRanges — current constraints; other admission plugins can also change a Pod"
@@ -687,7 +735,11 @@ def _quota_rows(quota: QuotaProjection, namespace: str) -> list[Row]:
             _marker(quota, entry.usage),
         )
         for entry in quota.entries
-    ] or [("", "no hard limits", "", "")]
+    ]
+    if not quota.complete:
+        cells.append(_UNREADABLE)
+    elif not cells:
+        cells.append(("", "no hard limits", "", ""))
     scopes = _scopes_text(quota)
     if scopes:
         cells.append(("", "scopes", scopes, ""))
@@ -708,7 +760,11 @@ def _limit_range_rows(limit_range: LimitRangeProjection, namespace: str) -> list
     cells: list[tuple[str, str, str, str]] = [
         ("", f"{value.type} {value.resource}", _limit_text(value), "")
         for value in limit_range.values
-    ] or [("", "no constraints", "", "")]
+    ]
+    if not limit_range.complete:
+        cells.append(_UNREADABLE)
+    elif not cells:
+        cells.append(("", "no constraints", "", ""))
     cells[0] = (limit_range.name, *cells[0][1:])
     return [Row(row, destination) for row in cells]
 
@@ -760,10 +816,11 @@ def _failure_notes(report: CreationReport) -> list[Text]:
     target = report.target
     notes: list[Text] = []
     if report.earlier_failures:
+        children = f" or its {target.child}s" if target.child is not None else ""
         notes.append(
             Text(
-                f"{report.earlier_failures} creation failures recorded about an earlier "
-                f"{target.kind} named {target.name} are not shown."
+                f"{report.earlier_failures} creation failures recorded about earlier "
+                f"incarnations of this {target.kind}{children} are not shown."
             )
         )
     if report.failures:
@@ -866,6 +923,7 @@ class CreationConstraintsScreen(ModalScreen[Destination | None]):
         self._clock = clock
         self._refresh_seconds = refresh_seconds
         self._rows: dict[str, Destination] = {}
+        self._columns: list[ColumnKey] = []
 
     def compose(self) -> ComposeResult:
         yield Footer()
@@ -880,13 +938,24 @@ class CreationConstraintsScreen(ModalScreen[Destination | None]):
         self.query_one("#creation-evidence", Static).update(evidence)
         notes = Text("\n").join(report_notes(self.report, now))
         self.query_one("#creation-notes", Static).update(notes)
+        self._refresh_rows(now)
+
+    def _refresh_rows(self, now: datetime) -> None:
+        """Re-render cells that depend on the time: ages, and whether a list still rules out."""
+        if not self._columns:
+            return
+        table: DataTable[Text] = self.query_one(DataTable)
+        for index, row in enumerate(table_rows(self.report, now)):
+            if isinstance(row, Row):
+                for column, cell in zip(self._columns, row.cells, strict=True):
+                    table.update_cell(f"r{index}", column, Text(cell))
 
     def on_mount(self) -> None:
         self._render_text()
         self.set_interval(self._refresh_seconds, self._render_text)
         table: DataTable[Text] = self.query_one(DataTable)
         table.cursor_type = "row"
-        table.add_columns(*_COLUMNS)
+        self._columns = table.add_columns(*_COLUMNS)
         first: int | None = None
         for index, row in enumerate(table_rows(self.report, self._clock())):
             if isinstance(row, Heading):

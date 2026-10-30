@@ -25,6 +25,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.screen import ModalScreen
 from textual.widgets import DataTable, Footer, Static
+from textual.widgets.data_table import ColumnKey
 
 from korvid.core.capability import Basis, EvidenceState, Observation, conclusive, is_fresh
 from korvid.core.creation_constraints import CreationReport, declarations
@@ -40,6 +41,7 @@ from korvid.ui.evidence_text import (
 )
 
 _COLUMNS = ("Object", "What", "Value", "Note")
+_UNREADABLE = ("", "constraints could not be read", "", "")
 _FAILURES = "Recorded creation failures — what the controller recorded, when it was recorded"
 _QUOTAS = "ResourceQuotas — current values; not a reservation, and the next create may still differ"
 _LIMIT_RANGES = "LimitRanges — current constraints; other admission plugins can also change a Pod"
@@ -178,7 +180,11 @@ def _quota_rows(quota: QuotaProjection, namespace: str) -> list[Row]:
             _marker(quota, entry.usage),
         )
         for entry in quota.entries
-    ] or [("", "no hard limits", "", "")]
+    ]
+    if not quota.complete:
+        cells.append(_UNREADABLE)
+    elif not cells:
+        cells.append(("", "no hard limits", "", ""))
     scopes = _scopes_text(quota)
     if scopes:
         cells.append(("", "scopes", scopes, ""))
@@ -199,7 +205,11 @@ def _limit_range_rows(limit_range: LimitRangeProjection, namespace: str) -> list
     cells: list[tuple[str, str, str, str]] = [
         ("", f"{value.type} {value.resource}", _limit_text(value), "")
         for value in limit_range.values
-    ] or [("", "no constraints", "", "")]
+    ]
+    if not limit_range.complete:
+        cells.append(_UNREADABLE)
+    elif not cells:
+        cells.append(("", "no constraints", "", ""))
     cells[0] = (limit_range.name, *cells[0][1:])
     return [Row(row, destination) for row in cells]
 
@@ -251,10 +261,11 @@ def _failure_notes(report: CreationReport) -> list[Text]:
     target = report.target
     notes: list[Text] = []
     if report.earlier_failures:
+        children = f" or its {target.child}s" if target.child is not None else ""
         notes.append(
             Text(
-                f"{report.earlier_failures} creation failures recorded about an earlier "
-                f"{target.kind} named {target.name} are not shown."
+                f"{report.earlier_failures} creation failures recorded about earlier "
+                f"incarnations of this {target.kind}{children} are not shown."
             )
         )
     if report.failures:
@@ -357,6 +368,7 @@ class CreationConstraintsScreen(ModalScreen[Destination | None]):
         self._clock = clock
         self._refresh_seconds = refresh_seconds
         self._rows: dict[str, Destination] = {}
+        self._columns: list[ColumnKey] = []
 
     def compose(self) -> ComposeResult:
         yield Footer()
@@ -371,13 +383,24 @@ class CreationConstraintsScreen(ModalScreen[Destination | None]):
         self.query_one("#creation-evidence", Static).update(evidence)
         notes = Text("\n").join(report_notes(self.report, now))
         self.query_one("#creation-notes", Static).update(notes)
+        self._refresh_rows(now)
+
+    def _refresh_rows(self, now: datetime) -> None:
+        """Re-render cells that depend on the time: ages, and whether a list still rules out."""
+        if not self._columns:
+            return
+        table: DataTable[Text] = self.query_one(DataTable)
+        for index, row in enumerate(table_rows(self.report, now)):
+            if isinstance(row, Row):
+                for column, cell in zip(self._columns, row.cells, strict=True):
+                    table.update_cell(f"r{index}", column, Text(cell))
 
     def on_mount(self) -> None:
         self._render_text()
         self.set_interval(self._refresh_seconds, self._render_text)
         table: DataTable[Text] = self.query_one(DataTable)
         table.cursor_type = "row"
-        table.add_columns(*_COLUMNS)
+        self._columns = table.add_columns(*_COLUMNS)
         first: int | None = None
         for index, row in enumerate(table_rows(self.report, self._clock())):
             if isinstance(row, Heading):

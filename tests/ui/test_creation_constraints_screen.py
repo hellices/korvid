@@ -360,8 +360,15 @@ def test_earlier_incarnations_are_counted() -> None:
     notes = _plain(report_notes(_report(earlier_failures=2), NOW))
 
     assert (
-        "2 creation failures recorded about an earlier Deployment named api are not shown." in notes
+        "2 creation failures recorded about earlier incarnations of this Deployment or its "
+        "ReplicaSets are not shown."
+    ) in notes
+    job = _report(
+        target=CreationTarget("Job", "shop", "j"), earlier_failures=1, children_observation=None
     )
+    assert (
+        "1 creation failures recorded about earlier incarnations of this Job are not shown."
+    ) in _plain(report_notes(job, NOW))
 
 
 def test_a_gone_or_recreated_workload_is_said() -> None:
@@ -453,3 +460,42 @@ def test_without_the_workload_there_are_no_counters_to_explain() -> None:
     denied = _report(workload=None, workload_observation=_seen(WORKLOAD_SOURCE, Basis.FORBIDDEN))
 
     assert not any("counters" in n for n in _plain(report_notes(denied, NOW)))
+
+
+def test_a_policy_that_could_not_be_read_in_full_never_claims_to_be_empty() -> None:
+    quota = replace(QUOTA, entries=(), scopes=(), scope_selector=(), complete=False)
+    partial = replace(QUOTA, name="partial", scopes=(), scope_selector=(), complete=False)
+    limit_range = replace(LIMITS, values=(), complete=False)
+
+    rows = [
+        row.cells
+        for row in _rows(_report(failures=(), quotas=(quota, partial), limit_ranges=(limit_range,)))
+    ]
+
+    assert ("compute", "constraints could not be read", "", "") in rows
+    assert ("", "constraints could not be read", "", "") in rows
+    assert ("defaults", "constraints could not be read", "", "") in rows
+    assert not any(cells[1] in ("no hard limits", "no constraints") for cells in rows)
+
+
+async def test_an_open_view_ages_its_table_cells_too() -> None:
+    now = [NOW]
+    report = _report(quotas=(), limit_ranges=())
+    app = _Host(CreationConstraintsScreen(report, lambda: now[0], refresh_seconds=0.05))
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: screen_ready(app, CreationConstraintsScreen), label="view open")
+        table = app.screen.query_one(DataTable)
+        assert str(table.get_row_at(1)[1]) == "12 times · last 2m ago"
+        assert str(table.get_row_at(1)[2]) == "quota compute (no longer present) — quota exceeded"
+
+        now[0] = NOW + timedelta(minutes=5)
+        await until(
+            pilot,
+            lambda: str(table.get_row_at(1)[1]) == "12 times · last 7m ago",
+            label="age refreshed",
+        )
+
+        assert str(table.get_row_at(1)[2]) == (
+            "quota compute (not in the quotas read) — quota exceeded"
+        )
+        assert table.cursor_row == 1
