@@ -244,6 +244,35 @@ def test_a_stale_or_unreadable_quota_is_not_established() -> None:
         ),
         ({"scope_selector": (ScopeExpression("BestEffort", "DoesNotExist", ()),)}, {}, True),
         ({"scope_selector": (ScopeExpression("Terminating", "Exists", ()),)}, {}, False),
+        # Every scope and every expression must hold, not just one.
+        ({"scopes": ("Terminating", "BestEffort")}, {"active_deadline_seconds": 60}, False),
+        ({"scopes": ("Terminating", "NotBestEffort")}, {"active_deadline_seconds": 60}, True),
+        (
+            {
+                "scopes": ("NotTerminating",),
+                "scope_selector": (ScopeExpression("PriorityClass", "In", ("gold",)),),
+            },
+            {"priority_class": "low"},
+            False,
+        ),
+        (
+            {
+                "scopes": ("NotTerminating",),
+                "scope_selector": (ScopeExpression("PriorityClass", "In", ("gold",)),),
+            },
+            {"priority_class": "gold"},
+            True,
+        ),
+        (
+            {
+                "scope_selector": (
+                    ScopeExpression("PriorityClass", "Exists", ()),
+                    ScopeExpression("Terminating", "Exists", ()),
+                )
+            },
+            {"priority_class": "gold"},
+            False,
+        ),
     ],
 )
 def test_a_quota_applies_only_when_every_scope_does(
@@ -823,3 +852,105 @@ def test_a_pod_level_request_leaves_an_unread_default_limit_open() -> None:
     )
 
     assert rows == [("cpu", Finding.NOT_ESTABLISHED, _POD_UNSEEN)]
+
+
+def test_new_claims_are_charged_together() -> None:
+    quota = _quota(
+        "storage",
+        {"requests.storage": ("85Gi", "100Gi"), "persistentvolumeclaims": ("9", "10")},
+    )
+    claims = (ClaimTemplate("data", "10Gi", "gold"), ClaimTemplate("logs", "10Gi", "gold"))
+
+    rows = _findings(_report(_stateful(*claims), quotas=(quota,), kind="StatefulSet"))
+
+    assert rows == [
+        ("claims data, logs: requests.storage", Finding.WOULD_EXCEED, "needs 20Gi; 15Gi remaining"),
+        ("claims data, logs: persistentvolumeclaims", Finding.WOULD_EXCEED, "needs 2; 1 remaining"),
+    ]
+
+
+def test_a_per_class_quota_charges_its_class_together_and_waits_on_unknown_classes() -> None:
+    key = "gold.storageclass.storage.k8s.io/requests.storage"
+    quota = _quota("storage", {key: ("85Gi", "100Gi")})
+    claims = (
+        ClaimTemplate("data", "10Gi", "gold"),
+        ClaimTemplate("logs", "10Gi", "gold"),
+        ClaimTemplate("scratch", "10Gi", "silver"),
+        ClaimTemplate("cache", "10Gi", None),
+    )
+
+    rows = _findings(_report(_stateful(*claims), quotas=(quota,), kind="StatefulSet"))
+
+    assert rows == [
+        (
+            f"claim cache: {key}",
+            Finding.NOT_ESTABLISHED,
+            "the claim sets no storage class, and the cluster default may apply",
+        ),
+        (f"claims data, logs: {key}", Finding.WOULD_EXCEED, "needs at least 20Gi; 15Gi remaining"),
+    ]
+
+
+def test_a_limit_range_that_could_not_be_read_is_not_established() -> None:
+    broken = LimitRangeProjection("limits", "uid-lr", (), complete=False)
+
+    possibilities = possible_constraints(_report(_template(), limit_ranges=(broken,)), NOW)
+
+    assert possibilities is not None
+    assert [(p.subject, p.finding, p.detail) for p in possibilities.rows] == [
+        ("limit range", Finding.NOT_ESTABLISHED, "its constraints could not be read")
+    ]
+    assert not possibilities.nothing_constrains
+
+
+def test_a_claim_of_another_class_leaves_the_total_exact() -> None:
+    key = "gold.storageclass.storage.k8s.io/requests.storage"
+    quota = _quota("storage", {key: ("85Gi", "100Gi")})
+    claims = (
+        ClaimTemplate("data", "10Gi", "gold"),
+        ClaimTemplate("logs", "10Gi", "gold"),
+        ClaimTemplate("scratch", "10Gi", "silver"),
+    )
+
+    rows = _findings(_report(_stateful(*claims), quotas=(quota,), kind="StatefulSet"))
+
+    assert rows == [
+        (f"claims data, logs: {key}", Finding.WOULD_EXCEED, "needs 20Gi; 15Gi remaining")
+    ]
+
+
+def test_every_claim_meets_full_quotas_and_its_own_limit_range_bounds() -> None:
+    count = "gold.storageclass.storage.k8s.io/persistentvolumeclaims"
+    quota = _quota("storage", {"requests.storage": ("100Gi", "100Gi"), count: ("5", "5")})
+    limits = _range(LimitValue("PersistentVolumeClaim", "storage", max="5Gi"))
+    claims = (ClaimTemplate("data", "10Gi", "gold"), ClaimTemplate("logs", "10Gi", "gold"))
+
+    rows = _findings(
+        _report(_stateful(*claims), quotas=(quota,), limit_ranges=(limits,), kind="StatefulSet")
+    )
+
+    assert rows == [
+        ("claims data, logs: requests.storage", Finding.WOULD_EXCEED, "needs 20Gi; none remaining"),
+        (f"claims data, logs: {count}", Finding.AT_LIMIT, "5 of 5 claims exist"),
+        ("claim data: storage", Finding.ABOVE_MAXIMUM, "request 10Gi is above 5Gi"),
+        ("claim logs: storage", Finding.ABOVE_MAXIMUM, "request 10Gi is above 5Gi"),
+    ]
+
+
+def test_with_no_claim_known_to_charge_a_quota_only_the_open_claims_are_shown() -> None:
+    key = "gold.storageclass.storage.k8s.io/requests.storage"
+    quota = _quota("storage", {key: ("lots", "100Gi")})
+
+    rows = _findings(
+        _report(
+            _stateful(ClaimTemplate("cache", "10Gi", None)), quotas=(quota,), kind="StatefulSet"
+        )
+    )
+
+    assert rows == [
+        (
+            f"claim cache: {key}",
+            Finding.NOT_ESTABLISHED,
+            "the claim sets no storage class, and the cluster default may apply",
+        )
+    ]

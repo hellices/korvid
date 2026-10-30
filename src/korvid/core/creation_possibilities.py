@@ -379,6 +379,15 @@ def _owners(value: LimitValue, demand: PodDemand) -> list[_Values]:
 def _limit_range_rows(
     limit_range: LimitRangeProjection, demand: PodDemand
 ) -> Iterator[Possibility]:
+    if not limit_range.complete:
+        yield Possibility(
+            "LimitRange",
+            limit_range.name,
+            limit_range.uid,
+            "limit range",
+            Finding.NOT_ESTABLISHED,
+            "its constraints could not be read",
+        )
     for value in limit_range.values:
         for owner in _owners(value, demand):
             for finding, detail in _checks(value, owner):
@@ -390,26 +399,53 @@ def _limit_range_rows(
 # --- claims -----------------------------------------------------------------
 
 
-def _claim_quota_row(entry: QuotaEntry, claim: ClaimTemplate) -> tuple[Finding, str] | None:
-    key = entry.resource
+def _claim_charge(key: str, claim: ClaimTemplate) -> Decimal | tuple[Finding, str] | None:
+    """What `claim` charges quota `key`: an amount, `None` for nothing, or why it is open."""
     if _STORAGE_CLASS in key:
         if claim.storage_class is None:
             return Finding.NOT_ESTABLISHED, _DEFAULT_CLASS
         if key.partition(_STORAGE_CLASS)[0] != claim.storage_class:
             return None
         key = key.partition(_STORAGE_CLASS)[2]
-    counted = key in _CLAIM_COUNTS
-    amount = Decimal(1) if counted else _parse(claim.storage)
-    if amount is None:
-        return Finding.NOT_ESTABLISHED, _UNKNOWN_CLAIM
-    over = _over(entry, amount)
+    if key in _CLAIM_COUNTS:
+        return Decimal(1)
+    amount = _parse(claim.storage)
+    return (Finding.NOT_ESTABLISHED, _UNKNOWN_CLAIM) if amount is None else amount
+
+
+def _claims_over(entry: QuotaEntry, total: Decimal, at_least: bool) -> tuple[Finding, str] | None:
+    over = _over(entry, total)
     if over is None:
         return Finding.NOT_ESTABLISHED, _UNREADABLE_USAGE
     if not over:
         return None
-    if counted:
+    counted = entry.resource.rpartition(_STORAGE_CLASS)[2] in _CLAIM_COUNTS
+    if counted and _over(entry, Decimal(1)):
         return Finding.AT_LIMIT, f"{entry.used} of {entry.hard} claims exist"
-    return Finding.WOULD_EXCEED, _need(entry, amount)
+    return Finding.WOULD_EXCEED, _need(entry, total, at_least=at_least)
+
+
+def _claim_quota_rows(
+    quota: QuotaProjection, entry: QuotaEntry, claims: Sequence[ClaimTemplate]
+) -> Iterator[Possibility]:
+    """`entry` checked against every new claim it charges, since they are created together."""
+
+    def row(names: Sequence[str], finding: Finding, detail: str) -> Possibility:
+        subject = f"{'claim' if len(names) == 1 else 'claims'} {', '.join(names)}: {entry.resource}"
+        return Possibility("ResourceQuota", quota.name, quota.uid, subject, finding, detail, True)
+
+    known: dict[str, Decimal] = {}
+    open_claims = False
+    for claim in claims:
+        charge = _claim_charge(entry.resource, claim)
+        if isinstance(charge, Decimal):
+            known[claim.name] = charge
+        elif charge is not None:
+            open_claims = True
+            yield row([claim.name], *charge)
+    found = _claims_over(entry, sum(known.values(), Decimal(0)), open_claims)
+    if known and found is not None:
+        yield row(list(known), *found)
 
 
 def _claim_rows(
@@ -417,16 +453,14 @@ def _claim_rows(
     quotas: Sequence[QuotaProjection],
     limit_ranges: Sequence[LimitRangeProjection],
 ) -> Iterator[Possibility]:
+    for quota in quotas:
+        # A quota whose scopes were not all read may be scoped: its own row says so.
+        if quota.stale or quota.scopes or quota.scope_selector or not quota.scopes_complete:
+            continue
+        for entry in quota.entries:
+            if _is_claim_key(entry.resource):
+                yield from _claim_quota_rows(quota, entry, claims)
     for claim in claims:
-        for quota in quotas:
-            # A quota whose scopes were not all read may be scoped: its own row says so.
-            if quota.stale or quota.scopes or quota.scope_selector or not quota.scopes_complete:
-                continue
-            for entry in quota.entries:
-                found = _claim_quota_row(entry, claim) if _is_claim_key(entry.resource) else None
-                if found is not None:
-                    subject = f"claim {claim.name}: {entry.resource}"
-                    yield Possibility("ResourceQuota", quota.name, quota.uid, subject, *found, True)
         yield from _claim_limit_rows(claim, limit_ranges)
 
 

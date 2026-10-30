@@ -379,7 +379,7 @@ def test_a_pod_level_limit_stands_in_for_a_missing_pod_level_request() -> None:
 
     demand = pod_demand(template, (defaults,))
 
-    assert demand.requests["cpu"] == Decimal(2)
+    assert (demand.requests["cpu"], demand.limits["cpu"]) == (Decimal(2), Decimal(2))
     assert demand.pod_level == frozenset({"cpu"})
 
 

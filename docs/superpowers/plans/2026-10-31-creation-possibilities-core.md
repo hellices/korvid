@@ -35,6 +35,8 @@ The view shows the result in the next slice.
   - `maxLimitRequestRatio` needs both a request and a limit, each nonzero.
   - A value checked against a bound is shown in that bound's unit family.
 - **Claims are checked only against unscoped quotas.** Quota scopes match Pods, so a scoped quota's storage keys are not claim constraints.
+- **New claims are charged together.** A StatefulSet creates every claim of an ordinal before its Pod, so each quota entry is checked against the total of the claims it charges ("claims data, logs: requests.storage"). A claim whose class or request is unknown keeps its own not-established row, and the total then "needs at least". LimitRange bounds stay per claim.
+- **A LimitRange korvid could not wholly read is a row of its own,** "its constraints could not be read", so it can never leave nothing constraining the template.
 - **LimitRanges korvid could not all read leave defaults open.** When the LimitRange list is not conclusive, or a LimitRange is incomplete, an unseen default may still fill what a container leaves unset. Then:
   - a missing CPU or memory field is not established;
   - BestEffort is not established;
@@ -46,7 +48,7 @@ The view shows the result in the next slice.
 - **A quota whose scopes could not be read may not apply.** `QuotaProjection.scopes_complete` records that apart from `complete`: such a quota gives only "whether it applies: its scopes could not be read", and no claim row, while a quota with only an unreadable `hard` value still reports its readable entries.
 - **Any Pod-level CPU or memory leaves every required field open.** With Pod-level resources the cluster may skip the per-container checks altogether, which korvid does not observe.
 - **Unreadable values are never satisfied.** An unparsable `used` or `hard`, LimitRange bound or claim request gives a not-established row, never silence.
-- **QoS ignores zero values and Pod-level values that do not parse,** as Kubernetes does, and unprefixed `hugepages-<size>` quota keys charge the request.
+- **QoS ignores zero values, as Kubernetes does, while an unparsable Pod-level CPU or memory value leaves QoS not established.** Unprefixed `hugepages-<size>` quota keys charge the request.
 - **Ratios are explained exactly:** "limit X is more than N times the request Y", never a rounded ratio.
 - **A sidecar's own peak is not a candidate.** Apps plus sidecars already include it, so only regular init containers, with the sidecars started before them, compete with that total.
 
@@ -460,7 +462,7 @@ def test_a_pod_level_limit_stands_in_for_a_missing_pod_level_request() -> None:
 
     demand = pod_demand(template, (defaults,))
 
-    assert demand.requests["cpu"] == Decimal(2)
+    assert (demand.requests["cpu"], demand.limits["cpu"]) == (Decimal(2), Decimal(2))
     assert demand.pod_level == frozenset({"cpu"})
 
 
@@ -1078,6 +1080,35 @@ def test_a_stale_or_unreadable_quota_is_not_established() -> None:
         ),
         ({"scope_selector": (ScopeExpression("BestEffort", "DoesNotExist", ()),)}, {}, True),
         ({"scope_selector": (ScopeExpression("Terminating", "Exists", ()),)}, {}, False),
+        # Every scope and every expression must hold, not just one.
+        ({"scopes": ("Terminating", "BestEffort")}, {"active_deadline_seconds": 60}, False),
+        ({"scopes": ("Terminating", "NotBestEffort")}, {"active_deadline_seconds": 60}, True),
+        (
+            {
+                "scopes": ("NotTerminating",),
+                "scope_selector": (ScopeExpression("PriorityClass", "In", ("gold",)),),
+            },
+            {"priority_class": "low"},
+            False,
+        ),
+        (
+            {
+                "scopes": ("NotTerminating",),
+                "scope_selector": (ScopeExpression("PriorityClass", "In", ("gold",)),),
+            },
+            {"priority_class": "gold"},
+            True,
+        ),
+        (
+            {
+                "scope_selector": (
+                    ScopeExpression("PriorityClass", "Exists", ()),
+                    ScopeExpression("Terminating", "Exists", ()),
+                )
+            },
+            {"priority_class": "gold"},
+            False,
+        ),
     ],
 )
 def test_a_quota_applies_only_when_every_scope_does(
@@ -1657,6 +1688,108 @@ def test_a_pod_level_request_leaves_an_unread_default_limit_open() -> None:
     )
 
     assert rows == [("cpu", Finding.NOT_ESTABLISHED, _POD_UNSEEN)]
+
+
+def test_new_claims_are_charged_together() -> None:
+    quota = _quota(
+        "storage",
+        {"requests.storage": ("85Gi", "100Gi"), "persistentvolumeclaims": ("9", "10")},
+    )
+    claims = (ClaimTemplate("data", "10Gi", "gold"), ClaimTemplate("logs", "10Gi", "gold"))
+
+    rows = _findings(_report(_stateful(*claims), quotas=(quota,), kind="StatefulSet"))
+
+    assert rows == [
+        ("claims data, logs: requests.storage", Finding.WOULD_EXCEED, "needs 20Gi; 15Gi remaining"),
+        ("claims data, logs: persistentvolumeclaims", Finding.WOULD_EXCEED, "needs 2; 1 remaining"),
+    ]
+
+
+def test_a_per_class_quota_charges_its_class_together_and_waits_on_unknown_classes() -> None:
+    key = "gold.storageclass.storage.k8s.io/requests.storage"
+    quota = _quota("storage", {key: ("85Gi", "100Gi")})
+    claims = (
+        ClaimTemplate("data", "10Gi", "gold"),
+        ClaimTemplate("logs", "10Gi", "gold"),
+        ClaimTemplate("scratch", "10Gi", "silver"),
+        ClaimTemplate("cache", "10Gi", None),
+    )
+
+    rows = _findings(_report(_stateful(*claims), quotas=(quota,), kind="StatefulSet"))
+
+    assert rows == [
+        (
+            f"claim cache: {key}",
+            Finding.NOT_ESTABLISHED,
+            "the claim sets no storage class, and the cluster default may apply",
+        ),
+        (f"claims data, logs: {key}", Finding.WOULD_EXCEED, "needs at least 20Gi; 15Gi remaining"),
+    ]
+
+
+def test_a_limit_range_that_could_not_be_read_is_not_established() -> None:
+    broken = LimitRangeProjection("limits", "uid-lr", (), complete=False)
+
+    possibilities = possible_constraints(_report(_template(), limit_ranges=(broken,)), NOW)
+
+    assert possibilities is not None
+    assert [(p.subject, p.finding, p.detail) for p in possibilities.rows] == [
+        ("limit range", Finding.NOT_ESTABLISHED, "its constraints could not be read")
+    ]
+    assert not possibilities.nothing_constrains
+
+
+def test_a_claim_of_another_class_leaves_the_total_exact() -> None:
+    key = "gold.storageclass.storage.k8s.io/requests.storage"
+    quota = _quota("storage", {key: ("85Gi", "100Gi")})
+    claims = (
+        ClaimTemplate("data", "10Gi", "gold"),
+        ClaimTemplate("logs", "10Gi", "gold"),
+        ClaimTemplate("scratch", "10Gi", "silver"),
+    )
+
+    rows = _findings(_report(_stateful(*claims), quotas=(quota,), kind="StatefulSet"))
+
+    assert rows == [
+        (f"claims data, logs: {key}", Finding.WOULD_EXCEED, "needs 20Gi; 15Gi remaining")
+    ]
+
+
+def test_every_claim_meets_full_quotas_and_its_own_limit_range_bounds() -> None:
+    count = "gold.storageclass.storage.k8s.io/persistentvolumeclaims"
+    quota = _quota("storage", {"requests.storage": ("100Gi", "100Gi"), count: ("5", "5")})
+    limits = _range(LimitValue("PersistentVolumeClaim", "storage", max="5Gi"))
+    claims = (ClaimTemplate("data", "10Gi", "gold"), ClaimTemplate("logs", "10Gi", "gold"))
+
+    rows = _findings(
+        _report(_stateful(*claims), quotas=(quota,), limit_ranges=(limits,), kind="StatefulSet")
+    )
+
+    assert rows == [
+        ("claims data, logs: requests.storage", Finding.WOULD_EXCEED, "needs 20Gi; none remaining"),
+        (f"claims data, logs: {count}", Finding.AT_LIMIT, "5 of 5 claims exist"),
+        ("claim data: storage", Finding.ABOVE_MAXIMUM, "request 10Gi is above 5Gi"),
+        ("claim logs: storage", Finding.ABOVE_MAXIMUM, "request 10Gi is above 5Gi"),
+    ]
+
+
+def test_with_no_claim_known_to_charge_a_quota_only_the_open_claims_are_shown() -> None:
+    key = "gold.storageclass.storage.k8s.io/requests.storage"
+    quota = _quota("storage", {key: ("lots", "100Gi")})
+
+    rows = _findings(
+        _report(
+            _stateful(ClaimTemplate("cache", "10Gi", None)), quotas=(quota,), kind="StatefulSet"
+        )
+    )
+
+    assert rows == [
+        (
+            f"claim cache: {key}",
+            Finding.NOT_ESTABLISHED,
+            "the claim sets no storage class, and the cluster default may apply",
+        )
+    ]
 ```
 
 Create `src/korvid/core/creation_possibilities.py` with:
@@ -2043,6 +2176,15 @@ def _owners(value: LimitValue, demand: PodDemand) -> list[_Values]:
 def _limit_range_rows(
     limit_range: LimitRangeProjection, demand: PodDemand
 ) -> Iterator[Possibility]:
+    if not limit_range.complete:
+        yield Possibility(
+            "LimitRange",
+            limit_range.name,
+            limit_range.uid,
+            "limit range",
+            Finding.NOT_ESTABLISHED,
+            "its constraints could not be read",
+        )
     for value in limit_range.values:
         for owner in _owners(value, demand):
             for finding, detail in _checks(value, owner):
@@ -2054,26 +2196,53 @@ def _limit_range_rows(
 # --- claims -----------------------------------------------------------------
 
 
-def _claim_quota_row(entry: QuotaEntry, claim: ClaimTemplate) -> tuple[Finding, str] | None:
-    key = entry.resource
+def _claim_charge(key: str, claim: ClaimTemplate) -> Decimal | tuple[Finding, str] | None:
+    """What `claim` charges quota `key`: an amount, `None` for nothing, or why it is open."""
     if _STORAGE_CLASS in key:
         if claim.storage_class is None:
             return Finding.NOT_ESTABLISHED, _DEFAULT_CLASS
         if key.partition(_STORAGE_CLASS)[0] != claim.storage_class:
             return None
         key = key.partition(_STORAGE_CLASS)[2]
-    counted = key in _CLAIM_COUNTS
-    amount = Decimal(1) if counted else _parse(claim.storage)
-    if amount is None:
-        return Finding.NOT_ESTABLISHED, _UNKNOWN_CLAIM
-    over = _over(entry, amount)
+    if key in _CLAIM_COUNTS:
+        return Decimal(1)
+    amount = _parse(claim.storage)
+    return (Finding.NOT_ESTABLISHED, _UNKNOWN_CLAIM) if amount is None else amount
+
+
+def _claims_over(entry: QuotaEntry, total: Decimal, at_least: bool) -> tuple[Finding, str] | None:
+    over = _over(entry, total)
     if over is None:
         return Finding.NOT_ESTABLISHED, _UNREADABLE_USAGE
     if not over:
         return None
-    if counted:
+    counted = entry.resource.rpartition(_STORAGE_CLASS)[2] in _CLAIM_COUNTS
+    if counted and _over(entry, Decimal(1)):
         return Finding.AT_LIMIT, f"{entry.used} of {entry.hard} claims exist"
-    return Finding.WOULD_EXCEED, _need(entry, amount)
+    return Finding.WOULD_EXCEED, _need(entry, total, at_least=at_least)
+
+
+def _claim_quota_rows(
+    quota: QuotaProjection, entry: QuotaEntry, claims: Sequence[ClaimTemplate]
+) -> Iterator[Possibility]:
+    """`entry` checked against every new claim it charges, since they are created together."""
+
+    def row(names: Sequence[str], finding: Finding, detail: str) -> Possibility:
+        subject = f"{'claim' if len(names) == 1 else 'claims'} {', '.join(names)}: {entry.resource}"
+        return Possibility("ResourceQuota", quota.name, quota.uid, subject, finding, detail, True)
+
+    known: dict[str, Decimal] = {}
+    open_claims = False
+    for claim in claims:
+        charge = _claim_charge(entry.resource, claim)
+        if isinstance(charge, Decimal):
+            known[claim.name] = charge
+        elif charge is not None:
+            open_claims = True
+            yield row([claim.name], *charge)
+    found = _claims_over(entry, sum(known.values(), Decimal(0)), open_claims)
+    if known and found is not None:
+        yield row(list(known), *found)
 
 
 def _claim_rows(
@@ -2081,16 +2250,14 @@ def _claim_rows(
     quotas: Sequence[QuotaProjection],
     limit_ranges: Sequence[LimitRangeProjection],
 ) -> Iterator[Possibility]:
+    for quota in quotas:
+        # A quota whose scopes were not all read may be scoped: its own row says so.
+        if quota.stale or quota.scopes or quota.scope_selector or not quota.scopes_complete:
+            continue
+        for entry in quota.entries:
+            if _is_claim_key(entry.resource):
+                yield from _claim_quota_rows(quota, entry, claims)
     for claim in claims:
-        for quota in quotas:
-            # A quota whose scopes were not all read may be scoped: its own row says so.
-            if quota.stale or quota.scopes or quota.scope_selector or not quota.scopes_complete:
-                continue
-            for entry in quota.entries:
-                found = _claim_quota_row(entry, claim) if _is_claim_key(entry.resource) else None
-                if found is not None:
-                    subject = f"claim {claim.name}: {entry.resource}"
-                    yield Possibility("ResourceQuota", quota.name, quota.uid, subject, *found, True)
         yield from _claim_limit_rows(claim, limit_ranges)
 
 
