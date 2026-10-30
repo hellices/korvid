@@ -3,7 +3,7 @@
 **Issue:** [#411](https://github.com/hellices/korvid/issues/411) (design: [#515](https://github.com/hellices/korvid/issues/515))  
 **Release:** v0.7.0  
 **Builds on:** [capability-aware diagnostics](2026-10-25-capability-aware-diagnostics-design.md) (S1–S6, merged) and the reads, renderer and lifecycle of [ConfigMap and Secret propagation](2026-10-28-config-propagation-design.md) (#410, merged)  
-**Status:** Proposed — awaiting maintainer review
+**Status:** Decisions confirmed by the maintainer; awaiting merge
 
 ## Purpose
 
@@ -34,23 +34,24 @@ LimitRanges, and keeps four answers apart:
 It is the second consumer of the #409 foundation, after #410, and reuses its
 readers, renderer, run tokens and lifecycle.
 
-## Decisions to confirm in review
+## Decisions
 
-This design was written without a clarifying conversation, so these choices
-are stated rather than assumed agreed:
+The maintainer confirmed these choices in review:
 
-1. **Five workload kinds.** The view opens on a Deployment, ReplicaSet,
-   StatefulSet, DaemonSet or Job: each of their controllers records
-   `FailedCreate` when the API server rejects a Pod it creates. A CronJob
-   creates Jobs, not Pods; its Jobs can be inspected directly. A bare Pod is
-   rejected at the client, not by a controller.
+1. **Six workload kinds.** The view opens on a Deployment, ReplicaSet,
+   StatefulSet, DaemonSet, Job or CronJob. The first five's controllers
+   record `FailedCreate` when the API server rejects a Pod they create. A
+   CronJob's controller records `FailedCreate` when it cannot create a Job,
+   and the view follows the CronJob's Jobs for their Pods' failures. A bare
+   Pod is rejected at the client, not by a controller.
 2. **Reads at run time.** As in #410, the view reads what it needs when it
    opens, through the #409 readers, and keeps nothing between runs. The
    watch store keeps summaries without the Pod template or Events, and
    holding them all session long would serve one occasional view.
 3. **Events are listed and filtered locally.** The readers do not send field
    selectors, and a Deployment's failures are recorded on several
-   ReplicaSets, which one selector cannot name. So the view lists the
+   ReplicaSets, and a CronJob's on several Jobs, which one selector cannot
+   name. So the view lists the
    namespace's Events within the maximum budgets and keeps only the
    `FailedCreate` events about the workload. A busy namespace can truncate
    the list, and the view says so. Adding field selectors to the reader
@@ -70,10 +71,10 @@ are stated rather than assumed agreed:
    workload's next Pod would run into a policy needs the template's
    demand with LimitRange defaults applied and each quota scope's
    applicability, so it is its own pull request.
-7. **The command is `:admission`.** `:quota` is the ResourceQuota view's
-   kind alias, and `:creation` would leave `c` prefixes harder to complete.
-   The palette entry is **Explain workload creation failures**. As in #410,
-   no default key is bound.
+7. **The command is `:blocked`.** `:quota` is the ResourceQuota view's
+   kind alias; no command or alias begins with `bl`. The palette entry is
+   **Explain workload creation failures**. As in #410, no default key is
+   bound.
 
 ## Approaches considered
 
@@ -93,7 +94,7 @@ are stated rather than assumed agreed:
 
 ## The view
 
-Opened on a workload row, from `:admission` or the palette entry:
+Opened on a workload row, from `:blocked` or the palette entry:
 
 ```text
 Deployment shop/api   desired 3 · created 0
@@ -125,7 +126,8 @@ The rejections were recorded at the times shown; the quotas are as read now.
 - **The header** names the workload and its counters: for a Deployment,
   ReplicaSet or StatefulSet, `spec.replicas` and `status.replicas`; for a
   DaemonSet, `desiredNumberScheduled` and `currentNumberScheduled`; for a
-  Job, `parallelism` and `status.active`. They come from the workload's own
+  Job, `parallelism` and `status.active`; for a CronJob, whether it is
+  suspended, its active Jobs and `lastScheduleTime`. They come from the workload's own
   status, so they say what the controller last reported, not how many Pods
   exist.
 - **Recorded creation failures** are rows of `FailedCreate` events and
@@ -148,18 +150,19 @@ All reads are in the workload's namespace, under one run token:
 | --- | --- | --- | --- | --- |
 | `workload` | the workload's resource in `apps/v1` or `batch/v1` | GET, object, expected UID | confirms | see Projections |
 | `replicasets` | `replicasets` in `apps/v1`, Deployments only | LIST, maximum budgets | confirms | name, UID, controller owner UID, `ReplicaFailure` condition |
-| `events` | `EVENTS` (`events.k8s.io/v1`, then core `v1`) | LIST, maximum budgets | confirms | `FailedCreate` events about the workload or its ReplicaSets |
+| `jobs` | `jobs` in `batch/v1`, CronJobs only | LIST, maximum budgets | confirms | name, UID, controller owner UID, creation time |
+| `events` | `EVENTS` (`events.k8s.io/v1`, then core `v1`) | LIST, maximum budgets | confirms | `FailedCreate` events about the workload or its ReplicaSets or Jobs |
 | `quotas` | `resourcequotas` in `v1` | LIST | rules out | name, UID, `spec.hard`, `spec.scopes`, `spec.scopeSelector`, `status.hard`, `status.used` |
 | `limit-ranges` | `limitranges` in `v1` | LIST | rules out | name, UID, `spec.limits` |
 
 - The workload and the quotas and LimitRanges are required. The
-  ReplicaSets are required for a Deployment, since its failures are
-  recorded on them. The Events are required, with the `confirms` role
+  ReplicaSets are required for a Deployment, and the Jobs for a CronJob,
+  since their Pods' failures are recorded on them. The Events are required, with the `confirms` role
   `EVENTS` forces: Events expire, so they can confirm a failure but never
   show that none happened.
 - The workload is not a payload resource, so it is read whole. ReplicaSets
-  arrive whole too. Both carry a Pod template with literal environment
-  values, so each is projected at once and only the projection leaves the
+  and Jobs arrive whole too. Each carries a Pod template with literal
+  environment values, so each is projected at once and only the projection leaves the
   run, as in #410.
 - No Pod is read: the question is about Pods that do not exist.
 
@@ -185,8 +188,12 @@ volume source or annotation.
 Deployment's UID are kept. A ReplicaSet owned by another Deployment of the
 same name, or by none, is not the workload's.
 
+**Jobs.** For a CronJob, only Jobs whose controller owner reference has the
+CronJob's UID are kept, newest first. Its Pod template is the CronJob's
+`jobTemplate.spec.template`, projected as a workload's is.
+
 **Events.** An event is kept only when its `reason` is `FailedCreate` and
-its subject is the workload or one of its ReplicaSets, matched by **UID**:
+its subject is the workload or one of its ReplicaSets or Jobs, matched by **UID**:
 `regarding.uid` for `events.k8s.io/v1`, `involvedObject.uid` for core `v1`.
 An event about an object with the right kind and name but another UID is
 about an earlier incarnation. It is not shown, but the view counts it
@@ -387,7 +394,7 @@ These follow #410:
 - The context-switch coordinator cancels the group by name, and a failed
   worker is reported through `REPORTED_WORKER_GROUPS`.
 - Availability reasons are `MISSING_CAPABILITY` without a connection,
-  `WRONG_VIEW` outside the five workload views, and `NO_SELECTION`.
+  `WRONG_VIEW` outside the six workload views, and `NO_SELECTION`.
 - The screen re-renders its evidence lines and notes against its clock, so
   a policy that ages past its freshness policy is marked stale and stops
   ruling anything out.
@@ -411,7 +418,7 @@ Each slice gets a sub-issue under #411 and its own pull request:
 | Slice | Content |
 | --- | --- |
 | Q1 core | the projections, the message classifier, quantity grouping and comparison, stale-status downgrade, and the run in `core/` |
-| Q1 view | the controller, the view, `:admission` and its palette entry, a version-matrix scenario (a namespace with `pods: "0"` and a Deployment whose ReplicaSet records `exceeded quota`), and docs |
+| Q1 view | the controller, the view, `:blocked` and its palette entry, a version-matrix scenario (a namespace with `pods: "0"` and a Deployment whose ReplicaSet records `exceeded quota`), and docs |
 | Q2 | possible constraints: the template's demand with defaults, quota scope applicability, the exact-unit formatting of computed amounts, LimitRange checks, and claim templates |
 
 ## Testing
@@ -426,14 +433,15 @@ Each slice gets a sub-issue under #411 and its own pull request:
 - Events: `events.k8s.io/v1` and core `v1` shapes, including a
   `deprecatedCount` and `deprecatedLastTimestamp` without a series; matching by UID, not
   name; an earlier incarnation's events counted and hidden; a Deployment's
-  events through its owned ReplicaSets only; a truncated list.
+  events through its owned ReplicaSets only; a CronJob's own `FailedCreate`
+  and its owned Jobs' events; a truncated list.
 - Policies: multiple quotas; scopes and scope selectors shown; missing and
   stale status downgraded, including matching hard maps with a missing
   `used` entry, and a stale quota in a truncated list keeping its basis; changing status between runs; an empty
   conclusive list versus a denied or truncated one.
 - A `ReplicaFailure` condition with `FailedCreate`, with `FailedDelete`
   (not shown), and with status `False`.
-- Recreated workloads; a workload kind outside the five.
+- Recreated workloads; a workload kind outside the six.
 - The literal-value test: a template `env[].value` is absent from the
   report's `repr`.
 - Lifecycle, as in #410: a newer run, a context switch, new credentials, a
@@ -468,6 +476,6 @@ Each slice gets a sub-issue under #411 and its own pull request:
   but not scheduled is Pulse's and the Pod view's concern.
 - Admission webhooks and Pod Security admission, beyond showing their
   recorded message verbatim.
-- CronJobs, bare Pods, and workloads in other namespaces.
+- Bare Pods, and workloads in other namespaces.
 - Raising these findings in the #389 attention surface, and agent or MCP
   tools: possible follow-ups once the view has shipped.
