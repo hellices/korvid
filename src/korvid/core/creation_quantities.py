@@ -101,3 +101,45 @@ def same_quantity(left: str, right: str) -> bool | None:
     if left_value is None or right_value is None:
         return None
     return left_value == right_value
+
+
+_BINARY = (("Ei", 60), ("Pi", 50), ("Ti", 40), ("Gi", 30), ("Mi", 20), ("Ki", 10))
+_DECIMAL = (("E", 18), ("P", 15), ("T", 12), ("G", 9), ("M", 6), ("k", 3), ("", 0))
+_FRACTIONS = (("m", -3), ("u", -6), ("n", -9))
+
+
+def _binary_family(limit: str) -> bool:
+    return limit.rstrip().endswith(tuple(suffix for suffix, _ in _BINARY))
+
+
+def unit_word(resource: str) -> str:
+    """What one base unit of `resource` is called."""
+    canonical = canonical_resource(resource)
+    if canonical.endswith(".cpu"):
+        return "cores"
+    if quota_group(canonical) is QuotaGroup.COUNT:
+        return "objects"
+    if quota_group(canonical) in (QuotaGroup.COMPUTE, QuotaGroup.STORAGE):
+        return "bytes"
+    return "units"
+
+
+def format_quantity(value: Decimal, limit: str, resource: str) -> str:
+    """`value` in `limit`'s unit family, with the largest suffix that shows it exactly.
+
+    Binary suffixes when `limit` is written with one, decimal ones otherwise;
+    never rounded. An amount no suffix shows exactly is written in base units
+    with the resource's unit word.
+    """
+    if value == 0:
+        return "0"
+    family = (
+        (*((s, Decimal(2) ** e) for s, e in _BINARY), ("", Decimal(1)))
+        if _binary_family(limit)
+        else tuple((s, Decimal(10) ** e) for s, e in (*_DECIMAL, *_FRACTIONS))
+    )
+    for suffix, size in family:
+        scaled = value / size
+        if scaled == scaled.to_integral_value():
+            return f"{int(scaled)}{suffix}"
+    return f"{value.normalize():f} {unit_word(resource)}"

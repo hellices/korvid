@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
+
 import pytest
 
 from korvid.core.creation_quantities import (
     QuotaGroup,
     Usage,
     canonical_resource,
+    format_quantity,
     quota_group,
     same_quantity,
+    unit_word,
     usage,
 )
 
@@ -106,3 +110,44 @@ def test_a_quantity_too_large_for_decimal_arithmetic_is_not_established() -> Non
 
     assert usage(huge, "10") is Usage.NOT_ESTABLISHED
     assert same_quantity(huge, "10") is None
+
+
+@pytest.mark.parametrize(
+    ("value", "limit", "resource", "text"),
+    [
+        ("1.5", "2", "requests.cpu", "1500m"),
+        ("0.5", "2", "requests.cpu", "500m"),
+        ("2", "4", "requests.cpu", "2"),
+        ("0", "4", "requests.cpu", "0"),
+        ("-0.5", "2", "requests.cpu", "-500m"),
+        ("1.0000000001", "2", "requests.cpu", "1.0000000001 cores"),
+        ("1073741824", "8Gi", "limits.memory", "1Gi"),
+        ("1610612736", "8Gi", "limits.memory", "1536Mi"),
+        ("100", "1Gi", "limits.memory", "100"),
+        ("0.5", "1Gi", "limits.memory", "0.5 bytes"),
+        ("3000", "10k", "pods", "3k"),
+        ("1000000", "8G", "requests.storage", "1M"),
+        ("7", "10", "count/pods", "7"),
+    ],
+)
+def test_a_computed_amount_is_shown_exactly_in_its_limits_unit_family(
+    value: str, limit: str, resource: str, text: str
+) -> None:
+    assert format_quantity(Decimal(value), limit, resource) == text
+
+
+@pytest.mark.parametrize(
+    ("resource", "word"),
+    [
+        ("cpu", "cores"),
+        ("limits.cpu", "cores"),
+        ("memory", "bytes"),
+        ("requests.storage", "bytes"),
+        ("hugepages-2Mi", "bytes"),
+        ("pods", "objects"),
+        ("count/jobs.batch", "objects"),
+        ("requests.nvidia.com/gpu", "units"),
+    ],
+)
+def test_each_resource_names_its_base_unit(resource: str, word: str) -> None:
+    assert unit_word(resource) == word
