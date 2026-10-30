@@ -159,7 +159,7 @@ def test_a_failure_row_says_what_recorded_it_how_often_when_and_why() -> None:
         "quota compute — quota exceeded",
         EXCEEDED,
     )
-    assert row.destination == Destination("replicasets", "shop", "api-7d9f", "uid-rs")
+    assert row.destination == Destination("apps", "replicasets", "shop", "api-7d9f", "uid-rs")
 
 
 def test_a_condition_failure_and_an_undated_one_are_labelled() -> None:
@@ -170,7 +170,7 @@ def test_a_condition_failure_and_an_undated_one_are_labelled() -> None:
     (row, *_) = _rows(_report(failures=(condition,)))
 
     assert row.cells[:2] == ("Deployment api (condition)", "once · undated")
-    assert row.destination == Destination("deployments", "shop", "api", "uid-api")
+    assert row.destination == Destination("apps", "deployments", "shop", "api", "uid-api")
 
 
 @pytest.mark.parametrize(
@@ -216,7 +216,7 @@ def test_quota_rows_show_values_verbatim_with_markers_and_scopes() -> None:
     rows = [
         row
         for row in _rows(_report(failures=()))
-        if row.destination and row.destination.kind == "resourcequotas"
+        if row.destination and row.destination.resource == "resourcequotas"
     ]
 
     assert [row.cells for row in rows] == [
@@ -226,7 +226,7 @@ def test_quota_rows_show_values_verbatim_with_markers_and_scopes() -> None:
         ("", "scopes", "NotTerminating; PriorityClass In gold, silver", ""),
     ]
     assert {row.destination for row in rows} == {
-        Destination("resourcequotas", "shop", "compute", "uid-q")
+        Destination("", "resourcequotas", "shop", "compute", "uid-q")
     }
 
 
@@ -409,7 +409,7 @@ async def test_enter_on_a_row_returns_where_it_leads() -> None:
         await pilot.press("down", "down", "enter")
         await until(pilot, lambda: bool(app.result), label="view closed")
 
-    assert app.result == [Destination("resourcequotas", "shop", "compute", "uid-q")]
+    assert app.result == [Destination("", "resourcequotas", "shop", "compute", "uid-q")]
 
 
 async def test_enter_on_a_heading_does_nothing_and_escape_closes() -> None:
@@ -499,3 +499,17 @@ async def test_an_open_view_ages_its_table_cells_too() -> None:
             "quota compute (not in the quotas read) — quota exceeded"
         )
         assert table.cursor_row == 1
+
+
+async def test_a_multiline_message_is_shown_in_full() -> None:
+    multiline = replace(FAILURE, rejection=classify("first line\nsecond line\nthird line"))
+    app = _Host(
+        CreationConstraintsScreen(
+            _report(failures=(multiline,), quotas=(), limit_ranges=()), lambda: NOW
+        )
+    )
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: screen_ready(app, CreationConstraintsScreen), label="view open")
+        table = app.screen.query_one(DataTable)
+        row_key = table.coordinate_to_cell_key((1, 0)).row_key
+        assert table.rows[row_key].height == 3

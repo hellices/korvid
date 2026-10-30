@@ -31,6 +31,9 @@ NOW = datetime(2026, 10, 30, 10, 0, tzinfo=UTC)
 DEPLOYMENTS = ResourceMeta("Deployment", "deployments", "apps", "v1", True)
 CRON_JOBS = ResourceMeta("CronJob", "cronjobs", "batch", "v1", True)
 PODS = ResourceMeta("Pod", "pods", "", "v1", True)
+QUOTAS = ResourceMeta("ResourceQuota", "resourcequotas", "", "v1", True)
+REPLICA_SETS = ResourceMeta("ReplicaSet", "replicasets", "apps", "v1", True)
+FOREIGN_REPLICA_SETS = ResourceMeta("ReplicaSet", "replicasets", "vendor.example.com", "v1", True)
 FOREIGN = ResourceMeta("Deployment", "deployments", "vendor.example.com", "v1", True)
 _SERVED = {
     ("", "v1"): ("resourcequotas", "limitranges", "events"),
@@ -55,6 +58,7 @@ class FakeView(ViewState):
             "cronjobs": CRON_JOBS,
             "pods": PODS,
             "deployments.vendor.example.com": FOREIGN,
+            "resourcequotas": QUOTAS,
         }
 
     def current_kind(self) -> str:
@@ -300,7 +304,7 @@ async def test_choosing_a_row_opens_its_object_in_the_run_epoch() -> None:
     harness.ui.screen_callback(None)
     assert len(harness.ui.workers) == 1
     harness.context.current = 2
-    harness.ui.screen_callback(Destination("resourcequotas", "shop", "compute", "uid-q"))
+    harness.ui.screen_callback(Destination("", "resourcequotas", "shop", "compute", "uid-q"))
     await harness.run()
 
     assert harness.navigations == [("resourcequotas", "shop", "compute", 1, "uid-q")]
@@ -339,3 +343,35 @@ async def test_the_worker_group_is_cancelled_on_request() -> None:
     await harness.controller.cancel_workers()
 
     assert harness.ui.cancelled_groups == [CREATION_CONSTRAINTS_GROUP]
+
+
+async def _choose(harness: Harness, destination: Destination) -> None:
+    harness.controller.open_selected()
+    await harness.run()
+    assert harness.ui.screen_callback is not None
+    harness.ui.screen_callback(destination)
+    await harness.run()
+
+
+async def test_a_destination_is_opened_under_its_own_api_group_not_a_colliding_alias() -> None:
+    harness = Harness()
+    harness.view.alias_map["replicasets"] = FOREIGN_REPLICA_SETS
+    harness.view.alias_map["replicasets.apps"] = REPLICA_SETS
+
+    await _choose(harness, Destination("apps", "replicasets", "shop", "api-7d9f", "uid-rs"))
+
+    assert harness.navigations == [("replicasets.apps", "shop", "api-7d9f", 1, "uid-rs")]
+
+
+async def test_a_destination_this_session_does_not_serve_is_said_not_opened() -> None:
+    harness = Harness()
+
+    harness.controller.open_selected()
+    await harness.run()
+    assert harness.ui.screen_callback is not None
+    harness.ui.screen_callback(Destination("apps", "replicasets", "shop", "api-7d9f", "uid-rs"))
+
+    assert harness.navigations == []
+    assert [(n.message, n.severity) for n in harness.ui.notifications] == [
+        ("replicasets.apps is not discovered in this session", "warning")
+    ]

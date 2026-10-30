@@ -67,9 +67,14 @@ _LIMIT_FIELDS: tuple[tuple[str, Callable[[LimitValue], str | None]], ...] = (
 
 @dataclass(frozen=True, slots=True)
 class Destination:
-    """The object a row leads to: a view alias, its namespace and name, and its UID."""
+    """The object a row leads to: its API group and resource, namespace, name and UID.
 
-    kind: str
+    The group is kept so the caller resolves the resource by identity, not by a
+    display alias another API may have claimed.
+    """
+
+    group: str
+    resource: str
     namespace: str
     name: str
     uid: str | None = None
@@ -147,8 +152,9 @@ def _failure_row(failure: Failure, report: CreationReport, now: datetime) -> Row
     if failure.source is FailureSource.CONDITION:
         label = f"{label} (condition)"
     when = "undated" if failure.at is None else f"last {elapsed_text(failure.at, now)}"
+    workload = WORKLOAD_KINDS[subject.kind]
     destination = Destination(
-        WORKLOAD_KINDS[subject.kind].resource, report.target.namespace, subject.name, subject.uid
+        workload.group, workload.resource, report.target.namespace, subject.name, subject.uid
     )
     times = "once" if failure.count == 1 else f"{failure.count} times"
     cells = (label, f"{times} · {when}", _rejection_text(failure, report, now))
@@ -171,7 +177,7 @@ def _marker(quota: QuotaProjection, usage: Usage) -> str:
 
 
 def _quota_rows(quota: QuotaProjection, namespace: str) -> list[Row]:
-    destination = Destination("resourcequotas", namespace, quota.name, quota.uid)
+    destination = Destination("", "resourcequotas", namespace, quota.name, quota.uid)
     cells: list[tuple[str, str, str, str]] = [
         (
             "",
@@ -201,7 +207,7 @@ def _limit_text(value: LimitValue) -> str:
 
 
 def _limit_range_rows(limit_range: LimitRangeProjection, namespace: str) -> list[Row]:
-    destination = Destination("limitranges", namespace, limit_range.name, limit_range.uid)
+    destination = Destination("", "limitranges", namespace, limit_range.name, limit_range.uid)
     cells: list[tuple[str, str, str, str]] = [
         ("", f"{value.type} {value.resource}", _limit_text(value), "")
         for value in limit_range.values
@@ -410,7 +416,8 @@ class CreationConstraintsScreen(ModalScreen[Destination | None]):
             key = f"r{index}"
             if row.destination is not None:
                 self._rows[key] = row.destination
-            table.add_row(*(Text(cell) for cell in row.cells), key=key)
+            # A rejection message can span lines; the row grows to show all of it.
+            table.add_row(*(Text(cell) for cell in row.cells), key=key, height=None)
             first = index if first is None else first
         if first is not None:
             table.move_cursor(row=first)

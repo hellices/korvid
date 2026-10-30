@@ -19,6 +19,7 @@ from korvid.core.capability import RunToken
 from korvid.core.creation_constraints import CreationTarget, explain_creation
 from korvid.core.creation_workloads import WORKLOAD_KINDS
 from korvid.core.run_tokens import RunTracker
+from korvid.k8s.discovery import canonical_resource_alias, resolve_resource
 from korvid.k8s.evidence_requests import EvidenceClient
 from korvid.ui.action_availability import AvailabilityCode, UnavailableReason
 from korvid.ui.ui_surface import UiSurface
@@ -139,12 +140,21 @@ class CreationConstraintsController:
         )
 
     def _open(self, destination: Destination | None, epoch: int) -> None:
+        """Open a row's object by its API identity, never by a colliding display alias."""
         if destination is None:
             return
+        aliases = self._view.aliases()
+        meta = resolve_resource(aliases, destination.group, destination.resource)
+        if meta is None:
+            name = destination.resource
+            qualified = f"{name}.{destination.group}" if destination.group else name
+            self._ui.notify(
+                f"{qualified} is not discovered in this session", severity="warning", markup=False
+            )
+            return
+        alias = canonical_resource_alias(aliases, meta)
         self._ui.run_worker(
-            self._navigate(
-                destination.kind, destination.namespace, destination.name, epoch, destination.uid
-            ),
+            self._navigate(alias, destination.namespace, destination.name, epoch, destination.uid),
             group=CREATION_CONSTRAINTS_GROUP,
             exit_on_error=False,
         )

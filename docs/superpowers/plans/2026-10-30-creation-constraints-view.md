@@ -25,6 +25,10 @@
 - **Four generic columns.** The view's sections differ, so the table uses `Object`, `What`, `Value` and `Note` for all three, with a heading row per section, as the `:consumers` view does.
 - **Counts read "once" or "N times".** The design's sketch used `12×`; ruff rejects the ambiguous multiplication sign, and words read better.
 - **`elapsed_text`.** Failure ages read "last 2m ago", so `evidence_text` gains `elapsed_text`, which `age_text` now uses.
+- **Destinations carry their API group.** A row leads to a group and resource, not a view alias; the controller resolves it with `resolve_resource` and `canonical_resource_alias`, as `WorkspaceController.drill_into` does, so a custom API that claimed `replicasets` or `jobs` cannot receive the navigation. A resource the session has not discovered is said, not opened.
+- **Rows grow to fit.** Data rows use automatic height, so a multiline rejection message is shown in full.
+- **Unreadable policies are said.** A quota or LimitRange the projection could not read in full shows "constraints could not be read", never "no hard limits" or "no constraints".
+- **The table's times refresh too.** The timer re-renders time-dependent cells (failure ages and quota attribution) with `update_cell`, keeping the cursor.
 - **The fake UI surface records exclusivity.** `FakeUiSurface.exclusive_workers` lets the controller test pin `exclusive=True`, which no test checked before.
 
 ## File structure
@@ -208,7 +212,7 @@ def test_a_failure_row_says_what_recorded_it_how_often_when_and_why() -> None:
         "quota compute — quota exceeded",
         EXCEEDED,
     )
-    assert row.destination == Destination("replicasets", "shop", "api-7d9f", "uid-rs")
+    assert row.destination == Destination("apps", "replicasets", "shop", "api-7d9f", "uid-rs")
 
 
 def test_a_condition_failure_and_an_undated_one_are_labelled() -> None:
@@ -219,7 +223,7 @@ def test_a_condition_failure_and_an_undated_one_are_labelled() -> None:
     (row, *_) = _rows(_report(failures=(condition,)))
 
     assert row.cells[:2] == ("Deployment api (condition)", "once · undated")
-    assert row.destination == Destination("deployments", "shop", "api", "uid-api")
+    assert row.destination == Destination("apps", "deployments", "shop", "api", "uid-api")
 
 
 @pytest.mark.parametrize(
@@ -265,7 +269,7 @@ def test_quota_rows_show_values_verbatim_with_markers_and_scopes() -> None:
     rows = [
         row
         for row in _rows(_report(failures=()))
-        if row.destination and row.destination.kind == "resourcequotas"
+        if row.destination and row.destination.resource == "resourcequotas"
     ]
 
     assert [row.cells for row in rows] == [
@@ -275,7 +279,7 @@ def test_quota_rows_show_values_verbatim_with_markers_and_scopes() -> None:
         ("", "scopes", "NotTerminating; PriorityClass In gold, silver", ""),
     ]
     assert {row.destination for row in rows} == {
-        Destination("resourcequotas", "shop", "compute", "uid-q")
+        Destination("", "resourcequotas", "shop", "compute", "uid-q")
     }
 
 
@@ -458,7 +462,7 @@ async def test_enter_on_a_row_returns_where_it_leads() -> None:
         await pilot.press("down", "down", "enter")
         await until(pilot, lambda: bool(app.result), label="view closed")
 
-    assert app.result == [Destination("resourcequotas", "shop", "compute", "uid-q")]
+    assert app.result == [Destination("", "resourcequotas", "shop", "compute", "uid-q")]
 
 
 async def test_enter_on_a_heading_does_nothing_and_escape_closes() -> None:
@@ -548,6 +552,20 @@ async def test_an_open_view_ages_its_table_cells_too() -> None:
             "quota compute (not in the quotas read) — quota exceeded"
         )
         assert table.cursor_row == 1
+
+
+async def test_a_multiline_message_is_shown_in_full() -> None:
+    multiline = replace(FAILURE, rejection=classify("first line\nsecond line\nthird line"))
+    app = _Host(
+        CreationConstraintsScreen(
+            _report(failures=(multiline,), quotas=(), limit_ranges=()), lambda: NOW
+        )
+    )
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: screen_ready(app, CreationConstraintsScreen), label="view open")
+        table = app.screen.query_one(DataTable)
+        row_key = table.coordinate_to_cell_key((1, 0)).row_key
+        assert table.rows[row_key].height == 3
 ```
 
 Create `src/korvid/ui/widgets/creation_constraints_screen.py` with:
@@ -622,9 +640,14 @@ _LIMIT_FIELDS: tuple[tuple[str, Callable[[LimitValue], str | None]], ...] = (
 
 @dataclass(frozen=True, slots=True)
 class Destination:
-    """The object a row leads to: a view alias, its namespace and name, and its UID."""
+    """The object a row leads to: its API group and resource, namespace, name and UID.
 
-    kind: str
+    The group is kept so the caller resolves the resource by identity, not by a
+    display alias another API may have claimed.
+    """
+
+    group: str
+    resource: str
     namespace: str
     name: str
     uid: str | None = None
@@ -702,8 +725,9 @@ def _failure_row(failure: Failure, report: CreationReport, now: datetime) -> Row
     if failure.source is FailureSource.CONDITION:
         label = f"{label} (condition)"
     when = "undated" if failure.at is None else f"last {elapsed_text(failure.at, now)}"
+    workload = WORKLOAD_KINDS[subject.kind]
     destination = Destination(
-        WORKLOAD_KINDS[subject.kind].resource, report.target.namespace, subject.name, subject.uid
+        workload.group, workload.resource, report.target.namespace, subject.name, subject.uid
     )
     times = "once" if failure.count == 1 else f"{failure.count} times"
     cells = (label, f"{times} · {when}", _rejection_text(failure, report, now))
@@ -726,7 +750,7 @@ def _marker(quota: QuotaProjection, usage: Usage) -> str:
 
 
 def _quota_rows(quota: QuotaProjection, namespace: str) -> list[Row]:
-    destination = Destination("resourcequotas", namespace, quota.name, quota.uid)
+    destination = Destination("", "resourcequotas", namespace, quota.name, quota.uid)
     cells: list[tuple[str, str, str, str]] = [
         (
             "",
@@ -756,7 +780,7 @@ def _limit_text(value: LimitValue) -> str:
 
 
 def _limit_range_rows(limit_range: LimitRangeProjection, namespace: str) -> list[Row]:
-    destination = Destination("limitranges", namespace, limit_range.name, limit_range.uid)
+    destination = Destination("", "limitranges", namespace, limit_range.name, limit_range.uid)
     cells: list[tuple[str, str, str, str]] = [
         ("", f"{value.type} {value.resource}", _limit_text(value), "")
         for value in limit_range.values
@@ -965,7 +989,8 @@ class CreationConstraintsScreen(ModalScreen[Destination | None]):
             key = f"r{index}"
             if row.destination is not None:
                 self._rows[key] = row.destination
-            table.add_row(*(Text(cell) for cell in row.cells), key=key)
+            # A rejection message can span lines; the row grows to show all of it.
+            table.add_row(*(Text(cell) for cell in row.cells), key=key, height=None)
             first = index if first is None else first
         if first is not None:
             table.move_cursor(row=first)
@@ -1022,6 +1047,9 @@ NOW = datetime(2026, 10, 30, 10, 0, tzinfo=UTC)
 DEPLOYMENTS = ResourceMeta("Deployment", "deployments", "apps", "v1", True)
 CRON_JOBS = ResourceMeta("CronJob", "cronjobs", "batch", "v1", True)
 PODS = ResourceMeta("Pod", "pods", "", "v1", True)
+QUOTAS = ResourceMeta("ResourceQuota", "resourcequotas", "", "v1", True)
+REPLICA_SETS = ResourceMeta("ReplicaSet", "replicasets", "apps", "v1", True)
+FOREIGN_REPLICA_SETS = ResourceMeta("ReplicaSet", "replicasets", "vendor.example.com", "v1", True)
 FOREIGN = ResourceMeta("Deployment", "deployments", "vendor.example.com", "v1", True)
 _SERVED = {
     ("", "v1"): ("resourcequotas", "limitranges", "events"),
@@ -1046,6 +1074,7 @@ class FakeView(ViewState):
             "cronjobs": CRON_JOBS,
             "pods": PODS,
             "deployments.vendor.example.com": FOREIGN,
+            "resourcequotas": QUOTAS,
         }
 
     def current_kind(self) -> str:
@@ -1291,7 +1320,7 @@ async def test_choosing_a_row_opens_its_object_in_the_run_epoch() -> None:
     harness.ui.screen_callback(None)
     assert len(harness.ui.workers) == 1
     harness.context.current = 2
-    harness.ui.screen_callback(Destination("resourcequotas", "shop", "compute", "uid-q"))
+    harness.ui.screen_callback(Destination("", "resourcequotas", "shop", "compute", "uid-q"))
     await harness.run()
 
     assert harness.navigations == [("resourcequotas", "shop", "compute", 1, "uid-q")]
@@ -1330,6 +1359,38 @@ async def test_the_worker_group_is_cancelled_on_request() -> None:
     await harness.controller.cancel_workers()
 
     assert harness.ui.cancelled_groups == [CREATION_CONSTRAINTS_GROUP]
+
+
+async def _choose(harness: Harness, destination: Destination) -> None:
+    harness.controller.open_selected()
+    await harness.run()
+    assert harness.ui.screen_callback is not None
+    harness.ui.screen_callback(destination)
+    await harness.run()
+
+
+async def test_a_destination_is_opened_under_its_own_api_group_not_a_colliding_alias() -> None:
+    harness = Harness()
+    harness.view.alias_map["replicasets"] = FOREIGN_REPLICA_SETS
+    harness.view.alias_map["replicasets.apps"] = REPLICA_SETS
+
+    await _choose(harness, Destination("apps", "replicasets", "shop", "api-7d9f", "uid-rs"))
+
+    assert harness.navigations == [("replicasets.apps", "shop", "api-7d9f", 1, "uid-rs")]
+
+
+async def test_a_destination_this_session_does_not_serve_is_said_not_opened() -> None:
+    harness = Harness()
+
+    harness.controller.open_selected()
+    await harness.run()
+    assert harness.ui.screen_callback is not None
+    harness.ui.screen_callback(Destination("apps", "replicasets", "shop", "api-7d9f", "uid-rs"))
+
+    assert harness.navigations == []
+    assert [(n.message, n.severity) for n in harness.ui.notifications] == [
+        ("replicasets.apps is not discovered in this session", "warning")
+    ]
 ```
 
 Create `src/korvid/ui/creation_constraints_controller.py` with:
@@ -1356,6 +1417,7 @@ from korvid.core.capability import RunToken
 from korvid.core.creation_constraints import CreationTarget, explain_creation
 from korvid.core.creation_workloads import WORKLOAD_KINDS
 from korvid.core.run_tokens import RunTracker
+from korvid.k8s.discovery import canonical_resource_alias, resolve_resource
 from korvid.k8s.evidence_requests import EvidenceClient
 from korvid.ui.action_availability import AvailabilityCode, UnavailableReason
 from korvid.ui.ui_surface import UiSurface
@@ -1476,12 +1538,21 @@ class CreationConstraintsController:
         )
 
     def _open(self, destination: Destination | None, epoch: int) -> None:
+        """Open a row's object by its API identity, never by a colliding display alias."""
         if destination is None:
             return
+        aliases = self._view.aliases()
+        meta = resolve_resource(aliases, destination.group, destination.resource)
+        if meta is None:
+            name = destination.resource
+            qualified = f"{name}.{destination.group}" if destination.group else name
+            self._ui.notify(
+                f"{qualified} is not discovered in this session", severity="warning", markup=False
+            )
+            return
+        alias = canonical_resource_alias(aliases, meta)
         self._ui.run_worker(
-            self._navigate(
-                destination.kind, destination.namespace, destination.name, epoch, destination.uid
-            ),
+            self._navigate(alias, destination.namespace, destination.name, epoch, destination.uid),
             group=CREATION_CONSTRAINTS_GROUP,
             exit_on_error=False,
         )
