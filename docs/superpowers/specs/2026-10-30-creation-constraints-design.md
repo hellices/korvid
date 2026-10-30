@@ -276,9 +276,12 @@ The view recognises these phrasings:
   current when it has no status, when its `status.hard` differs from its
   `spec.hard` as parsed quantities, or when `status.used` lacks an entry for
   a resource in `status.hard`: its usage is then unknown, which is also
-  what makes admission reject with `status unknown for quota`. The quotas observation is then downgraded to
-  `PARTIAL`/`STALE_STATUS` with `downgrade_stale_status`, naming the quota,
-  and its rows say "status not yet updated". No quota is called "at its
+  what makes admission reject with `status unknown for quota`. When the quotas observation is
+  `AVAILABLE`, it is then downgraded to `PARTIAL`/`STALE_STATUS` with
+  `downgrade_stale_status`, naming the quota. An observation that is
+  already `PARTIAL`, for example a truncated list, keeps its own basis,
+  which is already inconclusive. Either way, the quota's rows say "status
+  not yet updated". No quota is called "at its
   limit" from stale status.
 - **Absence.** "No ResourceQuota in namespace shop" and "no LimitRange in
   namespace shop" are said only when that list is conclusive. A recorded
@@ -426,7 +429,7 @@ Each slice gets a sub-issue under #411 and its own pull request:
   events through its owned ReplicaSets only; a truncated list.
 - Policies: multiple quotas; scopes and scope selectors shown; missing and
   stale status downgraded, including matching hard maps with a missing
-  `used` entry; changing status between runs; an empty
+  `used` entry, and a stale quota in a truncated list keeping its basis; changing status between runs; an empty
   conclusive list versus a denied or truncated one.
 - A `ReplicaFailure` condition with `FailedCreate`, with `FailedDelete`
   (not shown), and with status `False`.
