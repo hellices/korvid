@@ -2014,6 +2014,8 @@ class FakeReader(EvidenceReader):
     ) -> EvidencePage:
         self.lists.append((target, limit, max_bytes))
         answer = self._answer(target)
+        if isinstance(answer, list):
+            answer = answer.pop(0)
         if isinstance(answer, EvidencePage):
             return answer
         assert isinstance(answer, tuple)
@@ -2026,6 +2028,11 @@ class FakeReader(EvidenceReader):
         answer = self._answer(target)
         assert isinstance(answer, dict)
         return answer
+
+
+def _truncated(item: dict[str, Any]) -> list[EvidencePage]:
+    """Two pages, each with more pending: the default page cap truncates the read."""
+    return [EvidencePage((item,), continuation="a"), EvidencePage((), continuation="b")]
 
 
 def _state(observation: Observation | None) -> tuple[EvidenceState, Basis] | None:
@@ -2167,12 +2174,11 @@ async def test_a_stale_quota_downgrades_an_available_quota_list() -> None:
 
 async def test_a_stale_quota_in_a_truncated_list_keeps_its_basis() -> None:
     stale = {**QUOTA, "status": {}}
-    reader = FakeReader(resourcequotas=EvidencePage((stale,), continuation="more"))
+    reader = FakeReader(resourcequotas=_truncated(stale))
 
     report = await explain_creation(reader, _snapshot(), TARGET, token=TOKEN, clock=_clock)
 
-    assert report.quotas_observation.state is EvidenceState.PARTIAL
-    assert report.quotas_observation.basis is not Basis.STALE_STATUS
+    assert _state(report.quotas_observation) == (EvidenceState.PARTIAL, Basis.TRUNCATED)
     assert report.quotas[0].stale
 
 
@@ -2297,12 +2303,11 @@ async def test_a_policy_the_projection_cannot_name_makes_its_list_inconclusive(
 
 async def test_an_unnamed_policy_in_a_truncated_list_keeps_the_lists_basis() -> None:
     unnamed = {"metadata": {"namespace": "shop"}, "spec": {"limits": []}}
-    reader = FakeReader(limitranges=EvidencePage((unnamed,), continuation="more"))
+    reader = FakeReader(limitranges=_truncated(unnamed))
 
     report = await _explain(reader)
 
-    assert report.limit_ranges_observation.state is EvidenceState.PARTIAL
-    assert report.limit_ranges_observation.basis is not Basis.MALFORMED
+    assert _state(report.limit_ranges_observation) == (EvidenceState.PARTIAL, Basis.TRUNCATED)
 ```
 
 Create `src/korvid/core/creation_constraints.py` with:
