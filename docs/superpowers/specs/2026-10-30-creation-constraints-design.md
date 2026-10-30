@@ -174,8 +174,9 @@ and for P2 the template's demand:
   `restartPolicy`, which marks a sidecar;
 - the Pod's `priorityClassName`, `activeDeadlineSeconds`,
   `runtimeClassName` and the Pod-level `resources`, when set;
-- a StatefulSet's `volumeClaimTemplates`: each claim's name, storage class
-  name and `resources.requests.storage`.
+- a StatefulSet's `volumeClaimTemplates`: each claim's name,
+  `resources.requests.storage`, and its `storageClassName`, keeping an
+  omitted name apart from an explicitly empty one.
 
 Nothing else of the template is kept: no environment, command, image,
 volume source or annotation.
@@ -268,9 +269,11 @@ The view recognises these phrasings:
 ## Evidence
 
 - **Stale quota status.** The quota controller fills `status.hard` and
-  `status.used` after `spec.hard` changes. When a quota has no status, or
-  its `status.hard` differs from its `spec.hard` as parsed quantities, its
-  values are not current. The quotas observation is then downgraded to
+  `status.used` after `spec.hard` changes. A quota's values are not
+  current when it has no status, when its `status.hard` differs from its
+  `spec.hard` as parsed quantities, or when `status.used` lacks an entry for
+  a resource in `status.hard`: its usage is then unknown, which is also
+  what makes admission reject with `status unknown for quota`. The quotas observation is then downgraded to
   `PARTIAL`/`STALE_STATUS` with `downgrade_stale_status`, naming the quota,
   and its rows say "status not yet updated". No quota is called "at its
   limit" from stale status.
@@ -326,15 +329,19 @@ does:
 | --- | --- |
 | `Terminating` / `NotTerminating` | `activeDeadlineSeconds` is set / unset |
 | `BestEffort` / `NotBestEffort` | the Pod's QoS class is BestEffort / is not: no container and no Pod-level `resources` request or limit CPU or memory, after defaults |
-| `PriorityClass` (selector) | `priorityClassName` satisfies the `In`, `NotIn`, `Exists` or `DoesNotExist` expression |
+| `PriorityClass` (selector) | `priorityClassName` satisfies the `In`, `NotIn`, `Exists` or `DoesNotExist` expression; with no `priorityClassName`, admission may assign a global-default PriorityClass, which is cluster-scoped and not read, so applicability is not established |
 | `CrossNamespacePodAffinity` | not projected; applicability is not established |
 | any other | applicability is not established |
 
 **Rows.** For each applicable quota and each resource it limits:
 
 - "would exceed" when `used + demand > hard`, with the remaining amount;
-- "requires a field" when the quota limits a compute resource the Pod
-  does not specify, even after defaults, matching `must specify`;
+- "requires a field" when the quota limits `requests.cpu`, `cpu`,
+  `limits.cpu`, `requests.memory`, `memory` or `limits.memory` and some
+  container or init container does not specify it, even after defaults,
+  matching `must specify`. Only these keys require a field; a hugepages or
+  extended-resource quota does not. The check is per container, so the
+  projection keeps which container lacks what, not only the Pod's sum;
 - "at its limit" for the `pods` and `count/pods` counts when `used >= hard`.
 
 For each LimitRange, the Pod's per-container and per-Pod values are checked
@@ -346,7 +353,11 @@ retained claims does, and the view does not read claims. So claim rows say
 "if a new claim is created": each claim template's storage request is
 checked, per storage class, against the storage and claim-count quotas and
 the `PersistentVolumeClaim` LimitRanges, and never added to the Pod's
-demand.
+demand. A claim template that omits `storageClassName` may get the
+cluster's default class at admission, which is not read. Its per-class
+checks are then not established, and so is "nothing constrains this
+template". An explicitly empty `storageClassName` means no class, so no
+per-class quota applies to it.
 
 **What P2 never says.** That the next create will fail or succeed: quota
 status is not atomic, other controllers create and delete objects
@@ -407,7 +418,8 @@ Each slice gets a sub-issue under #411 and its own pull request:
   name; an earlier incarnation's events counted and hidden; a Deployment's
   events through its owned ReplicaSets only; a truncated list.
 - Policies: multiple quotas; scopes and scope selectors shown; missing and
-  stale status downgraded; changing status between runs; an empty
+  stale status downgraded, including matching hard maps with a missing
+  `used` entry; changing status between runs; an empty
   conclusive list versus a denied or truncated one.
 - Recreated workloads; a workload kind outside the five.
 - The literal-value test: a template `env[].value` is absent from the
@@ -417,8 +429,11 @@ Each slice gets a sub-issue under #411 and its own pull request:
 - P2: defaults applied only to missing values; conflicting defaults from
   two LimitRanges; init containers and sidecars in order; Pod-level
   resources overriding one resource only; a `runtimeClassName`;
-  conditional claim rows; each scope row in the table; "would exceed" at,
-  just under and just over the limit; "requires a field"; LimitRange
+  conditional claim rows, with an omitted and an empty storage class;
+  each scope row in the table, including a PriorityClass selector with no
+  `priorityClassName`; "would exceed" at,
+  just under and just over the limit; "requires a field" for one container
+  of several, and not for a hugepages quota; LimitRange
   min, max and ratio per container, Pod and claim; remaining amounts
   formatted exactly.
 
