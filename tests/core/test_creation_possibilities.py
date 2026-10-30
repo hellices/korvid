@@ -322,7 +322,7 @@ def _range(*values: LimitValue) -> LimitRangeProjection:
         ),
         (
             LimitValue("Container", "memory", max_limit_request_ratio="1.5"),
-            (Finding.ABOVE_RATIO, "app: limit is 2 times the request, above 1.5"),
+            (Finding.ABOVE_RATIO, "app: limit 512Mi is more than 1.5 times the request 256Mi"),
         ),
         (
             LimitValue("Container", "ephemeral-storage", min="1Gi"),
@@ -538,3 +538,147 @@ def test_an_inconclusive_limit_range_list_blocks_the_conclusion() -> None:
 
     assert possibilities is not None
     assert (possibilities.rows, possibilities.nothing_constrains) == ((), False)
+
+
+def test_a_ratio_is_explained_without_rounding() -> None:
+    close = ContainerDemand("app", "container", (("cpu", "1"),), (("cpu", "1.0001"),))
+    ratio = _range(LimitValue("Container", "cpu", max_limit_request_ratio="1"))
+
+    rows = _findings(_report(_template(close), limit_ranges=(ratio,)))
+
+    assert rows == [
+        ("cpu", Finding.ABOVE_RATIO, "app: limit 1000100u is more than 1 times the request 1")
+    ]
+
+
+def test_an_unreadable_usage_is_not_established_and_blocks_the_conclusion() -> None:
+    quota = _quota("compute", {"requests.cpu": ("lots", "8")})
+
+    possibilities = possible_constraints(_report(_template(), quotas=(quota,)), NOW)
+
+    assert possibilities is not None
+    assert [(p.subject, p.finding, p.detail) for p in possibilities.rows] == [
+        ("requests.cpu", Finding.NOT_ESTABLISHED, "its used or hard amount could not be read")
+    ]
+    assert not possibilities.nothing_constrains
+
+
+@pytest.mark.parametrize(
+    ("value", "name"),
+    [
+        (LimitValue("Container", "cpu", max="lots"), "max"),
+        (LimitValue("Container", "cpu", min="lots"), "min"),
+        (LimitValue("Container", "cpu", max_limit_request_ratio="lots"), "maxLimitRequestRatio"),
+    ],
+)
+def test_an_unreadable_limit_range_bound_is_not_established(value: LimitValue, name: str) -> None:
+    rows = _findings(_report(_template(), limit_ranges=(_range(value),)))
+
+    assert rows == [("cpu", Finding.NOT_ESTABLISHED, f"app: its {name} bound could not be read")]
+
+
+def test_a_claim_count_quota_charges_one_claim() -> None:
+    quota = _quota("objects", {"count/persistentvolumeclaims": ("10", "10")})
+
+    possibilities = possible_constraints(
+        _report(
+            _stateful(ClaimTemplate("data", "1Gi", "gold")), quotas=(quota,), kind="StatefulSet"
+        ),
+        NOW,
+    )
+
+    assert possibilities is not None
+    assert [(p.subject, p.finding, p.conditional) for p in possibilities.rows] == [
+        ("claim data: count/persistentvolumeclaims", Finding.AT_LIMIT, True)
+    ]
+
+
+def test_an_unknown_claim_request_leaves_its_storage_checks_open() -> None:
+    quota = _quota(
+        "storage", {"requests.storage": ("0", "100Gi"), "persistentvolumeclaims": ("10", "10")}
+    )
+    limits = _range(LimitValue("PersistentVolumeClaim", "storage", max="5Gi", min="lots"))
+
+    possibilities = possible_constraints(
+        _report(
+            _stateful(ClaimTemplate("data", None, "gold")),
+            quotas=(quota,),
+            limit_ranges=(limits,),
+            kind="StatefulSet",
+        ),
+        NOW,
+    )
+
+    assert possibilities is not None
+    assert [(p.subject, p.finding, p.detail) for p in possibilities.rows] == [
+        (
+            "claim data: requests.storage",
+            Finding.NOT_ESTABLISHED,
+            "the claim's storage request is not established",
+        ),
+        ("claim data: persistentvolumeclaims", Finding.AT_LIMIT, "10 of 10 claims exist"),
+        (
+            "claim data: storage",
+            Finding.NOT_ESTABLISHED,
+            "the claim's storage request is not established",
+        ),
+    ]
+
+
+def test_an_unreadable_claim_limit_bound_is_not_established() -> None:
+    limits = _range(LimitValue("PersistentVolumeClaim", "storage", max="lots"))
+
+    rows = _findings(
+        _report(
+            _stateful(ClaimTemplate("data", "1Gi", "gold")),
+            limit_ranges=(limits,),
+            kind="StatefulSet",
+        )
+    )
+
+    assert rows == [
+        ("claim data: storage", Finding.NOT_ESTABLISHED, "its max bound could not be read")
+    ]
+
+
+def test_limit_ranges_not_read_leave_fields_and_growing_demand_open() -> None:
+    bare = ContainerDemand("sidecar", "container", (), ())
+    quota = _quota(
+        "compute",
+        {
+            "limits.cpu": ("0", "8"),
+            "requests.memory": ("8000Mi", "8Gi"),
+            "requests.ephemeral-storage": ("0", "1Gi"),
+        },
+    )
+
+    rows = _findings(_report(_template(APP, bare), quotas=(quota,), limits_basis=Basis.FORBIDDEN))
+
+    assert rows == [
+        ("limits.cpu", Finding.NOT_ESTABLISHED, "a LimitRange that could not be read may set it"),
+        # Already over with what is known: an unseen default can only add to it.
+        ("requests.memory", Finding.WOULD_EXCEED, "needs at least 256Mi; 192Mi remaining"),
+        (
+            "requests.ephemeral-storage",
+            Finding.NOT_ESTABLISHED,
+            "a default from a LimitRange that could not be read may add to the Pod's demand",
+        ),
+    ]
+
+
+def test_an_unreadable_claim_quota_usage_is_not_established() -> None:
+    quota = _quota("storage", {"requests.storage": ("lots", "100Gi")})
+
+    rows = _findings(
+        _report(
+            _stateful(ClaimTemplate("data", "1Gi", "gold")), quotas=(quota,), kind="StatefulSet"
+        )
+    )
+
+    assert rows == [
+        (
+            "claim data: requests.storage",
+            Finding.NOT_ESTABLISHED,
+            "its used or hard amount could not be read",
+        )
+    ]

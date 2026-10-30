@@ -54,7 +54,13 @@ class Usage(Enum):
 
 
 def canonical_resource(name: str) -> str:
-    """`name` with a short compute name replaced by the requests it means."""
+    """`name` with a short name replaced by the requests it means.
+
+    `cpu`, `memory`, `ephemeral-storage` and `hugepages-<size>` are quota
+    aliases for their `requests.` forms.
+    """
+    if name.startswith("hugepages-"):
+        return f"requests.{name}"
     return _SHORT_NAMES.get(name, name)
 
 

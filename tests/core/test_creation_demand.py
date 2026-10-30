@@ -317,3 +317,48 @@ def test_each_containers_values_after_defaults_are_kept_in_order() -> None:
             "setup", {"cpu": Decimal(2)}, {"cpu": Decimal(2)}, frozenset(), frozenset()
         ),
     )
+
+
+def test_zero_values_do_not_change_the_qos_class() -> None:
+    zero = _container("a", requests={"cpu": "0"}, limits={"memory": "0"})
+
+    assert pod_demand(_template(zero), ()).best_effort is True
+
+
+def test_an_unknown_pod_level_value_leaves_the_qos_class_unknown() -> None:
+    template = _template(_container("a"), pod_requests=(("cpu", "lots"),))
+
+    assert pod_demand(template, ()).best_effort is None
+
+
+def test_an_unprefixed_hugepages_key_charges_the_request() -> None:
+    demand = pod_demand(_template(_container("a", requests={"hugepages-2Mi": "4Mi"})), ())
+
+    assert demand.for_quota("hugepages-2Mi") == Decimal(4 * 2**20)
+
+
+def test_defaults_not_read_leave_qos_and_missing_values_open() -> None:
+    bare = pod_demand(_template(_container("a")), (), defaults_known=False)
+    full = pod_demand(
+        _template(_container("a", requests={"cpu": "1"}, limits={"cpu": "1"})),
+        (),
+        defaults_known=False,
+    )
+
+    assert bare.best_effort is None
+    assert bare.may_grow("requests.cpu")
+    assert not full.may_grow("requests.cpu")
+    assert not full.may_grow("pods")
+    assert not pod_demand(_template(_container("a")), ()).may_grow("requests.cpu")
+
+
+def test_a_value_set_at_pod_level_or_set_unreadably_cannot_grow() -> None:
+    pod_level = pod_demand(
+        _template(_container("a"), pod_requests=(("cpu", "1"),)), (), defaults_known=False
+    )
+    unreadable = pod_demand(
+        _template(_container("a", requests={"cpu": "x"})), (), defaults_known=False
+    )
+
+    assert not pod_level.may_grow("requests.cpu")
+    assert not unreadable.may_grow("requests.cpu")

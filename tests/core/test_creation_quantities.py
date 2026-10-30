@@ -24,6 +24,7 @@ from korvid.core.creation_quantities import (
         ("cpu", "requests.cpu"),
         ("memory", "requests.memory"),
         ("ephemeral-storage", "requests.ephemeral-storage"),
+        ("hugepages-2Mi", "requests.hugepages-2Mi"),
         ("requests.cpu", "requests.cpu"),
         ("limits.memory", "limits.memory"),
         ("pods", "pods"),

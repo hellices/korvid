@@ -30,12 +30,15 @@ from korvid.core.creation_policies import (
     QuotaProjection,
     ScopeExpression,
 )
-from korvid.core.creation_quantities import canonical_resource, format_quantity
+from korvid.core.creation_quantities import canonical_resource, format_quantity, unit_word
 from korvid.core.creation_workloads import ClaimTemplate, PodTemplate
 from korvid.k8s.models import parse_quantity
 
 _STORAGE_CLASS = ".storageclass.storage.k8s.io/"
-_CLAIM_KEYS = frozenset({"requests.storage", "persistentvolumeclaims"})
+_CLAIM_KEYS = frozenset(
+    {"requests.storage", "persistentvolumeclaims", "count/persistentvolumeclaims"}
+)
+_CLAIM_COUNTS = frozenset({"persistentvolumeclaims", "count/persistentvolumeclaims"})
 _POD_COUNTS = frozenset({"pods", "count/pods"})
 _NO_PRIORITY = "the Pod sets no priorityClassName, and a cluster default may apply"
 _POD_LEVEL = (
@@ -43,6 +46,10 @@ _POD_LEVEL = (
     "container's is not observed"
 )
 _DEFAULT_CLASS = "the claim sets no storage class, and the cluster default may apply"
+_UNREADABLE_USAGE = "its used or hard amount could not be read"
+_UNKNOWN_CLAIM = "the claim's storage request is not established"
+_UNSEEN_FIELD = "a LimitRange that could not be read may set it"
+_UNSEEN_GROWTH = "a default from a LimitRange that could not be read may add to the Pod's demand"
 
 
 class Finding(StrEnum):
@@ -148,14 +155,21 @@ def _is_claim_key(key: str) -> bool:
     return key in _CLAIM_KEYS or _STORAGE_CLASS in key
 
 
-def _exceeds(entry: QuotaEntry, amount: Decimal) -> str | None:
-    """The detail of a would-exceed row, if `amount` more takes `entry` past its limit."""
+def _over(entry: QuotaEntry, amount: Decimal) -> bool | None:
+    """Whether `amount` more takes `entry` past its limit; `None` if a value does not parse."""
     used, hard = _parse(entry.used), _parse(entry.hard)
-    if used is None or hard is None or used + amount <= hard:
+    if used is None or hard is None:
         return None
-    remaining = hard - used
+    return used + amount > hard
+
+
+def _need(entry: QuotaEntry, amount: Decimal, *, at_least: bool = False) -> str:
+    """What the would-exceed row says: what is needed, and what remains."""
+    used, hard = _parse(entry.used), _parse(entry.hard)
+    remaining = (hard or Decimal(0)) - (used or Decimal(0))
     left = format_quantity(remaining, entry.hard, entry.resource) if remaining > 0 else "none"
-    return f"needs {format_quantity(amount, entry.hard, entry.resource)}; {left} remaining"
+    needed = format_quantity(amount, entry.hard, entry.resource)
+    return f"needs {'at least ' if at_least else ''}{needed}; {left} remaining"
 
 
 def _field_row(entry: QuotaEntry, demand: PodDemand) -> tuple[Finding, str] | None:
@@ -167,25 +181,31 @@ def _field_row(entry: QuotaEntry, demand: PodDemand) -> tuple[Finding, str] | No
         return None
     if key.partition(".")[2] in demand.pod_level:
         return Finding.NOT_ESTABLISHED, _POD_LEVEL
+    if not demand.defaults_known:
+        return Finding.NOT_ESTABLISHED, _UNSEEN_FIELD
     verb = "does" if len(lacking) == 1 else "do"
     return Finding.REQUIRES_FIELD, f"{', '.join(lacking)} {verb} not set it"
 
 
 def _entry_row(entry: QuotaEntry, demand: PodDemand) -> tuple[Finding, str] | None:
-    field = _field_row(entry, demand)
-    if field is not None:
-        return field
     key = canonical_resource(entry.resource)
     amount = demand.for_quota(key)
     if amount is None:
         return Finding.NOT_ESTABLISHED, "the Pod's demand for it is not established"
-    if amount == 0:
-        return None
+    grows = demand.may_grow(key)
+    over = _over(entry, amount) if amount else False
+    field = _field_row(entry, demand)
+    if field is not None and not (over and grows):
+        # A field the Pod lacks rejects it whatever the amounts; only an excess
+        # already certain without the unread defaults says more.
+        return field
+    if over is None:
+        return Finding.NOT_ESTABLISHED, _UNREADABLE_USAGE
     if key in _POD_COUNTS:
-        exceeded = _exceeds(entry, amount) is not None
-        return (Finding.AT_LIMIT, f"{entry.used} of {entry.hard} Pods exist") if exceeded else None
-    detail = _exceeds(entry, amount)
-    return (Finding.WOULD_EXCEED, detail) if detail is not None else None
+        return (Finding.AT_LIMIT, f"{entry.used} of {entry.hard} Pods exist") if over else None
+    if over:
+        return Finding.WOULD_EXCEED, _need(entry, amount, at_least=grows)
+    return (Finding.NOT_ESTABLISHED, _UNSEEN_GROWTH) if grows else None
 
 
 def _quota_rows(
@@ -231,10 +251,19 @@ def _values(owner: str, values: ContainerValues | PodDemand, resource: str) -> _
     return _Values(owner, values.requests.get(resource), values.limits.get(resource), unknown)
 
 
+def _unreadable_bound(v: _Values, name: str) -> tuple[Finding, str]:
+    return Finding.NOT_ESTABLISHED, f"{v.owner}: its {name} bound could not be read"
+
+
+def _shown(value: Decimal, resource: str) -> str:
+    """A container's value in its resource's own unit family."""
+    return format_quantity(value, "1Ki" if unit_word(resource) == "bytes" else "1", resource)
+
+
 def _minimum(v: _Values, raw: str, resource: str) -> tuple[Finding, str] | None:
     bound = _parse(raw)
     if bound is None:
-        return None
+        return _unreadable_bound(v, "min")
     if v.request is None:
         return Finding.BELOW_MINIMUM, f"{v.owner}: no request is set"
     for side, value in (("request", v.request), ("limit", v.limit)):
@@ -247,7 +276,7 @@ def _minimum(v: _Values, raw: str, resource: str) -> tuple[Finding, str] | None:
 def _maximum(v: _Values, raw: str, resource: str) -> tuple[Finding, str] | None:
     bound = _parse(raw)
     if bound is None:
-        return None
+        return _unreadable_bound(v, "max")
     if v.limit is None:
         return Finding.ABOVE_MAXIMUM, f"{v.owner}: no limit is set"
     for side, value in (("limit", v.limit), ("request", v.request)):
@@ -257,17 +286,17 @@ def _maximum(v: _Values, raw: str, resource: str) -> tuple[Finding, str] | None:
     return None
 
 
-def _ratio(v: _Values, raw: str) -> tuple[Finding, str] | None:
+def _ratio(v: _Values, raw: str, resource: str) -> tuple[Finding, str] | None:
     bound = _parse(raw)
     if bound is None:
-        return None
+        return _unreadable_bound(v, "maxLimitRequestRatio")
     if v.request is None or v.limit is None or v.request == 0:
         return Finding.ABOVE_RATIO, f"{v.owner}: needs both a request and a limit"
-    ratio = v.limit / v.request
-    if ratio <= bound:
+    if v.limit <= v.request * bound:
         return None
-    shown = f"{round(ratio, 2).normalize():f}"
-    return Finding.ABOVE_RATIO, f"{v.owner}: limit is {shown} times the request, above {raw}"
+    limit, request = _shown(v.limit, resource), _shown(v.request, resource)
+    detail = f"{v.owner}: limit {limit} is more than {raw} times the request {request}"
+    return Finding.ABOVE_RATIO, detail
 
 
 def _checks(value: LimitValue, v: _Values) -> Iterator[tuple[Finding, str]]:
@@ -277,7 +306,7 @@ def _checks(value: LimitValue, v: _Values) -> Iterator[tuple[Finding, str]]:
     found = [
         _minimum(v, value.min, value.resource) if value.min is not None else None,
         _maximum(v, value.max, value.resource) if value.max is not None else None,
-        _ratio(v, value.max_limit_request_ratio)
+        _ratio(v, value.max_limit_request_ratio, value.resource)
         if value.max_limit_request_ratio is not None
         else None,
     ]
@@ -314,12 +343,18 @@ def _claim_quota_row(entry: QuotaEntry, claim: ClaimTemplate) -> tuple[Finding, 
         if key.partition(_STORAGE_CLASS)[0] != claim.storage_class:
             return None
         key = key.partition(_STORAGE_CLASS)[2]
-    if key == "persistentvolumeclaims":
-        detail = _exceeds(entry, Decimal(1))
-        return (Finding.AT_LIMIT, f"{entry.used} of {entry.hard} claims exist") if detail else None
-    storage = _parse(claim.storage)
-    detail = _exceeds(entry, storage) if storage is not None else None
-    return (Finding.WOULD_EXCEED, detail) if detail is not None else None
+    counted = key in _CLAIM_COUNTS
+    amount = Decimal(1) if counted else _parse(claim.storage)
+    if amount is None:
+        return Finding.NOT_ESTABLISHED, _UNKNOWN_CLAIM
+    over = _over(entry, amount)
+    if over is None:
+        return Finding.NOT_ESTABLISHED, _UNREADABLE_USAGE
+    if not over:
+        return None
+    if counted:
+        return Finding.AT_LIMIT, f"{entry.used} of {entry.hard} claims exist"
+    return Finding.WOULD_EXCEED, _need(entry, amount)
 
 
 def _claim_rows(
@@ -339,23 +374,33 @@ def _claim_rows(
         yield from _claim_limit_rows(claim, limit_ranges)
 
 
+def _claim_bound(storage: Decimal | None, raw: str, below: bool) -> tuple[Finding, str] | None:
+    """One PersistentVolumeClaim bound checked against a claim's storage request."""
+    if storage is None:
+        return Finding.NOT_ESTABLISHED, _UNKNOWN_CLAIM
+    bound = _parse(raw)
+    if bound is None:
+        return Finding.NOT_ESTABLISHED, f"its {'min' if below else 'max'} bound could not be read"
+    if storage >= bound if below else storage <= bound:
+        return None
+    finding = Finding.BELOW_MINIMUM if below else Finding.ABOVE_MAXIMUM
+    text = format_quantity(storage, raw, "storage")
+    return finding, f"request {text} is {'below' if below else 'above'} {raw}"
+
+
 def _claim_limit_rows(
     claim: ClaimTemplate, limit_ranges: Sequence[LimitRangeProjection]
 ) -> Iterator[Possibility]:
     storage = _parse(claim.storage)
-    if storage is None:
-        return
     for limit_range in limit_ranges:
         for value in limit_range.values:
             if value.type != "PersistentVolumeClaim" or value.resource != "storage":
                 continue
-            for raw, below in ((value.min, True), (value.max, False)):
-                bound = _parse(raw)
-                if bound is None or (storage >= bound if below else storage <= bound):
-                    continue
-                finding = Finding.BELOW_MINIMUM if below else Finding.ABOVE_MAXIMUM
-                text = format_quantity(storage, raw or "", "storage")
-                detail = f"request {text} is {'below' if below else 'above'} {raw}"
+            bounds = [(raw, below) for raw, below in ((value.min, True), (value.max, False)) if raw]
+            found = [_claim_bound(storage, raw, below) for raw, below in bounds]
+            # An unknown request says so once per LimitRange value, not once per bound.
+            rows = list(dict.fromkeys(row for row in found if row is not None))
+            for finding, detail in rows:
                 yield Possibility(
                     "LimitRange",
                     limit_range.name,
@@ -387,7 +432,10 @@ def possible_constraints(report: CreationReport, now: datetime) -> Possibilities
     template = report.workload.template if report.workload is not None else None
     if template is None:
         return None
-    demand = pod_demand(template, report.limit_ranges)
+    defaults_known = report.limit_ranges_conclusive(now) and all(
+        limit_range.complete for limit_range in report.limit_ranges
+    )
+    demand = pod_demand(template, report.limit_ranges, defaults_known=defaults_known)
     rows = [row for quota in report.quotas for row in _quota_rows(quota, template, demand)]
     rows += [row for limits in report.limit_ranges for row in _limit_range_rows(limits, demand)]
     rows += _claim_rows(template.claims, report.quotas, report.limit_ranges)

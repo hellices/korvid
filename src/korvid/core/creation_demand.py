@@ -67,6 +67,7 @@ class PodDemand:
     best_effort: bool | None = True
     defaults_applied: bool = False
     containers: tuple[ContainerValues, ...] = ()
+    defaults_known: bool = True
 
     def for_quota(self, key: str) -> Decimal | None:
         """What the Pod charges against quota resource `key`; `None` when not established.
@@ -86,6 +87,22 @@ class PodDemand:
         if resource in unknown:
             return None
         return values.get(resource, Decimal(0))
+
+    def may_grow(self, key: str) -> bool:
+        """Whether a LimitRange default korvid could not read may add to `key`'s demand.
+
+        Only when the LimitRanges were not all read, and some container does
+        not set the resource itself.
+        """
+        side, _, resource = canonical_resource(key).partition(".")
+        if self.defaults_known or side not in ("requests", "limits") or resource in self.pod_level:
+            return False
+        for container in self.containers:
+            values = container.requests if side == "requests" else container.limits
+            unknown = container.unknown_requests if side == "requests" else container.unknown_limits
+            if resource not in values and resource not in unknown:
+                return True
+        return False
 
 
 @dataclass(slots=True)
@@ -242,19 +259,31 @@ def _missing(containers: Sequence[_Container]) -> tuple[tuple[str, str], ...]:
     return tuple(missing)
 
 
-def _best_effort(containers: Sequence[_Container], pod_level: frozenset[str]) -> bool | None:
-    if pod_level & _COMPUTE:
-        return False
-    sides = [side for c in containers for side in (c.requests, c.limits)]
-    if any(r in side.values for side in sides for r in _COMPUTE):
+def _best_effort(sides: Sequence[_Side]) -> bool | None:
+    """BestEffort as Kubernetes computes it: no positive CPU or memory anywhere.
+
+    `None` when a CPU or memory value is not established and none is positive.
+    """
+    if any(side.values.get(r, Decimal(0)) > 0 for side in sides for r in _COMPUTE):
         return False
     if any(r in side.unknown for side in sides for r in _COMPUTE):
         return None
     return True
 
 
-def pod_demand(template: PodTemplate, limit_ranges: Sequence[LimitRangeProjection]) -> PodDemand:
-    """One new Pod's demand from `template`, after defaulting and `limit_ranges`' defaults."""
+def pod_demand(
+    template: PodTemplate,
+    limit_ranges: Sequence[LimitRangeProjection],
+    *,
+    defaults_known: bool = True,
+) -> PodDemand:
+    """One new Pod's demand from `template`, after defaulting and `limit_ranges`' defaults.
+
+    `defaults_known` is whether `limit_ranges` are all the namespace's: when
+    not, a default korvid could not read may still fill what a container
+    leaves unset, so the QoS class is not established while it looks
+    BestEffort, and `may_grow` says which demands could rise.
+    """
     defaults = _defaults(limit_ranges)
     completed = [_complete(c, defaults) for c in (*template.containers, *template.init_containers)]
     containers = [container for container, _ in completed]
@@ -264,7 +293,12 @@ def pod_demand(template: PodTemplate, limit_ranges: Sequence[LimitRangeProjectio
     limits, unknown_limits = _effective(apps, inits, "limits")
     pod_level = _override(requests, unknown_requests, template.pod_requests)
     pod_level |= _override(limits, unknown_limits, template.pod_limits)
-    best_effort = _best_effort(containers, pod_level)
+    pod_sides = [_side(template.pod_requests), _side(template.pod_limits)]
+    best_effort = _best_effort(
+        [*(s for c in containers for s in (c.requests, c.limits)), *pod_sides]
+    )
+    if best_effort is True and not defaults_known:
+        best_effort = None
     if template.runtime_class is not None:
         for values, unknown in ((requests, unknown_requests), (limits, unknown_limits)):
             for resource in _COMPUTE:
@@ -289,4 +323,5 @@ def pod_demand(template: PodTemplate, limit_ranges: Sequence[LimitRangeProjectio
             )
             for c in containers
         ),
+        defaults_known,
     )

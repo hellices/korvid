@@ -35,6 +35,13 @@ The view shows the result in the next slice.
   - `maxLimitRequestRatio` needs both a request and a limit, and a nonzero request.
   - A value checked against a bound is shown in that bound's unit family.
 - **Claims are checked only against unscoped quotas.** Quota scopes match Pods, so a scoped quota's storage keys are not claim constraints.
+- **LimitRanges korvid could not all read leave defaults open.** When the LimitRange list is not conclusive, or a LimitRange is incomplete, an unseen default may still fill what a container leaves unset. Then:
+  - a missing CPU or memory field is not established;
+  - BestEffort is not established;
+  - a demand an unseen default could raise is not established unless it already exceeds the limit, in which case the row says "needs at least".
+- **Unreadable values are never satisfied.** An unparsable `used` or `hard`, LimitRange bound or claim request gives a not-established row, never silence.
+- **QoS ignores zero values and Pod-level values that do not parse,** as Kubernetes does, and unprefixed `hugepages-<size>` quota keys charge the request.
+- **Ratios are explained exactly:** "limit X is more than N times the request Y", never a rounded ratio.
 - **A sidecar's own peak is not a candidate.** Apps plus sidecars already include it, so only regular init containers, with the sidecars started before them, compete with that total.
 
 ## File structure
@@ -385,6 +392,51 @@ def test_each_containers_values_after_defaults_are_kept_in_order() -> None:
             "setup", {"cpu": Decimal(2)}, {"cpu": Decimal(2)}, frozenset(), frozenset()
         ),
     )
+
+
+def test_zero_values_do_not_change_the_qos_class() -> None:
+    zero = _container("a", requests={"cpu": "0"}, limits={"memory": "0"})
+
+    assert pod_demand(_template(zero), ()).best_effort is True
+
+
+def test_an_unknown_pod_level_value_leaves_the_qos_class_unknown() -> None:
+    template = _template(_container("a"), pod_requests=(("cpu", "lots"),))
+
+    assert pod_demand(template, ()).best_effort is None
+
+
+def test_an_unprefixed_hugepages_key_charges_the_request() -> None:
+    demand = pod_demand(_template(_container("a", requests={"hugepages-2Mi": "4Mi"})), ())
+
+    assert demand.for_quota("hugepages-2Mi") == Decimal(4 * 2**20)
+
+
+def test_defaults_not_read_leave_qos_and_missing_values_open() -> None:
+    bare = pod_demand(_template(_container("a")), (), defaults_known=False)
+    full = pod_demand(
+        _template(_container("a", requests={"cpu": "1"}, limits={"cpu": "1"})),
+        (),
+        defaults_known=False,
+    )
+
+    assert bare.best_effort is None
+    assert bare.may_grow("requests.cpu")
+    assert not full.may_grow("requests.cpu")
+    assert not full.may_grow("pods")
+    assert not pod_demand(_template(_container("a")), ()).may_grow("requests.cpu")
+
+
+def test_a_value_set_at_pod_level_or_set_unreadably_cannot_grow() -> None:
+    pod_level = pod_demand(
+        _template(_container("a"), pod_requests=(("cpu", "1"),)), (), defaults_known=False
+    )
+    unreadable = pod_demand(
+        _template(_container("a", requests={"cpu": "x"})), (), defaults_known=False
+    )
+
+    assert not pod_level.may_grow("requests.cpu")
+    assert not unreadable.may_grow("requests.cpu")
 ```
 
 Create `src/korvid/core/creation_demand.py` with:
@@ -459,6 +511,7 @@ class PodDemand:
     best_effort: bool | None = True
     defaults_applied: bool = False
     containers: tuple[ContainerValues, ...] = ()
+    defaults_known: bool = True
 
     def for_quota(self, key: str) -> Decimal | None:
         """What the Pod charges against quota resource `key`; `None` when not established.
@@ -478,6 +531,22 @@ class PodDemand:
         if resource in unknown:
             return None
         return values.get(resource, Decimal(0))
+
+    def may_grow(self, key: str) -> bool:
+        """Whether a LimitRange default korvid could not read may add to `key`'s demand.
+
+        Only when the LimitRanges were not all read, and some container does
+        not set the resource itself.
+        """
+        side, _, resource = canonical_resource(key).partition(".")
+        if self.defaults_known or side not in ("requests", "limits") or resource in self.pod_level:
+            return False
+        for container in self.containers:
+            values = container.requests if side == "requests" else container.limits
+            unknown = container.unknown_requests if side == "requests" else container.unknown_limits
+            if resource not in values and resource not in unknown:
+                return True
+        return False
 
 
 @dataclass(slots=True)
@@ -634,19 +703,31 @@ def _missing(containers: Sequence[_Container]) -> tuple[tuple[str, str], ...]:
     return tuple(missing)
 
 
-def _best_effort(containers: Sequence[_Container], pod_level: frozenset[str]) -> bool | None:
-    if pod_level & _COMPUTE:
-        return False
-    sides = [side for c in containers for side in (c.requests, c.limits)]
-    if any(r in side.values for side in sides for r in _COMPUTE):
+def _best_effort(sides: Sequence[_Side]) -> bool | None:
+    """BestEffort as Kubernetes computes it: no positive CPU or memory anywhere.
+
+    `None` when a CPU or memory value is not established and none is positive.
+    """
+    if any(side.values.get(r, Decimal(0)) > 0 for side in sides for r in _COMPUTE):
         return False
     if any(r in side.unknown for side in sides for r in _COMPUTE):
         return None
     return True
 
 
-def pod_demand(template: PodTemplate, limit_ranges: Sequence[LimitRangeProjection]) -> PodDemand:
-    """One new Pod's demand from `template`, after defaulting and `limit_ranges`' defaults."""
+def pod_demand(
+    template: PodTemplate,
+    limit_ranges: Sequence[LimitRangeProjection],
+    *,
+    defaults_known: bool = True,
+) -> PodDemand:
+    """One new Pod's demand from `template`, after defaulting and `limit_ranges`' defaults.
+
+    `defaults_known` is whether `limit_ranges` are all the namespace's: when
+    not, a default korvid could not read may still fill what a container
+    leaves unset, so the QoS class is not established while it looks
+    BestEffort, and `may_grow` says which demands could rise.
+    """
     defaults = _defaults(limit_ranges)
     completed = [_complete(c, defaults) for c in (*template.containers, *template.init_containers)]
     containers = [container for container, _ in completed]
@@ -656,7 +737,12 @@ def pod_demand(template: PodTemplate, limit_ranges: Sequence[LimitRangeProjectio
     limits, unknown_limits = _effective(apps, inits, "limits")
     pod_level = _override(requests, unknown_requests, template.pod_requests)
     pod_level |= _override(limits, unknown_limits, template.pod_limits)
-    best_effort = _best_effort(containers, pod_level)
+    pod_sides = [_side(template.pod_requests), _side(template.pod_limits)]
+    best_effort = _best_effort(
+        [*(s for c in containers for s in (c.requests, c.limits)), *pod_sides]
+    )
+    if best_effort is True and not defaults_known:
+        best_effort = None
     if template.runtime_class is not None:
         for values, unknown in ((requests, unknown_requests), (limits, unknown_limits)):
             for resource in _COMPUTE:
@@ -681,6 +767,7 @@ def pod_demand(template: PodTemplate, limit_ranges: Sequence[LimitRangeProjectio
             )
             for c in containers
         ),
+        defaults_known,
     )
 ```
 
@@ -1015,7 +1102,7 @@ def _range(*values: LimitValue) -> LimitRangeProjection:
         ),
         (
             LimitValue("Container", "memory", max_limit_request_ratio="1.5"),
-            (Finding.ABOVE_RATIO, "app: limit is 2 times the request, above 1.5"),
+            (Finding.ABOVE_RATIO, "app: limit 512Mi is more than 1.5 times the request 256Mi"),
         ),
         (
             LimitValue("Container", "ephemeral-storage", min="1Gi"),
@@ -1231,6 +1318,150 @@ def test_an_inconclusive_limit_range_list_blocks_the_conclusion() -> None:
 
     assert possibilities is not None
     assert (possibilities.rows, possibilities.nothing_constrains) == ((), False)
+
+
+def test_a_ratio_is_explained_without_rounding() -> None:
+    close = ContainerDemand("app", "container", (("cpu", "1"),), (("cpu", "1.0001"),))
+    ratio = _range(LimitValue("Container", "cpu", max_limit_request_ratio="1"))
+
+    rows = _findings(_report(_template(close), limit_ranges=(ratio,)))
+
+    assert rows == [
+        ("cpu", Finding.ABOVE_RATIO, "app: limit 1000100u is more than 1 times the request 1")
+    ]
+
+
+def test_an_unreadable_usage_is_not_established_and_blocks_the_conclusion() -> None:
+    quota = _quota("compute", {"requests.cpu": ("lots", "8")})
+
+    possibilities = possible_constraints(_report(_template(), quotas=(quota,)), NOW)
+
+    assert possibilities is not None
+    assert [(p.subject, p.finding, p.detail) for p in possibilities.rows] == [
+        ("requests.cpu", Finding.NOT_ESTABLISHED, "its used or hard amount could not be read")
+    ]
+    assert not possibilities.nothing_constrains
+
+
+@pytest.mark.parametrize(
+    ("value", "name"),
+    [
+        (LimitValue("Container", "cpu", max="lots"), "max"),
+        (LimitValue("Container", "cpu", min="lots"), "min"),
+        (LimitValue("Container", "cpu", max_limit_request_ratio="lots"), "maxLimitRequestRatio"),
+    ],
+)
+def test_an_unreadable_limit_range_bound_is_not_established(value: LimitValue, name: str) -> None:
+    rows = _findings(_report(_template(), limit_ranges=(_range(value),)))
+
+    assert rows == [("cpu", Finding.NOT_ESTABLISHED, f"app: its {name} bound could not be read")]
+
+
+def test_a_claim_count_quota_charges_one_claim() -> None:
+    quota = _quota("objects", {"count/persistentvolumeclaims": ("10", "10")})
+
+    possibilities = possible_constraints(
+        _report(
+            _stateful(ClaimTemplate("data", "1Gi", "gold")), quotas=(quota,), kind="StatefulSet"
+        ),
+        NOW,
+    )
+
+    assert possibilities is not None
+    assert [(p.subject, p.finding, p.conditional) for p in possibilities.rows] == [
+        ("claim data: count/persistentvolumeclaims", Finding.AT_LIMIT, True)
+    ]
+
+
+def test_an_unknown_claim_request_leaves_its_storage_checks_open() -> None:
+    quota = _quota(
+        "storage", {"requests.storage": ("0", "100Gi"), "persistentvolumeclaims": ("10", "10")}
+    )
+    limits = _range(LimitValue("PersistentVolumeClaim", "storage", max="5Gi", min="lots"))
+
+    possibilities = possible_constraints(
+        _report(
+            _stateful(ClaimTemplate("data", None, "gold")),
+            quotas=(quota,),
+            limit_ranges=(limits,),
+            kind="StatefulSet",
+        ),
+        NOW,
+    )
+
+    assert possibilities is not None
+    assert [(p.subject, p.finding, p.detail) for p in possibilities.rows] == [
+        (
+            "claim data: requests.storage",
+            Finding.NOT_ESTABLISHED,
+            "the claim's storage request is not established",
+        ),
+        ("claim data: persistentvolumeclaims", Finding.AT_LIMIT, "10 of 10 claims exist"),
+        (
+            "claim data: storage",
+            Finding.NOT_ESTABLISHED,
+            "the claim's storage request is not established",
+        ),
+    ]
+
+
+def test_an_unreadable_claim_limit_bound_is_not_established() -> None:
+    limits = _range(LimitValue("PersistentVolumeClaim", "storage", max="lots"))
+
+    rows = _findings(
+        _report(
+            _stateful(ClaimTemplate("data", "1Gi", "gold")),
+            limit_ranges=(limits,),
+            kind="StatefulSet",
+        )
+    )
+
+    assert rows == [
+        ("claim data: storage", Finding.NOT_ESTABLISHED, "its max bound could not be read")
+    ]
+
+
+def test_limit_ranges_not_read_leave_fields_and_growing_demand_open() -> None:
+    bare = ContainerDemand("sidecar", "container", (), ())
+    quota = _quota(
+        "compute",
+        {
+            "limits.cpu": ("0", "8"),
+            "requests.memory": ("8000Mi", "8Gi"),
+            "requests.ephemeral-storage": ("0", "1Gi"),
+        },
+    )
+
+    rows = _findings(_report(_template(APP, bare), quotas=(quota,), limits_basis=Basis.FORBIDDEN))
+
+    assert rows == [
+        ("limits.cpu", Finding.NOT_ESTABLISHED, "a LimitRange that could not be read may set it"),
+        # Already over with what is known: an unseen default can only add to it.
+        ("requests.memory", Finding.WOULD_EXCEED, "needs at least 256Mi; 192Mi remaining"),
+        (
+            "requests.ephemeral-storage",
+            Finding.NOT_ESTABLISHED,
+            "a default from a LimitRange that could not be read may add to the Pod's demand",
+        ),
+    ]
+
+
+def test_an_unreadable_claim_quota_usage_is_not_established() -> None:
+    quota = _quota("storage", {"requests.storage": ("lots", "100Gi")})
+
+    rows = _findings(
+        _report(
+            _stateful(ClaimTemplate("data", "1Gi", "gold")), quotas=(quota,), kind="StatefulSet"
+        )
+    )
+
+    assert rows == [
+        (
+            "claim data: requests.storage",
+            Finding.NOT_ESTABLISHED,
+            "its used or hard amount could not be read",
+        )
+    ]
 ```
 
 Create `src/korvid/core/creation_possibilities.py` with:
@@ -1268,12 +1499,15 @@ from korvid.core.creation_policies import (
     QuotaProjection,
     ScopeExpression,
 )
-from korvid.core.creation_quantities import canonical_resource, format_quantity
+from korvid.core.creation_quantities import canonical_resource, format_quantity, unit_word
 from korvid.core.creation_workloads import ClaimTemplate, PodTemplate
 from korvid.k8s.models import parse_quantity
 
 _STORAGE_CLASS = ".storageclass.storage.k8s.io/"
-_CLAIM_KEYS = frozenset({"requests.storage", "persistentvolumeclaims"})
+_CLAIM_KEYS = frozenset(
+    {"requests.storage", "persistentvolumeclaims", "count/persistentvolumeclaims"}
+)
+_CLAIM_COUNTS = frozenset({"persistentvolumeclaims", "count/persistentvolumeclaims"})
 _POD_COUNTS = frozenset({"pods", "count/pods"})
 _NO_PRIORITY = "the Pod sets no priorityClassName, and a cluster default may apply"
 _POD_LEVEL = (
@@ -1281,6 +1515,10 @@ _POD_LEVEL = (
     "container's is not observed"
 )
 _DEFAULT_CLASS = "the claim sets no storage class, and the cluster default may apply"
+_UNREADABLE_USAGE = "its used or hard amount could not be read"
+_UNKNOWN_CLAIM = "the claim's storage request is not established"
+_UNSEEN_FIELD = "a LimitRange that could not be read may set it"
+_UNSEEN_GROWTH = "a default from a LimitRange that could not be read may add to the Pod's demand"
 
 
 class Finding(StrEnum):
@@ -1386,14 +1624,21 @@ def _is_claim_key(key: str) -> bool:
     return key in _CLAIM_KEYS or _STORAGE_CLASS in key
 
 
-def _exceeds(entry: QuotaEntry, amount: Decimal) -> str | None:
-    """The detail of a would-exceed row, if `amount` more takes `entry` past its limit."""
+def _over(entry: QuotaEntry, amount: Decimal) -> bool | None:
+    """Whether `amount` more takes `entry` past its limit; `None` if a value does not parse."""
     used, hard = _parse(entry.used), _parse(entry.hard)
-    if used is None or hard is None or used + amount <= hard:
+    if used is None or hard is None:
         return None
-    remaining = hard - used
+    return used + amount > hard
+
+
+def _need(entry: QuotaEntry, amount: Decimal, *, at_least: bool = False) -> str:
+    """What the would-exceed row says: what is needed, and what remains."""
+    used, hard = _parse(entry.used), _parse(entry.hard)
+    remaining = (hard or Decimal(0)) - (used or Decimal(0))
     left = format_quantity(remaining, entry.hard, entry.resource) if remaining > 0 else "none"
-    return f"needs {format_quantity(amount, entry.hard, entry.resource)}; {left} remaining"
+    needed = format_quantity(amount, entry.hard, entry.resource)
+    return f"needs {'at least ' if at_least else ''}{needed}; {left} remaining"
 
 
 def _field_row(entry: QuotaEntry, demand: PodDemand) -> tuple[Finding, str] | None:
@@ -1405,25 +1650,31 @@ def _field_row(entry: QuotaEntry, demand: PodDemand) -> tuple[Finding, str] | No
         return None
     if key.partition(".")[2] in demand.pod_level:
         return Finding.NOT_ESTABLISHED, _POD_LEVEL
+    if not demand.defaults_known:
+        return Finding.NOT_ESTABLISHED, _UNSEEN_FIELD
     verb = "does" if len(lacking) == 1 else "do"
     return Finding.REQUIRES_FIELD, f"{', '.join(lacking)} {verb} not set it"
 
 
 def _entry_row(entry: QuotaEntry, demand: PodDemand) -> tuple[Finding, str] | None:
-    field = _field_row(entry, demand)
-    if field is not None:
-        return field
     key = canonical_resource(entry.resource)
     amount = demand.for_quota(key)
     if amount is None:
         return Finding.NOT_ESTABLISHED, "the Pod's demand for it is not established"
-    if amount == 0:
-        return None
+    grows = demand.may_grow(key)
+    over = _over(entry, amount) if amount else False
+    field = _field_row(entry, demand)
+    if field is not None and not (over and grows):
+        # A field the Pod lacks rejects it whatever the amounts; only an excess
+        # already certain without the unread defaults says more.
+        return field
+    if over is None:
+        return Finding.NOT_ESTABLISHED, _UNREADABLE_USAGE
     if key in _POD_COUNTS:
-        exceeded = _exceeds(entry, amount) is not None
-        return (Finding.AT_LIMIT, f"{entry.used} of {entry.hard} Pods exist") if exceeded else None
-    detail = _exceeds(entry, amount)
-    return (Finding.WOULD_EXCEED, detail) if detail is not None else None
+        return (Finding.AT_LIMIT, f"{entry.used} of {entry.hard} Pods exist") if over else None
+    if over:
+        return Finding.WOULD_EXCEED, _need(entry, amount, at_least=grows)
+    return (Finding.NOT_ESTABLISHED, _UNSEEN_GROWTH) if grows else None
 
 
 def _quota_rows(
@@ -1469,10 +1720,19 @@ def _values(owner: str, values: ContainerValues | PodDemand, resource: str) -> _
     return _Values(owner, values.requests.get(resource), values.limits.get(resource), unknown)
 
 
+def _unreadable_bound(v: _Values, name: str) -> tuple[Finding, str]:
+    return Finding.NOT_ESTABLISHED, f"{v.owner}: its {name} bound could not be read"
+
+
+def _shown(value: Decimal, resource: str) -> str:
+    """A container's value in its resource's own unit family."""
+    return format_quantity(value, "1Ki" if unit_word(resource) == "bytes" else "1", resource)
+
+
 def _minimum(v: _Values, raw: str, resource: str) -> tuple[Finding, str] | None:
     bound = _parse(raw)
     if bound is None:
-        return None
+        return _unreadable_bound(v, "min")
     if v.request is None:
         return Finding.BELOW_MINIMUM, f"{v.owner}: no request is set"
     for side, value in (("request", v.request), ("limit", v.limit)):
@@ -1485,7 +1745,7 @@ def _minimum(v: _Values, raw: str, resource: str) -> tuple[Finding, str] | None:
 def _maximum(v: _Values, raw: str, resource: str) -> tuple[Finding, str] | None:
     bound = _parse(raw)
     if bound is None:
-        return None
+        return _unreadable_bound(v, "max")
     if v.limit is None:
         return Finding.ABOVE_MAXIMUM, f"{v.owner}: no limit is set"
     for side, value in (("limit", v.limit), ("request", v.request)):
@@ -1495,17 +1755,17 @@ def _maximum(v: _Values, raw: str, resource: str) -> tuple[Finding, str] | None:
     return None
 
 
-def _ratio(v: _Values, raw: str) -> tuple[Finding, str] | None:
+def _ratio(v: _Values, raw: str, resource: str) -> tuple[Finding, str] | None:
     bound = _parse(raw)
     if bound is None:
-        return None
+        return _unreadable_bound(v, "maxLimitRequestRatio")
     if v.request is None or v.limit is None or v.request == 0:
         return Finding.ABOVE_RATIO, f"{v.owner}: needs both a request and a limit"
-    ratio = v.limit / v.request
-    if ratio <= bound:
+    if v.limit <= v.request * bound:
         return None
-    shown = f"{round(ratio, 2).normalize():f}"
-    return Finding.ABOVE_RATIO, f"{v.owner}: limit is {shown} times the request, above {raw}"
+    limit, request = _shown(v.limit, resource), _shown(v.request, resource)
+    detail = f"{v.owner}: limit {limit} is more than {raw} times the request {request}"
+    return Finding.ABOVE_RATIO, detail
 
 
 def _checks(value: LimitValue, v: _Values) -> Iterator[tuple[Finding, str]]:
@@ -1515,7 +1775,7 @@ def _checks(value: LimitValue, v: _Values) -> Iterator[tuple[Finding, str]]:
     found = [
         _minimum(v, value.min, value.resource) if value.min is not None else None,
         _maximum(v, value.max, value.resource) if value.max is not None else None,
-        _ratio(v, value.max_limit_request_ratio)
+        _ratio(v, value.max_limit_request_ratio, value.resource)
         if value.max_limit_request_ratio is not None
         else None,
     ]
@@ -1552,12 +1812,18 @@ def _claim_quota_row(entry: QuotaEntry, claim: ClaimTemplate) -> tuple[Finding, 
         if key.partition(_STORAGE_CLASS)[0] != claim.storage_class:
             return None
         key = key.partition(_STORAGE_CLASS)[2]
-    if key == "persistentvolumeclaims":
-        detail = _exceeds(entry, Decimal(1))
-        return (Finding.AT_LIMIT, f"{entry.used} of {entry.hard} claims exist") if detail else None
-    storage = _parse(claim.storage)
-    detail = _exceeds(entry, storage) if storage is not None else None
-    return (Finding.WOULD_EXCEED, detail) if detail is not None else None
+    counted = key in _CLAIM_COUNTS
+    amount = Decimal(1) if counted else _parse(claim.storage)
+    if amount is None:
+        return Finding.NOT_ESTABLISHED, _UNKNOWN_CLAIM
+    over = _over(entry, amount)
+    if over is None:
+        return Finding.NOT_ESTABLISHED, _UNREADABLE_USAGE
+    if not over:
+        return None
+    if counted:
+        return Finding.AT_LIMIT, f"{entry.used} of {entry.hard} claims exist"
+    return Finding.WOULD_EXCEED, _need(entry, amount)
 
 
 def _claim_rows(
@@ -1577,23 +1843,33 @@ def _claim_rows(
         yield from _claim_limit_rows(claim, limit_ranges)
 
 
+def _claim_bound(storage: Decimal | None, raw: str, below: bool) -> tuple[Finding, str] | None:
+    """One PersistentVolumeClaim bound checked against a claim's storage request."""
+    if storage is None:
+        return Finding.NOT_ESTABLISHED, _UNKNOWN_CLAIM
+    bound = _parse(raw)
+    if bound is None:
+        return Finding.NOT_ESTABLISHED, f"its {'min' if below else 'max'} bound could not be read"
+    if storage >= bound if below else storage <= bound:
+        return None
+    finding = Finding.BELOW_MINIMUM if below else Finding.ABOVE_MAXIMUM
+    text = format_quantity(storage, raw, "storage")
+    return finding, f"request {text} is {'below' if below else 'above'} {raw}"
+
+
 def _claim_limit_rows(
     claim: ClaimTemplate, limit_ranges: Sequence[LimitRangeProjection]
 ) -> Iterator[Possibility]:
     storage = _parse(claim.storage)
-    if storage is None:
-        return
     for limit_range in limit_ranges:
         for value in limit_range.values:
             if value.type != "PersistentVolumeClaim" or value.resource != "storage":
                 continue
-            for raw, below in ((value.min, True), (value.max, False)):
-                bound = _parse(raw)
-                if bound is None or (storage >= bound if below else storage <= bound):
-                    continue
-                finding = Finding.BELOW_MINIMUM if below else Finding.ABOVE_MAXIMUM
-                text = format_quantity(storage, raw or "", "storage")
-                detail = f"request {text} is {'below' if below else 'above'} {raw}"
+            bounds = [(raw, below) for raw, below in ((value.min, True), (value.max, False)) if raw]
+            found = [_claim_bound(storage, raw, below) for raw, below in bounds]
+            # An unknown request says so once per LimitRange value, not once per bound.
+            rows = list(dict.fromkeys(row for row in found if row is not None))
+            for finding, detail in rows:
                 yield Possibility(
                     "LimitRange",
                     limit_range.name,
@@ -1625,7 +1901,10 @@ def possible_constraints(report: CreationReport, now: datetime) -> Possibilities
     template = report.workload.template if report.workload is not None else None
     if template is None:
         return None
-    demand = pod_demand(template, report.limit_ranges)
+    defaults_known = report.limit_ranges_conclusive(now) and all(
+        limit_range.complete for limit_range in report.limit_ranges
+    )
+    demand = pod_demand(template, report.limit_ranges, defaults_known=defaults_known)
     rows = [row for quota in report.quotas for row in _quota_rows(quota, template, demand)]
     rows += [row for limits in report.limit_ranges for row in _limit_range_rows(limits, demand)]
     rows += _claim_rows(template.claims, report.quotas, report.limit_ranges)
