@@ -3,8 +3,9 @@
 One run reads two sources through the #409 readers, under the run token it
 started with:
 
-- `config-object`: the object's metadata, by name, to confirm it exists and
-  which incarnation it is. A ConfigMap or Secret is never read as an object.
+- `config-object`: the object's metadata, by name, to confirm it exists,
+  which incarnation it is, and which resource version it has. A ConfigMap or
+  Secret is never read as an object.
 - `pods`: the Pods in its namespace, at the readers' maximum budgets. Each
   Pod is projected to its references at once, and only the projection
   leaves this module.
@@ -39,6 +40,7 @@ from korvid.core.capability import (
     Verb,
     conclusive,
 )
+from korvid.core.config_changes import Sighting
 from korvid.core.config_consumers import Consumer, consumers_of
 from korvid.core.evidence_reads import (
     LIST_PAGE_SIZE,
@@ -84,13 +86,18 @@ def declarations(target: ConfigTarget) -> tuple[Declaration, ...]:
 
 @dataclass(frozen=True, slots=True)
 class PropagationReport:
-    """What one run established about the target and its consumers."""
+    """What one run established about the target and its consumers.
+
+    `sighting` is the object's resource version, from before the reads were
+    sent until the object's arrived, when the object was observed with one.
+    """
 
     target: ConfigTarget
     object: Observation
     pods: Observation
     consumers: tuple[Consumer, ...]
     baseline: Baseline
+    sighting: Sighting | None = None
 
     @property
     def object_absent(self) -> bool:
@@ -124,11 +131,22 @@ async def _read_object(
     resolution: Resolution,
     token: RunToken | None,
     clock: Callable[[], datetime],
-) -> Observation:
+) -> tuple[Observation, str | None]:
+    """The object's observation, and its resource version if it was observed with one."""
     if not resolution.sources:
-        return _unresolved(resolution, token)
+        return _unresolved(resolution, token), None
     evidence = await read_object(reader, resolution.sources[0], token=token, clock=clock)
-    return evidence.observation
+    metadata = (evidence.item or {}).get("metadata")
+    version = metadata.get("resourceVersion") if isinstance(metadata, dict) else None
+    return evidence.observation, version if isinstance(version, str) and version else None
+
+
+def _sighting(observation: Observation, version: str | None, sent_at: datetime) -> Sighting | None:
+    """A version is read only from an object that was observed, so it has a time."""
+    observed_at = observation.observed_at
+    if version is None or observed_at is None:
+        return None
+    return Sighting(version, sent_at, observed_at)
 
 
 async def _read_consumers(
@@ -177,10 +195,18 @@ async def explain_propagation(
         expected_uid=target.uid,
     )
     pod_resolution = resolve(PODS, Verb.LIST, snapshot, scope=scope)
-    object_observation, (pod_observation, consumers) = await asyncio.gather(
+    sent_at = clock()
+    (object_observation, version), (pod_observation, consumers) = await asyncio.gather(
         _read_object(reader, object_resolution, token, clock),
         _read_consumers(reader, pod_resolution, target, token, clock),
     )
     evidence = EvidenceSet({"config-object": object_observation, "pods": pod_observation})
     baseline = evidence.baseline(declarations(target), clock())
-    return PropagationReport(target, object_observation, pod_observation, consumers, baseline)
+    return PropagationReport(
+        target,
+        object_observation,
+        pod_observation,
+        consumers,
+        baseline,
+        _sighting(object_observation, version, sent_at),
+    )
