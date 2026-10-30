@@ -145,6 +145,29 @@ consumers is not established. CSI and other volume plugins are not checked. Whet
 immutable is never claimed, because only its metadata is read. Enter on a
 row opens that Pod.
 
+The view also tells you whether an environment variable or `subPath` row is
+behind a change. Each run records the object's resource version. When
+you reopen the view after that version moved, an **Object change** column
+appears, and a note bounds the change: after the request that last saw the
+old version was sent, and before the response with the new one arrived.
+Each environment and `subPath` row says the object **changed after this
+container started**, **changed before this container started**, or **not
+established**. The container's start is its current `state.running.startedAt`.
+A container that is not running has no start, so its row says not
+established. The node's clock and korvid's are allowed to differ by up to
+one minute, so a change within a minute of the start is not established
+either.
+
+These limits apply:
+
+- Only changes korvid saw count: the view must have been open both before
+  and after the change, in the same context and session, against the same
+  object incarnation.
+- A new resource version can carry only a metadata change, so the view says
+  the object changed, not that its data did.
+- korvid keeps no history across restarts and never reads
+  `creationTimestamp` as a change time.
+
 ## Change scope without losing context
 
 korvid always watches exactly one explicit scope. The startup namespace

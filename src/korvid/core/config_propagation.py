@@ -88,8 +88,9 @@ def declarations(target: ConfigTarget) -> tuple[Declaration, ...]:
 class PropagationReport:
     """What one run established about the target and its consumers.
 
-    `sighting` is the object's resource version, from before the reads were
-    sent until the object's arrived, when the object was observed with one.
+    `sighting` is the object's resource version, timed from before the reads
+    were sent to when the object arrived. It is `None` unless the object was
+    observed with a resource version.
     """
 
     target: ConfigTarget
@@ -142,7 +143,7 @@ async def _read_object(
 
 
 def _sighting(observation: Observation, version: str | None, sent_at: datetime) -> Sighting | None:
-    """A version is read only from an object that was observed, so it has a time."""
+    """The run's sighting; only an observed object has a version, and so a time."""
     observed_at = observation.observed_at
     if version is None or observed_at is None:
         return None

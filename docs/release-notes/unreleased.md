@@ -17,6 +17,10 @@ tracks the next release scope.
   only the object's metadata and the namespace's Pods, and says when the set
   of consumers is not established. See
   [Configuration propagation](../tui.md#configuration-propagation).
+- Reopening `:consumers` after the object's resource version moved shows
+  whether the change followed each environment variable or `subPath`
+  consumer's container start, judged with a one-minute allowance for clock
+  skew. Only changes seen between two openings in the same session count.
 
 ## Current configuration and extension contracts
 
