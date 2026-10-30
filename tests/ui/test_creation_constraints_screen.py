@@ -31,7 +31,13 @@ from korvid.core.creation_policies import (
     ScopeExpression,
 )
 from korvid.core.creation_quantities import QuotaGroup, Usage
-from korvid.core.creation_workloads import Counter, WorkloadProjection
+from korvid.core.creation_workloads import (
+    ClaimTemplate,
+    ContainerDemand,
+    Counter,
+    PodTemplate,
+    WorkloadProjection,
+)
 from korvid.ui.widgets.creation_constraints_screen import (
     CreationConstraintsScreen,
     Destination,
@@ -560,3 +566,196 @@ def test_a_kind_without_replica_failure_conditions_names_only_events() -> None:
         "No creation failure is recorded in the Events read. Events expire, so this does not "
         "show that none happened."
     ) in _plain(report_notes(job, NOW))
+
+
+# --- possible constraints (#411 Q2) -----------------------------------------
+
+APP = ContainerDemand("app", "container", (("cpu", "500m"),), (("cpu", "500m"),))
+TEMPLATE = PodTemplate((APP,), ())
+COMPUTE = QuotaProjection(
+    "compute",
+    "uid-c",
+    (
+        QuotaEntry("requests.cpu", QuotaGroup.COMPUTE, "2", "2", Usage.AT_LIMIT),
+        QuotaEntry("pods", QuotaGroup.COUNT, "20", "20", Usage.AT_LIMIT),
+    ),
+)
+TIGHT = LimitRangeProjection("tight", "uid-t", (LimitValue("Container", "cpu", max="250m"),))
+_POSSIBLE = "Possible constraints — "
+_CAVEAT = (
+    "A possible constraint is not a cause or a forecast: quota status is not a reservation, "
+    "other Pods are created concurrently, and admission webhooks are not observed."
+)
+_UNCONSTRAINED = "No ResourceQuota or LimitRange observed constrains this template."
+_OPEN = "Not established: whether a ResourceQuota or LimitRange constrains this template: "
+
+
+def _with(template: PodTemplate | None, **changes: Any) -> CreationReport:
+    return _report(workload=replace(WORKLOAD, template=template), **changes)
+
+
+def _possible(report: CreationReport, now: datetime = NOW) -> list[Row]:
+    rows = table_rows(report, now)
+    start = next(
+        i
+        for i, row in enumerate(rows)
+        if isinstance(row, Heading) and row.text.startswith(_POSSIBLE)
+    )
+    return [row for row in rows[start + 1 :] if isinstance(row, Row)]
+
+
+def test_possible_constraints_come_last_naming_each_policy_once_per_run() -> None:
+    report = _with(TEMPLATE, failures=(), quotas=(COMPUTE,), limit_ranges=(TIGHT,))
+
+    headings = [row.text for row in table_rows(report, NOW) if isinstance(row, Heading)]
+    possible = _possible(report)
+
+    assert headings[-1].startswith(_POSSIBLE + "what the next Pod could run into as now observed")
+    quota = Destination("", "resourcequotas", "shop", "compute", "uid-c")
+    limits = Destination("", "limitranges", "shop", "tight", "uid-t")
+    assert possible == [
+        Row(
+            ("quota compute", "requests.cpu", "would exceed", "needs 500m; none remaining"),
+            quota,
+        ),
+        Row(("", "pods", "at its limit", "20 of 20 Pods exist"), quota),
+        Row(
+            ("LimitRange tight", "cpu", "above the maximum", "app: limit 500m is above 250m"),
+            limits,
+        ),
+    ]
+
+
+def test_a_claim_row_holds_only_if_the_claim_is_created() -> None:
+    storage = QuotaProjection(
+        "storage",
+        "uid-s",
+        (QuotaEntry("requests.storage", QuotaGroup.STORAGE, "100Gi", "95Gi", Usage.BELOW),),
+    )
+    one = replace(TEMPLATE, claims=(ClaimTemplate("data", "10Gi", "gold"),))
+    two = replace(
+        TEMPLATE,
+        claims=(ClaimTemplate("data", "4Gi", "gold"), ClaimTemplate("logs", "4Gi", "gold")),
+    )
+
+    single = _possible(_with(one, quotas=(storage,), limit_ranges=()))
+    both = _possible(_with(two, quotas=(storage,), limit_ranges=()))
+
+    assert [row.cells for row in single] == [
+        (
+            "quota storage",
+            "claim data: requests.storage",
+            "would exceed, if the claim is created",
+            "needs 10Gi; 5Gi remaining",
+        )
+    ]
+    assert [row.cells for row in both] == [
+        (
+            "quota storage",
+            "claims data, logs: requests.storage",
+            "would exceed, if the claims are created",
+            "needs 8Gi; 5Gi remaining",
+        )
+    ]
+
+
+def test_possible_constraints_are_never_a_cause_and_say_when_defaults_were_applied() -> None:
+    bare = PodTemplate((ContainerDemand("app", "container", (), ()),), ())
+
+    notes = _plain(report_notes(_with(bare, quotas=(COMPUTE,)), NOW))
+
+    assert _CAVEAT in notes
+    assert (
+        "Container defaults from the LimitRanges fill what the template leaves unset; other "
+        "admission plugins can change a Pod further."
+    ) in notes
+
+
+def test_nothing_constrains_the_template_only_when_the_core_concludes_it() -> None:
+    report = _with(TEMPLATE, quotas=(), limit_ranges=())
+
+    notes = _plain(report_notes(report, NOW))
+
+    assert _UNCONSTRAINED in notes
+    assert _CAVEAT not in notes
+    assert not any(
+        isinstance(row, Heading) and row.text.startswith(_POSSIBLE)
+        for row in table_rows(report, NOW)
+    )
+
+
+@pytest.mark.parametrize(
+    ("template", "changes", "reason"),
+    [
+        (
+            replace(TEMPLATE, runtime_class="kata"),
+            {},
+            "a RuntimeClass may add overhead, and RuntimeClasses are not read",
+        ),
+        (
+            replace(TEMPLATE, claims=(ClaimTemplate("data", "1Gi", None),)),
+            {},
+            "a claim without a storage class may get the cluster's default, which is not read",
+        ),
+        (
+            TEMPLATE,
+            {"quotas_observation": _seen(_source("", "resourcequotas"), Basis.TRUNCATED)},
+            "not every ResourceQuota and LimitRange is listed",
+        ),
+        (
+            TEMPLATE,
+            {"limit_ranges_observation": _seen(_source("", "limitranges"), Basis.FORBIDDEN)},
+            "not every ResourceQuota and LimitRange is listed",
+        ),
+    ],
+    ids=["runtime-class", "default-storage-class", "quotas-not-listed", "limit-ranges-not-listed"],
+)
+def test_why_nothing_is_not_known_to_constrain_the_template_is_said(
+    template: PodTemplate, changes: dict[str, Any], reason: str
+) -> None:
+    notes = _plain(report_notes(_with(template, quotas=(), limit_ranges=(), **changes), NOW))
+
+    assert _OPEN + reason in notes
+    assert _UNCONSTRAINED not in notes
+
+
+def test_a_list_gone_stale_stops_ruling_constraints_out() -> None:
+    report = _with(TEMPLATE, quotas=(), limit_ranges=())
+
+    notes = _plain(report_notes(report, NOW + timedelta(minutes=5)))
+
+    assert _OPEN + "not every ResourceQuota and LimitRange is listed" in notes
+    assert _UNCONSTRAINED not in notes
+
+
+def test_an_unreadable_template_leaves_the_possibilities_open() -> None:
+    unread = _plain(report_notes(_with(None), NOW))
+    gone = _plain(
+        report_notes(
+            _report(
+                workload=None, workload_observation=_seen(WORKLOAD_SOURCE, Basis.OBJECT_ABSENT)
+            ),
+            NOW,
+        )
+    )
+
+    assert (
+        "Not established: what could constrain the next Pod: its template could not be read"
+        in unread
+    )
+    assert not any("constrain" in note for note in gone)
+
+
+async def test_enter_on_a_possible_constraint_opens_its_policy() -> None:
+    report = _with(TEMPLATE, failures=(), quotas=(), limit_ranges=(TIGHT,))
+    app = _Host(CreationConstraintsScreen(report, lambda: NOW))
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: screen_ready(app, CreationConstraintsScreen), label="view open")
+        table = app.screen.query_one(DataTable)
+        # From the LimitRange's own row, past the next heading, to the possibility.
+        await pilot.press("down", "down")
+        assert table.get_row_at(table.cursor_row)[0].plain == "LimitRange tight"
+        await pilot.press("enter")
+        await until(pilot, lambda: bool(app.result), label="view closed")
+
+    assert app.result == [Destination("", "limitranges", "shop", "tight", "uid-t")]

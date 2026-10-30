@@ -3,7 +3,8 @@
 `CreationConstraintsScreen` shows one `CreationReport`: the workload and its
 counters, a line per evidence source from the shared renderer, then the
 recorded creation failures, the namespace's ResourceQuotas and its
-LimitRanges, and what the evidence does not establish. It performs no I/O,
+LimitRanges, the constraints the workload's next Pod could run into, and
+what the evidence does not establish. It performs no I/O,
 but re-renders the evidence lines and notes against its clock while it is
 open, so a policy list that ages past its freshness policy stops ruling
 anything out. Enter on a row dismisses with the `Destination` it leads to;
@@ -31,6 +32,7 @@ from korvid.core.capability import Basis, EvidenceState, Observation, conclusive
 from korvid.core.creation_constraints import CreationReport, declarations
 from korvid.core.creation_failures import Failure, FailureSource, RejectionKind
 from korvid.core.creation_policies import LimitRangeProjection, LimitValue, QuotaProjection
+from korvid.core.creation_possibilities import Possibility, possible_constraints
 from korvid.core.creation_quantities import Usage
 from korvid.core.creation_workloads import WORKLOAD_KINDS
 from korvid.ui.evidence_text import (
@@ -47,6 +49,9 @@ _CONDITION_KINDS = frozenset({"Deployment", "ReplicaSet"})
 _FAILURES = "Recorded creation failures — what the controller recorded, when it was recorded"
 _QUOTAS = "ResourceQuotas — current values; not a reservation, and the next create may still differ"
 _LIMIT_RANGES = "LimitRanges — current constraints; other admission plugins can also change a Pod"
+_POSSIBLE = "Possible constraints — what the next Pod could run into as now observed"
+_POLICY_RESOURCES = {"ResourceQuota": "resourcequotas", "LimitRange": "limitranges"}
+_POLICY_LABELS = {"ResourceQuota": "quota", "LimitRange": "LimitRange"}
 _QUOTA_KINDS = frozenset(
     {
         RejectionKind.QUOTA_EXCEEDED,
@@ -224,8 +229,36 @@ def _limit_range_rows(limit_range: LimitRangeProjection, namespace: str) -> list
     return [Row(row, destination) for row in cells]
 
 
+def _possibility_rows(report: CreationReport, now: datetime) -> list[Row]:
+    """Each possible constraint, its policy named on the first of its consecutive rows."""
+    possibilities = possible_constraints(report, now)
+    rows: list[Row] = []
+    previous: tuple[str, str] | None = None
+    for possibility in possibilities.rows if possibilities is not None else ():
+        policy = (possibility.policy_kind, possibility.policy)
+        label = "" if policy == previous else f"{_POLICY_LABELS[policy[0]]} {policy[1]}"
+        previous = policy
+        destination = Destination(
+            "",
+            _POLICY_RESOURCES[possibility.policy_kind],
+            report.target.namespace,
+            possibility.policy,
+            possibility.uid,
+        )
+        cells = (label, possibility.subject, _finding_text(possibility), possibility.detail)
+        rows.append(Row(cells, destination))
+    return rows
+
+
+def _finding_text(possibility: Possibility) -> str:
+    if not possibility.conditional:
+        return possibility.finding.value
+    created = "the claims are" if possibility.subject.startswith("claims ") else "the claim is"
+    return f"{possibility.finding.value}, if {created} created"
+
+
 def table_rows(report: CreationReport, now: datetime) -> list[TableRow]:
-    """The failures, quotas and LimitRanges under their headings; an empty section is left out."""
+    """The failures, quotas, LimitRanges and possible constraints; an empty section is left out."""
     namespace = report.target.namespace
     sections: list[tuple[str, list[Row]]] = [
         (_FAILURES, [_failure_row(f, report, now) for f in report.failures]),
@@ -234,6 +267,7 @@ def table_rows(report: CreationReport, now: datetime) -> list[TableRow]:
             _LIMIT_RANGES,
             [row for r in report.limit_ranges for row in _limit_range_rows(r, namespace)],
         ),
+        (_POSSIBLE, _possibility_rows(report, now)),
     ]
     rows: list[TableRow] = []
     for heading, section in sections:
@@ -352,12 +386,64 @@ def _completeness_notes(report: CreationReport, now: datetime) -> list[Text]:
     return notes
 
 
+def _unconstrained_reasons(report: CreationReport, now: datetime) -> list[str]:
+    """Why the core could not conclude that nothing constrains the template."""
+    template = report.workload.template if report.workload is not None else None
+    reasons: list[str] = []
+    if not (report.quotas_conclusive(now) and report.limit_ranges_conclusive(now)):
+        reasons.append("not every ResourceQuota and LimitRange is listed")
+    if template is not None and template.runtime_class is not None:
+        reasons.append("a RuntimeClass may add overhead, and RuntimeClasses are not read")
+    if template is not None and any(claim.storage_class is None for claim in template.claims):
+        reasons.append(
+            "a claim without a storage class may get the cluster's default, which is not read"
+        )
+    return reasons
+
+
+def _possibility_notes(report: CreationReport, now: datetime) -> list[Text]:
+    if report.workload is None:
+        return []
+    possibilities = possible_constraints(report, now)
+    if possibilities is None:
+        return [
+            not_established("what could constrain the next Pod: its template could not be read")
+        ]
+    notes: list[Text] = []
+    if possibilities.defaults_applied:
+        notes.append(
+            Text(
+                "Container defaults from the LimitRanges fill what the template leaves unset; "
+                "other admission plugins can change a Pod further."
+            )
+        )
+    if possibilities.rows:
+        notes.append(
+            Text(
+                "A possible constraint is not a cause or a forecast: quota status is not a "
+                "reservation, other Pods are created concurrently, and admission webhooks are "
+                "not observed."
+            )
+        )
+    elif possibilities.nothing_constrains:
+        notes.append(Text("No ResourceQuota or LimitRange observed constrains this template."))
+    else:
+        reasons = "; ".join(_unconstrained_reasons(report, now))
+        notes.append(
+            not_established(
+                f"whether a ResourceQuota or LimitRange constrains this template: {reasons}"
+            )
+        )
+    return notes
+
+
 def report_notes(report: CreationReport, now: datetime) -> list[Text]:
     """What the evidence says about the workload, and what it does not establish."""
     return [
         *_workload_notes(report, now),
         *_failure_notes(report),
         *_completeness_notes(report, now),
+        *_possibility_notes(report, now),
     ]
 
 
