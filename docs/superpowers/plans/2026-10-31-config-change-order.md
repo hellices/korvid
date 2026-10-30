@@ -314,8 +314,10 @@ def test_the_skew_allowance_is_one_minute() -> None:
     [
         ("", START, START, "resource version"),
         ("1", _at(1), START, "arrives after it is sent"),
-        ("1", START.replace(tzinfo=None), START.replace(tzinfo=None), "aware"),
+        ("1", START.replace(tzinfo=None), START, "aware"),
+        ("1", START, START.replace(tzinfo=None), "aware"),
     ],
+    ids=["no-version", "arrives-first", "naive-send", "naive-arrival"],
 )
 def test_a_sighting_is_checked(
     version: str, sent: datetime, arrived: datetime, message: str
