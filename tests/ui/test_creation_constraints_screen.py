@@ -759,3 +759,45 @@ async def test_enter_on_a_possible_constraint_opens_its_policy() -> None:
         await until(pilot, lambda: bool(app.result), label="view closed")
 
     assert app.result == [Destination("", "limitranges", "shop", "tight", "uid-t")]
+
+
+def test_a_workload_that_could_not_be_read_leaves_the_possibilities_open() -> None:
+    denied = _report(workload=None, workload_observation=_seen(WORKLOAD_SOURCE, Basis.FORBIDDEN))
+
+    notes = _plain(report_notes(denied, NOW))
+
+    assert (
+        "Not established: what could constrain the next Pod: the Deployment could not be read"
+        in notes
+    )
+
+
+async def test_an_open_view_adds_rows_a_stale_list_no_longer_rules_out() -> None:
+    now = [NOW]
+    bare = PodTemplate((ContainerDemand("app", "container", (), ()),), ())
+    scratch = QuotaProjection(
+        "scratch",
+        "uid-x",
+        (QuotaEntry("requests.ephemeral-storage", QuotaGroup.STORAGE, "1Gi", "0", Usage.BELOW),),
+    )
+    report = _with(bare, quotas=(scratch,), limit_ranges=())
+    app = _Host(CreationConstraintsScreen(report, lambda: now[0], refresh_seconds=0.05))
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: screen_ready(app, CreationConstraintsScreen), label="view open")
+        table = app.screen.query_one(DataTable)
+        assert table.row_count == 4
+        await pilot.press("down")
+        assert table.cursor_row == 2
+
+        # Once the LimitRange list is stale, an unseen default may add to the Pod's demand.
+        now[0] = NOW + timedelta(minutes=5)
+        await until(pilot, lambda: table.row_count == 6, label="possibility added")
+
+        assert [str(table.get_row_at(i)[1]) for i in (4, 5)] == ["", "requests.ephemeral-storage"]
+        assert table.cursor_row == 2
+        await pilot.press("down", "down", "down")
+        assert str(table.get_row_at(table.cursor_row)[0]) == "quota scratch"
+        await pilot.press("enter")
+        await until(pilot, lambda: bool(app.result), label="view closed")
+
+    assert app.result == [Destination("", "resourcequotas", "shop", "scratch", "uid-x")]

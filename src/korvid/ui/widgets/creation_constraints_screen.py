@@ -402,13 +402,12 @@ def _unconstrained_reasons(report: CreationReport, now: datetime) -> list[str]:
 
 
 def _possibility_notes(report: CreationReport, now: datetime) -> list[Text]:
-    if report.workload is None:
+    if report.workload_observation.basis is Basis.OBJECT_ABSENT:
         return []
     possibilities = possible_constraints(report, now)
     if possibilities is None:
-        return [
-            not_established("what could constrain the next Pod: its template could not be read")
-        ]
+        unread = "its template" if report.workload is not None else f"the {report.target.kind}"
+        return [not_established(f"what could constrain the next Pod: {unread} could not be read")]
     notes: list[Text] = []
     if possibilities.defaults_applied:
         notes.append(
@@ -445,6 +444,11 @@ def report_notes(report: CreationReport, now: datetime) -> list[Text]:
         *_completeness_notes(report, now),
         *_possibility_notes(report, now),
     ]
+
+
+def _shape(row: TableRow) -> str | Destination | None:
+    """What a row is, apart from cells that age: its heading, or where it leads."""
+    return row.text if isinstance(row, Heading) else row.destination
 
 
 class CreationConstraintsScreen(ModalScreen[Destination | None]):
@@ -486,6 +490,7 @@ class CreationConstraintsScreen(ModalScreen[Destination | None]):
         self._refresh_seconds = refresh_seconds
         self._rows: dict[str, Destination] = {}
         self._columns: list[ColumnKey] = []
+        self._shown: list[TableRow] = []
 
     def compose(self) -> ComposeResult:
         yield Footer()
@@ -503,23 +508,33 @@ class CreationConstraintsScreen(ModalScreen[Destination | None]):
         self._refresh_rows(now)
 
     def _refresh_rows(self, now: datetime) -> None:
-        """Re-render cells that depend on the time: ages, and whether a list still rules out."""
+        """Re-render what depends on the time: ages, and whether a list still rules out.
+
+        A list going stale can add or drop possible constraints, so when the
+        rows themselves change the table is rebuilt. Only that last section
+        changes with time, so the cursor keeps its index.
+        """
         if not self._columns:
             return
+        rows = table_rows(self.report, now)
         table: DataTable[Text] = self.query_one(DataTable)
-        for index, row in enumerate(table_rows(self.report, now)):
+        if [_shape(row) for row in rows] != [_shape(row) for row in self._shown]:
+            cursor = table.cursor_row
+            table.clear()
+            self._fill(table, rows)
+            table.move_cursor(row=max(0, min(cursor, len(rows) - 1)))
+            return
+        for index, row in enumerate(rows):
             if isinstance(row, Row):
                 for column, cell in zip(self._columns, row.cells, strict=True):
                     table.update_cell(f"r{index}", column, Text(cell))
 
-    def on_mount(self) -> None:
-        self._render_text()
-        self.set_interval(self._refresh_seconds, self._render_text)
-        table: DataTable[Text] = self.query_one(DataTable)
-        table.cursor_type = "row"
-        self._columns = table.add_columns(*_COLUMNS)
+    def _fill(self, table: DataTable[Text], rows: list[TableRow]) -> int | None:
+        """Add `rows` to the empty `table`; the index of the first row Enter can open."""
+        self._shown = rows
+        self._rows.clear()
         first: int | None = None
-        for index, row in enumerate(table_rows(self.report, self._clock())):
+        for index, row in enumerate(rows):
             if isinstance(row, Heading):
                 title, _, meaning = row.text.partition(" — ")
                 table.add_row(Text(title, style="bold"), Text(""), Text(meaning), key=f"h{index}")
@@ -530,6 +545,15 @@ class CreationConstraintsScreen(ModalScreen[Destination | None]):
             # A rejection message can span lines; the row grows to show all of it.
             table.add_row(*(Text(cell) for cell in row.cells), key=key, height=None)
             first = index if first is None else first
+        return first
+
+    def on_mount(self) -> None:
+        table: DataTable[Text] = self.query_one(DataTable)
+        table.cursor_type = "row"
+        self._columns = table.add_columns(*_COLUMNS)
+        first = self._fill(table, table_rows(self.report, self._clock()))
+        self._render_text()
+        self.set_interval(self._refresh_seconds, self._render_text)
         if first is not None:
             table.move_cursor(row=first)
         table.focus()

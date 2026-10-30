@@ -15,7 +15,7 @@
 - **"No ResourceQuota or LimitRange observed constrains this template"** only when `Possibilities.nothing_constrains`; otherwise "Not established" with every reason that applies.
 - **Claim rows are conditional:** they hold only if the claim is created.
 - **Literal text:** every cell and note is plain `Text`.
-- **Stable rows:** the timer re-renders cells by row index, so the number of rows must not depend on the clock. `possible_constraints` uses `now` only for `nothing_constrains`, which is a note.
+- **Rows can change with the clock:** a LimitRange list going stale leaves defaults unknown, which can add possible constraints. The timer updates cells in place while the rows lead to the same places, and rebuilds the table, keeping the cursor index, when they do not.
 - **Size limits:** `scripts/check_source_size.py` is not edited.
 - **Commands:** use `uv run --frozen …`. Behind the corporate mirror, call the project venv's tools directly with `PYTHONPATH=src`.
 
@@ -24,6 +24,7 @@
 - **The policy is named once per run of rows,** as the quota and LimitRange sections name each policy on its first row only. Rows say "quota NAME" or "LimitRange NAME", since one section mixes both kinds.
 - **A claim row's finding carries the condition:** "would exceed, if the claim is created", or "if the claims are created" for a row about several claims.
 - **The notes say why nothing is not known to constrain the template:** the lists not all read, a RuntimeClass, or a claim without a storage class, mirroring the core's conditions.
+- **A workload that could not be read** leaves the possibilities not established, as an unreadable template does; only an absent workload has no such note.
 - **The version-matrix workflow** now also runs when `creation_demand.py` or `creation_possibilities.py` changes, since its scenario checks them.
 
 ## File structure
@@ -241,6 +242,48 @@ async def test_enter_on_a_possible_constraint_opens_its_policy() -> None:
         await until(pilot, lambda: bool(app.result), label="view closed")
 
     assert app.result == [Destination("", "limitranges", "shop", "tight", "uid-t")]
+
+
+def test_a_workload_that_could_not_be_read_leaves_the_possibilities_open() -> None:
+    denied = _report(workload=None, workload_observation=_seen(WORKLOAD_SOURCE, Basis.FORBIDDEN))
+
+    notes = _plain(report_notes(denied, NOW))
+
+    assert (
+        "Not established: what could constrain the next Pod: the Deployment could not be read"
+        in notes
+    )
+
+
+async def test_an_open_view_adds_rows_a_stale_list_no_longer_rules_out() -> None:
+    now = [NOW]
+    bare = PodTemplate((ContainerDemand("app", "container", (), ()),), ())
+    scratch = QuotaProjection(
+        "scratch",
+        "uid-x",
+        (QuotaEntry("requests.ephemeral-storage", QuotaGroup.STORAGE, "1Gi", "0", Usage.BELOW),),
+    )
+    report = _with(bare, quotas=(scratch,), limit_ranges=())
+    app = _Host(CreationConstraintsScreen(report, lambda: now[0], refresh_seconds=0.05))
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: screen_ready(app, CreationConstraintsScreen), label="view open")
+        table = app.screen.query_one(DataTable)
+        assert table.row_count == 4
+        await pilot.press("down")
+        assert table.cursor_row == 2
+
+        # Once the LimitRange list is stale, an unseen default may add to the Pod's demand.
+        now[0] = NOW + timedelta(minutes=5)
+        await until(pilot, lambda: table.row_count == 6, label="possibility added")
+
+        assert [str(table.get_row_at(i)[1]) for i in (4, 5)] == ["", "requests.ephemeral-storage"]
+        assert table.cursor_row == 2
+        await pilot.press("down", "down", "down")
+        assert str(table.get_row_at(table.cursor_row)[0]) == "quota scratch"
+        await pilot.press("enter")
+        await until(pilot, lambda: bool(app.result), label="view closed")
+
+    assert app.result == [Destination("", "resourcequotas", "shop", "scratch", "uid-x")]
 ```
 
 - [ ] **Step 2: Run them to see them fail.**
@@ -308,13 +351,12 @@ def _unconstrained_reasons(report: CreationReport, now: datetime) -> list[str]:
 
 
 def _possibility_notes(report: CreationReport, now: datetime) -> list[Text]:
-    if report.workload is None:
+    if report.workload_observation.basis is Basis.OBJECT_ABSENT:
         return []
     possibilities = possible_constraints(report, now)
     if possibilities is None:
-        return [
-            not_established("what could constrain the next Pod: its template could not be read")
-        ]
+        unread = "its template" if report.workload is not None else f"the {report.target.kind}"
+        return [not_established(f"what could constrain the next Pod: {unread} could not be read")]
     notes: list[Text] = []
     if possibilities.defaults_applied:
         notes.append(
@@ -351,6 +393,69 @@ def report_notes(report: CreationReport, now: datetime) -> list[Text]:
         *_completeness_notes(report, now),
         *_possibility_notes(report, now),
     ]
+```
+
+- [ ] **Step 4b: Rebuild the table when its rows change.** A stale LimitRange list can add rows, which `update_cell` cannot reach. Add before the screen class:
+
+```python
+def _shape(row: TableRow) -> str | Destination | None:
+    """What a row is, apart from cells that age: its heading, or where it leads."""
+    return row.text if isinstance(row, Heading) else row.destination
+```
+
+give the screen `self._shown: list[TableRow] = []`, and replace `_refresh_rows` and `on_mount` with:
+
+```python
+    def _refresh_rows(self, now: datetime) -> None:
+        """Re-render what depends on the time: ages, and whether a list still rules out.
+
+        A list going stale can add or drop possible constraints, so when the
+        rows themselves change the table is rebuilt. Only that last section
+        changes with time, so the cursor keeps its index.
+        """
+        if not self._columns:
+            return
+        rows = table_rows(self.report, now)
+        table: DataTable[Text] = self.query_one(DataTable)
+        if [_shape(row) for row in rows] != [_shape(row) for row in self._shown]:
+            cursor = table.cursor_row
+            table.clear()
+            self._fill(table, rows)
+            table.move_cursor(row=max(0, min(cursor, len(rows) - 1)))
+            return
+        for index, row in enumerate(rows):
+            if isinstance(row, Row):
+                for column, cell in zip(self._columns, row.cells, strict=True):
+                    table.update_cell(f"r{index}", column, Text(cell))
+
+    def _fill(self, table: DataTable[Text], rows: list[TableRow]) -> int | None:
+        """Add `rows` to the empty `table`; the index of the first row Enter can open."""
+        self._shown = rows
+        self._rows.clear()
+        first: int | None = None
+        for index, row in enumerate(rows):
+            if isinstance(row, Heading):
+                title, _, meaning = row.text.partition(" — ")
+                table.add_row(Text(title, style="bold"), Text(""), Text(meaning), key=f"h{index}")
+                continue
+            key = f"r{index}"
+            if row.destination is not None:
+                self._rows[key] = row.destination
+            # A rejection message can span lines; the row grows to show all of it.
+            table.add_row(*(Text(cell) for cell in row.cells), key=key, height=None)
+            first = index if first is None else first
+        return first
+
+    def on_mount(self) -> None:
+        table: DataTable[Text] = self.query_one(DataTable)
+        table.cursor_type = "row"
+        self._columns = table.add_columns(*_COLUMNS)
+        first = self._fill(table, table_rows(self.report, self._clock()))
+        self._render_text()
+        self.set_interval(self._refresh_seconds, self._render_text)
+        if first is not None:
+            table.move_cursor(row=first)
+        table.focus()
 ```
 
 - [ ] **Step 5: Run the tests to see them pass.**
