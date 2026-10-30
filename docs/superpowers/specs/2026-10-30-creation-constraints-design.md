@@ -170,9 +170,10 @@ counters above, a `ReplicaFailure` condition's reason, message and time,
 and for P2 the template's demand:
 
 - each container's and init container's name, `resources.requests` and
-  `resources.limits`;
-- the Pod's `priorityClassName`, `activeDeadlineSeconds` and the Pod-level
-  `resources`, when set;
+  `resources.limits`, in declaration order, and an init container's
+  `restartPolicy`, which marks a sidecar;
+- the Pod's `priorityClassName`, `activeDeadlineSeconds`,
+  `runtimeClassName` and the Pod-level `resources`, when set;
 - a StatefulSet's `volumeClaimTemplates`: each claim's name, storage class
   name and `resources.requests.storage`.
 
@@ -189,8 +190,15 @@ its subject is the workload or one of its ReplicaSets, matched by **UID**:
 An event about an object with the right kind and name but another UID is
 about an earlier incarnation. It is not shown, but the view counts it
 ("2 failures recorded for an earlier Deployment named api are not shown").
-Each kept event keeps its subject, `note` or `message`, count (`series.count`
-or `count`), and time, chosen by `k8s/events.py`'s precedence.
+Each kept event keeps its subject, `note` or `message`, count and time:
+
+- the count is `series.count`, then `deprecatedCount`, for
+  `events.k8s.io/v1`, and `count` for core `v1`, and 1 when none is set;
+- the time is chosen by `k8s/events.py`'s precedence. Q1 adds
+  `deprecatedLastTimestamp` after `lastTimestamp` and
+  `deprecatedFirstTimestamp` after `firstTimestamp`, so an older controller's
+  repeating event served through `events.k8s.io/v1` is dated by its last
+  occurrence, not by its creation.
 
 **Quotas and LimitRanges** are kept as listed above. They carry no
 payload.
@@ -295,13 +303,21 @@ are computed from the projected template:
   defaults then fill what is still missing: `defaultRequest` a request,
   `default` a limit. The view says these are the configured defaults, and
   that other admission plugins can change a Pod further.
+- When more than one LimitRange gives a different default for the same
+  resource, Kubernetes does not define which one applies. That resource's
+  demand is then not established, and so is every row and scope that
+  depends on it.
 - The Pod's demand is computed as Kubernetes computes its effective
-  request: app containers and sidecars (restartable init containers) are
-  summed, and each other init container counts only if it alone, with the
-  sidecars started before it, needs more. A Pod-level `resources` stanza,
-  when set, replaces the computed value.
-- A StatefulSet's claim templates add each claim's storage request, per
-  storage class, to its storage and claim counts.
+  request: app containers and sidecars (restartable init containers, in
+  declaration order) are summed, and each other init container counts only
+  if it alone, with the sidecars started before it, needs more.
+- Pod-level `resources` override per resource and separately for requests
+  and limits: a Pod-level CPU request replaces the computed CPU request and
+  leaves the memory demand as the containers give it.
+- A `runtimeClassName` can add a RuntimeClass `overhead` at admission.
+  RuntimeClasses are cluster-scoped and not read, so with one set, the CPU
+  and memory demand is not established, and neither is "nothing
+  constrains this template".
 
 **Quota applicability.** A quota applies to the Pod only if every scope
 does:
@@ -309,7 +325,7 @@ does:
 | Scope | Applies when |
 | --- | --- |
 | `Terminating` / `NotTerminating` | `activeDeadlineSeconds` is set / unset |
-| `BestEffort` / `NotBestEffort` | no container requests or limits CPU or memory / some does, after defaults |
+| `BestEffort` / `NotBestEffort` | the Pod's QoS class is BestEffort / is not: no container and no Pod-level `resources` request or limit CPU or memory, after defaults |
 | `PriorityClass` (selector) | `priorityClassName` satisfies the `In`, `NotIn`, `Exists` or `DoesNotExist` expression |
 | `CrossNamespacePodAffinity` | not projected; applicability is not established |
 | any other | applicability is not established |
@@ -321,8 +337,16 @@ does:
   does not specify, even after defaults, matching `must specify`;
 - "at its limit" for the `pods` and `count/pods` counts when `used >= hard`.
 
-For each LimitRange, the Pod's per-container, per-Pod and per-claim values
-are checked against `min`, `max` and `maxLimitRequestRatio`.
+For each LimitRange, the Pod's per-container and per-Pod values are checked
+against `min`, `max` and `maxLimitRequestRatio`.
+
+A StatefulSet's claims are a separate, conditional demand. A new Pod reuses
+any claim that already exists, as a replacement Pod or a scale-up over
+retained claims does, and the view does not read claims. So claim rows say
+"if a new claim is created": each claim template's storage request is
+checked, per storage class, against the storage and claim-count quotas and
+the `PersistentVolumeClaim` LimitRanges, and never added to the Pod's
+demand.
 
 **What P2 never says.** That the next create will fail or succeed: quota
 status is not atomic, other controllers create and delete objects
@@ -378,7 +402,8 @@ Each slice gets a sub-issue under #411 and its own pull request:
   but absent from the list; a message with several LimitRange violations;
   an unrecognised webhook message shown verbatim; a markup-looking message
   shown literally.
-- Events: `events.k8s.io/v1` and core `v1` shapes; matching by UID, not
+- Events: `events.k8s.io/v1` and core `v1` shapes, including a
+  `deprecatedCount` and `deprecatedLastTimestamp` without a series; matching by UID, not
   name; an earlier incarnation's events counted and hidden; a Deployment's
   events through its owned ReplicaSets only; a truncated list.
 - Policies: multiple quotas; scopes and scope selectors shown; missing and
@@ -389,8 +414,10 @@ Each slice gets a sub-issue under #411 and its own pull request:
   report's `repr`.
 - Lifecycle, as in #410: a newer run, a context switch, new credentials, a
   moved selection and an open dialog each drop the result.
-- P2: defaults applied only to missing values; init-container and
-  Pod-level resources; each scope row in the table; "would exceed" at,
+- P2: defaults applied only to missing values; conflicting defaults from
+  two LimitRanges; init containers and sidecars in order; Pod-level
+  resources overriding one resource only; a `runtimeClassName`;
+  conditional claim rows; each scope row in the table; "would exceed" at,
   just under and just over the limit; "requires a field"; LimitRange
   min, max and ratio per container, Pod and claim; remaining amounts
   formatted exactly.
