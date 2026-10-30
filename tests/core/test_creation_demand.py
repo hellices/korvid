@@ -6,7 +6,7 @@ from decimal import Decimal
 
 import pytest
 
-from korvid.core.creation_demand import pod_demand
+from korvid.core.creation_demand import ContainerValues, pod_demand
 from korvid.core.creation_policies import LimitRangeProjection, LimitValue
 from korvid.core.creation_workloads import ContainerDemand, PodTemplate
 
@@ -298,3 +298,22 @@ def test_an_init_container_runs_alongside_the_sidecars_started_before_it() -> No
 
     # apps + sidecars = 350m; warm with only the proxy before it = 600m.
     assert pod_demand(template, ()).requests == {"cpu": Decimal("0.6")}
+
+
+def test_each_containers_values_after_defaults_are_kept_in_order() -> None:
+    defaults = _limits("d", LimitValue("Container", "cpu", default="1", default_request="100m"))
+    template = _template(
+        _container("app", requests={"memory": "x"}),
+        init=(_container("setup", "init", limits={"cpu": "2"}),),
+    )
+
+    demand = pod_demand(template, (defaults,))
+
+    assert demand.containers == (
+        ContainerValues(
+            "app", {"cpu": Decimal("0.1")}, {"cpu": Decimal(1)}, frozenset({"memory"}), frozenset()
+        ),
+        ContainerValues(
+            "setup", {"cpu": Decimal(2)}, {"cpu": Decimal(2)}, frozenset(), frozenset()
+        ),
+    )

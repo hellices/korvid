@@ -38,6 +38,17 @@ _POD_COUNTS = frozenset({"pods", "count/pods"})
 
 
 @dataclass(frozen=True, slots=True)
+class ContainerValues:
+    """One container's requests and limits after defaulting, and what is not established."""
+
+    name: str
+    requests: Mapping[str, Decimal]
+    limits: Mapping[str, Decimal]
+    unknown_requests: frozenset[str] = frozenset()
+    unknown_limits: frozenset[str] = frozenset()
+
+
+@dataclass(frozen=True, slots=True)
 class PodDemand:
     """One new Pod's requests and limits per resource, and what is not established.
 
@@ -55,6 +66,7 @@ class PodDemand:
     pod_level: frozenset[str] = frozenset()
     best_effort: bool | None = True
     defaults_applied: bool = False
+    containers: tuple[ContainerValues, ...] = ()
 
     def for_quota(self, key: str) -> Decimal | None:
         """What the Pod charges against quota resource `key`; `None` when not established.
@@ -267,4 +279,14 @@ def pod_demand(template: PodTemplate, limit_ranges: Sequence[LimitRangeProjectio
         pod_level,
         best_effort,
         any(applied for _, applied in completed),
+        tuple(
+            ContainerValues(
+                c.name,
+                dict(c.requests.values),
+                dict(c.limits.values),
+                frozenset(c.requests.unknown),
+                frozenset(c.limits.unknown),
+            )
+            for c in containers
+        ),
     )
