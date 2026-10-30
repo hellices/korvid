@@ -16,6 +16,11 @@ on:
       - src/korvid/core/capability_classifier.py
       - src/korvid/core/config_consumers.py
       - src/korvid/core/config_propagation.py
+      - src/korvid/core/creation_constraints.py
+      - src/korvid/core/creation_failures.py
+      - src/korvid/core/creation_policies.py
+      - src/korvid/core/creation_quantities.py
+      - src/korvid/core/creation_workloads.py
       - src/korvid/core/evidence_reads.py
       - src/korvid/core/run_tokens.py
       - src/korvid/k8s/bounded_transport.py
@@ -24,6 +29,7 @@ on:
       - src/korvid/k8s/discovery.py
       - src/korvid/k8s/discovery_snapshot.py
       - src/korvid/k8s/errors.py
+      - src/korvid/k8s/events.py
       - src/korvid/k8s/evidence_requests.py
       - tests/version_matrix/**
       - .github/workflows/k8s-version-matrix.yml
@@ -37,6 +43,11 @@ on:
       - src/korvid/core/capability_classifier.py
       - src/korvid/core/config_consumers.py
       - src/korvid/core/config_propagation.py
+      - src/korvid/core/creation_constraints.py
+      - src/korvid/core/creation_failures.py
+      - src/korvid/core/creation_policies.py
+      - src/korvid/core/creation_quantities.py
+      - src/korvid/core/creation_workloads.py
       - src/korvid/core/evidence_reads.py
       - src/korvid/core/run_tokens.py
       - src/korvid/k8s/bounded_transport.py
@@ -45,6 +56,7 @@ on:
       - src/korvid/k8s/discovery.py
       - src/korvid/k8s/discovery_snapshot.py
       - src/korvid/k8s/errors.py
+      - src/korvid/k8s/events.py
       - src/korvid/k8s/evidence_requests.py
       - tests/version_matrix/**
       - .github/workflows/k8s-version-matrix.yml

@@ -8,6 +8,7 @@ group. They read; the only writes are the fixtures `setup.sh` installed.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import UTC, datetime
 
@@ -25,6 +26,8 @@ from korvid.core.capability import (
 )
 from korvid.core.config_consumers import ConsumptionMode
 from korvid.core.config_propagation import ConfigTarget, explain_propagation
+from korvid.core.creation_constraints import CreationReport, CreationTarget, explain_creation
+from korvid.core.creation_failures import RejectionKind
 from korvid.core.evidence_reads import (
     LAST_APPLIED_ANNOTATION,
     read_list,
@@ -267,3 +270,42 @@ async def test_a_config_maps_consumers_are_read_by_mode(connect: Connect) -> Non
     assert report.consumers_conclusive(datetime.now(UTC))
     assert "matrix-configmap-payload" not in repr(report)
     assert "matrix-pod-literal" not in repr(report)
+
+
+QUOTA_NAMESPACE = "korvid-matrix-quota"
+#: How long the ReplicaSet controller gets to record its first rejection.
+_REJECTION_WAIT = 90.0
+
+
+async def _recorded(connect: Connect) -> CreationReport:
+    """The blocked Deployment's report, once a rejection and current quota status are in."""
+    kube = await connect(ADMIN_CONTEXT)
+    target = CreationTarget("Deployment", QUOTA_NAMESPACE, "blocked")
+    deadline = asyncio.get_running_loop().time() + _REJECTION_WAIT
+    while True:
+        report = await explain_creation(kube, await snapshot_of(kube), target)
+        settled = report.failures and report.quotas and not report.quotas[0].stale
+        if settled or asyncio.get_running_loop().time() > deadline:
+            return report
+        await asyncio.sleep(2)
+
+
+async def test_a_quota_rejection_is_read_next_to_the_namespace_policies(connect: Connect) -> None:
+    report = await _recorded(connect)
+
+    assert _state(report.workload_observation) == (EvidenceState.AVAILABLE, Basis.OBSERVED)
+    assert [child.subject.kind for child in report.children] == ["ReplicaSet"]
+    assert report.failures, "the ReplicaSet recorded no FailedCreate in time"
+    quota_kinds = {RejectionKind.QUOTA_EXCEEDED, RejectionKind.QUOTA_STATUS_UNKNOWN}
+    assert any(
+        quota_kinds & set(f.rejection.kinds) and f.rejection.quotas == ("matrix-pods",)
+        for f in report.failures
+    )
+    (quota,) = report.quotas
+    assert (quota.name, [(e.resource, e.hard) for e in quota.entries]) == (
+        "matrix-pods",
+        [("pods", "0")],
+    )
+    assert [r.name for r in report.limit_ranges] == ["matrix-limits"]
+    assert report.quotas_conclusive(datetime.now(UTC))
+    assert "matrix-template-literal" not in repr(report)
