@@ -5,10 +5,13 @@ the "latest occurrence" instant across several optional fields with the
 same precedence everywhere the field is read: repeating events roll their
 latest occurrence into `series.lastObservedTime`; non-repeating core v1
 events set `lastTimestamp`; events.k8s.io events with no series set
-`eventTime` (the initial observation); the deprecated `firstTimestamp` and
-finally `metadata.creationTimestamp` are the last resorts — a valid event
-may carry only those, and treating it as undated would misorder or
-suppress it in every caller that ranks or ages events.
+`eventTime` (the initial observation). An older controller's event served
+through events.k8s.io carries its core times as `deprecatedLastTimestamp`
+and `deprecatedFirstTimestamp`, each read right after its core name. The
+deprecated `firstTimestamp` and finally `metadata.creationTimestamp` are the
+last resorts — a valid event may carry only those, and treating it as
+undated would misorder or suppress it in every caller that ranks or ages
+events.
 """
 
 from __future__ import annotations
@@ -19,8 +22,9 @@ from typing import Any
 def select_event_timestamp(event: dict[str, Any]) -> str:
     """Raw timestamp string of an Event's latest occurrence, or `""`.
 
-    Precedence: `series.lastObservedTime`, `lastTimestamp`, `eventTime`,
-    `firstTimestamp`, `metadata.creationTimestamp`. `series` and `metadata`
+    Precedence: `series.lastObservedTime`, `lastTimestamp`,
+    `deprecatedLastTimestamp`, `eventTime`, `firstTimestamp`,
+    `deprecatedFirstTimestamp`, `metadata.creationTimestamp`. `series` and `metadata`
     are guarded against being absent or not a mapping — some client
     payloads carry `None` or a malformed nested value there, and this
     helper must fall through rather than raise. Callers own parsing
@@ -34,8 +38,10 @@ def select_event_timestamp(event: dict[str, Any]) -> str:
     raw = (
         series.get("lastObservedTime")
         or event.get("lastTimestamp")
+        or event.get("deprecatedLastTimestamp")
         or event.get("eventTime")
         or event.get("firstTimestamp")
+        or event.get("deprecatedFirstTimestamp")
         or metadata.get("creationTimestamp")
         or ""
     )

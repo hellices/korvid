@@ -88,3 +88,38 @@ def test_non_mapping_metadata_is_ignored_rather_than_raising() -> None:
     for malformed_metadata in malformed_values:
         event: dict[str, Any] = {"metadata": malformed_metadata}
         assert select_event_timestamp(event) == ""
+
+
+def test_a_legacy_event_served_as_events_k8s_io_is_dated_by_its_last_occurrence() -> None:
+    event = {
+        "deprecatedLastTimestamp": "2026-10-30T09:10:00Z",
+        "deprecatedFirstTimestamp": "2026-10-30T09:00:00Z",
+        "eventTime": None,
+        "metadata": {"creationTimestamp": "2026-10-30T08:00:00Z"},
+    }
+
+    assert select_event_timestamp(event) == "2026-10-30T09:10:00Z"
+
+
+def test_last_timestamp_wins_over_its_deprecated_form() -> None:
+    event = {
+        "lastTimestamp": "2026-10-30T09:20:00Z",
+        "deprecatedLastTimestamp": "2026-10-30T09:10:00Z",
+    }
+
+    assert select_event_timestamp(event) == "2026-10-30T09:20:00Z"
+
+
+def test_a_deprecated_last_timestamp_wins_over_event_time() -> None:
+    event = {"deprecatedLastTimestamp": "2026-10-30T09:10:00Z", "eventTime": "2026-10-30T09:00:00Z"}
+
+    assert select_event_timestamp(event) == "2026-10-30T09:10:00Z"
+
+
+def test_a_deprecated_first_timestamp_wins_over_creation_timestamp() -> None:
+    event = {
+        "deprecatedFirstTimestamp": "2026-10-30T09:00:00Z",
+        "metadata": {"creationTimestamp": "2026-10-30T08:00:00Z"},
+    }
+
+    assert select_event_timestamp(event) == "2026-10-30T09:00:00Z"
