@@ -4,8 +4,9 @@ A Pod is projected to its references to one object, each with the mode
 that decides whether a change reaches the running container. The projection
 reads only the fields `korvid.k8s.config_references` reads, plus each
 container's name, `restartPolicy` and `volumeMounts`, the Pod's identity and
-controlling owner, and of the status only each running container's
-`state.running.startedAt`. No value of the Pod is kept.
+controlling owner, and of the status only each container status's `name`,
+to match it to its container, and `state.running.startedAt`. No value of the
+Pod is kept.
 """
 
 from __future__ import annotations

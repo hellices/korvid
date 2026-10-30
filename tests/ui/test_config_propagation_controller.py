@@ -400,8 +400,8 @@ async def test_a_dropped_run_leaves_no_sighting() -> None:
     harness.view.selected = ("team-a", "other")
     await harness.run()  # finishes after the selection moved
     harness.view.selected = ("team-a", "settings")
+    assert harness.ui.screens == []
 
     reopened = await _open(harness, minutes=10, version="2")
 
-    assert harness.ui.screens == []
     assert reopened.change == ObservedChange(NOW, NOW + timedelta(minutes=10))

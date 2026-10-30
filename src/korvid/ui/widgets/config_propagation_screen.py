@@ -217,9 +217,9 @@ def _change_note(report: PropagationReport, change: ObservedChange | None) -> Te
     kind = report.target.kind
     if change is not None:
         return Text(
-            f"The {kind} changed between {_time(change.after)} and {_time(change.before)}, "
-            "as seen this session: it has a new resource version, which may change only its "
-            "metadata. An earlier change is not known."
+            f"The {kind}'s latest change seen this session happened between "
+            f"{_time(change.after)} and {_time(change.before)}: it has a new resource version, "
+            "which may change only its metadata."
         )
     if report.sighting is None or not any(c.mode in _READ_AT_START for c in report.consumers):
         return None

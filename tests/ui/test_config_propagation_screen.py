@@ -395,9 +395,9 @@ def test_a_seen_change_is_described_as_an_object_change_this_session() -> None:
     notes = _plain(report_notes(_sighted(ENV), NOW, CHANGE))
 
     assert (
-        "The ConfigMap changed between 2026-10-30 08:30:00 UTC and 2026-10-30 08:40:00 UTC, "
-        "as seen this session: it has a new resource version, which may change only its "
-        "metadata. An earlier change is not known."
+        "The ConfigMap's latest change seen this session happened between "
+        "2026-10-30 08:30:00 UTC and 2026-10-30 08:40:00 UTC: it has a new resource version, "
+        "which may change only its metadata."
     ) in notes
 
 
@@ -426,6 +426,6 @@ async def test_the_change_column_is_shown_only_when_a_change_is_known(
         notes = str(app.screen.query_one("#propagation-notes", Static).render())
         assert len(table.columns) == columns
         assert [len(table.get_row_at(row)) for row in (0, 1)] == [columns, columns]
-        assert ("The ConfigMap changed between" in notes) is (change is not None)
+        assert ("latest change seen this session" in notes) is (change is not None)
         if change is not None:
             assert str(table.get_row_at(1)[3]) == "changed after this container started"

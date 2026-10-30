@@ -148,7 +148,7 @@ row opens that Pod.
 The view also tells you whether an environment variable or `subPath` row is
 behind a change. Each run records the object's resource version. When
 you reopen the view after that version moved, an **Object change** column
-appears, and a note bounds the change: after the request that last saw the
+appears, and a note bounds the latest change seen: after the request that last saw the
 old version was sent, and before the response with the new one arrived.
 Each environment and `subPath` row says the object **changed after this
 container started**, **changed before this container started**, or **not

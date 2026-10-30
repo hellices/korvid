@@ -708,7 +708,7 @@ In `tests/ui/test_config_propagation_screen.py`, with `CHANGE = ObservedChange(N
 - `test_a_read_at_start_row_says_where_the_change_falls_against_its_start`: starts 60 and 31 minutes ago give "changed after this container started" (31 is the boundary), 25 minutes ago straddles and gives "not established", a container without a start gives "not established", and a volume row gives an empty cell.
 - `test_a_change_before_the_start_is_said`: a start 10 minutes ago gives "changed before this container started".
 - `test_without_a_change_rows_have_three_cells`.
-- `test_a_seen_change_is_described_as_an_object_change_this_session`: the note reads "The ConfigMap changed between 2026-10-30 08:30:00 UTC and 2026-10-30 08:40:00 UTC, as seen this session: it has a new resource version, which may change only its metadata. An earlier change is not known."
+- `test_a_seen_change_is_described_as_an_object_change_this_session`: the note reads "The ConfigMap's latest change seen this session happened between 2026-10-30 08:30:00 UTC and 2026-10-30 08:40:00 UTC: it has a new resource version, which may change only its metadata." Only the latest change is kept: sightings are sequential, so a later change's bound starts no earlier than an earlier one's, and "changed after this container started" for the latest holds for every change seen.
 - `test_without_a_seen_change_the_note_says_how_one_is_seen`: with a sighting and an environment consumer, "Not established: whether the ConfigMap changed after its consumers started: a change is seen only between two openings of this view in this session"; not with only volume consumers, nor without a sighting.
 - `test_the_change_column_is_shown_only_when_a_change_is_known`, parametrized over no change (three columns) and `CHANGE` (four, every row as wide, the change note shown).
 
@@ -744,9 +744,9 @@ def _change_note(report: PropagationReport, change: ObservedChange | None) -> Te
     kind = report.target.kind
     if change is not None:
         return Text(
-            f"The {kind} changed between {_time(change.after)} and {_time(change.before)}, "
-            "as seen this session: it has a new resource version, which may change only its "
-            "metadata. An earlier change is not known."
+            f"The {kind}'s latest change seen this session happened between "
+            f"{_time(change.after)} and {_time(change.before)}: it has a new resource version, "
+            "which may change only its metadata."
         )
     if report.sighting is None or not any(c.mode in _READ_AT_START for c in report.consumers):
         return None
