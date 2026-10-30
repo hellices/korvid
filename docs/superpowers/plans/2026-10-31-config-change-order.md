@@ -84,7 +84,7 @@ Then these tests, each building a Pod with `_with_status` and reading `started_a
 
 - `test_each_container_gets_its_running_start_from_its_own_status_list`: an app container, a sidecar (`initContainers` with `restartPolicy: Always`) and an ephemeral container, each with a start in its own list.
 - `test_a_status_from_another_list_or_container_is_not_used`: the app's name in `initContainerStatuses` and another name in `containerStatuses` give `None`.
-- `test_only_a_running_container_has_a_start`: waiting, terminated (with a running `lastState`), an unparseable time, and no status give four `None`s.
+- `test_only_a_running_container_has_a_start`: waiting, terminated (with a running `lastState`), an unparsable time, and no status give four `None`s.
 - `test_a_restarted_container_has_its_current_start`: `running.startedAt` wins over `lastState.terminated.startedAt`.
 - `test_nothing_else_of_the_status_reaches_the_result`: a status `message` and a status `image` are absent from `repr(consumers)`.
 - `test_a_start_without_a_time_zone_is_not_used`: `"2026-10-30T09:00:00"` gives `None`.
@@ -528,6 +528,7 @@ async def test_an_observed_object_is_sighted_from_before_the_reads_to_its_arriva
         FakeReader(get=_versioned("812")), _snapshot(), TARGET, token=TOKEN, clock=clock
     )
 
+    assert report.object.observed_at is not None
     assert report.sighting == Sighting("812", NOW + timedelta(seconds=1), report.object.observed_at)
     assert report.sighting.arrived_at > report.sighting.sent_at
 

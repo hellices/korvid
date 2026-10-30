@@ -294,6 +294,7 @@ async def test_an_observed_object_is_sighted_from_before_the_reads_to_its_arriva
         FakeReader(get=_versioned("812")), _snapshot(), TARGET, token=TOKEN, clock=clock
     )
 
+    assert report.object.observed_at is not None
     assert report.sighting == Sighting("812", NOW + timedelta(seconds=1), report.object.observed_at)
     assert report.sighting.arrived_at > report.sighting.sent_at
 
