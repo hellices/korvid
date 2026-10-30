@@ -115,7 +115,7 @@ def test_a_status_hard_missing_a_resource_is_stale() -> None:
     quota = _quota(
         "compute",
         {"pods": "10", "services": "2"},
-        status={"hard": {"pods": "10"}, "used": {"pods": "1"}},
+        status={"hard": {"pods": "10"}, "used": {"pods": "1", "services": "0"}},
     )
 
     assert project_quotas([quota])[0].stale
