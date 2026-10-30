@@ -121,6 +121,7 @@ class BuiltinOperation(Enum):
     NAMESPACE_SLOTS = "slots"
     DEPLOYMENT_OUTCOMES = "outcomes"
     CONFIG_PROPAGATION = "consumers"
+    CREATION_FAILURES = "blocked"
 
 
 class BuiltinCommand(Message):

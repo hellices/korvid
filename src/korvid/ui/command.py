@@ -126,6 +126,22 @@ COMMANDS: tuple[CommandDescriptor, ...] = (
         ),
     ),
     CommandDescriptor(
+        aliases=("blocked",),
+        help=(
+            (
+                ":blocked",
+                "Pods not created for a workload: recorded failures, quotas, LimitRanges",
+            ),
+        ),
+        operation=BuiltinOperation.CREATION_FAILURES,
+        maximum_arguments=0,
+        palette=PaletteCommand(
+            "Explain workload creation failures",
+            "blocked",
+            ("quota", "limitrange", "failedcreate", "admission", "pending", "replicas"),
+        ),
+    ),
+    CommandDescriptor(
         aliases=("q", "quit"),
         help=((":q", "Quit (also :quit)"),),
         operation=CommandParse.QUIT,

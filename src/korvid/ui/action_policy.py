@@ -211,6 +211,7 @@ def compose_command_reasons(
     slots: Callable[[], UnavailableReason | None] | None = None,
     outcomes: Callable[[], UnavailableReason | None] | None = None,
     propagation: Callable[[], UnavailableReason | None] | None = None,
+    creation: Callable[[], UnavailableReason | None] | None = None,
 ) -> dict[str, Callable[[], UnavailableReason | None]]:
     """Build `ActionPolicy(reason_by_command=...)` from its owners.
 
@@ -258,6 +259,8 @@ def compose_command_reasons(
         propagation: `ConfigPropagationController.unavailable_reason` -
             whether `:consumers` has a connection and a selected ConfigMap or
             Secret to explain.
+        creation: `CreationConstraintsController.unavailable_reason` -
+            whether `:blocked` has a connection and a selected workload.
 
     Returns:
         The canonical command text -> reason-resolver map.
@@ -286,6 +289,7 @@ def compose_command_reasons(
         **({"slots": slots} if slots is not None else {}),
         **({"outcomes": outcomes} if outcomes is not None else {}),
         **({"consumers": propagation} if propagation is not None else {}),
+        **({"blocked": creation} if creation is not None else {}),
     }
 
 

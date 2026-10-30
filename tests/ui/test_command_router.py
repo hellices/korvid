@@ -114,6 +114,7 @@ class Harness:
         catalog_missing: bool = False,
         outcomes: FakeOutcomes | None = None,
         propagation: FakePropagation | None = None,
+        creation: FakePropagation | None = None,
     ) -> None:
         self.ui = FakeUi()
         self.agent = FakeAgent(agent_available)
@@ -136,6 +137,7 @@ class Harness:
             slots=self.slots,
             outcomes=outcomes,
             propagation=propagation,
+            creation=creation,
         )
 
 
@@ -296,4 +298,24 @@ def test_configuration_propagation_without_owner_warns_unavailable() -> None:
 
     assert harness.ui.notifications == [
         ("Configuration propagation is unavailable in this session", "warning")
+    ]
+
+
+def test_creation_failures_reach_their_owner_once() -> None:
+    creation = FakePropagation()
+    harness = Harness(creation=creation)
+
+    harness.router.route_builtin(_builtin(BuiltinOperation.CREATION_FAILURES))
+
+    assert creation.opens == 1
+    assert harness.ui.notifications == []
+
+
+def test_creation_failures_without_owner_warn_unavailable() -> None:
+    harness = Harness()
+
+    harness.router.route_builtin(_builtin(BuiltinOperation.CREATION_FAILURES))
+
+    assert harness.ui.notifications == [
+        ("Workload creation failures are unavailable in this session", "warning")
     ]
