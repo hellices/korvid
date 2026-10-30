@@ -27,6 +27,7 @@ from textual.screen import ModalScreen
 from textual.widgets import DataTable, Footer, Static
 
 from korvid.core.capability import EvidenceState, is_fresh
+from korvid.core.config_changes import ObservedChange
 from korvid.core.config_consumers import Consumer, ConsumptionMode, ContainerCategory
 from korvid.core.config_propagation import PropagationReport, declarations
 from korvid.ui.evidence_text import basis_sentence, not_established, observation_line
@@ -238,10 +239,12 @@ class ConfigPropagationScreen(ModalScreen[Consumer | None]):
         report: PropagationReport,
         clock: Callable[[], datetime],
         *,
+        change: ObservedChange | None = None,
         refresh_seconds: float = 5.0,
     ) -> None:
         super().__init__()
         self.report = report
+        self.change = change
         self._clock = clock
         self._refresh_seconds = refresh_seconds
         self._rows: dict[str, Consumer] = {}
