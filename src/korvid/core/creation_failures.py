@@ -6,6 +6,8 @@ children, matched by UID, or a `ReplicaFailure` condition whose reason is
 classified only by the fixed quota and LimitRanger phrasings below, and kept
 verbatim, bounded, whatever it says. A quota is named only as the message
 names it; a LimitRange is never named, because its messages do not say which.
+An admission webhook's denial is never classified further: its text is the
+webhook's own, and can say anything.
 """
 
 from __future__ import annotations
@@ -44,8 +46,10 @@ _PHRASES: tuple[tuple[RejectionKind, re.Pattern[str]], ...] = (
     (RejectionKind.QUOTA_STATUS_UNKNOWN, re.compile(r"status unknown for quota: ([^,\s]+)")),
     (RejectionKind.LIMIT_MINIMUM, re.compile(rf"minimum \S+ usage {_PER}")),
     (RejectionKind.LIMIT_MAXIMUM, re.compile(rf"maximum \S+ usage {_PER}")),
-    (RejectionKind.LIMIT_RATIO, re.compile(rf"\S+ max limit to request ratio {_PER}")),
+    # Anchored at a word's start, so a long unbroken message is scanned in linear time.
+    (RejectionKind.LIMIT_RATIO, re.compile(rf"(?<!\S)\S+ max limit to request ratio {_PER}")),
 )
+_WEBHOOK = re.compile(r'admission webhook "[^"]*" denied the request')
 
 
 class FailureSource(StrEnum):
@@ -101,8 +105,11 @@ def _bounded(message: str) -> str:
 def classify(message: str) -> Rejection:
     """Classify `message` by its fixed phrasings, in the order it states them.
 
-    A message that states none of them is `OTHER`.
+    A message that states none of them, or that an admission webhook wrote,
+    is `OTHER`.
     """
+    if _WEBHOOK.search(message):
+        return Rejection((RejectionKind.OTHER,), (), _bounded(message))
     matches = sorted(
         (match.start(), kind, match.group(1) if match.groups() else None)
         for kind, pattern in _PHRASES
@@ -153,8 +160,9 @@ def event_failures(
     """The `FailedCreate` events about `subjects`, newest first, and how many are not.
 
     An event is about a subject only when its UID matches. One whose kind and
-    name match a subject but whose UID does not, or is missing, is about
-    another incarnation: it is counted, not returned.
+    name match a subject but whose UID is another is about an earlier
+    incarnation: it is counted, not returned. One without a UID establishes
+    neither, and is ignored.
     """
     by_uid = {subject.uid: subject for subject in subjects}
     names = {(subject.kind, subject.name) for subject in subjects}
@@ -164,9 +172,10 @@ def event_failures(
         if not isinstance(event, Mapping) or event.get("reason") != _FAILED_CREATE:
             continue
         about = _event_subject(event)
-        subject = by_uid.get(_text(about.get("uid")))
+        uid = _text(about.get("uid"))
+        subject = by_uid.get(uid)
         if subject is None:
-            earlier += (_text(about.get("kind")), _text(about.get("name"))) in names
+            earlier += bool(uid) and (_text(about.get("kind")), _text(about.get("name"))) in names
             continue
         message = _text(event.get("note")) or _text(event.get("message"))
         at = _timestamp(select_event_timestamp(dict(event)))

@@ -29,6 +29,10 @@
 
 - **A denied workload read still matches Events.** The design does not say whom failures are about when the workload cannot be read. The run uses the selected row's UID then, so a user without `get` on the workload still sees its recorded failures. It does not do so for an absent workload: the view will say it no longer exists.
 - **Failure order is by time, not by source.** Conditions and Events are merged newest first, undated last.
+- **An admission webhook's denial is never classified further.** Its text is the webhook's own and can contain a quota or LimitRanger phrase. A message containing `admission webhook "…" denied the request` is `OTHER`, and names no quota.
+- **An event without a UID is ignored.** It neither matches the workload nor shows an earlier incarnation; only a nonempty, different UID counts as earlier.
+- **A policy the projection cannot name makes its list inconclusive.** An `AVAILABLE` quota or LimitRange list from which the projection drops an unnamed item becomes `PARTIAL`/`MALFORMED`, so a list of only unnamed items cannot conclude that there are none. A list that is already partial keeps its own basis.
+- **The ratio phrase is anchored at a word's start**, so a long unbroken message is classified in linear time.
 
 ## File structure
 
@@ -922,7 +926,7 @@ def test_an_event_without_a_subject_uid_or_with_a_bad_count_is_handled() -> None
     failures, earlier = event_failures(events, (DEPLOYMENT,))
 
     assert [(f.count, f.at) for f in failures] == [(1, None)]
-    assert earlier == 1
+    assert earlier == 0
 
 
 def test_a_replica_failure_condition_counts_only_for_failed_create() -> None:
@@ -988,6 +992,36 @@ def test_a_time_without_a_zone_is_not_used() -> None:
     (failure,), _ = event_failures([event], (DEPLOYMENT,))
 
     assert failure.at is None
+
+
+def test_a_webhook_denial_is_never_attributed_to_a_policy() -> None:
+    message = (
+        'admission webhook "policy.example.com" denied the request: exceeded quota: compute, '
+        "minimum cpu usage per Container is 1"
+    )
+
+    assert classify(message) == Rejection((RejectionKind.OTHER,), (), message)
+
+
+def test_a_very_long_unbroken_message_is_classified() -> None:
+    message = "x" * 200_000 + " max limit to request ratio per Container is 2"
+
+    rejection = classify(message)
+
+    assert rejection.kinds == (RejectionKind.LIMIT_RATIO,)
+    assert len(rejection.message) == MESSAGE_LIMIT
+
+
+def test_only_a_different_uid_is_an_earlier_incarnation() -> None:
+    events = [
+        _event({"kind": "Deployment", "name": "api"}, note=EXCEEDED),
+        _event({"kind": "Deployment", "name": "api", "uid": ""}, note=EXCEEDED),
+        _event(_ref(DEPLOYMENT, "uid-old"), note=EXCEEDED),
+    ]
+
+    failures, earlier = event_failures(events, (DEPLOYMENT,))
+
+    assert (failures, earlier) == ((), 1)
 ```
 
 Create `src/korvid/core/creation_failures.py` with:
@@ -1001,6 +1035,8 @@ children, matched by UID, or a `ReplicaFailure` condition whose reason is
 classified only by the fixed quota and LimitRanger phrasings below, and kept
 verbatim, bounded, whatever it says. A quota is named only as the message
 names it; a LimitRange is never named, because its messages do not say which.
+An admission webhook's denial is never classified further: its text is the
+webhook's own, and can say anything.
 """
 
 from __future__ import annotations
@@ -1039,8 +1075,10 @@ _PHRASES: tuple[tuple[RejectionKind, re.Pattern[str]], ...] = (
     (RejectionKind.QUOTA_STATUS_UNKNOWN, re.compile(r"status unknown for quota: ([^,\s]+)")),
     (RejectionKind.LIMIT_MINIMUM, re.compile(rf"minimum \S+ usage {_PER}")),
     (RejectionKind.LIMIT_MAXIMUM, re.compile(rf"maximum \S+ usage {_PER}")),
-    (RejectionKind.LIMIT_RATIO, re.compile(rf"\S+ max limit to request ratio {_PER}")),
+    # Anchored at a word's start, so a long unbroken message is scanned in linear time.
+    (RejectionKind.LIMIT_RATIO, re.compile(rf"(?<!\S)\S+ max limit to request ratio {_PER}")),
 )
+_WEBHOOK = re.compile(r'admission webhook "[^"]*" denied the request')
 
 
 class FailureSource(StrEnum):
@@ -1096,8 +1134,11 @@ def _bounded(message: str) -> str:
 def classify(message: str) -> Rejection:
     """Classify `message` by its fixed phrasings, in the order it states them.
 
-    A message that states none of them is `OTHER`.
+    A message that states none of them, or that an admission webhook wrote,
+    is `OTHER`.
     """
+    if _WEBHOOK.search(message):
+        return Rejection((RejectionKind.OTHER,), (), _bounded(message))
     matches = sorted(
         (match.start(), kind, match.group(1) if match.groups() else None)
         for kind, pattern in _PHRASES
@@ -1148,8 +1189,9 @@ def event_failures(
     """The `FailedCreate` events about `subjects`, newest first, and how many are not.
 
     An event is about a subject only when its UID matches. One whose kind and
-    name match a subject but whose UID does not, or is missing, is about
-    another incarnation: it is counted, not returned.
+    name match a subject but whose UID is another is about an earlier
+    incarnation: it is counted, not returned. One without a UID establishes
+    neither, and is ignored.
     """
     by_uid = {subject.uid: subject for subject in subjects}
     names = {(subject.kind, subject.name) for subject in subjects}
@@ -1159,9 +1201,10 @@ def event_failures(
         if not isinstance(event, Mapping) or event.get("reason") != _FAILED_CREATE:
             continue
         about = _event_subject(event)
-        subject = by_uid.get(_text(about.get("uid")))
+        uid = _text(about.get("uid"))
+        subject = by_uid.get(uid)
         if subject is None:
-            earlier += (_text(about.get("kind")), _text(about.get("name"))) in names
+            earlier += bool(uid) and (_text(about.get("kind")), _text(about.get("name"))) in names
             continue
         message = _text(event.get("note")) or _text(event.get("message"))
         at = _timestamp(select_event_timestamp(dict(event)))
@@ -2227,6 +2270,39 @@ async def test_an_unserved_workload_resource_is_reported_with_the_token_and_not_
     assert report.workload_observation.state is EvidenceState.UNSUPPORTED
     assert report.workload_observation.token == TOKEN
     assert reader.gets == []
+
+
+@pytest.mark.parametrize(
+    ("resource", "item"),
+    [
+        ("resourcequotas", {"metadata": {"namespace": "shop"}, "spec": {"hard": {"pods": "0"}}}),
+        ("limitranges", {"metadata": {"namespace": "shop"}, "spec": {"limits": []}}),
+    ],
+)
+async def test_a_policy_the_projection_cannot_name_makes_its_list_inconclusive(
+    resource: str, item: dict[str, Any]
+) -> None:
+    report = await _explain(FakeReader(**{resource: (item,)}))
+
+    observation = (
+        report.quotas_observation
+        if resource == "resourcequotas"
+        else report.limit_ranges_observation
+    )
+    assert _state(observation) == (EvidenceState.PARTIAL, Basis.MALFORMED)
+    assert not report.quotas_conclusive(NOW) or resource != "resourcequotas"
+    assert not report.limit_ranges_conclusive(NOW) or resource != "limitranges"
+    assert report.baseline.state is not EvidenceState.AVAILABLE
+
+
+async def test_an_unnamed_policy_in_a_truncated_list_keeps_the_lists_basis() -> None:
+    unnamed = {"metadata": {"namespace": "shop"}, "spec": {"limits": []}}
+    reader = FakeReader(limitranges=EvidencePage((unnamed,), continuation="more"))
+
+    report = await _explain(reader)
+
+    assert report.limit_ranges_observation.state is EvidenceState.PARTIAL
+    assert report.limit_ranges_observation.basis is not Basis.MALFORMED
 ```
 
 Create `src/korvid/core/creation_constraints.py` with:
@@ -2438,6 +2514,17 @@ async def _no_children() -> None:
     return None
 
 
+def _downgrade_dropped(observation: Observation, read: int, kept: int, what: str) -> Observation:
+    """An available list whose projection dropped an item it could not name is `PARTIAL`.
+
+    Otherwise a list of only unnamed items would conclude that there are none.
+    """
+    if kept >= read or observation.state is not EvidenceState.AVAILABLE:
+        return observation
+    detail = f"{read - kept} {what} without a name not shown"
+    return replace(observation, state=EvidenceState.PARTIAL, basis=Basis.MALFORMED, detail=detail)
+
+
 def _downgrade_stale(observation: Observation, quotas: tuple[QuotaProjection, ...]) -> Observation:
     """An available quota list whose status lags is `PARTIAL`/`STALE_STATUS`.
 
@@ -2533,12 +2620,21 @@ async def explain_creation(
         events, subjects + tuple(child.subject for child in children), workload, children
     )
     quota_projections = project_quotas(quotas.items)
-    quotas_observation = _downgrade_stale(quotas.observation, quota_projections)
+    quotas_observation = _downgrade_stale(
+        _downgrade_dropped(
+            quotas.observation, len(quotas.items), len(quota_projections), "ResourceQuotas"
+        ),
+        quota_projections,
+    )
+    range_projections = project_limit_ranges(limit_ranges.items)
+    limit_ranges_observation = _downgrade_dropped(
+        limit_ranges.observation, len(limit_ranges.items), len(range_projections), "LimitRanges"
+    )
     observations = {
         "workload": workload_observation,
         "events": events.observation,
         "quotas": quotas_observation,
-        "limit-ranges": limit_ranges.observation,
+        "limit-ranges": limit_ranges_observation,
     }
     if children_lists is not None:
         observations["children"] = children_lists.observation
@@ -2549,13 +2645,13 @@ async def explain_creation(
         children_lists.observation if children_lists is not None else None,
         events.observation,
         quotas_observation,
-        limit_ranges.observation,
+        limit_ranges_observation,
         workload,
         children,
         failures,
         earlier,
         quota_projections,
-        project_limit_ranges(limit_ranges.items),
+        range_projections,
         baseline,
     )
 ```

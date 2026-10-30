@@ -204,6 +204,17 @@ async def _no_children() -> None:
     return None
 
 
+def _downgrade_dropped(observation: Observation, read: int, kept: int, what: str) -> Observation:
+    """An available list whose projection dropped an item it could not name is `PARTIAL`.
+
+    Otherwise a list of only unnamed items would conclude that there are none.
+    """
+    if kept >= read or observation.state is not EvidenceState.AVAILABLE:
+        return observation
+    detail = f"{read - kept} {what} without a name not shown"
+    return replace(observation, state=EvidenceState.PARTIAL, basis=Basis.MALFORMED, detail=detail)
+
+
 def _downgrade_stale(observation: Observation, quotas: tuple[QuotaProjection, ...]) -> Observation:
     """An available quota list whose status lags is `PARTIAL`/`STALE_STATUS`.
 
@@ -299,12 +310,21 @@ async def explain_creation(
         events, subjects + tuple(child.subject for child in children), workload, children
     )
     quota_projections = project_quotas(quotas.items)
-    quotas_observation = _downgrade_stale(quotas.observation, quota_projections)
+    quotas_observation = _downgrade_stale(
+        _downgrade_dropped(
+            quotas.observation, len(quotas.items), len(quota_projections), "ResourceQuotas"
+        ),
+        quota_projections,
+    )
+    range_projections = project_limit_ranges(limit_ranges.items)
+    limit_ranges_observation = _downgrade_dropped(
+        limit_ranges.observation, len(limit_ranges.items), len(range_projections), "LimitRanges"
+    )
     observations = {
         "workload": workload_observation,
         "events": events.observation,
         "quotas": quotas_observation,
-        "limit-ranges": limit_ranges.observation,
+        "limit-ranges": limit_ranges_observation,
     }
     if children_lists is not None:
         observations["children"] = children_lists.observation
@@ -315,12 +335,12 @@ async def explain_creation(
         children_lists.observation if children_lists is not None else None,
         events.observation,
         quotas_observation,
-        limit_ranges.observation,
+        limit_ranges_observation,
         workload,
         children,
         failures,
         earlier,
         quota_projections,
-        project_limit_ranges(limit_ranges.items),
+        range_projections,
         baseline,
     )

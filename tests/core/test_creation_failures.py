@@ -189,7 +189,7 @@ def test_an_event_without_a_subject_uid_or_with_a_bad_count_is_handled() -> None
     failures, earlier = event_failures(events, (DEPLOYMENT,))
 
     assert [(f.count, f.at) for f in failures] == [(1, None)]
-    assert earlier == 1
+    assert earlier == 0
 
 
 def test_a_replica_failure_condition_counts_only_for_failed_create() -> None:
@@ -255,3 +255,33 @@ def test_a_time_without_a_zone_is_not_used() -> None:
     (failure,), _ = event_failures([event], (DEPLOYMENT,))
 
     assert failure.at is None
+
+
+def test_a_webhook_denial_is_never_attributed_to_a_policy() -> None:
+    message = (
+        'admission webhook "policy.example.com" denied the request: exceeded quota: compute, '
+        "minimum cpu usage per Container is 1"
+    )
+
+    assert classify(message) == Rejection((RejectionKind.OTHER,), (), message)
+
+
+def test_a_very_long_unbroken_message_is_classified() -> None:
+    message = "x" * 200_000 + " max limit to request ratio per Container is 2"
+
+    rejection = classify(message)
+
+    assert rejection.kinds == (RejectionKind.LIMIT_RATIO,)
+    assert len(rejection.message) == MESSAGE_LIMIT
+
+
+def test_only_a_different_uid_is_an_earlier_incarnation() -> None:
+    events = [
+        _event({"kind": "Deployment", "name": "api"}, note=EXCEEDED),
+        _event({"kind": "Deployment", "name": "api", "uid": ""}, note=EXCEEDED),
+        _event(_ref(DEPLOYMENT, "uid-old"), note=EXCEEDED),
+    ]
+
+    failures, earlier = event_failures(events, (DEPLOYMENT,))
+
+    assert (failures, earlier) == ((), 1)

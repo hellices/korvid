@@ -392,3 +392,36 @@ async def test_an_unserved_workload_resource_is_reported_with_the_token_and_not_
     assert report.workload_observation.state is EvidenceState.UNSUPPORTED
     assert report.workload_observation.token == TOKEN
     assert reader.gets == []
+
+
+@pytest.mark.parametrize(
+    ("resource", "item"),
+    [
+        ("resourcequotas", {"metadata": {"namespace": "shop"}, "spec": {"hard": {"pods": "0"}}}),
+        ("limitranges", {"metadata": {"namespace": "shop"}, "spec": {"limits": []}}),
+    ],
+)
+async def test_a_policy_the_projection_cannot_name_makes_its_list_inconclusive(
+    resource: str, item: dict[str, Any]
+) -> None:
+    report = await _explain(FakeReader(**{resource: (item,)}))
+
+    observation = (
+        report.quotas_observation
+        if resource == "resourcequotas"
+        else report.limit_ranges_observation
+    )
+    assert _state(observation) == (EvidenceState.PARTIAL, Basis.MALFORMED)
+    assert not report.quotas_conclusive(NOW) or resource != "resourcequotas"
+    assert not report.limit_ranges_conclusive(NOW) or resource != "limitranges"
+    assert report.baseline.state is not EvidenceState.AVAILABLE
+
+
+async def test_an_unnamed_policy_in_a_truncated_list_keeps_the_lists_basis() -> None:
+    unnamed = {"metadata": {"namespace": "shop"}, "spec": {"limits": []}}
+    reader = FakeReader(limitranges=EvidencePage((unnamed,), continuation="more"))
+
+    report = await _explain(reader)
+
+    assert report.limit_ranges_observation.state is EvidenceState.PARTIAL
+    assert report.limit_ranges_observation.basis is not Basis.MALFORMED
