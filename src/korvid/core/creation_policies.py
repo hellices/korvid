@@ -143,7 +143,10 @@ def _expression(raw: object) -> ScopeExpression | None:
 
 def _scope_selector(spec: Mapping[str, Any]) -> tuple[tuple[ScopeExpression, ...], bool]:
     """The selector's expressions, and whether every one of them could be read."""
-    expressions = _mapping(spec.get("scopeSelector")).get("matchExpressions", [])
+    selector = spec.get("scopeSelector", {})
+    if not isinstance(selector, Mapping):
+        return (), False
+    expressions = selector.get("matchExpressions", [])
     if not isinstance(expressions, list):
         return (), False
     selected = [_expression(raw) for raw in expressions]
@@ -189,7 +192,10 @@ def _quota(item: Mapping[str, Any]) -> QuotaProjection | None:
         scopes,
         selector,
         stale,
-        _readable_quantities(spec.get("hard")) and scopes_read and selector_read,
+        isinstance(item.get("spec"), Mapping)
+        and _readable_quantities(spec.get("hard"))
+        and scopes_read
+        and selector_read,
     )
 
 
@@ -215,8 +221,11 @@ def _limit_values(limit: Mapping[str, Any]) -> Iterable[LimitValue]:
 
 
 def _readable_limit(limit: object) -> bool:
-    return isinstance(limit, Mapping) and all(
-        _readable_quantities(limit.get(field)) for field in _LIMIT_FIELDS
+    """Whether a limit says what it applies to and every constraint is a quantity."""
+    return (
+        isinstance(limit, Mapping)
+        and _text(limit.get("type")) is not None
+        and all(_readable_quantities(limit.get(field)) for field in _LIMIT_FIELDS)
     )
 
 
@@ -224,7 +233,8 @@ def _limit_range(item: Mapping[str, Any]) -> LimitRangeProjection | None:
     identity = _identity(item)
     if identity is None:
         return None
-    limits = _mapping(item.get("spec")).get("limits", [])
+    # `spec.limits` is required: a LimitRange without it could not be read.
+    limits = _mapping(item.get("spec")).get("limits")
     entries = limits if isinstance(limits, list) else []
     values = (
         value for limit in entries if isinstance(limit, Mapping) for value in _limit_values(limit)

@@ -33,12 +33,13 @@
 - **An event without a UID is ignored.** It neither matches the workload nor shows an earlier incarnation; only a nonempty, different UID counts as earlier.
 - **Whatever the projection cannot read makes its list inconclusive.** An `AVAILABLE` list becomes `PARTIAL`/`MALFORMED` when its projection drops or cannot fully read an item:
   - a quota or LimitRange without a name;
-  - a quota constraint that is not a quantity, a scope that is not text, or a scope expression without a name, an operator or text values;
-  - a LimitRange whose `limits` is not a list of maps of quantities;
+  - a quota without a readable `spec`, a constraint that is not a quantity, a scope that is not text, a `scopeSelector` that is not a map, or a scope expression without a name, an operator or text values;
+  - a LimitRange without a readable `spec.limits` (it is required), or a limit that is not a map of quantities with a text `type`;
   - a child the workload controls that has no name or UID.
 
   A list that is already partial keeps its own basis.
 - **An empty quota with no status is stale**, like any quota with no status.
+- **An empty selected UID is none.** A summary without a UID carries `""`, so `CreationTarget` normalises it to `None`, and the workload is read without an expected incarnation.
 - **A quantity decimal arithmetic cannot represent** (`decimal.InvalidOperation`, for example a huge exponent) is not established, like an unparsable one.
 - **The ratio phrase is anchored at a word's start**, so a long unbroken message is classified in linear time.
 
@@ -569,6 +570,9 @@ def test_a_well_formed_quota_and_limit_range_are_complete() -> None:
             "scopeSelector": {"matchExpressions": [{"scopeName": "PriorityClass"}]},
         },
         {"hard": {"pods": "1"}, "scopeSelector": {"matchExpressions": "x"}},
+        {"hard": {"pods": "1"}, "scopeSelector": "x"},
+        "not-a-spec",
+        None,
     ],
     ids=[
         "null-value",
@@ -577,9 +581,12 @@ def test_a_well_formed_quota_and_limit_range_are_complete() -> None:
         "scopes-not-a-list",
         "expression-without-operator",
         "expressions-not-a-list",
+        "selector-not-a-map",
+        "spec-not-a-map",
+        "no-spec",
     ],
 )
-def test_a_quota_with_an_unreadable_constraint_is_incomplete(spec: dict[str, Any]) -> None:
+def test_a_quota_with_an_unreadable_constraint_is_incomplete(spec: object) -> None:
     item = {"metadata": {"name": "q", "namespace": "shop", "uid": "u"}, "spec": spec}
 
     assert not project_quotas([item])[0].complete
@@ -592,10 +599,25 @@ def test_a_quota_with_an_unreadable_constraint_is_incomplete(spec: dict[str, Any
         {"limits": ["x"]},
         {"limits": [{"type": "Container", "max": {"cpu": None}}]},
         {"limits": [{"type": "Container", "max": "1"}]},
+        {"limits": [{"max": {"cpu": "1"}}]},
+        {"limits": [{"type": 3, "max": {"cpu": "1"}}]},
+        {},
+        "not-a-spec",
+        None,
     ],
-    ids=["limits-not-a-list", "limit-not-a-map", "null-value", "field-not-a-map"],
+    ids=[
+        "limits-not-a-list",
+        "limit-not-a-map",
+        "null-value",
+        "field-not-a-map",
+        "no-type",
+        "type-not-text",
+        "no-limits",
+        "spec-not-a-map",
+        "no-spec",
+    ],
 )
-def test_a_limit_range_with_an_unreadable_constraint_is_incomplete(spec: dict[str, Any]) -> None:
+def test_a_limit_range_with_an_unreadable_constraint_is_incomplete(spec: object) -> None:
     item = {"metadata": {"name": "lr", "namespace": "shop", "uid": "u"}, "spec": spec}
 
     assert not project_limit_ranges([item])[0].complete
@@ -749,7 +771,10 @@ def _expression(raw: object) -> ScopeExpression | None:
 
 def _scope_selector(spec: Mapping[str, Any]) -> tuple[tuple[ScopeExpression, ...], bool]:
     """The selector's expressions, and whether every one of them could be read."""
-    expressions = _mapping(spec.get("scopeSelector")).get("matchExpressions", [])
+    selector = spec.get("scopeSelector", {})
+    if not isinstance(selector, Mapping):
+        return (), False
+    expressions = selector.get("matchExpressions", [])
     if not isinstance(expressions, list):
         return (), False
     selected = [_expression(raw) for raw in expressions]
@@ -795,7 +820,10 @@ def _quota(item: Mapping[str, Any]) -> QuotaProjection | None:
         scopes,
         selector,
         stale,
-        _readable_quantities(spec.get("hard")) and scopes_read and selector_read,
+        isinstance(item.get("spec"), Mapping)
+        and _readable_quantities(spec.get("hard"))
+        and scopes_read
+        and selector_read,
     )
 
 
@@ -821,8 +849,11 @@ def _limit_values(limit: Mapping[str, Any]) -> Iterable[LimitValue]:
 
 
 def _readable_limit(limit: object) -> bool:
-    return isinstance(limit, Mapping) and all(
-        _readable_quantities(limit.get(field)) for field in _LIMIT_FIELDS
+    """Whether a limit says what it applies to and every constraint is a quantity."""
+    return (
+        isinstance(limit, Mapping)
+        and _text(limit.get("type")) is not None
+        and all(_readable_quantities(limit.get(field)) for field in _LIMIT_FIELDS)
     )
 
 
@@ -830,7 +861,8 @@ def _limit_range(item: Mapping[str, Any]) -> LimitRangeProjection | None:
     identity = _identity(item)
     if identity is None:
         return None
-    limits = _mapping(item.get("spec")).get("limits", [])
+    # `spec.limits` is required: a LimitRange without it could not be read.
+    limits = _mapping(item.get("spec")).get("limits")
     entries = limits if isinstance(limits, list) else []
     values = (
         value for limit in entries if isinstance(limit, Mapping) for value in _limit_values(limit)
@@ -2039,6 +2071,7 @@ Create `tests/core/test_creation_constraints.py` with:
 from __future__ import annotations
 
 import json
+from collections import Counter
 from datetime import UTC, datetime
 from typing import Any
 
@@ -2052,7 +2085,7 @@ from korvid.core.creation_constraints import (
     explain_creation,
 )
 from korvid.core.creation_failures import RejectionKind, Subject
-from korvid.core.evidence_reads import LIST_PAGE_SIZE, MAX_BYTES
+from korvid.core.evidence_reads import DEFAULT_MAX_BYTES, LIST_PAGE_SIZE, MAX_BYTES
 from korvid.k8s.discovery_snapshot import (
     GroupVersionOutcome,
     RawDiscovery,
@@ -2156,8 +2189,9 @@ class FakeReader(EvidenceReader):
             "limitranges": (LIMIT_RANGE,),
             **answers,
         }
-        self.gets: list[tuple[EvidenceTarget, str]] = []
+        self.gets: list[tuple[EvidenceTarget, str, int]] = []
         self.lists: list[tuple[EvidenceTarget, int, int]] = []
+        self.continuations: dict[str, list[str]] = {}
 
     def _answer(self, target: EvidenceTarget) -> object:
         answer = self.answers.get(
@@ -2171,6 +2205,7 @@ class FakeReader(EvidenceReader):
         self, target: EvidenceTarget, *, limit: int, continuation: str, max_bytes: int
     ) -> EvidencePage:
         self.lists.append((target, limit, max_bytes))
+        self.continuations.setdefault(target.resource, []).append(continuation)
         answer = self._answer(target)
         if isinstance(answer, list):
             answer = answer.pop(0)
@@ -2182,7 +2217,7 @@ class FakeReader(EvidenceReader):
     async def get_evidence_object(
         self, target: EvidenceTarget, name: str, *, max_bytes: int
     ) -> dict[str, Any]:
-        self.gets.append((target, name))
+        self.gets.append((target, name, max_bytes))
         answer = self._answer(target)
         assert isinstance(answer, dict)
         return answer
@@ -2228,16 +2263,21 @@ async def test_the_reads_and_their_budgets() -> None:
 
     await _explain(reader)
 
-    assert reader.gets == [(EvidenceTarget("apps", "v1", "deployments", "shop"), "api")]
-    lists = {(t.group, t.resource): (limit, max_bytes) for t, limit, max_bytes in reader.lists}
-    assert lists[("apps", "replicasets")] == (LIST_PAGE_SIZE, MAX_BYTES)
-    assert lists[("events.k8s.io", "events")] == (LIST_PAGE_SIZE, MAX_BYTES)
-    assert set(lists) == {
-        ("apps", "replicasets"),
-        ("events.k8s.io", "events"),
-        ("", "resourcequotas"),
-        ("", "limitranges"),
-    }
+    assert reader.gets == [
+        (EvidenceTarget("apps", "v1", "deployments", "shop"), "api", DEFAULT_MAX_BYTES)
+    ]
+    assert Counter(reader.lists) == Counter(
+        {
+            (EvidenceTarget("apps", "v1", "replicasets", "shop"), LIST_PAGE_SIZE, MAX_BYTES): 1,
+            (EvidenceTarget("events.k8s.io", "v1", "events", "shop"), LIST_PAGE_SIZE, MAX_BYTES): 1,
+            (
+                EvidenceTarget("", "v1", "resourcequotas", "shop"),
+                LIST_PAGE_SIZE,
+                DEFAULT_MAX_BYTES,
+            ): 1,
+            (EvidenceTarget("", "v1", "limitranges", "shop"), LIST_PAGE_SIZE, DEFAULT_MAX_BYTES): 1,
+        }
+    )
 
 
 async def test_a_cronjob_reads_its_jobs_and_a_statefulset_no_children() -> None:
@@ -2336,6 +2376,7 @@ async def test_a_stale_quota_in_a_truncated_list_keeps_its_basis() -> None:
 
     report = await explain_creation(reader, _snapshot(), TARGET, token=TOKEN, clock=_clock)
 
+    assert reader.continuations["resourcequotas"] == ["", "a"]
     assert _state(report.quotas_observation) == (EvidenceState.PARTIAL, Basis.TRUNCATED)
     assert report.quotas[0].stale
 
@@ -2465,6 +2506,7 @@ async def test_an_unnamed_policy_in_a_truncated_list_keeps_the_lists_basis() -> 
 
     report = await _explain(reader)
 
+    assert reader.continuations["limitranges"] == ["", "a"]
     assert _state(report.limit_ranges_observation) == (EvidenceState.PARTIAL, Basis.TRUNCATED)
 
 
@@ -2501,6 +2543,16 @@ async def test_a_policy_with_an_unreadable_constraint_makes_its_list_inconclusiv
         else report.limit_ranges_observation
     )
     assert _state(observation) == (EvidenceState.PARTIAL, Basis.MALFORMED)
+
+
+async def test_an_empty_selected_uid_reads_the_workload_without_an_expected_incarnation() -> None:
+    reader = FakeReader()
+
+    report = await _explain(reader, CreationTarget("Deployment", "shop", "api", ""))
+
+    assert report.target.uid is None
+    assert report.workload is not None
+    assert not report.recreated
 ```
 
 Create `src/korvid/core/creation_constraints.py` with:
@@ -2595,7 +2647,7 @@ def _children_source(child: str) -> LogicalSource:
 
 @dataclass(frozen=True, slots=True)
 class CreationTarget:
-    """The selected workload, with the UID the selection showed."""
+    """The selected workload, with the UID the selection showed; an empty UID is none."""
 
     kind: str
     namespace: str
@@ -2605,6 +2657,8 @@ class CreationTarget:
     def __post_init__(self) -> None:
         if self.kind not in WORKLOAD_KINDS or not self.namespace or not self.name:
             raise ValueError("a target is a named workload of a supported kind, in a namespace")
+        if not self.uid:
+            object.__setattr__(self, "uid", None)
 
     @property
     def child(self) -> str | None:

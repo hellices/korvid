@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections import Counter
 from datetime import UTC, datetime
 from typing import Any
 
@@ -16,7 +17,7 @@ from korvid.core.creation_constraints import (
     explain_creation,
 )
 from korvid.core.creation_failures import RejectionKind, Subject
-from korvid.core.evidence_reads import LIST_PAGE_SIZE, MAX_BYTES
+from korvid.core.evidence_reads import DEFAULT_MAX_BYTES, LIST_PAGE_SIZE, MAX_BYTES
 from korvid.k8s.discovery_snapshot import (
     GroupVersionOutcome,
     RawDiscovery,
@@ -120,8 +121,9 @@ class FakeReader(EvidenceReader):
             "limitranges": (LIMIT_RANGE,),
             **answers,
         }
-        self.gets: list[tuple[EvidenceTarget, str]] = []
+        self.gets: list[tuple[EvidenceTarget, str, int]] = []
         self.lists: list[tuple[EvidenceTarget, int, int]] = []
+        self.continuations: dict[str, list[str]] = {}
 
     def _answer(self, target: EvidenceTarget) -> object:
         answer = self.answers.get(
@@ -135,6 +137,7 @@ class FakeReader(EvidenceReader):
         self, target: EvidenceTarget, *, limit: int, continuation: str, max_bytes: int
     ) -> EvidencePage:
         self.lists.append((target, limit, max_bytes))
+        self.continuations.setdefault(target.resource, []).append(continuation)
         answer = self._answer(target)
         if isinstance(answer, list):
             answer = answer.pop(0)
@@ -146,7 +149,7 @@ class FakeReader(EvidenceReader):
     async def get_evidence_object(
         self, target: EvidenceTarget, name: str, *, max_bytes: int
     ) -> dict[str, Any]:
-        self.gets.append((target, name))
+        self.gets.append((target, name, max_bytes))
         answer = self._answer(target)
         assert isinstance(answer, dict)
         return answer
@@ -192,16 +195,21 @@ async def test_the_reads_and_their_budgets() -> None:
 
     await _explain(reader)
 
-    assert reader.gets == [(EvidenceTarget("apps", "v1", "deployments", "shop"), "api")]
-    lists = {(t.group, t.resource): (limit, max_bytes) for t, limit, max_bytes in reader.lists}
-    assert lists[("apps", "replicasets")] == (LIST_PAGE_SIZE, MAX_BYTES)
-    assert lists[("events.k8s.io", "events")] == (LIST_PAGE_SIZE, MAX_BYTES)
-    assert set(lists) == {
-        ("apps", "replicasets"),
-        ("events.k8s.io", "events"),
-        ("", "resourcequotas"),
-        ("", "limitranges"),
-    }
+    assert reader.gets == [
+        (EvidenceTarget("apps", "v1", "deployments", "shop"), "api", DEFAULT_MAX_BYTES)
+    ]
+    assert Counter(reader.lists) == Counter(
+        {
+            (EvidenceTarget("apps", "v1", "replicasets", "shop"), LIST_PAGE_SIZE, MAX_BYTES): 1,
+            (EvidenceTarget("events.k8s.io", "v1", "events", "shop"), LIST_PAGE_SIZE, MAX_BYTES): 1,
+            (
+                EvidenceTarget("", "v1", "resourcequotas", "shop"),
+                LIST_PAGE_SIZE,
+                DEFAULT_MAX_BYTES,
+            ): 1,
+            (EvidenceTarget("", "v1", "limitranges", "shop"), LIST_PAGE_SIZE, DEFAULT_MAX_BYTES): 1,
+        }
+    )
 
 
 async def test_a_cronjob_reads_its_jobs_and_a_statefulset_no_children() -> None:
@@ -300,6 +308,7 @@ async def test_a_stale_quota_in_a_truncated_list_keeps_its_basis() -> None:
 
     report = await explain_creation(reader, _snapshot(), TARGET, token=TOKEN, clock=_clock)
 
+    assert reader.continuations["resourcequotas"] == ["", "a"]
     assert _state(report.quotas_observation) == (EvidenceState.PARTIAL, Basis.TRUNCATED)
     assert report.quotas[0].stale
 
@@ -429,6 +438,7 @@ async def test_an_unnamed_policy_in_a_truncated_list_keeps_the_lists_basis() -> 
 
     report = await _explain(reader)
 
+    assert reader.continuations["limitranges"] == ["", "a"]
     assert _state(report.limit_ranges_observation) == (EvidenceState.PARTIAL, Basis.TRUNCATED)
 
 
@@ -465,3 +475,13 @@ async def test_a_policy_with_an_unreadable_constraint_makes_its_list_inconclusiv
         else report.limit_ranges_observation
     )
     assert _state(observation) == (EvidenceState.PARTIAL, Basis.MALFORMED)
+
+
+async def test_an_empty_selected_uid_reads_the_workload_without_an_expected_incarnation() -> None:
+    reader = FakeReader()
+
+    report = await _explain(reader, CreationTarget("Deployment", "shop", "api", ""))
+
+    assert report.target.uid is None
+    assert report.workload is not None
+    assert not report.recreated

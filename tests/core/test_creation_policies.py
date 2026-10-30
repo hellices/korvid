@@ -269,6 +269,9 @@ def test_a_well_formed_quota_and_limit_range_are_complete() -> None:
             "scopeSelector": {"matchExpressions": [{"scopeName": "PriorityClass"}]},
         },
         {"hard": {"pods": "1"}, "scopeSelector": {"matchExpressions": "x"}},
+        {"hard": {"pods": "1"}, "scopeSelector": "x"},
+        "not-a-spec",
+        None,
     ],
     ids=[
         "null-value",
@@ -277,9 +280,12 @@ def test_a_well_formed_quota_and_limit_range_are_complete() -> None:
         "scopes-not-a-list",
         "expression-without-operator",
         "expressions-not-a-list",
+        "selector-not-a-map",
+        "spec-not-a-map",
+        "no-spec",
     ],
 )
-def test_a_quota_with_an_unreadable_constraint_is_incomplete(spec: dict[str, Any]) -> None:
+def test_a_quota_with_an_unreadable_constraint_is_incomplete(spec: object) -> None:
     item = {"metadata": {"name": "q", "namespace": "shop", "uid": "u"}, "spec": spec}
 
     assert not project_quotas([item])[0].complete
@@ -292,10 +298,25 @@ def test_a_quota_with_an_unreadable_constraint_is_incomplete(spec: dict[str, Any
         {"limits": ["x"]},
         {"limits": [{"type": "Container", "max": {"cpu": None}}]},
         {"limits": [{"type": "Container", "max": "1"}]},
+        {"limits": [{"max": {"cpu": "1"}}]},
+        {"limits": [{"type": 3, "max": {"cpu": "1"}}]},
+        {},
+        "not-a-spec",
+        None,
     ],
-    ids=["limits-not-a-list", "limit-not-a-map", "null-value", "field-not-a-map"],
+    ids=[
+        "limits-not-a-list",
+        "limit-not-a-map",
+        "null-value",
+        "field-not-a-map",
+        "no-type",
+        "type-not-text",
+        "no-limits",
+        "spec-not-a-map",
+        "no-spec",
+    ],
 )
-def test_a_limit_range_with_an_unreadable_constraint_is_incomplete(spec: dict[str, Any]) -> None:
+def test_a_limit_range_with_an_unreadable_constraint_is_incomplete(spec: object) -> None:
     item = {"metadata": {"name": "lr", "namespace": "shop", "uid": "u"}, "spec": spec}
 
     assert not project_limit_ranges([item])[0].complete

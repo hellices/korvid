@@ -87,7 +87,7 @@ def _children_source(child: str) -> LogicalSource:
 
 @dataclass(frozen=True, slots=True)
 class CreationTarget:
-    """The selected workload, with the UID the selection showed."""
+    """The selected workload, with the UID the selection showed; an empty UID is none."""
 
     kind: str
     namespace: str
@@ -97,6 +97,8 @@ class CreationTarget:
     def __post_init__(self) -> None:
         if self.kind not in WORKLOAD_KINDS or not self.namespace or not self.name:
             raise ValueError("a target is a named workload of a supported kind, in a namespace")
+        if not self.uid:
+            object.__setattr__(self, "uid", None)
 
     @property
     def child(self) -> str | None:
