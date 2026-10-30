@@ -232,7 +232,10 @@ The view recognises these phrasings:
   rejection". It may come from an admission webhook, a Pod Security
   admission, or a quota on a resource korvid does not know. The view does
   not attribute it.
-- A `ReplicaFailure` condition is classified the same way by its message.
+- A `ReplicaFailure` condition counts only when its `status` is `True` and
+  its `reason` is `FailedCreate`: the ReplicaSet controller also sets it
+  with `FailedDelete` when it cannot delete a Pod, which is not a creation
+  failure. It is classified the same way by its message.
   It reports the controller's latest failure, so it can outlive the Events
   that recorded it.
 
@@ -425,6 +428,8 @@ Each slice gets a sub-issue under #411 and its own pull request:
   stale status downgraded, including matching hard maps with a missing
   `used` entry; changing status between runs; an empty
   conclusive list versus a denied or truncated one.
+- A `ReplicaFailure` condition with `FailedCreate`, with `FailedDelete`
+  (not shown), and with status `False`.
 - Recreated workloads; a workload kind outside the five.
 - The literal-value test: a template `env[].value` is absent from the
   report's `repr`.
