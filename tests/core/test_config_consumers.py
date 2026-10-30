@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 
 from korvid.core.config_consumers import (
@@ -254,3 +255,142 @@ def test_consumers_of_keeps_pod_order() -> None:
     consumers = consumers_of([first, {"metadata": "broken"}, second], "ConfigMap", "settings")
 
     assert [consumer.pod.name for consumer in consumers] == ["first", "second"]
+
+
+def _with_status(spec: dict[str, Any], status: dict[str, Any]) -> dict[str, Any]:
+    pod = _pod(spec)
+    pod["status"] = status
+    return pod
+
+
+def _running(name: str, started: str, **extra: Any) -> dict[str, Any]:
+    return {"name": name, "state": {"running": {"startedAt": started}}, **extra}
+
+
+def test_each_container_gets_its_running_start_from_its_own_status_list() -> None:
+    env_from = [{"configMapRef": {"name": "settings"}}]
+    pod = _with_status(
+        {
+            "containers": [{"name": "app", "envFrom": env_from}],
+            "initContainers": [{"name": "proxy", "restartPolicy": "Always", "envFrom": env_from}],
+            "ephemeralContainers": [{"name": "debugger", "envFrom": env_from}],
+        },
+        {
+            "containerStatuses": [_running("app", "2026-10-30T09:00:00Z")],
+            "initContainerStatuses": [_running("proxy", "2026-10-30T08:59:00Z")],
+            "ephemeralContainerStatuses": [_running("debugger", "2026-10-30T09:05:00Z")],
+        },
+    )
+
+    started = {c.container: c.started_at for c in pod_consumers(pod, "ConfigMap", "settings")}
+
+    assert started == {
+        "app": datetime(2026, 10, 30, 9, 0, tzinfo=UTC),
+        "proxy": datetime(2026, 10, 30, 8, 59, tzinfo=UTC),
+        "debugger": datetime(2026, 10, 30, 9, 5, tzinfo=UTC),
+    }
+
+
+def test_a_status_from_another_list_or_container_is_not_used() -> None:
+    pod = _with_status(
+        {
+            "containers": [{"name": "app", "envFrom": [{"configMapRef": {"name": "settings"}}]}],
+        },
+        {
+            "initContainerStatuses": [_running("app", "2026-10-30T09:00:00Z")],
+            "containerStatuses": [_running("other", "2026-10-30T09:00:00Z")],
+        },
+    )
+
+    (consumer,) = pod_consumers(pod, "ConfigMap", "settings")
+
+    assert consumer.started_at is None
+
+
+def test_only_a_running_container_has_a_start() -> None:
+    env_from = [{"configMapRef": {"name": "settings"}}]
+    containers = [
+        {"name": name, "envFrom": env_from} for name in ("waiting", "done", "bad", "none")
+    ]
+    pod = _with_status(
+        {"containers": containers},
+        {
+            "containerStatuses": [
+                {"name": "waiting", "state": {"waiting": {"reason": "ContainerCreating"}}},
+                {
+                    "name": "done",
+                    "state": {"terminated": {"startedAt": "2026-10-30T09:00:00Z"}},
+                    "lastState": {"running": {"startedAt": "2026-10-30T08:00:00Z"}},
+                },
+                _running("bad", "not-a-time"),
+            ]
+        },
+    )
+
+    started = [c.started_at for c in pod_consumers(pod, "ConfigMap", "settings")]
+
+    assert started == [None, None, None, None]
+
+
+def test_a_restarted_container_has_its_current_start() -> None:
+    pod = _with_status(
+        {"containers": [{"name": "app", "envFrom": [{"configMapRef": {"name": "settings"}}]}]},
+        {
+            "containerStatuses": [
+                _running(
+                    "app",
+                    "2026-10-30T09:30:00Z",
+                    restartCount=3,
+                    lastState={"terminated": {"startedAt": "2026-10-30T09:00:00Z"}},
+                )
+            ]
+        },
+    )
+
+    (consumer,) = pod_consumers(pod, "ConfigMap", "settings")
+
+    assert consumer.started_at == datetime(2026, 10, 30, 9, 30, tzinfo=UTC)
+
+
+def test_nothing_else_of_the_status_reaches_the_result() -> None:
+    pod = _with_status(
+        {"containers": [{"name": "app", "envFrom": [{"configMapRef": {"name": "settings"}}]}]},
+        {
+            "message": "status-message-literal",
+            "containerStatuses": [
+                _running("app", "2026-10-30T09:00:00Z", image="registry/app:status-literal")
+            ],
+        },
+    )
+
+    consumers = pod_consumers(pod, "ConfigMap", "settings")
+
+    assert "status-message-literal" not in repr(consumers)
+    assert "status-literal" not in repr(consumers)
+
+
+def test_a_start_without_a_time_zone_is_not_used() -> None:
+    pod = _with_status(
+        {"containers": [{"name": "app", "envFrom": [{"configMapRef": {"name": "settings"}}]}]},
+        {"containerStatuses": [_running("app", "2026-10-30T09:00:00")]},
+    )
+
+    (consumer,) = pod_consumers(pod, "ConfigMap", "settings")
+
+    assert consumer.started_at is None
+
+
+def test_a_mounting_container_gets_its_start() -> None:
+    pod = _with_status(
+        {
+            "volumes": [{"name": "config", "configMap": {"name": "settings"}}],
+            "containers": [
+                {"name": "app", "volumeMounts": [{"name": "config", "mountPath": "/etc/app"}]}
+            ],
+        },
+        {"containerStatuses": [_running("app", "2026-10-30T09:00:00Z")]},
+    )
+
+    (consumer,) = pod_consumers(pod, "ConfigMap", "settings")
+
+    assert consumer.started_at == datetime(2026, 10, 30, 9, 0, tzinfo=UTC)

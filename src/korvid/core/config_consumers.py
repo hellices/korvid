@@ -3,14 +3,16 @@
 A Pod is projected to its references to one object, each with the mode
 that decides whether a change reaches the running container. The projection
 reads only the fields `korvid.k8s.config_references` reads, plus each
-container's name, `restartPolicy` and `volumeMounts`, and the Pod's identity
-and controlling owner. No value of the Pod is kept.
+container's name, `restartPolicy` and `volumeMounts`, the Pod's identity and
+controlling owner, and of the status only each running container's
+`state.running.startedAt`. No value of the Pod is kept.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
+from datetime import datetime
 from enum import StrEnum
 from typing import Any
 
@@ -51,10 +53,11 @@ class ContainerCategory(StrEnum):
     EPHEMERAL = "ephemeral container"
 
 
+#: Each container list, its category, and the status list its starts are in.
 _CONTAINER_LISTS = (
-    ("containers", ContainerCategory.CONTAINER),
-    ("initContainers", ContainerCategory.INIT),
-    ("ephemeralContainers", ContainerCategory.EPHEMERAL),
+    ("containers", ContainerCategory.CONTAINER, "containerStatuses"),
+    ("initContainers", ContainerCategory.INIT, "initContainerStatuses"),
+    ("ephemeralContainers", ContainerCategory.EPHEMERAL, "ephemeralContainerStatuses"),
 )
 _ENV_MODES = {
     ReferenceSource.ENV_FROM: ConsumptionMode.ENV_FROM,
@@ -79,7 +82,9 @@ class Consumer:
 
     `container` and `category` are `None` for the Pod-level modes,
     `UNMOUNTED` and `IMAGE_PULL`. `env_name` and `key` are set for `ENV_KEY`;
-    `volume`, `mount_path` and `sub_path` for the volume modes.
+    `volume`, `mount_path` and `sub_path` for the volume modes. `started_at`
+    is when the container's current instance started running, by the node's
+    clock, and `None` unless it is running.
     """
 
     pod: PodIdentity
@@ -93,6 +98,7 @@ class Consumer:
     volume: str | None = None
     mount_path: str | None = None
     sub_path: str | None = None
+    started_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,6 +107,7 @@ class _Container:
     category: ContainerCategory
     field: str
     spec: Mapping[str, Any]
+    started_at: datetime | None = None
 
 
 class _Matcher:
@@ -144,18 +151,43 @@ def _identity(metadata: Mapping[str, Any]) -> PodIdentity | None:
     )
 
 
-def _containers(spec: Mapping[str, Any]) -> Iterator[_Container]:
-    for list_field, category in _CONTAINER_LISTS:
+def _timestamp(value: object) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else None
+
+
+def _running_starts(statuses: object) -> dict[str, datetime]:
+    """Each running container's current start, by name; nothing else of a status."""
+    starts: dict[str, datetime] = {}
+    for status in statuses if isinstance(statuses, list) else []:
+        name = _text(_mapping(status).get("name"))
+        running = _mapping(_mapping(_mapping(status).get("state")).get("running"))
+        started = _timestamp(running.get("startedAt"))
+        if name is not None and started is not None:
+            starts[name] = started
+    return starts
+
+
+def _containers(spec: Mapping[str, Any], status: Mapping[str, Any]) -> Iterator[_Container]:
+    for list_field, category, status_field in _CONTAINER_LISTS:
         entries = spec.get(list_field)
+        starts = _running_starts(status.get(status_field))
         for index, entry in enumerate(entries if isinstance(entries, list) else []):
             if not isinstance(entry, Mapping):
                 continue
             sidecar = category is ContainerCategory.INIT and entry.get("restartPolicy") == "Always"
+            name = _text(entry.get("name"))
             yield _Container(
-                _text(entry.get("name")),
+                name,
                 ContainerCategory.SIDECAR if sidecar else category,
                 f"spec.{list_field}[{index}]",
                 entry,
+                starts.get(name) if name is not None else None,
             )
 
 
@@ -173,6 +205,7 @@ def _env_consumers(
                 container.category,
                 env_name=reference.env_name,
                 key=reference.key,
+                started_at=container.started_at,
             )
 
 
@@ -214,6 +247,7 @@ def _volume_consumers(
                     volume=reference.volume,
                     mount_path=_text(mount.get("mountPath")),
                     sub_path=sub_path,
+                    started_at=container.started_at,
                 )
 
 
@@ -228,7 +262,7 @@ def pod_consumers(pod: Mapping[str, Any], kind: str, name: str) -> tuple[Consume
     if identity is None:
         return ()
     spec = _mapping(pod.get("spec"))
-    containers = list(_containers(spec))
+    containers = list(_containers(spec, _mapping(pod.get("status"))))
     matches = _Matcher(kind, name)
     consumers = [*_env_consumers(identity, containers, matches)]
     consumers += _volume_consumers(identity, spec, containers, matches)
