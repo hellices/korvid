@@ -130,6 +130,11 @@ def _run_subprocess_probe(probe: str) -> None:
         "korvid.core.config_consumers",
         "korvid.core.config_propagation",
         "korvid.core.config_changes",
+        "korvid.core.creation_quantities",
+        "korvid.core.creation_policies",
+        "korvid.core.creation_failures",
+        "korvid.core.creation_workloads",
+        "korvid.core.creation_constraints",
     ],
 )
 def test_base_import_does_not_require_optional_extras(module: str) -> None:
