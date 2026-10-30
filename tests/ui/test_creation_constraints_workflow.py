@@ -36,7 +36,7 @@ class Client(EvidenceClient):
     """Serves one Deployment whose ReplicaSet records a quota rejection."""
 
     def __init__(self) -> None:
-        self.reads: list[tuple[str, str]] = []
+        self.reads: list[tuple[str, str, str]] = []
 
     @property
     def session_generation(self) -> int:
@@ -61,7 +61,7 @@ class Client(EvidenceClient):
     async def list_evidence_page(
         self, target: EvidenceTarget, *, limit: int, continuation: str, max_bytes: int
     ) -> EvidencePage:
-        self.reads.append(("list", target.resource))
+        self.reads.append(("list", target.resource, target.namespace or ""))
         if target.resource == "replicasets":
             owner = [{"uid": "uid-api", "controller": True}]
             rs = {
@@ -93,7 +93,7 @@ class Client(EvidenceClient):
     async def get_evidence_object(
         self, target: EvidenceTarget, name: str, *, max_bytes: int
     ) -> dict[str, Any]:
-        self.reads.append(("get", target.resource))
+        self.reads.append(("get", target.resource, name))
         template = {
             "spec": {
                 "containers": [{"name": "app", "env": [{"name": "T", "value": "s3cr3t-literal"}]}]
@@ -149,11 +149,11 @@ async def test_a_deployments_failures_lead_to_their_replica_set() -> None:
         assert failure.rejection.quotas == ("compute",)
         assert "s3cr3t-literal" not in repr(screen.report)
         assert sorted(client.reads) == [
-            ("get", "deployments"),
-            ("list", "events"),
-            ("list", "limitranges"),
-            ("list", "replicasets"),
-            ("list", "resourcequotas"),
+            ("get", "deployments", "api"),
+            ("list", "events", "default"),
+            ("list", "limitranges", "default"),
+            ("list", "replicasets", "default"),
+            ("list", "resourcequotas", "default"),
         ]
 
         await pilot.press("enter")

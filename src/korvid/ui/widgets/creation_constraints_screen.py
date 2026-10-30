@@ -42,6 +42,8 @@ from korvid.ui.evidence_text import (
 
 _COLUMNS = ("Object", "What", "Value", "Note")
 _UNREADABLE = ("", "constraints could not be read", "", "")
+#: The kinds whose own status can record a creation failure, as a ReplicaFailure condition.
+_CONDITION_KINDS = frozenset({"Deployment", "ReplicaSet"})
 _FAILURES = "Recorded creation failures — what the controller recorded, when it was recorded"
 _QUOTAS = "ResourceQuotas — current values; not a reservation, and the next create may still differ"
 _LIMIT_RANGES = "LimitRanges — current constraints; other admission plugins can also change a Pod"
@@ -173,6 +175,8 @@ def _scopes_text(quota: QuotaProjection) -> str:
 def _marker(quota: QuotaProjection, usage: Usage) -> str:
     if quota.stale:
         return "status not yet updated"
+    if usage is Usage.NOT_ESTABLISHED:
+        return "not established"
     return "at its limit" if usage is Usage.AT_LIMIT else ""
 
 
@@ -282,15 +286,36 @@ def _failure_notes(report: CreationReport) -> list[Text]:
             )
         )
     elif report.events_observation.state is EvidenceState.AVAILABLE:
-        notes.append(
-            Text(
-                "No creation failure is recorded in the Events and conditions read. Events "
-                "expire, so this does not show that none happened."
-            )
-        )
+        notes += _nothing_recorded(report)
     else:
         reason = basis_sentence(report.events_observation.basis)
         notes.append(not_established(f"whether a creation failure is recorded: {reason}"))
+    return notes
+
+
+def _nothing_recorded(report: CreationReport) -> list[Text]:
+    """No failure in what was read: never a conclusion, and only about what was read."""
+    target = report.target
+    children = report.children_observation
+    subjects_read = report.workload_observation.state is EvidenceState.AVAILABLE and (
+        children is None or children.state is EvidenceState.AVAILABLE
+    )
+    sources = (
+        "Events and conditions" if subjects_read and target.kind in _CONDITION_KINDS else "Events"
+    )
+    notes = [
+        Text(
+            f"No creation failure is recorded in the {sources} read. Events expire, so this "
+            "does not show that none happened."
+        )
+    ]
+    if not subjects_read:
+        about = target.kind + (f" or its {target.child}s" if target.child is not None else "")
+        notes.append(
+            not_established(
+                f"whether a failure is recorded about the {about}: they could not all be read"
+            )
+        )
     return notes
 
 

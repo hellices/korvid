@@ -62,6 +62,7 @@ from typing import Any
 import pytest
 from rich.text import Text
 from textual.app import App
+from textual.coordinate import Coordinate
 from textual.widgets import DataTable, Static
 
 from korvid.core.capability import (
@@ -564,8 +565,54 @@ async def test_a_multiline_message_is_shown_in_full() -> None:
     async with app.run_test() as pilot:
         await until(pilot, lambda: screen_ready(app, CreationConstraintsScreen), label="view open")
         table = app.screen.query_one(DataTable)
-        row_key = table.coordinate_to_cell_key((1, 0)).row_key
+        row_key = table.coordinate_to_cell_key(Coordinate(1, 0)).row_key
         assert table.rows[row_key].height == 3
+        assert str(table.get_row_at(1)[3]) == "first line\nsecond line\nthird line"
+
+
+def test_an_unestablished_comparison_is_marked_not_left_blank() -> None:
+    unknown = replace(
+        QUOTA,
+        entries=(QuotaEntry("pods", QuotaGroup.COUNT, "20", "lots", Usage.NOT_ESTABLISHED),),
+        scopes=(),
+        scope_selector=(),
+    )
+
+    rows = [row.cells for row in _rows(_report(failures=(), quotas=(unknown,), limit_ranges=()))]
+
+    assert rows == [("compute", "object counts: pods", "used lots / hard 20", "not established")]
+
+
+def test_no_recorded_failure_names_only_the_sources_actually_read() -> None:
+    unread_children = _report(
+        failures=(), children_observation=_seen(_source("apps", "replicasets"), Basis.FORBIDDEN)
+    )
+    unread_workload = _report(
+        failures=(),
+        workload=None,
+        workload_observation=_seen(WORKLOAD_SOURCE, Basis.FORBIDDEN),
+    )
+
+    for report in (unread_children, unread_workload):
+        notes = _plain(report_notes(report, NOW))
+        assert (
+            "No creation failure is recorded in the Events read. Events expire, so this does "
+            "not show that none happened."
+        ) in notes
+        assert (
+            "Not established: whether a failure is recorded about the Deployment or its "
+            "ReplicaSets: they could not all be read"
+        ) in notes
+        assert not any("Events and conditions read" in n for n in notes)
+
+
+def test_a_kind_without_replica_failure_conditions_names_only_events() -> None:
+    job = _report(target=CreationTarget("Job", "shop", "j"), failures=(), children_observation=None)
+
+    assert (
+        "No creation failure is recorded in the Events read. Events expire, so this does not "
+        "show that none happened."
+    ) in _plain(report_notes(job, NOW))
 ```
 
 Create `src/korvid/ui/widgets/creation_constraints_screen.py` with:
@@ -615,6 +662,8 @@ from korvid.ui.evidence_text import (
 
 _COLUMNS = ("Object", "What", "Value", "Note")
 _UNREADABLE = ("", "constraints could not be read", "", "")
+#: The kinds whose own status can record a creation failure, as a ReplicaFailure condition.
+_CONDITION_KINDS = frozenset({"Deployment", "ReplicaSet"})
 _FAILURES = "Recorded creation failures — what the controller recorded, when it was recorded"
 _QUOTAS = "ResourceQuotas — current values; not a reservation, and the next create may still differ"
 _LIMIT_RANGES = "LimitRanges — current constraints; other admission plugins can also change a Pod"
@@ -746,6 +795,8 @@ def _scopes_text(quota: QuotaProjection) -> str:
 def _marker(quota: QuotaProjection, usage: Usage) -> str:
     if quota.stale:
         return "status not yet updated"
+    if usage is Usage.NOT_ESTABLISHED:
+        return "not established"
     return "at its limit" if usage is Usage.AT_LIMIT else ""
 
 
@@ -855,15 +906,36 @@ def _failure_notes(report: CreationReport) -> list[Text]:
             )
         )
     elif report.events_observation.state is EvidenceState.AVAILABLE:
-        notes.append(
-            Text(
-                "No creation failure is recorded in the Events and conditions read. Events "
-                "expire, so this does not show that none happened."
-            )
-        )
+        notes += _nothing_recorded(report)
     else:
         reason = basis_sentence(report.events_observation.basis)
         notes.append(not_established(f"whether a creation failure is recorded: {reason}"))
+    return notes
+
+
+def _nothing_recorded(report: CreationReport) -> list[Text]:
+    """No failure in what was read: never a conclusion, and only about what was read."""
+    target = report.target
+    children = report.children_observation
+    subjects_read = report.workload_observation.state is EvidenceState.AVAILABLE and (
+        children is None or children.state is EvidenceState.AVAILABLE
+    )
+    sources = (
+        "Events and conditions" if subjects_read and target.kind in _CONDITION_KINDS else "Events"
+    )
+    notes = [
+        Text(
+            f"No creation failure is recorded in the {sources} read. Events expire, so this "
+            "does not show that none happened."
+        )
+    ]
+    if not subjects_read:
+        about = target.kind + (f" or its {target.child}s" if target.child is not None else "")
+        notes.append(
+            not_established(
+                f"whether a failure is recorded about the {about}: they could not all be read"
+            )
+        )
     return notes
 
 
@@ -1614,7 +1686,7 @@ class Client(EvidenceClient):
     """Serves one Deployment whose ReplicaSet records a quota rejection."""
 
     def __init__(self) -> None:
-        self.reads: list[tuple[str, str]] = []
+        self.reads: list[tuple[str, str, str]] = []
 
     @property
     def session_generation(self) -> int:
@@ -1639,7 +1711,7 @@ class Client(EvidenceClient):
     async def list_evidence_page(
         self, target: EvidenceTarget, *, limit: int, continuation: str, max_bytes: int
     ) -> EvidencePage:
-        self.reads.append(("list", target.resource))
+        self.reads.append(("list", target.resource, target.namespace or ""))
         if target.resource == "replicasets":
             owner = [{"uid": "uid-api", "controller": True}]
             rs = {
@@ -1671,7 +1743,7 @@ class Client(EvidenceClient):
     async def get_evidence_object(
         self, target: EvidenceTarget, name: str, *, max_bytes: int
     ) -> dict[str, Any]:
-        self.reads.append(("get", target.resource))
+        self.reads.append(("get", target.resource, name))
         template = {
             "spec": {
                 "containers": [{"name": "app", "env": [{"name": "T", "value": "s3cr3t-literal"}]}]
@@ -1727,11 +1799,11 @@ async def test_a_deployments_failures_lead_to_their_replica_set() -> None:
         assert failure.rejection.quotas == ("compute",)
         assert "s3cr3t-literal" not in repr(screen.report)
         assert sorted(client.reads) == [
-            ("get", "deployments"),
-            ("list", "events"),
-            ("list", "limitranges"),
-            ("list", "replicasets"),
-            ("list", "resourcequotas"),
+            ("get", "deployments", "api"),
+            ("list", "events", "default"),
+            ("list", "limitranges", "default"),
+            ("list", "replicasets", "default"),
+            ("list", "resourcequotas", "default"),
         ]
 
         await pilot.press("enter")

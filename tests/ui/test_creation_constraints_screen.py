@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 from rich.text import Text
 from textual.app import App
+from textual.coordinate import Coordinate
 from textual.widgets import DataTable, Static
 
 from korvid.core.capability import (
@@ -511,5 +512,51 @@ async def test_a_multiline_message_is_shown_in_full() -> None:
     async with app.run_test() as pilot:
         await until(pilot, lambda: screen_ready(app, CreationConstraintsScreen), label="view open")
         table = app.screen.query_one(DataTable)
-        row_key = table.coordinate_to_cell_key((1, 0)).row_key
+        row_key = table.coordinate_to_cell_key(Coordinate(1, 0)).row_key
         assert table.rows[row_key].height == 3
+        assert str(table.get_row_at(1)[3]) == "first line\nsecond line\nthird line"
+
+
+def test_an_unestablished_comparison_is_marked_not_left_blank() -> None:
+    unknown = replace(
+        QUOTA,
+        entries=(QuotaEntry("pods", QuotaGroup.COUNT, "20", "lots", Usage.NOT_ESTABLISHED),),
+        scopes=(),
+        scope_selector=(),
+    )
+
+    rows = [row.cells for row in _rows(_report(failures=(), quotas=(unknown,), limit_ranges=()))]
+
+    assert rows == [("compute", "object counts: pods", "used lots / hard 20", "not established")]
+
+
+def test_no_recorded_failure_names_only_the_sources_actually_read() -> None:
+    unread_children = _report(
+        failures=(), children_observation=_seen(_source("apps", "replicasets"), Basis.FORBIDDEN)
+    )
+    unread_workload = _report(
+        failures=(),
+        workload=None,
+        workload_observation=_seen(WORKLOAD_SOURCE, Basis.FORBIDDEN),
+    )
+
+    for report in (unread_children, unread_workload):
+        notes = _plain(report_notes(report, NOW))
+        assert (
+            "No creation failure is recorded in the Events read. Events expire, so this does "
+            "not show that none happened."
+        ) in notes
+        assert (
+            "Not established: whether a failure is recorded about the Deployment or its "
+            "ReplicaSets: they could not all be read"
+        ) in notes
+        assert not any("Events and conditions read" in n for n in notes)
+
+
+def test_a_kind_without_replica_failure_conditions_names_only_events() -> None:
+    job = _report(target=CreationTarget("Job", "shop", "j"), failures=(), children_observation=None)
+
+    assert (
+        "No creation failure is recorded in the Events read. Events expire, so this does not "
+        "show that none happened."
+    ) in _plain(report_notes(job, NOW))
