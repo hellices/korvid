@@ -19,7 +19,7 @@
 - **Design:** `docs/superpowers/specs/2026-10-30-creation-constraints-design.md`, sections "Reads", "Projections", "Classifying a recorded rejection", "Quantities" and "Evidence".
 - **No literal leaves the run:** templates are projected before the report is built; a `repr` test checks for literal environment values, commands, images, annotations and volume sources.
 - **Exact quantities:** shown verbatim; compared only as `Decimal` through `parse_quantity`; an unparsable value is not established.
-- **UID matching:** a failure is about a subject only when its UID matches; kind-and-name matches with another or no UID are counted as earlier incarnations.
+- **UID matching:** a failure is about a subject only when its UID matches; a kind-and-name match with another, nonempty UID is counted as an earlier incarnation, and one without a UID is ignored.
 - **`ReplicaFailure`:** only `status: "True"` with `reason: FailedCreate`.
 - **Stale quota status:** missing status, `status.hard` differing from `spec.hard`, or a `status.used` missing a `status.hard` key; downgrade only an `AVAILABLE` list.
 - **Code rules:** no `assert` in `src/`; every `pytest.raises` takes `match=`; maximum complexity 10; Google-style docstrings.
@@ -2278,6 +2278,12 @@ async def test_the_reads_and_their_budgets() -> None:
             (EvidenceTarget("", "v1", "limitranges", "shop"), LIST_PAGE_SIZE, DEFAULT_MAX_BYTES): 1,
         }
     )
+    assert reader.continuations == {
+        "replicasets": [""],
+        "events": [""],
+        "resourcequotas": [""],
+        "limitranges": [""],
+    }
 
 
 async def test_a_cronjob_reads_its_jobs_and_a_statefulset_no_children() -> None:

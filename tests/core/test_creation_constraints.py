@@ -210,6 +210,12 @@ async def test_the_reads_and_their_budgets() -> None:
             (EvidenceTarget("", "v1", "limitranges", "shop"), LIST_PAGE_SIZE, DEFAULT_MAX_BYTES): 1,
         }
     )
+    assert reader.continuations == {
+        "replicasets": [""],
+        "events": [""],
+        "resourcequotas": [""],
+        "limitranges": [""],
+    }
 
 
 async def test_a_cronjob_reads_its_jobs_and_a_statefulset_no_children() -> None:
