@@ -143,9 +143,9 @@ async def _read_object(
 
 
 def _sighting(observation: Observation, version: str | None, sent_at: datetime) -> Sighting | None:
-    """The run's sighting; only an observed object has a version, and so a time."""
+    """The run's sighting, unless there is no version or the clock stepped back."""
     observed_at = observation.observed_at
-    if version is None or observed_at is None:
+    if version is None or observed_at is None or observed_at < sent_at:
         return None
     return Sighting(version, sent_at, observed_at)
 

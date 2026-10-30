@@ -166,8 +166,36 @@ def test_a_capacity_is_positive() -> None:
         ChangeLog(capacity=0)
 
 
-def test_a_sighting_sent_at_the_same_moment_still_counts() -> None:
+def test_a_new_version_sent_as_the_last_one_arrived_still_counts() -> None:
     log = ChangeLog()
     log.record(KEY, _sighting("1", 0, 1))
 
-    assert log.record(KEY, _sighting("2", 0, 2)) == ObservedChange(_at(0), _at(2))
+    assert log.record(KEY, _sighting("2", 1, 2)) == ObservedChange(_at(0), _at(2))
+
+
+@pytest.mark.parametrize("sent", [0, 0.5], ids=["same-send", "overlapping"])
+def test_a_new_version_from_a_read_that_overlapped_the_last_one_is_ignored(sent: float) -> None:
+    log = ChangeLog()
+    log.record(KEY, _sighting("1", -60))
+    log.record(KEY, _sighting("2", 0, 1))
+
+    late_old = log.record(KEY, _sighting("1", sent, 5))
+
+    assert late_old == ObservedChange(_at(-60), _at(1))
+    assert log.record(KEY, _sighting("3", 10)) == ObservedChange(_at(0), _at(10))
+
+
+def test_the_same_version_from_an_overlapping_read_moves_the_bound_forward() -> None:
+    log = ChangeLog()
+    log.record(KEY, _sighting("1", 0, 5))
+    log.record(KEY, _sighting("1", 2, 3))
+
+    assert log.record(KEY, _sighting("2", 10)) == ObservedChange(_at(2), _at(10))
+
+
+def test_the_same_version_sent_earlier_does_not_move_the_bound_back() -> None:
+    log = ChangeLog()
+    log.record(KEY, _sighting("1", 2, 3))
+    log.record(KEY, _sighting("1", 0, 5))
+
+    assert log.record(KEY, _sighting("2", 10)) == ObservedChange(_at(2), _at(10))

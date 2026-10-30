@@ -8,9 +8,10 @@ open when the reads finish, or a change of view, scope or selection since
 they started, as the relationship view does. The context-switch coordinator
 cancels the worker group before it swaps the client.
 
-Each run's sighting of the object's resource version goes into a
+Each shown run's sighting of the object's resource version goes into a
 `ChangeLog`, under the run's context epoch and session generation, so a later
-run of the same incarnation can show that it changed in between.
+run of the same incarnation can show that it changed in between. A dropped
+run records nothing.
 """
 
 from __future__ import annotations
@@ -133,15 +134,15 @@ class ConfigPropagationController:
             return
         snapshot = observe_discovery(await client.discovery_snapshot())
         report = await explain_propagation(client, snapshot, target, token=token, clock=self._clock)
-        change = self._record(report, token)
         # Another dialog is open, or the user has moved on, as the reads finish.
         if self._ui.screen_depth() > 1 or self._origin() != origin:
             return
+        self._tracker.apply_if_current(token, lambda: self._show(report, token, epoch))
+
+    def _show(self, report: PropagationReport, token: RunToken, epoch: int) -> None:
+        change = self._record(report, token)
         screen = ConfigPropagationScreen(report, self._clock, change=change)
-        self._tracker.apply_if_current(
-            token,
-            lambda: self._ui.push_screen(screen, lambda chosen: self._open_pod(chosen, epoch)),
-        )
+        self._ui.push_screen(screen, lambda chosen: self._open_pod(chosen, epoch))
 
     def _record(self, report: PropagationReport, token: RunToken) -> ObservedChange | None:
         """The object's latest change seen this session, after this run's sighting."""

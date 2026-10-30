@@ -314,3 +314,24 @@ async def test_without_an_observed_resource_version_there_is_no_sighting(get: ob
     report = await _explain(FakeReader(get=get))
 
     assert report.sighting is None
+
+
+async def test_a_clock_that_stepped_back_during_the_reads_gives_no_sighting() -> None:
+    times = iter([NOW + timedelta(seconds=10)])
+
+    report = await explain_propagation(
+        FakeReader(get=_versioned("812")),
+        _snapshot(),
+        TARGET,
+        token=TOKEN,
+        clock=lambda: next(times, NOW),
+    )
+
+    assert report.object.basis is Basis.OBSERVED
+    assert report.sighting is None
+
+
+async def test_a_clock_that_did_not_move_still_gives_a_sighting() -> None:
+    report = await _explain(FakeReader(get=_versioned("812")))
+
+    assert report.sighting == Sighting("812", NOW, NOW)

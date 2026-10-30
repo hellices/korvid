@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Mapping
+from collections.abc import Awaitable, Coroutine, Mapping
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -383,3 +383,25 @@ async def test_another_incarnation_context_or_session_starts_without_a_change() 
     assert (await _open(harness, minutes=20, version="5")).change == ObservedChange(
         NOW + timedelta(minutes=15), NOW + timedelta(minutes=20)
     )
+
+
+async def test_a_dropped_run_leaves_no_sighting() -> None:
+    harness = Harness()
+    await _open(harness, minutes=0)
+    harness.now = NOW + timedelta(minutes=5)
+    harness.client.version = "2"
+    harness.controller.open_selected()
+    harness.controller.open_selected()
+    await harness.run(-2)  # superseded by the run after it, which never finishes
+    newer = harness.ui.workers[-1]
+    assert isinstance(newer, Coroutine)
+    newer.close()
+    harness.controller.open_selected()
+    harness.view.selected = ("team-a", "other")
+    await harness.run()  # finishes after the selection moved
+    harness.view.selected = ("team-a", "settings")
+
+    reopened = await _open(harness, minutes=10, version="2")
+
+    assert harness.ui.screens == []
+    assert reopened.change == ObservedChange(NOW, NOW + timedelta(minutes=10))

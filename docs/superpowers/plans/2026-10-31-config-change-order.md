@@ -26,13 +26,16 @@ The design says a change is seen as two sightings but not which reads make them.
 - its send time is `clock()` taken before the reads start, earlier than the real send;
 - its arrival is the object observation's `observed_at`, taken after the response.
 
-Both errors widen the bound, which can only turn an ordering into "not established". The cost is that korvid sees a change only if the view was opened before and after it, in the same session. The note and `docs/tui.md` say so.
+Both errors widen the bound, which can only turn an ordering into "not established". If the clock steps back between the two, so that the arrival precedes the send, the run has no sighting. The cost is that korvid sees a change only if the view was opened before and after it, in the same session. The note and `docs/tui.md` say so.
+
+Only a run whose result is shown records its sighting: a run dropped for a newer run, a context switch, new credentials, another dialog or a moved selection records nothing.
 
 The log is keyed by the run token's context epoch and session generation and by the object's kind, namespace, name and observed UID:
 
 - a context switch, new credentials or a recreated object starts afresh;
 - it holds at most 256 objects, least recently recorded first out;
-- a sighting sent before the last one recorded is ignored.
+- the same version sent later moves the last sighting forward, and sent earlier is ignored;
+- another version is a change only when its read was sent at or after the last sighting arrived. Two overlapping reads say nothing about which version the server served first, so an overlapping read of another version is ignored.
 
 ## File structure
 
@@ -326,11 +329,39 @@ def test_a_capacity_is_positive() -> None:
         ChangeLog(capacity=0)
 
 
-def test_a_sighting_sent_at_the_same_moment_still_counts() -> None:
+def test_a_new_version_sent_as_the_last_one_arrived_still_counts() -> None:
     log = ChangeLog()
     log.record(KEY, _sighting("1", 0, 1))
 
-    assert log.record(KEY, _sighting("2", 0, 2)) == ObservedChange(_at(0), _at(2))
+    assert log.record(KEY, _sighting("2", 1, 2)) == ObservedChange(_at(0), _at(2))
+
+
+@pytest.mark.parametrize("sent", [0, 0.5], ids=["same-send", "overlapping"])
+def test_a_new_version_from_a_read_that_overlapped_the_last_one_is_ignored(sent: float) -> None:
+    log = ChangeLog()
+    log.record(KEY, _sighting("1", -60))
+    log.record(KEY, _sighting("2", 0, 1))
+
+    late_old = log.record(KEY, _sighting("1", sent, 5))
+
+    assert late_old == ObservedChange(_at(-60), _at(1))
+    assert log.record(KEY, _sighting("3", 10)) == ObservedChange(_at(0), _at(10))
+
+
+def test_the_same_version_from_an_overlapping_read_moves_the_bound_forward() -> None:
+    log = ChangeLog()
+    log.record(KEY, _sighting("1", 0, 5))
+    log.record(KEY, _sighting("1", 2, 3))
+
+    assert log.record(KEY, _sighting("2", 10)) == ObservedChange(_at(2), _at(10))
+
+
+def test_the_same_version_sent_earlier_does_not_move_the_bound_back() -> None:
+    log = ChangeLog()
+    log.record(KEY, _sighting("1", 2, 3))
+    log.record(KEY, _sighting("1", 0, 5))
+
+    assert log.record(KEY, _sighting("2", 10)) == ObservedChange(_at(2), _at(10))
 ```
 
 - [ ] **Step 2: Run them to see them fail**
@@ -350,6 +381,9 @@ resource versions. A sighting is not an instant: the server answered at some
 point between the request being sent and the response arriving. So a change
 is bounded by the old sighting's send time and the new sighting's arrival,
 and a delayed old-version response cannot push the bound past the change.
+Two reads that overlap say nothing about which version the server served
+first, so a new version counts only from a read sent after the last
+sighting arrived.
 
 Resource versions are compared only for equality, never ordered, and
 `creationTimestamp` is never used as a change time. A container's start
@@ -460,17 +494,17 @@ class ChangeLog:
     def record(self, key: ObjectKey, sighting: Sighting) -> ObservedChange | None:
         """Record `sighting` of `key`, and return the latest change known for it.
 
-        A sighting sent before the last one recorded is ignored: it can only
-        be older news.
+        The same version sent later moves the last sighting forward; sent
+        earlier, it is older news. Another version is a change only when its
+        read was sent after the last sighting arrived, and is ignored otherwise.
         """
         entry = self._entries.pop(key, None)
         if entry is None:
             entry = _Entry(sighting, None)
-        elif sighting.sent_at < entry.last.sent_at:
-            pass
         elif sighting.resource_version == entry.last.resource_version:
-            entry = _Entry(sighting, entry.change)
-        else:
+            if sighting.sent_at >= entry.last.sent_at:
+                entry = _Entry(sighting, entry.change)
+        elif sighting.sent_at >= entry.last.arrived_at:
             entry = _Entry(sighting, ObservedChange(entry.last.sent_at, sighting.arrived_at))
         self._entries[key] = entry
         while len(self._entries) > self._capacity:
@@ -550,6 +584,8 @@ async def test_without_an_observed_resource_version_there_is_no_sighting(get: ob
     assert report.sighting is None
 ```
 
+Also `test_a_clock_that_did_not_move_still_gives_a_sighting` (send and arrival equal) and `test_a_clock_that_stepped_back_during_the_reads_gives_no_sighting` (the report is still returned, without a sighting).
+
 - [ ] **Step 2: Run them to see them fail**
 
 Run: `uv run --frozen pytest -p no:tach tests/core/test_config_propagation.py -q`
@@ -561,9 +597,9 @@ Expected: FAIL with `AttributeError: 'PropagationReport' object has no attribute
 
 ```python
 def _sighting(observation: Observation, version: str | None, sent_at: datetime) -> Sighting | None:
-    """The run's sighting; only an observed object has a version, and so a time."""
+    """The run's sighting, unless there is no version or the clock stepped back."""
     observed_at = observation.observed_at
-    if version is None or observed_at is None:
+    if version is None or observed_at is None or observed_at < sent_at:
         return None
     return Sighting(version, sent_at, observed_at)
 ```
@@ -619,7 +655,7 @@ async def test_a_new_resource_version_is_shown_as_a_change_since_the_last_run() 
     assert changed.change == ObservedChange(NOW + timedelta(minutes=5), NOW + timedelta(minutes=10))
 ```
 
-Also `test_a_run_that_does_not_see_the_object_keeps_the_last_sighting` (a 403 run between two sightings) and `test_another_incarnation_context_or_session_starts_without_a_change` (a new UID, a new epoch and a new session generation each start afresh, and the next sighting in the same scope finds the change).
+Also `test_a_run_that_does_not_see_the_object_keeps_the_last_sighting` (a 403 run between two sightings), `test_another_incarnation_context_or_session_starts_without_a_change` (a new UID, a new epoch and a new session generation each start afresh, and the next sighting in the same scope finds the change), and `test_a_dropped_run_leaves_no_sighting` (a superseded run and a run that finishes after the selection moved record nothing).
 
 - [ ] **Step 2: Run them to see them fail**
 
@@ -628,7 +664,7 @@ Expected: FAIL with `AttributeError: 'ConfigPropagationScreen' object has no att
 
 - [ ] **Step 3: Implement**
 
-The controller creates `self._changes = ChangeLog()`, records each report before the "user moved on" check, and hands the change to the screen:
+The controller creates `self._changes = ChangeLog()`. Recording moves into the callback `apply_if_current` runs, after the "user moved on" check, so a dropped run records nothing; the callback hands the change to the screen:
 
 ```python
     def _record(self, report: PropagationReport, token: RunToken) -> ObservedChange | None:

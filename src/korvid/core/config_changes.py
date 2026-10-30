@@ -5,6 +5,9 @@ resource versions. A sighting is not an instant: the server answered at some
 point between the request being sent and the response arriving. So a change
 is bounded by the old sighting's send time and the new sighting's arrival,
 and a delayed old-version response cannot push the bound past the change.
+Two reads that overlap say nothing about which version the server served
+first, so a new version counts only from a read sent after the last
+sighting arrived.
 
 Resource versions are compared only for equality, never ordered, and
 `creationTimestamp` is never used as a change time. A container's start
@@ -115,17 +118,17 @@ class ChangeLog:
     def record(self, key: ObjectKey, sighting: Sighting) -> ObservedChange | None:
         """Record `sighting` of `key`, and return the latest change known for it.
 
-        A sighting sent before the last one recorded is ignored: it can only
-        be older news.
+        The same version sent later moves the last sighting forward; sent
+        earlier, it is older news. Another version is a change only when its
+        read was sent after the last sighting arrived, and is ignored otherwise.
         """
         entry = self._entries.pop(key, None)
         if entry is None:
             entry = _Entry(sighting, None)
-        elif sighting.sent_at < entry.last.sent_at:
-            pass
         elif sighting.resource_version == entry.last.resource_version:
-            entry = _Entry(sighting, entry.change)
-        else:
+            if sighting.sent_at >= entry.last.sent_at:
+                entry = _Entry(sighting, entry.change)
+        elif sighting.sent_at >= entry.last.arrived_at:
             entry = _Entry(sighting, ObservedChange(entry.last.sent_at, sighting.arrived_at))
         self._entries[key] = entry
         while len(self._entries) > self._capacity:
