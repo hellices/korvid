@@ -278,23 +278,35 @@ def _controller_uid(item: Mapping[str, Any]) -> str | None:
     return None
 
 
+@dataclass(frozen=True, slots=True)
+class ChildrenProjection:
+    """The children a workload controls, and how many of them had no name or UID."""
+
+    children: tuple[ChildProjection, ...]
+    unprojected: int = 0
+
+
 def _newest_first(child: ChildProjection) -> tuple[bool, float]:
     at = child.created_at
     return (at is None, -at.timestamp() if at is not None else 0.0)
 
 
-def project_children(
-    kind: str, items: Iterable[object], parent_uid: str
-) -> tuple[ChildProjection, ...]:
-    """The `kind` objects in `items` whose controller is `parent_uid`, newest first."""
+def project_children(kind: str, items: Iterable[object], parent_uid: str) -> ChildrenProjection:
+    """The `kind` objects in `items` whose controller is `parent_uid`, newest first.
+
+    One the workload controls but that has no name or UID is counted, since
+    its conditions and the events about it are lost.
+    """
     children: list[ChildProjection] = []
+    unprojected = 0
     for item in items:
         if not isinstance(item, Mapping) or _controller_uid(item) != parent_uid:
             continue
         subject = _subject(kind, item)
         if subject is None:
+            unprojected += 1
             continue
         created = _timestamp(_mapping(item.get("metadata")).get("creationTimestamp"))
         failure = condition_failure(subject, _mapping(item.get("status")))
         children.append(ChildProjection(subject, failure, created))
-    return tuple(sorted(children, key=_newest_first))
+    return ChildrenProjection(tuple(sorted(children, key=_newest_first)), unprojected)

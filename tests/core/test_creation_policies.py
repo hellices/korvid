@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from korvid.core.creation_policies import (
     LimitValue,
     QuotaEntry,
@@ -214,7 +216,7 @@ def test_a_whole_number_written_as_a_number_is_kept_as_text() -> None:
     assert projected.entries == (QuotaEntry("pods", QuotaGroup.COUNT, "10", "4", Usage.BELOW),)
 
 
-def test_a_scope_expression_without_a_name_or_operator_is_skipped() -> None:
+def test_an_unreadable_scope_expression_is_dropped_and_the_quota_incomplete() -> None:
     quota = _quota(
         "gold",
         {"pods": "5"},
@@ -223,10 +225,77 @@ def test_a_scope_expression_without_a_name_or_operator_is_skipped() -> None:
                 {"scopeName": "PriorityClass"},
                 {"operator": "Exists"},
                 {"scopeName": "PriorityClass", "operator": "NotIn", "values": ["low", 3]},
+                {"scopeName": "PriorityClass", "operator": "In", "values": "gold"},
+                {"scopeName": "PriorityClass", "operator": "Exists"},
             ]
         },
     )
 
-    assert project_quotas([quota])[0].scope_selector == (
-        ScopeExpression("PriorityClass", "NotIn", ("low",)),
+    (projected,) = project_quotas([quota])
+
+    assert projected.scope_selector == (ScopeExpression("PriorityClass", "Exists", ()),)
+    assert not projected.complete
+
+
+def test_a_quota_with_no_hard_limits_and_no_status_is_stale() -> None:
+    assert project_quotas([_quota("empty", {})])[0].stale
+
+
+def test_a_well_formed_quota_and_limit_range_are_complete() -> None:
+    quota = _quota(
+        "ok",
+        {"pods": "1"},
+        status={"hard": {"pods": "1"}, "used": {"pods": "0"}},
+        scopes=["BestEffort"],
     )
+    limit_range = {
+        "metadata": {"name": "lr", "namespace": "shop", "uid": "u"},
+        "spec": {"limits": [{"type": "Container", "max": {"cpu": "1"}}]},
+    }
+
+    assert project_quotas([quota])[0].complete
+    assert project_limit_ranges([limit_range])[0].complete
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        {"hard": {"pods": "1", "services": None}},
+        {"hard": "x"},
+        {"hard": {"pods": "1"}, "scopes": ["BestEffort", 3]},
+        {"hard": {"pods": "1"}, "scopes": "BestEffort"},
+        {
+            "hard": {"pods": "1"},
+            "scopeSelector": {"matchExpressions": [{"scopeName": "PriorityClass"}]},
+        },
+        {"hard": {"pods": "1"}, "scopeSelector": {"matchExpressions": "x"}},
+    ],
+    ids=[
+        "null-value",
+        "hard-not-a-map",
+        "scope-not-text",
+        "scopes-not-a-list",
+        "expression-without-operator",
+        "expressions-not-a-list",
+    ],
+)
+def test_a_quota_with_an_unreadable_constraint_is_incomplete(spec: dict[str, Any]) -> None:
+    item = {"metadata": {"name": "q", "namespace": "shop", "uid": "u"}, "spec": spec}
+
+    assert not project_quotas([item])[0].complete
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        {"limits": "x"},
+        {"limits": ["x"]},
+        {"limits": [{"type": "Container", "max": {"cpu": None}}]},
+        {"limits": [{"type": "Container", "max": "1"}]},
+    ],
+    ids=["limits-not-a-list", "limit-not-a-map", "null-value", "field-not-a-map"],
+)
+def test_a_limit_range_with_an_unreadable_constraint_is_incomplete(spec: dict[str, Any]) -> None:
+    item = {"metadata": {"name": "lr", "namespace": "shop", "uid": "u"}, "spec": spec}
+
+    assert not project_limit_ranges([item])[0].complete

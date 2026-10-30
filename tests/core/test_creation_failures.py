@@ -285,3 +285,12 @@ def test_only_a_different_uid_is_an_earlier_incarnation() -> None:
     failures, earlier = event_failures(events, (DEPLOYMENT,))
 
     assert (failures, earlier) == ((), 1)
+
+
+def test_a_validating_admission_policy_denial_is_never_attributed_to_a_policy() -> None:
+    message = (
+        "ValidatingAdmissionPolicy 'quota-guard' with binding 'quota-guard-binding' denied "
+        "request: exceeded quota: compute, maximum cpu usage per Container is 1"
+    )
+
+    assert classify(message) == Rejection((RejectionKind.OTHER,), (), message)

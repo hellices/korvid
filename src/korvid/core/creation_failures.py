@@ -6,8 +6,9 @@ children, matched by UID, or a `ReplicaFailure` condition whose reason is
 classified only by the fixed quota and LimitRanger phrasings below, and kept
 verbatim, bounded, whatever it says. A quota is named only as the message
 names it; a LimitRange is never named, because its messages do not say which.
-An admission webhook's denial is never classified further: its text is the
-webhook's own, and can say anything.
+A denial an admission webhook or a ValidatingAdmissionPolicy wrote is never
+classified further: its text is the policy author's own, and can say
+anything.
 """
 
 from __future__ import annotations
@@ -49,7 +50,10 @@ _PHRASES: tuple[tuple[RejectionKind, re.Pattern[str]], ...] = (
     # Anchored at a word's start, so a long unbroken message is scanned in linear time.
     (RejectionKind.LIMIT_RATIO, re.compile(rf"(?<!\S)\S+ max limit to request ratio {_PER}")),
 )
-_WEBHOOK = re.compile(r'admission webhook "[^"]*" denied the request')
+_AUTHORED_DENIAL = re.compile(
+    r'admission webhook "[^"]*" denied the request'
+    r"|ValidatingAdmissionPolicy '[^']*' with binding '[^']*' denied request"
+)
 
 
 class FailureSource(StrEnum):
@@ -105,10 +109,10 @@ def _bounded(message: str) -> str:
 def classify(message: str) -> Rejection:
     """Classify `message` by its fixed phrasings, in the order it states them.
 
-    A message that states none of them, or that an admission webhook wrote,
-    is `OTHER`.
+    A message that states none of them, or that an admission webhook or a
+    ValidatingAdmissionPolicy wrote, is `OTHER`.
     """
-    if _WEBHOOK.search(message):
+    if _AUTHORED_DENIAL.search(message):
         return Rejection((RejectionKind.OTHER,), (), _bounded(message))
     matches = sorted(
         (match.start(), kind, match.group(1) if match.groups() else None)

@@ -5,7 +5,8 @@ the cluster wrote them, quota scopes and scope selectors, and whether a
 quota's status is current. Quota status is filled by the quota controller
 after `spec.hard` changes, so a quota whose status is missing, lags its spec
 or lacks a used amount is stale, and none of its resources is called at its
-limit.
+limit. A policy with a constraint the projection cannot read is kept, but
+marked incomplete, so a list holding it cannot rule anything out.
 """
 
 from __future__ import annotations
@@ -56,6 +57,7 @@ class QuotaProjection:
     scopes: tuple[str, ...] = ()
     scope_selector: tuple[ScopeExpression, ...] = ()
     stale: bool = False
+    complete: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,6 +80,7 @@ class LimitRangeProjection:
     name: str
     uid: str | None
     values: tuple[LimitValue, ...]
+    complete: bool = True
 
 
 def _mapping(value: object) -> Mapping[str, Any]:
@@ -105,6 +108,13 @@ def _quantities(value: object) -> dict[str, str]:
     }
 
 
+def _readable_quantities(value: object) -> bool:
+    """Whether every entry of an optional quantity map can be read."""
+    if value is None:
+        return True
+    return isinstance(value, Mapping) and len(_quantities(value)) == len(value)
+
+
 def _identity(item: Mapping[str, Any]) -> tuple[str, str | None] | None:
     metadata = _mapping(item.get("metadata"))
     name = _text(metadata.get("name"))
@@ -113,24 +123,40 @@ def _identity(item: Mapping[str, Any]) -> tuple[str, str | None] | None:
 
 def _stale(hard: Mapping[str, str], status: Mapping[str, Any]) -> bool:
     """Whether the quota controller has not yet caught up with `hard`."""
+    if not status:
+        return True
     status_hard, used = _quantities(status.get("hard")), _quantities(status.get("used"))
     if status_hard.keys() != hard.keys() or not status_hard.keys() <= used.keys():
         return True
     return not all(same_quantity(hard[name], status_hard[name]) for name in hard)
 
 
-def _scope_selector(spec: Mapping[str, Any]) -> tuple[ScopeExpression, ...]:
-    expressions = _mapping(spec.get("scopeSelector")).get("matchExpressions")
-    selected: list[ScopeExpression] = []
-    for raw in expressions if isinstance(expressions, list) else []:
-        expression = _mapping(raw)
-        scope, operator = _text(expression.get("scopeName")), _text(expression.get("operator"))
-        if scope is None or operator is None:
-            continue
-        values = expression.get("values")
-        texts = tuple(v for v in values if isinstance(v, str)) if isinstance(values, list) else ()
-        selected.append(ScopeExpression(scope, operator, texts))
-    return tuple(selected)
+def _expression(raw: object) -> ScopeExpression | None:
+    expression = _mapping(raw)
+    scope, operator = _text(expression.get("scopeName")), _text(expression.get("operator"))
+    values = expression.get("values", [])
+    if scope is None or operator is None or not isinstance(values, list):
+        return None
+    texts = tuple(v for v in values if isinstance(v, str))
+    return ScopeExpression(scope, operator, texts) if len(texts) == len(values) else None
+
+
+def _scope_selector(spec: Mapping[str, Any]) -> tuple[tuple[ScopeExpression, ...], bool]:
+    """The selector's expressions, and whether every one of them could be read."""
+    expressions = _mapping(spec.get("scopeSelector")).get("matchExpressions", [])
+    if not isinstance(expressions, list):
+        return (), False
+    selected = [_expression(raw) for raw in expressions]
+    kept = tuple(e for e in selected if e is not None)
+    return kept, len(kept) == len(selected)
+
+
+def _scopes(spec: Mapping[str, Any]) -> tuple[tuple[str, ...], bool]:
+    scopes = spec.get("scopes", [])
+    if not isinstance(scopes, list):
+        return (), False
+    kept = tuple(s for s in scopes if isinstance(s, str))
+    return kept, len(kept) == len(scopes)
 
 
 def _quota(item: Mapping[str, Any]) -> QuotaProjection | None:
@@ -154,14 +180,16 @@ def _quota(item: Mapping[str, Any]) -> QuotaProjection | None:
         ),
         key=lambda entry: (_GROUP_ORDER[entry.group], entry.resource),
     )
-    scopes = spec.get("scopes")
+    scopes, scopes_read = _scopes(spec)
+    selector, selector_read = _scope_selector(spec)
     return QuotaProjection(
         identity[0],
         identity[1],
         tuple(entries),
-        tuple(s for s in scopes if isinstance(s, str)) if isinstance(scopes, list) else (),
-        _scope_selector(spec),
+        scopes,
+        selector,
         stale,
+        _readable_quantities(spec.get("hard")) and scopes_read and selector_read,
     )
 
 
@@ -186,18 +214,23 @@ def _limit_values(limit: Mapping[str, Any]) -> Iterable[LimitValue]:
         )
 
 
+def _readable_limit(limit: object) -> bool:
+    return isinstance(limit, Mapping) and all(
+        _readable_quantities(limit.get(field)) for field in _LIMIT_FIELDS
+    )
+
+
 def _limit_range(item: Mapping[str, Any]) -> LimitRangeProjection | None:
     identity = _identity(item)
     if identity is None:
         return None
-    limits = _mapping(item.get("spec")).get("limits")
+    limits = _mapping(item.get("spec")).get("limits", [])
+    entries = limits if isinstance(limits, list) else []
     values = (
-        value
-        for limit in (limits if isinstance(limits, list) else [])
-        if isinstance(limit, Mapping)
-        for value in _limit_values(limit)
+        value for limit in entries if isinstance(limit, Mapping) for value in _limit_values(limit)
     )
-    return LimitRangeProjection(identity[0], identity[1], tuple(values))
+    complete = isinstance(limits, list) and all(_readable_limit(limit) for limit in entries)
+    return LimitRangeProjection(identity[0], identity[1], tuple(values), complete)
 
 
 def project_limit_ranges(items: Iterable[object]) -> tuple[LimitRangeProjection, ...]:

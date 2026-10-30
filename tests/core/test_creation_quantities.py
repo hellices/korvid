@@ -99,3 +99,10 @@ def test_two_quantities_are_the_same_only_by_value(
     left: str, right: str, expected: bool | None
 ) -> None:
     assert same_quantity(left, right) is expected
+
+
+def test_a_quantity_too_large_for_decimal_arithmetic_is_not_established() -> None:
+    huge = "1e999999999999999999999999"
+
+    assert usage(huge, "10") is Usage.NOT_ESTABLISHED
+    assert same_quantity(huge, "10") is None

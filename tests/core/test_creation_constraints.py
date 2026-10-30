@@ -430,3 +430,38 @@ async def test_an_unnamed_policy_in_a_truncated_list_keeps_the_lists_basis() -> 
     report = await _explain(reader)
 
     assert _state(report.limit_ranges_observation) == (EvidenceState.PARTIAL, Basis.TRUNCATED)
+
+
+async def test_an_owned_child_the_projection_cannot_name_makes_the_children_inconclusive() -> None:
+    nameless = {
+        "metadata": {
+            "namespace": "shop",
+            "uid": "u",
+            "ownerReferences": [{"uid": "uid-api", "controller": True}],
+        }
+    }
+
+    report = await _explain(FakeReader(replicasets=(REPLICA_SET, nameless)))
+
+    assert _state(report.children_observation) == (EvidenceState.PARTIAL, Basis.MALFORMED)
+    assert report.baseline.state is not EvidenceState.AVAILABLE
+
+
+@pytest.mark.parametrize(
+    ("resource", "item"),
+    [
+        ("resourcequotas", {**QUOTA, "spec": {"hard": {"pods": "0", "services": None}}}),
+        ("limitranges", {**LIMIT_RANGE, "spec": {"limits": "x"}}),
+    ],
+)
+async def test_a_policy_with_an_unreadable_constraint_makes_its_list_inconclusive(
+    resource: str, item: dict[str, Any]
+) -> None:
+    report = await _explain(FakeReader(**{resource: (item,)}))
+
+    observation = (
+        report.quotas_observation
+        if resource == "resourcequotas"
+        else report.limit_ranges_observation
+    )
+    assert _state(observation) == (EvidenceState.PARTIAL, Basis.MALFORMED)

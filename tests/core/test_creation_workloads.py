@@ -253,7 +253,7 @@ def test_only_children_the_workload_controls_are_kept() -> None:
         "not-an-object",
     ]
 
-    children = project_children("ReplicaSet", items, "uid-api")
+    children = project_children("ReplicaSet", items, "uid-api").children
 
     assert [c.subject for c in children] == [Subject("ReplicaSet", "api-1", "uid-api-1")]
     assert "s3cr3t-literal" not in repr(children)
@@ -268,7 +268,7 @@ def test_a_replica_sets_failed_create_condition_is_kept() -> None:
 
     (child,) = project_children(
         "ReplicaSet", [_child("api-1", "uid-api", status=status)], "uid-api"
-    )
+    ).children
 
     assert child.failure is not None
     assert child.failure.subject == child.subject
@@ -281,7 +281,7 @@ def test_jobs_are_newest_first() -> None:
         _child("job-undated", "uid-cron"),
     ]
 
-    children = project_children("Job", items, "uid-cron")
+    children = project_children("Job", items, "uid-cron").children
 
     assert [c.subject.name for c in children] == ["job-new", "job-old", "job-undated"]
     assert children[0].created_at == datetime(2026, 10, 30, 9, 0, tzinfo=UTC)
@@ -317,3 +317,19 @@ def test_only_a_statefulset_has_claim_templates() -> None:
     assert projected is not None
     assert projected.template is not None
     assert projected.template.claims == ()
+
+
+def test_owned_children_without_a_name_or_uid_are_counted_as_unprojected() -> None:
+    nameless = _child("x", "uid-api")
+    del nameless["metadata"]["name"]
+    uidless = _child("y", "uid-api")
+    del uidless["metadata"]["uid"]
+    unowned = _child("z", "uid-other")
+    del unowned["metadata"]["name"]
+
+    projected = project_children(
+        "ReplicaSet", [_child("api-1", "uid-api"), nameless, uidless, unowned], "uid-api"
+    )
+
+    assert [c.subject.name for c in projected.children] == ["api-1"]
+    assert projected.unprojected == 2

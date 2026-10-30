@@ -204,15 +204,22 @@ async def _no_children() -> None:
     return None
 
 
-def _downgrade_dropped(observation: Observation, read: int, kept: int, what: str) -> Observation:
-    """An available list whose projection dropped an item it could not name is `PARTIAL`.
+def _downgrade_unreadable(observation: Observation, unreadable: int, what: str) -> Observation:
+    """An available list with items the projection could not read in full is `PARTIAL`.
 
-    Otherwise a list of only unnamed items would conclude that there are none.
+    Otherwise a list of only unnamed policies, or a policy whose constraints
+    were dropped, would rule out what it could not show. A list already
+    partial keeps its own, already inconclusive, basis.
     """
-    if kept >= read or observation.state is not EvidenceState.AVAILABLE:
+    if not unreadable or observation.state is not EvidenceState.AVAILABLE:
         return observation
-    detail = f"{read - kept} {what} without a name not shown"
+    detail = f"{unreadable} {what} could not be read in full"
     return replace(observation, state=EvidenceState.PARTIAL, basis=Basis.MALFORMED, detail=detail)
+
+
+def _unreadable(read: int, projections: tuple[QuotaProjection | LimitRangeProjection, ...]) -> int:
+    """How many listed policies were dropped, or kept with a constraint that could not be read."""
+    return read - len(projections) + sum(not p.complete for p in projections)
 
 
 def _downgrade_stale(observation: Observation, quotas: tuple[QuotaProjection, ...]) -> Observation:
@@ -304,21 +311,30 @@ async def explain_creation(
     workload = project_workload(target.kind, item) if item is not None else None
     subjects = _subjects(target, workload, workload_observation)
     children: tuple[ChildProjection, ...] = ()
+    children_observation = children_lists.observation if children_lists is not None else None
     if children_lists is not None and subjects and target.child is not None:
-        children = project_children(target.child, children_lists.items, subjects[0].uid)
+        projected = project_children(target.child, children_lists.items, subjects[0].uid)
+        children = projected.children
+        children_observation = _downgrade_unreadable(
+            children_lists.observation, projected.unprojected, f"{target.child}s"
+        )
     failures, earlier = _failures(
         events, subjects + tuple(child.subject for child in children), workload, children
     )
     quota_projections = project_quotas(quotas.items)
     quotas_observation = _downgrade_stale(
-        _downgrade_dropped(
-            quotas.observation, len(quotas.items), len(quota_projections), "ResourceQuotas"
+        _downgrade_unreadable(
+            quotas.observation,
+            _unreadable(len(quotas.items), quota_projections),
+            "ResourceQuotas",
         ),
         quota_projections,
     )
     range_projections = project_limit_ranges(limit_ranges.items)
-    limit_ranges_observation = _downgrade_dropped(
-        limit_ranges.observation, len(limit_ranges.items), len(range_projections), "LimitRanges"
+    limit_ranges_observation = _downgrade_unreadable(
+        limit_ranges.observation,
+        _unreadable(len(limit_ranges.items), range_projections),
+        "LimitRanges",
     )
     observations = {
         "workload": workload_observation,
@@ -326,13 +342,13 @@ async def explain_creation(
         "quotas": quotas_observation,
         "limit-ranges": limit_ranges_observation,
     }
-    if children_lists is not None:
-        observations["children"] = children_lists.observation
+    if children_observation is not None:
+        observations["children"] = children_observation
     baseline = EvidenceSet(observations).baseline(declarations(target), clock())
     return CreationReport(
         target,
         workload_observation,
-        children_lists.observation if children_lists is not None else None,
+        children_observation,
         events.observation,
         quotas_observation,
         limit_ranges_observation,

@@ -29,9 +29,17 @@
 
 - **A denied workload read still matches Events.** The design does not say whom failures are about when the workload cannot be read. The run uses the selected row's UID then, so a user without `get` on the workload still sees its recorded failures. It does not do so for an absent workload: the view will say it no longer exists.
 - **Failure order is by time, not by source.** Conditions and Events are merged newest first, undated last.
-- **An admission webhook's denial is never classified further.** Its text is the webhook's own and can contain a quota or LimitRanger phrase. A message containing `admission webhook "…" denied the request` is `OTHER`, and names no quota.
+- **A policy-authored denial is never classified further.** An admission webhook's or a ValidatingAdmissionPolicy's text is its author's own and can contain a quota or LimitRanger phrase. A message containing `admission webhook "…" denied the request` or `ValidatingAdmissionPolicy '…' with binding '…' denied request` is `OTHER`, and names no quota.
 - **An event without a UID is ignored.** It neither matches the workload nor shows an earlier incarnation; only a nonempty, different UID counts as earlier.
-- **A policy the projection cannot name makes its list inconclusive.** An `AVAILABLE` quota or LimitRange list from which the projection drops an unnamed item becomes `PARTIAL`/`MALFORMED`, so a list of only unnamed items cannot conclude that there are none. A list that is already partial keeps its own basis.
+- **Whatever the projection cannot read makes its list inconclusive.** An `AVAILABLE` list becomes `PARTIAL`/`MALFORMED` when its projection drops or cannot fully read an item:
+  - a quota or LimitRange without a name;
+  - a quota constraint that is not a quantity, a scope that is not text, or a scope expression without a name, an operator or text values;
+  - a LimitRange whose `limits` is not a list of maps of quantities;
+  - a child the workload controls that has no name or UID.
+
+  A list that is already partial keeps its own basis.
+- **An empty quota with no status is stale**, like any quota with no status.
+- **A quantity decimal arithmetic cannot represent** (`decimal.InvalidOperation`, for example a huge exponent) is not established, like an unparsable one.
 - **The ratio phrase is anchored at a word's start**, so a long unbroken message is classified in linear time.
 
 ## File structure
@@ -166,6 +174,13 @@ def test_two_quantities_are_the_same_only_by_value(
     left: str, right: str, expected: bool | None
 ) -> None:
     assert same_quantity(left, right) is expected
+
+
+def test_a_quantity_too_large_for_decimal_arithmetic_is_not_established() -> None:
+    huge = "1e999999999999999999999999"
+
+    assert usage(huge, "10") is Usage.NOT_ESTABLISHED
+    assert same_quantity(huge, "10") is None
 ```
 
 Create `src/korvid/core/creation_quantities.py` with:
@@ -256,7 +271,7 @@ def _parsed(value: str | None) -> Decimal | None:
         return None
     try:
         return parse_quantity(value)
-    except ValueError:
+    except (ValueError, ArithmeticError):  # decimal.InvalidOperation for an absurd exponent
         return None
 
 
@@ -288,6 +303,8 @@ Create `tests/core/test_creation_policies.py` with:
 from __future__ import annotations
 
 from typing import Any
+
+import pytest
 
 from korvid.core.creation_policies import (
     LimitValue,
@@ -499,7 +516,7 @@ def test_a_whole_number_written_as_a_number_is_kept_as_text() -> None:
     assert projected.entries == (QuotaEntry("pods", QuotaGroup.COUNT, "10", "4", Usage.BELOW),)
 
 
-def test_a_scope_expression_without_a_name_or_operator_is_skipped() -> None:
+def test_an_unreadable_scope_expression_is_dropped_and_the_quota_incomplete() -> None:
     quota = _quota(
         "gold",
         {"pods": "5"},
@@ -508,13 +525,80 @@ def test_a_scope_expression_without_a_name_or_operator_is_skipped() -> None:
                 {"scopeName": "PriorityClass"},
                 {"operator": "Exists"},
                 {"scopeName": "PriorityClass", "operator": "NotIn", "values": ["low", 3]},
+                {"scopeName": "PriorityClass", "operator": "In", "values": "gold"},
+                {"scopeName": "PriorityClass", "operator": "Exists"},
             ]
         },
     )
 
-    assert project_quotas([quota])[0].scope_selector == (
-        ScopeExpression("PriorityClass", "NotIn", ("low",)),
+    (projected,) = project_quotas([quota])
+
+    assert projected.scope_selector == (ScopeExpression("PriorityClass", "Exists", ()),)
+    assert not projected.complete
+
+
+def test_a_quota_with_no_hard_limits_and_no_status_is_stale() -> None:
+    assert project_quotas([_quota("empty", {})])[0].stale
+
+
+def test_a_well_formed_quota_and_limit_range_are_complete() -> None:
+    quota = _quota(
+        "ok",
+        {"pods": "1"},
+        status={"hard": {"pods": "1"}, "used": {"pods": "0"}},
+        scopes=["BestEffort"],
     )
+    limit_range = {
+        "metadata": {"name": "lr", "namespace": "shop", "uid": "u"},
+        "spec": {"limits": [{"type": "Container", "max": {"cpu": "1"}}]},
+    }
+
+    assert project_quotas([quota])[0].complete
+    assert project_limit_ranges([limit_range])[0].complete
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        {"hard": {"pods": "1", "services": None}},
+        {"hard": "x"},
+        {"hard": {"pods": "1"}, "scopes": ["BestEffort", 3]},
+        {"hard": {"pods": "1"}, "scopes": "BestEffort"},
+        {
+            "hard": {"pods": "1"},
+            "scopeSelector": {"matchExpressions": [{"scopeName": "PriorityClass"}]},
+        },
+        {"hard": {"pods": "1"}, "scopeSelector": {"matchExpressions": "x"}},
+    ],
+    ids=[
+        "null-value",
+        "hard-not-a-map",
+        "scope-not-text",
+        "scopes-not-a-list",
+        "expression-without-operator",
+        "expressions-not-a-list",
+    ],
+)
+def test_a_quota_with_an_unreadable_constraint_is_incomplete(spec: dict[str, Any]) -> None:
+    item = {"metadata": {"name": "q", "namespace": "shop", "uid": "u"}, "spec": spec}
+
+    assert not project_quotas([item])[0].complete
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        {"limits": "x"},
+        {"limits": ["x"]},
+        {"limits": [{"type": "Container", "max": {"cpu": None}}]},
+        {"limits": [{"type": "Container", "max": "1"}]},
+    ],
+    ids=["limits-not-a-list", "limit-not-a-map", "null-value", "field-not-a-map"],
+)
+def test_a_limit_range_with_an_unreadable_constraint_is_incomplete(spec: dict[str, Any]) -> None:
+    item = {"metadata": {"name": "lr", "namespace": "shop", "uid": "u"}, "spec": spec}
+
+    assert not project_limit_ranges([item])[0].complete
 ```
 
 Create `src/korvid/core/creation_policies.py` with:
@@ -527,7 +611,8 @@ the cluster wrote them, quota scopes and scope selectors, and whether a
 quota's status is current. Quota status is filled by the quota controller
 after `spec.hard` changes, so a quota whose status is missing, lags its spec
 or lacks a used amount is stale, and none of its resources is called at its
-limit.
+limit. A policy with a constraint the projection cannot read is kept, but
+marked incomplete, so a list holding it cannot rule anything out.
 """
 
 from __future__ import annotations
@@ -578,6 +663,7 @@ class QuotaProjection:
     scopes: tuple[str, ...] = ()
     scope_selector: tuple[ScopeExpression, ...] = ()
     stale: bool = False
+    complete: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -600,6 +686,7 @@ class LimitRangeProjection:
     name: str
     uid: str | None
     values: tuple[LimitValue, ...]
+    complete: bool = True
 
 
 def _mapping(value: object) -> Mapping[str, Any]:
@@ -627,6 +714,13 @@ def _quantities(value: object) -> dict[str, str]:
     }
 
 
+def _readable_quantities(value: object) -> bool:
+    """Whether every entry of an optional quantity map can be read."""
+    if value is None:
+        return True
+    return isinstance(value, Mapping) and len(_quantities(value)) == len(value)
+
+
 def _identity(item: Mapping[str, Any]) -> tuple[str, str | None] | None:
     metadata = _mapping(item.get("metadata"))
     name = _text(metadata.get("name"))
@@ -635,24 +729,40 @@ def _identity(item: Mapping[str, Any]) -> tuple[str, str | None] | None:
 
 def _stale(hard: Mapping[str, str], status: Mapping[str, Any]) -> bool:
     """Whether the quota controller has not yet caught up with `hard`."""
+    if not status:
+        return True
     status_hard, used = _quantities(status.get("hard")), _quantities(status.get("used"))
     if status_hard.keys() != hard.keys() or not status_hard.keys() <= used.keys():
         return True
     return not all(same_quantity(hard[name], status_hard[name]) for name in hard)
 
 
-def _scope_selector(spec: Mapping[str, Any]) -> tuple[ScopeExpression, ...]:
-    expressions = _mapping(spec.get("scopeSelector")).get("matchExpressions")
-    selected: list[ScopeExpression] = []
-    for raw in expressions if isinstance(expressions, list) else []:
-        expression = _mapping(raw)
-        scope, operator = _text(expression.get("scopeName")), _text(expression.get("operator"))
-        if scope is None or operator is None:
-            continue
-        values = expression.get("values")
-        texts = tuple(v for v in values if isinstance(v, str)) if isinstance(values, list) else ()
-        selected.append(ScopeExpression(scope, operator, texts))
-    return tuple(selected)
+def _expression(raw: object) -> ScopeExpression | None:
+    expression = _mapping(raw)
+    scope, operator = _text(expression.get("scopeName")), _text(expression.get("operator"))
+    values = expression.get("values", [])
+    if scope is None or operator is None or not isinstance(values, list):
+        return None
+    texts = tuple(v for v in values if isinstance(v, str))
+    return ScopeExpression(scope, operator, texts) if len(texts) == len(values) else None
+
+
+def _scope_selector(spec: Mapping[str, Any]) -> tuple[tuple[ScopeExpression, ...], bool]:
+    """The selector's expressions, and whether every one of them could be read."""
+    expressions = _mapping(spec.get("scopeSelector")).get("matchExpressions", [])
+    if not isinstance(expressions, list):
+        return (), False
+    selected = [_expression(raw) for raw in expressions]
+    kept = tuple(e for e in selected if e is not None)
+    return kept, len(kept) == len(selected)
+
+
+def _scopes(spec: Mapping[str, Any]) -> tuple[tuple[str, ...], bool]:
+    scopes = spec.get("scopes", [])
+    if not isinstance(scopes, list):
+        return (), False
+    kept = tuple(s for s in scopes if isinstance(s, str))
+    return kept, len(kept) == len(scopes)
 
 
 def _quota(item: Mapping[str, Any]) -> QuotaProjection | None:
@@ -676,14 +786,16 @@ def _quota(item: Mapping[str, Any]) -> QuotaProjection | None:
         ),
         key=lambda entry: (_GROUP_ORDER[entry.group], entry.resource),
     )
-    scopes = spec.get("scopes")
+    scopes, scopes_read = _scopes(spec)
+    selector, selector_read = _scope_selector(spec)
     return QuotaProjection(
         identity[0],
         identity[1],
         tuple(entries),
-        tuple(s for s in scopes if isinstance(s, str)) if isinstance(scopes, list) else (),
-        _scope_selector(spec),
+        scopes,
+        selector,
         stale,
+        _readable_quantities(spec.get("hard")) and scopes_read and selector_read,
     )
 
 
@@ -708,18 +820,23 @@ def _limit_values(limit: Mapping[str, Any]) -> Iterable[LimitValue]:
         )
 
 
+def _readable_limit(limit: object) -> bool:
+    return isinstance(limit, Mapping) and all(
+        _readable_quantities(limit.get(field)) for field in _LIMIT_FIELDS
+    )
+
+
 def _limit_range(item: Mapping[str, Any]) -> LimitRangeProjection | None:
     identity = _identity(item)
     if identity is None:
         return None
-    limits = _mapping(item.get("spec")).get("limits")
+    limits = _mapping(item.get("spec")).get("limits", [])
+    entries = limits if isinstance(limits, list) else []
     values = (
-        value
-        for limit in (limits if isinstance(limits, list) else [])
-        if isinstance(limit, Mapping)
-        for value in _limit_values(limit)
+        value for limit in entries if isinstance(limit, Mapping) for value in _limit_values(limit)
     )
-    return LimitRangeProjection(identity[0], identity[1], tuple(values))
+    complete = isinstance(limits, list) and all(_readable_limit(limit) for limit in entries)
+    return LimitRangeProjection(identity[0], identity[1], tuple(values), complete)
 
 
 def project_limit_ranges(items: Iterable[object]) -> tuple[LimitRangeProjection, ...]:
@@ -1022,6 +1139,15 @@ def test_only_a_different_uid_is_an_earlier_incarnation() -> None:
     failures, earlier = event_failures(events, (DEPLOYMENT,))
 
     assert (failures, earlier) == ((), 1)
+
+
+def test_a_validating_admission_policy_denial_is_never_attributed_to_a_policy() -> None:
+    message = (
+        "ValidatingAdmissionPolicy 'quota-guard' with binding 'quota-guard-binding' denied "
+        "request: exceeded quota: compute, maximum cpu usage per Container is 1"
+    )
+
+    assert classify(message) == Rejection((RejectionKind.OTHER,), (), message)
 ```
 
 Create `src/korvid/core/creation_failures.py` with:
@@ -1035,8 +1161,9 @@ children, matched by UID, or a `ReplicaFailure` condition whose reason is
 classified only by the fixed quota and LimitRanger phrasings below, and kept
 verbatim, bounded, whatever it says. A quota is named only as the message
 names it; a LimitRange is never named, because its messages do not say which.
-An admission webhook's denial is never classified further: its text is the
-webhook's own, and can say anything.
+A denial an admission webhook or a ValidatingAdmissionPolicy wrote is never
+classified further: its text is the policy author's own, and can say
+anything.
 """
 
 from __future__ import annotations
@@ -1078,7 +1205,10 @@ _PHRASES: tuple[tuple[RejectionKind, re.Pattern[str]], ...] = (
     # Anchored at a word's start, so a long unbroken message is scanned in linear time.
     (RejectionKind.LIMIT_RATIO, re.compile(rf"(?<!\S)\S+ max limit to request ratio {_PER}")),
 )
-_WEBHOOK = re.compile(r'admission webhook "[^"]*" denied the request')
+_AUTHORED_DENIAL = re.compile(
+    r'admission webhook "[^"]*" denied the request'
+    r"|ValidatingAdmissionPolicy '[^']*' with binding '[^']*' denied request"
+)
 
 
 class FailureSource(StrEnum):
@@ -1134,10 +1264,10 @@ def _bounded(message: str) -> str:
 def classify(message: str) -> Rejection:
     """Classify `message` by its fixed phrasings, in the order it states them.
 
-    A message that states none of them, or that an admission webhook wrote,
-    is `OTHER`.
+    A message that states none of them, or that an admission webhook or a
+    ValidatingAdmissionPolicy wrote, is `OTHER`.
     """
-    if _WEBHOOK.search(message):
+    if _AUTHORED_DENIAL.search(message):
         return Rejection((RejectionKind.OTHER,), (), _bounded(message))
     matches = sorted(
         (match.start(), kind, match.group(1) if match.groups() else None)
@@ -1498,7 +1628,7 @@ def test_only_children_the_workload_controls_are_kept() -> None:
         "not-an-object",
     ]
 
-    children = project_children("ReplicaSet", items, "uid-api")
+    children = project_children("ReplicaSet", items, "uid-api").children
 
     assert [c.subject for c in children] == [Subject("ReplicaSet", "api-1", "uid-api-1")]
     assert "s3cr3t-literal" not in repr(children)
@@ -1513,7 +1643,7 @@ def test_a_replica_sets_failed_create_condition_is_kept() -> None:
 
     (child,) = project_children(
         "ReplicaSet", [_child("api-1", "uid-api", status=status)], "uid-api"
-    )
+    ).children
 
     assert child.failure is not None
     assert child.failure.subject == child.subject
@@ -1526,7 +1656,7 @@ def test_jobs_are_newest_first() -> None:
         _child("job-undated", "uid-cron"),
     ]
 
-    children = project_children("Job", items, "uid-cron")
+    children = project_children("Job", items, "uid-cron").children
 
     assert [c.subject.name for c in children] == ["job-new", "job-old", "job-undated"]
     assert children[0].created_at == datetime(2026, 10, 30, 9, 0, tzinfo=UTC)
@@ -1562,6 +1692,22 @@ def test_only_a_statefulset_has_claim_templates() -> None:
     assert projected is not None
     assert projected.template is not None
     assert projected.template.claims == ()
+
+
+def test_owned_children_without_a_name_or_uid_are_counted_as_unprojected() -> None:
+    nameless = _child("x", "uid-api")
+    del nameless["metadata"]["name"]
+    uidless = _child("y", "uid-api")
+    del uidless["metadata"]["uid"]
+    unowned = _child("z", "uid-other")
+    del unowned["metadata"]["name"]
+
+    projected = project_children(
+        "ReplicaSet", [_child("api-1", "uid-api"), nameless, uidless, unowned], "uid-api"
+    )
+
+    assert [c.subject.name for c in projected.children] == ["api-1"]
+    assert projected.unprojected == 2
 ```
 
 Create `src/korvid/core/creation_workloads.py` with:
@@ -1847,26 +1993,38 @@ def _controller_uid(item: Mapping[str, Any]) -> str | None:
     return None
 
 
+@dataclass(frozen=True, slots=True)
+class ChildrenProjection:
+    """The children a workload controls, and how many of them had no name or UID."""
+
+    children: tuple[ChildProjection, ...]
+    unprojected: int = 0
+
+
 def _newest_first(child: ChildProjection) -> tuple[bool, float]:
     at = child.created_at
     return (at is None, -at.timestamp() if at is not None else 0.0)
 
 
-def project_children(
-    kind: str, items: Iterable[object], parent_uid: str
-) -> tuple[ChildProjection, ...]:
-    """The `kind` objects in `items` whose controller is `parent_uid`, newest first."""
+def project_children(kind: str, items: Iterable[object], parent_uid: str) -> ChildrenProjection:
+    """The `kind` objects in `items` whose controller is `parent_uid`, newest first.
+
+    One the workload controls but that has no name or UID is counted, since
+    its conditions and the events about it are lost.
+    """
     children: list[ChildProjection] = []
+    unprojected = 0
     for item in items:
         if not isinstance(item, Mapping) or _controller_uid(item) != parent_uid:
             continue
         subject = _subject(kind, item)
         if subject is None:
+            unprojected += 1
             continue
         created = _timestamp(_mapping(item.get("metadata")).get("creationTimestamp"))
         failure = condition_failure(subject, _mapping(item.get("status")))
         children.append(ChildProjection(subject, failure, created))
-    return tuple(sorted(children, key=_newest_first))
+    return ChildrenProjection(tuple(sorted(children, key=_newest_first)), unprojected)
 ```
 
 - [ ] Run the module's tests before and after, then commit: `Project workloads and their children for creation diagnostics`.
@@ -2308,6 +2466,41 @@ async def test_an_unnamed_policy_in_a_truncated_list_keeps_the_lists_basis() -> 
     report = await _explain(reader)
 
     assert _state(report.limit_ranges_observation) == (EvidenceState.PARTIAL, Basis.TRUNCATED)
+
+
+async def test_an_owned_child_the_projection_cannot_name_makes_the_children_inconclusive() -> None:
+    nameless = {
+        "metadata": {
+            "namespace": "shop",
+            "uid": "u",
+            "ownerReferences": [{"uid": "uid-api", "controller": True}],
+        }
+    }
+
+    report = await _explain(FakeReader(replicasets=(REPLICA_SET, nameless)))
+
+    assert _state(report.children_observation) == (EvidenceState.PARTIAL, Basis.MALFORMED)
+    assert report.baseline.state is not EvidenceState.AVAILABLE
+
+
+@pytest.mark.parametrize(
+    ("resource", "item"),
+    [
+        ("resourcequotas", {**QUOTA, "spec": {"hard": {"pods": "0", "services": None}}}),
+        ("limitranges", {**LIMIT_RANGE, "spec": {"limits": "x"}}),
+    ],
+)
+async def test_a_policy_with_an_unreadable_constraint_makes_its_list_inconclusive(
+    resource: str, item: dict[str, Any]
+) -> None:
+    report = await _explain(FakeReader(**{resource: (item,)}))
+
+    observation = (
+        report.quotas_observation
+        if resource == "resourcequotas"
+        else report.limit_ranges_observation
+    )
+    assert _state(observation) == (EvidenceState.PARTIAL, Basis.MALFORMED)
 ```
 
 Create `src/korvid/core/creation_constraints.py` with:
@@ -2519,15 +2712,22 @@ async def _no_children() -> None:
     return None
 
 
-def _downgrade_dropped(observation: Observation, read: int, kept: int, what: str) -> Observation:
-    """An available list whose projection dropped an item it could not name is `PARTIAL`.
+def _downgrade_unreadable(observation: Observation, unreadable: int, what: str) -> Observation:
+    """An available list with items the projection could not read in full is `PARTIAL`.
 
-    Otherwise a list of only unnamed items would conclude that there are none.
+    Otherwise a list of only unnamed policies, or a policy whose constraints
+    were dropped, would rule out what it could not show. A list already
+    partial keeps its own, already inconclusive, basis.
     """
-    if kept >= read or observation.state is not EvidenceState.AVAILABLE:
+    if not unreadable or observation.state is not EvidenceState.AVAILABLE:
         return observation
-    detail = f"{read - kept} {what} without a name not shown"
+    detail = f"{unreadable} {what} could not be read in full"
     return replace(observation, state=EvidenceState.PARTIAL, basis=Basis.MALFORMED, detail=detail)
+
+
+def _unreadable(read: int, projections: tuple[QuotaProjection | LimitRangeProjection, ...]) -> int:
+    """How many listed policies were dropped, or kept with a constraint that could not be read."""
+    return read - len(projections) + sum(not p.complete for p in projections)
 
 
 def _downgrade_stale(observation: Observation, quotas: tuple[QuotaProjection, ...]) -> Observation:
@@ -2619,21 +2819,30 @@ async def explain_creation(
     workload = project_workload(target.kind, item) if item is not None else None
     subjects = _subjects(target, workload, workload_observation)
     children: tuple[ChildProjection, ...] = ()
+    children_observation = children_lists.observation if children_lists is not None else None
     if children_lists is not None and subjects and target.child is not None:
-        children = project_children(target.child, children_lists.items, subjects[0].uid)
+        projected = project_children(target.child, children_lists.items, subjects[0].uid)
+        children = projected.children
+        children_observation = _downgrade_unreadable(
+            children_lists.observation, projected.unprojected, f"{target.child}s"
+        )
     failures, earlier = _failures(
         events, subjects + tuple(child.subject for child in children), workload, children
     )
     quota_projections = project_quotas(quotas.items)
     quotas_observation = _downgrade_stale(
-        _downgrade_dropped(
-            quotas.observation, len(quotas.items), len(quota_projections), "ResourceQuotas"
+        _downgrade_unreadable(
+            quotas.observation,
+            _unreadable(len(quotas.items), quota_projections),
+            "ResourceQuotas",
         ),
         quota_projections,
     )
     range_projections = project_limit_ranges(limit_ranges.items)
-    limit_ranges_observation = _downgrade_dropped(
-        limit_ranges.observation, len(limit_ranges.items), len(range_projections), "LimitRanges"
+    limit_ranges_observation = _downgrade_unreadable(
+        limit_ranges.observation,
+        _unreadable(len(limit_ranges.items), range_projections),
+        "LimitRanges",
     )
     observations = {
         "workload": workload_observation,
@@ -2641,13 +2850,13 @@ async def explain_creation(
         "quotas": quotas_observation,
         "limit-ranges": limit_ranges_observation,
     }
-    if children_lists is not None:
-        observations["children"] = children_lists.observation
+    if children_observation is not None:
+        observations["children"] = children_observation
     baseline = EvidenceSet(observations).baseline(declarations(target), clock())
     return CreationReport(
         target,
         workload_observation,
-        children_lists.observation if children_lists is not None else None,
+        children_observation,
         events.observation,
         quotas_observation,
         limit_ranges_observation,

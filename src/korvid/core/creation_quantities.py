@@ -83,7 +83,7 @@ def _parsed(value: str | None) -> Decimal | None:
         return None
     try:
         return parse_quantity(value)
-    except ValueError:
+    except (ValueError, ArithmeticError):  # decimal.InvalidOperation for an absurd exponent
         return None
 
 
