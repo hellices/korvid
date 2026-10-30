@@ -42,6 +42,8 @@ The view shows the result in the next slice.
   - a demand an unseen default could raise is not established unless it already exceeds the limit, in which case the row says "needs at least";
   - a LimitRange check a default could change is not established, but a value already above `max`, or a ratio only a growing limit could reach, is still reported.
 - **A Pod-level limit stands in for a missing Pod-level request,** as the API defaults it, before any LimitRange check.
+- **Pod-level values close growth one side at a time.** A Pod-level limit also sets the request, but a Pod-level request leaves an unread default free to add a limit.
+- **A quota whose scopes could not be read may not apply.** `QuotaProjection.scopes_complete` records that apart from `complete`: such a quota gives only "whether it applies: its scopes could not be read", and no claim row, while a quota with only an unreadable `hard` value still reports its readable entries.
 - **Any Pod-level CPU or memory leaves every required field open.** With Pod-level resources the cluster may skip the per-container checks altogether, which korvid does not observe.
 - **Unreadable values are never satisfied.** An unparsable `used` or `hard`, LimitRange bound or claim request gives a not-established row, never silence.
 - **QoS ignores zero values and Pod-level values that do not parse,** as Kubernetes does, and unprefixed `hugepages-<size>` quota keys charge the request.
@@ -470,6 +472,14 @@ def test_a_pod_level_request_wins_over_the_pod_level_limit() -> None:
     demand = pod_demand(template, ())
 
     assert (demand.requests["cpu"], demand.limits["cpu"]) == (Decimal("0.5"), Decimal(2))
+
+
+def test_a_pod_level_request_leaves_the_limit_free_to_grow() -> None:
+    template = _template(_container("a"), pod_requests=(("cpu", "1"),))
+
+    demand = pod_demand(template, (), defaults_known=False)
+
+    assert (demand.may_grow("requests.cpu"), demand.may_grow("limits.cpu")) == (False, True)
 ```
 
 Create `src/korvid/core/creation_demand.py` with:
@@ -531,7 +541,8 @@ class PodDemand:
 
     `missing` lists `(container, quota key)` for each CPU or memory field a
     container still lacks after defaults. `pod_level` names the resources the
-    Pod-level `resources` set. `best_effort` is the Pod's QoS class being
+    Pod-level `resources` set (a Pod-level limit sets the request too), and
+    `pod_level_limits` those whose limit they set. `best_effort` is the Pod's QoS class being
     BestEffort, or `None` when that depends on a value not established.
     """
 
@@ -545,6 +556,7 @@ class PodDemand:
     defaults_applied: bool = False
     containers: tuple[ContainerValues, ...] = ()
     defaults_known: bool = True
+    pod_level_limits: frozenset[str] = frozenset()
 
     def for_quota(self, key: str) -> Decimal | None:
         """What the Pod charges against quota resource `key`; `None` when not established.
@@ -572,7 +584,10 @@ class PodDemand:
         not set the resource itself.
         """
         side, _, resource = canonical_resource(key).partition(".")
-        if self.defaults_known or side not in ("requests", "limits") or resource in self.pod_level:
+        if self.defaults_known or side not in ("requests", "limits"):
+            return False
+        # A Pod-level limit also sets the request, but a Pod-level request not the limit.
+        if resource in (self.pod_level_limits if side == "limits" else self.pod_level):
             return False
         for container in self.containers:
             values = container.requests if side == "requests" else container.limits
@@ -774,7 +789,7 @@ def pod_demand(
     # A Pod-level limit stands in for a missing Pod-level request, before admission.
     pod_requests = tuple({**dict(template.pod_limits), **dict(template.pod_requests)}.items())
     pod_level = _override(requests, unknown_requests, pod_requests)
-    pod_level |= _override(limits, unknown_limits, template.pod_limits)
+    pod_level_limits = _override(limits, unknown_limits, template.pod_limits)
     pod_sides = [_side(pod_requests), _side(template.pod_limits)]
     best_effort = _best_effort(
         [*(s for c in containers for s in (c.requests, c.limits)), *pod_sides]
@@ -806,6 +821,7 @@ def pod_demand(
             for c in containers
         ),
         defaults_known,
+        pod_level_limits,
     )
 ```
 
@@ -1602,6 +1618,45 @@ def test_a_ratio_over_with_only_the_limit_able_to_grow_is_provable() -> None:
     assert rows == [
         ("cpu", Finding.ABOVE_RATIO, "Pod: limit 1 is more than 4 times the request 200m")
     ]
+
+
+def test_a_quota_whose_scopes_could_not_be_read_may_not_apply() -> None:
+    quota = _quota("compute", {"pods": ("10", "10")}, complete=False, scopes_complete=False)
+
+    rows = _findings(_report(_template(), quotas=(quota,)))
+
+    assert rows == [
+        ("quota", Finding.NOT_ESTABLISHED, "whether it applies: its scopes could not be read")
+    ]
+
+
+def test_a_quota_whose_scopes_could_not_be_read_checks_no_claim() -> None:
+    quota = _quota("storage", {"persistentvolumeclaims": ("10", "10")}, scopes_complete=False)
+
+    rows = _findings(
+        _report(
+            _stateful(ClaimTemplate("data", "1Gi", "gold")), quotas=(quota,), kind="StatefulSet"
+        )
+    )
+
+    assert rows == [
+        ("quota", Finding.NOT_ESTABLISHED, "whether it applies: its scopes could not be read")
+    ]
+
+
+def test_a_pod_level_request_leaves_an_unread_default_limit_open() -> None:
+    bare = ContainerDemand("app", "container", (), ())
+    maximum = LimitValue("Pod", "cpu", max="4")
+
+    rows = _findings(
+        _report(
+            _template(bare, pod_requests=(("cpu", "1"),)),
+            limit_ranges=(_range(maximum),),
+            limits_basis=Basis.TRUNCATED,
+        )
+    )
+
+    assert rows == [("cpu", Finding.NOT_ESTABLISHED, _POD_UNSEEN)]
 ```
 
 Create `src/korvid/core/creation_possibilities.py` with:
@@ -1828,6 +1883,8 @@ def _quota_rows(
     applies = _applies(quota, template, demand)
     if applies is False:
         return
+    if not quota.scopes_complete:
+        applies = "its scopes could not be read"
     if isinstance(applies, str):
         yield row("quota", Finding.NOT_ESTABLISHED, f"whether it applies: {applies}")
         return
@@ -2026,7 +2083,8 @@ def _claim_rows(
 ) -> Iterator[Possibility]:
     for claim in claims:
         for quota in quotas:
-            if quota.stale or quota.scopes or quota.scope_selector:
+            # A quota whose scopes were not all read may be scoped: its own row says so.
+            if quota.stale or quota.scopes or quota.scope_selector or not quota.scopes_complete:
                 continue
             for entry in quota.entries:
                 found = _claim_quota_row(entry, claim) if _is_claim_key(entry.resource) else None

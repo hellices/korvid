@@ -391,3 +391,11 @@ def test_a_pod_level_request_wins_over_the_pod_level_limit() -> None:
     demand = pod_demand(template, ())
 
     assert (demand.requests["cpu"], demand.limits["cpu"]) == (Decimal("0.5"), Decimal(2))
+
+
+def test_a_pod_level_request_leaves_the_limit_free_to_grow() -> None:
+    template = _template(_container("a"), pod_requests=(("cpu", "1"),))
+
+    demand = pod_demand(template, (), defaults_known=False)
+
+    assert (demand.may_grow("requests.cpu"), demand.may_grow("limits.cpu")) == (False, True)

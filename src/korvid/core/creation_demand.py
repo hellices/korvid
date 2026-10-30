@@ -54,7 +54,8 @@ class PodDemand:
 
     `missing` lists `(container, quota key)` for each CPU or memory field a
     container still lacks after defaults. `pod_level` names the resources the
-    Pod-level `resources` set. `best_effort` is the Pod's QoS class being
+    Pod-level `resources` set (a Pod-level limit sets the request too), and
+    `pod_level_limits` those whose limit they set. `best_effort` is the Pod's QoS class being
     BestEffort, or `None` when that depends on a value not established.
     """
 
@@ -68,6 +69,7 @@ class PodDemand:
     defaults_applied: bool = False
     containers: tuple[ContainerValues, ...] = ()
     defaults_known: bool = True
+    pod_level_limits: frozenset[str] = frozenset()
 
     def for_quota(self, key: str) -> Decimal | None:
         """What the Pod charges against quota resource `key`; `None` when not established.
@@ -95,7 +97,10 @@ class PodDemand:
         not set the resource itself.
         """
         side, _, resource = canonical_resource(key).partition(".")
-        if self.defaults_known or side not in ("requests", "limits") or resource in self.pod_level:
+        if self.defaults_known or side not in ("requests", "limits"):
+            return False
+        # A Pod-level limit also sets the request, but a Pod-level request not the limit.
+        if resource in (self.pod_level_limits if side == "limits" else self.pod_level):
             return False
         for container in self.containers:
             values = container.requests if side == "requests" else container.limits
@@ -297,7 +302,7 @@ def pod_demand(
     # A Pod-level limit stands in for a missing Pod-level request, before admission.
     pod_requests = tuple({**dict(template.pod_limits), **dict(template.pod_requests)}.items())
     pod_level = _override(requests, unknown_requests, pod_requests)
-    pod_level |= _override(limits, unknown_limits, template.pod_limits)
+    pod_level_limits = _override(limits, unknown_limits, template.pod_limits)
     pod_sides = [_side(pod_requests), _side(template.pod_limits)]
     best_effort = _best_effort(
         [*(s for c in containers for s in (c.requests, c.limits)), *pod_sides]
@@ -329,4 +334,5 @@ def pod_demand(
             for c in containers
         ),
         defaults_known,
+        pod_level_limits,
     )

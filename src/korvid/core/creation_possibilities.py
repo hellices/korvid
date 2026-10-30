@@ -219,6 +219,8 @@ def _quota_rows(
     applies = _applies(quota, template, demand)
     if applies is False:
         return
+    if not quota.scopes_complete:
+        applies = "its scopes could not be read"
     if isinstance(applies, str):
         yield row("quota", Finding.NOT_ESTABLISHED, f"whether it applies: {applies}")
         return
@@ -417,7 +419,8 @@ def _claim_rows(
 ) -> Iterator[Possibility]:
     for claim in claims:
         for quota in quotas:
-            if quota.stale or quota.scopes or quota.scope_selector:
+            # A quota whose scopes were not all read may be scoped: its own row says so.
+            if quota.stale or quota.scopes or quota.scope_selector or not quota.scopes_complete:
                 continue
             for entry in quota.entries:
                 found = _claim_quota_row(entry, claim) if _is_claim_key(entry.resource) else None

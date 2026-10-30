@@ -784,3 +784,42 @@ def test_a_ratio_over_with_only_the_limit_able_to_grow_is_provable() -> None:
     assert rows == [
         ("cpu", Finding.ABOVE_RATIO, "Pod: limit 1 is more than 4 times the request 200m")
     ]
+
+
+def test_a_quota_whose_scopes_could_not_be_read_may_not_apply() -> None:
+    quota = _quota("compute", {"pods": ("10", "10")}, complete=False, scopes_complete=False)
+
+    rows = _findings(_report(_template(), quotas=(quota,)))
+
+    assert rows == [
+        ("quota", Finding.NOT_ESTABLISHED, "whether it applies: its scopes could not be read")
+    ]
+
+
+def test_a_quota_whose_scopes_could_not_be_read_checks_no_claim() -> None:
+    quota = _quota("storage", {"persistentvolumeclaims": ("10", "10")}, scopes_complete=False)
+
+    rows = _findings(
+        _report(
+            _stateful(ClaimTemplate("data", "1Gi", "gold")), quotas=(quota,), kind="StatefulSet"
+        )
+    )
+
+    assert rows == [
+        ("quota", Finding.NOT_ESTABLISHED, "whether it applies: its scopes could not be read")
+    ]
+
+
+def test_a_pod_level_request_leaves_an_unread_default_limit_open() -> None:
+    bare = ContainerDemand("app", "container", (), ())
+    maximum = LimitValue("Pod", "cpu", max="4")
+
+    rows = _findings(
+        _report(
+            _template(bare, pod_requests=(("cpu", "1"),)),
+            limit_ranges=(_range(maximum),),
+            limits_basis=Basis.TRUNCATED,
+        )
+    )
+
+    assert rows == [("cpu", Finding.NOT_ESTABLISHED, _POD_UNSEEN)]
