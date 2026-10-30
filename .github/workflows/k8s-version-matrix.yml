@@ -17,8 +17,10 @@ on:
       - src/korvid/core/config_consumers.py
       - src/korvid/core/config_propagation.py
       - src/korvid/core/creation_constraints.py
+      - src/korvid/core/creation_demand.py
       - src/korvid/core/creation_failures.py
       - src/korvid/core/creation_policies.py
+      - src/korvid/core/creation_possibilities.py
       - src/korvid/core/creation_quantities.py
       - src/korvid/core/creation_workloads.py
       - src/korvid/core/evidence_reads.py
@@ -44,8 +46,10 @@ on:
       - src/korvid/core/config_consumers.py
       - src/korvid/core/config_propagation.py
       - src/korvid/core/creation_constraints.py
+      - src/korvid/core/creation_demand.py
       - src/korvid/core/creation_failures.py
       - src/korvid/core/creation_policies.py
+      - src/korvid/core/creation_possibilities.py
       - src/korvid/core/creation_quantities.py
       - src/korvid/core/creation_workloads.py
       - src/korvid/core/evidence_reads.py

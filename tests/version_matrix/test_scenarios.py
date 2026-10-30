@@ -28,6 +28,7 @@ from korvid.core.config_consumers import ConsumptionMode
 from korvid.core.config_propagation import ConfigTarget, explain_propagation
 from korvid.core.creation_constraints import CreationReport, CreationTarget, explain_creation
 from korvid.core.creation_failures import RejectionKind
+from korvid.core.creation_possibilities import Finding, possible_constraints
 from korvid.core.evidence_reads import (
     LAST_APPLIED_ANNOTATION,
     read_list,
@@ -309,3 +310,11 @@ async def test_a_quota_rejection_is_read_next_to_the_namespace_policies(connect:
     assert [r.name for r in report.limit_ranges] == ["matrix-limits"]
     assert report.quotas_conclusive(datetime.now(UTC))
     assert "matrix-template-literal" not in repr(report)
+    # The template sets no resources, so the LimitRange's CPU defaults fill them,
+    # within its maximum: only the Pod count is left to constrain the next Pod.
+    possibilities = possible_constraints(report, datetime.now(UTC))
+    assert possibilities is not None
+    assert possibilities.defaults_applied
+    assert [(p.policy, p.subject, p.finding, p.detail) for p in possibilities.rows] == [
+        ("matrix-pods", "pods", Finding.AT_LIMIT, "0 of 0 Pods exist")
+    ]

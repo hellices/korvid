@@ -175,7 +175,8 @@ they are created: the Pod list is empty, so nothing on it explains why.
 Select a Deployment, ReplicaSet, StatefulSet, DaemonSet, Job or CronJob and
 run `:blocked` (or **Explain workload creation failures** in the Action
 Palette). The view shows the failures recorded for that workload next to its
-namespace's ResourceQuotas and LimitRanges:
+namespace's ResourceQuotas and LimitRanges, and what its next Pod could run
+into:
 
 | Section | What it shows |
 |---|---|
@@ -183,6 +184,7 @@ namespace's ResourceQuotas and LimitRanges:
 | Recorded creation failures | Each `FailedCreate` event about the workload or its ReplicaSets or Jobs, and each `ReplicaFailure` condition, with how often and when it was last recorded, and what the rejection says |
 | ResourceQuotas | Each quota's `used / hard` values, grouped as compute, storage, object counts and other, with a resource at or over its limit marked, and its scopes |
 | LimitRanges | Each constraint: defaults, minimums, maximums and limit-to-request ratios |
+| Possible constraints | What the next Pod, as its template asks, could run into under the policies as now observed: a quota it would exceed or that requires a field it leaves unset, a Pod count at its limit, a LimitRange minimum, maximum or ratio, and, for a StatefulSet, the same for the claims a new Pod would create |
 
 How to read it:
 
@@ -200,6 +202,17 @@ How to read it:
   only when every quota could be listed. A quota whose status has not caught
   up with its spec is marked, and is never called "at its limit". Events
   expire, so finding no recorded failure does not show that none happened.
+- **A possible constraint is never a cause or a forecast.** It is computed
+  from the template, after the LimitRanges' Container defaults, against the
+  policies as read now. Quota status is not a reservation, other Pods are
+  created concurrently, and admission webhooks are not observed, so the next
+  create may still differ. A row about a claim holds only if the claim is
+  created: a new Pod reuses a claim that already exists. "No ResourceQuota or
+  LimitRange observed constrains this template" appears only when every
+  quota and LimitRange was read and none applies. Otherwise the view says
+  why that is not established, for example a RuntimeClass, whose overhead is
+  not read, or a claim with no storage class, which may get the cluster's
+  default.
 
 The view reads the workload, its ReplicaSets or Jobs, the namespace's
 Events, ResourceQuotas and LimitRanges when it opens, and nothing else. The

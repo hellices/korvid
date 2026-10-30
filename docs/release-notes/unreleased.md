@@ -28,7 +28,10 @@ tracks the next release scope.
   Palette) shows why a Deployment, ReplicaSet, StatefulSet, DaemonSet, Job or
   CronJob has no Pods: the `FailedCreate` rejections recorded for it, next to
   its namespace's ResourceQuotas and LimitRanges, with quantities compared
-  exactly and absence said only from complete lists. See
+  exactly and absence said only from complete lists. A **Possible
+  constraints** section checks what the next Pod, and a StatefulSet's new
+  claims, ask for against those policies as now observed. Each row is a
+  possibility, not a cause. See
   [Workload creation failures](../tui.md#workload-creation-failures).
 
 ## Current configuration and extension contracts
