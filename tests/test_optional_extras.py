@@ -135,6 +135,8 @@ def _run_subprocess_probe(probe: str) -> None:
         "korvid.core.creation_failures",
         "korvid.core.creation_workloads",
         "korvid.core.creation_constraints",
+        "korvid.core.creation_demand",
+        "korvid.core.creation_possibilities",
     ],
 )
 def test_base_import_does_not_require_optional_extras(module: str) -> None:

@@ -49,7 +49,12 @@ class ScopeExpression:
 
 @dataclass(frozen=True, slots=True)
 class QuotaProjection:
-    """One ResourceQuota, as the view shows it."""
+    """One ResourceQuota, as the view shows it.
+
+    `complete` is whether every constraint was read; `scopes_complete` only
+    whether its scopes and scope selector were, which decides whether korvid
+    can tell the quota applies at all.
+    """
 
     name: str
     uid: str | None
@@ -58,6 +63,7 @@ class QuotaProjection:
     scope_selector: tuple[ScopeExpression, ...] = ()
     stale: bool = False
     complete: bool = True
+    scopes_complete: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -185,6 +191,7 @@ def _quota(item: Mapping[str, Any]) -> QuotaProjection | None:
     )
     scopes, scopes_read = _scopes(spec)
     selector, selector_read = _scope_selector(spec)
+    scopes_complete = isinstance(item.get("spec"), Mapping) and scopes_read and selector_read
     return QuotaProjection(
         identity[0],
         identity[1],
@@ -192,10 +199,8 @@ def _quota(item: Mapping[str, Any]) -> QuotaProjection | None:
         scopes,
         selector,
         stale,
-        isinstance(item.get("spec"), Mapping)
-        and _readable_quantities(spec.get("hard"))
-        and scopes_read
-        and selector_read,
+        scopes_complete and _readable_quantities(spec.get("hard")),
+        scopes_complete,
     )
 
 

@@ -320,3 +320,22 @@ def test_a_limit_range_with_an_unreadable_constraint_is_incomplete(spec: object)
     item = {"metadata": {"name": "lr", "namespace": "shop", "uid": "u"}, "spec": spec}
 
     assert not project_limit_ranges([item])[0].complete
+
+
+@pytest.mark.parametrize(
+    ("spec", "scopes_complete"),
+    [
+        ({"hard": {"pods": "1", "services": None}}, True),
+        ({"hard": "x"}, True),
+        ({"hard": {"pods": "1"}, "scopes": ["BestEffort", 3]}, False),
+        ({"hard": {"pods": "1"}, "scopeSelector": "x"}, False),
+        ("not-a-spec", False),
+    ],
+    ids=["null-value", "hard-not-a-map", "scope-not-text", "selector-not-a-map", "no-spec"],
+)
+def test_only_unreadable_scopes_leave_whether_a_quota_applies_open(
+    spec: object, scopes_complete: bool
+) -> None:
+    item = {"metadata": {"name": "q", "namespace": "shop", "uid": "u"}, "spec": spec}
+
+    assert project_quotas([item])[0].scopes_complete is scopes_complete
