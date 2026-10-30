@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Mapping
-from datetime import UTC, datetime
+from collections.abc import Awaitable, Coroutine, Mapping
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from korvid.core.config_changes import ObservedChange
 from korvid.core.config_consumers import ConsumptionMode, PodIdentity
 from korvid.core.config_propagation import ConfigTarget
 from korvid.core.evidence_reads import DEFAULT_MAX_BYTES, LIST_PAGE_SIZE, MAX_BYTES
@@ -16,6 +17,7 @@ from korvid.k8s.discovery_snapshot import (
     RootOutcome,
     ServedResource,
 )
+from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.evidence_requests import EvidenceClient, EvidencePage, EvidenceTarget
 from korvid.ui.action_availability import AvailabilityCode
 from korvid.ui.config_propagation_controller import (
@@ -107,6 +109,9 @@ class FakeContext(ContextGuard):
 class FakeClient(EvidenceClient):
     def __init__(self) -> None:
         self.generation = 3
+        self.version = "1"
+        self.uid = "uid-settings"
+        self.get_error: Exception | None = None
         self.gets: list[tuple[EvidenceTarget, str, int]] = []
         self.lists: list[tuple[EvidenceTarget, int, str, int]] = []
 
@@ -138,7 +143,10 @@ class FakeClient(EvidenceClient):
         self, target: EvidenceTarget, name: str, *, max_bytes: int
     ) -> dict[str, Any]:
         self.gets.append((target, name, max_bytes))
-        return {"metadata": {"name": name, "namespace": "team-a", "uid": f"uid-{name}"}}
+        if self.get_error is not None:
+            raise self.get_error
+        metadata = {"name": name, "namespace": "team-a", "uid": self.uid}
+        return {"metadata": {**metadata, "resourceVersion": self.version}}
 
 
 class Harness:
@@ -148,13 +156,14 @@ class Harness:
         self.context = FakeContext()
         self.client = FakeClient() if client is None else client
         self.navigations: list[tuple[str, str, int, str | None]] = []
+        self.now = NOW
         self.controller = ConfigPropagationController(
             ui=self.ui,
             view=self.view,
             context=self.context,
             client=self.client,
             navigate=self._navigate,
-            clock=lambda: NOW,
+            clock=lambda: self.now,
         )
 
     async def _navigate(self, namespace: str, name: str, epoch: int, uid: str | None) -> None:
@@ -321,3 +330,78 @@ async def test_the_worker_group_is_cancelled_on_request() -> None:
     await harness.controller.cancel_workers()
 
     assert harness.ui.cancelled_groups == [CONFIG_PROPAGATION_GROUP]
+
+
+async def _open(harness: Harness, *, minutes: int, version: str = "1") -> ConfigPropagationScreen:
+    harness.now = NOW + timedelta(minutes=minutes)
+    harness.client.version = version
+    harness.controller.open_selected()
+    await harness.run()
+    screen = harness.ui.screens[-1]
+    assert isinstance(screen, ConfigPropagationScreen)
+    harness.ui.screens.clear()
+    return screen
+
+
+async def test_a_new_resource_version_is_shown_as_a_change_since_the_last_run() -> None:
+    harness = Harness()
+
+    first = await _open(harness, minutes=0)
+    unchanged = await _open(harness, minutes=5)
+    changed = await _open(harness, minutes=10, version="2")
+
+    assert first.change is None
+    assert unchanged.change is None
+    assert changed.change == ObservedChange(NOW + timedelta(minutes=5), NOW + timedelta(minutes=10))
+
+
+async def test_a_run_that_does_not_see_the_object_keeps_the_last_sighting() -> None:
+    harness = Harness()
+    await _open(harness, minutes=0)
+    harness.client.get_error = ApiStatusError(403, "Forbidden", "")
+
+    denied = await _open(harness, minutes=5)
+    harness.client.get_error = None
+    changed = await _open(harness, minutes=10, version="2")
+
+    assert denied.change is None
+    assert changed.change == ObservedChange(NOW, NOW + timedelta(minutes=10))
+
+
+async def test_another_incarnation_context_or_session_starts_without_a_change() -> None:
+    harness = Harness()
+    await _open(harness, minutes=0)
+
+    harness.client.uid = "uid-recreated"
+    recreated = await _open(harness, minutes=5, version="2")
+    harness.context.current = 2
+    switched = await _open(harness, minutes=10, version="3")
+    harness.client.generation = 4
+    reauthenticated = await _open(harness, minutes=15, version="4")
+
+    assert (recreated.change, switched.change, reauthenticated.change) == (None, None, None)
+    assert (await _open(harness, minutes=20, version="5")).change == ObservedChange(
+        NOW + timedelta(minutes=15), NOW + timedelta(minutes=20)
+    )
+
+
+async def test_a_dropped_run_leaves_no_sighting() -> None:
+    harness = Harness()
+    await _open(harness, minutes=0)
+    harness.now = NOW + timedelta(minutes=5)
+    harness.client.version = "2"
+    harness.controller.open_selected()
+    harness.controller.open_selected()
+    await harness.run(-2)  # superseded by the run after it, which never finishes
+    newer = harness.ui.workers[-1]
+    assert isinstance(newer, Coroutine)
+    newer.close()
+    harness.controller.open_selected()
+    harness.view.selected = ("team-a", "other")
+    await harness.run()  # finishes after the selection moved
+    harness.view.selected = ("team-a", "settings")
+    assert harness.ui.screens == []
+
+    reopened = await _open(harness, minutes=10, version="2")
+
+    assert reopened.change == ObservedChange(NOW, NOW + timedelta(minutes=10))

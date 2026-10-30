@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -11,6 +11,7 @@ import pytest
 from korvid.core import config_propagation
 from korvid.core.api_versions import DiscoverySnapshot, observe_discovery
 from korvid.core.capability import Basis, EvidenceState, Observation, RunToken
+from korvid.core.config_changes import Sighting
 from korvid.core.config_consumers import ConsumptionMode
 from korvid.core.config_propagation import ConfigTarget, explain_propagation
 from korvid.core.evidence_reads import (
@@ -268,3 +269,69 @@ async def test_an_unserved_source_is_reported_with_the_token_and_not_read() -> N
 def test_a_target_is_a_config_map_or_a_secret() -> None:
     with pytest.raises(ValueError, match="ConfigMap or a Secret"):
         ConfigTarget("Pod", "team-a", "api-1")
+
+
+class _Ticking:
+    """A clock that moves a second forward each time it is read."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def __call__(self) -> datetime:
+        self.calls += 1
+        return NOW + timedelta(seconds=self.calls)
+
+
+def _versioned(version: object) -> dict[str, Any]:
+    metadata = {**SETTINGS_META["metadata"], "resourceVersion": version}
+    return {"metadata": metadata}
+
+
+async def test_an_observed_object_is_sighted_from_before_the_reads_to_its_arrival() -> None:
+    clock = _Ticking()
+
+    report = await explain_propagation(
+        FakeReader(get=_versioned("812")), _snapshot(), TARGET, token=TOKEN, clock=clock
+    )
+
+    assert report.object.observed_at is not None
+    assert report.sighting == Sighting("812", NOW + timedelta(seconds=1), report.object.observed_at)
+    assert report.sighting.arrived_at > report.sighting.sent_at
+
+
+@pytest.mark.parametrize(
+    "get",
+    [
+        SETTINGS_META,
+        _versioned(""),
+        _versioned(812),
+        _status(404, "NotFound", name="settings", kind="configmaps"),
+        _status(403, "Forbidden"),
+    ],
+    ids=["no-version", "empty-version", "non-string-version", "absent", "denied"],
+)
+async def test_without_an_observed_resource_version_there_is_no_sighting(get: object) -> None:
+    report = await _explain(FakeReader(get=get))
+
+    assert report.sighting is None
+
+
+async def test_a_clock_that_stepped_back_during_the_reads_gives_no_sighting() -> None:
+    times = iter([NOW + timedelta(seconds=10)])
+
+    report = await explain_propagation(
+        FakeReader(get=_versioned("812")),
+        _snapshot(),
+        TARGET,
+        token=TOKEN,
+        clock=lambda: next(times, NOW),
+    )
+
+    assert report.object.basis is Basis.OBSERVED
+    assert report.sighting is None
+
+
+async def test_a_clock_that_did_not_move_still_gives_a_sighting() -> None:
+    report = await _explain(FakeReader(get=_versioned("812")))
+
+    assert report.sighting == Sighting("812", NOW, NOW)

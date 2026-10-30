@@ -7,6 +7,11 @@ drops the result, as `RunTracker` decides. So does another dialog that is
 open when the reads finish, or a change of view, scope or selection since
 they started, as the relationship view does. The context-switch coordinator
 cancels the worker group before it swaps the client.
+
+Each shown run's sighting of the object's resource version goes into a
+`ChangeLog`, under the run's context epoch and session generation, so a later
+run of the same incarnation can show that it changed in between. A dropped
+run records nothing.
 """
 
 from __future__ import annotations
@@ -16,8 +21,9 @@ from datetime import UTC, datetime
 
 from korvid.core.api_versions import observe_discovery
 from korvid.core.capability import RunToken
+from korvid.core.config_changes import ChangeLog, ObjectKey, ObservedChange
 from korvid.core.config_consumers import Consumer
-from korvid.core.config_propagation import ConfigTarget, explain_propagation
+from korvid.core.config_propagation import ConfigTarget, PropagationReport, explain_propagation
 from korvid.core.run_tokens import RunTracker
 from korvid.k8s.evidence_requests import EvidenceClient
 from korvid.ui.action_availability import AvailabilityCode, UnavailableReason
@@ -70,6 +76,7 @@ class ConfigPropagationController:
             session_generation=lambda: client.session_generation if client is not None else 0,
             switching=context.switching,
         )
+        self._changes = ChangeLog()
 
     def _selected_kind(self) -> str | None:
         meta = self._view.aliases().get(self._view.canonical_kind(self._view.current_kind()))
@@ -130,11 +137,23 @@ class ConfigPropagationController:
         # Another dialog is open, or the user has moved on, as the reads finish.
         if self._ui.screen_depth() > 1 or self._origin() != origin:
             return
-        screen = ConfigPropagationScreen(report, self._clock)
-        self._tracker.apply_if_current(
-            token,
-            lambda: self._ui.push_screen(screen, lambda chosen: self._open_pod(chosen, epoch)),
+        self._tracker.apply_if_current(token, lambda: self._show(report, token, epoch))
+
+    def _show(self, report: PropagationReport, token: RunToken, epoch: int) -> None:
+        change = self._record(report, token)
+        screen = ConfigPropagationScreen(report, self._clock, change=change)
+        self._ui.push_screen(screen, lambda chosen: self._open_pod(chosen, epoch))
+
+    def _record(self, report: PropagationReport, token: RunToken) -> ObservedChange | None:
+        """The object's latest change seen this session, after this run's sighting."""
+        uid = report.object.observed_uid
+        if report.sighting is None or uid is None:
+            return None
+        target = report.target
+        key = ObjectKey(
+            token.epoch, token.session_generation, target.kind, target.namespace, target.name, uid
         )
+        return self._changes.record(key, report.sighting)
 
     def _open_pod(self, consumer: Consumer | None, epoch: int) -> None:
         if consumer is None:

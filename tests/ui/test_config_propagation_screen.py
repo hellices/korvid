@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
+import pytest
 from rich.text import Text
 from textual.app import App
 from textual.widgets import DataTable, Static
@@ -18,6 +20,7 @@ from korvid.core.capability import (
     SourceScope,
     Verb,
 )
+from korvid.core.config_changes import ObservedChange, Sighting
 from korvid.core.config_consumers import (
     Consumer,
     ConsumptionMode,
@@ -342,3 +345,87 @@ async def test_an_open_view_ages_its_evidence_without_reading_again() -> None:
         assert "observed 5m ago" in str(evidence.render())
         assert "No Pod in namespace team-a" not in str(notes.render())
         assert "the Pod list is stale" in str(notes.render())
+
+
+CHANGE = ObservedChange(NOW - timedelta(minutes=30), NOW - timedelta(minutes=20))
+
+
+def _started(consumer: Consumer, minutes_ago: float | None) -> Consumer:
+    started = None if minutes_ago is None else NOW - timedelta(minutes=minutes_ago)
+    return replace(consumer, started_at=started)
+
+
+def _sighted(*consumers: Consumer) -> PropagationReport:
+    return replace(_report(*consumers), sighting=Sighting("812", NOW - timedelta(seconds=3), NOW))
+
+
+def test_a_read_at_start_row_says_where_the_change_falls_against_its_start() -> None:
+    long_running = _started(ENV, 60)
+    just_clear = _started(KEY, 31)
+    straddling = _started(SUBPATH, 25)
+    not_running = _started(replace(ENV, container="sidecar"), None)
+    volume = _started(VOLUME, 60)
+
+    rows = {
+        row.consumer: row.cells
+        for row in table_rows((long_running, just_clear, straddling, not_running, volume), CHANGE)
+        if isinstance(row, ConsumerRow)
+    }
+
+    assert rows[long_running][3] == "changed after this container started"
+    assert rows[just_clear][3] == "changed after this container started"
+    assert rows[straddling][3] == "not established"
+    assert rows[not_running][3] == "not established"
+    assert rows[volume][3] == ""
+
+
+def test_a_change_before_the_start_is_said() -> None:
+    (row,) = [r for r in table_rows((_started(ENV, 10),), CHANGE) if isinstance(r, ConsumerRow)]
+
+    assert row.cells[3] == "changed before this container started"
+
+
+def test_without_a_change_rows_have_three_cells() -> None:
+    rows = [r for r in table_rows((_started(ENV, 60),)) if isinstance(r, ConsumerRow)]
+
+    assert [len(row.cells) for row in rows] == [3]
+
+
+def test_a_seen_change_is_described_as_an_object_change_this_session() -> None:
+    notes = _plain(report_notes(_sighted(ENV), NOW, CHANGE))
+
+    assert (
+        "The ConfigMap's latest change seen this session happened between "
+        "2026-10-30 08:30:00 UTC and 2026-10-30 08:40:00 UTC: it has a new resource version, "
+        "which may change only its metadata."
+    ) in notes
+
+
+def test_without_a_seen_change_the_note_says_how_one_is_seen() -> None:
+    first = _plain(report_notes(_sighted(ENV), NOW))
+    volume_only = _plain(report_notes(_sighted(VOLUME), NOW))
+    unsighted = _plain(report_notes(_report(ENV), NOW))
+
+    expected = (
+        "Not established: whether the ConfigMap changed after its consumers started: a change "
+        "is seen only between two openings of this view in this session"
+    )
+    assert expected in first
+    assert not any("changed after its consumers started" in n for n in volume_only + unsighted)
+
+
+@pytest.mark.parametrize(("change", "columns"), [(None, 3), (CHANGE, 4)])
+async def test_the_change_column_is_shown_only_when_a_change_is_known(
+    change: ObservedChange | None, columns: int
+) -> None:
+    screen = ConfigPropagationScreen(_report(_started(ENV, 60)), lambda: NOW, change=change)
+    app = _Host(screen)
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: screen_ready(app, ConfigPropagationScreen), label="view open")
+        table = app.screen.query_one(DataTable)
+        notes = str(app.screen.query_one("#propagation-notes", Static).render())
+        assert len(table.columns) == columns
+        assert [len(table.get_row_at(row)) for row in (0, 1)] == [columns, columns]
+        assert ("latest change seen this session" in notes) is (change is not None)
+        if change is not None:
+            assert str(table.get_row_at(1)[3]) == "changed after this container started"

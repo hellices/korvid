@@ -7,6 +7,8 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Any
 
+from textual.widgets import DataTable
+
 from korvid.core.config import KorvidConfig
 from korvid.core.store import ResourceStore, Summary
 from korvid.core.watch import WatchManager
@@ -35,6 +37,11 @@ SETTINGS_POD = {
             }
         ]
     },
+    "status": {
+        "containerStatuses": [
+            {"name": "app", "state": {"running": {"startedAt": "2020-01-01T00:00:00Z"}}}
+        ]
+    },
 }
 
 
@@ -43,6 +50,7 @@ class Client(EvidenceClient):
 
     def __init__(self) -> None:
         self.reads: list[tuple[str, EvidenceTarget, str]] = []
+        self.version = "1"
 
     @property
     def session_generation(self) -> int:
@@ -72,7 +80,8 @@ class Client(EvidenceClient):
         self, target: EvidenceTarget, name: str, *, max_bytes: int
     ) -> dict[str, Any]:
         self.reads.append(("get", target, name))
-        return {"metadata": {"name": name, "namespace": target.namespace, "uid": "uid-settings"}}
+        metadata = {"name": name, "namespace": target.namespace, "uid": "uid-settings"}
+        return {"metadata": {**metadata, "resourceVersion": self.version}}
 
 
 async def _source(kind: str, scope: str) -> AsyncIterator[tuple[str, Summary]]:
@@ -129,6 +138,41 @@ async def test_consumers_of_a_config_map_lead_to_their_pod() -> None:
             lambda: app._view.selected_ns_name(notify=False) == ("default", "api-1"),
             label="consumer Pod selected",
         )
+
+
+async def test_reopening_after_the_object_changed_orders_the_change_against_the_start() -> None:
+    client = Client()
+    store = ResourceStore()
+    app = build_test_app(
+        config=KorvidConfig(namespace="default"),
+        store=store,
+        watch_manager=WatchManager(store, _source),
+        aliases=build_alias_map([PODS_META, CONFIG_MAPS]),
+        agent_available=False,
+        evidence_client=client,
+    )
+    async with app.run_test() as pilot:
+        await _command(pilot, "configmaps")
+        await until(
+            pilot,
+            lambda: app._view.selected_ns_name(notify=False) == ("default", "settings"),
+            label="ConfigMap selected",
+        )
+        await _command(pilot, "consumers")
+        await until(pilot, lambda: screen_ready(app, ConfigPropagationScreen), label="view open")
+        await pilot.press("escape")
+        await until(
+            pilot, lambda: not isinstance(app.screen, ConfigPropagationScreen), label="closed"
+        )
+
+        client.version = "2"
+        await _command(pilot, "consumers")
+        await until(pilot, lambda: screen_ready(app, ConfigPropagationScreen), label="reopened")
+        screen = app.screen
+        assert isinstance(screen, ConfigPropagationScreen)
+        assert screen.change is not None
+        table = screen.query_one(DataTable)
+        assert str(table.get_row_at(1)[3]) == "changed after this container started"
 
 
 async def test_consumers_on_another_view_says_what_to_open() -> None:

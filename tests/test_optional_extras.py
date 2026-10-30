@@ -129,6 +129,7 @@ def _run_subprocess_probe(probe: str) -> None:
         "korvid.k8s.config_references",
         "korvid.core.config_consumers",
         "korvid.core.config_propagation",
+        "korvid.core.config_changes",
     ],
 )
 def test_base_import_does_not_require_optional_extras(module: str) -> None:

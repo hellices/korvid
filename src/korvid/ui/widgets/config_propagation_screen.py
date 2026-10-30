@@ -2,7 +2,9 @@
 
 `ConfigPropagationScreen` shows one `PropagationReport`: a line per evidence
 source from the shared renderer, then the consumers grouped by how they
-consume the object, then what the evidence does not establish. It performs
+consume the object, then what the evidence does not establish. When a change
+to the object was seen this session, a column says, for each row that reads
+the object only at start, whether the change followed the container's start. It performs
 no I/O, but re-renders the evidence lines and notes against its clock while
 it is open, so evidence that ages past its policy is marked stale and stops
 proving that no Pod references the object. Enter on a consumer row dismisses with that `Consumer`, so the
@@ -17,7 +19,7 @@ from __future__ import annotations
 import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import ClassVar
 
 from rich.text import Text
@@ -27,6 +29,7 @@ from textual.screen import ModalScreen
 from textual.widgets import DataTable, Footer, Static
 
 from korvid.core.capability import EvidenceState, is_fresh
+from korvid.core.config_changes import ObservedChange, Ordering, order
 from korvid.core.config_consumers import Consumer, ConsumptionMode, ContainerCategory
 from korvid.core.config_propagation import PropagationReport, declarations
 from korvid.ui.evidence_text import basis_sentence, not_established, observation_line
@@ -58,6 +61,12 @@ _SECTIONS: tuple[tuple[frozenset[ConsumptionMode], str], ...] = (
     ),
 )
 _COLUMNS = ("Pod", "Container", "Reference")
+_CHANGE_COLUMN = "Object change"
+_ORDERINGS = {
+    Ordering.AFTER_START: "changed after this container started",
+    Ordering.BEFORE_START: "changed before this container started",
+    Ordering.NOT_ESTABLISHED: "not established",
+}
 _IN_CONTAINER = re.compile(r"^spec\.(?:containers|initContainers|ephemeralContainers)\[\d+\]\.")
 _INIT_NOTE = (
     "An init container runs to completion before the other containers start; once it "
@@ -83,10 +92,10 @@ class Heading:
 
 @dataclass(frozen=True, slots=True)
 class ConsumerRow:
-    """One consumer and its Pod, Container and Reference cells."""
+    """One consumer and its Pod, Container and Reference cells, then its change cell if any."""
 
     consumer: Consumer
-    cells: tuple[str, str, str]
+    cells: tuple[str, ...]
 
 
 TableRow = Heading | ConsumerRow
@@ -125,17 +134,31 @@ def _reference_cell(consumer: Consumer) -> str:
     return f"{text} (optional)" if consumer.optional else text
 
 
-def table_rows(consumers: Sequence[Consumer]) -> list[TableRow]:
-    """The consumers under their section headings; an empty section is left out."""
+def _change_cell(consumer: Consumer, change: ObservedChange) -> str:
+    if consumer.mode not in _READ_AT_START:
+        return ""
+    return _ORDERINGS[order(change, consumer.started_at)]
+
+
+def _cells(consumer: Consumer, change: ObservedChange | None) -> tuple[str, ...]:
+    cells = (consumer.pod.name, _container_cell(consumer), _reference_cell(consumer))
+    return cells if change is None else (*cells, _change_cell(consumer, change))
+
+
+def table_rows(
+    consumers: Sequence[Consumer], change: ObservedChange | None = None
+) -> list[TableRow]:
+    """The consumers under their section headings; an empty section is left out.
+
+    With a `change`, each row has a fourth cell: for a row that reads the
+    object only at start, whether the change followed the container's start.
+    """
     rows: list[TableRow] = []
     for modes, heading in _SECTIONS:
         section = [consumer for consumer in consumers if consumer.mode in modes]
         if section:
             rows.append(Heading(heading))
-            rows += (
-                ConsumerRow(c, (c.pod.name, _container_cell(c), _reference_cell(c)))
-                for c in section
-            )
+            rows += (ConsumerRow(c, _cells(c, change)) for c in section)
     return rows
 
 
@@ -186,9 +209,34 @@ def _completeness_note(report: PropagationReport, now: datetime) -> Text | None:
     return not_established(f"whether every consumer is listed: {reason}")
 
 
-def report_notes(report: PropagationReport, now: datetime) -> list[Text]:
+def _time(at: datetime) -> str:
+    return f"{at.astimezone(UTC):%Y-%m-%d %H:%M:%S} UTC"
+
+
+def _change_note(report: PropagationReport, change: ObservedChange | None) -> Text | None:
+    kind = report.target.kind
+    if change is not None:
+        return Text(
+            f"The {kind}'s latest change seen this session happened between "
+            f"{_time(change.after)} and {_time(change.before)}: it has a new resource version, "
+            "which may change only its metadata."
+        )
+    if report.sighting is None or not any(c.mode in _READ_AT_START for c in report.consumers):
+        return None
+    return not_established(
+        f"whether the {kind} changed after its consumers started: a change is seen only "
+        "between two openings of this view in this session"
+    )
+
+
+def report_notes(
+    report: PropagationReport, now: datetime, change: ObservedChange | None = None
+) -> list[Text]:
     """What the evidence says about the object, and what it does not establish."""
     notes = _object_notes(report, now)
+    change_note = _change_note(report, change)
+    if change_note is not None:
+        notes.append(change_note)
     if any(consumer.category is ContainerCategory.INIT for consumer in report.consumers):
         notes.append(Text(_INIT_NOTE))
     if any(
@@ -238,10 +286,12 @@ class ConfigPropagationScreen(ModalScreen[Consumer | None]):
         report: PropagationReport,
         clock: Callable[[], datetime],
         *,
+        change: ObservedChange | None = None,
         refresh_seconds: float = 5.0,
     ) -> None:
         super().__init__()
         self.report = report
+        self.change = change
         self._clock = clock
         self._refresh_seconds = refresh_seconds
         self._rows: dict[str, Consumer] = {}
@@ -262,7 +312,7 @@ class ConfigPropagationScreen(ModalScreen[Consumer | None]):
         now = self._clock()
         evidence = Text("\n").join(evidence_lines(self.report, now))
         self.query_one("#propagation-evidence", Static).update(evidence)
-        notes = Text("\n").join(report_notes(self.report, now))
+        notes = Text("\n").join(report_notes(self.report, now, self.change))
         self.query_one("#propagation-notes", Static).update(notes)
 
     def on_mount(self) -> None:
@@ -270,9 +320,10 @@ class ConfigPropagationScreen(ModalScreen[Consumer | None]):
         self.set_interval(self._refresh_seconds, self._render_text)
         table: DataTable[Text] = self.query_one(DataTable)
         table.cursor_type = "row"
-        table.add_columns(*_COLUMNS)
+        columns = _COLUMNS if self.change is None else (*_COLUMNS, _CHANGE_COLUMN)
+        table.add_columns(*columns)
         first: int | None = None
-        for index, row in enumerate(table_rows(self.report.consumers)):
+        for index, row in enumerate(table_rows(self.report.consumers, self.change)):
             if isinstance(row, Heading):
                 title, _, meaning = row.text.partition(" — ")
                 table.add_row(Text(title, style="bold"), Text(""), Text(meaning), key=f"h{index}")
