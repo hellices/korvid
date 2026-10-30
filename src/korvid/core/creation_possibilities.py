@@ -42,9 +42,10 @@ _CLAIM_COUNTS = frozenset({"persistentvolumeclaims", "count/persistentvolumeclai
 _POD_COUNTS = frozenset({"pods", "count/pods"})
 _NO_PRIORITY = "the Pod sets no priorityClassName, and a cluster default may apply"
 _POD_LEVEL = (
-    "Pod-level resources set it; whether the cluster accepts that in place of each "
+    "Pod-level resources are set; whether the cluster accepts them in place of each "
     "container's is not observed"
 )
+_UNSEEN_DEFAULT = "a default from a LimitRange that could not be read"
 _DEFAULT_CLASS = "the claim sets no storage class, and the cluster default may apply"
 _UNREADABLE_USAGE = "its used or hard amount could not be read"
 _UNKNOWN_CLAIM = "the claim's storage request is not established"
@@ -179,7 +180,8 @@ def _field_row(entry: QuotaEntry, demand: PodDemand) -> tuple[Finding, str] | No
     lacking = [name for name, missing in demand.missing if missing == key]
     if not lacking:
         return None
-    if key.partition(".")[2] in demand.pod_level:
+    # With PodLevelResources, Pod-level CPU or memory skips every per-container check.
+    if demand.pod_level & {"cpu", "memory"}:
         return Finding.NOT_ESTABLISHED, _POD_LEVEL
     if not demand.defaults_known:
         return Finding.NOT_ESTABLISHED, _UNSEEN_FIELD
@@ -238,17 +240,48 @@ def _quota_rows(
 
 @dataclass(frozen=True, slots=True)
 class _Values:
-    """One container's, or the Pod's, values for one resource."""
+    """One container's, or the Pod's, values for one resource.
+
+    `request_grows` and `limit_grows` say a LimitRange default korvid could
+    not read may still set or raise that side.
+    """
 
     owner: str
     request: Decimal | None
     limit: Decimal | None
     unknown: bool
+    request_grows: bool = False
+    limit_grows: bool = False
+
+    @property
+    def unseen(self) -> tuple[Finding, str]:
+        verb = "change" if self.owner == "Pod" else "set"
+        return Finding.NOT_ESTABLISHED, f"{self.owner}: {_UNSEEN_DEFAULT} may {verb} it"
 
 
-def _values(owner: str, values: ContainerValues | PodDemand, resource: str) -> _Values:
-    unknown = resource in values.unknown_requests or resource in values.unknown_limits
-    return _Values(owner, values.requests.get(resource), values.limits.get(resource), unknown)
+def _container_values(c: ContainerValues, resource: str, defaults_known: bool) -> _Values:
+    unknown = resource in c.unknown_requests or resource in c.unknown_limits
+    request, limit = c.requests.get(resource), c.limits.get(resource)
+    return _Values(
+        c.name,
+        request,
+        limit,
+        unknown,
+        not defaults_known and request is None and not unknown,
+        not defaults_known and limit is None and not unknown,
+    )
+
+
+def _pod_values(demand: PodDemand, resource: str) -> _Values:
+    unknown = resource in demand.unknown_requests or resource in demand.unknown_limits
+    return _Values(
+        "Pod",
+        demand.requests.get(resource),
+        demand.limits.get(resource),
+        unknown,
+        demand.may_grow(f"requests.{resource}"),
+        demand.may_grow(f"limits.{resource}"),
+    )
 
 
 def _unreadable_bound(v: _Values, name: str) -> tuple[Finding, str]:
@@ -261,42 +294,61 @@ def _shown(value: Decimal, resource: str) -> str:
 
 
 def _minimum(v: _Values, raw: str, resource: str) -> tuple[Finding, str] | None:
+    """A value below `min` is provable only if no unread default could raise it."""
     bound = _parse(raw)
     if bound is None:
         return _unreadable_bound(v, "min")
     if v.request is None:
-        return Finding.BELOW_MINIMUM, f"{v.owner}: no request is set"
-    for side, value in (("request", v.request), ("limit", v.limit)):
+        return (
+            v.unseen
+            if v.request_grows
+            else (Finding.BELOW_MINIMUM, f"{v.owner}: no request is set")
+        )
+    for side, value, grows in (
+        ("request", v.request, v.request_grows),
+        ("limit", v.limit, v.limit_grows),
+    ):
         if value is not None and value < bound:
             text = format_quantity(value, raw, resource)
-            return Finding.BELOW_MINIMUM, f"{v.owner}: {side} {text} is below {raw}"
+            return (
+                v.unseen
+                if grows
+                else (Finding.BELOW_MINIMUM, f"{v.owner}: {side} {text} is below {raw}")
+            )
     return None
 
 
 def _maximum(v: _Values, raw: str, resource: str) -> tuple[Finding, str] | None:
+    """A value above `max` is provable, since a default can only add; a value below is not."""
     bound = _parse(raw)
     if bound is None:
         return _unreadable_bound(v, "max")
     if v.limit is None:
-        return Finding.ABOVE_MAXIMUM, f"{v.owner}: no limit is set"
+        return v.unseen if v.limit_grows else (Finding.ABOVE_MAXIMUM, f"{v.owner}: no limit is set")
     for side, value in (("limit", v.limit), ("request", v.request)):
         if value is not None and value > bound:
             text = format_quantity(value, raw, resource)
             return Finding.ABOVE_MAXIMUM, f"{v.owner}: {side} {text} is above {raw}"
-    return None
+    # A request can grow only where its limit is unset, so `limit_grows` covers both.
+    return v.unseen if v.limit_grows else None
 
 
 def _ratio(v: _Values, raw: str, resource: str) -> tuple[Finding, str] | None:
+    """The LimitRanger needs a nonzero request and limit, and limit / request within `raw`."""
     bound = _parse(raw)
     if bound is None:
         return _unreadable_bound(v, "maxLimitRequestRatio")
-    if v.request is None or v.limit is None or v.request == 0:
+    if not v.request or not v.limit:
+        if v.request_grows or v.limit_grows:
+            return v.unseen
         return Finding.ABOVE_RATIO, f"{v.owner}: needs both a request and a limit"
-    if v.limit <= v.request * bound:
-        return None
-    limit, request = _shown(v.limit, resource), _shown(v.request, resource)
-    detail = f"{v.owner}: limit {limit} is more than {raw} times the request {request}"
-    return Finding.ABOVE_RATIO, detail
+    over = v.limit > v.request * bound
+    if over and not v.request_grows:
+        limit, request = _shown(v.limit, resource), _shown(v.request, resource)
+        detail = f"{v.owner}: limit {limit} is more than {raw} times the request {request}"
+        return Finding.ABOVE_RATIO, detail
+    # Over with a growing request means a growing limit too: either way, not established.
+    return v.unseen if v.limit_grows else None
 
 
 def _checks(value: LimitValue, v: _Values) -> Iterator[tuple[Finding, str]]:
@@ -315,9 +367,10 @@ def _checks(value: LimitValue, v: _Values) -> Iterator[tuple[Finding, str]]:
 
 def _owners(value: LimitValue, demand: PodDemand) -> list[_Values]:
     if value.type == "Container":
-        return [_values(c.name, c, value.resource) for c in demand.containers]
+        known = demand.defaults_known
+        return [_container_values(c, value.resource, known) for c in demand.containers]
     if value.type == "Pod":
-        return [_values("Pod", demand, value.resource)]
+        return [_pod_values(demand, value.resource)]
     return []
 
 

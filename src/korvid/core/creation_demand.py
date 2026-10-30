@@ -284,16 +284,21 @@ def pod_demand(
     leaves unset, so the QoS class is not established while it looks
     BestEffort, and `may_grow` says which demands could rise.
     """
-    defaults = _defaults(limit_ranges)
+    # Defaults seen in an incomplete list may conflict with ones not read, so
+    # none is applied: explicit values are a lower bound, and `may_grow` says
+    # which demands could rise.
+    defaults = _defaults(limit_ranges) if defaults_known else (_Defaults(), _Defaults())
     completed = [_complete(c, defaults) for c in (*template.containers, *template.init_containers)]
     containers = [container for container, _ in completed]
     apps = containers[: len(template.containers)]
     inits = containers[len(template.containers) :]
     requests, unknown_requests = _effective(apps, inits, "requests")
     limits, unknown_limits = _effective(apps, inits, "limits")
-    pod_level = _override(requests, unknown_requests, template.pod_requests)
+    # A Pod-level limit stands in for a missing Pod-level request, before admission.
+    pod_requests = tuple({**dict(template.pod_limits), **dict(template.pod_requests)}.items())
+    pod_level = _override(requests, unknown_requests, pod_requests)
     pod_level |= _override(limits, unknown_limits, template.pod_limits)
-    pod_sides = [_side(template.pod_requests), _side(template.pod_limits)]
+    pod_sides = [_side(pod_requests), _side(template.pod_limits)]
     best_effort = _best_effort(
         [*(s for c in containers for s in (c.requests, c.limits)), *pod_sides]
     )

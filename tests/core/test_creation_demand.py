@@ -362,3 +362,32 @@ def test_a_value_set_at_pod_level_or_set_unreadably_cannot_grow() -> None:
 
     assert not pod_level.may_grow("requests.cpu")
     assert not unreadable.may_grow("requests.cpu")
+
+
+def test_defaults_seen_from_an_incomplete_list_are_not_applied() -> None:
+    defaults = _limits("d", LimitValue("Container", "cpu", default="1", default_request="100m"))
+
+    demand = pod_demand(_template(_container("a")), (defaults,), defaults_known=False)
+
+    assert (demand.requests, demand.limits, demand.defaults_applied) == ({}, {}, False)
+    assert demand.may_grow("requests.cpu")
+
+
+def test_a_pod_level_limit_stands_in_for_a_missing_pod_level_request() -> None:
+    defaults = _limits("d", LimitValue("Container", "cpu", default_request="100m"))
+    template = _template(_container("a"), pod_limits=(("cpu", "2"),))
+
+    demand = pod_demand(template, (defaults,))
+
+    assert demand.requests["cpu"] == Decimal(2)
+    assert demand.pod_level == frozenset({"cpu"})
+
+
+def test_a_pod_level_request_wins_over_the_pod_level_limit() -> None:
+    template = _template(
+        _container("a"), pod_requests=(("cpu", "500m"),), pod_limits=(("cpu", "2"),)
+    )
+
+    demand = pod_demand(template, ())
+
+    assert (demand.requests["cpu"], demand.limits["cpu"]) == (Decimal("0.5"), Decimal(2))

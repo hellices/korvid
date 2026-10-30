@@ -168,7 +168,7 @@ def test_a_pod_level_value_may_supply_a_required_field() -> None:
         (
             "limits.cpu",
             Finding.NOT_ESTABLISHED,
-            "Pod-level resources set it; whether the cluster accepts that in place of each "
+            "Pod-level resources are set; whether the cluster accepts them in place of each "
             "container's is not observed",
         )
     ]
@@ -681,4 +681,106 @@ def test_an_unreadable_claim_quota_usage_is_not_established() -> None:
             Finding.NOT_ESTABLISHED,
             "its used or hard amount could not be read",
         )
+    ]
+
+
+def test_a_zero_limit_cannot_satisfy_a_pod_ratio() -> None:
+    unlimited = ContainerDemand("a", "container", (("cpu", "1"),), ())
+    zero = ContainerDemand("b", "container", (("cpu", "0"),), (("cpu", "0"),))
+    ratio = _range(LimitValue("Pod", "cpu", max_limit_request_ratio="4"))
+
+    rows = _findings(_report(_template(unlimited, zero), limit_ranges=(ratio,)))
+
+    assert rows == [("cpu", Finding.ABOVE_RATIO, "Pod: needs both a request and a limit")]
+
+
+def test_any_pod_level_cpu_or_memory_leaves_every_required_field_open() -> None:
+    bare = ContainerDemand("app", "container", (), ())
+    quota = _quota("compute", {"requests.memory": ("0", "8Gi")})
+
+    rows = _findings(_report(_template(bare, pod_requests=(("cpu", "1"),)), quotas=(quota,)))
+
+    assert rows == [
+        (
+            "requests.memory",
+            Finding.NOT_ESTABLISHED,
+            "Pod-level resources are set; whether the cluster accepts them in place of each "
+            "container's is not observed",
+        )
+    ]
+
+
+def test_limit_range_checks_wait_on_defaults_not_read_but_keep_provable_violations() -> None:
+    bare = ContainerDemand("sidecar", "container", (), ())
+    limits = _range(
+        LimitValue("Container", "cpu", max="800m"),
+        LimitValue("Pod", "cpu", min="2"),
+    )
+
+    rows = _findings(
+        _report(_template(APP, bare), limit_ranges=(limits,), limits_basis=Basis.TRUNCATED)
+    )
+
+    assert rows == [
+        ("cpu", Finding.ABOVE_MAXIMUM, "app: limit 1 is above 800m"),
+        (
+            "cpu",
+            Finding.NOT_ESTABLISHED,
+            "sidecar: a default from a LimitRange that could not be read may set it",
+        ),
+        (
+            "cpu",
+            Finding.NOT_ESTABLISHED,
+            "Pod: a default from a LimitRange that could not be read may change it",
+        ),
+    ]
+
+
+_SIDECAR_UNSEEN = "sidecar: a default from a LimitRange that could not be read may set it"
+_POD_UNSEEN = "Pod: a default from a LimitRange that could not be read may change it"
+_WIDE = ContainerDemand("app", "container", (("cpu", "100m"),), (("cpu", "1"),))
+
+
+@pytest.mark.parametrize(
+    ("app", "value", "detail"),
+    [
+        # A missing request may yet come from a default.
+        (None, LimitValue("Container", "cpu", min="100m"), _SIDECAR_UNSEEN),
+        (None, LimitValue("Container", "cpu", max_limit_request_ratio="2"), _SIDECAR_UNSEEN),
+        # The Pod's limit is within `max` so far, but the sidecar may add to it.
+        (APP, LimitValue("Pod", "cpu", max="4"), _POD_UNSEEN),
+        # Over the ratio so far, but a default may raise the request.
+        (_WIDE, LimitValue("Pod", "cpu", max_limit_request_ratio="4"), _POD_UNSEEN),
+        # Within the ratio so far, but a default may raise the limit.
+        (APP, LimitValue("Pod", "cpu", max_limit_request_ratio="4"), _POD_UNSEEN),
+    ],
+)
+def test_a_limit_range_check_a_default_not_read_may_change_is_not_established(
+    app: ContainerDemand | None, value: LimitValue, detail: str
+) -> None:
+    sidecar = ContainerDemand("sidecar", "container", (), ())
+    containers = (sidecar,) if app is None else (app, sidecar)
+
+    rows = _findings(
+        _report(_template(*containers), limit_ranges=(_range(value),), limits_basis=Basis.TRUNCATED)
+    )
+
+    assert rows == [("cpu", Finding.NOT_ESTABLISHED, detail)]
+
+
+def test_a_ratio_over_with_only_the_limit_able_to_grow_is_provable() -> None:
+    # A default can only raise the Pod's limit here, so it stays over the ratio.
+    request_only = ContainerDemand("sidecar", "container", (("cpu", "100m"),), ())
+    ratio = LimitValue("Pod", "cpu", max_limit_request_ratio="4")
+
+    rows = _findings(
+        _report(
+            _template(_WIDE, request_only),
+            limit_ranges=(_range(ratio),),
+            limits_basis=Basis.TRUNCATED,
+        )
+    )
+
+    assert rows == [
+        ("cpu", Finding.ABOVE_RATIO, "Pod: limit 1 is more than 4 times the request 200m")
     ]
