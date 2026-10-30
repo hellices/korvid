@@ -847,3 +847,25 @@ def test_every_search_key_has_an_owner() -> None:
     """The same audit for `n`/`N`: `SEARCH_ACTIONS` is the pane-search
     vocabulary, and the inspect owner is who answers for it."""
     assert set(SEARCH_ACTIONS) <= set(_INSPECT_REASON_ACTIONS)
+
+
+def test_composed_command_reasons_ask_the_creation_owner_about_blocked() -> None:
+    """`:blocked` is greyed out by its owner's own answer: no connection, the
+    wrong view, or no selected workload."""
+    wrong_view = UnavailableReason(AvailabilityCode.WRONG_VIEW, "Open a workload view")
+    answer: UnavailableReason | None = wrong_view
+    reasons = compose_command_reasons(
+        agent_available=lambda: True,
+        agent_setup_available=lambda: True,
+        agent_session_configured=lambda: True,
+        mcp=lambda: None,
+        telepresence=lambda: None,
+        proposals=lambda: None,
+        namespace=lambda: None,
+        context=lambda: None,
+        port_forwards=lambda: None,
+        creation=lambda: answer,
+    )
+    assert reasons["blocked"]() == wrong_view
+    answer = None
+    assert reasons["blocked"]() is None

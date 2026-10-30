@@ -140,6 +140,7 @@ from korvid.ui.bridge_dispatch import AppContextDispatch
 from korvid.ui.command_router import CommandRouter
 from korvid.ui.config_propagation_controller import ConfigPropagationController
 from korvid.ui.context_switch_coordinator import ContextSwitchCoordinator, ContextSwitchResult
+from korvid.ui.creation_constraints_controller import CreationConstraintsController
 from korvid.ui.debug import DebugController, DebugSettings
 from korvid.ui.deployment_outcome_actions import DeploymentOutcomePodActions
 from korvid.ui.deployment_outcome_controller import DeploymentOutcomeController
@@ -992,6 +993,15 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
             "pods", namespace, name, epoch=epoch, expected_uid=uid
         ),
     )
+    creation_constraints = CreationConstraintsController(
+        ui=AppUiSurface(app),
+        view=view,
+        context=context,
+        client=inputs.evidence_client,
+        navigate=lambda kind, namespace, name, epoch, uid: workspace_ref.get().jump_to_object(
+            kind, namespace, name, epoch=epoch, expected_uid=uid
+        ),
+    )
     bridge_dispatch = AppContextDispatch()
     inspect_surface = AppInspectSurface(app)
     inspect_controller = ResourceInspectController(
@@ -1276,6 +1286,7 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
             slots=slots.unavailable_reason,
             outcomes=deployment_outcomes.unavailable_reason,
             propagation=config_propagation.unavailable_reason,
+            creation=creation_constraints.unavailable_reason,
         ),
     )
     commands = CommandRouter(
@@ -1290,6 +1301,7 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
         slots=slots,
         outcomes=deployment_outcomes,
         propagation=config_propagation,
+        creation=creation_constraints,
     )
     return AppRuntime(
         view=view,

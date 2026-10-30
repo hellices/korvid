@@ -64,6 +64,7 @@ from korvid.ui.action_availability import (
     UnavailableReason,
 )
 from korvid.ui.config_propagation_controller import CONFIG_PROPAGATION_GROUP
+from korvid.ui.creation_constraints_controller import CREATION_CONSTRAINTS_GROUP
 from korvid.ui.ui_surface import UiSurface
 from korvid.ui.view_state import ViewState
 from korvid.ui.widgets.pick_screen import PickScreen
@@ -839,9 +840,10 @@ class ContextSwitchCoordinator(ContextGuard):
         # caller) so those pollers and workers release the old connection
         # before the wholesale watch stop below.
         await self._workspace().quiesce_for_context_switch()
-        # A configuration propagation run reads through the old client; its
-        # run token would drop the result anyway, but the reads must stop too.
+        # A diagnostic run reads through the old client; its run token would
+        # drop the result anyway, but the reads must stop too.
         self._surface.cancel_worker_group(CONFIG_PROPAGATION_GROUP)
+        self._surface.cancel_worker_group(CREATION_CONSTRAINTS_GROUP)
         # An old-cluster namespace prefetch still in flight could land after
         # the new cluster's and overwrite its completions — cancel it first.
         # Both steps run on the workspace controller: it owns the prefetch

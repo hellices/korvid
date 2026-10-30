@@ -54,6 +54,7 @@ class FakeUiSurface(UiSurface):
         self.notifications: list[_Notification] = []
         self.workers: list[Any] = []  # stores the coroutine/callable passed to run_worker
         self.worker_groups: list[tuple[str, bool]] = []  # (group, exit_on_error)
+        self.exclusive_workers: list[bool] = []
         self.cancelled_groups: list[str] = []
         self.screens: list[Any] = []
         self.screen_callback: Callable[[Any], None] | None = None
@@ -103,6 +104,7 @@ class FakeUiSurface(UiSurface):
         else:
             self.workers.append(work)
         self.worker_groups.append((group, exit_on_error))
+        self.exclusive_workers.append(exclusive)
         return None
 
     async def cancel_workers(self, group: str) -> None:

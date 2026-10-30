@@ -187,3 +187,57 @@ subjects:
   - kind: ServiceAccount
     name: events-group
     namespace: korvid-matrix
+---
+# Workload creation constraints (#411). A namespace of its own, because its
+# quota admits no Pod at all: the Deployment's ReplicaSet records the
+# rejection as FailedCreate. The pause image is already on every kind node.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: korvid-matrix-quota
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: matrix-pods
+  namespace: korvid-matrix-quota
+spec:
+  hard:
+    pods: "0"
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: matrix-limits
+  namespace: korvid-matrix-quota
+spec:
+  limits:
+    - type: Container
+      default:
+        cpu: 200m
+      defaultRequest:
+        cpu: 100m
+      max:
+        cpu: "1"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: blocked
+  namespace: korvid-matrix-quota
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: blocked
+  template:
+    metadata:
+      labels:
+        app: blocked
+    spec:
+      containers:
+        - name: app
+          image: registry.k8s.io/pause:3.10
+          env:
+            - name: LITERAL
+              value: matrix-template-literal

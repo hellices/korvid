@@ -39,6 +39,7 @@ from korvid.ui.context_switch_coordinator import (
     SessionConfiguration,
     SwitchAgent,
 )
+from korvid.ui.creation_constraints_controller import CREATION_CONSTRAINTS_GROUP
 from korvid.ui.session_timeline_controller import SessionTimelineController
 from korvid.ui.widgets.pick_screen import PickScreen
 
@@ -481,6 +482,7 @@ _SUCCESSFUL_ORDER = [
     "describe-hide",
     "workspace-quiesce",
     f"workers-cancelled:{CONFIG_PROPAGATION_GROUP}",
+    f"workers-cancelled:{CREATION_CONSTRAINTS_GROUP}",
     "ns-prefetch-cancelled",
     "ns-words-cleared",
     "watch-stop-all",

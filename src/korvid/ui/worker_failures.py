@@ -12,6 +12,7 @@ from collections.abc import Mapping
 from types import MappingProxyType
 
 from korvid.ui.config_propagation_controller import CONFIG_PROPAGATION_GROUP
+from korvid.ui.creation_constraints_controller import CREATION_CONSTRAINTS_GROUP
 from korvid.ui.session_timeline_controller import TIMELINE_EVENT_GROUP, TIMELINE_NAVIGATION_GROUP
 from korvid.ui.workspace_controller import RELATIONSHIP_GROUP
 
@@ -22,5 +23,6 @@ REPORTED_WORKER_GROUPS: Mapping[str, str] = MappingProxyType(
         RELATIONSHIP_GROUP: "Relationships failed",
         TIMELINE_NAVIGATION_GROUP: "Timeline navigation failed",
         CONFIG_PROPAGATION_GROUP: "Configuration propagation failed",
+        CREATION_CONSTRAINTS_GROUP: "Workload creation failure explanation failed",
     }
 )

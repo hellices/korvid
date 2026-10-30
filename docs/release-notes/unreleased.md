@@ -22,6 +22,15 @@ tracks the next release scope.
   consumer's container start, judged with a one-minute allowance for clock
   skew. Only changes seen between two openings in the same session count.
 
+## Workload creation failures
+
+- `:blocked` (or **Explain workload creation failures** in the Action
+  Palette) shows why a Deployment, ReplicaSet, StatefulSet, DaemonSet, Job or
+  CronJob has no Pods: the `FailedCreate` rejections recorded for it, next to
+  its namespace's ResourceQuotas and LimitRanges, with quantities compared
+  exactly and absence said only from complete lists. See
+  [Workload creation failures](../tui.md#workload-creation-failures).
+
 ## Current configuration and extension contracts
 
 Existing migration links continue in the

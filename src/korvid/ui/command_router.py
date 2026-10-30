@@ -98,6 +98,12 @@ class PropagationCommands(Protocol):
     def open_selected(self) -> None: ...
 
 
+class CreationCommands(Protocol):
+    """The workload creation constraints view's owner."""
+
+    def open_selected(self) -> None: ...
+
+
 class CommandRouter:
     """Dispatches typed commands to the owner that implements them."""
 
@@ -115,6 +121,7 @@ class CommandRouter:
         slots: SlotCommands,
         outcomes: OutcomeCommands | None = None,
         propagation: PropagationCommands | None = None,
+        creation: CreationCommands | None = None,
     ) -> None:
         self._ui = ui
         self._agent = agent
@@ -127,6 +134,7 @@ class CommandRouter:
         self._slots = slots
         self._outcomes = outcomes
         self._propagation = propagation
+        self._creation = creation
 
     def route_builtin(self, command: BuiltinCommand) -> None:
         """Dispatch an app-owned command by canonical operation identity."""
@@ -140,6 +148,7 @@ class CommandRouter:
             BuiltinOperation.NAMESPACE_SLOTS: self._slots.open_reallocation,
             BuiltinOperation.DEPLOYMENT_OUTCOMES: self._open_outcomes,
             BuiltinOperation.CONFIG_PROPAGATION: self._open_propagation,
+            BuiltinOperation.CREATION_FAILURES: self._open_creation,
         }
         handler = no_argument_handlers.get(operation)
         if handler is not None:
@@ -172,6 +181,14 @@ class CommandRouter:
             )
             return
         self._propagation.open_selected()
+
+    def _open_creation(self) -> None:
+        if self._creation is None:
+            self._ui.notify(
+                "Workload creation failures are unavailable in this session", severity="warning"
+            )
+            return
+        self._creation.open_selected()
 
     def _route_agent(self, command: BuiltinCommand) -> None:
         if not self._agent.available:

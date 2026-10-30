@@ -168,6 +168,46 @@ These limits apply:
 - korvid keeps no history across restarts and never reads
   `creationTimestamp` as a change time.
 
+### Workload creation failures
+
+A Deployment can exist, or be scaled up, while its Pods are rejected before
+they are created: the Pod list is empty, so nothing on it explains why.
+Select a Deployment, ReplicaSet, StatefulSet, DaemonSet, Job or CronJob and
+run `:blocked` (or **Explain workload creation failures** in the Action
+Palette). The view shows the failures recorded for that workload next to its
+namespace's ResourceQuotas and LimitRanges:
+
+| Section | What it shows |
+|---|---|
+| Header | The workload and the counters its controller last reported, such as desired and created replicas |
+| Recorded creation failures | Each `FailedCreate` event about the workload or its ReplicaSets or Jobs, and each `ReplicaFailure` condition, with how often and when it was last recorded, and what the rejection says |
+| ResourceQuotas | Each quota's `used / hard` values, grouped as compute, storage, object counts and other, with a resource at or over its limit marked, and its scopes |
+| LimitRanges | Each constraint: defaults, minimums, maximums and limit-to-request ratios |
+
+How to read it:
+
+- **A rejection is attributed only as far as its message goes.** A message
+  that names a quota links to it. A LimitRange message is attributed to "a
+  LimitRange in this namespace", because LimitRanger messages do not say
+  which. A rejection an admission webhook or a ValidatingAdmissionPolicy
+  wrote is shown verbatim and attributed to nothing.
+- **Quantities are shown as the cluster wrote them**, and compared exactly:
+  `1Gi` is never rounded or converted, and `0.5` equals `500m`.
+- **Times are kept apart.** A rejection was recorded at its own time; the
+  quotas are as read now. Quota status is not a reservation, and the next
+  create may still differ.
+- **Absence is said only when it is a fact.** "No ResourceQuota" appears
+  only when every quota could be listed. A quota whose status has not caught
+  up with its spec is marked, and is never called "at its limit". Events
+  expire, so finding no recorded failure does not show that none happened.
+
+The view reads the workload, its ReplicaSets or Jobs, the namespace's
+Events, ResourceQuotas and LimitRanges when it opens, and nothing else. The
+workload's Pod template arrives whole, but only its requests, limits and
+scheduling fields are kept: no environment value, command or image. Enter on
+a row opens the object it is about. Nothing is changed: korvid does not
+scale, retry or edit a policy for you.
+
 ## Change scope without losing context
 
 korvid always watches exactly one explicit scope. The startup namespace
