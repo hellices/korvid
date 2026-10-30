@@ -22,6 +22,7 @@ from korvid.core.capability import (
 from korvid.ui.evidence_text import (
     age_text,
     basis_sentence,
+    elapsed_text,
     not_established,
     observation_line,
 )
@@ -161,3 +162,11 @@ def test_not_established_says_why() -> None:
 
     assert line.plain == "Not established: whether every consumer is listed"
     assert not_established("[red]x").plain == "Not established: [red]x"
+
+
+@pytest.mark.parametrize(
+    ("seconds", "text"),
+    [(0.5, "just now"), (120, "2m ago"), (-5, "in the future")],
+)
+def test_an_elapsed_time_reads_without_a_verb(seconds: float, text: str) -> None:
+    assert elapsed_text(NOW - timedelta(seconds=seconds), NOW) == text

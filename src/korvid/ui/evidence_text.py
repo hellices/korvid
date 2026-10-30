@@ -71,17 +71,22 @@ def basis_sentence(basis: Basis) -> str:
     return BASIS_SENTENCES[basis]
 
 
+def elapsed_text(at: datetime, now: datetime) -> str:
+    """How long ago `at` was, in its largest whole unit, such as `2m ago`."""
+    seconds = (now - at).total_seconds()
+    if seconds < 0:
+        return "in the future"
+    for size, unit in _UNITS:
+        if seconds >= size:
+            return f"{int(seconds // size)}{unit} ago"
+    return "just now"
+
+
 def age_text(observed_at: datetime | None, now: datetime) -> str:
     """How long ago an observation was made, in its largest whole unit."""
     if observed_at is None:
         return "not observed"
-    seconds = (now - observed_at).total_seconds()
-    if seconds < 0:
-        return "observed in the future"
-    for size, unit in _UNITS:
-        if seconds >= size:
-            return f"observed {int(seconds // size)}{unit} ago"
-    return "observed just now"
+    return f"observed {elapsed_text(observed_at, now)}"
 
 
 def _scope_text(scope: SourceScope) -> str:
