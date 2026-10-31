@@ -228,12 +228,13 @@ class ApiResourcesController:
         if self._epoch() != epoch or (outcome is not None and not outcome.applied):
             return
         self._report(outcome, failure, announce=announce)
-        # Only the newest command typed in a pane may navigate it: an older
-        # one, replayed first, would bump the pane's generation and turn the
-        # newer one away as stale.
-        newest = {position: index for index, (_, position) in enumerate(waiting)}
+        # Only the newest command typed in a pane may navigate it, whatever
+        # that pane did in between: an older one, replayed first, would bump
+        # the pane's generation and turn the newer one away as stale.
+        newest = {id(pane): index for index, (_, (pane, _)) in enumerate(waiting)}
         for index, (text, position) in enumerate(waiting):
-            self._post_again(text, position, epoch, newest=newest[position] == index)
+            is_newest = newest[id(position[0])] == index
+            self._post_again(text, position, epoch, newest=is_newest)
 
     def _report(self, outcome: Rediscovery | None, failure: str | None, *, announce: bool) -> None:
         if outcome is None:

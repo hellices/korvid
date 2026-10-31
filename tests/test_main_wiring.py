@@ -1922,12 +1922,14 @@ async def test_wire_and_run_rediscovers_through_the_session_client_and_aliases(
     captured = _FakeAppCapturesKwargs.instances[0].captured
     assert await captured["rediscover"]() == Rediscovery()
     assert await captured["rediscover"]() == Rediscovery()
-    (first_kube, first_aliases, first), (_, _, second) = calls
-    assert first_kube is kube
-    assert first_aliases is captured["aliases"]
+    reservations = calls[0][2]
     # One reservation record for the whole run, or no alias would stay reserved.
-    assert isinstance(first, AliasReservations)
-    assert second is first
+    assert isinstance(reservations, AliasReservations)
+    assert len(calls) == 2
+    for called_kube, called_aliases, called_reservations in calls:
+        assert called_kube is kube
+        assert called_aliases is captured["aliases"]
+        assert called_reservations is reservations
 
 
 async def test_wire_and_run_wires_helm_release_identity_reader_from_kube(

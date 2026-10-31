@@ -13,7 +13,7 @@
 - **Bounded:** one read at a time, and commands typed meanwhile wait for it. An unknown command starts a read at most once every 30 seconds; `:rediscover` is not rate-limited.
 - **Context-safe:** the context-switch coordinator cancels the worker group before the client swaps. A read whose session generation changed is never applied, and the controller drops a result whose context epoch changed.
 - **An alias never moves to another resource:** an open view, its watch and its rows are keyed by an alias, so a refresh keeps every known alias on its resource and drops one whose resource is gone. `AliasReservations` remembers that owner for the rest of the session, so a later refresh does not hand the alias over either, and gives the alias back if the resource is reinstalled; a new session generation (connect or context switch) lifts the reservations. Only an alias nobody held goes to a new resource, and the `:operators` catalog fallback is applied before that rule, not after it.
-- **A command runs where it was typed, and only if nothing overtook it:** a settled navigation carries a `NavigationOrigin` (the pane it was typed in, that pane's `nav_gen` then, and the read's context epoch). `deferred_navigation_guard` runs it only while that pane is focused, has not navigated since, and no context switch crossed the epoch, re-checking under the navigation lock; otherwise it says the kind is served now, or nothing if a context switch made it stale. Of the commands one read settles, only the newest typed in each pane may navigate; older ones there are superseded, while every command still unknown is reported. An ordinary navigation calls `navigate_command` exactly as before.
+- **A command runs where it was typed, and only if nothing overtook it:** a settled navigation carries a `NavigationOrigin` (the pane it was typed in, that pane's `nav_gen` then, and the read's context epoch). `deferred_navigation_guard` runs it only while that pane is focused, has not navigated since, and no context switch crossed the epoch, re-checking under the navigation lock; otherwise it says the kind is served now, or nothing if a context switch made it stale. Of the commands one read settles, only the newest typed in each pane (by pane identity, whatever that pane navigated in between) may navigate; older ones there are superseded, while every command still unknown is reported. An ordinary navigation calls `navigate_command` exactly as before.
 - **No read during a context switch:** the controller checks `ContextGuard.reads_allowed()` before starting or queuing a read, because the coordinator has already cancelled the group and the old client would refill the alias map the switch reset.
 - **Never drop what could not be read:** a group version that failed or was incomplete keeps the kinds korvid knew from that very group version (a kind known at another version of the same group is not kept); an incomplete `/api` or `/apis` root removes nothing. A failed core `v1` or `/apis` read changes nothing and is said.
 - **Palette search:** the help text and keywords must not contain the subsequence `h…e…l…m`, which a test reserves for Helm, and must not outrank the rows existing palette tests search for. Hence no "custom resource" or "reload" keyword.
@@ -302,32 +302,61 @@ async def test_a_failed_read_keeps_the_known_kinds_and_reports_the_command() -> 
 
 
 class HeldCluster(Cluster):
-    """Holds each read until `release` is set, so the context can move meanwhile."""
+    """Holds each read until `release` is set, so the context can move meanwhile.
+
+    Like `rediscover_aliases`, it applies nothing, and says so, when the
+    session changed while it read: a context switch swaps the client.
+    """
 
     def __init__(self, outcome: Rediscovery, *served: str) -> None:
         super().__init__(outcome, *served)
         self.entered = asyncio.Event()
         self.release = asyncio.Event()
+        self.session = 1
 
     async def rediscover(self) -> Rediscovery:
+        session = self.session
         self.entered.set()
         await self.release.wait()
+        if session != self.session:
+            return Rediscovery(applied=False)
         return await super().rediscover()
 
 
-async def test_a_context_switch_during_a_read_discards_it() -> None:
+async def _switch_during_read(*, client_swapped: bool) -> tuple[Harness, HeldCluster]:
     epoch = [1]
     cluster = HeldCluster(UNCHANGED, "widgets")
     harness = Harness(cluster, epoch=lambda: epoch[0])
-
     harness.controller.resolve_unknown("widgets")
     read = asyncio.ensure_future(harness.ui.workers.pop(0))
     await cluster.entered.wait()
     epoch[0] = 2
+    if client_swapped:
+        cluster.session = 2
     cluster.release.set()
     await read
+    return harness, cluster
+
+
+async def test_a_context_switch_during_a_read_discards_it() -> None:
+    harness, cluster = await _switch_during_read(client_swapped=True)
 
     assert (harness.messages(), harness.updates, harness.notes()) == ([], 0, [])
+    assert cluster.resolve("widgets") is None
+
+
+async def test_a_read_finished_before_the_client_swap_is_not_acted_on() -> None:
+    """The switch has begun but not yet swapped the client, so the read applied.
+
+    The controller's own epoch check must still keep it from navigating,
+    noticing or refreshing completions. The aliases themselves are the
+    switch's to reset (`switch_context` clears them once it has cancelled
+    discovery), not the controller's.
+    """
+    harness, cluster = await _switch_during_read(client_swapped=False)
+
+    assert (harness.messages(), harness.updates, harness.notes()) == ([], 0, [])
+    assert cluster.resolve("widgets") == "widgets"
 
 
 async def test_a_read_the_composition_root_did_not_apply_is_discarded() -> None:
@@ -482,6 +511,20 @@ async def test_the_newest_command_of_a_pane_may_be_one_that_resolves() -> None:
     await harness.finish()
 
     assert harness.messages() == [("unknown", "doodads", "True"), ("navigate", "gadgets", "None")]
+
+
+async def test_a_pane_that_navigated_while_a_read_ran_still_runs_only_its_newest_command() -> None:
+    harness = Harness(Cluster(UNCHANGED, "widgets", "gadgets"))
+
+    harness.controller.resolve_unknown("widgets")
+    harness.generation += 1
+    harness.controller.resolve_unknown("gadgets")
+    await harness.finish()
+
+    (command,) = harness.posted
+    assert isinstance(command, NavigateCommand)
+    assert (command.view, command.origin) == ("gadgets", NavigationOrigin("pane-1", 8, 1))
+    assert harness.notes() == []
 ```
 
 - [ ] **Step 2:** Run `uv run --frozen pytest -p no:tach tests/ui/test_api_resources_controller.py -q`. Expected: collection fails, no module.
@@ -718,12 +761,13 @@ class ApiResourcesController:
         if self._epoch() != epoch or (outcome is not None and not outcome.applied):
             return
         self._report(outcome, failure, announce=announce)
-        # Only the newest command typed in a pane may navigate it: an older
-        # one, replayed first, would bump the pane's generation and turn the
-        # newer one away as stale.
-        newest = {position: index for index, (_, position) in enumerate(waiting)}
+        # Only the newest command typed in a pane may navigate it, whatever
+        # that pane did in between: an older one, replayed first, would bump
+        # the pane's generation and turn the newer one away as stale.
+        newest = {id(pane): index for index, (_, (pane, _)) in enumerate(waiting)}
         for index, (text, position) in enumerate(waiting):
-            self._post_again(text, position, epoch, newest=newest[position] == index)
+            is_newest = newest[id(position[0])] == index
+            self._post_again(text, position, epoch, newest=is_newest)
 
     def _report(self, outcome: Rediscovery | None, failure: str | None, *, announce: bool) -> None:
         if outcome is None:
@@ -1421,6 +1465,7 @@ async def test_a_navigation_found_before_a_context_switch_is_not_applied_after_i
         await until(pilot, lambda: app._pane.scope == "kube-system", label="later navigation")
 
         assert app.current_kind == "pods"
+        assert not any("is served now" in m for m in _messages(app))
 
 
 async def test_a_stale_navigation_from_another_pane_says_nothing() -> None:

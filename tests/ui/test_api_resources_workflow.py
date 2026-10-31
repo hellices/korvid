@@ -186,6 +186,7 @@ async def test_a_navigation_found_before_a_context_switch_is_not_applied_after_i
         await until(pilot, lambda: app._pane.scope == "kube-system", label="later navigation")
 
         assert app.current_kind == "pods"
+        assert not any("is served now" in m for m in _messages(app))
 
 
 async def test_a_stale_navigation_from_another_pane_says_nothing() -> None:

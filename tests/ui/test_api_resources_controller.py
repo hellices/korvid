@@ -254,32 +254,61 @@ async def test_a_failed_read_keeps_the_known_kinds_and_reports_the_command() -> 
 
 
 class HeldCluster(Cluster):
-    """Holds each read until `release` is set, so the context can move meanwhile."""
+    """Holds each read until `release` is set, so the context can move meanwhile.
+
+    Like `rediscover_aliases`, it applies nothing, and says so, when the
+    session changed while it read: a context switch swaps the client.
+    """
 
     def __init__(self, outcome: Rediscovery, *served: str) -> None:
         super().__init__(outcome, *served)
         self.entered = asyncio.Event()
         self.release = asyncio.Event()
+        self.session = 1
 
     async def rediscover(self) -> Rediscovery:
+        session = self.session
         self.entered.set()
         await self.release.wait()
+        if session != self.session:
+            return Rediscovery(applied=False)
         return await super().rediscover()
 
 
-async def test_a_context_switch_during_a_read_discards_it() -> None:
+async def _switch_during_read(*, client_swapped: bool) -> tuple[Harness, HeldCluster]:
     epoch = [1]
     cluster = HeldCluster(UNCHANGED, "widgets")
     harness = Harness(cluster, epoch=lambda: epoch[0])
-
     harness.controller.resolve_unknown("widgets")
     read = asyncio.ensure_future(harness.ui.workers.pop(0))
     await cluster.entered.wait()
     epoch[0] = 2
+    if client_swapped:
+        cluster.session = 2
     cluster.release.set()
     await read
+    return harness, cluster
+
+
+async def test_a_context_switch_during_a_read_discards_it() -> None:
+    harness, cluster = await _switch_during_read(client_swapped=True)
 
     assert (harness.messages(), harness.updates, harness.notes()) == ([], 0, [])
+    assert cluster.resolve("widgets") is None
+
+
+async def test_a_read_finished_before_the_client_swap_is_not_acted_on() -> None:
+    """The switch has begun but not yet swapped the client, so the read applied.
+
+    The controller's own epoch check must still keep it from navigating,
+    noticing or refreshing completions. The aliases themselves are the
+    switch's to reset (`switch_context` clears them once it has cancelled
+    discovery), not the controller's.
+    """
+    harness, cluster = await _switch_during_read(client_swapped=False)
+
+    assert (harness.messages(), harness.updates, harness.notes()) == ([], 0, [])
+    assert cluster.resolve("widgets") == "widgets"
 
 
 async def test_a_read_the_composition_root_did_not_apply_is_discarded() -> None:
@@ -434,3 +463,17 @@ async def test_the_newest_command_of_a_pane_may_be_one_that_resolves() -> None:
     await harness.finish()
 
     assert harness.messages() == [("unknown", "doodads", "True"), ("navigate", "gadgets", "None")]
+
+
+async def test_a_pane_that_navigated_while_a_read_ran_still_runs_only_its_newest_command() -> None:
+    harness = Harness(Cluster(UNCHANGED, "widgets", "gadgets"))
+
+    harness.controller.resolve_unknown("widgets")
+    harness.generation += 1
+    harness.controller.resolve_unknown("gadgets")
+    await harness.finish()
+
+    (command,) = harness.posted
+    assert isinstance(command, NavigateCommand)
+    assert (command.view, command.origin) == ("gadgets", NavigationOrigin("pane-1", 8, 1))
+    assert harness.notes() == []
