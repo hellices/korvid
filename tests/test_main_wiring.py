@@ -1902,11 +1902,10 @@ async def test_wire_and_run_rediscovers_through_the_session_client_and_aliases(
     from korvid.core.config import KorvidConfig
     from korvid.ui.api_resources_controller import Rediscovery
 
-    calls: list[tuple[Any, Any]] = []
+    calls: list[tuple[Any, Any, Any]] = []
 
     async def rediscover_aliases(kube: Any, aliases: Any, reservations: Any) -> Rediscovery:
-        calls.append((kube, aliases))
-        assert isinstance(reservations, AliasReservations)
+        calls.append((kube, aliases, reservations))
         return Rediscovery()
 
     monkeypatch.setattr(main_mod, "KorvidApp", _FakeAppCapturesKwargs)
@@ -1922,9 +1921,13 @@ async def test_wire_and_run_rediscovers_through_the_session_client_and_aliases(
 
     captured = _FakeAppCapturesKwargs.instances[0].captured
     assert await captured["rediscover"]() == Rediscovery()
-    ((called_kube, called_aliases),) = calls
-    assert called_kube is kube
-    assert called_aliases is captured["aliases"]
+    assert await captured["rediscover"]() == Rediscovery()
+    (first_kube, first_aliases, first), (_, _, second) = calls
+    assert first_kube is kube
+    assert first_aliases is captured["aliases"]
+    # One reservation record for the whole run, or no alias would stay reserved.
+    assert isinstance(first, AliasReservations)
+    assert second is first
 
 
 async def test_wire_and_run_wires_helm_release_identity_reader_from_kube(
