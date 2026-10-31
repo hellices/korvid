@@ -1012,6 +1012,7 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
         post=app.post_message,
         aliases_updated=app.on_aliases_updated,
         epoch=context.epoch,
+        crossed=context.crossed,
         reads_allowed=context.reads_allowed,
         navigation_position=lambda: (app._pane, app._pane.nav_gen),
     )

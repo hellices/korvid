@@ -10,8 +10,9 @@ coordinator cancels. Commands typed during a read wait for it. An unknown
 command starts a read only when none started in the last `min_interval`
 seconds, so repeated typos do not flood the API server; an explicit refresh
 is not rate-limited. A read the context has moved past is discarded: the
-composition root never applies one from an earlier session, and the epoch
-check drops what is left.
+composition root never applies one from an earlier session, and a read a
+switch has crossed, even one only under way, posts, notifies and refreshes
+nothing.
 """
 
 from __future__ import annotations
@@ -134,6 +135,7 @@ class ApiResourcesController:
         post: Callable[[Message], object],
         aliases_updated: Callable[[], None],
         epoch: Callable[[], int],
+        crossed: Callable[[int], bool],
         reads_allowed: Callable[[], bool],
         navigation_position: Callable[[], NavigationPosition],
         clock: Callable[[], float] = time.monotonic,
@@ -145,6 +147,7 @@ class ApiResourcesController:
         self._post = post
         self._aliases_updated = aliases_updated
         self._epoch = epoch
+        self._crossed = crossed
         self._reads_allowed = reads_allowed
         self._position = navigation_position
         self._clock = clock
@@ -225,7 +228,8 @@ class ApiResourcesController:
         finally:
             self._running = False
             waiting, self._waiting = self._waiting, []
-        if self._epoch() != epoch or (outcome is not None and not outcome.applied):
+        # `crossed` also covers a switch under way, before its epoch moves.
+        if self._crossed(epoch) or (outcome is not None and not outcome.applied):
             return
         self._report(outcome, failure, announce=announce)
         # Only the newest command typed in a pane may navigate it, whatever

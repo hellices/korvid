@@ -11,7 +11,7 @@
 ## Global Constraints
 
 - **Bounded:** one read at a time, and commands typed meanwhile wait for it. An unknown command starts a read at most once every 30 seconds; `:rediscover` is not rate-limited.
-- **Context-safe:** the context-switch coordinator cancels the worker group before the client swaps. A read whose session generation changed is never applied, and the controller drops a result whose context epoch changed.
+- **Context-safe:** the context-switch coordinator cancels the worker group before the client swaps. A read whose session generation changed is never applied, and the controller drops a result a switch has crossed (`ContextGuard.crossed`: under way, or its epoch moved), since the switching flag rises before the epoch does.
 - **An alias never moves to another resource:** an open view, its watch and its rows are keyed by an alias, so a refresh keeps every known alias on its resource and drops one whose resource is gone. `AliasReservations` remembers that owner for the rest of the session, so a later refresh does not hand the alias over either, and gives the alias back if the resource is reinstalled; a new session generation (connect or context switch) lifts the reservations. Only an alias nobody held goes to a new resource, and the `:operators` catalog fallback is applied before that rule, not after it.
 - **A command runs where it was typed, and only if nothing overtook it:** a settled navigation carries a `NavigationOrigin` (the pane it was typed in, that pane's `nav_gen` then, and the read's context epoch). `deferred_navigation_guard` runs it only while that pane is focused, has not navigated since, and no context switch crossed the epoch, re-checking under the navigation lock; otherwise it says the kind is served now, or nothing if a context switch made it stale. Of the commands one read settles, only the newest typed in each pane (by pane identity, whatever that pane navigated in between) may navigate; older ones there are superseded, while every command still unknown is reported. An ordinary navigation calls `navigate_command` exactly as before.
 - **No read during a context switch:** the controller checks `ContextGuard.reads_allowed()` before starting or queuing a read, because the coordinator has already cancelled the group and the old client would refill the alias map the switch reset.
@@ -109,6 +109,7 @@ class Harness:
         *,
         epoch: Callable[[], int] = lambda: 1,
         reads_allowed: Callable[[], bool] = lambda: True,
+        switching: Callable[[], bool] = lambda: False,
     ) -> None:
         self.pane: object = "pane-1"
         self.generation = 7
@@ -124,6 +125,7 @@ class Harness:
             post=self.posted.append,
             aliases_updated=self._updated,
             epoch=epoch,
+            crossed=lambda since: switching() or since != epoch(),
             reads_allowed=reads_allowed,
             navigation_position=lambda: (self.pane, self.generation),
             clock=self.clock,
@@ -525,6 +527,23 @@ async def test_a_pane_that_navigated_while_a_read_ran_still_runs_only_its_newest
     assert isinstance(command, NavigateCommand)
     assert (command.view, command.origin) == ("gadgets", NavigationOrigin("pane-1", 8, 1))
     assert harness.notes() == []
+
+
+async def test_a_read_finished_once_a_switch_has_begun_is_not_acted_on() -> None:
+    """The switch flag rises before the epoch moves: that window counts too."""
+    switching = [False]
+    cluster = HeldCluster(Rediscovery(added=("widgets.example.com",)), "widgets")
+    harness = Harness(cluster, switching=lambda: switching[0])
+    harness.controller.refresh()
+    harness.controller.resolve_unknown("widgets")
+    read = asyncio.ensure_future(harness.ui.workers.pop(0))
+    await cluster.entered.wait()
+
+    switching[0] = True
+    cluster.release.set()
+    await read
+
+    assert (harness.messages(), harness.updates, harness.notes()) == ([], 0, [])
 ```
 
 - [ ] **Step 2:** Run `uv run --frozen pytest -p no:tach tests/ui/test_api_resources_controller.py -q`. Expected: collection fails, no module.
@@ -543,8 +562,9 @@ coordinator cancels. Commands typed during a read wait for it. An unknown
 command starts a read only when none started in the last `min_interval`
 seconds, so repeated typos do not flood the API server; an explicit refresh
 is not rate-limited. A read the context has moved past is discarded: the
-composition root never applies one from an earlier session, and the epoch
-check drops what is left.
+composition root never applies one from an earlier session, and a read a
+switch has crossed, even one only under way, posts, notifies and refreshes
+nothing.
 """
 
 from __future__ import annotations
@@ -667,6 +687,7 @@ class ApiResourcesController:
         post: Callable[[Message], object],
         aliases_updated: Callable[[], None],
         epoch: Callable[[], int],
+        crossed: Callable[[int], bool],
         reads_allowed: Callable[[], bool],
         navigation_position: Callable[[], NavigationPosition],
         clock: Callable[[], float] = time.monotonic,
@@ -678,6 +699,7 @@ class ApiResourcesController:
         self._post = post
         self._aliases_updated = aliases_updated
         self._epoch = epoch
+        self._crossed = crossed
         self._reads_allowed = reads_allowed
         self._position = navigation_position
         self._clock = clock
@@ -758,7 +780,8 @@ class ApiResourcesController:
         finally:
             self._running = False
             waiting, self._waiting = self._waiting, []
-        if self._epoch() != epoch or (outcome is not None and not outcome.applied):
+        # `crossed` also covers a switch under way, before its epoch moves.
+        if self._crossed(epoch) or (outcome is not None and not outcome.applied):
             return
         self._report(outcome, failure, announce=announce)
         # Only the newest command typed in a pane may navigate it, whatever
@@ -1269,7 +1292,7 @@ async def rediscover_aliases(
         self._report_unknown(text)
 ```
 
-- [ ] Add `rediscover` to `compose_command_reasons`; `cancel_worker_group(API_RESOURCES_GROUP)` after the creation group; `rediscover: Rediscover | None` on `KorvidApp` and `AppRuntimeInputs`. In `__main__.py`, create one `alias_reservations = AliasReservations()` for the run, pass `rediscover=lambda: rediscover_aliases(kube, aliases, alias_reservations)` to `KorvidApp`, and build the controller with `known=lambda word: view.canonical_kind(word) if word in view.aliases() else None`, `post=app.post_message`, `aliases_updated=app.on_aliases_updated`, `epoch=context.epoch`, `reads_allowed=context.reads_allowed` and `navigation_position=lambda: (app._pane, app._pane.nav_gen)`; `on_navigate_command` asks `deferred_navigation_guard` before navigating.
+- [ ] Add `rediscover` to `compose_command_reasons`; `cancel_worker_group(API_RESOURCES_GROUP)` after the creation group; `rediscover: Rediscover | None` on `KorvidApp` and `AppRuntimeInputs`. In `__main__.py`, create one `alias_reservations = AliasReservations()` for the run, pass `rediscover=lambda: rediscover_aliases(kube, aliases, alias_reservations)` to `KorvidApp`, and build the controller with `known=lambda word: view.canonical_kind(word) if word in view.aliases() else None`, `post=app.post_message`, `aliases_updated=app.on_aliases_updated`, `epoch=context.epoch`, `crossed=context.crossed`, `reads_allowed=context.reads_allowed` and `navigation_position=lambda: (app._pane, app._pane.nav_gen)`; `on_navigate_command` asks `deferred_navigation_guard` before navigating.
 - [ ] Run the router, policy, coordinator, wiring and palette tests, then commit.
 
 ### Task 4: End to end

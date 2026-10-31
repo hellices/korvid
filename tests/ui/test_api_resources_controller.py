@@ -61,6 +61,7 @@ class Harness:
         *,
         epoch: Callable[[], int] = lambda: 1,
         reads_allowed: Callable[[], bool] = lambda: True,
+        switching: Callable[[], bool] = lambda: False,
     ) -> None:
         self.pane: object = "pane-1"
         self.generation = 7
@@ -76,6 +77,7 @@ class Harness:
             post=self.posted.append,
             aliases_updated=self._updated,
             epoch=epoch,
+            crossed=lambda since: switching() or since != epoch(),
             reads_allowed=reads_allowed,
             navigation_position=lambda: (self.pane, self.generation),
             clock=self.clock,
@@ -477,3 +479,20 @@ async def test_a_pane_that_navigated_while_a_read_ran_still_runs_only_its_newest
     assert isinstance(command, NavigateCommand)
     assert (command.view, command.origin) == ("gadgets", NavigationOrigin("pane-1", 8, 1))
     assert harness.notes() == []
+
+
+async def test_a_read_finished_once_a_switch_has_begun_is_not_acted_on() -> None:
+    """The switch flag rises before the epoch moves: that window counts too."""
+    switching = [False]
+    cluster = HeldCluster(Rediscovery(added=("widgets.example.com",)), "widgets")
+    harness = Harness(cluster, switching=lambda: switching[0])
+    harness.controller.refresh()
+    harness.controller.resolve_unknown("widgets")
+    read = asyncio.ensure_future(harness.ui.workers.pop(0))
+    await cluster.entered.wait()
+
+    switching[0] = True
+    cluster.release.set()
+    await read
+
+    assert (harness.messages(), harness.updates, harness.notes()) == ([], 0, [])
