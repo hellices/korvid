@@ -34,6 +34,16 @@ tracks the next release scope.
   possibility, not a cause. See
   [Workload creation failures](../tui.md#workload-creation-failures).
 
+## Kinds served during a session
+
+- A CustomResourceDefinition installed while korvid runs opens through `:`
+  without a restart. An unknown `:` command reads the API resources again
+  before it is reported, at most once every 30 seconds. `:rediscover` (or
+  **Refresh API resources** in the Action Palette) reads them now and says
+  which kinds were added, removed or moved to another version. Group versions
+  that cannot be read keep the kinds korvid already knew. See
+  [Read the cockpit](../tui.md#read-the-cockpit).
+
 ## Current configuration and extension contracts
 
 Existing migration links continue in the
