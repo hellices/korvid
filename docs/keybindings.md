@@ -177,6 +177,8 @@ printable keys, including Shift-only letters, punctuation, spaces, and Unicode:
 those keys must remain available to text inputs and typed approval gates.
 Use an available Ctrl/Alt combination or function key instead. This restriction
 does not apply to normal actions or the main-screen-only command-bar shortcut.
+Copy (`y`) also works in the Describe view, so it cannot take that view's
+own keys: `Esc`, `q`, `/`, `n` and `N`, even when Quit has moved off `q`.
 The editor cannot open over a dialog or during a context switch. The palette's
 own key moves under
 `open_action_palette`, but its fixed

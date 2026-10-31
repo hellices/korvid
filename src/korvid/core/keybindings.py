@@ -190,6 +190,7 @@ def _entry_problem(
     priority_actions: Collection[str],
     reserved: Mapping[str, str],
     priority_reserved: Mapping[str, str],
+    action_reserved: Mapping[str, str] | None = None,
 ) -> str | None:
     if action in PROTECTED_ACTIONS:
         return f"'{action}' belongs to the approval dialog and cannot be remapped"
@@ -208,6 +209,11 @@ def _entry_problem(
         return f"priority action '{action}' may not take fixed modal key '{key}' owned by '{priority_owner}'"
     if marker in reserved:
         return f"key '{key}' for '{action}' is reserved by '{reserved[marker]}' and cannot be remapped over"
+    owner = (action_reserved or {}).get(marker)
+    if owner is not None:
+        return (
+            f"key '{key}' for '{action}' is fixed to '{owner}' on a screen '{action}' also works on"
+        )
     if action in priority_actions and _printable_key(key):
         return f"priority action '{action}' may not take printable key '{key}' — text input must keep that key"
     return None
@@ -221,6 +227,7 @@ def _validated_overrides(
     priority_reserved_keys: Mapping[str, str],
     warnings: list[str],
     action_contexts: ActionContexts,
+    action_reserved_keys: Mapping[str, Mapping[str, str]],
 ) -> dict[str, str]:
     """First pass: per-entry checks (action known, key usable, no dup key)."""
     overrides: dict[str, str] = {}
@@ -228,8 +235,15 @@ def _validated_overrides(
     reserved = {canonical_key(key): owner for key, owner in reserved_keys.items()}
     priority_reserved = {canonical_key(key): owner for key, owner in priority_reserved_keys.items()}
     for action, raw_key in raw.items():
+        fixed = action_reserved_keys.get(action, {})
         problem = _entry_problem(
-            action, raw_key, actions, priority_actions, reserved, priority_reserved
+            action,
+            raw_key,
+            actions,
+            priority_actions,
+            reserved,
+            priority_reserved,
+            {canonical_key(key): owner for key, owner in fixed.items()},
         )
         if problem is not None:
             warnings.append(f"keybindings: {problem}")
@@ -297,6 +311,7 @@ def plan_keybindings(
     priority_reserved_keys: Mapping[str, str] | None = None,
     *,
     action_contexts: ActionContexts | None = None,
+    action_reserved_keys: Mapping[str, Mapping[str, str]] | None = None,
 ) -> KeymapPlan:
     """Validate config keybinding overrides against the app's actions.
 
@@ -313,6 +328,9 @@ def plan_keybindings(
             another priority action must not intercept before the modal.
         action_contexts: Static resource-view scopes from the dispatch policy.
             Unlisted actions overlap every view, including split-pane states.
+        action_reserved_keys: Per action, the fixed keys (key → owning
+            action) of a screen that binds the action too; that action may
+            not take them, though other actions may.
 
     Returns:
         A plan whose `overrides` contains only safe, conflict-free entries;
@@ -327,6 +345,7 @@ def plan_keybindings(
         priority_reserved_keys or {},
         warnings,
         action_contexts or {},
+        action_reserved_keys or {},
     )
     _drop_default_collisions(overrides, actions, warnings, action_contexts or {})
     return KeymapPlan(overrides, tuple(warnings))

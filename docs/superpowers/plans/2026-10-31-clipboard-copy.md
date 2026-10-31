@@ -12,7 +12,7 @@
 
 - **Masked stays masked:** the copy is the text the view displays (`DescribePane.body_text`, `describe_body_text` of the manifest the screen was given), never the manifest behind it. A Secret reaches the describe views only masked (`mask_secret_manifest` on the agent path; `d` sends Secrets to the Secret viewer), and the Secret viewer's audited `c` stays the only way to copy a Secret value.
 - **The notice never repeats the content:** it says what kind of thing was copied.
-- **Remappable:** the app binding has id `copy`, and so does the `DescribeScreen` binding, because Textual applies a keymap by id to every node.
+- **Remappable:** the app binding has id `copy`, and so does the `DescribeScreen` binding, because Textual applies a keymap by id to every node. So `copy` must not take `DescribeScreen`'s own fixed keys (`escape`, `q`, `/`, `n`, `N`): `KeybindingCatalog` derives per-action reservations from `SHARED_BINDING_SCREENS`, and `plan_keybindings` (startup and `:keys`) rejects them for that action only.
 - **Size limits:** `src/korvid/ui/app.py` is at 1496 of 1500 lines and `scripts/check_source_size.py` is not edited, so `action_describe`'s docstring is shortened to one line to make room for `action_copy` beside it.
 - **Commands:** use `uv run --frozen …`. Behind the corporate mirror, call the project venv's tools directly with `PYTHONPATH=src`.
 
@@ -317,7 +317,41 @@ async def test_a_remapped_copy_key_works_in_the_describe_view_too() -> None:
 
 - [ ] **Step 3:** Run `uv run --frozen pytest -p no:tach tests/ui -q`. Expected: all pass. Then commit.
 
-### Task 3: Document it, then run the full gate
+### Task 3: Keep a remapped copy off the describe view's own keys
 
-- [ ] `docs/keybindings.md`: a `y` row under "Move and inspect", and a paragraph on masking and the OSC 52 caveat. Add a release-notes entry.
+- [ ] **Step 1: Write the failing tests:** `tests/core/test_keybindings.py::test_an_action_may_not_take_a_key_another_screen_of_its_owns` (`plan_keybindings(..., action_reserved_keys=...)` rejects only that action), and in `tests/ui/test_keybinding_catalog.py`, `test_copy_may_not_take_a_fixed_key_of_the_describe_view` (startup plan and editor `assignment`) and `test_every_screen_that_reuses_an_app_binding_id_is_checked` (every widget screen that binds an app id is in `SHARED_BINDING_SCREENS`).
+- [ ] **Step 2: Implement.** `plan_keybindings` and `_entry_problem` take `action_reserved_keys: Mapping[str, Mapping[str, str]]`; `KeymapRules` carries it into `plan` and `assignment`; `KeybindingCatalog` derives it:
+
+```python
+SHARED_BINDING_SCREENS: tuple[type[DOMNode], ...] = (DescribeScreen,)
+
+
+def _key_owners(bindings: Iterable[BindingType]) -> dict[str, str]:
+    return {
+        canonical_key(key.strip()): binding.action
+        for raw in bindings
+        for binding in (as_binding(raw),)
+        for key in binding.key.split(",")
+    }
+```
+
+```python
+    def _screen_reserved_keys(self, screens: Iterable[type[DOMNode]]) -> dict[str, dict[str, str]]:
+        """Per shared action, the fixed keys of each screen that binds it too."""
+        by_id = {b.id: b.action for b in self._bindings if b.id is not None}
+        reserved: dict[str, dict[str, str]] = {}
+        for screen in screens:
+            own = [as_binding(b) for b in screen.__dict__.get("BINDINGS", [])]
+            fixed = _key_owners(b for b in own if b.id is None)
+            for binding in own:
+                if binding.id in by_id:
+                    reserved.setdefault(by_id[binding.id], {}).update(fixed)
+        return reserved
+```
+
+- [ ] **Step 3:** Run `uv run --frozen pytest -p no:tach tests/core/test_keybindings.py tests/core/test_keymap_edit.py tests/ui/test_keybinding_catalog.py -q`. Expected: all pass. Then commit.
+
+### Task 4: Document it, then run the full gate
+
+- [ ] `docs/keybindings.md`: a `y` row under "Move and inspect", a paragraph on masking and the OSC 52 caveat, and, under "Remap an app action", the describe view's keys copy cannot take. Add a release-notes entry.
 - [ ] Run `make check`. Expected: every step passes.

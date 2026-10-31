@@ -19,6 +19,12 @@ from korvid.ui.app_bindings import (
     as_binding,
 )
 from korvid.ui.modal_bindings import modal_bindings
+from korvid.ui.widgets.describe_screen import DescribeScreen
+
+#: Screens that bind an app binding's id too, so a remap moves their key
+#: with the app's (Textual applies a keymap by id). Their own fixed keys
+#: are then reserved for that action.
+SHARED_BINDING_SCREENS: tuple[type[DOMNode], ...] = (DescribeScreen,)
 
 
 def _key_owners(bindings: Iterable[BindingType]) -> dict[str, str]:
@@ -34,7 +40,11 @@ class KeybindingCatalog:
     """One view of declared bindings, shared by startup and the editor."""
 
     def __init__(
-        self, bindings: Iterable[BindingType], *, modal_keys: Collection[str] = ()
+        self,
+        bindings: Iterable[BindingType],
+        *,
+        modal_keys: Collection[str] = (),
+        screens: Iterable[type[DOMNode]] = SHARED_BINDING_SCREENS,
     ) -> None:
         self._bindings = tuple(as_binding(binding) for binding in bindings)
         actions: dict[str, tuple[str, ...]] = {}
@@ -53,7 +63,20 @@ class KeybindingCatalog:
             reserved_keys=self._reserved_keys(),
             priority_reserved_keys=self._priority_keys(modal_keys),
             action_contexts=action_contexts(),
+            action_reserved_keys=self._screen_reserved_keys(screens),
         )
+
+    def _screen_reserved_keys(self, screens: Iterable[type[DOMNode]]) -> dict[str, dict[str, str]]:
+        """Per shared action, the fixed keys of each screen that binds it too."""
+        by_id = {b.id: b.action for b in self._bindings if b.id is not None}
+        reserved: dict[str, dict[str, str]] = {}
+        for screen in screens:
+            own = [as_binding(b) for b in screen.__dict__.get("BINDINGS", [])]
+            fixed = _key_owners(b for b in own if b.id is None)
+            for binding in own:
+                if binding.id in by_id:
+                    reserved.setdefault(by_id[binding.id], {}).update(fixed)
+        return reserved
 
     def _reserved_keys(self) -> dict[str, str]:
         fixed: dict[str, str] = {}
