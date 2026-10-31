@@ -4,7 +4,7 @@
 
 **Goal:** Open a kind the cluster started serving during the session, such as a CRD installed after startup, without restarting korvid (#517).
 
-**Architecture:** The composition root gains `rediscover_aliases(kube, aliases)`. It invalidates the session's discovery, reads it again, and makes the shared alias map match it, keeping what could not be read. `ui/api_resources_controller.py` runs it in one exclusive worker, for `:rediscover` and its palette entry and, rate-limited, before an unknown `:` command is reported. The router asks it first; the command it settles is posted again, marked `rediscovered` if still unknown.
+**Architecture:** The composition root gains `rediscover_aliases(kube, aliases, reservations)`. It invalidates the session's discovery, reads it again, and makes the shared alias map match it, keeping what could not be read. `ui/api_resources_controller.py` runs it in one exclusive worker, for `:rediscover` and its palette entry and, rate-limited, before an unknown `:` command is reported. The router asks it first; the command it settles is posted again, marked `rediscovered` if still unknown.
 
 **Tech Stack:** Python 3.11+, Textual, pytest with `asyncio_mode = "auto"`, mypy `--strict`, ruff, tach.
 
@@ -50,6 +50,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from typing import Any
 
@@ -297,14 +298,37 @@ async def test_a_failed_read_keeps_the_known_kinds_and_reports_the_command() -> 
     assert harness.messages() == [("unknown", "widgets", "True")]
 
 
-@pytest.mark.parametrize("discarded_by", ["epoch", "generation"])
-async def test_a_context_switch_during_a_read_discards_it(discarded_by: str) -> None:
-    epochs = iter([1, 2])
-    outcome = Rediscovery(applied=discarded_by != "generation")
-    harness = Harness(
-        Cluster(outcome, "widgets"),
-        epoch=(lambda: next(epochs)) if discarded_by == "epoch" else (lambda: 1),
-    )
+class HeldCluster(Cluster):
+    """Holds each read until `release` is set, so the context can move meanwhile."""
+
+    def __init__(self, outcome: Rediscovery, *served: str) -> None:
+        super().__init__(outcome, *served)
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def rediscover(self) -> Rediscovery:
+        self.entered.set()
+        await self.release.wait()
+        return await super().rediscover()
+
+
+async def test_a_context_switch_during_a_read_discards_it() -> None:
+    epoch = [1]
+    cluster = HeldCluster(UNCHANGED, "widgets")
+    harness = Harness(cluster, epoch=lambda: epoch[0])
+
+    harness.controller.resolve_unknown("widgets")
+    read = asyncio.ensure_future(harness.ui.workers.pop(0))
+    await cluster.entered.wait()
+    epoch[0] = 2
+    cluster.release.set()
+    await read
+
+    assert (harness.messages(), harness.updates, harness.notes()) == ([], 0, [])
+
+
+async def test_a_read_the_composition_root_did_not_apply_is_discarded() -> None:
+    harness = Harness(Cluster(Rediscovery(applied=False), "widgets"))
 
     harness.controller.resolve_unknown("widgets")
     await harness.finish()
@@ -1033,7 +1057,7 @@ async def rediscover_aliases(
         self._report_unknown(text)
 ```
 
-- [ ] Add `rediscover` to `compose_command_reasons`; `cancel_worker_group(API_RESOURCES_GROUP)` after the creation group; `rediscover: Rediscover | None` on `KorvidApp` and `AppRuntimeInputs`. In `__main__.py`, pass `rediscover=lambda: rediscover_aliases(kube, aliases)` to `KorvidApp` and build the controller with `known=lambda word: view.canonical_kind(word) if word in view.aliases() else None`, `post=app.post_message`, `aliases_updated=app.on_aliases_updated`, `epoch=context.epoch`, `reads_allowed=context.reads_allowed` and `focused_pane=lambda: app._pane`, and pass `rediscover=lambda: rediscover_aliases(kube, aliases, alias_reservations)` with one `AliasReservations` for the run.
+- [ ] Add `rediscover` to `compose_command_reasons`; `cancel_worker_group(API_RESOURCES_GROUP)` after the creation group; `rediscover: Rediscover | None` on `KorvidApp` and `AppRuntimeInputs`. In `__main__.py`, create one `alias_reservations = AliasReservations()` for the run, pass `rediscover=lambda: rediscover_aliases(kube, aliases, alias_reservations)` to `KorvidApp`, and build the controller with `known=lambda word: view.canonical_kind(word) if word in view.aliases() else None`, `post=app.post_message`, `aliases_updated=app.on_aliases_updated`, `epoch=context.epoch`, `reads_allowed=context.reads_allowed` and `focused_pane=lambda: app._pane`.
 - [ ] Run the router, policy, coordinator, wiring and palette tests, then commit.
 
 ### Task 4: End to end

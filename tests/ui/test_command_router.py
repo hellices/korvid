@@ -376,6 +376,7 @@ def test_a_command_still_unknown_after_reading_again_is_reported_not_read_again(
     harness.router.route_unknown(UnknownCommand("operators", rediscovered=True))
 
     assert api_resources.asked == []
+    assert api_resources.refreshes == 0
     assert harness.operators.explanations == 1
     assert any("Unknown resource or command: widgets" in m for m in harness.ui.messages())
 

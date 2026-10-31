@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from typing import Any
 
@@ -249,14 +250,37 @@ async def test_a_failed_read_keeps_the_known_kinds_and_reports_the_command() -> 
     assert harness.messages() == [("unknown", "widgets", "True")]
 
 
-@pytest.mark.parametrize("discarded_by", ["epoch", "generation"])
-async def test_a_context_switch_during_a_read_discards_it(discarded_by: str) -> None:
-    epochs = iter([1, 2])
-    outcome = Rediscovery(applied=discarded_by != "generation")
-    harness = Harness(
-        Cluster(outcome, "widgets"),
-        epoch=(lambda: next(epochs)) if discarded_by == "epoch" else (lambda: 1),
-    )
+class HeldCluster(Cluster):
+    """Holds each read until `release` is set, so the context can move meanwhile."""
+
+    def __init__(self, outcome: Rediscovery, *served: str) -> None:
+        super().__init__(outcome, *served)
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def rediscover(self) -> Rediscovery:
+        self.entered.set()
+        await self.release.wait()
+        return await super().rediscover()
+
+
+async def test_a_context_switch_during_a_read_discards_it() -> None:
+    epoch = [1]
+    cluster = HeldCluster(UNCHANGED, "widgets")
+    harness = Harness(cluster, epoch=lambda: epoch[0])
+
+    harness.controller.resolve_unknown("widgets")
+    read = asyncio.ensure_future(harness.ui.workers.pop(0))
+    await cluster.entered.wait()
+    epoch[0] = 2
+    cluster.release.set()
+    await read
+
+    assert (harness.messages(), harness.updates, harness.notes()) == ([], 0, [])
+
+
+async def test_a_read_the_composition_root_did_not_apply_is_discarded() -> None:
+    harness = Harness(Cluster(Rediscovery(applied=False), "widgets"))
 
     harness.controller.resolve_unknown("widgets")
     await harness.finish()
