@@ -797,8 +797,9 @@ class KorvidApp(App[None]):
             again = f"run :{message.view} again in the pane you want it in"
             self.notify(f"{message.view} is served now; {again}", markup=False)
             return
-        epoch = self._ctx.epoch()
-        await self._workspace_ctl.navigate_command(message.view, message.namespace)
+        epoch = self._ctx.epoch() if message.epoch is None else message.epoch
+        guard = () if message.epoch is None else (lambda: not self._ctx.crossed(epoch),)
+        await self._workspace_ctl.navigate_command(message.view, message.namespace, *guard)
         if self._ctx.crossed(epoch):
             return  # the namespace belongs to the cluster switched away from
         if message.namespace and pane.scope == message.namespace:

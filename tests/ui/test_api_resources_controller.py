@@ -307,4 +307,4 @@ async def test_a_settled_command_carries_the_pane_it_was_typed_in() -> None:
 
     (command,) = harness.posted
     assert isinstance(command, NavigateCommand)
-    assert command.origin == "pane-1"
+    assert (command.origin, command.epoch) == ("pane-1", 1)

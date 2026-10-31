@@ -16,6 +16,7 @@ from korvid.k8s.discovery import PODS_META, ResourceMeta, build_alias_map
 from korvid.k8s.discovery_snapshot import GroupVersionOutcome, RawDiscovery, RootOutcome
 from korvid.k8s.models import GenericSummary
 from korvid.ui.api_resources_controller import Rediscovery
+from korvid.ui.messages import NavigateCommand
 from tests.app_factory import build_test_app
 from tests.ui.waits import until
 
@@ -173,3 +174,15 @@ async def test_a_kind_found_after_focus_moved_does_not_open_in_the_other_pane() 
         )
 
         assert [pane.kind for pane in app._workspace.panes] == ["pods", "pods"]
+
+
+async def test_a_navigation_found_before_a_context_switch_is_not_applied_after_it() -> None:
+    app = _app(Cluster())
+    async with app.run_test() as pilot:
+        stale = app._ctx.epoch() - 1
+        app.post_message(NavigateCommand("widgets", origin=app._pane, epoch=stale))
+        # Handled in order: once this one lands, the stale one has been handled.
+        app.post_message(NavigateCommand(None, "kube-system"))
+        await until(pilot, lambda: app._pane.scope == "kube-system", label="later navigation")
+
+        assert app.current_kind == "pods"

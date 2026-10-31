@@ -12,8 +12,9 @@ from korvid.tools.proposals import WriteProposal
 class NavigateCommand(Message):
     """Command to navigate to a view, optionally in a specific namespace.
 
-    `origin` is the pane a deferred command was typed in: the handler opens
-    the view only while that pane is still focused.
+    `origin` is the pane a deferred command was typed in, and `epoch` the
+    context epoch it was settled in: the handler opens the view only while
+    that pane is focused and no context switch has crossed that epoch.
     """
 
     view: str | None
@@ -24,12 +25,18 @@ class NavigateCommand(Message):
     namespace: str | None  # type: ignore[misc,assignment]
 
     def __init__(
-        self, view: str | None, namespace: str | None = None, *, origin: object | None = None
+        self,
+        view: str | None,
+        namespace: str | None = None,
+        *,
+        origin: object | None = None,
+        epoch: int | None = None,
     ) -> None:
         super().__init__()
         self.view = view
         self.namespace = namespace
         self.origin = origin
+        self.epoch = epoch
 
 
 class FilterCommand(Message):

@@ -186,7 +186,7 @@ class ApiResourcesController:
             return
         self._report(outcome, failure, announce=announce)
         for text, pane in waiting:
-            self._post_again(text, pane)
+            self._post_again(text, pane, epoch)
 
     def _report(self, outcome: Rediscovery | None, failure: str | None, *, announce: bool) -> None:
         if outcome is None:
@@ -208,17 +208,18 @@ class ApiResourcesController:
                 markup=False,
             )
 
-    def _post_again(self, text: str, pane: object) -> None:
+    def _post_again(self, text: str, pane: object, epoch: int) -> None:
         """Run `text` again in the pane it was typed in.
 
-        The navigation carries that pane, and the app opens the view only
-        while it is still focused when the message is handled.
+        The navigation carries that pane and the read's epoch: the app opens
+        the view only while the pane is focused and, under the navigation
+        lock, only if no context switch has crossed the epoch.
         """
         command = parse_command(text, self._known)
         if isinstance(command, UnknownCommand):
             command = UnknownCommand(text, rediscovered=True)
         elif isinstance(command, NavigateCommand):
-            command = NavigateCommand(command.view, command.namespace, origin=pane)
+            command = NavigateCommand(command.view, command.namespace, origin=pane, epoch=epoch)
         self._post(command)
 
     async def cancel_workers(self) -> None:
