@@ -224,6 +224,29 @@ the same authenticated transport as reads, never a second credential in
 tool arguments. MCP `clientInfo` is caller-supplied display metadata, never
 treated as authenticated identity.
 
+## Tool hints
+
+`tools/list` gives each tool a title and MCP tool annotations, so a host can
+treat tools differently, for example by allowing read-only tools without
+asking and prompting before the rest. korvid derives them from the effect each
+tool declares in its registry, so no tool claims less than it does:
+
+| Tools | `readOnlyHint` | `destructiveHint` | `idempotentHint` | `openWorldHint` |
+|---|---|---|---|---|
+| Kubernetes reads: listings, manifests, logs, events and diagnoses | true | false | — | false |
+| Observability reads, such as Prometheus and Loki queries | true | false | — | true |
+| Screen tools, such as `navigate` and `open_logs` | true | false | — | false |
+| `propose_write` | false | true | false | false |
+| `get_write_proposal`, `cancel_write_proposal` | false | false | true | false |
+
+Screen tools change only what the TUI shows, never the cluster.
+`propose_write` is marked destructive because one tool proposes every write,
+deletes included.
+
+The hints are for the host's own prompting. korvid's approval never relies on
+them: a proposal still waits for your keystroke in the TUI whatever the host
+allowed, and read-only mode still removes writes.
+
 ## Representative tools
 
 Not a full schema inventory — a compact map of what each family does and how

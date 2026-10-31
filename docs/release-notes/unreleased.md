@@ -44,6 +44,14 @@ tracks the next release scope.
   that cannot be read keep the kinds korvid already knew. See
   [Read the cockpit](../tui.md#read-the-cockpit).
 
+## MCP tool hints
+
+- `tools/list` now gives every MCP tool a title and annotations
+  (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`)
+  derived from what the tool touches, so a host can allow read-only tools
+  without asking. Approval does not rely on them: write proposals still wait
+  for a keystroke in the TUI. See [Tool hints](../mcp.md#tool-hints).
+
 ## Current configuration and extension contracts
 
 Existing migration links continue in the
