@@ -142,6 +142,17 @@ COMMANDS: tuple[CommandDescriptor, ...] = (
         ),
     ),
     CommandDescriptor(
+        aliases=("rediscover",),
+        help=((":rediscover", "Read the cluster's API resources again, as after a CRD install"),),
+        operation=BuiltinOperation.REDISCOVER,
+        maximum_arguments=0,
+        palette=PaletteCommand(
+            "Refresh API resources",
+            "rediscover",
+            ("crd", "discovery", "api", "new kind"),
+        ),
+    ),
+    CommandDescriptor(
         aliases=("q", "quit"),
         help=((":q", "Quit (also :quit)"),),
         operation=CommandParse.QUIT,
@@ -237,6 +248,11 @@ def command_help(*, telepresence: bool = True) -> list[tuple[str, str]]:
         if descriptor.operation is CommandParse.CONTEXT:
             rows.extend(_RESOURCE_HELP)
     return rows
+
+
+def is_builtin_command(word: str) -> bool:
+    """Whether `word` is an app-owned command's alias, never a resource's."""
+    return word in _COMMAND_BY_ALIAS
 
 
 def command_words(resource_aliases: Iterable[str]) -> list[str]:

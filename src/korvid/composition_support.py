@@ -32,11 +32,13 @@ from korvid.core.store import ALL_NAMESPACES, Summary
 from korvid.k8s.client import KubeClient
 from korvid.k8s.csp import ProviderInfo
 from korvid.k8s.discovery import PODS_META, ResourceMeta, build_alias_map
+from korvid.k8s.discovery_snapshot import RawDiscovery, project_resources
 from korvid.k8s.helm import HELM_RELEASES_META, HELM_REVISIONS_META
 from korvid.k8s.olm import PACKAGES_GROUP
 from korvid.k8s.watch_events import WatchEvent
 from korvid.tools.executor import UIBridge
 from korvid.tools.structured import ERROR_PREFIX
+from korvid.ui.api_resources_controller import Rediscovery
 
 if TYPE_CHECKING:
     from korvid.agent.provider import LLMProvider
@@ -429,12 +431,76 @@ async def _discover_in_background(
         logger.warning("Resource discovery failed; staying pods-only", exc_info=True)
         return
     aliases.update(discovered)
-    # Where OLM serves the operator catalog, `:operators` opens it - unless a
-    # real kind (e.g. OLM v1's Operator) already claims that alias.
+    _alias_operator_catalog(aliases)
+    app.on_aliases_updated()
+
+
+def _alias_operator_catalog(aliases: dict[str, ResourceMeta]) -> None:
+    """Where OLM serves the operator catalog, `:operators` opens it - unless a
+    real kind (e.g. OLM v1's Operator) already claims that alias."""
     pkg_meta = aliases.get(f"packagemanifests.{PACKAGES_GROUP}")
     if pkg_meta is not None:
         aliases.setdefault("operators", pkg_meta)
-    app.on_aliases_updated()
+
+
+def _unreadable(snapshot: RawDiscovery) -> tuple[str, ...]:
+    """What a discovery could not read in full, so its kinds are kept as they were."""
+    names = [
+        f"{outcome.group}/{outcome.version}" if outcome.group else outcome.version
+        for outcome in snapshot.group_versions
+        if not outcome.complete
+    ]
+    if not snapshot.core_root.complete:
+        names.append("the core API version list")
+    if not snapshot.group_root.complete:
+        names.append("the API group list")
+    return tuple(names)
+
+
+def _kept(snapshot: RawDiscovery, meta: ResourceMeta) -> bool:
+    """Whether a known kind stays although this discovery did not report it."""
+    if not (snapshot.core_root.complete and snapshot.group_root.complete):
+        return True
+    return any(o.group == meta.group and not o.complete for o in snapshot.group_versions)
+
+
+async def rediscover_aliases(kube: KubeClient, aliases: dict[str, ResourceMeta]) -> Rediscovery:
+    """Read discovery afresh and make the session's aliases match it (#517).
+
+    Unlike the startup merge, a kind the cluster no longer serves is dropped
+    and one served at a new preferred version replaces the old, except where
+    discovery could not be read in full: those kinds are kept. A read that a
+    context switch overtook changes nothing. A failed core or `/apis` read
+    raises, as `project_resources` does, and changes nothing either.
+    """
+    generation = kube.session_generation
+    kube.invalidate_discovery()
+    snapshot = await kube.discovery_snapshot()
+    if generation != kube.session_generation or snapshot.generation != generation:
+        return Rediscovery(applied=False)
+    fresh = build_alias_map(
+        [PODS_META, HELM_RELEASES_META, HELM_REVISIONS_META, *project_resources(snapshot)]
+    )
+    for alias, meta in aliases.items():
+        if _kept(snapshot, meta):
+            fresh.setdefault(alias, meta)
+    _alias_operator_catalog(fresh)
+    before = {meta.identity: meta for meta in aliases.values() if not meta.synthetic}
+    after = {meta.identity: meta for meta in fresh.values() if not meta.synthetic}
+    aliases.clear()
+    aliases.update(fresh)
+    return Rediscovery(
+        added=tuple(sorted(m.qualified_name for i, m in after.items() if i not in before)),
+        removed=tuple(sorted(m.qualified_name for i, m in before.items() if i not in after)),
+        changed=tuple(
+            sorted(
+                m.qualified_name
+                for i, m in after.items()
+                if i in before and before[i].version != m.version
+            )
+        ),
+        unreadable=_unreadable(snapshot),
+    )
 
 
 def _close_provider_in_background(provider: LLMProvider, tasks: set[asyncio.Future[Any]]) -> None:

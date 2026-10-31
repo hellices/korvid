@@ -90,10 +90,15 @@ class SwitchContextCommand(Message):
 
 
 class UnknownCommand(Message):
-    """Command that was not recognised — future agent fallthrough hook."""
+    """Command that was not recognised — future agent fallthrough hook.
 
-    def __init__(self, text: str) -> None:
+    `rediscovered` marks a command parsed again after the API resources were
+    read again for it, so it is reported rather than read for once more.
+    """
+
+    def __init__(self, text: str, *, rediscovered: bool = False) -> None:
         self.text = text
+        self.rediscovered = rediscovered
         super().__init__()
 
 
@@ -122,6 +127,7 @@ class BuiltinOperation(Enum):
     DEPLOYMENT_OUTCOMES = "outcomes"
     CONFIG_PROPAGATION = "consumers"
     CREATION_FAILURES = "blocked"
+    REDISCOVER = "rediscover"
 
 
 class BuiltinCommand(Message):

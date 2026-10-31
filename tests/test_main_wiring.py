@@ -1893,6 +1893,36 @@ async def test_wire_and_run_hands_the_kube_client_to_diagnostics(
     assert _FakeAppCapturesKwargs.instances[0].captured["evidence_client"] is kube
 
 
+async def test_wire_and_run_rediscovers_through_the_session_client_and_aliases(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`:rediscover` reads through the session's client into the live alias map."""
+    import korvid.__main__ as main_mod
+    from korvid.core.config import KorvidConfig
+    from korvid.ui.api_resources_controller import Rediscovery
+
+    calls: list[tuple[Any, Any]] = []
+
+    async def rediscover_aliases(kube: Any, aliases: Any) -> Rediscovery:
+        calls.append((kube, aliases))
+        return Rediscovery()
+
+    monkeypatch.setattr(main_mod, "KorvidApp", _FakeAppCapturesKwargs)
+    monkeypatch.setattr(main_mod, "assemble_app_runtime", lambda app: app)
+    monkeypatch.setattr(main_mod, "rediscover_aliases", rediscover_aliases)
+    _FakeAppCapturesKwargs.instances.clear()
+
+    kube = _FakeKubeForWiring()
+    state = main_mod._RunState()
+    await main_mod._wire_and_run(KorvidConfig(readonly=True), cast("Any", kube), state)
+    if state.discovery_box:
+        await state.discovery_box[0]
+
+    captured = _FakeAppCapturesKwargs.instances[0].captured
+    assert await captured["rediscover"]() == Rediscovery()
+    assert calls == [(kube, captured["aliases"])]
+
+
 async def test_wire_and_run_wires_helm_release_identity_reader_from_kube(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

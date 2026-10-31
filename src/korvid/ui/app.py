@@ -66,6 +66,7 @@ from korvid.ui.action_palette import (
 from korvid.ui.agent_ui_controller import (
     AgentUiController,
 )
+from korvid.ui.api_resources_controller import Rediscover
 from korvid.ui.app_bindings import (
     APP_BINDINGS,
     APP_CSS,
@@ -191,6 +192,7 @@ class KorvidApp(App[None]):
         deployment_outcome_reader: DeploymentOutcomeReader | None = None,
         deployment_cluster_id: Callable[[], str | None] = lambda: None,
         evidence_client: EvidenceClient | None = None,
+        rediscover: Rediscover | None = None,
     ) -> None:
         super().__init__()
         if approval_timeout_seconds is not None and (
@@ -246,6 +248,7 @@ class KorvidApp(App[None]):
             deployment_outcome_reader=deployment_outcome_reader,
             deployment_cluster_id=deployment_cluster_id,
             evidence_client=evidence_client,
+            rediscover=rediscover,
         )
         self._runtime_bound = False
         self._runtime_inputs = runtime_inputs

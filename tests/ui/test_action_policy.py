@@ -869,3 +869,21 @@ def test_composed_command_reasons_ask_the_creation_owner_about_blocked() -> None
     assert reasons["blocked"]() == wrong_view
     answer = None
     assert reasons["blocked"]() is None
+
+
+def test_composed_command_reasons_ask_the_api_resources_owner_about_rediscover() -> None:
+    """`:rediscover` is greyed out only without a cluster connection."""
+    unconnected = UnavailableReason(AvailabilityCode.MISSING_CAPABILITY, "Needs a connection")
+    reasons = compose_command_reasons(
+        agent_available=lambda: True,
+        agent_setup_available=lambda: True,
+        agent_session_configured=lambda: True,
+        mcp=lambda: None,
+        telepresence=lambda: None,
+        proposals=lambda: None,
+        namespace=lambda: None,
+        context=lambda: None,
+        port_forwards=lambda: None,
+        rediscover=lambda: unconnected,
+    )
+    assert reasons["rediscover"]() == unconnected

@@ -63,6 +63,7 @@ from korvid.ui.action_availability import (
     AvailabilityCode,
     UnavailableReason,
 )
+from korvid.ui.api_resources_controller import API_RESOURCES_GROUP
 from korvid.ui.config_propagation_controller import CONFIG_PROPAGATION_GROUP
 from korvid.ui.creation_constraints_controller import CREATION_CONSTRAINTS_GROUP
 from korvid.ui.ui_surface import UiSurface
@@ -844,6 +845,9 @@ class ContextSwitchCoordinator(ContextGuard):
         # drop the result anyway, but the reads must stop too.
         self._surface.cancel_worker_group(CONFIG_PROPAGATION_GROUP)
         self._surface.cancel_worker_group(CREATION_CONSTRAINTS_GROUP)
+        # So must a rediscovery, which would otherwise write the old cluster's
+        # kinds into the alias map the switch is about to reset.
+        self._surface.cancel_worker_group(API_RESOURCES_GROUP)
         # An old-cluster namespace prefetch still in flight could land after
         # the new cluster's and overwrite its completions — cancel it first.
         # Both steps run on the workspace controller: it owns the prefetch
