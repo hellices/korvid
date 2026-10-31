@@ -246,3 +246,28 @@ async def test_operators_is_not_handed_to_the_catalog_once_its_kind_is_gone() ->
     await rediscover_aliases(kube, aliases, AliasReservations())
 
     assert "operators" not in aliases
+
+
+async def test_a_reinstalled_resource_gets_its_reserved_aliases_back() -> None:
+    aliases = _aliases(WIDGET)
+    reservations = AliasReservations()
+    kube = Kube(_snapshot(_outcome(OTHER_WIDGET)))
+    await rediscover_aliases(kube, aliases, reservations)
+
+    kube.snapshot = _snapshot(_outcome(OTHER_WIDGET), _outcome(WIDGET))
+    await rediscover_aliases(kube, aliases, reservations)
+
+    assert aliases["widgets"] is WIDGET
+    assert aliases["wd"] is WIDGET
+    assert aliases["widgets.other.example.org"] is OTHER_WIDGET
+
+
+async def test_a_kind_served_again_takes_the_version_read_even_if_another_version_failed() -> None:
+    aliases = _aliases(GADGET)
+    failed = _outcome(group="example.com", version="v1", complete=False)
+    kube = Kube(_snapshot(_outcome(GADGET_V2), failed))
+
+    outcome = await rediscover_aliases(kube, aliases, AliasReservations())
+
+    assert aliases["gadgets"] is GADGET_V2
+    assert outcome.unreadable == ("example.com/v1",)

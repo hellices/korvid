@@ -505,11 +505,11 @@ def _stable_aliases(
     for alias, meta in known.items():
         owners.setdefault(alias, meta.identity)
     served = {meta.identity: meta for meta in fresh.values()}
-    stable: dict[str, ResourceMeta] = {}
+    # Every alias whose owner is served, including a resource reinstalled
+    # after it went away, names it again at the version now served.
+    stable = {alias: served[owner] for alias, owner in owners.items() if owner in served}
     for alias, meta in known.items():
-        if meta.identity in served:
-            stable[alias] = served[meta.identity]
-        elif _kept(snapshot, meta):
+        if alias not in stable and _kept(snapshot, meta):
             stable[alias] = meta
     for alias, meta in fresh.items():
         if owners.setdefault(alias, meta.identity) == meta.identity:

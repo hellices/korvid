@@ -12,8 +12,8 @@
 
 - **Bounded:** one read at a time, and commands typed meanwhile wait for it. An unknown command starts a read at most once every 30 seconds; `:rediscover` is not rate-limited.
 - **Context-safe:** the context-switch coordinator cancels the worker group before the client swaps. A read whose session generation changed is never applied, and the controller drops a result whose context epoch changed.
-- **An alias never moves to another resource:** an open view, its watch and its rows are keyed by an alias, so a refresh keeps every known alias on its resource and drops one whose resource is gone. `AliasReservations` remembers that owner for the rest of the session, so a later refresh does not hand the alias over either; a new session generation (connect or context switch) lifts the reservations. Only an alias nobody held goes to a new resource, and the `:operators` catalog fallback is applied before that rule, not after it.
-- **A command runs where it was typed:** a read settles each waiting command in the pane it was typed in; if focus moved to another pane meanwhile, korvid says the kind is served now instead of opening it there.
+- **An alias never moves to another resource:** an open view, its watch and its rows are keyed by an alias, so a refresh keeps every known alias on its resource and drops one whose resource is gone. `AliasReservations` remembers that owner for the rest of the session, so a later refresh does not hand the alias over either, and gives the alias back if the resource is reinstalled; a new session generation (connect or context switch) lifts the reservations. Only an alias nobody held goes to a new resource, and the `:operators` catalog fallback is applied before that rule, not after it.
+- **A command runs where it was typed:** a settled navigation carries the pane it was typed in as `NavigateCommand.origin`, and `KorvidApp.on_navigate_command` opens it only while that pane is focused when the message is handled; otherwise it says the kind is served now. `ui/app.py` has 3 lines of room after this.
 - **No read during a context switch:** the controller checks `ContextGuard.reads_allowed()` before starting or queuing a read, because the coordinator has already cancelled the group and the old client would refill the alias map the switch reset.
 - **Never drop what could not be read:** a group version that failed or was incomplete keeps the kinds korvid knew from it; an incomplete `/api` or `/apis` root removes nothing. A failed core `v1` or `/apis` read changes nothing and is said.
 - **Palette search:** the help text and keywords must not contain the subsequence `h…e…l…m`, which a test reserves for Helm, and must not outrank the rows existing palette tests search for. Hence no "custom resource" or "reload" keyword.
@@ -346,17 +346,16 @@ def test_nothing_is_read_while_a_context_switch_is_under_way() -> None:
     ]
 
 
-async def test_a_kind_found_after_focus_moved_does_not_open_in_the_other_pane() -> None:
+async def test_a_settled_command_carries_the_pane_it_was_typed_in() -> None:
     harness = Harness(Cluster(UNCHANGED, "widgets"))
 
     harness.controller.resolve_unknown("widgets shop")
     harness.pane = "pane-2"
     await harness.finish()
 
-    assert harness.messages() == []
-    assert harness.notes() == [
-        ("widgets is served now; run :widgets shop again to open it", "information")
-    ]
+    (command,) = harness.posted
+    assert isinstance(command, NavigateCommand)
+    assert command.origin == "pane-1"
 ```
 
 - [ ] **Step 2:** Run `uv run --frozen pytest -p no:tach tests/ui/test_api_resources_controller.py -q`. Expected: collection fails, no module.
@@ -390,7 +389,7 @@ from textual.message import Message
 from korvid.k8s.errors import ApiStatusError, KubeClientError
 from korvid.ui.action_availability import AvailabilityCode, UnavailableReason
 from korvid.ui.command import is_builtin_command, parse_command
-from korvid.ui.messages import UnknownCommand
+from korvid.ui.messages import NavigateCommand, UnknownCommand
 from korvid.ui.ui_surface import UiSurface
 
 API_RESOURCES_GROUP = "api-resources"
@@ -574,15 +573,17 @@ class ApiResourcesController:
             )
 
     def _post_again(self, text: str, pane: object) -> None:
-        """Run `text` again where it was typed; never in a pane focused since."""
+        """Run `text` again in the pane it was typed in.
+
+        The navigation carries that pane, and the app opens the view only
+        while it is still focused when the message is handled.
+        """
         command = parse_command(text, self._known)
         if isinstance(command, UnknownCommand):
-            self._post(UnknownCommand(text, rediscovered=True))
-        elif self._focused_pane() is pane:
-            self._post(command)
-        else:
-            kind = text.split()[0]
-            self._ui.notify(f"{kind} is served now; run :{text} again to open it", markup=False)
+            command = UnknownCommand(text, rediscovered=True)
+        elif isinstance(command, NavigateCommand):
+            command = NavigateCommand(command.view, command.namespace, origin=pane)
+        self._post(command)
 
     async def cancel_workers(self) -> None:
         """Stop a read holding the old client, before a context switch swaps it."""
@@ -847,6 +848,31 @@ async def test_operators_is_not_handed_to_the_catalog_once_its_kind_is_gone() ->
     await rediscover_aliases(kube, aliases, AliasReservations())
 
     assert "operators" not in aliases
+
+
+async def test_a_reinstalled_resource_gets_its_reserved_aliases_back() -> None:
+    aliases = _aliases(WIDGET)
+    reservations = AliasReservations()
+    kube = Kube(_snapshot(_outcome(OTHER_WIDGET)))
+    await rediscover_aliases(kube, aliases, reservations)
+
+    kube.snapshot = _snapshot(_outcome(OTHER_WIDGET), _outcome(WIDGET))
+    await rediscover_aliases(kube, aliases, reservations)
+
+    assert aliases["widgets"] is WIDGET
+    assert aliases["wd"] is WIDGET
+    assert aliases["widgets.other.example.org"] is OTHER_WIDGET
+
+
+async def test_a_kind_served_again_takes_the_version_read_even_if_another_version_failed() -> None:
+    aliases = _aliases(GADGET)
+    failed = _outcome(group="example.com", version="v1", complete=False)
+    kube = Kube(_snapshot(_outcome(GADGET_V2), failed))
+
+    outcome = await rediscover_aliases(kube, aliases, AliasReservations())
+
+    assert aliases["gadgets"] is GADGET_V2
+    assert outcome.unreadable == ("example.com/v1",)
 ```
 
 - [ ] **Step 2: Implement it.** Move the startup discovery's `:operators` aliasing into `_alias_operator_catalog`, then add:
@@ -922,11 +948,11 @@ def _stable_aliases(
     for alias, meta in known.items():
         owners.setdefault(alias, meta.identity)
     served = {meta.identity: meta for meta in fresh.values()}
-    stable: dict[str, ResourceMeta] = {}
+    # Every alias whose owner is served, including a resource reinstalled
+    # after it went away, names it again at the version now served.
+    stable = {alias: served[owner] for alias, owner in owners.items() if owner in served}
     for alias, meta in known.items():
-        if meta.identity in served:
-            stable[alias] = served[meta.identity]
-        elif _kept(snapshot, meta):
+        if alias not in stable and _kept(snapshot, meta):
             stable[alias] = meta
     for alias, meta in fresh.items():
         if owners.setdefault(alias, meta.identity) == meta.identity:
@@ -1153,6 +1179,42 @@ async def test_rediscover_says_what_the_cluster_now_serves() -> None:
             label="refresh summary",
         )
         assert app._command_bar.known("wd") == "widgets"
+
+
+class SlowCluster(Cluster):
+    """Holds each discovery read until `release` is set."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.release = asyncio.Event()
+
+    async def discovery_snapshot(self) -> RawDiscovery:
+        await self.release.wait()
+        return await super().discovery_snapshot()
+
+
+async def test_a_kind_found_after_focus_moved_does_not_open_in_the_other_pane() -> None:
+    cluster = SlowCluster()
+    cluster.installed = True
+    app = _app(cluster)
+    async with app.run_test() as pilot:
+        await pilot.press("ctrl+w", "v")
+        await until(pilot, lambda: app._workspace.pane_count == 2, label="split")
+        await _command(pilot, "wd")
+        await pilot.press("ctrl+w", "w")
+        await until(pilot, lambda: app._workspace.focused_index == 0, label="focus on pane 1")
+
+        cluster.release.set()
+        await until(
+            pilot,
+            lambda: (
+                "widgets is served now; run :widgets again in the pane you want it in"
+                in _messages(app)
+            ),
+            label="told instead of opened",
+        )
+
+        assert [pane.kind for pane in app._workspace.panes] == ["pods", "pods"]
 ```
 
 ### Task 5: Document it, then run the full gate

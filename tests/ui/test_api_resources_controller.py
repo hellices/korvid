@@ -298,14 +298,13 @@ def test_nothing_is_read_while_a_context_switch_is_under_way() -> None:
     ]
 
 
-async def test_a_kind_found_after_focus_moved_does_not_open_in_the_other_pane() -> None:
+async def test_a_settled_command_carries_the_pane_it_was_typed_in() -> None:
     harness = Harness(Cluster(UNCHANGED, "widgets"))
 
     harness.controller.resolve_unknown("widgets shop")
     harness.pane = "pane-2"
     await harness.finish()
 
-    assert harness.messages() == []
-    assert harness.notes() == [
-        ("widgets is served now; run :widgets shop again to open it", "information")
-    ]
+    (command,) = harness.posted
+    assert isinstance(command, NavigateCommand)
+    assert command.origin == "pane-1"

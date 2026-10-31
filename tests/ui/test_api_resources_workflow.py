@@ -137,3 +137,39 @@ async def test_rediscover_says_what_the_cluster_now_serves() -> None:
             label="refresh summary",
         )
         assert app._command_bar.known("wd") == "widgets"
+
+
+class SlowCluster(Cluster):
+    """Holds each discovery read until `release` is set."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.release = asyncio.Event()
+
+    async def discovery_snapshot(self) -> RawDiscovery:
+        await self.release.wait()
+        return await super().discovery_snapshot()
+
+
+async def test_a_kind_found_after_focus_moved_does_not_open_in_the_other_pane() -> None:
+    cluster = SlowCluster()
+    cluster.installed = True
+    app = _app(cluster)
+    async with app.run_test() as pilot:
+        await pilot.press("ctrl+w", "v")
+        await until(pilot, lambda: app._workspace.pane_count == 2, label="split")
+        await _command(pilot, "wd")
+        await pilot.press("ctrl+w", "w")
+        await until(pilot, lambda: app._workspace.focused_index == 0, label="focus on pane 1")
+
+        cluster.release.set()
+        await until(
+            pilot,
+            lambda: (
+                "widgets is served now; run :widgets again in the pane you want it in"
+                in _messages(app)
+            ),
+            label="told instead of opened",
+        )
+
+        assert [pane.kind for pane in app._workspace.panes] == ["pods", "pods"]

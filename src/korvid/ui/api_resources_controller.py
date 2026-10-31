@@ -25,7 +25,7 @@ from textual.message import Message
 from korvid.k8s.errors import ApiStatusError, KubeClientError
 from korvid.ui.action_availability import AvailabilityCode, UnavailableReason
 from korvid.ui.command import is_builtin_command, parse_command
-from korvid.ui.messages import UnknownCommand
+from korvid.ui.messages import NavigateCommand, UnknownCommand
 from korvid.ui.ui_surface import UiSurface
 
 API_RESOURCES_GROUP = "api-resources"
@@ -209,15 +209,17 @@ class ApiResourcesController:
             )
 
     def _post_again(self, text: str, pane: object) -> None:
-        """Run `text` again where it was typed; never in a pane focused since."""
+        """Run `text` again in the pane it was typed in.
+
+        The navigation carries that pane, and the app opens the view only
+        while it is still focused when the message is handled.
+        """
         command = parse_command(text, self._known)
         if isinstance(command, UnknownCommand):
-            self._post(UnknownCommand(text, rediscovered=True))
-        elif self._focused_pane() is pane:
-            self._post(command)
-        else:
-            kind = text.split()[0]
-            self._ui.notify(f"{kind} is served now; run :{text} again to open it", markup=False)
+            command = UnknownCommand(text, rediscovered=True)
+        elif isinstance(command, NavigateCommand):
+            command = NavigateCommand(command.view, command.namespace, origin=pane)
+        self._post(command)
 
     async def cancel_workers(self) -> None:
         """Stop a read holding the old client, before a context switch swaps it."""

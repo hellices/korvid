@@ -793,6 +793,10 @@ class KorvidApp(App[None]):
 
     async def on_navigate_command(self, message: NavigateCommand) -> None:
         pane = self._pane  # focus may move to another split pane while this awaits
+        if message.origin is not None and message.origin is not pane:
+            again = f"run :{message.view} again in the pane you want it in"
+            self.notify(f"{message.view} is served now; {again}", markup=False)
+            return
         epoch = self._ctx.epoch()
         await self._workspace_ctl.navigate_command(message.view, message.namespace)
         if self._ctx.crossed(epoch):
