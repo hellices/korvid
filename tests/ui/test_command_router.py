@@ -388,4 +388,5 @@ def test_an_unknown_command_no_read_will_settle_is_reported_now() -> None:
     harness.router.route_unknown(UnknownCommand("widgets"))
 
     assert api_resources.asked == ["widgets"]
+    assert api_resources.refreshes == 0
     assert any("Unknown resource or command: widgets" in m for m in harness.ui.messages())

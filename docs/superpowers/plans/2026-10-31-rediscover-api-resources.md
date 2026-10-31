@@ -13,7 +13,7 @@
 - **Bounded:** one read at a time, and commands typed meanwhile wait for it. An unknown command starts a read at most once every 30 seconds; `:rediscover` is not rate-limited.
 - **Context-safe:** the context-switch coordinator cancels the worker group before the client swaps. A read whose session generation changed is never applied, and the controller drops a result whose context epoch changed.
 - **An alias never moves to another resource:** an open view, its watch and its rows are keyed by an alias, so a refresh keeps every known alias on its resource and drops one whose resource is gone. `AliasReservations` remembers that owner for the rest of the session, so a later refresh does not hand the alias over either, and gives the alias back if the resource is reinstalled; a new session generation (connect or context switch) lifts the reservations. Only an alias nobody held goes to a new resource, and the `:operators` catalog fallback is applied before that rule, not after it.
-- **A command runs where it was typed:** a settled navigation carries the pane it was typed in as `NavigateCommand.origin`, and `KorvidApp.on_navigate_command` opens it only while that pane is focused when the message is handled; otherwise it says the kind is served now. It also carries the read's context epoch as `NavigateCommand.epoch`, which the handler passes to `navigate_command` as a guard re-checked under the navigation lock (only for such deferred navigations: an ordinary one calls it exactly as before), so a navigation found before a context switch is never applied after it. `ui/app.py` has 2 lines of room after this.
+- **A command runs where it was typed:** a settled navigation carries the pane it was typed in as `NavigateCommand.origin`, and `KorvidApp.on_navigate_command` opens it only while that pane is focused when the message is handled; otherwise it says the kind is served now, unless a context switch has crossed its epoch, when it is dropped silently. It also carries the read's context epoch as `NavigateCommand.epoch`, which the handler passes to `navigate_command` as a guard re-checked under the navigation lock (only for such deferred navigations: an ordinary one calls it exactly as before), so a navigation found before a context switch is never applied after it. `ui/app.py` has 1 line of room after this.
 - **No read during a context switch:** the controller checks `ContextGuard.reads_allowed()` before starting or queuing a read, because the coordinator has already cancelled the group and the old client would refill the alias map the switch reset.
 - **Never drop what could not be read:** a group version that failed or was incomplete keeps the kinds korvid knew from it; an incomplete `/api` or `/apis` root removes nothing. A failed core `v1` or `/apis` read changes nothing and is said.
 - **Palette search:** the help text and keywords must not contain the subsequence `h…e…l…m`, which a test reserves for Helm, and must not outrank the rows existing palette tests search for. Hence no "custom resource" or "reload" keyword.
@@ -1253,6 +1253,17 @@ async def test_a_navigation_found_before_a_context_switch_is_not_applied_after_i
         await until(pilot, lambda: app._pane.scope == "kube-system", label="later navigation")
 
         assert app.current_kind == "pods"
+
+
+async def test_a_stale_navigation_from_another_pane_says_nothing() -> None:
+    app = _app(Cluster())
+    async with app.run_test() as pilot:
+        stale = app._ctx.epoch() - 1
+        app.post_message(NavigateCommand("widgets", origin=object(), epoch=stale))
+        app.post_message(NavigateCommand(None, "kube-system"))
+        await until(pilot, lambda: app._pane.scope == "kube-system", label="later navigation")
+
+        assert not any("is served now" in m for m in _messages(app))
 ```
 
 ### Task 5: Document it, then run the full gate

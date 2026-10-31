@@ -186,3 +186,14 @@ async def test_a_navigation_found_before_a_context_switch_is_not_applied_after_i
         await until(pilot, lambda: app._pane.scope == "kube-system", label="later navigation")
 
         assert app.current_kind == "pods"
+
+
+async def test_a_stale_navigation_from_another_pane_says_nothing() -> None:
+    app = _app(Cluster())
+    async with app.run_test() as pilot:
+        stale = app._ctx.epoch() - 1
+        app.post_message(NavigateCommand("widgets", origin=object(), epoch=stale))
+        app.post_message(NavigateCommand(None, "kube-system"))
+        await until(pilot, lambda: app._pane.scope == "kube-system", label="later navigation")
+
+        assert not any("is served now" in m for m in _messages(app))

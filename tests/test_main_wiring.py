@@ -1898,6 +1898,7 @@ async def test_wire_and_run_rediscovers_through_the_session_client_and_aliases(
 ) -> None:
     """`:rediscover` reads through the session's client into the live alias map."""
     import korvid.__main__ as main_mod
+    from korvid.composition_support import AliasReservations
     from korvid.core.config import KorvidConfig
     from korvid.ui.api_resources_controller import Rediscovery
 
@@ -1905,7 +1906,7 @@ async def test_wire_and_run_rediscovers_through_the_session_client_and_aliases(
 
     async def rediscover_aliases(kube: Any, aliases: Any, reservations: Any) -> Rediscovery:
         calls.append((kube, aliases))
-        assert isinstance(reservations, main_mod.AliasReservations)
+        assert isinstance(reservations, AliasReservations)
         return Rediscovery()
 
     monkeypatch.setattr(main_mod, "KorvidApp", _FakeAppCapturesKwargs)
