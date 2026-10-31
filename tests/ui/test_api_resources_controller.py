@@ -59,6 +59,7 @@ class Harness:
         epoch: Callable[[], int] = lambda: 1,
         reads_allowed: Callable[[], bool] = lambda: True,
     ) -> None:
+        self.pane: object = "pane-1"
         self.ui = FakeUiSurface(close_worker_coroutines=False)
         self.clock = Clock()
         self.posted: list[Message] = []
@@ -72,6 +73,7 @@ class Harness:
             aliases_updated=self._updated,
             epoch=epoch,
             reads_allowed=reads_allowed,
+            focused_pane=lambda: self.pane,
             clock=self.clock,
             min_interval=30.0,
         )
@@ -154,15 +156,15 @@ def test_only_a_word_that_could_name_a_kind_is_read_again(text: str) -> None:
 async def test_commands_typed_during_a_read_wait_for_it() -> None:
     harness = Harness(Cluster(UNCHANGED, "widgets"))
 
-    first = harness.controller.resolve_unknown("widgets")
-    second = harness.controller.resolve_unknown("gadgets all")
+    first = harness.controller.resolve_unknown("gadgets all")
+    second = harness.controller.resolve_unknown("widgets")
     await harness.finish()
 
     assert (first, second) == (True, True)
     assert harness.reads() == 1
     assert harness.messages() == [
-        ("navigate", "widgets", "None"),
         ("unknown", "gadgets all", "True"),
+        ("navigate", "widgets", "None"),
     ]
 
 
@@ -293,4 +295,17 @@ def test_nothing_is_read_while_a_context_switch_is_under_way() -> None:
     assert harness.ui.workers == []
     assert harness.notes() == [
         ("The API resources can be read again once the context switch is done", "warning")
+    ]
+
+
+async def test_a_kind_found_after_focus_moved_does_not_open_in_the_other_pane() -> None:
+    harness = Harness(Cluster(UNCHANGED, "widgets"))
+
+    harness.controller.resolve_unknown("widgets shop")
+    harness.pane = "pane-2"
+    await harness.finish()
+
+    assert harness.messages() == []
+    assert harness.notes() == [
+        ("widgets is served now; run :widgets shop again to open it", "information")
     ]

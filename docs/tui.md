@@ -60,7 +60,11 @@ or an operator installs during the session, opens without a restart:
 - **A name keeps its meaning.** A name such as `:widgets` stays on the
   resource it already opened, even when a newly installed CRD from another
   API group has the same plural; open that one by its qualified name. A
-  name whose resource is no longer served is dropped, not given to another.
+  name whose resource is no longer served is dropped, and not given to
+  another until you switch context.
+- **A view opens where you asked for it.** If you move to the other split
+  pane while discovery is read, korvid says the kind is served now instead
+  of opening it in the pane you moved to.
 
 ## Ask in the way you already think
 

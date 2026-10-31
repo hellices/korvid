@@ -464,17 +464,46 @@ def _kept(snapshot: RawDiscovery, meta: ResourceMeta) -> bool:
     return any(o.group == meta.group and not o.complete for o in snapshot.group_versions)
 
 
+_Identity = tuple[str, str, bool]
+
+
+@dataclasses.dataclass
+class AliasReservations:
+    """Which resource each alias has named in this session (#517).
+
+    An alias stays reserved for its resource after that resource is no longer
+    served, so no later rediscovery hands it to another. A new session
+    generation, a connect or a context switch, lifts every reservation: the
+    switch has already closed the views keyed by them.
+    """
+
+    generation: int | None = None
+    owners: dict[str, _Identity] = dataclasses.field(default_factory=dict)
+
+    def for_session(self, generation: int) -> dict[str, _Identity]:
+        """The reservations of session `generation`, empty for a new one."""
+        if generation != self.generation:
+            self.generation = generation
+            self.owners = {}
+        return self.owners
+
+
 def _stable_aliases(
-    known: dict[str, ResourceMeta], fresh: dict[str, ResourceMeta], snapshot: RawDiscovery
+    known: dict[str, ResourceMeta],
+    fresh: dict[str, ResourceMeta],
+    snapshot: RawDiscovery,
+    owners: dict[str, _Identity],
 ) -> dict[str, ResourceMeta]:
-    """`fresh`, with every alias kept on the resource it already named.
+    """`fresh`, with every alias kept on the resource it has named this session.
 
     An open view, its watch and its rows are keyed by an alias, so moving one
     to another API group mid-session would make describe or a write reach a
     different resource than the rows show. A known alias keeps its resource,
-    at the version now served; one whose resource is gone is dropped, never
-    handed to another; only an alias nobody held goes to a new resource.
+    at the version now served; one whose resource is gone is dropped and stays
+    reserved in `owners`; only an alias nobody held goes to a new resource.
     """
+    for alias, meta in known.items():
+        owners.setdefault(alias, meta.identity)
     served = {meta.identity: meta for meta in fresh.values()}
     stable: dict[str, ResourceMeta] = {}
     for alias, meta in known.items():
@@ -483,12 +512,14 @@ def _stable_aliases(
         elif _kept(snapshot, meta):
             stable[alias] = meta
     for alias, meta in fresh.items():
-        if alias not in known:
+        if owners.setdefault(alias, meta.identity) == meta.identity:
             stable.setdefault(alias, meta)
     return stable
 
 
-async def rediscover_aliases(kube: KubeClient, aliases: dict[str, ResourceMeta]) -> Rediscovery:
+async def rediscover_aliases(
+    kube: KubeClient, aliases: dict[str, ResourceMeta], reservations: AliasReservations
+) -> Rediscovery:
     """Read discovery afresh and make the session's aliases match it (#517).
 
     Unlike the startup merge, a kind the cluster no longer serves is dropped
@@ -503,14 +534,12 @@ async def rediscover_aliases(kube: KubeClient, aliases: dict[str, ResourceMeta])
     snapshot = await kube.discovery_snapshot()
     if generation != kube.session_generation or snapshot.generation != generation:
         return Rediscovery(applied=False)
-    fresh = _stable_aliases(
-        aliases,
-        build_alias_map(
-            [PODS_META, HELM_RELEASES_META, HELM_REVISIONS_META, *project_resources(snapshot)]
-        ),
-        snapshot,
+    candidate = build_alias_map(
+        [PODS_META, HELM_RELEASES_META, HELM_REVISIONS_META, *project_resources(snapshot)]
     )
-    _alias_operator_catalog(fresh)
+    # The catalog's `:operators` follows the same ownership rule as every alias.
+    _alias_operator_catalog(candidate)
+    fresh = _stable_aliases(aliases, candidate, snapshot, reservations.for_session(generation))
     before = {meta.identity: meta for meta in aliases.values() if not meta.synthetic}
     after = {meta.identity: meta for meta in fresh.values() if not meta.synthetic}
     aliases.clear()

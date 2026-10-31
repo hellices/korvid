@@ -12,7 +12,8 @@
 
 - **Bounded:** one read at a time, and commands typed meanwhile wait for it. An unknown command starts a read at most once every 30 seconds; `:rediscover` is not rate-limited.
 - **Context-safe:** the context-switch coordinator cancels the worker group before the client swaps. A read whose session generation changed is never applied, and the controller drops a result whose context epoch changed.
-- **An alias never moves to another resource:** an open view, its watch and its rows are keyed by an alias, so a refresh keeps every known alias on its resource and drops one whose resource is gone; only an unheld alias goes to a new resource.
+- **An alias never moves to another resource:** an open view, its watch and its rows are keyed by an alias, so a refresh keeps every known alias on its resource and drops one whose resource is gone. `AliasReservations` remembers that owner for the rest of the session, so a later refresh does not hand the alias over either; a new session generation (connect or context switch) lifts the reservations. Only an alias nobody held goes to a new resource, and the `:operators` catalog fallback is applied before that rule, not after it.
+- **A command runs where it was typed:** a read settles each waiting command in the pane it was typed in; if focus moved to another pane meanwhile, korvid says the kind is served now instead of opening it there.
 - **No read during a context switch:** the controller checks `ContextGuard.reads_allowed()` before starting or queuing a read, because the coordinator has already cancelled the group and the old client would refill the alias map the switch reset.
 - **Never drop what could not be read:** a group version that failed or was incomplete keeps the kinds korvid knew from it; an incomplete `/api` or `/apis` root removes nothing. A failed core `v1` or `/apis` read changes nothing and is said.
 - **Palette search:** the help text and keywords must not contain the subsequence `h…e…l…m`, which a test reserves for Helm, and must not outrank the rows existing palette tests search for. Hence no "custom resource" or "reload" keyword.
@@ -106,6 +107,7 @@ class Harness:
         epoch: Callable[[], int] = lambda: 1,
         reads_allowed: Callable[[], bool] = lambda: True,
     ) -> None:
+        self.pane: object = "pane-1"
         self.ui = FakeUiSurface(close_worker_coroutines=False)
         self.clock = Clock()
         self.posted: list[Message] = []
@@ -119,6 +121,7 @@ class Harness:
             aliases_updated=self._updated,
             epoch=epoch,
             reads_allowed=reads_allowed,
+            focused_pane=lambda: self.pane,
             clock=self.clock,
             min_interval=30.0,
         )
@@ -201,15 +204,15 @@ def test_only_a_word_that_could_name_a_kind_is_read_again(text: str) -> None:
 async def test_commands_typed_during_a_read_wait_for_it() -> None:
     harness = Harness(Cluster(UNCHANGED, "widgets"))
 
-    first = harness.controller.resolve_unknown("widgets")
-    second = harness.controller.resolve_unknown("gadgets all")
+    first = harness.controller.resolve_unknown("gadgets all")
+    second = harness.controller.resolve_unknown("widgets")
     await harness.finish()
 
     assert (first, second) == (True, True)
     assert harness.reads() == 1
     assert harness.messages() == [
-        ("navigate", "widgets", "None"),
         ("unknown", "gadgets all", "True"),
+        ("navigate", "widgets", "None"),
     ]
 
 
@@ -341,6 +344,19 @@ def test_nothing_is_read_while_a_context_switch_is_under_way() -> None:
     assert harness.notes() == [
         ("The API resources can be read again once the context switch is done", "warning")
     ]
+
+
+async def test_a_kind_found_after_focus_moved_does_not_open_in_the_other_pane() -> None:
+    harness = Harness(Cluster(UNCHANGED, "widgets"))
+
+    harness.controller.resolve_unknown("widgets shop")
+    harness.pane = "pane-2"
+    await harness.finish()
+
+    assert harness.messages() == []
+    assert harness.notes() == [
+        ("widgets is served now; run :widgets shop again to open it", "information")
+    ]
 ```
 
 - [ ] **Step 2:** Run `uv run --frozen pytest -p no:tach tests/ui/test_api_resources_controller.py -q`. Expected: collection fails, no module.
@@ -441,6 +457,7 @@ class ApiResourcesController:
         aliases_updated: Callable[[], None],
         epoch: Callable[[], int],
         reads_allowed: Callable[[], bool],
+        focused_pane: Callable[[], object],
         clock: Callable[[], float] = time.monotonic,
         min_interval: float = MIN_INTERVAL_SECONDS,
     ) -> None:
@@ -451,11 +468,13 @@ class ApiResourcesController:
         self._aliases_updated = aliases_updated
         self._epoch = epoch
         self._reads_allowed = reads_allowed
+        self._focused_pane = focused_pane
         self._clock = clock
         self._min_interval = min_interval
         self._running = False
         self._last_start: float | None = None
-        self._waiting: list[str] = []
+        #: Each command a read will settle, and the pane it was typed in.
+        self._waiting: list[tuple[str, object]] = []
 
     def unavailable_reason(self) -> UnavailableReason | None:
         """Why the API resources cannot be read again, or None."""
@@ -490,12 +509,12 @@ class ApiResourcesController:
         if not self._reads_allowed():
             return False
         if self._running:
-            self._waiting.append(text)
+            self._waiting.append((text, self._focused_pane()))
             return True
         last = self._last_start
         if last is not None and self._clock() - last < self._min_interval:
             return False
-        self._waiting.append(text)
+        self._waiting.append((text, self._focused_pane()))
         self._start(announce=False)
         return True
 
@@ -531,8 +550,8 @@ class ApiResourcesController:
         if self._epoch() != epoch or (outcome is not None and not outcome.applied):
             return
         self._report(outcome, failure, announce=announce)
-        for text in waiting:
-            self._post_again(text)
+        for text, pane in waiting:
+            self._post_again(text, pane)
 
     def _report(self, outcome: Rediscovery | None, failure: str | None, *, announce: bool) -> None:
         if outcome is None:
@@ -554,11 +573,16 @@ class ApiResourcesController:
                 markup=False,
             )
 
-    def _post_again(self, text: str) -> None:
+    def _post_again(self, text: str, pane: object) -> None:
+        """Run `text` again where it was typed; never in a pane focused since."""
         command = parse_command(text, self._known)
         if isinstance(command, UnknownCommand):
-            command = UnknownCommand(text, rediscovered=True)
-        self._post(command)
+            self._post(UnknownCommand(text, rediscovered=True))
+        elif self._focused_pane() is pane:
+            self._post(command)
+        else:
+            kind = text.split()[0]
+            self._ui.notify(f"{kind} is served now; run :{text} again to open it", markup=False)
 
     async def cancel_workers(self) -> None:
         """Stop a read holding the old client, before a context switch swaps it."""
@@ -583,7 +607,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from korvid.composition_support import rediscover_aliases
+from korvid.composition_support import AliasReservations, rediscover_aliases
 from korvid.k8s.client import KubeClient
 from korvid.k8s.discovery import PODS_META, ResourceMeta, build_alias_map
 from korvid.k8s.discovery_snapshot import GroupVersionOutcome, RawDiscovery, RootOutcome
@@ -666,7 +690,7 @@ async def test_a_kind_served_since_the_last_read_is_added() -> None:
     aliases = _aliases()
     kube = Kube(_snapshot(_outcome(WIDGET)))
 
-    outcome = await rediscover_aliases(kube, aliases)
+    outcome = await rediscover_aliases(kube, aliases, AliasReservations())
 
     assert kube.calls == ["invalidate", "read"]
     assert aliases["wd"] is WIDGET
@@ -679,7 +703,7 @@ async def test_a_kind_no_longer_served_is_dropped_and_a_new_version_replaces_the
     aliases = _aliases(WIDGET, GADGET)
     kube = Kube(_snapshot(_outcome(GADGET_V2)))
 
-    outcome = await rediscover_aliases(kube, aliases)
+    outcome = await rediscover_aliases(kube, aliases, AliasReservations())
 
     assert "widgets" not in aliases
     assert "wd" not in aliases
@@ -700,7 +724,7 @@ async def test_a_group_version_that_could_not_be_read_keeps_its_kinds() -> None:
     )
     kube = Kube(_snapshot(failed))
 
-    outcome = await rediscover_aliases(kube, aliases)
+    outcome = await rediscover_aliases(kube, aliases, AliasReservations())
 
     assert aliases["pods.metrics.k8s.io"] is METRIC
     assert "widgets" not in aliases
@@ -722,7 +746,7 @@ async def test_an_incomplete_version_list_removes_nothing(root: str, unreadable:
     )
     kube = Kube(snapshot)
 
-    outcome = await rediscover_aliases(kube, aliases)
+    outcome = await rediscover_aliases(kube, aliases, AliasReservations())
 
     assert aliases["widgets"] is WIDGET
     assert aliases["gadgets"] is GADGET
@@ -735,7 +759,7 @@ async def test_a_read_from_an_earlier_session_is_discarded() -> None:
     kube = Kube(_snapshot(_outcome(GADGET)))
     kube.switch_during_read = True
 
-    outcome = await rediscover_aliases(kube, aliases)
+    outcome = await rediscover_aliases(kube, aliases, AliasReservations())
 
     assert aliases == before
     assert outcome == Rediscovery(applied=False)
@@ -748,7 +772,7 @@ async def test_a_failed_core_read_raises_and_keeps_every_kind() -> None:
     kube = Kube(_snapshot(_outcome(WIDGET), core=_outcome(complete=False, error=error)))
 
     with pytest.raises(ApiStatusError, match="InternalError"):
-        await rediscover_aliases(kube, aliases)
+        await rediscover_aliases(kube, aliases, AliasReservations())
 
     assert aliases == before
 
@@ -757,7 +781,7 @@ async def test_operators_opens_the_package_catalog_once_it_is_served() -> None:
     aliases = _aliases()
     kube = Kube(_snapshot(_outcome(PACKAGES)))
 
-    await rediscover_aliases(kube, aliases)
+    await rediscover_aliases(kube, aliases, AliasReservations())
 
     assert aliases["operators"] is PACKAGES
 
@@ -770,7 +794,7 @@ async def test_a_new_kind_never_takes_an_alias_another_kind_holds() -> None:
     # The other group is advertised first, so a fresh map would give it `widgets`.
     kube = Kube(_snapshot(_outcome(OTHER_WIDGET), _outcome(WIDGET)))
 
-    await rediscover_aliases(kube, aliases)
+    await rediscover_aliases(kube, aliases, AliasReservations())
 
     assert aliases["widgets"] is WIDGET
     assert aliases["wd"] is WIDGET
@@ -781,11 +805,48 @@ async def test_an_alias_of_a_kind_no_longer_served_is_not_given_to_another() -> 
     aliases = _aliases(WIDGET)
     kube = Kube(_snapshot(_outcome(OTHER_WIDGET)))
 
-    await rediscover_aliases(kube, aliases)
+    await rediscover_aliases(kube, aliases, AliasReservations())
 
     assert "widgets" not in aliases
     assert "wd" not in aliases
     assert aliases["widgets.other.example.org"] is OTHER_WIDGET
+
+
+OPERATOR = ResourceMeta("Operator", "operators", "operators.operatorframework.io", "v1", False)
+
+
+async def test_an_alias_whose_resource_went_away_stays_reserved_for_the_session() -> None:
+    aliases = _aliases(WIDGET)
+    reservations = AliasReservations()
+    kube = Kube(_snapshot(_outcome(OTHER_WIDGET)))
+
+    await rediscover_aliases(kube, aliases, reservations)
+    await rediscover_aliases(kube, aliases, reservations)
+
+    assert "widgets" not in aliases
+    assert "wd" not in aliases
+
+
+async def test_a_new_session_lifts_the_reservations() -> None:
+    aliases = _aliases(WIDGET)
+    reservations = AliasReservations()
+    kube = Kube(_snapshot(_outcome(OTHER_WIDGET)))
+    await rediscover_aliases(kube, aliases, reservations)
+
+    kube.generation = 2
+    kube.snapshot = _snapshot(_outcome(OTHER_WIDGET), generation=2)
+    await rediscover_aliases(kube, aliases, reservations)
+
+    assert aliases["widgets"] is OTHER_WIDGET
+
+
+async def test_operators_is_not_handed_to_the_catalog_once_its_kind_is_gone() -> None:
+    aliases = _aliases(OPERATOR, PACKAGES)
+    kube = Kube(_snapshot(_outcome(PACKAGES)))
+
+    await rediscover_aliases(kube, aliases, AliasReservations())
+
+    assert "operators" not in aliases
 ```
 
 - [ ] **Step 2: Implement it.** Move the startup discovery's `:operators` aliasing into `_alias_operator_catalog`, then add:
@@ -820,17 +881,46 @@ def _kept(snapshot: RawDiscovery, meta: ResourceMeta) -> bool:
     return any(o.group == meta.group and not o.complete for o in snapshot.group_versions)
 
 
+_Identity = tuple[str, str, bool]
+
+
+@dataclasses.dataclass
+class AliasReservations:
+    """Which resource each alias has named in this session (#517).
+
+    An alias stays reserved for its resource after that resource is no longer
+    served, so no later rediscovery hands it to another. A new session
+    generation, a connect or a context switch, lifts every reservation: the
+    switch has already closed the views keyed by them.
+    """
+
+    generation: int | None = None
+    owners: dict[str, _Identity] = dataclasses.field(default_factory=dict)
+
+    def for_session(self, generation: int) -> dict[str, _Identity]:
+        """The reservations of session `generation`, empty for a new one."""
+        if generation != self.generation:
+            self.generation = generation
+            self.owners = {}
+        return self.owners
+
+
 def _stable_aliases(
-    known: dict[str, ResourceMeta], fresh: dict[str, ResourceMeta], snapshot: RawDiscovery
+    known: dict[str, ResourceMeta],
+    fresh: dict[str, ResourceMeta],
+    snapshot: RawDiscovery,
+    owners: dict[str, _Identity],
 ) -> dict[str, ResourceMeta]:
-    """`fresh`, with every alias kept on the resource it already named.
+    """`fresh`, with every alias kept on the resource it has named this session.
 
     An open view, its watch and its rows are keyed by an alias, so moving one
     to another API group mid-session would make describe or a write reach a
     different resource than the rows show. A known alias keeps its resource,
-    at the version now served; one whose resource is gone is dropped, never
-    handed to another; only an alias nobody held goes to a new resource.
+    at the version now served; one whose resource is gone is dropped and stays
+    reserved in `owners`; only an alias nobody held goes to a new resource.
     """
+    for alias, meta in known.items():
+        owners.setdefault(alias, meta.identity)
     served = {meta.identity: meta for meta in fresh.values()}
     stable: dict[str, ResourceMeta] = {}
     for alias, meta in known.items():
@@ -839,12 +929,14 @@ def _stable_aliases(
         elif _kept(snapshot, meta):
             stable[alias] = meta
     for alias, meta in fresh.items():
-        if alias not in known:
+        if owners.setdefault(alias, meta.identity) == meta.identity:
             stable.setdefault(alias, meta)
     return stable
 
 
-async def rediscover_aliases(kube: KubeClient, aliases: dict[str, ResourceMeta]) -> Rediscovery:
+async def rediscover_aliases(
+    kube: KubeClient, aliases: dict[str, ResourceMeta], reservations: AliasReservations
+) -> Rediscovery:
     """Read discovery afresh and make the session's aliases match it (#517).
 
     Unlike the startup merge, a kind the cluster no longer serves is dropped
@@ -859,14 +951,12 @@ async def rediscover_aliases(kube: KubeClient, aliases: dict[str, ResourceMeta])
     snapshot = await kube.discovery_snapshot()
     if generation != kube.session_generation or snapshot.generation != generation:
         return Rediscovery(applied=False)
-    fresh = _stable_aliases(
-        aliases,
-        build_alias_map(
-            [PODS_META, HELM_RELEASES_META, HELM_REVISIONS_META, *project_resources(snapshot)]
-        ),
-        snapshot,
+    candidate = build_alias_map(
+        [PODS_META, HELM_RELEASES_META, HELM_REVISIONS_META, *project_resources(snapshot)]
     )
-    _alias_operator_catalog(fresh)
+    # The catalog's `:operators` follows the same ownership rule as every alias.
+    _alias_operator_catalog(candidate)
+    fresh = _stable_aliases(aliases, candidate, snapshot, reservations.for_session(generation))
     before = {meta.identity: meta for meta in aliases.values() if not meta.synthetic}
     after = {meta.identity: meta for meta in fresh.values() if not meta.synthetic}
     aliases.clear()
@@ -916,7 +1006,7 @@ async def rediscover_aliases(kube: KubeClient, aliases: dict[str, ResourceMeta])
         self._report_unknown(text)
 ```
 
-- [ ] Add `rediscover` to `compose_command_reasons`; `cancel_worker_group(API_RESOURCES_GROUP)` after the creation group; `rediscover: Rediscover | None` on `KorvidApp` and `AppRuntimeInputs`. In `__main__.py`, pass `rediscover=lambda: rediscover_aliases(kube, aliases)` to `KorvidApp` and build the controller with `known=lambda word: view.canonical_kind(word) if word in view.aliases() else None`, `post=app.post_message`, `aliases_updated=app.on_aliases_updated`, `epoch=context.epoch` and `reads_allowed=context.reads_allowed`.
+- [ ] Add `rediscover` to `compose_command_reasons`; `cancel_worker_group(API_RESOURCES_GROUP)` after the creation group; `rediscover: Rediscover | None` on `KorvidApp` and `AppRuntimeInputs`. In `__main__.py`, pass `rediscover=lambda: rediscover_aliases(kube, aliases)` to `KorvidApp` and build the controller with `known=lambda word: view.canonical_kind(word) if word in view.aliases() else None`, `post=app.post_message`, `aliases_updated=app.on_aliases_updated`, `epoch=context.epoch`, `reads_allowed=context.reads_allowed` and `focused_pane=lambda: app._pane`, and pass `rediscover=lambda: rediscover_aliases(kube, aliases, alias_reservations)` with one `AliasReservations` for the run.
 - [ ] Run the router, policy, coordinator, wiring and palette tests, then commit.
 
 ### Task 4: End to end
@@ -933,7 +1023,7 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Any
 
-from korvid.composition_support import rediscover_aliases
+from korvid.composition_support import AliasReservations, rediscover_aliases
 from korvid.core.config import KorvidConfig
 from korvid.core.store import ResourceStore, Summary
 from korvid.core.watch import WatchManager
@@ -974,8 +1064,12 @@ class Cluster(KubeClient):
         )
 
 
+WATCHED: list[tuple[str, str]] = []
+
+
 async def _source(kind: str, scope: str) -> AsyncIterator[tuple[str, Summary]]:
-    if kind == "widgets":
+    WATCHED.append((kind, scope))
+    if (kind, scope) == ("widgets", "default"):
         yield ("ADDED", GenericSummary("blue", "default", "Widget", "", uid="uid-blue"))
     await asyncio.Event().wait()
 
@@ -983,9 +1077,10 @@ async def _source(kind: str, scope: str) -> AsyncIterator[tuple[str, Summary]]:
 def _app(cluster: Cluster) -> Any:
     store = ResourceStore()
     aliases = build_alias_map([PODS_META])
+    reservations = AliasReservations()
 
     async def rediscover() -> Rediscovery:
-        return await rediscover_aliases(cluster, aliases)
+        return await rediscover_aliases(cluster, aliases, reservations)
 
     return build_test_app(
         config=KorvidConfig(namespace="default"),
@@ -1006,6 +1101,7 @@ def _messages(app: Any) -> list[str]:
 
 
 async def test_a_crd_installed_after_startup_opens_through_its_command() -> None:
+    WATCHED.clear()
     cluster = Cluster()
     cluster.installed = True
     app = _app(cluster)
@@ -1020,6 +1116,7 @@ async def test_a_crd_installed_after_startup_opens_through_its_command() -> None
         )
         assert cluster.reads == 1
         assert not any("Unknown resource" in m for m in _messages(app))
+        assert [w for w in WATCHED if w[0] == "widgets"] == [("widgets", "default")]
 
 
 async def test_a_kind_still_not_served_is_reported_and_not_read_again_at_once() -> None:

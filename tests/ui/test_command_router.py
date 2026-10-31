@@ -365,7 +365,7 @@ def test_an_unknown_command_waits_for_the_api_resources_to_be_read_again() -> No
 
     assert api_resources.asked == ["operators"]
     assert harness.operators.explanations == 0
-    assert harness.ui.notifications == []
+    assert harness.ui.messages() == []
 
 
 def test_a_command_still_unknown_after_reading_again_is_reported_not_read_again() -> None:

@@ -92,6 +92,7 @@ class ApiResourcesController:
         aliases_updated: Callable[[], None],
         epoch: Callable[[], int],
         reads_allowed: Callable[[], bool],
+        focused_pane: Callable[[], object],
         clock: Callable[[], float] = time.monotonic,
         min_interval: float = MIN_INTERVAL_SECONDS,
     ) -> None:
@@ -102,11 +103,13 @@ class ApiResourcesController:
         self._aliases_updated = aliases_updated
         self._epoch = epoch
         self._reads_allowed = reads_allowed
+        self._focused_pane = focused_pane
         self._clock = clock
         self._min_interval = min_interval
         self._running = False
         self._last_start: float | None = None
-        self._waiting: list[str] = []
+        #: Each command a read will settle, and the pane it was typed in.
+        self._waiting: list[tuple[str, object]] = []
 
     def unavailable_reason(self) -> UnavailableReason | None:
         """Why the API resources cannot be read again, or None."""
@@ -141,12 +144,12 @@ class ApiResourcesController:
         if not self._reads_allowed():
             return False
         if self._running:
-            self._waiting.append(text)
+            self._waiting.append((text, self._focused_pane()))
             return True
         last = self._last_start
         if last is not None and self._clock() - last < self._min_interval:
             return False
-        self._waiting.append(text)
+        self._waiting.append((text, self._focused_pane()))
         self._start(announce=False)
         return True
 
@@ -182,8 +185,8 @@ class ApiResourcesController:
         if self._epoch() != epoch or (outcome is not None and not outcome.applied):
             return
         self._report(outcome, failure, announce=announce)
-        for text in waiting:
-            self._post_again(text)
+        for text, pane in waiting:
+            self._post_again(text, pane)
 
     def _report(self, outcome: Rediscovery | None, failure: str | None, *, announce: bool) -> None:
         if outcome is None:
@@ -205,11 +208,16 @@ class ApiResourcesController:
                 markup=False,
             )
 
-    def _post_again(self, text: str) -> None:
+    def _post_again(self, text: str, pane: object) -> None:
+        """Run `text` again where it was typed; never in a pane focused since."""
         command = parse_command(text, self._known)
         if isinstance(command, UnknownCommand):
-            command = UnknownCommand(text, rediscovered=True)
-        self._post(command)
+            self._post(UnknownCommand(text, rediscovered=True))
+        elif self._focused_pane() is pane:
+            self._post(command)
+        else:
+            kind = text.split()[0]
+            self._ui.notify(f"{kind} is served now; run :{text} again to open it", markup=False)
 
     async def cancel_workers(self) -> None:
         """Stop a read holding the old client, before a context switch swaps it."""

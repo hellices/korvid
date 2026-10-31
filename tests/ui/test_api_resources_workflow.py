@@ -7,7 +7,7 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Any
 
-from korvid.composition_support import rediscover_aliases
+from korvid.composition_support import AliasReservations, rediscover_aliases
 from korvid.core.config import KorvidConfig
 from korvid.core.store import ResourceStore, Summary
 from korvid.core.watch import WatchManager
@@ -48,8 +48,12 @@ class Cluster(KubeClient):
         )
 
 
+WATCHED: list[tuple[str, str]] = []
+
+
 async def _source(kind: str, scope: str) -> AsyncIterator[tuple[str, Summary]]:
-    if kind == "widgets":
+    WATCHED.append((kind, scope))
+    if (kind, scope) == ("widgets", "default"):
         yield ("ADDED", GenericSummary("blue", "default", "Widget", "", uid="uid-blue"))
     await asyncio.Event().wait()
 
@@ -57,9 +61,10 @@ async def _source(kind: str, scope: str) -> AsyncIterator[tuple[str, Summary]]:
 def _app(cluster: Cluster) -> Any:
     store = ResourceStore()
     aliases = build_alias_map([PODS_META])
+    reservations = AliasReservations()
 
     async def rediscover() -> Rediscovery:
-        return await rediscover_aliases(cluster, aliases)
+        return await rediscover_aliases(cluster, aliases, reservations)
 
     return build_test_app(
         config=KorvidConfig(namespace="default"),
@@ -80,6 +85,7 @@ def _messages(app: Any) -> list[str]:
 
 
 async def test_a_crd_installed_after_startup_opens_through_its_command() -> None:
+    WATCHED.clear()
     cluster = Cluster()
     cluster.installed = True
     app = _app(cluster)
@@ -94,6 +100,7 @@ async def test_a_crd_installed_after_startup_opens_through_its_command() -> None
         )
         assert cluster.reads == 1
         assert not any("Unknown resource" in m for m in _messages(app))
+        assert [w for w in WATCHED if w[0] == "widgets"] == [("widgets", "default")]
 
 
 async def test_a_kind_still_not_served_is_reported_and_not_read_again_at_once() -> None:

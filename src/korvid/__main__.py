@@ -32,6 +32,7 @@ from korvid.composition_support import (
     _PROMPT_DEGRADE_HINT,
     _UNKNOWN_CLUSTER,
     AgentWiring,
+    AliasReservations,
     ObservabilityWiring,
     _active_model_name,
     _agent_environment,
@@ -1012,6 +1013,7 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
         aliases_updated=app.on_aliases_updated,
         epoch=context.epoch,
         reads_allowed=context.reads_allowed,
+        focused_pane=lambda: app._pane,
     )
     bridge_dispatch = AppContextDispatch()
     inspect_surface = AppInspectSurface(app)
@@ -1451,6 +1453,8 @@ async def _wire_and_run(config: KorvidConfig, kube: KubeClient, state: _RunState
     app_box: list[KorvidApp] = []
     discovery_box = state.discovery_box
 
+    # Which resource each alias has named this session, so no rediscovery moves one.
+    alias_reservations = AliasReservations()
     app = KorvidApp(
         config=config,
         store=store,
@@ -1522,7 +1526,7 @@ async def _wire_and_run(config: KorvidConfig, kube: KubeClient, state: _RunState
             else None
         ),
         evidence_client=kube,
-        rediscover=lambda: rediscover_aliases(kube, aliases),
+        rediscover=lambda: rediscover_aliases(kube, aliases, alias_reservations),
     )
     app = assemble_app_runtime(app)
     app_box.append(app)

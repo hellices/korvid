@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from korvid.composition_support import rediscover_aliases
+from korvid.composition_support import AliasReservations, rediscover_aliases
 from korvid.k8s.client import KubeClient
 from korvid.k8s.discovery import PODS_META, ResourceMeta, build_alias_map
 from korvid.k8s.discovery_snapshot import GroupVersionOutcome, RawDiscovery, RootOutcome
@@ -89,7 +89,7 @@ async def test_a_kind_served_since_the_last_read_is_added() -> None:
     aliases = _aliases()
     kube = Kube(_snapshot(_outcome(WIDGET)))
 
-    outcome = await rediscover_aliases(kube, aliases)
+    outcome = await rediscover_aliases(kube, aliases, AliasReservations())
 
     assert kube.calls == ["invalidate", "read"]
     assert aliases["wd"] is WIDGET
@@ -102,7 +102,7 @@ async def test_a_kind_no_longer_served_is_dropped_and_a_new_version_replaces_the
     aliases = _aliases(WIDGET, GADGET)
     kube = Kube(_snapshot(_outcome(GADGET_V2)))
 
-    outcome = await rediscover_aliases(kube, aliases)
+    outcome = await rediscover_aliases(kube, aliases, AliasReservations())
 
     assert "widgets" not in aliases
     assert "wd" not in aliases
@@ -123,7 +123,7 @@ async def test_a_group_version_that_could_not_be_read_keeps_its_kinds() -> None:
     )
     kube = Kube(_snapshot(failed))
 
-    outcome = await rediscover_aliases(kube, aliases)
+    outcome = await rediscover_aliases(kube, aliases, AliasReservations())
 
     assert aliases["pods.metrics.k8s.io"] is METRIC
     assert "widgets" not in aliases
@@ -145,7 +145,7 @@ async def test_an_incomplete_version_list_removes_nothing(root: str, unreadable:
     )
     kube = Kube(snapshot)
 
-    outcome = await rediscover_aliases(kube, aliases)
+    outcome = await rediscover_aliases(kube, aliases, AliasReservations())
 
     assert aliases["widgets"] is WIDGET
     assert aliases["gadgets"] is GADGET
@@ -158,7 +158,7 @@ async def test_a_read_from_an_earlier_session_is_discarded() -> None:
     kube = Kube(_snapshot(_outcome(GADGET)))
     kube.switch_during_read = True
 
-    outcome = await rediscover_aliases(kube, aliases)
+    outcome = await rediscover_aliases(kube, aliases, AliasReservations())
 
     assert aliases == before
     assert outcome == Rediscovery(applied=False)
@@ -171,7 +171,7 @@ async def test_a_failed_core_read_raises_and_keeps_every_kind() -> None:
     kube = Kube(_snapshot(_outcome(WIDGET), core=_outcome(complete=False, error=error)))
 
     with pytest.raises(ApiStatusError, match="InternalError"):
-        await rediscover_aliases(kube, aliases)
+        await rediscover_aliases(kube, aliases, AliasReservations())
 
     assert aliases == before
 
@@ -180,7 +180,7 @@ async def test_operators_opens_the_package_catalog_once_it_is_served() -> None:
     aliases = _aliases()
     kube = Kube(_snapshot(_outcome(PACKAGES)))
 
-    await rediscover_aliases(kube, aliases)
+    await rediscover_aliases(kube, aliases, AliasReservations())
 
     assert aliases["operators"] is PACKAGES
 
@@ -193,7 +193,7 @@ async def test_a_new_kind_never_takes_an_alias_another_kind_holds() -> None:
     # The other group is advertised first, so a fresh map would give it `widgets`.
     kube = Kube(_snapshot(_outcome(OTHER_WIDGET), _outcome(WIDGET)))
 
-    await rediscover_aliases(kube, aliases)
+    await rediscover_aliases(kube, aliases, AliasReservations())
 
     assert aliases["widgets"] is WIDGET
     assert aliases["wd"] is WIDGET
@@ -204,8 +204,45 @@ async def test_an_alias_of_a_kind_no_longer_served_is_not_given_to_another() -> 
     aliases = _aliases(WIDGET)
     kube = Kube(_snapshot(_outcome(OTHER_WIDGET)))
 
-    await rediscover_aliases(kube, aliases)
+    await rediscover_aliases(kube, aliases, AliasReservations())
 
     assert "widgets" not in aliases
     assert "wd" not in aliases
     assert aliases["widgets.other.example.org"] is OTHER_WIDGET
+
+
+OPERATOR = ResourceMeta("Operator", "operators", "operators.operatorframework.io", "v1", False)
+
+
+async def test_an_alias_whose_resource_went_away_stays_reserved_for_the_session() -> None:
+    aliases = _aliases(WIDGET)
+    reservations = AliasReservations()
+    kube = Kube(_snapshot(_outcome(OTHER_WIDGET)))
+
+    await rediscover_aliases(kube, aliases, reservations)
+    await rediscover_aliases(kube, aliases, reservations)
+
+    assert "widgets" not in aliases
+    assert "wd" not in aliases
+
+
+async def test_a_new_session_lifts_the_reservations() -> None:
+    aliases = _aliases(WIDGET)
+    reservations = AliasReservations()
+    kube = Kube(_snapshot(_outcome(OTHER_WIDGET)))
+    await rediscover_aliases(kube, aliases, reservations)
+
+    kube.generation = 2
+    kube.snapshot = _snapshot(_outcome(OTHER_WIDGET), generation=2)
+    await rediscover_aliases(kube, aliases, reservations)
+
+    assert aliases["widgets"] is OTHER_WIDGET
+
+
+async def test_operators_is_not_handed_to_the_catalog_once_its_kind_is_gone() -> None:
+    aliases = _aliases(OPERATOR, PACKAGES)
+    kube = Kube(_snapshot(_outcome(PACKAGES)))
+
+    await rediscover_aliases(kube, aliases, AliasReservations())
+
+    assert "operators" not in aliases

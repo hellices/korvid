@@ -1903,8 +1903,9 @@ async def test_wire_and_run_rediscovers_through_the_session_client_and_aliases(
 
     calls: list[tuple[Any, Any]] = []
 
-    async def rediscover_aliases(kube: Any, aliases: Any) -> Rediscovery:
+    async def rediscover_aliases(kube: Any, aliases: Any, reservations: Any) -> Rediscovery:
         calls.append((kube, aliases))
+        assert isinstance(reservations, main_mod.AliasReservations)
         return Rediscovery()
 
     monkeypatch.setattr(main_mod, "KorvidApp", _FakeAppCapturesKwargs)
