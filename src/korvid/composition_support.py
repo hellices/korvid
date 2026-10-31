@@ -464,12 +464,37 @@ def _kept(snapshot: RawDiscovery, meta: ResourceMeta) -> bool:
     return any(o.group == meta.group and not o.complete for o in snapshot.group_versions)
 
 
+def _stable_aliases(
+    known: dict[str, ResourceMeta], fresh: dict[str, ResourceMeta], snapshot: RawDiscovery
+) -> dict[str, ResourceMeta]:
+    """`fresh`, with every alias kept on the resource it already named.
+
+    An open view, its watch and its rows are keyed by an alias, so moving one
+    to another API group mid-session would make describe or a write reach a
+    different resource than the rows show. A known alias keeps its resource,
+    at the version now served; one whose resource is gone is dropped, never
+    handed to another; only an alias nobody held goes to a new resource.
+    """
+    served = {meta.identity: meta for meta in fresh.values()}
+    stable: dict[str, ResourceMeta] = {}
+    for alias, meta in known.items():
+        if meta.identity in served:
+            stable[alias] = served[meta.identity]
+        elif _kept(snapshot, meta):
+            stable[alias] = meta
+    for alias, meta in fresh.items():
+        if alias not in known:
+            stable.setdefault(alias, meta)
+    return stable
+
+
 async def rediscover_aliases(kube: KubeClient, aliases: dict[str, ResourceMeta]) -> Rediscovery:
     """Read discovery afresh and make the session's aliases match it (#517).
 
     Unlike the startup merge, a kind the cluster no longer serves is dropped
     and one served at a new preferred version replaces the old, except where
-    discovery could not be read in full: those kinds are kept. A read that a
+    discovery could not be read in full: those kinds are kept. An alias never
+    moves to another resource, as `_stable_aliases` says. A read that a
     context switch overtook changes nothing. A failed core or `/apis` read
     raises, as `project_resources` does, and changes nothing either.
     """
@@ -478,12 +503,13 @@ async def rediscover_aliases(kube: KubeClient, aliases: dict[str, ResourceMeta])
     snapshot = await kube.discovery_snapshot()
     if generation != kube.session_generation or snapshot.generation != generation:
         return Rediscovery(applied=False)
-    fresh = build_alias_map(
-        [PODS_META, HELM_RELEASES_META, HELM_REVISIONS_META, *project_resources(snapshot)]
+    fresh = _stable_aliases(
+        aliases,
+        build_alias_map(
+            [PODS_META, HELM_RELEASES_META, HELM_REVISIONS_META, *project_resources(snapshot)]
+        ),
+        snapshot,
     )
-    for alias, meta in aliases.items():
-        if _kept(snapshot, meta):
-            fresh.setdefault(alias, meta)
     _alias_operator_catalog(fresh)
     before = {meta.identity: meta for meta in aliases.values() if not meta.synthetic}
     after = {meta.identity: meta for meta in fresh.values() if not meta.synthetic}

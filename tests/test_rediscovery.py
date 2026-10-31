@@ -183,3 +183,29 @@ async def test_operators_opens_the_package_catalog_once_it_is_served() -> None:
     await rediscover_aliases(kube, aliases)
 
     assert aliases["operators"] is PACKAGES
+
+
+OTHER_WIDGET = ResourceMeta("Widget", "widgets", "other.example.org", "v1", True, ("wd",))
+
+
+async def test_a_new_kind_never_takes_an_alias_another_kind_holds() -> None:
+    aliases = _aliases(WIDGET)
+    # The other group is advertised first, so a fresh map would give it `widgets`.
+    kube = Kube(_snapshot(_outcome(OTHER_WIDGET), _outcome(WIDGET)))
+
+    await rediscover_aliases(kube, aliases)
+
+    assert aliases["widgets"] is WIDGET
+    assert aliases["wd"] is WIDGET
+    assert aliases["widgets.other.example.org"] is OTHER_WIDGET
+
+
+async def test_an_alias_of_a_kind_no_longer_served_is_not_given_to_another() -> None:
+    aliases = _aliases(WIDGET)
+    kube = Kube(_snapshot(_outcome(OTHER_WIDGET)))
+
+    await rediscover_aliases(kube, aliases)
+
+    assert "widgets" not in aliases
+    assert "wd" not in aliases
+    assert aliases["widgets.other.example.org"] is OTHER_WIDGET

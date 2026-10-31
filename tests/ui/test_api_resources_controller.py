@@ -52,7 +52,13 @@ class Cluster:
 
 
 class Harness:
-    def __init__(self, cluster: Cluster | None, *, epoch: Callable[[], int] = lambda: 1) -> None:
+    def __init__(
+        self,
+        cluster: Cluster | None,
+        *,
+        epoch: Callable[[], int] = lambda: 1,
+        reads_allowed: Callable[[], bool] = lambda: True,
+    ) -> None:
         self.ui = FakeUiSurface(close_worker_coroutines=False)
         self.clock = Clock()
         self.posted: list[Message] = []
@@ -65,6 +71,7 @@ class Harness:
             post=self.posted.append,
             aliases_updated=self._updated,
             epoch=epoch,
+            reads_allowed=reads_allowed,
             clock=self.clock,
             min_interval=30.0,
         )
@@ -274,3 +281,16 @@ async def test_cancel_workers_stops_a_read_holding_the_old_client() -> None:
     await harness.controller.cancel_workers()
 
     assert harness.ui.cancelled_groups == [API_RESOURCES_GROUP]
+
+
+def test_nothing_is_read_while_a_context_switch_is_under_way() -> None:
+    harness = Harness(Cluster(), reads_allowed=lambda: False)
+
+    harness.controller.refresh()
+    settled = harness.controller.resolve_unknown("widgets")
+
+    assert not settled
+    assert harness.ui.workers == []
+    assert harness.notes() == [
+        ("The API resources can be read again once the context switch is done", "warning")
+    ]

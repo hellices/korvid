@@ -12,6 +12,8 @@
 
 - **Bounded:** one read at a time, and commands typed meanwhile wait for it. An unknown command starts a read at most once every 30 seconds; `:rediscover` is not rate-limited.
 - **Context-safe:** the context-switch coordinator cancels the worker group before the client swaps. A read whose session generation changed is never applied, and the controller drops a result whose context epoch changed.
+- **An alias never moves to another resource:** an open view, its watch and its rows are keyed by an alias, so a refresh keeps every known alias on its resource and drops one whose resource is gone; only an unheld alias goes to a new resource.
+- **No read during a context switch:** the controller checks `ContextGuard.reads_allowed()` before starting or queuing a read, because the coordinator has already cancelled the group and the old client would refill the alias map the switch reset.
 - **Never drop what could not be read:** a group version that failed or was incomplete keeps the kinds korvid knew from it; an incomplete `/api` or `/apis` root removes nothing. A failed core `v1` or `/apis` read changes nothing and is said.
 - **Palette search:** the help text and keywords must not contain the subsequence `h…e…l…m`, which a test reserves for Helm, and must not outrank the rows existing palette tests search for. Hence no "custom resource" or "reload" keyword.
 - **Size limits:** `scripts/check_source_size.py` is not edited; `ui/app.py` has 10 lines of room.
@@ -97,7 +99,13 @@ class Cluster:
 
 
 class Harness:
-    def __init__(self, cluster: Cluster | None, *, epoch: Callable[[], int] = lambda: 1) -> None:
+    def __init__(
+        self,
+        cluster: Cluster | None,
+        *,
+        epoch: Callable[[], int] = lambda: 1,
+        reads_allowed: Callable[[], bool] = lambda: True,
+    ) -> None:
         self.ui = FakeUiSurface(close_worker_coroutines=False)
         self.clock = Clock()
         self.posted: list[Message] = []
@@ -110,6 +118,7 @@ class Harness:
             post=self.posted.append,
             aliases_updated=self._updated,
             epoch=epoch,
+            reads_allowed=reads_allowed,
             clock=self.clock,
             min_interval=30.0,
         )
@@ -319,6 +328,19 @@ async def test_cancel_workers_stops_a_read_holding_the_old_client() -> None:
     await harness.controller.cancel_workers()
 
     assert harness.ui.cancelled_groups == [API_RESOURCES_GROUP]
+
+
+def test_nothing_is_read_while_a_context_switch_is_under_way() -> None:
+    harness = Harness(Cluster(), reads_allowed=lambda: False)
+
+    harness.controller.refresh()
+    settled = harness.controller.resolve_unknown("widgets")
+
+    assert not settled
+    assert harness.ui.workers == []
+    assert harness.notes() == [
+        ("The API resources can be read again once the context switch is done", "warning")
+    ]
 ```
 
 - [ ] **Step 2:** Run `uv run --frozen pytest -p no:tach tests/ui/test_api_resources_controller.py -q`. Expected: collection fails, no module.
@@ -362,6 +384,7 @@ _NAMES_SHOWN = 3
 _UNCONNECTED = UnavailableReason(
     AvailabilityCode.MISSING_CAPABILITY, "Reading API resources needs a cluster connection"
 )
+_SWITCHING = "The API resources can be read again once the context switch is done"
 
 
 @dataclass(frozen=True, slots=True)
@@ -417,6 +440,7 @@ class ApiResourcesController:
         post: Callable[[Message], object],
         aliases_updated: Callable[[], None],
         epoch: Callable[[], int],
+        reads_allowed: Callable[[], bool],
         clock: Callable[[], float] = time.monotonic,
         min_interval: float = MIN_INTERVAL_SECONDS,
     ) -> None:
@@ -426,6 +450,7 @@ class ApiResourcesController:
         self._post = post
         self._aliases_updated = aliases_updated
         self._epoch = epoch
+        self._reads_allowed = reads_allowed
         self._clock = clock
         self._min_interval = min_interval
         self._running = False
@@ -441,6 +466,9 @@ class ApiResourcesController:
         if self._rediscover is None:
             self._ui.notify(_UNCONNECTED.message, severity="warning", markup=False)
             return
+        if not self._reads_allowed():
+            self._ui.notify(_SWITCHING, severity="warning", markup=False)
+            return
         if self._running:
             self._ui.notify("The API resources are already being read")
             return
@@ -452,9 +480,14 @@ class ApiResourcesController:
         True when one runs for it: the command is parsed again afterwards and
         posted, as an `UnknownCommand` marked `rediscovered` if still unknown.
         False when it should be reported now: it cannot name a kind, nothing
-        can be read, or a read started too recently.
+        can be read, a context switch is under way, or a read started too
+        recently. A read must not start during a switch: the coordinator has
+        already cancelled this worker group, and the old client would refill
+        the alias map the switch has just reset.
         """
         if self._rediscover is None or not self._could_name_a_kind(text):
+            return False
+        if not self._reads_allowed():
             return False
         if self._running:
             self._waiting.append(text)
@@ -727,6 +760,32 @@ async def test_operators_opens_the_package_catalog_once_it_is_served() -> None:
     await rediscover_aliases(kube, aliases)
 
     assert aliases["operators"] is PACKAGES
+
+
+OTHER_WIDGET = ResourceMeta("Widget", "widgets", "other.example.org", "v1", True, ("wd",))
+
+
+async def test_a_new_kind_never_takes_an_alias_another_kind_holds() -> None:
+    aliases = _aliases(WIDGET)
+    # The other group is advertised first, so a fresh map would give it `widgets`.
+    kube = Kube(_snapshot(_outcome(OTHER_WIDGET), _outcome(WIDGET)))
+
+    await rediscover_aliases(kube, aliases)
+
+    assert aliases["widgets"] is WIDGET
+    assert aliases["wd"] is WIDGET
+    assert aliases["widgets.other.example.org"] is OTHER_WIDGET
+
+
+async def test_an_alias_of_a_kind_no_longer_served_is_not_given_to_another() -> None:
+    aliases = _aliases(WIDGET)
+    kube = Kube(_snapshot(_outcome(OTHER_WIDGET)))
+
+    await rediscover_aliases(kube, aliases)
+
+    assert "widgets" not in aliases
+    assert "wd" not in aliases
+    assert aliases["widgets.other.example.org"] is OTHER_WIDGET
 ```
 
 - [ ] **Step 2: Implement it.** Move the startup discovery's `:operators` aliasing into `_alias_operator_catalog`, then add:
@@ -761,12 +820,37 @@ def _kept(snapshot: RawDiscovery, meta: ResourceMeta) -> bool:
     return any(o.group == meta.group and not o.complete for o in snapshot.group_versions)
 
 
+def _stable_aliases(
+    known: dict[str, ResourceMeta], fresh: dict[str, ResourceMeta], snapshot: RawDiscovery
+) -> dict[str, ResourceMeta]:
+    """`fresh`, with every alias kept on the resource it already named.
+
+    An open view, its watch and its rows are keyed by an alias, so moving one
+    to another API group mid-session would make describe or a write reach a
+    different resource than the rows show. A known alias keeps its resource,
+    at the version now served; one whose resource is gone is dropped, never
+    handed to another; only an alias nobody held goes to a new resource.
+    """
+    served = {meta.identity: meta for meta in fresh.values()}
+    stable: dict[str, ResourceMeta] = {}
+    for alias, meta in known.items():
+        if meta.identity in served:
+            stable[alias] = served[meta.identity]
+        elif _kept(snapshot, meta):
+            stable[alias] = meta
+    for alias, meta in fresh.items():
+        if alias not in known:
+            stable.setdefault(alias, meta)
+    return stable
+
+
 async def rediscover_aliases(kube: KubeClient, aliases: dict[str, ResourceMeta]) -> Rediscovery:
     """Read discovery afresh and make the session's aliases match it (#517).
 
     Unlike the startup merge, a kind the cluster no longer serves is dropped
     and one served at a new preferred version replaces the old, except where
-    discovery could not be read in full: those kinds are kept. A read that a
+    discovery could not be read in full: those kinds are kept. An alias never
+    moves to another resource, as `_stable_aliases` says. A read that a
     context switch overtook changes nothing. A failed core or `/apis` read
     raises, as `project_resources` does, and changes nothing either.
     """
@@ -775,12 +859,13 @@ async def rediscover_aliases(kube: KubeClient, aliases: dict[str, ResourceMeta])
     snapshot = await kube.discovery_snapshot()
     if generation != kube.session_generation or snapshot.generation != generation:
         return Rediscovery(applied=False)
-    fresh = build_alias_map(
-        [PODS_META, HELM_RELEASES_META, HELM_REVISIONS_META, *project_resources(snapshot)]
+    fresh = _stable_aliases(
+        aliases,
+        build_alias_map(
+            [PODS_META, HELM_RELEASES_META, HELM_REVISIONS_META, *project_resources(snapshot)]
+        ),
+        snapshot,
     )
-    for alias, meta in aliases.items():
-        if _kept(snapshot, meta):
-            fresh.setdefault(alias, meta)
     _alias_operator_catalog(fresh)
     before = {meta.identity: meta for meta in aliases.values() if not meta.synthetic}
     after = {meta.identity: meta for meta in fresh.values() if not meta.synthetic}
@@ -831,7 +916,7 @@ async def rediscover_aliases(kube: KubeClient, aliases: dict[str, ResourceMeta])
         self._report_unknown(text)
 ```
 
-- [ ] Add `rediscover` to `compose_command_reasons`; `cancel_worker_group(API_RESOURCES_GROUP)` after the creation group; `rediscover: Rediscover | None` on `KorvidApp` and `AppRuntimeInputs`. In `__main__.py`, pass `rediscover=lambda: rediscover_aliases(kube, aliases)` to `KorvidApp` and build the controller with `known=lambda word: view.canonical_kind(word) if word in view.aliases() else None`, `post=app.post_message`, `aliases_updated=app.on_aliases_updated` and `epoch=context.epoch`.
+- [ ] Add `rediscover` to `compose_command_reasons`; `cancel_worker_group(API_RESOURCES_GROUP)` after the creation group; `rediscover: Rediscover | None` on `KorvidApp` and `AppRuntimeInputs`. In `__main__.py`, pass `rediscover=lambda: rediscover_aliases(kube, aliases)` to `KorvidApp` and build the controller with `known=lambda word: view.canonical_kind(word) if word in view.aliases() else None`, `post=app.post_message`, `aliases_updated=app.on_aliases_updated`, `epoch=context.epoch` and `reads_allowed=context.reads_allowed`.
 - [ ] Run the router, policy, coordinator, wiring and palette tests, then commit.
 
 ### Task 4: End to end

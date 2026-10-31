@@ -35,6 +35,7 @@ _NAMES_SHOWN = 3
 _UNCONNECTED = UnavailableReason(
     AvailabilityCode.MISSING_CAPABILITY, "Reading API resources needs a cluster connection"
 )
+_SWITCHING = "The API resources can be read again once the context switch is done"
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,6 +91,7 @@ class ApiResourcesController:
         post: Callable[[Message], object],
         aliases_updated: Callable[[], None],
         epoch: Callable[[], int],
+        reads_allowed: Callable[[], bool],
         clock: Callable[[], float] = time.monotonic,
         min_interval: float = MIN_INTERVAL_SECONDS,
     ) -> None:
@@ -99,6 +101,7 @@ class ApiResourcesController:
         self._post = post
         self._aliases_updated = aliases_updated
         self._epoch = epoch
+        self._reads_allowed = reads_allowed
         self._clock = clock
         self._min_interval = min_interval
         self._running = False
@@ -114,6 +117,9 @@ class ApiResourcesController:
         if self._rediscover is None:
             self._ui.notify(_UNCONNECTED.message, severity="warning", markup=False)
             return
+        if not self._reads_allowed():
+            self._ui.notify(_SWITCHING, severity="warning", markup=False)
+            return
         if self._running:
             self._ui.notify("The API resources are already being read")
             return
@@ -125,9 +131,14 @@ class ApiResourcesController:
         True when one runs for it: the command is parsed again afterwards and
         posted, as an `UnknownCommand` marked `rediscovered` if still unknown.
         False when it should be reported now: it cannot name a kind, nothing
-        can be read, or a read started too recently.
+        can be read, a context switch is under way, or a read started too
+        recently. A read must not start during a switch: the coordinator has
+        already cancelled this worker group, and the old client would refill
+        the alias map the switch has just reset.
         """
         if self._rediscover is None or not self._could_name_a_kind(text):
+            return False
+        if not self._reads_allowed():
             return False
         if self._running:
             self._waiting.append(text)

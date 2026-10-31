@@ -55,7 +55,12 @@ or an operator installs during the session, opens without a restart:
   kinds now served at another version.
 - **What could not be read is kept.** When a group version cannot be read,
   the kinds korvid already knew from it stay, and the notification names it.
-  A read that a context switch overtakes is discarded.
+  A read that a context switch overtakes is discarded, and none starts while
+  a switch is under way.
+- **A name keeps its meaning.** A name such as `:widgets` stays on the
+  resource it already opened, even when a newly installed CRD from another
+  API group has the same plural; open that one by its qualified name. A
+  name whose resource is no longer served is dropped, not given to another.
 
 ## Ask in the way you already think
 
