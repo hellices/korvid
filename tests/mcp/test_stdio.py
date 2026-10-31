@@ -174,6 +174,13 @@ async def test_stdio_forwards_tools_results_and_proposals_without_credentials(
                 await session.initialize()
                 tools = await session.list_tools()
                 assert "propose_write" in {tool.name for tool in tools.tools}
+                relayed = {tool.name: tool.annotations for tool in tools.tools}
+                listing = relayed["list_resources"]
+                propose = relayed["propose_write"]
+                assert listing is not None
+                assert listing.read_only_hint
+                assert propose is not None
+                assert (propose.read_only_hint, propose.destructive_hint) == (False, True)
                 assert "capability" not in tools.model_dump_json()
                 for tool, arguments in (
                     ("list_resources", {"kind": "pods"}),

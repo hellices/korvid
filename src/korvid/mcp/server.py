@@ -59,6 +59,7 @@ from korvid.tools.executor import (
     cap_result,
 )
 from korvid.tools.follow import mirror_read, read_summary
+from korvid.tools.hints import tool_hints
 from korvid.tools.registry import TOOLS_BY_NAME
 from korvid.tools.structured import ERROR_PREFIX
 
@@ -131,6 +132,23 @@ def _sanitize_client_meta(value: object, *, limit: int = 120) -> str:
     """
     text = "".join(ch if ch.isprintable() else " " for ch in str(value))
     return text[:limit]
+
+
+def _tool(function: dict[str, Any]) -> types.Tool:
+    hints = tool_hints(function["name"])
+    return types.Tool(
+        name=function["name"],
+        title=hints.title,
+        description=function["description"],
+        input_schema=function["parameters"],
+        annotations=types.ToolAnnotations(
+            title=hints.title,
+            read_only_hint=hints.read_only,
+            destructive_hint=hints.destructive,
+            idempotent_hint=hints.idempotent,
+            open_world_hint=hints.open_world,
+        ),
+    )
 
 
 class KorvidMCPServer:
@@ -231,15 +249,13 @@ class KorvidMCPServer:
         return types.CallToolResult(content=list(content), is_error=failed)
 
     async def list_tools(self) -> list[types.Tool]:
-        """MCP ``tools/list``: mirror the agent tool definitions 1:1."""
-        return [
-            types.Tool(
-                name=t["function"]["name"],
-                description=t["function"]["description"],
-                input_schema=t["function"]["parameters"],
-            )
-            for t in self._tools
-        ]
+        """MCP ``tools/list``: mirror the agent tool definitions 1:1.
+
+        Each tool carries its title and the hints its declared effect gives
+        (`korvid.tools.hints`), for the host's own prompting. korvid's
+        approval never relies on them.
+        """
+        return [_tool(t["function"]) for t in self._tools]
 
     async def call_tool(
         self,
