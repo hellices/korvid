@@ -3,6 +3,7 @@
 `ResourceInspectController` owns what the user's *look at this* keys do:
 
 - `d` — describe the selected row, and the hierarchy tree's named describe;
+- `y` — copy the open describe pane, or the selected row's name (#519);
 - the Secret rule both of those share (values render masked in the
   dedicated viewer, per-key reveal is explicit and audit-logged);
 - the provider footer the describe screens carry (issue #30);
@@ -43,6 +44,7 @@ from korvid.ui.log_controller import StreamLogsFn
 from korvid.ui.read_availability import (
     SEARCH_ACTIONS,
     PaneSearch,
+    copy_reason,
     describe_reason,
     hint_details_reason,
     search_reason,
@@ -103,6 +105,18 @@ class InspectSurface(ABC):
         implementations must tolerate the widget being gone, exactly like
         `cursor_row_key`, and must never open or move a search.
         """
+
+    @abstractmethod
+    def describe_text(self) -> str | None:
+        """The open describe pane's plain text, exactly as shown; None while closed.
+
+        What `y` copies, so it is the masked text the pane displays, never
+        the manifest behind it. Tolerates the widget being gone.
+        """
+
+    @abstractmethod
+    def copy_to_clipboard(self, text: str) -> None:
+        """Hand *text* to the terminal clipboard (an OSC 52 sequence)."""
 
 
 class InspectShell(Protocol):
@@ -185,6 +199,11 @@ class ResourceInspectController:
                 row=row_key is not None,
                 hinted=summary is not None and pod_needs_hint(summary),
             )
+        if action == "copy":
+            return copy_reason(
+                pane=self._surface.describe_text() is not None,
+                selected=self._view.selected_ns_name(notify=False)[1] is not None,
+            )
         if action in SEARCH_ACTIONS:
             return search_reason(
                 action,
@@ -192,6 +211,24 @@ class ResourceInspectController:
                 logs=self._logs_fn().search_state(),
             )
         return None
+
+    def copy(self) -> None:
+        """`y`: copy the open describe pane, or else the selected row's name.
+
+        A namespaced row is copied as `namespace/name`. The notice says what
+        was copied, never the text itself.
+        """
+        text = self._surface.describe_text()
+        if text is not None:
+            self._surface.copy_to_clipboard(text)
+            self._ui.notify("Copied the describe pane to the clipboard")
+            return
+        namespace, name = self._view.selected_ns_name()
+        if name is None:
+            return
+        self._surface.copy_to_clipboard(f"{namespace}/{name}" if namespace else name)
+        what = "namespace/name" if namespace else "name"
+        self._ui.notify(f"Copied the selected resource's {what} to the clipboard")
 
     def _selected_row(self) -> str | None:
         """The selected row's name, read without the keypress's warning."""

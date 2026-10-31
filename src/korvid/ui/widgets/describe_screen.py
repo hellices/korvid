@@ -226,6 +226,8 @@ class DescribeScreen(ModalScreen[None]):
         Binding("n", "search_next", "Next hit", show=False),
         Binding("shift+n", "search_prev", "Prev hit", show=False),
         Binding("N", "search_prev", "Prev hit", show=False),
+        # The app's copy id: a `:keys` remap of copy moves this key too (#519).
+        Binding("y", "copy", "Copy", show=True, id="copy"),
     ]
 
     DEFAULT_CSS = """
@@ -295,6 +297,11 @@ class DescribeScreen(ModalScreen[None]):
     # ------------------------------------------------------------------
     # Inline search (mirrors the log pane's / + n/N semantics)
     # ------------------------------------------------------------------
+
+    def action_copy(self) -> None:
+        """Copy the view's text, exactly as shown, without repeating it."""
+        self.app.copy_to_clipboard(describe_body_text(self._manifest, self._events))
+        self.notify("Copied the describe view to the clipboard")
 
     def action_open_search(self) -> None:
         """Show the inline search Input and give it focus (``/`` key)."""

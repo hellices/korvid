@@ -485,6 +485,7 @@ def test_composed_action_reasons_ask_each_owner_about_its_own_actions() -> None:
         "logs_multi",
         "log_save",
         "describe",
+        "copy",
         "hint_details",
         "log_search_next",
         "log_search_prev",
@@ -505,7 +506,8 @@ def test_composed_action_reasons_ask_each_owner_about_its_own_actions() -> None:
     assert reasons["logs_multi"]() is None
     assert log_calls == ["logs_multi"]
     assert reasons["log_search_prev"]() is None
-    assert inspect_calls == ["log_search_prev"]
+    assert reasons["copy"]() is None
+    assert inspect_calls == ["log_search_prev", "copy"]
     assert reasons["relationships"]() is None
     assert reasons["sort_by_cpu"]() is None
     assert reasons["sort_by_age"]() is None
