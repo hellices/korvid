@@ -24,6 +24,7 @@ Korvid shows only the keys that act on the current view. Press `?` for the compl
 | `0` | Toggle all namespaces |
 | `1`–`9` | Jump to a [namespace shortcut](tui.md#namespace-shortcuts): pinned favorites first, then the namespaces you visit, in first-visit order |
 | `d` | Describe the selected resource |
+| `y` | Copy the open describe view or pane, otherwise the selected resource's name (`namespace/name` when it has one), to the clipboard |
 | `g` | Open operational relationships |
 | `T` | Open the bounded session timeline |
 | `l` / `L` | Open selected or merged pod logs |
@@ -31,6 +32,13 @@ Korvid shows only the keys that act on the current view. Press `?` for the compl
 | `Ctrl-W v/w/q` | Split, focus, or close a workspace pane |
 | `Ctrl-A` / `Ctrl-X` | Toggle the Agent / stop its current turn |
 | `q` | Quit |
+
+`y` copies the text exactly as it is shown, so a masked value stays masked. A
+Secret value is copied only by the Secret viewer's own `c`, which records each
+copy in the audit log. The copy is an OSC 52 escape sequence, so it can reach
+your local clipboard over SSH, but only where the terminal, and any
+multiplexer in between, allows OSC 52 clipboard writes: some need it enabled,
+and some do not support it.
 
 `Ctrl-P` opens the Action Palette: type what you want to do — `scale`, `logs`,
 `context` — and korvid ranks the app actions and the built-in `:` commands
