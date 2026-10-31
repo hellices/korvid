@@ -274,3 +274,14 @@ async def test_a_kind_served_again_takes_the_version_read_even_if_another_versio
 
     assert aliases["gadgets"] is GADGET_V2
     assert outcome.unreadable == ("example.com/v1",)
+
+
+async def test_only_the_version_that_could_not_be_read_keeps_its_kinds() -> None:
+    aliases = _aliases(GADGET_V2)
+    failed = _outcome(group="example.com", version="v1", complete=False)
+    kube = Kube(_snapshot(_outcome(group="example.com", version="v2"), failed))
+
+    outcome = await rediscover_aliases(kube, aliases, AliasReservations())
+
+    assert "gadgets" not in aliases
+    assert outcome.removed == ("gadgets.example.com",)

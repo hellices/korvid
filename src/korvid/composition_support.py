@@ -461,7 +461,10 @@ def _kept(snapshot: RawDiscovery, meta: ResourceMeta) -> bool:
     """Whether a known kind stays although this discovery did not report it."""
     if not (snapshot.core_root.complete and snapshot.group_root.complete):
         return True
-    return any(o.group == meta.group and not o.complete for o in snapshot.group_versions)
+    return any(
+        (o.group, o.version) == (meta.group, meta.version) and not o.complete
+        for o in snapshot.group_versions
+    )
 
 
 _Identity = tuple[str, str, bool]

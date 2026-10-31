@@ -15,7 +15,7 @@
 - **An alias never moves to another resource:** an open view, its watch and its rows are keyed by an alias, so a refresh keeps every known alias on its resource and drops one whose resource is gone. `AliasReservations` remembers that owner for the rest of the session, so a later refresh does not hand the alias over either, and gives the alias back if the resource is reinstalled; a new session generation (connect or context switch) lifts the reservations. Only an alias nobody held goes to a new resource, and the `:operators` catalog fallback is applied before that rule, not after it.
 - **A command runs where it was typed, and only if nothing overtook it:** a settled navigation carries a `NavigationOrigin` (the pane it was typed in, that pane's `nav_gen` then, and the read's context epoch). `deferred_navigation_guard` runs it only while that pane is focused, has not navigated since, and no context switch crossed the epoch, re-checking under the navigation lock; otherwise it says the kind is served now, or nothing if a context switch made it stale. Of the commands one read settles, only the newest typed in each pane may navigate; older ones there are superseded, while every command still unknown is reported. An ordinary navigation calls `navigate_command` exactly as before.
 - **No read during a context switch:** the controller checks `ContextGuard.reads_allowed()` before starting or queuing a read, because the coordinator has already cancelled the group and the old client would refill the alias map the switch reset.
-- **Never drop what could not be read:** a group version that failed or was incomplete keeps the kinds korvid knew from it; an incomplete `/api` or `/apis` root removes nothing. A failed core `v1` or `/apis` read changes nothing and is said.
+- **Never drop what could not be read:** a group version that failed or was incomplete keeps the kinds korvid knew from that very group version (a kind known at another version of the same group is not kept); an incomplete `/api` or `/apis` root removes nothing. A failed core `v1` or `/apis` read changes nothing and is said.
 - **Palette search:** the help text and keywords must not contain the subsequence `h…e…l…m`, which a test reserves for Helm, and must not outrank the rows existing palette tests search for. Hence no "custom resource" or "reload" keyword.
 - **Size limits:** `scripts/check_source_size.py` is not edited; `ui/app.py` has 10 lines of room.
 - **Commands:** use `uv run --frozen …`. Behind the corporate mirror, call the project venv's tools directly with `PYTHONPATH=src`.
@@ -1052,6 +1052,17 @@ async def test_a_kind_served_again_takes_the_version_read_even_if_another_versio
 
     assert aliases["gadgets"] is GADGET_V2
     assert outcome.unreadable == ("example.com/v1",)
+
+
+async def test_only_the_version_that_could_not_be_read_keeps_its_kinds() -> None:
+    aliases = _aliases(GADGET_V2)
+    failed = _outcome(group="example.com", version="v1", complete=False)
+    kube = Kube(_snapshot(_outcome(group="example.com", version="v2"), failed))
+
+    outcome = await rediscover_aliases(kube, aliases, AliasReservations())
+
+    assert "gadgets" not in aliases
+    assert outcome.removed == ("gadgets.example.com",)
 ```
 
 - [ ] **Step 2: Implement it.** Move the startup discovery's `:operators` aliasing into `_alias_operator_catalog`, then add:
@@ -1083,7 +1094,10 @@ def _kept(snapshot: RawDiscovery, meta: ResourceMeta) -> bool:
     """Whether a known kind stays although this discovery did not report it."""
     if not (snapshot.core_root.complete and snapshot.group_root.complete):
         return True
-    return any(o.group == meta.group and not o.complete for o in snapshot.group_versions)
+    return any(
+        (o.group, o.version) == (meta.group, meta.version) and not o.complete
+        for o in snapshot.group_versions
+    )
 
 
 _Identity = tuple[str, str, bool]
@@ -1418,6 +1432,7 @@ async def test_a_stale_navigation_from_another_pane_says_nothing() -> None:
         await until(pilot, lambda: app._pane.scope == "kube-system", label="later navigation")
 
         assert not any("is served now" in m for m in _messages(app))
+        assert app.current_kind == "pods"
 
 
 def _stale(app: Any, pane: object, epoch: int) -> NavigateCommand:

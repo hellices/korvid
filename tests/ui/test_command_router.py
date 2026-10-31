@@ -364,6 +364,7 @@ def test_an_unknown_command_waits_for_the_api_resources_to_be_read_again() -> No
     harness.router.route_unknown(UnknownCommand("operators"))
 
     assert api_resources.asked == ["operators"]
+    assert api_resources.refreshes == 0
     assert harness.operators.explanations == 0
     assert harness.ui.messages() == []
 

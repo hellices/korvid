@@ -197,6 +197,7 @@ async def test_a_stale_navigation_from_another_pane_says_nothing() -> None:
         await until(pilot, lambda: app._pane.scope == "kube-system", label="later navigation")
 
         assert not any("is served now" in m for m in _messages(app))
+        assert app.current_kind == "pods"
 
 
 def _stale(app: Any, pane: object, epoch: int) -> NavigateCommand:
