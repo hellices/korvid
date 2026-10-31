@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from enum import Enum
 
 from textual.message import Message
@@ -9,8 +10,26 @@ from textual.message import Message
 from korvid.tools.proposals import WriteProposal
 
 
+@dataclass(frozen=True, slots=True)
+class NavigationOrigin:
+    """Where a deferred navigation was asked for, and when.
+
+    The pane it was typed in (compared by identity), that pane's navigation
+    generation then, and the context epoch the read that settled it began in.
+    """
+
+    pane: object
+    generation: int
+    epoch: int
+
+
 class NavigateCommand(Message):
-    """Command to navigate to a view, optionally in a specific namespace."""
+    """Command to navigate to a view, optionally in a specific namespace.
+
+    `origin` marks a deferred navigation: the app runs it only while its pane
+    is focused and has not navigated since, and no context switch crossed its
+    epoch (`deferred_navigation_guard`).
+    """
 
     view: str | None
     # `namespace` is a ClassVar on Message used only in __init_subclass__ to derive
@@ -19,10 +38,17 @@ class NavigateCommand(Message):
     # instance-attribute shadow is safe. Mypy cannot model this; suppression required.
     namespace: str | None  # type: ignore[misc,assignment]
 
-    def __init__(self, view: str | None, namespace: str | None = None) -> None:
+    def __init__(
+        self,
+        view: str | None,
+        namespace: str | None = None,
+        *,
+        origin: NavigationOrigin | None = None,
+    ) -> None:
         super().__init__()
         self.view = view
         self.namespace = namespace
+        self.origin = origin
 
 
 class FilterCommand(Message):
@@ -90,10 +116,15 @@ class SwitchContextCommand(Message):
 
 
 class UnknownCommand(Message):
-    """Command that was not recognised — future agent fallthrough hook."""
+    """Command that was not recognised — future agent fallthrough hook.
 
-    def __init__(self, text: str) -> None:
+    `rediscovered` marks a command parsed again after the API resources were
+    read again for it, so it is reported rather than read for once more.
+    """
+
+    def __init__(self, text: str, *, rediscovered: bool = False) -> None:
         self.text = text
+        self.rediscovered = rediscovered
         super().__init__()
 
 
@@ -122,6 +153,7 @@ class BuiltinOperation(Enum):
     DEPLOYMENT_OUTCOMES = "outcomes"
     CONFIG_PROPAGATION = "consumers"
     CREATION_FAILURES = "blocked"
+    REDISCOVER = "rediscover"
 
 
 class BuiltinCommand(Message):

@@ -66,6 +66,7 @@ from korvid.ui.action_palette import (
 from korvid.ui.agent_ui_controller import (
     AgentUiController,
 )
+from korvid.ui.api_resources_controller import Rediscover, deferred_navigation_guard
 from korvid.ui.app_bindings import (
     APP_BINDINGS,
     APP_CSS,
@@ -191,6 +192,7 @@ class KorvidApp(App[None]):
         deployment_outcome_reader: DeploymentOutcomeReader | None = None,
         deployment_cluster_id: Callable[[], str | None] = lambda: None,
         evidence_client: EvidenceClient | None = None,
+        rediscover: Rediscover | None = None,
     ) -> None:
         super().__init__()
         if approval_timeout_seconds is not None and (
@@ -246,6 +248,7 @@ class KorvidApp(App[None]):
             deployment_outcome_reader=deployment_outcome_reader,
             deployment_cluster_id=deployment_cluster_id,
             evidence_client=evidence_client,
+            rediscover=rediscover,
         )
         self._runtime_bound = False
         self._runtime_inputs = runtime_inputs
@@ -790,8 +793,11 @@ class KorvidApp(App[None]):
 
     async def on_navigate_command(self, message: NavigateCommand) -> None:
         pane = self._pane  # focus may move to another split pane while this awaits
+        guard = deferred_navigation_guard(message, pane, self._ctx, self.notify)
+        if guard is None:
+            return  # settled by a rediscovery, and overtaken since
         epoch = self._ctx.epoch()
-        await self._workspace_ctl.navigate_command(message.view, message.namespace)
+        await self._workspace_ctl.navigate_command(message.view, message.namespace, *guard)
         if self._ctx.crossed(epoch):
             return  # the namespace belongs to the cluster switched away from
         if message.namespace and pane.scope == message.namespace:

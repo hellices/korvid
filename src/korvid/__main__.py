@@ -32,6 +32,7 @@ from korvid.composition_support import (
     _PROMPT_DEGRADE_HINT,
     _UNKNOWN_CLUSTER,
     AgentWiring,
+    AliasReservations,
     ObservabilityWiring,
     _active_model_name,
     _agent_environment,
@@ -55,6 +56,7 @@ from korvid.composition_support import (
     _start_mcp_if_enabled,
     _validate_ca_bundle,
     _warn_agent_disabled,
+    rediscover_aliases,
 )
 from korvid.composition_support import (
     _build_observability as _build_observability,
@@ -118,6 +120,7 @@ from korvid.tools.proposals import ProposalStore
 from korvid.tools.registry import mcp_tool_schemas
 from korvid.ui.action_policy import ActionPolicy, compose_action_reasons, compose_command_reasons
 from korvid.ui.agent_ui_controller import AgentUiController
+from korvid.ui.api_resources_controller import ApiResourcesController
 from korvid.ui.app import KorvidApp
 from korvid.ui.app_runtime import AppRuntime, AppRuntimeInputs, _LateReference
 from korvid.ui.app_surfaces import (
@@ -1002,6 +1005,17 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
             kind, namespace, name, epoch=epoch, expected_uid=uid
         ),
     )
+    api_resources = ApiResourcesController(
+        ui=AppUiSurface(app),
+        rediscover=inputs.rediscover,
+        known=lambda word: view.canonical_kind(word) if word in view.aliases() else None,
+        post=app.post_message,
+        aliases_updated=app.on_aliases_updated,
+        epoch=context.epoch,
+        crossed=context.crossed,
+        reads_allowed=context.reads_allowed,
+        navigation_position=lambda: (app._pane, app._pane.nav_gen),
+    )
     bridge_dispatch = AppContextDispatch()
     inspect_surface = AppInspectSurface(app)
     inspect_controller = ResourceInspectController(
@@ -1287,6 +1301,7 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
             outcomes=deployment_outcomes.unavailable_reason,
             propagation=config_propagation.unavailable_reason,
             creation=creation_constraints.unavailable_reason,
+            rediscover=api_resources.unavailable_reason,
         ),
     )
     commands = CommandRouter(
@@ -1302,6 +1317,7 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
         outcomes=deployment_outcomes,
         propagation=config_propagation,
         creation=creation_constraints,
+        api_resources=api_resources,
     )
     return AppRuntime(
         view=view,
@@ -1438,6 +1454,8 @@ async def _wire_and_run(config: KorvidConfig, kube: KubeClient, state: _RunState
     app_box: list[KorvidApp] = []
     discovery_box = state.discovery_box
 
+    # Which resource each alias has named this session, so no rediscovery moves one.
+    alias_reservations = AliasReservations()
     app = KorvidApp(
         config=config,
         store=store,
@@ -1509,6 +1527,7 @@ async def _wire_and_run(config: KorvidConfig, kube: KubeClient, state: _RunState
             else None
         ),
         evidence_client=kube,
+        rediscover=lambda: rediscover_aliases(kube, aliases, alias_reservations),
     )
     app = assemble_app_runtime(app)
     app_box.append(app)

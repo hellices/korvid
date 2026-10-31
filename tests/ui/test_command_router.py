@@ -106,6 +106,20 @@ class FakePropagation:
         self.opens += 1
 
 
+class FakeApiResources:
+    def __init__(self, *, settles: bool = True) -> None:
+        self.settles = settles
+        self.refreshes = 0
+        self.asked: list[str] = []
+
+    def refresh(self) -> None:
+        self.refreshes += 1
+
+    def resolve_unknown(self, text: str) -> bool:
+        self.asked.append(text)
+        return self.settles
+
+
 class Harness:
     def __init__(
         self,
@@ -115,6 +129,7 @@ class Harness:
         outcomes: FakeOutcomes | None = None,
         propagation: FakePropagation | None = None,
         creation: FakePropagation | None = None,
+        api_resources: FakeApiResources | None = None,
     ) -> None:
         self.ui = FakeUi()
         self.agent = FakeAgent(agent_available)
@@ -138,6 +153,7 @@ class Harness:
             outcomes=outcomes,
             propagation=propagation,
             creation=creation,
+            api_resources=api_resources,
         )
 
 
@@ -319,3 +335,59 @@ def test_creation_failures_without_owner_warn_unavailable() -> None:
     assert harness.ui.notifications == [
         ("Workload creation failures are unavailable in this session", "warning")
     ]
+
+
+def test_rediscover_reaches_its_owner_once() -> None:
+    api_resources = FakeApiResources()
+    harness = Harness(api_resources=api_resources)
+
+    harness.router.route_builtin(_builtin(BuiltinOperation.REDISCOVER))
+
+    assert api_resources.refreshes == 1
+    assert harness.ui.notifications == []
+
+
+def test_rediscover_without_owner_warns_unavailable() -> None:
+    harness = Harness()
+
+    harness.router.route_builtin(_builtin(BuiltinOperation.REDISCOVER))
+
+    assert harness.ui.notifications == [
+        ("Reading API resources is unavailable in this session", "warning")
+    ]
+
+
+def test_an_unknown_command_waits_for_the_api_resources_to_be_read_again() -> None:
+    api_resources = FakeApiResources()
+    harness = Harness(api_resources=api_resources, catalog_missing=True)
+
+    harness.router.route_unknown(UnknownCommand("operators"))
+
+    assert api_resources.asked == ["operators"]
+    assert api_resources.refreshes == 0
+    assert harness.operators.explanations == 0
+    assert harness.ui.messages() == []
+
+
+def test_a_command_still_unknown_after_reading_again_is_reported_not_read_again() -> None:
+    api_resources = FakeApiResources()
+    harness = Harness(api_resources=api_resources, catalog_missing=True)
+
+    harness.router.route_unknown(UnknownCommand("widgets", rediscovered=True))
+    harness.router.route_unknown(UnknownCommand("operators", rediscovered=True))
+
+    assert api_resources.asked == []
+    assert api_resources.refreshes == 0
+    assert harness.operators.explanations == 1
+    assert any("Unknown resource or command: widgets" in m for m in harness.ui.messages())
+
+
+def test_an_unknown_command_no_read_will_settle_is_reported_now() -> None:
+    api_resources = FakeApiResources(settles=False)
+    harness = Harness(api_resources=api_resources)
+
+    harness.router.route_unknown(UnknownCommand("widgets"))
+
+    assert api_resources.asked == ["widgets"]
+    assert api_resources.refreshes == 0
+    assert any("Unknown resource or command: widgets" in m for m in harness.ui.messages())

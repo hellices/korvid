@@ -34,6 +34,7 @@ if TYPE_CHECKING:
     from korvid.tools.proposals import ProposalStore
     from korvid.ui.action_policy import ActionPolicy
     from korvid.ui.agent_ui_controller import AgentUiController
+    from korvid.ui.api_resources_controller import Rediscover
     from korvid.ui.app_surfaces import AppInspectSurface, AppViewState
     from korvid.ui.bridge_dispatch import AppContextDispatch
     from korvid.ui.command_router import CommandRouter
@@ -137,6 +138,8 @@ class AppRuntimeInputs:
     deployment_cluster_id: Callable[[], str | None]
     #: Diagnostics' client: evidence reads, discovery and the session generation.
     evidence_client: EvidenceClient | None = None
+    #: Reads discovery again into `aliases`; None without a cluster connection.
+    rediscover: Rediscover | None = None
 
 
 @dataclasses.dataclass(frozen=True)

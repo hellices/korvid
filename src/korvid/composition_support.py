@@ -32,11 +32,13 @@ from korvid.core.store import ALL_NAMESPACES, Summary
 from korvid.k8s.client import KubeClient
 from korvid.k8s.csp import ProviderInfo
 from korvid.k8s.discovery import PODS_META, ResourceMeta, build_alias_map
+from korvid.k8s.discovery_snapshot import RawDiscovery, project_resources
 from korvid.k8s.helm import HELM_RELEASES_META, HELM_REVISIONS_META
 from korvid.k8s.olm import PACKAGES_GROUP
 from korvid.k8s.watch_events import WatchEvent
 from korvid.tools.executor import UIBridge
 from korvid.tools.structured import ERROR_PREFIX
+from korvid.ui.api_resources_controller import Rediscovery
 
 if TYPE_CHECKING:
     from korvid.agent.provider import LLMProvider
@@ -429,12 +431,134 @@ async def _discover_in_background(
         logger.warning("Resource discovery failed; staying pods-only", exc_info=True)
         return
     aliases.update(discovered)
-    # Where OLM serves the operator catalog, `:operators` opens it - unless a
-    # real kind (e.g. OLM v1's Operator) already claims that alias.
+    _alias_operator_catalog(aliases)
+    app.on_aliases_updated()
+
+
+def _alias_operator_catalog(aliases: dict[str, ResourceMeta]) -> None:
+    """Where OLM serves the operator catalog, `:operators` opens it - unless a
+    real kind (e.g. OLM v1's Operator) already claims that alias."""
     pkg_meta = aliases.get(f"packagemanifests.{PACKAGES_GROUP}")
     if pkg_meta is not None:
         aliases.setdefault("operators", pkg_meta)
-    app.on_aliases_updated()
+
+
+def _unreadable(snapshot: RawDiscovery) -> tuple[str, ...]:
+    """What a discovery could not read in full, so its kinds are kept as they were."""
+    names = [
+        f"{outcome.group}/{outcome.version}" if outcome.group else outcome.version
+        for outcome in snapshot.group_versions
+        if not outcome.complete
+    ]
+    if not snapshot.core_root.complete:
+        names.append("the core API version list")
+    if not snapshot.group_root.complete:
+        names.append("the API group list")
+    return tuple(names)
+
+
+def _kept(snapshot: RawDiscovery, meta: ResourceMeta) -> bool:
+    """Whether a known kind stays although this discovery did not report it."""
+    if not (snapshot.core_root.complete and snapshot.group_root.complete):
+        return True
+    return any(
+        (o.group, o.version) == (meta.group, meta.version) and not o.complete
+        for o in snapshot.group_versions
+    )
+
+
+_Identity = tuple[str, str, bool]
+
+
+@dataclasses.dataclass
+class AliasReservations:
+    """Which resource each alias has named in this session (#517).
+
+    An alias stays reserved for its resource after that resource is no longer
+    served, so no later rediscovery hands it to another. A new session
+    generation, a connect or a context switch, lifts every reservation: the
+    switch has already closed the views keyed by them.
+    """
+
+    generation: int | None = None
+    owners: dict[str, _Identity] = dataclasses.field(default_factory=dict)
+
+    def for_session(self, generation: int) -> dict[str, _Identity]:
+        """The reservations of session `generation`, empty for a new one."""
+        if generation != self.generation:
+            self.generation = generation
+            self.owners = {}
+        return self.owners
+
+
+def _stable_aliases(
+    known: dict[str, ResourceMeta],
+    fresh: dict[str, ResourceMeta],
+    snapshot: RawDiscovery,
+    owners: dict[str, _Identity],
+) -> dict[str, ResourceMeta]:
+    """`fresh`, with every alias kept on the resource it has named this session.
+
+    An open view, its watch and its rows are keyed by an alias, so moving one
+    to another API group mid-session would make describe or a write reach a
+    different resource than the rows show. A known alias keeps its resource,
+    at the version now served; one whose resource is gone is dropped and stays
+    reserved in `owners`; only an alias nobody held goes to a new resource.
+    """
+    for alias, meta in known.items():
+        owners.setdefault(alias, meta.identity)
+    served = {meta.identity: meta for meta in fresh.values()}
+    # Every alias whose owner is served, including a resource reinstalled
+    # after it went away, names it again at the version now served.
+    stable = {alias: served[owner] for alias, owner in owners.items() if owner in served}
+    for alias, meta in known.items():
+        if alias not in stable and _kept(snapshot, meta):
+            stable[alias] = meta
+    for alias, meta in fresh.items():
+        if owners.setdefault(alias, meta.identity) == meta.identity:
+            stable.setdefault(alias, meta)
+    return stable
+
+
+async def rediscover_aliases(
+    kube: KubeClient, aliases: dict[str, ResourceMeta], reservations: AliasReservations
+) -> Rediscovery:
+    """Read discovery afresh and make the session's aliases match it (#517).
+
+    Unlike the startup merge, a kind the cluster no longer serves is dropped
+    and one served at a new preferred version replaces the old, except where
+    discovery could not be read in full: those kinds are kept. An alias never
+    moves to another resource, as `_stable_aliases` says. A read that a
+    context switch overtook changes nothing. A failed core or `/apis` read
+    raises, as `project_resources` does, and changes nothing either.
+    """
+    generation = kube.session_generation
+    kube.invalidate_discovery()
+    snapshot = await kube.discovery_snapshot()
+    if generation != kube.session_generation or snapshot.generation != generation:
+        return Rediscovery(applied=False)
+    candidate = build_alias_map(
+        [PODS_META, HELM_RELEASES_META, HELM_REVISIONS_META, *project_resources(snapshot)]
+    )
+    # The catalog's `:operators` follows the same ownership rule as every alias.
+    _alias_operator_catalog(candidate)
+    fresh = _stable_aliases(aliases, candidate, snapshot, reservations.for_session(generation))
+    before = {meta.identity: meta for meta in aliases.values() if not meta.synthetic}
+    after = {meta.identity: meta for meta in fresh.values() if not meta.synthetic}
+    aliases.clear()
+    aliases.update(fresh)
+    return Rediscovery(
+        added=tuple(sorted(m.qualified_name for i, m in after.items() if i not in before)),
+        removed=tuple(sorted(m.qualified_name for i, m in before.items() if i not in after)),
+        changed=tuple(
+            sorted(
+                m.qualified_name
+                for i, m in after.items()
+                if i in before and before[i].version != m.version
+            )
+        ),
+        unreadable=_unreadable(snapshot),
+    )
 
 
 def _close_provider_in_background(provider: LLMProvider, tasks: set[asyncio.Future[Any]]) -> None:

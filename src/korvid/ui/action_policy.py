@@ -212,6 +212,7 @@ def compose_command_reasons(
     outcomes: Callable[[], UnavailableReason | None] | None = None,
     propagation: Callable[[], UnavailableReason | None] | None = None,
     creation: Callable[[], UnavailableReason | None] | None = None,
+    rediscover: Callable[[], UnavailableReason | None] | None = None,
 ) -> dict[str, Callable[[], UnavailableReason | None]]:
     """Build `ActionPolicy(reason_by_command=...)` from its owners.
 
@@ -261,6 +262,8 @@ def compose_command_reasons(
             Secret to explain.
         creation: `CreationConstraintsController.unavailable_reason` -
             whether `:blocked` has a connection and a selected workload.
+        rediscover: `ApiResourcesController.unavailable_reason` - whether
+            `:rediscover` has a connection to read the API resources through.
 
     Returns:
         The canonical command text -> reason-resolver map.
@@ -290,6 +293,7 @@ def compose_command_reasons(
         **({"outcomes": outcomes} if outcomes is not None else {}),
         **({"consumers": propagation} if propagation is not None else {}),
         **({"blocked": creation} if creation is not None else {}),
+        **({"rediscover": rediscover} if rediscover is not None else {}),
     }
 
 

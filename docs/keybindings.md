@@ -13,6 +13,7 @@ Korvid shows only the keys that act on the current view. Press `?` for the compl
 | `:outcomes` / `:deployment-outcomes` | Open the latest bounded Deployment scale/restart outcome |
 | `:consumers` / `:config-consumers` | Show which Pods use the selected ConfigMap or Secret, and [what a change means](tui.md#configuration-propagation) for each |
 | `:blocked` | Show why the selected workload's Pods are [not being created](tui.md#workload-creation-failures): recorded failures, quotas and LimitRanges, and what the next Pod could run into |
+| `:rediscover` | Read the cluster's API resources again, to open a kind [installed during the session](tui.md#read-the-cockpit) |
 | `Ctrl-P` | Search app actions and built-in commands by intent |
 | `:keys` / `:keybindings` | Edit, review, and save app keybindings |
 | `:slots` / `:ns-slots` | Preview and repack the `1`–`9` namespace shortcuts |

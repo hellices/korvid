@@ -104,6 +104,14 @@ class CreationCommands(Protocol):
     def open_selected(self) -> None: ...
 
 
+class ApiResourceCommands(Protocol):
+    """The `:rediscover` owner, which also reads the API again for an unknown kind."""
+
+    def refresh(self) -> None: ...
+
+    def resolve_unknown(self, text: str) -> bool: ...
+
+
 class CommandRouter:
     """Dispatches typed commands to the owner that implements them."""
 
@@ -122,6 +130,7 @@ class CommandRouter:
         outcomes: OutcomeCommands | None = None,
         propagation: PropagationCommands | None = None,
         creation: CreationCommands | None = None,
+        api_resources: ApiResourceCommands | None = None,
     ) -> None:
         self._ui = ui
         self._agent = agent
@@ -135,6 +144,7 @@ class CommandRouter:
         self._outcomes = outcomes
         self._propagation = propagation
         self._creation = creation
+        self._api_resources = api_resources
 
     def route_builtin(self, command: BuiltinCommand) -> None:
         """Dispatch an app-owned command by canonical operation identity."""
@@ -149,6 +159,7 @@ class CommandRouter:
             BuiltinOperation.DEPLOYMENT_OUTCOMES: self._open_outcomes,
             BuiltinOperation.CONFIG_PROPAGATION: self._open_propagation,
             BuiltinOperation.CREATION_FAILURES: self._open_creation,
+            BuiltinOperation.REDISCOVER: self._rediscover,
         }
         handler = no_argument_handlers.get(operation)
         if handler is not None:
@@ -190,6 +201,14 @@ class CommandRouter:
             return
         self._creation.open_selected()
 
+    def _rediscover(self) -> None:
+        if self._api_resources is None:
+            self._ui.notify(
+                "Reading API resources is unavailable in this session", severity="warning"
+            )
+            return
+        self._api_resources.refresh()
+
     def _route_agent(self, command: BuiltinCommand) -> None:
         if not self._agent.available:
             self._report_unknown(_builtin_text(command))
@@ -199,8 +218,20 @@ class CommandRouter:
             self._agent.handle_model_command(list(command.arguments))
 
     def route_unknown(self, command: UnknownCommand) -> None:
-        """Explain a missing operator catalog or report a genuine unknown."""
+        """Read the API again for it, explain a missing operator catalog, or report it.
+
+        A kind the cluster started serving since the last discovery resolves
+        once the API resources are read again: the owner then posts the
+        command again, marked `rediscovered` if it is still unknown.
+        """
         text = command.text
+        api_resources = self._api_resources
+        if (
+            not command.rediscovered
+            and api_resources is not None
+            and api_resources.resolve_unknown(text)
+        ):
+            return
         parts = text.strip().split()
         head = parts[0] if parts else ""
         args = parts[1:]

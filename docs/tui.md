@@ -42,6 +42,32 @@ use the qualified plural, such as `:deployments.apps` or
 Qualified views retain their resource identity through watches, describe, and
 drill-down.
 
+korvid discovers the cluster's API resources when it connects. A kind the
+cluster starts serving later, such as a CustomResourceDefinition a Helm chart
+or an operator installs during the session, opens without a restart:
+
+- **An unknown `:` command reads discovery once more** before it is reported
+  as unknown, then opens the view if the cluster now serves that kind. To
+  spare the API server repeated typos, an unknown command reads it again at
+  most once every 30 seconds.
+- **`:rediscover`** (or **Refresh API resources** in the Action Palette) reads
+  it now and says what changed: kinds added, kinds no longer served, and
+  kinds now served at another version.
+- **What could not be read is kept.** When a group version cannot be read,
+  the kinds korvid already knew from it stay, and the notification names it.
+  A read that a context switch overtakes is discarded, and none starts while
+  a switch is under way.
+- **A name keeps its meaning.** A name such as `:widgets` stays on the
+  resource it already opened, even when a newly installed CRD from another
+  API group has the same plural; open that one by its qualified name. A
+  name whose resource is no longer served is dropped, and not given to
+  another until you switch context; it names that resource again if it is
+  reinstalled.
+- **A view opens where, and only if, you still want it.** If you move to the
+  other split pane, or open another view in the same pane, while discovery
+  is read, korvid says the kind is served now instead of opening it. Of
+  several commands typed in one pane meanwhile, only the newest can open.
+
 ## Ask in the way you already think
 
 Three keys answer three different questions, so none of them replaces another:
