@@ -117,6 +117,9 @@ class FakeSurface(InspectSurface):
         self.troubles: list[tuple[tuple[ContainerTrouble, ...], str | None]] = []
         self.cleared = 0
         self.describe = describe
+        #: The open describe pane's plain text, or None while it is closed.
+        self.describe_body: str | None = None
+        self.copied: list[str] = []
 
     def cursor_row_key(self) -> str | None:
         return self.row_key
@@ -131,6 +134,12 @@ class FakeSurface(InspectSurface):
 
     def describe_search(self) -> PaneSearch:
         return self.describe
+
+    def describe_text(self) -> str | None:
+        return self.describe_body
+
+    def copy_to_clipboard(self, text: str) -> None:
+        self.copied.append(text)
 
 
 class FakeShell:
@@ -672,3 +681,71 @@ def test_probes_answer_nothing_for_actions_this_controller_does_not_own() -> Non
     h = Harness()
     assert h.controller.unavailable_reason("delete_resource") is None
     assert h.controller.unavailable_reason("shell") is None
+
+
+# ---------------------------------------------------------------------------
+# copy (#519)
+# ---------------------------------------------------------------------------
+
+
+def test_copy_takes_the_open_describe_pane_whole() -> None:
+    h = Harness()
+    h.surface.describe_body = "apiVersion: v1\nkind: Pod\n\nEVENTS\n"
+
+    h.controller.copy()
+
+    assert h.surface.copied == ["apiVersion: v1\nkind: Pod\n\nEVENTS\n"]
+    assert h.ui.notifications == [("Copied the describe pane to the clipboard", "information")]
+
+
+@pytest.mark.parametrize(
+    ("selected", "copied", "what"),
+    [
+        (("default", "api-1"), "default/api-1", "namespace/name"),
+        (("", "node-1"), "node-1", "name"),
+    ],
+    ids=["namespaced", "cluster-scoped"],
+)
+def test_copy_takes_the_selected_rows_name_without_a_pane_open(
+    selected: tuple[str, str], copied: str, what: str
+) -> None:
+    h = Harness(selected=selected)
+
+    h.controller.copy()
+
+    assert h.surface.copied == [copied]
+    assert h.ui.notifications == [
+        (f"Copied the selected resource's {what} to the clipboard", "information")
+    ]
+
+
+def test_copy_never_repeats_what_it_copied() -> None:
+    h = Harness(selected=("payments", "ledger-7c9f"))
+
+    h.controller.copy()
+
+    assert not any("ledger" in message for message, _ in h.ui.notifications)
+
+
+def test_copy_with_nothing_to_copy_copies_nothing() -> None:
+    h = Harness(selected=(None, None))
+
+    h.controller.copy()
+
+    assert h.surface.copied == []
+
+
+def test_copy_probe_needs_an_open_pane_or_a_selected_row() -> None:
+    h = Harness(selected=(None, None))
+    refused = h.controller.unavailable_reason("copy")
+
+    h.surface.describe_body = "kind: Pod\n"
+    with_pane = h.controller.unavailable_reason("copy")
+    h.surface.describe_body = None
+    h.view.selected = ("default", "api-1")
+    with_row = h.controller.unavailable_reason("copy")
+
+    assert refused is not None
+    assert refused.code is AvailabilityCode.NO_SELECTION
+    assert (with_pane, with_row) == (None, None)
+    assert h.surface.copied == []

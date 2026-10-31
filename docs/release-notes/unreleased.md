@@ -52,6 +52,14 @@ tracks the next release scope.
   without asking. Approval does not rely on them: write proposals still wait
   for a keystroke in the TUI. See [Tool hints](../mcp.md#tool-hints).
 
+## Copy to the clipboard
+
+- `y` copies the open describe view or pane, or else the selected resource's
+  name (`namespace/name` when it has one). The text is copied exactly as shown,
+  so masked values stay masked. It uses OSC 52, so it depends on the terminal
+  allowing clipboard writes. The key is remappable in `:keys`. See
+  [Keybindings](../keybindings.md#move-and-inspect).
+
 ## Current configuration and extension contracts
 
 Existing migration links continue in the

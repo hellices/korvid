@@ -170,3 +170,18 @@ def test_comma_separated_key_values_are_rejected() -> None:
     assert plan.overrides == {}
     assert len(plan.warnings) == 1
     assert "one key" in plan.warnings[0]
+
+
+def test_an_action_may_not_take_a_key_another_screen_of_its_owns() -> None:
+    """An action bound on a screen too must not take that screen's fixed keys."""
+    actions = {"quit": ("q",), "copy": ("y",), "logs": ("l",)}
+    reserved = {"copy": {"q": "dismiss", "slash": "open_search"}}
+
+    plan = plan_keybindings(
+        {"quit": "f12", "copy": "q", "logs": "slash"}, actions, action_reserved_keys=reserved
+    )
+
+    assert plan.overrides == {"quit": "f12", "logs": "slash"}
+    assert plan.warnings == (
+        "keybindings: key 'q' for 'copy' is fixed to 'dismiss' on a screen 'copy' also works on",
+    )

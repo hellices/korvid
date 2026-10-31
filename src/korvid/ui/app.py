@@ -947,12 +947,12 @@ class KorvidApp(App[None]):
         self._timeline.open()
 
     async def action_describe(self) -> None:
-        """`d` — describe the currently highlighted row.
-
-        Textual resolves `action_*` on the app, so the binding entry point
-        stays here; the flow belongs to `ResourceInspectController`.
-        """
+        """`d` — describe the highlighted row; the flow is `ResourceInspectController`'s."""
         await self._inspect.describe_selected()
+
+    def action_copy(self) -> None:
+        """`y` — copy the describe pane or the selected row's name; likewise."""
+        self._inspect.copy()
 
     def on_builtin_command(self, message: BuiltinCommand) -> None:
         """Dispatch the catalog's typed operation to its feature owner."""

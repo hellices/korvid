@@ -454,6 +454,16 @@ class AppInspectSurface(InspectSurface):
             return PaneSearch(displayed=False, hits=False)
         return PaneSearch(displayed=pane.display, hits=pane.has_search_hits)
 
+    def describe_text(self) -> str | None:
+        try:
+            pane = self._app._describe_pane
+        except NoMatches:
+            return None
+        return pane.body_text if pane.display else None
+
+    def copy_to_clipboard(self, text: str) -> None:
+        self._app.copy_to_clipboard(text)
+
 
 class AppTransferScreens(TransferScreens):
     """Nominal `TransferScreens` adapter over `KorvidApp`'s screen stack.

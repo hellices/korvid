@@ -48,6 +48,8 @@ APP_BINDINGS: list[Binding | tuple[str, str] | tuple[str, str, str]] = [
         for i in range(1, 10)
     ],
     Binding("d", "describe", "Describe", id="describe"),
+    # The describe view binds the same id, so a `:keys` remap moves both (#519).
+    Binding("y", "copy", "Copy name or describe text", show=False, id="copy"),
     Binding("g", "relationships", "Relationships", id="relationships"),
     Binding("T", "timeline", "Timeline", id="timeline"),
     Binding("s", "shell", "Shell", id="shell"),
@@ -145,6 +147,7 @@ ACTION_HELP_GROUPS: dict[str, tuple[str, ...]] = {
     # `/` filters the table but searches inside the log / describe panes.
     "open_filter": ("Table", "Logs"),
     "describe": ("Table",),
+    "copy": ("Table", "Describe"),
     "relationships": ("Table",),
     "timeline": ("Table",),
     "shell": ("Table",),

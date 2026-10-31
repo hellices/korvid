@@ -92,6 +92,15 @@ def describe_reason(*, manifest: bool, switching: bool, selected: bool) -> Unava
     return None
 
 
+def copy_reason(*, pane: bool, selected: bool) -> UnavailableReason | None:
+    """Why `y` has nothing to copy, or None.
+
+    `ResourceInspectController.copy` takes the open describe pane first,
+    then the selected row's name; with neither there is nothing to copy.
+    """
+    return None if pane or selected else NO_SELECTION
+
+
 def hint_details_reason(*, row: bool, hinted: bool) -> UnavailableReason | None:
     """Why `h` has no detail overlay to open, or None.
 

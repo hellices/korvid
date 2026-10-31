@@ -26,6 +26,8 @@ class KeymapRules:
     reserved_keys: Mapping[str, str] = field(default_factory=dict)
     priority_reserved_keys: Mapping[str, str] = field(default_factory=dict)
     action_contexts: ActionContexts = field(default_factory=dict)
+    #: Per action, a screen's fixed keys that action is also bound beside.
+    action_reserved_keys: Mapping[str, Mapping[str, str]] = field(default_factory=dict)
 
     def plan(self, overrides: Mapping[str, object]) -> KeymapPlan:
         """Validate a complete proposal using the startup policy."""
@@ -36,6 +38,7 @@ class KeymapRules:
             self.reserved_keys,
             self.priority_reserved_keys,
             action_contexts=self.action_contexts,
+            action_reserved_keys=self.action_reserved_keys,
         )
 
     def assignment(self, action: str, key: str) -> KeymapPlan:
@@ -46,6 +49,7 @@ class KeymapRules:
             self.priority_actions,
             self.reserved_keys,
             self.priority_reserved_keys,
+            action_reserved_keys=self.action_reserved_keys,
         )
 
     def keys(self, action: str, overrides: Mapping[str, str]) -> tuple[str, ...]:

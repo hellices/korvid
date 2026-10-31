@@ -114,6 +114,7 @@ _LOG_REASON_ACTIONS: tuple[str, ...] = ("logs", "logs_multi", "log_save")
 #: question is the describe pane it owns (issue #388 final review).
 _INSPECT_REASON_ACTIONS: tuple[str, ...] = (
     "describe",
+    "copy",
     "hint_details",
     "log_search_next",
     "log_search_prev",

@@ -161,3 +161,38 @@ def test_emitted_aliases_dispatch_actual_legacy_and_extended_events(
     bindings = BindingsMap([Binding("l", "logs", "Logs", id="logs")])
     bindings.apply_keymap(App._normalize_keymap({"logs": shift_alias_keys(key)}))
     assert any(alias in bindings.key_to_bindings for alias in events[0].aliases)
+
+
+def test_copy_may_not_take_a_fixed_key_of_the_describe_view() -> None:
+    catalog = KeybindingCatalog(APP_BINDINGS)
+
+    plan = catalog.rules.plan({"quit": "f12", "copy": "q"})
+    staged = catalog.rules.assignment("copy", "n")
+
+    assert plan.overrides == {"quit": "f12"}
+    assert any("'q' for 'copy'" in warning for warning in plan.warnings)
+    assert any("'n' for 'copy'" in warning for warning in staged.warnings)
+    assert catalog.rules.plan({"copy": "x"}).overrides == {"copy": "x"}
+
+
+def test_every_screen_that_reuses_an_app_binding_id_is_checked() -> None:
+    import importlib
+    import pkgutil
+
+    from textual.screen import Screen
+
+    import korvid.ui.widgets as widgets
+    from korvid.ui.keybinding_catalog import SHARED_BINDING_SCREENS
+
+    app_ids = {b.id for b in (a for a in APP_BINDINGS if isinstance(a, Binding)) if b.id}
+    reusing = set()
+    for module in pkgutil.iter_modules(widgets.__path__):
+        loaded = importlib.import_module(f"{widgets.__name__}.{module.name}")
+        for value in vars(loaded).values():
+            if isinstance(value, type) and issubclass(value, Screen):
+                own = value.__dict__.get("BINDINGS", [])
+                if any(isinstance(b, Binding) and b.id in app_ids for b in own):
+                    reusing.add(value)
+
+    assert reusing
+    assert reusing <= set(SHARED_BINDING_SCREENS)
