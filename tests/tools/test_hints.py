@@ -7,7 +7,7 @@ from typing import get_args
 
 import pytest
 
-from korvid.tools.hints import TOOL_TITLES, ToolHints, tool_hints, validate_hints
+from korvid.tools.hints import TOOL_TITLES, ToolHints, check_effects, tool_hints, validate_hints
 from korvid.tools.registry import TOOL_DEFS, Effect, tool_def
 
 
@@ -72,3 +72,8 @@ def test_an_unknown_effect_is_rejected() -> None:
 
     with pytest.raises(ValueError, match="'cluster_teleport' has no hints"):
         validate_hints([odd])
+
+
+def test_an_effect_no_tool_uses_yet_still_needs_hints_at_import() -> None:
+    with pytest.raises(ValueError, match="no hints for effect 'write_proposal'"):
+        check_effects({"cluster_read", "external_read", "ui_only", "cluster_write"})

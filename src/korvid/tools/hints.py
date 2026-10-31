@@ -22,9 +22,10 @@ only stated where a tool is not read-only, as the MCP specification reads it.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
+from typing import get_args
 
 from korvid.tools.registry import TOOL_DEFS, Effect, ToolDef
 
@@ -51,6 +52,20 @@ _BY_EFFECT: Mapping[Effect, tuple[bool, bool, bool | None, bool]] = MappingProxy
         "write_proposal": (False, True, False, False),
     }
 )
+
+
+def check_effects(mapped: Collection[str]) -> None:
+    """Reject `mapped` effects that miss an `Effect` value, used by a tool yet or not.
+
+    Raises:
+        ValueError: naming the first effect without hints.
+    """
+    for effect in get_args(Effect):
+        if effect not in mapped:
+            raise ValueError(f"no hints for effect {effect!r}")
+
+
+check_effects(_BY_EFFECT.keys())
 #: Proposal tool -> (destructive, idempotent).
 _PROPOSALS: Mapping[str, tuple[bool, bool]] = MappingProxyType(
     {

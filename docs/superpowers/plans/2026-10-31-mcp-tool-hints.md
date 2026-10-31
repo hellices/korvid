@@ -12,7 +12,7 @@
 
 - **Hints never gate anything.** korvid's approval does not read them: a proposal still waits for a keystroke in the TUI, and `--readonly` still removes writes.
 - **Derived, never claimed:** a tool's hints come from its registered `effect`; no `cluster_write` or `write_proposal` tool is ever read-only.
-- **Every effect and every tool is covered:** a new effect, a tool without a title, or a new proposal tool without hints of its own fails at import.
+- **Every effect and every tool is covered:** at import, `check_effects` rejects an `Effect` value without hints even if no tool uses it yet, and `validate_hints` rejects a registered tool without a title or a proposal tool without hints of its own.
 - **Size limits:** `src/korvid/tools/registry.py` is at its limit (1420 lines), and `scripts/check_source_size.py` is not edited, so titles live in `tools/hints.py`, not on `ToolDef`.
 - **Docs tests:** `tests/test_docs_readability.py` requires `list_resources`, `get_resource`, `get_logs` and `diagnose_workload` to each name exactly one table row in `docs/mcp.md`, so the hints table describes read families without naming them.
 - **Commands:** use `uv run --frozen …`. Behind the corporate mirror, call the project venv's tools directly with `PYTHONPATH=src`.
@@ -52,7 +52,7 @@ from typing import get_args
 
 import pytest
 
-from korvid.tools.hints import TOOL_TITLES, ToolHints, tool_hints, validate_hints
+from korvid.tools.hints import TOOL_TITLES, ToolHints, check_effects, tool_hints, validate_hints
 from korvid.tools.registry import TOOL_DEFS, Effect, tool_def
 
 
@@ -117,6 +117,11 @@ def test_an_unknown_effect_is_rejected() -> None:
 
     with pytest.raises(ValueError, match="'cluster_teleport' has no hints"):
         validate_hints([odd])
+
+
+def test_an_effect_no_tool_uses_yet_still_needs_hints_at_import() -> None:
+    with pytest.raises(ValueError, match="no hints for effect 'write_proposal'"):
+        check_effects({"cluster_read", "external_read", "ui_only", "cluster_write"})
 ```
 
 - [ ] **Step 2:** Run `uv run --frozen pytest -p no:tach tests/tools/test_hints.py -q`. Expected: collection fails, no module.
@@ -147,9 +152,10 @@ only stated where a tool is not read-only, as the MCP specification reads it.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
+from typing import get_args
 
 from korvid.tools.registry import TOOL_DEFS, Effect, ToolDef
 
@@ -176,6 +182,20 @@ _BY_EFFECT: Mapping[Effect, tuple[bool, bool, bool | None, bool]] = MappingProxy
         "write_proposal": (False, True, False, False),
     }
 )
+
+
+def check_effects(mapped: Collection[str]) -> None:
+    """Reject `mapped` effects that miss an `Effect` value, used by a tool yet or not.
+
+    Raises:
+        ValueError: naming the first effect without hints.
+    """
+    for effect in get_args(Effect):
+        if effect not in mapped:
+            raise ValueError(f"no hints for effect {effect!r}")
+
+
+check_effects(_BY_EFFECT.keys())
 #: Proposal tool -> (destructive, idempotent).
 _PROPOSALS: Mapping[str, tuple[bool, bool]] = MappingProxyType(
     {
