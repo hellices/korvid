@@ -2078,3 +2078,31 @@ async def test_a_failed_external_read_is_reported_as_a_failed_call() -> None:
     assert executor.calls == [("query_metrics", {"signal": "cpu", "namespace": "prod"})], (
         "the failed read was rejected before dispatch"
     )
+
+
+async def test_list_tools_publishes_each_tools_title_and_hints() -> None:
+    from korvid.tools.hints import tool_hints
+    from korvid.tools.registry import mcp_tool_schemas
+
+    schemas = mcp_tool_schemas(write_proposals=True, observability_backends=frozenset({"metrics"}))
+    server = KorvidMCPServer(RecordingExecutor(), schemas, capability_token=_TEST_CAPABILITY)
+
+    tools = await server.list_tools()
+
+    assert {t.name for t in tools} >= {"list_resources", "query_metrics", "propose_write"}
+    for tool in tools:
+        hints = tool_hints(tool.name)
+        assert tool.title == hints.title
+        assert tool.annotations == types.ToolAnnotations(
+            title=hints.title,
+            read_only_hint=hints.read_only,
+            destructive_hint=hints.destructive,
+            idempotent_hint=hints.idempotent,
+            open_world_hint=hints.open_world,
+        )
+    proposal = next(t for t in tools if t.name == "propose_write")
+    assert proposal.annotations is not None
+    assert (proposal.annotations.read_only_hint, proposal.annotations.destructive_hint) == (
+        False,
+        True,
+    )
