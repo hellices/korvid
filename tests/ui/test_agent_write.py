@@ -21,7 +21,7 @@ from korvid.ui.widgets.pick_screen import PickScreen
 from tests.ui.agent_session_fakes import FakeSession
 
 from .agent_write_support import _DEPLOY_META, Recorder, _expand_panel, make_app
-from .waits import until
+from .waits import screen_ready, until
 
 
 def _pending_delete(app: Any) -> asyncio.Task[str]:
@@ -789,10 +789,11 @@ async def test_agent_write_dialog_shows_the_ownership_banner(tmp_path: Path) -> 
         task = asyncio.ensure_future(
             app._agent_ui.agent_request_write("delete", "deployments", "web", namespace="default")
         )
+        # Pushed is not mounted: the banner is composed after the screen is current.
         await until(
             pilot,
-            lambda: isinstance(app.screen, ConfirmScreen),
-            label="agent approval dialog opened",
+            lambda: screen_ready(app, ConfirmScreen) and bool(app.screen.query(".confirm-managed")),
+            label="agent approval dialog mounted",
         )
         banner = app.screen.query_one(".confirm-managed")
         assert "kafka-operator.v0.38.0" in str(banner.render())
