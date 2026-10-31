@@ -13,7 +13,7 @@
 - **Bounded:** one read at a time, and commands typed meanwhile wait for it. An unknown command starts a read at most once every 30 seconds; `:rediscover` is not rate-limited.
 - **Context-safe:** the context-switch coordinator cancels the worker group before the client swaps. A read whose session generation changed is never applied, and the controller drops a result whose context epoch changed.
 - **An alias never moves to another resource:** an open view, its watch and its rows are keyed by an alias, so a refresh keeps every known alias on its resource and drops one whose resource is gone. `AliasReservations` remembers that owner for the rest of the session, so a later refresh does not hand the alias over either, and gives the alias back if the resource is reinstalled; a new session generation (connect or context switch) lifts the reservations. Only an alias nobody held goes to a new resource, and the `:operators` catalog fallback is applied before that rule, not after it.
-- **A command runs where it was typed:** a settled navigation carries the pane it was typed in as `NavigateCommand.origin`, and `KorvidApp.on_navigate_command` opens it only while that pane is focused when the message is handled; otherwise it says the kind is served now, unless a context switch has crossed its epoch, when it is dropped silently. It also carries the read's context epoch as `NavigateCommand.epoch`, which the handler passes to `navigate_command` as a guard re-checked under the navigation lock (only for such deferred navigations: an ordinary one calls it exactly as before), so a navigation found before a context switch is never applied after it. `ui/app.py` has 1 line of room after this.
+- **A command runs where it was typed, and only if nothing overtook it:** a settled navigation carries a `NavigationOrigin` (the pane it was typed in, that pane's `nav_gen` then, and the read's context epoch). `deferred_navigation_guard` runs it only while that pane is focused, has not navigated since, and no context switch crossed the epoch, re-checking under the navigation lock; otherwise it says the kind is served now, or nothing if a context switch made it stale. An ordinary navigation calls `navigate_command` exactly as before.
 - **No read during a context switch:** the controller checks `ContextGuard.reads_allowed()` before starting or queuing a read, because the coordinator has already cancelled the group and the old client would refill the alias map the switch reset.
 - **Never drop what could not be read:** a group version that failed or was incomplete keeps the kinds korvid knew from it; an incomplete `/api` or `/apis` root removes nothing. A failed core `v1` or `/apis` read changes nothing and is said.
 - **Palette search:** the help text and keywords must not contain the subsequence `h…e…l…m`, which a test reserves for Helm, and must not outrank the rows existing palette tests search for. Hence no "custom resource" or "reload" keyword.
@@ -63,8 +63,9 @@ from korvid.ui.api_resources_controller import (
     API_RESOURCES_GROUP,
     ApiResourcesController,
     Rediscovery,
+    deferred_navigation_guard,
 )
-from korvid.ui.messages import NavigateCommand, UnknownCommand
+from korvid.ui.messages import NavigateCommand, NavigationOrigin, UnknownCommand
 
 from .test_session_timeline_controller import FakeUiSurface
 
@@ -93,7 +94,8 @@ class Cluster:
         self.reads += 1
         if self.error is not None:
             raise self.error
-        self.known |= self.served
+        if self.outcome.applied:
+            self.known |= self.served
         return self.outcome
 
     def resolve(self, word: str) -> str | None:
@@ -109,6 +111,7 @@ class Harness:
         reads_allowed: Callable[[], bool] = lambda: True,
     ) -> None:
         self.pane: object = "pane-1"
+        self.generation = 7
         self.ui = FakeUiSurface(close_worker_coroutines=False)
         self.clock = Clock()
         self.posted: list[Message] = []
@@ -122,7 +125,7 @@ class Harness:
             aliases_updated=self._updated,
             epoch=epoch,
             reads_allowed=reads_allowed,
-            focused_pane=lambda: self.pane,
+            navigation_position=lambda: (self.pane, self.generation),
             clock=self.clock,
             min_interval=30.0,
         )
@@ -328,12 +331,14 @@ async def test_a_context_switch_during_a_read_discards_it() -> None:
 
 
 async def test_a_read_the_composition_root_did_not_apply_is_discarded() -> None:
-    harness = Harness(Cluster(Rediscovery(applied=False), "widgets"))
+    cluster = Cluster(Rediscovery(applied=False), "widgets")
+    harness = Harness(cluster)
 
     harness.controller.resolve_unknown("widgets")
     await harness.finish()
 
     assert (harness.messages(), harness.updates, harness.notes()) == ([], 0, [])
+    assert cluster.resolve("widgets") is None
 
 
 def test_without_a_cluster_connection_nothing_is_read() -> None:
@@ -379,7 +384,78 @@ async def test_a_settled_command_carries_the_pane_it_was_typed_in() -> None:
 
     (command,) = harness.posted
     assert isinstance(command, NavigateCommand)
-    assert (command.origin, command.epoch) == ("pane-1", 1)
+    assert command.origin == NavigationOrigin("pane-1", 7, 1)
+
+
+class Context:
+    def __init__(self) -> None:
+        self.current = 3
+        self.switching = False
+
+    def crossed(self, epoch: int) -> bool:
+        return self.switching or epoch != self.current
+
+
+class Pane:
+    def __init__(self) -> None:
+        self.nav_gen = 7
+
+
+def _deferred(pane: object, generation: int = 7, epoch: int = 3) -> NavigateCommand:
+    return NavigateCommand("widgets", "shop", origin=NavigationOrigin(pane, generation, epoch))
+
+
+def _quiet(*_: object, **__: object) -> None:
+    pass
+
+
+def test_an_ordinary_navigation_runs_unguarded() -> None:
+    notes: list[str] = []
+
+    guard = deferred_navigation_guard(
+        NavigateCommand("pods"), Pane(), Context(), lambda text, **_: notes.append(text)
+    )
+
+    assert (guard, notes) == ((), [])
+
+
+def test_a_deferred_navigation_runs_while_its_pane_has_not_moved_on() -> None:
+    pane, context = Pane(), Context()
+
+    guard = deferred_navigation_guard(_deferred(pane), pane, context, _quiet)
+
+    assert guard is not None
+    (current,) = guard
+    assert current()
+    pane.nav_gen += 1
+    assert not current()
+    pane.nav_gen -= 1
+    context.switching = True
+    assert not current()
+
+
+@pytest.mark.parametrize("moved", ["focus", "navigation"])
+def test_a_deferred_navigation_its_pane_moved_past_is_dropped_and_said(moved: str) -> None:
+    pane, notes = Pane(), []
+    origin = Pane() if moved == "focus" else pane
+    generation = 7 if moved == "focus" else 6
+
+    guard = deferred_navigation_guard(
+        _deferred(origin, generation), pane, Context(), lambda text, **_: notes.append(text)
+    )
+
+    assert guard is None
+    assert notes == ["widgets is served now; run :widgets again in the pane you want it in"]
+
+
+def test_a_deferred_navigation_a_context_switch_crossed_is_dropped_silently() -> None:
+    notes: list[str] = []
+
+    guard = deferred_navigation_guard(
+        _deferred(Pane(), epoch=2), Pane(), Context(), lambda text, **_: notes.append(text)
+    )
+
+    assert (guard, notes) == (None, [])
 ```
 
 - [ ] **Step 2:** Run `uv run --frozen pytest -p no:tach tests/ui/test_api_resources_controller.py -q`. Expected: collection fails, no module.
@@ -407,13 +483,14 @@ from __future__ import annotations
 import time
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
+from typing import Protocol
 
 from textual.message import Message
 
 from korvid.k8s.errors import ApiStatusError, KubeClientError
 from korvid.ui.action_availability import AvailabilityCode, UnavailableReason
 from korvid.ui.command import is_builtin_command, parse_command
-from korvid.ui.messages import NavigateCommand, UnknownCommand
+from korvid.ui.messages import NavigateCommand, NavigationOrigin, UnknownCommand
 from korvid.ui.ui_surface import UiSurface
 
 API_RESOURCES_GROUP = "api-resources"
@@ -444,6 +521,48 @@ class Rediscovery:
 
 #: Reads discovery again and applies it to the session's aliases.
 Rediscover = Callable[[], Awaitable[Rediscovery]]
+#: The focused pane, and how many navigations it has made.
+NavigationPosition = tuple[object, int]
+
+
+class _Pane(Protocol):
+    @property
+    def nav_gen(self) -> int: ...
+
+
+class _Context(Protocol):
+    def crossed(self, epoch: int) -> bool: ...
+
+
+def deferred_navigation_guard(
+    message: NavigateCommand, pane: _Pane, context: _Context, notify: Callable[..., object]
+) -> tuple[Callable[[], bool], ...] | None:
+    """How the app runs `message` in the focused `pane`.
+
+    An ordinary navigation runs as it always has: `()`. One a rediscovery
+    settled runs only while it is still current, with a guard the navigation
+    re-checks under its lock: its pane is focused and has not navigated since
+    the command was typed, and no context switch crossed the read's epoch.
+    Otherwise it returns None, after saying the kind is served now unless a
+    context switch made the message stale.
+    """
+    origin = message.origin
+    if origin is None:
+        return ()
+
+    def current() -> bool:
+        return (
+            origin.pane is pane
+            and origin.generation == pane.nav_gen
+            and not context.crossed(origin.epoch)
+        )
+
+    if current():
+        return (current,)
+    if not context.crossed(origin.epoch):
+        again = f"run :{message.view} again in the pane you want it in"
+        notify(f"{message.view} is served now; {again}", markup=False)
+    return None
 
 
 def _names(count_label: str, names: Sequence[str]) -> str:
@@ -480,7 +599,7 @@ class ApiResourcesController:
         aliases_updated: Callable[[], None],
         epoch: Callable[[], int],
         reads_allowed: Callable[[], bool],
-        focused_pane: Callable[[], object],
+        navigation_position: Callable[[], NavigationPosition],
         clock: Callable[[], float] = time.monotonic,
         min_interval: float = MIN_INTERVAL_SECONDS,
     ) -> None:
@@ -491,13 +610,13 @@ class ApiResourcesController:
         self._aliases_updated = aliases_updated
         self._epoch = epoch
         self._reads_allowed = reads_allowed
-        self._focused_pane = focused_pane
+        self._position = navigation_position
         self._clock = clock
         self._min_interval = min_interval
         self._running = False
         self._last_start: float | None = None
-        #: Each command a read will settle, and the pane it was typed in.
-        self._waiting: list[tuple[str, object]] = []
+        #: Each command a read will settle, and where it was typed.
+        self._waiting: list[tuple[str, NavigationPosition]] = []
 
     def unavailable_reason(self) -> UnavailableReason | None:
         """Why the API resources cannot be read again, or None."""
@@ -532,12 +651,12 @@ class ApiResourcesController:
         if not self._reads_allowed():
             return False
         if self._running:
-            self._waiting.append((text, self._focused_pane()))
+            self._waiting.append((text, self._position()))
             return True
         last = self._last_start
         if last is not None and self._clock() - last < self._min_interval:
             return False
-        self._waiting.append((text, self._focused_pane()))
+        self._waiting.append((text, self._position()))
         self._start(announce=False)
         return True
 
@@ -573,8 +692,8 @@ class ApiResourcesController:
         if self._epoch() != epoch or (outcome is not None and not outcome.applied):
             return
         self._report(outcome, failure, announce=announce)
-        for text, pane in waiting:
-            self._post_again(text, pane, epoch)
+        for text, position in waiting:
+            self._post_again(text, position, epoch)
 
     def _report(self, outcome: Rediscovery | None, failure: str | None, *, announce: bool) -> None:
         if outcome is None:
@@ -596,18 +715,18 @@ class ApiResourcesController:
                 markup=False,
             )
 
-    def _post_again(self, text: str, pane: object, epoch: int) -> None:
-        """Run `text` again in the pane it was typed in.
+    def _post_again(self, text: str, position: NavigationPosition, epoch: int) -> None:
+        """Run `text` again where it was typed, unless that pane has moved on.
 
-        The navigation carries that pane and the read's epoch: the app opens
-        the view only while the pane is focused and, under the navigation
-        lock, only if no context switch has crossed the epoch.
+        The navigation carries its `NavigationOrigin`, which
+        `deferred_navigation_guard` checks when the app handles it.
         """
         command = parse_command(text, self._known)
         if isinstance(command, UnknownCommand):
             command = UnknownCommand(text, rediscovered=True)
         elif isinstance(command, NavigateCommand):
-            command = NavigateCommand(command.view, command.namespace, origin=pane, epoch=epoch)
+            origin = NavigationOrigin(*position, epoch)
+            command = NavigateCommand(command.view, command.namespace, origin=origin)
         self._post(command)
 
     async def cancel_workers(self) -> None:
@@ -645,6 +764,8 @@ from korvid.ui.api_resources_controller import Rediscovery
 NOW = datetime(2026, 10, 31, tzinfo=UTC)
 BASE = [PODS_META, HELM_RELEASES_META, HELM_REVISIONS_META]
 CORE = ResourceMeta("ConfigMap", "configmaps", "", "v1", True, ("cm",))
+#: A core kind the snapshots below do not serve.
+SECRET = ResourceMeta("Secret", "secrets", "", "v1", True)
 WIDGET = ResourceMeta("Widget", "widgets", "example.com", "v1", True, ("wd",))
 GADGET = ResourceMeta("Gadget", "gadgets", "example.com", "v1", True)
 GADGET_V2 = ResourceMeta("Gadget", "gadgets", "example.com", "v2", True)
@@ -764,7 +885,7 @@ async def test_a_group_version_that_could_not_be_read_keeps_its_kinds() -> None:
     [("groups_complete", "the API group list"), ("versions_complete", "the core API version list")],
 )
 async def test_an_incomplete_version_list_removes_nothing(root: str, unreadable: str) -> None:
-    aliases = _aliases(WIDGET)
+    aliases = _aliases(WIDGET, SECRET)
     snapshot = _snapshot(
         _outcome(GADGET),
         groups_complete=root != "groups_complete",
@@ -775,6 +896,7 @@ async def test_an_incomplete_version_list_removes_nothing(root: str, unreadable:
     outcome = await rediscover_aliases(kube, aliases, AliasReservations())
 
     assert aliases["widgets"] is WIDGET
+    assert aliases["secrets"] is SECRET
     assert aliases["gadgets"] is GADGET
     assert outcome == Rediscovery(added=("gadgets.example.com",), unreadable=(unreadable,))
 
@@ -1057,7 +1179,7 @@ async def rediscover_aliases(
         self._report_unknown(text)
 ```
 
-- [ ] Add `rediscover` to `compose_command_reasons`; `cancel_worker_group(API_RESOURCES_GROUP)` after the creation group; `rediscover: Rediscover | None` on `KorvidApp` and `AppRuntimeInputs`. In `__main__.py`, create one `alias_reservations = AliasReservations()` for the run, pass `rediscover=lambda: rediscover_aliases(kube, aliases, alias_reservations)` to `KorvidApp`, and build the controller with `known=lambda word: view.canonical_kind(word) if word in view.aliases() else None`, `post=app.post_message`, `aliases_updated=app.on_aliases_updated`, `epoch=context.epoch`, `reads_allowed=context.reads_allowed` and `focused_pane=lambda: app._pane`.
+- [ ] Add `rediscover` to `compose_command_reasons`; `cancel_worker_group(API_RESOURCES_GROUP)` after the creation group; `rediscover: Rediscover | None` on `KorvidApp` and `AppRuntimeInputs`. In `__main__.py`, create one `alias_reservations = AliasReservations()` for the run, pass `rediscover=lambda: rediscover_aliases(kube, aliases, alias_reservations)` to `KorvidApp`, and build the controller with `known=lambda word: view.canonical_kind(word) if word in view.aliases() else None`, `post=app.post_message`, `aliases_updated=app.on_aliases_updated`, `epoch=context.epoch`, `reads_allowed=context.reads_allowed` and `navigation_position=lambda: (app._pane, app._pane.nav_gen)`; `on_navigate_command` asks `deferred_navigation_guard` before navigating.
 - [ ] Run the router, policy, coordinator, wiring and palette tests, then commit.
 
 ### Task 4: End to end
@@ -1083,7 +1205,7 @@ from korvid.k8s.discovery import PODS_META, ResourceMeta, build_alias_map
 from korvid.k8s.discovery_snapshot import GroupVersionOutcome, RawDiscovery, RootOutcome
 from korvid.k8s.models import GenericSummary
 from korvid.ui.api_resources_controller import Rediscovery
-from korvid.ui.messages import NavigateCommand
+from korvid.ui.messages import NavigateCommand, NavigationOrigin
 from tests.app_factory import build_test_app
 from tests.ui.waits import until
 
@@ -1247,7 +1369,7 @@ async def test_a_navigation_found_before_a_context_switch_is_not_applied_after_i
     app = _app(Cluster())
     async with app.run_test() as pilot:
         stale = app._ctx.epoch() - 1
-        app.post_message(NavigateCommand("widgets", origin=app._pane, epoch=stale))
+        app.post_message(_stale(app, app._pane, stale))
         # Handled in order: once this one lands, the stale one has been handled.
         app.post_message(NavigateCommand(None, "kube-system"))
         await until(pilot, lambda: app._pane.scope == "kube-system", label="later navigation")
@@ -1259,11 +1381,38 @@ async def test_a_stale_navigation_from_another_pane_says_nothing() -> None:
     app = _app(Cluster())
     async with app.run_test() as pilot:
         stale = app._ctx.epoch() - 1
-        app.post_message(NavigateCommand("widgets", origin=object(), epoch=stale))
+        app.post_message(_stale(app, object(), stale))
         app.post_message(NavigateCommand(None, "kube-system"))
         await until(pilot, lambda: app._pane.scope == "kube-system", label="later navigation")
 
         assert not any("is served now" in m for m in _messages(app))
+
+
+def _stale(app: Any, pane: object, epoch: int) -> NavigateCommand:
+    generation = getattr(pane, "nav_gen", 0)
+    return NavigateCommand("widgets", origin=NavigationOrigin(pane, generation, epoch))
+
+
+async def test_a_kind_found_after_a_newer_navigation_does_not_undo_it() -> None:
+    cluster = SlowCluster()
+    cluster.installed = True
+    app = _app(cluster)
+    async with app.run_test() as pilot:
+        await _command(pilot, "wd")
+        await _command(pilot, "ns kube-system")
+        await until(pilot, lambda: app._pane.scope == "kube-system", label="newer navigation")
+
+        cluster.release.set()
+        await until(
+            pilot,
+            lambda: (
+                "widgets is served now; run :widgets again in the pane you want it in"
+                in _messages(app)
+            ),
+            label="told instead of opened",
+        )
+
+        assert (app.current_kind, app._pane.scope) == ("pods", "kube-system")
 ```
 
 ### Task 5: Document it, then run the full gate

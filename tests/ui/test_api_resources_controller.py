@@ -15,8 +15,9 @@ from korvid.ui.api_resources_controller import (
     API_RESOURCES_GROUP,
     ApiResourcesController,
     Rediscovery,
+    deferred_navigation_guard,
 )
-from korvid.ui.messages import NavigateCommand, UnknownCommand
+from korvid.ui.messages import NavigateCommand, NavigationOrigin, UnknownCommand
 
 from .test_session_timeline_controller import FakeUiSurface
 
@@ -45,7 +46,8 @@ class Cluster:
         self.reads += 1
         if self.error is not None:
             raise self.error
-        self.known |= self.served
+        if self.outcome.applied:
+            self.known |= self.served
         return self.outcome
 
     def resolve(self, word: str) -> str | None:
@@ -61,6 +63,7 @@ class Harness:
         reads_allowed: Callable[[], bool] = lambda: True,
     ) -> None:
         self.pane: object = "pane-1"
+        self.generation = 7
         self.ui = FakeUiSurface(close_worker_coroutines=False)
         self.clock = Clock()
         self.posted: list[Message] = []
@@ -74,7 +77,7 @@ class Harness:
             aliases_updated=self._updated,
             epoch=epoch,
             reads_allowed=reads_allowed,
-            focused_pane=lambda: self.pane,
+            navigation_position=lambda: (self.pane, self.generation),
             clock=self.clock,
             min_interval=30.0,
         )
@@ -280,12 +283,14 @@ async def test_a_context_switch_during_a_read_discards_it() -> None:
 
 
 async def test_a_read_the_composition_root_did_not_apply_is_discarded() -> None:
-    harness = Harness(Cluster(Rediscovery(applied=False), "widgets"))
+    cluster = Cluster(Rediscovery(applied=False), "widgets")
+    harness = Harness(cluster)
 
     harness.controller.resolve_unknown("widgets")
     await harness.finish()
 
     assert (harness.messages(), harness.updates, harness.notes()) == ([], 0, [])
+    assert cluster.resolve("widgets") is None
 
 
 def test_without_a_cluster_connection_nothing_is_read() -> None:
@@ -331,4 +336,75 @@ async def test_a_settled_command_carries_the_pane_it_was_typed_in() -> None:
 
     (command,) = harness.posted
     assert isinstance(command, NavigateCommand)
-    assert (command.origin, command.epoch) == ("pane-1", 1)
+    assert command.origin == NavigationOrigin("pane-1", 7, 1)
+
+
+class Context:
+    def __init__(self) -> None:
+        self.current = 3
+        self.switching = False
+
+    def crossed(self, epoch: int) -> bool:
+        return self.switching or epoch != self.current
+
+
+class Pane:
+    def __init__(self) -> None:
+        self.nav_gen = 7
+
+
+def _deferred(pane: object, generation: int = 7, epoch: int = 3) -> NavigateCommand:
+    return NavigateCommand("widgets", "shop", origin=NavigationOrigin(pane, generation, epoch))
+
+
+def _quiet(*_: object, **__: object) -> None:
+    pass
+
+
+def test_an_ordinary_navigation_runs_unguarded() -> None:
+    notes: list[str] = []
+
+    guard = deferred_navigation_guard(
+        NavigateCommand("pods"), Pane(), Context(), lambda text, **_: notes.append(text)
+    )
+
+    assert (guard, notes) == ((), [])
+
+
+def test_a_deferred_navigation_runs_while_its_pane_has_not_moved_on() -> None:
+    pane, context = Pane(), Context()
+
+    guard = deferred_navigation_guard(_deferred(pane), pane, context, _quiet)
+
+    assert guard is not None
+    (current,) = guard
+    assert current()
+    pane.nav_gen += 1
+    assert not current()
+    pane.nav_gen -= 1
+    context.switching = True
+    assert not current()
+
+
+@pytest.mark.parametrize("moved", ["focus", "navigation"])
+def test_a_deferred_navigation_its_pane_moved_past_is_dropped_and_said(moved: str) -> None:
+    pane, notes = Pane(), []
+    origin = Pane() if moved == "focus" else pane
+    generation = 7 if moved == "focus" else 6
+
+    guard = deferred_navigation_guard(
+        _deferred(origin, generation), pane, Context(), lambda text, **_: notes.append(text)
+    )
+
+    assert guard is None
+    assert notes == ["widgets is served now; run :widgets again in the pane you want it in"]
+
+
+def test_a_deferred_navigation_a_context_switch_crossed_is_dropped_silently() -> None:
+    notes: list[str] = []
+
+    guard = deferred_navigation_guard(
+        _deferred(Pane(), epoch=2), Pane(), Context(), lambda text, **_: notes.append(text)
+    )
+
+    assert (guard, notes) == (None, [])

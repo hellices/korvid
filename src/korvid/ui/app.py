@@ -66,7 +66,7 @@ from korvid.ui.action_palette import (
 from korvid.ui.agent_ui_controller import (
     AgentUiController,
 )
-from korvid.ui.api_resources_controller import Rediscover
+from korvid.ui.api_resources_controller import Rediscover, deferred_navigation_guard
 from korvid.ui.app_bindings import (
     APP_BINDINGS,
     APP_CSS,
@@ -793,13 +793,10 @@ class KorvidApp(App[None]):
 
     async def on_navigate_command(self, message: NavigateCommand) -> None:
         pane = self._pane  # focus may move to another split pane while this awaits
-        if message.origin is not None and message.origin is not pane:
-            if message.epoch is None or not self._ctx.crossed(message.epoch):
-                again = f"run :{message.view} again in the pane you want it in"
-                self.notify(f"{message.view} is served now; {again}", markup=False)
-            return
-        epoch = self._ctx.epoch() if message.epoch is None else message.epoch
-        guard = () if message.epoch is None else (lambda: not self._ctx.crossed(epoch),)
+        guard = deferred_navigation_guard(message, pane, self._ctx, self.notify)
+        if guard is None:
+            return  # settled by a rediscovery, and overtaken since
+        epoch = self._ctx.epoch()
         await self._workspace_ctl.navigate_command(message.view, message.namespace, *guard)
         if self._ctx.crossed(epoch):
             return  # the namespace belongs to the cluster switched away from

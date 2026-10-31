@@ -18,6 +18,8 @@ from korvid.ui.api_resources_controller import Rediscovery
 NOW = datetime(2026, 10, 31, tzinfo=UTC)
 BASE = [PODS_META, HELM_RELEASES_META, HELM_REVISIONS_META]
 CORE = ResourceMeta("ConfigMap", "configmaps", "", "v1", True, ("cm",))
+#: A core kind the snapshots below do not serve.
+SECRET = ResourceMeta("Secret", "secrets", "", "v1", True)
 WIDGET = ResourceMeta("Widget", "widgets", "example.com", "v1", True, ("wd",))
 GADGET = ResourceMeta("Gadget", "gadgets", "example.com", "v1", True)
 GADGET_V2 = ResourceMeta("Gadget", "gadgets", "example.com", "v2", True)
@@ -137,7 +139,7 @@ async def test_a_group_version_that_could_not_be_read_keeps_its_kinds() -> None:
     [("groups_complete", "the API group list"), ("versions_complete", "the core API version list")],
 )
 async def test_an_incomplete_version_list_removes_nothing(root: str, unreadable: str) -> None:
-    aliases = _aliases(WIDGET)
+    aliases = _aliases(WIDGET, SECRET)
     snapshot = _snapshot(
         _outcome(GADGET),
         groups_complete=root != "groups_complete",
@@ -148,6 +150,7 @@ async def test_an_incomplete_version_list_removes_nothing(root: str, unreadable:
     outcome = await rediscover_aliases(kube, aliases, AliasReservations())
 
     assert aliases["widgets"] is WIDGET
+    assert aliases["secrets"] is SECRET
     assert aliases["gadgets"] is GADGET
     assert outcome == Rediscovery(added=("gadgets.example.com",), unreadable=(unreadable,))
 

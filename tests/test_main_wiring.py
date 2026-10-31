@@ -1922,7 +1922,9 @@ async def test_wire_and_run_rediscovers_through_the_session_client_and_aliases(
 
     captured = _FakeAppCapturesKwargs.instances[0].captured
     assert await captured["rediscover"]() == Rediscovery()
-    assert calls == [(kube, captured["aliases"])]
+    ((called_kube, called_aliases),) = calls
+    assert called_kube is kube
+    assert called_aliases is captured["aliases"]
 
 
 async def test_wire_and_run_wires_helm_release_identity_reader_from_kube(

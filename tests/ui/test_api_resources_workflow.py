@@ -16,7 +16,7 @@ from korvid.k8s.discovery import PODS_META, ResourceMeta, build_alias_map
 from korvid.k8s.discovery_snapshot import GroupVersionOutcome, RawDiscovery, RootOutcome
 from korvid.k8s.models import GenericSummary
 from korvid.ui.api_resources_controller import Rediscovery
-from korvid.ui.messages import NavigateCommand
+from korvid.ui.messages import NavigateCommand, NavigationOrigin
 from tests.app_factory import build_test_app
 from tests.ui.waits import until
 
@@ -180,7 +180,7 @@ async def test_a_navigation_found_before_a_context_switch_is_not_applied_after_i
     app = _app(Cluster())
     async with app.run_test() as pilot:
         stale = app._ctx.epoch() - 1
-        app.post_message(NavigateCommand("widgets", origin=app._pane, epoch=stale))
+        app.post_message(_stale(app, app._pane, stale))
         # Handled in order: once this one lands, the stale one has been handled.
         app.post_message(NavigateCommand(None, "kube-system"))
         await until(pilot, lambda: app._pane.scope == "kube-system", label="later navigation")
@@ -192,8 +192,35 @@ async def test_a_stale_navigation_from_another_pane_says_nothing() -> None:
     app = _app(Cluster())
     async with app.run_test() as pilot:
         stale = app._ctx.epoch() - 1
-        app.post_message(NavigateCommand("widgets", origin=object(), epoch=stale))
+        app.post_message(_stale(app, object(), stale))
         app.post_message(NavigateCommand(None, "kube-system"))
         await until(pilot, lambda: app._pane.scope == "kube-system", label="later navigation")
 
         assert not any("is served now" in m for m in _messages(app))
+
+
+def _stale(app: Any, pane: object, epoch: int) -> NavigateCommand:
+    generation = getattr(pane, "nav_gen", 0)
+    return NavigateCommand("widgets", origin=NavigationOrigin(pane, generation, epoch))
+
+
+async def test_a_kind_found_after_a_newer_navigation_does_not_undo_it() -> None:
+    cluster = SlowCluster()
+    cluster.installed = True
+    app = _app(cluster)
+    async with app.run_test() as pilot:
+        await _command(pilot, "wd")
+        await _command(pilot, "ns kube-system")
+        await until(pilot, lambda: app._pane.scope == "kube-system", label="newer navigation")
+
+        cluster.release.set()
+        await until(
+            pilot,
+            lambda: (
+                "widgets is served now; run :widgets again in the pane you want it in"
+                in _messages(app)
+            ),
+            label="told instead of opened",
+        )
+
+        assert (app.current_kind, app._pane.scope) == ("pods", "kube-system")

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from enum import Enum
 
 from textual.message import Message
@@ -9,12 +10,25 @@ from textual.message import Message
 from korvid.tools.proposals import WriteProposal
 
 
+@dataclass(frozen=True, slots=True)
+class NavigationOrigin:
+    """Where a deferred navigation was asked for, and when.
+
+    The pane it was typed in (compared by identity), that pane's navigation
+    generation then, and the context epoch the read that settled it began in.
+    """
+
+    pane: object
+    generation: int
+    epoch: int
+
+
 class NavigateCommand(Message):
     """Command to navigate to a view, optionally in a specific namespace.
 
-    `origin` is the pane a deferred command was typed in, and `epoch` the
-    context epoch it was settled in: the handler opens the view only while
-    that pane is focused and no context switch has crossed that epoch.
+    `origin` marks a deferred navigation: the app runs it only while its pane
+    is focused and has not navigated since, and no context switch crossed its
+    epoch (`deferred_navigation_guard`).
     """
 
     view: str | None
@@ -29,14 +43,12 @@ class NavigateCommand(Message):
         view: str | None,
         namespace: str | None = None,
         *,
-        origin: object | None = None,
-        epoch: int | None = None,
+        origin: NavigationOrigin | None = None,
     ) -> None:
         super().__init__()
         self.view = view
         self.namespace = namespace
         self.origin = origin
-        self.epoch = epoch
 
 
 class FilterCommand(Message):

@@ -1013,7 +1013,7 @@ def _construct_app_runtime(app: KorvidApp, inputs: AppRuntimeInputs) -> AppRunti
         aliases_updated=app.on_aliases_updated,
         epoch=context.epoch,
         reads_allowed=context.reads_allowed,
-        focused_pane=lambda: app._pane,
+        navigation_position=lambda: (app._pane, app._pane.nav_gen),
     )
     bridge_dispatch = AppContextDispatch()
     inspect_surface = AppInspectSurface(app)

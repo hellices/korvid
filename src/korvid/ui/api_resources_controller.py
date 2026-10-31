@@ -19,13 +19,14 @@ from __future__ import annotations
 import time
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
+from typing import Protocol
 
 from textual.message import Message
 
 from korvid.k8s.errors import ApiStatusError, KubeClientError
 from korvid.ui.action_availability import AvailabilityCode, UnavailableReason
 from korvid.ui.command import is_builtin_command, parse_command
-from korvid.ui.messages import NavigateCommand, UnknownCommand
+from korvid.ui.messages import NavigateCommand, NavigationOrigin, UnknownCommand
 from korvid.ui.ui_surface import UiSurface
 
 API_RESOURCES_GROUP = "api-resources"
@@ -56,6 +57,48 @@ class Rediscovery:
 
 #: Reads discovery again and applies it to the session's aliases.
 Rediscover = Callable[[], Awaitable[Rediscovery]]
+#: The focused pane, and how many navigations it has made.
+NavigationPosition = tuple[object, int]
+
+
+class _Pane(Protocol):
+    @property
+    def nav_gen(self) -> int: ...
+
+
+class _Context(Protocol):
+    def crossed(self, epoch: int) -> bool: ...
+
+
+def deferred_navigation_guard(
+    message: NavigateCommand, pane: _Pane, context: _Context, notify: Callable[..., object]
+) -> tuple[Callable[[], bool], ...] | None:
+    """How the app runs `message` in the focused `pane`.
+
+    An ordinary navigation runs as it always has: `()`. One a rediscovery
+    settled runs only while it is still current, with a guard the navigation
+    re-checks under its lock: its pane is focused and has not navigated since
+    the command was typed, and no context switch crossed the read's epoch.
+    Otherwise it returns None, after saying the kind is served now unless a
+    context switch made the message stale.
+    """
+    origin = message.origin
+    if origin is None:
+        return ()
+
+    def current() -> bool:
+        return (
+            origin.pane is pane
+            and origin.generation == pane.nav_gen
+            and not context.crossed(origin.epoch)
+        )
+
+    if current():
+        return (current,)
+    if not context.crossed(origin.epoch):
+        again = f"run :{message.view} again in the pane you want it in"
+        notify(f"{message.view} is served now; {again}", markup=False)
+    return None
 
 
 def _names(count_label: str, names: Sequence[str]) -> str:
@@ -92,7 +135,7 @@ class ApiResourcesController:
         aliases_updated: Callable[[], None],
         epoch: Callable[[], int],
         reads_allowed: Callable[[], bool],
-        focused_pane: Callable[[], object],
+        navigation_position: Callable[[], NavigationPosition],
         clock: Callable[[], float] = time.monotonic,
         min_interval: float = MIN_INTERVAL_SECONDS,
     ) -> None:
@@ -103,13 +146,13 @@ class ApiResourcesController:
         self._aliases_updated = aliases_updated
         self._epoch = epoch
         self._reads_allowed = reads_allowed
-        self._focused_pane = focused_pane
+        self._position = navigation_position
         self._clock = clock
         self._min_interval = min_interval
         self._running = False
         self._last_start: float | None = None
-        #: Each command a read will settle, and the pane it was typed in.
-        self._waiting: list[tuple[str, object]] = []
+        #: Each command a read will settle, and where it was typed.
+        self._waiting: list[tuple[str, NavigationPosition]] = []
 
     def unavailable_reason(self) -> UnavailableReason | None:
         """Why the API resources cannot be read again, or None."""
@@ -144,12 +187,12 @@ class ApiResourcesController:
         if not self._reads_allowed():
             return False
         if self._running:
-            self._waiting.append((text, self._focused_pane()))
+            self._waiting.append((text, self._position()))
             return True
         last = self._last_start
         if last is not None and self._clock() - last < self._min_interval:
             return False
-        self._waiting.append((text, self._focused_pane()))
+        self._waiting.append((text, self._position()))
         self._start(announce=False)
         return True
 
@@ -185,8 +228,8 @@ class ApiResourcesController:
         if self._epoch() != epoch or (outcome is not None and not outcome.applied):
             return
         self._report(outcome, failure, announce=announce)
-        for text, pane in waiting:
-            self._post_again(text, pane, epoch)
+        for text, position in waiting:
+            self._post_again(text, position, epoch)
 
     def _report(self, outcome: Rediscovery | None, failure: str | None, *, announce: bool) -> None:
         if outcome is None:
@@ -208,18 +251,18 @@ class ApiResourcesController:
                 markup=False,
             )
 
-    def _post_again(self, text: str, pane: object, epoch: int) -> None:
-        """Run `text` again in the pane it was typed in.
+    def _post_again(self, text: str, position: NavigationPosition, epoch: int) -> None:
+        """Run `text` again where it was typed, unless that pane has moved on.
 
-        The navigation carries that pane and the read's epoch: the app opens
-        the view only while the pane is focused and, under the navigation
-        lock, only if no context switch has crossed the epoch.
+        The navigation carries its `NavigationOrigin`, which
+        `deferred_navigation_guard` checks when the app handles it.
         """
         command = parse_command(text, self._known)
         if isinstance(command, UnknownCommand):
             command = UnknownCommand(text, rediscovered=True)
         elif isinstance(command, NavigateCommand):
-            command = NavigateCommand(command.view, command.namespace, origin=pane, epoch=epoch)
+            origin = NavigationOrigin(*position, epoch)
+            command = NavigateCommand(command.view, command.namespace, origin=origin)
         self._post(command)
 
     async def cancel_workers(self) -> None:
