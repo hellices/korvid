@@ -13,7 +13,7 @@
 - **Bounded:** one read at a time, and commands typed meanwhile wait for it. An unknown command starts a read at most once every 30 seconds; `:rediscover` is not rate-limited.
 - **Context-safe:** the context-switch coordinator cancels the worker group before the client swaps. A read whose session generation changed is never applied, and the controller drops a result whose context epoch changed.
 - **An alias never moves to another resource:** an open view, its watch and its rows are keyed by an alias, so a refresh keeps every known alias on its resource and drops one whose resource is gone. `AliasReservations` remembers that owner for the rest of the session, so a later refresh does not hand the alias over either, and gives the alias back if the resource is reinstalled; a new session generation (connect or context switch) lifts the reservations. Only an alias nobody held goes to a new resource, and the `:operators` catalog fallback is applied before that rule, not after it.
-- **A command runs where it was typed, and only if nothing overtook it:** a settled navigation carries a `NavigationOrigin` (the pane it was typed in, that pane's `nav_gen` then, and the read's context epoch). `deferred_navigation_guard` runs it only while that pane is focused, has not navigated since, and no context switch crossed the epoch, re-checking under the navigation lock; otherwise it says the kind is served now, or nothing if a context switch made it stale. An ordinary navigation calls `navigate_command` exactly as before.
+- **A command runs where it was typed, and only if nothing overtook it:** a settled navigation carries a `NavigationOrigin` (the pane it was typed in, that pane's `nav_gen` then, and the read's context epoch). `deferred_navigation_guard` runs it only while that pane is focused, has not navigated since, and no context switch crossed the epoch, re-checking under the navigation lock; otherwise it says the kind is served now, or nothing if a context switch made it stale. Of the commands one read settles, only the newest typed in each pane may navigate; older ones there are superseded, while every command still unknown is reported. An ordinary navigation calls `navigate_command` exactly as before.
 - **No read during a context switch:** the controller checks `ContextGuard.reads_allowed()` before starting or queuing a read, because the coordinator has already cancelled the group and the old client would refill the alias map the switch reset.
 - **Never drop what could not be read:** a group version that failed or was incomplete keeps the kinds korvid knew from it; an incomplete `/api` or `/apis` root removes nothing. A failed core `v1` or `/apis` read changes nothing and is said.
 - **Palette search:** the help text and keywords must not contain the subsequence `h…e…l…m`, which a test reserves for Helm, and must not outrank the rows existing palette tests search for. Hence no "custom resource" or "reload" keyword.
@@ -456,6 +456,32 @@ def test_a_deferred_navigation_a_context_switch_crossed_is_dropped_silently() ->
     )
 
     assert (guard, notes) == (None, [])
+
+
+async def test_of_commands_typed_in_one_pane_during_a_read_the_newest_runs() -> None:
+    harness = Harness(Cluster(UNCHANGED, "widgets", "gadgets"))
+
+    harness.controller.resolve_unknown("widgets")
+    harness.controller.resolve_unknown("gadgets")
+    harness.controller.resolve_unknown("doodads")
+    harness.pane = "pane-2"
+    harness.controller.resolve_unknown("widgets kube-system")
+    await harness.finish()
+
+    assert harness.messages() == [
+        ("unknown", "doodads", "True"),
+        ("navigate", "widgets", "kube-system"),
+    ]
+
+
+async def test_the_newest_command_of_a_pane_may_be_one_that_resolves() -> None:
+    harness = Harness(Cluster(UNCHANGED, "gadgets"))
+
+    harness.controller.resolve_unknown("doodads")
+    harness.controller.resolve_unknown("gadgets")
+    await harness.finish()
+
+    assert harness.messages() == [("unknown", "doodads", "True"), ("navigate", "gadgets", "None")]
 ```
 
 - [ ] **Step 2:** Run `uv run --frozen pytest -p no:tach tests/ui/test_api_resources_controller.py -q`. Expected: collection fails, no module.
@@ -692,8 +718,12 @@ class ApiResourcesController:
         if self._epoch() != epoch or (outcome is not None and not outcome.applied):
             return
         self._report(outcome, failure, announce=announce)
-        for text, position in waiting:
-            self._post_again(text, position, epoch)
+        # Only the newest command typed in a pane may navigate it: an older
+        # one, replayed first, would bump the pane's generation and turn the
+        # newer one away as stale.
+        newest = {position: index for index, (_, position) in enumerate(waiting)}
+        for index, (text, position) in enumerate(waiting):
+            self._post_again(text, position, epoch, newest=newest[position] == index)
 
     def _report(self, outcome: Rediscovery | None, failure: str | None, *, announce: bool) -> None:
         if outcome is None:
@@ -715,19 +745,21 @@ class ApiResourcesController:
                 markup=False,
             )
 
-    def _post_again(self, text: str, position: NavigationPosition, epoch: int) -> None:
+    def _post_again(
+        self, text: str, position: NavigationPosition, epoch: int, *, newest: bool
+    ) -> None:
         """Run `text` again where it was typed, unless that pane has moved on.
 
-        The navigation carries its `NavigationOrigin`, which
-        `deferred_navigation_guard` checks when the app handles it.
+        A command still unknown is reported. A navigation runs only if it is
+        the newest command typed in its pane, carrying its `NavigationOrigin`
+        for `deferred_navigation_guard` to check when the app handles it.
         """
         command = parse_command(text, self._known)
         if isinstance(command, UnknownCommand):
-            command = UnknownCommand(text, rediscovered=True)
-        elif isinstance(command, NavigateCommand):
+            self._post(UnknownCommand(text, rediscovered=True))
+        elif isinstance(command, NavigateCommand) and newest:
             origin = NavigationOrigin(*position, epoch)
-            command = NavigateCommand(command.view, command.namespace, origin=origin)
-        self._post(command)
+            self._post(NavigateCommand(command.view, command.namespace, origin=origin))
 
     async def cancel_workers(self) -> None:
         """Stop a read holding the old client, before a context switch swaps it."""

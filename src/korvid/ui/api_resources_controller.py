@@ -228,8 +228,12 @@ class ApiResourcesController:
         if self._epoch() != epoch or (outcome is not None and not outcome.applied):
             return
         self._report(outcome, failure, announce=announce)
-        for text, position in waiting:
-            self._post_again(text, position, epoch)
+        # Only the newest command typed in a pane may navigate it: an older
+        # one, replayed first, would bump the pane's generation and turn the
+        # newer one away as stale.
+        newest = {position: index for index, (_, position) in enumerate(waiting)}
+        for index, (text, position) in enumerate(waiting):
+            self._post_again(text, position, epoch, newest=newest[position] == index)
 
     def _report(self, outcome: Rediscovery | None, failure: str | None, *, announce: bool) -> None:
         if outcome is None:
@@ -251,19 +255,21 @@ class ApiResourcesController:
                 markup=False,
             )
 
-    def _post_again(self, text: str, position: NavigationPosition, epoch: int) -> None:
+    def _post_again(
+        self, text: str, position: NavigationPosition, epoch: int, *, newest: bool
+    ) -> None:
         """Run `text` again where it was typed, unless that pane has moved on.
 
-        The navigation carries its `NavigationOrigin`, which
-        `deferred_navigation_guard` checks when the app handles it.
+        A command still unknown is reported. A navigation runs only if it is
+        the newest command typed in its pane, carrying its `NavigationOrigin`
+        for `deferred_navigation_guard` to check when the app handles it.
         """
         command = parse_command(text, self._known)
         if isinstance(command, UnknownCommand):
-            command = UnknownCommand(text, rediscovered=True)
-        elif isinstance(command, NavigateCommand):
+            self._post(UnknownCommand(text, rediscovered=True))
+        elif isinstance(command, NavigateCommand) and newest:
             origin = NavigationOrigin(*position, epoch)
-            command = NavigateCommand(command.view, command.namespace, origin=origin)
-        self._post(command)
+            self._post(NavigateCommand(command.view, command.namespace, origin=origin))
 
     async def cancel_workers(self) -> None:
         """Stop a read holding the old client, before a context switch swaps it."""

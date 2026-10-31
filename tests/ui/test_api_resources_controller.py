@@ -408,3 +408,29 @@ def test_a_deferred_navigation_a_context_switch_crossed_is_dropped_silently() ->
     )
 
     assert (guard, notes) == (None, [])
+
+
+async def test_of_commands_typed_in_one_pane_during_a_read_the_newest_runs() -> None:
+    harness = Harness(Cluster(UNCHANGED, "widgets", "gadgets"))
+
+    harness.controller.resolve_unknown("widgets")
+    harness.controller.resolve_unknown("gadgets")
+    harness.controller.resolve_unknown("doodads")
+    harness.pane = "pane-2"
+    harness.controller.resolve_unknown("widgets kube-system")
+    await harness.finish()
+
+    assert harness.messages() == [
+        ("unknown", "doodads", "True"),
+        ("navigate", "widgets", "kube-system"),
+    ]
+
+
+async def test_the_newest_command_of_a_pane_may_be_one_that_resolves() -> None:
+    harness = Harness(Cluster(UNCHANGED, "gadgets"))
+
+    harness.controller.resolve_unknown("doodads")
+    harness.controller.resolve_unknown("gadgets")
+    await harness.finish()
+
+    assert harness.messages() == [("unknown", "doodads", "True"), ("navigate", "gadgets", "None")]

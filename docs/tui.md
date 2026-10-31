@@ -63,9 +63,10 @@ or an operator installs during the session, opens without a restart:
   name whose resource is no longer served is dropped, and not given to
   another until you switch context; it names that resource again if it is
   reinstalled.
-- **A view opens where you asked for it.** If you move to the other split
-  pane while discovery is read, korvid says the kind is served now instead
-  of opening it in the pane you moved to.
+- **A view opens where, and only if, you still want it.** If you move to the
+  other split pane, or open another view in the same pane, while discovery
+  is read, korvid says the kind is served now instead of opening it. Of
+  several commands typed in one pane meanwhile, only the newest can open.
 
 ## Ask in the way you already think
 
