@@ -109,7 +109,7 @@ all = [
 
 [build-system]
 # hatchling >=1.26 required: PEP 639 SPDX string form of `license` above
-requires = ["hatchling==1.32.4"]
+requires = ["hatchling==1.33.0"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build]
@@ -119,7 +119,7 @@ exclude = ["/src/korvid/evals", "/tests/evals"]
 packages = ["src/korvid"]
 
 [dependency-groups]
-docs = ["mkdocs-material==9.7.7"]
+docs = ["mkdocs-material==9.8.0"]
 dev = [
     "pytest>=8",
     "pytest-asyncio>=0.24",
