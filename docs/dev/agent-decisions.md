@@ -35,36 +35,33 @@ timing, or causality that the API does not carry. Every shipped rule is in the
 left column, and the Service rules deliberately stop short of concluding
 "selector mismatch" even when that is the likely cause.
 
-**Why, with external evidence.** [k8sgpt](https://github.com/k8sgpt-ai/k8sgpt)
-(8k stars, CNCF sandbox, since 2023) is the same architecture at scale — 28
-analyzers feeding an LLM — and its bug tracker documents the failure mode
-precisely:
+**Why: intent-inferring rules fail in predictable ways.** A rule that encodes
+what "normal" looks like and hands its verdict to an LLM breaks wherever the
+assumption does not hold:
 
-- [#849](https://github.com/k8sgpt-ai/k8sgpt/issues/849): on GKE, every managed
-  ingress was reported as using a nonexistent IngressClass, and the LLM
-  confidently advised `kubectl create ingressclass gce` — actionably wrong on a
-  production cluster. Open for **over two years**.
-- [#1668](https://github.com/k8sgpt-ai/k8sgpt/issues/1668): the fix for #849 was
-  a hardcoded GKE allowlist, which **immediately** created the same false
-  positive for AWS Load Balancer Controller users. Fires every 30 minutes.
-- [#1723](https://github.com/k8sgpt-ai/k8sgpt/issues/1723): the Job analyzer
-  reads `status.Failed > 0` as failure, but that is a cumulative attempt
-  counter. A Job that retried twice within `backoffLimit` and succeeded is
-  reported as failed.
-- [#1720](https://github.com/k8sgpt-ai/k8sgpt/issues/1720): the ConfigMap
-  analyzer iterates `Containers` but not `InitContainers`, so a ConfigMap used
-  only by an init container is flagged unused.
+- **Platform defaults.** A rule that expects every Ingress to name an
+  IngressClass the cluster lists flags every managed GKE ingress. The LLM then
+  confidently advises `kubectl create ingressclass gce`, which is actionably
+  wrong on a production cluster.
+- **Hardcoded exceptions.** Fixing that with a GKE allowlist immediately
+  creates the same false positive for AWS Load Balancer Controller users.
+- **Counters read as state.** `status.failed > 0` is a cumulative attempt
+  counter, not a verdict. A Job that retried twice within `backoffLimit` and
+  succeeded reads as failed.
+- **Partial walks.** A ConfigMap check that iterates `containers` but not
+  `initContainers` flags a ConfigMap used only by an init container as unused.
 
 The mechanism repeats: a rule encodes what "normal" looks like, the assumption
 fails on some cluster, the patch is a hardcoded exception, and the exception is
 incomplete for the next platform. Closed-world rules in an open world.
 
-**Each deferred family maps onto one of those bugs.** ConfigMap/Secret
-references *is* #1720 — and the real surface is wider still (initContainers,
-ephemeral containers, projected volumes, external-secrets-operator where the
-Secret appears after scheduling, SealedSecrets where the plaintext never
-exists). Rollout health is the same class as #1723: `unavailableReplicas > 0`
-is normal during a rolling update, a surge window, and HPA scale-up. A PDB
+**Each deferred family maps onto one of those failures.** ConfigMap/Secret
+references *is* the partial walk, and the real surface is wider still
+(initContainers, ephemeral containers, projected volumes,
+external-secrets-operator where the Secret appears after scheduling,
+SealedSecrets where the plaintext never exists). Rollout health is the same
+class as the counter read as state: `unavailableReplicas > 0` is normal during
+a rolling update, a surge window, and HPA scale-up. A PDB
 blocking eviction is frequently *correct* — it is protecting a quorum.
 Unschedulable pods are the expected steady state while cluster-autoscaler
 provisions.
@@ -72,15 +69,13 @@ provisions.
 **What keeps the shipped two safe.** Severity and confidence are hedged where
 the evidence is weak. `pvc.provisioning_pending` is `info`/`medium` and says
 "provisioning has not reported a specific failure" — it declines to assert a
-fault. Compare k8sgpt's "Job X has failed" for a Job that succeeded.
+fault, where a counter-reading rule would report "Job X has failed" for a Job
+that succeeded.
 
 **Provisional, and what would change it.** The *value* of the two shipped tools
 is unverified. No published benchmark compares analyzer-based against agentic
-troubleshooting — [HolmesGPT](https://github.com/HolmesGPT/holmesgpt) chose a
-pure agentic loop and publishes
-[150+ evaluations](https://holmesgpt.dev/latest/development/evaluations/), but
-with no pre-analysis control arm and no published rationale. #176 will run the
-first matched comparison. If it shows no benefit, the right response is to
+troubleshooting with a pre-analysis control arm. #176 will run the first
+matched comparison. If it shows no benefit, the right response is to
 simplify them into bounded evidence-bundling reads, or remove them.
 
 One finding cuts the other way and is worth preserving. The
@@ -89,7 +84,7 @@ framework finds structured intermediate representations *do* help — but STAR's
 structure is **evidence the agent assembles into conclusions**, not conclusions
 handed to the agent. `AnalysisReport` carries both halves: `Evidence` /
 `EvidenceGap`, and `Finding`. The evidence favours the first half. A `Finding`
-is something the model can anchor on; the k8sgpt Ingress case is exactly an LLM
+is something the model can anchor on; the Ingress case above is exactly an LLM
 elaborating a wrong conclusion with confidence.
 
 **Related:** #191 (closed), #213, #216, #221.
@@ -129,13 +124,6 @@ compound tools and output projections often improve small-model behavior more
 reliably than adding prompt text."* Two sources, one internal and one external,
 reaching the same conclusion.
 
-**The pattern is established, but not uniform.** Of seven comparable tools, four
-expose an override — [kubectl-ai](https://github.com/GoogleCloudPlatform/kubectl-ai)
-(`promptTemplateFilePath`), [HolmesGPT](https://github.com/HolmesGPT/holmesgpt)
-(`file://` prompts plus `custom_instructions`), Continue.dev
-(`baseSystemMessage`), Ollama (Modelfile `SYSTEM`). Cline allows append-only.
-Aider and k8sgpt expose none; k8sgpt sends no system role at all.
-
 **Why the override replaces a slot, not the composed prompt.** The effective
 prompt for a local model has three layers, and merging them is the source of
 risk:
@@ -146,9 +134,9 @@ risk:
 | Tool-schema injection | korvid, sent as native structured definitions |
 | Behavioural framing (role statement) | **configurable** |
 
-kubectl-ai shows the hazard: under `--enable-tool-use-shim` the tool JSON lives
-*inside* the system prompt, so an override that drops `{{.ToolsAsJSON}}`
-silently disables tool calling. korvid is not exposed to that, and the same
+The hazard is a tool-use shim that puts the tool JSON *inside* the system
+prompt: an override that drops the tool block then silently disables tool
+calling. korvid is not exposed to that, and the same
 reasoning keeps the write/no-write and UI clauses out of every configurable
 layer — the prompt harness derives them from the tools the resolved policy
 actually armed.
@@ -164,10 +152,8 @@ read-only enforcement live in code. "Delete pods without asking" produces a
 model that tries and is refused.
 
 **Per-model forks remain unsupported.** Model *families* need different chat
-templates — that is well established
-([Continue.dev's `autodetect.ts`](https://github.com/continuedev/continue) carries 20+)
-— but that is message formatting, handled below korvid. Per-family prompt
-*content* forks have no evidence behind them.
+templates, but that is message formatting, handled below korvid by the serving
+engine. Per-family prompt *content* forks have no evidence behind them.
 
 **Related:** #71, #176, #177.
 
@@ -239,23 +225,22 @@ Tracked in #221 as a third arm of #176's evaluation.
 
 ---
 
-## 5. What this project competes on
+## 5. What this project focuses on
 
 From the [design document](specs/2026-07-23-korvid-tui-design.md) §1, the
-differentiators against general-purpose agents (Claude Code plus a Kubernetes
-MCP) are:
+focus is:
 
 > automatic screen-context injection + TUI driving + approval/audit system
 
 Deterministic analyzers are **not** on that list, and today no consumer of
 `AnalysisReport` exists under `src/korvid/ui/` — they feed neither screen
-context nor TUI driving. They live purely on the agent tool surface, which is
-where general-purpose agents compete hardest.
+context nor TUI driving. They live purely on the agent tool surface, apart
+from the screen.
 
 This is not an argument to remove them. It is the reason capability proposals
-should be checked against the differentiators before they are checked for
-technical merit: a capability that a general-purpose agent already has is worth
-less to korvid than one that only a TUI-integrated agent can offer.
+should be checked against that focus before they are checked for technical
+merit: a capability tied to the shared screen is worth more to korvid than one
+that could live anywhere.
 
 ---
 

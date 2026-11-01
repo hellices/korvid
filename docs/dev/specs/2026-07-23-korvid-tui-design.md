@@ -20,11 +20,10 @@
 - With the agent enabled: the agent investigates the cluster and **drives the TUI directly** (switching views, applying filters, opening logs) while showing its evidence as it diagnoses. Command execution goes through an approval gate
 - The user can take over with the keyboard at any moment — the TUI experience is never lost
 
-### Why now (research findings, as of 2026-07)
-- No mature tool yet combines "full-screen TUI + conversational LLM + command execution" (the only attempt, ks-ai, remains a 7★ early-stage PoC)
+### Why now (as of 2026-07)
 - Combining keyboard-first cluster control with a deeply integrated AI agent is naturally achievable when starting from a fresh design
 - The Python/Textual stack is proven capable of production-grade TUIs
-- The biggest threat is general-purpose agents (Claude Code + K8s MCP) → differentiate through domain specialization: **automatic screen-context injection + TUI driving + approval/audit system**
+- The focus is domain specialization: **automatic screen-context injection + TUI driving + approval/audit system**
 
 ---
 
@@ -45,8 +44,8 @@ Core scenarios:
 | | A. Sidecar chat | B. Agent-first shell | **C. Dual-mode hybrid (chosen)** |
 |---|---|---|---|
 | Summary | TUI + read-only Q&A panel | Conversation is the primary UI; widgets are artifacts | Keyboard-first TUI + an agent that can drive the TUI |
-| Pros | Simple, low risk | Maximum AI differentiation | Satisfies both needs; structural differentiation |
-| Cons | Underserves the requirements; limited differentiation | Loses the TUI experience; competes head-on with general-purpose agents | Highest complexity |
+| Pros | Simple, low risk | Most room for the agent | Satisfies both needs; the agent and the TUI share one screen |
+| Cons | Underserves the requirements; the agent cannot act in the TUI | Loses the TUI experience; the screen context is gone | Highest complexity |
 | Verdict | ❌ | ❌ | ✅ manage complexity with a phased roadmap |
 
 ---
@@ -130,7 +129,7 @@ These are the core needs of terminal Kubernetes workflows that korvid, being a f
 
 ---
 
-## 6. Agent Design (the differentiating core)
+## 6. Agent Design (the core)
 
 ### 6.1 UX — a conversational AI panel inside a keyboard-first TUI
 
@@ -207,7 +206,7 @@ Non-disruptive debugging of running pods is a first-class feature. All three kub
 - RBAC pre-check: without `pods/ephemeralcontainers` update permission, show "missing permission: pods/ephemeralcontainers" explicitly (the §5 #5 principle)
 - Cluster version check: EphemeralContainers is stable in K8s 1.25+ — on older versions the feature is disabled with the reason shown
 
-**🌟 Agent integration (the differentiating killer workflow)**:
+**🌟 Agent integration (the key workflow)**:
 - `launch_debug_session` tool: the agent decides and proposes a debug configuration that fits the diagnostic context — "why is this pod's network broken?" → composes netshoot image + `--target app` + netadmin profile → user approves → shell opens
 - `suggest_debug_commands` tool: proposes a sequence of diagnostic commands to run after entry (e.g., `nslookup svc`, `ss -tlnp`, `tcpdump -i eth0`)
 - Scenario completeness: "symptom question → agent investigation → auto-configured debug session → verification in the shell" flows as one continuous experience. This connects what previously lived in separate tools: conversational diagnosis (REPL tools) and manual shell-in (TUIs)
@@ -279,7 +278,7 @@ Five diagnostic features deliverable at the level of the **vanilla Kubernetes AP
 
 | Risk | Mitigation |
 |---|---|
-| General-purpose agents (Claude Code + MCP) erode the niche | Screen-context injection, TUI driving, and the approval/audit system are things general-purpose tools cannot do. In Phase 3, become an MCP client ourselves and absorb the ecosystem |
+| The agent adds little over a plain chat panel | Screen-context injection, TUI driving, and the approval/audit system tie the agent to what is on screen. In Phase 3, connect to external MCP servers to extend the agent's tools |
 | Python performance (large-scale watch) | Selective watch + async architecture. Mega-clusters are an explicit non-goal |
 | Textual bus factor = 1 | MIT license, large community, fork as a last resort. Manage UI-framework coupling behind an abstraction layer |
 | Agent misbehavior damaging a cluster | Writes are approval-gated by default. `--skip-approvals` can relax this, but **protected contexts ignore that option and always require approval**. Audit log, read-only mode |

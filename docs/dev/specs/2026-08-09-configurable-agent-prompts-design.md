@@ -34,17 +34,7 @@ tier. This design connects configuration to seams that are already there.
 
 ## Evidence (added 2026-08-09, after external review)
 
-The direction was checked against comparable tools and published work rather
-than assumed.
-
-**The pattern is established.** Of seven comparable tools, four expose a
-system-prompt override: [kubectl-ai](https://github.com/GoogleCloudPlatform/kubectl-ai)
-(`promptTemplateFilePath`, `extraPromptPaths`),
-[HolmesGPT](https://github.com/HolmesGPT/holmesgpt) (`file://` prompt URIs plus
-`custom_instructions`/`global_instructions`), Continue.dev
-(`baseSystemMessage`), and Ollama itself (Modelfile `SYSTEM`). Cline allows
-append-only; Aider and k8sgpt do not expose one at all — k8sgpt sends no system
-role whatsoever.
+The direction was checked against published work rather than assumed.
 
 **But the prompt is the lowest-leverage layer.** Three independent papers find
 tool-description quality dominates prompt preamble for tool-calling accuracy:
@@ -63,11 +53,11 @@ Two consequences for this design:
 - The feature is correctly scoped as *local adaptation*, not as guidance. It
   does not become a recommended tuning step.
 
-**The key decision is externally validated.** The effective prompt for a local
+**The key decision.** The effective prompt for a local
 model has three layers: chat-template formatting, tool-schema injection, and
-behavioural framing. kubectl-ai shows the hazard of merging them: under
-`--enable-tool-use-shim` the tool JSON lives *inside* the system prompt, so a
-user override that drops `{{.ToolsAsJSON}}` silently disables tool calling.
+behavioural framing. Merging them is the hazard: when a tool-use shim puts the
+tool JSON *inside* the system prompt, a user override that drops the tool block
+silently disables tool calling.
 korvid is not exposed to that failure — it sends tools as native structured
 function definitions — and this design further keeps the armed-capability
 clauses out of the override for the same reason: configuration touches framing

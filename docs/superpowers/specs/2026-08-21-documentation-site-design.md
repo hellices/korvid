@@ -45,8 +45,8 @@ the first public documentation site.
 
 ## Information architecture
 
-The landing page is `docs/index.md`, a product-led page inspired by the direct,
-playful structure of the K9s official site. It is not a generic documentation
+The landing page is `docs/index.md`, a product-led page with a direct,
+playful structure. It is not a generic documentation
 index. A concise hero, one-command install, the existing TUI demo, and a small
 set of capability sections explain the product before directing readers into
 the documentation.
@@ -154,7 +154,7 @@ replacing those checks.
 
 ## Presentation
 
-The site borrows K9s's product-site qualities without copying its branding or
+The site aims for these product-site qualities, in korvid's own branding and
 content: a memorable opening line, prominent terminal product imagery, short
 feature statements, and documentation that feels like part of the product
 rather than a separate portal.

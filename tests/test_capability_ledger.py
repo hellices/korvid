@@ -32,7 +32,10 @@ HISTORICAL_BANNER = (
     "> [living capability ledger](../capabilities.md) for the system as built and\n"
     "> current product decisions.\n\n"
 )
-HISTORICAL_BODY_SHA256 = "614889af28739946260b9baac2121e1127dad58472e0bf93d64c53aa29959f6c"
+#: The body is frozen except for deliberate amendments. #547 removed its
+#: competitor framing (the "Why now" prior-attempt line, the "biggest
+#: threat" bullet, the option-table and risk-row comparisons).
+HISTORICAL_BODY_SHA256 = "238480e629ccb6562b2353366df4650cde5dc1ebdc1f95956ec70a78257bdcc7"
 
 _STATUS_ROW = re.compile(
     r"^\|\s*`(?P<status>[a-z]+)`\s*\|\s*(?P<meaning>[^|]+?)\s*\|$",

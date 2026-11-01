@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Publish a K9s-inspired korvid product landing page and searchable official documentation site at `https://hellices.github.io/korvid/`.
+**Goal:** Publish a product-led korvid landing page and searchable official documentation site at `https://hellices.github.io/korvid/`.
 
 **Architecture:** MkDocs Material renders the existing `docs/` Markdown tree, a custom landing page, and one focused stylesheet into a static site. A strict local build validates content and navigation; a least-privilege GitHub Pages workflow builds pull requests and deploys reviewed `main` revisions.
 
@@ -13,7 +13,7 @@
 - Existing files under `docs/` remain the canonical source; generated HTML is never committed.
 - The first release uses `https://hellices.github.io/korvid/` and no custom domain.
 - The initial site has no analytics, localization, version switcher, blog, backend, or custom JavaScript application.
-- The landing page uses korvid's own brand and copy; it borrows K9s's product-led structure without copying K9s assets or content.
+- The landing page uses korvid's own brand, copy, and artwork, with a product-led structure.
 - Internal links and navigation targets must pass `mkdocs build --strict`.
 - Dependency locking must clear `UV_INDEX`, `UV_DEFAULT_INDEX`, `UV_INDEX_URL`, `UV_EXTRA_INDEX_URL`, and `UV_FIND_LINKS` and use `uv lock --no-config`.
 - GitHub Actions must be pinned by full commit SHA and deployment permissions must be isolated to the deploy job.
@@ -167,7 +167,7 @@ git commit -m "build: add reproducible documentation site"
 
 ---
 
-### Task 2: K9s-inspired korvid landing experience
+### Task 2: Product-led korvid landing experience
 
 **Files:**
 - Create: `docs/index.md`
@@ -264,7 +264,7 @@ Create `docs/overrides/home.html`:
 ```
 
 Create an original `docs/assets/korvid-mark.svg` using geometric wing and eye
-shapes with `currentColor`; do not use K9s artwork. Create
+shapes with `currentColor`. Create
 `docs/stylesheets/extra.css` with CSS custom properties, an amber-on-charcoal
 hero, responsive two-column demo layout above 960px, a three-card feature grid,
 visible keyboard focus, reduced-motion handling, and standard readable

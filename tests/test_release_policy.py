@@ -24,6 +24,7 @@ _SECURITY = _ROOT / "SECURITY.md"
 _V0_5_RELEASE_NOTE = _ROOT / "docs" / "release-notes" / "v0.5.0.md"
 _V0_6_RELEASE_NOTE = _ROOT / "docs" / "release-notes" / "v0.6.0.md"
 _V0_6_1_RELEASE_NOTE = _ROOT / "docs" / "release-notes" / "v0.6.1.md"
+_V0_7_0_RELEASE_NOTE = _ROOT / "docs" / "release-notes" / "v0.7.0.md"
 _UNPUBLISHED_RELEASE_NOTE = _ROOT / "docs" / "release-notes" / "v0.4.0.md"
 _FIRST_PUBLISHED_0_4_VERSION = "0.4.1"
 _FIRST_PUBLISHED_0_4_NOTE = _ROOT / "docs" / "release-notes" / f"v{_FIRST_PUBLISHED_0_4_VERSION}.md"
@@ -666,7 +667,7 @@ def test_v0_6_release_note_explains_stricter_priority_key_validation() -> None:
             id="v0.6.1",
         ),
         pytest.param(
-            None,
+            _V0_7_0_RELEASE_NOTE,
             (
                 "https://hellices.github.io/korvid/tui/#workload-creation-failures",
                 "https://hellices.github.io/korvid/tui/#configuration-propagation",
@@ -676,6 +677,11 @@ def test_v0_6_release_note_explains_stricter_priority_key_validation() -> None:
                 "https://hellices.github.io/korvid/mcp/#tool-hints",
                 "https://hellices.github.io/korvid/release-notes/v0.6.1/",
             ),
+            id="v0.7.0",
+        ),
+        pytest.param(
+            None,
+            ("https://hellices.github.io/korvid/release-notes/v0.7.0/",),
             id="current",
         ),
     ],
@@ -941,10 +947,10 @@ def test_publish_step_requires_reviewed_commit_version_guard() -> None:
         _assert_release_runbook_contracts(runbook.replace(publish, mutated))
 
 
-def test_v0_7_0_release_metadata_takes_v0_6_0_as_upgrade_source() -> None:
-    assert _project_version() == "0.7.0"
+def test_v0_7_1_release_metadata_keeps_v0_6_0_as_upgrade_source() -> None:
+    assert _project_version() == "0.7.1"
     assert UPGRADE_SOURCE_VERSION == "0.6.0"
-    assert __version__ == "0.7.0"
+    assert __version__ == "0.7.1"
 
 
 #: The runtime dependencies v0.6.1 updates for advisories against the
@@ -1012,8 +1018,9 @@ def test_upgrade_source_is_the_previous_minor_release() -> None:
     assert source_notes.is_file(), f"upgrade source has no release notes: {source_notes.name}"
 
 
-def test_current_release_note_is_the_v0_7_0_summary() -> None:
-    notes = _release_notes(_project_version())
+def test_v0_7_0_release_note_is_a_concise_summary() -> None:
+    """The v0.7.0 note's own contract, kept with that note once it is history."""
+    notes = _V0_7_0_RELEASE_NOTE.read_text(encoding="utf-8")
 
     assert re.findall(r"^## (.+)$", notes, re.MULTILINE) == [
         "Why upgrade",
@@ -1037,13 +1044,59 @@ def test_current_release_note_is_the_v0_7_0_summary() -> None:
     assert not re.search(r"(?<!\w)#\d+\b", notes), "link pages, not issue numbers"
 
 
+#: What v0.7.0 shipped for each v0.6.1 security update, read from the lock
+#: at the commit tagged `v0.7.0`. History, so it never follows the lock.
+_V0_7_0_SHIPPED = {
+    "certifi": "2026.10.19",
+    "aiohttp": "3.14.4",
+    "filelock": "4.2.4",
+    "litellm": "1.100.4",
+    "opentelemetry-api": "1.45.1",
+}
+
+
 def test_v0_7_0_still_ships_every_v0_6_1_security_fix() -> None:
-    """Whether or not v0.6.1 is published, v0.7.0 must carry its fixes, and say so."""
+    """Whether or not v0.6.1 is published, v0.7.0 must carry its fixes, and say so.
+
+    The note records what v0.7.0 shipped, so it is checked against the
+    advisory floors, not against a lock that moves on after it.
+    """
     safety = _normalized(
-        markdown_section(_release_notes(_project_version()), "Reliability and safety")
+        markdown_section(_V0_7_0_RELEASE_NOTE.read_text(encoding="utf-8"), "Reliability and safety")
     )
 
     for package, floor in _V0_6_1_SECURITY_FLOORS.items():
+        match = re.search(rf"`{re.escape(package)}` (\d[\w.]*\d)", safety)
+        assert match is not None, package
+        shipped = match.group(1)
+        assert shipped == _V0_7_0_SHIPPED[package], f"the note misstates v0.7.0's {package}"
+        assert Version(shipped) >= Version(floor), f"{package} {shipped} predates the fix {floor}"
+
+
+def test_current_release_note_is_the_v0_7_1_documentation_patch() -> None:
+    notes = _release_notes(_project_version())
+
+    assert re.findall(r"^## (.+)$", notes, re.MULTILINE) == [
+        "Why upgrade",
+        "Documentation",
+        "Kubernetes versions verified",
+        "Install or upgrade",
+        "Verify",
+        "Known limits",
+    ]
+    assert len(notes.splitlines()) <= 100
+    flat = _normalized(notes)
+    assert "changes no feature" in flat
+    assert "project description on PyPI" in flat
+    documentation = _normalized(markdown_section(notes, "Documentation"))
+    assert "without comparing it with other tools" in documentation
+    assert "every external read shows up on your screen" in documentation
+    assert "1.33, 1.34, 1.35 and 1.36" in markdown_section(notes, "Kubernetes versions verified")
+    assert not re.search(r"(?<!\w)#\d+\b", notes), "link pages, not issue numbers"
+
+
+def test_v0_7_1_still_ships_every_v0_6_1_security_fix() -> None:
+    """A documentation patch must not move a dependency below an advisory floor."""
+    for package, floor in _V0_6_1_SECURITY_FLOORS.items():
         locked = _locked_version(package)
         assert Version(locked) >= Version(floor), f"{package} {locked} predates the fix {floor}"
-        assert f"`{package}` {locked}" in safety, package
