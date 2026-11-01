@@ -4,9 +4,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:test-driven-development. Steps use checkbox (`- [x]`) syntax for tracking.
 
-**Goal:** Make the agent act like GitHub Copilot CLI / OpenClaw agents inside korvid: instead of only answering in the chat panel, the agent **drives the TUI directly** — switching resource views, applying filters, opening the log pane, and opening describe — while narrating its reasoning. This implements design spec §4.1 ("UI Bus"), §5 ("agent-drive mode"), and §6 tool table row "UI control".
+**Goal:** Make the agent act inside korvid: instead of only answering in the chat panel, the agent **drives the TUI directly** — switching resource views, applying filters, opening the log pane, and opening describe — while narrating its reasoning. This implements design spec §4.1 ("UI Bus"), §5 ("agent-drive mode"), and §6 tool table row "UI control".
 
-**Why:** Today the agent is a read-only Q&A proxy (an "MCP in a panel"). The design spec's core differentiator is an agent whose actions land in the same TUI the user works in, using the same command bus as keystrokes.
+**Why:** Today the agent is a read-only Q&A proxy (an "MCP in a panel"). The design spec's core idea is an agent whose actions land in the same TUI the user works in, using the same command bus as keystrokes.
 
 **Architecture:** tach layers forbid `agent → ui`. So:
 - `korvid.agent` defines a `UIBridge` **abc.ABC** (repository boundary-interface rule; no ui import) plus `UI_TOOLS` OpenAI tool schemas. `ToolExecutor` gains an optional bridge and dispatches the four UI tools to it.

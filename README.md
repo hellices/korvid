@@ -27,9 +27,8 @@ calls. The ending explains approval policy; no cluster write is shown.*
 ## Why korvid
 
 - **Useful without AI.** Browse resources, follow logs, inspect relationships,
-  and operate workloads from a keyboard-first TUI. If you know k9s, the pod
-  keys will feel familiar: `:` for commands, `/` to filter, `d` to describe,
-  `l` for logs, and `s` for a shell.
+  and operate workloads from a keyboard-first TUI: `:` for commands, `/` to
+  filter, `d` to describe, `l` for logs, and `s` for a shell.
 - **An agent that shares your screen.** It sees the current view and selection,
   gathers evidence through structured tools, and opens the same panes you use.
   Normal keyboard input stays available.
