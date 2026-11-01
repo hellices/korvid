@@ -11,6 +11,7 @@ on the list: they tell users how to connect, and compare nothing.
 
 from __future__ import annotations
 
+import html
 import re
 import subprocess
 from pathlib import Path
@@ -53,7 +54,8 @@ def _document_text(data: bytes) -> str | None:
 
 
 def _mentions(text: str) -> list[str]:
-    return [match.group(0) for match in _COMPETING_PRODUCTS.finditer(text)]
+    """Names in `text` as rendered, so a character reference (`K&#57;s`) counts."""
+    return [match.group(0) for match in _COMPETING_PRODUCTS.finditer(html.unescape(text))]
 
 
 def test_no_tracked_document_names_a_competing_product() -> None:
@@ -114,9 +116,12 @@ def test_the_guard_leaves_integration_names_alone(line: str) -> None:
         "Unlike _K9s_, korvid shares your screen.",
         "Unlike __K9s__, korvid shares your screen.",
         "Unlike *K9s*, korvid shares your screen.",
+        "Unlike K&#57;s, korvid shares your screen.",
+        "Unlike K&#x39;s, korvid shares your screen.",
+        "Unlike &#75;9s, korvid shares your screen.",
     ],
 )
-def test_the_guard_sees_through_markdown_emphasis(line: str) -> None:
+def test_the_guard_sees_through_emphasis_and_character_references(line: str) -> None:
     assert _mentions(line)
 
 
