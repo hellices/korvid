@@ -25,7 +25,8 @@ _TEXT_SUFFIXES = frozenset(
 )
 
 _COMPETING_PRODUCTS = re.compile(
-    r"(?<![\w-])(?:k9s|ks-ai|kubectl-ai|k8sgpt|holmesgpt|headlamp|freelens|openlens|aider)(?!\w)",
+    r"(?<![\w-])(?:k9s|ks-ai|kubectl-ai|k8sgpt|holmesgpt|headlamp|freelens|openlens|aider"
+    r"|continue\.dev|continuedev|cline|openclaw)(?!\w)",
     re.IGNORECASE,
 )
 
@@ -72,6 +73,10 @@ def test_no_tracked_document_names_a_competing_product() -> None:
         "Aider exposes no override.",
         "Publish a K9s-inspired landing page.",
         "The only attempt, ks-ai, is an early PoC.",
+        "Continue.dev's `autodetect.ts` carries 20+.",
+        "See https://github.com/continuedev/continue.",
+        "Cline allows append-only.",
+        "Act like OpenClaw agents.",
     ],
 )
 def test_the_guard_catches_a_competing_product(line: str) -> None:
@@ -85,6 +90,7 @@ def test_the_guard_catches_a_competing_product(line: str) -> None:
         "GitHub Copilot Chat can call korvid's tools.",
         "Run `kubectl get pods` on the throwaway cluster.",
         "A k8s cluster at 1.33 or later.",
+        "Continue with the next step; the request may decline.",
     ],
 )
 def test_the_guard_leaves_integration_names_alone(line: str) -> None:

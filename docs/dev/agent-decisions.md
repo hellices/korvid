@@ -152,10 +152,8 @@ read-only enforcement live in code. "Delete pods without asking" produces a
 model that tries and is refused.
 
 **Per-model forks remain unsupported.** Model *families* need different chat
-templates — that is well established
-([Continue.dev's `autodetect.ts`](https://github.com/continuedev/continue) carries 20+)
-— but that is message formatting, handled below korvid. Per-family prompt
-*content* forks have no evidence behind them.
+templates, but that is message formatting, handled below korvid by the serving
+engine. Per-family prompt *content* forks have no evidence behind them.
 
 **Related:** #71, #176, #177.
 

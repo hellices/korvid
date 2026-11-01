@@ -278,7 +278,7 @@ Five diagnostic features deliverable at the level of the **vanilla Kubernetes AP
 
 | Risk | Mitigation |
 |---|---|
-| The agent adds little over a plain chat panel | Screen-context injection, TUI driving, and the approval/audit system tie the agent to what is on screen. In Phase 3, expose the cockpit over MCP so any assistant can use it |
+| The agent adds little over a plain chat panel | Screen-context injection, TUI driving, and the approval/audit system tie the agent to what is on screen. In Phase 3, connect to external MCP servers to extend the agent's tools |
 | Python performance (large-scale watch) | Selective watch + async architecture. Mega-clusters are an explicit non-goal |
 | Textual bus factor = 1 | MIT license, large community, fork as a last resort. Manage UI-framework coupling behind an abstraction layer |
 | Agent misbehavior damaging a cluster | Writes are approval-gated by default. `--skip-approvals` can relax this, but **protected contexts ignore that option and always require approval**. Audit log, read-only mode |

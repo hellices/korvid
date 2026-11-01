@@ -35,7 +35,7 @@ HISTORICAL_BANNER = (
 #: The body is frozen except for deliberate amendments. #547 removed its
 #: competitor framing (the "Why now" prior-attempt line, the "biggest
 #: threat" bullet, the option-table and risk-row comparisons).
-HISTORICAL_BODY_SHA256 = "bee12c2290d9ca3a4f4848ec9f454606ad1a010257b597ebd128ba76c3806f06"
+HISTORICAL_BODY_SHA256 = "238480e629ccb6562b2353366df4650cde5dc1ebdc1f95956ec70a78257bdcc7"
 
 _STATUS_ROW = re.compile(
     r"^\|\s*`(?P<status>[a-z]+)`\s*\|\s*(?P<meaning>[^|]+?)\s*\|$",
