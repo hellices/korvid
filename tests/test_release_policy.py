@@ -1044,6 +1044,17 @@ def test_v0_7_0_release_note_is_a_concise_summary() -> None:
     assert not re.search(r"(?<!\w)#\d+\b", notes), "link pages, not issue numbers"
 
 
+#: What v0.7.0 shipped for each v0.6.1 security update, read from the lock
+#: at the commit tagged `v0.7.0`. History, so it never follows the lock.
+_V0_7_0_SHIPPED = {
+    "certifi": "2026.10.19",
+    "aiohttp": "3.14.4",
+    "filelock": "4.2.4",
+    "litellm": "1.100.4",
+    "opentelemetry-api": "1.45.1",
+}
+
+
 def test_v0_7_0_still_ships_every_v0_6_1_security_fix() -> None:
     """Whether or not v0.6.1 is published, v0.7.0 must carry its fixes, and say so.
 
@@ -1058,6 +1069,7 @@ def test_v0_7_0_still_ships_every_v0_6_1_security_fix() -> None:
         match = re.search(rf"`{re.escape(package)}` (\d[\w.]*\d)", safety)
         assert match is not None, package
         shipped = match.group(1)
+        assert shipped == _V0_7_0_SHIPPED[package], f"the note misstates v0.7.0's {package}"
         assert Version(shipped) >= Version(floor), f"{package} {shipped} predates the fix {floor}"
 
 
