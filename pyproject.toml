@@ -168,6 +168,7 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 addopts = "--strict-markers --tb=short"
 testpaths = ["tests"]
 filterwarnings = ["error"]
@@ -188,7 +189,7 @@ show_missing = true
 extend-exclude = [
     "*.lock",
     "*.snap",
-    "docs/assets/javascripts/bundle.d7400e89.min.js",
+    "docs/assets/javascripts/bundle.c21346df.min.js",
     "docs/assets/javascripts/vendor/*.js",
 ]
 

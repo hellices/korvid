@@ -24,7 +24,7 @@ import yaml
 from tests.docs_exclusions import is_published, parse_exclude_docs
 
 ROOT = Path(__file__).parent.parent
-MATERIAL_BUNDLE = ROOT / "docs" / "assets" / "javascripts" / "bundle.d7400e89.min.js"
+MATERIAL_BUNDLE = ROOT / "docs" / "assets" / "javascripts" / "bundle.c21346df.min.js"
 MERMAID_VENDOR = ROOT / "docs" / "assets" / "javascripts" / "vendor" / "mermaid-11.17.0.min.js"
 RESIZE_OBSERVER_VENDOR = (
     ROOT / "docs" / "assets" / "javascripts" / "vendor" / "resize-observer-polyfill-1.5.1.js"
@@ -60,9 +60,9 @@ def test_makefile_docs_serve_uses_frozen() -> None:
 
 
 def test_docs_dependency_matches_the_vendored_material_bundle() -> None:
-    """The hashed bundle override is specific to Material 9.7.7."""
+    """The hashed bundle override is specific to Material 9.8.0."""
     pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
-    assert pyproject["dependency-groups"]["docs"] == ["mkdocs-material==9.7.7"]
+    assert pyproject["dependency-groups"]["docs"] == ["mkdocs-material==9.8.0"]
 
 
 def _load_mkdocs_config() -> dict[str, Any]:
@@ -150,7 +150,7 @@ def test_material_bundle_uses_checksum_pinned_local_vendor_assets() -> None:
     assert b"/korvid/assets/javascripts/vendor/" not in bundle
     assert b"https://unpkg.com/" not in bundle
     assert hashlib.sha256(bundle).hexdigest() == (
-        "1c6de1ec928cbec390682d3ba17e617828eb391d8e0f9a5b718e31617b824b2c"
+        "45e928370290d1cb89ba61d93d40d04a198f3836c40c867ae36c52917122bccb"
     ), "the reviewed Material bundle override must not drift without an explicit update"
     assert hashlib.sha256(MERMAID_VENDOR.read_bytes()).hexdigest() == (
         "8d8e0eec56d3a83b4b3c87f42050845546dee93ebe1875d2117c12e6947c0cb3"
@@ -163,7 +163,7 @@ def test_material_bundle_uses_checksum_pinned_local_vendor_assets() -> None:
 def test_material_bundle_checkout_preserves_reviewed_bytes() -> None:
     """Git must not rewrite the checksum-pinned JavaScript to CRLF on Windows."""
     attributes = (ROOT / ".gitattributes").read_text(encoding="utf-8")
-    assert "docs/assets/javascripts/bundle.d7400e89.min.js -text" in attributes
+    assert "docs/assets/javascripts/bundle.c21346df.min.js -text" in attributes
     assert "docs/assets/javascripts/vendor/*.js -text" in attributes
 
 
