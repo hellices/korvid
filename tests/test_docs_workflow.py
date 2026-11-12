@@ -61,7 +61,7 @@ PATH_FILTERS = {
 
 PINNED_ACTIONS = {
     "actions/checkout": "3d3c42e5aac5ba805825da76410c181273ba90b1",
-    "astral-sh/setup-uv": "c18668ad3cf93ea998bef934396af7bb5c839dc7",
+    "astral-sh/setup-uv": "68559e99cc807c1eb7e9238fd43a15bba460eec2",
     "actions/configure-pages": "45bfe0192ca1faeb007ade9deae92b16b8254a0d",
     "actions/upload-pages-artifact": "fc324d3547104276b827a68afc52ff2a11cc49c9",
     "actions/deploy-pages": "368f82528645a54fb793d4d04e342629a3f51346",
