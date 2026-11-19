@@ -125,14 +125,13 @@ def test_dependabot_opens_version_updates_monthly() -> None:
     assert intervals == {"uv": "monthly", "github-actions": "monthly"}
 
 
-def test_dependabot_holds_litellm_exactly_above_the_measured_pin() -> None:
-    """LiteLLM 1.101+ breaks the provider tests (#420), so the pin is held.
+def test_a_dependabot_litellm_hold_starts_exactly_above_the_pin() -> None:
+    """A LiteLLM hold, when there is one, must sit right above the pin.
 
-    Without an ignore rule the runtime group keeps bundling the incompatible
-    release with every other runtime update, and the whole group fails. The
-    ignored range must start right above the pin: starting lower would hide
-    the measured release, and a stale range left behind after the pin moves
-    would silently stop future LiteLLM updates.
+    #420 held LiteLLM below 1.101 with a Dependabot `ignore` rule until the
+    pin could move. Any future hold has to start right above the pin: starting
+    lower would hide the measured release, and a stale range left behind after
+    the pin moves would silently stop future LiteLLM updates.
     """
     project = tomllib.loads((_ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
     pinned = next(
@@ -147,8 +146,38 @@ def test_dependabot_holds_litellm_exactly_above_the_measured_pin() -> None:
         update for update in configuration["updates"] if update["package-ecosystem"] == "uv"
     )
     ignored = [rule for rule in uv_update.get("ignore", []) if rule["dependency-name"] == "litellm"]
-    assert [str(pinned.specifier)] == ["==1.100.5"]
-    assert ignored == [{"dependency-name": "litellm", "versions": [">=1.101.0"]}]
+    (pin,) = pinned.specifier
+    assert pin.operator == "=="
+    for rule in ignored:
+        (floor,) = rule["versions"]
+        assert _holds_from_the_next_minor(pin.version, floor), (pin.version, floor)
+
+
+def _holds_from_the_next_minor(pin: str, floor: str) -> bool:
+    """Is *floor* the Dependabot range that starts right above *pin*?
+
+    The next minor's `.0`, spelled canonically: `==1.100.5` is held by
+    `>=1.101.0`, the shape #420 used.
+    """
+    pinned = Version(pin)
+    return floor == f">={pinned.release[0]}.{pinned.release[1] + 1}.0"
+
+
+@pytest.mark.parametrize(
+    ("floor", "accepted"),
+    [
+        (">=1.110.0", True),
+        (">=1.110.999", False),
+        (">=1.110", False),
+        (">=1.109.2", False),
+        (">=1.111.0", False),
+        (">1.110.0", False),
+    ],
+)
+def test_a_litellm_hold_is_recognised_only_at_the_next_minor(floor: str, accepted: bool) -> None:
+    """A hold that starts anywhere but the next minor's `.0` would leave
+    releases between the pin and the hold unheld, or hide the pin."""
+    assert _holds_from_the_next_minor("1.109.1", floor) is accepted
 
 
 def test_mcp_http_client_requirement_rejects_known_vulnerable_versions() -> None:

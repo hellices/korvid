@@ -72,7 +72,7 @@ upgrade-from = "0.6.0"
 [project.optional-dependencies]
 # Embedded AI agent: provider HTTP adapters + OS-keychain credential storage.
 agent = [
-    "litellm==1.100.5",
+    "litellm==1.109.1",
     # Imported directly by providers/litellm_runtime.py for ProviderSDKError,
     # so declared directly even though litellm already pulls it in.
     "openai>=2.20.0,<3.0.0",
@@ -114,6 +114,13 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build]
 exclude = ["/src/korvid/evals", "/tests/evals"]
+
+[tool.uv]
+# LiteLLM 1.109.1 asks for pydantic>=2.14 only on Python 3.15+, so an
+# upgrade of LiteLLM alone forks the lock into two pydantic releases. The
+# Homebrew formula carries one resource per package, so a fork would ship
+# a pydantic the 3.13 suite never ran against. One floor keeps one release.
+constraint-dependencies = ["pydantic>=2.14"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/korvid"]
@@ -171,7 +178,15 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 addopts = "--strict-markers --tb=short"
 testpaths = ["tests"]
-filterwarnings = ["error"]
+filterwarnings = [
+    "error",
+    # LiteLLM 1.101+ marks TypedDict fields `ReadOnly` as a static-typing rule
+    # and Pydantic warns that it cannot enforce that at runtime (#420). LiteLLM
+    # silences exactly this message at import; pytest re-arms "error" for each
+    # test, so the same exemption is restated here. Pinned to Pydantic's own
+    # module and wording, so every other warning still fails the suite.
+    'ignore:Items? .+ on TypedDict class .+ (is|are) using the `ReadOnly` qualifier\. Pydantic will not protect items from any mutation on dictionary instances\.:UserWarning:pydantic\._internal\._generate_schema',
+]
 markers = [
     "contract: live-cluster contract tests (opt-in via KORVID_CONTRACT_RUN_ID)",
     "version_matrix: read-only scenarios against a kind cluster (opt-in via KORVID_VERSION_MATRIX_CONTEXT)",

@@ -95,14 +95,13 @@ is optional, `tests/test_optional_extras.py` pins that import graph, and the
 alternative — a hand-maintained vendor routing table — routes credentials to
 the wrong host when it drifts.
 
-**Lockdown at import.** `providers/litellm_runtime.py` sets eight attributes on
+**Lockdown at import.** `providers/litellm_runtime.py` sets seven attributes on
 the `litellm` module before any completion call is possible. Each is a channel
 that would otherwise carry prompts, tool arguments, usage records or debug text
 to a third party or the terminal:
 
 | Attribute | Value |
 |---|---|
-| `telemetry` | `False` |
 | `turn_off_message_logging` | `True` |
 | `success_callback` | `[]` |
 | `failure_callback` | `[]` |
@@ -112,7 +111,7 @@ to a third party or the terminal:
 | `suppress_debug_info` | `True` |
 
 Two are private attributes, set deliberately because they are what the SDK
-reads at call time. All eight are checked for *existence before* assignment, so
+reads at call time. All seven are checked for *existence before* assignment, so
 a rename upstream raises at import instead of leaving the real sink open; a
 test asserts the same list. `providers/_litellm_import.py` also forces
 `LITELLM_LOCAL_MODEL_COST_MAP=true` before the import — assignment, not a
@@ -120,11 +119,12 @@ default, so an ambient `false` cannot re-arm it — suppressing the SDK's
 startup price-table fetch, and strips `StreamHandler`s from its loggers.
 
 **The device-login routing hazard.** Given a reference under LiteLLM's own
-`github_copilot` or `chatgpt` prefix, the SDK starts an **interactive
-device-code sign-in and writes a credential file** (under
+`github_copilot` or `chatgpt` prefix, the SDK can start an **interactive
+device-code sign-in and write a credential file** (under
 `~/.config/litellm/`) from inside its routing call, even if the intent was
-only to resolve the reference — and it replaces the profile's credential,
-`chatgpt` its endpoint too. `DEVICE_LOGIN_PREFIXES` in
+only to resolve the reference. `github_copilot` replaces the profile's
+credential even when one is given; `chatgpt` signs in, and points the request
+at its own endpoint, whenever the profile supplies no key. `DEVICE_LOGIN_PREFIXES` in
 `providers/litellm_settings.py` claims both ahead of routing, the underscore
 spelling folds onto the same claim, and the claim holds whether or not
 korvid's Copilot flow is installed. Such a reference is either served by a

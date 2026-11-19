@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import subprocess
 import sys
 import textwrap
+import tomllib
+from pathlib import Path
 
 import pytest
 
@@ -44,6 +47,7 @@ _PROBE = textwrap.dedent(
 
 _SCHEMA_PROBE = textwrap.dedent(
     """
+    import json
     import sys
     import warnings
 
@@ -58,8 +62,12 @@ _SCHEMA_PROBE = textwrap.dedent(
 
     import korvid.providers.litellm_runtime
     from litellm.types.utils import Message, ModelResponse
+    from _pytest.config import parse_warning_filter
 
-    warnings.simplefilter("error")
+    # Re-arm the suite's own policy after the SDK import, exactly as pytest
+    # does per test: "error" plus only the exemptions pyproject.toml names.
+    for spec in json.loads(sys.argv[2]):
+        warnings.filterwarnings(*parse_warning_filter(spec, escape=False))
     constructor = {"Message": Message, "ModelResponse": ModelResponse}[sys.argv[1]]
     response = constructor()
     assert isinstance(response.model_dump(), dict)
@@ -92,16 +100,27 @@ _FORCED_ENV_PROBE = textwrap.dedent(
 
     seen = {}
 
+    # Exactly the modules the shim imports: the package, the adapters'
+    # error-base leaf and the parents Python imports on the way to it.
+    _LEAF = "litellm.llms.base_llm.chat.transformation"
+    _ANSWERED = {_LEAF.rsplit(".", depth)[0] for depth in range(_LEAF.count(".") + 1)}
+
     class _RecordingLiteLLMStub:
         def find_spec(self, fullname, path=None, target=None):  # noqa: ANN001, ANN202
-            if fullname != "litellm":
+            if fullname not in _ANSWERED:
                 return None
-            return importlib.machinery.ModuleSpec(fullname, self)
+            return importlib.machinery.ModuleSpec(
+                fullname, self, is_package=fullname != _LEAF
+            )
 
         def create_module(self, spec):  # noqa: ANN001, ANN202
             return None
 
         def exec_module(self, module):  # noqa: ANN001, ANN202
+            if module.__name__ == _LEAF:
+                module.BaseLLMException = Exception
+            if module.__name__ != "litellm":
+                return
             seen["at_import"] = os.environ.get("LITELLM_LOCAL_MODEL_COST_MAP")
             module.verbose_logger = logging.getLogger("stub-litellm")
 
@@ -111,6 +130,17 @@ _FORCED_ENV_PROBE = textwrap.dedent(
 
     assert shim.litellm.__name__ == "litellm", shim.litellm
     assert attempts == [], attempts
+
+    # The stub must answer only the imports the shim really makes, or a
+    # mistyped adapter path in the shim would pass here and fail for users.
+    import importlib
+
+    try:
+        importlib.import_module("litellm.llms.not_a_real_adapter")
+    except ModuleNotFoundError:
+        pass
+    else:
+        raise AssertionError("the stub answered an import the shim does not make")
     print(seen.get("at_import"), os.environ.get("LITELLM_LOCAL_MODEL_COST_MAP"))
     """
 )
@@ -180,9 +210,18 @@ def test_litellm_logging_cannot_reach_the_terminal() -> None:
 @_needs_litellm
 @pytest.mark.parametrize("constructor", ["Message", "ModelResponse"])
 def test_response_schemas_construct_offline_with_warnings_as_errors(constructor: str) -> None:
-    """Validate each real SDK schema in a fresh interpreter without cached schemas."""
+    """Validate each real SDK schema in a fresh interpreter without cached schemas.
+
+    The interpreter runs the suite's own warning policy, read from
+    `pyproject.toml`, so the #420 `ReadOnly` exemption is exercised exactly
+    as configured and any other warning still fails construction.
+    """
+    pytest_options = tomllib.loads(
+        (Path(__file__).parents[2] / "pyproject.toml").read_text(encoding="utf-8")
+    )["tool"]["pytest"]["ini_options"]
+    policy = json.dumps(pytest_options["filterwarnings"])
     result = subprocess.run(
-        [sys.executable, "-W", "error", "-c", _SCHEMA_PROBE, constructor],
+        [sys.executable, "-W", "error", "-c", _SCHEMA_PROBE, constructor, policy],
         capture_output=True,
         text=True,
         timeout=120,

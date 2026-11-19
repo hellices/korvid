@@ -12,3 +12,13 @@ tracks the next release scope.
 
 Existing migration links continue in the
 [v0.5.0 migration notes](v0.5.0.md#breaking-changes-and-migration).
+
+## Dependency updates
+
+The `[agent]` extra now pins LiteLLM 1.109.1, up from 1.100.5, so dependency
+scanners stop flagging the older release. LiteLLM 1.104.0 removed
+`litellm.telemetry`, a setting that no SDK code ever read, so korvid now sets
+seven settings when it loads LiteLLM, not eight. A korvid build that pins
+1.100.5 fails to start its agent when a newer LiteLLM is installed into the
+same environment. A stream that ends before the provider finishes the answer
+is still reported as truncated, not as an unavailable provider.

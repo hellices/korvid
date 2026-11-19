@@ -16,8 +16,11 @@ import korvid.providers._litellm_import as _litellm_mod
 
 #: Names of every attribute the lockdown sets, so the contract test does
 #: not have to restate the list and drift from it.
+#:
+#: `telemetry` was dropped when the pin moved past 1.103: LiteLLM 1.104.0
+#: deleted the module attribute, and through 1.103 it was assigned at module
+#: scope and read nowhere in the SDK, so it never gated a channel.
 LOCKDOWN_FLAGS: Final[tuple[tuple[str, object], ...]] = (
-    ("telemetry", False),
     ("turn_off_message_logging", True),
     ("success_callback", []),
     ("failure_callback", []),
@@ -30,7 +33,8 @@ LOCKDOWN_FLAGS: Final[tuple[tuple[str, object], ...]] = (
 # Check before assigning. Assigning first and reading back afterwards is a
 # tautology: `setattr` on a name LiteLLM has renamed creates a fresh, unused
 # attribute, the read-back passes, and the real callback sink stays open. All
-# eight names exist in 1.98.0, so this is a tripwire for a future rename.
+# seven names exist in the pinned release, so this is a tripwire for a future
+# rename.
 #
 # This also fixes test isolation: by raising BEFORE `_litellm = _litellm_mod.litellm`,
 # a failed reload during testing does not overwrite the module-level `_litellm`
@@ -103,10 +107,15 @@ def model_cost_entry(provider: str, model_id: str) -> dict[str, Any] | None:
 
 
 def supported_params(model: str, provider: str) -> tuple[str, ...]:
-    """Best-effort per-provider parameter allowlist."""
+    """Best-effort per-provider parameter allowlist.
+
+    Measured on 1.109.1, a provider adapter may reject the model name with
+    its own `BaseLLMException` (`scaledown` accepts only its task names),
+    which is no allowlist rather than a reason to fail profile wiring.
+    """
     try:
         params = _litellm.get_supported_openai_params(model=model, custom_llm_provider=provider)
-    except (AttributeError, KeyError, ValueError):
+    except (AttributeError, KeyError, ValueError, _litellm_mod.BaseLLMException):
         return ()
     return tuple(params or ())
 
