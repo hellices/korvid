@@ -100,19 +100,26 @@ _FORCED_ENV_PROBE = textwrap.dedent(
 
     seen = {}
 
+    # Exactly the modules the shim imports: the package, the adapters'
+    # error-base leaf and the parents Python imports on the way to it.
+    _LEAF = "litellm.llms.base_llm.chat.transformation"
+    _ANSWERED = {_LEAF.rsplit(".", depth)[0] for depth in range(_LEAF.count(".") + 1)}
+
     class _RecordingLiteLLMStub:
         def find_spec(self, fullname, path=None, target=None):  # noqa: ANN001, ANN202
-            if fullname != "litellm" and not fullname.startswith("litellm."):
+            if fullname not in _ANSWERED:
                 return None
-            return importlib.machinery.ModuleSpec(fullname, self, is_package=True)
+            return importlib.machinery.ModuleSpec(
+                fullname, self, is_package=fullname != _LEAF
+            )
 
         def create_module(self, spec):  # noqa: ANN001, ANN202
             return None
 
         def exec_module(self, module):  # noqa: ANN001, ANN202
-            if module.__name__ != "litellm":
-                # The shim also imports the adapters' error base class.
+            if module.__name__ == _LEAF:
                 module.BaseLLMException = Exception
+            if module.__name__ != "litellm":
                 return
             seen["at_import"] = os.environ.get("LITELLM_LOCAL_MODEL_COST_MAP")
             module.verbose_logger = logging.getLogger("stub-litellm")
@@ -123,6 +130,17 @@ _FORCED_ENV_PROBE = textwrap.dedent(
 
     assert shim.litellm.__name__ == "litellm", shim.litellm
     assert attempts == [], attempts
+
+    # The stub must answer only the imports the shim really makes, or a
+    # mistyped adapter path in the shim would pass here and fail for users.
+    import importlib
+
+    try:
+        importlib.import_module("litellm.llms.not_a_real_adapter")
+    except ModuleNotFoundError:
+        pass
+    else:
+        raise AssertionError("the stub answered an import the shim does not make")
     print(seen.get("at_import"), os.environ.get("LITELLM_LOCAL_MODEL_COST_MAP"))
     """
 )

@@ -150,13 +150,34 @@ def test_a_dependabot_litellm_hold_starts_exactly_above_the_pin() -> None:
     assert pin.operator == "=="
     for rule in ignored:
         (floor,) = rule["versions"]
-        held = Version(floor.removeprefix(">="))
-        assert floor.startswith(">=")
-        assert held > Version(pin.version)
-        assert held.release[:2] == (
-            Version(pin.version).release[0],
-            Version(pin.version).release[1] + 1,
-        )
+        assert _holds_from_the_next_minor(pin.version, floor), (pin.version, floor)
+
+
+def _holds_from_the_next_minor(pin: str, floor: str) -> bool:
+    """Is *floor* the Dependabot range that starts right above *pin*?
+
+    The next minor's `.0`, spelled canonically: `==1.100.5` is held by
+    `>=1.101.0`, the shape #420 used.
+    """
+    pinned = Version(pin)
+    return floor == f">={pinned.release[0]}.{pinned.release[1] + 1}.0"
+
+
+@pytest.mark.parametrize(
+    ("floor", "accepted"),
+    [
+        (">=1.110.0", True),
+        (">=1.110.999", False),
+        (">=1.110", False),
+        (">=1.109.2", False),
+        (">=1.111.0", False),
+        (">1.110.0", False),
+    ],
+)
+def test_a_litellm_hold_is_recognised_only_at_the_next_minor(floor: str, accepted: bool) -> None:
+    """A hold that starts anywhere but the next minor's `.0` would leave
+    releases between the pin and the hold unheld, or hide the pin."""
+    assert _holds_from_the_next_minor("1.109.1", floor) is accepted
 
 
 def test_mcp_http_client_requirement_rejects_known_vulnerable_versions() -> None:
