@@ -1142,6 +1142,25 @@ def test_current_release_note_is_the_v0_7_2_dependency_patch() -> None:
     assert not re.search(r"(?<!\w)#\d+\b", notes), "link pages, not issue numbers"
 
 
+_V0_7_2_TABLE_HEADER = "| Package | v0.7.1 ships | v0.7.2 ships | Why |"
+
+
+def _v0_7_2_dependency_rows(notes: str) -> dict[str, tuple[str, str]]:
+    """The note's dependency table as `package -> (v0.7.1, v0.7.2)`.
+
+    The values are read by position, so the header that names each column
+    is checked first: swapping the two release labels would otherwise leave
+    every row comparison passing while readers take old for new.
+    """
+    table = markdown_section(notes, "Dependency updates")
+    headers = [line for line in table.splitlines() if line.startswith("| Package ")]
+    assert headers == [_V0_7_2_TABLE_HEADER], f"the table's columns are mislabelled: {headers}"
+    return {
+        match.group(1): (match.group(2), match.group(3))
+        for match in re.finditer(r"^\| `([^`]+)` \| ([^ |]+) \| ([^ |]+) \|", table, re.MULTILINE)
+    }
+
+
 def test_v0_7_2_note_states_what_each_release_ships() -> None:
     """The table's two columns are history and the lock, and must say so exactly.
 
@@ -1149,13 +1168,18 @@ def test_v0_7_2_note_states_what_each_release_ships() -> None:
     from the lock this candidate ships, so a later relock that moves a
     package without updating the note fails here.
     """
-    table = markdown_section(_release_notes(_project_version()), "Dependency updates")
-    rows = {
-        match.group(1): (match.group(2), match.group(3))
-        for match in re.finditer(r"^\| `([^`]+)` \| ([^ |]+) \| ([^ |]+) \|", table, re.MULTILINE)
-    }
+    rows = _v0_7_2_dependency_rows(_release_notes(_project_version()))
 
     assert set(rows) == set(_V0_7_1_SHIPPED)
     for package, (before, after) in rows.items():
         assert before == _V0_7_1_SHIPPED[package], f"the note misstates v0.7.1's {package}"
         assert after == _locked_version(package), f"the note misstates v0.7.2's {package}"
+
+
+def test_v0_7_2_table_rejects_swapped_release_columns() -> None:
+    notes = _release_notes(_project_version())
+    swapped = notes.replace(_V0_7_2_TABLE_HEADER, "| Package | v0.7.2 ships | v0.7.1 ships | Why |")
+    assert swapped != notes
+
+    with pytest.raises(AssertionError, match="mislabelled"):
+        _v0_7_2_dependency_rows(swapped)
