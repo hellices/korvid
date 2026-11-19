@@ -46,7 +46,7 @@ from korvid.providers.special_flows import SpecialFlowRegistry, normalize_prefix
 #: the one `pyproject.toml` pins. A bump has to re-measure: the discovery
 #: below reads an upstream layout convention, and the claimed set is only
 #: as good as the release it was checked against.
-MEASURED_LITELLM_VERSION: Final = "1.100.5"
+MEASURED_LITELLM_VERSION: Final = "1.109.1"
 
 #: The device-code providers measured on that release, as LiteLLM spells
 #: them. Discovery must keep finding *at least* these: a restructure that
@@ -250,24 +250,23 @@ def _profile(reference: str) -> ModelConnectionConfig:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("reference", ["chatgpt/gpt-5.2", "github_copilot/gpt-4o"])
-def test_routing_a_device_login_reference_authenticates_and_ignores_the_key(
-    monkeypatch: pytest.MonkeyPatch, reference: str
+def test_routing_a_copilot_reference_authenticates_and_ignores_the_key(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The measurement this whole file exists for, run against the real SDK.
 
-    `get_llm_provider` is asked only to *resolve* a reference. For these
-    prefixes it builds the provider config, which constructs the
+    `get_llm_provider` is asked only to *resolve* a reference. For
+    `github_copilot` it builds the provider config, which constructs the
     authenticator and asks it for a credential — and then returns that
     credential, discarding the `api_key` it was given. So an operator's
     own key does not make the reference safe, and there is no argument
     korvid could pass that would.
     """
     _Recorder.calls = []
-    _record_authenticator(monkeypatch, reference.split("/", 1)[0])
+    _record_authenticator(monkeypatch, "github_copilot")
 
     _model, _provider, dynamic_key, _api_base = litellm_runtime.get_llm_provider(
-        model=reference,
+        model="github_copilot/gpt-4o",
         api_key="the-operators-own-key",
         api_base="https://the-operators-own-endpoint.invalid",
     )
@@ -276,25 +275,27 @@ def test_routing_a_device_login_reference_authenticates_and_ignores_the_key(
     assert dynamic_key == "device-login-token"
 
 
-def test_routing_a_chatgpt_reference_also_discards_the_operators_endpoint(
+def test_routing_a_chatgpt_reference_without_a_key_is_the_login(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`chatgpt` overwrites the host as well as the credential.
+    """`chatgpt` resolves the credential and the host by logging in.
 
-    Copilot's config at least honours an `api_base` it is handed; this
-    one takes the authenticator's. Recorded because it removes the last
-    argument korvid could have used to keep the reference pointed
-    somewhere the operator chose.
+    Measured on 1.100.5 it discarded an operator's key and endpoint as
+    well. Measured on 1.109.1 it honours both when handed them, but without
+    a key — korvid's `provider-default` auth — resolving the reference asks
+    the authenticator for a token, which is the device-code login, and
+    points the request at the authenticator's host instead of one the
+    operator chose.
     """
     _Recorder.calls = []
     _record_authenticator(monkeypatch, "chatgpt")
 
-    _model, _provider, _key, api_base = litellm_runtime.get_llm_provider(
+    _model, _provider, dynamic_key, api_base = litellm_runtime.get_llm_provider(
         model="chatgpt/gpt-5.2",
-        api_key="the-operators-own-key",
-        api_base="https://the-operators-own-endpoint.invalid",
     )
 
+    assert "get_access_token" in _Recorder.calls
+    assert dynamic_key == "device-login-token"
     assert api_base == "https://device-login.invalid"
 
 
@@ -305,11 +306,12 @@ def test_the_real_authenticator_writes_a_credential_directory_on_construction(
 
     Recorded here because the regression below asserts the *absence* of
     that directory, and an absence only means something once the presence
-    has been demonstrated.
+    has been demonstrated. Measured on Copilot's authenticator: on 1.109.1
+    ChatGPT's defers the write to the first token it stores.
     """
-    module = importlib.import_module("litellm.llms.chatgpt.authenticator")
-    token_dir = tmp_path / "chatgpt"
-    monkeypatch.setenv("CHATGPT_TOKEN_DIR", str(token_dir))
+    module = importlib.import_module("litellm.llms.github_copilot.authenticator")
+    token_dir = tmp_path / "github_copilot"
+    monkeypatch.setenv("GITHUB_COPILOT_TOKEN_DIR", str(token_dir))
 
     module.Authenticator()
 

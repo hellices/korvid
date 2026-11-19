@@ -379,8 +379,10 @@ def _tool_call_events(calls: dict[int, _PartialToolCall]) -> Iterator[dict[str, 
 async def _close_quietly(response: Any) -> None:
     """Close the stream wrapper without masking the error on the way out.
 
-    `CustomStreamWrapper` exposes `aclose()` and no `close()`, so
-    `contextlib.closing` would raise instead of cleaning up.
+    Only `aclose()` releases an async stream: measured on 1.109.1, the
+    wrapper's synchronous `close()` discards the coroutine the underlying
+    stream's close returns, so `contextlib.closing` would leave the HTTP
+    response open.
     """
     close = getattr(response, "aclose", None)
     if not callable(close):
@@ -406,6 +408,30 @@ def _finished(response: Any) -> bool:
     caught here instead of in production.
     """
     return bool(getattr(response, "received_finish_reason", None))
+
+
+def _ended_without_finishing(exc: BaseException, response: Any) -> bool:
+    """Is this SDK error LiteLLM's own report of a clean, unfinished EOF?
+
+    Measured on 1.109.1: LiteLLM now enforces the same postcondition as
+    `_finished` for OpenAI-dialect streams. A stream that reaches EOF
+    without a reason raises a `MidStreamFallbackError` from inside the
+    wrapper's `except StopAsyncIteration` handler, so the error's
+    `__context__` is that `StopAsyncIteration`. A connection that really
+    dropped carries the `httpx` transport error there instead, and keeps
+    its own translation. Matching the structure rather than LiteLLM's
+    message keeps a reworded message from changing the outcome; if the
+    structure changes, the stream is still refused, only under the
+    generic transport message.
+    """
+    return not _finished(response) and isinstance(exc.__context__, StopAsyncIteration)
+
+
+def _stream_failure(exc: Exception, response: Any) -> Exception:
+    """The korvid error for an SDK failure raised while reading a stream."""
+    if _ended_without_finishing(exc, response):
+        return ProviderStreamTruncatedError(STREAM_TRUNCATED)
+    return _translate(exc)
 
 
 async def _stream_events(
@@ -455,7 +481,7 @@ async def _stream_events(
     except asyncio.CancelledError:
         raise
     except ProviderSDKError as exc:
-        raise _translate(exc) from exc
+        raise _stream_failure(exc, response) from exc
     finally:
         await _close_quietly(response)
 

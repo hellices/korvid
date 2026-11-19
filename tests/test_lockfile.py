@@ -125,14 +125,13 @@ def test_dependabot_opens_version_updates_monthly() -> None:
     assert intervals == {"uv": "monthly", "github-actions": "monthly"}
 
 
-def test_dependabot_holds_litellm_exactly_above_the_measured_pin() -> None:
-    """LiteLLM 1.101+ breaks the provider tests (#420), so the pin is held.
+def test_a_dependabot_litellm_hold_starts_exactly_above_the_pin() -> None:
+    """A LiteLLM hold, when there is one, must sit right above the pin.
 
-    Without an ignore rule the runtime group keeps bundling the incompatible
-    release with every other runtime update, and the whole group fails. The
-    ignored range must start right above the pin: starting lower would hide
-    the measured release, and a stale range left behind after the pin moves
-    would silently stop future LiteLLM updates.
+    #420 held LiteLLM below 1.101 with a Dependabot `ignore` rule until the
+    pin could move. Any future hold has to start right above the pin: starting
+    lower would hide the measured release, and a stale range left behind after
+    the pin moves would silently stop future LiteLLM updates.
     """
     project = tomllib.loads((_ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
     pinned = next(
@@ -147,8 +146,17 @@ def test_dependabot_holds_litellm_exactly_above_the_measured_pin() -> None:
         update for update in configuration["updates"] if update["package-ecosystem"] == "uv"
     )
     ignored = [rule for rule in uv_update.get("ignore", []) if rule["dependency-name"] == "litellm"]
-    assert [str(pinned.specifier)] == ["==1.100.5"]
-    assert ignored == [{"dependency-name": "litellm", "versions": [">=1.101.0"]}]
+    (pin,) = pinned.specifier
+    assert pin.operator == "=="
+    for rule in ignored:
+        (floor,) = rule["versions"]
+        held = Version(floor.removeprefix(">="))
+        assert floor.startswith(">=")
+        assert held > Version(pin.version)
+        assert held.release[:2] == (
+            Version(pin.version).release[0],
+            Version(pin.version).release[1] + 1,
+        )
 
 
 def test_mcp_http_client_requirement_rejects_known_vulnerable_versions() -> None:

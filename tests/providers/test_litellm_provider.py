@@ -12,6 +12,7 @@ double korvid wrote to agree with itself.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import threading
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
@@ -764,14 +765,26 @@ async def test_the_stream_ends_with_the_terminal_done_event() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_litellm_synthesizes_a_finish_reason_the_provider_never_sent() -> None:
-    """The measurement the whole terminal rule rests on.
+async def _drain_text(wrapper: Any, into: list[str]) -> None:
+    """Read a real wrapper to its end, keeping the text each chunk carried."""
+    async for chunk in wrapper:
+        into.extend(
+            choice.delta.content
+            for choice in (getattr(chunk, "choices", None) or ())
+            if choice.delta.content
+        )
 
-    Measured on 1.98.0: a stream whose frames carried no `finish_reason`
-    is still yielded with `finish_reason="stop"` on its last chunk — the
-    wrapper puts one there — while `received_finish_reason` stays `None`.
-    So the per-chunk field cannot distinguish a provider that finished
-    from one whose connection stopped, and the wrapper's own record can.
+
+async def test_litellm_refuses_a_stream_the_provider_never_finished() -> None:
+    """The measurement `_ended_without_finishing` rests on.
+
+    Measured on 1.98.0 through 1.100.5, the wrapper synthesized
+    `finish_reason="stop"` on the last chunk of a stream that never carried
+    one. Measured on 1.109.1, it refuses that stream itself: the text that
+    arrived is yielded, then an SDK error is raised from inside the
+    wrapper's `StopAsyncIteration` handler, while `received_finish_reason`
+    stays `None`. That `__context__` is what tells this apart from a
+    connection that dropped, so pin it against the real wrapper.
     """
     wrapper = await acompletion(
         model=_MODEL,
@@ -780,14 +793,13 @@ async def test_litellm_synthesizes_a_finish_reason_the_provider_never_sent() -> 
         api_key=_SECRET,
         client=_client(_streaming([_delta(content="hi")], finish=None)),
     )
+    texts: list[str] = []
     async with aclosing(wrapper):
-        reasons = [
-            getattr(choice, "finish_reason", None)
-            async for chunk in wrapper
-            for choice in (getattr(chunk, "choices", None) or ())
-        ]
+        with pytest.raises(ProviderSDKError, match="finish_reason") as raised:
+            await _drain_text(wrapper, texts)
 
-    assert "stop" in reasons, "1.98.0 synthesizes a stop the provider never sent"
+    assert texts == ["hi"]
+    assert isinstance(raised.value.__context__, StopAsyncIteration)
     assert wrapper.received_finish_reason is None
 
 
@@ -1078,9 +1090,14 @@ async def test_a_non_streaming_call_yields_the_same_event_shapes() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_the_real_wrapper_exposes_aclose_and_not_close() -> None:
-    """The measurement the cleanup rests on: `CustomStreamWrapper` has
-    `aclose()` and no `close()`, so `contextlib.closing` would raise."""
+async def test_the_real_wrapper_releases_an_async_stream_only_through_aclose() -> None:
+    """The measurement the cleanup rests on.
+
+    Measured on 1.98.0 the wrapper had `aclose()` and no `close()`. Measured
+    on 1.109.1 it has both, but `close()` is synchronous and *discards* the
+    coroutine an async stream's own close returns, so the HTTP response is
+    never released. `aclose()` is the only call that awaits it.
+    """
     response = await acompletion(
         model=_MODEL,
         messages=_MESSAGES,
@@ -1088,8 +1105,8 @@ async def test_the_real_wrapper_exposes_aclose_and_not_close() -> None:
         api_key=_SECRET,
         client=_client(_streaming([_delta(content="hi")])),
     )
-    assert callable(response.aclose)
-    assert not hasattr(response, "close")
+    assert inspect.iscoroutinefunction(response.aclose)
+    assert not inspect.iscoroutinefunction(getattr(response, "close", None))
     await response.aclose()
 
 

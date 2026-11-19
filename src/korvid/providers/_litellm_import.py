@@ -38,6 +38,9 @@ os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "true"
 
 try:
     import litellm as _litellm
+    from litellm.llms.base_llm.chat.transformation import (
+        BaseLLMException as _BaseLLMException,
+    )
 except ImportError as exc:  # pragma: no cover - exercised by the extras tests
     raise ImportError(isolated_install_hint(feature="the embedded agent")) from exc
 
@@ -68,3 +71,7 @@ _detach_litellm_logging()
 #: The imported module, re-exported under a name that makes the indirection
 #: obvious at the call site.
 litellm: ModuleType = _litellm
+
+#: The base of the errors a provider adapter raises from its own config
+#: code, outside the mapped `litellm.exceptions` family.
+BaseLLMException: type[Exception] = _BaseLLMException

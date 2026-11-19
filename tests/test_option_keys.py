@@ -294,16 +294,26 @@ MIN_DISTINCT_PARAMS: Final[int] = 60
 
 
 def _supported_parameter_surface() -> dict[str, set[str]]:
-    """Every parameter litellm reports as supported, to the providers reporting it."""
+    """Every parameter litellm reports as supported, to the providers reporting it.
+
+    A provider that rejects a probed model name outright (measured on
+    1.109.1: `scaledown` raises for anything but its own task names) has no
+    surface for that model, so the pair is skipped rather than failing the
+    whole sweep.
+    """
     litellm = pytest.importorskip("litellm")
+    from litellm.llms.base_llm.chat.transformation import BaseLLMException
 
     surface: dict[str, set[str]] = {}
     for entry in litellm.provider_list:
         provider = entry.value if hasattr(entry, "value") else str(entry)
         for model in SURVEY_MODELS:
-            supported = litellm.get_supported_openai_params(
-                model=model, custom_llm_provider=provider
-            )
+            try:
+                supported = litellm.get_supported_openai_params(
+                    model=model, custom_llm_provider=provider
+                )
+            except BaseLLMException:
+                continue
             for key in supported or ():
                 surface.setdefault(key, set()).add(provider)
     return surface

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import warnings
 from pathlib import Path, PurePath, PureWindowsPath
 from typing import Any, cast
 
@@ -26,6 +27,7 @@ from korvid.providers.litellm_runtime import (  # noqa: E402
     ProviderSDKError,
     model_cost_entry,
     models_by_provider,
+    supported_params,
 )
 from korvid.providers.models_dev import (  # noqa: E402
     ModelMetadata,
@@ -99,6 +101,26 @@ def test_the_flag_that_protects_stdout_is_not_quietly_droppable() -> None:
     assert ("suppress_debug_info", True) in LOCKDOWN_FLAGS
 
 
+def test_a_provider_that_rejects_the_model_has_no_allowlist() -> None:
+    """`scaledown` raises its own `BaseLLMException` for a model it does not
+    serve (measured on 1.109.1). The allowlist is best effort, so that is an
+    empty allowlist, not an error escaping profile wiring."""
+    assert supported_params("not-a-scaledown-task", "scaledown") == ()
+
+
+def test_the_readonly_exemption_leaves_other_pydantic_warnings_fatal() -> None:
+    """The #420 exemption in `pyproject.toml` is one message, not a module:
+    a different warning from the same Pydantic module must still fail."""
+    with pytest.raises(UserWarning, match="unrelated"):
+        warnings.warn_explicit(
+            "an unrelated schema warning",
+            UserWarning,
+            filename="_generate_schema.py",
+            lineno=1,
+            module="pydantic._internal._generate_schema",
+        )
+
+
 def test_the_runtime_reexports_the_base_class_that_actually_catches_errors() -> None:
     """`except litellm.exceptions.APIError` catches almost nothing.
 
@@ -138,7 +160,7 @@ def test_a_renamed_lockdown_flag_fails_the_import_loudly(
     import types
 
     stub = types.SimpleNamespace(
-        **{name: value for name, value in LOCKDOWN_FLAGS if name != "telemetry"},
+        **{name: value for name, value in LOCKDOWN_FLAGS if name != "turn_off_message_logging"},
         acompletion=None,
         get_llm_provider=None,
         exceptions=None,
@@ -148,7 +170,7 @@ def test_a_renamed_lockdown_flag_fails_the_import_loudly(
     monkeypatch.setattr("korvid.providers._litellm_import.litellm", stub, raising=True)
     import korvid.providers.litellm_runtime as runtime
 
-    with pytest.raises(ImportError, match="telemetry"):
+    with pytest.raises(ImportError, match="turn_off_message_logging"):
         importlib.reload(runtime)
 
 
