@@ -75,7 +75,7 @@ agent = [
     "litellm==1.109.1",
     # Imported directly by providers/litellm_runtime.py for ProviderSDKError,
     # so declared directly even though litellm already pulls it in.
-    "openai>=2.20.0,<3.0.0",
+    "openai>=2.20.0,<4.0.0",
     "httpx>=0.27",
     "keyring>=25.7.0",
 ]
