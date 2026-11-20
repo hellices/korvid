@@ -25,6 +25,7 @@ _V0_5_RELEASE_NOTE = _ROOT / "docs" / "release-notes" / "v0.5.0.md"
 _V0_6_RELEASE_NOTE = _ROOT / "docs" / "release-notes" / "v0.6.0.md"
 _V0_6_1_RELEASE_NOTE = _ROOT / "docs" / "release-notes" / "v0.6.1.md"
 _V0_7_0_RELEASE_NOTE = _ROOT / "docs" / "release-notes" / "v0.7.0.md"
+_V0_7_1_RELEASE_NOTE = _ROOT / "docs" / "release-notes" / "v0.7.1.md"
 _UNPUBLISHED_RELEASE_NOTE = _ROOT / "docs" / "release-notes" / "v0.4.0.md"
 _FIRST_PUBLISHED_0_4_VERSION = "0.4.1"
 _FIRST_PUBLISHED_0_4_NOTE = _ROOT / "docs" / "release-notes" / f"v{_FIRST_PUBLISHED_0_4_VERSION}.md"
@@ -680,8 +681,17 @@ def test_v0_6_release_note_explains_stricter_priority_key_validation() -> None:
             id="v0.7.0",
         ),
         pytest.param(
-            None,
+            _V0_7_1_RELEASE_NOTE,
             ("https://hellices.github.io/korvid/release-notes/v0.7.0/",),
+            id="v0.7.1",
+        ),
+        pytest.param(
+            None,
+            (
+                "https://hellices.github.io/korvid/release-notes/v0.7.0/",
+                "https://hellices.github.io/korvid/release-notes/v0.7.1/",
+                "https://hellices.github.io/korvid/threat-model/",
+            ),
             id="current",
         ),
     ],
@@ -947,10 +957,10 @@ def test_publish_step_requires_reviewed_commit_version_guard() -> None:
         _assert_release_runbook_contracts(runbook.replace(publish, mutated))
 
 
-def test_v0_7_1_release_metadata_keeps_v0_6_0_as_upgrade_source() -> None:
-    assert _project_version() == "0.7.1"
+def test_v0_7_2_release_metadata_keeps_v0_6_0_as_upgrade_source() -> None:
+    assert _project_version() == "0.7.2"
     assert UPGRADE_SOURCE_VERSION == "0.6.0"
-    assert __version__ == "0.7.1"
+    assert __version__ == "0.7.2"
 
 
 #: The runtime dependencies v0.6.1 updates for advisories against the
@@ -1073,8 +1083,9 @@ def test_v0_7_0_still_ships_every_v0_6_1_security_fix() -> None:
         assert Version(shipped) >= Version(floor), f"{package} {shipped} predates the fix {floor}"
 
 
-def test_current_release_note_is_the_v0_7_1_documentation_patch() -> None:
-    notes = _release_notes(_project_version())
+def test_v0_7_1_release_note_is_a_documentation_patch() -> None:
+    """The v0.7.1 note's own contract, kept with that note once it is history."""
+    notes = _V0_7_1_RELEASE_NOTE.read_text(encoding="utf-8")
 
     assert re.findall(r"^## (.+)$", notes, re.MULTILINE) == [
         "Why upgrade",
@@ -1095,8 +1106,97 @@ def test_current_release_note_is_the_v0_7_1_documentation_patch() -> None:
     assert not re.search(r"(?<!\w)#\d+\b", notes), "link pages, not issue numbers"
 
 
-def test_v0_7_1_still_ships_every_v0_6_1_security_fix() -> None:
-    """A documentation patch must not move a dependency below an advisory floor."""
+def test_v0_7_2_still_ships_every_v0_6_1_security_fix() -> None:
+    """A dependency patch must not move a dependency below an advisory floor."""
     for package, floor in _V0_6_1_SECURITY_FLOORS.items():
         locked = _locked_version(package)
         assert Version(locked) >= Version(floor), f"{package} {locked} predates the fix {floor}"
+
+
+#: What v0.7.1 shipped for each package the v0.7.2 note updates, read from
+#: the lock at the commit tagged `v0.7.1`. History, so it never follows the lock.
+_V0_7_1_SHIPPED = {
+    "litellm": "1.100.4",
+    "opentelemetry-api": "1.45.1",
+    "pydantic": "2.13.4",
+}
+
+
+def test_current_release_note_is_the_v0_7_2_dependency_patch() -> None:
+    notes = _release_notes(_project_version())
+
+    assert re.findall(r"^## (.+)$", notes, re.MULTILINE) == [
+        "Why upgrade",
+        "Dependency updates",
+        "Kubernetes versions verified",
+        "Install or upgrade",
+        "Verify",
+        "Known limits",
+    ]
+    assert len(notes.splitlines()) <= 110
+    flat = _normalized(notes)
+    assert "changes no feature" in flat
+    assert "`litellm.telemetry`" in flat
+    assert "CVE-2026-126360" in flat
+    assert "1.33, 1.34, 1.35 and 1.36" in markdown_section(notes, "Kubernetes versions verified")
+    assert not re.search(r"(?<!\w)#\d+\b", notes), "link pages, not issue numbers"
+
+
+_V0_7_2_TABLE_HEADER = "| Package | v0.7.1 ships | v0.7.2 ships | Why |"
+
+
+def _v0_7_2_dependency_rows(notes: str) -> dict[str, tuple[str, str]]:
+    """The note's dependency table as `package -> (v0.7.1, v0.7.2)`.
+
+    The values are read by position, so the header that names each column
+    is checked first: swapping the two release labels would otherwise leave
+    every row comparison passing while readers take old for new.
+    """
+    table = markdown_section(notes, "Dependency updates")
+    headers = [line for line in table.splitlines() if line.startswith("| Package ")]
+    assert headers == [_V0_7_2_TABLE_HEADER], f"the table's columns are mislabelled: {headers}"
+    matches = [
+        (match.group(1), (match.group(2), match.group(3)))
+        for match in re.finditer(r"^\| `([^`]+)` \| ([^ |]+) \| ([^ |]+) \|", table, re.MULTILINE)
+    ]
+    packages = [package for package, _ in matches]
+    repeated = sorted({package for package in packages if packages.count(package) > 1})
+    assert not repeated, f"the table lists a package more than once: {repeated}"
+    return dict(matches)
+
+
+def test_v0_7_2_note_states_what_each_release_ships() -> None:
+    """The table's two columns are history and the lock, and must say so exactly.
+
+    The old column is pinned from the v0.7.1 tag, and the new one is read
+    from the lock this candidate ships, so a later relock that moves a
+    package without updating the note fails here.
+    """
+    rows = _v0_7_2_dependency_rows(_release_notes(_project_version()))
+
+    assert set(rows) == set(_V0_7_1_SHIPPED)
+    for package, (before, after) in rows.items():
+        assert before == _V0_7_1_SHIPPED[package], f"the note misstates v0.7.1's {package}"
+        assert after == _locked_version(package), f"the note misstates v0.7.2's {package}"
+
+
+def test_v0_7_2_table_rejects_swapped_release_columns() -> None:
+    notes = _release_notes(_project_version())
+    swapped = notes.replace(_V0_7_2_TABLE_HEADER, "| Package | v0.7.2 ships | v0.7.1 ships | Why |")
+    assert swapped != notes
+
+    with pytest.raises(AssertionError, match="mislabelled"):
+        _v0_7_2_dependency_rows(swapped)
+
+
+def test_v0_7_2_table_rejects_a_repeated_package() -> None:
+    """A dict keeps only the last row, so a conflicting earlier row would
+    be published while every comparison still read the correct one."""
+    notes = _release_notes(_project_version())
+    (row,) = [line for line in notes.splitlines() if line.startswith("| `litellm` |")]
+    conflicting = row.replace(_locked_version("litellm"), "9.9.9")
+    assert conflicting != row
+    repeated = notes.replace(row, f"{conflicting}\n{row}")
+
+    with pytest.raises(AssertionError, match="more than once"):
+        _v0_7_2_dependency_rows(repeated)
