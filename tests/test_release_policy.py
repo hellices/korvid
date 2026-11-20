@@ -1155,10 +1155,14 @@ def _v0_7_2_dependency_rows(notes: str) -> dict[str, tuple[str, str]]:
     table = markdown_section(notes, "Dependency updates")
     headers = [line for line in table.splitlines() if line.startswith("| Package ")]
     assert headers == [_V0_7_2_TABLE_HEADER], f"the table's columns are mislabelled: {headers}"
-    return {
-        match.group(1): (match.group(2), match.group(3))
+    matches = [
+        (match.group(1), (match.group(2), match.group(3)))
         for match in re.finditer(r"^\| `([^`]+)` \| ([^ |]+) \| ([^ |]+) \|", table, re.MULTILINE)
-    }
+    ]
+    packages = [package for package, _ in matches]
+    repeated = sorted({package for package in packages if packages.count(package) > 1})
+    assert not repeated, f"the table lists a package more than once: {repeated}"
+    return dict(matches)
 
 
 def test_v0_7_2_note_states_what_each_release_ships() -> None:
@@ -1183,3 +1187,16 @@ def test_v0_7_2_table_rejects_swapped_release_columns() -> None:
 
     with pytest.raises(AssertionError, match="mislabelled"):
         _v0_7_2_dependency_rows(swapped)
+
+
+def test_v0_7_2_table_rejects_a_repeated_package() -> None:
+    """A dict keeps only the last row, so a conflicting earlier row would
+    be published while every comparison still read the correct one."""
+    notes = _release_notes(_project_version())
+    (row,) = [line for line in notes.splitlines() if line.startswith("| `litellm` |")]
+    conflicting = row.replace(_locked_version("litellm"), "9.9.9")
+    assert conflicting != row
+    repeated = notes.replace(row, f"{conflicting}\n{row}")
+
+    with pytest.raises(AssertionError, match="more than once"):
+        _v0_7_2_dependency_rows(repeated)
