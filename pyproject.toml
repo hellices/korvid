@@ -126,7 +126,7 @@ constraint-dependencies = ["pydantic>=2.14"]
 packages = ["src/korvid"]
 
 [dependency-groups]
-docs = ["mkdocs-material==9.8.0"]
+docs = ["mkdocs-material==9.8.1"]
 dev = [
     "pytest>=8",
     "pytest-asyncio>=0.24",
